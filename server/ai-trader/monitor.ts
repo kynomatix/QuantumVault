@@ -102,6 +102,7 @@ import {
   journalBase,
   newMutationAttemptId,
   orderResultEvent,
+  safeAppendEntryReconciliationTerminal,
   safeAppendExecutionEvents,
   type JournalCause,
 } from "./execution-journal";
@@ -2448,9 +2449,6 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
         eventType: "position_observed", side: view.side, price: position.entryPrice,
         sizeBase: Math.abs(position.baseSize) },
-      { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
-        eventType: "reconciliation_observed", side: view.side, price: position.entryPrice,
-        sizeBase: Math.abs(position.baseSize) },
     ]);
 
     // Complete the bracket before promoting (the entry landed with no TP/SL).
@@ -2517,10 +2515,14 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
     safeAppendExecutionEvents([
       { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
         eventType: "bracket_verified", side: view.side },
-      { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
-        eventType: "entry_terminal_open", side: view.side, price: position.entryPrice,
-        sizeBase: Math.abs(position.baseSize) },
     ]);
+    safeAppendEntryReconciliationTerminal({
+      base: entryJournal,
+      attemptId: adoptedAttemptId,
+      terminal: "entry_terminal_open",
+      proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
+        sizeBase: Math.abs(position.baseSize) },
+    });
     console.log(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} late entry ADOPTED — decision ${view.decision.id.slice(0, 8)} → executed @ ${position.entryPrice}, bot → open (bracket verified)`);
     return true;
   }
@@ -2535,12 +2537,12 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
     await storage.updateAiTraderDecision(row.id, { outcome: "aborted_order" });
     const base = journalBase(bot, row.id);
     const attemptId = entryAttemptId(row.id);
-    safeAppendExecutionEvents([
-      { ...base, attemptId, action: "entry", cause: "decision", eventType: "reconciliation_observed",
-        failureCode: "position_not_confirmed" },
-      { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_no_land",
-        failureCode: "position_not_confirmed" },
-    ]);
+    safeAppendEntryReconciliationTerminal({
+      base,
+      attemptId,
+      terminal: "entry_terminal_no_land",
+      proof: { kind: "flat_after_landing_window" },
+    });
   }
   await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed_expired" });
   await sendTradeNotification(bot.walletAddress, {
@@ -2781,17 +2783,17 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
   safeAppendExecutionEvents([
     { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed", side: view.side,
       price: position.entryPrice, sizeBase: Math.abs(position.baseSize) },
-    { ...base, attemptId, action: "entry", cause: "decision", eventType: "reconciliation_observed", side: view.side,
-      price: position.entryPrice, sizeBase: Math.abs(position.baseSize) },
     { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified", side: view.side },
   ]);
-  // Legacy pre-journal entries may have no command predecessor. Preserve the
-  // evidence batch above; the queued terminal append succeeds only when this
-  // attempt already has the required live command sequence.
-  safeAppendExecutionEvents([
-    { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_open", side: view.side,
-      price: position.entryPrice, sizeBase: Math.abs(position.baseSize) },
-  ]);
+  // Legacy pre-journal entries intentionally retain the evidence above but
+  // cannot acquire a recovery terminal without the durable phase-0/10 lineage.
+  safeAppendEntryReconciliationTerminal({
+    base,
+    attemptId,
+    terminal: "entry_terminal_open",
+    proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
+      sizeBase: Math.abs(position.baseSize) },
+  });
   console.log(`[AiTraderMonitor] reconcile: live bot ${bot.id.slice(0, 8)} '${bot.status}' → open (position + bracket verified)`);
   return true;
 }

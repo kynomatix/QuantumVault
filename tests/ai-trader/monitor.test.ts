@@ -94,6 +94,7 @@ vi.mock("../../server/notification-service", () => ({
 }));
 
 const safeJournalMock = vi.fn();
+const safeReconciliationTerminalMock = vi.fn();
 vi.mock("../../server/ai-trader/execution-journal", () => ({
   entryAttemptId: (decisionId: string) => `entry:${decisionId}`,
   newMutationAttemptId: (action: string, decisionId: string | null) => `${action}:${decisionId ?? "unattributed"}:test-attempt`,
@@ -110,6 +111,7 @@ vi.mock("../../server/ai-trader/execution-journal", () => ({
     venueStatus: order?.status ?? "unknown",
   }),
   safeAppendExecutionEvents: (...a: unknown[]) => safeJournalMock(...a),
+  safeAppendEntryReconciliationTerminal: (...a: unknown[]) => safeReconciliationTerminalMock(...a),
 }));
 
 const getAdapterMock = vi.fn();
@@ -347,6 +349,7 @@ beforeEach(() => {
     stopScannerMock, isMarketAdmittedMock, isMultiplierQuarantinedMock,
     schemaCapabilityReadyMock,
     safeJournalMock,
+    safeReconciliationTerminalMock,
   ]) {
     m.mockReset();
   }
@@ -1860,17 +1863,24 @@ describe("unconfirmed-landing reconciliation", () => {
       (call[0] as Array<{ eventType: string }>).map((event) => event.eventType),
     );
     expect(adoptionTypes).toEqual(expect.arrayContaining([
-      "position_observed", "reconciliation_observed", "bracket_verified", "entry_terminal_open",
+      "position_observed", "bracket_verified",
     ]));
+    expect(safeReconciliationTerminalMock).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId: "entry:dec-u",
+      terminal: "entry_terminal_open",
+      proof: { kind: "landed_position", side: "long", price: 150.1, sizeBase: 2 },
+    }));
 
     safeJournalMock.mockClear();
+    safeReconciliationTerminalMock.mockClear();
     getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
     getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
     await reconcileUnconfirmedLanding(makeQuarantinedBot({ updatedAt: new Date(NOW - 6 * 60_000) }));
-    const noLandTypes = safeJournalMock.mock.calls.flatMap((call) =>
-      (call[0] as Array<{ eventType: string }>).map((event) => event.eventType),
-    );
-    expect(noLandTypes).toEqual(expect.arrayContaining(["reconciliation_observed", "entry_terminal_no_land"]));
+    expect(safeReconciliationTerminalMock).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId: "entry:dec-u",
+      terminal: "entry_terminal_no_land",
+      proof: { kind: "flat_after_landing_window" },
+    }));
   });
 
   it("monitorBotOnce routes a quarantined bot to the reconciler (tick pickup) and never treats the pause as inert", async () => {
