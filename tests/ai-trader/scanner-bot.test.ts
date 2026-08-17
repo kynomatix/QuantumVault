@@ -102,8 +102,10 @@ vi.mock("../../server/ai-trader/executor", async (importOriginal) => {
 });
 
 const getScannerShortlistMock = vi.fn();
+const getScannerShortlistResultMock = vi.fn();
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
+  getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
 }));
 
 const isMarketAdmittedMock = vi.fn(() => true);
@@ -230,6 +232,9 @@ beforeEach(() => {
     await updateBotMock(botId, patch);
     return { ...(botId === "bot-scanner-2222" ? makeScannerBot() : makeFixedBot()), ...patch };
   });
+  getScannerShortlistResultMock.mockImplementation((...a: unknown[]) => ({
+    authority: "tradable", candidates: getScannerShortlistMock(...a),
+  }));
   vi.useFakeTimers();
 });
 
@@ -291,10 +296,29 @@ describe("scanner consumer capability", () => {
   });
 });
 
+describe("scanner generation authority", () => {
+  it("automatic scanner consumer rejects a stale absent or diagnostic-only generation before LLM or mutation", async () => {
+    const { runAutoCycle } = await importMonitor();
+    for (const authority of ["stale", "absent", "diagnostic_only"] as const) {
+      vi.clearAllMocks();
+      armScannerBot();
+      getScannerShortlistResultMock.mockReturnValue({ authority, candidates: [] });
+      await runAutoCycle("bot-scanner-2222");
+      expect(buildContextMock).not.toHaveBeenCalled();
+      expect(runDecisionMock).not.toHaveBeenCalled();
+      expect(executeDecisionMock).not.toHaveBeenCalled();
+      expect(updateBotMock).not.toHaveBeenCalled();
+    }
+  });
+});
+
 describe("scanner bot: zero-candidate boundary", () => {
   it("is a clean no-op: bot stays idle, no status churn, no LLM spend, rescheduled", async () => {
     armScannerBot();
-    getScannerShortlistMock.mockReturnValue([]);
+  getScannerShortlistMock.mockReturnValue([]);
+  getScannerShortlistResultMock.mockImplementation((...a: unknown[]) => ({
+    authority: "tradable", candidates: getScannerShortlistMock(...a),
+  }));
 
     const { runAutoCycle } = await importMonitor();
     await runAutoCycle("bot-scanner-2222");

@@ -38,7 +38,27 @@ vi.mock("../../server/ai-trader/session-context", () => ({
   getSessionContext: vi.fn(() => ({ label: "test" })),
 }));
 
-import { classifySweepFetchError } from "../../server/ai-trader/scanner";
+import { classifySweepFetchError, createScannerSweepManifest } from "../../server/ai-trader/scanner";
+
+describe("scanner candidate provenance classification", () => {
+  it("rejects a candidate whose selected or required parent provenance is inadmissible", () => {
+    const accounting = { attempted: 1, scanned: 1, feedHealthSkipped: 0, venueClosed: 0,
+      timeoutSkipped: 0, primaryCacheDegraded: 0, parentInconclusive: 0, errors: 0,
+      abandoned: 0, unclassified: 0, accountingValid: true };
+    const spot = { source: "gate", venue: "gate", basis: "spot", proxy: "direct",
+      finality: "finalized", timeSemantic: "open_time" } as const;
+    const candidate = { protocol: "pacifica", market: "BTC-PERP", timeframe: "15m",
+      direction: "long", setup: "W", score: 80, necklineDistancePct: 0.2,
+      parentTrend: "HH/HL", evaluatedAt: Date.now(), candleProvenance: spot,
+      parentCandleProvenance: spot } as const;
+    const manifest = createScannerSweepManifest({ generation: 1, boundaryTimeframes: ["15m"],
+      startedAt: 1, finishedAt: 2, accounting, budgetSkippedUnits: 0,
+      parentCacheDegraded: false, candidatesByProtocol: new Map([["pacifica", [candidate]]]),
+      completed: true });
+    expect(manifest.verdict).toBe("diagnostic_only");
+    expect(manifest.diagnosticReasons).toContain("candidate_provenance_invalid");
+  });
+});
 import { CacheDegradedError } from "../../server/lab/datafeed";
 
 // Datafeed-style AbortError (datafeed's makeAbortError produces exactly this

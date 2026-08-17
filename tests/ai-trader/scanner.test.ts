@@ -38,6 +38,9 @@ const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
   setDatafeedIncidentReporter: vi.fn(),
+  MONEY_CANDLE_POLICY: {
+    consumer: "scanner", acceptedBasis: ["perp"], acceptedFinality: ["finalized"], acceptedProxy: ["direct"],
+  },
 }));
 
 vi.mock("../../server/ai-trader/context-builder", () => ({
@@ -204,8 +207,58 @@ import {
   SCANNER_FEED_EXCLUDE,
   buildScannerUniverse,
   getScannerStatus,
+  createScannerSweepManifest,
+  publishScannerSweepManifest,
+  getScannerShortlist,
+  resetScannerPublicationForTest,
   stopScanner,
 } from "../../server/ai-trader/scanner";
+
+const directPerp = {
+  source: "okx", venue: "okx", basis: "perp", proxy: "direct",
+  finality: "finalized", timeSemantic: "open_time",
+} as const;
+
+describe("scanner generation publication", () => {
+  const candidate = {
+    protocol: "pacifica", market: "BTC-PERP", timeframe: "1d", direction: "long",
+    setup: "W", score: 90, necklineDistancePct: 0.1, parentTrend: "none",
+    evaluatedAt: Date.now(), candleProvenance: directPerp, parentCandleProvenance: null,
+  } as const;
+  const accounting = {
+    attempted: 1, scanned: 1, feedHealthSkipped: 0, venueClosed: 0,
+    timeoutSkipped: 0, primaryCacheDegraded: 0, parentInconclusive: 0,
+    errors: 0, abandoned: 0, unclassified: 0, accountingValid: true,
+  };
+
+  it("publishes candidates and manifest atomically for one sweepGeneration", () => {
+    resetScannerPublicationForTest();
+    const manifest = createScannerSweepManifest({ generation: 10, boundaryTimeframes: ["1d"],
+      startedAt: Date.now() - 10, finishedAt: Date.now(), accounting, budgetSkippedUnits: 0,
+      parentCacheDegraded: false, candidatesByProtocol: new Map([["pacifica", [candidate]]]), completed: true });
+    publishScannerSweepManifest(manifest);
+    expect(getScannerStatus().currentGeneration?.generation).toBe(10);
+    expect(getScannerShortlist("pacifica")).toHaveLength(1);
+  });
+
+  it("retains the last tradable generation when the current generation is diagnostic-only", () => {
+    const diagnostic = createScannerSweepManifest({ generation: 11, boundaryTimeframes: ["15m"],
+      startedAt: 3, finishedAt: 4, accounting, budgetSkippedUnits: 0,
+      parentCacheDegraded: false, candidatesByProtocol: new Map(), completed: false });
+    publishScannerSweepManifest(diagnostic);
+    expect(getScannerStatus().currentGeneration?.verdict).toBe("diagnostic_only");
+    expect(getScannerStatus().lastTradableGeneration?.generation).toBe(10);
+    expect(getScannerShortlist("pacifica")).toEqual([]);
+  });
+
+  it("admits a 1d candidate with no configured parent vacuously", () => {
+    const manifest = createScannerSweepManifest({ generation: 12, boundaryTimeframes: ["1d"],
+      startedAt: 5, finishedAt: 6, accounting, budgetSkippedUnits: 0,
+      parentCacheDegraded: false, candidatesByProtocol: new Map([["pacifica", [candidate]]]),
+      completed: true });
+    expect(manifest.verdict).toBe("tradable");
+  });
+});
 
 // ─── Test constants ───────────────────────────────────────────────────────────
 
@@ -500,6 +553,7 @@ describe("evaluateCandidate — parent Dow filtering", () => {
         parentTrend: "none",
         evaluatedAt: NOW_MS,
         candleProvenance: null,
+        parentCandleProvenance: null,
       },
     });
     if (typed.kind !== "candidate") throw new Error("expected not-applicable candidate");

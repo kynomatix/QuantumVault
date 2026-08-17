@@ -90,9 +90,12 @@ vi.mock("../../server/ai-trader/graduation", () => ({
 }));
 
 const getScannerShortlistMock = vi.fn();
+const getScannerShortlistResultMock = vi.fn();
+const getScannerStatusMock = vi.fn();
 vi.mock("../../server/ai-trader/scanner", () => ({
-  getScannerStatus: vi.fn(),
+  getScannerStatus: (...a: unknown[]) => getScannerStatusMock(...a),
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
+  getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
 }));
 const scannerCapabilitiesMock = vi.hoisted(() => ({
   producerEnabled: true,
@@ -220,8 +223,32 @@ describe("AI Trader scanner route market admission", () => {
       timeframe: "15m",
       evaluatedAt: Date.now(),
     }]);
+    getScannerShortlistResultMock.mockImplementation(() => ({
+      authority: "tradable",
+      candidates: getScannerShortlistMock(),
+    }));
     isMarketAdmittedMock.mockReturnValue(false);
     isMultiplierQuarantinedMock.mockReturnValue(false);
+  });
+
+  it("manual scanner consumer rejects a stale absent or diagnostic-only generation before LLM or mutation", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    for (const authority of ["stale", "absent", "diagnostic_only"] as const) {
+      vi.clearAllMocks();
+      getBotMock.mockResolvedValue(scannerBot());
+      getScannerShortlistResultMock.mockReturnValue({ authority, candidates: [] });
+      const built = buildApp();
+      registerAiTraderRoutes(built.app);
+      const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+        params: { id: "scanner-bot-route" }, session: { walletAddress: "WALLET_ROUTE" },
+        body: {}, query: {}, headers: {},
+      });
+      expect(result.statusCode).toBe(409);
+      expect(updateBotMock).not.toHaveBeenCalled();
+      expect(buildContextMock).not.toHaveBeenCalled();
+      expect(runDecisionMock).not.toHaveBeenCalled();
+      expect(executeDecisionMock).not.toHaveBeenCalled();
+    }
   });
 
   it("refuses an unadmitted fresh manual pick before UMK, bot write, context, LLM, or execution", async () => {
@@ -379,7 +406,6 @@ describe("AI Trader manual analyze position-authority inputs", () => {
       paperPositionRows: [],
     });
   });
-
   it("terminalizes a manual close-with-no-position in the same analyzing-to-idle release", async () => {
     const bot = fixedBot(true);
     getBotMock.mockResolvedValue(bot);
@@ -412,5 +438,33 @@ describe("AI Trader manual analyze position-authority inputs", () => {
       expectedDecisionOutcome: null,
       decisionOutcome: "flat",
     }));
+  });
+});
+
+describe("AI Trader scanner status reporting", () => {
+  it("status distinguishes healthy zero setups from diagnostic-only coverage", async () => {
+    const healthy = {
+      shortlist: { flash: [], pacifica: [] }, currentGeneration: {
+        generation: 7, verdict: "tradable", candidateCounts: { flash: 0, pacifica: 0 },
+      }, lastTradableGeneration: { generation: 7 }, recentHistory: [], lastBoundaryStats: null,
+      excludedMarkets: [], multiplierQuarantinedMarkets: [], scannerRunning: true,
+    };
+    const diagnostic = {
+      ...healthy,
+      currentGeneration: { generation: 8, verdict: "diagnostic_only", candidateCounts: { flash: 0, pacifica: 0 } },
+      lastTradableGeneration: { generation: 7 },
+    };
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    getScannerStatusMock.mockReturnValueOnce(healthy);
+    expect((await invoke(built.routes, "GET /api/ai-trader/scanner/status", {
+      query: {}, body: {}, headers: {}, session: { walletAddress: "WALLET_ROUTE" },
+    })).body.currentGeneration.verdict).toBe("tradable");
+    getScannerStatusMock.mockReturnValueOnce(diagnostic);
+    const degraded = await invoke(built.routes, "GET /api/ai-trader/scanner/status", {
+      query: {}, body: {}, headers: {}, session: { walletAddress: "WALLET_ROUTE" },
+    });
+    expect(degraded.body.currentGeneration.verdict).toBe("diagnostic_only");
+    expect(degraded.body.lastTradableGeneration.generation).toBe(7);
   });
 });
