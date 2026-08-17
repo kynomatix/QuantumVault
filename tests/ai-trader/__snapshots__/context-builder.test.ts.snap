@@ -230,9 +230,9 @@ Unrealized PnL: $12.81
 
 ## Last 3 closed trades (most recent first)
 
-1. side=short entry=148.50 exit=146.00 exitReason=tp realizedPnl=$45.00 regime=trending (ADX 30.2)
-2. side=long entry=140.00 exit=142.50 exitReason=sl realizedPnl=$-20.00 regime=ranging (ADX 15.4)
-3. side=long entry=135.00 exit=137.00 exitReason=ai_close realizedPnl=$30.00 regime=regime unknown (no ADX recorded)
+1. market=LTC-PERP side=short entry=148.50 exit=146.00 exitReason=tp realizedPnl=$45.00 regime=trending (ADX 30.2)
+2. market=ICP-PERP side=long entry=140.00 exit=142.50 exitReason=sl realizedPnl=$-20.00 regime=ranging (ADX 15.4)
+3. market=XRP-PERP side=long entry=135.00 exit=137.00 exitReason=ai_close realizedPnl=$30.00 regime=regime unknown (no ADX recorded)
 
 ## Guardrails (self-censor before the enforced clamp)
 

@@ -879,13 +879,20 @@ export async function buildMarketContext(
     recentClosedDecisions.length === 0
       ? ["No closed trades yet."]
       : recentClosedDecisions.map((d, i) => {
-          const digest = d.contextDigest as { indicators?: { adx14?: { value?: number } } } | null | undefined;
+          const digest = d.contextDigest as {
+            market?: unknown;
+            indicators?: { adx14?: { value?: number } };
+          } | null | undefined;
+          const decisionMarket =
+            typeof digest?.market === "string" && digest.market.trim().length > 0
+              ? digest.market.trim()
+              : "unknown";
           const regime = adxRegimeTag(digest?.indicators?.adx14?.value);
           const entry = d.entryPrice !== null && d.entryPrice !== undefined ? fmtPrice(parseFloat(d.entryPrice)) : "n/a";
           const exit = d.exitPrice !== null && d.exitPrice !== undefined ? fmtPrice(parseFloat(d.exitPrice)) : "n/a";
           const pnl =
             d.realizedPnl !== null && d.realizedPnl !== undefined ? fmtPrice(parseFloat(d.realizedPnl)) : "n/a";
-          return `${i + 1}. side=${decisionSide(d)} entry=${entry} exit=${exit} exitReason=${
+          return `${i + 1}. market=${decisionMarket} side=${decisionSide(d)} entry=${entry} exit=${exit} exitReason=${
             d.exitReason ?? "n/a"
           } realizedPnl=$${pnl} regime=${regime}`;
         });

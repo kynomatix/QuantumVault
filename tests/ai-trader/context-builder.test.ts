@@ -234,7 +234,7 @@ const RECENT_DECISIONS: AiTraderDecision[] = [
     exitReason: "tp",
     realizedPnl: "45.00",
     closedAt: new Date(FIXED_NOW - 3_600_000),
-    contextDigest: { indicators: { adx14: { value: 30.2 } } },
+    contextDigest: { market: "LTC-PERP", indicators: { adx14: { value: 30.2 } } },
   }),
   makeDecision({
     id: "d-2",
@@ -245,7 +245,7 @@ const RECENT_DECISIONS: AiTraderDecision[] = [
     exitReason: "sl",
     realizedPnl: "-20.00",
     closedAt: new Date(FIXED_NOW - 7_200_000),
-    contextDigest: { indicators: { adx14: { value: 15.4 } } },
+    contextDigest: { market: "ICP-PERP", indicators: { adx14: { value: 15.4 } } },
   }),
   makeDecision({
     id: "d-3",
@@ -255,7 +255,7 @@ const RECENT_DECISIONS: AiTraderDecision[] = [
     exitReason: "ai_close",
     realizedPnl: "30.00",
     closedAt: new Date(FIXED_NOW - 10_800_000),
-    contextDigest: null,
+    contextDigest: { market: "XRP-PERP" },
   }),
 ];
 
@@ -496,6 +496,9 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).toContain("regime=trending (ADX 30.2)");
     expect(result.user).toContain("regime=ranging (ADX 15.4)");
     expect(result.user).toContain("regime=regime unknown (no ADX recorded)");
+    expect(result.user).toContain("1. market=LTC-PERP side=short");
+    expect(result.user).toContain("2. market=ICP-PERP side=long");
+    expect(result.user).toContain("3. market=XRP-PERP side=long");
     expect(result.user).toContain("## Candles — 1h parent timeframe (oldest -> newest, CSV)");
     expect(result.user).toContain("Open position: long 2.5 @ entry 145.00");
     expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
