@@ -105,6 +105,15 @@ vi.mock("../../server/ai-trader/executor", async (importOriginal) => {
   return { ...actual, executeDecision: (...a: unknown[]) => executeDecisionMock(...a) };
 });
 
+const schemaCapabilityReadyMock = vi.fn(() => true);
+vi.mock("../../server/schema-readiness", () => ({
+  applySchemaMigrationManifest: vi.fn(),
+  installSchemaReadinessSnapshot: vi.fn(),
+  isSchemaCapabilityReady: (...args: unknown[]) => schemaCapabilityReadyMock(...args),
+  registerSchemaMigrationManifest: vi.fn(),
+  reportSchemaReadiness: vi.fn(),
+}));
+
 // --- Fixtures -----------------------------------------------------------------
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 15m boundary
@@ -209,12 +218,14 @@ beforeEach(() => {
     claimAnalysisMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock,
     healUmkMock, getSessionByWalletMock, restoreSecurityMock, decryptLlmKeyMock, notifyMock,
     getAdapterMock, fetchOHLCVMock, buildContextMock, runDecisionMock, executeDecisionMock,
+    schemaCapabilityReadyMock,
   ]) {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
   getOpenDecisionsMock.mockResolvedValue([]);
   getUnresolvedDecisionsMock.mockResolvedValue([]);
+  schemaCapabilityReadyMock.mockReturnValue(true);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
   claimAnalysisMock.mockImplementation(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {

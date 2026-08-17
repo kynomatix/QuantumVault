@@ -26,6 +26,15 @@ vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
   SCANNER_CAPABILITIES: scannerCapabilitiesMock,
 }));
 
+const schemaCapabilityReadyMock = vi.fn(() => true);
+vi.mock("../../server/schema-readiness", () => ({
+  applySchemaMigrationManifest: vi.fn(),
+  installSchemaReadinessSnapshot: vi.fn(),
+  isSchemaCapabilityReady: (...args: unknown[]) => schemaCapabilityReadyMock(...args),
+  registerSchemaMigrationManifest: vi.fn(),
+  reportSchemaReadiness: vi.fn(),
+}));
+
 // --- Mocks ────────────────────────────────────────────────────────────────────
 
 const getWalletMock = vi.fn();
@@ -214,6 +223,7 @@ const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  schemaCapabilityReadyMock.mockReturnValue(true);
   isMarketAdmittedMock.mockReturnValue(true);
   scannerCapabilitiesMock.producerEnabled = true;
   scannerCapabilitiesMock.consumersEnabled = true;
