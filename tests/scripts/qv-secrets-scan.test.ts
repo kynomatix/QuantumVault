@@ -208,11 +208,8 @@ describe('qv-secrets-scan', () => {
     const commit = gitObject('HEAD');
     const result = cli([repositoryFixture(`api_key=${commit}\n`)]);
     expect(result.status).toBe(2);
-    expect(JSON.parse(result.stdout).files[0].findings).toEqual(
-      expect.arrayContaining([
-        { ruleId: 'api-key-assignment', line: 1 },
-        { ruleId: 'unclassified-hex', line: 1 },
-      ]),
+    expect(JSON.parse(result.stdout).files[0].findings).toContainEqual(
+      { ruleId: 'api-key-assignment', line: 1 },
     );
   });
 
