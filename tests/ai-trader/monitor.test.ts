@@ -106,9 +106,11 @@ vi.mock("../../server/ai-trader/execution-journal", () => ({
     accountRef: bot.protocolSubaccountId ?? bot.walletAddress,
     market: bot.market,
   }),
-  orderResultEvent: ({ base, attemptId, action, cause, order }: any) => ({
+  orderResultEvent: ({ base, attemptId, action, cause, order, failureCode, recordedAfterBroadcast }: any) => ({
     ...base, attemptId, action, cause, eventType: "broadcast_result",
     venueStatus: order?.status ?? "unknown",
+    failureCode: failureCode ?? null,
+    recordedAfterBroadcast: recordedAfterBroadcast === true,
   }),
   safeAppendExecutionEvents: (...a: unknown[]) => safeJournalMock(...a),
   safeAppendEntryReconciliationTerminal: (...a: unknown[]) => safeReconciliationTerminalMock(...a),
@@ -324,6 +326,9 @@ function exitFill(overrides: Partial<TradeRecord> = {}): TradeRecord {
 const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 const decisionUpdates = () => updateDecisionMock.mock.calls.map((c) => c[1]);
 const notifications = () => notifyMock.mock.calls.map((c) => c[1]);
+const journalEvents = () => safeJournalMock.mock.calls.flatMap((call) =>
+  call[0] as Array<Record<string, unknown>>,
+);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -634,6 +639,32 @@ describe("live close-result consumption", () => {
     expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
     expect(decisionUpdates().some((update) => update.exitReason === "user_close")).toBe(true);
     expect(safeJournalMock).toHaveBeenCalled();
+  });
+
+  it("journals signing-unavailable user close and cancel attempts without reaching the venue", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    decryptSubKeyMock.mockResolvedValue(null);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: false });
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "user_requested", eventType: "close_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+      expect.objectContaining({
+        action: "cancel", cause: "pre_close_bracket", eventType: "cancel_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+    ]));
   });
 
   it("does not record or notify a user close that is only acknowledged", async () => {
@@ -1001,6 +1032,32 @@ describe("G10 bracket re-verification", () => {
     expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
     expect(botUpdates().some((update) => update.status === "paused" && update.pauseReason === "bracket_failed")).toBe(true);
     expect(safeJournalMock).toHaveBeenCalled();
+  });
+
+  it("journals signing-unavailable protective close and cancel attempts without reaching the venue", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    decryptSubKeyMock.mockResolvedValue(null);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [{ ...openPosition, unrealizedPnl: -200 }]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    await monitorBotOnce(makeBot({ paperMode: false, dailyRealizedPnl: "-200" }));
+
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(botUpdates().some((update) => update.status === "paused")).toBe(true);
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "protective", eventType: "close_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+      expect.objectContaining({
+        action: "cancel", cause: "pre_close_bracket", eventType: "cancel_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+    ]));
   });
 
   it("does not record a protective close that is only submitted", async () => {
@@ -1549,6 +1606,33 @@ describe("startup reconciliation", () => {
     expect(notifications().some((n) => n.type === "trade_failed")).toBe(true);
   });
 
+  it("journals a startup-orphan venue throw and still pauses instead of propagating", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: -3, entryPrice: 150, markPrice: 150,
+          unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      closePosition: vi.fn(async () => { throw new Error("ambiguous venue timeout"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([]);
+
+    const resolved = await reconcileBotOnStartup(makeBot({ status: "open", paperMode: false }));
+
+    expect(resolved).toBe(true);
+    expect(botUpdates().some((update) =>
+      update.status === "paused" && update.pauseReason === "reconcile_orphan_position",
+    )).toBe(true);
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "startup_orphan", eventType: "close_terminal_failed",
+        failureCode: "venue_error", recordedAfterBroadcast: true,
+      }),
+    ]));
+  });
+
   it("re-arms auto-next for hands-off bots after a restart (deploy must not halt them)", async () => {
     const { reconcileOnStartup } = await importMonitor();
     getActiveBotsMock.mockResolvedValue([
@@ -1881,6 +1965,33 @@ describe("unconfirmed-landing reconciliation", () => {
       terminal: "entry_terminal_no_land",
       proof: { kind: "flat_after_landing_window" },
     }));
+  });
+
+  it("journals an unconfirmed-orphan venue throw and completes the safety pause", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150,
+          unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      closePosition: vi.fn(async () => { throw new Error("ambiguous venue timeout"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([]);
+
+    const resolved = await reconcileUnconfirmedLanding(makeQuarantinedBot());
+
+    expect(resolved).toBe(true);
+    expect(botUpdates().some((update) =>
+      update.status === "paused" && update.pauseReason === "reconcile_orphan_position",
+    )).toBe(true);
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "unconfirmed_orphan", eventType: "close_terminal_failed",
+        failureCode: "venue_error", recordedAfterBroadcast: true,
+      }),
+    ]));
   });
 
   it("monitorBotOnce routes a quarantined bot to the reconciler (tick pickup) and never treats the pause as inert", async () => {
