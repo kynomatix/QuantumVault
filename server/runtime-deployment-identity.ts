@@ -1,4 +1,8 @@
 import { SERVER_BOOT_ID, SERVER_BOOT_STARTED_AT } from "./boot-id";
+import {
+  getSchemaReadinessHealth,
+  type SchemaReadinessHealth,
+} from "./schema-readiness";
 
 declare const __QV_BUILD_COMMIT_SHA__: string;
 declare const __QV_BUILD_TREE_SHA__: string;
@@ -68,6 +72,7 @@ export function createRuntimeHealthPayload(
   ready: boolean,
   timestamp = Date.now(),
   identity: RuntimeDeploymentIdentity = RUNTIME_DEPLOYMENT_IDENTITY,
+  schemaReadiness: SchemaReadinessHealth = getSchemaReadinessHealth(),
 ) {
   return {
     status: "ok" as const,
@@ -78,5 +83,9 @@ export function createRuntimeHealthPayload(
     bootId: identity.bootId,
     bootStartedAt: identity.bootStartedAt,
     identityVerified: identity.identityVerified,
+    schemaReadiness: {
+      evaluated: schemaReadiness.evaluated,
+      unavailableCapabilities: [...schemaReadiness.unavailableCapabilities],
+    },
   };
 }

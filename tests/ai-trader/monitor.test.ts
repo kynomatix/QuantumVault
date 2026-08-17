@@ -159,6 +159,15 @@ vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
   SCANNER_CAPABILITIES: scannerCapabilitiesMock,
 }));
 
+const schemaCapabilityReadyMock = vi.fn(() => true);
+vi.mock("../../server/schema-readiness", () => ({
+  applySchemaMigrationManifest: vi.fn(),
+  installSchemaReadinessSnapshot: vi.fn(),
+  isSchemaCapabilityReady: (...args: unknown[]) => schemaCapabilityReadyMock(...args),
+  registerSchemaMigrationManifest: vi.fn(),
+  reportSchemaReadiness: vi.fn(),
+}));
+
 const isMarketAdmittedMock = vi.fn();
 vi.mock("../../server/ai-trader/market-admission", () => ({
   isAiTraderMarketAdmitted: (...a: unknown[]) => isMarketAdmittedMock(...a),
@@ -311,6 +320,7 @@ beforeEach(() => {
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
     stopScannerMock, isMarketAdmittedMock, isMultiplierQuarantinedMock,
+    schemaCapabilityReadyMock,
   ]) {
     m.mockReset();
   }
@@ -323,6 +333,7 @@ beforeEach(() => {
   }));
   isMarketAdmittedMock.mockReturnValue(true);
   isMultiplierQuarantinedMock.mockReturnValue(false);
+  schemaCapabilityReadyMock.mockReturnValue(true);
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
   claimAnalysisMock.mockImplementation(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {
@@ -1123,6 +1134,23 @@ describe("runAutoCycle", () => {
     await runAutoCycle("bot-1111-2222");
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
+  });
+
+  it("withholds decision consumers without bot mutation when lab_scanner schema is unavailable", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armAutoBot();
+    schemaCapabilityReadyMock.mockReturnValue(false);
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(schemaCapabilityReadyMock).toHaveBeenCalledWith("lab_scanner");
+    expect(getAdapterMock).not.toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
   });
 
   it("scanner bot rejects multiplier candidate before registry admission, mutation, LLM, or execution", async () => {

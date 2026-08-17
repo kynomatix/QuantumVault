@@ -4,6 +4,14 @@ const { Pool } = pkg;
 import * as schema from "@shared/schema";
 import { appendTelemetry } from "./telemetry";
 import { formatPoolLoadTags, registerPoolLoadTag } from "./pool-load";
+import {
+  applySchemaMigrationManifest,
+  installSchemaReadinessSnapshot,
+  registerSchemaMigrationManifest,
+  reportSchemaReadiness,
+  type SchemaMigrationDefinition,
+  type SchemaReadinessSnapshot,
+} from "./schema-readiness";
 
 if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL must be set");
@@ -333,11 +341,7 @@ export { pool };
 export async function closePool(): Promise<void> {
   await pool.end();
 }
-
-export async function ensureSchema() {
-  const client = await pool.connect();
-  try {
-    const migrations = [
+const schemaMigrationSql = [
       `CREATE TABLE IF NOT EXISTS lab_candle_cache_v2 (
         id serial PRIMARY KEY,
         symbol text NOT NULL,
@@ -1176,38 +1180,2962 @@ export async function ensureSchema() {
       // Additive: never changes any row or constraint. Idempotent CREATE INDEX IF NOT EXISTS.
       // Rollback: DROP INDEX IF EXISTS idx_equity_events_bot_created
       `CREATE INDEX IF NOT EXISTS idx_equity_events_bot_created ON equity_events(trading_bot_id, created_at DESC)`,
-    ];
-    // Fault-isolate EACH migration. These statements are written to be
-    // idempotent, but some still throw on re-run with an error their inner
-    // guard doesn't trap: e.g. `ADD CONSTRAINT ... UNIQUE` raises
-    // duplicate_table (42P07, "relation ... already exists") when its backing
-    // index already exists, while the DO/EXCEPTION block only catches
-    // duplicate_object (42710). Running the whole list under a single
-    // try/catch meant one such throw aborted the loop and SILENTLY SKIPPED
-    // every later migration — this is exactly how the Flash active_protocol
-    // constraint (the last item) never reached production. Per-statement
-    // isolation guarantees every migration is attempted on every boot.
-    let skipped = 0;
-    for (const sql of migrations) {
-      try {
-        await client.query(sql);
-      } catch (err: any) {
-        skipped++;
-        const firstLine = sql.trim().split("\n")[0].slice(0, 120);
-        console.warn(`[DB] Schema migration skipped (${err.code || "error"}): ${firstLine} — ${err.message}`);
+    ] as const;
+
+const schemaMigrationMetadata = [
+  {
+    "id": "000-create-table-if-not",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "lab_candle_cache_v2",
+        "columns": [
+          "id",
+          "symbol",
+          "timeframe",
+          "time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "source",
+          "venue",
+          "basis",
+          "proxy",
+          "finality",
+          "time_semantic"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "source IN ('okx', 'gate', 'pyth', 'unknown')",
+          "venue IN ('okx', 'gate', 'none', 'unknown')",
+          "basis IN ('perp', 'spot', 'index', 'unknown')",
+          "proxy IN ('direct', 'proxy', 'unknown')",
+          "finality IN ('finalized', 'forming', 'unknown')",
+          "time_semantic IN ('open_time', 'unknown')"
+        ]
       }
-    }
-    if (skipped === 0) {
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "001-create-unique-index-if",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_candle_cache_v2",
+        "index": "lab_candle_cache_v2_identity_unique",
+        "columns": [
+          "symbol",
+          "timeframe",
+          "time",
+          "source",
+          "venue",
+          "basis",
+          "proxy",
+          "finality",
+          "time_semantic"
+        ],
+        "unique": true
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "002-create-index-if-not",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_candle_cache_v2",
+        "index": "lab_candle_cache_v2_lookup",
+        "columns": [
+          "symbol",
+          "timeframe",
+          "basis",
+          "finality",
+          "proxy",
+          "time"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "003-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "queue_order"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "004-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "config_snapshot"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "005-create-table-if-not",
+    "capabilities": [
+      "platform"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "platform_cumulative_stats",
+        "columns": [
+          "id",
+          "cumulative_volume",
+          "cumulative_trades",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "006-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_runs",
+        "index": "idx_lab_opt_runs_user_status",
+        "columns": [
+          "user_id",
+          "status",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "007-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_results",
+        "index": "idx_lab_opt_results_run_id",
+        "columns": [
+          "run_id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "008-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "subaccount_auth_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "009-update-trading_bots-set-subaccount_auth_mode",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-009-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM trading_bots WHERE subaccount_auth_mode IS NULL AND bot_subaccount_key_encrypted IS NOT NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "010-update-trading_bots-set-subaccount_auth_mode",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-010-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM trading_bots WHERE subaccount_auth_mode IS NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "011-do--begin-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_subaccount_auth_mode_check",
+        "definitionIncludes": [
+          "CHECK (subaccount_auth_mode IN ('external_key', 'main_plus_id'))"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "012-do--begin-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_external_key_invariant",
+        "definitionIncludes": [
+          "CHECK ( NOT (subaccount_auth_mode = 'external_key' AND subaccount_status = 'active') OR (protocol_subaccount_id IS NOT NULL AND bot_subaccount_key_encrypted IS NOT NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "013-alter-table-trading_bots-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "subaccount_auth_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "014-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "bot_subaccount_key_encrypted_v3"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "015-do--begin-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_external_key_invariant",
+        "definitionIncludes": [
+          "CHECK ( NOT (subaccount_auth_mode = 'external_key' AND subaccount_status = 'active') OR ( protocol_subaccount_id IS NOT NULL AND (bot_subaccount_key_encrypted IS NOT NULL OR bot_subaccount_key_encrypted_v3 IS NOT NULL) ) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "016-do--begin-update",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_active_protocol_check",
+        "definitionIncludes": [
+          "CHECK (active_protocol IN ('pacifica', 'drift'))"
+        ]
+      },
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "active_protocol"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "017-create-table-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "referral_links",
+        "columns": [
+          "id",
+          "descendant_wallet",
+          "ancestor_wallet",
+          "level",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (descendant_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "FOREIGN KEY (ancestor_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "UNIQUE (descendant_wallet, level)",
+          "CHECK (descendant_wallet <> ancestor_wallet)",
+          "CHECK (level BETWEEN 1 AND 3)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "018-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_links",
+        "index": "idx_referral_links_ancestor",
+        "columns": [
+          "ancestor_wallet"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "019-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_links",
+        "index": "idx_referral_links_descendant",
+        "columns": [
+          "descendant_wallet"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "020-create-table-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "referral_reward_events",
+        "columns": [
+          "id",
+          "source_type",
+          "source_id",
+          "earner_wallet",
+          "referee_wallet",
+          "level",
+          "amount_usdc",
+          "status",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (earner_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "FOREIGN KEY (referee_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "UNIQUE (source_type, source_id, earner_wallet, level)",
+          "CHECK (level BETWEEN 1 AND 3)",
+          "CHECK (status IN ('pending','confirmed','paid','failed'))"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "021-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_reward_events",
+        "index": "idx_referral_reward_events_earner",
+        "columns": [
+          "earner_wallet"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "022-do--begin-if",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "referral_reward_events",
+        "constraint": "referral_reward_events_status_valid",
+        "definitionIncludes": [
+          "CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'))"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "023-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "funding_wallet"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "024-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "transfer_signature"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "025-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "retry_count"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "026-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "last_error"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "027-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "last_attempt_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "028-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_reward_events",
+        "index": "idx_referral_reward_events_status_created",
+        "columns": [
+          "status",
+          "created_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "029-insert-into-referral_links-descendant_wallet",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-029-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM wallets w WHERE w.referred_by IS NOT NULL AND w.referred_by <> w.address AND EXISTS (SELECT 1 FROM wallets a WHERE a.address=w.referred_by) AND NOT EXISTS (SELECT 1 FROM referral_links r WHERE r.descendant_wallet=w.address AND r.level=1 AND r.ancestor_wallet=w.referred_by)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "030-insert-into-referral_links-descendant_wallet",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-030-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM wallets w JOIN wallets w2 ON w2.address=w.referred_by WHERE w2.referred_by IS NOT NULL AND w2.referred_by <> w.address AND EXISTS (SELECT 1 FROM wallets a WHERE a.address=w2.referred_by) AND NOT EXISTS (SELECT 1 FROM referral_links r WHERE r.descendant_wallet=w.address AND r.level=2 AND r.ancestor_wallet=w2.referred_by)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "031-insert-into-referral_links-descendant_wallet",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-031-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM wallets w JOIN wallets w2 ON w2.address=w.referred_by JOIN wallets w3 ON w3.address=w2.referred_by WHERE w3.referred_by IS NOT NULL AND w3.referred_by <> w.address AND EXISTS (SELECT 1 FROM wallets a WHERE a.address=w3.referred_by) AND NOT EXISTS (SELECT 1 FROM referral_links r WHERE r.descendant_wallet=w.address AND r.level=3 AND r.ancestor_wallet=w3.referred_by)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "032-alter-table-equity_events-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "equity_events",
+        "column": "tx_block_time"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "033-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_external_deposits"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "034-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_external_withdrawals"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "035-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_internal_transfers"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "036-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_trading_pnl"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "037-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "net_external_flow"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "038-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "pnl_percent"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "039-alter-table-wallets-add",
+    "capabilities": [
+      "notifications"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "daily_summary_enabled"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "040-alter-table-wallets-add",
+    "capabilities": [
+      "notifications"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "daily_summary_last_sent_date"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "041-alter-table-wallets-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "pacifica_builder_approved"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "042-alter-table-wallets-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "pacifica_referral_claimed"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "043-alter-table-wallets-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "hands_off_approved"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "044-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "pacifica_builder_approved"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "045-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "pacifica_referral_claimed"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "046-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_park_idle"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "047-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_park_due_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "048-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "park_destination_asset"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "049-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "vault_all_out"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "050-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_collateral_top_up"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "051-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_repay_enabled"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "052-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "next_bot_derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "053-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "recovered_orphan_indices"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "054-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_encrypted"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "055-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_last4"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "056-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_provider"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "057-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_updated_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "058-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "vault_enabled"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "059-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "vault_default_asset"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "060-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "061-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "derivation_path_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "062-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_derivation_index_positive",
+        "definitionIncludes": [
+          "CHECK (derivation_index IS NULL OR derivation_index >= 1)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "063-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_derivation_dual_model",
+        "definitionIncludes": [
+          "CHECK ( (derivation_index IS NULL AND derivation_path_version IS NULL) OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "064-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_wallet_derivation_index_unique",
+        "definitionIncludes": [
+          "UNIQUE (wallet_address, derivation_index)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "065-alter-table-protocol_subaccounts-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "protocol_subaccounts",
+        "column": "derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "066-alter-table-protocol_subaccounts-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "protocol_subaccounts",
+        "column": "derivation_path_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "067-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "protocol_subaccounts",
+        "constraint": "protocol_subaccounts_derivation_index_positive",
+        "definitionIncludes": [
+          "CHECK (derivation_index IS NULL OR derivation_index >= 1)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "068-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "protocol_subaccounts",
+        "constraint": "protocol_subaccounts_derivation_dual_model",
+        "definitionIncludes": [
+          "CHECK ( (derivation_index IS NULL AND derivation_path_version IS NULL) OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "069-insert-into-lab_strategies-user_id",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-069-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM lab_strategies src WHERE src.user_id='BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41' AND src.name IN ('SBR v1 – Structure Break & Retest','Adaptive Regime V3.8') AND NOT EXISTS (SELECT 1 FROM lab_strategies dest WHERE dest.user_id='AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez' AND dest.name=src.name)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "070-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_active_protocol_check",
+        "definitionIncludes": [
+          "CHECK (active_protocol IN ('pacifica', 'drift', 'flash'))"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "071-alter-table-bot_trades-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "bot_trades",
+        "column": "protocol"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "072-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "oos_fraction"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "073-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "slippage"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "074-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "parity_match"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "075-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "parity_diffs"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "076-alter-table-lab_optimization_results-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_results",
+        "column": "is_metrics"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "077-alter-table-lab_optimization_results-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_results",
+        "column": "oos_metrics"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "078-create-table-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "lab_agent_tasks",
+        "columns": [
+          "id",
+          "wallet_address",
+          "status",
+          "mode",
+          "goal",
+          "plan",
+          "memory",
+          "active_run_id",
+          "owned_run_ids",
+          "loop_count",
+          "spend_estimate_usd",
+          "stop_reason",
+          "last_reconciled_at",
+          "awaiting_since",
+          "cancel_requested_at",
+          "toolkit_version",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "079-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_agent_tasks",
+        "index": "idx_lab_agent_tasks_wallet_status",
+        "columns": [
+          "wallet_address",
+          "status"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "080-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_task_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "081-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_idempotency_key"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "082-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_correlation_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "083-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_owned"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "084-create-unique-index-if",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_runs",
+        "index": "uq_lab_opt_runs_agent_idem",
+        "columns": [
+          "user_id",
+          "agent_task_id",
+          "agent_idempotency_key"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "agent_idempotency_key IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "085-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_runs",
+        "index": "idx_lab_opt_runs_agent_task",
+        "columns": [
+          "agent_task_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "agent_task_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "086-create-table-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "lab_agent_messages",
+        "columns": [
+          "id",
+          "task_id",
+          "role",
+          "content",
+          "suggested_actions",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "role IN ('user','agent','tool')"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "087-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_agent_messages",
+        "index": "idx_lab_agent_messages_task_created",
+        "columns": [
+          "task_id",
+          "created_at",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "088-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_state"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "089-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_lease"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "090-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_lease_expires_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "091-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_state_changed_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "092-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "step_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "093-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "current_step"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "094-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "vault_positions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "asset_key",
+          "mint",
+          "token_amount_raw",
+          "usdc_cost_basis",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE",
+          "UNIQUE (wallet_address, asset_key)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "095-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "idx_vault_positions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "096-alter-table-vault_positions-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "vault_positions",
+        "column": "trading_bot_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "097-create-unique-index-if",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "vault_positions_account_unique",
+        "columns": [
+          "wallet_address",
+          "asset_key"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "trading_bot_id IS NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "098-create-unique-index-if",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "vault_positions_bot_unique",
+        "columns": [
+          "wallet_address",
+          "trading_bot_id",
+          "asset_key"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "trading_bot_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "099-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "idx_vault_positions_bot",
+        "columns": [
+          "trading_bot_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "trading_bot_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "100-alter-table-vault_positions-drop",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint_absent",
+        "table": "vault_positions",
+        "constraint": "vault_positions_wallet_asset_unique"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "101-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "yield_price_snapshots",
+        "columns": [
+          "id",
+          "asset_key",
+          "price_usdc_per_token",
+          "as_of"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "102-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "yield_price_snapshots",
+        "index": "idx_yield_price_snapshots_asset_time",
+        "columns": [
+          "asset_key",
+          "as_of"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "103-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "yield_apy_cache",
+        "columns": [
+          "asset_key",
+          "apy",
+          "apy_base",
+          "apy_reward",
+          "apy_mean_30d",
+          "source",
+          "pool_id",
+          "as_of"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (asset_key)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "104-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "loop_rate_samples",
+        "columns": [
+          "id",
+          "vault_id",
+          "symbol",
+          "staking_apy",
+          "staking_apy_mean_30d",
+          "borrow_apr",
+          "withdraw_utilization",
+          "net_carry_2x",
+          "liquidation_threshold",
+          "as_of"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "105-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_rate_samples",
+        "index": "idx_loop_rate_samples_vault_time",
+        "columns": [
+          "vault_id",
+          "as_of"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "106-alter-table-loop_rate_samples-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "loop_rate_samples",
+        "column": "liquidation_threshold"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "107-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "borrow_positions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "trading_bot_id",
+          "debt_venue",
+          "venue_vault_id",
+          "venue_position_id",
+          "collateral_asset_key",
+          "collateral_mint",
+          "collateral_amount_raw",
+          "debt_asset_key",
+          "debt_mint",
+          "debt_amount_raw",
+          "attributed_bot_id",
+          "status",
+          "health_snapshot",
+          "health_as_of",
+          "health_source",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "108-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_positions",
+        "index": "idx_borrow_positions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "109-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_positions",
+        "index": "idx_borrow_positions_bot",
+        "columns": [
+          "trading_bot_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "trading_bot_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "110-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "venue_position_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "111-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_observed_health_band"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "112-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "health_band_changed_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "113-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_health_alert_band"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "114-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_health_alert_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "115-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_auto_topup_attempt_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "116-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "kind"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "117-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "policy_state"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "118-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "policy_reason"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "119-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "policy_state_changed_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "120-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_policy_action_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "121-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "loop_policy_decisions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "borrow_position_id",
+          "vault_id",
+          "tick",
+          "action",
+          "fraction",
+          "reason",
+          "details",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "122-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_policy_decisions",
+        "index": "idx_loop_policy_decisions_vault_time",
+        "columns": [
+          "vault_id",
+          "created_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "123-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_policy_decisions",
+        "index": "idx_loop_policy_decisions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "124-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "loop_tick_heartbeats",
+        "columns": [
+          "id",
+          "tick",
+          "evaluated",
+          "acted",
+          "failed",
+          "skipped",
+          "skip_reason_counts",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "125-alter-table-loop_tick_heartbeats-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "loop_tick_heartbeats",
+        "column": "skipped"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "126-alter-table-loop_tick_heartbeats-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "loop_tick_heartbeats",
+        "column": "skip_reason_counts"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "127-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_tick_heartbeats",
+        "index": "idx_loop_tick_heartbeats_tick_time",
+        "columns": [
+          "tick",
+          "created_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "128-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "borrow_operations",
+        "columns": [
+          "id",
+          "wallet_address",
+          "borrow_position_id",
+          "operation_type",
+          "status",
+          "step",
+          "tx_signatures",
+          "error",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "129-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_operations",
+        "index": "idx_borrow_operations_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "130-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_operations",
+        "index": "idx_borrow_operations_position",
+        "columns": [
+          "borrow_position_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "borrow_position_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "131-alter-table-borrow_operations-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_operations",
+        "column": "client_request_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "132-alter-table-borrow_operations-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_operations",
+        "column": "metadata"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "133-alter-table-borrow_operations-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_operations",
+        "column": "result"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "134-create-unique-index-if",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_operations",
+        "index": "uq_borrow_operations_client_req",
+        "columns": [
+          "wallet_address",
+          "client_request_id"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "client_request_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "135-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "fy_positions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "venue",
+          "market_address",
+          "venue_vault_address",
+          "pt_mint",
+          "pt_decimals",
+          "underlying_mint",
+          "underlying_symbol",
+          "pt_amount_raw",
+          "cost_basis_usdc",
+          "implied_apy_at_entry",
+          "maturity_at",
+          "status",
+          "notified_maturity_at",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "136-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "fy_positions",
+        "index": "idx_fy_positions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "137-create-table-if-not",
+    "capabilities": [
+      "oracle"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "oracle_price_snapshots",
+        "columns": [
+          "id",
+          "feed_id",
+          "symbol",
+          "price_usd",
+          "publish_time_sec",
+          "taken_at",
+          "source"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "138-create-index-if-not",
+    "capabilities": [
+      "oracle"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "oracle_price_snapshots",
+        "index": "idx_oracle_snapshots_feed_taken",
+        "columns": [
+          "feed_id",
+          "taken_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "139-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "scanner_incident_holds",
+        "columns": [
+          "id",
+          "state",
+          "active_slot",
+          "export_row_count",
+          "export_digest",
+          "created_at",
+          "canary_started_at",
+          "exported_at",
+          "released_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "state IN ('baseline', 'canary', 'exported', 'released')",
+          "CHECK ( (state = 'released' AND active_slot IS NULL) OR (state <> 'released' AND active_slot = 1) )",
+          "CHECK ( (state IN ('exported', 'released') AND export_row_count IS NOT NULL AND export_digest IS NOT NULL) OR (state IN ('baseline', 'canary') AND export_row_count IS NULL AND export_digest IS NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "140-create-unique-index-if",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "scanner_incident_holds",
+        "index": "scanner_incident_holds_active_slot_unique",
+        "columns": [
+          "active_slot"
+        ],
+        "unique": true
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "141-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "scanner_incident_occurrences",
+        "columns": [
+          "event_id",
+          "hold_id",
+          "window",
+          "fingerprint",
+          "observed_at",
+          "category",
+          "source",
+          "summary",
+          "context"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (event_id)",
+          "FOREIGN KEY (hold_id) REFERENCES scanner_incident_holds(id) ON DELETE CASCADE",
+          "\"window\" IN ('baseline', 'canary')",
+          "category = 'scanner'"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "142-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "scanner_incident_occurrences",
+        "index": "scanner_incident_occurrences_hold_order_idx",
+        "columns": [
+          "hold_id",
+          "observed_at",
+          "event_id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "143-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "scanner_incident_occurrences",
+        "index": "scanner_incident_occurrences_hold_fingerprint_idx",
+        "columns": [
+          "hold_id",
+          "fingerprint"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "144-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_bots",
+        "columns": [
+          "id",
+          "wallet_address",
+          "protocol",
+          "protocol_subaccount_id",
+          "market",
+          "timeframe",
+          "mode",
+          "risk_profile",
+          "paper_mode",
+          "auto_next",
+          "model",
+          "allocated_usdc",
+          "max_leverage",
+          "stop_policy",
+          "park_when_idle",
+          "graduation_state",
+          "graduation_criteria",
+          "trial_started_at",
+          "graduated_at",
+          "policy_hmac",
+          "status",
+          "pause_reason",
+          "daily_realized_pnl",
+          "consecutive_losses",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "145-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_bots",
+        "index": "idx_ai_trader_bots_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "146-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_bots",
+        "index": "idx_ai_trader_bots_status",
+        "columns": [
+          "status"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "147-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_decisions",
+        "columns": [
+          "id",
+          "bot_id",
+          "context_digest",
+          "raw_decision",
+          "clamped_decision",
+          "guardrail_violations",
+          "outcome",
+          "entry_price",
+          "exit_price",
+          "exit_reason",
+          "realized_pnl",
+          "fees_paid",
+          "llm_cost_usd",
+          "llm_latency_ms",
+          "decided_at",
+          "closed_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (bot_id) REFERENCES ai_trader_bots(id) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "148-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_decisions",
+        "index": "idx_ai_trader_decisions_bot_decided",
+        "columns": [
+          "bot_id",
+          "decided_at DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "149-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_decisions",
+        "index": "idx_ai_trader_decisions_executed",
+        "columns": [
+          "bot_id",
+          "decided_at DESC"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "outcome = 'executed'"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "150-alter-table-wallets-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "ai_trader_free_calls_used"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "151-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "bot_subaccount_key_encrypted_v3"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "152-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "153-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "derivation_path_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "154-alter-table-ai_trader_decisions-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_decisions",
+        "column": "model_used"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "155-update-ai_trader_decisions-d-set",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-150-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM ai_trader_decisions d JOIN ai_trader_bots b ON b.id=d.bot_id WHERE d.model_used IS NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "156-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "sizing_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "157-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "risk_min_pct"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "158-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "risk_max_pct"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "159-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "cot_snapshots",
+        "columns": [
+          "id",
+          "report_date",
+          "commercial_net",
+          "noncomm_net",
+          "nonrept_net",
+          "dumb_net",
+          "comm_index",
+          "noncomm_index",
+          "nonrept_index",
+          "dumb_index",
+          "state",
+          "weeks_in_window",
+          "fetched_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "160-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "cot_snapshots",
+        "index": "idx_cot_snapshots_report_date",
+        "columns": [
+          "report_date DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "161-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "playbook"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "162-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "playbook_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "163-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "playbook_updated_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "164-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "market_source"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "165-create-index-if-not",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "equity_events",
+        "index": "idx_equity_events_bot_created",
+        "columns": [
+          "trading_bot_id",
+          "created_at DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  }
+] as const;
+
+export const SCHEMA_MIGRATION_MANIFEST: readonly SchemaMigrationDefinition[] =
+  schemaMigrationSql.map((sql, index) => {
+    const metadataEntry = schemaMigrationMetadata[index];
+    if (!metadataEntry) throw new Error(`missing schema migration metadata at index ${index}`);
+    return { ...metadataEntry, sql } as SchemaMigrationDefinition;
+  });
+
+registerSchemaMigrationManifest(SCHEMA_MIGRATION_MANIFEST);
+
+export async function ensureSchema(): Promise<SchemaReadinessSnapshot> {
+  const client = await pool.connect();
+  try {
+    const snapshot = await applySchemaMigrationManifest(
+      async (text, values) => {
+        const result = await client.query(text, values ? [...values] : undefined);
+        return { rows: result.rows as readonly Record<string, unknown>[] };
+      },
+      SCHEMA_MIGRATION_MANIFEST,
+    );
+    installSchemaReadinessSnapshot(snapshot);
+    await reportSchemaReadiness(snapshot);
+    if (snapshot.unavailableCapabilities.length === 0) {
       console.log("[DB] Schema check complete");
     } else {
-      console.warn(`[DB] Schema check complete with ${skipped} skipped statement(s) (see warnings above)`);
+      console.warn(`[DB] Schema readiness unavailable capabilities=${snapshot.unavailableCapabilities.join(",")}`);
     }
-  } catch (err: any) {
-    console.warn("[DB] Schema check warning:", err.message);
+    return snapshot;
   } finally {
     client.release();
   }
 }
+
 
 /**
  * V3 Phase 0 startup health-check.

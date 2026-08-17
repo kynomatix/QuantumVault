@@ -30,10 +30,16 @@ afterEach(() => {
 });
 
 /** Mirrors the exact gate in server/index.ts — sync version for testability. */
-function applyStartupGate(startScanner: () => void, logFn: (msg: string) => void): void {
+function applyStartupGate(
+  startScanner: () => void,
+  logFn: (msg: string) => void,
+  schemaReady = true,
+): void {
   const capabilities = parseScannerCapabilities(process.env);
   if (!capabilities.producerEnabled) {
     logFn("[Scanner] disabled via SCANNER_ENABLED=false — startScanner will not be called");
+  } else if (!schemaReady) {
+    logFn("[Scanner] withheld: schema capability unavailable capability=lab_scanner");
   } else {
     // In production this is inside a setTimeout; calling directly here is
     // equivalent for the purpose of asserting reachability.
@@ -124,11 +130,14 @@ describe("SCANNER_ENABLED kill switch", () => {
     const gateStart = source.indexOf("if (!SCANNER_CAPABILITIES.producerEnabled)");
     const gateEnd = source.indexOf("// Admin error-log retention", gateStart);
     const gate = source.slice(gateStart, gateEnd);
-    const enabledArm = gate.indexOf("} else {");
+    const schemaGate = gate.indexOf('isSchemaCapabilityReady("lab_scanner")');
+    const enabledArm = gate.lastIndexOf("} else {");
 
     expect(gateStart).toBeGreaterThan(-1);
     expect(gateEnd).toBeGreaterThan(gateStart);
+    expect(schemaGate).toBeGreaterThan(-1);
     expect(enabledArm).toBeGreaterThan(-1);
+    expect(schemaGate).toBeLessThan(enabledArm);
     expect(gate.slice(0, enabledArm)).not.toContain("startObservedBackgroundComponent({");
     expect(gate.slice(0, enabledArm)).not.toContain("import('./ai-trader/scanner')");
     expect(gate.slice(0, enabledArm)).not.toContain("startScanner();");
@@ -171,5 +180,31 @@ describe("SCANNER_ENABLED kill switch", () => {
     applyStartupGate(startScanner, log);
 
     expect(startScanner).toHaveBeenCalledTimes(1);
+  });
+
+  it("schema unavailable: producer stays withheld even when the environment gate is enabled", () => {
+    process.env.SCANNER_ENABLED = "true";
+    const startScanner = vi.fn();
+    const log = vi.fn();
+
+    applyStartupGate(startScanner, log, false);
+
+    expect(startScanner).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "[Scanner] withheld: schema capability unavailable capability=lab_scanner",
+    );
+  });
+
+  it("the complete /api/lab family is gated before inline handlers and proxy work", () => {
+    const source = readFileSync(new URL("../../server/index.ts", import.meta.url), "utf8");
+    const gate = source.indexOf('app.use("/api/lab", (_req: Request, res: Response, next: NextFunction) => {');
+    const firstInlineHandler = source.indexOf('app.post("/api/lab/run-optimization"');
+    const proxyMount = source.indexOf('app.use("/api/lab", (req: Request, res: Response, next: NextFunction) => {');
+
+    expect(gate).toBeGreaterThan(-1);
+    expect(gate).toBeLessThan(firstInlineHandler);
+    expect(gate).toBeLessThan(proxyMount);
+    expect(source.slice(gate, firstInlineHandler)).toContain('isSchemaCapabilityReady("lab_scanner")');
+    expect(source.slice(gate, firstInlineHandler)).toContain('status(503)');
   });
 });

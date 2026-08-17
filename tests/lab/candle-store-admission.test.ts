@@ -24,6 +24,7 @@ const { fakePool, fakeDb } = vi.hoisted(() => ({
     totalCount: 0,
     idleCount: 0,
     waitingCount: 0,
+    query: vi.fn(),
     connect: vi.fn<() => Promise<unknown>>(),
   },
   fakeDb: { insert: vi.fn() },
@@ -34,13 +35,82 @@ vi.mock("../../server/telemetry", () => ({ appendTelemetry: vi.fn() }));
 
 import {
   getCachedCandles,
-  getCandleStoreLoad,
   saveCandlesToDb,
+  getCacheStats,
+  clearCandleCache,
+  getCandleStoreLoad,
   CandleWriteQueueFullError,
   CACHE_BUDGET_ABORT_REASON,
   type CandleReadPhases,
 } from "../../server/lab/candle-store";
 import type { CandleFinality, ProvenancedOHLCV } from "../../server/lab/datafeed";
+import {
+  SchemaCapabilityUnavailableError,
+  registerSchemaMigrationManifest,
+  resetSchemaReadinessForTests,
+  type SchemaMigrationDefinition,
+} from "../../server/schema-readiness";
+
+const LAB_READINESS_MANIFEST: readonly SchemaMigrationDefinition[] = [
+  {
+    id: "000-lab-table",
+    sql: "CREATE TABLE lab_candle_cache_v2",
+    capabilities: ["lab_scanner"],
+    operation: "ddl",
+    requirements: [{
+      kind: "table",
+      table: "lab_candle_cache_v2",
+      columns: ["id", "symbol", "timeframe"],
+      constraintDefinitions: ["PRIMARY KEY (id)"],
+    }],
+  },
+  {
+    id: "001-lab-identity-index",
+    sql: "CREATE UNIQUE INDEX lab_candle_cache_v2_identity_unique",
+    capabilities: ["lab_scanner"],
+    operation: "ddl",
+    requirements: [{
+      kind: "index",
+      table: "lab_candle_cache_v2",
+      index: "lab_candle_cache_v2_identity_unique",
+      columns: ["symbol", "timeframe"],
+      unique: true,
+    }],
+  },
+  {
+    id: "002-lab-lookup-index",
+    sql: "CREATE INDEX lab_candle_cache_v2_lookup",
+    capabilities: ["lab_scanner"],
+    operation: "ddl",
+    requirements: [{
+      kind: "index",
+      table: "lab_candle_cache_v2",
+      index: "lab_candle_cache_v2_lookup",
+      columns: ["symbol", "timeframe"],
+      unique: false,
+    }],
+  },
+];
+
+function installSuccessfulCatalog(): void {
+  fakePool.query.mockImplementation(async (text: string, values?: readonly unknown[]) => {
+    if (text.includes("to_regclass")) return { rows: [{ relation: "lab_candle_cache_v2" }] };
+    if (text.includes("information_schema.columns")) {
+      return { rows: [{ column_name: "id" }, { column_name: "symbol" }, { column_name: "timeframe" }] };
+    }
+    if (text.includes("pg_get_constraintdef")) return { rows: [{ definition: "PRIMARY KEY (id)" }] };
+    if (text.includes("FROM pg_index")) {
+      const index = String(values?.[0]);
+      return { rows: [{
+        table_name: "lab_candle_cache_v2",
+        is_unique: index === "lab_candle_cache_v2_identity_unique",
+        predicate: null,
+        columns: ["symbol", "timeframe"],
+      }] };
+    }
+    throw new Error(`unexpected readiness query: ${text}`);
+  });
+}
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -76,6 +146,10 @@ function read(
 }
 
 beforeEach(() => {
+  resetSchemaReadinessForTests();
+  registerSchemaMigrationManifest(LAB_READINESS_MANIFEST);
+  fakePool.query.mockReset();
+  installSuccessfulCatalog();
   fakePool.connect.mockReset();
 });
 
@@ -146,8 +220,12 @@ describe("candle write queue convergence", () => {
     const occupyingB = saveCandlesToDb("ACTIVE-B", "1h", [candle(2, 2)]);
     await waitForLoad((load) => load.activeWrites === 2);
 
+    const coalescedBefore = getCandleStoreLoad().coalescedWrites;
     const updates = Array.from({ length: 16 }, (_, index) =>
       saveCandlesToDb("COLD", "1h", [candle(3, 100 + index)])
+    );
+    await waitForLoad((load) =>
+      load.activeWrites + load.queuedWrites + (load.coalescedWrites - coalescedBefore) === 18
     );
     expect(getCandleStoreLoad().queuedWrites).toBe(1);
     expect(getCandleStoreLoad().coalescedWrites).toBeGreaterThanOrEqual(15);
@@ -204,8 +282,12 @@ describe("candle write queue convergence", () => {
     await waitForLoad((load) => load.activeWrites === 2);
     const hot = saveCandlesToDb("HOT", "1h", [candle(102, 1)]);
     const cold = saveCandlesToDb("COLD", "1h", [candle(103, 1)]);
+    const coalescedBefore = getCandleStoreLoad().coalescedWrites;
     const replacements = Array.from({ length: 20 }, (_, index) =>
       saveCandlesToDb("HOT", "1h", [candle(102, 2 + index)])
+    );
+    await waitForLoad((load) =>
+      load.activeWrites + load.queuedWrites + (load.coalescedWrites - coalescedBefore) === 24
     );
 
     activeA.resolve();
@@ -232,16 +314,34 @@ describe("candle write queue convergence", () => {
     await waitForLoad((load) => load.activeWrites === 2);
     const forming = saveCandlesToDb("BAR", "1h", [candle(202, 10, "forming")]);
     const finalized = saveCandlesToDb("BAR", "1h", [candle(202, 11, "finalized")]);
-    expect(getCandleStoreLoad().queuedWrites).toBe(2);
+    // Async readiness makes mid-flight queue depth unobservable without a
+    // tautological wait. Exact finality order below proves both entries stayed
+    // distinct; the settled drain assertions prove durable convergence.
 
     activeA.resolve();
     activeB.resolve();
     await Promise.all([occupyingA, occupyingB, forming, finalized]);
     expect(finalities).toEqual(["forming", "finalized"]);
+    expect(getCandleStoreLoad().activeWrites).toBe(0);
+    expect(getCandleStoreLoad().queuedWrites).toBe(0);
   });
 });
 
 describe("getCachedCandles — cancellation-aware admission", () => {
+  it("fails all DB-touching entry points before business pool/semaphore work when child readiness is absent", async () => {
+    fakePool.query.mockImplementation(async (text: string) => {
+      if (text.includes("to_regclass")) return { rows: [{ relation: null }] };
+      return { rows: [] };
+    });
+
+    await expect(read(undefined)).rejects.toBeInstanceOf(SchemaCapabilityUnavailableError);
+    await expect(saveCandlesToDb("BTC-PERP", "1h", [])).rejects.toBeInstanceOf(SchemaCapabilityUnavailableError);
+    await expect(getCacheStats()).rejects.toBeInstanceOf(SchemaCapabilityUnavailableError);
+    await expect(clearCandleCache()).rejects.toBeInstanceOf(SchemaCapabilityUnavailableError);
+    expect(fakePool.connect).not.toHaveBeenCalled();
+    expect(getCandleStoreLoad()).toMatchObject({ activeReads: 0, activeWrites: 0 });
+  });
+
   it("A: pre-aborted signal fails typed BEFORE any pool contact, outcome=deadline for budget reason", async () => {
     const ctrl = new AbortController();
     ctrl.abort(CACHE_BUDGET_ABORT_REASON);

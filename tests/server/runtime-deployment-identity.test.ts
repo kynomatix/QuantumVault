@@ -62,8 +62,14 @@ describe("runtime deployment identity", () => {
       identityVerified: true,
     });
 
-    const starting = createRuntimeHealthPayload(false, 100, identity);
-    const ready = createRuntimeHealthPayload(true, 200, identity);
+    const starting = createRuntimeHealthPayload(false, 100, identity, {
+      evaluated: false,
+      unavailableCapabilities: [],
+    });
+    const ready = createRuntimeHealthPayload(true, 200, identity, {
+      evaluated: true,
+      unavailableCapabilities: ["lab_scanner"],
+    });
 
     expect(starting).toEqual({
       status: "ok",
@@ -74,6 +80,10 @@ describe("runtime deployment identity", () => {
       bootId: BOOT_ID,
       bootStartedAt: BOOT_STARTED_AT,
       identityVerified: true,
+      schemaReadiness: {
+        evaluated: false,
+        unavailableCapabilities: [],
+      },
     });
     expect(ready).toMatchObject({
       ready: true,
@@ -83,7 +93,26 @@ describe("runtime deployment identity", () => {
       bootId: starting.bootId,
       bootStartedAt: starting.bootStartedAt,
       identityVerified: true,
+      schemaReadiness: {
+        evaluated: true,
+        unavailableCapabilities: ["lab_scanner"],
+      },
     });
+    expect(ready.ready).toBe(true);
+  });
+
+  it("copies bounded readiness data instead of exposing a mutable internal array", () => {
+    const unavailableCapabilities = ["lab_scanner"] as const;
+    const payload = createRuntimeHealthPayload(true, 300, undefined, {
+      evaluated: true,
+      unavailableCapabilities,
+    });
+
+    expect(payload.schemaReadiness).toEqual({
+      evaluated: true,
+      unavailableCapabilities: ["lab_scanner"],
+    });
+    expect(payload.schemaReadiness.unavailableCapabilities).not.toBe(unavailableCapabilities);
   });
 
   it("defaults to an honest unverified identity outside an injected production bundle", () => {

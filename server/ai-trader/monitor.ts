@@ -77,6 +77,7 @@ import { executeDecision, checkCooldownAndCaps, aiTraderPolicyObject } from "./e
 import { computeBotPolicyHmac } from "../session-v3";
 import { getScannerShortlistResult } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
+import { isSchemaCapabilityReady } from "../schema-readiness";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
@@ -1807,6 +1808,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
   if (bot.marketSource === "scanner" && !SCANNER_CAPABILITIES.consumersEnabled) {
     if (_obs) _obs.exitReason = "gate_skip";
     console.log(`[AiTraderMonitor] scanner consumers disabled - skipping bot ${bot.id.slice(0, 8)}`);
+    scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+    return;
+  }
+
+  if (!isSchemaCapabilityReady("lab_scanner")) {
+    if (_obs) _obs.exitReason = "gate_skip";
+    console.warn(`[AiTraderMonitor] schema capability unavailable capability=lab_scanner - skipping decision cycle for bot ${bot.id.slice(0, 8)}`);
     scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
     return;
   }
