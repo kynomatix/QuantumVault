@@ -369,7 +369,64 @@ let bootCatchUpTimer: ReturnType<typeof setTimeout> | null = null;
  */
 let sweepStartedAt: number | null = null;
 let sweepGeneration = 0;
+type ScannerSweepOwner = {
+  generation: number;
+  controller: AbortController;
+  children: Set<AbortController>;
+};
+let activeSweepOwner: ScannerSweepOwner | null = null;
 const SWEEP_WEDGE_MS = 5 * 60_000;
+
+class ScannerSweepRevokedError extends Error {
+  constructor(readonly generation: number) {
+    super(`scanner sweep generation ${generation} no longer owns publication`);
+    this.name = "ScannerSweepRevokedError";
+  }
+}
+
+function ownsScannerSweep(owner: ScannerSweepOwner): boolean {
+  return scannerRunning && activeSweepOwner === owner &&
+    sweepGeneration === owner.generation && !owner.controller.signal.aborted;
+}
+
+function requireScannerSweepOwner(owner: ScannerSweepOwner): void {
+  if (!ownsScannerSweep(owner)) throw new ScannerSweepRevokedError(owner.generation);
+}
+
+function createSweepChildAbort(owner: ScannerSweepOwner): AbortController {
+  const child = new AbortController();
+  owner.children.add(child);
+  if (owner.controller.signal.aborted) child.abort(owner.controller.signal.reason);
+  return child;
+}
+
+function releaseSweepChildAbort(owner: ScannerSweepOwner, child: AbortController): void {
+  owner.children.delete(child);
+}
+
+function revokeScannerSweep(owner: ScannerSweepOwner | null, reason: string): void {
+  if (!owner) return;
+  if (activeSweepOwner === owner) activeSweepOwner = null;
+  if (!owner.controller.signal.aborted) owner.controller.abort(reason);
+  for (const child of owner.children) {
+    if (!child.signal.aborted) child.abort(reason);
+  }
+  owner.children.clear();
+}
+
+async function withSweepOwnership<T>(owner: ScannerSweepOwner, promise: Promise<T>): Promise<T> {
+  if (!ownsScannerSweep(owner)) throw new ScannerSweepRevokedError(owner.generation);
+  let onAbort: (() => void) | null = null;
+  const revoked = new Promise<never>((_, reject) => {
+    onAbort = () => reject(new ScannerSweepRevokedError(owner.generation));
+    owner.controller.signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, revoked]);
+  } finally {
+    if (onAbort) owner.controller.signal.removeEventListener("abort", onAbort);
+  }
+}
 /**
  * Total network-fetch budget for one whole sweep (all protocols, all TFs).
  * Must stay well under SWEEP_WEDGE_MS: the enforced sweep envelope is
@@ -733,7 +790,10 @@ export function evaluateCandidate(
 
 // ─── Universe builder (cached 1h per protocol) ───────────────────────────────
 
-export async function buildScannerUniverse(protocol: string): Promise<string[]> {
+export async function buildScannerUniverse(
+  protocol: string,
+  mayMutate: () => boolean = () => true,
+): Promise<string[]> {
   const cached = universeCache.get(protocol);
   if (cached && Date.now() < cached.expiresAt) return cached.data;
 
@@ -759,6 +819,7 @@ export async function buildScannerUniverse(protocol: string): Promise<string[]> 
       markets = all.filter((m) => m.isActive).map((m) => m.internalSymbol);
     }
   } catch (err) {
+    if (!mayMutate()) return universeCache.get(protocol)?.data ?? [];
     const line = `[Scanner] universe build failed for ${protocol}: ${err instanceof Error ? err.message : err}`;
     console.error(line);
     appendTelemetry(line);
@@ -770,6 +831,9 @@ export async function buildScannerUniverse(protocol: string): Promise<string[]> 
   // Quarantine unqualified multiplier identities before the sweep constructs
   // attempt keys or performs any candle fetch. Ordinary feed exclusions stay
   // independent and the exhaustive attempt ledger remains unchanged.
+  if (!mayMutate()) return markets.filter(
+    (market) => !isMultiplierMarketQuarantined(market) && !SCANNER_FEED_EXCLUDE.has(market),
+  );
   multiplierQuarantineByProtocol.set(
     protocol,
     new Set(markets.filter(isMultiplierMarketQuarantined)),
@@ -802,8 +866,15 @@ async function runSweep(): Promise<void> {
     const wedgeLine = `[Scanner] SWEEP WEDGE OVERRIDE: previous sweep wedged for ${Math.round(ageMs / 1000)}s — overriding so scanning continues`;
     console.error(wedgeLine);
     appendTelemetry(wedgeLine);
+    revokeScannerSweep(activeSweepOwner, "superseded by wedge recovery");
   }
   const gen = ++sweepGeneration;
+  const owner: ScannerSweepOwner = {
+    generation: gen,
+    controller: new AbortController(),
+    children: new Set(),
+  };
+  activeSweepOwner = owner;
   sweepStartedAt = Date.now();
   const sweepBeganAt = sweepStartedAt;
   // Sweep-global fetch deadline: bounds the WHOLE sweep's network time so a
@@ -832,6 +903,7 @@ async function runSweep(): Promise<void> {
     const candleCache = new Map<string, ProvenancedOHLCV[]>();
 
     for (const protocol of PROTOCOLS) {
+      requireScannerSweepOwner(owner);
       // Genuine wall-clock gate: once the sweep-global fetch budget is spent,
       // no further protocol may start dispatching (previously only checked
       // between markets, so a late protocol still burned real time).
@@ -842,7 +914,11 @@ async function runSweep(): Promise<void> {
         appendTelemetry(gateLine);
         continue;
       }
-      const universe = await buildScannerUniverse(protocol);
+      const universe = await withSweepOwnership(
+        owner,
+        buildScannerUniverse(protocol, () => ownsScannerSweep(owner)),
+      );
+      requireScannerSweepOwner(owner);
 
       // Per-protocol budget clock. The budget used to be measured from the GLOBAL
       // sweep start, which let the first protocol (flash) consume the entire 55s on
@@ -862,6 +938,7 @@ async function runSweep(): Promise<void> {
       const protocolStart = Date.now();
 
       for (const tf of boundaryTfs) {
+        requireScannerSweepOwner(owner);
         // Same wall-clock gate per TF: a budget spent mid-protocol must stop
         // the NEXT timeframe from dispatching, not just the next market.
         if (Date.now() >= fetchDeadlineAt) {
@@ -887,7 +964,7 @@ async function runSweep(): Promise<void> {
         // Real cancellation for this TF's dispatches: when the drain cap
         // expires, aborting unwinds retries/backoffs/pagination/in-flight
         // HTTP inside fetchOHLCV instead of leaving them running blind.
-        const tfAbort = new AbortController();
+        const tfAbort = createSweepChildAbort(owner);
 
         // Concurrency tracking (module-local to each TF scan, not shared across TFs).
         let inFlight = 0;
@@ -899,6 +976,7 @@ async function runSweep(): Promise<void> {
         // Per-market fetch + evaluate, dispatched concurrently (max 3 in flight).
         const dispatchMarket = (market: string): Promise<void> => {
           return (async () => {
+            requireScannerSweepOwner(owner);
             const ticker = marketToDatafeedTicker(market);
 
             // Feed health check: skip if recently failed (mirrors datafeed negcaches).
@@ -958,6 +1036,7 @@ async function runSweep(): Promise<void> {
                   signal: tfAbort.signal,
                   callerClass: "scanner",
                 });
+                requireScannerSweepOwner(owner);
                 // If the fetch came back EMPTY after running out its deadline,
                 // treat it as a budget timeout, not a dead feed — a truncated
                 // fetch is indistinguishable from a dead feed by bars alone.
@@ -969,6 +1048,7 @@ async function runSweep(): Promise<void> {
                 }
               }
             } catch (err) {
+              if (!ownsScannerSweep(owner)) return;
               // Ordering rationale lives on classifySweepFetchError (pure,
               // unit-tested): abort-skip first, cache-degraded second (never
               // feed-dead — the next boundary retries naturally), genuine
@@ -1036,10 +1116,12 @@ async function runSweep(): Promise<void> {
                         callerClass: "scanner",
                       },
                     );
+                    requireScannerSweepOwner(owner);
                     candleCache.set(parentCacheKey, parentBars);
                   }
                 }
               } catch (err) {
+                if (!ownsScannerSweep(owner)) return;
                 // Parent fetch failure is non-fatal, but degraded reads are
                 // still counted so DB pressure stays visible in the summary.
                 parentCacheDegradedCount = countParentCacheDegradation(
@@ -1063,6 +1145,7 @@ async function runSweep(): Promise<void> {
               if (candidate) tfCandidates.push(candidate);
             }
           })().catch((err) => {
+            if (!ownsScannerSweep(owner)) return;
             // Dispatches must NEVER reject: a single rejection would blow up
             // the drain's Promise.all and abort the whole sweep. Anything
             // reaching here escaped the inner catches (e.g. an evaluator bug).
@@ -1081,6 +1164,7 @@ async function runSweep(): Promise<void> {
 
         // Dispatch loop: max 3 concurrent + ≥150ms stagger between dispatches.
         for (let i = 0; i < universe.length; i++) {
+          requireScannerSweepOwner(owner);
           const market = universe[i];
 
           // Check BOTH clocks: this protocol's window AND the sweep-global
@@ -1109,6 +1193,7 @@ async function runSweep(): Promise<void> {
               break;
             }
             await sleep(10);
+            requireScannerSweepOwner(owner);
           }
           if (slotWaitTimedOut) {
             for (let skipped = i; skipped < universe.length; skipped++) {
@@ -1139,6 +1224,7 @@ async function runSweep(): Promise<void> {
             (!parentTf || candleCache.has(`${staggerTicker}:${parentTf}`));
           if (!healthSkipped && !venueClosed && !fullyCached) {
             await sleep(FETCH_STAGGER_MS);
+            requireScannerSweepOwner(owner);
           }
         }
 
@@ -1156,10 +1242,11 @@ async function runSweep(): Promise<void> {
           sweepBeganAt + SWEEP_WEDGE_MS - 30_000,
         );
         const drainCapMs = Math.max(SWEEP_DRAIN_FLOOR_MS, drainDeadlineAt - Date.now());
-        const drained = await Promise.race([
+        const drained = await withSweepOwnership(owner, Promise.race([
           Promise.all(pendingPromises).then(() => true),
           sleep(drainCapMs).then(() => false),
-        ]);
+        ]));
+        requireScannerSweepOwner(owner);
         if (!drained) {
           // REAL cancellation (the fix for the 2026-07-19 incident): abort the
           // TF's signal so every in-flight fetch chain unwinds — retries,
@@ -1172,10 +1259,11 @@ async function runSweep(): Promise<void> {
           appendTelemetry(cancelLine);
           // Bounded teardown: aborted dispatches settle near-instantly via the
           // abort checks; give pathological cases a short window, then abandon.
-          const settledInTime = await Promise.race([
+          const settledInTime = await withSweepOwnership(owner, Promise.race([
             Promise.allSettled(pendingPromises).then(() => true),
             sleep(SWEEP_TEARDOWN_ALLOWANCE_MS).then(() => false),
-          ]);
+          ]));
+          requireScannerSweepOwner(owner);
           if (!settledInTime) {
             const abandoned = [...inFlightMarkets];
             for (const m of abandoned) {
@@ -1195,6 +1283,7 @@ async function runSweep(): Promise<void> {
             for (const p of pendingPromises) p.catch(() => {});
           }
         }
+        releaseSweepChildAbort(owner, tfAbort);
 
         const accounting = sweepLedger.reconcile(attemptKeys);
 
@@ -1226,6 +1315,7 @@ async function runSweep(): Promise<void> {
 
         sweepCandidates += tfCandidates.length;
         sweepParentCacheDegraded += parentCacheDegradedCount;
+        requireScannerSweepOwner(owner);
 
         // Accumulate this TF's candidates into the per-protocol pool.
         const pool = allCandidatesByProtocol.get(protocol)!;
@@ -1287,6 +1377,7 @@ async function runSweep(): Promise<void> {
     // One-line sweep summary: total time vs. fetch budget + starvation signal.
     const sweepDurationMs = Date.now() - sweepBeganAt;
     const sweepAccounting = sweepLedger.reconcile();
+    requireScannerSweepOwner(owner);
     publishScannerSweepManifest(createScannerSweepManifest({
       generation: gen,
       boundaryTimeframes: boundaryTfs,
@@ -1400,6 +1491,12 @@ async function runSweep(): Promise<void> {
       });
     }
   } catch (err) {
+    if (err instanceof ScannerSweepRevokedError || !ownsScannerSweep(owner)) {
+      const cancelledLine = `[Scanner] SWEEP CANCELLED: generation ${gen} lost lifecycle ownership`;
+      console.log(cancelledLine);
+      appendTelemetry(cancelledLine);
+      return;
+    }
     // Invariant: no sweep may end without a SWEEP TOTAL or SWEEP ABORT line
     // reaching telemetry — external log readers only see the telemetry file.
     const abortAccounting = sweepLedger.reconcile();
@@ -1456,10 +1553,21 @@ async function runSweep(): Promise<void> {
       },
     });
   } finally {
+    for (const child of owner.children) {
+      if (!child.signal.aborted) child.abort("sweep finished");
+    }
+    owner.children.clear();
+    if (activeSweepOwner === owner) activeSweepOwner = null;
     // Only clear our own claim — a wedged sweep that resumes after an override
     // must not wipe the newer sweep's timestamp.
     if (gen === sweepGeneration) sweepStartedAt = null;
   }
+}
+
+/** Runs the production sweep path directly for lifecycle race tests. */
+export function runScannerSweepForTest(): Promise<void> {
+  if (!scannerRunning) throw new Error("scanner must be started before running a test sweep");
+  return runSweep();
 }
 
 // ─── Scheduler ────────────────────────────────────────────────────────────────
@@ -1609,6 +1717,7 @@ export function startScanner(): void {
  */
 export function stopScanner(): void {
   scannerRunning = false; // primary stop signal — scheduleNextScan() exits on this
+  revokeScannerSweep(activeSweepOwner, "scanner stopped");
   setDatafeedIncidentReporter(null);
   if (scannerTimer) {
     clearTimeout(scannerTimer);
