@@ -424,6 +424,133 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     }
   });
 
+  it("returns exact typed conflicts for every direct-live predicate, lineage, and replay contradiction", async () => {
+    const cases = [
+      { kind: "decision_outcome", reason: "decision_state_conflict" },
+      { kind: "decision_timestamp", reason: "decision_state_conflict" },
+      { kind: "bot_status", reason: "bot_state_conflict" },
+      { kind: "bot_pause", reason: "bot_state_conflict" },
+      { kind: "lineage_identity", reason: "journal_state_conflict" },
+      { kind: "phase20", reason: "journal_state_conflict" },
+      { kind: "terminal", reason: "journal_state_conflict" },
+      { kind: "decision_at_target_only", reason: "bot_state_conflict" },
+      { kind: "bot_at_target_only", reason: "decision_state_conflict" },
+    ] as const;
+
+    for (const testCase of cases) {
+      const atomicBot = await storage.createAiTraderBot({
+        walletAddress: `${WALLET}-live-conflict-${testCase.kind}`,
+        protocol: "pacifica",
+        market: "SOL-PERP",
+        timeframe: "15m",
+        allocatedUsdc: "100.00",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: `live-conflict-${testCase.kind}-hmac`,
+      } as any);
+      try {
+        await storage.updateAiTraderBot(atomicBot.id, { status: "executing" as any });
+        const decision = await storage.insertAiTraderDecision({
+          botId: atomicBot.id,
+          rawDecision: { action: "long" },
+          decidedAt: new Date(),
+        } as any);
+        const decidedAt = new Date(decision.decidedAt!);
+        const observedAt = testCase.kind === "decision_timestamp"
+          ? new Date(decidedAt.getTime() + 1)
+          : decidedAt;
+        const attemptId = await journal.appendRequiredEntryPrebroadcast({
+          bot: testCase.kind === "lineage_identity" ? { ...atomicBot, market: "BTC-PERP" } : atomicBot,
+          decisionId: decision.id,
+          side: "long",
+          clientOrderId: `aitrader-${decision.id}`,
+          sizeBase: 2,
+        });
+        const base = journal.journalBase(atomicBot, decision.id);
+        const broadcast = {
+          ...journal.orderResultEvent({
+            base,
+            attemptId,
+            action: "entry",
+            cause: "decision",
+            order: { success: true, status: "filled", fillPrice: 150.25, fillSize: 2, orderId: "venue-target" },
+            failureCode: null,
+          }),
+          side: "long" as const,
+          observedAt,
+        };
+        const journalEvents = [
+          broadcast,
+          { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed", side: "long", price: 150.24, sizeBase: 2, observedAt },
+          { ...base, attemptId, action: "entry", cause: "decision", eventType: "fill_observed", side: "long", price: 150.25, sizeBase: 2, observedAt },
+          { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified", side: "long", observedAt },
+          { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_open", side: "long", price: 150.25, sizeBase: 2, observedAt },
+        ] as const;
+
+        if (testCase.kind === "decision_outcome") {
+          await storage.updateAiTraderDecision(decision.id, { outcome: "flat" } as any);
+        } else if (testCase.kind === "bot_status") {
+          await storage.updateAiTraderBot(atomicBot.id, { status: "idle" as any });
+        } else if (testCase.kind === "bot_pause") {
+          await storage.updateAiTraderBot(atomicBot.id, { pauseReason: "position_unconfirmed" } as any);
+        } else if (testCase.kind === "phase20" || testCase.kind === "terminal") {
+          const preexistingBroadcast = {
+            ...journal.orderResultEvent({
+              base,
+              attemptId,
+              action: "entry",
+              cause: "decision",
+              order: { success: true, status: "filled", fillPrice: 149.5, fillSize: 2, orderId: "venue-preexisting" },
+              failureCode: null,
+            }),
+            side: "long" as const,
+            observedAt: decidedAt,
+          };
+          await journal.appendExecutionEvents(testCase.kind === "terminal"
+            ? [
+                preexistingBroadcast,
+                { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_no_land", side: "long",
+                  failureCode: "venue_rejected", recordedAfterBroadcast: true, observedAt: decidedAt },
+              ]
+            : [preexistingBroadcast]);
+        } else if (testCase.kind === "decision_at_target_only") {
+          await storage.updateAiTraderDecision(decision.id, { outcome: "executed", entryPrice: "150.25000000" } as any);
+        } else if (testCase.kind === "bot_at_target_only") {
+          await storage.updateAiTraderBot(atomicBot.id, { status: "open" as any, pauseReason: null });
+        }
+
+        const snapshot = async () => {
+          const currentDecision = await storage.getAiTraderDecision(decision.id);
+          const currentBot = await storage.getAiTraderBot(atomicBot.id);
+          const rows = await pool.query(
+            "SELECT event_identity, event_type, phase, market, venue_order_id FROM ai_trader_execution_events WHERE attempt_id=$1 ORDER BY phase NULLS LAST, event_identity",
+            [attemptId],
+          );
+          return {
+            decision: { outcome: currentDecision?.outcome ?? null, entryPrice: currentDecision?.entryPrice ?? null },
+            bot: { status: currentBot?.status, pauseReason: currentBot?.pauseReason ?? null },
+            rows: rows.rows,
+          };
+        };
+        const before = await snapshot();
+        const result = await storage.commitAiTraderDirectLiveEntryTransition({
+          botId: atomicBot.id,
+          decisionId: decision.id,
+          disposition: "open",
+          side: "long",
+          observedAt,
+          entryPrice: 150.25,
+          sizeBase: 2,
+          journalEvents,
+        });
+        expect(result).toEqual({ status: "conflict", reason: testCase.reason });
+        expect(await snapshot()).toEqual(before);
+      } finally {
+        await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, atomicBot.id));
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, atomicBot.id));
+      }
+    }
+  }, 30_000);
+
   it("real PostgreSQL faults after each direct-live mutation roll back decision, bot, and suffix together", async () => {
     const safeIdentifier = `qv_live_atomic_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9_]/g, "");
     const cases = [
@@ -431,67 +558,84 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       { stage: "bot", table: "ai_trader_bots", operation: "UPDATE", key: "id" },
       { stage: "journal", table: "ai_trader_execution_events", operation: "INSERT", key: "attempt_id" },
     ] as const;
-    for (const testCase of cases) {
-      const atomicBot = await storage.createAiTraderBot({
-        walletAddress: `${WALLET}-live-fault-${testCase.stage}`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
-        allocatedUsdc: "100.00",
-        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
-        policyHmac: `live-fault-${testCase.stage}-hmac`,
-      } as any);
-      const decision = await storage.insertAiTraderDecision({
-        botId: atomicBot.id, rawDecision: { action: "long" }, decidedAt: new Date(),
-      } as any);
-      await storage.updateAiTraderBot(atomicBot.id, { status: "executing" as any });
-      const observedAt = new Date(decision.decidedAt!);
-      const attemptId = await journal.appendRequiredEntryPrebroadcast({
-        bot: atomicBot, decisionId: decision.id, side: "long",
-        clientOrderId: `aitrader-${decision.id}`, sizeBase: 1.5,
-      });
-      const base = journal.journalBase(atomicBot, decision.id);
-      const journalEvents = [
-        { ...journal.orderResultEvent({
-          base, attemptId, action: "entry", cause: "decision",
-          order: { success: true, status: "filled", fillPrice: 151, fillSize: 1.5, orderId: "venue-fault" },
-          failureCode: null,
-        }), side: "long" as const, observedAt },
-        { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed", side: "long", price: 151, sizeBase: 1.5, observedAt },
-        { ...base, attemptId, action: "entry", cause: "decision", eventType: "fill_observed", side: "long", price: 151, sizeBase: 1.5, observedAt },
-        { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified", side: "long", observedAt },
-        { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_open", side: "long", price: 151, sizeBase: 1.5, observedAt },
-      ] as const;
-      const functionName = `${safeIdentifier}_${testCase.stage}_fn`;
-      const triggerName = `${safeIdentifier}_${testCase.stage}_trg`;
-      const keyValue = (testCase.stage === "bot" ? atomicBot.id : testCase.stage === "decision" ? decision.id : attemptId)
-        .replace(/'/g, "''");
-      try {
-        await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'live_atomic_fault_${testCase.stage}'; END; $$`);
-        await pool.query(`CREATE TRIGGER ${triggerName} AFTER ${testCase.operation} ON ${testCase.table} FOR EACH ROW WHEN (NEW.${testCase.key} = '${keyValue}') EXECUTE FUNCTION ${functionName}()`);
-        await expect(storage.commitAiTraderDirectLiveEntryTransition({
-          botId: atomicBot.id,
-          decisionId: decision.id,
-          disposition: "open",
-          side: "long",
+    for (const disposition of ["open", "quarantined", "no_land"] as const) {
+      for (const testCase of cases) {
+        const atomicBot = await storage.createAiTraderBot({
+          walletAddress: `${WALLET}-live-fault-${disposition}-${testCase.stage}`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+          allocatedUsdc: "100.00",
+          graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+          policyHmac: `live-fault-${disposition}-${testCase.stage}-hmac`,
+        } as any);
+        const decision = await storage.insertAiTraderDecision({
+          botId: atomicBot.id, rawDecision: { action: "long" }, decidedAt: new Date(),
+        } as any);
+        await storage.updateAiTraderBot(atomicBot.id, { status: "executing" as any });
+        const observedAt = new Date(decision.decidedAt!);
+        const attemptId = await journal.appendRequiredEntryPrebroadcast({
+          bot: atomicBot, decisionId: decision.id, side: "long",
+          clientOrderId: `aitrader-${decision.id}`, sizeBase: 1.5,
+        });
+        const base = journal.journalBase(atomicBot, decision.id);
+        const success = disposition === "open";
+        const broadcast = {
+          ...journal.orderResultEvent({
+            base, attemptId, action: "entry", cause: "decision",
+            order: success
+              ? { success: true, status: "filled", fillPrice: 151, fillSize: 1.5, orderId: `venue-fault-${disposition}` }
+              : { success: false, status: "rejected", error: disposition === "quarantined" ? "may still land" : "price band" },
+            failureCode: disposition === "quarantined" ? "venue_unconfirmed" : disposition === "no_land" ? "venue_rejected" : null,
+          }),
+          side: "long" as const,
           observedAt,
-          entryPrice: 151,
-          sizeBase: 1.5,
-          journalEvents,
-        })).rejects.toThrow(`live_atomic_fault_${testCase.stage}`);
-      } finally {
-        await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ${testCase.table}`);
-        await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
-      }
+        } as const;
+        const journalEvents = disposition === "open"
+          ? [
+              broadcast,
+              { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed", side: "long", price: 151, sizeBase: 1.5, observedAt },
+              { ...base, attemptId, action: "entry", cause: "decision", eventType: "fill_observed", side: "long", price: 151, sizeBase: 1.5, observedAt },
+              { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified", side: "long", observedAt },
+              { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_open", side: "long", price: 151, sizeBase: 1.5, observedAt },
+            ]
+          : disposition === "quarantined"
+            ? [broadcast]
+            : [
+                broadcast,
+                { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_no_land", side: "long",
+                  failureCode: "venue_rejected", recordedAfterBroadcast: true, observedAt },
+              ];
+        const functionName = `${safeIdentifier}_${disposition}_${testCase.stage}_fn`;
+        const triggerName = `${safeIdentifier}_${disposition}_${testCase.stage}_trg`;
+        const keyValue = (testCase.stage === "bot" ? atomicBot.id : testCase.stage === "decision" ? decision.id : attemptId)
+          .replace(/'/g, "''");
+        try {
+          await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'live_atomic_fault_${disposition}_${testCase.stage}'; END; $$`);
+          await pool.query(`CREATE TRIGGER ${triggerName} AFTER ${testCase.operation} ON ${testCase.table} FOR EACH ROW WHEN (NEW.${testCase.key} = '${keyValue}') EXECUTE FUNCTION ${functionName}()`);
+          await expect(storage.commitAiTraderDirectLiveEntryTransition({
+            botId: atomicBot.id,
+            decisionId: decision.id,
+            disposition,
+            side: "long",
+            observedAt,
+            ...(disposition === "open" ? { entryPrice: 151, sizeBase: 1.5 } : {}),
+            journalEvents,
+          } as any)).rejects.toThrow(`live_atomic_fault_${disposition}_${testCase.stage}`);
+        } finally {
+          await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ${testCase.table}`);
+          await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+        }
 
-      expect(await storage.getAiTraderDecision(decision.id)).toMatchObject({ outcome: null, entryPrice: null });
-      expect(await storage.getAiTraderBot(atomicBot.id)).toMatchObject({ status: "executing", pauseReason: null });
-      const rows = await pool.query(
-        "SELECT event_type FROM ai_trader_execution_events WHERE attempt_id=$1 ORDER BY phase NULLS LAST, event_type",
-        [attemptId],
-      );
-      expect(rows.rows.map((row: { event_type: string }) => row.event_type)).toEqual(["attempt_claimed", "prebroadcast_authorized"]);
-      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, atomicBot.id));
-      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, atomicBot.id));
+        expect(await storage.getAiTraderDecision(decision.id)).toMatchObject({ outcome: null, entryPrice: null });
+        expect(await storage.getAiTraderBot(atomicBot.id)).toMatchObject({ status: "executing", pauseReason: null });
+        const rows = await pool.query(
+          "SELECT event_type FROM ai_trader_execution_events WHERE attempt_id=$1 ORDER BY phase NULLS LAST, event_type",
+          [attemptId],
+        );
+        expect(rows.rows.map((row: { event_type: string }) => row.event_type)).toEqual(["attempt_claimed", "prebroadcast_authorized"]);
+        await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, atomicBot.id));
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, atomicBot.id));
+      }
     }
-  }, 30_000);
+  }, 60_000);
 
   it("getAiTraderBotsByWallet returns the bot for its wallet", async () => {
     const bots = await storage.getAiTraderBotsByWallet(WALLET);
