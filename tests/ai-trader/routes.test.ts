@@ -24,6 +24,11 @@ vi.mock("../../server/storage", () => ({
   },
 }));
 
+const readJournalMock = vi.fn();
+vi.mock("../../server/ai-trader/execution-journal", () => ({
+  readExecutionJournalPage: (...a: unknown[]) => readJournalMock(...a),
+}));
+
 const getSessionMock = vi.fn();
 const restoreSecurityMock = vi.fn();
 const decryptLlmApiKeyMock = vi.fn();
@@ -466,5 +471,48 @@ describe("AI Trader scanner status reporting", () => {
     });
     expect(degraded.body.currentGeneration.verdict).toBe("diagnostic_only");
     expect(degraded.body.lastTradableGeneration.generation).toBe(7);
+  });
+});
+
+function journalBot(walletAddress: string): AiTraderBot {
+  return {
+    id: "bot-route-journal",
+    walletAddress,
+    protocol: "pacifica",
+    protocolSubaccountId: "public-subaccount",
+    market: "SOL-PERP",
+    status: "idle",
+  } as unknown as AiTraderBot;
+}
+
+describe("AI Trader execution journal route", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("execution journal route is wallet scoped and omits accountRef", async () => {
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const key = "GET /api/ai-trader/:id/execution-journal";
+
+    getBotMock.mockResolvedValueOnce(journalBot("another-wallet"));
+    const denied = await invoke(built.routes, key, {
+      params: { id: "bot-route-journal" }, query: {}, body: {}, headers: {}, session: { walletAddress: "owner-wallet" },
+    });
+    expect(denied.statusCode).toBe(404);
+    expect(readJournalMock).not.toHaveBeenCalled();
+
+    getBotMock.mockResolvedValueOnce(journalBot("owner-wallet"));
+    readJournalMock.mockResolvedValueOnce({
+      events: [{ id: "event-1", botId: "bot-route-journal", market: "SOL-PERP", eventType: "attempt_claimed",
+        accountRef: "public-subaccount-that-must-not-cross-the-route-boundary" }],
+      nextCursor: null,
+    });
+    const allowed = await invoke(built.routes, key, {
+      params: { id: "bot-route-journal" }, query: { limit: "20" }, body: {}, headers: {}, session: { walletAddress: "owner-wallet" },
+    });
+    expect(allowed.statusCode).toBe(200);
+    expect(allowed.body.events[0]).not.toHaveProperty("accountRef");
+    expect(readJournalMock).toHaveBeenCalledWith({ botId: "bot-route-journal", limit: 20 });
   });
 });

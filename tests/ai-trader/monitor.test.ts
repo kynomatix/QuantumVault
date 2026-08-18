@@ -14,7 +14,7 @@
 // pauses, stale-context reschedule, happy-path execution), and startup
 // reconciliation (paper reset, live flat reset, bracket completion, orphan
 // position fail-closed flatten, venue-read-failure retry signal).
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import type { TradeRecord } from "../../server/protocol/protocol-types";
@@ -91,6 +91,29 @@ const notifyMock = vi.fn();
 vi.mock("../../server/notification-service", () => ({
   sendTradeNotification: (...a: unknown[]) => notifyMock(...a),
   getCloseReasonLabel: (source: string, leg?: string) => (leg ? `${leg} Hit` : source === "liquidation" ? "Liquidated" : source),
+}));
+
+const safeJournalMock = vi.fn();
+const safeReconciliationTerminalMock = vi.fn();
+vi.mock("../../server/ai-trader/execution-journal", () => ({
+  entryAttemptId: (decisionId: string) => `entry:${decisionId}`,
+  newMutationAttemptId: (action: string, decisionId: string | null) => `${action}:${decisionId ?? "unattributed"}:test-attempt`,
+  journalBase: (bot: AiTraderBot, decisionId: string | null) => ({
+    botId: bot.id,
+    decisionId,
+    protocol: bot.protocol,
+    accountScope: bot.protocolSubaccountId ? "bot_subaccount" : "main",
+    accountRef: bot.protocolSubaccountId ?? bot.walletAddress,
+    market: bot.market,
+  }),
+  orderResultEvent: ({ base, attemptId, action, cause, order, failureCode, recordedAfterBroadcast }: any) => ({
+    ...base, attemptId, action, cause, eventType: "broadcast_result",
+    venueStatus: order?.status ?? "unknown",
+    failureCode: failureCode ?? null,
+    recordedAfterBroadcast: recordedAfterBroadcast === true,
+  }),
+  safeAppendExecutionEvents: (...a: unknown[]) => safeJournalMock(...a),
+  safeAppendEntryReconciliationTerminal: (...a: unknown[]) => safeReconciliationTerminalMock(...a),
 }));
 
 const getAdapterMock = vi.fn();
@@ -279,6 +302,12 @@ async function importMonitor() {
   return await import("../../server/ai-trader/monitor");
 }
 
+// Module transformation is harness setup, not a five-second behavior under
+// test. Warm it before per-cell fake timers and assertions begin.
+beforeAll(async () => {
+  await importMonitor();
+});
+
 function exitFill(overrides: Partial<TradeRecord> = {}): TradeRecord {
   return {
     tradeId: "t-1",
@@ -297,6 +326,9 @@ function exitFill(overrides: Partial<TradeRecord> = {}): TradeRecord {
 const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 const decisionUpdates = () => updateDecisionMock.mock.calls.map((c) => c[1]);
 const notifications = () => notifyMock.mock.calls.map((c) => c[1]);
+const journalEvents = () => safeJournalMock.mock.calls.flatMap((call) =>
+  call[0] as Array<Record<string, unknown>>,
+);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -321,6 +353,8 @@ beforeEach(() => {
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
     stopScannerMock, isMarketAdmittedMock, isMultiplierQuarantinedMock,
     schemaCapabilityReadyMock,
+    safeJournalMock,
+    safeReconciliationTerminalMock,
   ]) {
     m.mockReset();
   }
@@ -588,6 +622,51 @@ describe("live close-result consumption", () => {
     appliedTakeProfitPrice: p.takeProfitPrice ?? null,
   }));
 
+  it("user close succeeds while every journal append fails", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    safeJournalMock.mockImplementation(() => undefined);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 151 })),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: true, closed: true, exitPrice: 151 });
+    expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(decisionUpdates().some((update) => update.exitReason === "user_close")).toBe(true);
+    expect(safeJournalMock).toHaveBeenCalled();
+  });
+
+  it("journals signing-unavailable user close and cancel attempts without reaching the venue", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    decryptSubKeyMock.mockResolvedValue(null);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: false });
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "user_requested", eventType: "close_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+      expect.objectContaining({
+        action: "cancel", cause: "pre_close_bracket", eventType: "cancel_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+    ]));
+  });
+
   it("does not record or notify a user close that is only acknowledged", async () => {
     const { userInitiatedClose } = await importMonitor();
     armLiveAuth();
@@ -804,6 +883,24 @@ describe("live close-result consumption", () => {
 });
 
 describe("live close detection", () => {
+  it("survivor cancel executes while every journal append fails", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    safeJournalMock.mockImplementation(() => undefined);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => []),
+      getTradeHistory: vi.fn(async () => [exitFill({ price: 145.02, size: 2 })]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect((adapter as any).cancelTpSlOrders).toHaveBeenCalledTimes(1);
+    expect(decisionUpdates().some((update) => update.exitReason === "sl")).toBe(true);
+    expect(safeJournalMock).toHaveBeenCalled();
+  });
+
   it("classifies a vanished position with an SL-priced fill as 'sl' and cancels the survivor leg", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
@@ -918,6 +1015,50 @@ describe("live close detection", () => {
 
 describe("G10 bracket re-verification", () => {
   const openPosition = { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" as const };
+
+  it("protective close reaches closePosition while every journal append fails", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    safeJournalMock.mockImplementation(() => undefined);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getOpenStopOrders: vi.fn(async () => []),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(botUpdates().some((update) => update.status === "paused" && update.pauseReason === "bracket_failed")).toBe(true);
+    expect(safeJournalMock).toHaveBeenCalled();
+  });
+
+  it("journals signing-unavailable protective close and cancel attempts without reaching the venue", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    decryptSubKeyMock.mockResolvedValue(null);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [{ ...openPosition, unrealizedPnl: -200 }]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    await monitorBotOnce(makeBot({ paperMode: false, dailyRealizedPnl: "-200" }));
+
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(botUpdates().some((update) => update.status === "paused")).toBe(true);
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "protective", eventType: "close_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+      expect.objectContaining({
+        action: "cancel", cause: "pre_close_bracket", eventType: "cancel_terminal_failed",
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false,
+      }),
+    ]));
+  });
 
   it("does not record a protective close that is only submitted", async () => {
     const { monitorBotOnce } = await importMonitor();
@@ -1465,6 +1606,33 @@ describe("startup reconciliation", () => {
     expect(notifications().some((n) => n.type === "trade_failed")).toBe(true);
   });
 
+  it("journals a startup-orphan venue throw and still pauses instead of propagating", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: -3, entryPrice: 150, markPrice: 150,
+          unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      closePosition: vi.fn(async () => { throw new Error("ambiguous venue timeout"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([]);
+
+    const resolved = await reconcileBotOnStartup(makeBot({ status: "open", paperMode: false }));
+
+    expect(resolved).toBe(true);
+    expect(botUpdates().some((update) =>
+      update.status === "paused" && update.pauseReason === "reconcile_orphan_position",
+    )).toBe(true);
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "startup_orphan", eventType: "close_terminal_failed",
+        failureCode: "venue_error", recordedAfterBroadcast: true,
+      }),
+    ]));
+  });
+
   it("re-arms auto-next for hands-off bots after a restart (deploy must not halt them)", async () => {
     const { reconcileOnStartup } = await importMonitor();
     getActiveBotsMock.mockResolvedValue([
@@ -1762,6 +1930,69 @@ describe("unconfirmed-landing reconciliation", () => {
   }
   const unconfirmedRow = (overrides: Partial<Record<string, unknown>> = {}) =>
     makeOpenDecision({ id: "dec-u", outcome: "unconfirmed_landing", ...overrides });
+
+  it("unconfirmed reconciliation appends adoption and no-land truth best-effort", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    safeJournalMock.mockImplementation(() => undefined);
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+    }));
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    await reconcileUnconfirmedLanding(makeQuarantinedBot());
+    const adoptionTypes = safeJournalMock.mock.calls.flatMap((call) =>
+      (call[0] as Array<{ eventType: string }>).map((event) => event.eventType),
+    );
+    expect(adoptionTypes).toEqual(expect.arrayContaining([
+      "position_observed", "bracket_verified",
+    ]));
+    expect(safeReconciliationTerminalMock).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId: "entry:dec-u",
+      terminal: "entry_terminal_open",
+      proof: { kind: "landed_position", side: "long", price: 150.1, sizeBase: 2 },
+    }));
+
+    safeJournalMock.mockClear();
+    safeReconciliationTerminalMock.mockClear();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+    await reconcileUnconfirmedLanding(makeQuarantinedBot({ updatedAt: new Date(NOW - 6 * 60_000) }));
+    expect(safeReconciliationTerminalMock).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId: "entry:dec-u",
+      terminal: "entry_terminal_no_land",
+      proof: { kind: "flat_after_landing_window" },
+    }));
+  });
+
+  it("journals an unconfirmed-orphan venue throw and completes the safety pause", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150,
+          unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      closePosition: vi.fn(async () => { throw new Error("ambiguous venue timeout"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([]);
+
+    const resolved = await reconcileUnconfirmedLanding(makeQuarantinedBot());
+
+    expect(resolved).toBe(true);
+    expect(botUpdates().some((update) =>
+      update.status === "paused" && update.pauseReason === "reconcile_orphan_position",
+    )).toBe(true);
+    expect(journalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "close", cause: "unconfirmed_orphan", eventType: "close_terminal_failed",
+        failureCode: "venue_error", recordedAfterBroadcast: true,
+      }),
+    ]));
+  });
 
   it("monitorBotOnce routes a quarantined bot to the reconciler (tick pickup) and never treats the pause as inert", async () => {
     const { monitorBotOnce } = await importMonitor();

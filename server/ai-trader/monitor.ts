@@ -81,7 +81,7 @@ import { isSchemaCapabilityReady } from "../schema-readiness";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../protocol/adapter";
-import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
+import type { CancelResult, OrderResult, ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
 import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
@@ -97,6 +97,16 @@ import {
   type OpenDecisionView,
 } from "./paper-position-authority";
 export { computeUnrealizedPnl, parseOpenDecision } from "./paper-position-authority";
+import {
+  entryAttemptId,
+  journalBase,
+  newMutationAttemptId,
+  orderResultEvent,
+  safeAppendEntryReconciliationTerminal,
+  safeAppendExecutionEvents,
+  type JournalCause,
+  type JournalFailureCode,
+} from "./execution-journal";
 
 // --- Constants ---------------------------------------------------------------------
 
@@ -741,6 +751,140 @@ async function notifyClosed(bot: AiTraderBot, close: CloseRecord, closeReason: s
   });
 }
 
+function journalPaperClose(bot: AiTraderBot, view: OpenDecisionView, close: CloseRecord): void {
+  const attemptId = newMutationAttemptId("close", view.decision.id);
+  const base = journalBase(bot, view.decision.id);
+  safeAppendExecutionEvents([
+    { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: view.side },
+    { ...base, attemptId, action: "close", cause: "paper", eventType: "fill_observed", side: view.side,
+      price: close.exitPrice, sizeBase: view.sizeBase, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+    { ...base, attemptId, action: "close", cause: "paper", eventType: "close_terminal_confirmed", side: view.side,
+      price: close.exitPrice, sizeBase: view.sizeBase, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+  ]);
+}
+
+function journalCloseAttempt(args: {
+  bot: AiTraderBot;
+  decisionId: string | null;
+  attemptId: string;
+  cause: JournalCause;
+  side: "long" | "short" | null;
+  order: OrderResult | null;
+  close?: CloseRecord;
+  failureCode?: JournalFailureCode;
+  recordedAfterBroadcast?: boolean;
+}): void {
+  const base = journalBase(args.bot, args.decisionId);
+  const confirmed = args.order !== null && isTerminalCloseResult(args.order);
+  const recordedAfterBroadcast = args.recordedAfterBroadcast ?? true;
+  const failureCode = confirmed
+    ? null
+    : args.failureCode ?? (args.order?.status === "rejected" ? "venue_rejected" : "venue_error");
+  safeAppendExecutionEvents([
+    { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      eventType: "attempt_claimed", side: args.side, recordedAfterBroadcast },
+    { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      eventType: "broadcast_attempted", side: args.side, recordedAfterBroadcast },
+    orderResultEvent({ base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      order: args.order, recordedAfterBroadcast, failureCode }),
+    ...(args.close ? [{ ...base, attemptId: args.attemptId, action: "close" as const, cause: args.cause,
+      eventType: "fill_observed" as const, side: args.side, price: args.close.exitPrice,
+      sizeBase: args.order?.fillSize ?? null, fee: args.close.feesPaid, realizedPnl: args.close.realizedPnl,
+      recordedAfterBroadcast }] : []),
+    { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      eventType: confirmed ? "close_terminal_confirmed" : "close_terminal_failed", side: args.side,
+      price: args.close?.exitPrice ?? args.order?.fillPrice ?? null,
+      sizeBase: args.order?.fillSize ?? null, fee: args.close?.feesPaid ?? args.order?.fee ?? null,
+      realizedPnl: args.close?.realizedPnl ?? null,
+      failureCode, recordedAfterBroadcast },
+  ]);
+}
+
+function journalCancelAttempt(args: {
+  bot: AiTraderBot;
+  decisionId: string;
+  attemptId: string;
+  cause: "pre_close_bracket" | "survivor_leg";
+  result: CancelResult | null;
+  failureCode?: JournalFailureCode;
+  recordedAfterBroadcast?: boolean;
+}): void {
+  const base = journalBase(args.bot, args.decisionId);
+  const success = args.result?.success === true;
+  const recordedAfterBroadcast = args.recordedAfterBroadcast ?? true;
+  const failureCode = success
+    ? null
+    : args.failureCode ?? (args.result ? "venue_rejected" : "venue_error");
+  safeAppendExecutionEvents([
+    { ...base, attemptId: args.attemptId, action: "cancel", cause: args.cause, eventType: "attempt_claimed", recordedAfterBroadcast },
+    { ...base, attemptId: args.attemptId, action: "cancel", cause: args.cause, eventType: "broadcast_attempted", recordedAfterBroadcast },
+    { ...base, attemptId: args.attemptId, action: "cancel", cause: args.cause, eventType: "broadcast_result",
+      venueStatus: success ? "canceled" : args.result ? "rejected" : "unknown",
+      failureCode, recordedAfterBroadcast },
+    { ...base, attemptId: args.attemptId, action: "cancel", cause: args.cause,
+      eventType: success ? "cancel_terminal_confirmed" : "cancel_terminal_failed",
+      venueStatus: success ? "canceled" : args.result ? "rejected" : "unknown",
+      failureCode, recordedAfterBroadcast },
+  ]);
+}
+
+async function closeOrphanPositionWithJournal(args: {
+  bot: AiTraderBot;
+  adapter: ProtocolAdapter;
+  decisionId: string | null;
+  attemptId: string;
+  cause: "unconfirmed_orphan" | "startup_orphan";
+  side: "long" | "short";
+}): Promise<boolean> {
+  let result: Awaited<ReturnType<typeof withSigningContext<
+    | { kind: "order"; order: OrderResult }
+    | { kind: "close_threw"; detail: string }
+  >>>;
+  try {
+    result = await withSigningContext(args.bot, async (keyTrio) => {
+      try {
+        const order = await args.adapter.closePosition({
+          ...keyTrio,
+          internalSymbol: args.bot.market,
+          subaccountId: undefined,
+          maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
+        });
+        return { kind: "order", order } as const;
+      } catch (err) {
+        return { kind: "close_threw", detail: err instanceof Error ? err.message : String(err) } as const;
+      }
+    });
+  } catch {
+    journalCloseAttempt({ ...args, order: null, failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+    return false;
+  }
+  if (!result.ok) {
+    journalCloseAttempt({ ...args, order: null, failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+    return false;
+  }
+  if (result.value.kind === "close_threw") {
+    journalCloseAttempt({ ...args, order: null, failureCode: "venue_error", recordedAfterBroadcast: true });
+    return false;
+  }
+  journalCloseAttempt({ ...args, order: result.value.order });
+  return result.value.order.success;
+}
+
+function journalVenueDetectedClose(bot: AiTraderBot, view: OpenDecisionView, close: CloseRecord, fillSize: number, attemptId: string): void {
+  const base = journalBase(bot, view.decision.id);
+  safeAppendExecutionEvents([
+    { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "attempt_claimed", side: view.side },
+    { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "fill_observed", side: view.side,
+      price: close.exitPrice, sizeBase: fillSize, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+    { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "close_terminal_confirmed", side: view.side,
+      price: close.exitPrice, sizeBase: fillSize, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+  ]);
+}
+
 // --- Breakeven protect (shared paper + live) --------------------------------------------
 
 /**
@@ -876,6 +1020,7 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       closedAt: new Date(hit.candleTime),
     };
     await recordClose(bot, view, close);
+    journalPaperClose(bot, view, close);
     console.log(
       `[AiTraderMonitor] Paper close: bot ${bot.id.slice(0, 8)} ${view.side} ${bot.market} ${hit.leg.toUpperCase()} @ ${hit.exitPrice.toFixed(6)} pnl ${pnl.netPnl.toFixed(2)}`
     );
@@ -928,6 +1073,7 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       closedAt: new Date(now),
     };
     await recordClose(bot, view, close);
+    journalPaperClose(bot, view, close);
     await pauseBot(
       bot,
       "daily_loss_breaker",
@@ -955,6 +1101,8 @@ async function closeLivePositionAndPause(
 ): Promise<void> {
   const releaseCloseClaim = tryAcquireCloseClaim(bot.id);
   if (!releaseCloseClaim) return;
+  const closeAttemptId = newMutationAttemptId("close", view.decision.id);
+  const cancelAttemptId = newMutationAttemptId("cancel", view.decision.id);
   try {
     const fresh = await loadFreshCloseContext(bot, view.decision.id);
     if (!fresh.ok) {
@@ -983,16 +1131,18 @@ async function closeLivePositionAndPause(
         return { kind: "identity_failure", detail: "live position market or side no longer matches" } as const;
       }
 
-      try {
-        const canceled = await adapter.cancelTpSlOrders?.({
+      if (adapter.cancelTpSlOrders) try {
+        const canceled = await adapter.cancelTpSlOrders({
           ...keyTrio,
           internalSymbol: bot.market,
           subaccountId,
         });
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: canceled });
         if (canceled && !canceled.success) {
           console.warn("[AiTraderMonitor] cancelTpSlOrders reported failure before protective close");
         }
       } catch (err) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: null });
         console.warn(`[AiTraderMonitor] cancelTpSlOrders failed before protective close: ${err instanceof Error ? err.message : err}`);
       }
 
@@ -1016,6 +1166,14 @@ async function closeLivePositionAndPause(
     try {
       result = await runCloseMutation();
     } catch (err) {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: closeAttemptId,
+        cause: "protective", side: view.side, order: null,
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      if (adapter.cancelTpSlOrders) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId,
+          cause: "pre_close_bracket", result: null,
+          failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      }
       await pauseBot(
         bot,
         args.pauseReason,
@@ -1025,12 +1183,28 @@ async function closeLivePositionAndPause(
     }
 
     if (!result.ok) {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: closeAttemptId,
+        cause: "protective", side: view.side, order: null,
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      if (adapter.cancelTpSlOrders) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId,
+          cause: "pre_close_bracket", result: null,
+          failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      }
       // Could not even sign — pause anyway (fail closed) and say so loudly. The
       // position is still protected because the callback never reached cancel.
       await pauseBot(bot, args.pauseReason, `${args.detail}; PROTECTIVE CLOSE FAILED (${result.detail}) — check the venue manually`);
       return;
     }
     if (result.value.kind === "identity_failure") {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: closeAttemptId,
+        cause: "protective", side: view.side, order: null,
+        failureCode: "identity_mismatch", recordedAfterBroadcast: false });
+      if (adapter.cancelTpSlOrders) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId,
+          cause: "pre_close_bracket", result: null,
+          failureCode: "identity_mismatch", recordedAfterBroadcast: false });
+      }
       console.warn(
         `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: skipping protective close — ${result.value.detail} (stale pass)`
       );
@@ -1039,6 +1213,8 @@ async function closeLivePositionAndPause(
 
     const order = result.value.kind === "order" ? result.value.order : null;
     if (!order || !isTerminalCloseResult(order)) {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: closeAttemptId,
+        cause: "protective", side: view.side, order });
       const closeFailure =
         result.value.kind === "close_threw"
           ? `closePosition threw: ${result.value.detail}`
@@ -1079,6 +1255,8 @@ async function closeLivePositionAndPause(
       feesPaid,
       closedAt: new Date(),
     };
+    journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: closeAttemptId,
+      cause: "protective", side: view.side, order, close });
     await recordClose(bot, view, close);
     await pauseBot(bot, args.pauseReason, args.detail);
     await notifyClosed(bot, close, "Closed by Circuit Breaker");
@@ -1122,6 +1300,8 @@ export async function userInitiatedClose(
     if (!fresh.ok) return { ok: false, detail: fresh.detail };
     bot = fresh.bot;
     view = fresh.view;
+    const attributedCloseAttemptId = newMutationAttemptId("close", view.decision.id);
+    const cancelAttemptId = newMutationAttemptId("cancel", view.decision.id);
     const adapter = getAdapter(bot.protocol);
 
     if (bot.paperMode) {
@@ -1150,6 +1330,7 @@ export async function userInitiatedClose(
         closedAt: new Date(),
       };
       await recordClose(bot, view, close);
+      journalPaperClose(bot, view, close);
       await notifyClosed(bot, close, "Closed by You");
       await afterClose(bot, close, { alreadyPaused: false });
       return { ok: true, closed: true, exitPrice, realizedPnl: pnl.netPnl };
@@ -1170,16 +1351,18 @@ export async function userInitiatedClose(
         return { kind: "identity_failure", detail: "live position market or side no longer matches" } as const;
       }
 
-      try {
-        const canceled = await adapter.cancelTpSlOrders?.({
+      if (adapter.cancelTpSlOrders) try {
+        const canceled = await adapter.cancelTpSlOrders({
           ...keyTrio,
           internalSymbol: bot.market,
           subaccountId,
         });
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: canceled });
         if (canceled && !canceled.success) {
           console.warn("[AiTraderMonitor] cancelTpSlOrders reported failure before user-initiated close");
         }
       } catch (err) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: null });
         console.warn(`[AiTraderMonitor] cancelTpSlOrders failed before user-initiated close: ${err instanceof Error ? err.message : err}`);
       }
 
@@ -1203,15 +1386,43 @@ export async function userInitiatedClose(
     try {
       result = await runCloseMutation();
     } catch (err) {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: attributedCloseAttemptId,
+        cause: "user_requested", side: view.side, order: null,
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      if (adapter.cancelTpSlOrders) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId,
+          cause: "pre_close_bracket", result: null,
+          failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      }
       return { ok: false, detail: `close precondition failed: ${err instanceof Error ? err.message : err}` };
     }
-    if (!result.ok) return { ok: false, detail: result.detail };
+    if (!result.ok) {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: attributedCloseAttemptId,
+        cause: "user_requested", side: view.side, order: null,
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      if (adapter.cancelTpSlOrders) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId,
+          cause: "pre_close_bracket", result: null,
+          failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+      }
+      return { ok: false, detail: result.detail };
+    }
     if (result.value.kind === "identity_failure") {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: attributedCloseAttemptId,
+        cause: "user_requested", side: view.side, order: null,
+        failureCode: "identity_mismatch", recordedAfterBroadcast: false });
+      if (adapter.cancelTpSlOrders) {
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId,
+          cause: "pre_close_bracket", result: null,
+          failureCode: "identity_mismatch", recordedAfterBroadcast: false });
+      }
       return { ok: false, detail: result.value.detail };
     }
 
     const order = result.value.kind === "order" ? result.value.order : null;
     if (!order || !isTerminalCloseResult(order)) {
+      journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: attributedCloseAttemptId,
+        cause: "user_requested", side: view.side, order });
       const closeFailure =
         result.value.kind === "close_threw"
           ? `closePosition threw: ${result.value.detail}`
@@ -1250,6 +1461,8 @@ export async function userInitiatedClose(
       feesPaid,
       closedAt: new Date(),
     };
+    journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: attributedCloseAttemptId,
+      cause: "user_requested", side: view.side, order, close });
     await recordClose(bot, view, close);
     await notifyClosed(bot, close, "Closed by You");
     await afterClose(bot, close, { alreadyPaused: false });
@@ -1268,6 +1481,8 @@ async function handleLiveClose(
 ): Promise<void> {
   const releaseCloseClaim = tryAcquireCloseClaim(bot.id);
   if (!releaseCloseClaim) return;
+  const detectedCloseAttemptId = newMutationAttemptId("close", view.decision.id);
+  const survivorCancelAttemptId = newMutationAttemptId("cancel", view.decision.id);
   try {
   // Stale-pass guard (mirrors closeLivePositionAndPause): if a newer pass
   // already recorded this close, bail before canceling the survivor leg —
@@ -1320,15 +1535,23 @@ async function handleLiveClose(
   // Cancel the surviving bracket leg (best-effort; reduce-only orders on a
   // flat account are inert, but leaving them resting is sloppy and confusing).
   const cancelRes = await withSigningContext(bot, async (keyTrio) => {
+    if (!adapter.cancelTpSlOrders) return true;
     try {
-      await adapter.cancelTpSlOrders?.({ ...keyTrio, internalSymbol: bot.market, subaccountId });
-      return true;
+      const canceled = await adapter.cancelTpSlOrders({ ...keyTrio, internalSymbol: bot.market, subaccountId });
+      journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: survivorCancelAttemptId, cause: "survivor_leg", result: canceled });
+      return canceled.success;
     } catch (err) {
+      journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: survivorCancelAttemptId, cause: "survivor_leg", result: null });
       console.warn(`[AiTraderMonitor] survivor-leg cancel failed: ${err instanceof Error ? err.message : err}`);
       return false;
     }
   });
   if (!cancelRes.ok) {
+    if (adapter.cancelTpSlOrders) {
+      journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: survivorCancelAttemptId,
+        cause: "survivor_leg", result: null,
+        failureCode: "signing_unavailable", recordedAfterBroadcast: false });
+    }
     console.warn(`[AiTraderMonitor] survivor-leg cancel unavailable (${cancelRes.detail})`);
   }
 
@@ -1346,6 +1569,7 @@ async function handleLiveClose(
     closedAt: new Date(),
   };
   await recordClose(bot, view, close);
+  journalVenueDetectedClose(bot, view, close, fills.exitSize, detectedCloseAttemptId);
   bracketReplaceAttempted.delete(view.decision.id);
 
   if (exitReason === "liquidation") {
@@ -2306,22 +2530,30 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       // A position we cannot attribute to a usable decision row: fail closed —
       // flatten (same as the startup orphan path).
       console.error(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} position landed with NO usable decision row — closing for safety`);
-      const res = await withSigningContext(bot, (keyTrio) =>
-        adapter.closePosition({ ...keyTrio, internalSymbol: bot.market, subaccountId: undefined, maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT })
-      );
+      const orphanAttemptId = newMutationAttemptId("close", row?.id ?? null);
+      const closed = await closeOrphanPositionWithJournal({ bot, adapter,
+        decisionId: row?.id ?? null, attemptId: orphanAttemptId, cause: "unconfirmed_orphan",
+        side: position.baseSize >= 0 ? "long" : "short" });
       if (row) await storage.updateAiTraderDecision(row.id, { outcome: "aborted_order" });
       await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "reconcile_orphan_position" });
       await sendTradeNotification(bot.walletAddress, {
         type: "trade_failed",
         botName: botLabel(bot),
         market: bot.market,
-        error: res.ok && res.value.success
+        error: closed
           ? "A late-landing entry could not be matched to its decision record; the position was closed and the bot paused."
           : "A late-landing entry could not be matched to its decision record and COULD NOT be closed — check the venue.",
       });
       return true;
     }
     const adoptedView: OpenDecisionView = { ...view, entryPrice: position.entryPrice };
+    const entryJournal = journalBase(bot, view.decision.id);
+    const adoptedAttemptId = entryAttemptId(view.decision.id);
+    safeAppendExecutionEvents([
+      { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
+        eventType: "position_observed", side: view.side, price: position.entryPrice,
+        sizeBase: Math.abs(position.baseSize) },
+    ]);
 
     // Complete the bracket before promoting (the entry landed with no TP/SL).
     if (typeof adapter.setTpSl !== "function" || typeof adapter.getOpenStopOrders !== "function") {
@@ -2384,6 +2616,17 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       entryPrice: position.entryPrice.toFixed(8),
     });
     await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
+    safeAppendExecutionEvents([
+      { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
+        eventType: "bracket_verified", side: view.side },
+    ]);
+    safeAppendEntryReconciliationTerminal({
+      base: entryJournal,
+      attemptId: adoptedAttemptId,
+      terminal: "entry_terminal_open",
+      proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
+        sizeBase: Math.abs(position.baseSize) },
+    });
     console.log(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} late entry ADOPTED — decision ${view.decision.id.slice(0, 8)} → executed @ ${position.entryPrice}, bot → open (bracket verified)`);
     return true;
   }
@@ -2396,6 +2639,14 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
   }
   if (row) {
     await storage.updateAiTraderDecision(row.id, { outcome: "aborted_order" });
+    const base = journalBase(bot, row.id);
+    const attemptId = entryAttemptId(row.id);
+    safeAppendEntryReconciliationTerminal({
+      base,
+      attemptId,
+      terminal: "entry_terminal_no_land",
+      proof: { kind: "flat_after_landing_window" },
+    });
   }
   await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed_expired" });
   await sendTradeNotification(bot.walletAddress, {
@@ -2560,15 +2811,15 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
       decidedAtMs: Date.now(),
       breakevenProtect: null,
     };
-    const res = await withSigningContext(bot, (keyTrio) =>
-      adapter.closePosition({ ...keyTrio, internalSymbol: bot.market, subaccountId: undefined, maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT })
-    );
+    const attemptId = newMutationAttemptId("close", null);
+    const closed = await closeOrphanPositionWithJournal({ bot, adapter, decisionId: null,
+      attemptId, cause: "startup_orphan", side: fallbackView.side });
     await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "reconcile_orphan_position" });
     await sendTradeNotification(bot.walletAddress, {
       type: "trade_failed",
       botName: botLabel(bot),
       market: bot.market,
-      error: res.ok && res.value.success
+      error: closed
         ? "Recovered from a crash: an untracked position was closed and the bot paused."
         : "Recovered from a crash: an untracked position was found and COULD NOT be closed — check the venue.",
     });
@@ -2626,6 +2877,22 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
     entryPrice: (view.entryPrice ?? position.entryPrice).toFixed(8),
   });
   await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
+  const base = journalBase(bot, view.decision.id);
+  const attemptId = entryAttemptId(view.decision.id);
+  safeAppendExecutionEvents([
+    { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed", side: view.side,
+      price: position.entryPrice, sizeBase: Math.abs(position.baseSize) },
+    { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified", side: view.side },
+  ]);
+  // Legacy pre-journal entries intentionally retain the evidence above but
+  // cannot acquire a recovery terminal without the durable phase-0/10 lineage.
+  safeAppendEntryReconciliationTerminal({
+    base,
+    attemptId,
+    terminal: "entry_terminal_open",
+    proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
+      sizeBase: Math.abs(position.baseSize) },
+  });
   console.log(`[AiTraderMonitor] reconcile: live bot ${bot.id.slice(0, 8)} '${bot.status}' → open (position + bracket verified)`);
   return true;
 }

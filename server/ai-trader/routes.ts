@@ -65,6 +65,7 @@ import {
   AI_TRADER_PROPOSAL_EXPIRY_MS,
   evaluateAiTraderStateAuthority,
 } from "./state-authority";
+import { readExecutionJournalPage } from "./execution-journal";
 
 // --- Auth (duplicated verbatim from server/routes.ts requireWallet) --------------------
 // Kept as an exact copy rather than an import: server/routes.ts defines it as a
@@ -1780,6 +1781,47 @@ export function registerAiTraderRoutes(app: Express): void {
       });
     } catch (err) {
       console.error("[AiTrader:Admin] waive error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // --- Immutable execution journal ------------------------------------------------------
+  app.get("/api/ai-trader/:id/execution-journal", requireWallet, async (req: any, res) => {
+    try {
+      const bot = await loadOwnedBot(req, res);
+      if (!bot) return;
+
+      const limitRaw = Number.parseInt(String(req.query.limit ?? "100"), 10);
+      const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 200) : 100;
+      const decisionId = typeof req.query.decisionId === "string" && req.query.decisionId.length > 0
+        ? req.query.decisionId
+        : undefined;
+      if (decisionId) {
+        const decision = await storage.getAiTraderDecision(decisionId);
+        if (!decision || decision.botId !== bot.id) return res.status(404).json({ error: "Decision not found" });
+      }
+
+      const beforeRaw = typeof req.query.before === "string" ? req.query.before : "";
+      const beforeId = typeof req.query.beforeId === "string" ? req.query.beforeId : "";
+      if ((beforeRaw && !beforeId) || (!beforeRaw && beforeId)) {
+        return res.status(400).json({ error: "before and beforeId must be supplied together" });
+      }
+      const before = beforeRaw ? new Date(beforeRaw) : undefined;
+      if (before && Number.isNaN(before.getTime())) return res.status(400).json({ error: "before must be a valid timestamp" });
+
+      const page = await readExecutionJournalPage({
+        botId: bot.id,
+        decisionId,
+        limit,
+        ...(before && beforeId ? { before, beforeId } : {}),
+      });
+      // Keep the transport allowlist at the route boundary as well as in the
+      // storage reader. A future reader refactor must not make the public
+      // account reference reachable through this endpoint.
+      const events = page.events.map(({ accountRef: _accountRef, ...event }: any) => event);
+      res.json({ ...page, events });
+    } catch (err) {
+      console.error("[AiTrader] execution journal read error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });
