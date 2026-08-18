@@ -220,7 +220,8 @@ export function isExecutionJournalConflict(error: unknown): boolean {
   return error.message.startsWith("execution_journal_invalid_")
     || error.message === "execution_journal_mixed_attempt_batch"
     || error.message === "execution_journal_command_phase_conflict"
-    || error.message === "execution_journal_atomic_replay_conflict";
+    || error.message === "execution_journal_atomic_replay_conflict"
+    || error.message === "execution_journal_entry_command_lineage_conflict";
 }
 
 /**
@@ -231,7 +232,7 @@ export function isExecutionJournalConflict(error: unknown): boolean {
 export async function prepareExecutionJournalEventsInTransaction(
   tx: ExecutionJournalTransaction,
   inputs: readonly JournalEventInput[],
-  options: { requireExactBatchReplay?: boolean } = {},
+  options: { requireExactBatchReplay?: boolean; requireEntryCommandLineage?: boolean } = {},
 ): Promise<PreparedExecutionJournalAppend> {
   if (inputs.length === 0) {
     return { status: "replayed", insert: async () => undefined };
@@ -247,9 +248,34 @@ export async function prepareExecutionJournalEventsInTransaction(
   await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE}, hashtext(${attemptId}))`);
   const existing = await tx.select({
     eventIdentity: aiTraderExecutionEvents.eventIdentity,
+    attemptId: aiTraderExecutionEvents.attemptId,
+    botId: aiTraderExecutionEvents.botId,
+    decisionId: aiTraderExecutionEvents.decisionId,
+    action: aiTraderExecutionEvents.action,
+    cause: aiTraderExecutionEvents.cause,
+    eventType: aiTraderExecutionEvents.eventType,
     phase: aiTraderExecutionEvents.phase,
+    protocol: aiTraderExecutionEvents.protocol,
+    accountScope: aiTraderExecutionEvents.accountScope,
+    accountRef: aiTraderExecutionEvents.accountRef,
+    market: aiTraderExecutionEvents.market,
   }).from(aiTraderExecutionEvents).where(eq(aiTraderExecutionEvents.attemptId, attemptId));
   const identities = new Set(existing.map((row) => row.eventIdentity));
+
+  if (options.requireEntryCommandLineage) {
+    const expected = values[0];
+    const phase0 = existing.filter((row) => row.phase === 0);
+    const phase10 = existing.filter((row) => row.phase === 10);
+    const valid = expected.action === "entry"
+      && expected.cause === "decision"
+      && phase0.length === 1
+      && phase10.length === 1
+      && phase0[0].eventType === "attempt_claimed"
+      && phase10[0].eventType === "prebroadcast_authorized"
+      && sameRecoveryIdentity(phase0[0], expected)
+      && sameRecoveryIdentity(phase10[0], expected);
+    if (!valid) throw new Error("execution_journal_entry_command_lineage_conflict");
+  }
 
   if (options.requireExactBatchReplay && existing.length > 0) {
     const exactReplay = existing.length === values.length

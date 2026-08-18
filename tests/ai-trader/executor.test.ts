@@ -31,6 +31,7 @@ const getAiTraderDecisionMock = vi.fn();
 const claimExecutionMock = vi.fn();
 const transitionStateMock = vi.fn();
 const commitPaperEntryMock = vi.fn();
+const commitDirectLiveEntryMock = vi.fn();
 const isMarketAdmittedMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
@@ -43,6 +44,7 @@ vi.mock("../../server/storage", () => ({
     claimAiTraderExecution: (...a: unknown[]) => claimExecutionMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
     commitAiTraderPaperEntryTransition: (...a: unknown[]) => commitPaperEntryMock(...a),
+    commitAiTraderDirectLiveEntryTransition: (...a: unknown[]) => commitDirectLiveEntryMock(...a),
   },
 }));
 
@@ -228,7 +230,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   callOrder = [];
   scannerCapabilitiesMock.liveExecutionEnabled = true;
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, commitPaperEntryMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, commitPaperEntryMock, commitDirectLiveEntryMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
     m.mockReset();
   }
   appendRequiredJournalMock.mockImplementation(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
@@ -257,6 +259,17 @@ beforeEach(() => {
     status: "applied",
     bot: makeBot({ status: "open" }),
     decision: makePersistedDecision({ outcome: "executed" }),
+  });
+  commitDirectLiveEntryMock.mockImplementation(async (params: any) => {
+    const status = params.disposition === "open" ? "open"
+      : params.disposition === "quarantined" ? "paused" : "idle";
+    callOrder.push(`status:${status}`);
+    return {
+      status: "applied",
+      bot: makeBot({ status, pauseReason: params.disposition === "quarantined" ? "position_unconfirmed" : null }),
+      decision: makePersistedDecision({ outcome: params.disposition === "open" ? "executed"
+        : params.disposition === "quarantined" ? "unconfirmed_landing" : "aborted_order" }),
+    };
   });
   transitionStateMock.mockImplementation(async (params: any) => {
     callOrder.push(`status:${params.nextStatus}`);
@@ -524,6 +537,25 @@ describe("executeDecision — retained fee-rate admission authority", () => {
     expect(adapter.setLeverage).not.toHaveBeenCalled();
     expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
   });
+
+  it("refuses a live decision with a non-finite decidedAt before claiming execution", async () => {
+    getAiTraderDecisionMock.mockResolvedValueOnce(makePersistedDecision({ id: "d-invalid-time", decidedAt: new Date(Number.NaN) }));
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-invalid-time",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bot_busy" });
+    expect((result as any).detail).toContain("decidedAt");
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
 });
 
 // --- G6 -------------------------------------------------------------------------
@@ -739,8 +771,11 @@ describe("live execution — pre-flight", () => {
       markPrice: 150,
     });
     expect(r).toMatchObject({ ok: false, reason: "policy_hmac_mismatch" });
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "policy_hmac_mismatch" });
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "aborted_policy" });
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222", expectedStatus: "analyzing", expectedPauseReason: null,
+      nextStatus: "paused", nextPauseReason: "policy_hmac_mismatch",
+      decisionId: "d-1", expectedDecisionOutcome: null, decisionOutcome: "aborted_policy",
+    }));
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
     expect((adapter.setLeverage as any)).not.toHaveBeenCalled();
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
@@ -751,6 +786,27 @@ describe("live execution — pre-flight", () => {
       "hmac-abc"
     );
     expect(cleanupUmk).toHaveBeenCalled();
+  });
+
+  it("G15: lost pre-claim decision/status predicate returns bot_busy without notification or venue mutation", async () => {
+    armLiveAuth();
+    verifyHmacMock.mockReturnValue(false);
+    transitionStateMock.mockResolvedValue(undefined);
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-g15-race",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bot_busy" });
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
   });
 
   it("G11: insufficient free collateral records aborted_funding and returns the bot to idle", async () => {
@@ -768,8 +824,11 @@ describe("live execution — pre-flight", () => {
       markPrice: 150,
     });
     expect(r).toMatchObject({ ok: false, reason: "insufficient_funding" });
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "aborted_funding" });
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222", expectedStatus: "analyzing", expectedPauseReason: null,
+      nextStatus: "idle", nextPauseReason: null,
+      decisionId: "d-1", expectedDecisionOutcome: null, decisionOutcome: "aborted_funding",
+    }));
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
     expect(cleanupUmk).toHaveBeenCalled();
     expect(cleanupKey).toHaveBeenCalled();
@@ -831,16 +890,15 @@ describe("live execution — happy path", () => {
     // The sub key signed — the main agent key was never decrypted.
     expect(decryptSubKeyMock).toHaveBeenCalled();
     expect(decryptKeyMock).not.toHaveBeenCalled();
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-live", {
-      outcome: "executed",
-      entryPrice: "150.20000000",
-    });
-    expect(transitionStateMock).toHaveBeenLastCalledWith(expect.objectContaining({
-      botId: "bot-1111-2222",
-      expectedStatus: "executing",
-      nextStatus: "open",
-      nextPauseReason: null,
+    expect(commitDirectLiveEntryMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222", decisionId: "d-live", disposition: "open",
+      entryPrice: 150.2, sizeBase: 6.66, observedAt: new Date(NOW),
     }));
+    const committed = commitDirectLiveEntryMock.mock.calls[0][0];
+    expect(committed.journalEvents.map((event: any) => event.eventType)).toEqual([
+      "broadcast_result", "position_observed", "fill_observed", "bracket_verified", "entry_terminal_open",
+    ]);
+    expect(committed.journalEvents.every((event: any) => event.observedAt.getTime() === NOW)).toBe(true);
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_executed", side: "LONG" }));
     expect(cleanupUmk).toHaveBeenCalled();
     expect(cleanupKey).toHaveBeenCalled();
@@ -883,8 +941,28 @@ describe("live execution — failure handling (fail closed)", () => {
 
     expect(result).toMatchObject({ ok: false, reason: "journal_unavailable" });
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-journal-refuse", { outcome: "aborted_order" });
-    expect(updateBotMock).toHaveBeenLastCalledWith("bot-1111-2222", { status: "idle" });
+    expect(transitionStateMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      expectedStatus: "executing", nextStatus: "idle", decisionId: "d-journal-refuse",
+      expectedDecisionOutcome: null, decisionOutcome: "aborted_order",
+    }));
+  });
+
+  it("journal refusal with a lost executing predicate returns bot_busy and never sends the order", async () => {
+    armLiveAuth();
+    appendRequiredJournalMock.mockRejectedValueOnce(new Error("journal unavailable"));
+    transitionStateMock.mockResolvedValue(undefined);
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-journal-race",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bot_busy" });
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
   });
 
   it("post-broadcast journal failure does not delay position confirmation or bracket protection", async () => {
@@ -905,11 +983,31 @@ describe("live execution — failure handling (fail closed)", () => {
     expect((adapter.getPositions as any)).toHaveBeenCalled();
     expect((adapter.setTpSl as any)).toHaveBeenCalled();
     expect((adapter.getOpenStopOrders as any)).toHaveBeenCalled();
-    expect(transitionStateMock).toHaveBeenLastCalledWith(expect.objectContaining({
-      botId: "bot-1111-2222",
-      expectedStatus: "executing",
-      nextStatus: "open",
-      nextPauseReason: null,
+    expect(commitDirectLiveEntryMock).toHaveBeenLastCalledWith(expect.objectContaining({ disposition: "open" }));
+  });
+
+  it("post-broadcast open transition conflict leaves the executing marker and emits one protected-position alert", async () => {
+    armLiveAuth();
+    commitDirectLiveEntryMock.mockResolvedValueOnce({ status: "conflict", reason: "journal_state_conflict" });
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-open-conflict",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "position_unconfirmed" });
+    expect((result as any).detail).toContain("journal_state_conflict");
+    expect(adapter.closePosition).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({
+      type: "trade_failed",
+      error: expect.stringContaining("bracket-protected"),
     }));
   });
 
@@ -957,10 +1055,34 @@ describe("live execution — failure handling (fail closed)", () => {
       markPrice: 150,
     });
     expect(r).toMatchObject({ ok: false, reason: "order_failed" });
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "aborted_order" });
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
+    expect(commitDirectLiveEntryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "no_land", observedAt: new Date(NOW),
+    }));
     expect((adapter.closePosition as any)).not.toHaveBeenCalled();
     expect(cleanupKey).toHaveBeenCalled();
+  });
+
+  it("confirmed-flat no-land transition conflict remains fail-closed with one alert", async () => {
+    armLiveAuth();
+    commitDirectLiveEntryMock.mockResolvedValueOnce({ status: "conflict", reason: "decision_state_conflict" });
+    const adapter = makeAdapter({
+      placeMarketOrder: vi.fn(async () => ({ success: false, status: "rejected" as const, error: "px band" })),
+      getPositions: vi.fn(async () => []),
+    });
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-no-land-conflict",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "position_unconfirmed" });
+    expect(adapter.closePosition).not.toHaveBeenCalled();
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
   });
 
   it("setLeverage throw → STRUCTURED clean abort (aborted_order, idle), never a raw throw stranding 'executing'", async () => {
@@ -981,8 +1103,10 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     expect(r).toMatchObject({ ok: false, reason: "order_failed" });
     expect((r as any).detail).toContain("setLeverage failed before any order was sent");
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "aborted_order" });
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
+    expect(transitionStateMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      expectedStatus: "executing", nextStatus: "idle", decisionId: "d-1",
+      expectedDecisionOutcome: null, decisionOutcome: "aborted_order",
+    }));
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
     expect((adapter.closePosition as any)).not.toHaveBeenCalled();
     expect(cleanupUmk).toHaveBeenCalled();
@@ -1025,31 +1149,20 @@ describe("live execution — failure handling (fail closed)", () => {
     // NO venue write of any kind: a close against a flat venue is a no-op that
     // manufactures the naked-position window.
     expect((adapter.closePosition as any)).not.toHaveBeenCalled();
-    // Honest persisted state for the reconciler to key on.
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-1", { outcome: "unconfirmed_landing" });
-    expect(updateDecisionMock).not.toHaveBeenCalledWith("d-1", expect.objectContaining({ outcome: "aborted_order" }));
-    // Bot quarantine write FIRST (WO 01.1 crash-consistency: its updatedAt
-    // anchors the landing window AND a crash between the two writes must leave
-    // the recognized paused/position_unconfirmed state, never a bare
-    // 'executing' bot whose decision already says unconfirmed_landing).
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
-    expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
-    const decisionCallOrder = updateDecisionMock.mock.invocationCallOrder[0];
-    const botCallOrder = updateBotMock.mock.invocationCallOrder[updateBotMock.mock.invocationCallOrder.length - 1];
-    expect(botCallOrder).toBeLessThan(decisionCallOrder);
+    expect(commitDirectLiveEntryMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222", decisionId: "d-1", disposition: "quarantined",
+      observedAt: new Date(NOW),
+      journalEvents: [expect.objectContaining({ eventType: "broadcast_result", failureCode: "venue_unconfirmed" })],
+    }));
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
     // Exactly ONE notification.
     expect(notifyMock).toHaveBeenCalledTimes(1);
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
     expect(cleanupKey).toHaveBeenCalled();
   });
 
-  it("WO 01.1: bot quarantine write REJECTS → no unconfirmed_landing decision write, no idle, no venue touch; error propagates", async () => {
-    // Crash point 1 (before either quarantine write lands): if the bot write
-    // itself fails, NOTHING may be persisted for this state — the decision
-    // must NOT carry 'unconfirmed_landing' (that would recreate the old
-    // decision-first partial state), no idle verdict may be written, and the
-    // venue must not be touched. The 'executing' crash marker remains and the
-    // storage error propagates to the caller's existing crash handling.
+  it("atomic quarantine conflict leaves executing, touches no venue, and emits exactly one failure alert", async () => {
     armLiveAuth();
     const { UNCONFIRMED_LANDING_VERDICT_TOKEN } = await import("../../server/protocol/tx-verdicts");
     const getPositionsMock = vi.fn(async () => []);
@@ -1061,36 +1174,65 @@ describe("live execution — failure handling (fail closed)", () => {
       })),
       getPositions: getPositionsMock,
     });
-    updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => {
-      if (updates?.pauseReason === "position_unconfirmed") throw new Error("db down");
-      return {};
-    });
+    commitDirectLiveEntryMock.mockResolvedValueOnce({ status: "conflict", reason: "bot_state_conflict" });
     const { executeDecision } = await importExecutor();
-    await expect(
-      executeDecision({
-        authoritySource: "internal_cycle",
-        bot: makeBot({ paperMode: false }),
-        decisionId: "d-1",
-        clamped: makeClamped(),
-        adapter,
-        markPrice: 150,
-      })
-    ).rejects.toThrow("db down");
-    expect(updateDecisionMock).not.toHaveBeenCalledWith("d-1", expect.objectContaining({ outcome: "unconfirmed_landing" }));
-    expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "position_unconfirmed" });
+    expect((result as any).detail).toContain("bot_state_conflict");
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
     expect(getPositionsMock).not.toHaveBeenCalled();
     expect((adapter.closePosition as any)).not.toHaveBeenCalled();
-    // Key material still zeroed on the throw path.
+    expect(notifyMock).toHaveBeenCalledTimes(1);
     expect(cleanupKey).toHaveBeenCalled();
   });
 
-  it("WO 01.1: decision write REJECTS after the bot write → quarantine stays, no rollback to idle, no venue touch", async () => {
-    // Crash point 2 (after the bot write, before the decision write): the
-    // durable quarantine already exists, so the executor must NOT roll the
-    // bot back or touch the venue — the reconciler treats the missing
-    // unconfirmed row as unattributed (position ⇒ orphan flatten; flat expiry
-    // just flips the pauseReason). The call still completes its quarantine
-    // contract: one notification, position_unconfirmed result.
+  it("setLeverage failure with a lost executing predicate returns bot_busy without sending an order", async () => {
+    armLiveAuth();
+    transitionStateMock.mockResolvedValue(undefined);
+    const adapter = makeAdapter({ setLeverage: vi.fn(async () => { throw new Error("venue 500"); }) });
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-leverage-race",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bot_busy" });
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it("G11: lost pre-claim decision/status predicate returns bot_busy without venue mutation", async () => {
+    armLiveAuth();
+    transitionStateMock.mockResolvedValue(undefined);
+    const adapter = makeAdapter({
+      getBalances: vi.fn(async () => ({ totalEquity: 100, freeCollateral: 1, totalMarginUsed: 0, unrealizedPnl: 0 })),
+    });
+    const { executeDecision } = await importExecutor();
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-g11-race",
+      clamped: makeClamped({ marginUsdc: 500 }),
+      adapter,
+      markPrice: 150,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "bot_busy" });
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it("atomic quarantine storage error leaves executing, touches no venue, and emits exactly one failure alert", async () => {
     armLiveAuth();
     const { UNCONFIRMED_LANDING_VERDICT_TOKEN } = await import("../../server/protocol/tx-verdicts");
     const getPositionsMock = vi.fn(async () => []);
@@ -1102,10 +1244,7 @@ describe("live execution — failure handling (fail closed)", () => {
       })),
       getPositions: getPositionsMock,
     });
-    updateDecisionMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => {
-      if (updates?.outcome === "unconfirmed_landing") throw new Error("db blip");
-      return {};
-    });
+    commitDirectLiveEntryMock.mockRejectedValueOnce(new Error("db blip"));
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
         authoritySource: "internal_cycle",
@@ -1116,12 +1255,9 @@ describe("live execution — failure handling (fail closed)", () => {
       markPrice: 150,
     });
     expect(r).toMatchObject({ ok: false, reason: "position_unconfirmed" });
-    // Quarantine persisted BEFORE the failing decision write…
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
-    // …and never rolled back or downgraded afterwards.
-    expect(updateBotMock).not.toHaveBeenCalledWith("bot-1111-2222", { status: "idle" });
-    const lastBotWrite = updateBotMock.mock.calls[updateBotMock.mock.calls.length - 1][1] as Record<string, unknown>;
-    expect(lastBotWrite).toEqual({ status: "paused", pauseReason: "position_unconfirmed" });
+    expect((r as any).detail).toContain("db blip");
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
     expect(getPositionsMock).not.toHaveBeenCalled();
     expect((adapter.closePosition as any)).not.toHaveBeenCalled();
     expect(notifyMock).toHaveBeenCalledTimes(1);

@@ -57,6 +57,78 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     ]);
   });
 
+  it("requires retained phase-20 venue evidence before an emergency-unwind entry terminal", async () => {
+    const observedAt = new Date("2026-08-19T01:00:00.000Z");
+    const decisionId = `decision-unwind-lineage-${RUN}`;
+    const attemptId = await journal.appendRequiredEntryPrebroadcast({
+      bot,
+      decisionId,
+      side: "long",
+      clientOrderId: `client-unwind-${RUN}`,
+      sizeBase: 1.5,
+    });
+    const base = journal.journalBase(bot, decisionId);
+    await journal.appendExecutionEvents([{
+      ...base,
+      attemptId,
+      action: "entry",
+      cause: "decision",
+      eventType: "broadcast_result",
+      side: "long",
+      clientOrderId: `client-unwind-${RUN}`,
+      venueStatus: "filled",
+      price: 150.25,
+      sizeBase: 1.5,
+      recordedAfterBroadcast: true,
+      observedAt,
+    }]);
+    await journal.appendExecutionEvents([{
+      ...base,
+      attemptId,
+      action: "entry",
+      cause: "decision",
+      eventType: "entry_terminal_unwound",
+      side: "long",
+      price: 150.1,
+      sizeBase: 1.5,
+      failureCode: "bracket_failed",
+      recordedAfterBroadcast: true,
+      observedAt,
+    }]);
+    const rows = await dbModule.pool.query(
+      "SELECT event_type, phase FROM ai_trader_execution_events WHERE attempt_id=$1 ORDER BY phase",
+      [attemptId],
+    );
+    expect(rows.rows.map((row) => row.event_type)).toEqual([
+      "attempt_claimed",
+      "prebroadcast_authorized",
+      "broadcast_result",
+      "entry_terminal_unwound",
+    ]);
+
+    const missingDecisionId = `decision-unwind-missing-20-${RUN}`;
+    const missingAttemptId = await journal.appendRequiredEntryPrebroadcast({
+      bot,
+      decisionId: missingDecisionId,
+      side: "short",
+      clientOrderId: `client-unwind-missing-${RUN}`,
+      sizeBase: 1,
+    });
+    await expect(journal.appendExecutionEvents([{
+      ...journal.journalBase(bot, missingDecisionId),
+      attemptId: missingAttemptId,
+      action: "entry",
+      cause: "decision",
+      eventType: "entry_terminal_unwound",
+      side: "short",
+      price: 149.5,
+      sizeBase: 1,
+      failureCode: "position_not_confirmed",
+      recordedAfterBroadcast: true,
+      observedAt,
+    }])).rejects.toThrow("execution_journal_command_phase_conflict");
+  });
+
   it("same event identity is idempotent and conflicting content is rejected", async () => {
     const attemptId = `close-idempotent-${RUN}`;
     const base = journal.journalBase(bot, null);

@@ -163,6 +163,23 @@ export interface AiTraderPaperEntryTransitionParams {
   journalEvents: readonly [JournalEventInput, JournalEventInput, JournalEventInput];
 }
 
+export type AiTraderDirectLiveEntryDisposition = "open" | "quarantined" | "no_land";
+export type AiTraderDirectLiveEntryTransitionConflict = AiTraderPaperEntryTransitionConflict;
+export type AiTraderDirectLiveEntryTransitionResult =
+  | { status: "applied" | "replayed"; decision: AiTraderDecision; bot: AiTraderBot }
+  | { status: "conflict"; reason: AiTraderDirectLiveEntryTransitionConflict };
+
+export interface AiTraderDirectLiveEntryTransitionParams {
+  botId: string;
+  decisionId: string;
+  disposition: AiTraderDirectLiveEntryDisposition;
+  side: "long" | "short";
+  observedAt: Date;
+  entryPrice?: number;
+  sizeBase?: number;
+  journalEvents: readonly JournalEventInput[];
+}
+
 /** A spare subaccount row atomically claimed for reuse (Subaccount Recycling Plan §5.1). */
 export type ClaimedSpare = {
   id: number;
@@ -202,6 +219,12 @@ class AiTraderPaperEntryConflictError extends Error {
   }
 }
 
+class AiTraderDirectLiveEntryConflictError extends Error {
+  constructor(readonly reason: AiTraderDirectLiveEntryTransitionConflict) {
+    super(reason);
+  }
+}
+
 function isExactPaperEntryJournalTuple(params: AiTraderPaperEntryTransitionParams): boolean {
   if (!Number.isFinite(params.entryPrice) || params.entryPrice <= 0
       || !Number.isFinite(params.sizeBase) || params.sizeBase <= 0
@@ -231,6 +254,56 @@ function isExactPaperEntryJournalTuple(params: AiTraderPaperEntryTransitionParam
   return Number(filled.price) === params.entryPrice
     && Number(terminal.price) === params.entryPrice
     && Number(filled.sizeBase) === params.sizeBase
+    && Number(terminal.sizeBase) === params.sizeBase;
+}
+
+function isExactDirectLiveEntryJournalSuffix(params: AiTraderDirectLiveEntryTransitionParams): boolean {
+  if (!(params.observedAt instanceof Date) || !Number.isFinite(params.observedAt.getTime())) return false;
+  const expectedTypes = params.disposition === "open"
+    ? ["broadcast_result", "position_observed", "fill_observed", "bracket_verified", "entry_terminal_open"]
+    : params.disposition === "quarantined"
+      ? ["broadcast_result"]
+      : ["broadcast_result", "entry_terminal_no_land"];
+  if (params.journalEvents.length !== expectedTypes.length
+      || params.journalEvents.some((event, index) => event.eventType !== expectedTypes[index])) return false;
+  const expectedAttemptId = `entry:${params.decisionId}`;
+  const first = params.journalEvents[0];
+  const sameNullable = (left: unknown, right: unknown) => (left ?? null) === (right ?? null);
+  for (const event of params.journalEvents) {
+    if (event.attemptId !== expectedAttemptId
+        || event.botId !== params.botId
+        || event.decisionId !== params.decisionId
+        || event.action !== "entry"
+        || event.cause !== "decision"
+        || event.side !== params.side
+        || event.protocol !== first.protocol
+        || event.accountScope !== first.accountScope
+        || !sameNullable(event.accountRef, first.accountRef)
+        || event.market !== first.market
+        || !(event.observedAt instanceof Date)
+        || event.observedAt.getTime() !== params.observedAt.getTime()) return false;
+  }
+  if (params.disposition === "quarantined") {
+    return first.failureCode === "venue_unconfirmed";
+  }
+  if (params.disposition === "no_land") {
+    const terminal = params.journalEvents[1];
+    return (first.failureCode === "venue_rejected" || first.failureCode === "venue_error")
+      && terminal.failureCode === first.failureCode
+      && terminal.recordedAfterBroadcast === true;
+  }
+  if (!Number.isFinite(params.entryPrice) || (params.entryPrice as number) <= 0
+      || !Number.isFinite(params.sizeBase) || (params.sizeBase as number) <= 0) return false;
+  const [, position, fill, , terminal] = params.journalEvents;
+  return first.failureCode == null
+    && (first.venueStatus === "submitted" || first.venueStatus === "acknowledged"
+      || first.venueStatus === "filled" || first.venueStatus === "partial_fill")
+    && position.side === params.side
+    && fill.side === params.side
+    && terminal.side === params.side
+    && Number(position.sizeBase) === params.sizeBase
+    && Number(fill.price) === params.entryPrice
+    && Number(terminal.price) === params.entryPrice
     && Number(terminal.sizeBase) === params.sizeBase;
 }
 
@@ -862,6 +935,7 @@ export interface IStorage {
   claimAiTraderExecution(params: { botId: string; decisionId: string; expectedStatus: "proposed" | "analyzing"; now: Date; expiryMs: number }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
   transitionAiTraderState(params: { botId: string; expectedStatus: string; expectedPauseReason: string | null; nextStatus: string; nextPauseReason: string | null; decisionId?: string; expectedDecisionOutcome?: string | null; decisionOutcome?: string; botUpdates?: Partial<InsertAiTraderBot> & { trialStartedAt?: Date } }): Promise<AiTraderBot | undefined>;
   commitAiTraderPaperEntryTransition(params: AiTraderPaperEntryTransitionParams): Promise<AiTraderPaperEntryTransitionResult>;
+  commitAiTraderDirectLiveEntryTransition(params: AiTraderDirectLiveEntryTransitionParams): Promise<AiTraderDirectLiveEntryTransitionResult>;
   insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
@@ -6042,6 +6116,110 @@ export class DatabaseStorage implements IStorage {
       });
     } catch (error) {
       if (error instanceof AiTraderPaperEntryConflictError) {
+        return { status: "conflict", reason: error.reason };
+      }
+      if (isExecutionJournalConflict(error)) {
+        return { status: "conflict", reason: "journal_state_conflict" };
+      }
+      throw error;
+    }
+  }
+
+  async commitAiTraderDirectLiveEntryTransition(
+    params: AiTraderDirectLiveEntryTransitionParams,
+  ): Promise<AiTraderDirectLiveEntryTransitionResult> {
+    if (!isExactDirectLiveEntryJournalSuffix(params)) {
+      return { status: "conflict", reason: "journal_state_conflict" };
+    }
+    try {
+      return await db.transaction(async (tx) => {
+        const preparedJournal = await prepareExecutionJournalEventsInTransaction(
+          tx,
+          params.journalEvents,
+          { requireExactBatchReplay: false, requireEntryCommandLineage: true },
+        );
+
+        const [decision] = await tx.select().from(aiTraderDecisions)
+          .where(and(
+            eq(aiTraderDecisions.id, params.decisionId),
+            eq(aiTraderDecisions.botId, params.botId),
+          ))
+          .limit(1);
+        if (!decision || !decision.decidedAt
+            || new Date(decision.decidedAt).getTime() !== params.observedAt.getTime()) {
+          throw new AiTraderDirectLiveEntryConflictError("decision_state_conflict");
+        }
+
+        const [bot] = await tx.select().from(aiTraderBots)
+          .where(eq(aiTraderBots.id, params.botId))
+          .limit(1);
+        if (!bot) throw new AiTraderDirectLiveEntryConflictError("bot_state_conflict");
+
+        const expectedAccountScope = bot.protocolSubaccountId ? "bot_subaccount" : "main";
+        const expectedAccountRef = bot.protocolSubaccountId ?? bot.walletAddress;
+        if (params.journalEvents.some((event) => event.protocol !== bot.protocol
+            || event.accountScope !== expectedAccountScope
+            || (event.accountRef ?? null) !== expectedAccountRef
+            || event.market !== bot.market)) {
+          throw new AiTraderDirectLiveEntryConflictError("journal_state_conflict");
+        }
+
+        const expectedEntryPrice = params.entryPrice?.toFixed(8);
+        const decisionAtTarget = params.disposition === "open"
+          ? decision.outcome === "executed" && decision.entryPrice === expectedEntryPrice
+          : decision.outcome === (params.disposition === "quarantined" ? "unconfirmed_landing" : "aborted_order")
+            && decision.entryPrice === null;
+        const targetBotStatus = params.disposition === "open" ? "open"
+          : params.disposition === "quarantined" ? "paused" : "idle";
+        const targetPauseReason = params.disposition === "quarantined" ? "position_unconfirmed" : null;
+        const botAtTarget = bot.status === targetBotStatus
+          && (bot.pauseReason ?? null) === targetPauseReason;
+
+        if (decisionAtTarget || botAtTarget) {
+          if (!decisionAtTarget) throw new AiTraderDirectLiveEntryConflictError("decision_state_conflict");
+          if (!botAtTarget) throw new AiTraderDirectLiveEntryConflictError("bot_state_conflict");
+          await preparedJournal.insert();
+          return { status: "replayed", decision, bot };
+        }
+        if (decision.outcome !== null) {
+          throw new AiTraderDirectLiveEntryConflictError("decision_state_conflict");
+        }
+        if (bot.status !== "executing" || bot.pauseReason !== null) {
+          throw new AiTraderDirectLiveEntryConflictError("bot_state_conflict");
+        }
+
+        const decisionUpdates = params.disposition === "open"
+          ? { outcome: "executed", entryPrice: expectedEntryPrice }
+          : { outcome: params.disposition === "quarantined" ? "unconfirmed_landing" : "aborted_order" };
+        const [updatedDecision] = await tx.update(aiTraderDecisions)
+          .set(decisionUpdates as any)
+          .where(and(
+            eq(aiTraderDecisions.id, params.decisionId),
+            eq(aiTraderDecisions.botId, params.botId),
+            isNull(aiTraderDecisions.outcome),
+          ))
+          .returning();
+        if (!updatedDecision) throw new AiTraderDirectLiveEntryConflictError("decision_state_conflict");
+
+        const [updatedBot] = await tx.update(aiTraderBots)
+          .set({
+            status: targetBotStatus,
+            pauseReason: targetPauseReason,
+            updatedAt: sql`NOW()`,
+          } as any)
+          .where(and(
+            eq(aiTraderBots.id, params.botId),
+            eq(aiTraderBots.status, "executing"),
+            isNull(aiTraderBots.pauseReason),
+          ))
+          .returning();
+        if (!updatedBot) throw new AiTraderDirectLiveEntryConflictError("bot_state_conflict");
+
+        await preparedJournal.insert();
+        return { status: "applied", decision: updatedDecision, bot: updatedBot };
+      });
+    } catch (error) {
+      if (error instanceof AiTraderDirectLiveEntryConflictError) {
         return { status: "conflict", reason: error.reason };
       }
       if (isExecutionJournalConflict(error)) {

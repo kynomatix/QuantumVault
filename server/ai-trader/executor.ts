@@ -378,6 +378,17 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     });
   }
 
+  const liveJournalObservedAt = persistedDecision?.decidedAt
+    ? new Date(persistedDecision.decidedAt)
+    : null;
+  if (!bot.paperMode && (!liveJournalObservedAt || !Number.isFinite(liveJournalObservedAt.getTime()))) {
+    return unwindRejectedInternalDecision(input, {
+      ok: false,
+      reason: "bot_busy",
+      detail: "persisted live decision has no finite decidedAt identity anchor",
+    });
+  }
+
   if (bot.paperMode) {
     const result = await executePaperEntry(input, side);
     return result.ok ? result : unwindRejectedInternalDecision(input, result);
@@ -389,6 +400,8 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     stopLossPrice: stopLossPrice as number,
     takeProfitPrice: takeProfitPrice as number,
     feeRateAccount: feeRateQuote.account,
+    journalObservedAt: liveJournalObservedAt as Date,
+    expectedAuthorityStatus,
   });
   return result.ok ? result : unwindRejectedInternalDecision(input, result);
 }
@@ -465,6 +478,10 @@ interface LiveEntryNumbers {
   takeProfitPrice: number;
   /** Root venue account proven by the retained admission quote. */
   feeRateAccount: string;
+  /** Durable decision-time anchor used for every event in this entry attempt. */
+  journalObservedAt: Date;
+  /** Exact state that is authorized to fail before the execution claim. */
+  expectedAuthorityStatus: "proposed" | "analyzing";
 }
 
 async function executeLiveEntry(
@@ -505,8 +522,19 @@ async function executeLiveEntry(
     // pause hard, notify, send nothing.
     const policyOk = verifyBotPolicyHmac(umkResult.umk, aiTraderPolicyObject(bot), bot.policyHmac);
     if (!policyOk) {
-      await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "policy_hmac_mismatch" });
-      await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_policy" });
+      const transitioned = await storage.transitionAiTraderState({
+        botId: bot.id,
+        expectedStatus: n.expectedAuthorityStatus,
+        expectedPauseReason: null,
+        nextStatus: "paused",
+        nextPauseReason: "policy_hmac_mismatch",
+        decisionId,
+        expectedDecisionOutcome: null,
+        decisionOutcome: "aborted_policy",
+      });
+      if (!transitioned) {
+        return { ok: false, reason: "bot_busy", detail: "G15 refusal lost its exact decision/status predicate" };
+      }
       await sendTradeNotification(bot.walletAddress, {
         type: "trade_failed",
         botName: `AI Trader ${bot.market}`,
@@ -572,8 +600,19 @@ async function executeLiveEntry(
     // which the capability pre-flight above already blocks).
     const balances = await adapter.getBalances(agentPublicKey, subaccountId);
     if (!Number.isFinite(balances.freeCollateral) || balances.freeCollateral < n.marginUsdc) {
-      await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_funding" });
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      const transitioned = await storage.transitionAiTraderState({
+        botId: bot.id,
+        expectedStatus: n.expectedAuthorityStatus,
+        expectedPauseReason: null,
+        nextStatus: "idle",
+        nextPauseReason: null,
+        decisionId,
+        expectedDecisionOutcome: null,
+        decisionOutcome: "aborted_funding",
+      });
+      if (!transitioned) {
+        return { ok: false, reason: "bot_busy", detail: "G11 refusal lost its exact decision/status predicate" };
+      }
       return {
         ok: false,
         reason: "insufficient_funding",
@@ -596,8 +635,19 @@ async function executeLiveEntry(
     try {
       await adapter.setLeverage({ ...keyTrio, internalSymbol: bot.market, leverage: n.leverage, subaccountId });
     } catch (err) {
-      await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_order" });
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      const transitioned = await storage.transitionAiTraderState({
+        botId: bot.id,
+        expectedStatus: "executing",
+        expectedPauseReason: null,
+        nextStatus: "idle",
+        nextPauseReason: null,
+        decisionId,
+        expectedDecisionOutcome: null,
+        decisionOutcome: "aborted_order",
+      });
+      if (!transitioned) {
+        return { ok: false, reason: "bot_busy", detail: "setLeverage refusal lost its exact decision/status predicate" };
+      }
       return {
         ok: false,
         reason: "order_failed",
@@ -619,8 +669,19 @@ async function executeLiveEntry(
       const line = "[AiTraderExecutionJournal] required pre-broadcast append failed action=entry event=prebroadcast_authorized — live entry refused";
       console.warn(line);
       appendTelemetry(line);
-      await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_order" });
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      const transitioned = await storage.transitionAiTraderState({
+        botId: bot.id,
+        expectedStatus: "executing",
+        expectedPauseReason: null,
+        nextStatus: "idle",
+        nextPauseReason: null,
+        decisionId,
+        expectedDecisionOutcome: null,
+        decisionOutcome: "aborted_order",
+      });
+      if (!transitioned) {
+        return { ok: false, reason: "bot_busy", detail: "journal refusal lost its exact decision/status predicate" };
+      }
       return {
         ok: false,
         reason: "journal_unavailable",
@@ -644,8 +705,8 @@ async function executeLiveEntry(
       orderResult = { success: false, status: "rejected" as const, error: err instanceof Error ? err.message : String(err) };
     }
     const entryJournal = journalBase(bot, decisionId);
-    safeAppendExecutionEvents([
-      orderResultEvent({
+    const entryOrderEvent = {
+      ...orderResultEvent({
         base: entryJournal,
         attemptId: journalAttemptId,
         action: "entry",
@@ -655,7 +716,39 @@ async function executeLiveEntry(
         failureCode: orderResult.success ? null : isUnconfirmedLandingVerdict(orderResult.error)
           ? "venue_unconfirmed" : orderResult.status === "rejected" ? "venue_rejected" : "venue_error",
       }),
-    ]);
+      side,
+      observedAt: n.journalObservedAt,
+    };
+
+    const transitionFailure = async (detail: string, bracketProtected = false): Promise<ExecuteDecisionResult> => {
+      await sendTradeNotification(bot.walletAddress, {
+        type: "trade_failed",
+        botName: `AI Trader ${bot.market}`,
+        market: bot.market,
+        side: side === "long" ? "LONG" : "SHORT",
+        error: `${detail}. The durable entry transition did not commit; the bot remains in its executing crash marker. ${
+          bracketProtected
+            ? "The venue position is bracket-protected while reconciliation takes ownership."
+            : "Verify the venue before any further entry."
+        }`,
+      });
+      return { ok: false, reason: "position_unconfirmed", detail };
+    };
+
+    const commitLiveTransition = async (
+      params: Parameters<typeof storage.commitAiTraderDirectLiveEntryTransition>[0],
+      detail: string,
+      bracketProtected = false,
+    ): Promise<ExecuteDecisionResult | null> => {
+      try {
+        const transitioned = await storage.commitAiTraderDirectLiveEntryTransition(params);
+        return transitioned.status === "conflict"
+          ? await transitionFailure(`${detail} (${transitioned.reason})`, bracketProtected)
+          : null;
+      } catch (err) {
+        return transitionFailure(`${detail} (${err instanceof Error ? err.message : String(err)})`, bracketProtected);
+      }
+    };
 
     if (!orderResult.success) {
       // Landing-verification timeout: the order tx was BROADCAST and may still
@@ -673,29 +766,19 @@ async function executeLiveEntry(
       // the marker after a conservative flat window. (Retry classification
       // also hard-excludes this verdict — see tx-verdicts.ts.)
       if (isUnconfirmedLandingVerdict(orderResult.error)) {
-        // BOT quarantine write FIRST (crash-consistency, WO 01.1): its
-        // updatedAt anchors the five-minute reconciliation window, and
-        // bot-first ordering guarantees a crash between the two writes leaves
-        // paused/position_unconfirmed — a state both the tick loop and startup
-        // route into reconcileUnconfirmedLanding(). The old decision-first
-        // order could die mid-way leaving 'executing' + 'unconfirmed_landing',
-        // which generic startup recovery would flat-read → idle → auto-next
-        // re-entry while the broadcast tx can still land. If THIS write
-        // throws, nothing has been written: the 'executing' crash marker
-        // stays and the error propagates through existing behavior.
-        await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed" });
-        try {
-          await storage.updateAiTraderDecision(decisionId, { outcome: "unconfirmed_landing" });
-        } catch (err) {
-          // The quarantine is already durable — never roll the bot back, never
-          // set idle, never touch the venue. The reconciler treats a missing
-          // 'unconfirmed_landing' row as unattributed: a landed position fails
-          // closed (orphan flatten) and a flat expiry just flips the
-          // pauseReason, so proceeding to notify + return is safe.
-          console.error(
-            `[AiTrader] unconfirmed-landing: decision write failed AFTER quarantine for bot ${bot.id.slice(0, 8)} — leaving paused/position_unconfirmed (${err instanceof Error ? err.message : err})`
-          );
-        }
+        // Quarantine decision, bot state, and the exact venue-result suffix in
+        // one transaction. A conflict/throw leaves the pre-existing executing
+        // crash marker intact and returns position_unconfirmed; there is no
+        // split state for startup recovery to misclassify as a clean abort.
+        const failedTransition = await commitLiveTransition({
+          botId: bot.id,
+          decisionId,
+          disposition: "quarantined",
+          side,
+          observedAt: n.journalObservedAt,
+          journalEvents: [entryOrderEvent],
+        }, "Unconfirmed entry quarantine could not be committed atomically");
+        if (failedTransition) return failedTransition;
         await sendTradeNotification(bot.walletAddress, {
           type: "trade_failed",
           botName: `AI Trader ${bot.market}`,
@@ -724,13 +807,21 @@ async function executeLiveEntry(
         confirmedFlat = false;
       }
       if (confirmedFlat) {
-        await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_order" });
-        await storage.updateAiTraderBot(bot.id, { status: "idle" });
-        safeAppendExecutionEvents([
-          { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
-            eventType: "entry_terminal_no_land", side, clientOrderId,
-            failureCode: orderResult.status === "rejected" ? "venue_rejected" : "venue_error" },
-        ]);
+        const failedTransition = await commitLiveTransition({
+          botId: bot.id,
+          decisionId,
+          disposition: "no_land",
+          side,
+          observedAt: n.journalObservedAt,
+          journalEvents: [
+            entryOrderEvent,
+            { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+              eventType: "entry_terminal_no_land", side, clientOrderId,
+              failureCode: orderResult.status === "rejected" ? "venue_rejected" : "venue_error",
+              recordedAfterBroadcast: true, observedAt: n.journalObservedAt },
+          ],
+        }, "Confirmed-flat no-land transition could not be committed atomically");
+        if (failedTransition) return failedTransition;
         return { ok: false, reason: "order_failed", detail: `entry order failed cleanly (no position): ${orderResult.error ?? "unknown"}` };
       }
       // Can't prove we're flat — treat like an unconfirmed position: try to
@@ -740,6 +831,7 @@ async function executeLiveEntry(
       // reconcileUnconfirmedLanding every tick — intentional: flat bots get a
       // clean expiry, and a position that shows up late gets adopted or
       // orphan-flattened instead of sitting naked.
+      safeAppendExecutionEvents([entryOrderEvent]);
       return await emergencyCloseAndPause({
         input, keyTrio, subaccountId,
         pauseReason: "position_unconfirmed",
@@ -762,6 +854,7 @@ async function executeLiveEntry(
       if (attempt < POSITION_CONFIRM_ATTEMPTS) await sleep(POSITION_CONFIRM_DELAY_MS);
     }
     if (!confirmed) {
+      safeAppendExecutionEvents([entryOrderEvent]);
       return await emergencyCloseAndPause({
         input, keyTrio, subaccountId,
         pauseReason: "position_unconfirmed",
@@ -784,6 +877,7 @@ async function executeLiveEntry(
       takeProfitPrice: n.takeProfitPrice,
     });
     if (!bracketOk.ok) {
+      safeAppendExecutionEvents([entryOrderEvent]);
       return await emergencyCloseAndPause({
         input, keyTrio, subaccountId,
         pauseReason: "bracket_failed",
@@ -796,31 +890,31 @@ async function executeLiveEntry(
     }
 
     // Step 7 — success.
-    await storage.updateAiTraderDecision(decisionId, {
-      outcome: "executed",
-      entryPrice: entryPrice.toFixed(8),
-    });
-    await storage.transitionAiTraderState({
+    const failedTransition = await commitLiveTransition({
       botId: bot.id,
-      expectedStatus: "executing",
-      expectedPauseReason: null,
-      nextStatus: "open",
-      nextPauseReason: null,
       decisionId,
-      expectedDecisionOutcome: "executed",
-    });
-    safeAppendExecutionEvents([
-      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
-        eventType: "position_observed", side, price: confirmed.entryPrice, sizeBase: n.sizeBase },
-      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
-        eventType: "fill_observed", side, clientOrderId, venueOrderId: orderResult.orderId ?? null,
-        venueStatus: orderResult.status, price: entryPrice, sizeBase: orderResult.fillSize ?? n.sizeBase,
-        fee: orderResult.fee ?? null },
-      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
-        eventType: "bracket_verified", side },
-      { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
-        eventType: "entry_terminal_open", side, price: entryPrice, sizeBase: n.sizeBase },
-    ]);
+      disposition: "open",
+      side,
+      observedAt: n.journalObservedAt,
+      entryPrice,
+      sizeBase: n.sizeBase,
+      journalEvents: [
+        entryOrderEvent,
+        { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+          eventType: "position_observed", side, price: confirmed.entryPrice, sizeBase: n.sizeBase,
+          observedAt: n.journalObservedAt },
+        { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+          eventType: "fill_observed", side, clientOrderId, venueOrderId: orderResult.orderId ?? null,
+          venueStatus: orderResult.status, price: entryPrice, sizeBase: orderResult.fillSize ?? n.sizeBase,
+          fee: orderResult.fee ?? null, observedAt: n.journalObservedAt },
+        { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+          eventType: "bracket_verified", side, observedAt: n.journalObservedAt },
+        { ...entryJournal, attemptId: journalAttemptId, action: "entry", cause: "decision",
+          eventType: "entry_terminal_open", side, price: entryPrice, sizeBase: n.sizeBase,
+          observedAt: n.journalObservedAt },
+      ],
+    }, "Bracketed open transition could not be committed atomically", true);
+    if (failedTransition) return failedTransition;
     await sendTradeNotification(bot.walletAddress, {
       type: "trade_executed",
       botName: `AI Trader ${bot.market}`,
