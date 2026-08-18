@@ -835,6 +835,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const result = await executeDecision({
+      authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-journal-refuse",
       clamped: makeClamped(),
@@ -854,6 +855,7 @@ describe("live execution — failure handling (fail closed)", () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const result = await executeDecision({
+      authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-journal-best-effort",
       clamped: makeClamped(),
@@ -865,7 +867,12 @@ describe("live execution — failure handling (fail closed)", () => {
     expect((adapter.getPositions as any)).toHaveBeenCalled();
     expect((adapter.setTpSl as any)).toHaveBeenCalled();
     expect((adapter.getOpenStopOrders as any)).toHaveBeenCalled();
-    expect(updateBotMock).toHaveBeenLastCalledWith("bot-1111-2222", { status: "open", pauseReason: null });
+    expect(transitionStateMock).toHaveBeenLastCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222",
+      expectedStatus: "executing",
+      nextStatus: "open",
+      nextPauseReason: null,
+    }));
   });
 
   it("emergency close reaches closePosition when every journal append fails", async () => {
@@ -876,6 +883,7 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     const { executeDecision } = await importExecutor();
     const result = await executeDecision({
+      authoritySource: "internal_cycle",
       bot: makeBot({ paperMode: false }),
       decisionId: "d-journal-emergency",
       clamped: makeClamped(),
