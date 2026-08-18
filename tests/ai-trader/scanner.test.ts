@@ -66,6 +66,15 @@ vi.mock("../../server/ai-trader/session-context", () => ({
   getSessionContext: (...a: unknown[]) => getSessionContextMock(...(a as [Date])),
 }));
 
+// Lifecycle tests deliberately drive cancellation, replacement, and empty-sweep
+// paths. Keep their incident reporting process-local: the real recorder targets
+// the one global database evidence hold and can contaminate a concurrently running
+// real-Postgres retention test.
+const recordCriticalErrorMock = vi.fn();
+vi.mock("../../server/error-log", () => ({
+  recordCriticalError: (...a: unknown[]) => recordCriticalErrorMock(...a),
+}));
+
 // ─── Bar fixture helpers ──────────────────────────────────────────────────────
 //
 // Conventions exactly matching wm-detector.test.ts (H=52/L=48/C=50 for flats).
@@ -779,6 +788,7 @@ describe("active sweep lifecycle ownership", () => {
       lastTradableGeneration: null,
       recentHistory: [],
     });
+    expect(recordCriticalErrorMock).not.toHaveBeenCalled();
 
     pending.resolve(textbookWBars(Date.now(), TF_15M));
     await Promise.resolve();
