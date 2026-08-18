@@ -37,6 +37,10 @@ import { classifyDow, detectPivots } from "../../server/ai-trader/dow-structure"
 const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>();
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
+  isNonCryptoMarketOpen: () => true,
+  isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
+  isCacheDegradedError: (err: unknown) =>
+    typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CacheDegradedError",
   setDatafeedIncidentReporter: vi.fn(),
   MONEY_CANDLE_POLICY: {
     consumer: "scanner", acceptedBasis: ["perp"], acceptedFinality: ["finalized"], acceptedProxy: ["direct"],
@@ -60,6 +64,15 @@ vi.mock("../../server/protocol/adapter-registry", () => ({
 const getSessionContextMock = vi.fn<[Date], { label: string }>();
 vi.mock("../../server/ai-trader/session-context", () => ({
   getSessionContext: (...a: unknown[]) => getSessionContextMock(...(a as [Date])),
+}));
+
+// Lifecycle tests deliberately drive cancellation, replacement, and empty-sweep
+// paths. Keep their incident reporting process-local: the real recorder targets
+// the one global database evidence hold and can contaminate a concurrently running
+// real-Postgres retention test.
+const recordCriticalErrorMock = vi.fn();
+vi.mock("../../server/error-log", () => ({
+  recordCriticalError: (...a: unknown[]) => recordCriticalErrorMock(...a),
 }));
 
 // ─── Bar fixture helpers ──────────────────────────────────────────────────────
@@ -211,6 +224,8 @@ import {
   publishScannerSweepManifest,
   getScannerShortlist,
   resetScannerPublicationForTest,
+  runScannerSweepForTest,
+  startScanner,
   stopScanner,
 } from "../../server/ai-trader/scanner";
 
@@ -734,5 +749,109 @@ describe("multiplier quarantine — real universe-build seam", () => {
 
     stopScanner();
     expect(getScannerStatus().multiplierQuarantinedMarkets).toEqual([]);
+  });
+});
+
+describe("active sweep lifecycle ownership", () => {
+  function deferredBars() {
+    let resolve!: (bars: OHLCV[]) => void;
+    const promise = new Promise<OHLCV[]>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  function oneMarketUniverse() {
+    getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+    getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+  }
+
+  it("aborts the active fetch and rejects every late mutation after stop", async () => {
+    stopScanner();
+    oneMarketUniverse();
+    const pending = deferredBars();
+    let capturedSignal: AbortSignal | null = null;
+    fetchOHLCVMock.mockImplementation((...args: unknown[]) => {
+      capturedSignal = (args as unknown as any[])[5]?.signal ?? null;
+      return pending.promise;
+    });
+
+    startScanner();
+    const sweep = runScannerSweepForTest();
+    await vi.waitFor(() => expect(fetchOHLCVMock).toHaveBeenCalledTimes(1));
+
+    stopScanner();
+    await sweep;
+    expect(capturedSignal).not.toBeNull();
+    expect((capturedSignal as AbortSignal).aborted).toBe(true);
+    expect(getScannerStatus()).toMatchObject({
+      scannerRunning: false,
+      currentGeneration: null,
+      lastTradableGeneration: null,
+      recentHistory: [],
+    });
+    expect(recordCriticalErrorMock).not.toHaveBeenCalled();
+
+    pending.resolve(textbookWBars(Date.now(), TF_15M));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(getScannerStatus().currentGeneration).toBeNull();
+  });
+
+  it("lets a wedge replacement publish while the revoked generation resolves late", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      oneMarketUniverse();
+      const pending = deferredBars();
+      fetchOHLCVMock
+        .mockImplementationOnce(() => pending.promise)
+        .mockResolvedValue([]);
+
+      startScanner();
+      const staleSweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+
+      vi.setSystemTime(new Date("2026-08-18T00:20:00.001Z"));
+      const replacementSweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(200);
+      await replacementSweep;
+      await staleSweep;
+
+      const replacementGeneration = getScannerStatus().currentGeneration?.generation;
+      expect(replacementGeneration).toBeTypeOf("number");
+      pending.resolve(textbookWBars(Date.now(), TF_15M));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getScannerStatus().currentGeneration?.generation).toBe(replacementGeneration);
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let a pre-stop promise overwrite a restarted scanner generation", async () => {
+    stopScanner();
+    oneMarketUniverse();
+    const pending = deferredBars();
+    fetchOHLCVMock
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValue([]);
+
+    startScanner();
+    const staleSweep = runScannerSweepForTest();
+    await vi.waitFor(() => expect(fetchOHLCVMock).toHaveBeenCalledTimes(1));
+    stopScanner();
+    await staleSweep;
+
+    startScanner();
+    await runScannerSweepForTest();
+    const restartedGeneration = getScannerStatus().currentGeneration?.generation;
+    expect(restartedGeneration).toBeTypeOf("number");
+
+    pending.resolve(textbookWBars(Date.now(), TF_15M));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(getScannerStatus().currentGeneration?.generation).toBe(restartedGeneration);
+    stopScanner();
   });
 });
