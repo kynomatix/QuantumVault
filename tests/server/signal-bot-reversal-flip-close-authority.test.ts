@@ -32,7 +32,13 @@ function position(
 }
 
 function signedClose(signature = "close-signature"): SignalBotFlipCloseExecution {
-  return { success: true, signature, fillPrice: 101, executionMethod: "test" };
+  return {
+    success: true,
+    signature,
+    fillPrice: 101,
+    executionMethod: "test",
+    feeEvidence: { kind: "venue_exact", amount: 0.25, protocol: "pacifica" },
+  };
 }
 
 describe("shared Signal Bot FLIP close-then-open resolver", () => {
@@ -101,7 +107,11 @@ describe("shared Signal Bot FLIP close-then-open resolver", () => {
   it.each([
     {
       name: "no signature",
-      close: { success: true, signature: null } satisfies SignalBotFlipCloseExecution,
+      close: {
+        success: true,
+        signature: null,
+        feeEvidence: { kind: "unavailable", reason: "no_signature" },
+      } satisfies SignalBotFlipCloseExecution,
       post: { kind: "authoritative_flat" } satisfies SignalBotFlipAuthorityRead,
       expected: "no_signature",
       reads: 1,

@@ -35,21 +35,24 @@ describe('Trade retry fee-rate admission choke point', () => {
     expect(closeBranch).not.toContain('placeMarketOrderWithFeeAuthority');
   });
 
-  it('retains the retry close-accounting constant and expressions', () => {
-    expect(source).toContain('const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;');
+  it('retains exact-or-null close accounting without a legacy numeric default', () => {
+    expect(source).not.toContain('const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;');
+    expect(source).not.toContain('getExchangeFeeRate()');
     expect(source).toContain(
-      'const fee = originalTrade?.fee ? parseFloat(originalTrade.fee) : job.size * exitPrice * getExchangeFeeRate();',
+      'const fee = originalTrade?.fee === null || originalTrade?.fee === undefined',
     );
     expect(source).toContain(
-      'const closeFee = closeTrade.fee ? parseFloat(closeTrade.fee) : closeSize * closePrice * getExchangeFeeRate();',
+      'const closeFee = closeTrade.fee === null || closeTrade.fee === undefined',
     );
+    expect(source).toContain('exact close fee unavailable, skipping');
     expect(source).toContain("job.side === 'close'");
-    expect(source).toContain('(result.actualFee || notional * getExchangeFeeRate())');
+    expect(source).toContain("closeFeeAmount(result.closeFeeEvidence ?? { kind: 'unavailable', reason: 'fee_evidence_missing' })");
   });
 
   it('reuses the admitted quote for the OPEN estimate while retaining prior exact-fee precedence', () => {
     expect(source).toContain(
-      '(result.actualFee || notional * result.admissionFeeQuote!.effectiveRate)',
+      '(result.actualFee ?? notional * result.admissionFeeQuote!.effectiveRate)',
     );
+    expect(source).not.toContain('result.actualFee ||');
   });
 });

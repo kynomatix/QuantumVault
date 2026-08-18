@@ -7,9 +7,15 @@ import { PublicKey } from "@solana/web3.js";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import {
   placeMarketOrderWithFeeAuthority,
+  resolveFeeRateQuote,
   type AvailableFeeRateQuote,
   type FeeAuthorizedMarketOrderResult,
 } from "./protocol/adapter";
+import {
+  classifyCloseFeeEvidence,
+  closeFeeAmount,
+  type CloseFeeEvidence,
+} from "./trading/signal-bot-close-integrity";
 import { isUnconfirmedLandingVerdict } from "./protocol/tx-verdicts";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
@@ -17,12 +23,6 @@ import { eq } from "drizzle-orm";
 import { getUmkForWebhook, decryptAgentKeyStrict } from "./session-v3";
 import { recordCriticalError } from "./error-log";
 import { checkSignalBotLeverageAdmission } from "./signal-bot-leverage-admission";
-
-const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
-
-function getExchangeFeeRate(_protocol?: string | null): number {
-  return DEFAULT_EXCHANGE_FEE_RATE;
-}
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -101,6 +101,7 @@ async function driftClosePerpPosition(
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
   const mainWalletAddress = await _lookupMainWallet(pubKey);
   let orderResult;
+  let closedSize = size;
   if (size && side) {
     const closeSide: 'long' | 'short' = side === 'long' ? 'short' : 'long';
     orderResult = await adapter.placeMarketOrder({
@@ -117,8 +118,14 @@ async function driftClosePerpPosition(
     const positions = await adapter.getPositions(pubKey, _subIdStr(subAccountId));
     const pos = positions.find(p => p.internalSymbol.toUpperCase().includes(market.toUpperCase().replace('-PERP', '')));
     if (!pos || Math.abs(pos.baseSize) < 0.0001) {
-      return { success: true, signature: 'no-position', executionMethod: 'adapter' };
+      return {
+        success: true,
+        signature: 'no-position',
+        executionMethod: 'adapter',
+        closeFeeEvidence: { kind: 'unavailable', reason: 'already_flat' } satisfies CloseFeeEvidence,
+      };
     }
+    closedSize = Math.abs(pos.baseSize);
     const closeSide: 'long' | 'short' = pos.baseSize >= 0 ? 'short' : 'long';
     orderResult = await adapter.placeMarketOrder({
       agentPublicKey: pubKey,
@@ -126,17 +133,34 @@ async function driftClosePerpPosition(
       mainWalletAddress,
       internalSymbol: market,
       side: closeSide,
-      sizeBase: Math.abs(pos.baseSize),
+      sizeBase: closedSize,
       reduceOnly: true,
       subaccountId: _subIdStr(subAccountId),
     });
   }
+  const feeRateQuote = orderResult.success
+    ? await resolveFeeRateQuote(adapter, {
+        account: pubKey,
+        subaccountId: _subIdStr(subAccountId) ?? null,
+        liquidityRole: 'taker',
+      })
+    : null;
+  const closeFeeEvidence = classifyCloseFeeEvidence({
+    protocol: adapter.protocolName,
+    venueFee: orderResult.fee,
+    notional: closedSize !== undefined && orderResult.fillPrice !== undefined
+      ? closedSize * orderResult.fillPrice
+      : null,
+    rateQuote: feeRateQuote,
+  });
   return {
     success: orderResult.success,
     signature: orderResult.orderId,
     error: orderResult.error,
     executionMethod: 'adapter',
     fillPrice: orderResult.fillPrice,
+    actualFee: orderResult.fee,
+    closeFeeEvidence,
   };
 }
 
@@ -725,7 +749,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   }
 
   try {
-    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; executionMethod?: string; swiftOrderId?: string };
+    let result: { success: boolean; signature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; closeFeeEvidence?: CloseFeeEvidence; executionMethod?: string; swiftOrderId?: string };
     let actualCloseSide: 'long' | 'short' = 'short';
     const jobBot = preAuthJobBot ?? await storage.getTradingBotById(job.botId);
     const jobAdapter = preAuthJobAdapter ?? (jobBot ? getAdapterForBot(jobBot) : getDefaultAdapter());
@@ -758,7 +782,9 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             if (job.entryPrice && job.entryPrice > 0) {
               const exitPrice = originalTrade?.price ? parseFloat(originalTrade.price) : 0;
               if (exitPrice > 0) {
-                const fee = originalTrade?.fee ? parseFloat(originalTrade.fee) : job.size * exitPrice * getExchangeFeeRate();
+                const fee = originalTrade?.fee === null || originalTrade?.fee === undefined
+                  ? null
+                  : parseFloat(originalTrade.fee);
                 const normalizedMarket = job.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
                 const recentTrades = await storage.getBotTrades(job.botId, 30);
                 const sortedTrades = recentTrades
@@ -767,7 +793,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                   .sort((a, b) => new Date(b.executedAt).getTime() - new Date(a.executedAt).getTime());
                 const matchedOpen = sortedTrades.find(t => new Date(t.executedAt) < new Date(originalTrade!.executedAt));
                 
-                if (matchedOpen) {
+                if (matchedOpen && fee !== null && Number.isFinite(fee) && fee >= 0) {
                   const wasLong = matchedOpen.side === 'LONG';
                   let closePnl: number;
                   if (wasLong) {
@@ -893,8 +919,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         const fillPrice = result.fillPrice || 0;
         const notional = job.size * fillPrice;
         const fee = job.side === 'close'
-          ? (result.actualFee || notional * getExchangeFeeRate())
-          : (result.actualFee || notional * result.admissionFeeQuote!.effectiveRate);
+          ? closeFeeAmount(result.closeFeeEvidence ?? { kind: 'unavailable', reason: 'fee_evidence_missing' })
+          : (result.actualFee ?? notional * result.admissionFeeQuote!.effectiveRate);
         
         // Update original trade if it exists, otherwise create new
         let tradeId: string;
@@ -918,7 +944,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
           const recoveredUpdate: Record<string, any> = {
             status: 'recovered',
             price: fillPrice.toString(),
-            fee: fee.toString(),
+            fee: fee === null ? null : fee.toString(),
             txSignature: result.signature || null,
             errorMessage: null,
             recoveredFromError: originalError,
@@ -927,7 +953,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             swiftOrderId: result.swiftOrderId || null,
             ...(recoveredFillId ? { protocolFillId: recoveredFillId } : {}),
           };
-          if (job.side === 'close' && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
+          if (job.side === 'close' && fee !== null && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
             const positionWasLong = actualCloseSide === 'short';
             let closePnl: number;
             if (positionWasLong) {
@@ -957,7 +983,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
           // canonical trades. Breakeven uses '0' (never null) per task #67.
           let retryClosePnl: string | undefined;
           let retryClosePnlNum = 0;
-          if (job.side === 'close' && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
+          if (job.side === 'close' && fee !== null && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
             const positionWasLong = actualCloseSide === 'short';
             const closePnl = positionWasLong
               ? (fillPrice - job.entryPrice) * job.size - fee
@@ -984,12 +1010,17 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             side: (job.side === 'close' ? 'CLOSE' : job.side.toUpperCase()) as string,
             size: job.size.toString(),
             price: fillPrice.toString(),
-            fee: fee.toString(),
-            pnl: retryClosePnl,
+            fee: fee === null ? null : fee.toString(),
+            pnl: retryClosePnl ?? null,
             status: 'executed' as const,
             txSignature: result.signature,
             ...(protocolFillId ? { protocolFillId } : {}),
-            webhookPayload: { autoRetry: true, attempts: job.attempts, originalJobId: job.id },
+            webhookPayload: {
+              autoRetry: true,
+              attempts: job.attempts,
+              originalJobId: job.id,
+              ...(job.side === 'close' ? { feeEvidence: result.closeFeeEvidence } : {}),
+            },
             executionMethod: result.executionMethod || 'legacy',
             swiftOrderId: result.swiftOrderId || null,
           };
@@ -1022,7 +1053,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             job.subAccountId,
             job.market,
             tradeId,
-            fee,
+            fee ?? 0,
             fillPrice,
             syncSide,
             job.size
@@ -1060,7 +1091,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         }
         
         // PROFIT SHARE: Distribute creator's share of realized profit for subscriber bots
-        if (job.side === 'close' && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
+        if (job.side === 'close' && fee !== null && job.entryPrice && job.entryPrice > 0 && fillPrice > 0) {
           try {
             // Calculate PnL based on position side
             const positionWasLong = actualCloseSide === 'short'; // If we closed with short, position was long
@@ -1491,7 +1522,13 @@ export async function backfillRecoveredClosePnl(): Promise<void> {
         for (const closeTrade of recoveredCloses) {
           const closePrice = parseFloat(closeTrade.price);
           const closeSize = parseFloat(closeTrade.size);
-          const closeFee = closeTrade.fee ? parseFloat(closeTrade.fee) : closeSize * closePrice * getExchangeFeeRate();
+          const closeFee = closeTrade.fee === null || closeTrade.fee === undefined
+            ? null
+            : parseFloat(closeTrade.fee);
+          if (closeFee === null || !Number.isFinite(closeFee) || closeFee < 0) {
+            console.log(`[PnL Backfill] ${bot.name} ${closeTrade.market}: exact close fee unavailable, skipping`);
+            continue;
+          }
           const closeMarket = closeTrade.market.toUpperCase().replace('-PERP', '').replace('PERP', '');
           
           const sortedOpens = trades

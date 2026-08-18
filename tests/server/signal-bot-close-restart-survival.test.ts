@@ -6,8 +6,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 const routeMocks = vi.hoisted(() => ({
   adapter: {
+    protocolName: 'pacifica',
     getStrictPositionForMarket: vi.fn(),
     getPositions: vi.fn(),
+    getFeeRateQuote: vi.fn(),
     placeMarketOrder: vi.fn(),
     closePosition: vi.fn(),
     getCapabilities: vi.fn(() => ({})),
@@ -203,6 +205,7 @@ function primeCloseRoute(cachedPosition: unknown) {
     cleanup: vi.fn(),
   });
   routeMocks.adapter.getStrictPositionForMarket.mockReset().mockRejectedValue(new Error('venue unavailable'));
+  routeMocks.adapter.getFeeRateQuote.mockReset().mockResolvedValue({ availability: 'unavailable', reason: 'builder_rate_unknown' });
   routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
     success: false,
     error: 'expected test stop after order submission',
@@ -244,6 +247,7 @@ function primeFlipRoute(options: {
     success: true,
     orderId: 'flip-close-signature',
     fillPrice: 65000,
+    fee: 0,
   });
 }
 
@@ -477,6 +481,12 @@ describe('close-path and restart contract wiring', () => {
         expect(storage.recordCloseEventAtomic).toHaveBeenCalledTimes(1);
         const atomic = vi.mocked(storage.recordCloseEventAtomic as any).mock.calls[0][0];
         expect(atomic.update.tradeId).toBe('close-trade-1');
+        expect(atomic.update.fields.fee).toBe('0');
+        expect(atomic.update.fields.webhookPayload.feeEvidence).toEqual({
+          kind: 'venue_exact',
+          amount: 0,
+          protocol: 'pacifica',
+        });
         if (endpoint === 'tradingview') {
           expect(atomic.update.fields.executionMethod).toBe('adapter');
         } else {

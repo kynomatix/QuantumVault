@@ -1,5 +1,112 @@
 import Decimal from "decimal.js";
+import type { FeeRateQuoteResult } from "../protocol/adapter";
 import type { ClassifiedSignal } from "./signal-classifier";
+
+export type CloseFeeEvidence =
+  | {
+      kind: "venue_exact";
+      amount: number;
+      protocol: "pacifica";
+    }
+  | {
+      kind: "rate_estimate";
+      amount: number;
+      notional: number;
+      rate: number;
+      protocol: string;
+      provenance: string;
+      observedAt: number;
+    }
+  | {
+      kind: "unavailable";
+      reason: string;
+    };
+
+export interface ClassifyCloseFeeEvidenceInput {
+  protocol: string;
+  venueFee?: number | null;
+  notional?: number | null;
+  rateQuote?: FeeRateQuoteResult | null;
+}
+
+/**
+ * Classify fee evidence without ever turning absence into zero. Pacifica is
+ * the only adapter whose returned OrderResult.fee has proven venue-exact
+ * semantics. Other protocols may still use a separately validated quote as
+ * an explicitly labelled estimate.
+ */
+export function classifyCloseFeeEvidence(
+  input: ClassifyCloseFeeEvidenceInput,
+): CloseFeeEvidence {
+  const protocol = typeof input.protocol === "string" ? input.protocol.trim().toLowerCase() : "";
+  const venueFeePresent = input.venueFee !== null && input.venueFee !== undefined;
+  const venueFeeValid = venueFeePresent
+    && typeof input.venueFee === "number"
+    && Number.isFinite(input.venueFee)
+    && input.venueFee >= 0;
+
+  if (venueFeeValid && protocol === "pacifica") {
+    return { kind: "venue_exact", amount: input.venueFee as number, protocol: "pacifica" };
+  }
+
+  const quote = input.rateQuote;
+  const notional = input.notional;
+  if (
+    quote?.availability === "available"
+    && typeof notional === "number"
+    && Number.isFinite(notional)
+    && notional >= 0
+  ) {
+    return {
+      kind: "rate_estimate",
+      amount: notional * quote.effectiveRate,
+      notional,
+      rate: quote.effectiveRate,
+      protocol: quote.protocol,
+      provenance: quote.provenance,
+      observedAt: quote.observedAt,
+    };
+  }
+
+  if (venueFeePresent && !venueFeeValid) {
+    return { kind: "unavailable", reason: "invalid_venue_fee" };
+  }
+  if (venueFeeValid && protocol !== "pacifica") {
+    return { kind: "unavailable", reason: `unproven_exact_fee_semantics:${protocol || "unknown"}` };
+  }
+  if (quote?.availability === "unavailable") {
+    return { kind: "unavailable", reason: `fee_rate_${quote.reason}` };
+  }
+  if (typeof notional !== "number" || !Number.isFinite(notional) || notional < 0) {
+    return { kind: "unavailable", reason: "close_notional_unavailable" };
+  }
+  return { kind: "unavailable", reason: "fee_evidence_unavailable" };
+}
+
+export function closeFeeAmount(evidence: CloseFeeEvidence): number | null {
+  return evidence.kind === "unavailable" ? null : evidence.amount;
+}
+
+/** Explicit DB-bound values: unavailable is SQL NULL, never omitted/default 0. */
+export function closeFeePersistence(
+  evidence: CloseFeeEvidence,
+  pnl: number | null,
+): {
+  fee: string | null;
+  pnl: string | null;
+  feeDelta: number;
+  pnlDelta: number;
+  feeEvidence: CloseFeeEvidence;
+} {
+  const fee = closeFeeAmount(evidence);
+  return {
+    fee: fee === null ? null : String(fee),
+    pnl: pnl === null ? null : String(pnl),
+    feeDelta: fee ?? 0,
+    pnlDelta: pnl ?? 0,
+    feeEvidence: evidence,
+  };
+}
 
 export type SignalBotCloseOutcome =
   | "executed"
@@ -89,6 +196,7 @@ export interface SignalBotFlipCloseExecution {
   signature: string | null;
   fillPrice?: number;
   executionMethod?: string;
+  feeEvidence: CloseFeeEvidence;
   error?: string;
   context?: Record<string, unknown>;
 }

@@ -26,6 +26,7 @@ import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adap
 import { normalizeMarket } from './protocol/symbol-registry';
 import {
   placeMarketOrderWithFeeAuthority,
+  resolveFeeRateQuote,
   type AvailableFeeRateQuote,
   type FeeAuthorizedMarketOrderResult,
   type ProtocolAdapter,
@@ -1449,7 +1450,7 @@ async function closePerpPosition(
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
   adapter = getDefaultAdapter(),
-): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number }> {
+): Promise<{ success: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number; actualFee?: number; feeEvidence: CloseFeeEvidence }> {
   let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   try {
     signing = await _resolveSigningContext(encryptedPrivateKey, subAccountId, botCtx ?? null);
@@ -1481,15 +1482,36 @@ async function closePerpPosition(
         subaccountId: signing.subaccountId,
       });
     }
+    const feeRateQuote = orderResult.success
+      ? await resolveFeeRateQuote(adapter, {
+          account: agentPubKey,
+          subaccountId: signing.subaccountId ?? null,
+          liquidityRole: 'taker',
+        })
+      : null;
+    const feeEvidence = classifyCloseFeeEvidence({
+      protocol: adapter.protocolName,
+      venueFee: orderResult.fee,
+      notional: (positionSizeBase ?? orderResult.fillSize) !== undefined && orderResult.fillPrice !== undefined
+        ? Math.abs((positionSizeBase ?? orderResult.fillSize)!) * orderResult.fillPrice
+        : null,
+      rateQuote: feeRateQuote,
+    });
     return {
       success: orderResult.success,
       signature: orderResult.orderId,
       error: orderResult.error,
       executionMethod: 'adapter',
       fillPrice: orderResult.fillPrice,
+      actualFee: orderResult.fee,
+      feeEvidence,
     };
   } catch (error: any) {
-    return { success: false, error: error.message || String(error) };
+    return {
+      success: false,
+      error: error.message || String(error),
+      feeEvidence: { kind: 'unavailable', reason: 'close_execution_failed' },
+    };
   } finally {
     signing?.cleanup();
   }
@@ -1568,6 +1590,9 @@ async function settleAllPnl(
 import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
 import {
   buildSignalBotCloseResponse,
+  classifyCloseFeeEvidence,
+  closeFeeAmount,
+  closeFeePersistence,
   deferSignalBotFlipOpen,
   markSignalBotFlipOpenExecuted,
   rejectSignalBotFlipOpen,
@@ -1577,6 +1602,7 @@ import {
   type SignalBotFlipDisposition,
   type SignalBotFlipOpenRejectionCategory,
   type SignalBotFlipPosition,
+  type CloseFeeEvidence,
 } from "./trading/signal-bot-close-integrity";
 import { PositionService } from "./position-service";
 import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
@@ -1671,10 +1697,21 @@ async function getSwiftDiagnostics() { try { return (await import("./swift-confi
 import nacl from "tweetnacl";
 import { PublicKey } from "@solana/web3.js";
 
-const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;
-
-function getExchangeFeeRate(_protocol?: string | null): number {
-  return DEFAULT_EXCHANGE_FEE_RATE;
+function closeAccounting(
+  feeEvidence: CloseFeeEvidence,
+  entryPrice: number,
+  fillPrice: number,
+  size: number,
+  closingSide: 'long' | 'short',
+): { fee: number | null; pnl: number | null } {
+  const fee = closeFeeAmount(feeEvidence);
+  if (fee === null || entryPrice <= 0 || fillPrice <= 0 || size < 0) {
+    return { fee, pnl: null };
+  }
+  const gross = closingSide === 'short'
+    ? (fillPrice - entryPrice) * size
+    : (entryPrice - fillPrice) * size;
+  return { fee, pnl: gross - fee };
 }
 
 declare module "express-session" {
@@ -4701,12 +4738,23 @@ interface CanonicalCloseFinalizationInput {
   signature: string;
   size: number;
   fillPrice: number;
-  fee: number;
-  pnl: number;
+  feeEvidence: CloseFeeEvidence;
+  pnl: number | null;
   executionMethod?: string;
+  webhookPayload?: unknown;
+}
+
+function closeFeeEventPayload(input: CanonicalCloseFinalizationInput): Record<string, unknown> {
+  return {
+    ...(typeof input.webhookPayload === 'object' && input.webhookPayload !== null
+      ? input.webhookPayload as Record<string, unknown>
+      : {}),
+    feeEvidence: input.feeEvidence,
+  };
 }
 
 async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInput) {
+  const accounting = closeFeePersistence(input.feeEvidence, input.pnl);
   const fillId = DatabaseStorage.canonicalCloseFillId({
     signature: input.signature,
     botId: input.bot.id,
@@ -4724,28 +4772,30 @@ async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInp
         status: "executed",
         txSignature: input.signature,
         price: String(input.fillPrice),
-        fee: String(input.fee),
-        pnl: String(input.pnl),
+        fee: accounting.fee,
+        pnl: accounting.pnl,
         executionMethod: input.executionMethod || "legacy",
         protocolFillId: fillId,
+        webhookPayload: closeFeeEventPayload(input),
       },
     },
     deltas: {
-      totalPnlDelta: input.pnl,
+      totalPnlDelta: accounting.pnlDelta,
       totalVolumeDelta: input.size * input.fillPrice,
       lastTradeAt: new Date().toISOString(),
     },
     confirmedPositionClose: {
       walletAddress: input.bot.walletAddress,
       market: input.bot.market,
-      realizedPnlDelta: input.pnl,
-      feeDelta: input.fee,
+      realizedPnlDelta: accounting.pnlDelta,
+      feeDelta: accounting.feeDelta,
     },
   });
   return { ...result, fillId };
 }
 
 async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizationInput) {
+  const accounting = closeFeePersistence(input.feeEvidence, input.pnl);
   if (!input.tradeId) throw new Error("user-webhook finalizer requires an existing close trade");
   const fillId = DatabaseStorage.canonicalCloseFillId({
     signature: input.signature,
@@ -4764,21 +4814,22 @@ async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizati
         status: "executed",
         txSignature: input.signature,
         price: String(input.fillPrice),
-        fee: String(input.fee),
-        pnl: String(input.pnl),
+        fee: accounting.fee,
+        pnl: accounting.pnl,
         protocolFillId: fillId,
+        webhookPayload: closeFeeEventPayload(input),
       },
     },
     deltas: {
-      totalPnlDelta: input.pnl,
+      totalPnlDelta: accounting.pnlDelta,
       totalVolumeDelta: input.size * input.fillPrice,
       lastTradeAt: new Date().toISOString(),
     },
     confirmedPositionClose: {
       walletAddress: input.bot.walletAddress,
       market: input.bot.market,
-      realizedPnlDelta: input.pnl,
-      feeDelta: input.fee,
+      realizedPnlDelta: accounting.pnlDelta,
+      feeDelta: accounting.feeDelta,
     },
   });
   return { ...result, fillId };
@@ -4838,6 +4889,8 @@ async function executeSignalBotFlipClose(
         size: String(position.size),
         price: input.signalPrice,
         status: "pending",
+        fee: null,
+        pnl: null,
         webhookPayload: {
           ...(typeof input.webhookPayload === "object" && input.webhookPayload !== null
             ? input.webhookPayload as Record<string, unknown>
@@ -4867,6 +4920,7 @@ async function executeSignalBotFlipClose(
         signature: result.signature || null,
         fillPrice: result.fillPrice,
         executionMethod: result.executionMethod,
+        feeEvidence: result.feeEvidence,
         error: result.error,
       };
       return closeExecution;
@@ -4875,12 +4929,12 @@ async function executeSignalBotFlipClose(
       if (!closeTradeId) throw new Error("confirmed FLIP close has no pending trade identity");
       const fillPrice = execution.fillPrice ?? parseFloat(input.signalPrice || "0");
       const safeFillPrice = Number.isFinite(fillPrice) ? fillPrice : 0;
-      const fee = position.size * safeFillPrice * getExchangeFeeRate();
-      const pnl = position.entryPrice > 0 && safeFillPrice > 0
+      const fee = closeFeeAmount(execution.feeEvidence);
+      const pnl = fee !== null && position.entryPrice > 0 && safeFillPrice > 0
         ? position.side === "LONG"
           ? (safeFillPrice - position.entryPrice) * position.size - fee
           : (position.entryPrice - safeFillPrice) * position.size - fee
-        : 0;
+        : null;
       const finalize = input.finalizer === "user_webhook"
         ? finalizeUserWebhookConfirmedClose
         : finalizePerBotConfirmedClose;
@@ -4890,16 +4944,17 @@ async function executeSignalBotFlipClose(
         signature: execution.signature,
         size: position.size,
         fillPrice: safeFillPrice,
-        fee,
+        feeEvidence: execution.feeEvidence,
         pnl,
         executionMethod: execution.executionMethod,
+        webhookPayload: input.webhookPayload,
       });
 
       // Preserve the existing confirmed-close side effects without allowing
       // either one to become authority for the opposite open. Profit sharing
       // remains deduped by the canonical close fill, and settlement remains a
       // best-effort balance operation after durable close truth is committed.
-      if (pnl > 0 && finalized.isNew && input.agentPublicKey) {
+      if (pnl !== null && pnl > 0 && finalized.isNew && input.agentPublicKey) {
         const profitShareKeyCopy = new Uint8Array(input.agentSecretKey);
         distributeCreatorProfitShare({
           subscriberBotId: input.bot.id,
@@ -5178,21 +5233,16 @@ export async function routeSignalToSubscribers(
           if (closeResult.success) {
             const fillPrice = parseFloat(signal.price);
             
-            // Estimate fee from notional (closePerpPosition doesn't return actualFee)
             const closeNotional = Math.abs(position.size) * fillPrice;
-            const closeFee = closeNotional * getExchangeFeeRate();
-            
-            // Calculate PnL for subscriber close
             const closeEntryPrice = position.entryPrice || 0;
-            let closeTradePnl = 0;
-            if (closeEntryPrice > 0 && fillPrice > 0) {
-              if (position.side === 'LONG') {
-                // Closing LONG: profit if exitPrice > entryPrice
-                closeTradePnl = (fillPrice - closeEntryPrice) * Math.abs(position.size) - closeFee;
-              } else {
-                // Closing SHORT: profit if entryPrice > exitPrice
-                closeTradePnl = (closeEntryPrice - fillPrice) * Math.abs(position.size) - closeFee;
-              }
+            const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
+              closeResult.feeEvidence,
+              closeEntryPrice,
+              fillPrice,
+              Math.abs(position.size),
+              position.side === 'LONG' ? 'short' : 'long',
+            );
+            if (closeTradePnl !== null) {
               console.log(`[Subscriber Routing] PnL calculated for ${subBot.id}: entry=$${closeEntryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
             }
             
@@ -5215,15 +5265,15 @@ export async function routeSignalToSubscribers(
                 size: Math.abs(position.size).toFixed(8),
                 price: closeResult.fillPrice?.toString() || fillPrice.toFixed(6),
                 status: 'executed',
-                fee: closeFee.toFixed(6),
-                pnl: closeTradePnl.toFixed(6),
+                fee: closeFee === null ? null : closeFee.toFixed(6),
+                pnl: closeTradePnl === null ? null : closeTradePnl.toFixed(6),
                 txSignature: closeResult.signature || null,
                 protocolFillId: subRouteFillId,
-                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, feeEvidence: closeResult.feeEvidence },
                 executionMethod: closeResult.executionMethod || 'legacy',
               },
               deltas: {
-                totalPnlDelta: closeTradePnl,
+                totalPnlDelta: closeTradePnl ?? 0,
                 totalVolumeDelta: closeNotional,
                 lastTradeAt: new Date().toISOString(),
               },
@@ -5233,7 +5283,7 @@ export async function routeSignalToSubscribers(
             // Gate on isNew (5.5/T4) so a reconciler/retry replay of the SAME close
             // can't pay the creator twice; key tradeId off the canonical fill id so
             // any IOU dedupes on the (subscriber_bot_id, trade_id) unique index.
-            if (closeTradePnl > 0 && subRouteAtomic.isNew) {
+            if (closeTradePnl !== null && closeTradePnl > 0 && subRouteAtomic.isNew) {
               const tradeId = subRouteFillId;
               console.log(`[Subscriber Routing] Initiating profit share for ${subBot.id}: pnl=$${closeTradePnl.toFixed(4)}`);
               // V3 Phase 3b fund-safety: this is fire-and-forget, but the
@@ -5259,12 +5309,14 @@ export async function routeSignalToSubscribers(
                 .finally(() => { profitShareKeyCopy.fill(0); });
             }
 
-            sendTradeNotification(subWallet.address, {
-              type: 'position_closed',
-              botName: subBot.name,
-              market: subBot.market,
-              pnl: closeTradePnl,
-            }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+            if (closeTradePnl !== null) {
+              sendTradeNotification(subWallet.address, {
+                type: 'position_closed',
+                botName: subBot.name,
+                market: subBot.market,
+                pnl: closeTradePnl,
+              }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
+            }
             
             return 'closeSuccess';
           } else {
@@ -5344,10 +5396,13 @@ export async function routeSignalToSubscribers(
             const subPartialFillPrice = subPartialResult.fillPrice ?? parseFloat(signal.price);
             const subPartialEntryPrice = subPartialPosition.entryPrice || 0;
             const subPartialNotional = subPartialSize * subPartialFillPrice;
-            const subPartialFee = subPartialNotional * getExchangeFeeRate();
-            const subPartialPnl = subPartialPosition.side === 'LONG'
-              ? (subPartialFillPrice - subPartialEntryPrice) * subPartialSize - subPartialFee
-              : (subPartialEntryPrice - subPartialFillPrice) * subPartialSize - subPartialFee;
+            const { fee: subPartialFee, pnl: subPartialPnl } = closeAccounting(
+              subPartialResult.feeEvidence,
+              subPartialEntryPrice,
+              subPartialFillPrice,
+              subPartialSize,
+              subPartialPosition.side === 'LONG' ? 'short' : 'long',
+            );
 
             const subPartialDedupKey = DatabaseStorage.canonicalCloseFillId({
               signature: subPartialResult.signature ? `tx-${subPartialResult.signature}` : undefined,
@@ -5368,22 +5423,22 @@ export async function routeSignalToSubscribers(
                 side: subPartialPosition.side === 'LONG' ? 'short' : 'long',
                 size: String(subPartialSize),
                 price: String(subPartialFillPrice),
-                fee: String(subPartialFee),
-                pnl: String(subPartialPnl),
+                fee: subPartialFee === null ? null : String(subPartialFee),
+                pnl: subPartialPnl === null ? null : String(subPartialPnl),
                 status: 'executed',
                 txSignature: subPartialResult.signature || null,
                 protocolFillId: subPartialDedupKey,
-                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, partialClose: true, fraction: signal.partialCloseFraction },
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, partialClose: true, fraction: signal.partialCloseFraction, feeEvidence: subPartialResult.feeEvidence },
                 executionMethod: subPartialResult.executionMethod || 'legacy',
               },
               deltas: {
-                totalPnlDelta: subPartialPnl,
+                totalPnlDelta: subPartialPnl ?? 0,
                 totalVolumeDelta: subPartialNotional,
                 lastTradeAt: new Date().toISOString(),
               },
             });
 
-            schedulePartialCloseNotification({
+            if (subPartialPnl !== null) schedulePartialCloseNotification({
               walletAddress: subBot.walletAddress,
               botId: subBot.id,
               botName: subBot.name,
@@ -8939,7 +8994,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         side: "CLOSE",
         size: String(closeSize),
         price: "0",
-        fee: "0",
+        fee: null,
         status: "pending",
         webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice },
         executionMethod: 'legacy',
@@ -9082,25 +9137,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         console.log(`[ClosePosition] Using entry price as fallback exit price: $${fillPrice}`);
       }
 
-      // Calculate fee (0.05% taker fee on notional value)
       const closeNotional = closeSize * fillPrice;
-      const closeFee = closeNotional * getExchangeFeeRate();
-
-      // Calculate trade PnL based on entry and exit prices
-      // closeSide = 'short' means we're closing a LONG (bought low, selling high)
-      // closeSide = 'long' means we're closing a SHORT (sold high, buying low)
-      let tradePnl = 0;
-      if (closeEntryPrice > 0 && fillPrice > 0) {
-        if (closeSide === 'short') {
-          // Closing LONG: profit if exitPrice > entryPrice
-          tradePnl = (fillPrice - closeEntryPrice) * closeSize - closeFee;
-        } else {
-          // Closing SHORT: profit if entryPrice > exitPrice
-          tradePnl = (closeEntryPrice - fillPrice) * closeSize - closeFee;
-        }
+      const { fee: closeFee, pnl: tradePnl } = closeAccounting(
+        result.feeEvidence,
+        closeEntryPrice,
+        fillPrice,
+        closeSize,
+        closeSide,
+      );
+      if (tradePnl !== null && closeFee !== null) {
         console.log(`[ClosePosition] Trade PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${tradePnl.toFixed(4)}`);
       } else {
-        console.warn(`[ClosePosition] Cannot calculate PnL - entryPrice=$${closeEntryPrice}, fillPrice=$${fillPrice}`);
+        console.warn(`[ClosePosition] Cannot calculate PnL - fee evidence ${result.feeEvidence.kind}, entryPrice=$${closeEntryPrice}, fillPrice=$${fillPrice}`);
       }
 
       // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
@@ -9208,18 +9256,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           tradeId: pendingCloseTrade.id,
           fields: {
             price: String(fillPrice || result.fillPrice || 0),
-            fee: String(closeFee),
-            pnl: String(tradePnl),
+            fee: closeFee === null ? null : String(closeFee),
+            pnl: tradePnl === null ? null : String(tradePnl),
             status: "executed",
             txSignature: finalTxSignature,
             protocolFillId: manualCloseFillId,
-            webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: result.fillPrice || fillPrice },
+            webhookPayload: { action: "manual_close", reason: "User requested position close", entryPrice: closeEntryPrice, exitPrice: result.fillPrice || fillPrice, feeEvidence: result.feeEvidence },
             errorMessage: verificationWarning,
             executionMethod: result.executionMethod || 'legacy',
           },
         },
         deltas: {
-          totalPnlDelta: tradePnl,
+          totalPnlDelta: tradePnl ?? 0,
           totalVolumeDelta: manualCloseNotional,
           lastTradeAt: new Date().toISOString(),
         },
@@ -9230,7 +9278,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // reconciler / retry queue already wrote the canonical row, isNew=false
       // and that path already fired (or will fire) the notification —
       // suppressing here is what guarantees exactly-once delivery per close.
-      if (manualCloseAtomicResult.isNew) {
+      if (manualCloseAtomicResult.isNew && tradePnl !== null) {
         sendTradeNotification(bot.walletAddress, {
           type: 'position_closed',
           botName: bot.name,
@@ -9251,7 +9299,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         subAccountId,
         bot.market,
         pendingCloseTrade.id,
-        closeFee,
+        closeFee ?? 0,
         fillPrice,
         closeSide,
         closeSize,
@@ -9260,7 +9308,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
       // This must happen BEFORE auto-withdraw to ensure creator gets their share
-      if (tradePnl > 0 && manualCloseAtomicResult.isNew) {
+      if (tradePnl !== null && tradePnl > 0 && manualCloseAtomicResult.isNew) {
         const tradeId = manualCloseFillId;
         distributeCreatorProfitShare({
           subscriberBotId: bot.id,
@@ -16539,21 +16587,28 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 closeError = "Close order sent but verification failed - please check Drift manually";
               }
               
-              // Calculate fee (0.05% taker fee on notional value)
               const pauseFillPrice = result.fillPrice || 0;
               const closeNotional = closeSize * pauseFillPrice;
-              const closeFee = closeNotional * getExchangeFeeRate();
-              
-              // Calculate trade PnL for pause close
-              let pauseClosePnl = 0;
-              if (pauseEntryPrice > 0 && pauseFillPrice > 0) {
-                if (closeSide === 'short') {
-                  // Closing LONG: profit if exitPrice > entryPrice
-                  pauseClosePnl = (pauseFillPrice - pauseEntryPrice) * closeSize - closeFee;
-                } else {
-                  // Closing SHORT: profit if entryPrice > exitPrice
-                  pauseClosePnl = (pauseEntryPrice - pauseFillPrice) * closeSize - closeFee;
-                }
+              const pauseAdapter = getAdapterForBot(bot);
+              const pauseFeeRateQuote = await resolveFeeRateQuote(pauseAdapter, {
+                account: pauseQueryAccount,
+                subaccountId: pauseBotCtx ? null : (_subIdStr(pauseSubAccountId) ?? null),
+                liquidityRole: 'taker',
+              });
+              const pauseFeeEvidence = classifyCloseFeeEvidence({
+                protocol: pauseAdapter.protocolName,
+                venueFee: result.actualFee,
+                notional: closeNotional,
+                rateQuote: pauseFeeRateQuote,
+              });
+              const { fee: closeFee, pnl: pauseClosePnl } = closeAccounting(
+                pauseFeeEvidence,
+                pauseEntryPrice,
+                pauseFillPrice,
+                closeSize,
+                closeSide,
+              );
+              if (pauseClosePnl !== null && closeFee !== null) {
                 console.log(`[Bot] Pause close PnL: entry=$${pauseEntryPrice.toFixed(2)}, exit=$${pauseFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${pauseClosePnl.toFixed(4)}`);
               }
               
@@ -16576,17 +16631,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   side: "CLOSE",
                   size: String(closeSize),
                   price: pauseFillPrice ? String(pauseFillPrice) : "0",
-                  fee: String(closeFee),
-                  pnl: String(pauseClosePnl),
+                  fee: closeFee === null ? null : String(closeFee),
+                  pnl: pauseClosePnl === null ? null : String(pauseClosePnl),
                   status: "executed",
                   txSignature: result.txSignature,
                   protocolFillId: pauseFillId,
-                  webhookPayload: { action: "pause_close", reason: "Bot paused by user", entryPrice: pauseEntryPrice, exitPrice: pauseFillPrice },
+                  webhookPayload: { action: "pause_close", reason: "Bot paused by user", entryPrice: pauseEntryPrice, exitPrice: pauseFillPrice, feeEvidence: pauseFeeEvidence },
                   executionMethod: result.executionMethod || 'legacy',
                   swiftOrderId: result.swiftOrderId || null,
                 },
                 deltas: {
-                  totalPnlDelta: pauseClosePnl,
+                  totalPnlDelta: pauseClosePnl ?? 0,
                   totalVolumeDelta: pauseNotional,
                   lastTradeAt: new Date().toISOString(),
                 },
@@ -16601,7 +16656,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 pauseSubAccountId,
                 bot.market,
                 closeTrade.id,
-                closeFee,
+                closeFee ?? 0,
                 result.fillPrice || 0,
                 closeSide,
                 closeSize,
@@ -18744,6 +18799,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           side: "CLOSE",
           size: String(closeSize),
           price: signalPrice,
+          fee: null,
+          pnl: null,
           status: "pending",
           webhookPayload: payload,
           executionMethod: 'legacy',
@@ -18799,28 +18856,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
           
           if (result.success && txSignature) {
-            // Calculate fee (0.05% taker fee on notional value)
-            // Since closePerpPosition doesn't return fillPrice, use the signal price as estimate
             const closeFillPrice = parseFloat(signalPrice) || 0;
             const closeNotional = closeSize * closeFillPrice;
-            const closeFee = closeNotional * getExchangeFeeRate();
-            
-            // Calculate trade PnL based on entry and exit prices
-            // IMPORTANT: closeEntryPrice was captured BEFORE close attempt
             console.log(`[Webhook] PnL calculation inputs: entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice}, closeSide=${closeSide}, closeSize=${closeSize}`);
-            
-            let closeTradePnl = 0;
-            if (closeEntryPrice > 0 && closeFillPrice > 0) {
-              if (closeSide === 'short') {
-                // Closing LONG: profit if exitPrice > entryPrice
-                closeTradePnl = (closeFillPrice - closeEntryPrice) * closeSize - closeFee;
-              } else {
-                // Closing SHORT: profit if entryPrice > exitPrice
-                closeTradePnl = (closeEntryPrice - closeFillPrice) * closeSize - closeFee;
-              }
+            const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
+              result.feeEvidence,
+              closeEntryPrice,
+              closeFillPrice,
+              closeSize,
+              closeSide,
+            );
+            if (closeTradePnl !== null && closeFee !== null) {
               console.log(`[Webhook] Close PnL CALCULATED: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${closeTradePnl.toFixed(4)}`);
             } else {
-              console.warn(`[Webhook] PnL NOT calculated: entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice} - one or both are zero`);
+              console.warn(`[Webhook] PnL NOT calculated: fee evidence ${result.feeEvidence.kind}, entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice}`);
             }
             
             // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
@@ -18937,8 +18986,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 status: "executed",
                 txSignature: finalTxSignature,
                 price: result.fillPrice ? String(result.fillPrice) : signalPrice,
-                fee: String(closeFee),
-                pnl: String(closeTradePnl),
+                fee: closeFee === null ? null : String(closeFee),
+                pnl: closeTradePnl === null ? null : String(closeTradePnl),
                 errorMessage: `WARNING: Position not fully closed after ${maxRetries} attempts. Remaining: ${finalPositionRemaining.side} ${finalPositionRemaining.size}`,
                 executionMethod: result.executionMethod || 'legacy',
               });
@@ -18979,9 +19028,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 signature: finalTxSignature,
                 size: closeSize,
                 fillPrice: Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0,
-                fee: closeFee,
+                feeEvidence: result.feeEvidence,
                 pnl: closeTradePnl,
                 executionMethod: result.executionMethod,
+                webhookPayload: closeTrade.webhookPayload,
               });
               webhookCloseAtomic = finalized;
               webhookCloseFillId = finalized.fillId;
@@ -19046,7 +19096,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // --- Deferred post-trade work (fire-and-forget, non-blocking) ---
             console.log('[Webhook] Response sent, deferring post-trade work...');
             (async () => {
-              if (closeTradePnl > 0 && webhookCloseAtomic.isNew) {
+              if (closeTradePnl !== null && closeTradePnl > 0 && webhookCloseAtomic.isNew) {
                 const tradeId = webhookCloseFillId;
                 distributeCreatorProfitShare({
                   subscriberBotId: botId,
@@ -19177,7 +19227,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 }
               }
 
-              sendTradeNotification(wallet.address, {
+              if (closeTradePnl !== null) sendTradeNotification(wallet.address, {
                 type: 'position_closed',
                 botName: bot.name,
                 market: bot.market,
@@ -19304,10 +19354,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // Book realized PnL for the closed slice.
           const pcFillPrice = pcResult.fillPrice ?? (signalPrice ? parseFloat(signalPrice) : 0);
           const pcEntryPrice = dbPositionForClassification ? parseFloat(dbPositionForClassification.avgEntryPrice) : 0;
-          const pcFee = partialCloseSize * (pcFillPrice || pcEntryPrice) * getExchangeFeeRate();
-          const pcPnl = pcPositionSide === 'long'
-            ? (pcFillPrice - pcEntryPrice) * partialCloseSize - pcFee
-            : (pcEntryPrice - pcFillPrice) * partialCloseSize - pcFee;
+          const { fee: pcFee, pnl: pcPnl } = closeAccounting(
+            pcResult.feeEvidence,
+            pcEntryPrice,
+            pcFillPrice,
+            partialCloseSize,
+            pcPositionSide === 'long' ? 'short' : 'long',
+          );
 
           const pcDedupKey = DatabaseStorage.canonicalCloseFillId({
             signature: pcResult.signature ? `tx-${pcResult.signature}` : undefined,
@@ -19328,16 +19381,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               side: pcPositionSide === 'long' ? 'short' : 'long',
               size: String(partialCloseSize),
               price: String(pcFillPrice),
-              fee: String(pcFee),
-              pnl: String(pcPnl),
+              fee: pcFee === null ? null : String(pcFee),
+              pnl: pcPnl === null ? null : String(pcPnl),
               status: 'executed',
               txSignature: pcResult.signature || null,
               protocolFillId: pcDedupKey,
-              webhookPayload: { ...payload, partialClose: true, fraction: partialCloseFraction },
+              webhookPayload: { ...payload, partialClose: true, fraction: partialCloseFraction, feeEvidence: pcResult.feeEvidence },
               executionMethod: pcResult.executionMethod || 'legacy',
             },
             deltas: {
-              totalPnlDelta: pcPnl,
+              totalPnlDelta: pcPnl ?? 0,
               totalVolumeDelta: partialCloseSize * pcFillPrice,
               lastTradeAt: new Date().toISOString(),
             },
@@ -19355,7 +19408,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             pcSubAccountId,
             bot.market,
             pcAtomic.trade?.id ?? '',
-            pcFee,
+            pcFee ?? 0,
             pcFillPrice,
             pcPositionSide === 'long' ? 'short' : 'long',
             partialCloseSize,
@@ -19364,7 +19417,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             console.error(`[Webhook] Post-partial-close sync error:`, err));
 
           // Schedule debounced Telegram notification.
-          schedulePartialCloseNotification({
+          if (pcPnl !== null) schedulePartialCloseNotification({
             walletAddress: bot.walletAddress,
             botId,
             botName: bot.name,
@@ -20201,6 +20254,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             side: "CLOSE",
             size: String(closeSize),
             price: signalPrice,
+            fee: null,
+            pnl: null,
             status: "pending",
             webhookPayload: payload,
             executionMethod: 'legacy',
@@ -20261,18 +20316,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           
           if (result.success && result.signature) {
             const closeFillPrice = parseFloat(signalPrice) || 0;
-            const closeNotional = closeSize * closeFillPrice;
-            const closeFee = closeNotional * getExchangeFeeRate();
-            
-            // Calculate PnL
             const closeEntryPrice = onChainPosition.entryPrice || 0;
-            let closeTradePnl = 0;
-            if (closeEntryPrice > 0 && closeFillPrice > 0) {
-              if (closeSide === 'short') {
-                closeTradePnl = (closeFillPrice - closeEntryPrice) * closeSize - closeFee;
-              } else {
-                closeTradePnl = (closeEntryPrice - closeFillPrice) * closeSize - closeFee;
-              }
+            const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
+              result.feeEvidence,
+              closeEntryPrice,
+              closeFillPrice,
+              closeSize,
+              closeSide,
+            );
+            if (closeTradePnl !== null) {
               console.log(`[User Webhook] Close PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
             }
 
@@ -20318,8 +20370,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 status: "executed",
                 txSignature: result.signature,
                 price: closeFillPrice.toString(),
-                fee: closeFee.toString(),
-                pnl: closeTradePnl.toString(),
+                fee: closeFee === null ? null : closeFee.toString(),
+                pnl: closeTradePnl === null ? null : closeTradePnl.toString(),
                 errorMessage: `WARNING: Signed close left residual position ${postClosePosition.side} ${postClosePosition.size}`,
               });
               await storage.updateWebhookLog(log.id, {
@@ -20353,9 +20405,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 signature: result.signature,
                 size: closeSize,
                 fillPrice: closeFillPrice,
-                fee: closeFee,
+                feeEvidence: result.feeEvidence,
                 pnl: closeTradePnl,
                 executionMethod: result.executionMethod,
+                webhookPayload: closeTrade.webhookPayload,
               });
               userWebhookCloseAtomic = finalized;
               userWebhookCloseFillId = finalized.fillId;
@@ -20406,7 +20459,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
 
             // Send position closed notification
-            sendTradeNotification(walletAddress, {
+            if (closeTradePnl !== null) sendTradeNotification(walletAddress, {
               type: 'position_closed',
               botName: bot.name,
               market: bot.market,
@@ -20415,7 +20468,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             
             // PROFIT SHARE: If this is a subscriber bot with profitable close, distribute to creator
             // This must happen BEFORE auto-withdraw to ensure creator gets their share
-            if (closeTradePnl > 0 && userWebhookCloseAtomic.isNew) {
+            if (closeTradePnl !== null && closeTradePnl > 0 && userWebhookCloseAtomic.isNew) {
               const tradeId = userWebhookCloseFillId;
               distributeCreatorProfitShare({
                 subscriberBotId: botId,
@@ -20724,10 +20777,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // Book realized PnL for the closed slice.
           const pcFillPrice = pcResult.fillPrice ?? (signalPrice ? parseFloat(signalPrice) : 0);
           const pcEntryPrice = uwDbPosition ? parseFloat(uwDbPosition.avgEntryPrice) : 0;
-          const pcFee = uwPartialCloseSize * (pcFillPrice || pcEntryPrice) * getExchangeFeeRate();
-          const pcPnl = pcPositionSide === 'long'
-            ? (pcFillPrice - pcEntryPrice) * uwPartialCloseSize - pcFee
-            : (pcEntryPrice - pcFillPrice) * uwPartialCloseSize - pcFee;
+          const { fee: pcFee, pnl: pcPnl } = closeAccounting(
+            pcResult.feeEvidence,
+            pcEntryPrice,
+            pcFillPrice,
+            uwPartialCloseSize,
+            pcPositionSide === 'long' ? 'short' : 'long',
+          );
 
           const pcDedupKey = DatabaseStorage.canonicalCloseFillId({
             signature: pcResult.signature ? `tx-${pcResult.signature}` : undefined,
@@ -20748,16 +20804,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               side: pcPositionSide === 'long' ? 'short' : 'long',
               size: String(uwPartialCloseSize),
               price: String(pcFillPrice),
-              fee: String(pcFee),
-              pnl: String(pcPnl),
+              fee: pcFee === null ? null : String(pcFee),
+              pnl: pcPnl === null ? null : String(pcPnl),
               status: 'executed',
               txSignature: pcResult.signature || null,
               protocolFillId: pcDedupKey,
-              webhookPayload: { ...payload, partialClose: true, fraction: uwPartialCloseFraction },
+              webhookPayload: { ...payload, partialClose: true, fraction: uwPartialCloseFraction, feeEvidence: pcResult.feeEvidence },
               executionMethod: pcResult.executionMethod || 'legacy',
             },
             deltas: {
-              totalPnlDelta: pcPnl,
+              totalPnlDelta: pcPnl ?? 0,
               totalVolumeDelta: uwPartialCloseSize * pcFillPrice,
               lastTradeAt: new Date().toISOString(),
             },
@@ -20775,7 +20831,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             pcSubAccountId,
             bot.market,
             pcAtomic.trade?.id ?? '',
-            pcFee,
+            pcFee ?? 0,
             pcFillPrice,
             pcPositionSide === 'long' ? 'short' : 'long',
             uwPartialCloseSize,
@@ -20784,7 +20840,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             console.error(`[User Webhook] Post-partial-close sync error:`, err));
 
           // Schedule debounced Telegram notification.
-          schedulePartialCloseNotification({
+          if (pcPnl !== null) schedulePartialCloseNotification({
             walletAddress: bot.walletAddress,
             botId,
             botName: bot.name,
