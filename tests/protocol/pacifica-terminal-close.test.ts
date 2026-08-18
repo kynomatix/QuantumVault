@@ -79,4 +79,20 @@ describe('PacificaAdapter terminal close truth', () => {
     const result = subject.mapOrderResponse({ order_id: 'o-1', status: 'venue_future_state' });
     expect(result).toMatchObject({ success: true, status: 'unknown', orderId: 'o-1' });
   });
+
+  it.each([0, 0.123456])('preserves a terminal venue fee of %s on the close result', async fee => {
+    const subject = adapter() as any;
+    subject.getPositions = vi.fn(async () => [position]);
+    subject.placeMarketOrder = vi.fn(async () => ({
+      success: true,
+      status: 'filled',
+      fillPrice: 99,
+      fillSize: 2,
+      fee,
+    } satisfies OrderResult));
+
+    const result = await subject.closePosition(request());
+
+    expect(result).toMatchObject({ success: true, status: 'filled', fee });
+  });
 });

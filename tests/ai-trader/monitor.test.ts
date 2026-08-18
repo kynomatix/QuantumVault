@@ -243,6 +243,7 @@ function candle(time: number, open: number, high: number, low: number, close: nu
 
 function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   return {
+    protocolName: "pacifica",
     getPositions: vi.fn(async () => []),
     getTradeHistory: vi.fn(async () => []),
     getOpenStopOrders: vi.fn(async () => [{ order_id: "st-1", symbol: "SOL-PERP" }]),
@@ -800,6 +801,61 @@ describe("live close-result consumption", () => {
     expect(result).toMatchObject({ ok: true, closed: true, exitPrice: 151 });
     expect(setTpSl).not.toHaveBeenCalled();
     expect(decisionUpdates().filter((u) => u.exitReason === "user_close")).toHaveLength(1);
+  });
+
+  it("keeps an exact zero exit fee and estimates only the entry component from a validated quote", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const getFeeRateQuote = vi.fn(async (request: any) => ({
+      availability: "available" as const,
+      protocol: "pacifica",
+      account: request.account,
+      subaccountId: request.subaccountId ?? null,
+      liquidityRole: "taker" as const,
+      baseRate: 0.001,
+      effectiveRate: 0.001,
+      provenance: "pacifica:/account:taker_fee",
+      observedAt: NOW,
+      builder: { status: "absent" as const },
+    }));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 151, fee: 0 })),
+      getFeeRateQuote,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ entryPrice: "150", sizeBase: "2" })]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: true, closed: true, exitPrice: 151, realizedPnl: 1.7 });
+    expect(decisionUpdates()).toContainEqual(expect.objectContaining({
+      exitReason: "user_close",
+      feesPaid: "0.300000",
+      realizedPnl: "1.70",
+    }));
+    expect(getFeeRateQuote).toHaveBeenCalledOnce();
+  });
+
+  it("persists nullable money fields when a direct close cannot establish every fee component", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 151 })),
+      getFeeRateQuote: vi.fn(async () => ({ availability: "unavailable", reason: "builder_rate_unknown" })),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ entryPrice: "150", sizeBase: "2" })]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: true, closed: true, exitPrice: 151, realizedPnl: null });
+    expect(decisionUpdates()).toContainEqual(expect.objectContaining({
+      exitReason: "user_close",
+      feesPaid: null,
+      realizedPnl: null,
+    }));
   });
 });
 

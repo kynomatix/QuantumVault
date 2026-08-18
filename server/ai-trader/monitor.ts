@@ -80,7 +80,16 @@ import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import { isSchemaCapabilityReady } from "../schema-readiness";
 import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
-import type { ProtocolAdapter } from "../protocol/adapter";
+import {
+  resolveFeeRateQuote,
+  type FeeRateQuoteResult,
+  type ProtocolAdapter,
+} from "../protocol/adapter";
+import {
+  classifyCloseFeeEvidence,
+  closeFeeAmount,
+  type CloseFeeEvidence,
+} from "../trading/signal-bot-close-integrity";
 import type { ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
 import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
@@ -534,6 +543,38 @@ interface CloseRecord {
   realizedPnl: number | null;
   feesPaid: number | null;
   closedAt: Date;
+}
+
+function directLiveCloseAccounting(args: {
+  protocol: string;
+  venueFee?: number | null;
+  rateQuote: FeeRateQuoteResult | null;
+  entryPrice: number | null;
+  fillPrice: number | null;
+  sizeBase: number;
+  side: "long" | "short";
+}): { feeEvidence: CloseFeeEvidence; realizedPnl: number | null; feesPaid: number | null } {
+  const exitNotional = args.fillPrice === null ? null : args.fillPrice * args.sizeBase;
+  const feeEvidence = classifyCloseFeeEvidence({
+    protocol: args.protocol,
+    venueFee: args.venueFee,
+    notional: exitNotional,
+    rateQuote: args.rateQuote,
+  });
+  const exitFee = closeFeeAmount(feeEvidence);
+  if (
+    exitFee === null
+    || args.rateQuote?.availability !== "available"
+    || args.entryPrice === null
+    || args.fillPrice === null
+  ) {
+    return { feeEvidence, realizedPnl: null, feesPaid: null };
+  }
+  const entryFee = args.entryPrice * args.sizeBase * args.rateQuote.effectiveRate;
+  const feesPaid = entryFee + exitFee;
+  const direction = args.side === "long" ? 1 : -1;
+  const realizedPnl = (args.fillPrice - args.entryPrice) * args.sizeBase * direction - feesPaid;
+  return { feeEvidence, realizedPnl, feesPaid };
 }
 
 type FreshCloseContext =
@@ -1003,7 +1044,12 @@ async function closeLivePositionAndPause(
           subaccountId,
           maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
         });
-        return { kind: "order", order } as const;
+        const feeRateQuote = await resolveFeeRateQuote(adapter, {
+          account: keyTrio.agentPublicKey,
+          subaccountId: subaccountId ?? null,
+          liquidityRole: "taker",
+        });
+        return { kind: "order", order, feeRateQuote } as const;
       } catch (err) {
         return {
           kind: "close_threw",
@@ -1064,14 +1110,16 @@ async function closeLivePositionAndPause(
     }
 
     const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
-    let realizedPnl: number | null = null;
-    let feesPaid: number | null = null;
-    if (fillPrice !== null && view.entryPrice !== null) {
-      const direction = view.side === "long" ? 1 : -1;
-      const grossPnl = (fillPrice - view.entryPrice) * view.sizeBase * direction;
-      feesPaid = EXCHANGE_TAKER_FEE_RATE * (view.entryPrice + fillPrice) * view.sizeBase;
-      realizedPnl = grossPnl - feesPaid;
-    }
+    const accounting = directLiveCloseAccounting({
+      protocol: adapter.protocolName,
+      venueFee: order.fee,
+      rateQuote: result.value.kind === "order" ? result.value.feeRateQuote : null,
+      entryPrice: view.entryPrice,
+      fillPrice,
+      sizeBase: view.sizeBase,
+      side: view.side,
+    });
+    const { realizedPnl, feesPaid } = accounting;
     const close: CloseRecord = {
       exitPrice: fillPrice,
       exitReason: args.exitReason,
@@ -1190,7 +1238,12 @@ export async function userInitiatedClose(
           subaccountId,
           maxSlippagePct: PROTECTIVE_CLOSE_MAX_SLIPPAGE_PCT,
         });
-        return { kind: "order", order } as const;
+        const feeRateQuote = await resolveFeeRateQuote(adapter, {
+          account: keyTrio.agentPublicKey,
+          subaccountId: subaccountId ?? null,
+          liquidityRole: "taker",
+        });
+        return { kind: "order", order, feeRateQuote } as const;
       } catch (err) {
         return {
           kind: "close_threw",
@@ -1235,14 +1288,16 @@ export async function userInitiatedClose(
     }
 
     const fillPrice = typeof order.fillPrice === "number" && Number.isFinite(order.fillPrice) ? order.fillPrice : null;
-    let realizedPnl: number | null = null;
-    let feesPaid: number | null = null;
-    if (fillPrice !== null && view.entryPrice !== null) {
-      const direction = view.side === "long" ? 1 : -1;
-      const grossPnl = (fillPrice - view.entryPrice) * view.sizeBase * direction;
-      feesPaid = EXCHANGE_TAKER_FEE_RATE * (view.entryPrice + fillPrice) * view.sizeBase;
-      realizedPnl = grossPnl - feesPaid;
-    }
+    const accounting = directLiveCloseAccounting({
+      protocol: adapter.protocolName,
+      venueFee: order.fee,
+      rateQuote: result.value.kind === "order" ? result.value.feeRateQuote : null,
+      entryPrice: view.entryPrice,
+      fillPrice,
+      sizeBase: view.sizeBase,
+      side: view.side,
+    });
+    const { realizedPnl, feesPaid } = accounting;
     const close: CloseRecord = {
       exitPrice: fillPrice,
       exitReason: "user_close",

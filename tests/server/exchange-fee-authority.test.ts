@@ -120,15 +120,12 @@ describe('Signal Bot route choke point', () => {
     expect(wrapper).toContain(': await placeMarketOrderWithFeeAuthority(adapter, orderParams)');
   });
 
-  it('retains the existing close-accounting constant and expressions', () => {
-    expect(source).toContain('const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;');
-    expect(source).toContain('const closeFee = closeNotional * getExchangeFeeRate();');
-    expect(source).toContain(
-      'const pcFee = partialCloseSize * (pcFillPrice || pcEntryPrice) * getExchangeFeeRate();',
-    );
-    expect(source).toContain(
-      'const pcFee = uwPartialCloseSize * (pcFillPrice || pcEntryPrice) * getExchangeFeeRate();',
-    );
+  it('requires explicit close-fee evidence and never restores the legacy numeric default', () => {
+    expect(source).not.toContain('const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;');
+    expect(source).not.toContain('getExchangeFeeRate()');
+    expect(source).toContain('const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(');
+    expect(source).toContain('fee: closeFee === null ? null : closeFee.toFixed(6)');
+    expect(source).toContain('fee: pcFee === null ? null : String(pcFee)');
   });
 
   it('uses the admitted quote for every OPEN estimate without changing exact-fee precedence', () => {
@@ -136,6 +133,7 @@ describe('Signal Bot route choke point', () => {
     expect(source).toMatch(
       /const tradeFee = orderResult\.actualFee\s+\?\? \(tradeNotional \* orderResult\.admissionFeeQuote!\.effectiveRate\);/,
     );
+    expect(source).not.toContain('orderResult.actualFee ||');
     expect(source).toContain(
       'const userTradeFee = userTradeNotional * orderResult.admissionFeeQuote!.effectiveRate;',
     );
