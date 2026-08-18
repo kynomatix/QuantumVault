@@ -1352,6 +1352,150 @@ const schemaMigrationMetadata = [
   {
     "id": "005-create-table-if-not",
     "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_execution_events",
+        "columns": [
+          "id",
+          "event_identity",
+          "attempt_id",
+          "bot_id",
+          "decision_id",
+          "action",
+          "cause",
+          "event_type",
+          "phase",
+          "protocol",
+          "account_scope",
+          "account_ref",
+          "market",
+          "side",
+          "client_order_id",
+          "venue_order_id",
+          "transaction_signature",
+          "venue_status",
+          "price",
+          "size_base",
+          "fee",
+          "realized_pnl",
+          "failure_code",
+          "recorded_after_broadcast",
+          "observed_at",
+          "recorded_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "action IN ('entry','close','cancel')",
+          "cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')",
+          "account_scope IN ('main','bot_subaccount','unknown')",
+          "side IS NULL OR side IN ('long','short')",
+          "venue_status IS NULL OR venue_status IN ('submitted','acknowledged','filled','partial_fill','canceled','expired','rejected','unknown')",
+          "price IS NULL OR price <> 'NaN'::numeric",
+          "size_base IS NULL OR (size_base >= 0 AND size_base <> 'NaN'::numeric)",
+          "fee IS NULL OR (fee >= 0 AND fee <> 'NaN'::numeric)",
+          "realized_pnl IS NULL OR realized_pnl <> 'NaN'::numeric",
+          "failure_code IS NULL OR failure_code IN ('venue_rejected','venue_unconfirmed','venue_error','identity_mismatch','signing_unavailable','position_not_confirmed','bracket_failed','unknown')",
+          "CHECK ( (event_type = 'attempt_claimed' AND phase = 0) OR (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR (event_type = 'broadcast_result' AND phase = 20) OR (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "006-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_execution_events",
+        "index": "idx_ai_trader_execution_attempt",
+        "columns": [
+          "attempt_id",
+          "phase",
+          "observed_at",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "007-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_execution_events",
+        "index": "idx_ai_trader_execution_bot",
+        "columns": [
+          "bot_id",
+          "recorded_at DESC",
+          "id DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "008-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_execution_events",
+        "index": "idx_ai_trader_execution_decision",
+        "columns": [
+          "decision_id",
+          "recorded_at",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "009-create-or-replace-function",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "function:qv_reject_ai_trader_execution_event_mutation",
+        "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname='qv_reject_ai_trader_execution_event_mutation') AS ok"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "010-do--begin-create",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "trigger:ai_trader_execution_events_append_only",
+        "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='ai_trader_execution_events_append_only' AND NOT tgisinternal) AS ok"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "011-create-table-if-not",
+    "capabilities": [
       "platform"
     ],
     "requirements": [
@@ -1372,7 +1516,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "006-create-index-if-not",
+    "id": "012-create-index-if-not",
     "capabilities": [
       "lab"
     ],
@@ -1392,7 +1536,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "007-create-index-if-not",
+    "id": "013-create-index-if-not",
     "capabilities": [
       "lab"
     ],
@@ -1410,7 +1554,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "008-alter-table-trading_bots-add",
+    "id": "014-alter-table-trading_bots-add",
     "capabilities": [
       "signal_bot"
     ],
@@ -1424,7 +1568,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "009-update-trading_bots-set-subaccount_auth_mode",
+    "id": "015-update-trading_bots-set-subaccount_auth_mode",
     "capabilities": [
       "signal_bot"
     ],
@@ -1438,7 +1582,7 @@ const schemaMigrationMetadata = [
     "operation": "backfill"
   },
   {
-    "id": "010-update-trading_bots-set-subaccount_auth_mode",
+    "id": "016-update-trading_bots-set-subaccount_auth_mode",
     "capabilities": [
       "signal_bot"
     ],
@@ -1452,7 +1596,7 @@ const schemaMigrationMetadata = [
     "operation": "backfill"
   },
   {
-    "id": "011-do--begin-alter",
+    "id": "017-do--begin-alter",
     "capabilities": [
       "signal_bot"
     ],
@@ -1469,7 +1613,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "012-do--begin-alter",
+    "id": "018-do--begin-alter",
     "capabilities": [
       "signal_bot"
     ],
@@ -1486,7 +1630,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "013-alter-table-trading_bots-alter",
+    "id": "019-alter-table-trading_bots-alter",
     "capabilities": [
       "signal_bot"
     ],
@@ -1500,7 +1644,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "014-alter-table-trading_bots-add",
+    "id": "020-alter-table-trading_bots-add",
     "capabilities": [
       "signal_bot"
     ],
@@ -1514,7 +1658,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "015-do--begin-alter",
+    "id": "021-do--begin-alter",
     "capabilities": [
       "signal_bot"
     ],
@@ -1531,7 +1675,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "016-do--begin-update",
+    "id": "022-do--begin-update",
     "capabilities": [
       "signal_bot"
     ],
@@ -1553,7 +1697,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "017-create-table-if-not",
+    "id": "023-create-table-if-not",
     "capabilities": [
       "referrals"
     ],
@@ -1581,7 +1725,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "018-create-index-if-not",
+    "id": "024-create-index-if-not",
     "capabilities": [
       "referrals"
     ],
@@ -1599,7 +1743,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "019-create-index-if-not",
+    "id": "025-create-index-if-not",
     "capabilities": [
       "referrals"
     ],
@@ -1617,7 +1761,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "020-create-table-if-not",
+    "id": "026-create-table-if-not",
     "capabilities": [
       "referrals"
     ],
@@ -1649,7 +1793,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "021-create-index-if-not",
+    "id": "027-create-index-if-not",
     "capabilities": [
       "referrals"
     ],
@@ -1667,7 +1811,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "022-do--begin-if",
+    "id": "028-do--begin-if",
     "capabilities": [
       "referrals"
     ],
@@ -1684,7 +1828,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "023-alter-table-referral_reward_events-add",
+    "id": "029-alter-table-referral_reward_events-add",
     "capabilities": [
       "referrals"
     ],
@@ -1698,7 +1842,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "024-alter-table-referral_reward_events-add",
+    "id": "030-alter-table-referral_reward_events-add",
     "capabilities": [
       "referrals"
     ],
@@ -1712,7 +1856,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "025-alter-table-referral_reward_events-add",
+    "id": "031-alter-table-referral_reward_events-add",
     "capabilities": [
       "referrals"
     ],
@@ -1726,7 +1870,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "026-alter-table-referral_reward_events-add",
+    "id": "032-alter-table-referral_reward_events-add",
     "capabilities": [
       "referrals"
     ],
@@ -1740,7 +1884,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "027-alter-table-referral_reward_events-add",
+    "id": "033-alter-table-referral_reward_events-add",
     "capabilities": [
       "referrals"
     ],
@@ -1754,7 +1898,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "028-create-index-if-not",
+    "id": "034-create-index-if-not",
     "capabilities": [
       "referrals"
     ],
@@ -1773,7 +1917,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "029-insert-into-referral_links-descendant_wallet",
+    "id": "035-insert-into-referral_links-descendant_wallet",
     "capabilities": [
       "referrals"
     ],
@@ -1787,7 +1931,7 @@ const schemaMigrationMetadata = [
     "operation": "backfill"
   },
   {
-    "id": "030-insert-into-referral_links-descendant_wallet",
+    "id": "036-insert-into-referral_links-descendant_wallet",
     "capabilities": [
       "referrals"
     ],
@@ -1801,7 +1945,7 @@ const schemaMigrationMetadata = [
     "operation": "backfill"
   },
   {
-    "id": "031-insert-into-referral_links-descendant_wallet",
+    "id": "037-insert-into-referral_links-descendant_wallet",
     "capabilities": [
       "referrals"
     ],
@@ -1815,7 +1959,7 @@ const schemaMigrationMetadata = [
     "operation": "backfill"
   },
   {
-    "id": "032-alter-table-equity_events-add",
+    "id": "038-alter-table-equity_events-add",
     "capabilities": [
       "portfolio"
     ],
@@ -1829,7 +1973,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "033-alter-table-portfolio_daily_snapshots-add",
+    "id": "039-alter-table-portfolio_daily_snapshots-add",
     "capabilities": [
       "portfolio"
     ],
@@ -1843,7 +1987,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "034-alter-table-portfolio_daily_snapshots-add",
+    "id": "040-alter-table-portfolio_daily_snapshots-add",
     "capabilities": [
       "portfolio"
     ],
@@ -1857,7 +2001,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "035-alter-table-portfolio_daily_snapshots-add",
+    "id": "041-alter-table-portfolio_daily_snapshots-add",
     "capabilities": [
       "portfolio"
     ],
@@ -1871,7 +2015,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "036-alter-table-portfolio_daily_snapshots-add",
+    "id": "042-alter-table-portfolio_daily_snapshots-add",
     "capabilities": [
       "portfolio"
     ],
@@ -1885,7 +2029,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "037-alter-table-portfolio_daily_snapshots-add",
+    "id": "043-alter-table-portfolio_daily_snapshots-add",
     "capabilities": [
       "portfolio"
     ],
@@ -1899,7 +2043,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "038-alter-table-portfolio_daily_snapshots-add",
+    "id": "044-alter-table-portfolio_daily_snapshots-add",
     "capabilities": [
       "portfolio"
     ],
@@ -1913,7 +2057,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "039-alter-table-wallets-add",
+    "id": "045-alter-table-wallets-add",
     "capabilities": [
       "notifications"
     ],
@@ -1927,7 +2071,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "040-alter-table-wallets-add",
+    "id": "046-alter-table-wallets-add",
     "capabilities": [
       "notifications"
     ],
@@ -1941,7 +2085,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "041-alter-table-wallets-add",
+    "id": "047-alter-table-wallets-add",
     "capabilities": [
       "signal_bot"
     ],
@@ -1955,7 +2099,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "042-alter-table-wallets-add",
+    "id": "048-alter-table-wallets-add",
     "capabilities": [
       "signal_bot"
     ],
@@ -1969,7 +2113,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "043-alter-table-wallets-add",
+    "id": "049-alter-table-wallets-add",
     "capabilities": [
       "signal_bot"
     ],
@@ -1983,7 +2127,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "044-alter-table-trading_bots-add",
+    "id": "050-alter-table-trading_bots-add",
     "capabilities": [
       "signal_bot"
     ],
@@ -1997,7 +2141,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "045-alter-table-trading_bots-add",
+    "id": "051-alter-table-trading_bots-add",
     "capabilities": [
       "signal_bot"
     ],
@@ -2011,7 +2155,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "046-alter-table-trading_bots-add",
+    "id": "052-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2025,7 +2169,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "047-alter-table-trading_bots-add",
+    "id": "053-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2039,7 +2183,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "048-alter-table-trading_bots-add",
+    "id": "054-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2053,7 +2197,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "049-alter-table-trading_bots-add",
+    "id": "055-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2067,7 +2211,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "050-alter-table-trading_bots-add",
+    "id": "056-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2081,7 +2225,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "051-alter-table-trading_bots-add",
+    "id": "057-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2095,7 +2239,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "052-alter-table-wallets-add",
+    "id": "058-alter-table-wallets-add",
     "capabilities": [
       "vault"
     ],
@@ -2109,7 +2253,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "053-alter-table-wallets-add",
+    "id": "059-alter-table-wallets-add",
     "capabilities": [
       "vault"
     ],
@@ -2123,7 +2267,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "054-alter-table-wallets-add",
+    "id": "060-alter-table-wallets-add",
     "capabilities": [
       "wallet_security"
     ],
@@ -2137,7 +2281,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "055-alter-table-wallets-add",
+    "id": "061-alter-table-wallets-add",
     "capabilities": [
       "wallet_security"
     ],
@@ -2151,7 +2295,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "056-alter-table-wallets-add",
+    "id": "062-alter-table-wallets-add",
     "capabilities": [
       "wallet_security"
     ],
@@ -2165,7 +2309,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "057-alter-table-wallets-add",
+    "id": "063-alter-table-wallets-add",
     "capabilities": [
       "wallet_security"
     ],
@@ -2179,7 +2323,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "058-alter-table-wallets-add",
+    "id": "064-alter-table-wallets-add",
     "capabilities": [
       "vault"
     ],
@@ -2193,7 +2337,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "059-alter-table-wallets-add",
+    "id": "065-alter-table-wallets-add",
     "capabilities": [
       "vault"
     ],
@@ -2207,7 +2351,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "060-alter-table-trading_bots-add",
+    "id": "066-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2221,7 +2365,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "061-alter-table-trading_bots-add",
+    "id": "067-alter-table-trading_bots-add",
     "capabilities": [
       "vault"
     ],
@@ -2235,7 +2379,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "062-do--begin-alter",
+    "id": "068-do--begin-alter",
     "capabilities": [
       "vault"
     ],
@@ -2252,7 +2396,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "063-do--begin-alter",
+    "id": "069-do--begin-alter",
     "capabilities": [
       "vault"
     ],
@@ -2269,7 +2413,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "064-do--begin-alter",
+    "id": "070-do--begin-alter",
     "capabilities": [
       "vault"
     ],
@@ -2286,7 +2430,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "065-alter-table-protocol_subaccounts-add",
+    "id": "071-alter-table-protocol_subaccounts-add",
     "capabilities": [
       "vault"
     ],
@@ -2300,7 +2444,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "066-alter-table-protocol_subaccounts-add",
+    "id": "072-alter-table-protocol_subaccounts-add",
     "capabilities": [
       "vault"
     ],
@@ -2314,7 +2458,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "067-do--begin-alter",
+    "id": "073-do--begin-alter",
     "capabilities": [
       "vault"
     ],
@@ -2331,7 +2475,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "068-do--begin-alter",
+    "id": "074-do--begin-alter",
     "capabilities": [
       "vault"
     ],
@@ -2348,7 +2492,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "069-insert-into-lab_strategies-user_id",
+    "id": "075-insert-into-lab_strategies-user_id",
     "capabilities": [
       "lab"
     ],
@@ -2362,7 +2506,7 @@ const schemaMigrationMetadata = [
     "operation": "backfill"
   },
   {
-    "id": "070-do--begin-alter",
+    "id": "076-do--begin-alter",
     "capabilities": [
       "vault"
     ],
@@ -2379,7 +2523,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "071-alter-table-bot_trades-alter",
+    "id": "077-alter-table-bot_trades-alter",
     "capabilities": [
       "vault"
     ],
@@ -2393,7 +2537,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "072-alter-table-lab_optimization_runs-add",
+    "id": "078-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2407,7 +2551,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "073-alter-table-lab_optimization_runs-add",
+    "id": "079-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2421,7 +2565,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "074-alter-table-lab_optimization_runs-add",
+    "id": "080-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2435,7 +2579,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "075-alter-table-lab_optimization_runs-add",
+    "id": "081-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2449,7 +2593,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "076-alter-table-lab_optimization_results-add",
+    "id": "082-alter-table-lab_optimization_results-add",
     "capabilities": [
       "lab"
     ],
@@ -2463,7 +2607,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "077-alter-table-lab_optimization_results-add",
+    "id": "083-alter-table-lab_optimization_results-add",
     "capabilities": [
       "lab"
     ],
@@ -2477,7 +2621,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "078-create-table-if-not",
+    "id": "084-create-table-if-not",
     "capabilities": [
       "lab"
     ],
@@ -2513,7 +2657,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "079-create-index-if-not",
+    "id": "085-create-index-if-not",
     "capabilities": [
       "lab"
     ],
@@ -2532,7 +2676,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "080-alter-table-lab_optimization_runs-add",
+    "id": "086-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2546,7 +2690,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "081-alter-table-lab_optimization_runs-add",
+    "id": "087-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2560,7 +2704,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "082-alter-table-lab_optimization_runs-add",
+    "id": "088-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2574,7 +2718,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "083-alter-table-lab_optimization_runs-add",
+    "id": "089-alter-table-lab_optimization_runs-add",
     "capabilities": [
       "lab"
     ],
@@ -2588,7 +2732,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "084-create-unique-index-if",
+    "id": "090-create-unique-index-if",
     "capabilities": [
       "lab"
     ],
@@ -2611,7 +2755,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "085-create-index-if-not",
+    "id": "091-create-index-if-not",
     "capabilities": [
       "lab"
     ],
@@ -2632,7 +2776,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "086-create-table-if-not",
+    "id": "092-create-table-if-not",
     "capabilities": [
       "lab"
     ],
@@ -2657,7 +2801,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "087-create-index-if-not",
+    "id": "093-create-index-if-not",
     "capabilities": [
       "lab"
     ],
@@ -2677,7 +2821,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "088-alter-table-lab_agent_tasks-add",
+    "id": "094-alter-table-lab_agent_tasks-add",
     "capabilities": [
       "lab"
     ],
@@ -2691,7 +2835,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "089-alter-table-lab_agent_tasks-add",
+    "id": "095-alter-table-lab_agent_tasks-add",
     "capabilities": [
       "lab"
     ],
@@ -2705,7 +2849,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "090-alter-table-lab_agent_tasks-add",
+    "id": "096-alter-table-lab_agent_tasks-add",
     "capabilities": [
       "lab"
     ],
@@ -2719,7 +2863,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "091-alter-table-lab_agent_tasks-add",
+    "id": "097-alter-table-lab_agent_tasks-add",
     "capabilities": [
       "lab"
     ],
@@ -2733,7 +2877,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "092-alter-table-lab_agent_tasks-add",
+    "id": "098-alter-table-lab_agent_tasks-add",
     "capabilities": [
       "lab"
     ],
@@ -2747,7 +2891,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "093-alter-table-lab_agent_tasks-add",
+    "id": "099-alter-table-lab_agent_tasks-add",
     "capabilities": [
       "lab"
     ],
@@ -2761,7 +2905,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "094-create-table-if-not",
+    "id": "100-create-table-if-not",
     "capabilities": [
       "vault"
     ],
@@ -2790,7 +2934,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "095-create-index-if-not",
+    "id": "101-create-index-if-not",
     "capabilities": [
       "vault"
     ],
@@ -2808,7 +2952,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "096-alter-table-vault_positions-add",
+    "id": "102-alter-table-vault_positions-add",
     "capabilities": [
       "vault"
     ],
@@ -2822,7 +2966,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "097-create-unique-index-if",
+    "id": "103-create-unique-index-if",
     "capabilities": [
       "vault"
     ],
@@ -2844,7 +2988,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "098-create-unique-index-if",
+    "id": "104-create-unique-index-if",
     "capabilities": [
       "vault"
     ],
@@ -2867,7 +3011,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "099-create-index-if-not",
+    "id": "105-create-index-if-not",
     "capabilities": [
       "vault"
     ],
@@ -2888,7 +3032,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "100-alter-table-vault_positions-drop",
+    "id": "106-alter-table-vault_positions-drop",
     "capabilities": [
       "vault"
     ],
@@ -2902,7 +3046,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "101-create-table-if-not",
+    "id": "107-create-table-if-not",
     "capabilities": [
       "vault"
     ],
@@ -2924,7 +3068,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "102-create-index-if-not",
+    "id": "108-create-index-if-not",
     "capabilities": [
       "vault"
     ],
@@ -2943,7 +3087,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "103-create-table-if-not",
+    "id": "109-create-table-if-not",
     "capabilities": [
       "vault"
     ],
@@ -2969,7 +3113,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "104-create-table-if-not",
+    "id": "110-create-table-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -2997,7 +3141,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "105-create-index-if-not",
+    "id": "111-create-index-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3016,7 +3160,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "106-alter-table-loop_rate_samples-add",
+    "id": "112-alter-table-loop_rate_samples-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3030,7 +3174,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "107-create-table-if-not",
+    "id": "113-create-table-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3068,7 +3212,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "108-create-index-if-not",
+    "id": "114-create-index-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3086,7 +3230,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "109-create-index-if-not",
+    "id": "115-create-index-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3107,7 +3251,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "110-alter-table-borrow_positions-add",
+    "id": "116-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3121,7 +3265,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "111-alter-table-borrow_positions-add",
+    "id": "117-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3135,7 +3279,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "112-alter-table-borrow_positions-add",
+    "id": "118-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3149,7 +3293,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "113-alter-table-borrow_positions-add",
+    "id": "119-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3163,7 +3307,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "114-alter-table-borrow_positions-add",
+    "id": "120-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3177,7 +3321,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "115-alter-table-borrow_positions-add",
+    "id": "121-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3191,7 +3335,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "116-alter-table-borrow_positions-add",
+    "id": "122-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3205,7 +3349,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "117-alter-table-borrow_positions-add",
+    "id": "123-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3219,7 +3363,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "118-alter-table-borrow_positions-add",
+    "id": "124-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3233,7 +3377,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "119-alter-table-borrow_positions-add",
+    "id": "125-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3247,7 +3391,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "120-alter-table-borrow_positions-add",
+    "id": "126-alter-table-borrow_positions-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3261,7 +3405,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "121-create-table-if-not",
+    "id": "127-create-table-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3290,7 +3434,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "122-create-index-if-not",
+    "id": "128-create-index-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3309,7 +3453,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "123-create-index-if-not",
+    "id": "129-create-index-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3327,7 +3471,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "124-create-table-if-not",
+    "id": "130-create-table-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3353,7 +3497,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "125-alter-table-loop_tick_heartbeats-add",
+    "id": "131-alter-table-loop_tick_heartbeats-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3367,7 +3511,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "126-alter-table-loop_tick_heartbeats-add",
+    "id": "132-alter-table-loop_tick_heartbeats-add",
     "capabilities": [
       "sol_loop"
     ],
@@ -3381,7 +3525,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "127-create-index-if-not",
+    "id": "133-create-index-if-not",
     "capabilities": [
       "sol_loop"
     ],
@@ -3400,7 +3544,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "128-create-table-if-not",
+    "id": "134-create-table-if-not",
     "capabilities": [
       "vault"
     ],
@@ -3429,7 +3573,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "129-create-index-if-not",
+    "id": "135-create-index-if-not",
     "capabilities": [
       "vault"
     ],
@@ -3447,7 +3591,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "130-create-index-if-not",
+    "id": "136-create-index-if-not",
     "capabilities": [
       "vault"
     ],
@@ -3468,7 +3612,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "131-alter-table-borrow_operations-add",
+    "id": "137-alter-table-borrow_operations-add",
     "capabilities": [
       "vault"
     ],
@@ -3482,7 +3626,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "132-alter-table-borrow_operations-add",
+    "id": "138-alter-table-borrow_operations-add",
     "capabilities": [
       "vault"
     ],
@@ -3496,7 +3640,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "133-alter-table-borrow_operations-add",
+    "id": "139-alter-table-borrow_operations-add",
     "capabilities": [
       "vault"
     ],
@@ -3510,7 +3654,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "134-create-unique-index-if",
+    "id": "140-create-unique-index-if",
     "capabilities": [
       "vault"
     ],
@@ -3532,7 +3676,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "135-create-table-if-not",
+    "id": "141-create-table-if-not",
     "capabilities": [
       "vault"
     ],
@@ -3568,7 +3712,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "136-create-index-if-not",
+    "id": "142-create-index-if-not",
     "capabilities": [
       "vault"
     ],
@@ -3586,7 +3730,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "137-create-table-if-not",
+    "id": "143-create-table-if-not",
     "capabilities": [
       "oracle"
     ],
@@ -3611,7 +3755,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "138-create-index-if-not",
+    "id": "144-create-index-if-not",
     "capabilities": [
       "oracle"
     ],
@@ -3630,7 +3774,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "139-create-table-if-not",
+    "id": "145-create-table-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3660,7 +3804,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "140-create-unique-index-if",
+    "id": "146-create-unique-index-if",
     "capabilities": [
       "ai_trader"
     ],
@@ -3678,7 +3822,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "141-create-table-if-not",
+    "id": "147-create-table-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3708,7 +3852,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "142-create-index-if-not",
+    "id": "148-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3728,7 +3872,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "143-create-index-if-not",
+    "id": "149-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3747,7 +3891,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "144-create-table-if-not",
+    "id": "150-create-table-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3791,7 +3935,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "145-create-index-if-not",
+    "id": "151-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3809,7 +3953,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "146-create-index-if-not",
+    "id": "152-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3827,7 +3971,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "147-create-table-if-not",
+    "id": "153-create-table-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3862,7 +4006,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "148-create-index-if-not",
+    "id": "154-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3881,7 +4025,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "149-create-index-if-not",
+    "id": "155-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -3903,7 +4047,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "150-alter-table-wallets-add",
+    "id": "156-alter-table-wallets-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -3917,7 +4061,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "151-alter-table-ai_trader_bots-add",
+    "id": "157-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -3931,7 +4075,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "152-alter-table-ai_trader_bots-add",
+    "id": "158-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -3945,7 +4089,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "153-alter-table-ai_trader_bots-add",
+    "id": "159-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -3959,7 +4103,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "154-alter-table-ai_trader_decisions-add",
+    "id": "160-alter-table-ai_trader_decisions-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -3973,7 +4117,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "155-update-ai_trader_decisions-d-set",
+    "id": "161-update-ai_trader_decisions-d-set",
     "capabilities": [
       "ai_trader"
     ],
@@ -3987,7 +4131,7 @@ const schemaMigrationMetadata = [
     "operation": "backfill"
   },
   {
-    "id": "156-alter-table-ai_trader_bots-add",
+    "id": "162-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4001,7 +4145,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "157-alter-table-ai_trader_bots-add",
+    "id": "163-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4015,7 +4159,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "158-alter-table-ai_trader_bots-add",
+    "id": "164-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4029,7 +4173,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "159-create-table-if-not",
+    "id": "165-create-table-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -4060,7 +4204,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "160-create-index-if-not",
+    "id": "166-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -4078,7 +4222,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "161-alter-table-ai_trader_bots-add",
+    "id": "167-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4092,7 +4236,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "162-alter-table-ai_trader_bots-add",
+    "id": "168-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4106,7 +4250,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "163-alter-table-ai_trader_bots-add",
+    "id": "169-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4120,7 +4264,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "164-alter-table-ai_trader_bots-add",
+    "id": "170-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4134,7 +4278,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "165-create-index-if-not",
+    "id": "171-create-index-if-not",
     "capabilities": [
       "portfolio"
     ],
