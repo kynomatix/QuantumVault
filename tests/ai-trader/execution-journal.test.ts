@@ -74,6 +74,47 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     ])).rejects.toThrow("execution_journal_command_phase_conflict");
   });
 
+  it("transaction-scoped exact batches distinguish pending, replayed, and partial conflict", async () => {
+    const decisionId = `decision-atomic-${RUN}`;
+    const attemptId = journal.entryAttemptId(decisionId);
+    const observedAt = new Date("2026-08-19T00:00:00.000Z");
+    const base = journal.journalBase(bot, decisionId);
+    const events = [
+      { ...base, attemptId, action: "entry", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt },
+      { ...base, attemptId, action: "entry", cause: "paper", eventType: "fill_observed", side: "long", price: 150, sizeBase: 1, observedAt },
+      { ...base, attemptId, action: "entry", cause: "paper", eventType: "entry_terminal_open", side: "long", price: 150, sizeBase: 1, observedAt },
+    ] as const;
+    await dbModule.db.transaction(async (tx) => {
+      const prepared = await journal.prepareExecutionJournalEventsInTransaction(
+        tx, events, { requireExactBatchReplay: true },
+      );
+      expect(prepared.status).toBe("pending");
+      await prepared.insert();
+    });
+    await dbModule.db.transaction(async (tx) => {
+      const prepared = await journal.prepareExecutionJournalEventsInTransaction(
+        tx, events, { requireExactBatchReplay: true },
+      );
+      expect(prepared.status).toBe("replayed");
+      await prepared.insert();
+    });
+
+    const partialDecisionId = `decision-atomic-partial-${RUN}`;
+    const partialAttemptId = journal.entryAttemptId(partialDecisionId);
+    const partialBase = journal.journalBase(bot, partialDecisionId);
+    const partialEvents = [
+      { ...partialBase, attemptId: partialAttemptId, action: "entry", cause: "paper", eventType: "attempt_claimed", side: "short", observedAt },
+      { ...partialBase, attemptId: partialAttemptId, action: "entry", cause: "paper", eventType: "fill_observed", side: "short", price: 149, sizeBase: 2, observedAt },
+      { ...partialBase, attemptId: partialAttemptId, action: "entry", cause: "paper", eventType: "entry_terminal_open", side: "short", price: 149, sizeBase: 2, observedAt },
+    ] as const;
+    await journal.appendExecutionEvents([partialEvents[0]]);
+    await expect(dbModule.db.transaction(async (tx) => {
+      await journal.prepareExecutionJournalEventsInTransaction(
+        tx, partialEvents, { requireExactBatchReplay: true },
+      );
+    })).rejects.toThrow("execution_journal_atomic_replay_conflict");
+  });
+
   it("rejects decreasing or conflicting command phases but accepts late evidence after terminal", async () => {
     const attemptId = `close-phases-${RUN}`;
     const base = journal.journalBase(bot, null);

@@ -12,6 +12,8 @@ const WALLET = "ai-trader-test-" + Math.random().toString(36).slice(2);
 describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
   let storage: typeof import("../../server/storage")["storage"];
   let db: typeof import("../../server/db")["db"];
+  let pool: typeof import("../../server/db")["pool"];
+  let journal: typeof import("../../server/ai-trader/execution-journal");
   let aiTraderBots: typeof import("@shared/schema")["aiTraderBots"];
   let aiTraderDecisions: typeof import("@shared/schema")["aiTraderDecisions"];
 
@@ -21,7 +23,8 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
 
   beforeAll(async () => {
     ({ storage } = await import("../../server/storage"));
-    ({ db } = await import("../../server/db"));
+    ({ db, pool } = await import("../../server/db"));
+    journal = await import("../../server/ai-trader/execution-journal");
     ({ aiTraderBots, aiTraderDecisions } = await import("@shared/schema"));
   });
 
@@ -144,6 +147,147 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     expect((await storage.getUnresolvedAiTraderDecisions(authorityBotId, 2)).map((row) => row.id))
       .toContain(raceDecision.id);
   });
+
+  it("atomically commits and exactly replays a paper decision, bot, and journal tuple", async () => {
+    const atomicBot = await storage.createAiTraderBot({
+      walletAddress: `${WALLET}-atomic-success`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+      allocatedUsdc: "100.00",
+      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+      policyHmac: "atomic-success-hmac",
+    } as any);
+    try {
+      await storage.updateAiTraderBot(atomicBot.id, { status: "executing" as any });
+      const decision = await storage.insertAiTraderDecision({
+        botId: atomicBot.id,
+        rawDecision: { action: "long" },
+        decidedAt: new Date("2026-08-19T00:00:00.000Z"),
+      } as any);
+      const observedAt = new Date(decision.decidedAt!);
+      const attemptId = journal.entryAttemptId(decision.id);
+      const base = journal.journalBase(atomicBot, decision.id);
+      const journalEvents = [
+        { ...base, attemptId, action: "entry", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt },
+        { ...base, attemptId, action: "entry", cause: "paper", eventType: "fill_observed", side: "long", price: 150.25, sizeBase: 2, observedAt },
+        { ...base, attemptId, action: "entry", cause: "paper", eventType: "entry_terminal_open", side: "long", price: 150.25, sizeBase: 2, observedAt },
+      ] as const;
+      const params = {
+        botId: atomicBot.id, decisionId: decision.id, entryPrice: 150.25, sizeBase: 2,
+        side: "long" as const, observedAt, journalEvents,
+      };
+
+      const applied = await storage.commitAiTraderPaperEntryTransition(params);
+      expect(applied).toMatchObject({ status: "applied", decision: { outcome: "executed", entryPrice: "150.25000000" }, bot: { status: "open", pauseReason: null } });
+      const replayed = await storage.commitAiTraderPaperEntryTransition(params);
+      expect(replayed).toMatchObject({ status: "replayed", decision: { outcome: "executed" }, bot: { status: "open" } });
+      const rows = await pool.query(
+        "SELECT event_type, count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1 GROUP BY event_type ORDER BY event_type",
+        [attemptId],
+      );
+      expect(rows.rows).toEqual([
+        { event_type: "attempt_claimed", count: 1 },
+        { event_type: "entry_terminal_open", count: 1 },
+        { event_type: "fill_observed", count: 1 },
+      ]);
+    } finally {
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, atomicBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, atomicBot.id));
+    }
+  });
+
+  it("returns exact typed conflicts for lost decision, lost bot, and partial journal state", async () => {
+    for (const kind of ["decision", "bot", "journal"] as const) {
+      const atomicBot = await storage.createAiTraderBot({
+        walletAddress: `${WALLET}-atomic-${kind}`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+        allocatedUsdc: "100.00",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: `atomic-${kind}-hmac`,
+      } as any);
+      try {
+        await storage.updateAiTraderBot(atomicBot.id, { status: "executing" as any });
+        const decision = await storage.insertAiTraderDecision({
+          botId: atomicBot.id, rawDecision: { action: "short" }, decidedAt: new Date(),
+        } as any);
+        const observedAt = new Date(decision.decidedAt!);
+        const attemptId = journal.entryAttemptId(decision.id);
+        const base = journal.journalBase(atomicBot, decision.id);
+        const journalEvents = [
+          { ...base, attemptId, action: "entry", cause: "paper", eventType: "attempt_claimed", side: "short", observedAt },
+          { ...base, attemptId, action: "entry", cause: "paper", eventType: "fill_observed", side: "short", price: 149.75, sizeBase: 1, observedAt },
+          { ...base, attemptId, action: "entry", cause: "paper", eventType: "entry_terminal_open", side: "short", price: 149.75, sizeBase: 1, observedAt },
+        ] as const;
+        if (kind === "decision") await storage.updateAiTraderDecision(decision.id, { outcome: "flat" } as any);
+        if (kind === "bot") await storage.updateAiTraderBot(atomicBot.id, { status: "idle" as any });
+        if (kind === "journal") await journal.appendExecutionEvents([journalEvents[0]]);
+
+        const result = await storage.commitAiTraderPaperEntryTransition({
+          botId: atomicBot.id, decisionId: decision.id, entryPrice: 149.75, sizeBase: 1,
+          side: "short", observedAt, journalEvents,
+        });
+        expect(result).toEqual({
+          status: "conflict",
+          reason: kind === "decision" ? "decision_state_conflict"
+            : kind === "bot" ? "bot_state_conflict" : "journal_state_conflict",
+        });
+      } finally {
+        await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, atomicBot.id));
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, atomicBot.id));
+      }
+    }
+  });
+
+  it("real PostgreSQL faults after each prospective mutation roll back the whole paper tuple", async () => {
+    const safeIdentifier = `qv_atomic_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9_]/g, "");
+    const cases = [
+      { stage: "decision", table: "ai_trader_decisions", operation: "UPDATE", key: "id" },
+      { stage: "bot", table: "ai_trader_bots", operation: "UPDATE", key: "id" },
+      { stage: "journal", table: "ai_trader_execution_events", operation: "INSERT", key: "attempt_id" },
+    ] as const;
+    for (const testCase of cases) {
+      const atomicBot = await storage.createAiTraderBot({
+        walletAddress: `${WALLET}-fault-${testCase.stage}`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+        allocatedUsdc: "100.00",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: `fault-${testCase.stage}-hmac`,
+      } as any);
+      const decision = await storage.insertAiTraderDecision({
+        botId: atomicBot.id, rawDecision: { action: "long" }, decidedAt: new Date(),
+      } as any);
+      await storage.updateAiTraderBot(atomicBot.id, { status: "executing" as any });
+      const observedAt = new Date(decision.decidedAt!);
+      const attemptId = journal.entryAttemptId(decision.id);
+      const base = journal.journalBase(atomicBot, decision.id);
+      const journalEvents = [
+        { ...base, attemptId, action: "entry", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt },
+        { ...base, attemptId, action: "entry", cause: "paper", eventType: "fill_observed", side: "long", price: 151, sizeBase: 1.5, observedAt },
+        { ...base, attemptId, action: "entry", cause: "paper", eventType: "entry_terminal_open", side: "long", price: 151, sizeBase: 1.5, observedAt },
+      ] as const;
+      const functionName = `${safeIdentifier}_${testCase.stage}_fn`;
+      const triggerName = `${safeIdentifier}_${testCase.stage}_trg`;
+      const keyValue = (testCase.stage === "bot" ? atomicBot.id : testCase.stage === "decision" ? decision.id : attemptId)
+        .replace(/'/g, "''");
+      try {
+        await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'atomic_fault_${testCase.stage}'; END; $$`);
+        await pool.query(`CREATE TRIGGER ${triggerName} AFTER ${testCase.operation} ON ${testCase.table} FOR EACH ROW WHEN (NEW.${testCase.key} = '${keyValue}') EXECUTE FUNCTION ${functionName}()`);
+        await expect(storage.commitAiTraderPaperEntryTransition({
+          botId: atomicBot.id, decisionId: decision.id, entryPrice: 151, sizeBase: 1.5,
+          side: "long", observedAt, journalEvents,
+        })).rejects.toThrow(`atomic_fault_${testCase.stage}`);
+      } finally {
+        await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ${testCase.table}`);
+        await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      }
+
+      expect(await storage.getAiTraderDecision(decision.id)).toMatchObject({ outcome: null, entryPrice: null });
+      expect(await storage.getAiTraderBot(atomicBot.id)).toMatchObject({ status: "executing", pauseReason: null });
+      const rows = await pool.query(
+        "SELECT count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1",
+        [attemptId],
+      );
+      expect(rows.rows[0]?.count).toBe(0);
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, atomicBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, atomicBot.id));
+    }
+  }, 30_000);
 
   it("getAiTraderBotsByWallet returns the bot for its wallet", async () => {
     const bots = await storage.getAiTraderBotsByWallet(WALLET);

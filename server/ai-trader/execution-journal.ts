@@ -207,36 +207,91 @@ export function journalBase(
   };
 }
 
-export async function appendExecutionEvents(inputs: readonly JournalEventInput[]): Promise<void> {
-  if (inputs.length === 0) return;
-  const { db } = await import("../db");
+type ExecutionJournalDb = (typeof import("../db"))["db"];
+export type ExecutionJournalTransaction = Parameters<Parameters<ExecutionJournalDb["transaction"]>[0]>[0];
+
+export type PreparedExecutionJournalAppend = {
+  status: "pending" | "replayed";
+  insert(): Promise<void>;
+};
+
+export function isExecutionJournalConflict(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message.startsWith("execution_journal_invalid_")
+    || error.message === "execution_journal_mixed_attempt_batch"
+    || error.message === "execution_journal_command_phase_conflict"
+    || error.message === "execution_journal_atomic_replay_conflict";
+}
+
+/**
+ * Validate and lock one journal batch inside a caller-owned transaction.
+ * The returned insert step deliberately runs after the caller's row predicates,
+ * while the advisory lock remains held for the whole transaction.
+ */
+export async function prepareExecutionJournalEventsInTransaction(
+  tx: ExecutionJournalTransaction,
+  inputs: readonly JournalEventInput[],
+  options: { requireExactBatchReplay?: boolean } = {},
+): Promise<PreparedExecutionJournalAppend> {
+  if (inputs.length === 0) {
+    return { status: "replayed", insert: async () => undefined };
+  }
   const attemptId = inputs[0].attemptId;
   if (inputs.some((input) => input.attemptId !== attemptId)) throw new Error("execution_journal_mixed_attempt_batch");
   const values = inputs.map((input) => rowValues(canonicalize(input), input.observedAt ?? new Date()));
+  if (options.requireExactBatchReplay
+      && new Set(values.map((value) => value.eventIdentity)).size !== values.length) {
+    throw new Error("execution_journal_atomic_replay_conflict");
+  }
 
-  await db.transaction(async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE}, hashtext(${attemptId}))`);
-    const existing = await tx.select({
-      eventIdentity: aiTraderExecutionEvents.eventIdentity,
-      phase: aiTraderExecutionEvents.phase,
-    }).from(aiTraderExecutionEvents).where(eq(aiTraderExecutionEvents.attemptId, attemptId));
-    const identities = new Set(existing.map((row) => row.eventIdentity));
-    let maxPhase = existing.reduce<number>((max, row) => row.phase === null ? max : Math.max(max, row.phase), -1);
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE}, hashtext(${attemptId}))`);
+  const existing = await tx.select({
+    eventIdentity: aiTraderExecutionEvents.eventIdentity,
+    phase: aiTraderExecutionEvents.phase,
+  }).from(aiTraderExecutionEvents).where(eq(aiTraderExecutionEvents.attemptId, attemptId));
+  const identities = new Set(existing.map((row) => row.eventIdentity));
 
-    for (const value of values) {
-      if (identities.has(value.eventIdentity)) continue;
-      if (value.phase !== null) {
-        const sparseNonBroadcastTerminal = value.phase === 90 && maxPhase === 0
-          && (value.cause === "paper" || value.cause === "venue_detected");
-        const expected = maxPhase < 0 ? 0 : maxPhase === 0 ? 10 : maxPhase === 10 ? 20 : maxPhase === 20 ? 90 : null;
-        if (!sparseNonBroadcastTerminal && (expected === null || value.phase !== expected)) {
-          throw new Error("execution_journal_command_phase_conflict");
-        }
+  if (options.requireExactBatchReplay && existing.length > 0) {
+    const exactReplay = existing.length === values.length
+      && values.every((value) => identities.has(value.eventIdentity));
+    if (!exactReplay) throw new Error("execution_journal_atomic_replay_conflict");
+    return { status: "replayed", insert: async () => undefined };
+  }
+
+  let maxPhase = existing.reduce<number>((max, row) => row.phase === null ? max : Math.max(max, row.phase), -1);
+  const pending: typeof values = [];
+
+  for (const value of values) {
+    if (identities.has(value.eventIdentity)) continue;
+    if (value.phase !== null) {
+      const sparseNonBroadcastTerminal = value.phase === 90 && maxPhase === 0
+        && (value.cause === "paper" || value.cause === "venue_detected");
+      const expected = maxPhase < 0 ? 0 : maxPhase === 0 ? 10 : maxPhase === 10 ? 20 : maxPhase === 20 ? 90 : null;
+      if (!sparseNonBroadcastTerminal && (expected === null || value.phase !== expected)) {
+        throw new Error("execution_journal_command_phase_conflict");
       }
-      await tx.insert(aiTraderExecutionEvents).values(value).onConflictDoNothing({ target: aiTraderExecutionEvents.eventIdentity });
-      identities.add(value.eventIdentity);
-      if (value.phase !== null) maxPhase = value.phase;
     }
+    pending.push(value);
+    identities.add(value.eventIdentity);
+    if (value.phase !== null) maxPhase = value.phase;
+  }
+
+  return {
+    status: pending.length === 0 ? "replayed" : "pending",
+    insert: async () => {
+      for (const value of pending) {
+        await tx.insert(aiTraderExecutionEvents).values(value).onConflictDoNothing({ target: aiTraderExecutionEvents.eventIdentity });
+      }
+    },
+  };
+}
+
+export async function appendExecutionEvents(inputs: readonly JournalEventInput[]): Promise<void> {
+  if (inputs.length === 0) return;
+  const { db } = await import("../db");
+  await db.transaction(async (tx) => {
+    const prepared = await prepareExecutionJournalEventsInTransaction(tx, inputs);
+    await prepared.insert();
   });
 }
 

@@ -30,6 +30,7 @@ const getAiTraderBotMock = vi.fn();
 const getAiTraderDecisionMock = vi.fn();
 const claimExecutionMock = vi.fn();
 const transitionStateMock = vi.fn();
+const commitPaperEntryMock = vi.fn();
 const isMarketAdmittedMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
@@ -41,6 +42,7 @@ vi.mock("../../server/storage", () => ({
     getAiTraderDecision: (...a: unknown[]) => getAiTraderDecisionMock(...a),
     claimAiTraderExecution: (...a: unknown[]) => claimExecutionMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
+    commitAiTraderPaperEntryTransition: (...a: unknown[]) => commitPaperEntryMock(...a),
   },
 }));
 
@@ -150,6 +152,7 @@ function makePersistedDecision(overrides: Partial<AiTraderDecision> = {}): AiTra
         builder: { status: "included", code: "QuantumVault", rate: 0.0002, provenance: "pacifica:builder_actual" },
       },
     },
+    decidedAt: new Date(NOW),
     ...overrides,
   } as unknown as AiTraderDecision;
 }
@@ -225,7 +228,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   callOrder = [];
   scannerCapabilitiesMock.liveExecutionEnabled = true;
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, commitPaperEntryMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
     m.mockReset();
   }
   appendRequiredJournalMock.mockImplementation(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
@@ -249,6 +252,11 @@ beforeEach(() => {
   claimExecutionMock.mockImplementation(async () => {
     callOrder.push("status:executing");
     return { bot: makeBot({ status: "executing" }), decision: { id: "d-1" } };
+  });
+  commitPaperEntryMock.mockResolvedValue({
+    status: "applied",
+    bot: makeBot({ status: "open" }),
+    decision: makePersistedDecision({ outcome: "executed" }),
   });
   transitionStateMock.mockImplementation(async (params: any) => {
     callOrder.push(`status:${params.nextStatus}`);
@@ -572,7 +580,7 @@ describe("G6 — cooldown and daily caps (checkCooldownAndCaps + executeDecision
 // --- Paper path -------------------------------------------------------------------
 
 describe("paper execution", () => {
-  it("long paper entry fills at mark + adverse slippage; decision + bot updated; NO adapter or key access", async () => {
+  it("long paper entry atomically commits decision, bot, and exact journal tuple with NO adapter or key access", async () => {
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
@@ -585,16 +593,25 @@ describe("paper execution", () => {
     });
     const expectedEntry = 150 * (1 + PAPER_SLIPPAGE_PER_LEG);
     expect(r).toEqual({ ok: true, mode: "paper", entryPrice: expectedEntry });
-    expect(updateDecisionMock).toHaveBeenCalledWith("d-paper", {
-      outcome: "executed",
-      entryPrice: expectedEntry.toFixed(8),
-    });
-    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(commitPaperEntryMock).toHaveBeenCalledWith(expect.objectContaining({
       botId: "bot-1111-2222",
-      expectedStatus: "executing",
-      nextStatus: "open",
-      nextPauseReason: null,
+      decisionId: "d-paper",
+      entryPrice: expectedEntry,
+      sizeBase: 6.66,
+      side: "long",
+      observedAt: new Date(NOW),
     }));
+    const committed = commitPaperEntryMock.mock.calls[0][0];
+    expect(committed.journalEvents.map((event: any) => event.eventType)).toEqual([
+      "attempt_claimed", "fill_observed", "entry_terminal_open",
+    ]);
+    expect(committed.journalEvents.every((event: any) =>
+      event.attemptId === "entry:d-paper"
+      && event.cause === "paper"
+      && event.observedAt.getTime() === NOW)).toBe(true);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(transitionStateMock).not.toHaveBeenCalled();
+    expect(safeJournalMock).not.toHaveBeenCalled();
     // Paper reads the wallet identity only to bind the retained quote; it must
     // never touch the venue or unwrap key material.
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
@@ -615,6 +632,27 @@ describe("paper execution", () => {
       markPrice: 150,
     });
     expect(r).toEqual({ ok: true, mode: "paper", entryPrice: 150 * (1 - PAPER_SLIPPAGE_PER_LEG) });
+  });
+
+  it("maps atomic paper-entry conflicts to the existing fail-closed executor results", async () => {
+    const { executeDecision } = await importExecutor();
+    for (const [reason, expected] of [
+      ["decision_state_conflict", "bot_busy"],
+      ["bot_state_conflict", "bot_busy"],
+      ["journal_state_conflict", "journal_unavailable"],
+    ] as const) {
+      commitPaperEntryMock.mockResolvedValueOnce({ status: "conflict", reason });
+      const result = await executeDecision({
+        authoritySource: "internal_cycle",
+        bot: makeBot({ paperMode: true }),
+        decisionId: `d-paper-${reason}`,
+        clamped: makeClamped({ action: "long" }),
+        adapter: makeAdapter(),
+        markPrice: 150,
+      });
+      expect(result).toMatchObject({ ok: false, reason: expected });
+      expect(notifyMock).not.toHaveBeenCalled();
+    }
   });
 
   it("refuses a paper entry without a usable mark price", async () => {

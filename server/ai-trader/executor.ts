@@ -412,28 +412,36 @@ async function executePaperEntry(input: ExecuteDecisionInput, side: PaperSide): 
     return { ok: false, reason: "bot_busy", detail: "exact decision/status execution claim was lost" };
   }
   const entryPrice = paperEntryPrice(markPrice, side);
-  await storage.updateAiTraderDecision(decisionId, {
-    outcome: "executed",
-    entryPrice: entryPrice.toFixed(8),
-  });
-  await storage.transitionAiTraderState({
-    botId: bot.id,
-    expectedStatus: "executing",
-    expectedPauseReason: null,
-    nextStatus: "open",
-    nextPauseReason: null,
-    decisionId,
-    expectedDecisionOutcome: "executed",
-  });
+  const persistedDecision = await storage.getAiTraderDecision(decisionId);
+  if (!persistedDecision?.decidedAt || persistedDecision.botId !== bot.id) {
+    return { ok: false, reason: "bot_busy", detail: "claimed paper decision identity was lost before terminal commit" };
+  }
+  const observedAt = new Date(persistedDecision.decidedAt);
   const attemptId = entryAttemptId(decisionId);
   const journal = journalBase(bot, decisionId);
-  safeAppendExecutionEvents([
-    { ...journal, attemptId, action: "entry", cause: "paper", eventType: "attempt_claimed", side },
+  const journalEvents = [
+    { ...journal, attemptId, action: "entry" as const, cause: "paper" as const,
+      eventType: "attempt_claimed" as const, side, observedAt },
     { ...journal, attemptId, action: "entry", cause: "paper", eventType: "fill_observed", side,
-      price: entryPrice, sizeBase: Number(input.clamped.sizeBase) },
+      price: entryPrice, sizeBase: Number(input.clamped.sizeBase), observedAt },
     { ...journal, attemptId, action: "entry", cause: "paper", eventType: "entry_terminal_open", side,
-      price: entryPrice, sizeBase: Number(input.clamped.sizeBase) },
-  ]);
+      price: entryPrice, sizeBase: Number(input.clamped.sizeBase), observedAt },
+  ] as const;
+  const transition = await storage.commitAiTraderPaperEntryTransition({
+    botId: bot.id,
+    decisionId,
+    entryPrice,
+    sizeBase: Number(input.clamped.sizeBase),
+    side,
+    observedAt,
+    journalEvents,
+  });
+  if (transition.status === "conflict") {
+    if (transition.reason === "journal_state_conflict") {
+      return { ok: false, reason: "journal_unavailable", detail: "paper entry journal tuple conflicted; no terminal state committed" };
+    }
+    return { ok: false, reason: "bot_busy", detail: `paper entry terminal predicate lost (${transition.reason})` };
+  }
   await sendTradeNotification(bot.walletAddress, {
     type: "trade_executed",
     botName: `AI Trader ${bot.market} (Paper)`,
