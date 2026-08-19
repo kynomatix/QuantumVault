@@ -1355,12 +1355,20 @@ export function registerAiTraderRoutes(app: Express): void {
         storage.getOpenAiTraderDecisions(bot.id, 2),
         storage.getUnresolvedAiTraderDecisions(bot.id, 2),
       ]);
+      const restartDecision = unresolved.length === 1 ? unresolved[0] : null;
       const authority = evaluateAiTraderStateAuthority({
         action: "restart_trial",
         source: "external_http",
         bot,
-        requestedDecisionId: null,
-        decision: null,
+        requestedDecisionId: restartDecision?.id ?? null,
+        decision: restartDecision ? {
+          id: restartDecision.id,
+          botId: restartDecision.botId ?? "",
+          outcome: restartDecision.outcome ?? null,
+          decidedAtMs: restartDecision.decidedAt
+            ? new Date(restartDecision.decidedAt).getTime()
+            : Number.NaN,
+        } : null,
         unresolvedDecisionCount: unresolved.length,
         positionTruth: openPositions.length === 0 ? "flat" : "maybe_open",
         internalAnalysisClaimHeld: false,
@@ -1380,10 +1388,21 @@ export function registerAiTraderRoutes(app: Express): void {
           consecutiveLosses: 0,
           trialStartedAt: new Date(),
         },
+        ...(authority.decisionTerminalization ? {
+          decisionId: authority.decisionTerminalization.decisionId,
+          expectedDecisionOutcome: null,
+          decisionOutcome: authority.decisionTerminalization.outcome,
+        } : {}),
       });
       // A restarted-trial Auto bot goes back to idle — re-arm the cadence.
-      if (updated) armAutoNextIfEligible(updated);
-      res.json({ bot: updated ? toBotDto(updated) : null });
+      if (!updated) {
+        return res.status(409).json({
+          error: "state_denied",
+          detail: "Restart state changed before the atomic trial-reset commit.",
+        });
+      }
+      armAutoNextIfEligible(updated);
+      res.json({ bot: toBotDto(updated) });
     } catch (err) {
       console.error("[AiTrader] restart-trial error:", err);
       res.status(500).json({ error: "Internal server error" });

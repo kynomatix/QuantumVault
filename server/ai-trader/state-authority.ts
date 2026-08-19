@@ -26,7 +26,14 @@ export type AiTraderRequiredClaim =
   | "none";
 
 export type AiTraderAuthorityVerdict =
-  | { allowed: true; requiredClaim: AiTraderRequiredClaim }
+  | {
+      allowed: true;
+      requiredClaim: AiTraderRequiredClaim;
+      decisionTerminalization?: {
+        decisionId: string;
+        outcome: "aborted_trial_restart";
+      };
+    }
   | {
       allowed: false;
       reason:
@@ -43,7 +50,13 @@ export const AI_TRADER_PROPOSAL_EXPIRY_MS = 10 * 60 * 1000;
 export interface AiTraderAuthorityInput {
   action: AiTraderAuthorityAction;
   source: AiTraderAuthoritySource;
-  bot: Readonly<{ id: string; status: string; pauseReason: string | null }>;
+  bot: Readonly<{
+    id: string;
+    status: string;
+    pauseReason: string | null;
+    graduationState: string;
+    paperMode: boolean;
+  }>;
   requestedDecisionId: string | null;
   decision: Readonly<{
     id: string;
@@ -160,15 +173,36 @@ export function evaluateAiTraderStateAuthority(input: Readonly<AiTraderAuthority
   }
 
   if (action === "restart_trial") {
-    if (source !== "external_http" || input.unresolvedDecisionCount !== 0 || positionTruth !== "flat") {
+    if (source !== "external_http" || positionTruth !== "flat") {
       return denied("state_denied");
     }
-    if (bot.status === "idle"
+    if (!bot.paperMode || bot.graduationState !== "failed") return denied("state_denied");
+    const lifecycleEligible = bot.status === "idle"
       || bot.status === "stopped"
-      || (bot.status === "paused" && bot.pauseReason === "user_requested")) {
+      || (bot.status === "paused" && bot.pauseReason === "user_requested");
+    if (!lifecycleEligible) return denied("state_denied");
+    if (input.unresolvedDecisionCount === 0) {
       return { allowed: true, requiredClaim: "conditional_lifecycle_transition" };
     }
-    return denied("state_denied");
+    if (input.unresolvedDecisionCount !== 1 || !decisionMatches(input)) {
+      return denied("decision_mismatch");
+    }
+    const decidedAtMs = input.decision!.decidedAtMs;
+    if (!Number.isFinite(input.nowMs)
+      || !Number.isFinite(decidedAtMs)
+      || !Number.isFinite(input.proposalExpiryMs)
+      || input.proposalExpiryMs < 0) {
+      return denied("decision_mismatch");
+    }
+    if (input.nowMs - decidedAtMs <= input.proposalExpiryMs) return denied("state_denied");
+    return {
+      allowed: true,
+      requiredClaim: "conditional_lifecycle_transition",
+      decisionTerminalization: {
+        decisionId: input.decision!.id,
+        outcome: "aborted_trial_restart",
+      },
+    };
   }
 
   if (action === "reconcile") {
