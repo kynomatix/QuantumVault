@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   placeMarketOrderWithFeeAuthority,
   type ProtocolAdapter,
+  type AvailableOrderFeeRateQuote,
 } from '../../server/protocol/adapter';
 import type { MarketOrderParams, OrderResult } from '../../server/protocol/protocol-types';
 
@@ -119,17 +120,131 @@ describe('Signal Bot fee-rate admission authority', () => {
     });
   });
 
+  it('prefers one exact order quote for Flash and suppresses builder attachment', async () => {
+    const params = marketOrder({ leverage: 2, maxSlippagePct: 0.5 });
+    const expectedOrder = {
+      internalSymbol: params.internalSymbol,
+      side: params.side,
+      sizeBase: params.sizeBase,
+      leverage: 2,
+      maxSlippagePct: 0.5,
+    };
+    const getFeeRateQuote = vi.fn();
+    const getOrderFeeRateQuote = vi.fn(async (): Promise<AvailableOrderFeeRateQuote> => ({
+      availability: 'available',
+      protocol: 'flash',
+      account: params.agentPublicKey,
+      subaccountId: params.subaccountId ?? null,
+      liquidityRole: 'taker',
+      builderCode: undefined,
+      order: expectedOrder,
+      baseRate: 0.001,
+      effectiveRate: 0.001,
+      provenance: 'flash:legacy-contract-helper:fresh-solana+pyth:pool:market',
+      observedAt: now,
+      builder: { status: 'absent' },
+      audit: {
+        feeUnit: 'micro-usd',
+        entryFeeUsd: '10',
+        volatilityFeeUsd: '0',
+        swapFeeUsd: '0',
+        totalFeeUsd: '10',
+        sizeUsd: '10000',
+        swappedCollateralBaseUnits: '1000',
+        pool: 'pool',
+        market: 'market',
+        targetCustody: 'target',
+        collateralCustody: 'collateral',
+        pricePublishTime: 1,
+        emaPublishTime: 1,
+      },
+    }));
+    const adapter = adapterWith({
+      protocolName: 'flash',
+      getFeeRateQuote,
+      getOrderFeeRateQuote,
+    });
+
+    await expect(placeMarketOrderWithFeeAuthority(adapter, params, { now })).resolves.toMatchObject({
+      success: true,
+      admissionFeeQuote: { protocol: 'flash', order: expectedOrder, effectiveRate: 0.001 },
+    });
+    expect(getOrderFeeRateQuote).toHaveBeenCalledOnce();
+    expect(getOrderFeeRateQuote).toHaveBeenCalledWith({
+      account: params.agentPublicKey,
+      subaccountId: params.subaccountId,
+      liquidityRole: 'taker',
+      builderCode: undefined,
+      order: expectedOrder,
+    });
+    expect(getFeeRateQuote).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).toHaveBeenCalledWith({
+      ...params,
+      builderAttachment: { mode: 'suppress' },
+    });
+  });
+
+  it('refuses before placement when an order-specific quote is unavailable', async () => {
+    const getOrderFeeRateQuote = vi.fn(async () => ({
+      availability: 'unavailable' as const,
+      reason: 'stale_quote' as const,
+    }));
+    const adapter = adapterWith({ protocolName: 'flash', getOrderFeeRateQuote });
+
+    await expect(placeMarketOrderWithFeeAuthority(adapter, marketOrder())).resolves.toEqual({
+      success: false,
+      status: 'rejected',
+      error: 'FEE_RATE_UNAVAILABLE:stale_quote',
+    });
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it('refuses a zero-notional order even if an adapter attempts to quote it', async () => {
+    const params = marketOrder({ sizeBase: 0 });
+    const getOrderFeeRateQuote = vi.fn(async (input: any) => ({
+      availability: 'available' as const,
+      protocol: 'flash',
+      account: input.account,
+      subaccountId: input.subaccountId,
+      liquidityRole: 'taker' as const,
+      order: input.order,
+      baseRate: 0.001,
+      effectiveRate: 0.001,
+      provenance: 'flash:legacy-contract-helper:fresh-solana+pyth:pool:market',
+      observedAt: now,
+      builder: { status: 'absent' as const },
+      audit: {
+        feeUnit: 'micro-usd' as const, entryFeeUsd: '1', volatilityFeeUsd: '0', swapFeeUsd: '0',
+        totalFeeUsd: '1', sizeUsd: '1000', swappedCollateralBaseUnits: '1',
+        pool: 'pool', market: 'market', targetCustody: 'target', collateralCustody: 'target',
+        pricePublishTime: 1, emaPublishTime: 1,
+      },
+    }));
+    const adapter = adapterWith({ protocolName: 'flash', getOrderFeeRateQuote });
+
+    await expect(placeMarketOrderWithFeeAuthority(adapter, params, { now })).resolves.toEqual({
+      success: false,
+      status: 'rejected',
+      error: 'FEE_RATE_UNAVAILABLE:malformed_quote',
+    });
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+
   it('bypasses the new admission read for a reduce-only close', async () => {
     const getFeeRateQuote = vi.fn(async () => {
       throw new Error('a close must never ask for admission fee authority');
     });
-    const adapter = adapterWith({ getFeeRateQuote });
+    const getOrderFeeRateQuote = vi.fn(async () => {
+      throw new Error('a close must never ask for order-specific fee authority');
+    });
+    const adapter = adapterWith({ getFeeRateQuote, getOrderFeeRateQuote });
     const params = marketOrder({ reduceOnly: true, side: 'short' });
 
     await expect(placeMarketOrderWithFeeAuthority(adapter, params)).resolves.toMatchObject({
       success: true,
     });
     expect(getFeeRateQuote).not.toHaveBeenCalled();
+    expect(getOrderFeeRateQuote).not.toHaveBeenCalled();
     expect(adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
     expect(adapter.placeMarketOrder).toHaveBeenCalledWith(params);
   });

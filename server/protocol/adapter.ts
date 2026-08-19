@@ -141,9 +141,53 @@ export interface UnavailableFeeRateQuote {
 
 export type FeeRateQuoteResult = AvailableFeeRateQuote | UnavailableFeeRateQuote;
 
+export interface OrderFeeRateQuoteRequest extends FeeRateQuoteRequest {
+  order: {
+    internalSymbol: string;
+    side: 'long' | 'short';
+    sizeBase: number;
+    leverage: number;
+    maxSlippagePct: number;
+  };
+}
+
+export interface OrderFeeRateQuoteExpectedIdentity extends OrderFeeRateQuoteRequest {
+  protocol: string;
+}
+
+/** Exact integer micro-USD components retained for admission auditability. */
+export interface FlashOrderFeeAudit {
+  feeUnit: 'micro-usd';
+  entryFeeUsd: string;
+  volatilityFeeUsd: string;
+  swapFeeUsd: string;
+  totalFeeUsd: string;
+  sizeUsd: string;
+  swappedCollateralBaseUnits: string | null;
+  pool: string;
+  market: string;
+  targetCustody: string;
+  collateralCustody: string;
+  /** Target-custody Pyth publish times in Unix seconds. */
+  pricePublishTime: number;
+  emaPublishTime: number;
+}
+
+export interface AvailableOrderFeeRateQuote extends OrderFeeRateQuoteExpectedIdentity {
+  availability: 'available';
+  baseRate: number;
+  effectiveRate: number;
+  provenance: string;
+  observedAt: number;
+  builder: { status: 'absent' };
+  audit: FlashOrderFeeAudit;
+}
+
+export type OrderFeeRateQuoteResult = AvailableOrderFeeRateQuote | UnavailableFeeRateQuote;
+
 /** Map only a validated retained quote into the order attachment decision. */
 export function builderAttachmentFromFeeQuote(
-  quote: AvailableFeeRateQuote,
+  quote: AvailableFeeRateQuote | AvailableOrderFeeRateQuote,
 ): BuilderAttachmentPolicy {
   return quote.builder.status === 'included'
     ? { mode: 'attach', code: quote.builder.code }
@@ -152,7 +196,7 @@ export function builderAttachmentFromFeeQuote(
 
 /** The exact admission quote accompanies the open result for estimate reuse. */
 export type FeeAuthorizedMarketOrderResult = OrderResult & {
-  admissionFeeQuote?: AvailableFeeRateQuote;
+  admissionFeeQuote?: AvailableFeeRateQuote | AvailableOrderFeeRateQuote;
 };
 
 export interface FeeRateQuoteValidationOptions {
@@ -299,6 +343,180 @@ export function validateFeeRateQuote(
   };
 }
 
+function isCanonicalNonnegativeIntegerString(value: unknown): value is string {
+  return typeof value === 'string' && /^(?:0|[1-9][0-9]*)$/.test(value);
+}
+
+/** Fail-closed validator for a venue/order-specific admission quote. */
+export function validateOrderFeeRateQuote(
+  value: unknown,
+  expected: OrderFeeRateQuoteExpectedIdentity,
+  options: FeeRateQuoteValidationOptions = {},
+): OrderFeeRateQuoteResult {
+  if (!value || typeof value !== 'object') return unavailableFeeRate('malformed_quote');
+  const candidate = value as Record<string, unknown>;
+  if (candidate.availability === 'unavailable') {
+    return typeof candidate.reason === 'string' && FEE_RATE_UNAVAILABLE_REASONS.has(candidate.reason)
+      ? unavailableFeeRate(candidate.reason as FeeRateQuoteUnavailableReason)
+      : unavailableFeeRate('malformed_quote');
+  }
+  if (candidate.availability !== 'available') return unavailableFeeRate('malformed_quote');
+
+  const expectedSubaccount = expected.subaccountId ?? null;
+  const candidateOrder = candidate.order as Record<string, unknown> | null;
+  if (
+    !isNonEmptyString(expected.order.internalSymbol)
+    || (expected.order.side !== 'long' && expected.order.side !== 'short')
+    || !Number.isFinite(expected.order.sizeBase)
+    || expected.order.sizeBase <= 0
+    || !Number.isFinite(expected.order.leverage)
+    || expected.order.leverage <= 0
+    || !Number.isFinite(expected.order.maxSlippagePct)
+    || expected.order.maxSlippagePct < 0
+  ) {
+    return unavailableFeeRate('malformed_quote');
+  }
+  if (
+    !isNonEmptyString(expected.protocol)
+    || !isNonEmptyString(expected.account)
+    || expected.liquidityRole !== 'taker'
+    || !candidateOrder
+    || candidate.protocol !== expected.protocol
+    || candidate.account !== expected.account
+    || candidate.subaccountId !== expectedSubaccount
+    || candidate.liquidityRole !== expected.liquidityRole
+    || candidateOrder.internalSymbol !== expected.order.internalSymbol
+    || candidateOrder.side !== expected.order.side
+    || candidateOrder.sizeBase !== expected.order.sizeBase
+    || candidateOrder.leverage !== expected.order.leverage
+    || candidateOrder.maxSlippagePct !== expected.order.maxSlippagePct
+  ) {
+    return unavailableFeeRate('identity_mismatch');
+  }
+
+  if (isNonEmptyString(expected.builderCode)) return unavailableFeeRate('ambiguous_builder');
+  const builder = candidate.builder as Record<string, unknown> | null;
+  if (!builder || builder.status !== 'absent'
+      || 'code' in builder || 'rate' in builder || 'provenance' in builder) {
+    return unavailableFeeRate('ambiguous_builder');
+  }
+
+  if (
+    !isFiniteNonnegative(candidate.baseRate)
+    || !isFiniteNonnegative(candidate.effectiveRate)
+    || candidate.baseRate !== candidate.effectiveRate
+    || !isNonEmptyString(candidate.provenance)
+    || !candidate.provenance.startsWith('flash:legacy-contract-helper:fresh-solana+pyth:')
+    || !isFiniteNonnegative(candidate.observedAt)
+  ) {
+    return unavailableFeeRate('malformed_quote');
+  }
+
+  const audit = candidate.audit as Record<string, unknown> | null;
+  if (
+    !audit
+    || audit.feeUnit !== 'micro-usd'
+    || !isCanonicalNonnegativeIntegerString(audit.entryFeeUsd)
+    || !isCanonicalNonnegativeIntegerString(audit.volatilityFeeUsd)
+    || !isCanonicalNonnegativeIntegerString(audit.swapFeeUsd)
+    || !isCanonicalNonnegativeIntegerString(audit.totalFeeUsd)
+    || !isCanonicalNonnegativeIntegerString(audit.sizeUsd)
+    || (audit.swappedCollateralBaseUnits !== null
+      && !isCanonicalNonnegativeIntegerString(audit.swappedCollateralBaseUnits))
+    || (expected.order.side === 'long' && audit.swappedCollateralBaseUnits === null)
+    || (expected.order.side === 'short' && audit.swappedCollateralBaseUnits !== null)
+    || !isNonEmptyString(audit.pool)
+    || !isNonEmptyString(audit.market)
+    || !isNonEmptyString(audit.targetCustody)
+    || !isNonEmptyString(audit.collateralCustody)
+    || !Number.isInteger(audit.pricePublishTime)
+    || (audit.pricePublishTime as number) < 0
+    || !Number.isInteger(audit.emaPublishTime)
+    || (audit.emaPublishTime as number) < 0
+  ) {
+    return unavailableFeeRate('malformed_quote');
+  }
+  if (candidate.provenance !== (
+    `flash:legacy-contract-helper:fresh-solana+pyth:${audit.pool}:${audit.market}`
+  )) {
+    return unavailableFeeRate('malformed_quote');
+  }
+
+  const entryFeeUsd = BigInt(audit.entryFeeUsd);
+  const volatilityFeeUsd = BigInt(audit.volatilityFeeUsd);
+  const swapFeeUsd = BigInt(audit.swapFeeUsd);
+  const totalFeeUsd = BigInt(audit.totalFeeUsd);
+  const sizeUsd = BigInt(audit.sizeUsd);
+  if (sizeUsd <= 0n || entryFeeUsd + volatilityFeeUsd + swapFeeUsd !== totalFeeUsd) {
+    return unavailableFeeRate('malformed_quote');
+  }
+  const expectedRate = Number(totalFeeUsd) / Number(sizeUsd);
+  if (!Number.isFinite(expectedRate) || candidate.baseRate !== expectedRate) {
+    return unavailableFeeRate('malformed_quote');
+  }
+
+  const now = options.now ?? Date.now();
+  const maxAgeMs = options.maxAgeMs ?? FEE_RATE_QUOTE_MAX_AGE_MS;
+  if (!Number.isFinite(now) || !Number.isFinite(maxAgeMs) || maxAgeMs < 0) {
+    return unavailableFeeRate('malformed_quote');
+  }
+  if ((candidate.observedAt as number) > now) return unavailableFeeRate('future_quote');
+  if (now - (candidate.observedAt as number) > maxAgeMs) return unavailableFeeRate('stale_quote');
+
+  return {
+    availability: 'available',
+    protocol: expected.protocol,
+    account: expected.account,
+    subaccountId: expectedSubaccount,
+    liquidityRole: expected.liquidityRole,
+    builderCode: expected.builderCode,
+    order: { ...expected.order },
+    baseRate: candidate.baseRate as number,
+    effectiveRate: candidate.effectiveRate as number,
+    provenance: candidate.provenance as string,
+    observedAt: candidate.observedAt as number,
+    builder: { status: 'absent' },
+    audit: {
+      feeUnit: 'micro-usd',
+      entryFeeUsd: audit.entryFeeUsd,
+      volatilityFeeUsd: audit.volatilityFeeUsd,
+      swapFeeUsd: audit.swapFeeUsd,
+      totalFeeUsd: audit.totalFeeUsd,
+      sizeUsd: audit.sizeUsd,
+      swappedCollateralBaseUnits: audit.swappedCollateralBaseUnits as string | null,
+      pool: audit.pool,
+      market: audit.market,
+      targetCustody: audit.targetCustody,
+      collateralCustody: audit.collateralCustody,
+      pricePublishTime: audit.pricePublishTime as number,
+      emaPublishTime: audit.emaPublishTime as number,
+    },
+  };
+}
+
+export async function resolveOrderFeeRateQuote(
+  adapter: ProtocolAdapter,
+  input: OrderFeeRateQuoteRequest,
+  options: FeeRateQuoteValidationOptions = {},
+): Promise<OrderFeeRateQuoteResult> {
+  if (typeof adapter.getOrderFeeRateQuote !== 'function') {
+    return unavailableFeeRate('capability_unavailable');
+  }
+  try {
+    const value = await adapter.getOrderFeeRateQuote(input);
+    return validateOrderFeeRateQuote(value, {
+      protocol: adapter.protocolName,
+      account: input.account,
+      subaccountId: input.subaccountId ?? null,
+      liquidityRole: input.liquidityRole,
+      builderCode: input.builderCode,
+      order: { ...input.order },
+    }, options);
+  } catch {
+    return unavailableFeeRate('read_failed');
+  }
+}
+
 /**
  * Fresh admission resolver. Missing adapter support, transport failures and
  * malformed responses are all unavailable; none can become an economic value.
@@ -339,12 +557,24 @@ export async function placeMarketOrderWithFeeAuthority(
     return adapter.placeMarketOrder(params);
   }
 
-  const quote = await resolveFeeRateQuote(adapter, {
+  const identity = {
     account: params.agentPublicKey,
     subaccountId: params.subaccountId ?? null,
-    liquidityRole: 'taker',
+    liquidityRole: 'taker' as const,
     builderCode: params.builderCode,
-  }, options);
+  };
+  const quote = typeof adapter.getOrderFeeRateQuote === 'function'
+    ? await resolveOrderFeeRateQuote(adapter, {
+        ...identity,
+        order: {
+          internalSymbol: params.internalSymbol,
+          side: params.side,
+          sizeBase: params.sizeBase,
+          leverage: params.leverage ?? 1,
+          maxSlippagePct: params.maxSlippagePct ?? 1,
+        },
+      }, options)
+    : await resolveFeeRateQuote(adapter, identity, options);
   if (quote.availability === 'unavailable') {
     return {
       success: false,
@@ -445,6 +675,8 @@ export interface ProtocolAdapter {
    * configured fee constants through this capability.
    */
   getFeeRateQuote?(input: FeeRateQuoteRequest): Promise<FeeRateQuoteResult>;
+  /** Fresh, exact quote for adapters whose fee is a function of order inputs. */
+  getOrderFeeRateQuote?(input: OrderFeeRateQuoteRequest): Promise<OrderFeeRateQuoteResult>;
   getPositions(agentPublicKey: string, subaccountId?: string): Promise<ProtocolPosition[]>;
   /**
    * Fresh, fail-closed single-market position authority for latency-sensitive
