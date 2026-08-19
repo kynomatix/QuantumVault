@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildConfirmedFlatPosition,
   buildSignalBotCloseResponse,
+  summarizeSignalBotCloseFills,
 } from "../../server/trading/signal-bot-close-integrity";
 
 describe("Signal Bot close response authority", () => {
@@ -10,6 +11,7 @@ describe("Signal Bot close response authority", () => {
     ["position_unavailable", 503],
     ["already_flat", 409],
     ["executed", 200],
+    ["confirmation_pending", 202],
     ["executed_state_unavailable", 500],
   ] as const)("maps %s to HTTP %i and names the outcome", (outcome, statusCode) => {
     expect(buildSignalBotCloseResponse(outcome, { status: "test" })).toEqual({
@@ -27,6 +29,43 @@ describe("Signal Bot close response authority", () => {
     expect(response.statusCode).toBe(200);
     expect(response.body.closeOutcome).toBe("partial");
     expect(response.body.closeOutcome).not.toBe("executed");
+  });
+});
+
+describe("Signal Bot venue-fill close confirmation", () => {
+  it("aggregates the incident split fill with venue price, fee, PnL, and identities", () => {
+    const confirmation = summarizeSignalBotCloseFills({
+      market: "ZEC-PERP",
+      openSide: "long",
+      expectedSize: 1.57,
+      notBeforeMs: 100,
+      trades: [
+        { tradeId: "101", orderId: "201", internalSymbol: "ZEC-PERP", side: "short", venueEventKind: "close_long", price: 506.72, size: 0.94, fee: 0.666844, realizedPnl: -0.731805, timestamp: 101 },
+        { tradeId: "102", orderId: "202", internalSymbol: "ZEC-PERP", side: "short", venueEventKind: "close_long", price: 506.73, size: 0.14, fee: 0.099319, realizedPnl: -0.107594, timestamp: 102 },
+        { tradeId: "103", orderId: "203", internalSymbol: "ZEC-PERP", side: "short", venueEventKind: "close_long", price: 506.73, size: 0.49, fee: 0.347617, realizedPnl: -0.37658, timestamp: 103 },
+      ],
+    });
+
+    expect(confirmation).not.toBeNull();
+    expect(confirmation?.filledSize).toBeCloseTo(1.57, 12);
+    expect(confirmation?.fee).toBeCloseTo(1.11378, 12);
+    expect(confirmation?.realizedPnl).toBeCloseTo(-1.215979, 12);
+    expect(confirmation?.fillIds).toEqual(["101", "102", "103"]);
+  });
+
+  it("does not confuse a newer flip open with the preceding semantic close", () => {
+    const confirmation = summarizeSignalBotCloseFills({
+      market: "BTC-PERP",
+      openSide: "long",
+      expectedSize: 1,
+      notBeforeMs: 100,
+      trades: [
+        { tradeId: "new-open", orderId: "2", internalSymbol: "BTC-PERP", side: "short", venueEventKind: "open_short", price: 99, size: 1, fee: 1, timestamp: 102 },
+        { tradeId: "close", orderId: "1", internalSymbol: "BTC-PERP", side: "short", venueEventKind: "close_long", price: 100, size: 1, fee: 1, timestamp: 101 },
+      ],
+    });
+    expect(confirmation?.fillIds).toEqual(["close"]);
+    expect(confirmation?.fillPrice).toBe(100);
   });
 });
 

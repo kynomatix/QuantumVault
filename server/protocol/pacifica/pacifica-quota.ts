@@ -31,7 +31,7 @@ export type RequestPriority = 'critical' | 'normal' | 'background';
 const ENDPOINT_COSTS: Record<string, number> = {
   '/account': 3,
   '/positions': 3,
-  '/account/trades': 3,
+  '/trades/history': 3,
   '/account/equity_history': 3,
   '/account/funding/history': 3,
   '/account/orders': 2,

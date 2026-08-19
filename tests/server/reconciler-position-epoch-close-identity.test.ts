@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   storage: {
     getTradingBotById: vi.fn(),
     getBotPosition: vi.fn(),
+    getBotTrades: vi.fn(),
     getRecentCanonicalCloseForBot: vi.fn(),
     recordCloseEventAtomic: vi.fn(),
     upsertBotPosition: vi.fn(),
@@ -95,6 +96,7 @@ describe('reconciler full-close position epoch identity', () => {
     mocks.storage.getTradingBotById.mockResolvedValue(bot);
     mocks.storage.getBotPosition.mockResolvedValue(storedPosition('entry-epoch-one'));
     mocks.storage.getRecentCanonicalCloseForBot.mockResolvedValue(null);
+    mocks.storage.getBotTrades.mockResolvedValue([]);
     mocks.storage.recordCloseEventAtomic.mockResolvedValue({ isNew: true });
     mocks.storage.upsertBotPosition.mockImplementation(async value => value);
     mocks.adapter.getPositions.mockResolvedValue([]);
@@ -105,6 +107,7 @@ describe('reconciler full-close position epoch identity', () => {
       equity: 100,
     });
     mocks.adapter.getPrice.mockResolvedValue(117000);
+    mocks.sendTradeNotification.mockResolvedValue(undefined);
   });
 
   it('ignores mutable estimate price and observation time for one entry epoch', () => {
@@ -149,6 +152,54 @@ describe('reconciler full-close position epoch identity', () => {
       market,
       positionEpochId: 'entry-one',
     })).toBe('tx-venue-fill-one');
+  });
+
+  it('promotes the matching pending close row from exact venue fills instead of inserting a duplicate', async () => {
+    mocks.storage.getBotTrades.mockResolvedValue([{
+      id: 'pending-close-row',
+      status: 'pending',
+      side: 'CLOSE',
+      market,
+      executedAt: new Date('2026-08-03T23:59:00.000Z'),
+      webhookPayload: { source: 'webhook' },
+    }]);
+    mocks.adapter.getTradeHistory.mockResolvedValue([{
+      tradeId: 'venue-fill-one',
+      orderId: 'order-one',
+      internalSymbol: market,
+      side: 'short',
+      venueEventKind: 'close_long',
+      price: 117000,
+      size: 0.00972,
+      fee: 0.25,
+      realizedPnl: 4.86,
+      timestamp: Date.now(),
+    }]);
+
+    await expect(reconcile('pending-close')).resolves.toEqual({
+      synced: true,
+      discrepancy: true,
+      liquidation: false,
+    });
+
+    expect(mocks.storage.getRecentCanonicalCloseForBot).not.toHaveBeenCalled();
+    expect(mocks.storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({
+      botId: 'pending-close',
+      update: expect.objectContaining({
+        tradeId: 'pending-close-row',
+        fields: expect.objectContaining({
+          status: 'executed',
+          protocolFillId: 'tx-venue-fill-one',
+          fee: '0.25',
+        }),
+      }),
+      confirmedPositionClose: expect.objectContaining({
+        walletAddress,
+        market,
+        feeDelta: 0.25,
+      }),
+    }));
+    expect(mocks.storage.upsertBotPosition).not.toHaveBeenCalled();
   });
 
   it('refuses a no-fill close with no durable position epoch before mutation or notification', async () => {

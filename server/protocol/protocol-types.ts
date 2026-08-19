@@ -284,6 +284,10 @@ export interface HistoryParams {
   endTime?: number;
   limit?: number;
   offset?: number;
+  /** Internal (registry) market symbol used for venue-side filtering. */
+  internalSymbol?: string;
+  /** Hard pagination bound for adapters that expose cursor history. */
+  maxPages?: number;
 }
 
 export interface EquityPoint {
@@ -302,6 +306,10 @@ export interface TradeRecord {
   fee: number;
   timestamp: number;
   subaccountId?: string;
+  venueEventKind?: 'open_long' | 'open_short' | 'close_long' | 'close_short';
+  realizedPnl?: number;
+  liquidityRole?: 'maker' | 'taker';
+  cause?: string;
 }
 
 export interface FillEvent {

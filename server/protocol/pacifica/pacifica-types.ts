@@ -113,16 +113,26 @@ export interface PacificaCancelResponse {
 }
 
 export interface PacificaTradeResponse {
-  trade_id: string;
-  order_id: string;
-  client_order_id?: string;
+  history_id: number;
+  order_id: number;
+  client_order_id?: string | null;
   symbol: string;
-  side: 'bid' | 'ask';
+  amount: string;
   price: string;
-  size: string;
+  entry_price: string;
   fee: string;
-  timestamp: number;
-  subaccount_id?: string;
+  pnl: string;
+  event_type: 'fulfill_maker' | 'fulfill_taker';
+  side: 'open_long' | 'open_short' | 'close_long' | 'close_short';
+  created_at: number;
+  cause: 'normal' | 'market_liquidation' | 'backstop_liquidation' | 'settlement';
+}
+
+export interface PacificaTradeHistoryEnvelope {
+  success: true;
+  data: PacificaTradeResponse[];
+  next_cursor?: string | null;
+  has_more: boolean;
 }
 
 export interface PacificaEquityHistoryPoint {
