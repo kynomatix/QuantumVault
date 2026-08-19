@@ -33,6 +33,8 @@ const getLlmCiphertextMock = vi.fn();
 const getAiTraderDecisionMock = vi.fn();
 const claimAnalysisMock = vi.fn();
 const transitionStateMock = vi.fn();
+const commitCloseMock = vi.fn();
+let closeBotState: Partial<AiTraderBot> = {};
 vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -48,6 +50,7 @@ vi.mock("../../server/storage", () => ({
     getAiTraderDecision: (...a: unknown[]) => getAiTraderDecisionMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
+    commitAiTraderConfirmedCloseTransition: (...a: unknown[]) => commitCloseMock(...a),
   },
 }));
 
@@ -345,10 +348,11 @@ beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
+  closeBotState = {};
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
     getOpenDecisionsMock, getUnresolvedDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock,
-    claimAnalysisMock, transitionStateMock, getUmkMock,
+    claimAnalysisMock, transitionStateMock, commitCloseMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
@@ -382,6 +386,59 @@ beforeEach(() => {
     const patch = { ...(botUpdates ?? {}), status: nextStatus, pauseReason: nextPauseReason };
     await updateBotMock(botId, patch);
     return makeBot({ id: botId, ...patch } as Partial<AiTraderBot>);
+  });
+  commitCloseMock.mockImplementation(async (params: any) => {
+    const lockedBot = makeBot({ id: params.botId, ...closeBotState });
+    const decisionPatch = {
+      exitPrice: params.close.exitPrice === null ? null : params.close.exitPrice.toFixed(8),
+      exitReason: params.close.exitReason,
+      realizedPnl: params.close.realizedPnl === null ? null : params.close.realizedPnl.toFixed(2),
+      feesPaid: params.close.feesPaid === null ? null : params.close.feesPaid.toFixed(6),
+      closedAt: params.close.closedAt,
+    };
+    await updateDecisionMock(params.decisionId, decisionPatch);
+    const recent = await getRecentClosedMock(params.botId, 60);
+    const closedToday = recent.filter((row: AiTraderDecision) => row.closedAt
+      && new Date(row.closedAt).getTime() >= params.dayStart.getTime());
+    const knownDailyRealizedPnl = closedToday.reduce(
+      (sum: number, row: AiTraderDecision) => sum + (row.realizedPnl === null ? 0 : Number(row.realizedPnl)),
+      0,
+    );
+    const dailyRealizedComplete = closedToday.every(
+      (row: AiTraderDecision) => row.realizedPnl !== null && Number.isFinite(Number(row.realizedPnl)),
+    );
+    const consecutiveLosses = params.isStopLossLoss ? (lockedBot.consecutiveLosses ?? 0) + 1 : 0;
+    let status = params.forcedPauseReason ? "paused" : "idle";
+    let pauseReason = params.forcedPauseReason ?? null;
+    if (!pauseReason && closedToday.length >= params.policy.malfunctionTradesPerDay) {
+      status = "paused";
+      pauseReason = "malfunction_ceiling";
+    } else if (!pauseReason && lockedBot.riskProfile !== "degen"
+        && consecutiveLosses >= params.policy.consecutiveSlLimit) {
+      status = "paused";
+      pauseReason = "consecutive_losses";
+    } else if (!pauseReason && lockedBot.riskProfile !== "degen"
+        && knownDailyRealizedPnl <= -150) {
+      status = "paused";
+      pauseReason = "daily_loss_breaker";
+    }
+    const botPatch = {
+      status,
+      pauseReason,
+      dailyRealizedPnl: dailyRealizedComplete ? knownDailyRealizedPnl.toFixed(2) : null,
+      consecutiveLosses,
+    };
+    await updateBotMock(params.botId, botPatch);
+    return {
+      status: "applied",
+      decision: makeOpenDecision({ ...decisionPatch, closedAt: params.close.closedAt }),
+      bot: makeBot({ ...lockedBot, paperMode: params.journalEvents[0]?.cause === "paper", ...botPatch }),
+      closedTodayCount: closedToday.length,
+      knownDailyRealizedPnl,
+      dailyRealizedComplete,
+      consecutiveLosses,
+      journal: { status: "appended", failureCode: null },
+    };
   });
   notifyMock.mockResolvedValue(true);
   healUmkMock.mockResolvedValue(undefined);
@@ -640,6 +697,74 @@ describe("live close-result consumption", () => {
     expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
     expect(decisionUpdates().some((update) => update.exitReason === "user_close")).toBe(true);
     expect(safeJournalMock).toHaveBeenCalled();
+  });
+
+  it("does not retry or claim success when the confirmed live close hits a storage conflict", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const closePosition = vi.fn(async () => ({ success: true, status: "filled", fillPrice: 151 }));
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition,
+    }));
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    commitCloseMock.mockResolvedValueOnce({ status: "conflict", reason: "bot_state_conflict" });
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toEqual({
+      ok: false,
+      detail: "close transition conflict: bot_state_conflict; venue close may have completed; reconciliation required",
+    });
+    expect(closePosition).toHaveBeenCalledTimes(1);
+    expect(notifications().filter((event) => event.type === "position_closed")).toHaveLength(0);
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] conflict family=live_user reason=bot_state_conflict",
+    );
+  });
+
+  it("passes the exact paused user-close predicate and materializes one observedAt across the batch", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    const paused = makeBot({ paperMode: true, status: "paused", pauseReason: "user_requested" });
+    getBotMock.mockResolvedValue(paused);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPrice: vi.fn(async () => 151) }));
+
+    const result = await userInitiatedClose(paused);
+
+    expect(result).toMatchObject({ ok: true, closed: true });
+    const params = commitCloseMock.mock.calls[0][0];
+    expect(params).toMatchObject({ expectedBotStatus: "paused", expectedPauseReason: "user_requested" });
+    const observed = params.journalEvents.map((event: any) => event.observedAt.getTime());
+    expect(new Set(observed)).toEqual(new Set([params.close.closedAt.getTime()]));
+    expect(params.journalEvents.every((event: any) => event.attemptId === params.journalEvents[0].attemptId)).toBe(true);
+  });
+
+  it("records fixed durable telemetry when journal persistence degrades after a confirmed close", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 151 })),
+    }));
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    commitCloseMock.mockResolvedValueOnce({
+      status: "applied",
+      decision: makeOpenDecision({ closedAt: new Date(NOW), exitReason: "user_close" }),
+      bot: makeBot({ paperMode: false, status: "idle" }),
+      closedTodayCount: 1,
+      knownDailyRealizedPnl: 1,
+      dailyRealizedComplete: true,
+      consecutiveLosses: 0,
+      journal: { status: "degraded", failureCode: "insert_failed" },
+    });
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: true, closed: true });
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] journal degraded code=insert_failed",
+    );
   });
 
   it("journals signing-unavailable user close and cancel attempts without reaching the venue", async () => {
@@ -1220,6 +1345,7 @@ describe("G10 bracket re-verification", () => {
 describe("post-close circuit breakers", () => {
   it("G8: pauses a guarded bot on the 3rd consecutive stop-loss", async () => {
     const { monitorBotOnce } = await importMonitor();
+    closeBotState = { consecutiveLosses: 2, riskProfile: "guarded" };
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     fetchOHLCVMock.mockResolvedValue([
       candle(ENTRY_CANDLE_OPEN + TF_15M, 150, 151, 144.5, 145.2), // SL 145 hit
@@ -1234,6 +1360,7 @@ describe("post-close circuit breakers", () => {
 
   it("G8 does not pause a 'degen' bot", async () => {
     const { monitorBotOnce } = await importMonitor();
+    closeBotState = { consecutiveLosses: 2, riskProfile: "degen" };
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     fetchOHLCVMock.mockResolvedValue([
       candle(ENTRY_CANDLE_OPEN + TF_15M, 150, 151, 144.5, 145.2),

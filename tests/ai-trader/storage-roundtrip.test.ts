@@ -424,6 +424,212 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     }
   });
 
+  it("atomically commits a confirmed close, derives the pause under locks, and exactly replays once", async () => {
+    const closeBot = await storage.createAiTraderBot({
+      walletAddress: `${WALLET}-close-atomic`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+      allocatedUsdc: "100.00", consecutiveLosses: 2,
+      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+      policyHmac: "close-atomic-hmac",
+    } as any);
+    try {
+      await storage.updateAiTraderBot(closeBot.id, { status: "open" as any, consecutiveLosses: 2 });
+      const decision = await storage.insertAiTraderDecision({
+        botId: closeBot.id, rawDecision: { action: "long" }, clampedDecision: { action: "long" },
+        outcome: "executed", entryPrice: "150.00000000", decidedAt: new Date("2026-08-19T01:00:00.000Z"),
+      } as any);
+      const closedAt = new Date("2026-08-19T02:00:00.000Z");
+      const attemptId = journal.newMutationAttemptId("close", decision.id);
+      const base = journal.journalBase(closeBot, decision.id);
+      const close = { exitPrice: 145, exitReason: "sl", realizedPnl: -10, feesPaid: 0.2, closedAt };
+      const journalEvents = [
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "fill_observed", side: "long",
+          price: 145, sizeBase: 2, fee: 0.2, realizedPnl: -10, observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "close_terminal_confirmed", side: "long",
+          price: 145, sizeBase: 2, fee: 0.2, realizedPnl: -10, observedAt: closedAt },
+      ] as const;
+      const params = {
+        botId: closeBot.id, decisionId: decision.id, expectedBotStatus: "open", expectedPauseReason: null,
+        side: "long" as const, sizeBase: 2, close, isStopLossLoss: true, forcedPauseReason: null,
+        dayStart: new Date("2026-08-19T00:00:00.000Z"),
+        policy: { recentClosedLimit: 60 as const, malfunctionTradesPerDay: 20, consecutiveSlLimit: 3, dailyLossBreakerPct: 15 },
+        journalEvents,
+      };
+
+      const applied = await storage.commitAiTraderConfirmedCloseTransition(params);
+      expect(applied).toMatchObject({
+        status: "applied", decision: { closedAt, realizedPnl: "-10.00", feesPaid: "0.200000" },
+        bot: { status: "paused", pauseReason: "consecutive_losses", consecutiveLosses: 3, dailyRealizedPnl: "-10.00" },
+        closedTodayCount: 1, knownDailyRealizedPnl: -10, dailyRealizedComplete: true,
+        journal: { status: "appended", failureCode: null },
+      });
+      const replayed = await storage.commitAiTraderConfirmedCloseTransition(params);
+      expect(replayed).toMatchObject({
+        status: "replayed", bot: { consecutiveLosses: 3, dailyRealizedPnl: "-10.00" },
+        journal: { status: "replayed", failureCode: null },
+      });
+      const rows = await pool.query(
+        "SELECT count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1",
+        [attemptId],
+      );
+      expect(rows.rows[0]?.count).toBe(3);
+
+      const otherAttempt = journalEvents.map((event) => ({ ...event, attemptId: journal.newMutationAttemptId("close", decision.id) }));
+      expect(await storage.commitAiTraderConfirmedCloseTransition({ ...params, journalEvents: otherAttempt }))
+        .toEqual({ status: "conflict", reason: "journal_identity_conflict" });
+      expect(await storage.commitAiTraderConfirmedCloseTransition({
+        ...params, close: { ...close, exitPrice: 144 },
+      })).toEqual({ status: "conflict", reason: "close_state_conflict" });
+      expect((await storage.getAiTraderBot(closeBot.id))?.consecutiveLosses).toBe(3);
+    } finally {
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, closeBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, closeBot.id));
+    }
+  });
+
+  it("commits confirmed close truth with null completeness when journal validation degrades", async () => {
+    const closeBot = await storage.createAiTraderBot({
+      walletAddress: `${WALLET}-close-degraded-validation`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+      allocatedUsdc: "100.00",
+      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+      policyHmac: "close-degraded-validation-hmac",
+    } as any);
+    try {
+      await storage.updateAiTraderBot(closeBot.id, { status: "paused" as any, pauseReason: "user_requested" });
+      const decision = await storage.insertAiTraderDecision({
+        botId: closeBot.id, rawDecision: { action: "short" }, outcome: "executed",
+        entryPrice: "150.00000000", decidedAt: new Date("2026-08-19T03:00:00.000Z"),
+      } as any);
+      const closedAt = new Date("2026-08-19T04:00:00.000Z");
+      const attemptId = journal.newMutationAttemptId("close", decision.id);
+      const base = journal.journalBase(closeBot, decision.id);
+      const close = { exitPrice: 151, exitReason: "user_close", realizedPnl: null, feesPaid: null, closedAt };
+      const malformed = [
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: "short", observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "close_terminal_failed", side: "short", observedAt: closedAt },
+      ] as any;
+      const result = await storage.commitAiTraderConfirmedCloseTransition({
+        botId: closeBot.id, decisionId: decision.id, expectedBotStatus: "paused", expectedPauseReason: "user_requested",
+        side: "short", sizeBase: 1, close, isStopLossLoss: false, forcedPauseReason: null,
+        dayStart: new Date("2026-08-19T00:00:00.000Z"),
+        policy: { recentClosedLimit: 60, malfunctionTradesPerDay: 20, consecutiveSlLimit: 3, dailyLossBreakerPct: 15 },
+        journalEvents: malformed,
+      });
+      expect(result).toMatchObject({
+        status: "applied", decision: { closedAt, realizedPnl: null, feesPaid: null },
+        bot: { status: "idle", pauseReason: null, dailyRealizedPnl: null },
+        dailyRealizedComplete: false,
+        journal: { status: "degraded", failureCode: "validation_conflict" },
+      });
+      const rows = await pool.query("SELECT count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1", [attemptId]);
+      expect(rows.rows[0]?.count).toBe(0);
+    } finally {
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, closeBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, closeBot.id));
+    }
+  });
+
+  it("isolates a real journal insert fault to a savepoint while retaining the confirmed close", async () => {
+    const closeBot = await storage.createAiTraderBot({
+      walletAddress: `${WALLET}-close-journal-fault`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+      allocatedUsdc: "100.00",
+      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+      policyHmac: "close-journal-fault-hmac",
+    } as any);
+    const safeIdentifier = `qv_close_journal_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9_]/g, "");
+    const functionName = `${safeIdentifier}_fn`;
+    const triggerName = `${safeIdentifier}_trg`;
+    try {
+      await storage.updateAiTraderBot(closeBot.id, { status: "open" as any });
+      const decision = await storage.insertAiTraderDecision({
+        botId: closeBot.id, rawDecision: { action: "long" }, outcome: "executed",
+        entryPrice: "150.00000000", decidedAt: new Date("2026-08-19T05:00:00.000Z"),
+      } as any);
+      const closedAt = new Date("2026-08-19T06:00:00.000Z");
+      const attemptId = journal.newMutationAttemptId("close", decision.id);
+      const base = journal.journalBase(closeBot, decision.id);
+      const journalEvents = [
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "fill_observed", side: "long", price: 151,
+          sizeBase: 1, fee: 0.1, realizedPnl: 0.9, observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "close_terminal_confirmed", side: "long", price: 151,
+          sizeBase: 1, fee: 0.1, realizedPnl: 0.9, observedAt: closedAt },
+      ] as const;
+      const keyValue = attemptId.replace(/'/g, "''");
+      await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'close_journal_insert_fault'; END; $$`);
+      await pool.query(`CREATE TRIGGER ${triggerName} AFTER INSERT ON ai_trader_execution_events FOR EACH ROW WHEN (NEW.attempt_id = '${keyValue}') EXECUTE FUNCTION ${functionName}()`);
+      const result = await storage.commitAiTraderConfirmedCloseTransition({
+        botId: closeBot.id, decisionId: decision.id, expectedBotStatus: "open", expectedPauseReason: null,
+        side: "long", sizeBase: 1,
+        close: { exitPrice: 151, exitReason: "tp", realizedPnl: 0.9, feesPaid: 0.1, closedAt },
+        isStopLossLoss: false, forcedPauseReason: null, dayStart: new Date("2026-08-19T00:00:00.000Z"),
+        policy: { recentClosedLimit: 60, malfunctionTradesPerDay: 20, consecutiveSlLimit: 3, dailyLossBreakerPct: 15 },
+        journalEvents,
+      });
+      expect(result).toMatchObject({
+        status: "applied", decision: { closedAt }, bot: { status: "idle" },
+        journal: { status: "degraded", failureCode: "insert_failed" },
+      });
+      expect((await storage.getAiTraderDecision(decision.id))?.closedAt).toEqual(closedAt);
+      expect((await storage.getAiTraderBot(closeBot.id))?.status).toBe("idle");
+      const rows = await pool.query("SELECT count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1", [attemptId]);
+      expect(rows.rows[0]?.count).toBe(0);
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ai_trader_execution_events`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, closeBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, closeBot.id));
+    }
+  }, 30_000);
+
+  it("rolls back both decision and bot close state on real non-journal database faults", async () => {
+    for (const stage of ["decision", "bot"] as const) {
+      const closeBot = await storage.createAiTraderBot({
+        walletAddress: `${WALLET}-close-outer-fault-${stage}`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+        allocatedUsdc: "100.00",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: `close-outer-fault-${stage}-hmac`,
+      } as any);
+      const decision = await storage.insertAiTraderDecision({
+        botId: closeBot.id, rawDecision: { action: "long" }, outcome: "executed",
+        entryPrice: "150.00000000", decidedAt: new Date(),
+      } as any);
+      await storage.updateAiTraderBot(closeBot.id, { status: "open" as any });
+      const closedAt = new Date();
+      const attemptId = journal.newMutationAttemptId("close", decision.id);
+      const base = journal.journalBase(closeBot, decision.id);
+      const events = [
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "fill_observed", side: "long", price: 151, sizeBase: 1, fee: 0.1, realizedPnl: 0.9, observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "paper", eventType: "close_terminal_confirmed", side: "long", price: 151, sizeBase: 1, fee: 0.1, realizedPnl: 0.9, observedAt: closedAt },
+      ] as const;
+      const safeIdentifier = `qv_close_outer_${stage}_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9_]/g, "");
+      const functionName = `${safeIdentifier}_fn`;
+      const triggerName = `${safeIdentifier}_trg`;
+      const table = stage === "decision" ? "ai_trader_decisions" : "ai_trader_bots";
+      const key = stage === "decision" ? decision.id : closeBot.id;
+      try {
+        await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'close_outer_${stage}_fault'; END; $$`);
+        await pool.query(`CREATE TRIGGER ${triggerName} AFTER UPDATE ON ${table} FOR EACH ROW WHEN (NEW.id = '${key.replace(/'/g, "''")}') EXECUTE FUNCTION ${functionName}()`);
+        await expect(storage.commitAiTraderConfirmedCloseTransition({
+          botId: closeBot.id, decisionId: decision.id, expectedBotStatus: "open", expectedPauseReason: null,
+          side: "long", sizeBase: 1,
+          close: { exitPrice: 151, exitReason: "tp", realizedPnl: 0.9, feesPaid: 0.1, closedAt },
+          isStopLossLoss: false, forcedPauseReason: null, dayStart: new Date(0),
+          policy: { recentClosedLimit: 60, malfunctionTradesPerDay: 20, consecutiveSlLimit: 3, dailyLossBreakerPct: 15 },
+          journalEvents: events,
+        })).rejects.toThrow(`close_outer_${stage}_fault`);
+      } finally {
+        await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ${table}`);
+        await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      }
+      expect(await storage.getAiTraderDecision(decision.id)).toMatchObject({ closedAt: null, exitReason: null });
+      expect(await storage.getAiTraderBot(closeBot.id)).toMatchObject({ status: "open", pauseReason: null });
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, closeBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, closeBot.id));
+    }
+  }, 30_000);
+
   it("returns exact typed conflicts for every direct-live predicate, lineage, and replay contradiction", async () => {
     const cases = [
       { kind: "decision_outcome", reason: "decision_state_conflict" },

@@ -409,6 +409,37 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     )).rejects.toThrow(/append-only/i);
   });
 
+  it("accepts only exact stable confirmed-close batches and rejects a drifting or failed terminal", () => {
+    const decisionId = `decision-close-shape-${RUN}`;
+    const attemptId = `close:${decisionId}:shape`;
+    const base = journal.journalBase(bot, decisionId);
+    const closedAt = new Date("2026-08-19T07:00:00.000Z");
+    const close = { exitPrice: 151, realizedPnl: 0.8, feesPaid: 0.2, closedAt };
+    const events = [
+      { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt: closedAt },
+      { ...base, attemptId, action: "close", cause: "paper", eventType: "fill_observed", side: "long",
+        price: 151, sizeBase: 1, fee: 0.2, realizedPnl: 0.8, observedAt: closedAt },
+      { ...base, attemptId, action: "close", cause: "paper", eventType: "close_terminal_confirmed", side: "long",
+        price: 151, sizeBase: 1, fee: 0.2, realizedPnl: 0.8, observedAt: closedAt },
+    ] as any;
+    const expected = { botId: bot.id, decisionId, side: "long" as const, sizeBase: 1, close };
+    expect(journal.isExactConfirmedCloseJournalBatch(events, expected)).toBe(true);
+    expect(journal.isExactConfirmedCloseJournalBatch(
+      events.map((event: any, index: number) => index === 0 ? { ...event, observedAt: new Date(closedAt.getTime() + 1) } : event),
+      expected,
+    )).toBe(false);
+    expect(journal.isExactConfirmedCloseJournalBatch(
+      events.map((event: any, index: number) => index === 2
+        ? { ...event, eventType: "close_terminal_failed", failureCode: "venue_error" }
+        : event),
+      expected,
+    )).toBe(false);
+    expect(journal.isExactConfirmedCloseJournalBatch(
+      events.map((event: any, index: number) => index === 2 ? { ...event, fee: 0.21 } : event),
+      expected,
+    )).toBe(false);
+  });
+
   it("typed builder rejects non-allowlisted identifiers and has no raw or error field", async () => {
     const base = journal.journalBase(bot, null);
     await expect(journal.appendExecutionEvents([{

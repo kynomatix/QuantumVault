@@ -770,6 +770,111 @@ async function afterClose(
   }
 }
 
+type ConfirmedCloseFamily =
+  | "paper_bracket" | "paper_g7" | "paper_user" | "live_protective"
+  | "live_user" | "venue_detected" | "liquidation";
+
+type ConfirmedCloseCommit = Exclude<
+  Awaited<ReturnType<typeof storage.commitAiTraderConfirmedCloseTransition>>,
+  { status: "conflict" }
+>;
+type ConfirmedCloseResult = Awaited<ReturnType<typeof storage.commitAiTraderConfirmedCloseTransition>>;
+
+async function commitConfirmedClose(args: {
+  bot: AiTraderBot;
+  view: OpenDecisionView;
+  close: CloseRecord;
+  family: ConfirmedCloseFamily;
+  forcedPauseReason: string | null;
+  journalEvents: readonly import("./execution-journal").JournalEventInput[];
+  journalSizeBase: number;
+}): Promise<ConfirmedCloseResult> {
+  const result = await storage.commitAiTraderConfirmedCloseTransition({
+    botId: args.bot.id,
+    decisionId: args.view.decision.id,
+    expectedBotStatus: args.bot.status,
+    expectedPauseReason: args.bot.pauseReason ?? null,
+    side: args.view.side,
+    sizeBase: args.journalSizeBase,
+    close: args.close,
+    isStopLossLoss: countsAsSlLoss(args.close.exitReason, args.close.realizedPnl),
+    forcedPauseReason: args.forcedPauseReason,
+    dayStart: new Date(utcDayStartMs(args.close.closedAt.getTime())),
+    policy: {
+      recentClosedLimit: 60,
+      malfunctionTradesPerDay: MALFUNCTION_TRADES_PER_DAY,
+      consecutiveSlLimit: CONSECUTIVE_SL_LIMIT,
+      dailyLossBreakerPct: DAILY_LOSS_BREAKER_PCT,
+    },
+    journalEvents: args.journalEvents,
+  });
+  if (result.status === "conflict") {
+    appendTelemetry(`[AiTraderCloseTransition] conflict family=${args.family} reason=${result.reason}`);
+    return result;
+  }
+  breakevenMoveAttempts.delete(args.view.decision.id);
+  if (result.journal.status === "degraded") {
+    appendTelemetry(`[AiTraderCloseTransition] journal degraded code=${result.journal.failureCode}`);
+  }
+  return result;
+}
+
+async function emitCommittedPause(
+  bot: AiTraderBot,
+  pauseReason: string,
+  detail: string,
+  notify = true,
+): Promise<void> {
+  clearAutoNext(bot.id);
+  console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)} paused (${pauseReason}): ${detail}`);
+  if (notify) {
+    await sendTradeNotification(bot.walletAddress, {
+      type: "trade_failed",
+      botName: botLabel(bot),
+      market: bot.market,
+      error: `Bot paused: ${detail}`,
+    });
+  }
+}
+
+function derivedPauseDetail(result: ConfirmedCloseCommit): string {
+  if (result.bot.pauseReason === "malfunction_ceiling") {
+    return `closed ${result.closedTodayCount} trades today (ceiling ${MALFUNCTION_TRADES_PER_DAY}) - pausing for inspection`;
+  }
+  if (result.bot.pauseReason === "consecutive_losses") {
+    return `${result.consecutiveLosses} consecutive stop-loss exits - pausing (G8)`;
+  }
+  return `daily realized PnL ${result.knownDailyRealizedPnl.toFixed(2)} breached -${DAILY_LOSS_BREAKER_PCT}% of allocation - pausing (G7)`;
+}
+
+/** Post-commit effects only. Exact replays never duplicate external effects. */
+async function afterCommittedClose(
+  result: ConfirmedCloseCommit,
+  opts: { pauseAlreadyEmitted?: boolean; suppressPauseNotification?: boolean } = {},
+): Promise<void> {
+  if (result.status === "replayed") return;
+  fireReflection(result.bot);
+  if (result.bot.paperMode) {
+    await evaluateBotGraduation(result.bot, 0);
+  }
+  if (result.bot.status === "paused") {
+    if (opts.pauseAlreadyEmitted) {
+      clearAutoNext(result.bot.id);
+    } else {
+      await emitCommittedPause(
+        result.bot,
+        result.bot.pauseReason ?? "unknown",
+        derivedPauseDetail(result),
+        opts.suppressPauseNotification !== true,
+      );
+    }
+    return;
+  }
+  if (result.bot.mode === "auto" && result.bot.autoNext) {
+    scheduleAutoNext(result.bot.id, nextCycleTimeframe(result.bot));
+  }
+}
+
 async function pauseBot(bot: AiTraderBot, pauseReason: string, detail: string): Promise<void> {
   clearAutoNext(bot.id);
   await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason });
@@ -804,6 +909,54 @@ function journalPaperClose(bot: AiTraderBot, view: OpenDecisionView, close: Clos
       price: close.exitPrice, sizeBase: view.sizeBase, fee: close.feesPaid, realizedPnl: close.realizedPnl,
       observedAt: close.closedAt },
   ]);
+}
+
+function buildPaperCloseJournal(
+  bot: AiTraderBot,
+  view: OpenDecisionView,
+  close: CloseRecord,
+  attemptId: string,
+): import("./execution-journal").JournalEventInput[] {
+  const base = journalBase(bot, view.decision.id);
+  return [
+    { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: view.side,
+      observedAt: close.closedAt },
+    { ...base, attemptId, action: "close", cause: "paper", eventType: "fill_observed", side: view.side,
+      price: close.exitPrice, sizeBase: view.sizeBase, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+    { ...base, attemptId, action: "close", cause: "paper", eventType: "close_terminal_confirmed", side: view.side,
+      price: close.exitPrice, sizeBase: view.sizeBase, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+  ];
+}
+
+function buildLiveConfirmedCloseJournal(args: {
+  bot: AiTraderBot;
+  view: OpenDecisionView;
+  close: CloseRecord;
+  attemptId: string;
+  cause: "protective" | "user_requested";
+  order: OrderResult;
+}): import("./execution-journal").JournalEventInput[] {
+  const base = journalBase(args.bot, args.view.decision.id);
+  const observedAt = args.close.closedAt;
+  return [
+    { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      eventType: "attempt_claimed", side: args.view.side, recordedAfterBroadcast: true, observedAt },
+    { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      eventType: "broadcast_attempted", side: args.view.side, recordedAfterBroadcast: true, observedAt },
+    { ...orderResultEvent({ base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      order: args.order, recordedAfterBroadcast: true, failureCode: null }),
+      side: args.view.side, observedAt },
+    { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      eventType: "fill_observed", side: args.view.side, price: args.close.exitPrice,
+      sizeBase: args.view.sizeBase, fee: args.close.feesPaid, realizedPnl: args.close.realizedPnl,
+      recordedAfterBroadcast: true, observedAt },
+    { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
+      eventType: "close_terminal_confirmed", side: args.view.side, price: args.close.exitPrice,
+      sizeBase: args.view.sizeBase, fee: args.close.feesPaid, realizedPnl: args.close.realizedPnl,
+      recordedAfterBroadcast: true, observedAt },
+  ];
 }
 
 function journalCloseAttempt(args: {
@@ -924,6 +1077,26 @@ function journalVenueDetectedClose(bot: AiTraderBot, view: OpenDecisionView, clo
       price: close.exitPrice, sizeBase: fillSize, fee: close.feesPaid, realizedPnl: close.realizedPnl,
       observedAt: close.closedAt },
   ]);
+}
+
+function buildVenueDetectedCloseJournal(
+  bot: AiTraderBot,
+  view: OpenDecisionView,
+  close: CloseRecord,
+  fillSize: number,
+  attemptId: string,
+): import("./execution-journal").JournalEventInput[] {
+  const base = journalBase(bot, view.decision.id);
+  return [
+    { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "attempt_claimed", side: view.side,
+      observedAt: close.closedAt },
+    { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "fill_observed", side: view.side,
+      price: close.exitPrice, sizeBase: fillSize, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+    { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "close_terminal_confirmed", side: view.side,
+      price: close.exitPrice, sizeBase: fillSize, fee: close.feesPaid, realizedPnl: close.realizedPnl,
+      observedAt: close.closedAt },
+  ];
 }
 
 // --- Breakeven protect (shared paper + live) --------------------------------------------
@@ -1060,13 +1233,20 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       feesPaid: pnl.fees,
       closedAt: new Date(hit.candleTime),
     };
-    await recordClose(bot, view, close);
-    journalPaperClose(bot, view, close);
-    console.log(
+    const paperCloseAttemptId = newMutationAttemptId("close", view.decision.id);
+    const committed = await commitConfirmedClose({
+      bot, view, close, family: "paper_bracket", forcedPauseReason: null,
+      journalEvents: buildPaperCloseJournal(bot, view, close, paperCloseAttemptId),
+      journalSizeBase: view.sizeBase,
+    });
+    if (committed.status === "conflict") return;
+    if (committed.status === "applied") console.log(
       `[AiTraderMonitor] Paper close: bot ${bot.id.slice(0, 8)} ${view.side} ${bot.market} ${hit.leg.toUpperCase()} @ ${hit.exitPrice.toFixed(6)} pnl ${pnl.netPnl.toFixed(2)}`
     );
-    await notifyClosed(bot, close, getCloseReasonLabel("tpsl", hit.leg === "tp" ? "TP" : "SL"));
-    await afterClose(bot, close, { alreadyPaused: false });
+    if (committed.status === "applied") {
+      await notifyClosed(committed.bot, close, getCloseReasonLabel("tpsl", hit.leg === "tp" ? "TP" : "SL"));
+    }
+    await afterCommittedClose(committed);
     return;
   }
 
@@ -1113,15 +1293,22 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       feesPaid: pnl.fees,
       closedAt: new Date(now),
     };
-    await recordClose(bot, view, close);
-    journalPaperClose(bot, view, close);
-    await pauseBot(
-      bot,
+    const paperCloseAttemptId = newMutationAttemptId("close", view.decision.id);
+    const committed = await commitConfirmedClose({
+      bot, view, close, family: "paper_g7", forcedPauseReason: "daily_loss_breaker",
+      journalEvents: buildPaperCloseJournal(bot, view, close, paperCloseAttemptId),
+      journalSizeBase: view.sizeBase,
+    });
+    if (committed.status === "conflict") return;
+    if (committed.status === "applied") await emitCommittedPause(
+      committed.bot,
       "daily_loss_breaker",
       `G7 daily-loss breaker: realized ${dailyRealized.toFixed(2)} + open MTM ${unrealized.toFixed(2)} breached −${DAILY_LOSS_BREAKER_PCT}% of allocation — paper position force-flattened`
     );
-    await notifyClosed(bot, close, "Circuit Breaker (Daily Loss)");
-    await afterClose(bot, close, { alreadyPaused: true });
+    if (committed.status === "applied") {
+      await notifyClosed(committed.bot, close, "Circuit Breaker (Daily Loss)");
+    }
+    await afterCommittedClose(committed, { pauseAlreadyEmitted: true });
   }
 }
 
@@ -1303,12 +1490,19 @@ async function closeLivePositionAndPause(
       feesPaid,
       closedAt: new Date(),
     };
-    journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: closeAttemptId,
-      cause: "protective", side: view.side, order, close });
-    await recordClose(bot, view, close);
-    await pauseBot(bot, args.pauseReason, args.detail);
-    await notifyClosed(bot, close, "Closed by Circuit Breaker");
-    await afterClose(bot, close, { alreadyPaused: true });
+    const committed = await commitConfirmedClose({
+      bot, view, close, family: "live_protective", forcedPauseReason: args.pauseReason,
+      journalEvents: buildLiveConfirmedCloseJournal({
+        bot, view, close, attemptId: closeAttemptId, cause: "protective", order,
+      }),
+      journalSizeBase: view.sizeBase,
+    });
+    if (committed.status === "conflict") return;
+    if (committed.status === "applied") {
+      await emitCommittedPause(committed.bot, args.pauseReason, args.detail);
+      await notifyClosed(committed.bot, close, "Closed by Circuit Breaker");
+    }
+    await afterCommittedClose(committed, { pauseAlreadyEmitted: true });
   } finally {
     releaseCloseClaim();
   }
@@ -1377,10 +1571,19 @@ export async function userInitiatedClose(
         feesPaid: pnl.fees,
         closedAt: new Date(),
       };
-      await recordClose(bot, view, close);
-      journalPaperClose(bot, view, close);
-      await notifyClosed(bot, close, "Closed by You");
-      await afterClose(bot, close, { alreadyPaused: false });
+      const paperCloseAttemptId = newMutationAttemptId("close", view.decision.id);
+      const committed = await commitConfirmedClose({
+        bot, view, close, family: "paper_user", forcedPauseReason: null,
+        journalEvents: buildPaperCloseJournal(bot, view, close, paperCloseAttemptId),
+        journalSizeBase: view.sizeBase,
+      });
+      if (committed.status === "conflict") {
+        return { ok: false, detail: `close transition conflict: ${committed.reason}; retry after state refresh` };
+      }
+      if (committed.status === "applied") {
+        await notifyClosed(committed.bot, close, "Closed by You");
+      }
+      await afterCommittedClose(committed);
       return { ok: true, closed: true, exitPrice, realizedPnl: pnl.netPnl };
     }
 
@@ -1516,11 +1719,23 @@ export async function userInitiatedClose(
       feesPaid,
       closedAt: new Date(),
     };
-    journalCloseAttempt({ bot, decisionId: view.decision.id, attemptId: attributedCloseAttemptId,
-      cause: "user_requested", side: view.side, order, close });
-    await recordClose(bot, view, close);
-    await notifyClosed(bot, close, "Closed by You");
-    await afterClose(bot, close, { alreadyPaused: false });
+    const committed = await commitConfirmedClose({
+      bot, view, close, family: "live_user", forcedPauseReason: null,
+      journalEvents: buildLiveConfirmedCloseJournal({
+        bot, view, close, attemptId: attributedCloseAttemptId, cause: "user_requested", order,
+      }),
+      journalSizeBase: view.sizeBase,
+    });
+    if (committed.status === "conflict") {
+      return {
+        ok: false,
+        detail: `close transition conflict: ${committed.reason}; venue close may have completed; reconciliation required`,
+      };
+    }
+    if (committed.status === "applied") {
+      await notifyClosed(committed.bot, close, "Closed by You");
+    }
+    await afterCommittedClose(committed);
     return { ok: true, closed: true, exitPrice: fillPrice, realizedPnl };
   } finally {
     releaseCloseClaim();
@@ -1623,26 +1838,35 @@ async function handleLiveClose(
     feesPaid: fills.avgExitPrice !== null ? totalFees : null,
     closedAt: new Date(),
   };
-  await recordClose(bot, view, close);
-  journalVenueDetectedClose(bot, view, close, fills.exitSize, detectedCloseAttemptId);
+  const closeFamily = exitReason === "liquidation" ? "liquidation" as const : "venue_detected" as const;
+  const committed = await commitConfirmedClose({
+    bot, view, close, family: closeFamily,
+    forcedPauseReason: exitReason === "liquidation" ? "liquidation" : null,
+    journalEvents: buildVenueDetectedCloseJournal(bot, view, close, fills.exitSize, detectedCloseAttemptId),
+    journalSizeBase: fills.exitSize,
+  });
+  if (committed.status === "conflict") return;
   bracketReplaceAttempted.delete(view.decision.id);
 
   if (exitReason === "liquidation") {
     // Plan §6: unattributable exit ⇒ treat as exchange-side liquidation, pause,
     // alert. (A manual close on the venue lands here too — pause + human eyes
     // is the safe response either way.)
-    await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "liquidation" });
-    clearAutoNext(bot.id);
+    clearAutoNext(committed.bot.id);
+    if (committed.status === "applied") {
     await notifyClosed(bot, close, `${getCloseReasonLabel("liquidation")} (or closed outside the app) — Bot Paused`);
-    await afterClose(bot, close, { alreadyPaused: true });
+    }
+    await afterCommittedClose(committed, { pauseAlreadyEmitted: true, suppressPauseNotification: true });
     return;
   }
 
-  console.log(
+  if (committed.status === "applied") {
+    console.log(
     `[AiTraderMonitor] Live close: bot ${bot.id.slice(0, 8)} ${view.side} ${bot.market} ${exitReason.toUpperCase()} @ ${fills.avgExitPrice?.toFixed(6)} pnl ${realizedPnl?.toFixed(2)}`
   );
-  await notifyClosed(bot, close, getCloseReasonLabel("tpsl", exitReason === "tp" ? "TP" : "SL"));
-  await afterClose(bot, close, { alreadyPaused: false });
+    await notifyClosed(committed.bot, close, getCloseReasonLabel("tpsl", exitReason === "tp" ? "TP" : "SL"));
+  }
+  await afterCommittedClose(committed);
   } finally {
     releaseCloseClaim();
   }

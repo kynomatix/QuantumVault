@@ -139,7 +139,10 @@ import {
   type InsertAiTraderDecision,
 } from "@shared/schema";
 import {
+  isConfirmedCloseReplayIdentityConflict,
+  isExactConfirmedCloseJournalBatch,
   isExecutionJournalConflict,
+  prepareConfirmedCloseJournalReplayInTransaction,
   prepareExecutionJournalEventsInTransaction,
   type JournalEventInput,
 } from "./ai-trader/execution-journal";
@@ -177,6 +180,56 @@ export interface AiTraderDirectLiveEntryTransitionParams {
   observedAt: Date;
   entryPrice?: number;
   sizeBase?: number;
+  journalEvents: readonly JournalEventInput[];
+}
+
+export type AiTraderConfirmedCloseTransitionConflict =
+  | "decision_state_conflict"
+  | "bot_state_conflict"
+  | "close_state_conflict"
+  | "journal_identity_conflict";
+
+export type AiTraderConfirmedCloseJournalResult = {
+  status: "appended" | "replayed" | "degraded";
+  failureCode: null | "validation_conflict" | "insert_failed";
+};
+
+export type AiTraderConfirmedCloseTransitionResult =
+  | {
+      status: "applied" | "replayed";
+      decision: AiTraderDecision;
+      bot: AiTraderBot;
+      closedTodayCount: number;
+      knownDailyRealizedPnl: number;
+      dailyRealizedComplete: boolean;
+      consecutiveLosses: number;
+      journal: AiTraderConfirmedCloseJournalResult;
+    }
+  | { status: "conflict"; reason: AiTraderConfirmedCloseTransitionConflict };
+
+export interface AiTraderConfirmedCloseTransitionParams {
+  botId: string;
+  decisionId: string;
+  expectedBotStatus: string;
+  expectedPauseReason: string | null;
+  side: "long" | "short";
+  sizeBase: number;
+  close: {
+    exitPrice: number | null;
+    exitReason: string;
+    realizedPnl: number | null;
+    feesPaid: number | null;
+    closedAt: Date;
+  };
+  isStopLossLoss: boolean;
+  forcedPauseReason: string | null;
+  dayStart: Date;
+  policy: {
+    recentClosedLimit: 60;
+    malfunctionTradesPerDay: number;
+    consecutiveSlLimit: number;
+    dailyLossBreakerPct: number;
+  };
   journalEvents: readonly JournalEventInput[];
 }
 
@@ -221,6 +274,12 @@ class AiTraderPaperEntryConflictError extends Error {
 
 class AiTraderDirectLiveEntryConflictError extends Error {
   constructor(readonly reason: AiTraderDirectLiveEntryTransitionConflict) {
+    super(reason);
+  }
+}
+
+class AiTraderConfirmedCloseConflictError extends Error {
+  constructor(readonly reason: AiTraderConfirmedCloseTransitionConflict) {
     super(reason);
   }
 }
@@ -936,6 +995,7 @@ export interface IStorage {
   transitionAiTraderState(params: { botId: string; expectedStatus: string; expectedPauseReason: string | null; nextStatus: string; nextPauseReason: string | null; decisionId?: string; expectedDecisionOutcome?: string | null; decisionOutcome?: string; botUpdates?: Partial<InsertAiTraderBot> & { trialStartedAt?: Date } }): Promise<AiTraderBot | undefined>;
   commitAiTraderPaperEntryTransition(params: AiTraderPaperEntryTransitionParams): Promise<AiTraderPaperEntryTransitionResult>;
   commitAiTraderDirectLiveEntryTransition(params: AiTraderDirectLiveEntryTransitionParams): Promise<AiTraderDirectLiveEntryTransitionResult>;
+  commitAiTraderConfirmedCloseTransition(params: AiTraderConfirmedCloseTransitionParams): Promise<AiTraderConfirmedCloseTransitionResult>;
   insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
@@ -6224,6 +6284,238 @@ export class DatabaseStorage implements IStorage {
       }
       if (isExecutionJournalConflict(error)) {
         return { status: "conflict", reason: "journal_state_conflict" };
+      }
+      throw error;
+    }
+  }
+
+  async commitAiTraderConfirmedCloseTransition(
+    params: AiTraderConfirmedCloseTransitionParams,
+  ): Promise<AiTraderConfirmedCloseTransitionResult> {
+    const finiteNullable = (value: number | null) => value === null || Number.isFinite(value);
+    if (!params.botId || !params.decisionId || !params.close.exitReason
+        || !Number.isFinite(params.sizeBase) || params.sizeBase <= 0
+        || !finiteNullable(params.close.exitPrice)
+        || !finiteNullable(params.close.realizedPnl)
+        || !finiteNullable(params.close.feesPaid)
+        || !(params.close.closedAt instanceof Date) || !Number.isFinite(params.close.closedAt.getTime())
+        || !(params.dayStart instanceof Date) || !Number.isFinite(params.dayStart.getTime())
+        || params.policy.recentClosedLimit !== 60
+        || !Number.isFinite(params.policy.malfunctionTradesPerDay)
+        || !Number.isFinite(params.policy.consecutiveSlLimit)
+        || !Number.isFinite(params.policy.dailyLossBreakerPct)) {
+      throw new Error("ai_trader_confirmed_close_invalid_input");
+    }
+
+    const expectedClose = {
+      exitPrice: params.close.exitPrice === null ? null : params.close.exitPrice.toFixed(8),
+      exitReason: params.close.exitReason,
+      realizedPnl: params.close.realizedPnl === null ? null : params.close.realizedPnl.toFixed(2),
+      feesPaid: params.close.feesPaid === null ? null : params.close.feesPaid.toFixed(6),
+      closedAtMs: params.close.closedAt.getTime(),
+    };
+    const journalBatchIsExact = isExactConfirmedCloseJournalBatch(params.journalEvents, {
+      botId: params.botId,
+      decisionId: params.decisionId,
+      side: params.side,
+      sizeBase: params.sizeBase,
+      close: params.close,
+    });
+
+    try {
+      return await db.transaction(async (tx) => {
+        // All close writers serialize bot -> decision. Venue mutation and every
+        // external effect have already happened or remain outside this method.
+        const [lockedBot] = await tx.select().from(aiTraderBots)
+          .where(eq(aiTraderBots.id, params.botId))
+          .limit(1)
+          .for("update");
+        if (!lockedBot) throw new AiTraderConfirmedCloseConflictError("bot_state_conflict");
+
+        const [decision] = await tx.select().from(aiTraderDecisions)
+          .where(and(
+            eq(aiTraderDecisions.id, params.decisionId),
+            eq(aiTraderDecisions.botId, params.botId),
+          ))
+          .limit(1)
+          .for("update");
+        if (!decision) throw new AiTraderConfirmedCloseConflictError("decision_state_conflict");
+
+        const decisionMatchesClose = decision.outcome === "executed"
+          && decision.closedAt !== null
+          && new Date(decision.closedAt).getTime() === expectedClose.closedAtMs
+          && (decision.exitPrice ?? null) === expectedClose.exitPrice
+          && (decision.exitReason ?? null) === expectedClose.exitReason
+          && (decision.realizedPnl ?? null) === expectedClose.realizedPnl
+          && (decision.feesPaid ?? null) === expectedClose.feesPaid;
+
+        const deriveClosedState = async () => {
+          const recentClosed = await tx.select().from(aiTraderDecisions)
+            .where(and(
+              eq(aiTraderDecisions.botId, params.botId),
+              isNotNull(aiTraderDecisions.closedAt),
+            ))
+            .orderBy(desc(aiTraderDecisions.decidedAt))
+            .limit(params.policy.recentClosedLimit);
+          const closedToday = recentClosed.filter((row) => row.closedAt !== null
+            && new Date(row.closedAt).getTime() >= params.dayStart.getTime());
+          let knownDailyRealizedPnl = 0;
+          let dailyRealizedComplete = true;
+          for (const row of closedToday) {
+            const value = row.realizedPnl === null ? null : Number(row.realizedPnl);
+            if (value === null || !Number.isFinite(value)) {
+              dailyRealizedComplete = false;
+            } else {
+              knownDailyRealizedPnl += value;
+            }
+          }
+          return { closedToday, knownDailyRealizedPnl, dailyRealizedComplete };
+        };
+
+        if (decision.closedAt !== null) {
+          if (!decisionMatchesClose) {
+            throw new AiTraderConfirmedCloseConflictError("close_state_conflict");
+          }
+          if (!journalBatchIsExact) {
+            throw new AiTraderConfirmedCloseConflictError("journal_identity_conflict");
+          }
+          try {
+            await prepareConfirmedCloseJournalReplayInTransaction(tx, params.journalEvents);
+          } catch (error) {
+            if (isConfirmedCloseReplayIdentityConflict(error) || isExecutionJournalConflict(error)) {
+              throw new AiTraderConfirmedCloseConflictError("journal_identity_conflict");
+            }
+            throw error;
+          }
+          const derived = await deriveClosedState();
+          return {
+            status: "replayed",
+            decision,
+            bot: lockedBot,
+            closedTodayCount: derived.closedToday.length,
+            knownDailyRealizedPnl: derived.knownDailyRealizedPnl,
+            dailyRealizedComplete: derived.dailyRealizedComplete,
+            consecutiveLosses: lockedBot.consecutiveLosses ?? 0,
+            journal: { status: "replayed", failureCode: null },
+          };
+        }
+
+        if (decision.outcome !== "executed") {
+          throw new AiTraderConfirmedCloseConflictError("decision_state_conflict");
+        }
+        if (lockedBot.status !== params.expectedBotStatus
+            || (lockedBot.pauseReason ?? null) !== params.expectedPauseReason) {
+          throw new AiTraderConfirmedCloseConflictError("bot_state_conflict");
+        }
+
+        const [updatedDecision] = await tx.update(aiTraderDecisions)
+          .set({
+            exitPrice: expectedClose.exitPrice,
+            exitReason: expectedClose.exitReason,
+            realizedPnl: expectedClose.realizedPnl,
+            feesPaid: expectedClose.feesPaid,
+            closedAt: params.close.closedAt,
+          } as any)
+          .where(and(
+            eq(aiTraderDecisions.id, params.decisionId),
+            eq(aiTraderDecisions.botId, params.botId),
+            eq(aiTraderDecisions.outcome, "executed"),
+            isNull(aiTraderDecisions.closedAt),
+          ))
+          .returning();
+        if (!updatedDecision) {
+          throw new AiTraderConfirmedCloseConflictError("decision_state_conflict");
+        }
+
+        const derived = await deriveClosedState();
+        const consecutiveLosses = params.isStopLossLoss
+          ? (lockedBot.consecutiveLosses ?? 0) + 1
+          : 0;
+        const allocation = Number(lockedBot.allocatedUsdc ?? 0);
+        let targetStatus = "idle";
+        let targetPauseReason: string | null = null;
+        if (params.forcedPauseReason !== null) {
+          targetStatus = "paused";
+          targetPauseReason = params.forcedPauseReason;
+        } else if (derived.closedToday.length >= params.policy.malfunctionTradesPerDay) {
+          targetStatus = "paused";
+          targetPauseReason = "malfunction_ceiling";
+        } else if (lockedBot.riskProfile !== "degen"
+            && consecutiveLosses >= params.policy.consecutiveSlLimit) {
+          targetStatus = "paused";
+          targetPauseReason = "consecutive_losses";
+        } else if (lockedBot.riskProfile !== "degen"
+            && Number.isFinite(allocation) && allocation > 0
+            && derived.knownDailyRealizedPnl
+              <= -(params.policy.dailyLossBreakerPct / 100) * allocation) {
+          targetStatus = "paused";
+          targetPauseReason = "daily_loss_breaker";
+        }
+
+        const pausePredicate = params.expectedPauseReason === null
+          ? isNull(aiTraderBots.pauseReason)
+          : eq(aiTraderBots.pauseReason, params.expectedPauseReason);
+        const [updatedBot] = await tx.update(aiTraderBots)
+          .set({
+            status: targetStatus,
+            pauseReason: targetPauseReason,
+            dailyRealizedPnl: derived.dailyRealizedComplete
+              ? derived.knownDailyRealizedPnl.toFixed(2)
+              : null,
+            consecutiveLosses,
+            updatedAt: sql`NOW()`,
+          } as any)
+          .where(and(
+            eq(aiTraderBots.id, params.botId),
+            eq(aiTraderBots.status, params.expectedBotStatus),
+            pausePredicate,
+          ))
+          .returning();
+        if (!updatedBot) {
+          throw new AiTraderConfirmedCloseConflictError("bot_state_conflict");
+        }
+
+        let journal: AiTraderConfirmedCloseJournalResult;
+        if (!journalBatchIsExact) {
+          journal = { status: "degraded", failureCode: "validation_conflict" };
+        } else {
+          let preparationCompleted = false;
+          try {
+            const journalStatus = await tx.transaction(async (journalTx) => {
+              const prepared = await prepareExecutionJournalEventsInTransaction(
+                journalTx,
+                params.journalEvents,
+                { requireExactBatchReplay: true },
+              );
+              preparationCompleted = true;
+              await prepared.insert();
+              return prepared.status;
+            });
+            journal = {
+              status: journalStatus === "replayed" ? "replayed" : "appended",
+              failureCode: null,
+            };
+          } catch (error) {
+            journal = isExecutionJournalConflict(error) && !preparationCompleted
+              ? { status: "degraded", failureCode: "validation_conflict" }
+              : { status: "degraded", failureCode: "insert_failed" };
+          }
+        }
+
+        return {
+          status: "applied",
+          decision: updatedDecision,
+          bot: updatedBot,
+          closedTodayCount: derived.closedToday.length,
+          knownDailyRealizedPnl: derived.knownDailyRealizedPnl,
+          dailyRealizedComplete: derived.dailyRealizedComplete,
+          consecutiveLosses,
+          journal,
+        };
+      });
+    } catch (error) {
+      if (error instanceof AiTraderConfirmedCloseConflictError) {
+        return { status: "conflict", reason: error.reason };
       }
       throw error;
     }

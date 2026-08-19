@@ -224,6 +224,107 @@ export function isExecutionJournalConflict(error: unknown): boolean {
     || error.message === "execution_journal_entry_command_lineage_conflict";
 }
 
+export function isConfirmedCloseReplayIdentityConflict(error: unknown): boolean {
+  return error instanceof Error
+    && error.message === "execution_journal_close_replay_identity_conflict";
+}
+
+export type ConfirmedCloseJournalBatchExpectation = {
+  botId: string;
+  decisionId: string;
+  side: "long" | "short";
+  sizeBase: number;
+  close: {
+    exitPrice: number | null;
+    realizedPnl: number | null;
+    feesPaid: number | null;
+    closedAt: Date;
+  };
+};
+
+/**
+ * Strict shape check for a journal batch which accompanies an already-confirmed
+ * close. This is deliberately pure: callers can degrade the journal without
+ * allowing malformed evidence to veto the authoritative close transition.
+ */
+export function isExactConfirmedCloseJournalBatch(
+  inputs: readonly JournalEventInput[],
+  expected: ConfirmedCloseJournalBatchExpectation,
+): boolean {
+  if (inputs.length === 0
+      || !Number.isFinite(expected.sizeBase) || expected.sizeBase <= 0
+      || !(expected.close.closedAt instanceof Date)
+      || !Number.isFinite(expected.close.closedAt.getTime())) return false;
+  const first = inputs[0];
+  const allowedCause = first.cause === "paper" || first.cause === "protective"
+    || first.cause === "user_requested" || first.cause === "venue_detected";
+  if (!allowedCause || first.action !== "close") return false;
+  const expectedTypes = first.cause === "paper" || first.cause === "venue_detected"
+    ? ["attempt_claimed", "fill_observed", "close_terminal_confirmed"]
+    : ["attempt_claimed", "broadcast_attempted", "broadcast_result", "fill_observed", "close_terminal_confirmed"];
+  if (inputs.length !== expectedTypes.length
+      || inputs.some((event, index) => event.eventType !== expectedTypes[index])) return false;
+  const sameNullable = (left: unknown, right: unknown) => (left ?? null) === (right ?? null);
+  for (const event of inputs) {
+    if (event.attemptId !== first.attemptId
+        || event.botId !== expected.botId
+        || event.decisionId !== expected.decisionId
+        || event.action !== "close"
+        || event.cause !== first.cause
+        || event.protocol !== first.protocol
+        || event.accountScope !== first.accountScope
+        || !sameNullable(event.accountRef, first.accountRef)
+        || event.market !== first.market
+        || event.side !== expected.side
+        || !(event.observedAt instanceof Date)
+        || event.observedAt.getTime() !== expected.close.closedAt.getTime()) return false;
+  }
+  const terminals = inputs.filter((event) => event.eventType === "close_terminal_confirmed");
+  if (terminals.length !== 1 || inputs.some((event) => event.eventType === "close_terminal_failed")) return false;
+  const terminal = terminals[0];
+  const fill = inputs.find((event) => event.eventType === "fill_observed");
+  if (!fill) return false;
+  for (const event of [fill, terminal]) {
+    if (!sameNullable(event.price, expected.close.exitPrice)
+        || Number(event.sizeBase) !== expected.sizeBase
+        || !sameNullable(event.fee, expected.close.feesPaid)
+        || !sameNullable(event.realizedPnl, expected.close.realizedPnl)
+        || (event.failureCode ?? null) !== null) return false;
+  }
+  return true;
+}
+
+/**
+ * Replay is rooted in the decision's retained close terminal, not the advisory
+ * lock keyed by the caller's attempt. A missing or different retained terminal
+ * cannot prove identity and is therefore a typed replay conflict.
+ */
+export async function prepareConfirmedCloseJournalReplayInTransaction(
+  tx: ExecutionJournalTransaction,
+  inputs: readonly JournalEventInput[],
+): Promise<PreparedExecutionJournalAppend> {
+  const first = inputs[0];
+  if (!first || first.decisionId === null) {
+    throw new Error("execution_journal_close_replay_identity_conflict");
+  }
+  const terminals = await tx.select({ attemptId: aiTraderExecutionEvents.attemptId })
+    .from(aiTraderExecutionEvents)
+    .where(and(
+      eq(aiTraderExecutionEvents.decisionId, first.decisionId),
+      eq(aiTraderExecutionEvents.action, "close"),
+      eq(aiTraderExecutionEvents.eventType, "close_terminal_confirmed"),
+    ))
+    .limit(2);
+  if (terminals.length !== 1 || terminals[0].attemptId !== first.attemptId) {
+    throw new Error("execution_journal_close_replay_identity_conflict");
+  }
+  return prepareExecutionJournalEventsInTransaction(
+    tx,
+    inputs,
+    { requireExactBatchReplay: true },
+  );
+}
+
 /**
  * Validate and lock one journal batch inside a caller-owned transaction.
  * The returned insert step deliberately runs after the caller's row predicates,
