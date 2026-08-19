@@ -21,7 +21,13 @@ function input(overrides: Partial<AiTraderAuthorityInput> = {}): AiTraderAuthori
   return {
     action: "analyze",
     source: "external_http",
-    bot: { id: "bot-1", status: "idle", pauseReason: null },
+    bot: {
+      id: "bot-1",
+      status: "idle",
+      pauseReason: null,
+      graduationState: "failed",
+      paperMode: true,
+    },
     requestedDecisionId: null,
     decision: null,
     unresolvedDecisionCount: 0,
@@ -46,7 +52,13 @@ function matrixInput(
   return input({
     action,
     source,
-    bot: { id: "bot-1", status, pauseReason: status === "paused" ? "user_requested" : null },
+    bot: {
+      id: "bot-1",
+      status,
+      pauseReason: status === "paused" ? "user_requested" : null,
+      graduationState: "failed",
+      paperMode: true,
+    },
     requestedDecisionId: needsDecision ? "d-1" : null,
     decision: needsDecision
       ? decision({ decidedAtMs: action === "proposal_expire" ? NOW - AI_TRADER_PROPOSAL_EXPIRY_MS - 1 : NOW - 1_000 })
@@ -114,9 +126,9 @@ describe("evaluateAiTraderStateAuthority", () => {
 
   it("denies malformed overlays for new risk while preserving exposure-bound close/cancel", () => {
     const malformed = [
-      { id: "bot-1", status: "idle", pauseReason: "user_requested" },
-      { id: "bot-1", status: "paused", pauseReason: null },
-      { id: "bot-1", status: "future", pauseReason: null },
+      { id: "bot-1", status: "idle", pauseReason: "user_requested", graduationState: "failed", paperMode: true },
+      { id: "bot-1", status: "paused", pauseReason: null, graduationState: "failed", paperMode: true },
+      { id: "bot-1", status: "future", pauseReason: null, graduationState: "failed", paperMode: true },
     ];
     for (const bot of malformed) {
       expect(evaluateAiTraderStateAuthority(input({ bot }))).toEqual({ allowed: false, reason: "malformed_authority" });
@@ -148,9 +160,69 @@ describe("evaluateAiTraderStateAuthority", () => {
     expect(evaluateAiTraderStateAuthority(input({
       action: "resume",
       source: "external_http",
-      bot: { id: "bot-1", status: "paused", pauseReason: "position_unconfirmed_expired" },
+      bot: {
+        id: "bot-1",
+        status: "paused",
+        pauseReason: "position_unconfirmed_expired",
+        graduationState: "failed",
+        paperMode: true,
+      },
       decision: decision({ outcome: "aborted_order" }),
       unresolvedDecisionCount: 1,
     })).allowed).toBe(false);
+  });
+
+  it("admits exactly one expired orphan only with its exact terminalization identity", () => {
+    const verdict = evaluateAiTraderStateAuthority(input({
+      action: "restart_trial",
+      requestedDecisionId: "d-1",
+      decision: decision({ decidedAtMs: NOW - AI_TRADER_PROPOSAL_EXPIRY_MS - 1 }),
+      unresolvedDecisionCount: 1,
+    }));
+    expect(verdict).toEqual({
+      allowed: true,
+      requiredClaim: "conditional_lifecycle_transition",
+      decisionTerminalization: {
+        decisionId: "d-1",
+        outcome: "aborted_trial_restart",
+      },
+    });
+  });
+
+  it("keeps fresh duplicate mismatched and malformed orphan decisions denied", () => {
+    const expired = decision({ decidedAtMs: NOW - AI_TRADER_PROPOSAL_EXPIRY_MS - 1 });
+    const candidates: AiTraderAuthorityInput[] = [
+      input({
+        action: "restart_trial", requestedDecisionId: "d-1",
+        decision: decision({ decidedAtMs: NOW - AI_TRADER_PROPOSAL_EXPIRY_MS }),
+        unresolvedDecisionCount: 1,
+      }),
+      input({ action: "restart_trial", requestedDecisionId: "d-1", decision: expired, unresolvedDecisionCount: 2 }),
+      input({ action: "restart_trial", requestedDecisionId: "other", decision: expired, unresolvedDecisionCount: 1 }),
+      input({
+        action: "restart_trial", requestedDecisionId: "d-1",
+        decision: decision({ botId: "other", decidedAtMs: NOW - AI_TRADER_PROPOSAL_EXPIRY_MS - 1 }),
+        unresolvedDecisionCount: 1,
+      }),
+      input({
+        action: "restart_trial", requestedDecisionId: "d-1",
+        decision: decision({ decidedAtMs: Number.NaN }), unresolvedDecisionCount: 1,
+      }),
+    ];
+    for (const candidate of candidates) {
+      expect(evaluateAiTraderStateAuthority(candidate).allowed).toBe(false);
+    }
+  });
+
+  it("restricts trial restart to failed paper bots with flat truth", () => {
+    const base = input({ action: "restart_trial" });
+    expect(evaluateAiTraderStateAuthority(base).allowed).toBe(true);
+    expect(evaluateAiTraderStateAuthority({
+      ...base, bot: { ...base.bot, graduationState: "in_trial" },
+    }).allowed).toBe(false);
+    expect(evaluateAiTraderStateAuthority({
+      ...base, bot: { ...base.bot, paperMode: false },
+    }).allowed).toBe(false);
+    expect(evaluateAiTraderStateAuthority({ ...base, positionTruth: "maybe_open" }).allowed).toBe(false);
   });
 });

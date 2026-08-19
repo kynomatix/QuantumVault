@@ -446,6 +446,134 @@ describe("AI Trader manual analyze position-authority inputs", () => {
   });
 });
 
+function failedTrialBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
+  return {
+    ...fixedBot(true),
+    id: "failed-trial-route",
+    graduationState: "failed",
+    status: "idle",
+    pauseReason: null,
+    ...overrides,
+  } as AiTraderBot;
+}
+
+describe("AI Trader restart-trial stale decision recovery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getOpenDecisionsMock.mockResolvedValue([]);
+    getUnresolvedDecisionsMock.mockResolvedValue([]);
+    transitionStateMock.mockImplementation(async ({ botUpdates }: { botUpdates?: Record<string, unknown> }) => ({
+      ...failedTrialBot(),
+      ...(botUpdates ?? {}),
+      status: "idle",
+      pauseReason: null,
+    }));
+  });
+
+  function restartRequest() {
+    return {
+      params: { id: "failed-trial-route" },
+      session: { walletAddress: "WALLET_ROUTE" },
+      body: {}, query: {}, headers: {},
+    };
+  }
+
+  it("atomically terminalizes the exact expired orphan while resetting the failed trial", async () => {
+    const bot = failedTrialBot();
+    const decidedAt = new Date(Date.now() - 11 * 60_000);
+    getBotMock.mockResolvedValue(bot);
+    getUnresolvedDecisionsMock.mockResolvedValue([{
+      id: "expired-orphan",
+      botId: bot.id,
+      outcome: null,
+      decidedAt,
+      closedAt: null,
+    }]);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/restart-trial", restartRequest());
+
+    expect(result.statusCode, JSON.stringify(result.body)).toBe(200);
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: bot.id,
+      expectedStatus: "idle",
+      expectedPauseReason: null,
+      nextStatus: "idle",
+      nextPauseReason: null,
+      decisionId: "expired-orphan",
+      expectedDecisionOutcome: null,
+      decisionOutcome: "aborted_trial_restart",
+      botUpdates: expect.objectContaining({
+        graduationState: "in_trial",
+        dailyRealizedPnl: "0",
+        consecutiveLosses: 0,
+        trialStartedAt: expect.any(Date),
+      }),
+    }));
+  });
+
+  it("preserves the zero-unresolved restart without inventing a decision mutation", async () => {
+    getBotMock.mockResolvedValue(failedTrialBot());
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/restart-trial", restartRequest());
+
+    expect(result.statusCode, JSON.stringify(result.body)).toBe(200);
+    const transition = transitionStateMock.mock.calls[0][0];
+    expect(transition).not.toHaveProperty("decisionId");
+    expect(transition).not.toHaveProperty("decisionOutcome");
+  });
+
+  it("denies fresh duplicate open non-failed and live cases without a transition", async () => {
+    const freshDecision = {
+      id: "fresh-orphan",
+      botId: "failed-trial-route",
+      outcome: null,
+      decidedAt: new Date(),
+      closedAt: null,
+    };
+    const cases = [
+      { bot: failedTrialBot(), open: [], unresolved: [freshDecision] },
+      { bot: failedTrialBot(), open: [], unresolved: [freshDecision, { ...freshDecision, id: "duplicate" }] },
+      { bot: failedTrialBot(), open: [{ id: "open-position" }], unresolved: [] },
+      { bot: failedTrialBot({ graduationState: "in_trial" }), open: [], unresolved: [] },
+      { bot: failedTrialBot({ paperMode: false }), open: [], unresolved: [] },
+    ];
+    for (const candidate of cases) {
+      vi.clearAllMocks();
+      getBotMock.mockResolvedValue(candidate.bot);
+      getOpenDecisionsMock.mockResolvedValue(candidate.open);
+      getUnresolvedDecisionsMock.mockResolvedValue(candidate.unresolved);
+      const built = buildApp();
+      registerAiTraderRoutes(built.app);
+      const result = await invoke(built.routes, "POST /api/ai-trader/:id/restart-trial", restartRequest());
+      expect(result.statusCode).toBe(409);
+      expect(transitionStateMock).not.toHaveBeenCalled();
+    }
+  });
+
+  it("returns 409 when the atomic decision-and-bot transition loses its predicate", async () => {
+    const bot = failedTrialBot();
+    getBotMock.mockResolvedValue(bot);
+    getUnresolvedDecisionsMock.mockResolvedValue([{
+      id: "expired-orphan",
+      botId: bot.id,
+      outcome: null,
+      decidedAt: new Date(Date.now() - 11 * 60_000),
+      closedAt: null,
+    }]);
+    transitionStateMock.mockResolvedValue(undefined);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/restart-trial", restartRequest());
+
+    expect(result).toMatchObject({ statusCode: 409, body: { error: "state_denied" } });
+  });
+});
+
 describe("AI Trader scanner status reporting", () => {
   it("status distinguishes healthy zero setups from diagnostic-only coverage", async () => {
     const healthy = {
