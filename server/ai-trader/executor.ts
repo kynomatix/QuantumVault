@@ -27,7 +27,11 @@ import { getUmkForWebhook, decryptAgentKeyStrict, verifyBotPolicyHmac, healExecu
 import { resolveAiTraderSubaccountSigner } from "./signing";
 import { sendTradeNotification } from "../notification-service";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
-import { validateFeeRateQuote, type ProtocolAdapter } from "../protocol/adapter";
+import {
+  builderAttachmentFromFeeQuote,
+  validateFeeRateQuote,
+  type ProtocolAdapter,
+} from "../protocol/adapter";
 import { isUnconfirmedLandingVerdict } from "../protocol/tx-verdicts";
 import type { ClampedDecision } from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
@@ -39,7 +43,7 @@ import {
   evaluateAiTraderStateAuthority,
   type AiTraderAuthoritySource,
 } from "./state-authority";
-import type { OrderResult } from "../protocol/protocol-types";
+import type { BuilderAttachmentPolicy, OrderResult } from "../protocol/protocol-types";
 import { appendTelemetry } from "../telemetry";
 import {
   appendRequiredEntryPrebroadcast,
@@ -400,6 +404,7 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     stopLossPrice: stopLossPrice as number,
     takeProfitPrice: takeProfitPrice as number,
     feeRateAccount: feeRateQuote.account,
+    builderAttachment: builderAttachmentFromFeeQuote(feeRateQuote),
     journalObservedAt: liveJournalObservedAt as Date,
     expectedAuthorityStatus,
   });
@@ -478,6 +483,8 @@ interface LiveEntryNumbers {
   takeProfitPrice: number;
   /** Root venue account proven by the retained admission quote. */
   feeRateAccount: string;
+  /** Exact attach/suppress policy retained by the validated admission quote. */
+  builderAttachment: BuilderAttachmentPolicy;
   /** Durable decision-time anchor used for every event in this entry attempt. */
   journalObservedAt: Date;
   /** Exact state that is authorized to fail before the execution claim. */
@@ -700,6 +707,7 @@ async function executeLiveEntry(
         subaccountId,
         maxSlippagePct: ENTRY_MAX_SLIPPAGE_PCT,
         leverage: n.leverage,
+        builderAttachment: n.builderAttachment,
       });
     } catch (err) {
       orderResult = { success: false, status: "rejected" as const, error: err instanceof Error ? err.message : String(err) };
@@ -875,6 +883,7 @@ async function executeLiveEntry(
       bot, adapter, keyTrio, subaccountId,
       stopLossPrice: n.stopLossPrice,
       takeProfitPrice: n.takeProfitPrice,
+      builderAttachment: n.builderAttachment,
     });
     if (!bracketOk.ok) {
       safeAppendExecutionEvents([entryOrderEvent]);
@@ -957,8 +966,9 @@ async function placeAndVerifyBracket(args: {
   subaccountId: string | undefined;
   stopLossPrice: number;
   takeProfitPrice: number;
+  builderAttachment: BuilderAttachmentPolicy;
 }): Promise<{ ok: true } | { ok: false; detail: string }> {
-  const { bot, adapter, keyTrio, subaccountId, stopLossPrice, takeProfitPrice } = args;
+  const { bot, adapter, keyTrio, subaccountId, stopLossPrice, takeProfitPrice, builderAttachment } = args;
 
   switch (bot.stopPolicy) {
     case "static":
@@ -974,6 +984,7 @@ async function placeAndVerifyBracket(args: {
           stopLossPrice,
           takeProfitPrice,
           subaccountId,
+          builderAttachment,
         });
       } catch (err) {
         return { ok: false, detail: `setTpSl threw: ${err instanceof Error ? err.message : String(err)}` };

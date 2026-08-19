@@ -9,6 +9,7 @@ import {
 } from '../../server/protocol/adapter.js';
 import type { MarketOrderParams, OrderResult } from '../../server/protocol/protocol-types.js';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
+import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
 
 const NOW = 1_800_000_000_000;
 const EXPECTED: FeeRateQuoteExpectedIdentity = {
@@ -59,7 +60,7 @@ function accountResponse(overrides: Record<string, unknown> = {}): Record<string
 function marketOrder(overrides: Partial<MarketOrderParams> = {}): MarketOrderParams {
   return {
     agentPublicKey: 'main-account',
-    agentSecretKey: new Uint8Array([1, 2, 3]),
+    agentSecretKey: new Uint8Array(64),
     mainWalletAddress: 'owner-wallet',
     internalSymbol: 'BTC-PERP',
     side: 'long',
@@ -274,13 +275,21 @@ describe('PacificaAdapter fee-rate authority', () => {
     })).resolves.toEqual({ availability: 'unavailable', reason: 'identity_mismatch' });
   });
 
-  it('never substitutes builderMaxFeeRate when the configured builder may attach', async () => {
+  it('includes the fresh actual builder rate only when overview and approval prove it', async () => {
     const adapter = new PacificaAdapter({
       baseUrl: 'http://test-pacifica.invalid',
       builderCode: 'QuantumVault',
+      referralAddress: 'public-builder-owner',
       builderMaxFeeRate: '0.001',
     });
-    const get = vi.spyOn(adapter as any, 'get').mockResolvedValue(accountResponse());
+    const get = vi.spyOn(adapter as any, 'get').mockImplementation(async (path: string) => {
+      if (path === '/account') return accountResponse();
+      if (path === '/builder/overview') return [{ builder_code: 'QuantumVault', fee_rate: '0.001' }];
+      if (path === '/account/builder_codes/approvals') {
+        return [{ builder_code: 'QuantumVault', max_fee_rate: '0.002' }];
+      }
+      throw new Error(`unexpected path ${path}`);
+    });
 
     const result = await adapter.getFeeRateQuote({
       account: 'main-account',
@@ -288,24 +297,131 @@ describe('PacificaAdapter fee-rate authority', () => {
       liquidityRole: 'taker',
     });
 
-    expect(get).toHaveBeenCalledOnce();
-    expect(result).toEqual({ availability: 'unavailable', reason: 'builder_rate_unknown' });
-    expect(result).not.toHaveProperty('baseRate');
-    expect(result).not.toHaveProperty('effectiveRate');
+    expect(get).toHaveBeenNthCalledWith(2, '/builder/overview', {
+      account: 'public-builder-owner',
+    }, { priority: 'critical', cachePolicy: 'fresh-required' });
+    expect(get).toHaveBeenNthCalledWith(3, '/account/builder_codes/approvals', {
+      account: 'main-account',
+    }, { priority: 'critical', cachePolicy: 'fresh-required' });
+    expect(result).toMatchObject({
+      availability: 'available',
+      baseRate: 0.0007,
+      builder: {
+        status: 'included',
+        code: 'QuantumVault',
+        rate: 0.001,
+        provenance: 'pacifica:/builder/overview.fee_rate:fresh-required',
+      },
+    });
+    expect(result.availability === 'available' ? result.effectiveRate : Number.NaN).toBeCloseTo(0.0017, 12);
   });
 
-  it('also fails closed for a caller-supplied builder code', async () => {
+  it('accepts numeric venue decimals without treating the configured approval max as the charge', async () => {
     const adapter = new PacificaAdapter({
-      baseUrl: 'http://test-pacifica.invalid',
-      builderCode: undefined,
+      baseUrl: 'http://test-pacifica.invalid', builderCode: 'QuantumVault',
+      referralAddress: 'public-builder-owner', builderMaxFeeRate: '9.999',
     });
-    vi.spyOn(adapter as any, 'get').mockResolvedValue(accountResponse());
-    await expect(adapter.getFeeRateQuote({
+    vi.spyOn(adapter as any, 'get').mockImplementation(async (path: string) => {
+      if (path === '/account') return accountResponse({ maker_fee: 0.0002, taker_fee: 0.0007 });
+      if (path === '/builder/overview') return [{ builder_code: 'QuantumVault', fee_rate: 0.001 }];
+      return [{ builder_code: 'QuantumVault', max_fee_rate: 0.002 }];
+    });
+    const result = await adapter.getFeeRateQuote({
       account: 'main-account',
       subaccountId: 'sub-1',
       liquidityRole: 'taker',
-      builderCode: 'some-builder',
-    })).resolves.toEqual({ availability: 'unavailable', reason: 'builder_rate_unknown' });
+    });
+    expect(result).toMatchObject({ builder: { rate: 0.001 } });
+    expect(result.availability === 'available' ? result.effectiveRate : Number.NaN).toBeCloseTo(0.0017, 12);
+  });
+
+  it.each([
+    ['builder_owner_unconfigured', 'owner-missing'],
+    ['overview_read_failed', 'overview-throw'],
+    ['overview_malformed', 'overview-malformed'],
+    ['overview_code_mismatch', 'overview-mismatch'],
+    ['approval_read_failed', 'approval-throw'],
+    ['approval_malformed', 'approval-malformed'],
+    ['approval_missing', 'approval-missing'],
+    ['approval_below_rate', 'approval-low'],
+  ])('suppresses builder attribution without blocking the base quote: %s', async (reason, mode) => {
+    const adapter = new PacificaAdapter({
+      baseUrl: 'http://test-pacifica.invalid',
+      builderCode: 'QuantumVault',
+      referralAddress: mode === 'owner-missing' ? undefined : 'public-builder-owner',
+      builderMaxFeeRate: '9.999',
+    });
+    vi.spyOn(adapter as any, 'get').mockImplementation(async (path: string) => {
+      if (path === '/account') return accountResponse();
+      if (path === '/builder/overview') {
+        if (mode === 'overview-throw') throw new Error('overview unavailable');
+        if (mode === 'overview-malformed') return { builder_code: 'QuantumVault', fee_rate: '0.001' };
+        if (mode === 'overview-mismatch') return [{ builder_code: 'Other', fee_rate: '0.001' }];
+        return [{ builder_code: 'QuantumVault', fee_rate: '0.001' }];
+      }
+      if (mode === 'approval-throw') throw new Error('approval unavailable');
+      if (mode === 'approval-malformed') return { builder_code: 'QuantumVault', max_fee_rate: '0.002' };
+      if (mode === 'approval-missing') return [];
+      if (mode === 'approval-low') return [{ builder_code: 'QuantumVault', max_fee_rate: '0.0005' }];
+      throw new Error(`unexpected path ${path}`);
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const result = await adapter.getFeeRateQuote({
+        account: 'main-account', subaccountId: 'sub-1', liquidityRole: 'taker',
+      });
+      expect(result).toMatchObject({
+        availability: 'available', baseRate: 0.0007, effectiveRate: 0.0007,
+        builder: { status: 'absent' },
+      });
+      expect(warn).toHaveBeenCalledWith(`[PacificaBuilderSuppression] reason=${reason} count=1`);
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('main-account');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('0.0007');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('bounds immediate suppression alerts to the first occurrence per reason in a telemetry window', async () => {
+    const adapter = new PacificaAdapter({
+      baseUrl: 'http://test-pacifica.invalid',
+      builderCode: 'QuantumVault',
+    });
+    vi.spyOn(adapter as any, 'get').mockResolvedValue(accountResponse());
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const request = { account: 'main-account', subaccountId: 'sub-1', liquidityRole: 'taker' as const };
+      await adapter.getFeeRateQuote(request);
+      await adapter.getFeeRateQuote(request);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        '[PacificaBuilderSuppression] reason=builder_owner_unconfigured count=1',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps explicit caller builder demand fail-closed when that requested code is unprovable', async () => {
+    const adapter = new PacificaAdapter({
+      baseUrl: 'http://test-pacifica.invalid',
+      builderCode: 'QuantumVault',
+      referralAddress: 'public-builder-owner',
+    });
+    vi.spyOn(adapter as any, 'get').mockImplementation(async (path: string) => {
+      if (path === '/account') return accountResponse();
+      if (path === '/builder/overview') return [{ builder_code: 'QuantumVault', fee_rate: '0.001' }];
+      return [];
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await expect(resolveFeeRateQuote(adapter, {
+        account: 'main-account', subaccountId: 'sub-1', liquidityRole: 'taker',
+        builderCode: 'some-builder',
+      })).resolves.toEqual({ availability: 'unavailable', reason: 'ambiguous_builder' });
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -351,5 +467,79 @@ describe('market-order admission choke point', () => {
       builderCode: undefined,
     });
     expect(stub.placeMarketOrder).toHaveBeenCalledOnce();
+    expect(stub.placeMarketOrder).toHaveBeenCalledWith({
+      ...params,
+      builderAttachment: { mode: 'suppress' },
+    });
+  });
+
+  it('copies an included quote into an authoritative attach policy', async () => {
+    const quote = available({
+      observedAt: Date.now(),
+      effectiveRate: 0.0014,
+      builder: { status: 'included', code: 'QuantumVault', rate: 0.001, provenance: 'venue-builder' },
+    });
+    const stub = adapterStub({ quote });
+    const params = marketOrder({ reduceOnly: false });
+
+    await placeMarketOrderWithFeeAuthority(stub.adapter, params);
+
+    expect(stub.placeMarketOrder).toHaveBeenCalledWith({
+      ...params,
+      builderAttachment: { mode: 'attach', code: 'QuantumVault' },
+    });
+  });
+});
+
+describe('PacificaAdapter market-order builder policy precedence', () => {
+  async function captureBuilderCode(input: {
+    builderAttachment?: MarketOrderParams['builderAttachment'];
+    builderCode?: string;
+    builderApproved: boolean;
+  }): Promise<unknown> {
+    const adapter = new PacificaAdapter({ builderCode: 'QuantumVault' }) as any;
+    adapter.ensurePacificaEnrollment = vi.fn(async () => ({
+      builderApproved: input.builderApproved,
+      referralClaimed: false,
+    }));
+    adapter.getRegistry = () => ({ internalToProtocol: () => 'BTC' });
+    adapter.quantizeOrderSize = (_symbol: string, size: number) => size;
+    adapter.mapOrderResponse = () => ({ success: true, status: 'submitted', orderId: 'order-1' });
+    adapter.post = vi.fn(async () => ({ order_id: 'order-1' }));
+    let operationData: Record<string, unknown> | undefined;
+    const build = vi.spyOn(PacificaSigner.prototype, 'buildRequestBody').mockImplementation(
+      (_operationType: string, data: Record<string, unknown>) => {
+        operationData = data;
+        return { ...data, account: 'main-account', signature: 'sig', timestamp: 0 } as any;
+      },
+    );
+    try {
+      await adapter.placeMarketOrder(marketOrder({
+        subaccountId: undefined,
+        builderAttachment: input.builderAttachment,
+        builderCode: input.builderCode,
+      }));
+      return operationData?.builder_code;
+    } finally {
+      build.mockRestore();
+    }
+  }
+
+  it('attach overrides a stale false enrollment cache', async () => {
+    await expect(captureBuilderCode({
+      builderAttachment: { mode: 'attach', code: 'QuantumVault' },
+      builderApproved: false,
+    })).resolves.toBe('QuantumVault');
+  });
+
+  it('suppress overrides explicit passthrough and true enrollment', async () => {
+    await expect(captureBuilderCode({
+      builderAttachment: { mode: 'suppress' }, builderCode: 'Other', builderApproved: true,
+    })).resolves.toBeUndefined();
+  });
+
+  it('absent policy preserves legacy explicit and enrollment behavior', async () => {
+    await expect(captureBuilderCode({ builderCode: 'Explicit', builderApproved: true })).resolves.toBe('Explicit');
+    await expect(captureBuilderCode({ builderApproved: true })).resolves.toBe('QuantumVault');
   });
 });

@@ -34,6 +34,7 @@ import type {
   AdapterCapabilities,
   Unsubscribe,
   TransactionBuildResult,
+  BuilderAttachmentPolicy,
 } from './protocol-types.js';
 
 export interface CreateSubaccountInput {
@@ -139,6 +140,15 @@ export interface UnavailableFeeRateQuote {
 }
 
 export type FeeRateQuoteResult = AvailableFeeRateQuote | UnavailableFeeRateQuote;
+
+/** Map only a validated retained quote into the order attachment decision. */
+export function builderAttachmentFromFeeQuote(
+  quote: AvailableFeeRateQuote,
+): BuilderAttachmentPolicy {
+  return quote.builder.status === 'included'
+    ? { mode: 'attach', code: quote.builder.code }
+    : { mode: 'suppress' };
+}
 
 /** The exact admission quote accompanies the open result for estimate reuse. */
 export type FeeAuthorizedMarketOrderResult = OrderResult & {
@@ -342,7 +352,10 @@ export async function placeMarketOrderWithFeeAuthority(
       error: `FEE_RATE_UNAVAILABLE:${quote.reason}`,
     };
   }
-  const result = await adapter.placeMarketOrder(params);
+  const result = await adapter.placeMarketOrder({
+    ...params,
+    builderAttachment: builderAttachmentFromFeeQuote(quote),
+  });
   return { ...result, admissionFeeQuote: quote };
 }
 

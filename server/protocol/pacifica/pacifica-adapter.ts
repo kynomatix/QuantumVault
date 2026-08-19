@@ -118,10 +118,31 @@ function countDecimals(val: number): number {
 }
 
 function parseFeeRateDecimal(value: unknown): number | null {
-  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  if ((typeof value !== 'string' && typeof value !== 'number') || String(value).trim().length === 0) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
+
+type BuilderSuppressionReason =
+  | 'builder_owner_unconfigured'
+  | 'overview_read_failed'
+  | 'overview_malformed'
+  | 'overview_code_mismatch'
+  | 'approval_read_failed'
+  | 'approval_malformed'
+  | 'approval_missing'
+  | 'approval_below_rate';
+
+const BUILDER_SUPPRESSION_REASONS: readonly BuilderSuppressionReason[] = [
+  'builder_owner_unconfigured',
+  'overview_read_failed',
+  'overview_malformed',
+  'overview_code_mismatch',
+  'approval_read_failed',
+  'approval_malformed',
+  'approval_missing',
+  'approval_below_rate',
+];
 
 interface CacheEntry<T> {
   data: T;
@@ -171,6 +192,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   private marketDetailsMap: Map<string, ProtocolMarket> = new Map();
   private initialized = false;
   private telemetryInterval: NodeJS.Timeout | null = null;
+  private builderSuppressionCounts = new Map<BuilderSuppressionReason, number>();
   // Task 143: per-wallet async mutex for enrollment. Concurrent first-trades
   // from the same user await a single in-flight approval+claim rather than
   // each firing their own (which would yield duplicate POSTs and racy flag
@@ -228,14 +250,32 @@ export class PacificaAdapter implements ProtocolAdapter {
     const top = q.topEndpoints
       .map((e) => `${e.path}=${e.credits}c/${e.calls}x`)
       .join(' ');
+    const builderSuppressed = BUILDER_SUPPRESSION_REASONS.reduce(
+      (sum, reason) => sum + (this.builderSuppressionCounts.get(reason) ?? 0),
+      0,
+    );
+    const builderReasons = BUILDER_SUPPRESSION_REASONS
+      .map((reason) => `${reason}=${this.builderSuppressionCounts.get(reason) ?? 0}`)
+      .join(',');
     console.log(
       `[pacifica-telemetry] credits=${q.creditsUsed}/${q.totalBudget} (60s) | ` +
         `served=${q.requestsServed} rejected=${q.requestsRejected} | ` +
         `cache: ${c.entries} entries, ${c.hitRatePct}% hit, ${c.dedupedJoins} deduped | ` +
+        `builder_suppressed=${builderSuppressed} reasons=${builderReasons} | ` +
         `top: ${top || '(none)'}`,
     );
+    this.builderSuppressionCounts.clear();
     pacificaQuota.resetCounters();
     pacificaCache.resetCounters();
+  }
+
+  private recordBuilderSuppression(reason: BuilderSuppressionReason): void {
+    const count = (this.builderSuppressionCounts.get(reason) ?? 0) + 1;
+    this.builderSuppressionCounts.set(reason, count);
+    if (count !== 1) return;
+    const line = `[PacificaBuilderSuppression] reason=${reason} count=${count}`;
+    console.warn(line);
+    appendTelemetry(line);
   }
 
   async healthCheck(): Promise<{ healthy: boolean; latencyMs: number; error?: string }> {
@@ -603,10 +643,9 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   /**
-   * Fresh Pacifica account-tier fee authority for risk-increasing admission.
-   * The approval max is deliberately absent here: it is not the current
-   * builder charge. Until Pacifica exposes the actual configured builder rate,
-   * any order that may attach a builder is unavailable rather than guessed.
+   * Fresh Pacifica account + builder authority for risk-increasing admission.
+   * Builder proof is optional commercial attribution: any builder-only failure
+   * returns the proven base rate and binds the resulting order to suppression.
    */
   async getFeeRateQuote(input: FeeRateQuoteRequest): Promise<FeeRateQuoteResult> {
     if (input.liquidityRole !== 'taker') {
@@ -631,11 +670,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       return { availability: 'unavailable', reason: 'identity_mismatch' };
     }
 
-    if (input.builderCode || this.config.builderCode) {
-      return { availability: 'unavailable', reason: 'builder_rate_unknown' };
-    }
-
-    return {
+    const baseQuote = (): FeeRateQuoteResult => ({
       availability: 'available',
       protocol: this.protocolName,
       account: input.account,
@@ -646,6 +681,74 @@ export class PacificaAdapter implements ProtocolAdapter {
       provenance: 'pacifica:/account.taker_fee:fresh-required',
       observedAt: Date.now(),
       builder: { status: 'absent' },
+    });
+
+    const requestedBuilderCode = (input.builderCode || this.config.builderCode || '').trim();
+    if (!requestedBuilderCode) return baseQuote();
+
+    const suppress = (reason: BuilderSuppressionReason): FeeRateQuoteResult => {
+      this.recordBuilderSuppression(reason);
+      return baseQuote();
+    };
+
+    const builderOwnerCandidate = this.config.referralAddress?.trim();
+    if (!builderOwnerCandidate) return suppress('builder_owner_unconfigured');
+
+    let overview: unknown;
+    try {
+      overview = await this.get('/builder/overview', { account: builderOwnerCandidate }, {
+        priority: 'critical',
+        cachePolicy: 'fresh-required',
+      });
+    } catch {
+      return suppress('overview_read_failed');
+    }
+    if (!Array.isArray(overview)) return suppress('overview_malformed');
+    const overviewMatches = overview.filter((row) =>
+      !!row && typeof row === 'object'
+      && (row as Record<string, unknown>).builder_code === requestedBuilderCode,
+    ) as Array<Record<string, unknown>>;
+    if (overviewMatches.length === 0) return suppress('overview_code_mismatch');
+    if (overviewMatches.length !== 1) return suppress('overview_malformed');
+    const builderRate = parseFeeRateDecimal(overviewMatches[0].fee_rate);
+    if (builderRate === null) return suppress('overview_malformed');
+
+    let approvals: unknown;
+    try {
+      approvals = await this.get('/account/builder_codes/approvals', { account: input.account }, {
+        priority: 'critical',
+        cachePolicy: 'fresh-required',
+      });
+    } catch {
+      return suppress('approval_read_failed');
+    }
+    if (!Array.isArray(approvals)) return suppress('approval_malformed');
+    const approvalMatches = approvals.filter((row) =>
+      !!row && typeof row === 'object'
+      && (row as Record<string, unknown>).builder_code === requestedBuilderCode,
+    ) as Array<Record<string, unknown>>;
+    if (approvalMatches.length === 0) return suppress('approval_missing');
+    if (approvalMatches.length !== 1) return suppress('approval_malformed');
+    const approvalCeiling = parseFeeRateDecimal(approvalMatches[0].max_fee_rate);
+    if (approvalCeiling === null) return suppress('approval_malformed');
+    if (approvalCeiling < builderRate) return suppress('approval_below_rate');
+
+    return {
+      availability: 'available',
+      protocol: this.protocolName,
+      account: input.account,
+      subaccountId: requestedSubaccount,
+      liquidityRole: input.liquidityRole,
+      baseRate: takerRate,
+      effectiveRate: takerRate + builderRate,
+      provenance: 'pacifica:/account.taker_fee+/builder/overview.fee_rate+/account/builder_codes/approvals.max_fee_rate:fresh-required',
+      observedAt: Date.now(),
+      builder: {
+        status: 'included',
+        code: requestedBuilderCode,
+        rate: builderRate,
+        provenance: 'pacifica:/builder/overview.fee_rate:fresh-required',
+      },
     };
   }
 
@@ -1013,11 +1116,14 @@ export class PacificaAdapter implements ProtocolAdapter {
       operationData.client_order_id = params.clientOrderId;
     }
 
-    // Task 143: fail-CLOSED on builder approval. Only inject our config'd
-    // builder_code if the user is confirmed-approved; otherwise the order
-    // would 403. Caller-supplied params.builderCode is passed through
-    // verbatim (caller is responsible for its own approval).
-    if (params.builderCode) {
+    // A retained admission policy is authoritative over both the legacy
+    // passthrough and enrollment cache. Enrollment still ran above, but cannot
+    // re-attach a builder that the quote explicitly suppressed.
+    if (params.builderAttachment?.mode === 'attach') {
+      operationData.builder_code = params.builderAttachment.code;
+    } else if (params.builderAttachment?.mode === 'suppress') {
+      // Intentionally absent.
+    } else if (params.builderCode) {
       operationData.builder_code = params.builderCode;
     } else if (enrollment.builderApproved && this.config.builderCode) {
       operationData.builder_code = this.config.builderCode;
@@ -1403,10 +1509,13 @@ export class PacificaAdapter implements ProtocolAdapter {
       side: closingSide,
     };
 
-    // Task 143: inject builder_code at the TOP LEVEL of the TP/SL data object
-    // (NOT inside take_profit / stop_loss sub-objects — per Pacifica docs).
-    // Same fail-CLOSED gate as the order paths.
-    if (enrollment.builderApproved && this.config.builderCode) {
+    // The retained admission policy is authoritative for AI Trader's bracket;
+    // policy-less manual/recovery callers preserve the legacy enrollment gate.
+    if (params.builderAttachment?.mode === 'attach') {
+      operationData.builder_code = params.builderAttachment.code;
+    } else if (params.builderAttachment?.mode === 'suppress') {
+      // Intentionally absent.
+    } else if (enrollment.builderApproved && this.config.builderCode) {
       operationData.builder_code = this.config.builderCode;
     }
 

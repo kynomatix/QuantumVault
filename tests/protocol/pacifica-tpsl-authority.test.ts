@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
+import type { TpSlParams } from '../../server/protocol/protocol-types.js';
 
 const ACCOUNT = 'PositionAuthorityAccount11111111111111111111111';
 const SECRET = new Uint8Array(64);
@@ -37,13 +38,18 @@ function createAdapter(): any {
   return adapter;
 }
 
-function request(takeProfitPrice = 110, stopLossPrice = 90) {
+function request(
+  takeProfitPrice = 110,
+  stopLossPrice = 90,
+  overrides: Partial<TpSlParams> = {},
+): TpSlParams {
   return {
     agentPublicKey: ACCOUNT,
     agentSecretKey: SECRET,
     internalSymbol: 'SOL-PERP',
     takeProfitPrice,
     stopLossPrice,
+    ...overrides,
   };
 }
 
@@ -127,5 +133,57 @@ describe('PacificaAdapter.setTpSl position-side authority', () => {
     } finally {
       build.mockRestore();
     }
+  });
+});
+
+describe('PacificaAdapter.setTpSl builder policy precedence', () => {
+  async function captureBuilderCode(input: {
+    builderAttachment?: TpSlParams['builderAttachment'];
+    builderApproved: boolean;
+  }): Promise<unknown> {
+    const adapter = createAdapter();
+    adapter.config.builderCode = 'QuantumVault';
+    adapter.ensurePacificaEnrollment = vi.fn(async () => ({ builderApproved: input.builderApproved }));
+    adapter.getPositions = vi.fn(async () => [position(1)]);
+    let operationData: Record<string, unknown> | undefined;
+    const build = vi.spyOn(PacificaSigner.prototype, 'buildRequestBody').mockImplementation(
+      (_operationType: string, data: Record<string, unknown>) => {
+        operationData = data;
+        return {
+          ...data,
+          account: ACCOUNT,
+          signature: 'test-signature',
+          timestamp: 0,
+          expiry_window: 5000,
+        } as any;
+      },
+    );
+
+    try {
+      await adapter.setTpSl(request(110, 90, {
+        builderAttachment: input.builderAttachment,
+      }));
+      return operationData?.builder_code;
+    } finally {
+      build.mockRestore();
+    }
+  }
+
+  it('attach overrides a stale false enrollment cache', async () => {
+    await expect(captureBuilderCode({
+      builderAttachment: { mode: 'attach', code: 'QuantumVault' },
+      builderApproved: false,
+    })).resolves.toBe('QuantumVault');
+  });
+
+  it('suppress overrides explicit passthrough and true enrollment', async () => {
+    await expect(captureBuilderCode({
+      builderAttachment: { mode: 'suppress' },
+      builderApproved: true,
+    })).resolves.toBeUndefined();
+  });
+
+  it('absent policy preserves legacy enrollment behavior', async () => {
+    await expect(captureBuilderCode({ builderApproved: true })).resolves.toBe('QuantumVault');
   });
 });

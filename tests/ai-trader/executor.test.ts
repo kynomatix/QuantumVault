@@ -882,10 +882,16 @@ describe("live execution — happy path", () => {
         subaccountId: undefined,
         maxSlippagePct: 0.5,
         leverage: 2,
+        builderAttachment: { mode: "attach", code: "QuantumVault" },
       })
     );
     expect((adapter.setTpSl as any)).toHaveBeenCalledWith(
-      expect.objectContaining({ stopLossPrice: 145, takeProfitPrice: 160, subaccountId: undefined })
+      expect.objectContaining({
+        stopLossPrice: 145,
+        takeProfitPrice: 160,
+        subaccountId: undefined,
+        builderAttachment: { mode: "attach", code: "QuantumVault" },
+      })
     );
     // The sub key signed — the main agent key was never decrypted.
     expect(decryptSubKeyMock).toHaveBeenCalled();

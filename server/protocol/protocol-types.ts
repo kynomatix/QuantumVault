@@ -33,6 +33,15 @@ export interface ProtocolPosition {
   subaccountId?: string;
 }
 
+/**
+ * Admission-bound Pacifica builder decision. A present value is authoritative
+ * for the order; adapters keep legacy behaviour when it is absent so close and
+ * other non-admission callers are never blocked by a new entry-only contract.
+ */
+export type BuilderAttachmentPolicy =
+  | { mode: 'suppress' }
+  | { mode: 'attach'; code: string };
+
 export interface MarketOrderParams {
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
@@ -44,6 +53,7 @@ export interface MarketOrderParams {
   clientOrderId?: string;
   subaccountId?: string;
   builderCode?: string;
+  builderAttachment?: BuilderAttachmentPolicy;
   maxSlippagePct?: number;
   leverage?: number;
 }
@@ -164,6 +174,7 @@ export interface TpSlParams {
   takeProfitPrice?: number;
   stopLossPrice?: number;
   subaccountId?: string;
+  builderAttachment?: BuilderAttachmentPolicy;
 }
 
 export interface CancelStopOrderParams {

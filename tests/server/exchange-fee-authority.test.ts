@@ -84,7 +84,39 @@ describe('Signal Bot fee-rate admission authority', () => {
       builderCode: undefined,
     });
     expect(adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
-    expect(adapter.placeMarketOrder).toHaveBeenCalledWith(params);
+    expect(adapter.placeMarketOrder).toHaveBeenCalledWith({
+      ...params,
+      builderAttachment: { mode: 'suppress' },
+    });
+  });
+
+  it('threads an included builder component as an attach policy', async () => {
+    const getFeeRateQuote = vi.fn(async () => ({
+      availability: 'available' as const,
+      protocol: 'pacifica',
+      account: 'signal-bot-account',
+      subaccountId: 'signal-bot-subaccount',
+      liquidityRole: 'taker' as const,
+      baseRate: 0.0004,
+      effectiveRate: 0.0014,
+      provenance: 'fresh-combined-authority',
+      observedAt: Date.now(),
+      builder: {
+        status: 'included' as const,
+        code: 'QuantumVault',
+        rate: 0.001,
+        provenance: 'fresh-builder-authority',
+      },
+    }));
+    const adapter = adapterWith({ getFeeRateQuote });
+    const params = marketOrder();
+
+    await placeMarketOrderWithFeeAuthority(adapter, params);
+
+    expect(adapter.placeMarketOrder).toHaveBeenCalledWith({
+      ...params,
+      builderAttachment: { mode: 'attach', code: 'QuantumVault' },
+    });
   });
 
   it('bypasses the new admission read for a reduce-only close', async () => {
