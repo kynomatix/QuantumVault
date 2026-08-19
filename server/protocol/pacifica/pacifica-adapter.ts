@@ -75,12 +75,13 @@ import type {
   PacificaMarginSettingResponse,
   PacificaOrderResponse,
   PacificaTradeResponse,
+  PacificaTradeHistoryEnvelope,
   PacificaEquityHistoryPoint,
   PacificaSubaccountResponse,
   PacificaOrderbookLevel,
   PacificaFundingResponse,
 } from './pacifica-types.js';
-import { mapPacificaSide, mapToProtocolSide } from './pacifica-types.js';
+import { mapToProtocolSide } from './pacifica-types.js';
 import { pacificaQuota, QuotaExhaustedError, type RequestPriority } from './pacifica-quota.js';
 import { pacificaCache } from './pacifica-cache.js';
 import { appendTelemetry } from '../../telemetry.js';
@@ -89,6 +90,93 @@ const MAX_MARKET_CACHE_SIZE = 200;
 const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
 const PRICE_CACHE_TTL_MS = 60 * 1000;
 const MAX_PRICE_CACHE_SIZE = 200;
+const PACIFICA_TRADE_HISTORY_PAGE_SIZE = 200;
+const PACIFICA_TRADE_HISTORY_MAX_PAGES = 10;
+
+const PACIFICA_TRADE_SIDES = new Set([
+  'open_long', 'open_short', 'close_long', 'close_short',
+]);
+const PACIFICA_TRADE_EVENT_TYPES = new Set(['fulfill_maker', 'fulfill_taker']);
+const PACIFICA_TRADE_CAUSES = new Set([
+  'normal', 'market_liquidation', 'backstop_liquidation', 'settlement',
+]);
+
+function requirePacificaTradeNumber(
+  value: unknown,
+  field: string,
+  positive = false,
+  allowNegative = false,
+): number {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new Error(`Pacifica trade history row ${field} malformed`);
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || (!allowNegative && (positive ? parsed <= 0 : parsed < 0))) {
+    throw new Error(`Pacifica trade history row ${field} malformed`);
+  }
+  return parsed;
+}
+
+function parsePacificaTradeHistoryEnvelope(value: unknown): PacificaTradeHistoryEnvelope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Pacifica trade history envelope malformed');
+  }
+  const envelope = value as Record<string, unknown>;
+  if (envelope.success !== true || !Array.isArray(envelope.data) || typeof envelope.has_more !== 'boolean') {
+    throw new Error('Pacifica trade history envelope malformed');
+  }
+  if (envelope.has_more && (typeof envelope.next_cursor !== 'string' || envelope.next_cursor.trim().length === 0)) {
+    throw new Error('Pacifica trade history cursor missing');
+  }
+  if (envelope.next_cursor !== undefined && envelope.next_cursor !== null && typeof envelope.next_cursor !== 'string') {
+    throw new Error('Pacifica trade history cursor malformed');
+  }
+
+  const data = envelope.data.map((candidate, index): PacificaTradeResponse => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`Pacifica trade history row ${index} malformed`);
+    }
+    const row = candidate as Record<string, unknown>;
+    if (!Number.isSafeInteger(row.history_id) || Number(row.history_id) < 0) {
+      throw new Error(`Pacifica trade history row ${index} history_id malformed`);
+    }
+    if (!Number.isSafeInteger(row.order_id) || Number(row.order_id) < 0) {
+      throw new Error(`Pacifica trade history row ${index} order_id malformed`);
+    }
+    if (row.client_order_id !== undefined && row.client_order_id !== null
+        && (typeof row.client_order_id !== 'string' || row.client_order_id.length === 0)) {
+      throw new Error(`Pacifica trade history row ${index} client_order_id malformed`);
+    }
+    if (typeof row.symbol !== 'string' || row.symbol.trim().length === 0) {
+      throw new Error(`Pacifica trade history row ${index} symbol malformed`);
+    }
+    requirePacificaTradeNumber(row.amount, `${index} amount`, true);
+    requirePacificaTradeNumber(row.price, `${index} price`, true);
+    requirePacificaTradeNumber(row.entry_price, `${index} entry_price`, true);
+    requirePacificaTradeNumber(row.fee, `${index} fee`);
+    requirePacificaTradeNumber(row.pnl, `${index} pnl`, false, true);
+    if (typeof row.event_type !== 'string' || !PACIFICA_TRADE_EVENT_TYPES.has(row.event_type)) {
+      throw new Error(`Pacifica trade history row ${index} event_type malformed`);
+    }
+    if (typeof row.side !== 'string' || !PACIFICA_TRADE_SIDES.has(row.side)) {
+      throw new Error(`Pacifica trade history row ${index} side malformed`);
+    }
+    if (!Number.isSafeInteger(row.created_at) || Number(row.created_at) < 0) {
+      throw new Error(`Pacifica trade history row ${index} created_at malformed`);
+    }
+    if (typeof row.cause !== 'string' || !PACIFICA_TRADE_CAUSES.has(row.cause)) {
+      throw new Error(`Pacifica trade history row ${index} cause malformed`);
+    }
+    return row as unknown as PacificaTradeResponse;
+  });
+
+  return {
+    success: true,
+    data,
+    next_cursor: envelope.next_cursor as string | null | undefined,
+    has_more: envelope.has_more,
+  };
+}
 
 const DISPLAY_NAMES: Record<string, string> = {
   BTC: 'Bitcoin', ETH: 'Ethereum', SOL: 'Solana', XRP: 'XRP',
@@ -973,37 +1061,69 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async getTradeHistory(agentPublicKey: string, params?: HistoryParams & { subaccountId?: string }): Promise<TradeRecord[]> {
-    const queryParams: Record<string, string> = { account: agentPublicKey };
-    if (params?.startTime) queryParams.start_time = String(params.startTime);
-    if (params?.endTime) queryParams.end_time = String(params.endTime);
-    if (params?.limit) queryParams.limit = String(params.limit);
-    if (params?.offset) queryParams.offset = String(params.offset);
-    if (params?.subaccountId) queryParams.subaccount_id = params.subaccountId;
-
-    // Pacifica returns 404 when no trades exist in the queried window (rather
-    // than an empty array). Treat that as "no trades" — consistent with how
-    // getAccountInfo and getPositions handle 404 above.
-    let response: PacificaTradeResponse[];
-    try {
-      response = await this.get('/account/trades', queryParams);
-    } catch (err: any) {
-      if (err?.message && err.message.includes('404')) {
-        return [];
-      }
-      throw err;
+    const requestedLimit = params?.limit ?? PACIFICA_TRADE_HISTORY_PAGE_SIZE;
+    const requestedMaxPages = params?.maxPages ?? PACIFICA_TRADE_HISTORY_MAX_PAGES;
+    if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > PACIFICA_TRADE_HISTORY_PAGE_SIZE) {
+      throw new Error(`Pacifica trade history limit must be an integer from 1 to ${PACIFICA_TRADE_HISTORY_PAGE_SIZE}`);
+    }
+    if (!Number.isInteger(requestedMaxPages) || requestedMaxPages < 1
+        || requestedMaxPages > PACIFICA_TRADE_HISTORY_MAX_PAGES) {
+      throw new Error(`Pacifica trade history maxPages must be an integer from 1 to ${PACIFICA_TRADE_HISTORY_MAX_PAGES}`);
+    }
+    const queryParams: Record<string, string> = {
+      account: agentPublicKey,
+      limit: String(requestedLimit),
+    };
+    if (params?.startTime !== undefined) queryParams.start_time = String(params.startTime);
+    if (params?.endTime !== undefined) queryParams.end_time = String(params.endTime);
+    if (params?.internalSymbol) {
+      queryParams.symbol = this.getRegistry().internalToProtocol(params.internalSymbol).toUpperCase();
     }
 
+    // The documented endpoint returns a cursor envelope. Malformed or failed
+    // reads remain unavailable (throw); absence is represented only by a
+    // successful empty data array.
+    const response: PacificaTradeResponse[] = [];
+    const seenHistoryIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    let completed = false;
+    for (let page = 0; page < requestedMaxPages; page += 1) {
+      const envelope = parsePacificaTradeHistoryEnvelope(await this.get(
+        '/trades/history',
+        cursor ? { ...queryParams, cursor } : queryParams,
+        { priority: 'critical', cachePolicy: 'fresh-required', responseShape: 'envelope' },
+      ));
+      for (const trade of envelope.data) {
+        const historyId = String(trade.history_id);
+        if (seenHistoryIds.has(historyId)) continue;
+        seenHistoryIds.add(historyId);
+        response.push(trade);
+      }
+      if (!envelope.has_more) {
+        completed = true;
+        break;
+      }
+      cursor = envelope.next_cursor!;
+      if (seenCursors.has(cursor)) throw new Error('Pacifica trade history cursor repeated');
+      seenCursors.add(cursor);
+    }
+    if (!completed) throw new Error(`Pacifica trade history exceeded ${requestedMaxPages} pages`);
+
     return response.map((t) => ({
-      tradeId: t.trade_id,
-      orderId: t.order_id,
-      clientOrderId: t.client_order_id,
+      tradeId: String(t.history_id),
+      orderId: String(t.order_id),
+      clientOrderId: t.client_order_id ?? undefined,
       internalSymbol: this.safeProtocolToInternal(t.symbol),
-      side: mapPacificaSide(t.side),
-      price: parseFloat(t.price),
-      size: parseFloat(t.size),
-      fee: parseFloat(t.fee),
-      timestamp: t.timestamp,
-      subaccountId: t.subaccount_id,
+      side: t.side === 'open_long' || t.side === 'close_short' ? 'long' : 'short',
+      price: requirePacificaTradeNumber(t.price, 'price', true),
+      size: requirePacificaTradeNumber(t.amount, 'amount', true),
+      fee: requirePacificaTradeNumber(t.fee, 'fee'),
+      timestamp: t.created_at,
+      venueEventKind: t.side,
+      realizedPnl: Number(t.pnl),
+      liquidityRole: t.event_type === 'fulfill_maker' ? 'maker' : 'taker',
+      cause: t.cause,
     }));
   }
 
@@ -2789,12 +2909,15 @@ export class PacificaAdapter implements ProtocolAdapter {
       priority?: RequestPriority;
       bypassCache?: boolean;
       cachePolicy?: 'default' | 'fresh-required';
+      responseShape?: 'data' | 'envelope';
     },
   ): Promise<any> {
     const priority = options?.priority ?? 'normal';
     const freshRequired = options?.cachePolicy === 'fresh-required';
     const bypassCache = options?.bypassCache === true || freshRequired;
-    const cacheKey = pacificaCache.buildKey(path, params);
+    const responseShape = options?.responseShape ?? 'data';
+    const cacheKey = pacificaCache.buildKey(path, params)
+      + (responseShape === 'envelope' ? ':envelope' : '');
     const dedupKey = freshRequired ? `fresh-required:${cacheKey}` : cacheKey;
 
     if (!bypassCache) {
@@ -2901,7 +3024,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
       // Bound the success-body read for the same reason.
       const json = await this.readBodyBounded(response.json(), 10_000, `GET ${path}`);
-      const data = this.unwrapEnvelope(json);
+      const data = responseShape === 'envelope' ? json : this.unwrapEnvelope(json);
       pacificaCache.set(cacheKey, path, data);
       return data;
     });

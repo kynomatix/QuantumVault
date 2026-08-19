@@ -1597,6 +1597,7 @@ import {
   markSignalBotFlipOpenExecuted,
   rejectSignalBotFlipOpen,
   resolveSignalBotFlipCloseThenOpen,
+  summarizeSignalBotCloseFills,
   type SignalBotFlipAuthorityRead,
   type SignalBotFlipCloseExecution,
   type SignalBotFlipDisposition,
@@ -4732,6 +4733,39 @@ async function readSignalBotFlipCloseAuthority(
   }
 }
 
+async function readSignalBotCloseFillConfirmation(input: {
+  adapter: ProtocolAdapter;
+  account: string | undefined;
+  market: string;
+  openSide: 'long' | 'short';
+  expectedSize: number;
+  closeSentAtMs: number;
+}) {
+  if (!input.account) return null;
+  try {
+    const trades = await input.adapter.getTradeHistory(input.account, {
+      internalSymbol: input.market,
+      startTime: input.closeSentAtMs,
+      endTime: Date.now(),
+      limit: 200,
+      maxPages: 10,
+    });
+    return summarizeSignalBotCloseFills({
+      trades,
+      market: input.market,
+      openSide: input.openSide,
+      expectedSize: input.expectedSize,
+      notBeforeMs: input.closeSentAtMs,
+    });
+  } catch (error) {
+    console.warn(
+      `[CloseConfirmation] Fresh fill history unavailable for ${input.market}: `
+      + (error instanceof Error ? error.message : String(error)),
+    );
+    return null;
+  }
+}
+
 interface CanonicalCloseFinalizationInput {
   bot: TradingBot;
   tradeId: string;
@@ -4740,6 +4774,8 @@ interface CanonicalCloseFinalizationInput {
   fillPrice: number;
   feeEvidence: CloseFeeEvidence;
   pnl: number | null;
+  canonicalFillSignature?: string;
+  fillTimestampMs?: number;
   executionMethod?: string;
   webhookPayload?: unknown;
 }
@@ -4756,13 +4792,13 @@ function closeFeeEventPayload(input: CanonicalCloseFinalizationInput): Record<st
 async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInput) {
   const accounting = closeFeePersistence(input.feeEvidence, input.pnl);
   const fillId = DatabaseStorage.canonicalCloseFillId({
-    signature: input.signature,
+    signature: input.canonicalFillSignature ?? input.signature,
     botId: input.bot.id,
     side: "CLOSE",
     size: input.size,
     market: input.bot.market,
     fillPrice: input.fillPrice,
-    timestampMs: Date.now(),
+    timestampMs: input.fillTimestampMs ?? Date.now(),
   });
   const result = await storage.recordCloseEventAtomic({
     botId: input.bot.id,
@@ -4798,13 +4834,13 @@ async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizati
   const accounting = closeFeePersistence(input.feeEvidence, input.pnl);
   if (!input.tradeId) throw new Error("user-webhook finalizer requires an existing close trade");
   const fillId = DatabaseStorage.canonicalCloseFillId({
-    signature: input.signature,
+    signature: input.canonicalFillSignature ?? input.signature,
     botId: input.bot.id,
     side: "CLOSE",
     size: input.size,
     market: input.bot.market,
     fillPrice: input.fillPrice,
-    timestampMs: Date.now(),
+    timestampMs: input.fillTimestampMs ?? Date.now(),
   });
   const result = await storage.recordCloseEventAtomic({
     botId: input.bot.id,
@@ -18811,6 +18847,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // Pass closeSize and positionSide so Swift can be used for closes
           const closeSubAccountId = webhookBotCtx ? 0 : (bot.driftSubaccountId ?? 0);
           const closeSlippageBps2 = wallet.slippageBps ?? 50;
+          const closeAdapter = getAdapterForBot(bot);
           const execStartTime = Date.now();
           console.log(`[Webhook] ⏱️ CLOSE EXEC START at +${execStartTime - webhookStartTime}ms, closeSize=${closeSize}, slippage=${closeSlippageBps2}bps`);
           const result = await closePerpPosition(
@@ -18824,7 +18861,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             webhookPositionSide,
             webhookBotCtx,
             bot.walletAddress,
-            getAdapterForBot(bot),
+            closeAdapter,
           );
           
           // closePerpPosition returns { success, signature, error } - map to expected format
@@ -18856,87 +18893,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
           
           if (result.success && txSignature) {
-            const closeFillPrice = parseFloat(signalPrice) || 0;
-            const closeNotional = closeSize * closeFillPrice;
+            let closeFillPrice = parseFloat(signalPrice) || 0;
             console.log(`[Webhook] PnL calculation inputs: entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice}, closeSide=${closeSide}, closeSize=${closeSize}`);
-            const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
+            let { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
               result.feeEvidence,
               closeEntryPrice,
               closeFillPrice,
               closeSize,
               closeSide,
             );
+            let effectiveFeeEvidence = result.feeEvidence;
+            let canonicalFillSignature: string | undefined;
+            let closeFillTimestampMs: number | undefined;
             if (closeTradePnl !== null && closeFee !== null) {
               console.log(`[Webhook] Close PnL CALCULATED: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, size=${closeSize}, fee=$${closeFee.toFixed(4)}, pnl=$${closeTradePnl.toFixed(4)}`);
             } else {
               console.warn(`[Webhook] PnL NOT calculated: fee evidence ${result.feeEvidence.kind}, entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice}`);
             }
             
-            // CRITICAL: Verify on-chain that position is actually closed and retry if dust remains
-            // This handles partial fills and ensures position is truly flat
-            // Use 1s delays with 5 retries (~5s total to stay within HTTP timeout)
-            let finalTxSignature = txSignature;
-            let retryCount = 0;
-            const maxRetries = 5; // Increased from 3 to 5 for stubborn dust
+            // One fresh authoritative position read follows the one close
+            // order. A non-flat/unavailable result is corroborated once with
+            // fresh venue fills and never triggers another inline order.
+            const finalTxSignature = txSignature;
             
-            while (retryCount < maxRetries) {
-              try {
-                // Wait 1s for on-chain state to settle - consistent delay keeps total under HTTP timeout
-                const delayMs = 1000;
-                console.log(`[Webhook] Waiting ${delayMs}ms for on-chain state to settle (attempt ${retryCount + 1}/${maxRetries})`);
-                await new Promise(resolve => setTimeout(resolve, delayMs));
-                
-                const postClosePosition = await PositionService.getPositionForExecution(
-                  botId,
-                  wallet.agentPublicKey,
-                  subAccountId,
-                  bot.market,
-                  webhookBotCtx?.botPublicKey
-                );
-                
-                if (postClosePosition.side === 'FLAT' || Math.abs(postClosePosition.size) < 0.0001) {
-                  console.log(`[Webhook] Post-close verification: Position confirmed FLAT`);
-                  break; // Position fully closed, exit retry loop
-                }
-                
-                // Position still exists - this is dust that needs cleanup
-                console.warn(`[Webhook] Position NOT fully closed after close order (attempt ${retryCount + 1}/${maxRetries})`);
-                console.warn(`[Webhook] Remaining dust: ${postClosePosition.side} ${Math.abs(postClosePosition.size).toFixed(6)} contracts - attempting cleanup...`);
-                
-                // Retry closePerpPosition to clean up the dust
-                const webhookDustSlippageBps = wallet.slippageBps ?? 50;
-                const retryResult = await closePerpPosition(
-                  agentKeyResult.secretKey,
-                  bot.market,
-                  subAccountId,
-                  Math.abs(postClosePosition.size),
-                  webhookDustSlippageBps,
-                  privateKeyBase58,
-                  wallet.agentPublicKey!,
-                  postClosePosition.side === 'LONG' ? 'long' : 'short',
-                  undefined,
-                  undefined,
-                  getAdapterForBot(bot),
-                );
-                
-                if (retryResult.success && retryResult.signature) {
-                  console.log(`[Webhook] Dust cleanup attempt ${retryCount + 1} succeeded: ${retryResult.signature}`);
-                  finalTxSignature = retryResult.signature; // Use the latest successful signature
-                } else if (retryResult.success && !retryResult.signature) {
-                  console.log(`[Webhook] Dust cleanup: position already closed`);
-                  break;
-                } else {
-                  console.error(`[Webhook] Dust cleanup attempt ${retryCount + 1} failed:`, retryResult.error);
-                }
-                
-                retryCount++;
-              } catch (verifyErr) {
-                console.warn(`[Webhook] Could not verify/cleanup post-close position (attempt ${retryCount + 1}):`, verifyErr);
-                retryCount++;
-              }
-            }
-            
-            // Final verification after all retries
             let finalPositionRemaining = null;
             let finalVerificationUnavailable: unknown = null;
             try {
@@ -18949,7 +18928,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               );
               if (finalCheck.side !== 'FLAT' && Math.abs(finalCheck.size) > 0.0001) {
                 finalPositionRemaining = { side: finalCheck.side, size: finalCheck.size };
-                console.error(`[Webhook] CRITICAL: Position still not flat after ${maxRetries} cleanup attempts!`);
+                console.warn(`[Webhook] Position is not yet flat after the signed close; checking venue fills`);
                 console.error(`[Webhook] Final remaining: ${finalCheck.side} ${finalCheck.size}`);
               }
             } catch (finalVerifyErr) {
@@ -18957,66 +18936,99 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               finalVerificationUnavailable = finalVerifyErr;
             }
 
+            if (finalVerificationUnavailable || finalPositionRemaining) {
+              const fillConfirmation = closeAdapter.protocolName.toLowerCase() === 'pacifica'
+                ? await readSignalBotCloseFillConfirmation({
+                    adapter: closeAdapter,
+                    account: webhookBotCtx?.botPublicKey ?? wallet.agentPublicKey ?? undefined,
+                    market: bot.market,
+                    openSide: webhookPositionSide,
+                    expectedSize: closeSize,
+                    closeSentAtMs: execStartTime,
+                  })
+                : null;
+              if (fillConfirmation) {
+                closeFillPrice = fillConfirmation.fillPrice;
+                effectiveFeeEvidence = {
+                  kind: 'venue_exact',
+                  amount: fillConfirmation.fee,
+                  protocol: 'pacifica',
+                };
+                closeFee = fillConfirmation.fee;
+                closeTradePnl = fillConfirmation.realizedPnl
+                  ?? closeAccounting(
+                    effectiveFeeEvidence,
+                    closeEntryPrice,
+                    closeFillPrice,
+                    closeSize,
+                    closeSide,
+                  ).pnl;
+                canonicalFillSignature = `history-${fillConfirmation.fillIds[0]}`;
+                closeFillTimestampMs = fillConfirmation.fillTimestampMs;
+                finalPositionRemaining = null;
+                finalVerificationUnavailable = null;
+                console.log(
+                  `[Webhook] Close confirmed by ${fillConfirmation.fillIds.length} venue fill(s): `
+                  + `size=${fillConfirmation.filledSize}, price=${fillConfirmation.fillPrice}`,
+                );
+              }
+            }
+
             if (finalVerificationUnavailable) {
               await Promise.allSettled([
                 storage.updateBotTrade(closeTrade.id, {
                   status: "pending",
                   txSignature: finalTxSignature,
-                  errorMessage: "Signed close executed; authoritative final position state unavailable",
+                  errorMessage: "Signed close executed; confirmation pending after position and fill reads",
                 }),
                 storage.updateWebhookLog(log.id, {
                   processed: true,
                   tradeExecuted: true,
-                  errorMessage: "Signed close executed but authoritative final position verification failed",
+                  errorMessage: "Signed close executed; confirmation pending after authoritative reads",
                 }),
               ]);
-              const closeResponse = buildSignalBotCloseResponse("executed_state_unavailable", {
-                status: "error",
+              const closeResponse = buildSignalBotCloseResponse("confirmation_pending", {
+                status: "pending",
                 type: "close",
                 trade: closeTrade.id,
                 txSignature: finalTxSignature,
-                error: "Close was signed, but final venue position state is unavailable",
+                message: "Close was signed; confirmation is pending reconciliation",
               });
               return res.status(closeResponse.statusCode).json(closeResponse.body);
             }
             
-            // If dust still remains after all retries, log error but continue
+            // One non-flat read cannot prove a durable residual. Leave the
+            // signed row pending for fresh fill-backed reconciliation; never
+            // submit a second inline close order.
             if (finalPositionRemaining) {
-              await storage.updateBotTrade(closeTrade.id, {
-                status: "executed",
-                txSignature: finalTxSignature,
-                price: result.fillPrice ? String(result.fillPrice) : signalPrice,
-                fee: closeFee === null ? null : String(closeFee),
-                pnl: closeTradePnl === null ? null : String(closeTradePnl),
-                errorMessage: `WARNING: Position not fully closed after ${maxRetries} attempts. Remaining: ${finalPositionRemaining.side} ${finalPositionRemaining.size}`,
-                executionMethod: result.executionMethod || 'legacy',
-              });
-              
-              await storage.updateWebhookLog(log.id, { 
-                processed: true, 
-                tradeExecuted: true,
-                errorMessage: `Close executed but dust remains after ${maxRetries} attempts: ${finalPositionRemaining.side} ${finalPositionRemaining.size}`
-              });
-              
-              const closeResponse = buildSignalBotCloseResponse("partial", {
-                status: "partial",
-                warning: `Position not fully closed after ${maxRetries} attempts - dust remains`,
+              await Promise.allSettled([
+                storage.updateBotTrade(closeTrade.id, {
+                  status: "pending",
+                  txSignature: finalTxSignature,
+                  errorMessage: `Signed close executed; confirmation pending with observed position ${finalPositionRemaining.side} ${finalPositionRemaining.size}`,
+                }),
+                storage.updateWebhookLog(log.id, {
+                  processed: true,
+                  tradeExecuted: true,
+                  errorMessage: "Signed close executed; confirmation pending after authoritative reads",
+                }),
+              ]);
+              const closeResponse = buildSignalBotCloseResponse("confirmation_pending", {
+                status: "pending",
                 type: "close",
                 trade: closeTrade.id,
                 txSignature: finalTxSignature,
-                closedSize: closeSize,
-                side: closeSide,
-                remainingPosition: finalPositionRemaining,
+                message: "Close was signed; confirmation is pending reconciliation",
+                observedPosition: finalPositionRemaining,
               });
               return res.status(closeResponse.statusCode).json(closeResponse.body);
             }
             
-            // Update trade record with execution details and PnL (use finalTxSignature which may include retry signatures)
+            // Update trade record with confirmed execution details and PnL.
             // Atomic: mark close row executed + recompute stats counters in
             // a single DB transaction. PnL/volume deltas are merged here so
             // the deferred sync only handles position state, not stats.
-            const webhookClosePrice = result.fillPrice ?? parseFloat(signalPrice || "0");
-            const webhookCloseVolume = closeSize * (Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0);
+            const webhookClosePrice = closeFillPrice;
             // Canonical fill id computed once → stored protocolFillId and the
             // profit-share tradeId match so any IOU dedupes (5.5/T4).
             let webhookCloseFillId: string;
@@ -19028,8 +19040,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 signature: finalTxSignature,
                 size: closeSize,
                 fillPrice: Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0,
-                feeEvidence: result.feeEvidence,
+                feeEvidence: effectiveFeeEvidence,
                 pnl: closeTradePnl,
+                canonicalFillSignature,
+                fillTimestampMs: closeFillTimestampMs,
                 executionMethod: result.executionMethod,
                 webhookPayload: closeTrade.webhookPayload,
               });
@@ -20264,6 +20278,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // Execute close
           const userCloseSlippageBps = wallet.slippageBps ?? 50;
           const uwCloseSubId = userWebhookBotCtx ? 0 : subAccountId;
+          const userCloseAdapter = getAdapterForBot(bot);
+          const userCloseSentAtMs = Date.now();
           const result = await closePerpPosition(
             agentKeyResult.secretKey,
             bot.market,
@@ -20275,7 +20291,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             onChainPosition.side === 'LONG' ? 'long' : 'short',
             userWebhookBotCtx,
             walletAddress,
-            getAdapterForBot(bot),
+            userCloseAdapter,
           );
           
           if (result.success && !result.signature) {
@@ -20315,15 +20331,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
           
           if (result.success && result.signature) {
-            const closeFillPrice = parseFloat(signalPrice) || 0;
+            let closeFillPrice = parseFloat(signalPrice) || 0;
             const closeEntryPrice = onChainPosition.entryPrice || 0;
-            const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
+            let { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
               result.feeEvidence,
               closeEntryPrice,
               closeFillPrice,
               closeSize,
               closeSide,
             );
+            let effectiveFeeEvidence = result.feeEvidence;
+            let canonicalFillSignature: string | undefined;
+            let closeFillTimestampMs: number | undefined;
             if (closeTradePnl !== null) {
               console.log(`[User Webhook] Close PnL: entry=$${closeEntryPrice.toFixed(2)}, exit=$${closeFillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
             }
@@ -20333,6 +20352,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // path performs exactly one strict authoritative read here; it
             // deliberately adds no retry, delay, fallback, or tolerance change.
             let postClosePosition;
+            let postCloseReadError: unknown = null;
             try {
               postClosePosition = await PositionService.getPositionForExecution(
                 botId,
@@ -20343,54 +20363,76 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               );
             } catch (postCloseErr) {
               console.error(`[User Webhook] Signed close final position read failed:`, postCloseErr);
-              await Promise.allSettled([
-                storage.updateBotTrade(closeTrade.id, {
-                  status: "pending",
-                  txSignature: result.signature,
-                  errorMessage: "Signed close executed; authoritative final position state unavailable",
-                }),
-                storage.updateWebhookLog(log.id, {
-                  processed: true,
-                  tradeExecuted: true,
-                  errorMessage: "Signed close executed but authoritative final position verification failed",
-                }),
-              ]);
-              const closeResponse = buildSignalBotCloseResponse("executed_state_unavailable", {
-                status: "error",
-                type: "close",
-                trade: closeTrade.id,
-                txSignature: result.signature,
-                error: "Close was signed, but final venue position state is unavailable",
-              });
-              return res.status(closeResponse.statusCode).json(closeResponse.body);
+              postCloseReadError = postCloseErr;
             }
 
-            if (postClosePosition.side !== "FLAT" && Math.abs(postClosePosition.size) >= 0.0001) {
-              await storage.updateBotTrade(closeTrade.id, {
-                status: "executed",
-                txSignature: result.signature,
-                price: closeFillPrice.toString(),
-                fee: closeFee === null ? null : closeFee.toString(),
-                pnl: closeTradePnl === null ? null : closeTradePnl.toString(),
-                errorMessage: `WARNING: Signed close left residual position ${postClosePosition.side} ${postClosePosition.size}`,
-              });
-              await storage.updateWebhookLog(log.id, {
-                processed: true,
-                tradeExecuted: true,
-                errorMessage: `Close executed but position remains ${postClosePosition.side} ${postClosePosition.size}`,
-              });
-              const closeResponse = buildSignalBotCloseResponse("partial", {
-                status: "partial",
-                type: "close",
-                trade: closeTrade.id,
-                txSignature: result.signature,
-                closedSize: closeSize,
-                remainingPosition: {
-                  side: postClosePosition.side,
-                  size: postClosePosition.size,
-                },
-              });
-              return res.status(closeResponse.statusCode).json(closeResponse.body);
+            const observedResidual = postClosePosition
+              && postClosePosition.side !== "FLAT"
+              && Math.abs(postClosePosition.size) >= 0.0001;
+            if (postCloseReadError || observedResidual) {
+              const fillConfirmation = userCloseAdapter.protocolName.toLowerCase() === 'pacifica'
+                ? await readSignalBotCloseFillConfirmation({
+                    adapter: userCloseAdapter,
+                    account: userWebhookBotCtx?.botPublicKey ?? wallet.agentPublicKey ?? undefined,
+                    market: bot.market,
+                    openSide: onChainPosition.side === 'LONG' ? 'long' : 'short',
+                    expectedSize: closeSize,
+                    closeSentAtMs: userCloseSentAtMs,
+                  })
+                : null;
+              if (fillConfirmation) {
+                closeFillPrice = fillConfirmation.fillPrice;
+                effectiveFeeEvidence = {
+                  kind: 'venue_exact',
+                  amount: fillConfirmation.fee,
+                  protocol: 'pacifica',
+                };
+                closeFee = fillConfirmation.fee;
+                closeTradePnl = fillConfirmation.realizedPnl
+                  ?? closeAccounting(
+                    effectiveFeeEvidence,
+                    closeEntryPrice,
+                    closeFillPrice,
+                    closeSize,
+                    closeSide,
+                  ).pnl;
+                canonicalFillSignature = `history-${fillConfirmation.fillIds[0]}`;
+                closeFillTimestampMs = fillConfirmation.fillTimestampMs;
+                console.log(
+                  `[User Webhook] Close confirmed by ${fillConfirmation.fillIds.length} venue fill(s): `
+                  + `size=${fillConfirmation.filledSize}, price=${fillConfirmation.fillPrice}`,
+                );
+              } else {
+                const residualDescription = observedResidual
+                  ? `${postClosePosition!.side} ${postClosePosition!.size}`
+                  : 'position read unavailable';
+                await Promise.allSettled([
+                  storage.updateBotTrade(closeTrade.id, {
+                    status: "pending",
+                    txSignature: result.signature,
+                    errorMessage: `Signed close executed; confirmation pending (${residualDescription})`,
+                  }),
+                  storage.updateWebhookLog(log.id, {
+                    processed: true,
+                    tradeExecuted: true,
+                    errorMessage: "Signed close executed; confirmation pending after authoritative reads",
+                  }),
+                ]);
+                const closeResponse = buildSignalBotCloseResponse("confirmation_pending", {
+                  status: "pending",
+                  type: "close",
+                  trade: closeTrade.id,
+                  txSignature: result.signature,
+                  message: "Close was signed; confirmation is pending reconciliation",
+                  ...(observedResidual ? {
+                    observedPosition: {
+                      side: postClosePosition!.side,
+                      size: postClosePosition!.size,
+                    },
+                  } : {}),
+                });
+                return res.status(closeResponse.statusCode).json(closeResponse.body);
+              }
             }
             
             // Atomic close-event update + stats recompute in a single tx.
@@ -20405,8 +20447,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 signature: result.signature,
                 size: closeSize,
                 fillPrice: closeFillPrice,
-                feeEvidence: result.feeEvidence,
+                feeEvidence: effectiveFeeEvidence,
                 pnl: closeTradePnl,
+                canonicalFillSignature,
+                fillTimestampMs: closeFillTimestampMs,
                 executionMethod: result.executionMethod,
                 webhookPayload: closeTrade.webhookPayload,
               });

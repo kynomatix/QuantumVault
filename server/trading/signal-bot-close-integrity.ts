@@ -1,5 +1,6 @@
 import Decimal from "decimal.js";
 import type { FeeRateQuoteResult } from "../protocol/adapter";
+import type { TradeRecord } from "../protocol/protocol-types";
 import type { ClassifiedSignal } from "./signal-classifier";
 
 export type CloseFeeEvidence =
@@ -113,6 +114,7 @@ export type SignalBotCloseOutcome =
   | "already_flat"
   | "position_unavailable"
   | "partial"
+  | "confirmation_pending"
   | "executed_state_unavailable";
 
 const CLOSE_OUTCOME_HTTP_STATUS: Record<SignalBotCloseOutcome, number> = {
@@ -120,8 +122,78 @@ const CLOSE_OUTCOME_HTTP_STATUS: Record<SignalBotCloseOutcome, number> = {
   already_flat: 409,
   position_unavailable: 503,
   partial: 200,
+  confirmation_pending: 202,
   executed_state_unavailable: 500,
 };
+
+export interface SignalBotCloseFillConfirmation {
+  fillPrice: number;
+  filledSize: number;
+  fee: number;
+  realizedPnl: number | null;
+  fillIds: string[];
+  fillTimestampMs: number;
+}
+
+function normalizedCloseMarket(value: string): string {
+  return value.trim().toUpperCase();
+}
+
+/**
+ * Aggregate only venue rows that can authoritatively represent the expected
+ * close. Pacifica's semantic event kind wins; adapters without that optional
+ * detail retain the legacy inverse-side fallback.
+ */
+export function summarizeSignalBotCloseFills(input: {
+  trades: TradeRecord[];
+  market: string;
+  openSide: "long" | "short";
+  expectedSize: number;
+  notBeforeMs: number;
+}): SignalBotCloseFillConfirmation | null {
+  if (!Number.isFinite(input.expectedSize) || input.expectedSize <= 0
+      || !Number.isFinite(input.notBeforeMs)) return null;
+  const closeSide = input.openSide === "long" ? "short" : "long";
+  const closeKind = input.openSide === "long" ? "close_long" : "close_short";
+  const candidates = input.trades
+    .filter((trade) => normalizedCloseMarket(trade.internalSymbol) === normalizedCloseMarket(input.market))
+    .filter((trade) => trade.timestamp >= input.notBeforeMs)
+    .filter((trade) => trade.venueEventKind ? trade.venueEventKind === closeKind : trade.side === closeSide)
+    .sort((left, right) => left.timestamp - right.timestamp);
+
+  let filledSize = 0;
+  let weightedPrice = 0;
+  let fee = 0;
+  let realizedPnl = 0;
+  let hasExactPnl = true;
+  const fillIds: string[] = [];
+  let fillTimestampMs = 0;
+  for (const trade of candidates) {
+    if (!Number.isFinite(trade.size) || trade.size <= 0
+        || !Number.isFinite(trade.price) || trade.price <= 0
+        || !Number.isFinite(trade.fee) || trade.fee < 0) return null;
+    filledSize += trade.size;
+    weightedPrice += trade.price * trade.size;
+    fee += trade.fee;
+    if (trade.realizedPnl === undefined || !Number.isFinite(trade.realizedPnl)) {
+      hasExactPnl = false;
+    } else {
+      realizedPnl += trade.realizedPnl;
+    }
+    fillIds.push(trade.tradeId);
+    fillTimestampMs = Math.max(fillTimestampMs, trade.timestamp);
+    if (filledSize >= input.expectedSize * 0.95) break;
+  }
+  if (filledSize < input.expectedSize * 0.95 || weightedPrice <= 0 || fillIds.length === 0) return null;
+  return {
+    fillPrice: weightedPrice / filledSize,
+    filledSize,
+    fee,
+    realizedPnl: hasExactPnl ? realizedPnl : null,
+    fillIds,
+    fillTimestampMs,
+  };
+}
 
 export function buildSignalBotCloseResponse<T extends Record<string, unknown>>(
   closeOutcome: SignalBotCloseOutcome,

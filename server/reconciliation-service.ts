@@ -156,6 +156,17 @@ interface CloseDetectionResult {
   tpslSubtype?: 'TP' | 'SL';
 }
 
+function isExpectedClosingTrade(
+  trade: TradeRecord,
+  openSide: 'long' | 'short',
+  closeSide: 'long' | 'short',
+): boolean {
+  const expectedKind = openSide === 'long' ? 'close_long' : 'close_short';
+  return trade.venueEventKind !== undefined
+    ? trade.venueEventKind === expectedKind
+    : trade.side === closeSide;
+}
+
 async function detectOnChainClose(
   botId: string,
   agentPublicKey: string,
@@ -195,7 +206,10 @@ async function detectOnChainClose(
         const startTime = Date.now() - windowMs;
         const trades = await adapter.getTradeHistory(readAccount, {
           limit: 200,
+          maxPages: 10,
+          internalSymbol: market,
           startTime,
+          endTime: Date.now(),
           ...(readSubaccountId ? { subaccountId: readSubaccountId } : {}),
         });
         const unknownTrade = trades.find(t => unknownProtocolSymbol(t.internalSymbol));
@@ -210,7 +224,7 @@ async function detectOnChainClose(
         return trades
           .filter(t =>
             normalizeMarket(t.internalSymbol) === normalizedMarket &&
-            t.side === closeSide
+            isExpectedClosingTrade(t, positionSide, closeSide)
           )
           .sort((a, b) => b.timestamp - a.timestamp);
       } catch (err) {
@@ -829,7 +843,10 @@ async function bookPartialReduction(opts: {
       const startTime = Date.now() - windowMs;
       const trades = await adapter.getTradeHistory(readAccount, {
         limit: 200,
+        maxPages: 10,
+        internalSymbol: market,
         startTime,
+        endTime: Date.now(),
       });
       const unknownTrade = trades.find(t => unknownProtocolSymbol(t.internalSymbol));
       if (unknownTrade) {
@@ -843,7 +860,7 @@ async function bookPartialReduction(opts: {
       closingFills = trades
         .filter(t =>
           normalizeMarket(t.internalSymbol) === normalizedMarket &&
-          t.side === closeSide
+          isExpectedClosingTrade(t, positionSide, closeSide)
         )
         .sort((a, b) => b.timestamp - a.timestamp);
 
@@ -1024,6 +1041,122 @@ export async function reconcileBotPosition(
         // already-booked and full-book branches below; the scanner re-verifies
         // flat on-chain before parking.
         await applyAutoReparkTransition(botRowForAdapter, true);
+
+        // A close handler may already have persisted the signed order as
+        // confirmation_pending. The canonical-close lookup intentionally
+        // excludes pending rows, so locate the exact newest pending candidate
+        // first and promote that row rather than inserting a duplicate.
+        const positionEpochFloor = dbPosition!.lastTradeAt
+          ? new Date(dbPosition!.lastTradeAt).getTime()
+          : null;
+        const pendingClose = (await storage.getBotTrades(botId, 200)).find((trade) => {
+          const executedAt = trade.executedAt ? new Date(trade.executedAt).getTime() : Number.NaN;
+          return String(trade.status).toLowerCase() === 'pending'
+            && String(trade.side).toUpperCase() === 'CLOSE'
+            && normalizeMarket(trade.market) === normalizedMarket
+            && (positionEpochFloor === null || (Number.isFinite(executedAt) && executedAt >= positionEpochFloor));
+        });
+
+        if (pendingClose) {
+          // A pending order is finalized only from a venue fill identity. The
+          // existing estimated-close fallback remains available for rows that
+          // were never created by a signed close handler, but it must not turn
+          // this pending row into invented fill truth.
+          if (!closeDetection.protocolFillId) {
+            console.log(
+              `[Reconcile] Pending close ${pendingClose.id} for ${botId} ${market} `
+              + 'still lacks venue fill identity; preserving it for a later fresh history read',
+            );
+            lastReconcileTime.set(botId, Date.now());
+            return { synced: true, discrepancy: true };
+          }
+
+          const closePnl = closeDetection.pnl ?? 0;
+          const closeFillPrice = closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice);
+          const closeNotional = closeFillPrice * Math.abs(dbBaseSize);
+          const dedupKey = canonicalReconcilerFullCloseId({
+            protocolFillId: closeDetection.protocolFillId,
+            botId,
+            market,
+            positionEpochId: dbPosition!.lastTradeId,
+          });
+          if (!dedupKey) {
+            console.error(`[Reconcile] Refusing pending close finalization for ${botId} ${market}: no canonical fill identity`);
+            lastReconcileTime.set(botId, Date.now());
+            return { synced: false, discrepancy: true };
+          }
+
+          const existingPayload = pendingClose.webhookPayload
+            && typeof pendingClose.webhookPayload === 'object'
+            ? pendingClose.webhookPayload as Record<string, unknown>
+            : {};
+          const { isNew } = await storage.recordCloseEventAtomic({
+            botId,
+            update: {
+              tradeId: pendingClose.id,
+              fields: {
+                status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
+                price: String(closeFillPrice),
+                fee: String(closeDetection.fee ?? 0),
+                pnl: String(closePnl),
+                protocolFillId: dedupKey,
+                webhookPayload: {
+                  ...existingPayload,
+                  reconciled: true,
+                  closeReason: closeDetection.reason,
+                  detectedAt: new Date().toISOString(),
+                  protocolFillId: closeDetection.protocolFillId,
+                  matchedFillIdsForDiagnostics: closeDetection.matchedFillIdsForDiagnostics,
+                },
+                executionMethod: 'on-chain-detected',
+              },
+            },
+            deltas: {
+              totalPnlDelta: closePnl,
+              totalVolumeDelta: closeNotional,
+              lastTradeAt: new Date().toISOString(),
+            },
+            confirmedPositionClose: {
+              walletAddress,
+              market,
+              realizedPnlDelta: closePnl,
+              feeDelta: closeDetection.fee ?? 0,
+            },
+          });
+          console.log(
+            `[Reconcile] ${isNew ? 'Finalized' : 'Observed finalized'} pending close ${pendingClose.id} `
+            + `for ${botId} ${market} from venue fill ${closeDetection.protocolFillId}`,
+          );
+          if (isNew) {
+            try {
+              const reasonLabel = getCloseReasonLabel(closeDetection.reason, closeDetection.tpslSubtype);
+              const botName = botRowForAdapter.name ?? 'Bot';
+              sendTradeNotification(walletAddress, {
+                type: 'position_closed',
+                botName,
+                market,
+                side: dbBaseSize > 0 ? 'LONG' : 'SHORT',
+                size: Math.abs(dbBaseSize),
+                price: closeFillPrice,
+                pnl: closePnl,
+                closeReason: reasonLabel,
+              }).catch(err => console.error(`[Reconcile] Notification error for bot ${botId}:`, err));
+            } catch (notifErr) {
+              console.error(`[Reconcile] Failed to dispatch close notification for bot ${botId}:`, notifErr);
+            }
+          }
+          if (botRowForAdapter.riskConfig) {
+            const rc = botRowForAdapter.riskConfig as Record<string, unknown>;
+            delete rc.takeProfitPercent;
+            delete rc.stopLossPercent;
+            delete rc.takeProfitPrice;
+            delete rc.stopLossPrice;
+            await storage.updateTradingBot(botId, { riskConfig: rc } as any);
+          }
+          lastReconcileTime.set(botId, Date.now());
+          return { synced: true, discrepancy: true, liquidation: closeDetection.reason === 'liquidation' };
+        }
+
         // Back-stop dedup: the webhook/manual/pause/subscriber close path may
         // have ALREADY booked this close under a different canonical id
         // (`tx-<close-tx-signature>` vs the reconciler's `tx-<exchange-fill-id>`),

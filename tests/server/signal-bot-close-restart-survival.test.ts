@@ -9,6 +9,7 @@ const routeMocks = vi.hoisted(() => ({
     protocolName: 'pacifica',
     getStrictPositionForMarket: vi.fn(),
     getPositions: vi.fn(),
+    getTradeHistory: vi.fn(),
     getFeeRateQuote: vi.fn(),
     placeMarketOrder: vi.fn(),
     closePosition: vi.fn(),
@@ -205,6 +206,7 @@ function primeCloseRoute(cachedPosition: unknown) {
     cleanup: vi.fn(),
   });
   routeMocks.adapter.getStrictPositionForMarket.mockReset().mockRejectedValue(new Error('venue unavailable'));
+  routeMocks.adapter.getTradeHistory.mockReset().mockResolvedValue([]);
   routeMocks.adapter.getFeeRateQuote.mockReset().mockResolvedValue({ availability: 'unavailable', reason: 'builder_rate_unknown' });
   routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
     success: false,
@@ -605,6 +607,43 @@ describe('close-path and restart contract wiring', () => {
         }));
         expect(routeMocks.adapter.closePosition).not.toHaveBeenCalled();
         expect(storage.createBotTrade).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s sends one close order and returns 202 when one position read and one fill read cannot confirm it',
+      async (endpoint) => {
+        primeCloseRoute({
+          market: 'BTC-PERP',
+          baseSize: '-0.25',
+          avgEntryPrice: '64000',
+        });
+        routeMocks.adapter.getStrictPositionForMarket.mockReset()
+          .mockRejectedValueOnce(new Error('initial venue read unavailable'))
+          .mockResolvedValueOnce({
+            internalSymbol: 'BTC-PERP',
+            baseSize: -0.25,
+            entryPrice: 64000,
+          });
+        routeMocks.adapter.getTradeHistory.mockResolvedValue([]);
+        routeMocks.adapter.placeMarketOrder.mockResolvedValue({
+          success: true,
+          orderId: 'signed-close-one',
+          fillPrice: 65000,
+          fee: 0,
+        });
+
+        const response = await postFullClose(endpoint);
+
+        expect(response.status).toBe(202);
+        expect(response.body.closeOutcome).toBe('confirmation_pending');
+        expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
+        expect(routeMocks.adapter.getTradeHistory).toHaveBeenCalledTimes(1);
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(storage.updateBotTrade).toHaveBeenCalledWith('close-trade-1', expect.objectContaining({
+          status: 'pending',
+          txSignature: 'signed-close-one',
+        }));
       },
     );
 
