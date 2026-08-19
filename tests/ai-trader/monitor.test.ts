@@ -592,6 +592,25 @@ describe("paper close detection", () => {
     expect(notifications().some((n) => n.type === "position_closed")).toBe(true);
   });
 
+  it("paper bracket conflict records its family and claims no close success", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(ENTRY_CANDLE_OPEN, 150, 151, 149, 150),
+      candle(ENTRY_CANDLE_OPEN + TF_15M, 151, 161, 150, 160.5),
+    ]);
+    commitCloseMock.mockResolvedValueOnce({ status: "conflict", reason: "bot_state_conflict" });
+
+    await monitorBotOnce(makeBot());
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] conflict family=paper_bracket reason=bot_state_conflict",
+    );
+  });
+
   it("excludes the entry candle: a bracket touch there does NOT close", async () => {
     const { monitorBotOnce } = await importMonitor();
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -632,6 +651,27 @@ describe("paper close detection", () => {
     expect(du).toHaveLength(1);
     expect(du[0].exitReason).toBe("circuit_breaker");
     expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "daily_loss_breaker")).toBe(true);
+  });
+
+  it("paper G7 conflict records its family without a pause or close notification", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ clampedDecision: { action: "long", sizeBase: 40, marginUsdc: 100, stopLossPrice: 145, takeProfitPrice: 160 } }),
+    ]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(ENTRY_CANDLE_OPEN, 150, 150.5, 149, 150),
+      candle(ENTRY_CANDLE_OPEN + TF_15M, 150, 150.5, 145.5, 145.6),
+    ]);
+    commitCloseMock.mockResolvedValueOnce({ status: "conflict", reason: "decision_state_conflict" });
+
+    await monitorBotOnce(makeBot());
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] conflict family=paper_g7 reason=decision_state_conflict",
+    );
   });
 
   it("G7 MTM breaker does not apply to 'degen' bots", async () => {
@@ -723,21 +763,52 @@ describe("live close-result consumption", () => {
     );
   });
 
-  it("passes the exact paused user-close predicate and materializes one observedAt across the batch", async () => {
+  it("returns the paper-user conflict shape without claiming or notifying success", async () => {
     const { userInitiatedClose } = await importMonitor();
-    const paused = makeBot({ paperMode: true, status: "paused", pauseReason: "user_requested" });
-    getBotMock.mockResolvedValue(paused);
+    const bot = makeBot({ paperMode: true });
+    getBotMock.mockResolvedValue(bot);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPrice: vi.fn(async () => 151) }));
+    commitCloseMock.mockResolvedValueOnce({ status: "conflict", reason: "decision_state_conflict" });
+
+    const result = await userInitiatedClose(bot);
+
+    expect(result).toEqual({
+      ok: false,
+      detail: "close transition conflict: decision_state_conflict; retry after state refresh",
+    });
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] conflict family=paper_user reason=decision_state_conflict",
+    );
+  });
+
+  it.each([
+    ["open", null],
+    ["paused", "user_requested"],
+    ["paused", "position_unconfirmed"],
+    ["executing", null],
+    ["analyzing", null],
+    ["proposed", null],
+  ] as const)("passes the exact %s/%s user-close predicate and derives idle", async (status, pauseReason) => {
+    const { userInitiatedClose } = await importMonitor();
+    const freshBot = makeBot({ paperMode: true, status: status as any, pauseReason });
+    closeBotState = { status: status as any, pauseReason };
+    getBotMock.mockResolvedValue(freshBot);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     getAdapterMock.mockReturnValue(makeAdapter({ getPrice: vi.fn(async () => 151) }));
 
-    const result = await userInitiatedClose(paused);
+    const result = await userInitiatedClose(freshBot);
 
     expect(result).toMatchObject({ ok: true, closed: true });
     const params = commitCloseMock.mock.calls[0][0];
-    expect(params).toMatchObject({ expectedBotStatus: "paused", expectedPauseReason: "user_requested" });
+    expect(params).toMatchObject({ expectedBotStatus: status, expectedPauseReason: pauseReason });
     const observed = params.journalEvents.map((event: any) => event.observedAt.getTime());
     expect(new Set(observed)).toEqual(new Set([params.close.closedAt.getTime()]));
     expect(params.journalEvents.every((event: any) => event.attemptId === params.journalEvents[0].attemptId)).toBe(true);
+    expect(botUpdates()).toContainEqual(expect.objectContaining({ status: "idle", pauseReason: null }));
   });
 
   it("records fixed durable telemetry when journal persistence degrades after a confirmed close", async () => {
@@ -1104,6 +1175,50 @@ describe("live close detection", () => {
     expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
   });
 
+  it("venue-detected conflict records its family without close effects", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => []),
+      getTradeHistory: vi.fn(async () => [exitFill({ price: 145.02, size: 2 })]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    commitCloseMock.mockResolvedValueOnce({ status: "conflict", reason: "journal_identity_conflict" });
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] conflict family=venue_detected reason=journal_identity_conflict",
+    );
+  });
+
+  it("liquidation conflict records its family without a false pause or notification", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => []),
+      getTradeHistory: vi.fn(async () => [exitFill({ price: 152, size: 2 })]),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    commitCloseMock.mockResolvedValueOnce({ status: "conflict", reason: "bot_state_conflict" });
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] conflict family=liquidation reason=bot_state_conflict",
+    );
+  });
+
   it("defers an uncorroborated flat read with no fills without recording, pausing, notifying, or canceling", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
@@ -1213,6 +1328,30 @@ describe("G10 bracket re-verification", () => {
     expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
     expect(botUpdates().some((update) => update.status === "paused" && update.pauseReason === "bracket_failed")).toBe(true);
     expect(safeJournalMock).toHaveBeenCalled();
+  });
+
+  it("protective-close conflict never retries the venue or claims a pause", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const closePosition = vi.fn(async () => ({ success: true, status: "filled", fillPrice: 150 }));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getOpenStopOrders: vi.fn(async () => []),
+      closePosition,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    commitCloseMock.mockResolvedValueOnce({ status: "conflict", reason: "bot_state_conflict" });
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect(closePosition).toHaveBeenCalledTimes(1);
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      "[AiTraderCloseTransition] conflict family=live_protective reason=bot_state_conflict",
+    );
   });
 
   it("journals signing-unavailable protective close and cancel attempts without reaching the venue", async () => {
