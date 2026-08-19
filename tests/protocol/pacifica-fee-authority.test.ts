@@ -339,12 +339,14 @@ describe('PacificaAdapter fee-rate authority', () => {
     ['builder_owner_unconfigured', 'owner-missing'],
     ['overview_read_failed', 'overview-throw'],
     ['overview_malformed', 'overview-malformed'],
+    ['overview_malformed', 'overview-duplicate'],
     ['overview_code_mismatch', 'overview-mismatch'],
     ['approval_read_failed', 'approval-throw'],
     ['approval_malformed', 'approval-malformed'],
+    ['approval_malformed', 'approval-duplicate'],
     ['approval_missing', 'approval-missing'],
     ['approval_below_rate', 'approval-low'],
-  ])('suppresses builder attribution without blocking the base quote: %s', async (reason, mode) => {
+  ])('suppresses builder attribution without blocking the base quote: %s (%s)', async (reason, mode) => {
     const adapter = new PacificaAdapter({
       baseUrl: 'http://test-pacifica.invalid',
       builderCode: 'QuantumVault',
@@ -356,11 +358,19 @@ describe('PacificaAdapter fee-rate authority', () => {
       if (path === '/builder/overview') {
         if (mode === 'overview-throw') throw new Error('overview unavailable');
         if (mode === 'overview-malformed') return { builder_code: 'QuantumVault', fee_rate: '0.001' };
+        if (mode === 'overview-duplicate') return [
+          { builder_code: 'QuantumVault', fee_rate: '0.001' },
+          { builder_code: 'QuantumVault', fee_rate: '0.001' },
+        ];
         if (mode === 'overview-mismatch') return [{ builder_code: 'Other', fee_rate: '0.001' }];
         return [{ builder_code: 'QuantumVault', fee_rate: '0.001' }];
       }
       if (mode === 'approval-throw') throw new Error('approval unavailable');
       if (mode === 'approval-malformed') return { builder_code: 'QuantumVault', max_fee_rate: '0.002' };
+      if (mode === 'approval-duplicate') return [
+        { builder_code: 'QuantumVault', max_fee_rate: '0.002' },
+        { builder_code: 'QuantumVault', max_fee_rate: '0.002' },
+      ];
       if (mode === 'approval-missing') return [];
       if (mode === 'approval-low') return [{ builder_code: 'QuantumVault', max_fee_rate: '0.0005' }];
       throw new Error(`unexpected path ${path}`);
