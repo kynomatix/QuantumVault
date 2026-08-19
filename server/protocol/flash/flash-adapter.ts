@@ -67,14 +67,17 @@ import {
   createAssociatedTokenAccountInstruction,
   createCloseAccountInstruction,
 } from '@solana/spl-token';
-import { PerpetualsClient, PoolConfig, OraclePrice } from 'flash-sdk';
+import { PerpetualsClient, PoolConfig, PoolAccount, CustodyAccount, OraclePrice } from 'flash-sdk';
 import type { ContractOraclePrice, Side, Privilege } from 'flash-sdk';
 
 import type {
   ProtocolAdapter,
   CreateSubaccountInput,
   SubaccountCaps,
+  OrderFeeRateQuoteRequest,
+  OrderFeeRateQuoteResult,
 } from '../adapter.js';
+import { FEE_RATE_QUOTE_MAX_AGE_MS } from '../adapter.js';
 import type {
   ProtocolMarket,
   ProtocolPosition,
@@ -156,6 +159,15 @@ const DEFAULT_SLIPPAGE_PCT = 1;
 
 /** Price exponent used when encoding a float price into a ContractOraclePrice. */
 const PRICE_EXPONENT = -8;
+
+type FlashCustodyConfig = PoolConfig['custodies'][number];
+
+interface FreshFeeOracle {
+  current: OraclePrice;
+  ema: OraclePrice;
+  pricePublishTime: number;
+  emaPublishTime: number;
+}
 
 // ── Adapter class ─────────────────────────────────────────────────────────────
 
@@ -465,6 +477,245 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   // ── Order execution ─────────────────────────────────────────────────────────
+
+  /**
+   * Flash's opening fee is a function of the exact order and current pool
+   * state, so it cannot be represented by the account-wide fee capability.
+   */
+  async getOrderFeeRateQuote(input: OrderFeeRateQuoteRequest): Promise<OrderFeeRateQuoteResult> {
+    const unavailable = (reason: Extract<OrderFeeRateQuoteResult, { availability: 'unavailable' }>['reason']) => ({
+      availability: 'unavailable' as const,
+      reason,
+    });
+
+    if (
+      input.liquidityRole !== 'taker'
+      || !input.account
+      || !input.order.internalSymbol
+      || !Number.isFinite(input.order.sizeBase)
+      || input.order.sizeBase <= 0
+      || !Number.isFinite(input.order.leverage)
+      || input.order.leverage <= 0
+      || !Number.isFinite(input.order.maxSlippagePct)
+      || input.order.maxSlippagePct < 0
+    ) {
+      return unavailable('malformed_quote');
+    }
+    if (input.builderCode) return unavailable('ambiguous_builder');
+
+    try {
+      const spec = this._specBySymbol(input.order.internalSymbol);
+      if (!spec) return unavailable('malformed_quote');
+
+      const poolConfig = this._getPoolConfig(spec.pool);
+      const targetConfig = poolConfig.custodies.find((custody) => custody.symbol === spec.flashSymbol);
+      const usdcConfig = poolConfig.custodies.find((custody) => custody.symbol === 'USDC');
+      if (!targetConfig || !usdcConfig) return unavailable('malformed_quote');
+
+      const sideEnum = input.order.side === 'long' ? FLASH_SIDE_LONG : FLASH_SIDE_SHORT;
+      const collateralConfig = input.order.side === 'long' ? targetConfig : usdcConfig;
+      const market = poolConfig.markets.find((candidate) => (
+        candidate.targetCustody.equals(targetConfig.custodyAccount)
+        && candidate.collateralCustody.equals(collateralConfig.custodyAccount)
+        && (input.order.side === 'long' ? 'long' in candidate.side : 'short' in candidate.side)
+      ));
+      if (!market) return unavailable('malformed_quote');
+
+      const client = this._getReadClient();
+      const rawPool = await client.getPool(poolConfig.poolName);
+      const poolAccount = PoolAccount.from(poolConfig.poolAddress, rawPool);
+      const custodyReader = (client as unknown as {
+        program: { account: { custody: { fetchMultiple(addresses: PublicKey[]): Promise<unknown[]> } } };
+      }).program.account.custody;
+      const rawCustodies = await custodyReader.fetchMultiple(poolAccount.custodies);
+      if (rawCustodies.length !== poolAccount.custodies.length || rawCustodies.some((row) => row == null)) {
+        return unavailable('read_failed');
+      }
+
+      const configured = [...poolConfig.custodies, ...poolConfig.custodiesDeprecated]
+        .filter((config, index, configs) => configs.findIndex((candidate) => (
+          candidate.custodyAccount.equals(config.custodyAccount)
+        )) === index);
+      const rows: Array<{
+        publicKey: PublicKey;
+        account: CustodyAccount;
+        config: FlashCustodyConfig | null;
+      }> = [];
+      for (let index = 0; index < poolAccount.custodies.length; index += 1) {
+        const publicKey = poolAccount.custodies[index];
+        const account = CustodyAccount.from(publicKey, rawCustodies[index]! as never);
+        const config = configured.find((candidate) => candidate.custodyAccount.equals(publicKey))
+          ?? configured.find((candidate) => candidate.mintKey.equals(account.mint))
+          ?? null;
+        if (!config && !account.assets.owned.isZero()) return unavailable('malformed_quote');
+        rows.push({ publicKey, account, config });
+      }
+
+      const pricedRows = rows.filter((row): row is typeof row & { config: FlashCustodyConfig } => (
+        typeof row.config?.pythPriceId === 'string' && row.config.pythPriceId.length > 0
+      ));
+      const fresh = await this._fetchFreshFeeOraclePrices(pricedRows.map((row) => ({
+        custodyPublicKey: row.publicKey,
+        pythPriceId: row.config.pythPriceId,
+      })));
+      if (fresh.availability === 'unavailable') return fresh;
+
+      const zeroOracle = () => OraclePrice.from({
+        price: new BN(0),
+        exponent: new BN(-8),
+        confidence: new BN(0),
+        timestamp: new BN(0),
+      });
+      const orderedCurrentPrices: OraclePrice[] = [];
+      const orderedEmaPrices: OraclePrice[] = [];
+      for (const row of rows) {
+        const oracle = fresh.values.get(row.publicKey.toBase58());
+        if (oracle) {
+          orderedCurrentPrices.push(oracle.current);
+          orderedEmaPrices.push(oracle.ema);
+        } else if (row.account.assets.owned.isZero()) {
+          orderedCurrentPrices.push(zeroOracle());
+          orderedEmaPrices.push(zeroOracle());
+        } else {
+          return unavailable('malformed_quote');
+        }
+      }
+
+      const targetKey = targetConfig.custodyAccount.toBase58();
+      const usdcKey = usdcConfig.custodyAccount.toBase58();
+      const targetRow = rows.find((row) => row.publicKey.toBase58() === targetKey);
+      const usdcRow = rows.find((row) => row.publicKey.toBase58() === usdcKey);
+      const targetOracle = fresh.values.get(targetKey);
+      const usdcOracle = fresh.values.get(usdcKey);
+      if (!targetRow || !usdcRow || !targetOracle || !usdcOracle) {
+        return unavailable('malformed_quote');
+      }
+
+      const helperTimestamp = new BN(Math.floor(Date.now() / 1000));
+      const poolAum = client.getAssetsUnderManagementUsdSync(
+        poolAccount,
+        orderedCurrentPrices,
+        orderedEmaPrices,
+        rows.map((row) => row.account),
+        [],
+        'excludePnl',
+        helperTimestamp,
+        poolConfig,
+      );
+      if (!poolAum?.poolAmountUsd || poolAum.poolAmountUsd.lten(0)) {
+        return unavailable('malformed_quote');
+      }
+
+      const targetPriceUi = Number(targetOracle.current.price.toString())
+        * Math.pow(10, targetOracle.current.exponent.toNumber());
+      if (!Number.isFinite(targetPriceUi) || targetPriceUi <= 0) {
+        return unavailable('malformed_quote');
+      }
+      const collateralAmount = this._toBaseUnits(
+        input.order.sizeBase * targetPriceUi / input.order.leverage,
+        6,
+      );
+      const sizeAmount = this._toBaseUnits(input.order.sizeBase, targetRow.account.decimals);
+
+      const feeUsd = (amount: BN, row: typeof targetRow, oracle: FreshFeeOracle): BN => {
+        const current = OraclePrice.from({
+          price: new BN(oracle.current.price),
+          exponent: new BN(oracle.current.exponent),
+          confidence: new BN(oracle.current.confidence),
+          timestamp: new BN(oracle.current.timestamp),
+        });
+        const ema = OraclePrice.from({
+          price: new BN(oracle.ema.price),
+          exponent: new BN(oracle.ema.exponent),
+          confidence: new BN(oracle.ema.confidence),
+          timestamp: new BN(oracle.ema.timestamp),
+        });
+        const max = client.getMinAndMaxOraclePriceSync(current, ema, row.account).max;
+        return max.getAssetAmountUsd(amount, row.account.decimals, row.account.tokenAmountMultiplier);
+      };
+
+      let openCollateralAmount = collateralAmount;
+      let swapFeeUsd = new BN(0);
+      let swappedCollateralBaseUnits: string | null = null;
+      if (input.order.side === 'long') {
+        const swap = client.getSwapAmountAndFeesSync(
+          collateralAmount,
+          new BN(0),
+          poolAccount,
+          usdcOracle.current,
+          usdcOracle.ema,
+          usdcRow.account,
+          targetOracle.current,
+          targetOracle.ema,
+          targetRow.account,
+          poolAum.poolAmountUsd,
+          poolConfig,
+        );
+        openCollateralAmount = swap.minAmountOut;
+        swappedCollateralBaseUnits = openCollateralAmount.toString();
+        swapFeeUsd = feeUsd(swap.feeIn, usdcRow, usdcOracle)
+          .add(feeUsd(swap.feeOut, targetRow, targetOracle));
+      }
+
+      const open = client.getEntryPriceAndFeeSyncV2(
+        null,
+        market.marketCorrelation,
+        openCollateralAmount,
+        sizeAmount,
+        sideEnum as unknown as Side,
+        targetOracle.current,
+        targetOracle.ema,
+        targetRow.account,
+        input.order.side === 'long' ? targetOracle.current : usdcOracle.current,
+        input.order.side === 'long' ? targetOracle.ema : usdcOracle.ema,
+        input.order.side === 'long' ? targetRow.account : usdcRow.account,
+        helperTimestamp,
+        new BN(0),
+      );
+      const sizeUsd = open.entryDeltaOraclePrice.getAssetAmountUsd(sizeAmount, targetRow.account.decimals);
+      if (sizeUsd.lten(0)) return unavailable('malformed_quote');
+      if (open.feeUsdAfterDiscount.isNeg() || open.vbFeeUsd.isNeg() || swapFeeUsd.isNeg()) {
+        return unavailable('malformed_quote');
+      }
+      const totalFeeUsd = open.feeUsdAfterDiscount.add(open.vbFeeUsd).add(swapFeeUsd);
+      const effectiveRate = Number(totalFeeUsd.toString()) / Number(sizeUsd.toString());
+      if (!Number.isFinite(effectiveRate) || effectiveRate < 0) return unavailable('malformed_quote');
+
+      setCachedPrice(input.order.internalSymbol, targetPriceUi);
+      const observedAt = Date.now();
+      return {
+        availability: 'available',
+        protocol: this.protocolName,
+        account: input.account,
+        subaccountId: input.subaccountId ?? null,
+        liquidityRole: input.liquidityRole,
+        builderCode: input.builderCode,
+        order: { ...input.order },
+        baseRate: effectiveRate,
+        effectiveRate,
+        provenance: `flash:legacy-contract-helper:fresh-solana+pyth:${poolConfig.poolAddress.toBase58()}:${market.marketAccount.toBase58()}`,
+        observedAt,
+        builder: { status: 'absent' },
+        audit: {
+          feeUnit: 'micro-usd',
+          entryFeeUsd: open.feeUsdAfterDiscount.toString(),
+          volatilityFeeUsd: open.vbFeeUsd.toString(),
+          swapFeeUsd: swapFeeUsd.toString(),
+          totalFeeUsd: totalFeeUsd.toString(),
+          sizeUsd: sizeUsd.toString(),
+          swappedCollateralBaseUnits,
+          pool: poolConfig.poolAddress.toBase58(),
+          market: market.marketAccount.toBase58(),
+          targetCustody: targetConfig.custodyAccount.toBase58(),
+          collateralCustody: collateralConfig.custodyAccount.toBase58(),
+          pricePublishTime: targetOracle.pricePublishTime,
+          emaPublishTime: targetOracle.emaPublishTime,
+        },
+      };
+    } catch {
+      return unavailable('read_failed');
+    }
+  }
 
   async placeMarketOrder(params: MarketOrderParams): Promise<OrderResult> {
     try {
@@ -1751,6 +2002,90 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   // ── Internal: Pyth Hermes HTTP ──────────────────────────────────────────────
+
+  private async _fetchFreshFeeOraclePrices(
+    inputs: Array<{ custodyPublicKey: PublicKey; pythPriceId: string }>,
+  ): Promise<
+    | { availability: 'available'; values: Map<string, FreshFeeOracle> }
+    | Extract<OrderFeeRateQuoteResult, { availability: 'unavailable' }>
+  > {
+    if (inputs.length === 0) return { availability: 'unavailable', reason: 'malformed_quote' };
+    const normalized = inputs.map((input) => ({
+      ...input,
+      normalizedId: input.pythPriceId.toLowerCase().replace(/^0x/, ''),
+    }));
+    if (normalized.some((input) => !/^[0-9a-f]{64}$/.test(input.normalizedId))) {
+      return { availability: 'unavailable', reason: 'malformed_quote' };
+    }
+
+    const qs = normalized.map((input) => `ids[]=${input.pythPriceId}`).join('&');
+    const url = hermesUrl(`/v2/updates/price/latest?${qs}`);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PYTH_FETCH_TIMEOUT_MS);
+    let data: PythHermesResponse;
+    try {
+      const response = await hermesFetch(url, { signal: controller.signal });
+      if (!response.ok) throw new Error(`Pyth Hermes HTTP ${response.status}: ${response.statusText}`);
+      data = (await response.json()) as PythHermesResponse;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!Array.isArray(data.parsed)) return { availability: 'unavailable', reason: 'malformed_quote' };
+    const byId = new Map<string, PythHermesResponse['parsed'][number]>();
+    for (const entry of data.parsed) {
+      if (typeof entry?.id !== 'string') continue;
+      byId.set(entry.id.toLowerCase().replace(/^0x/, ''), entry);
+    }
+    const validationNow = Date.now();
+    const values = new Map<string, FreshFeeOracle>();
+    for (const input of normalized) {
+      const entry = byId.get(input.normalizedId);
+      if (!entry) return { availability: 'unavailable', reason: 'malformed_quote' };
+      const current = entry.price;
+      const ema = entry.ema_price;
+      if (!current || !ema) return { availability: 'unavailable', reason: 'malformed_quote' };
+      for (const price of [current, ema]) {
+        if (
+          typeof price.price !== 'string'
+          || typeof price.conf !== 'string'
+          || !/^-?[0-9]+$/.test(price.price)
+          || !/^[0-9]+$/.test(price.conf)
+          || !Number.isInteger(price.expo)
+          || !Number.isInteger(price.publish_time)
+          || price.publish_time < 0
+          || BigInt(price.price) <= 0n
+        ) {
+          return { availability: 'unavailable', reason: 'malformed_quote' };
+        }
+        const publishMs = price.publish_time * 1000;
+        if (!Number.isSafeInteger(publishMs)) {
+          return { availability: 'unavailable', reason: 'malformed_quote' };
+        }
+        if (publishMs > validationNow) return { availability: 'unavailable', reason: 'future_quote' };
+        if (validationNow - publishMs > FEE_RATE_QUOTE_MAX_AGE_MS) {
+          return { availability: 'unavailable', reason: 'stale_quote' };
+        }
+      }
+      values.set(input.custodyPublicKey.toBase58(), {
+        current: OraclePrice.from({
+          price: new BN(current.price),
+          exponent: new BN(current.expo),
+          confidence: new BN(current.conf),
+          timestamp: new BN(current.publish_time),
+        }),
+        ema: OraclePrice.from({
+          price: new BN(ema.price),
+          exponent: new BN(ema.expo),
+          confidence: new BN(ema.conf),
+          timestamp: new BN(ema.publish_time),
+        }),
+        pricePublishTime: current.publish_time,
+        emaPublishTime: ema.publish_time,
+      });
+    }
+    return { availability: 'available', values };
+  }
 
   private async _fetchPriceFromHermes(internalSymbols: string[]): Promise<Record<string, number>> {
     const symbolsWithIds = internalSymbols
