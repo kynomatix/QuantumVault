@@ -82,6 +82,7 @@ import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import {
   resolveFeeRateQuote,
+  validateFeeRateQuote,
   type FeeRateQuoteResult,
   type ProtocolAdapter,
 } from "../protocol/adapter";
@@ -174,9 +175,6 @@ const TIMEFRAME_MS: Record<string, number> = {
   "4h": 14_400_000,
   "1d": 86_400_000,
 };
-
-/** Platform-wide taker fee convention (context-builder L73, decide L35). */
-const EXCHANGE_TAKER_FEE_RATE = 0.0004;
 
 /** G7 — daily loss breaker: realized-today + open MTM ≤ −15% of allocation ⇒ force flat + pause. */
 const DAILY_LOSS_BREAKER_PCT = 15;
@@ -553,6 +551,55 @@ interface CloseRecord {
   realizedPnl: number | null;
   feesPaid: number | null;
   closedAt: Date;
+}
+
+function retainedPaperEntryFeeRate(bot: AiTraderBot, view: OpenDecisionView): number | null {
+  const digest = view.decision.contextDigest;
+  if (!digest || typeof digest !== "object" || Array.isArray(digest)) return null;
+  const record = digest as Record<string, unknown>;
+  const identityValue = record.feeRateIdentity;
+  if (!identityValue || typeof identityValue !== "object" || Array.isArray(identityValue)) return null;
+  const identity = identityValue as Record<string, unknown>;
+  const expectedSubaccountId = bot.protocolSubaccountId ?? null;
+  const decidedAtMs = view.decision.decidedAt === null
+    ? NaN
+    : new Date(view.decision.decidedAt).getTime();
+  if (
+    !Number.isFinite(decidedAtMs)
+    || identity.protocol !== bot.protocol
+    || typeof identity.account !== "string"
+    || identity.account.trim().length === 0
+    || (identity.subaccountId ?? null) !== expectedSubaccountId
+    || identity.liquidityRole !== "taker"
+  ) {
+    return null;
+  }
+  const quote = validateFeeRateQuote(record.feeRateQuote, {
+    protocol: bot.protocol,
+    account: identity.account,
+    subaccountId: expectedSubaccountId,
+    liquidityRole: "taker",
+  }, { now: decidedAtMs });
+  return quote.availability === "available" ? quote.effectiveRate : null;
+}
+
+function paperCloseAccounting(
+  bot: AiTraderBot,
+  view: OpenDecisionView,
+  exitPrice: number,
+): { realizedPnl: number | null; feesPaid: number | null } {
+  const takerFeeRate = retainedPaperEntryFeeRate(bot, view);
+  if (takerFeeRate === null || view.entryPrice === null) {
+    return { realizedPnl: null, feesPaid: null };
+  }
+  const pnl = paperRealizedPnl({
+    side: view.side,
+    entryPrice: view.entryPrice,
+    exitPrice,
+    sizeBase: view.sizeBase,
+    takerFeeRate,
+  });
+  return { realizedPnl: pnl.netPnl, feesPaid: pnl.fees };
 }
 
 function directLiveCloseAccounting(args: {
@@ -1219,18 +1266,12 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       )
     : evaluatePaperBracket(post, view.side, view.stopLossPrice, view.takeProfitPrice);
   if (hit) {
-    const pnl = paperRealizedPnl({
-      side: view.side,
-      entryPrice: view.entryPrice,
-      exitPrice: hit.exitPrice,
-      sizeBase: view.sizeBase,
-      takerFeeRate: EXCHANGE_TAKER_FEE_RATE,
-    });
+    const accounting = paperCloseAccounting(bot, view, hit.exitPrice);
     const close: CloseRecord = {
       exitPrice: hit.exitPrice,
       exitReason: hit.leg,
-      realizedPnl: pnl.netPnl,
-      feesPaid: pnl.fees,
+      realizedPnl: accounting.realizedPnl,
+      feesPaid: accounting.feesPaid,
       closedAt: new Date(hit.candleTime),
     };
     const paperCloseAttemptId = newMutationAttemptId("close", view.decision.id);
@@ -1241,7 +1282,7 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
     });
     if (committed.status === "conflict") return;
     if (committed.status === "applied") console.log(
-      `[AiTraderMonitor] Paper close: bot ${bot.id.slice(0, 8)} ${view.side} ${bot.market} ${hit.leg.toUpperCase()} @ ${hit.exitPrice.toFixed(6)} pnl ${pnl.netPnl.toFixed(2)}`
+      `[AiTraderMonitor] Paper close: bot ${bot.id.slice(0, 8)} ${view.side} ${bot.market} ${hit.leg.toUpperCase()} @ ${hit.exitPrice.toFixed(6)} pnl ${accounting.realizedPnl === null ? "unavailable" : accounting.realizedPnl.toFixed(2)}`
     );
     if (committed.status === "applied") {
       await notifyClosed(committed.bot, close, getCloseReasonLabel("tpsl", hit.leg === "tp" ? "TP" : "SL"));
@@ -1279,18 +1320,12 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
   if (dailyRealized + unrealized <= -(DAILY_LOSS_BREAKER_PCT / 100) * allocation) {
     // Force-flat at the last known price with the adverse exit-slippage penalty.
     const exitPrice = paperExitPrice(lastClose, view.side);
-    const pnl = paperRealizedPnl({
-      side: view.side,
-      entryPrice: view.entryPrice,
-      exitPrice,
-      sizeBase: view.sizeBase,
-      takerFeeRate: EXCHANGE_TAKER_FEE_RATE,
-    });
+    const accounting = paperCloseAccounting(bot, view, exitPrice);
     const close: CloseRecord = {
       exitPrice,
       exitReason: "circuit_breaker",
-      realizedPnl: pnl.netPnl,
-      feesPaid: pnl.fees,
+      realizedPnl: accounting.realizedPnl,
+      feesPaid: accounting.feesPaid,
       closedAt: new Date(now),
     };
     const paperCloseAttemptId = newMutationAttemptId("close", view.decision.id);
@@ -1557,18 +1592,12 @@ export async function userInitiatedClose(
         return { ok: false, detail: "no live price available to close the paper position" };
       }
       const exitPrice = paperExitPrice(markPrice, view.side);
-      const pnl = paperRealizedPnl({
-        side: view.side,
-        entryPrice: view.entryPrice,
-        exitPrice,
-        sizeBase: view.sizeBase,
-        takerFeeRate: EXCHANGE_TAKER_FEE_RATE,
-      });
+      const accounting = paperCloseAccounting(bot, view, exitPrice);
       const close: CloseRecord = {
         exitPrice,
         exitReason: "user_close",
-        realizedPnl: pnl.netPnl,
-        feesPaid: pnl.fees,
+        realizedPnl: accounting.realizedPnl,
+        feesPaid: accounting.feesPaid,
         closedAt: new Date(),
       };
       const paperCloseAttemptId = newMutationAttemptId("close", view.decision.id);
@@ -1584,7 +1613,7 @@ export async function userInitiatedClose(
         await notifyClosed(committed.bot, close, "Closed by You");
       }
       await afterCommittedClose(committed);
-      return { ok: true, closed: true, exitPrice, realizedPnl: pnl.netPnl };
+      return { ok: true, closed: true, exitPrice, realizedPnl: accounting.realizedPnl };
     }
 
     const subaccountId = undefined; // WO-7.1: sub-provisioned bots sign AS the subaccount

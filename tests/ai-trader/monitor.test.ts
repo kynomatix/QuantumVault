@@ -211,7 +211,37 @@ vi.mock("../../server/ai-trader/multiplier-market-quarantine", () => ({
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z — 15m boundary
 const TF_15M = 900_000;
 const DAY = 86_400_000;
+const PAPER_TAKER_FEE_RATE = 0.00015;
 const ENTRY_CANDLE_OPEN = NOW - 2 * TF_15M; // decidedAt 11:30 → entry candle 11:30
+
+function retainedFeeContext(overrides: {
+  identity?: Record<string, unknown>;
+  quote?: Record<string, unknown>;
+} = {}) {
+  const identity = {
+    protocol: "pacifica",
+    account: "retained-agent-account",
+    subaccountId: "sub-1",
+    liquidityRole: "taker",
+    ...(overrides.identity ?? {}),
+  };
+  return {
+    feeRateIdentity: identity,
+    feeRateQuote: {
+      availability: "available",
+      protocol: identity.protocol,
+      account: identity.account,
+      subaccountId: identity.subaccountId ?? null,
+      liquidityRole: identity.liquidityRole,
+      baseRate: PAPER_TAKER_FEE_RATE,
+      effectiveRate: PAPER_TAKER_FEE_RATE,
+      provenance: "retained:entry-admission",
+      observedAt: ENTRY_CANDLE_OPEN,
+      builder: { status: "absent" },
+      ...(overrides.quote ?? {}),
+    },
+  };
+}
 
 function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
   return {
@@ -251,6 +281,7 @@ function makeOpenDecision(overrides: Partial<Record<string, unknown>> = {}): AiT
     outcome: "executed",
     closedAt: null,
     decidedAt: new Date(ENTRY_CANDLE_OPEN),
+    contextDigest: retainedFeeContext(),
     entryPrice: "150",
     clampedDecision: {
       action: "long",
@@ -585,7 +616,7 @@ describe("paper close detection", () => {
     expect(Number(du[0].exitPrice)).toBeCloseTo(expectedExit, 6);
     expect(du[0].closedAt).toEqual(new Date(ENTRY_CANDLE_OPEN + TF_15M));
     // netPnl = (exit-entry)*size − fee*(entry+exit)*size
-    const expectedNet = (expectedExit - 150) * 2 - 0.0004 * (150 + expectedExit) * 2;
+    const expectedNet = (expectedExit - 150) * 2 - PAPER_TAKER_FEE_RATE * (150 + expectedExit) * 2;
     expect(Number(du[0].realizedPnl)).toBeCloseTo(expectedNet, 2);
     // afterClose: back to idle.
     expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
@@ -783,6 +814,54 @@ describe("live close-result consumption", () => {
     expect(appendTelemetryMock).toHaveBeenCalledWith(
       "[AiTraderCloseTransition] conflict family=paper_user reason=decision_state_conflict",
     );
+  });
+
+  it("uses the retained entry-admission fee rate for a paper user close", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    const bot = makeBot({ paperMode: true });
+    const decision = makeOpenDecision();
+    getBotMock.mockResolvedValue(bot);
+    getDecisionsMock.mockResolvedValue([decision]);
+    getAiTraderDecisionMock.mockResolvedValue(decision);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPrice: vi.fn(async () => 151) }));
+
+    const result = await userInitiatedClose(bot);
+
+    expect(result).toMatchObject({ ok: true, closed: true });
+    const close = commitCloseMock.mock.calls[0][0].close;
+    expect(close.feesPaid).toBeCloseTo(PAPER_TAKER_FEE_RATE * (150 + close.exitPrice) * 2, 10);
+    expect(close.realizedPnl).not.toBeNull();
+  });
+
+  it.each([
+    ["missing retained digest", { contextDigest: null }],
+    ["unavailable quote", { contextDigest: retainedFeeContext({ quote: { availability: "unavailable", reason: "builder_rate_unknown" } }) }],
+    ["malformed quote", { contextDigest: retainedFeeContext({ quote: { effectiveRate: "not-a-number" } }) }],
+    ["stale-at-decision quote", { contextDigest: retainedFeeContext({ quote: { observedAt: ENTRY_CANDLE_OPEN - 600_001 } }) }],
+    ["future-at-decision quote", { contextDigest: retainedFeeContext({ quote: { observedAt: ENTRY_CANDLE_OPEN + 1 } }) }],
+    ["protocol mismatch", { contextDigest: retainedFeeContext({ identity: { protocol: "drift" } }) }],
+    ["quote/account mismatch", { contextDigest: retainedFeeContext({ quote: { account: "different-account" } }) }],
+    ["subaccount mismatch", { contextDigest: retainedFeeContext({ identity: { subaccountId: "sub-2" } }) }],
+    ["liquidity-role mismatch", { contextDigest: retainedFeeContext({ identity: { liquidityRole: "maker" } }) }],
+    ["missing recorded decision time", { decidedAt: null }],
+  ] as Array<[string, Partial<Record<string, unknown>>]>)
+  ("still flattens with null money fields for %s", async (_caseName, overrides) => {
+    const { userInitiatedClose } = await importMonitor();
+    const bot = makeBot({ paperMode: true });
+    const decision = makeOpenDecision(overrides);
+    getBotMock.mockResolvedValue(bot);
+    getDecisionsMock.mockResolvedValue([decision]);
+    getAiTraderDecisionMock.mockResolvedValue(decision);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPrice: vi.fn(async () => 151) }));
+
+    const result = await userInitiatedClose(bot);
+
+    expect(result).toMatchObject({ ok: true, closed: true, realizedPnl: null });
+    expect(commitCloseMock).toHaveBeenCalledOnce();
+    expect(commitCloseMock.mock.calls[0][0].close).toMatchObject({
+      realizedPnl: null,
+      feesPaid: null,
+    });
   });
 
   it.each([
