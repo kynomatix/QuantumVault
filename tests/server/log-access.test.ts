@@ -7,8 +7,66 @@
  * could slip through, and that it does NOT mangle the log content reviewers
  * actually need (tx sigs, wallet addresses, market symbols, numbers).
  */
-import { describe, it, expect } from "vitest";
-import { redactSensitive } from "../../server/log-access";
+import express from "express";
+import { createServer, type Server } from "node:http";
+import { afterEach, describe, it, expect, vi } from "vitest";
+
+const storageTarget = vi.hoisted(() => ({
+  getErrorStats: vi.fn(async () => []),
+  listErrors: vi.fn(async () => []),
+}));
+const telemetrySnapshotMock = vi.hoisted(() => vi.fn(() => ({
+  queueLength: 3,
+  queueBytes: 144,
+  droppedLines: 7,
+  drainerRunning: true,
+  consecutiveFailures: 2,
+})));
+
+vi.mock("../../server/storage", () => ({ storage: storageTarget }));
+vi.mock("../../server/telemetry", () => ({
+  getTelemetryWriterSnapshot: telemetrySnapshotMock,
+}));
+
+import { redactSensitive, registerLogAccessRoutes } from "../../server/log-access";
+
+let currentServer: Server | undefined;
+
+afterEach(async () => {
+  vi.clearAllMocks();
+  telemetrySnapshotMock.mockReturnValue({
+    queueLength: 3,
+    queueBytes: 144,
+    droppedLines: 7,
+    drainerRunning: true,
+    consecutiveFailures: 2,
+  });
+  delete process.env.LOG_READ_TOKEN;
+  if (currentServer) {
+    currentServer.closeAllConnections?.();
+    await new Promise<void>((resolve) => currentServer!.close(() => resolve()));
+    currentServer = undefined;
+  }
+});
+
+async function startServer(token?: string): Promise<string> {
+  if (token === undefined) delete process.env.LOG_READ_TOKEN;
+  else process.env.LOG_READ_TOKEN = token;
+  const app = express();
+  registerLogAccessRoutes(app);
+  currentServer = createServer(app);
+  await new Promise<void>((resolve) => currentServer!.listen(0, "127.0.0.1", resolve));
+  const address = currentServer.address();
+  if (!address || typeof address === "string") throw new Error("no ephemeral test port");
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function getSummary(base: string, token?: string) {
+  const response = await fetch(`${base}/api/logs/summary`, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+  });
+  return { status: response.status, body: await response.json() as Record<string, any> };
+}
 
 describe("redactSensitive", () => {
   it("redacts secret-looking key=value pairs in multiple syntaxes", () => {
@@ -61,5 +119,56 @@ describe("redactSensitive", () => {
       "[OKX] SOURCE DOWN: 3 consecutive network failures - skipping OKX for all symbols for 15min",
     ];
     for (const l of lines) expect(redactSensitive(l)).toBe(l);
+  });
+});
+
+describe("GET /api/logs/summary telemetry writer health", () => {
+  const token = "read-only-token-123456";
+
+  it("retains dedicated bearer authentication", async () => {
+    let base = await startServer();
+    expect((await getSummary(base)).status).toBe(503);
+    await new Promise<void>((resolve) => currentServer!.close(() => resolve()));
+    currentServer = undefined;
+
+    base = await startServer(token);
+    expect((await getSummary(base, "wrong-token-value")).status).toBe(401);
+    expect(telemetrySnapshotMock).not.toHaveBeenCalled();
+  });
+
+  it("returns the exact bounded writer snapshot under telemetry.writer", async () => {
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.status).toBe(200);
+    expect(response.body.telemetry.writer).toEqual({
+      queueLength: 3,
+      queueBytes: 144,
+      droppedLines: 7,
+      drainerRunning: true,
+      consecutiveFailures: 2,
+    });
+    expect(Object.keys(response.body.telemetry.writer).sort()).toEqual([
+      "consecutiveFailures",
+      "drainerRunning",
+      "droppedLines",
+      "queueBytes",
+      "queueLength",
+    ]);
+  });
+
+  it("keeps the summary available and returns writer null when the snapshot throws", async () => {
+    telemetrySnapshotMock.mockImplementationOnce(() => {
+      throw new Error("must not escape or appear in the response");
+    });
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.status).toBe(200);
+    expect(response.body.telemetry).toMatchObject({
+      present: false,
+      bytes: 0,
+      lastLineAt: null,
+      writer: null,
+    });
+    expect(JSON.stringify(response.body)).not.toContain("must not escape");
   });
 });

@@ -32,6 +32,7 @@ import path from "path";
 import crypto from "crypto";
 import type { Express, Request, Response, NextFunction } from "express";
 import { storage } from "./storage";
+import { getTelemetryWriterSnapshot, type TelemetryWriterSnapshot } from "./telemetry";
 
 const TELEMETRY_FILE = path.join("logs", "telemetry.log");
 const TELEMETRY_ROTATED = path.join("logs", "telemetry.log.1");
@@ -187,16 +188,34 @@ export function registerLogAccessRoutes(app: Express): void {
       ]);
       const unresolvedInWindow = stats.reduce((s, r) => s + (r.unresolved ?? 0), 0);
 
-      let telemetry: { present: boolean; bytes: number; lastLineAt: string | null } = {
+      let writer: TelemetryWriterSnapshot | null;
+      try {
+        writer = getTelemetryWriterSnapshot();
+      } catch {
+        writer = null;
+      }
+
+      let telemetry: {
+        present: boolean;
+        bytes: number;
+        lastLineAt: string | null;
+        writer: TelemetryWriterSnapshot | null;
+      } = {
         present: false,
         bytes: 0,
         lastLineAt: null,
+        writer,
       };
       try {
         const { size } = fs.statSync(TELEMETRY_FILE);
         const tail = readTelemetryTail(1);
         const tsMatch = tail.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
-        telemetry = { present: true, bytes: size, lastLineAt: tsMatch ? tsMatch[1] : null };
+        telemetry = {
+          present: true,
+          bytes: size,
+          lastLineAt: tsMatch ? tsMatch[1] : null,
+          writer,
+        };
       } catch {
         // No telemetry file yet.
       }
