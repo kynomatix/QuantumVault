@@ -20,7 +20,11 @@ import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import type { TradeRecord } from "../../server/protocol/protocol-types";
 import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
-import { SERVER_BOOT_ID } from "../../server/boot-id";
+
+vi.mock("../../server/boot-id", () => ({
+  SERVER_BOOT_ID: "ABCDEF12-0000-4000-8000-000000000000",
+  SERVER_BOOT_STARTED_AT: "2026-07-08T12:00:00.000Z",
+}));
 
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
@@ -1389,7 +1393,7 @@ describe("live close detection", () => {
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
     expect((adapter as any).getTradeHistory).toHaveBeenCalledTimes(1);
     expect(appendTelemetryMock).toHaveBeenCalledWith(
-      `[AIT-OBS] disposition=uncorroborated_flat_exit_deferred boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} ` +
+      `[AIT-OBS] disposition=uncorroborated_flat_exit_deferred boot=abcdef12 ` +
       `bot=${bot.id.slice(0, 8)} decision=dec-1 expected_size=2 observed_exit_fill_size=0`,
     );
   });
@@ -1412,7 +1416,7 @@ describe("live close detection", () => {
     expect(notifyMock).not.toHaveBeenCalled();
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
     expect(appendTelemetryMock).toHaveBeenCalledWith(
-      `[AIT-OBS] disposition=uncorroborated_flat_exit_deferred boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} ` +
+      `[AIT-OBS] disposition=uncorroborated_flat_exit_deferred boot=abcdef12 ` +
       `bot=${bot.id.slice(0, 8)} decision=dec-1 expected_size=2 observed_exit_fill_size=1`,
     );
   });
