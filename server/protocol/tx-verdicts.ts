@@ -23,3 +23,10 @@ export function isUnconfirmedLandingVerdict(error: string | Error | unknown): bo
   const s = error instanceof Error ? error.message : String(error ?? "");
   return s.includes(UNCONFIRMED_LANDING_VERDICT_TOKEN);
 }
+
+/** Prefer the typed venue disposition, retaining the token for legacy adapters. */
+export function isUnconfirmedLandingResult(result: Pick<OrderResult, 'landingDisposition' | 'error'>): boolean {
+  return result.landingDisposition === 'unconfirmed'
+    || isUnconfirmedLandingVerdict(result.error);
+}
+import type { OrderResult } from './protocol-types.js';

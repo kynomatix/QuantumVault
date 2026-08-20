@@ -85,6 +85,7 @@ import { mapToProtocolSide } from './pacifica-types.js';
 import { pacificaQuota, QuotaExhaustedError, type RequestPriority } from './pacifica-quota.js';
 import { pacificaCache } from './pacifica-cache.js';
 import { appendTelemetry } from '../../telemetry.js';
+import { UNCONFIRMED_LANDING_VERDICT_TOKEN } from '../tx-verdicts.js';
 
 const MAX_MARKET_CACHE_SIZE = 200;
 const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -1260,9 +1261,18 @@ export class PacificaAdapter implements ProtocolAdapter {
       (body as Record<string, unknown>).subaccount_id = params.subaccountId;
     }
 
-    const response: PacificaOrderResponse = await this.post('/orders/create_market', body);
+    if (isReduceOnly) {
+      // Risk-reducing closes retain the existing throw/retry semantics. They
+      // must never be stranded behind entry-only ambiguity quarantine.
+      const response: PacificaOrderResponse = await this.post('/orders/create_market', body);
+      return this.mapOrderResponse(response, params.clientOrderId);
+    }
 
-    return this.mapOrderResponse(response, params.clientOrderId);
+    return this.postRiskIncreasingMarketOrder(
+      '/orders/create_market',
+      body,
+      params.clientOrderId,
+    );
   }
 
   async placeLimitOrder(params: LimitOrderParams): Promise<OrderResult> {
@@ -2742,6 +2752,103 @@ export class PacificaAdapter implements ProtocolAdapter {
     };
   }
 
+  private unconfirmedMarketOrderResult(input: {
+    message: string;
+    rawResponse?: unknown;
+    clientOrderId?: string;
+    orderId?: string;
+    status?: OrderResult['status'];
+    acknowledged?: boolean;
+  }): OrderResult {
+    return {
+      success: input.acknowledged === true,
+      orderId: input.orderId,
+      clientOrderId: input.clientOrderId,
+      status: input.status ?? 'unknown',
+      error: `${input.message} ${UNCONFIRMED_LANDING_VERDICT_TOKEN}`,
+      rawResponse: input.rawResponse,
+      landingDisposition: 'unconfirmed',
+    };
+  }
+
+  private mapRiskIncreasingMarketOrderResponse(
+    value: unknown,
+    clientOrderId?: string,
+  ): OrderResult {
+    const envelope = value && typeof value === 'object'
+      ? value as Record<string, unknown>
+      : null;
+    if (envelope?.success === false) {
+      return this.unconfirmedMarketOrderResult({
+        message: `Pacifica returned a non-terminal success:false order envelope (${String(envelope.error ?? 'unknown')})`,
+        rawResponse: value,
+        clientOrderId,
+      });
+    }
+
+    const raw = envelope && 'data' in envelope && envelope.data && typeof envelope.data === 'object'
+      ? envelope.data as Record<string, unknown>
+      : envelope;
+    if (!raw) {
+      return this.unconfirmedMarketOrderResult({
+        message: 'Pacifica returned a malformed market-order acknowledgement',
+        rawResponse: value,
+        clientOrderId,
+      });
+    }
+
+    const rawStatus = typeof raw.status === 'string' ? raw.status : '';
+    const compactAcknowledgement = !rawStatus && ('i' in raw || 'I' in raw);
+    const status = compactAcknowledgement ? 'acknowledged' : this.normalizeOrderStatus(rawStatus);
+    const rawOrderId = raw.order_id ?? raw.i;
+    const rawClientOrderId = raw.client_order_id ?? raw.I;
+    const orderId = rawOrderId === undefined || rawOrderId === null ? undefined : String(rawOrderId);
+    const resolvedClientOrderId = clientOrderId
+      ?? (rawClientOrderId === undefined || rawClientOrderId === null ? undefined : String(rawClientOrderId));
+    const response = raw as unknown as PacificaOrderResponse;
+
+    if (status === 'filled') {
+      return {
+        ...this.mapOrderResponse(response, resolvedClientOrderId),
+        success: true,
+        orderId,
+        clientOrderId: resolvedClientOrderId,
+        status,
+        rawResponse: value,
+        landingDisposition: 'terminal',
+      };
+    }
+    if (status === 'canceled' || status === 'expired' || status === 'rejected') {
+      return {
+        ...this.mapOrderResponse(response, resolvedClientOrderId),
+        success: false,
+        orderId,
+        clientOrderId: resolvedClientOrderId,
+        status,
+        error: typeof raw.error === 'string'
+          ? raw.error
+          : `Pacifica market order reached terminal ${status} status`,
+        rawResponse: value,
+        landingDisposition: 'terminal',
+      };
+    }
+
+    const acknowledged = compactAcknowledgement
+      || status === 'submitted'
+      || status === 'acknowledged'
+      || status === 'partial_fill'
+      || envelope?.success === true
+      || orderId !== undefined;
+    return this.unconfirmedMarketOrderResult({
+      message: `Pacifica acknowledged the market order without a terminal outcome (status=${status})`,
+      rawResponse: value,
+      clientOrderId: resolvedClientOrderId,
+      orderId,
+      status,
+      acknowledged,
+    });
+  }
+
   private normalizeOrderStatus(
     status: string,
   ): OrderResult['status'] {
@@ -3403,11 +3510,84 @@ export class PacificaAdapter implements ProtocolAdapter {
       path.includes('/withdraw') ||
       path.includes('/transfer')
     ) {
-      pacificaCache.invalidate('/positions');
-      pacificaCache.invalidate('/account');
+      this.invalidateMutationCaches();
     }
 
     return data;
+  }
+
+  private invalidateMutationCaches(): void {
+    pacificaCache.invalidate('/positions');
+    pacificaCache.invalidate('/account');
+  }
+
+  private async postRiskIncreasingMarketOrder(
+    path: string,
+    body: unknown,
+    clientOrderId?: string,
+  ): Promise<OrderResult> {
+    const url = `${this.config.baseUrl}${path}`;
+    try {
+      let response: Response;
+      try {
+        response = await this.fetchBounded(
+          url,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          },
+          30_000,
+          30_000,
+          `POST ${path}`,
+        );
+      } catch (error) {
+        return this.unconfirmedMarketOrderResult({
+          message: `Pacifica market-order transport did not prove a terminal outcome (${error instanceof Error ? error.message : String(error)})`,
+          clientOrderId,
+        });
+      }
+
+      if (!response.ok) {
+        const terminalStatus = new Set([400, 401, 403, 404, 405, 422]).has(response.status);
+        let detail = '';
+        try {
+          detail = await this.readBodyBounded(response.text(), 10_000, `POST ${path}`);
+        } catch {
+          detail = '';
+        }
+        if (terminalStatus) {
+          return {
+            success: false,
+            clientOrderId,
+            status: 'rejected',
+            error: `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${detail}`,
+            landingDisposition: 'terminal',
+          };
+        }
+        return this.unconfirmedMarketOrderResult({
+          message: `Pacifica market-order HTTP ${response.status} did not prove a terminal outcome (${detail || response.statusText})`,
+          clientOrderId,
+        });
+      }
+
+      let json: unknown;
+      try {
+        json = await this.readBodyBounded(response.json(), 10_000, `POST ${path}`);
+      } catch (error) {
+        return this.unconfirmedMarketOrderResult({
+          message: `Pacifica market-order response body was unreadable (${error instanceof Error ? error.message : String(error)})`,
+          clientOrderId,
+        });
+      }
+      return this.mapRiskIncreasingMarketOrderResponse(json, clientOrderId);
+    } finally {
+      // Pacifica charges every attempted request, regardless of outcome. Any
+      // request that may have reached the venue can also have mutated account
+      // state, including requests whose response transport failed.
+      pacificaQuota.record(path);
+      this.invalidateMutationCaches();
+    }
   }
 
   private static assessRiskTier(maxLeverage: number): 'recommended' | 'caution' | 'high_risk' {

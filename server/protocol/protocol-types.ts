@@ -83,6 +83,8 @@ export type OrderStatus =
   | 'rejected'
   | 'unknown';
 
+export type OrderLandingDisposition = 'terminal' | 'unconfirmed';
+
 export interface OrderResult {
   success: boolean;
   orderId?: string;
@@ -93,6 +95,11 @@ export interface OrderResult {
   fee?: number;
   error?: string;
   rawResponse?: unknown;
+  /**
+   * Provider-neutral landing truth. `unconfirmed` means the request may have
+   * reached the venue but no terminal fill/no-fill outcome is proven yet.
+   */
+  landingDisposition?: OrderLandingDisposition;
   /**
    * For TP/SL operations: indicates which legs were actually applied vs.
    * dropped during pre-flight validation. Populated by adapters that

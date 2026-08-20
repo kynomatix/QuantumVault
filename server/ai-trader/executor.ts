@@ -32,7 +32,7 @@ import {
   validateFeeRateQuote,
   type ProtocolAdapter,
 } from "../protocol/adapter";
-import { isUnconfirmedLandingVerdict } from "../protocol/tx-verdicts";
+import { isUnconfirmedLandingResult } from "../protocol/tx-verdicts";
 import type { ClampedDecision } from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
 import { isTerminalCloseResult } from "./close-truth";
@@ -715,6 +715,7 @@ async function executeLiveEntry(
       orderResult = { success: false, status: "rejected" as const, error: err instanceof Error ? err.message : String(err) };
     }
     const entryJournal = journalBase(bot, decisionId);
+    const unconfirmedLanding = isUnconfirmedLandingResult(orderResult);
     const entryOrderEvent = {
       ...orderResultEvent({
         base: entryJournal,
@@ -723,8 +724,9 @@ async function executeLiveEntry(
         cause: "decision",
         order: orderResult,
         clientOrderId,
-        failureCode: orderResult.success ? null : isUnconfirmedLandingVerdict(orderResult.error)
-          ? "venue_unconfirmed" : orderResult.status === "rejected" ? "venue_rejected" : "venue_error",
+        failureCode: unconfirmedLanding
+          ? "venue_unconfirmed"
+          : orderResult.success ? null : orderResult.status === "rejected" ? "venue_rejected" : "venue_error",
       }),
       side,
       observedAt: n.journalObservedAt,
@@ -760,7 +762,7 @@ async function executeLiveEntry(
       }
     };
 
-    if (!orderResult.success) {
+    if (!orderResult.success || unconfirmedLanding) {
       // Landing-verification timeout: the order tx was BROADCAST and may still
       // land inside the blockhash validity window (~60–90s) even though the
       // adapter could not confirm it. A single flat probe here is NOT proof of
@@ -775,7 +777,7 @@ async function executeLiveEntry(
       // brackets a late-landing position, protectively closes it, or expires
       // the marker after a conservative flat window. (Retry classification
       // also hard-excludes this verdict — see tx-verdicts.ts.)
-      if (isUnconfirmedLandingVerdict(orderResult.error)) {
+      if (unconfirmedLanding) {
         // Quarantine decision, bot state, and the exact venue-result suffix in
         // one transaction. A conflict/throw leaves the pre-existing executing
         // crash marker intact and returns position_unconfirmed; there is no
@@ -795,7 +797,9 @@ async function executeLiveEntry(
           market: bot.market,
           side: side === "long" ? "LONG" : "SHORT",
           error:
-            `Entry order was broadcast but its on-chain landing could not be confirmed. ` +
+            `${orderResult.success
+              ? "Entry order was acknowledged by the venue but not terminally confirmed."
+              : "Entry order may have reached the venue, but no terminal outcome was confirmed."} ` +
             `The bot is quarantined from new entries while automatic reconciliation keeps checking the venue — ` +
             `a late-landing position will be stop-protected or safely closed. ` +
             `If reconciliation cannot settle it within a few minutes you'll get a final alert; verify the exchange before resuming.`,
