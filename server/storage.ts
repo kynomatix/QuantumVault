@@ -6772,7 +6772,7 @@ export class DatabaseStorage implements IStorage {
         });
 
         const appendJournal = async (
-          requireSemanticRequestedReplay = false,
+          requireDurableIdentityReplay = false,
         ): Promise<AiTraderRecoveryJournalResult> => {
           if (params.journalBatches.length === 0) {
             return { status: "replayed", failureCode: null };
@@ -6789,7 +6789,7 @@ export class DatabaseStorage implements IStorage {
                 prepared.push(await prepareExecutionJournalEventsInTransaction(journalTx, batch, {
                   requireEntryCommandLineage: batch[0].action === "entry",
                   requireExactRequestedReplay: true,
-                  requireSemanticRequestedReplay,
+                  requireSemanticRequestedReplay: requireDurableIdentityReplay,
                   attemptLockAlreadyHeld: true,
                 }));
               }
@@ -6812,13 +6812,13 @@ export class DatabaseStorage implements IStorage {
           if (journalPrevalidationFailure) {
             throw new AiTraderRecoveryConflictError("journal_identity_conflict");
           }
-          const contentReplayAllowed = params.disposition === "adopt_open"
+          const durableIdentityReplayAllowed = params.disposition === "adopt_open"
             || params.disposition === "adopt_for_protective_close";
-          const journal = await appendJournal(contentReplayAllowed);
+          const journal = await appendJournal(durableIdentityReplayAllowed);
           if (journal.status === "degraded") {
             throw new AiTraderRecoveryConflictError("journal_identity_conflict");
           }
-          if (journal.status !== "replayed" && !contentReplayAllowed) {
+          if (journal.status !== "replayed" && !durableIdentityReplayAllowed) {
             // A target-state replay must be backed by the same retained
             // journal identities. A newly supplied close attempt or suffix is
             // a different recovery, even if its requested row target matches.

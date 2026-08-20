@@ -75,11 +75,13 @@ vi.mock("../../server/notification-service", () => ({
 }));
 
 const appendRequiredJournalMock = vi.fn(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
+const appendJournalMock = vi.fn(async () => undefined);
 const safeJournalMock = vi.fn();
 vi.mock("../../server/ai-trader/execution-journal", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../server/ai-trader/execution-journal")>();
   return {
     ...actual,
+    appendExecutionEvents: (...a: unknown[]) => appendJournalMock(...a),
     appendRequiredEntryPrebroadcast: (...a: unknown[]) => appendRequiredJournalMock(...a as [{ decisionId: string }]),
     safeAppendExecutionEvents: (...a: unknown[]) => safeJournalMock(...a),
   };
@@ -1057,6 +1059,35 @@ describe("live execution — failure handling (fail closed)", () => {
       expect.objectContaining({ attemptId: "entry:d-journal-emergency", action: "entry",
         eventType: "entry_terminal_unwound", failureCode: "bracket_failed" }),
     ]));
+  });
+
+  it("persists completed emergency-close evidence outside a conflicted state transition", async () => {
+    armLiveAuth();
+    commitRecoveryMock.mockResolvedValueOnce({ status: "conflict", reason: "bot_state_conflict" });
+    const adapter = makeAdapter({
+      setTpSl: vi.fn(async () => ({ success: false, status: "rejected" as const, error: "wrong side" })),
+    });
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-conflicted-unwind",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "bracket_failed" });
+    expect(adapter.closePosition).toHaveBeenCalledTimes(1);
+    expect(appendJournalMock).toHaveBeenCalledTimes(2);
+    expect(appendJournalMock.mock.calls[0]![0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "close", eventType: "close_terminal_confirmed" }),
+    ]));
+    expect(appendJournalMock.mock.calls[1]![0]).toEqual([
+      expect.objectContaining({ action: "entry", eventType: "entry_terminal_unwound" }),
+    ]);
+    expect(appendJournalMock.mock.invocationCallOrder[1]).toBeLessThan(notifyMock.mock.invocationCallOrder[0]);
   });
 
   it("clean order rejection (confirmed flat) → aborted_order, bot idle, NO pause, NO close", async () => {

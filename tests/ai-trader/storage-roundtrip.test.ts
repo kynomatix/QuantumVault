@@ -984,24 +984,30 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       });
       const healthyBase = journal.journalBase(healthyBot, healthyDecision.id);
       const healthyObservedAt = new Date("2026-08-19T20:02:00.000Z");
+      // Exact direct-executor shape: venue average and fill price differ,
+      // fill size may differ from ordered size, and the open terminal leaves
+      // recordedAfterBroadcast at its canonical false default.
       await journal.appendExecutionEvents([
         { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
           eventType: "broadcast_result", side: "long", venueStatus: "filled",
-          price: 151.25, sizeBase: 1, recordedAfterBroadcast: true, observedAt: healthyObservedAt },
+          price: 151.25, sizeBase: 0.9, recordedAfterBroadcast: true, observedAt: healthyObservedAt },
         { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
-          eventType: "position_observed", side: "long", price: 151.25,
+          eventType: "position_observed", side: "long", price: 151.2,
           sizeBase: 1, observedAt: healthyObservedAt },
+        { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
+          eventType: "fill_observed", side: "long", venueStatus: "filled",
+          price: 151.25, sizeBase: 0.9, observedAt: healthyObservedAt },
         { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
           eventType: "bracket_verified", side: "long", observedAt: healthyObservedAt },
         { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
           eventType: "entry_terminal_open", side: "long", price: 151.25,
-          sizeBase: 1, recordedAfterBroadcast: true, observedAt: healthyObservedAt },
+          sizeBase: 1, observedAt: healthyObservedAt },
       ] as any);
       const restartedHealthyObservedAt = new Date("2026-08-19T20:03:00.000Z");
       const restartedHealthyEvents = [
         { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
-          eventType: "position_observed", side: "long", price: 151.25,
-          sizeBase: 1, observedAt: restartedHealthyObservedAt },
+          eventType: "position_observed", side: "long", price: 151.18,
+          sizeBase: 0.98, observedAt: restartedHealthyObservedAt },
         { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
           eventType: "bracket_verified", side: "long", observedAt: restartedHealthyObservedAt },
         ...journal.buildEntryReconciliationTerminalEvents({
@@ -1025,7 +1031,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         decisionId: healthyDecision.id, expectedDecisionOutcome: "executed",
         entryPrice: 151.25, targetBotStatus: "open", targetPauseReason: null,
         journalBatches: [[
-          { ...restartedHealthyEvents[0], price: 999.25 },
+          { ...restartedHealthyEvents[0], side: "short" },
           ...restartedHealthyEvents.slice(1),
         ]],
       })).toEqual({ status: "conflict", reason: "journal_identity_conflict" });

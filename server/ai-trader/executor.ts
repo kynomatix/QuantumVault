@@ -46,6 +46,7 @@ import {
 import type { BuilderAttachmentPolicy, OrderResult } from "../protocol/protocol-types";
 import { appendTelemetry } from "../telemetry";
 import {
+  appendExecutionEvents,
   appendRequiredEntryPrebroadcast,
   entryAttemptId,
   journalBase,
@@ -1100,6 +1101,23 @@ async function emergencyCloseAndPause(args: {
   });
   if (transition.status === "conflict") {
     console.error(`[AiTrader] Emergency recovery transition conflicted (${transition.reason}); bot state requires reconciliation`);
+    // The venue close has already happened. A stale row predicate must not
+    // erase the immutable evidence of that money-path mutation along with the
+    // rolled-back recovery transaction. Persist the retained attempt outside
+    // the failed state transition before notifying; the journal's own lineage
+    // and phase checks still fail closed on incompatible history.
+    try {
+      await appendExecutionEvents(closeJournalEvents);
+    } catch (error) {
+      console.warn(`[AiTrader] Emergency close evidence append failed after recovery conflict: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+    if (entryTerminalEvents.length > 0) {
+      try {
+        await appendExecutionEvents(entryTerminalEvents);
+      } catch (error) {
+        console.warn(`[AiTrader] Emergency entry-terminal append failed after recovery conflict: ${error instanceof Error ? error.message : "unknown"}`);
+      }
+    }
   } else if (transition.journal.status === "degraded") {
     console.warn(`[AiTrader] Emergency recovery state committed with degraded journal (${transition.journal.failureCode})`);
   }

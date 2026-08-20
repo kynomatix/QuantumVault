@@ -2369,7 +2369,7 @@ describe("startup reconciliation", () => {
     getDecisionsMock.mockResolvedValue([decision]);
     getAdapterMock.mockReturnValue(makeAdapter({
       getPositions: vi.fn(async () => [
-        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.5, markPrice: 150.4,
+        { internalSymbol: "SOL-PERP", baseSize: 1.75, entryPrice: 150.25, markPrice: 150.4,
           unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
       getOpenStopOrders: vi.fn(async () => [{ order_id: "st-restart", symbol: "SOL-PERP" }]),
@@ -2392,7 +2392,13 @@ describe("startup reconciliation", () => {
       decisionId: "dec-restart-replay",
       expectedBotStatus: "open",
       expectedDecisionOutcome: "executed",
+      entryPrice: 150.5,
     }));
+    const replay = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(recoveryJournalEvents(replay)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "position_observed", price: 150.25, sizeBase: 1.75 }),
+      expect.objectContaining({ eventType: "entry_terminal_open", price: 150.5, sizeBase: 2 }),
+    ]));
     expect(updateBotMock).not.toHaveBeenCalled();
     expect(updateDecisionMock).not.toHaveBeenCalled();
   });
@@ -2444,7 +2450,7 @@ describe("unconfirmed-landing reconciliation", () => {
     });
   }
   const unconfirmedRow = (overrides: Partial<Record<string, unknown>> = {}) =>
-    makeOpenDecision({ id: "dec-u", outcome: "unconfirmed_landing", ...overrides });
+    makeOpenDecision({ id: "dec-u", outcome: "unconfirmed_landing", entryPrice: null, ...overrides });
 
   it("unconfirmed reconciliation appends adoption and no-land truth best-effort", async () => {
     const { reconcileUnconfirmedLanding } = await importMonitor();
@@ -2650,6 +2656,33 @@ describe("unconfirmed-landing reconciliation", () => {
     expect((adapter as any).setTpSl).toHaveBeenCalledTimes(1);
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
     expect(botUpdates().some((u) => u.status === "open")).toBe(true);
+  });
+
+  it("replayed late landing retains the durable fill price while observing the current venue average", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    const decision = unconfirmedRow({ outcome: "executed", entryPrice: "150.50000000" });
+    getDecisionsMock.mockResolvedValue([decision]);
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 1.75, entryPrice: 150.1, markPrice: 150,
+          unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-replayed", symbol: "SOL-PERP" }]),
+    }));
+
+    expect(await reconcileUnconfirmedLanding(makeQuarantinedBot())).toBe(true);
+
+    const replay = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(replay).toMatchObject({
+      disposition: "adopt_open",
+      expectedDecisionOutcome: "executed",
+      entryPrice: 150.5,
+    });
+    expect(recoveryJournalEvents(replay)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: "position_observed", price: 150.1, sizeBase: 1.75 }),
+      expect.objectContaining({ eventType: "entry_terminal_open", price: 150.5, sizeBase: 1.75 }),
+    ]));
   });
 
   it("position LANDED but bracket UNRESTORABLE → protective close + pause bracket_failed (never idle, never naked)", async () => {
