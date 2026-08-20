@@ -413,22 +413,29 @@ export async function prepareExecutionJournalEventsInTransaction(
   }).from(aiTraderExecutionEvents).where(eq(aiTraderExecutionEvents.attemptId, attemptId));
   const identities = new Set(existing.map((row) => row.eventIdentity));
 
-  // Recovery callers reconstruct observations after a restart, so observedAt
-  // is necessarily fresh even when the durable fact is the same. At an
-  // already-recovered state, compare every stable event field instead of the
-  // timestamp-bearing eventIdentity. A normal live entry does not contain the
-  // recovery-only reconciliation_observed row, so entry-open replay is rooted
-  // in its matching position, bracket, and terminal facts.
+  // Recovery callers reconstruct observations after a restart. The current
+  // venue average/size, observedAt and recovery-builder flags are not the
+  // immutable identity of the event originally written by the executor. At an
+  // already-recovered state, replay is therefore rooted in the deterministic
+  // attempt plus command identity, event type/phase and side. A normal live
+  // entry does not contain the recovery-only reconciliation_observed row, so
+  // entry-open replay is rooted in its retained position, bracket and exact
+  // terminal type without pretending freshly observed money values are the
+  // original fill record.
   if (options.requireSemanticRequestedReplay) {
     const hasRequestedOpenTerminal = values.some((value) => value.eventType === "entry_terminal_open");
     const requested = values.filter((value) =>
       !(hasRequestedOpenTerminal && value.eventType === "reconciliation_observed"));
     const present = requested.filter((value) =>
-      existing.some((row) => sameRecoveryEventContent(row, value))).length;
+      existing.some((row) => sameRecoveryReplayIdentity(row, value))).length;
     if (present === requested.length) {
       return { status: "replayed", insert: async () => undefined };
     }
+    const conflictingRetainedType = requested.some((value) =>
+      !existing.some((row) => sameRecoveryReplayIdentity(row, value))
+      && existing.some((row) => row.eventType === value.eventType));
     if (present > 0
+        || conflictingRetainedType
         || (requested.some((value) => value.phase === 90)
           && existing.some((row) => row.phase === 90))) {
       throw new Error("execution_journal_atomic_replay_conflict");
@@ -596,33 +603,16 @@ export function buildEntryReconciliationTerminalEvents(
   return [evidence, terminal];
 }
 
-function sameRecoveryEventContent(
+function sameRecoveryReplayIdentity(
   row: Pick<AiTraderExecutionEvent,
     "attemptId" | "botId" | "decisionId" | "action" | "cause" | "eventType" |
-    "phase" | "protocol" | "accountScope" | "accountRef" | "market" | "side" |
-    "clientOrderId" | "venueOrderId" | "transactionSignature" | "venueStatus" |
-    "price" | "sizeBase" | "fee" | "realizedPnl" | "failureCode" |
-    "recordedAfterBroadcast">,
+    "phase" | "protocol" | "accountScope" | "accountRef" | "market" | "side">,
   expected: CanonicalEvent,
 ): boolean {
-  const sameDecimal = (actual: string | null, wanted: string | null): boolean => {
-    if (actual === null || wanted === null) return actual === wanted;
-    return Number(actual) === Number(wanted);
-  };
   return sameRecoveryIdentity(row, expected)
     && row.eventType === expected.eventType
     && row.phase === expected.phase
-    && row.side === expected.side
-    && row.clientOrderId === expected.clientOrderId
-    && row.venueOrderId === expected.venueOrderId
-    && row.transactionSignature === expected.transactionSignature
-    && row.venueStatus === expected.venueStatus
-    && sameDecimal(row.price, expected.price)
-    && sameDecimal(row.sizeBase, expected.sizeBase)
-    && sameDecimal(row.fee, expected.fee)
-    && sameDecimal(row.realizedPnl, expected.realizedPnl)
-    && row.failureCode === expected.failureCode
-    && row.recordedAfterBroadcast === expected.recordedAfterBroadcast;
+    && row.side === expected.side;
 }
 
 export async function appendEntryReconciliationTerminal(args: EntryReconciliationTerminalArgs): Promise<void> {

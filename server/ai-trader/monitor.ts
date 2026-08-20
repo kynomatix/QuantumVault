@@ -2892,7 +2892,8 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       });
       return true;
     }
-    const adoptedView: OpenDecisionView = { ...view, entryPrice: position.entryPrice };
+    const adoptedEntryPrice = view.entryPrice ?? position.entryPrice;
+    const adoptedView: OpenDecisionView = { ...view, entryPrice: adoptedEntryPrice };
     const entryJournal = journalBase(bot, view.decision.id);
     const adoptedAttemptId = entryAttemptId(view.decision.id);
     const positionObserved: JournalEventInput = {
@@ -2909,7 +2910,7 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
         expectedPauseReason: bot.pauseReason ?? null,
         decisionId: view.decision.id,
         expectedDecisionOutcome: row?.outcome ?? view.decision.outcome,
-        entryPrice: position.entryPrice,
+        entryPrice: adoptedEntryPrice,
         targetBotStatus: "paused",
         targetPauseReason: bot.pauseReason ?? "position_unconfirmed",
         journalBatches: [[positionObserved]],
@@ -2971,7 +2972,7 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       base: entryJournal,
       attemptId: adoptedAttemptId,
       terminal: "entry_terminal_open",
-      proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
+      proof: { kind: "landed_position", side: view.side, price: adoptedEntryPrice,
         sizeBase: Math.abs(position.baseSize) },
     });
     const committed = await storage.commitAiTraderRecoveryTransition({
@@ -2981,7 +2982,7 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       expectedPauseReason: bot.pauseReason ?? null,
       decisionId: view.decision.id,
       expectedDecisionOutcome: row?.outcome ?? view.decision.outcome,
-      entryPrice: position.entryPrice,
+      entryPrice: adoptedEntryPrice,
       targetBotStatus: "open",
       targetPauseReason: null,
       journalBatches: [[
@@ -3295,12 +3296,13 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
   }
 
   // Bracket confirmed: promote the decision + bot to a clean 'open' state.
+  const retainedEntryPrice = view.entryPrice ?? position.entryPrice;
   const terminalEvents = buildEntryReconciliationTerminalEvents({
     base: recoveryBase,
     attemptId: recoveryAttemptId,
     terminal: "entry_terminal_open",
-    proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
-      sizeBase: Math.abs(position.baseSize) },
+    proof: { kind: "landed_position", side: view.side, price: retainedEntryPrice,
+      sizeBase: view.sizeBase },
   });
   const committed = await storage.commitAiTraderRecoveryTransition({
     disposition: "adopt_open",
@@ -3309,7 +3311,7 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
     expectedPauseReason: bot.pauseReason ?? null,
     decisionId: view.decision.id,
     expectedDecisionOutcome: view.decision.outcome,
-    entryPrice: view.entryPrice ?? position.entryPrice,
+    entryPrice: retainedEntryPrice,
     targetBotStatus: "open",
     targetPauseReason: null,
     journalBatches: [[

@@ -187,6 +187,61 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     })).rejects.toThrow("execution_journal_atomic_replay_conflict");
   });
 
+  it("replays executor-written open history by durable identity across fresh venue measurements", async () => {
+    const decisionId = `decision-direct-recovery-${RUN}`;
+    const attemptId = await journal.appendRequiredEntryPrebroadcast({
+      bot, decisionId, side: "long", clientOrderId: `client-direct-${RUN}`, sizeBase: 1,
+    });
+    const base = journal.journalBase(bot, decisionId);
+    const enteredAt = new Date("2026-08-19T02:00:00.000Z");
+    await journal.appendExecutionEvents([
+      { ...base, attemptId, action: "entry", cause: "decision", eventType: "broadcast_result",
+        side: "long", clientOrderId: `client-direct-${RUN}`, venueStatus: "filled",
+        price: 151.25, sizeBase: 0.9, recordedAfterBroadcast: true, observedAt: enteredAt },
+      { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed",
+        side: "long", price: 151.2, sizeBase: 1, observedAt: enteredAt },
+      { ...base, attemptId, action: "entry", cause: "decision", eventType: "fill_observed",
+        side: "long", clientOrderId: `client-direct-${RUN}`, venueStatus: "filled",
+        price: 151.25, sizeBase: 0.9, observedAt: enteredAt },
+      { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified",
+        side: "long", observedAt: enteredAt },
+      { ...base, attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_open",
+        side: "long", price: 151.25, sizeBase: 1, observedAt: enteredAt },
+    ]);
+
+    const restartedAt = new Date("2026-08-19T02:05:00.000Z");
+    const requested = [
+      { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed",
+        side: "long", price: 151.18, sizeBase: 0.98, observedAt: restartedAt },
+      { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified",
+        side: "long", observedAt: restartedAt },
+      ...journal.buildEntryReconciliationTerminalEvents({
+        base, attemptId, terminal: "entry_terminal_open",
+        proof: { kind: "landed_position", side: "long", price: 151.25, sizeBase: 1 },
+        observedAt: restartedAt,
+      }),
+    ] as const;
+
+    await dbModule.db.transaction(async (tx) => {
+      const prepared = await journal.prepareExecutionJournalEventsInTransaction(tx, requested, {
+        requireEntryCommandLineage: true,
+        requireExactRequestedReplay: true,
+        requireSemanticRequestedReplay: true,
+      });
+      expect(prepared.status).toBe("replayed");
+    });
+    await expect(dbModule.db.transaction(async (tx) => {
+      await journal.prepareExecutionJournalEventsInTransaction(tx, [
+        { ...requested[0], side: "short" },
+        ...requested.slice(1),
+      ], {
+        requireEntryCommandLineage: true,
+        requireExactRequestedReplay: true,
+        requireSemanticRequestedReplay: true,
+      });
+    })).rejects.toThrow("execution_journal_atomic_replay_conflict");
+  });
+
   it("sorts multi-attempt recovery locks and an already-held lock preserves lineage, phase, and exact-suffix checks", async () => {
     const observedAt = new Date("2026-08-19T00:30:00.000Z");
     const base = journal.journalBase(bot, null);
