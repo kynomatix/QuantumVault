@@ -958,9 +958,77 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         decisions: [{ outcome: "executed", entryPrice: "150.25000000" }],
         journal: { status: "appended", failureCode: null },
       });
-      expect(await storage.commitAiTraderRecoveryTransition(adoptParams)).toMatchObject({
+      const restartedAdoptEvents = adoptEvents.map((event) => ({
+        ...event,
+        observedAt: new Date("2026-08-19T20:01:00.000Z"),
+      }));
+      expect(await storage.commitAiTraderRecoveryTransition({
+        ...adoptParams,
+        journalBatches: [restartedAdoptEvents],
+      })).toMatchObject({
         status: "replayed", journal: { status: "replayed", failureCode: null },
       });
+
+      // A healthy direct-live entry already has position, bracket, and the
+      // phase-90 terminal, but not the recovery-only reconciliation_observed
+      // row. A restart must accept those stable facts even though the monitor
+      // necessarily reconstructs them with a fresh observedAt.
+      const healthyBot = await makeRecoveryBot("healthy-open", "open", null);
+      const healthyDecision = await makeDecision(healthyBot.id, "07", "executed");
+      await storage.updateAiTraderDecision(healthyDecision.id, {
+        outcome: "executed", entryPrice: "151.25000000",
+      } as any);
+      const healthyAttempt = await journal.appendRequiredEntryPrebroadcast({
+        bot: healthyBot, decisionId: healthyDecision.id, side: "long",
+        clientOrderId: `healthy-${WALLET}`, sizeBase: 1,
+      });
+      const healthyBase = journal.journalBase(healthyBot, healthyDecision.id);
+      const healthyObservedAt = new Date("2026-08-19T20:02:00.000Z");
+      await journal.appendExecutionEvents([
+        { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
+          eventType: "broadcast_result", side: "long", venueStatus: "filled",
+          price: 151.25, sizeBase: 1, recordedAfterBroadcast: true, observedAt: healthyObservedAt },
+        { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
+          eventType: "position_observed", side: "long", price: 151.25,
+          sizeBase: 1, observedAt: healthyObservedAt },
+        { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
+          eventType: "bracket_verified", side: "long", observedAt: healthyObservedAt },
+        { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
+          eventType: "entry_terminal_open", side: "long", price: 151.25,
+          sizeBase: 1, recordedAfterBroadcast: true, observedAt: healthyObservedAt },
+      ] as any);
+      const restartedHealthyObservedAt = new Date("2026-08-19T20:03:00.000Z");
+      const restartedHealthyEvents = [
+        { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
+          eventType: "position_observed", side: "long", price: 151.25,
+          sizeBase: 1, observedAt: restartedHealthyObservedAt },
+        { ...healthyBase, attemptId: healthyAttempt, action: "entry", cause: "decision",
+          eventType: "bracket_verified", side: "long", observedAt: restartedHealthyObservedAt },
+        ...journal.buildEntryReconciliationTerminalEvents({
+          base: healthyBase, attemptId: healthyAttempt, terminal: "entry_terminal_open",
+          proof: { kind: "landed_position", side: "long", price: 151.25, sizeBase: 1 },
+          observedAt: restartedHealthyObservedAt,
+        }),
+      ] as any;
+      expect(await storage.commitAiTraderRecoveryTransition({
+        disposition: "adopt_open", botId: healthyBot.id,
+        expectedBotStatus: "open", expectedPauseReason: null,
+        decisionId: healthyDecision.id, expectedDecisionOutcome: "executed",
+        entryPrice: 151.25, targetBotStatus: "open", targetPauseReason: null,
+        journalBatches: [restartedHealthyEvents],
+      })).toMatchObject({
+        status: "replayed", journal: { status: "replayed", failureCode: null },
+      });
+      expect(await storage.commitAiTraderRecoveryTransition({
+        disposition: "adopt_open", botId: healthyBot.id,
+        expectedBotStatus: "open", expectedPauseReason: null,
+        decisionId: healthyDecision.id, expectedDecisionOutcome: "executed",
+        entryPrice: 151.25, targetBotStatus: "open", targetPauseReason: null,
+        journalBatches: [[
+          { ...restartedHealthyEvents[0], price: 999.25 },
+          ...restartedHealthyEvents.slice(1),
+        ]],
+      })).toEqual({ status: "conflict", reason: "journal_identity_conflict" });
 
       const protectBot = await makeRecoveryBot("adopt-protect", "paused", "position_unconfirmed");
       const protectDecision = await makeDecision(protectBot.id, "02", "unconfirmed_landing");
@@ -968,16 +1036,26 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         bot: protectBot, decisionId: protectDecision.id, side: "long", clientOrderId: `protect-${WALLET}`, sizeBase: 1,
       });
       const protectBase = journal.journalBase(protectBot, protectDecision.id);
-      expect(await storage.commitAiTraderRecoveryTransition({
+      const protectEvents = [{ ...protectBase, attemptId: protectAttempt, action: "entry", cause: "decision",
+        eventType: "position_observed", side: "long", price: 149.75, sizeBase: 1, observedAt }] as any;
+      const protectParams = {
         disposition: "adopt_for_protective_close", botId: protectBot.id,
         expectedBotStatus: "paused", expectedPauseReason: "position_unconfirmed",
         decisionId: protectDecision.id, expectedDecisionOutcome: "unconfirmed_landing", entryPrice: 149.75,
         targetBotStatus: "paused", targetPauseReason: "bracket_failed",
-        journalBatches: [[{ ...protectBase, attemptId: protectAttempt, action: "entry", cause: "decision",
-          eventType: "position_observed", side: "long", price: 149.75, sizeBase: 1, observedAt }]],
-      })).toMatchObject({
+        journalBatches: [protectEvents],
+      } as const;
+      expect(await storage.commitAiTraderRecoveryTransition(protectParams)).toMatchObject({
         status: "applied", bot: { status: "paused", pauseReason: "bracket_failed" },
         decisions: [{ outcome: "executed", entryPrice: "149.75000000" }],
+      });
+      expect(await storage.commitAiTraderRecoveryTransition({
+        ...protectParams,
+        expectedPauseReason: "bracket_failed",
+        expectedDecisionOutcome: "executed",
+        journalBatches: [[{ ...protectEvents[0], observedAt: new Date("2026-08-19T20:04:00.000Z") }]],
+      })).toMatchObject({
+        status: "replayed", journal: { status: "replayed", failureCode: null },
       });
 
       const noLandBot = await makeRecoveryBot("no-land", "paused", "position_unconfirmed");

@@ -2360,6 +2360,43 @@ describe("startup reconciliation", () => {
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
   });
 
+  it("treats a healthy-open atomic target replay as resolved instead of parking monitoring forever", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const decision = makeOpenDecision({
+      id: "dec-restart-replay", outcome: "executed", entryPrice: "150.50000000",
+    });
+    getDecisionsMock.mockResolvedValue([decision]);
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.5, markPrice: 150.4,
+          unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-restart", symbol: "SOL-PERP" }]),
+    }));
+    commitRecoveryMock.mockResolvedValueOnce({
+      status: "replayed",
+      bot: makeBot({ status: "open", pauseReason: null }),
+      decisions: [decision],
+      journal: { status: "replayed", failureCode: null },
+    });
+    updateBotMock.mockClear();
+    updateDecisionMock.mockClear();
+
+    const resolved = await reconcileBotOnStartup(makeBot({ status: "open", paperMode: false }));
+
+    expect(resolved).toBe(true);
+    expect(commitRecoveryMock).toHaveBeenCalledTimes(1);
+    expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "adopt_open",
+      decisionId: "dec-restart-replay",
+      expectedBotStatus: "open",
+      expectedDecisionOutcome: "executed",
+    }));
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
   it("returns false (retry signal) when the venue read fails — never assumes flat", async () => {
     const { reconcileBotOnStartup } = await importMonitor();
     armLiveAuth();
