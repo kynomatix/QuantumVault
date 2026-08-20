@@ -35,6 +35,7 @@ vi.mock("../../server/ai-trader/scanner-capabilities", () => ({
 const getAiTraderBotMock = vi.fn();
 const getWalletMock = vi.fn();
 const updateBotMock = vi.fn();
+const getAiTraderDecisionsMock = vi.fn();
 const getProtocolRowsMock = vi.fn();
 const deleteReservationMock = vi.fn();
 const releaseReservationMock = vi.fn();
@@ -45,6 +46,7 @@ vi.mock("../../server/storage", () => ({
     getAiTraderBot: (...a: unknown[]) => getAiTraderBotMock(...a),
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
+    getAiTraderDecisions: (...a: unknown[]) => getAiTraderDecisionsMock(...a),
     getProtocolSubaccountsByWallet: (...a: unknown[]) => getProtocolRowsMock(...a),
     deleteReservedSubaccount: (...a: unknown[]) => deleteReservationMock(...a),
     releaseReservationToSpare: (...a: unknown[]) => releaseReservationMock(...a),
@@ -117,6 +119,7 @@ vi.mock("../../server/ai-trader/scanner", () => ({
 }));
 
 import { registerAiTraderRoutes } from "../../server/ai-trader/routes";
+import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
 
 // --- Fake express harness ---------------------------------------------------------------
 
@@ -170,9 +173,26 @@ async function invoke(routes: Map<string, Handler[]>, key: string, req: any): Pr
 // --- Fixtures -----------------------------------------------------------------------------
 
 const WALLET = "WALLET_OWNER_XYZ";
+const ERA_CONTEXT = { candleProvenance: { selected: null, parent: null } };
+const ERA_BOT_INPUT = {
+  protocol: "pacifica",
+  marketSource: "fixed",
+  market: "SOL-PERP",
+  timeframe: "1h",
+  mode: "suggest",
+  riskProfile: "guarded",
+  model: "anthropic/claude-opus-4.8",
+  sizingMode: "discretionary",
+  riskMinPct: "0.50",
+  riskMaxPct: "1.50",
+  allocatedUsdc: "100",
+  maxLeverage: 3,
+  stopPolicy: "static",
+} as AiTraderBot;
+const DEFAULT_ERA = computeQualificationEraDigest({ bot: ERA_BOT_INPUT, contextDigest: ERA_CONTEXT });
 
 function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
-  return {
+  const bot = {
     id: "ai-bot-1",
     walletAddress: WALLET,
     protocol: "pacifica",
@@ -182,15 +202,33 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     derivationPathVersion: null,
     market: "SOL-PERP",
     timeframe: "1h",
+    marketSource: "fixed",
     mode: "suggest",
+    riskProfile: "guarded",
+    model: "anthropic/claude-opus-4.8",
+    sizingMode: "discretionary",
+    riskMinPct: "0.50",
+    riskMaxPct: "1.50",
     paperMode: true,
     allocatedUsdc: "100",
     maxLeverage: 3,
+    stopPolicy: "static",
     graduationState: "graduated",
+    currentQualificationEraDigest: DEFAULT_ERA,
+    graduatedQualificationEraDigest: DEFAULT_ERA,
+    qualificationEraInvalidationReason: null,
     status: "idle",
     policyHmac: "hmac",
     ...overrides,
   } as unknown as AiTraderBot;
+  const era = computeQualificationEraDigest({ bot, contextDigest: ERA_CONTEXT });
+  if (!Object.prototype.hasOwnProperty.call(overrides, "currentQualificationEraDigest")) {
+    bot.currentQualificationEraDigest = era;
+  }
+  if (!Object.prototype.hasOwnProperty.call(overrides, "graduatedQualificationEraDigest")) {
+    bot.graduatedQualificationEraDigest = era;
+  }
+  return bot;
 }
 
 function makeAdapter(overrides: Record<string, unknown> = {}) {
@@ -248,6 +286,7 @@ beforeEach(() => {
   scannerCapabilitiesMock.consumersEnabled = true;
   scannerCapabilitiesMock.liveExecutionEnabled = true;
   process.env.ADMIN_PASSWORD = "test-admin-pw";
+  getAiTraderDecisionsMock.mockResolvedValue([{ contextDigest: ERA_CONTEXT }]);
   freshApp();
 });
 
@@ -298,6 +337,25 @@ describe("go-live gates", () => {
     const r = await invoke(routes, GO_LIVE, goLiveReq());
     expect(r.statusCode).toBe(403);
     expect(r.body.error).toMatch(/failed/i);
+  });
+
+  it("403 on a stale qualification era before adapter, custody, or venue access", async () => {
+    getAiTraderBotMock.mockResolvedValue(makeBot({ graduatedQualificationEraDigest: "OLD_ERA" }));
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+    expect(r).toMatchObject({ statusCode: 403, body: { error: expect.stringMatching(/stale/i) } });
+    expect(getAdapterMock).not.toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(provisionMock).not.toHaveBeenCalled();
+  });
+
+  it("403 when current era cannot be recomputed, even if cached digests match", async () => {
+    getAiTraderBotMock.mockResolvedValue(makeBot());
+    getAiTraderDecisionsMock.mockResolvedValue([]);
+    const r = await invoke(routes, GO_LIVE, goLiveReq());
+    expect(r).toMatchObject({ statusCode: 403, body: { error: expect.stringMatching(/unknown/i) } });
+    expect(getAdapterMock).not.toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
+    expect(provisionMock).not.toHaveBeenCalled();
   });
 
   it("404 for a bot owned by someone else", async () => {

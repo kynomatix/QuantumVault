@@ -20,6 +20,305 @@
 //   - Profit factor:       ≥1.1 default / 1.0 absolute floor (blocks the
 //                          one-lucky-trade record)
 
+import { createHash } from "node:crypto";
+import type { AiTraderBot } from "@shared/schema";
+
+export type QualificationEraComponent =
+  | "scanner_capability_policy"
+  | "accepted_candle_provenance"
+  | "prompt_context_schema"
+  | "session_policy"
+  | "guardrail_risk_policy"
+  | "paper_execution_simulator";
+
+export type QualificationEraDecision = "bump" | "no_bump";
+
+export interface QualificationEraRegistryEntry {
+  materialVersion: number;
+  decisionGeneration: number;
+  decision: QualificationEraDecision;
+  ownerPaths: readonly string[];
+}
+
+export type QualificationEraRegistry = Record<QualificationEraComponent, QualificationEraRegistryEntry>;
+
+// QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN
+export const QUALIFICATION_ERA_REGISTRY = {
+  "scanner_capability_policy": {
+    "materialVersion": 1,
+    "decisionGeneration": 1,
+    "decision": "no_bump",
+    "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts"]
+  },
+  "accepted_candle_provenance": {
+    "materialVersion": 1,
+    "decisionGeneration": 1,
+    "decision": "no_bump",
+    "ownerPaths": ["server/lab/datafeed.ts", "server/lab/candle-store.ts", "server/ai-trader/context-builder.ts"]
+  },
+  "prompt_context_schema": {
+    "materialVersion": 1,
+    "decisionGeneration": 1,
+    "decision": "no_bump",
+    "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts"]
+  },
+  "session_policy": {
+    "materialVersion": 1,
+    "decisionGeneration": 1,
+    "decision": "no_bump",
+    "ownerPaths": ["server/ai-trader/session-context.ts"]
+  },
+  "guardrail_risk_policy": {
+    "materialVersion": 1,
+    "decisionGeneration": 1,
+    "decision": "no_bump",
+    "ownerPaths": ["server/ai-trader/guardrails.ts", "server/ai-trader/executor.ts", "server/ai-trader/routes.ts"]
+  },
+  "paper_execution_simulator": {
+    "materialVersion": 1,
+    "decisionGeneration": 1,
+    "decision": "no_bump",
+    "ownerPaths": ["server/ai-trader/paper-math.ts", "server/ai-trader/monitor.ts"]
+  }
+} as const satisfies QualificationEraRegistry;
+// QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END
+
+const QUALIFICATION_ERA_COMPONENTS = Object.freeze([
+  "scanner_capability_policy",
+  "accepted_candle_provenance",
+  "prompt_context_schema",
+  "session_policy",
+  "guardrail_risk_policy",
+  "paper_execution_simulator",
+] as const);
+
+export interface QualificationEraInput {
+  bot: Pick<
+    AiTraderBot,
+    | "protocol"
+    | "marketSource"
+    | "market"
+    | "timeframe"
+    | "mode"
+    | "riskProfile"
+    | "model"
+    | "sizingMode"
+    | "riskMinPct"
+    | "riskMaxPct"
+    | "allocatedUsdc"
+    | "maxLeverage"
+    | "stopPolicy"
+  >;
+  contextDigest?: Record<string, unknown> | null;
+}
+
+export interface QualificationEraObject {
+  schemaVersion: 1;
+  components: Record<QualificationEraComponent, number>;
+  bot: Record<string, string | number>;
+  scannerPick: Record<string, string | Record<string, string> | null> | null;
+  candleProvenance: {
+    selected: Record<string, string> | null;
+    parent: Record<string, string> | null;
+  };
+}
+
+function canonicalIdentifier(value: unknown, casing: "upper" | "lower"): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error("qualification era identifier is missing");
+  }
+  const trimmed = value.trim();
+  return casing === "upper" ? trimmed.toUpperCase() : trimmed.toLowerCase();
+}
+
+function canonicalEraInteger(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error("qualification era integer is malformed");
+  }
+  return parsed;
+}
+
+export function canonicalEraDecimal(value: unknown): string {
+  const raw = typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : "";
+  const match = /^([+-]?)(\d*?)(?:\.(\d*))?$/.exec(raw);
+  if (!match || (!match[2] && !match[3])) throw new Error("qualification era decimal is malformed");
+  const negative = match[1] === "-";
+  const integer = (match[2] || "0").replace(/^0+(?=\d)/, "") || "0";
+  const fraction = (match[3] || "").replace(/0+$/, "");
+  const magnitude = fraction ? `${integer}.${fraction}` : integer;
+  return negative && magnitude !== "0" ? `-${magnitude}` : magnitude;
+}
+
+function canonicalProvenance(value: unknown): Record<string, string> | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  const finality = canonicalIdentifier(source.finality, "lower");
+  return {
+    source: canonicalIdentifier(source.source, "lower"),
+    venue: canonicalIdentifier(source.venue, "lower"),
+    basis: canonicalIdentifier(source.basis, "lower"),
+    proxy: canonicalIdentifier(source.proxy, "lower"),
+    finalityClass:
+      finality === "forming" || finality === "finalized" ? "forming_or_finalized" : finality,
+  };
+}
+
+export function buildQualificationEraObject(input: QualificationEraInput): QualificationEraObject {
+  const digest = input.contextDigest ?? {};
+  const provenance =
+    digest.candleProvenance && typeof digest.candleProvenance === "object"
+      ? (digest.candleProvenance as Record<string, unknown>)
+      : {};
+  const selected = canonicalProvenance(provenance.selected);
+  const parent = canonicalProvenance(provenance.parent);
+  const components = {} as Record<QualificationEraComponent, number>;
+  for (const component of QUALIFICATION_ERA_COMPONENTS) {
+    components[component] = QUALIFICATION_ERA_REGISTRY[component].materialVersion;
+  }
+  const bot = input.bot;
+  const marketSource = canonicalIdentifier(bot.marketSource, "lower");
+  const market = canonicalIdentifier(bot.market, "upper");
+  const timeframe = canonicalIdentifier(bot.timeframe, "lower");
+  return {
+    schemaVersion: 1,
+    components,
+    bot: {
+      protocol: canonicalIdentifier(bot.protocol, "lower"),
+      marketSource,
+      market,
+      timeframe,
+      mode: canonicalIdentifier(bot.mode, "lower"),
+      riskProfile: canonicalIdentifier(bot.riskProfile, "lower"),
+      model: canonicalIdentifier(bot.model, "lower"),
+      sizingMode: canonicalIdentifier(bot.sizingMode, "lower"),
+      riskMinPct: canonicalEraDecimal(bot.riskMinPct),
+      riskMaxPct: canonicalEraDecimal(bot.riskMaxPct),
+      allocatedUsdc: canonicalEraDecimal(bot.allocatedUsdc),
+      maxLeverage: canonicalEraInteger(bot.maxLeverage),
+      stopPolicy: canonicalIdentifier(bot.stopPolicy, "lower"),
+    },
+    scannerPick:
+      marketSource === "scanner"
+        ? { market, timeframe, marketSource, selected, parent }
+        : null,
+    candleProvenance: { selected, parent },
+  };
+}
+
+export function computeQualificationEraDigest(input: QualificationEraInput): string {
+  const canonical = JSON.stringify(buildQualificationEraObject(input));
+  return createHash("sha256").update(canonical, "utf8").digest("hex").toUpperCase();
+}
+
+const MATERIAL_BOT_FIELDS = Object.freeze([
+  "protocol",
+  "marketSource",
+  "market",
+  "timeframe",
+  "mode",
+  "riskProfile",
+  "model",
+  "sizingMode",
+  "riskMinPct",
+  "riskMaxPct",
+  "allocatedUsdc",
+  "maxLeverage",
+  "stopPolicy",
+] as const);
+
+export function qualificationEraMutationPatch(
+  bot: AiTraderBot,
+  updates: Record<string, unknown>,
+  reason: string,
+): Record<string, unknown> | null {
+  const canonicalField = (field: typeof MATERIAL_BOT_FIELDS[number], value: unknown): string | number => {
+    if (field === "market") return canonicalIdentifier(value, "upper");
+    if (field === "riskMinPct" || field === "riskMaxPct" || field === "allocatedUsdc") {
+      return canonicalEraDecimal(value);
+    }
+    if (field === "maxLeverage") return canonicalEraInteger(value);
+    return canonicalIdentifier(value, "lower");
+  };
+  const changed = MATERIAL_BOT_FIELDS.some(
+    (field) => Object.prototype.hasOwnProperty.call(updates, field) &&
+      canonicalField(field, updates[field]) !== canonicalField(field, bot[field]),
+  );
+  if (!changed) return null;
+  return {
+    currentQualificationEraDigest: null,
+    graduatedQualificationEraDigest: null,
+    qualificationEraInvalidationReason: reason,
+    graduationState: bot.graduationState === "waived" ? "waived" : "in_trial",
+    graduatedAt: null,
+    trialStartedAt: new Date(),
+  };
+}
+
+export function qualificationEraDecisionPatch(
+  bot: AiTraderBot,
+  digest: string,
+): Record<string, unknown> | null {
+  if (bot.currentQualificationEraDigest === digest) return null;
+  const resumesInvalidatedEra =
+    bot.currentQualificationEraDigest === null &&
+    typeof bot.qualificationEraInvalidationReason === "string" &&
+    bot.qualificationEraInvalidationReason.length > 0;
+  return {
+    currentQualificationEraDigest: digest,
+    graduatedQualificationEraDigest: null,
+    qualificationEraInvalidationReason:
+      resumesInvalidatedEra
+        ? bot.qualificationEraInvalidationReason
+        : bot.currentQualificationEraDigest === null
+          ? "qualification_era_initialized"
+          : "qualification_era_changed",
+    graduationState: bot.graduationState === "waived" ? "waived" : "in_trial",
+    graduatedAt: null,
+    trialStartedAt: resumesInvalidatedEra && bot.trialStartedAt ? bot.trialStartedAt : new Date(),
+  };
+}
+
+export function validateQualificationEraDeclarationChanges(input: {
+  base: QualificationEraRegistry | null;
+  current: QualificationEraRegistry;
+  changedPaths: readonly string[];
+}): string[] {
+  const errors: string[] = [];
+  for (const component of QUALIFICATION_ERA_COMPONENTS) {
+    const current = input.current[component];
+    if (!current || !Number.isInteger(current.materialVersion) || current.materialVersion < 1 ||
+        !Number.isInteger(current.decisionGeneration) || current.decisionGeneration < 1 ||
+        (current.decision !== "bump" && current.decision !== "no_bump")) {
+      errors.push(`${component}: malformed registry entry`);
+      continue;
+    }
+    const base = input.base?.[component];
+    if (!input.base) {
+      if (current.materialVersion !== 1 || current.decisionGeneration !== 1) {
+        errors.push(`${component}: bootstrap must start at version/generation 1`);
+      }
+      continue;
+    }
+    if (!base) {
+      errors.push(`${component}: missing base registry entry`);
+      continue;
+    }
+    const affected = current.ownerPaths.some((path) => input.changedPaths.includes(path));
+    if (!affected) continue;
+    if (current.decisionGeneration !== base.decisionGeneration + 1) {
+      errors.push(`${component}: changed owner requires decisionGeneration + 1`);
+    }
+    if (current.decision === "bump" && current.materialVersion !== base.materialVersion + 1) {
+      errors.push(`${component}: bump requires materialVersion + 1`);
+    }
+    if (current.decision === "no_bump" && current.materialVersion !== base.materialVersion) {
+      errors.push(`${component}: no_bump requires unchanged materialVersion`);
+    }
+  }
+  return errors;
+}
+
 export interface GraduationCriteria {
   periodDays: number;
   minTrades: number;
@@ -208,8 +507,21 @@ export function evaluateGraduation(input: EvaluateGraduationInput): GraduationEv
  * Go-live gate (WO-7 uses this; defined here so the rule lives beside the
  * evaluator): a bot may flip paperMode→false ONLY from these states.
  */
-export function canGoLive(graduationState: string): { ok: true } | { ok: false; error: string } {
-  if (graduationState === "graduated" || graduationState === "waived") return { ok: true };
+export function canGoLive(
+  graduationState: string,
+  currentQualificationEraDigest?: string | null,
+  graduatedQualificationEraDigest?: string | null,
+): { ok: true } | { ok: false; error: string } {
+  if (graduationState === "waived") return { ok: true };
+  if (graduationState === "graduated") {
+    if (!currentQualificationEraDigest || !graduatedQualificationEraDigest) {
+      return { ok: false, error: "Qualification era is unknown — complete a new paper trial before going live." };
+    }
+    if (currentQualificationEraDigest !== graduatedQualificationEraDigest) {
+      return { ok: false, error: "Qualification era is stale — complete a new paper trial under the current behavior before going live." };
+    }
+    return { ok: true };
+  }
   return {
     ok: false,
     error:

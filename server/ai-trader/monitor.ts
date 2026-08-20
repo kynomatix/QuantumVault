@@ -78,7 +78,13 @@ import { computeBotPolicyHmac } from "../session-v3";
 import { getScannerShortlistResult } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import { isSchemaCapabilityReady } from "../schema-readiness";
-import { evaluateGraduation, type GraduationTradeRecord } from "./graduation";
+import {
+  computeQualificationEraDigest,
+  evaluateGraduation,
+  qualificationEraDecisionPatch,
+  qualificationEraMutationPatch,
+  type GraduationTradeRecord,
+} from "./graduation";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import {
   resolveFeeRateQuote,
@@ -128,9 +134,13 @@ const DAILY_SWEEP_MS = 6 * 60 * 60 * 1000; // graduation sweep every 6h (cheap; 
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+type InternalAnalysisClaimUpdates = NonNullable<
+  Parameters<typeof storage.claimAiTraderAnalysis>[0]["updates"]
+>;
+
 async function claimInternalAnalysis(
   bot: AiTraderBot,
-  updates?: Pick<AiTraderBot, "market" | "timeframe" | "policyHmac">,
+  updates?: InternalAnalysisClaimUpdates,
 ): Promise<AiTraderBot | undefined> {
   const [openPositions, unresolved] = await Promise.all([
     storage.getOpenAiTraderDecisions(bot.id, 2),
@@ -2161,8 +2171,30 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
   if (!trialStartedAt) return;
 
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 500);
+  const latestContext = recentClosed.find((decision) => decision.contextDigest)?.contextDigest;
+  if (!latestContext) return;
+  let recomputedEra: string;
+  try {
+    recomputedEra = computeQualificationEraDigest({
+      bot,
+      contextDigest: latestContext as Record<string, unknown>,
+    });
+  } catch {
+    return;
+  }
+  const eraPatch = qualificationEraDecisionPatch(bot, recomputedEra);
+  if (eraPatch) {
+    await storage.updateAiTraderBot(bot.id, eraPatch as any);
+    return;
+  }
+  if (!bot.currentQualificationEraDigest) return;
   const trades: GraduationTradeRecord[] = recentClosed
-    .filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= trialStartedAt && num(d.realizedPnl) !== null)
+    .filter((d) =>
+      d.closedAt &&
+      new Date(d.closedAt).getTime() >= trialStartedAt &&
+      num(d.realizedPnl) !== null &&
+      d.qualificationEraDigest === bot.currentQualificationEraDigest
+    )
     .map((d) => ({ closedAt: new Date(d.closedAt!).getTime(), netPnl: num(d.realizedPnl)! }));
 
   let result;
@@ -2180,7 +2212,12 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
   }
 
   if (result.verdict === "graduated") {
-    await storage.updateAiTraderBot(bot.id, { graduationState: "graduated", graduatedAt: new Date() });
+    await storage.updateAiTraderBot(bot.id, {
+      graduationState: "graduated",
+      graduatedAt: new Date(),
+      graduatedQualificationEraDigest: bot.currentQualificationEraDigest,
+      qualificationEraInvalidationReason: null,
+    });
     console.log(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)} GRADUATED: ${result.tradeCount} trades, net ${result.netPnl.toFixed(2)}, PF ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : "∞"}, maxDD ${result.maxDrawdownPct.toFixed(1)}%`);
     await sendTradeNotification(bot.walletAddress, {
       type: "ai_trader_graduation",
@@ -2530,11 +2567,16 @@ export async function runAutoCycle(botId: string): Promise<void> {
           umk,
           aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
         );
-        const claimed = await claimInternalAnalysis(bot, {
+        const pickUpdates: InternalAnalysisClaimUpdates = {
           market: candidate.market,
           timeframe: candidate.timeframe,
           policyHmac: newPolicyHmac,
-        });
+        };
+        Object.assign(
+          pickUpdates,
+          qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
+        );
+        const claimed = await claimInternalAnalysis(bot, pickUpdates);
         if (!claimed) {
           if (_obs) _obs.exitReason = "gate_skip";
           console.warn(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} lost idle-to-analyzing claim`);

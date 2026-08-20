@@ -31,6 +31,10 @@ import {
   type GuardrailTimeframe,
   type GuardrailViolation,
 } from "./guardrails";
+import {
+  computeQualificationEraDigest,
+  qualificationEraDecisionPatch,
+} from "./graduation";
 
 // --- Decision contract (§4) — the zod schema is the single source of truth. ------
 // Trade-level fields are structurally optional (flat/close carry none) and made
@@ -196,6 +200,15 @@ function finiteOrNaN(v: unknown): number {
 
 export async function runDecision(input: RunDecisionInput): Promise<RunDecisionResult> {
   const { bot, apiKey, context, adapter } = input;
+  const qualificationEraDigest = computeQualificationEraDigest({
+    bot,
+    contextDigest: context.contextDigest,
+  });
+  const eraPatch = qualificationEraDecisionPatch(bot, qualificationEraDigest);
+  if (eraPatch) {
+    const updated = await storage.updateAiTraderBot(bot.id, eraPatch);
+    if (!updated) throw new Error("qualification era synchronization lost the bot row");
+  }
 
   const messages: LlmMessage[] = [
     { role: "system", content: context.system },
@@ -295,6 +308,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
         usage: sawUsage ? { ...usageTotal } : undefined,
         latencyMs: Date.now() - started,
         llmCostUsd: await computeCostUsd(),
+        qualificationEraDigest,
       });
     }
 
@@ -326,6 +340,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     clampedDecision: null,
     guardrailViolations: null,
     outcome: "aborted_malformed",
+    qualificationEraDigest,
     llmCostUsd: await computeCostUsd(),
     llmLatencyMs: latencyMs,
   });
@@ -377,8 +392,9 @@ async function finalizeDecision(args: {
   usage?: LlmUsage;
   latencyMs: number;
   llmCostUsd: string | null;
+  qualificationEraDigest: string;
 }): Promise<RunDecisionResult> {
-  const { bot, adapter, context, decision, usage, latencyMs, llmCostUsd } = args;
+  const { bot, adapter, context, decision, usage, latencyMs, llmCostUsd, qualificationEraDigest } = args;
   const digest = context.contextDigest ?? {};
 
   // risk-based-sizing-spec Phase A: the equity read happens ONLY when the bot is
@@ -431,6 +447,7 @@ async function finalizeDecision(args: {
       clampedDecision: null,
       guardrailViolations: violations,
       outcome: "rejected_guardrails",
+      qualificationEraDigest,
       llmCostUsd,
       llmLatencyMs: latencyMs,
       modelUsed: bot.model,
@@ -512,6 +529,7 @@ async function finalizeDecision(args: {
     clampedDecision: guardrailResult.ok ? guardrailResult.clamped : null,
     guardrailViolations: guardrailResult.violations.length > 0 ? guardrailResult.violations : null,
     outcome,
+    qualificationEraDigest,
     llmCostUsd,
     llmLatencyMs: latencyMs,
     modelUsed: bot.model,

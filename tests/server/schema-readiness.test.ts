@@ -122,7 +122,7 @@ describe("schema readiness", () => {
     });
   });
 
-  it("retains all 173 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 177 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -155,16 +155,16 @@ describe("schema readiness", () => {
       requirements: unknown[];
       operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(173);
-    expect(metadata).toHaveLength(173);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(173);
+    expect(sqlEntries).toHaveLength(177);
+    expect(metadata).toHaveLength(177);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(177);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase())
-      .toBe("1356FC824E60A2519427C6CC3345E97C2BA85C51FBB86B9EAC2D88C9406E458E");
+      .toBe("98CFAE929D0E22C18D73A13DFEDEEF59B116B8AA33173692FCD59DCF18560150");
 
     const correctionSql = sqlEntries.at(-1)!;
     expect(metadata.at(-1)).toMatchObject({
-      id: "172-scrub-rogue-avax-close",
+      id: "176-scrub-rogue-avax-close",
       capabilities: ["signal_bot"],
       operation: "backfill",
     });

@@ -19,6 +19,7 @@ import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import type { TradeRecord } from "../../server/protocol/protocol-types";
 import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
+import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
 
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
@@ -227,6 +228,23 @@ const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z — 15m boun
 const TF_15M = 900_000;
 const DAY = 86_400_000;
 const PAPER_TAKER_FEE_RATE = 0.00015;
+const ERA_CONTEXT = { candleProvenance: { selected: null, parent: null } };
+const ERA_BOT_INPUT = {
+  protocol: "pacifica",
+  marketSource: "fixed",
+  market: "SOL-PERP",
+  timeframe: "15m",
+  mode: "manual",
+  riskProfile: "guarded",
+  model: "anthropic/claude-opus-4.8",
+  sizingMode: "discretionary",
+  riskMinPct: "0.50",
+  riskMaxPct: "1.50",
+  allocatedUsdc: "1000",
+  maxLeverage: 5,
+  stopPolicy: "static",
+} as AiTraderBot;
+const DEFAULT_ERA = computeQualificationEraDigest({ bot: ERA_BOT_INPUT, contextDigest: ERA_CONTEXT });
 const ENTRY_CANDLE_OPEN = NOW - 2 * TF_15M; // decidedAt 11:30 → entry candle 11:30
 
 function retainedFeeContext(overrides: {
@@ -270,13 +288,18 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     derivationPathVersion: null,
     market: "SOL-PERP",
     timeframe: "15m",
+    marketSource: "fixed",
     model: "anthropic/claude-opus-4.8",
     mode: "manual",
     paperMode: true,
     riskProfile: "guarded",
+    sizingMode: "discretionary",
+    riskMinPct: "0.50",
+    riskMaxPct: "1.50",
     autoNext: false,
     allocatedUsdc: "1000",
     maxLeverage: 5,
+    stopPolicy: "static",
     policyHmac: "hmac-abc",
     status: "open",
     pauseReason: null,
@@ -285,6 +308,9 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
     trialStartedAt: new Date(NOW - 10 * DAY),
     dailyRealizedPnl: "0",
     consecutiveLosses: 0,
+    currentQualificationEraDigest: DEFAULT_ERA,
+    graduatedQualificationEraDigest: null,
+    qualificationEraInvalidationReason: null,
     ...overrides,
   } as unknown as AiTraderBot;
 }
@@ -296,8 +322,9 @@ function makeOpenDecision(overrides: Partial<Record<string, unknown>> = {}): AiT
     outcome: "executed",
     closedAt: null,
     decidedAt: new Date(ENTRY_CANDLE_OPEN),
-    contextDigest: retainedFeeContext(),
     entryPrice: "150",
+    contextDigest: { ...ERA_CONTEXT, ...retainedFeeContext() },
+    qualificationEraDigest: DEFAULT_ERA,
     clampedDecision: {
       action: "long",
       sizeBase: 2,
@@ -1663,10 +1690,10 @@ describe("graduation", () => {
     ]);
     // Record inside the 10-day trial: 4 profitable trades (PF ∞, DD 0).
     getRecentClosedMock.mockResolvedValue([
-      { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10" },
-      { closedAt: new Date(NOW - 3 * DAY), realizedPnl: "12" },
-      { closedAt: new Date(NOW - 4 * DAY), realizedPnl: "8" },
-      { closedAt: new Date(NOW - 5 * DAY), realizedPnl: "15" },
+      { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { closedAt: new Date(NOW - 3 * DAY), realizedPnl: "12", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { closedAt: new Date(NOW - 4 * DAY), realizedPnl: "8", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { closedAt: new Date(NOW - 5 * DAY), realizedPnl: "15", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
     ]);
 
     await monitorBotOnce(makeBot());
@@ -1679,13 +1706,50 @@ describe("graduation", () => {
     const { runGraduationSweep } = await importMonitor();
     getActiveBotsMock.mockResolvedValue([makeBot({ status: "idle" })]);
     getRecentClosedMock.mockResolvedValue([
-      { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10" },
+      { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
     ]);
 
     await runGraduationSweep();
 
     expect(botUpdates().some((u) => u.graduationState === "failed")).toBe(true);
     expect(notifications().some((n) => n.type === "ai_trader_graduation")).toBe(false);
+  });
+
+  it("does not count missing or mixed-era terminal evidence", async () => {
+    const { runGraduationSweep } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([makeBot({ status: "idle" })]);
+    getRecentClosedMock.mockResolvedValue([
+      { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { closedAt: new Date(NOW - 3 * DAY), realizedPnl: "12", qualificationEraDigest: "PRIOR", contextDigest: ERA_CONTEXT },
+      { closedAt: new Date(NOW - 4 * DAY), realizedPnl: "8", qualificationEraDigest: null, contextDigest: ERA_CONTEXT },
+    ]);
+
+    await runGraduationSweep();
+
+    expect(botUpdates().some((u) => u.graduationState === "graduated")).toBe(false);
+    expect(botUpdates().some((u) => u.graduationState === "failed")).toBe(true);
+  });
+
+  it("invalidates before graduation when the recomputed platform era changed", async () => {
+    const { runGraduationSweep } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([makeBot({
+      status: "idle",
+      currentQualificationEraDigest: "PRIOR",
+      graduatedQualificationEraDigest: "PRIOR",
+    })]);
+    getRecentClosedMock.mockResolvedValue([
+      { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: "PRIOR", contextDigest: ERA_CONTEXT },
+    ]);
+
+    await runGraduationSweep();
+
+    expect(botUpdates()).toContainEqual(expect.objectContaining({
+      currentQualificationEraDigest: DEFAULT_ERA,
+      graduatedQualificationEraDigest: null,
+      graduationState: "in_trial",
+      qualificationEraInvalidationReason: "qualification_era_changed",
+    }));
+    expect(botUpdates().some((u) => u.graduationState === "graduated")).toBe(false);
   });
 
   it("sweep ignores live bots and already-decided trials", async () => {
@@ -1767,6 +1831,50 @@ describe("runAutoCycle", () => {
     expect(buildContextMock).not.toHaveBeenCalled();
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(executeDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("persists scanner selection with qualification-era invalidation before context or decision", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    const { runAutoCycle } = await importMonitor();
+    const bot = armAutoBot({ marketSource: "scanner", graduationState: "graduated", graduatedQualificationEraDigest: DEFAULT_ERA });
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getScannerShortlistMock.mockReturnValue([{
+      protocol: "pacifica",
+      market: "BTC-PERP",
+      timeframe: "1h",
+      direction: "long",
+      setup: "W",
+      score: 90,
+      necklineDistancePct: 0.1,
+      parentTrend: "uptrend",
+      evaluatedAt: NOW,
+    }]);
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "scanner-era", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+
+    await runAutoCycle(bot.id);
+
+    expect(updateBotMock.mock.calls[0]).toEqual([
+      bot.id,
+      expect.objectContaining({
+        market: "BTC-PERP",
+        timeframe: "1h",
+        policyHmac: "hmac-scanner-recomputed",
+        graduationState: "in_trial",
+        currentQualificationEraDigest: null,
+        graduatedQualificationEraDigest: null,
+        qualificationEraInvalidationReason: "scanner_market_selection_changed",
+      }),
+    ]);
+    expect(buildContextMock.mock.calls[0][0].bot).toMatchObject({
+      market: "BTC-PERP",
+      timeframe: "1h",
+      graduationState: "in_trial",
+      currentQualificationEraDigest: null,
+    });
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
   });
 
   it("G6 cooldown blocks BEFORE any LLM spend and reschedules without pausing", async () => {

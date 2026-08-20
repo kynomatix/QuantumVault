@@ -1127,6 +1127,9 @@ const schemaMigrationSql = [
         graduation_criteria jsonb NOT NULL,
         trial_started_at timestamp DEFAULT now(),
         graduated_at timestamp,
+        current_qualification_era_digest text,
+        graduated_qualification_era_digest text,
+        qualification_era_invalidation_reason text,
         policy_hmac text NOT NULL,
         status text NOT NULL DEFAULT 'idle',
         pause_reason text,
@@ -1141,6 +1144,7 @@ const schemaMigrationSql = [
         id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
         bot_id varchar REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
         context_digest jsonb,
+        qualification_era_digest text,
         raw_decision jsonb NOT NULL,
         clamped_decision jsonb,
         guardrail_violations jsonb,
@@ -1176,6 +1180,10 @@ const schemaMigrationSql = [
       // used at decision time so track records stay attributable when models change
       // mid-flight). Backfill existing rows from the bot's current model.
       `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS model_used text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS current_qualification_era_digest text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS graduated_qualification_era_digest text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS qualification_era_invalidation_reason text`,
+      `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS qualification_era_digest text`,
       `UPDATE ai_trader_decisions d
          SET model_used = b.model
          FROM ai_trader_bots b
@@ -4231,18 +4239,18 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "161-update-ai_trader_decisions-d-set",
+    "id": "161-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
     "requirements": [
       {
-        "kind": "data",
-        "identity": "migration-150-backfill",
-        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM ai_trader_decisions d JOIN ai_trader_bots b ON b.id=d.bot_id WHERE d.model_used IS NULL) AS ok"
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "current_qualification_era_digest"
       }
     ],
-    "operation": "backfill"
+    "operation": "ddl"
   },
   {
     "id": "162-alter-table-ai_trader_bots-add",
@@ -4253,7 +4261,7 @@ const schemaMigrationMetadata = [
       {
         "kind": "column",
         "table": "ai_trader_bots",
-        "column": "sizing_mode"
+        "column": "graduated_qualification_era_digest"
       }
     ],
     "operation": "ddl"
@@ -4267,13 +4275,69 @@ const schemaMigrationMetadata = [
       {
         "kind": "column",
         "table": "ai_trader_bots",
+        "column": "qualification_era_invalidation_reason"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "164-alter-table-ai_trader_decisions-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_decisions",
+        "column": "qualification_era_digest"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "165-update-ai_trader_decisions-d-set",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-150-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM ai_trader_decisions d JOIN ai_trader_bots b ON b.id=d.bot_id WHERE d.model_used IS NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "166-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "sizing_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "167-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
         "column": "risk_min_pct"
       }
     ],
     "operation": "ddl"
   },
   {
-    "id": "164-alter-table-ai_trader_bots-add",
+    "id": "168-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4287,7 +4351,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "165-create-table-if-not",
+    "id": "169-create-table-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -4318,7 +4382,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "166-create-index-if-not",
+    "id": "170-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -4336,7 +4400,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "167-alter-table-ai_trader_bots-add",
+    "id": "171-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4350,7 +4414,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "168-alter-table-ai_trader_bots-add",
+    "id": "172-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4364,7 +4428,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "169-alter-table-ai_trader_bots-add",
+    "id": "173-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4378,7 +4442,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "170-alter-table-ai_trader_bots-add",
+    "id": "174-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4392,7 +4456,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "171-create-index-if-not",
+    "id": "175-create-index-if-not",
     "capabilities": [
       "portfolio"
     ],
@@ -4411,7 +4475,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "172-scrub-rogue-avax-close",
+    "id": "176-scrub-rogue-avax-close",
     "capabilities": [
       "signal_bot"
     ],
