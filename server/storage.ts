@@ -2101,7 +2101,12 @@ export class DatabaseStorage implements IStorage {
     // writes (e.g. recomputed counters vs. PnL/volume deltas) don't blow each
     // other away. See task #67.
     await db.transaction(async (tx) => {
-      const rows = await tx.select({ stats: tradingBots.stats }).from(tradingBots).where(eq(tradingBots.id, id)).limit(1);
+      const rows = await tx
+        .select({ stats: tradingBots.stats })
+        .from(tradingBots)
+        .where(eq(tradingBots.id, id))
+        .for("update")
+        .limit(1);
       const existing = (rows[0]?.stats as any) ?? {};
       const merged = { ...existing, ...((stats as any) ?? {}) };
       await tx.update(tradingBots).set({ stats: merged, updatedAt: sql`NOW()` }).where(eq(tradingBots.id, id));
@@ -2150,6 +2155,8 @@ export class DatabaseStorage implements IStorage {
     txArg?: any,
   ): Promise<void> {
     const run = async (tx: any) => {
+      // Preserve the global lock order: bot_trades first, then the owner row.
+      // Startup corrections use the same order, avoiding a blue/green deadlock.
       const countsRows = await tx
         .select({
           totalTrades: sql<number>`COUNT(*)::int`,
@@ -2168,7 +2175,14 @@ export class DatabaseStorage implements IStorage {
         winningTrades: Number(countsRows[0]?.winningTrades ?? 0),
         losingTrades: Number(countsRows[0]?.losingTrades ?? 0),
       };
-      const rows = await tx.select({ stats: tradingBots.stats }).from(tradingBots).where(eq(tradingBots.id, tradingBotId)).limit(1);
+      // Serialize every JSON read/merge/write on the owner row. The lock must
+      // precede reading stats so a waiter merges against the committed winner.
+      const rows = await tx
+        .select({ stats: tradingBots.stats })
+        .from(tradingBots)
+        .where(eq(tradingBots.id, tradingBotId))
+        .for("update")
+        .limit(1);
       const existing: any = rows[0]?.stats ?? {};
       const merged: any = {
         ...existing,

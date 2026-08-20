@@ -122,7 +122,7 @@ describe("schema readiness", () => {
     });
   });
 
-  it("retains all 172 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 173 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -153,13 +153,27 @@ describe("schema readiness", () => {
       id: string;
       capabilities: string[];
       requirements: unknown[];
+      operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(172);
-    expect(metadata).toHaveLength(172);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(172);
+    expect(sqlEntries).toHaveLength(173);
+    expect(metadata).toHaveLength(173);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(173);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase())
-      .toBe("00D5C82F2FC4EAA0E96B0F75BA957A1E9F825CE07BFBBA5C7202A952334C4710");
+      .toBe("1356FC824E60A2519427C6CC3345E97C2BA85C51FBB86B9EAC2D88C9406E458E");
+
+    const correctionSql = sqlEntries.at(-1)!;
+    expect(metadata.at(-1)).toMatchObject({
+      id: "172-scrub-rogue-avax-close",
+      capabilities: ["signal_bot"],
+      operation: "backfill",
+    });
+    expect(correctionSql).toContain("491abec1-39c2-42c5-8963-e5f4fb644b3a");
+    expect(correctionSql).toContain("LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE");
+    expect(correctionSql).toContain("FOR UPDATE");
+    expect(correctionSql).toContain("DELETE FROM bot_trades");
+    expect(correctionSql).toContain("jsonb_build_object");
+    expect(correctionSql).toContain("rogue AVAX trade fingerprint mismatch");
   });
 
   it("runs one memoized postcondition-only probe when the Lab child has no snapshot", async () => {

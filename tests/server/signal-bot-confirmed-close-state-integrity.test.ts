@@ -136,6 +136,21 @@ describe("close-path integration guards", () => {
     expect(atomicSource.match(/await persistConfirmedPositionClose\(\)/g)).toHaveLength(2);
   });
 
+  it("locks every stats merge while preserving the trade-table-first lock order", () => {
+    const updateStart = storageSource.indexOf("async updateTradingBotStats(");
+    const updateEnd = storageSource.indexOf("async getCanonicalBotTradeStats(", updateStart);
+    const updateSource = storageSource.slice(updateStart, updateEnd);
+    expect(updateSource).toContain('.for("update")');
+
+    const recomputeStart = storageSource.indexOf("async recomputeAndMergeBotStats(");
+    const recomputeEnd = storageSource.indexOf("static canonicalCloseFillId(", recomputeStart);
+    const recomputeSource = storageSource.slice(recomputeStart, recomputeEnd);
+    const ownerLock = recomputeSource.indexOf('.for("update")');
+    const countRead = recomputeSource.indexOf("const countsRows = await tx");
+    expect(ownerLock).toBeGreaterThan(0);
+    expect(countRead).toBeLessThan(ownerLock);
+  });
+
   it("removes the fallback-capable sync from both full-close handler regions", () => {
     const tradingViewStart = routesSource.indexOf("// === BEGIN CLOSE SIGNAL HANDLING");
     const tradingViewEnd = routesSource.indexOf("// === END OUTER TRY/CATCH FOR CLOSE SIGNAL HANDLING", tradingViewStart);

@@ -1230,6 +1230,120 @@ const schemaMigrationSql = [
       // Additive: never changes any row or constraint. Idempotent CREATE INDEX IF NOT EXISTS.
       // Rollback: DROP INDEX IF EXISTS idx_equity_events_bot_created
       `CREATE INDEX IF NOT EXISTS idx_equity_events_bot_created ON equity_events(trading_bot_id, created_at DESC)`,
+
+      // --- One-time rogue AVAX close correction. ---
+      // A no-fill reconciler observation was persisted as a second close for a
+      // position that had already closed. Pin every immutable/economic field so
+      // a reused ID or changed row fails closed instead of deleting history.
+      // The anonymous block is one transaction: delete + stats repair commit
+      // together. Once the row is absent, every later startup is a no-op.
+      `DO $qv$
+       DECLARE
+         target_trade bot_trades%ROWTYPE;
+         canonical_stats RECORD;
+       BEGIN
+         IF NOT EXISTS (
+           SELECT 1 FROM bot_trades
+            WHERE id = '491abec1-39c2-42c5-8963-e5f4fb644b3a'
+         ) THEN
+           RETURN;
+         END IF;
+
+         -- Blue/green publish overlap can leave the outgoing instance trading.
+         -- Serialize with every bot_trades reader/writer before taking the
+         -- canonical stats snapshot. Existing stats recomputes read this table
+         -- inside their transaction, so ACCESS EXCLUSIVE also drains any stale
+         -- read/merge/write already running on the outgoing process.
+         LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = '491abec1-39c2-42c5-8963-e5f4fb644b3a'
+            AND trading_bot_id = 'c74f5d5a-be0f-4db9-8909-0605ece3a49d'
+            AND wallet_address = 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez'
+            AND market = 'AVAX-PERP'
+            AND side = 'long'
+            AND size = 38.63000000
+            AND price = 8.927900
+            AND fee = 0
+            AND pnl = -105.84
+            AND status = 'executed'
+            AND protocol = 'pacifica'
+            AND protocol_fill_id = 'tx-reconciler-position-epoch|c74f5d5a-be0f-4db9-8909-0605ece3a49d|AVAX|527034b2-6a0f-457b-a962-4b78aa890774'
+            AND tx_signature IS NULL
+            AND execution_method = 'on-chain-detected'
+            AND executed_at = TIMESTAMP '2026-08-13 05:27:28.496574'
+          FOR UPDATE;
+
+         IF NOT FOUND THEN
+           RAISE EXCEPTION 'rogue AVAX trade fingerprint mismatch';
+         END IF;
+
+         PERFORM 1
+           FROM trading_bots
+          WHERE id = target_trade.trading_bot_id
+            AND wallet_address = target_trade.wallet_address
+            AND name = 'AVAX 4H FLUX MOMENTUM'
+          FOR UPDATE;
+         IF NOT FOUND THEN
+           RAISE EXCEPTION 'rogue AVAX trade owner fingerprint mismatch';
+         END IF;
+
+         DELETE FROM bot_trades
+          WHERE id = target_trade.id;
+
+         SELECT
+           COALESCE(SUM(bt.pnl::numeric), 0) AS total_pnl,
+           COUNT(*)::int AS total_trades,
+           COUNT(*) FILTER (WHERE bt.pnl::numeric > 0)::int AS winning_trades,
+           COUNT(*) FILTER (WHERE bt.pnl::numeric < 0)::int AS losing_trades,
+           MAX(bt.executed_at) AS last_trade_at
+           INTO canonical_stats
+           FROM bot_trades bt
+          WHERE bt.trading_bot_id = target_trade.trading_bot_id
+            AND bt.pnl IS NOT NULL
+            AND bt.status IN ('executed', 'liquidated', 'recovered')
+            AND NOT (
+              bt.tx_signature IS NULL
+              AND COALESCE(bt.fee, 0) = 0
+              AND EXISTS (
+                SELECT 1 FROM bot_trades sibling
+                 WHERE sibling.trading_bot_id = bt.trading_bot_id
+                   AND sibling.market = bt.market
+                   AND sibling.id <> bt.id
+                   AND sibling.pnl IS NOT NULL
+                   AND sibling.status IN ('executed', 'liquidated', 'recovered')
+                   AND ABS(EXTRACT(EPOCH FROM (sibling.executed_at - bt.executed_at))) <= 120
+                   AND ABS(ABS(sibling.size) - ABS(bt.size)) <= 0.01 * ABS(bt.size)
+                   AND (sibling.tx_signature IS NOT NULL OR COALESCE(sibling.fee, 0) > 0)
+              )
+            );
+
+         UPDATE trading_bots
+            SET stats = COALESCE(stats, '{}'::jsonb) || jsonb_build_object(
+                  'totalPnl', canonical_stats.total_pnl,
+                  'totalTrades', canonical_stats.total_trades,
+                  'winningTrades', canonical_stats.winning_trades,
+                  'losingTrades', canonical_stats.losing_trades,
+                  'totalVolume', GREATEST(
+                    0,
+                    COALESCE((stats->>'totalVolume')::numeric, 0)
+                      - ABS(target_trade.size::numeric) * target_trade.price::numeric
+                  ),
+                  'lastTradeAt', CASE
+                    WHEN canonical_stats.last_trade_at IS NULL THEN NULL
+                    ELSE to_char(canonical_stats.last_trade_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                  END
+                ),
+                updated_at = NOW()
+          WHERE id = target_trade.trading_bot_id;
+
+         IF NOT FOUND THEN
+           RAISE EXCEPTION 'rogue AVAX trade stats repair missed owner';
+         END IF;
+       END
+       $qv$`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -4295,6 +4409,20 @@ const schemaMigrationMetadata = [
       }
     ],
     "operation": "ddl"
+  },
+  {
+    "id": "172-scrub-rogue-avax-close",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "rogue-avax-close-491abec1-absent",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM bot_trades WHERE id='491abec1-39c2-42c5-8963-e5f4fb644b3a') AS ok"
+      }
+    ],
+    "operation": "backfill"
   }
 ] as const;
 
