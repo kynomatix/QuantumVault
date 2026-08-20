@@ -24,6 +24,7 @@ import {
   appendTelemetry,
   appendTelemetrySync,
   flushTelemetry,
+  getTelemetryWriterSnapshot,
   __resetTelemetryForTests,
   __getTelemetryStateForTests,
   __setLogPathsForTests,
@@ -165,6 +166,29 @@ describe("QUEUE BOUNDS — overflow drops and does not grow memory unbounded", (
     const state = __getTelemetryStateForTests();
     expect(state.queueLength).toBeLessThanOrEqual(5);
     expect(state.droppedLines).toBe(95);
+    expect(getTelemetryWriterSnapshot()).toEqual(state);
+  });
+});
+
+describe("PRODUCTION SNAPSHOT", () => {
+  it("returns the exact stable five-field shape without resetting counters", () => {
+    const first = getTelemetryWriterSnapshot();
+    const second = getTelemetryWriterSnapshot();
+    expect(first).toEqual({
+      queueLength: 0,
+      queueBytes: 0,
+      droppedLines: 0,
+      drainerRunning: false,
+      consecutiveFailures: 0,
+    });
+    expect(second).toEqual(first);
+    expect(Object.keys(second).sort()).toEqual([
+      "consecutiveFailures",
+      "drainerRunning",
+      "droppedLines",
+      "queueBytes",
+      "queueLength",
+    ]);
   });
 });
 
@@ -179,6 +203,10 @@ describe("DROPPED COUNTER + RECOVERY — one summary line emits after recovery",
     // implementation calls through to the actual fs, not the spy itself.
     const realAppendFile = fs.promises.appendFile;
     let failCallCount = 0;
+    let firstFailureObservedResolve!: () => void;
+    const firstFailureObserved = new Promise<void>((resolve) => {
+      firstFailureObservedResolve = resolve;
+    });
     vi.spyOn(fs.promises, "appendFile").mockImplementation(
       async function (
         this: unknown,
@@ -186,6 +214,7 @@ describe("DROPPED COUNTER + RECOVERY — one summary line emits after recovery",
       ) {
         if (failCallCount < 1) {
           failCallCount++;
+          firstFailureObservedResolve();
           throw new Error("mock disk full");
         }
         return (realAppendFile as Function).apply(fs.promises, args);
@@ -200,6 +229,16 @@ describe("DROPPED COUNTER + RECOVERY — one summary line emits after recovery",
     __appendForTests("r-line3"); // queue=[r2,r3] (2/3)
     __appendForTests("r-line4"); // queue=[r2,r3,r4] (3/3 — at max)
     __appendForTests("r-line5"); // queue full → DROPPED → droppedLines=1
+
+    await firstFailureObserved;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const duringFailure = getTelemetryWriterSnapshot();
+    expect(duringFailure.queueLength).toBe(3);
+    expect(duringFailure.droppedLines).toBeGreaterThanOrEqual(2);
+    expect(duringFailure.drainerRunning).toBe(true);
+    expect(duringFailure.consecutiveFailures).toBeGreaterThanOrEqual(1);
+    expect(duringFailure.queueBytes).toBeGreaterThan(0);
+    expect(getTelemetryWriterSnapshot()).toEqual(duringFailure);
 
     // Wait past the 200ms retry backoff so the drainer can succeed on retry.
     await new Promise<void>((r) => setTimeout(r, 600));

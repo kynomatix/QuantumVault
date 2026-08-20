@@ -67,6 +67,14 @@ let _drainerRunning = false;
 let _consecutiveFailures = 0;
 const _flushResolvers: Array<() => void> = [];
 
+export interface TelemetryWriterSnapshot {
+  queueLength: number;
+  queueBytes: number;
+  droppedLines: number;
+  drainerRunning: boolean;
+  consecutiveFailures: number;
+}
+
 // Generation counter — incremented by __resetTelemetryForTests() to invalidate
 // any in-flight drainer from a previous test so stale drainers never resolve
 // flush resolvers or mutate state that belongs to the current generation.
@@ -180,6 +188,17 @@ export function appendTelemetry(line: string): void {
   }
 }
 
+/** Read the bounded in-process writer state without mutating it. */
+export function getTelemetryWriterSnapshot(): TelemetryWriterSnapshot {
+  return {
+    queueLength: _queue.length,
+    queueBytes: _queueBytes,
+    droppedLines: _droppedLines,
+    drainerRunning: _drainerRunning,
+    consecutiveFailures: _consecutiveFailures,
+  };
+}
+
 /**
  * Synchronously drain any lines still in the async queue.
  *
@@ -290,13 +309,7 @@ export function __getTelemetryStateForTests(): {
   drainerRunning: boolean;
   consecutiveFailures: number;
 } {
-  return {
-    queueLength: _queue.length,
-    queueBytes: _queueBytes,
-    droppedLines: _droppedLines,
-    drainerRunning: _drainerRunning,
-    consecutiveFailures: _consecutiveFailures,
-  };
+  return getTelemetryWriterSnapshot();
 }
 
 /** Redirect the drainer to a temp directory for test isolation. */
