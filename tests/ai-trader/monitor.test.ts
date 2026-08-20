@@ -34,6 +34,7 @@ const getAiTraderDecisionMock = vi.fn();
 const claimAnalysisMock = vi.fn();
 const transitionStateMock = vi.fn();
 const commitCloseMock = vi.fn();
+const commitRecoveryMock = vi.fn();
 let closeBotState: Partial<AiTraderBot> = {};
 vi.mock("../../server/storage", () => ({
   storage: {
@@ -51,6 +52,7 @@ vi.mock("../../server/storage", () => ({
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
     commitAiTraderConfirmedCloseTransition: (...a: unknown[]) => commitCloseMock(...a),
+    commitAiTraderRecoveryTransition: (...a: unknown[]) => commitRecoveryMock(...a),
   },
 }));
 
@@ -117,6 +119,19 @@ vi.mock("../../server/ai-trader/execution-journal", () => ({
   }),
   safeAppendExecutionEvents: (...a: unknown[]) => safeJournalMock(...a),
   safeAppendEntryReconciliationTerminal: (...a: unknown[]) => safeReconciliationTerminalMock(...a),
+  buildEntryReconciliationTerminalEvents: (args: any) => {
+    const observedAt = args.observedAt ?? new Date();
+    if (args.proof.kind === "flat_after_landing_window") {
+      return [
+        { ...args.base, attemptId: args.attemptId, action: "entry", cause: "decision", eventType: "reconciliation_observed", failureCode: "position_not_confirmed", observedAt },
+        { ...args.base, attemptId: args.attemptId, action: "entry", cause: "decision", eventType: "entry_terminal_no_land", failureCode: "position_not_confirmed", recordedAfterBroadcast: false, observedAt },
+      ];
+    }
+    return [
+      { ...args.base, attemptId: args.attemptId, action: "entry", cause: "decision", eventType: "reconciliation_observed", side: args.proof.side, price: args.proof.price, sizeBase: args.proof.sizeBase, observedAt },
+      { ...args.base, attemptId: args.attemptId, action: "entry", cause: "decision", eventType: args.terminal, side: args.proof.side, price: args.proof.price, sizeBase: args.proof.sizeBase, recordedAfterBroadcast: true, observedAt },
+    ];
+  },
 }));
 
 const getAdapterMock = vi.fn();
@@ -364,6 +379,8 @@ const notifications = () => notifyMock.mock.calls.map((c) => c[1]);
 const journalEvents = () => safeJournalMock.mock.calls.flatMap((call) =>
   call[0] as Array<Record<string, unknown>>,
 );
+const recoveryJournalEvents = (params: any = commitRecoveryMock.mock.calls.at(-1)?.[0]) =>
+  (params?.journalBatches ?? []).flat() as Array<Record<string, unknown>>;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -383,7 +400,7 @@ beforeEach(() => {
   for (const m of [
     getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
     getOpenDecisionsMock, getUnresolvedDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock,
-    claimAnalysisMock, transitionStateMock, commitCloseMock, getUmkMock,
+    claimAnalysisMock, transitionStateMock, commitCloseMock, commitRecoveryMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
@@ -469,6 +486,33 @@ beforeEach(() => {
       dailyRealizedComplete,
       consecutiveLosses,
       journal: { status: "appended", failureCode: null },
+    };
+  });
+  commitRecoveryMock.mockImplementation(async (params: any) => {
+    const status = params.disposition === "adopt_open" ? "open"
+      : params.disposition === "abort_crash" ? params.targetBotStatus : "paused";
+    const pauseReason = params.disposition === "adopt_open" ? null
+      : params.disposition === "abort_crash" ? params.targetPauseReason
+      : params.disposition === "no_land" ? "position_unconfirmed_expired"
+      : params.disposition === "orphan_paused" ? "reconcile_orphan_position"
+      : params.targetPauseReason ?? params.pauseReason;
+    const ids = params.disposition === "abort_crash" ? params.decisionIds
+      : params.decisionId === null || params.decisionId === undefined ? [] : [params.decisionId];
+    const decisionOutcome = params.disposition === "abort_crash" ? "aborted_crash"
+      : params.disposition === "no_land" || params.disposition === "orphan_paused" ? "aborted_order" : "executed";
+    for (const id of ids) {
+      await updateDecisionMock(id, {
+        outcome: decisionOutcome,
+        ...((params.disposition === "adopt_open" || params.disposition === "adopt_for_protective_close")
+          ? { entryPrice: params.entryPrice.toFixed(8) } : {}),
+      });
+    }
+    await updateBotMock(params.botId, { status, pauseReason });
+    return {
+      status: "applied",
+      bot: makeBot({ id: params.botId, status, pauseReason }),
+      decisions: ids.map((id: string) => makeOpenDecision({ id, outcome: decisionOutcome })),
+      journal: { status: params.journalBatches.some((batch: unknown[]) => batch.length > 0) ? "appended" : "replayed", failureCode: null },
     };
   });
   notifyMock.mockResolvedValue(true);
@@ -2007,6 +2051,34 @@ describe("startup reconciliation", () => {
     expect(notifications().some((n) => n.type === "trade_failed")).toBe(true);
   });
 
+  it("does not claim an orphan close from a non-terminal acknowledgement", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 3, entryPrice: 150, markPrice: 150,
+          unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      closePosition: vi.fn(async () => ({ success: true, status: "acknowledged" as const, fillPrice: 150 })),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([]);
+
+    const resolved = await reconcileBotOnStartup(makeBot({ status: "open", paperMode: false }));
+
+    expect(resolved).toBe(true);
+    expect(recoveryJournalEvents()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        cause: "startup_orphan",
+        eventType: "close_terminal_failed",
+        failureCode: "venue_error",
+      }),
+    ]));
+    expect(notifications()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ error: expect.stringContaining("COULD NOT be closed") }),
+    ]));
+  });
+
   it("journals a startup-orphan venue throw and still pauses instead of propagating", async () => {
     const { reconcileBotOnStartup } = await importMonitor();
     armLiveAuth();
@@ -2026,7 +2098,12 @@ describe("startup reconciliation", () => {
     expect(botUpdates().some((update) =>
       update.status === "paused" && update.pauseReason === "reconcile_orphan_position",
     )).toBe(true);
-    expect(journalEvents()).toEqual(expect.arrayContaining([
+    expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "orphan_paused",
+      botId: "bot-1111-2222",
+      decisionId: null,
+    }));
+    expect(recoveryJournalEvents()).toEqual(expect.arrayContaining([
       expect.objectContaining({
         action: "close", cause: "startup_orphan", eventType: "close_terminal_failed",
         failureCode: "venue_error", recordedAfterBroadcast: true,
@@ -2335,7 +2412,6 @@ describe("unconfirmed-landing reconciliation", () => {
   it("unconfirmed reconciliation appends adoption and no-land truth best-effort", async () => {
     const { reconcileUnconfirmedLanding } = await importMonitor();
     armLiveAuth();
-    safeJournalMock.mockImplementation(() => undefined);
     getAdapterMock.mockReturnValue(makeAdapter({
       getPositions: vi.fn(async () => [
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
@@ -2344,28 +2420,69 @@ describe("unconfirmed-landing reconciliation", () => {
     getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
 
     await reconcileUnconfirmedLanding(makeQuarantinedBot());
-    const adoptionTypes = safeJournalMock.mock.calls.flatMap((call) =>
-      (call[0] as Array<{ eventType: string }>).map((event) => event.eventType),
-    );
+    const adoption = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(adoption).toMatchObject({ disposition: "adopt_open", decisionId: "dec-u" });
+    const adoptionTypes = recoveryJournalEvents(adoption).map((event) => event.eventType);
     expect(adoptionTypes).toEqual(expect.arrayContaining([
       "position_observed", "bracket_verified",
     ]));
-    expect(safeReconciliationTerminalMock).toHaveBeenCalledWith(expect.objectContaining({
-      attemptId: "entry:dec-u",
-      terminal: "entry_terminal_open",
-      proof: { kind: "landed_position", side: "long", price: 150.1, sizeBase: 2 },
-    }));
+    expect(recoveryJournalEvents(adoption)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        attemptId: "entry:dec-u",
+        eventType: "entry_terminal_open",
+        side: "long",
+        price: 150.1,
+        sizeBase: 2,
+        recordedAfterBroadcast: true,
+      }),
+    ]));
 
-    safeJournalMock.mockClear();
-    safeReconciliationTerminalMock.mockClear();
+    commitRecoveryMock.mockClear();
     getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
     getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
     await reconcileUnconfirmedLanding(makeQuarantinedBot({ updatedAt: new Date(NOW - 6 * 60_000) }));
-    expect(safeReconciliationTerminalMock).toHaveBeenCalledWith(expect.objectContaining({
-      attemptId: "entry:dec-u",
-      terminal: "entry_terminal_no_land",
-      proof: { kind: "flat_after_landing_window" },
+    const noLand = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(noLand).toMatchObject({ disposition: "no_land", decisionId: "dec-u" });
+    expect(recoveryJournalEvents(noLand)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        attemptId: "entry:dec-u",
+        eventType: "entry_terminal_no_land",
+        recordedAfterBroadcast: false,
+        failureCode: "position_not_confirmed",
+      }),
+    ]));
+  });
+
+  it("commits no-land through the atomic seam once with no legacy split state write", async () => {
+    const { reconcileUnconfirmedLanding } = await importMonitor();
+    armLiveAuth();
+    commitRecoveryMock.mockResolvedValue({
+      status: "applied",
+      bot: makeQuarantinedBot({ pauseReason: "position_unconfirmed_expired" }),
+      decisions: [unconfirmedRow({ outcome: "aborted_order" })],
+      journal: { status: "appended", failureCode: null },
+    });
+    updateBotMock.mockClear();
+    updateDecisionMock.mockClear();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    getDecisionsMock.mockResolvedValue([unconfirmedRow()]);
+
+    const resolved = await reconcileUnconfirmedLanding(
+      makeQuarantinedBot({ updatedAt: new Date(NOW - 6 * 60_000) }),
+    );
+
+    expect(resolved).toBe(true);
+    expect(commitRecoveryMock).toHaveBeenCalledTimes(1);
+    expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "no_land",
+      botId: "bot-1111-2222",
+      decisionId: "dec-u",
+      expectedDecisionOutcome: "unconfirmed_landing",
     }));
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(safeJournalMock).not.toHaveBeenCalled();
+    expect(safeReconciliationTerminalMock).not.toHaveBeenCalled();
   });
 
   it("journals an unconfirmed-orphan venue throw and completes the safety pause", async () => {
@@ -2387,7 +2504,12 @@ describe("unconfirmed-landing reconciliation", () => {
     expect(botUpdates().some((update) =>
       update.status === "paused" && update.pauseReason === "reconcile_orphan_position",
     )).toBe(true);
-    expect(journalEvents()).toEqual(expect.arrayContaining([
+    expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "orphan_paused",
+      botId: "bot-1111-2222",
+      decisionId: null,
+    }));
+    expect(recoveryJournalEvents()).toEqual(expect.arrayContaining([
       expect.objectContaining({
         action: "close", cause: "unconfirmed_orphan", eventType: "close_terminal_failed",
         failureCode: "venue_error", recordedAfterBroadcast: true,

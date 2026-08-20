@@ -215,6 +215,37 @@ export type PreparedExecutionJournalAppend = {
   insert(): Promise<void>;
 };
 
+/**
+ * Recovery transitions can carry more than one independently replayable
+ * attempt (for example a close attempt plus the deterministic entry terminal).
+ * Validate the attempt identifiers and acquire every advisory lock in one
+ * stable order before any bot/decision row lock is taken.
+ */
+export async function acquireExecutionJournalAttemptLocksInTransaction(
+  tx: ExecutionJournalTransaction,
+  batches: readonly (readonly JournalEventInput[])[],
+): Promise<readonly string[]> {
+  const attemptIds = new Set<string>();
+  for (const batch of batches) {
+    if (batch.length === 0) continue;
+    const attemptId = batch[0].attemptId;
+    if (!INTERNAL_ID.test(attemptId)
+        || batch.some((event) => event.attemptId !== attemptId)) {
+      throw new Error("execution_journal_mixed_attempt_batch");
+    }
+    // Canonicalization here is deliberately pure. It ensures malformed
+    // recovery evidence is known before row locks are taken, without weakening
+    // the normal lineage/phase validation performed during prepare.
+    for (const event of batch) canonicalize(event);
+    attemptIds.add(attemptId);
+  }
+  const ordered = [...attemptIds].sort((left, right) => left.localeCompare(right));
+  for (const attemptId of ordered) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE}, hashtext(${attemptId}))`);
+  }
+  return ordered;
+}
+
 export function isExecutionJournalConflict(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.message.startsWith("execution_journal_invalid_")
@@ -333,7 +364,12 @@ export async function prepareConfirmedCloseJournalReplayInTransaction(
 export async function prepareExecutionJournalEventsInTransaction(
   tx: ExecutionJournalTransaction,
   inputs: readonly JournalEventInput[],
-  options: { requireExactBatchReplay?: boolean; requireEntryCommandLineage?: boolean } = {},
+  options: {
+    requireExactBatchReplay?: boolean;
+    requireExactRequestedReplay?: boolean;
+    requireEntryCommandLineage?: boolean;
+    attemptLockAlreadyHeld?: boolean;
+  } = {},
 ): Promise<PreparedExecutionJournalAppend> {
   if (inputs.length === 0) {
     return { status: "replayed", insert: async () => undefined };
@@ -346,7 +382,9 @@ export async function prepareExecutionJournalEventsInTransaction(
     throw new Error("execution_journal_atomic_replay_conflict");
   }
 
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE}, hashtext(${attemptId}))`);
+  if (!options.attemptLockAlreadyHeld) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE}, hashtext(${attemptId}))`);
+  }
   const existing = await tx.select({
     eventIdentity: aiTraderExecutionEvents.eventIdentity,
     attemptId: aiTraderExecutionEvents.attemptId,
@@ -362,6 +400,19 @@ export async function prepareExecutionJournalEventsInTransaction(
     market: aiTraderExecutionEvents.market,
   }).from(aiTraderExecutionEvents).where(eq(aiTraderExecutionEvents.attemptId, attemptId));
   const identities = new Set(existing.map((row) => row.eventIdentity));
+
+  // Recovery callers append a suffix after retained command lineage. Exact
+  // replay therefore means all-or-none for the requested suffix, rather than
+  // equality with every row already stored for the attempt.
+  if (options.requireExactRequestedReplay) {
+    const present = values.filter((value) => identities.has(value.eventIdentity)).length;
+    if (present > 0 && present !== values.length) {
+      throw new Error("execution_journal_atomic_replay_conflict");
+    }
+    if (present === values.length) {
+      return { status: "replayed", insert: async () => undefined };
+    }
+  }
 
   if (options.requireEntryCommandLineage) {
     const expected = values[0];
@@ -393,8 +444,13 @@ export async function prepareExecutionJournalEventsInTransaction(
     if (value.phase !== null) {
       const sparseNonBroadcastTerminal = value.phase === 90 && maxPhase === 0
         && (value.cause === "paper" || value.cause === "venue_detected");
+      const entryRecoveryTerminal = options.requireEntryCommandLineage === true
+        && value.phase === 90 && maxPhase === 10
+        && value.action === "entry" && value.cause === "decision"
+        && value.eventType.startsWith("entry_terminal_");
       const expected = maxPhase < 0 ? 0 : maxPhase === 0 ? 10 : maxPhase === 10 ? 20 : maxPhase === 20 ? 90 : null;
-      if (!sparseNonBroadcastTerminal && (expected === null || value.phase !== expected)) {
+      if (!sparseNonBroadcastTerminal && !entryRecoveryTerminal
+          && (expected === null || value.phase !== expected)) {
         throw new Error("execution_journal_command_phase_conflict");
       }
     }
@@ -422,7 +478,7 @@ export async function appendExecutionEvents(inputs: readonly JournalEventInput[]
   });
 }
 
-type EntryReconciliationTerminalArgs = {
+export type EntryReconciliationTerminalArgs = {
   base: ReturnType<typeof journalBase>;
   attemptId: string;
   observedAt?: Date;
@@ -463,7 +519,9 @@ function sameRecoveryIdentity(
  * phase-90 entry terminal when the durable command lineage is exactly 0,10.
  * This never reconstructs phase 20 and never authorizes a venue mutation.
  */
-export async function appendEntryReconciliationTerminal(args: EntryReconciliationTerminalArgs): Promise<void> {
+export function buildEntryReconciliationTerminalEvents(
+  args: EntryReconciliationTerminalArgs,
+): readonly [JournalEventInput, JournalEventInput] {
   if (!args.base.decisionId || args.attemptId !== entryAttemptId(args.base.decisionId)) {
     throw new Error("execution_journal_recovery_identity_mismatch");
   }
@@ -501,7 +559,13 @@ export async function appendEntryReconciliationTerminal(args: EntryReconciliatio
       recordedAfterBroadcast: true, observedAt,
     };
   }
-  const values = [evidence, terminal].map((input) => rowValues(canonicalize(input), observedAt));
+  return [evidence, terminal];
+}
+
+export async function appendEntryReconciliationTerminal(args: EntryReconciliationTerminalArgs): Promise<void> {
+  const observedAt = args.observedAt ?? new Date();
+  const inputs = buildEntryReconciliationTerminalEvents({ ...args, observedAt });
+  const values = inputs.map((input) => rowValues(canonicalize(input), observedAt));
   const { db } = await import("../db");
 
   await db.transaction(async (tx) => {

@@ -32,6 +32,7 @@ const claimExecutionMock = vi.fn();
 const transitionStateMock = vi.fn();
 const commitPaperEntryMock = vi.fn();
 const commitDirectLiveEntryMock = vi.fn();
+const commitRecoveryMock = vi.fn();
 const isMarketAdmittedMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
@@ -45,6 +46,7 @@ vi.mock("../../server/storage", () => ({
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
     commitAiTraderPaperEntryTransition: (...a: unknown[]) => commitPaperEntryMock(...a),
     commitAiTraderDirectLiveEntryTransition: (...a: unknown[]) => commitDirectLiveEntryMock(...a),
+    commitAiTraderRecoveryTransition: (...a: unknown[]) => commitRecoveryMock(...a),
   },
 }));
 
@@ -230,7 +232,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   callOrder = [];
   scannerCapabilitiesMock.liveExecutionEnabled = true;
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, commitPaperEntryMock, commitDirectLiveEntryMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, commitPaperEntryMock, commitDirectLiveEntryMock, commitRecoveryMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
     m.mockReset();
   }
   appendRequiredJournalMock.mockImplementation(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
@@ -271,6 +273,20 @@ beforeEach(() => {
         : params.disposition === "quarantined" ? "unconfirmed_landing" : "aborted_order" }),
     };
   });
+  commitRecoveryMock.mockImplementation(async (params: any) => ({
+    status: "applied",
+    bot: makeBot({ status: "paused", pauseReason: params.pauseReason }),
+    decisions: [makePersistedDecision({
+      outcome: params.entryFillPrice === null ? "aborted_order" : "executed",
+      entryPrice: params.entryFillPrice === null ? null : params.entryFillPrice.toFixed(8),
+      exitPrice: params.closeSucceeded && params.closeFillPrice !== null ? params.closeFillPrice.toFixed(8) : null,
+      exitReason: params.entryFillPrice === null ? null : params.pauseReason,
+      realizedPnl: null,
+      feesPaid: null,
+      closedAt: params.closeSucceeded ? params.closedAt : null,
+    })],
+    journal: { status: "appended", failureCode: null },
+  }));
   transitionStateMock.mockImplementation(async (params: any) => {
     callOrder.push(`status:${params.nextStatus}`);
     return makeBot({ status: params.nextStatus, pauseReason: params.nextPauseReason });
@@ -1035,13 +1051,11 @@ describe("live execution — failure handling (fail closed)", () => {
 
     expect(result).toMatchObject({ ok: false, reason: "bracket_failed" });
     expect((adapter.closePosition as any)).toHaveBeenCalledTimes(1);
-    expect(safeJournalMock).toHaveBeenCalledWith(expect.arrayContaining([
-      expect.objectContaining({
-        attemptId: "entry:d-journal-emergency",
-        action: "entry",
-        eventType: "entry_terminal_unwound",
-        failureCode: "bracket_failed",
-      }),
+    const recovery = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(recovery).toMatchObject({ disposition: "emergency_unwind", decisionId: "d-journal-emergency" });
+    expect(recovery.journalBatches.flat()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ attemptId: "entry:d-journal-emergency", action: "entry",
+        eventType: "entry_terminal_unwound", failureCode: "bracket_failed" }),
     ]));
   });
 
@@ -1289,7 +1303,9 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     expect(r).toMatchObject({ ok: false, reason: "position_unconfirmed" });
     expect((adapter.closePosition as any)).toHaveBeenCalled();
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
+    expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "emergency_unwind", botId: "bot-1111-2222", pauseReason: "position_unconfirmed",
+    }));
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
   });
 
@@ -1311,13 +1327,10 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(r).toMatchObject({ ok: false, reason: "position_unconfirmed" });
     expect(getPositionsMock).toHaveBeenCalledTimes(3);
     expect((adapter.closePosition as any)).toHaveBeenCalled();
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "position_unconfirmed" });
-    // Entry MAY have filled (order said success): recorded honestly as executed
-    // with the failure exit, using the close fill.
-    expect(updateDecisionMock).toHaveBeenCalledWith(
-      "d-1",
-      expect.objectContaining({ outcome: "executed", entryPrice: "150.20000000", exitReason: "position_unconfirmed" })
-    );
+    expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "emergency_unwind", botId: "bot-1111-2222", decisionId: "d-1",
+      pauseReason: "position_unconfirmed", entryFillPrice: 150.2,
+    }));
   });
 
   it("setTpSl failure → position closed at market, bot paused bracket_failed, decision executed with exit", async () => {
@@ -1336,18 +1349,20 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     expect(r).toMatchObject({ ok: false, reason: "bracket_failed" });
     expect((adapter.closePosition as any)).toHaveBeenCalled();
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "bracket_failed" });
-    expect(updateDecisionMock).toHaveBeenCalledWith(
-      "d-1",
-      expect.objectContaining({
-        outcome: "executed",
-        entryPrice: "150.20000000",
-        exitPrice: "150.00000000",
-        exitReason: "bracket_failed",
-        closedAt: expect.any(Date),
-      })
-    );
+    const recovery = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(recovery).toMatchObject({
+      disposition: "emergency_unwind", botId: "bot-1111-2222", decisionId: "d-1",
+      pauseReason: "bracket_failed", entryFillPrice: 150.2, closeSucceeded: true,
+      closeFillPrice: 150,
+    });
+    expect(recovery).not.toHaveProperty("realizedPnl");
+    expect(recovery).not.toHaveProperty("feesPaid");
+    expect(recovery.journalBatches[0].every((event: any) => event.attemptId === recovery.closeAttemptId)).toBe(true);
+    expect(recovery.journalBatches[1]).toEqual([
+      expect.objectContaining({ attemptId: "entry:d-1", eventType: "entry_terminal_unwound" }),
+    ]);
     expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({ type: "trade_failed" }));
+    expect(commitRecoveryMock.mock.invocationCallOrder[0]).toBeLessThan(notifyMock.mock.invocationCallOrder[0]);
   });
 
   it("does not record an emergency close when the venue only acknowledges it", async () => {
@@ -1372,11 +1387,9 @@ describe("live execution — failure handling (fail closed)", () => {
 
     expect(r).toMatchObject({ ok: false, reason: "bracket_failed" });
     expect((r as any).detail).toContain("EMERGENCY CLOSE FAILED");
-    const update = updateDecisionMock.mock.calls.find((c) => c[0] === "d-1")![1];
-    expect(update).toMatchObject({ outcome: "executed", entryPrice: "150.20000000", exitReason: "bracket_failed" });
-    expect(update.exitPrice).toBeUndefined();
-    expect(update.closedAt).toBeUndefined();
-    expect(update.realizedPnl).toBeUndefined();
+    const recovery = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(recovery).toMatchObject({ disposition: "emergency_unwind", decisionId: "d-1",
+      entryFillPrice: 150.2, pauseReason: "bracket_failed", closeSucceeded: false });
     expect(notifyMock).toHaveBeenCalledWith(
       "WALLET_X",
       expect.objectContaining({ error: expect.stringContaining("AUTOMATIC CLOSE FAILED") })
@@ -1444,7 +1457,9 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(r).toMatchObject({ ok: false, reason: "bracket_failed" });
     expect(stopsMock).toHaveBeenCalledTimes(3);
     expect((adapter.closePosition as any)).toHaveBeenCalled();
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "bracket_failed" });
+    expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "emergency_unwind", botId: "bot-1111-2222", pauseReason: "bracket_failed",
+    }));
   });
 
   it("emergency close FAILURE never masks the original failure and screams in the notification", async () => {
@@ -1466,18 +1481,23 @@ describe("live execution — failure handling (fail closed)", () => {
     });
     expect(r).toMatchObject({ ok: false, reason: "bracket_failed" });
     expect((r as any).detail).toContain("EMERGENCY CLOSE FAILED");
-    expect(updateBotMock).toHaveBeenCalledWith("bot-1111-2222", { status: "paused", pauseReason: "bracket_failed" });
+    const recovery = commitRecoveryMock.mock.calls.at(-1)![0];
+    expect(recovery).toMatchObject({
+      disposition: "emergency_unwind",
+      botId: "bot-1111-2222",
+      decisionId: "d-1",
+      entryFillPrice: 150.2,
+      closeSucceeded: false,
+      pauseReason: "bracket_failed",
+    });
     expect(notifyMock).toHaveBeenCalledWith(
       "WALLET_X",
       expect.objectContaining({ error: expect.stringContaining("AUTOMATIC CLOSE FAILED") })
     );
     // Entry recorded without a fabricated exit (close never filled).
-    expect(updateDecisionMock).toHaveBeenCalledWith(
-      "d-1",
-      expect.objectContaining({ outcome: "executed", exitReason: "bracket_failed" })
-    );
-    const args = updateDecisionMock.mock.calls.find((c) => c[0] === "d-1")![1];
-    expect(args.exitPrice).toBeUndefined();
+    expect(recovery.closeFillPrice).toBeNull();
+    expect(recovery).not.toHaveProperty("realizedPnl");
+    expect(recovery).not.toHaveProperty("feesPaid");
   });
 
   it("sub-key decrypt failure heals the execution UMK once and retries; both cleanups still run", async () => {

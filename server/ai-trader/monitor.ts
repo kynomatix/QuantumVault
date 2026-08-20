@@ -108,6 +108,7 @@ import {
 } from "./paper-position-authority";
 export { computeUnrealizedPnl, parseOpenDecision } from "./paper-position-authority";
 import {
+  buildEntryReconciliationTerminalEvents,
   entryAttemptId,
   journalBase,
   newMutationAttemptId,
@@ -115,6 +116,7 @@ import {
   safeAppendEntryReconciliationTerminal,
   safeAppendExecutionEvents,
   type JournalCause,
+  type JournalEventInput,
   type JournalFailureCode,
 } from "./execution-journal";
 
@@ -1006,7 +1008,7 @@ function buildLiveConfirmedCloseJournal(args: {
   ];
 }
 
-function journalCloseAttempt(args: {
+function buildCloseAttemptJournal(args: {
   bot: AiTraderBot;
   decisionId: string | null;
   attemptId: string;
@@ -1016,14 +1018,14 @@ function journalCloseAttempt(args: {
   close?: CloseRecord;
   failureCode?: JournalFailureCode;
   recordedAfterBroadcast?: boolean;
-}): void {
+}): JournalEventInput[] {
   const base = journalBase(args.bot, args.decisionId);
   const confirmed = args.order !== null && isTerminalCloseResult(args.order);
   const recordedAfterBroadcast = args.recordedAfterBroadcast ?? true;
   const failureCode = confirmed
     ? null
     : args.failureCode ?? (args.order?.status === "rejected" ? "venue_rejected" : "venue_error");
-  safeAppendExecutionEvents([
+  return [
     { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
       eventType: "attempt_claimed", side: args.side, recordedAfterBroadcast },
     { ...base, attemptId: args.attemptId, action: "close", cause: args.cause,
@@ -1040,7 +1042,11 @@ function journalCloseAttempt(args: {
       sizeBase: args.order?.fillSize ?? null, fee: args.close?.feesPaid ?? args.order?.fee ?? null,
       realizedPnl: args.close?.realizedPnl ?? null,
       failureCode, recordedAfterBroadcast },
-  ]);
+  ];
+}
+
+function journalCloseAttempt(args: Parameters<typeof buildCloseAttemptJournal>[0]): void {
+  safeAppendExecutionEvents(buildCloseAttemptJournal(args));
 }
 
 function journalCancelAttempt(args: {
@@ -1078,7 +1084,7 @@ async function closeOrphanPositionWithJournal(args: {
   attemptId: string;
   cause: "unconfirmed_orphan" | "startup_orphan";
   side: "long" | "short";
-}): Promise<boolean> {
+}): Promise<{ closed: boolean; journalEvents: JournalEventInput[] }> {
   let result: Awaited<ReturnType<typeof withSigningContext<
     | { kind: "order"; order: OrderResult }
     | { kind: "close_threw"; detail: string }
@@ -1098,19 +1104,18 @@ async function closeOrphanPositionWithJournal(args: {
       }
     });
   } catch {
-    journalCloseAttempt({ ...args, order: null, failureCode: "signing_unavailable", recordedAfterBroadcast: false });
-    return false;
+    return { closed: false, journalEvents: buildCloseAttemptJournal({ ...args, order: null, failureCode: "signing_unavailable", recordedAfterBroadcast: false }) };
   }
   if (!result.ok) {
-    journalCloseAttempt({ ...args, order: null, failureCode: "signing_unavailable", recordedAfterBroadcast: false });
-    return false;
+    return { closed: false, journalEvents: buildCloseAttemptJournal({ ...args, order: null, failureCode: "signing_unavailable", recordedAfterBroadcast: false }) };
   }
   if (result.value.kind === "close_threw") {
-    journalCloseAttempt({ ...args, order: null, failureCode: "venue_error", recordedAfterBroadcast: true });
-    return false;
+    return { closed: false, journalEvents: buildCloseAttemptJournal({ ...args, order: null, failureCode: "venue_error", recordedAfterBroadcast: true }) };
   }
-  journalCloseAttempt({ ...args, order: result.value.order });
-  return result.value.order.success;
+  return {
+    closed: isTerminalCloseResult(result.value.order),
+    journalEvents: buildCloseAttemptJournal({ ...args, order: result.value.order }),
+  };
 }
 
 function journalVenueDetectedClose(bot: AiTraderBot, view: OpenDecisionView, close: CloseRecord, fillSize: number, attemptId: string): void {
@@ -2761,13 +2766,39 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
 // --- Startup reconciliation --------------------------------------------------------------
 
-async function markUnfinishedDecisionsCrashed(botId: string): Promise<void> {
-  const decisions = await storage.getAiTraderDecisions(botId, 10);
-  for (const d of decisions) {
-    if (!d.outcome && !d.closedAt) {
-      await storage.updateAiTraderDecision(d.id, { outcome: "aborted_crash" });
-    }
+function recoveryTransitionSucceeded(
+  result: Awaited<ReturnType<typeof storage.commitAiTraderRecoveryTransition>>,
+  context: string,
+): boolean {
+  if (result.status === "conflict") {
+    console.warn(`[AiTraderMonitor] ${context}: atomic recovery conflict (${result.reason}) — will retry from fresh state`);
+    return false;
   }
+  if (result.journal.status === "degraded") {
+    console.warn(`[AiTraderMonitor] ${context}: recovery state committed with degraded journal (${result.journal.failureCode})`);
+  }
+  return true;
+}
+
+async function commitCrashedRecovery(
+  bot: AiTraderBot,
+  targetBotStatus: "idle" | "paused",
+  targetPauseReason: null | "position_unconfirmed_expired",
+): Promise<boolean> {
+  const decisions = await storage.getAiTraderDecisions(bot.id, 10);
+  const unfinishedIds = decisions.filter((decision) => !decision.outcome && !decision.closedAt)
+    .map((decision) => decision.id);
+  const result = await storage.commitAiTraderRecoveryTransition({
+    disposition: "abort_crash",
+    botId: bot.id,
+    expectedBotStatus: bot.status,
+    expectedPauseReason: bot.pauseReason ?? null,
+    decisionIds: unfinishedIds,
+    targetBotStatus,
+    targetPauseReason,
+    journalBatches: [],
+  });
+  return recoveryTransitionSucceeded(result, "abort-crash");
 }
 
 /**
@@ -2799,9 +2830,7 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
   // Unreachable for paper bots (the executor's unconfirmed branch is
   // live-only), but fail safe rather than loop on venue reads forever.
   if (bot.paperMode) {
-    await markUnfinishedDecisionsCrashed(bot.id);
-    await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed_expired" });
-    return true;
+    return commitCrashedRecovery(bot, "paused", "position_unconfirmed_expired");
   }
 
   let adapter: ProtocolAdapter;
@@ -2839,16 +2868,25 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       // flatten (same as the startup orphan path).
       console.error(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} position landed with NO usable decision row — closing for safety`);
       const orphanAttemptId = newMutationAttemptId("close", row?.id ?? null);
-      const closed = await closeOrphanPositionWithJournal({ bot, adapter,
+      const orphan = await closeOrphanPositionWithJournal({ bot, adapter,
         decisionId: row?.id ?? null, attemptId: orphanAttemptId, cause: "unconfirmed_orphan",
         side: position.baseSize >= 0 ? "long" : "short" });
-      if (row) await storage.updateAiTraderDecision(row.id, { outcome: "aborted_order" });
-      await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "reconcile_orphan_position" });
+      const committed = await storage.commitAiTraderRecoveryTransition({
+        disposition: "orphan_paused",
+        botId: bot.id,
+        expectedBotStatus: bot.status,
+        expectedPauseReason: bot.pauseReason ?? null,
+        decisionId: row?.id ?? null,
+        expectedDecisionOutcome: row?.outcome ?? null,
+        closeAttemptId: orphanAttemptId,
+        journalBatches: [orphan.journalEvents],
+      });
+      if (!recoveryTransitionSucceeded(committed, "unconfirmed-orphan")) return false;
       await sendTradeNotification(bot.walletAddress, {
         type: "trade_failed",
         botName: botLabel(bot),
         market: bot.market,
-        error: closed
+        error: orphan.closed
           ? "A late-landing entry could not be matched to its decision record; the position was closed and the bot paused."
           : "A late-landing entry could not be matched to its decision record and COULD NOT be closed — check the venue.",
       });
@@ -2857,18 +2895,31 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
     const adoptedView: OpenDecisionView = { ...view, entryPrice: position.entryPrice };
     const entryJournal = journalBase(bot, view.decision.id);
     const adoptedAttemptId = entryAttemptId(view.decision.id);
-    safeAppendExecutionEvents([
-      { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
-        eventType: "position_observed", side: view.side, price: position.entryPrice,
-        sizeBase: Math.abs(position.baseSize) },
-    ]);
+    const positionObserved: JournalEventInput = {
+      ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
+      eventType: "position_observed", side: view.side, price: position.entryPrice,
+      sizeBase: Math.abs(position.baseSize),
+    };
+
+    const adoptForProtectiveClose = async (): Promise<boolean> => {
+      const committed = await storage.commitAiTraderRecoveryTransition({
+        disposition: "adopt_for_protective_close",
+        botId: bot.id,
+        expectedBotStatus: bot.status,
+        expectedPauseReason: bot.pauseReason ?? null,
+        decisionId: view.decision.id,
+        expectedDecisionOutcome: row?.outcome ?? view.decision.outcome,
+        entryPrice: position.entryPrice,
+        targetBotStatus: "paused",
+        targetPauseReason: bot.pauseReason ?? "position_unconfirmed",
+        journalBatches: [[positionObserved]],
+      });
+      return recoveryTransitionSucceeded(committed, "adopt-for-protective-close");
+    };
 
     // Complete the bracket before promoting (the entry landed with no TP/SL).
     if (typeof adapter.setTpSl !== "function" || typeof adapter.getOpenStopOrders !== "function") {
-      await storage.updateAiTraderDecision(view.decision.id, {
-        outcome: "executed",
-        entryPrice: position.entryPrice.toFixed(8),
-      });
+      if (!await adoptForProtectiveClose()) return false;
       await closeLivePositionAndPause(bot, adoptedView, adapter, {
         pauseReason: "bracket_failed",
         exitReason: "circuit_breaker",
@@ -2905,10 +2956,7 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
       if (!verified) {
         // Record the entry HONESTLY (it filled) before the protective close so
         // the close books against an executed decision, then pause — never idle.
-        await storage.updateAiTraderDecision(view.decision.id, {
-          outcome: "executed",
-          entryPrice: position.entryPrice.toFixed(8),
-        });
+        if (!await adoptForProtectiveClose()) return false;
         await closeLivePositionAndPause(bot, adoptedView, adapter, {
           pauseReason: "bracket_failed",
           exitReason: "circuit_breaker",
@@ -2919,22 +2967,31 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
     }
 
     // Bracket confirmed: promote to a clean monitored 'open' state.
-    await storage.updateAiTraderDecision(view.decision.id, {
-      outcome: "executed",
-      entryPrice: position.entryPrice.toFixed(8),
-    });
-    await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
-    safeAppendExecutionEvents([
-      { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
-        eventType: "bracket_verified", side: view.side },
-    ]);
-    safeAppendEntryReconciliationTerminal({
+    const terminalEvents = buildEntryReconciliationTerminalEvents({
       base: entryJournal,
       attemptId: adoptedAttemptId,
       terminal: "entry_terminal_open",
       proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
         sizeBase: Math.abs(position.baseSize) },
     });
+    const committed = await storage.commitAiTraderRecoveryTransition({
+      disposition: "adopt_open",
+      botId: bot.id,
+      expectedBotStatus: bot.status,
+      expectedPauseReason: bot.pauseReason ?? null,
+      decisionId: view.decision.id,
+      expectedDecisionOutcome: row?.outcome ?? view.decision.outcome,
+      entryPrice: position.entryPrice,
+      targetBotStatus: "open",
+      targetPauseReason: null,
+      journalBatches: [[
+        positionObserved,
+        { ...entryJournal, attemptId: adoptedAttemptId, action: "entry", cause: "decision",
+          eventType: "bracket_verified", side: view.side },
+        ...terminalEvents,
+      ]],
+    });
+    if (!recoveryTransitionSucceeded(committed, "adopt-open")) return false;
     console.log(`[AiTraderMonitor] unconfirmed-landing: bot ${bot.id.slice(0, 8)} late entry ADOPTED — decision ${view.decision.id.slice(0, 8)} → executed @ ${position.entryPrice}, bot → open (bracket verified)`);
     return true;
   }
@@ -2946,17 +3003,37 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
     return true; // still inside the landing window — pending, touch nothing
   }
   if (row) {
-    await storage.updateAiTraderDecision(row.id, { outcome: "aborted_order" });
     const base = journalBase(bot, row.id);
     const attemptId = entryAttemptId(row.id);
-    safeAppendEntryReconciliationTerminal({
+    const terminalEvents = buildEntryReconciliationTerminalEvents({
       base,
       attemptId,
       terminal: "entry_terminal_no_land",
       proof: { kind: "flat_after_landing_window" },
     });
+    const committed = await storage.commitAiTraderRecoveryTransition({
+      disposition: "no_land",
+      botId: bot.id,
+      expectedBotStatus: bot.status,
+      expectedPauseReason: bot.pauseReason ?? null,
+      decisionId: row.id,
+      expectedDecisionOutcome: "unconfirmed_landing",
+      journalBatches: [terminalEvents],
+    });
+    if (!recoveryTransitionSucceeded(committed, "no-land")) return false;
+  } else {
+    const committed = await storage.commitAiTraderRecoveryTransition({
+      disposition: "abort_crash",
+      botId: bot.id,
+      expectedBotStatus: bot.status,
+      expectedPauseReason: bot.pauseReason ?? null,
+      decisionIds: [],
+      targetBotStatus: "paused",
+      targetPauseReason: "position_unconfirmed_expired",
+      journalBatches: [],
+    });
+    if (!recoveryTransitionSucceeded(committed, "no-land-without-decision")) return false;
   }
-  await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "position_unconfirmed_expired" });
   await sendTradeNotification(bot.walletAddress, {
     type: "trade_failed",
     botName: botLabel(bot),
@@ -2987,8 +3064,7 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
   // 'open' paper bots are handled by the normal tick (candle close detection).
   if (bot.paperMode) {
     if (preOpen) {
-      await markUnfinishedDecisionsCrashed(bot.id);
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      if (!await commitCrashedRecovery(bot, "idle", null)) return false;
       console.log(`[AiTraderMonitor] reconcile: paper bot ${bot.id.slice(0, 8)} '${bot.status}' → idle (aborted_crash)`);
     }
     return true;
@@ -3082,8 +3158,7 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
       }
       // Provably flat past the grace window: the crash happened before
       // (or the order never filled / the landing window has safely elapsed).
-      await markUnfinishedDecisionsCrashed(bot.id);
-      await storage.updateAiTraderBot(bot.id, { status: "idle" });
+      if (!await commitCrashedRecovery(bot, "idle", null)) return false;
       console.log(`[AiTraderMonitor] reconcile: live bot ${bot.id.slice(0, 8)} '${bot.status}' flat → idle (aborted_crash)`);
       return true;
     }
@@ -3120,22 +3195,61 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
       breakevenProtect: null,
     };
     const attemptId = newMutationAttemptId("close", null);
-    const closed = await closeOrphanPositionWithJournal({ bot, adapter, decisionId: null,
+    const orphan = await closeOrphanPositionWithJournal({ bot, adapter, decisionId: null,
       attemptId, cause: "startup_orphan", side: fallbackView.side });
-    await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason: "reconcile_orphan_position" });
+    const committed = await storage.commitAiTraderRecoveryTransition({
+      disposition: "orphan_paused",
+      botId: bot.id,
+      expectedBotStatus: bot.status,
+      expectedPauseReason: bot.pauseReason ?? null,
+      decisionId: null,
+      expectedDecisionOutcome: null,
+      closeAttemptId: attemptId,
+      journalBatches: [orphan.journalEvents],
+    });
+    if (!recoveryTransitionSucceeded(committed, "startup-orphan")) return false;
     await sendTradeNotification(bot.walletAddress, {
       type: "trade_failed",
       botName: botLabel(bot),
       market: bot.market,
-      error: closed
+      error: orphan.closed
         ? "Recovered from a crash: an untracked position was closed and the bot paused."
         : "Recovered from a crash: an untracked position was found and COULD NOT be closed — check the venue.",
     });
     return true;
   }
 
+  const recoveryBase = journalBase(bot, view.decision.id);
+  const recoveryAttemptId = entryAttemptId(view.decision.id);
+  const positionObserved: JournalEventInput = {
+    ...recoveryBase,
+    attemptId: recoveryAttemptId,
+    action: "entry",
+    cause: "decision",
+    eventType: "position_observed",
+    side: view.side,
+    price: position.entryPrice,
+    sizeBase: Math.abs(position.baseSize),
+  };
+  const adoptForProtectiveClose = async (): Promise<boolean> => {
+    const committed = await storage.commitAiTraderRecoveryTransition({
+      disposition: "adopt_for_protective_close",
+      botId: bot.id,
+      expectedBotStatus: bot.status,
+      expectedPauseReason: bot.pauseReason ?? null,
+      decisionId: view.decision.id,
+      expectedDecisionOutcome: view.decision.outcome,
+      entryPrice: view.entryPrice ?? position.entryPrice,
+      targetBotStatus: "paused",
+      targetPauseReason: "bracket_failed",
+      journalBatches: [[positionObserved]],
+    });
+    return recoveryTransitionSucceeded(committed, "startup-adopt-for-protective-close");
+  };
+
   // Complete the bracket (the crash may have hit between order and setTpSl).
   if (typeof adapter.setTpSl !== "function" || typeof adapter.getOpenStopOrders !== "function") {
+    if (!await adoptForProtectiveClose()) return false;
     await closeLivePositionAndPause(bot, view, adapter, {
       pauseReason: "bracket_failed",
       exitReason: "circuit_breaker",
@@ -3170,6 +3284,7 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
       }
     }
     if (!verified) {
+      if (!await adoptForProtectiveClose()) return false;
       await closeLivePositionAndPause(bot, view, adapter, {
         pauseReason: "bracket_failed",
         exitReason: "circuit_breaker",
@@ -3180,27 +3295,31 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
   }
 
   // Bracket confirmed: promote the decision + bot to a clean 'open' state.
-  await storage.updateAiTraderDecision(view.decision.id, {
-    outcome: "executed",
-    entryPrice: (view.entryPrice ?? position.entryPrice).toFixed(8),
-  });
-  await storage.updateAiTraderBot(bot.id, { status: "open", pauseReason: null });
-  const base = journalBase(bot, view.decision.id);
-  const attemptId = entryAttemptId(view.decision.id);
-  safeAppendExecutionEvents([
-    { ...base, attemptId, action: "entry", cause: "decision", eventType: "position_observed", side: view.side,
-      price: position.entryPrice, sizeBase: Math.abs(position.baseSize) },
-    { ...base, attemptId, action: "entry", cause: "decision", eventType: "bracket_verified", side: view.side },
-  ]);
-  // Legacy pre-journal entries intentionally retain the evidence above but
-  // cannot acquire a recovery terminal without the durable phase-0/10 lineage.
-  safeAppendEntryReconciliationTerminal({
-    base,
-    attemptId,
+  const terminalEvents = buildEntryReconciliationTerminalEvents({
+    base: recoveryBase,
+    attemptId: recoveryAttemptId,
     terminal: "entry_terminal_open",
     proof: { kind: "landed_position", side: view.side, price: position.entryPrice,
       sizeBase: Math.abs(position.baseSize) },
   });
+  const committed = await storage.commitAiTraderRecoveryTransition({
+    disposition: "adopt_open",
+    botId: bot.id,
+    expectedBotStatus: bot.status,
+    expectedPauseReason: bot.pauseReason ?? null,
+    decisionId: view.decision.id,
+    expectedDecisionOutcome: view.decision.outcome,
+    entryPrice: view.entryPrice ?? position.entryPrice,
+    targetBotStatus: "open",
+    targetPauseReason: null,
+    journalBatches: [[
+      positionObserved,
+      { ...recoveryBase, attemptId: recoveryAttemptId, action: "entry", cause: "decision",
+        eventType: "bracket_verified", side: view.side },
+      ...terminalEvents,
+    ]],
+  });
+  if (!recoveryTransitionSucceeded(committed, "startup-adopt-open")) return false;
   console.log(`[AiTraderMonitor] reconcile: live bot ${bot.id.slice(0, 8)} '${bot.status}' → open (position + bracket verified)`);
   return true;
 }

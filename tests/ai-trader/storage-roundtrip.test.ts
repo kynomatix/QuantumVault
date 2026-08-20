@@ -904,6 +904,256 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     }
   }, 60_000);
 
+  it("atomically commits and replays every recovery disposition with deterministic multi-decision ordering", async () => {
+    const createdBotIds: string[] = [];
+    const makeRecoveryBot = async (suffix: string, status: string, pauseReason: string | null) => {
+      const bot = await storage.createAiTraderBot({
+        walletAddress: `${WALLET}-recovery-${suffix}`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+        allocatedUsdc: "100.00",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: `recovery-${suffix}-hmac`,
+      } as any);
+      createdBotIds.push(bot.id);
+      await storage.updateAiTraderBot(bot.id, { status: status as any, pauseReason });
+      return { ...bot, status, pauseReason } as any;
+    };
+    const makeDecision = (botId: string, suffix: string, outcome: string | null) => storage.insertAiTraderDecision({
+      botId, rawDecision: { action: "long" }, clampedDecision: { action: "long" }, outcome,
+      decidedAt: new Date(`2026-08-19T${suffix.padStart(2, "0")}:00:00.000Z`),
+    } as any);
+    const observedAt = new Date("2026-08-19T20:00:00.000Z");
+    try {
+      const adoptBot = await makeRecoveryBot("adopt-open", "paused", "position_unconfirmed");
+      const adoptDecision = await makeDecision(adoptBot.id, "01", "unconfirmed_landing");
+      const adoptAttempt = await journal.appendRequiredEntryPrebroadcast({
+        bot: adoptBot, decisionId: adoptDecision.id, side: "long", clientOrderId: `adopt-${WALLET}`, sizeBase: 2,
+      });
+      const adoptBase = journal.journalBase(adoptBot, adoptDecision.id);
+      const adoptEvents = [
+        { ...adoptBase, attemptId: adoptAttempt, action: "entry", cause: "decision", eventType: "position_observed",
+          side: "long", price: 150.25, sizeBase: 2, observedAt },
+        { ...adoptBase, attemptId: adoptAttempt, action: "entry", cause: "decision", eventType: "bracket_verified",
+          side: "long", observedAt },
+        ...journal.buildEntryReconciliationTerminalEvents({
+          base: adoptBase, attemptId: adoptAttempt, terminal: "entry_terminal_open",
+          proof: { kind: "landed_position", side: "long", price: 150.25, sizeBase: 2 }, observedAt,
+        }),
+      ] as any;
+      const adoptParams = {
+        disposition: "adopt_open", botId: adoptBot.id, expectedBotStatus: "paused", expectedPauseReason: "position_unconfirmed",
+        decisionId: adoptDecision.id, expectedDecisionOutcome: "unconfirmed_landing", entryPrice: 150.25,
+        targetBotStatus: "open", targetPauseReason: null, journalBatches: [adoptEvents],
+      } as const;
+      await db.transaction(async (tx) => {
+        expect(await journal.acquireExecutionJournalAttemptLocksInTransaction(tx, [adoptEvents]))
+          .toEqual([adoptAttempt]);
+        expect(await journal.prepareExecutionJournalEventsInTransaction(tx, adoptEvents, {
+          requireEntryCommandLineage: true,
+          requireExactRequestedReplay: true,
+          attemptLockAlreadyHeld: true,
+        })).toMatchObject({ status: "pending" });
+      });
+      expect(await storage.commitAiTraderRecoveryTransition(adoptParams)).toMatchObject({
+        status: "applied", bot: { status: "open", pauseReason: null },
+        decisions: [{ outcome: "executed", entryPrice: "150.25000000" }],
+        journal: { status: "appended", failureCode: null },
+      });
+      expect(await storage.commitAiTraderRecoveryTransition(adoptParams)).toMatchObject({
+        status: "replayed", journal: { status: "replayed", failureCode: null },
+      });
+
+      const protectBot = await makeRecoveryBot("adopt-protect", "paused", "position_unconfirmed");
+      const protectDecision = await makeDecision(protectBot.id, "02", "unconfirmed_landing");
+      const protectAttempt = await journal.appendRequiredEntryPrebroadcast({
+        bot: protectBot, decisionId: protectDecision.id, side: "long", clientOrderId: `protect-${WALLET}`, sizeBase: 1,
+      });
+      const protectBase = journal.journalBase(protectBot, protectDecision.id);
+      expect(await storage.commitAiTraderRecoveryTransition({
+        disposition: "adopt_for_protective_close", botId: protectBot.id,
+        expectedBotStatus: "paused", expectedPauseReason: "position_unconfirmed",
+        decisionId: protectDecision.id, expectedDecisionOutcome: "unconfirmed_landing", entryPrice: 149.75,
+        targetBotStatus: "paused", targetPauseReason: "bracket_failed",
+        journalBatches: [[{ ...protectBase, attemptId: protectAttempt, action: "entry", cause: "decision",
+          eventType: "position_observed", side: "long", price: 149.75, sizeBase: 1, observedAt }]],
+      })).toMatchObject({
+        status: "applied", bot: { status: "paused", pauseReason: "bracket_failed" },
+        decisions: [{ outcome: "executed", entryPrice: "149.75000000" }],
+      });
+
+      const noLandBot = await makeRecoveryBot("no-land", "paused", "position_unconfirmed");
+      const noLandDecision = await makeDecision(noLandBot.id, "03", "unconfirmed_landing");
+      const noLandAttempt = await journal.appendRequiredEntryPrebroadcast({
+        bot: noLandBot, decisionId: noLandDecision.id, side: "long", clientOrderId: `no-land-${WALLET}`, sizeBase: 1,
+      });
+      const noLandEvents = journal.buildEntryReconciliationTerminalEvents({
+        base: journal.journalBase(noLandBot, noLandDecision.id), attemptId: noLandAttempt,
+        terminal: "entry_terminal_no_land", proof: { kind: "flat_after_landing_window" }, observedAt,
+      });
+      expect(await storage.commitAiTraderRecoveryTransition({
+        disposition: "no_land", botId: noLandBot.id, expectedBotStatus: "paused",
+        expectedPauseReason: "position_unconfirmed", decisionId: noLandDecision.id,
+        expectedDecisionOutcome: "unconfirmed_landing", journalBatches: [noLandEvents],
+      })).toMatchObject({
+        status: "applied", bot: { status: "paused", pauseReason: "position_unconfirmed_expired" },
+        decisions: [{ outcome: "aborted_order" }],
+      });
+
+      const crashBot = await makeRecoveryBot("abort-crash", "executing", null);
+      const crashB = await makeDecision(crashBot.id, "05", null);
+      const crashA = await makeDecision(crashBot.id, "04", null);
+      const crash = await storage.commitAiTraderRecoveryTransition({
+        disposition: "abort_crash", botId: crashBot.id, expectedBotStatus: "executing", expectedPauseReason: null,
+        decisionIds: [crashB.id, crashA.id], targetBotStatus: "idle", targetPauseReason: null, journalBatches: [],
+      });
+      expect(crash).toMatchObject({ status: "applied", bot: { status: "idle", pauseReason: null } });
+      if (crash.status === "conflict") throw new Error("expected applied crash recovery");
+      expect(crash.decisions.map((row) => row.id)).toEqual([crashA.id, crashB.id].sort());
+      expect(crash.decisions.every((row) => row.outcome === "aborted_crash")).toBe(true);
+
+      const orphanBot = await makeRecoveryBot("orphan", "open", null);
+      const orphanAttempt = journal.newMutationAttemptId("close", null);
+      expect(await storage.commitAiTraderRecoveryTransition({
+        disposition: "orphan_paused", botId: orphanBot.id, expectedBotStatus: "open", expectedPauseReason: null,
+        decisionId: null, expectedDecisionOutcome: null, closeAttemptId: orphanAttempt,
+        journalBatches: [[{ ...journal.journalBase(orphanBot, null), attemptId: orphanAttempt,
+          action: "close", cause: "startup_orphan", eventType: "attempt_claimed", observedAt }]],
+      })).toMatchObject({
+        status: "applied", bot: { status: "paused", pauseReason: "reconcile_orphan_position" },
+        decisions: [], journal: { status: "appended", failureCode: null },
+      });
+
+      const unwindBot = await makeRecoveryBot("emergency", "executing", null);
+      const unwindDecision = await makeDecision(unwindBot.id, "06", null);
+      const entryAttempt = await journal.appendRequiredEntryPrebroadcast({
+        bot: unwindBot, decisionId: unwindDecision.id, side: "long", clientOrderId: `unwind-entry-${WALLET}`, sizeBase: 1,
+      });
+      const entryBase = journal.journalBase(unwindBot, unwindDecision.id);
+      await journal.appendExecutionEvents([{ ...entryBase, attemptId: entryAttempt, action: "entry", cause: "decision",
+        eventType: "broadcast_result", side: "long", venueStatus: "filled", price: 150, sizeBase: 1,
+        recordedAfterBroadcast: true, observedAt }]);
+      const closeAttempt = journal.newMutationAttemptId("close", unwindDecision.id);
+      const closeBase = journal.journalBase(unwindBot, unwindDecision.id);
+      const closeEvents = [
+        { ...closeBase, attemptId: closeAttempt, action: "close", cause: "emergency_unwind", eventType: "attempt_claimed", side: "long", observedAt },
+        { ...closeBase, attemptId: closeAttempt, action: "close", cause: "emergency_unwind", eventType: "broadcast_attempted", side: "long", recordedAfterBroadcast: true, observedAt },
+        { ...closeBase, attemptId: closeAttempt, action: "close", cause: "emergency_unwind", eventType: "broadcast_result", side: "long", venueStatus: "filled", price: 151, recordedAfterBroadcast: true, observedAt },
+        { ...closeBase, attemptId: closeAttempt, action: "close", cause: "emergency_unwind", eventType: "close_terminal_confirmed", side: "long", venueStatus: "filled", price: 151, recordedAfterBroadcast: true, observedAt },
+      ] as any;
+      const entryTerminal = [{ ...entryBase, attemptId: entryAttempt, action: "entry", cause: "decision",
+        eventType: "entry_terminal_unwound", side: "long", price: 151, sizeBase: 1,
+        failureCode: "bracket_failed", recordedAfterBroadcast: true, observedAt }] as any;
+      const unwindParams = {
+        disposition: "emergency_unwind", botId: unwindBot.id, expectedBotStatus: "executing", expectedPauseReason: null,
+        decisionId: unwindDecision.id, expectedDecisionOutcome: null, closeAttemptId: closeAttempt,
+        pauseReason: "bracket_failed", entryFillPrice: 150, closeSucceeded: true, closeFillPrice: 151,
+        closedAt: observedAt, journalBatches: [closeEvents, entryTerminal],
+      } as const;
+      expect(await storage.commitAiTraderRecoveryTransition(unwindParams)).toMatchObject({
+        status: "applied", bot: { status: "paused", pauseReason: "bracket_failed" },
+        decisions: [{ outcome: "executed", entryPrice: "150.00000000", exitPrice: "151.00000000",
+          exitReason: "bracket_failed", realizedPnl: null, feesPaid: null, closedAt: observedAt }],
+        journal: { status: "appended", failureCode: null },
+      });
+      expect(await storage.commitAiTraderRecoveryTransition(unwindParams)).toMatchObject({
+        status: "replayed", journal: { status: "replayed", failureCode: null },
+      });
+      const otherCloseAttempt = journal.newMutationAttemptId("close", unwindDecision.id);
+      const otherCloseEvents = closeEvents.map((event: any) => ({ ...event, attemptId: otherCloseAttempt }));
+      expect(await storage.commitAiTraderRecoveryTransition({
+        ...unwindParams, closeAttemptId: otherCloseAttempt, journalBatches: [otherCloseEvents, entryTerminal],
+      })).toEqual({ status: "conflict", reason: "recovery_state_conflict" });
+    } finally {
+      for (const id of createdBotIds) {
+        await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, id));
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, id));
+      }
+    }
+  }, 60_000);
+
+  it("keeps recovered state when journal validation or insert degrades, but rolls back on a state-row fault", async () => {
+    const createdBotIds: string[] = [];
+    const create = async (suffix: string) => {
+      const bot = await storage.createAiTraderBot({
+        walletAddress: `${WALLET}-recovery-fault-${suffix}`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+        allocatedUsdc: "100.00", graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: `recovery-fault-${suffix}-hmac`,
+      } as any);
+      createdBotIds.push(bot.id);
+      await storage.updateAiTraderBot(bot.id, { status: "open" as any, pauseReason: null });
+      return { ...bot, status: "open", pauseReason: null } as any;
+    };
+    const observedAt = new Date("2026-08-19T21:00:00.000Z");
+    let triggerName: string | null = null;
+    let functionName: string | null = null;
+    let triggerTable: "ai_trader_execution_events" | "ai_trader_bots" | null = null;
+    try {
+      const malformedBot = await create("validation");
+      const requestedAttempt = journal.newMutationAttemptId("close", null);
+      const mismatchedAttempt = journal.newMutationAttemptId("close", null);
+      expect(await storage.commitAiTraderRecoveryTransition({
+        disposition: "orphan_paused", botId: malformedBot.id, expectedBotStatus: "open", expectedPauseReason: null,
+        decisionId: null, expectedDecisionOutcome: null, closeAttemptId: requestedAttempt,
+        journalBatches: [[{ ...journal.journalBase(malformedBot, null), attemptId: mismatchedAttempt,
+          action: "close", cause: "startup_orphan", eventType: "attempt_claimed", observedAt }]],
+      })).toMatchObject({
+        status: "applied", bot: { status: "paused", pauseReason: "reconcile_orphan_position" },
+        journal: { status: "degraded", failureCode: "validation_conflict" },
+      });
+
+      const insertBot = await create("insert");
+      const insertAttempt = journal.newMutationAttemptId("close", null);
+      const safe = `qv_recovery_insert_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9_]/g, "");
+      functionName = `${safe}_fn`;
+      triggerName = `${safe}_trg`;
+      triggerTable = "ai_trader_execution_events";
+      const key = insertAttempt.replace(/'/g, "''");
+      await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'recovery_journal_insert_fault'; END; $$`);
+      await pool.query(`CREATE TRIGGER ${triggerName} AFTER INSERT ON ai_trader_execution_events FOR EACH ROW WHEN (NEW.attempt_id = '${key}') EXECUTE FUNCTION ${functionName}()`);
+      expect(await storage.commitAiTraderRecoveryTransition({
+        disposition: "orphan_paused", botId: insertBot.id, expectedBotStatus: "open", expectedPauseReason: null,
+        decisionId: null, expectedDecisionOutcome: null, closeAttemptId: insertAttempt,
+        journalBatches: [[{ ...journal.journalBase(insertBot, null), attemptId: insertAttempt,
+          action: "close", cause: "startup_orphan", eventType: "attempt_claimed", observedAt }]],
+      })).toMatchObject({
+        status: "applied", bot: { status: "paused", pauseReason: "reconcile_orphan_position" },
+        journal: { status: "degraded", failureCode: "insert_failed" },
+      });
+      await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ai_trader_execution_events`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      triggerName = null;
+      functionName = null;
+      triggerTable = null;
+
+      const stateFaultBot = await create("state");
+      const stateAttempt = journal.newMutationAttemptId("close", null);
+      const stateSafe = `qv_recovery_state_${Date.now()}_${Math.random().toString(36).slice(2)}`.replace(/[^a-z0-9_]/g, "");
+      functionName = `${stateSafe}_fn`;
+      triggerName = `${stateSafe}_trg`;
+      triggerTable = "ai_trader_bots";
+      const botKey = stateFaultBot.id.replace(/'/g, "''");
+      await pool.query(`CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'recovery_state_fault'; END; $$`);
+      await pool.query(`CREATE TRIGGER ${triggerName} AFTER UPDATE ON ai_trader_bots FOR EACH ROW WHEN (NEW.id = '${botKey}') EXECUTE FUNCTION ${functionName}()`);
+      await expect(storage.commitAiTraderRecoveryTransition({
+        disposition: "orphan_paused", botId: stateFaultBot.id, expectedBotStatus: "open", expectedPauseReason: null,
+        decisionId: null, expectedDecisionOutcome: null, closeAttemptId: stateAttempt,
+        journalBatches: [[{ ...journal.journalBase(stateFaultBot, null), attemptId: stateAttempt,
+          action: "close", cause: "startup_orphan", eventType: "attempt_claimed", observedAt }]],
+      })).rejects.toThrow("recovery_state_fault");
+      expect(await storage.getAiTraderBot(stateFaultBot.id)).toMatchObject({ status: "open", pauseReason: null });
+      const journalRows = await pool.query(
+        "SELECT count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1", [stateAttempt],
+      );
+      expect(journalRows.rows[0]?.count).toBe(0);
+    } finally {
+      if (triggerName && triggerTable) await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ${triggerTable}`);
+      if (functionName) await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      for (const id of createdBotIds) {
+        await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, id));
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, id));
+      }
+    }
+  }, 60_000);
+
   it("getAiTraderBotsByWallet returns the bot for its wallet", async () => {
     const bots = await storage.getAiTraderBotsByWallet(WALLET);
     expect(bots.some((b) => b.id === botId)).toBe(true);

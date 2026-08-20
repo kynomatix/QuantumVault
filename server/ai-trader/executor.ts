@@ -52,6 +52,7 @@ import {
   newMutationAttemptId,
   orderResultEvent,
   safeAppendExecutionEvents,
+  type JournalEventInput,
 } from "./execution-journal";
 
 // --- G6 cadence rules (mirror of context-builder's advisory echo; THIS is the
@@ -1037,6 +1038,7 @@ async function emergencyCloseAndPause(args: {
   let closeFill: number | undefined;
   let closeSucceeded = false;
   let closeOrder: OrderResult | null = null;
+  const closedAt = new Date();
   const closeAttemptId = newMutationAttemptId("close", decisionId);
   const closeJournal = journalBase(bot, decisionId);
   const closeClientOrderId = `aitrader-close-${decisionId}`;
@@ -1054,49 +1056,52 @@ async function emergencyCloseAndPause(args: {
   } catch (err) {
     console.error(`[AiTrader] Emergency close failed for bot ${bot.id.slice(0, 8)} (${pauseReason}):`, err);
   }
-  safeAppendExecutionEvents([
+  const closeJournalEvents: JournalEventInput[] = [
     { ...closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
-      eventType: "attempt_claimed", side, recordedAfterBroadcast: true },
+      eventType: "attempt_claimed", side, recordedAfterBroadcast: true, observedAt: closedAt },
     { ...closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
-      eventType: "broadcast_attempted", side, clientOrderId: closeClientOrderId, recordedAfterBroadcast: true },
-    orderResultEvent({ base: closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
+      eventType: "broadcast_attempted", side, clientOrderId: closeClientOrderId, recordedAfterBroadcast: true, observedAt: closedAt },
+    { ...orderResultEvent({ base: closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
       order: closeOrder, clientOrderId: closeClientOrderId, recordedAfterBroadcast: true,
-      failureCode: closeOrder ? null : "venue_error" }),
+      failureCode: closeOrder ? null : "venue_error" }), observedAt: closedAt },
     { ...closeJournal, attemptId: closeAttemptId, action: "close", cause: "emergency_unwind",
       eventType: closeSucceeded ? "close_terminal_confirmed" : "close_terminal_failed", side,
       clientOrderId: closeClientOrderId, venueOrderId: closeOrder?.orderId ?? null,
       venueStatus: closeOrder?.status ?? "unknown", price: closeFill ?? null,
-      failureCode: closeSucceeded ? null : "venue_error", recordedAfterBroadcast: true },
-  ]);
-
-  await storage.updateAiTraderBot(bot.id, { status: "paused", pauseReason });
-
-  if (entryFillPrice !== undefined && Number.isFinite(entryFillPrice)) {
-    // The entry DID execute; record it honestly with the failure exit.
-    await storage.updateAiTraderDecision(decisionId, {
-      outcome: "executed",
-      entryPrice: entryFillPrice.toFixed(8),
-      ...(closeSucceeded && closeFill !== undefined && Number.isFinite(closeFill)
-        ? {
-            exitPrice: closeFill.toFixed(8),
-            exitReason: pauseReason,
-            closedAt: new Date(),
-            realizedPnl: ((closeFill - entryFillPrice) * sizeBase * (side === "long" ? 1 : -1)).toFixed(2),
-          }
-        : { exitReason: pauseReason }),
-    });
-  } else {
-    await storage.updateAiTraderDecision(decisionId, { outcome: "aborted_order" });
-  }
-
-  if (closeSucceeded) {
-    const entryJournal = journalBase(bot, decisionId);
-    safeAppendExecutionEvents([
-      { ...entryJournal, attemptId: entryAttemptId(decisionId), action: "entry", cause: "decision",
-        eventType: "entry_terminal_unwound", side, price: closeFill ?? null,
-        failureCode: pauseReason === "bracket_failed" ? "bracket_failed" : "position_not_confirmed",
-        recordedAfterBroadcast: true },
-    ]);
+      failureCode: closeSucceeded ? null : "venue_error", recordedAfterBroadcast: true, observedAt: closedAt },
+  ];
+  const entryTerminalEvents: JournalEventInput[] = closeSucceeded ? [{
+    ...journalBase(bot, decisionId),
+    attemptId: entryAttemptId(decisionId),
+    action: "entry",
+    cause: "decision",
+    eventType: "entry_terminal_unwound",
+    side,
+    price: closeFill ?? null,
+    sizeBase,
+    failureCode: pauseReason === "bracket_failed" ? "bracket_failed" : "position_not_confirmed",
+    recordedAfterBroadcast: true,
+    observedAt: closedAt,
+  }] : [];
+  const transition = await storage.commitAiTraderRecoveryTransition({
+    disposition: "emergency_unwind",
+    botId: bot.id,
+    expectedBotStatus: "executing",
+    expectedPauseReason: null,
+    decisionId,
+    expectedDecisionOutcome: null,
+    closeAttemptId,
+    pauseReason,
+    entryFillPrice: entryFillPrice !== undefined && Number.isFinite(entryFillPrice) ? entryFillPrice : null,
+    closeSucceeded,
+    closeFillPrice: closeFill !== undefined && Number.isFinite(closeFill) ? closeFill : null,
+    closedAt,
+    journalBatches: [closeJournalEvents, entryTerminalEvents],
+  });
+  if (transition.status === "conflict") {
+    console.error(`[AiTrader] Emergency recovery transition conflicted (${transition.reason}); bot state requires reconciliation`);
+  } else if (transition.journal.status === "degraded") {
+    console.warn(`[AiTrader] Emergency recovery state committed with degraded journal (${transition.journal.failureCode})`);
   }
 
   await sendTradeNotification(bot.walletAddress, {
