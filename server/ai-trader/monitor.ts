@@ -134,9 +134,13 @@ const DAILY_SWEEP_MS = 6 * 60 * 60 * 1000; // graduation sweep every 6h (cheap; 
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+type InternalAnalysisClaimUpdates = NonNullable<
+  Parameters<typeof storage.claimAiTraderAnalysis>[0]["updates"]
+>;
+
 async function claimInternalAnalysis(
   bot: AiTraderBot,
-  updates?: Pick<AiTraderBot, "market" | "timeframe" | "policyHmac">,
+  updates?: InternalAnalysisClaimUpdates,
 ): Promise<AiTraderBot | undefined> {
   const [openPositions, unresolved] = await Promise.all([
     storage.getOpenAiTraderDecisions(bot.id, 2),
@@ -2563,7 +2567,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           umk,
           aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
         );
-        const pickUpdates: Record<string, unknown> = {
+        const pickUpdates: InternalAnalysisClaimUpdates = {
           market: candidate.market,
           timeframe: candidate.timeframe,
           policyHmac: newPolicyHmac,
@@ -2572,7 +2576,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           pickUpdates,
           qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
         );
-        const claimed = await claimInternalAnalysis(bot, pickUpdates as any);
+        const claimed = await claimInternalAnalysis(bot, pickUpdates);
         if (!claimed) {
           if (_obs) _obs.exitReason = "gate_skip";
           console.warn(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} lost idle-to-analyzing claim`);

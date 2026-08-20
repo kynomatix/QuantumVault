@@ -249,7 +249,7 @@ export function qualificationEraMutationPatch(
     currentQualificationEraDigest: null,
     graduatedQualificationEraDigest: null,
     qualificationEraInvalidationReason: reason,
-    graduationState: "in_trial",
+    graduationState: bot.graduationState === "waived" ? "waived" : "in_trial",
     graduatedAt: null,
     trialStartedAt: new Date(),
   };
@@ -260,14 +260,22 @@ export function qualificationEraDecisionPatch(
   digest: string,
 ): Record<string, unknown> | null {
   if (bot.currentQualificationEraDigest === digest) return null;
+  const resumesInvalidatedEra =
+    bot.currentQualificationEraDigest === null &&
+    typeof bot.qualificationEraInvalidationReason === "string" &&
+    bot.qualificationEraInvalidationReason.length > 0;
   return {
     currentQualificationEraDigest: digest,
     graduatedQualificationEraDigest: null,
     qualificationEraInvalidationReason:
-      bot.currentQualificationEraDigest === null ? "qualification_era_initialized" : "qualification_era_changed",
-    graduationState: "in_trial",
+      resumesInvalidatedEra
+        ? bot.qualificationEraInvalidationReason
+        : bot.currentQualificationEraDigest === null
+          ? "qualification_era_initialized"
+          : "qualification_era_changed",
+    graduationState: bot.graduationState === "waived" ? "waived" : "in_trial",
     graduatedAt: null,
-    trialStartedAt: new Date(),
+    trialStartedAt: resumesInvalidatedEra && bot.trialStartedAt ? bot.trialStartedAt : new Date(),
   };
 }
 

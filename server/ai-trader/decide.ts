@@ -447,6 +447,7 @@ async function finalizeDecision(args: {
       clampedDecision: null,
       guardrailViolations: violations,
       outcome: "rejected_guardrails",
+      qualificationEraDigest,
       llmCostUsd,
       llmLatencyMs: latencyMs,
       modelUsed: bot.model,

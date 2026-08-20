@@ -19,6 +19,7 @@ import {
   buildQualificationEraObject,
   canonicalEraDecimal,
   computeQualificationEraDigest,
+  qualificationEraDecisionPatch,
   qualificationEraMutationPatch,
   validateQualificationEraDeclarationChanges,
   type QualificationEraComponent,
@@ -348,6 +349,35 @@ describe("qualification era identity", () => {
     expect(qualificationEraMutationPatch(ERA_BOT, { market: " BTC-PERP ", riskMinPct: ".5" }, "test")).toBeNull();
     expect(qualificationEraMutationPatch(ERA_BOT, { model: "different/model" }, "test"))
       .toMatchObject({ graduationState: "in_trial", currentQualificationEraDigest: null });
+  });
+
+  it("preserves an explicit waiver while rebinding era identity and its original invalidation cause", () => {
+    const trialStartedAt = new Date(NOW - DAY);
+    const waived = {
+      ...ERA_BOT,
+      graduationState: "waived",
+      currentQualificationEraDigest: "OLD",
+      qualificationEraInvalidationReason: null,
+      trialStartedAt,
+    } as AiTraderBot;
+    expect(qualificationEraMutationPatch(waived, { model: "different/model" }, "material_bot_settings_changed"))
+      .toMatchObject({
+        graduationState: "waived",
+        currentQualificationEraDigest: null,
+        qualificationEraInvalidationReason: "material_bot_settings_changed",
+      });
+
+    const invalidated = {
+      ...waived,
+      currentQualificationEraDigest: null,
+      qualificationEraInvalidationReason: "material_bot_settings_changed",
+    } as AiTraderBot;
+    expect(qualificationEraDecisionPatch(invalidated, "NEW")).toMatchObject({
+      graduationState: "waived",
+      currentQualificationEraDigest: "NEW",
+      qualificationEraInvalidationReason: "material_bot_settings_changed",
+      trialStartedAt,
+    });
   });
 
   it("fails closed on malformed integer identity", () => {

@@ -602,6 +602,7 @@ describe("admission fee-rate authority", () => {
     expect(insertMock.mock.calls[0][0]).toMatchObject({
       outcome: "rejected_guardrails",
       clampedDecision: null,
+      qualificationEraDigest: expect.stringMatching(/^[0-9A-F]{64}$/),
     });
     expect(pnlMapMock).not.toHaveBeenCalled();
   });
