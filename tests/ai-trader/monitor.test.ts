@@ -322,9 +322,8 @@ function makeOpenDecision(overrides: Partial<Record<string, unknown>> = {}): AiT
     outcome: "executed",
     closedAt: null,
     decidedAt: new Date(ENTRY_CANDLE_OPEN),
-    contextDigest: retainedFeeContext(),
     entryPrice: "150",
-    contextDigest: ERA_CONTEXT,
+    contextDigest: { ...ERA_CONTEXT, ...retainedFeeContext() },
     qualificationEraDigest: DEFAULT_ERA,
     clampedDecision: {
       action: "long",

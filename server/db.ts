@@ -4239,18 +4239,18 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "161-update-ai_trader_decisions-d-set",
+    "id": "161-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
     "requirements": [
       {
-        "kind": "data",
-        "identity": "migration-150-backfill",
-        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM ai_trader_decisions d JOIN ai_trader_bots b ON b.id=d.bot_id WHERE d.model_used IS NULL) AS ok"
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "current_qualification_era_digest"
       }
     ],
-    "operation": "backfill"
+    "operation": "ddl"
   },
   {
     "id": "162-alter-table-ai_trader_bots-add",
@@ -4261,7 +4261,7 @@ const schemaMigrationMetadata = [
       {
         "kind": "column",
         "table": "ai_trader_bots",
-        "column": "sizing_mode"
+        "column": "graduated_qualification_era_digest"
       }
     ],
     "operation": "ddl"
@@ -4275,13 +4275,69 @@ const schemaMigrationMetadata = [
       {
         "kind": "column",
         "table": "ai_trader_bots",
+        "column": "qualification_era_invalidation_reason"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "164-alter-table-ai_trader_decisions-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_decisions",
+        "column": "qualification_era_digest"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "165-update-ai_trader_decisions-d-set",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-150-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM ai_trader_decisions d JOIN ai_trader_bots b ON b.id=d.bot_id WHERE d.model_used IS NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "166-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "sizing_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "167-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
         "column": "risk_min_pct"
       }
     ],
     "operation": "ddl"
   },
   {
-    "id": "164-alter-table-ai_trader_bots-add",
+    "id": "168-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4295,7 +4351,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "165-create-table-if-not",
+    "id": "169-create-table-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -4326,7 +4382,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "166-create-index-if-not",
+    "id": "170-create-index-if-not",
     "capabilities": [
       "ai_trader"
     ],
@@ -4344,7 +4400,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "167-alter-table-ai_trader_bots-add",
+    "id": "171-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4358,7 +4414,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "168-alter-table-ai_trader_bots-add",
+    "id": "172-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4372,7 +4428,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "169-alter-table-ai_trader_bots-add",
+    "id": "173-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4386,7 +4442,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "170-alter-table-ai_trader_bots-add",
+    "id": "174-alter-table-ai_trader_bots-add",
     "capabilities": [
       "ai_trader"
     ],
@@ -4400,7 +4456,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "171-create-index-if-not",
+    "id": "175-create-index-if-not",
     "capabilities": [
       "portfolio"
     ],
@@ -4419,7 +4475,7 @@ const schemaMigrationMetadata = [
     "operation": "ddl"
   },
   {
-    "id": "172-scrub-rogue-avax-close",
+    "id": "176-scrub-rogue-avax-close",
     "capabilities": [
       "signal_bot"
     ],
