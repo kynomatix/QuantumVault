@@ -139,6 +139,7 @@ import {
   type InsertAiTraderDecision,
 } from "@shared/schema";
 import {
+  acquireExecutionJournalAttemptLocksInTransaction,
   isConfirmedCloseReplayIdentityConflict,
   isExactConfirmedCloseJournalBatch,
   isExecutionJournalConflict,
@@ -146,6 +147,7 @@ import {
   prepareExecutionJournalEventsInTransaction,
   type JournalEventInput,
 } from "./ai-trader/execution-journal";
+import { appendTelemetry } from "./telemetry";
 
 export type AiTraderPaperEntryTransitionConflict =
   | "decision_state_conflict"
@@ -233,6 +235,80 @@ export interface AiTraderConfirmedCloseTransitionParams {
   journalEvents: readonly JournalEventInput[];
 }
 
+export type AiTraderRecoveryTransitionConflict =
+  | "bot_state_conflict"
+  | "decision_state_conflict"
+  | "recovery_state_conflict"
+  | "journal_identity_conflict";
+
+export type AiTraderRecoveryJournalResult = {
+  status: "appended" | "replayed" | "degraded";
+  failureCode: null | "validation_conflict" | "insert_failed";
+};
+
+type AiTraderRecoveryCommon = {
+  botId: string;
+  expectedBotStatus: string;
+  expectedPauseReason: string | null;
+  journalBatches: readonly (readonly JournalEventInput[])[];
+};
+
+export type AiTraderRecoveryTransitionParams = AiTraderRecoveryCommon & (
+  | {
+      disposition: "adopt_open";
+      decisionId: string;
+      expectedDecisionOutcome: string | null;
+      entryPrice: number;
+      targetBotStatus: "open";
+      targetPauseReason: null;
+    }
+  | {
+      disposition: "adopt_for_protective_close";
+      decisionId: string;
+      expectedDecisionOutcome: string | null;
+      entryPrice: number;
+      targetBotStatus: "paused";
+      targetPauseReason: string;
+    }
+  | {
+      disposition: "no_land";
+      decisionId: string;
+      expectedDecisionOutcome: "unconfirmed_landing";
+    }
+  | {
+      disposition: "abort_crash";
+      decisionIds: readonly string[];
+      targetBotStatus: "idle" | "paused";
+      targetPauseReason: null | "position_unconfirmed_expired";
+    }
+  | {
+      disposition: "orphan_paused";
+      decisionId: string | null;
+      expectedDecisionOutcome: string | null;
+      closeAttemptId: string;
+    }
+  | {
+      disposition: "emergency_unwind";
+      decisionId: string;
+      expectedDecisionOutcome: string | null;
+      closeAttemptId: string;
+      pauseReason: "bracket_failed" | "position_unconfirmed";
+      entryFillPrice: number | null;
+      closeSucceeded: boolean;
+      closeFillPrice: number | null;
+      closedAt: Date;
+    }
+);
+
+export type AiTraderRecoveryTransitionResult =
+  | {
+      status: "applied" | "replayed";
+      bot: AiTraderBot;
+      decisions: readonly AiTraderDecision[];
+      journal: AiTraderRecoveryJournalResult;
+    }
+  | { status: "conflict"; reason: AiTraderRecoveryTransitionConflict };
+
 /** A spare subaccount row atomically claimed for reuse (Subaccount Recycling Plan §5.1). */
 export type ClaimedSpare = {
   id: number;
@@ -280,6 +356,12 @@ class AiTraderDirectLiveEntryConflictError extends Error {
 
 class AiTraderConfirmedCloseConflictError extends Error {
   constructor(readonly reason: AiTraderConfirmedCloseTransitionConflict) {
+    super(reason);
+  }
+}
+
+class AiTraderRecoveryConflictError extends Error {
+  constructor(readonly reason: AiTraderRecoveryTransitionConflict) {
     super(reason);
   }
 }
@@ -996,6 +1078,7 @@ export interface IStorage {
   commitAiTraderPaperEntryTransition(params: AiTraderPaperEntryTransitionParams): Promise<AiTraderPaperEntryTransitionResult>;
   commitAiTraderDirectLiveEntryTransition(params: AiTraderDirectLiveEntryTransitionParams): Promise<AiTraderDirectLiveEntryTransitionResult>;
   commitAiTraderConfirmedCloseTransition(params: AiTraderConfirmedCloseTransitionParams): Promise<AiTraderConfirmedCloseTransitionResult>;
+  commitAiTraderRecoveryTransition(params: AiTraderRecoveryTransitionParams): Promise<AiTraderRecoveryTransitionResult>;
   insertAiTraderDecision(decision: InsertAiTraderDecision): Promise<AiTraderDecision>;
   updateAiTraderDecision(id: string, updates: Partial<InsertAiTraderDecision>): Promise<AiTraderDecision | undefined>;
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
@@ -6515,6 +6598,281 @@ export class DatabaseStorage implements IStorage {
       });
     } catch (error) {
       if (error instanceof AiTraderConfirmedCloseConflictError) {
+        return { status: "conflict", reason: error.reason };
+      }
+      throw error;
+    }
+  }
+
+  async commitAiTraderRecoveryTransition(
+    params: AiTraderRecoveryTransitionParams,
+  ): Promise<AiTraderRecoveryTransitionResult> {
+    const oneDecisionId = "decisionId" in params ? params.decisionId : null;
+    const decisionIds = params.disposition === "abort_crash"
+      ? [...new Set(params.decisionIds)].sort((left, right) => left.localeCompare(right))
+      : oneDecisionId === null ? [] : [oneDecisionId];
+    const validFinite = (value: number | null) => value === null || Number.isFinite(value);
+    if (!params.botId || decisionIds.some((id) => !id)
+        || (params.disposition === "abort_crash" && decisionIds.length !== params.decisionIds.length)
+        || ((params.disposition === "adopt_open" || params.disposition === "adopt_for_protective_close")
+          && (!Number.isFinite(params.entryPrice) || params.entryPrice <= 0))
+        || (params.disposition === "emergency_unwind"
+          && (!validFinite(params.entryFillPrice) || !validFinite(params.closeFillPrice)
+            || !(params.closedAt instanceof Date) || !Number.isFinite(params.closedAt.getTime())))) {
+      throw new Error("ai_trader_recovery_transition_invalid_input");
+    }
+    if (params.disposition === "adopt_open"
+        && (params.targetBotStatus !== "open" || params.targetPauseReason !== null)) {
+      throw new Error("ai_trader_recovery_transition_invalid_input");
+    }
+    if (params.disposition === "adopt_for_protective_close"
+        && (params.targetBotStatus !== "paused" || params.targetPauseReason === null)) {
+      throw new Error("ai_trader_recovery_transition_invalid_input");
+    }
+
+    const expectedEntryAttempt = oneDecisionId === null ? null : `entry:${oneDecisionId}`;
+    const nonemptyBatches = params.journalBatches.filter((batch) => batch.length > 0);
+    const batchAttemptIds = nonemptyBatches.map((batch) => batch[0].attemptId);
+    const uniqueBatchAttempts = new Set(batchAttemptIds).size === batchAttemptIds.length;
+    const journalIdentityMatchesDisposition = uniqueBatchAttempts
+      && nonemptyBatches.length === (params.disposition === "abort_crash" ? 0 : params.disposition === "emergency_unwind" ? 1 + Number(params.closeSucceeded) : 1)
+      && nonemptyBatches.every((batch) => batch.every((event) => {
+        if (event.botId !== params.botId || event.attemptId !== batch[0].attemptId) return false;
+        switch (params.disposition) {
+          case "adopt_open":
+          case "adopt_for_protective_close":
+          case "no_land":
+            return event.attemptId === expectedEntryAttempt
+              && event.decisionId === params.decisionId
+              && event.action === "entry" && event.cause === "decision";
+          case "abort_crash":
+            return false;
+          case "orphan_paused":
+            return event.attemptId === params.closeAttemptId
+              && event.decisionId === params.decisionId
+              && event.action === "close"
+              && (event.cause === "unconfirmed_orphan" || event.cause === "startup_orphan");
+          case "emergency_unwind":
+            return event.decisionId === params.decisionId
+              && ((event.attemptId === params.closeAttemptId
+                && event.action === "close" && event.cause === "emergency_unwind")
+                || (event.attemptId === expectedEntryAttempt
+                  && event.action === "entry" && event.cause === "decision"));
+        }
+      }));
+
+    try {
+      const result = await db.transaction(async (tx) => {
+        let journalPrevalidationFailure = !journalIdentityMatchesDisposition;
+        if (!journalPrevalidationFailure) {
+          try {
+            await acquireExecutionJournalAttemptLocksInTransaction(tx, params.journalBatches);
+          } catch (error) {
+            if (!isExecutionJournalConflict(error)) throw error;
+            journalPrevalidationFailure = true;
+          }
+        }
+
+        // Recovery deliberately takes journal advisory locks before bot then
+        // lexicographically ordered decision rows. Confirmed-close currently
+        // takes bot/decision before its journal savepoint. Same-bot callers are
+        // serialized by disjoint lifecycle predicates and the monitor's close
+        // claim; if an unexpected overlap occurs Postgres aborts one retryable,
+        // replay-idempotent transaction rather than allowing state corruption.
+        const [lockedBot] = await tx.select().from(aiTraderBots)
+          .where(eq(aiTraderBots.id, params.botId))
+          .limit(1)
+          .for("update");
+        if (!lockedBot) throw new AiTraderRecoveryConflictError("bot_state_conflict");
+
+        const lockedDecisions = decisionIds.length === 0 ? [] : await tx.select().from(aiTraderDecisions)
+          .where(and(
+            eq(aiTraderDecisions.botId, params.botId),
+            inArray(aiTraderDecisions.id, decisionIds),
+          ))
+          .orderBy(asc(aiTraderDecisions.id))
+          .for("update");
+        if (lockedDecisions.length !== decisionIds.length
+            || lockedDecisions.some((row, index) => row.id !== decisionIds[index])) {
+          throw new AiTraderRecoveryConflictError("decision_state_conflict");
+        }
+
+        let targetBotStatus: string;
+        let targetPauseReason: string | null;
+        switch (params.disposition) {
+          case "adopt_open":
+          case "adopt_for_protective_close":
+          case "abort_crash":
+            targetBotStatus = params.targetBotStatus;
+            targetPauseReason = params.targetPauseReason;
+            break;
+          case "no_land":
+            targetBotStatus = "paused";
+            targetPauseReason = "position_unconfirmed_expired";
+            break;
+          case "orphan_paused":
+            targetBotStatus = "paused";
+            targetPauseReason = "reconcile_orphan_position";
+            break;
+          case "emergency_unwind":
+            targetBotStatus = "paused";
+            targetPauseReason = params.pauseReason;
+            break;
+        }
+        const botAtSource = lockedBot.status === params.expectedBotStatus
+          && (lockedBot.pauseReason ?? null) === params.expectedPauseReason;
+        const botAtTarget = lockedBot.status === targetBotStatus
+          && (lockedBot.pauseReason ?? null) === targetPauseReason;
+
+        const decisionTargetMatches = (row: AiTraderDecision): boolean => {
+          switch (params.disposition) {
+            case "adopt_open":
+            case "adopt_for_protective_close":
+              return row.id === params.decisionId && row.outcome === "executed"
+                && row.entryPrice === params.entryPrice.toFixed(8);
+            case "no_land":
+              return row.id === params.decisionId && row.outcome === "aborted_order";
+            case "abort_crash":
+              return row.outcome === "aborted_crash";
+            case "orphan_paused":
+              return params.decisionId === null || (row.id === params.decisionId && row.outcome === "aborted_order");
+            case "emergency_unwind": {
+              if (row.id !== params.decisionId) return false;
+              if (params.entryFillPrice === null) return row.outcome === "aborted_order";
+              const closedMatches = !params.closeSucceeded
+                || (row.closedAt !== null
+                  && new Date(row.closedAt).getTime() === params.closedAt.getTime()
+                  && (row.exitPrice ?? null) === (params.closeFillPrice === null ? null : params.closeFillPrice.toFixed(8))
+                  && row.realizedPnl === null && row.feesPaid === null);
+              return row.outcome === "executed"
+                && row.entryPrice === params.entryFillPrice.toFixed(8)
+                && row.exitReason === params.pauseReason
+                && closedMatches;
+            }
+          }
+        };
+        const decisionsAtTarget = lockedDecisions.every(decisionTargetMatches);
+        const decisionsAtSource = lockedDecisions.every((row) => {
+          if (params.disposition === "abort_crash") return row.outcome === null && row.closedAt === null;
+          return row.outcome === params.expectedDecisionOutcome && row.closedAt === null;
+        });
+
+        const appendJournal = async (): Promise<AiTraderRecoveryJournalResult> => {
+          if (params.journalBatches.length === 0) {
+            return { status: "replayed", failureCode: null };
+          }
+          if (journalPrevalidationFailure) {
+            return { status: "degraded", failureCode: "validation_conflict" };
+          }
+          let preparationCompleted = false;
+          try {
+            const statuses = await tx.transaction(async (journalTx) => {
+              const prepared = [];
+              for (const batch of params.journalBatches) {
+                if (batch.length === 0) continue;
+                prepared.push(await prepareExecutionJournalEventsInTransaction(journalTx, batch, {
+                  requireEntryCommandLineage: batch[0].action === "entry",
+                  requireExactRequestedReplay: true,
+                  attemptLockAlreadyHeld: true,
+                }));
+              }
+              preparationCompleted = true;
+              for (const append of prepared) await append.insert();
+              return prepared.map((append) => append.status);
+            });
+            return {
+              status: statuses.some((status) => status === "pending") ? "appended" : "replayed",
+              failureCode: null,
+            };
+          } catch (error) {
+            return isExecutionJournalConflict(error) && !preparationCompleted
+              ? { status: "degraded", failureCode: "validation_conflict" }
+              : { status: "degraded", failureCode: "insert_failed" };
+          }
+        };
+
+        if (botAtTarget && decisionsAtTarget) {
+          if (journalPrevalidationFailure) {
+            throw new AiTraderRecoveryConflictError("journal_identity_conflict");
+          }
+          const journal = await appendJournal();
+          if (journal.status === "degraded") {
+            throw new AiTraderRecoveryConflictError("journal_identity_conflict");
+          }
+          if (journal.status !== "replayed") {
+            // A target-state replay must be backed by the same retained
+            // journal identities. A newly supplied close attempt or suffix is
+            // a different recovery, even if its requested row target matches.
+            throw new AiTraderRecoveryConflictError("recovery_state_conflict");
+          }
+          return { status: "replayed" as const, bot: lockedBot, decisions: lockedDecisions, journal };
+        }
+        if (!botAtSource) {
+          if (botAtTarget || decisionsAtTarget) {
+            throw new AiTraderRecoveryConflictError("recovery_state_conflict");
+          }
+          throw new AiTraderRecoveryConflictError("bot_state_conflict");
+        }
+        if (!decisionsAtSource) throw new AiTraderRecoveryConflictError("decision_state_conflict");
+
+        const updatedDecisions: AiTraderDecision[] = [];
+        for (const decision of lockedDecisions) {
+          let updates: Record<string, unknown>;
+          switch (params.disposition) {
+            case "adopt_open":
+            case "adopt_for_protective_close":
+              updates = { outcome: "executed", entryPrice: params.entryPrice.toFixed(8) };
+              break;
+            case "no_land":
+            case "orphan_paused":
+              updates = { outcome: "aborted_order" };
+              break;
+            case "abort_crash":
+              updates = { outcome: "aborted_crash" };
+              break;
+            case "emergency_unwind":
+              updates = params.entryFillPrice === null
+                ? { outcome: "aborted_order" }
+                : {
+                    outcome: "executed",
+                    entryPrice: params.entryFillPrice.toFixed(8),
+                    exitReason: params.pauseReason,
+                    ...(params.closeSucceeded ? {
+                      exitPrice: params.closeFillPrice === null ? null : params.closeFillPrice.toFixed(8),
+                      closedAt: params.closedAt,
+                      realizedPnl: null,
+                      feesPaid: null,
+                    } : {}),
+                  };
+              break;
+          }
+          const [updated] = await tx.update(aiTraderDecisions)
+            .set(updates as any)
+            .where(and(
+              eq(aiTraderDecisions.id, decision.id),
+              eq(aiTraderDecisions.botId, params.botId),
+            ))
+            .returning();
+          if (!updated) throw new AiTraderRecoveryConflictError("decision_state_conflict");
+          updatedDecisions.push(updated);
+        }
+
+        const [updatedBot] = await tx.update(aiTraderBots)
+          .set({ status: targetBotStatus, pauseReason: targetPauseReason, updatedAt: sql`NOW()` } as any)
+          .where(eq(aiTraderBots.id, params.botId))
+          .returning();
+        if (!updatedBot) throw new AiTraderRecoveryConflictError("bot_state_conflict");
+
+        const journal = await appendJournal();
+        return { status: "applied" as const, bot: updatedBot, decisions: updatedDecisions, journal };
+      });
+      if (result.journal.status === "degraded") {
+        appendTelemetry("ai_trader_recovery_journal_degraded");
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof AiTraderRecoveryConflictError) {
+        appendTelemetry("ai_trader_recovery_transition_conflict");
         return { status: "conflict", reason: error.reason };
       }
       throw error;

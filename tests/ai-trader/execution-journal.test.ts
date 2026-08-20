@@ -187,6 +187,73 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     })).rejects.toThrow("execution_journal_atomic_replay_conflict");
   });
 
+  it("sorts multi-attempt recovery locks and an already-held lock preserves lineage, phase, and exact-suffix checks", async () => {
+    const observedAt = new Date("2026-08-19T00:30:00.000Z");
+    const base = journal.journalBase(bot, null);
+    const attemptZ = `close:z-${RUN}`;
+    const attemptA = `close:a-${RUN}`;
+    const closeA = [{ ...base, attemptId: attemptA, action: "close", cause: "startup_orphan",
+      eventType: "attempt_claimed", observedAt }] as const;
+    const closeZ = [{ ...base, attemptId: attemptZ, action: "close", cause: "startup_orphan",
+      eventType: "attempt_claimed", observedAt }] as const;
+    await dbModule.db.transaction(async (tx) => {
+      expect(await journal.acquireExecutionJournalAttemptLocksInTransaction(
+        tx, [closeZ, closeA, closeZ],
+      )).toEqual([attemptA, attemptZ]);
+    });
+
+    const missingLineageDecision = `decision-held-missing-lineage-${RUN}`;
+    const missingLineageAttempt = journal.entryAttemptId(missingLineageDecision);
+    const missingLineageEvent = [{
+      ...journal.journalBase(bot, missingLineageDecision), attemptId: missingLineageAttempt,
+      action: "entry", cause: "decision", eventType: "entry_terminal_open",
+      side: "long", price: 150, sizeBase: 1, recordedAfterBroadcast: true, observedAt,
+    }] as const;
+    await expect(dbModule.db.transaction(async (tx) => {
+      await journal.acquireExecutionJournalAttemptLocksInTransaction(tx, [missingLineageEvent]);
+      await journal.prepareExecutionJournalEventsInTransaction(tx, missingLineageEvent, {
+        requireEntryCommandLineage: true,
+        requireExactRequestedReplay: true,
+        attemptLockAlreadyHeld: true,
+      });
+    })).rejects.toThrow("execution_journal_entry_command_lineage_conflict");
+
+    const phaseAttempt = `close:held-phase-${RUN}`;
+    const phaseClaim = [{ ...base, attemptId: phaseAttempt, action: "close", cause: "startup_orphan",
+      eventType: "attempt_claimed", observedAt }] as const;
+    await journal.appendExecutionEvents(phaseClaim);
+    const skippedPhase = [{ ...base, attemptId: phaseAttempt, action: "close", cause: "startup_orphan",
+      eventType: "broadcast_result", venueStatus: "unknown", recordedAfterBroadcast: true, observedAt }] as const;
+    await expect(dbModule.db.transaction(async (tx) => {
+      await journal.acquireExecutionJournalAttemptLocksInTransaction(tx, [skippedPhase]);
+      await journal.prepareExecutionJournalEventsInTransaction(tx, skippedPhase, {
+        requireExactRequestedReplay: true,
+        attemptLockAlreadyHeld: true,
+      });
+    })).rejects.toThrow("execution_journal_command_phase_conflict");
+
+    const partialDecision = `decision-held-partial-${RUN}`;
+    const partialAttempt = await journal.appendRequiredEntryPrebroadcast({
+      bot, decisionId: partialDecision, side: "long", clientOrderId: `client-held-${RUN}`, sizeBase: 1,
+    });
+    const partialBase = journal.journalBase(bot, partialDecision);
+    const exactSuffix = [
+      { ...partialBase, attemptId: partialAttempt, action: "entry", cause: "decision",
+        eventType: "position_observed", side: "long", price: 150, sizeBase: 1, observedAt },
+      { ...partialBase, attemptId: partialAttempt, action: "entry", cause: "decision",
+        eventType: "bracket_verified", side: "long", observedAt },
+    ] as const;
+    await journal.appendExecutionEvents([exactSuffix[0]]);
+    await expect(dbModule.db.transaction(async (tx) => {
+      await journal.acquireExecutionJournalAttemptLocksInTransaction(tx, [exactSuffix]);
+      await journal.prepareExecutionJournalEventsInTransaction(tx, exactSuffix, {
+        requireEntryCommandLineage: true,
+        requireExactRequestedReplay: true,
+        attemptLockAlreadyHeld: true,
+      });
+    })).rejects.toThrow("execution_journal_atomic_replay_conflict");
+  });
+
   it("rejects decreasing or conflicting command phases but accepts late evidence after terminal", async () => {
     const attemptId = `close-phases-${RUN}`;
     const base = journal.journalBase(bot, null);
