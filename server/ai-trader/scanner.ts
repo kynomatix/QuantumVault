@@ -194,6 +194,37 @@ export interface ScannerSweepAccountingLineOptions {
   errorMessage?: string;
 }
 
+export type ScannerSweepCoverageIncident = "blackout" | "partial" | "none";
+
+export interface ScannerSweepIncidentClassification {
+  accountingInvalid: boolean;
+  coverage: ScannerSweepCoverageIncident;
+}
+
+/**
+ * Classifies only the durable incident surface. Sweep accounting telemetry is
+ * emitted independently before this decision, and manifest tradability is
+ * computed independently before incident reporting.
+ */
+export function classifyScannerSweepIncident(
+  accounting: Pick<
+    ScannerAttemptReconciliation,
+    "attempted" | "scanned" | "timeoutSkipped" | "errors" | "abandoned" | "accountingValid"
+  >,
+  budgetSkippedUnits: number,
+): ScannerSweepIncidentClassification {
+  const blackout = accounting.scanned === 0
+    && (accounting.attempted > 0 || budgetSkippedUnits > 0);
+  return {
+    accountingInvalid: !accounting.accountingValid,
+    coverage: blackout
+      ? "blackout"
+      : accounting.errors > 0 || accounting.abandoned > 0
+        ? "partial"
+        : "none",
+  };
+}
+
 /**
  * First terminal outcome wins. This keeps an abandoned dispatch terminal even
  * when its underlying promise settles after the bounded teardown window.
@@ -1424,7 +1455,11 @@ async function runSweep(): Promise<void> {
       durationMs: sweepDurationMs,
       ...(sweepAbandonedMarkets.length > 0 ? { abandonedMarkets: sweepAbandonedMarkets } : {}),
     };
-    if (!sweepAccounting.accountingValid) {
+    const incidentClassification = classifyScannerSweepIncident(
+      sweepAccounting,
+      budgetSkippedUnits,
+    );
+    if (incidentClassification.accountingInvalid) {
       recordCriticalError({
         category: "scanner",
         severity: "critical",
@@ -1433,8 +1468,8 @@ async function runSweep(): Promise<void> {
         context: incidentContext,
       });
     }
-    if (sweepAccounting.attempted > 0 && sweepAccounting.scanned === 0) {
-      // Blackout: the sweep intended to scan markets and scanned NONE.
+    if (incidentClassification.coverage === "blackout") {
+      // Blackout: intended work or whole budget-gated units produced no scan.
       recordCriticalError({
         category: "scanner",
         severity: "critical",
@@ -1443,15 +1478,13 @@ async function runSweep(): Promise<void> {
           `Scanner blackout: 0 of ${sweepAccounting.attempted} markets scanned ` +
           `(${sweepAccounting.feedHealthSkipped} feed-health-skipped, ` +
           `${sweepAccounting.timeoutSkipped} timeout-skipped, ` +
-          `${sweepAccounting.parentInconclusive} parent-inconclusive, ${sweepAccounting.errors} errors)`,
+          `${sweepAccounting.parentInconclusive} parent-inconclusive, ${sweepAccounting.errors} errors, ` +
+          `${budgetSkippedUnits} budget-gated unit(s))`,
         context: incidentContext,
       });
-    } else if (
-      sweepAccounting.abandoned > 0 ||
-      budgetSkippedUnits > 0 ||
-      (sweepAccounting.attempted > 0 && sweepAccounting.timeoutSkipped >= sweepAccounting.attempted * 0.25)
-    ) {
-      // PARTIAL failure — was previously invisible outside telemetry grep.
+    } else if (incidentClassification.coverage === "partial") {
+      // Real attempt failures and abandoned work remain alertable. Bounded
+      // budget/timeout partials stay visible in the TOTAL telemetry line.
       recordCriticalError({
         category: "scanner",
         severity: "error",
