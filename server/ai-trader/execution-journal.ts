@@ -367,6 +367,7 @@ export async function prepareExecutionJournalEventsInTransaction(
   options: {
     requireExactBatchReplay?: boolean;
     requireExactRequestedReplay?: boolean;
+    requireSemanticRequestedReplay?: boolean;
     requireEntryCommandLineage?: boolean;
     attemptLockAlreadyHeld?: boolean;
   } = {},
@@ -398,8 +399,41 @@ export async function prepareExecutionJournalEventsInTransaction(
     accountScope: aiTraderExecutionEvents.accountScope,
     accountRef: aiTraderExecutionEvents.accountRef,
     market: aiTraderExecutionEvents.market,
+    side: aiTraderExecutionEvents.side,
+    clientOrderId: aiTraderExecutionEvents.clientOrderId,
+    venueOrderId: aiTraderExecutionEvents.venueOrderId,
+    transactionSignature: aiTraderExecutionEvents.transactionSignature,
+    venueStatus: aiTraderExecutionEvents.venueStatus,
+    price: aiTraderExecutionEvents.price,
+    sizeBase: aiTraderExecutionEvents.sizeBase,
+    fee: aiTraderExecutionEvents.fee,
+    realizedPnl: aiTraderExecutionEvents.realizedPnl,
+    failureCode: aiTraderExecutionEvents.failureCode,
+    recordedAfterBroadcast: aiTraderExecutionEvents.recordedAfterBroadcast,
   }).from(aiTraderExecutionEvents).where(eq(aiTraderExecutionEvents.attemptId, attemptId));
   const identities = new Set(existing.map((row) => row.eventIdentity));
+
+  // Recovery callers reconstruct observations after a restart, so observedAt
+  // is necessarily fresh even when the durable fact is the same. At an
+  // already-recovered state, compare every stable event field instead of the
+  // timestamp-bearing eventIdentity. A normal live entry does not contain the
+  // recovery-only reconciliation_observed row, so entry-open replay is rooted
+  // in its matching position, bracket, and terminal facts.
+  if (options.requireSemanticRequestedReplay) {
+    const hasRequestedOpenTerminal = values.some((value) => value.eventType === "entry_terminal_open");
+    const requested = values.filter((value) =>
+      !(hasRequestedOpenTerminal && value.eventType === "reconciliation_observed"));
+    const present = requested.filter((value) =>
+      existing.some((row) => sameRecoveryEventContent(row, value))).length;
+    if (present === requested.length) {
+      return { status: "replayed", insert: async () => undefined };
+    }
+    if (present > 0
+        || (requested.some((value) => value.phase === 90)
+          && existing.some((row) => row.phase === 90))) {
+      throw new Error("execution_journal_atomic_replay_conflict");
+    }
+  }
 
   // Recovery callers append a suffix after retained command lineage. Exact
   // replay therefore means all-or-none for the requested suffix, rather than
@@ -560,6 +594,35 @@ export function buildEntryReconciliationTerminalEvents(
     };
   }
   return [evidence, terminal];
+}
+
+function sameRecoveryEventContent(
+  row: Pick<AiTraderExecutionEvent,
+    "attemptId" | "botId" | "decisionId" | "action" | "cause" | "eventType" |
+    "phase" | "protocol" | "accountScope" | "accountRef" | "market" | "side" |
+    "clientOrderId" | "venueOrderId" | "transactionSignature" | "venueStatus" |
+    "price" | "sizeBase" | "fee" | "realizedPnl" | "failureCode" |
+    "recordedAfterBroadcast">,
+  expected: CanonicalEvent,
+): boolean {
+  const sameDecimal = (actual: string | null, wanted: string | null): boolean => {
+    if (actual === null || wanted === null) return actual === wanted;
+    return Number(actual) === Number(wanted);
+  };
+  return sameRecoveryIdentity(row, expected)
+    && row.eventType === expected.eventType
+    && row.phase === expected.phase
+    && row.side === expected.side
+    && row.clientOrderId === expected.clientOrderId
+    && row.venueOrderId === expected.venueOrderId
+    && row.transactionSignature === expected.transactionSignature
+    && row.venueStatus === expected.venueStatus
+    && sameDecimal(row.price, expected.price)
+    && sameDecimal(row.sizeBase, expected.sizeBase)
+    && sameDecimal(row.fee, expected.fee)
+    && sameDecimal(row.realizedPnl, expected.realizedPnl)
+    && row.failureCode === expected.failureCode
+    && row.recordedAfterBroadcast === expected.recordedAfterBroadcast;
 }
 
 export async function appendEntryReconciliationTerminal(args: EntryReconciliationTerminalArgs): Promise<void> {
