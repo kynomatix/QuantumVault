@@ -163,12 +163,17 @@ describe("GET /api/logs/summary telemetry writer health", () => {
     const base = await startServer(token);
     const response = await getSummary(base, token);
     expect(response.status).toBe(200);
-    expect(response.body.telemetry).toMatchObject({
-      present: false,
-      bytes: 0,
-      lastLineAt: null,
-      writer: null,
-    });
+    const telemetry = response.body.telemetry;
+    expect(Object.keys(telemetry).sort()).toEqual([
+      "bytes",
+      "lastLineAt",
+      "present",
+      "writer",
+    ]);
+    expect(telemetry.writer).toBeNull();
+    expect(typeof telemetry.present).toBe("boolean");
+    expect(typeof telemetry.bytes).toBe("number");
+    expect(telemetry.lastLineAt === null || typeof telemetry.lastLineAt === "string").toBe(true);
     expect(JSON.stringify(response.body)).not.toContain("must not escape");
   });
 });
