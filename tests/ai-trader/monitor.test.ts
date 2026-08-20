@@ -20,6 +20,7 @@ import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import type { TradeRecord } from "../../server/protocol/protocol-types";
 import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
+import { SERVER_BOOT_ID } from "../../server/boot-id";
 
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
@@ -1379,13 +1380,18 @@ describe("live close detection", () => {
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
 
-    await monitorBotOnce(makeBot({ paperMode: false }));
+    const bot = makeBot({ paperMode: false });
+    await monitorBotOnce(bot);
 
     expect(updateDecisionMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
     expect((adapter as any).getTradeHistory).toHaveBeenCalledTimes(1);
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      `[AIT-OBS] disposition=uncorroborated_flat_exit_deferred boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} ` +
+      `bot=${bot.id.slice(0, 8)} decision=dec-1 expected_size=2 observed_exit_fill_size=0`,
+    );
   });
 
   it("defers a flat read corroborated by only a partial-size exit fill", async () => {
@@ -1398,12 +1404,17 @@ describe("live close detection", () => {
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
 
-    await monitorBotOnce(makeBot({ paperMode: false }));
+    const bot = makeBot({ paperMode: false });
+    await monitorBotOnce(bot);
 
     expect(updateDecisionMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(
+      `[AIT-OBS] disposition=uncorroborated_flat_exit_deferred boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} ` +
+      `bot=${bot.id.slice(0, 8)} decision=dec-1 expected_size=2 observed_exit_fill_size=1`,
+    );
   });
 
   it("records an authoritative full-size flat reconciliation exactly once", async () => {
@@ -1426,6 +1437,9 @@ describe("live close detection", () => {
     expect(updateDecisionMock).toHaveBeenCalledTimes(1);
     expect(notifications().filter((n) => n.type === "position_closed")).toHaveLength(1);
     expect((adapter as any).cancelTpSlOrders).toHaveBeenCalledTimes(1);
+    expect(appendTelemetryMock.mock.calls.some(
+      ([line]) => String(line).includes("disposition=uncorroborated_flat_exit_deferred"),
+    )).toBe(false);
   });
 
   it("NEVER treats a getPositions read failure as a close", async () => {
@@ -1456,6 +1470,9 @@ describe("live close detection", () => {
     await monitorBotOnce(makeBot({ paperMode: false }));
 
     expect(updateDecisionMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock.mock.calls.some(
+      ([line]) => String(line).includes("disposition=uncorroborated_flat_exit_deferred"),
+    )).toBe(false);
   });
 });
 

@@ -1873,6 +1873,11 @@ async function handleLiveClose(
       `[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: flat position is not corroborated by full-size exit fills ` +
       `(${fills.exitSize}/${view.sizeBase}) — close handling deferred`
     );
+    appendTelemetry(
+      `[AIT-OBS] disposition=uncorroborated_flat_exit_deferred boot=${MONITOR_BOOT_TAG} ` +
+      `bot=${bot.id.slice(0, 8)} decision=${view.decision.id.slice(0, 8)} ` +
+      `expected_size=${view.sizeBase} observed_exit_fill_size=${fills.exitSize}`,
+    );
     return;
   }
   const exitReason = classifyLiveExit({
