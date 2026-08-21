@@ -108,6 +108,60 @@ function formatUsdSigned(n: number): string {
   return `${sign}$${Math.abs(n).toFixed(2)}`;
 }
 
+interface ManualClosePositionControlProps {
+  paperMode: boolean;
+  loading: boolean;
+  degraded?: boolean;
+  onConfirm: () => void;
+}
+
+function ManualClosePositionControl({
+  paperMode,
+  loading,
+  degraded = false,
+  onConfirm,
+}: ManualClosePositionControlProps) {
+  const label = paperMode ? 'Close paper position' : 'Close LIVE position';
+  const description = paperMode
+    ? 'This closes only the simulated position and records the paper result.'
+    : 'This submits a real reduce-only market close. The confirmed venue result will be shown when available.';
+
+  return (
+    <AlertDialog>
+      <AlertDialogTrigger asChild>
+        <Button
+          type="button"
+          variant={paperMode ? 'outline' : 'destructive'}
+          size="sm"
+          className="h-7 px-2.5 text-[10px] gap-1"
+          disabled={loading}
+          data-testid={degraded ? 'button-close-ai-position-degraded' : 'button-close-ai-position'}
+        >
+          {loading ? <Loader2 className="w-3 h-3 animate-spin" /> : <XCircle className="w-3 h-3" />}
+          {loading ? 'Closing…' : label}
+        </Button>
+      </AlertDialogTrigger>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{label}?</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            className={paperMode ? undefined : 'bg-destructive hover:bg-destructive/90'}
+            onClick={onConfirm}
+            disabled={loading}
+            data-testid="button-confirm-close-ai-position"
+          >
+            {loading ? 'Closing…' : label}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 interface AiTraderBot {
   id: string;
   walletAddress: string;
@@ -477,6 +531,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [loading, setLoading] = useState(false);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [closePositionLoading, setClosePositionLoading] = useState(false);
   const [filterMode, setFilterMode] = useState<'all' | 'executed' | 'non_flat'>('all');
   const [historyCursor, setHistoryCursor] = useState<{ before: string; beforeId: string } | null>(null);
   const [historyHasMore, setHistoryHasMore] = useState(false);
@@ -869,6 +924,52 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     }
   };
 
+  const handleClosePosition = async () => {
+    if (!bot || closePositionLoading) return;
+    setClosePositionLoading(true);
+    try {
+      const res = await fetch(`/api/ai-trader/${bot.id}/close`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: walletAuthHeaders(),
+      });
+      const data = await safeResponseJson(res);
+      if (!res.ok) {
+        throw new Error(data?.detail ?? data?.error ?? 'Close failed');
+      }
+
+      if (!data?.closed) {
+        toast({
+          title: 'No recorded position closed',
+          description: 'No recorded position was closed. If the venue still shows exposure, close it there and contact support.',
+        });
+      } else {
+        const rawExitPrice = Number(data?.exitPrice);
+        const rawRealizedPnl = Number(data?.realizedPnl);
+        const exitPrice = data?.exitPrice != null && Number.isFinite(rawExitPrice)
+          ? `$${formatPrice(rawExitPrice)}`
+          : 'Unavailable';
+        const realizedPnl = data?.realizedPnl != null && Number.isFinite(rawRealizedPnl)
+          ? formatUsdSigned(rawRealizedPnl)
+          : 'Unavailable';
+        toast({
+          title: bot.paperMode ? 'Paper position closed' : 'LIVE position closed',
+          description: `Exit ${exitPrice} · Realized P&L ${realizedPnl}`,
+        });
+      }
+    } catch (err) {
+      toast({
+        title: 'Close failed',
+        description: err instanceof Error ? err.message : 'Close failed',
+        variant: 'destructive',
+      });
+    } finally {
+      setClosePositionLoading(false);
+      await Promise.allSettled([fetchDetail(), fetchHistory()]);
+      onBotUpdated();
+    }
+  };
+
   const canAnalyze = bot && ['idle', 'paused', 'proposed'].includes(bot.status);
   const canPauseResume = bot && !['executing', 'analyzing', 'open'].includes(bot.status);
   const isPaused = bot?.status === 'paused';
@@ -1002,7 +1103,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   </div>
                 )}
 
-                {bot.status === 'open' && openDecision && (
+                {openDecision && (
                   <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-2" data-testid="open-position-banner">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -1061,7 +1162,12 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         TP ${formatPrice(openDecision.takeProfitPrice)}
                       </span>
                     </div>
-                    <div className="flex justify-end">
+                    <div className="flex justify-end gap-1.5">
+                      <ManualClosePositionControl
+                        paperMode={!!bot.paperMode}
+                        loading={closePositionLoading}
+                        onConfirm={handleClosePosition}
+                      />
                       <Button
                         type="button"
                         variant="ghost"
@@ -1093,6 +1199,31 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         <CandlestickChart className="w-3 h-3" />
                         View Chart
                       </Button>
+                    </div>
+                  </div>
+                )}
+
+                {bot.status === 'open' && !openDecision && (
+                  <div
+                    className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 space-y-2"
+                    data-testid="open-position-details-unavailable"
+                  >
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold text-amber-300">Position details unavailable</p>
+                        <p className="text-xs text-muted-foreground">
+                          The bot is marked open, but position details could not be resolved. You can still request a risk-reducing close.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex justify-end">
+                      <ManualClosePositionControl
+                        paperMode={!!bot.paperMode}
+                        loading={closePositionLoading}
+                        degraded
+                        onConfirm={handleClosePosition}
+                      />
                     </div>
                   </div>
                 )}
