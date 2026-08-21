@@ -1,6 +1,6 @@
-import { getCachedMaxLeverage, isMarketNonTradable, getNonTradableMarkets } from "./leverage-cache-service";
+import { getCachedMaxLeverage, getCachedMaxLeverageWithSource, isMarketNonTradable, getNonTradableMarkets, type MarketMaxLeverageReading } from "./leverage-cache-service";
 import { getMarketInfo as getAdapterMarketInfo, getAllMarkets as getAdapterAllMarkets } from "./market-registry";
-import type { MarketInfo as RegistryMarketInfo } from "./market-registry";
+import type { MarketInfo as RegistryMarketInfo, MarketMaxLeverageSource } from "./market-registry";
 import type { RiskTier, ProtocolMarket } from "./protocol/protocol-types";
 import { getAdapter } from "./protocol/adapter-registry";
 
@@ -19,6 +19,7 @@ export interface MarketInfo {
   isActive: boolean;
   warning?: string;
   maxLeverage?: number;
+  maxLeverageSource: MarketMaxLeverageSource;
 }
 
 interface MarketCache {
@@ -54,6 +55,7 @@ function buildMarketFromRegistry(m: RegistryMarketInfo, price: number | null): M
     isActive: m.isActive,
     warning: m.warning,
     maxLeverage: m.maxLeverage,
+    maxLeverageSource: m.maxLeverageSource,
     riskTier: m.riskTier,
     estimatedSlippagePct: m.estimatedSlippagePct,
     lastPrice: price,
@@ -72,6 +74,7 @@ function buildMarketFromProtocol(m: ProtocolMarket, price: number | null): Marke
     isActive: m.isActive,
     warning: m.warning,
     maxLeverage: m.maxLeverage,
+    maxLeverageSource: m.maxLeverageSource === 'venue' ? 'venue' : 'fallback',
     riskTier: m.riskTier,
     estimatedSlippagePct: m.estimatedSlippagePct,
     lastPrice: price,
@@ -214,6 +217,10 @@ export function getMinOrderSizeUsd(symbol: string): number {
   const adapterInfo = getAdapterMarketInfo(normalizedSymbol);
   if (adapterInfo) return adapterInfo.minOrderSizeUsd;
   return 10;
+}
+
+export function getMarketMaxLeverageWithSource(symbol: string): MarketMaxLeverageReading {
+  return getCachedMaxLeverageWithSource(symbol);
 }
 
 export function getMarketMaxLeverage(symbol: string): number {

@@ -1,8 +1,9 @@
 import { getAllMarkets, getMarketInfo, isMarketCacheStale, updateMarketCache } from "./market-registry";
-import type { MarketInfo } from "./market-registry";
+import type { MarketInfo, MarketMaxLeverageSource } from "./market-registry";
 
 interface LeverageCache {
   leverageMap: Record<string, number>;
+  leverageSourceMap: Record<string, MarketMaxLeverageSource>;
   nonTradableMarkets: Set<string>;
   lastUpdated: Date;
   expiresAt: Date;
@@ -16,22 +17,29 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let isRefreshing = false;
 let onCacheRefreshed: (() => void) | null = null;
 
+export interface MarketMaxLeverageReading {
+  maxLeverage: number;
+  maxLeverageSource: MarketMaxLeverageSource;
+}
+
 export function setOnCacheRefreshed(cb: () => void): void {
   onCacheRefreshed = cb;
 }
 
-function buildCacheFromMarkets(markets: MarketInfo[]): { leverageMap: Record<string, number>; nonTradableMarkets: Set<string> } {
+function buildCacheFromMarkets(markets: MarketInfo[]): { leverageMap: Record<string, number>; leverageSourceMap: Record<string, MarketMaxLeverageSource>; nonTradableMarkets: Set<string> } {
   const leverageMap: Record<string, number> = {};
+  const leverageSourceMap: Record<string, MarketMaxLeverageSource> = {};
   const nonTradableMarkets = new Set<string>();
 
   for (const m of markets) {
     leverageMap[m.internalSymbol] = m.maxLeverage;
+    leverageSourceMap[m.internalSymbol] = m.maxLeverageSource;
     if (!m.isActive) {
       nonTradableMarkets.add(m.internalSymbol);
     }
   }
 
-  return { leverageMap, nonTradableMarkets };
+  return { leverageMap, leverageSourceMap, nonTradableMarkets };
 }
 
 export async function refreshLeverageCache(): Promise<void> {
@@ -42,11 +50,12 @@ export async function refreshLeverageCache(): Promise<void> {
     const markets = getAllMarkets();
 
     if (markets.length > 0) {
-      const { leverageMap, nonTradableMarkets } = buildCacheFromMarkets(markets);
+      const { leverageMap, leverageSourceMap, nonTradableMarkets } = buildCacheFromMarkets(markets);
       const now = new Date();
 
       leverageCache = {
         leverageMap,
+        leverageSourceMap,
         nonTradableMarkets,
         lastUpdated: now,
         expiresAt: new Date(now.getTime() + REFRESH_INTERVAL_MS),
@@ -73,19 +82,35 @@ export async function initLeverageCache(): Promise<void> {
   console.log(`[LeverageCache] Periodic refresh scheduled every ${REFRESH_INTERVAL_MS / 60000} minutes`);
 }
 
-export function getCachedMaxLeverage(symbol: string): number {
+export function getCachedMaxLeverageWithSource(symbol: string): MarketMaxLeverageReading {
   const normalizedSymbol = symbol.toUpperCase().includes('-PERP')
     ? symbol.toUpperCase()
     : `${symbol.toUpperCase()}-PERP`;
 
   if (leverageCache) {
-    return leverageCache.leverageMap[normalizedSymbol] ?? CONSERVATIVE_FALLBACK;
+    const maxLeverage = leverageCache.leverageMap[normalizedSymbol];
+    if (maxLeverage !== undefined) {
+      return {
+        maxLeverage,
+        maxLeverageSource: leverageCache.leverageSourceMap[normalizedSymbol] === 'venue' ? 'venue' : 'fallback',
+      };
+    }
+    return { maxLeverage: CONSERVATIVE_FALLBACK, maxLeverageSource: 'fallback' };
   }
 
   const marketInfo = getMarketInfo(normalizedSymbol);
-  if (marketInfo) return marketInfo.maxLeverage;
+  if (marketInfo) {
+    return {
+      maxLeverage: marketInfo.maxLeverage,
+      maxLeverageSource: marketInfo.maxLeverageSource,
+    };
+  }
 
-  return CONSERVATIVE_FALLBACK;
+  return { maxLeverage: CONSERVATIVE_FALLBACK, maxLeverageSource: 'fallback' };
+}
+
+export function getCachedMaxLeverage(symbol: string): number {
+  return getCachedMaxLeverageWithSource(symbol).maxLeverage;
 }
 
 export function getAllCachedLeverageLimits(): Record<string, number> {
@@ -95,6 +120,17 @@ export function getAllCachedLeverageLimits(): Record<string, number> {
   const result: Record<string, number> = {};
   for (const m of getAllMarkets()) {
     result[m.internalSymbol] = m.maxLeverage;
+  }
+  return result;
+}
+
+export function getAllCachedLeverageSources(): Record<string, MarketMaxLeverageSource> {
+  if (leverageCache) {
+    return { ...leverageCache.leverageSourceMap };
+  }
+  const result: Record<string, MarketMaxLeverageSource> = {};
+  for (const m of getAllMarkets()) {
+    result[m.internalSymbol] = m.maxLeverageSource;
   }
   return result;
 }

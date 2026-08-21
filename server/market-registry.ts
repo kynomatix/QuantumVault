@@ -141,9 +141,12 @@ export async function syncFromSdk(
   return { names: currentNames, indices: currentIndices };
 }
 
+export type MarketMaxLeverageSource = 'venue' | 'fallback';
+
 export interface MarketInfo {
   internalSymbol: string;
   maxLeverage: number;
+  maxLeverageSource: MarketMaxLeverageSource;
   maintenanceMarginWeight: number;
   minOrderSizeUsd: number;
   minOrderSizeBase: number;
@@ -169,6 +172,7 @@ export function updateMarketCache(markets: ProtocolMarket[]): void {
     newCache.set(m.internalSymbol, {
       internalSymbol: m.internalSymbol,
       maxLeverage: m.maxLeverage,
+      maxLeverageSource: m.maxLeverageSource === 'venue' ? 'venue' : 'fallback',
       maintenanceMarginWeight: m.maintenanceMarginWeight,
       minOrderSizeUsd: m.minOrderSizeUsd,
       minOrderSizeBase: m.minOrderSizeBase,
