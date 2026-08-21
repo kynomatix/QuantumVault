@@ -1,7 +1,9 @@
-import { spawn, type ChildProcess } from "child_process";
-import { resolve, dirname } from "path";
-import { createHash } from "crypto";
-import { writeFileSync, readFileSync, existsSync, unlinkSync } from "fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { resolve, dirname } from "node:path";
+import { createHash } from "node:crypto";
+import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
+import { appendTelemetry } from "../telemetry";
+import { SERVER_BOOT_ID } from "../boot-id";
 
 export interface LabSupervisorStatus {
   pid: number | null;
@@ -29,6 +31,7 @@ const HEALTH_CHECK_INTERVAL = 30000;
 const READY_TIMEOUT = 120000;
 const MAX_CONSECUTIVE_FAILURES = 8;
 const FAILURE_WINDOW_MS = 300_000;
+const LAB_HEALTH_BOOT_TAG = SERVER_BOOT_ID.slice(0, 8).toLowerCase();
 
 function deriveLabAuthSecret(): string {
   const base = process.env.SESSION_SECRET;
@@ -101,6 +104,34 @@ export function createLabSupervisor(): LabSupervisor {
   let backoffSuspended = false;
   let suspensionTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingAutoRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingHealthResolution = false;
+
+  function emitHealthTelemetry(
+    event: "readiness_poll_failed" | "restart_suspended" | "healthy_resolution",
+    reason: "timeout" | "failure_threshold" | "terminal_state_cleared",
+  ): void {
+    try {
+      appendTelemetry(
+        `[LabSupervisor] health event=${event} reason=${reason} boot=${LAB_HEALTH_BOOT_TAG}`,
+      );
+    } catch {
+      // Telemetry is observational only and must never alter process lifecycle.
+    }
+  }
+
+  function openPendingHealthState(
+    event: "readiness_poll_failed" | "restart_suspended",
+    reason: "timeout" | "failure_threshold",
+  ): void {
+    pendingHealthResolution = true;
+    emitHealthTelemetry(event, reason);
+  }
+
+  function resolvePendingHealthState(): void {
+    if (!pendingHealthResolution) return;
+    pendingHealthResolution = false;
+    emitHealthTelemetry("healthy_resolution", "terminal_state_cleared");
+  }
 
   function getRestartDelay(): number {
     const base = Math.min(MIN_RESTART_DELAY * Math.pow(2, restartCount), MAX_RESTART_DELAY);
@@ -116,7 +147,11 @@ export function createLabSupervisor(): LabSupervisor {
     }
     consecutiveFailures++;
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      const enteringSuspension = !backoffSuspended;
       backoffSuspended = true;
+      if (enteringSuspension) {
+        openPendingHealthState("restart_suspended", "failure_threshold");
+      }
       console.error(`[LabSupervisor] ${consecutiveFailures} consecutive failures in ${Math.round((now - firstFailureTime) / 1000)}s — suspending restarts for 5 minutes`);
       if (suspensionTimer) clearTimeout(suspensionTimer);
       suspensionTimer = setTimeout(() => {
@@ -140,6 +175,7 @@ export function createLabSupervisor(): LabSupervisor {
     consecutiveFailures = 0;
     firstFailureTime = 0;
     backoffSuspended = false;
+    resolvePendingHealthState();
   }
 
   let consecutiveHealthFailures = 0;
@@ -152,6 +188,7 @@ export function createLabSupervisor(): LabSupervisor {
       if (shuttingDown) return;
       const healthy = await probeHealth(labPort);
       if (healthy) {
+        resolvePendingHealthState();
         if (!isReady) {
           console.log(`[LabSupervisor] Lab process became reachable on port ${labPort}`);
         }
@@ -255,6 +292,7 @@ export function createLabSupervisor(): LabSupervisor {
           if (!resolved) {
             spawnInFlight = false;
             try { spawnedChild.kill("SIGKILL"); } catch {}
+            openPendingHealthState("readiness_poll_failed", "timeout");
             recordFailure();
             rejectReady(new Error("Lab child process health poll timeout"));
           }
