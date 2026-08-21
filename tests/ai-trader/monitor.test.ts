@@ -2964,6 +2964,168 @@ describe("tick loop", () => {
   });
 });
 
+// --- Reconciliation-attempt durable telemetry ---------------------------------------
+
+describe("reconciliation-attempt durable telemetry", () => {
+  const reconciliationLines = () => appendTelemetryMock.mock.calls
+    .map((call) => String(call[0]))
+    .filter((line) => line.startsWith("[AIT-RECON]"));
+
+  it("emits one fixed-shape begin/result pair for a resolved startup invocation", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([]);
+
+    await expect(reconcileBotOnStartup(makeBot({
+      id: "bot-resolved-secret",
+      status: "analyzing",
+      paperMode: true,
+      pauseReason: null,
+    }))).resolves.toBe(true);
+
+    expect(reconciliationLines()).toEqual([
+      expect.stringMatching(
+        /^\[AIT-RECON\] reconciliation_begin boot=[0-9a-f]{8} kind=startup bot=bot-reso status=analyzing pause_class=none paper=true$/,
+      ),
+      expect.stringMatching(
+        /^\[AIT-RECON\] reconciliation_result boot=[0-9a-f]{8} kind=startup bot=bot-reso status=analyzing pause_class=none paper=true outcome=resolved elapsed_ms=0$/,
+      ),
+    ]);
+  });
+
+  it("maps only a false retry result to pending", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    getDecisionsMock.mockResolvedValue([]);
+    getAdapterMock.mockReturnValue(makeAdapter({
+      getPositions: vi.fn(async () => { throw new Error("private venue detail"); }),
+    }));
+
+    await expect(reconcileBotOnStartup(makeBot({
+      id: "bot-pending-secret",
+      status: "executing",
+      paperMode: false,
+    }))).resolves.toBe(false);
+
+    const lines = reconciliationLines();
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(
+      /^\[AIT-RECON\] reconciliation_result boot=[0-9a-f]{8} kind=startup bot=bot-pend status=executing pause_class=none paper=false outcome=pending elapsed_ms=0$/,
+    );
+    expect(lines.join("\n")).not.toContain("private venue detail");
+  });
+
+  it("records a positive elapsed duration and rethrows the identical exception object", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    const original = new Error("private storage detail");
+    getDecisionsMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(NOW + 37);
+      throw original;
+    });
+
+    await expect(reconcileBotOnStartup(makeBot({
+      id: "bot-thrown-secret",
+      status: "analyzing",
+      paperMode: true,
+    }))).rejects.toBe(original);
+
+    const lines = reconciliationLines();
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(
+      /^\[AIT-RECON\] reconciliation_result boot=[0-9a-f]{8} kind=startup bot=bot-thro status=analyzing pause_class=none paper=true outcome=thrown elapsed_ms=37$/,
+    );
+    expect(lines.join("\n")).not.toContain("private storage detail");
+  });
+
+  it("attributes the direct paused startup route to two distinct invocation pairs", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ id: "dec-direct", outcome: "unconfirmed_landing" }),
+    ]);
+
+    await expect(reconcileBotOnStartup(makeBot({
+      id: "bot-direct-secret",
+      status: "paused",
+      pauseReason: "position_unconfirmed",
+      paperMode: false,
+      updatedAt: new Date(NOW - 60_000),
+    }))).resolves.toBe(true);
+
+    const lines = reconciliationLines();
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toMatch(/reconciliation_begin .* kind=startup .* status=paused pause_class=position_unconfirmed /);
+    expect(lines[1]).toMatch(/reconciliation_begin .* kind=unconfirmed_landing .* status=paused pause_class=position_unconfirmed /);
+    expect(lines[2]).toMatch(/reconciliation_result .* kind=unconfirmed_landing .* outcome=resolved /);
+    expect(lines[3]).toMatch(/reconciliation_result .* kind=startup .* outcome=resolved /);
+  });
+
+  it("attributes partial re-quarantine using the original outer and persisted inner states", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const staleBot = makeBot({
+      id: "bot-partial-secret",
+      status: "executing",
+      paperMode: false,
+      updatedAt: new Date(NOW - 10 * 60_000),
+    });
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => []) }));
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ id: "dec-partial", outcome: "unconfirmed_landing" }),
+    ]);
+    updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => ({
+      ...staleBot,
+      ...updates,
+      updatedAt: new Date(NOW),
+    }));
+
+    await expect(reconcileBotOnStartup(staleBot)).resolves.toBe(true);
+
+    const lines = reconciliationLines();
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toMatch(/reconciliation_begin .* kind=startup .* status=executing pause_class=none /);
+    expect(lines[1]).toMatch(/reconciliation_begin .* kind=unconfirmed_landing .* status=paused pause_class=position_unconfirmed /);
+    expect(lines[2]).toMatch(/reconciliation_result .* kind=unconfirmed_landing .* outcome=resolved /);
+    expect(lines[3]).toMatch(/reconciliation_result .* kind=startup .* outcome=resolved /);
+  });
+
+  it("emits only the short bot id and closed pause class", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    const bot = makeBot({
+      id: "bot-private-full-identifier",
+      walletAddress: "private-wallet-value",
+      market: "PRIVATE-MARKET",
+      status: "paused",
+      pauseReason: "private free-text pause reason",
+      paperMode: true,
+    });
+
+    await expect(reconcileBotOnStartup(bot)).resolves.toBe(true);
+
+    const joined = reconciliationLines().join("\n");
+    expect(joined).toContain("bot=bot-priv");
+    expect(joined).toContain("pause_class=other");
+    expect(joined).not.toContain(bot.id);
+    expect(joined).not.toContain(bot.walletAddress);
+    expect(joined).not.toContain(bot.market);
+    expect(joined).not.toContain(String(bot.pauseReason));
+  });
+
+  it("contains telemetry failures without changing reconciliation behavior", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([]);
+    appendTelemetryMock.mockImplementation(() => {
+      throw new Error("telemetry unavailable");
+    });
+
+    await expect(reconcileBotOnStartup(makeBot({
+      status: "analyzing",
+      paperMode: true,
+    }))).resolves.toBe(true);
+    expect(commitRecoveryMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 // --- Monitor liveness heartbeat ------------------------------------------------------
 
 describe("monitor liveness heartbeat", () => {

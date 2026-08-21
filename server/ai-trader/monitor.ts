@@ -235,6 +235,45 @@ function emitTickObservation(line: string): void {
   } catch {}
 }
 
+type ReconciliationTelemetryKind = "startup" | "unconfirmed_landing";
+type ReconciliationTelemetryOutcome = "resolved" | "pending" | "thrown";
+
+function reconciliationPauseClass(pauseReason: string | null | undefined):
+  "none" | "position_unconfirmed" | "other" {
+  if (!pauseReason) return "none";
+  return pauseReason === "position_unconfirmed" ? "position_unconfirmed" : "other";
+}
+
+function reconciliationTelemetryFields(kind: ReconciliationTelemetryKind, bot: AiTraderBot): string {
+  return `boot=${MONITOR_BOOT_TAG} kind=${kind} bot=${bot.id.slice(0, 8)} status=${bot.status} ` +
+    `pause_class=${reconciliationPauseClass(bot.pauseReason)} paper=${bot.paperMode}`;
+}
+
+async function withReconciliationTelemetry(
+  kind: ReconciliationTelemetryKind,
+  bot: AiTraderBot,
+  operation: () => Promise<boolean>,
+): Promise<boolean> {
+  const startedAt = Date.now();
+  const fields = reconciliationTelemetryFields(kind, bot);
+  emitTickObservation(`[AIT-RECON] reconciliation_begin ${fields}`);
+  try {
+    const resolved = await operation();
+    const outcome: ReconciliationTelemetryOutcome = resolved ? "resolved" : "pending";
+    emitTickObservation(
+      `[AIT-RECON] reconciliation_result ${fields} outcome=${outcome} ` +
+      `elapsed_ms=${Math.max(0, Date.now() - startedAt)}`,
+    );
+    return resolved;
+  } catch (error) {
+    emitTickObservation(
+      `[AIT-RECON] reconciliation_result ${fields} outcome=thrown ` +
+      `elapsed_ms=${Math.max(0, Date.now() - startedAt)}`,
+    );
+    throw error;
+  }
+}
+
 function emitHeartbeatLine(line: string): void {
   try {
     console.log(line);
@@ -2872,7 +2911,7 @@ async function commitCrashedRecovery(
  * Returns true when this pass reached a verdict or is cleanly pending;
  * false ⇒ venue read failed (caller may queue a reconciliation retry).
  */
-export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boolean> {
+async function reconcileUnconfirmedLandingImplementation(bot: AiTraderBot): Promise<boolean> {
   // Unreachable for paper bots (the executor's unconfirmed branch is
   // live-only), but fail safe rather than loop on venue reads forever.
   if (bot.paperMode) {
@@ -3093,11 +3132,19 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
   return true;
 }
 
+export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boolean> {
+  return withReconciliationTelemetry(
+    "unconfirmed_landing",
+    bot,
+    () => reconcileUnconfirmedLandingImplementation(bot),
+  );
+}
+
 /**
  * Resolve one bot's crash-marker status against reality. Returns true when
  * resolved (false ⇒ venue read failed; caller keeps it pending for retry).
  */
-export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> {
+async function reconcileBotOnStartupImplementation(bot: AiTraderBot): Promise<boolean> {
   // A quarantined unconfirmed-landing entry survives restarts via its
   // persisted state (paused/position_unconfirmed + 'unconfirmed_landing'
   // decision row) — route it to its dedicated reconciler.
@@ -3370,6 +3417,14 @@ export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> 
   if (!recoveryTransitionSucceeded(committed, "startup-adopt-open")) return false;
   console.log(`[AiTraderMonitor] reconcile: live bot ${bot.id.slice(0, 8)} '${bot.status}' → open (position + bracket verified)`);
   return true;
+}
+
+export async function reconcileBotOnStartup(bot: AiTraderBot): Promise<boolean> {
+  return withReconciliationTelemetry(
+    "startup",
+    bot,
+    () => reconcileBotOnStartupImplementation(bot),
+  );
 }
 
 export async function reconcileOnStartup(): Promise<void> {
