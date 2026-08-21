@@ -229,6 +229,84 @@ let lastMonitorCompletedHeartbeatAt: number | null = null;
 let lastMonitorDegradedHeartbeatAt: number | null = null;
 const MONITOR_BOOT_TAG = SERVER_BOOT_ID.slice(0, 8).toLowerCase();
 
+// Process-local, fleet-wide business-outcome signal. Boot starts unknown: a
+// database seed would add hot-path work and would pretend this process-owned
+// counter survived a restart. Scheduled entry outcomes below are the only
+// writers; flat/close/provider/gate outcomes intentionally leave it alone.
+const ENTRY_REJECTION_REASON_TOKEN = /^[a-z][a-z0-9_]{0,39}$/;
+let consecutiveEntryRejections: number | null = null;
+let lastEntryRejectionReason: string | null = null;
+
+function safeEntryRejectionReason(reason: unknown): string {
+  return typeof reason === "string" && ENTRY_REJECTION_REASON_TOKEN.test(reason)
+    ? reason
+    : "unknown";
+}
+
+function recordEntryRejection(reason: unknown): void {
+  const current = typeof consecutiveEntryRejections === "number" &&
+    Number.isSafeInteger(consecutiveEntryRejections) && consecutiveEntryRejections >= 0
+    ? consecutiveEntryRejections
+    : 0;
+  consecutiveEntryRejections = current >= Number.MAX_SAFE_INTEGER
+    ? Number.MAX_SAFE_INTEGER
+    : current + 1;
+  lastEntryRejectionReason = safeEntryRejectionReason(reason);
+}
+
+function recordEntrySuccess(): void {
+  consecutiveEntryRejections = 0;
+  lastEntryRejectionReason = null;
+}
+
+function classifyGuardrailEntryRejection(result: unknown): string | null {
+  try {
+    if (!result || typeof result !== "object") return null;
+    const candidate = result as {
+      ok?: unknown;
+      rejected?: unknown;
+      decision?: { action?: unknown } | null;
+      violations?: unknown;
+    };
+    const action = candidate.decision?.action;
+    if (candidate.ok !== true || candidate.rejected !== true ||
+        (action !== "long" && action !== "short")) return null;
+    const violations = Array.isArray(candidate.violations) ? candidate.violations : [];
+    const fatal = violations.find((violation) => {
+      try {
+        return !!violation && typeof violation === "object" &&
+          (violation as { fatal?: unknown }).fatal === true;
+      } catch {
+        return false;
+      }
+    });
+    let code: unknown;
+    try {
+      code = fatal && typeof fatal === "object" ? (fatal as { code?: unknown }).code : undefined;
+    } catch {
+      code = undefined;
+    }
+    return safeEntryRejectionReason(code);
+  } catch {
+    return null;
+  }
+}
+
+function typedExecutionRejectionReason(result: unknown): string {
+  try {
+    return safeEntryRejectionReason(
+      result && typeof result === "object" ? (result as { reason?: unknown }).reason : undefined,
+    );
+  } catch {
+    return "unknown";
+  }
+}
+
+function entryRejectionHeartbeatFields(): string {
+  const count = consecutiveEntryRejections === null ? "unknown" : String(consecutiveEntryRejections);
+  return `consec_rejects=${count} last_reject=${lastEntryRejectionReason ?? "none"}`;
+}
+
 function emitTickObservation(line: string): void {
   try {
     appendTelemetry(line);
@@ -297,7 +375,7 @@ function emitMonitorCompletedHeartbeatIfDue(input: {
   const durationMs = Math.max(0, Math.round(input.durationMs));
   const activeBotCount = Math.max(0, Math.trunc(input.activeBotCount));
   emitHeartbeatLine(
-    `[AiTraderMonitor] heartbeat tick_completed pid=${process.pid} boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} duration_ms=${durationMs} active_bots=${activeBotCount}`
+    `[AiTraderMonitor] heartbeat tick_completed pid=${process.pid} boot=${SERVER_BOOT_ID.slice(0, 8).toLowerCase()} duration_ms=${durationMs} active_bots=${activeBotCount} ${entryRejectionHeartbeatFields()}`
   );
 }
 
@@ -2692,6 +2770,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           });
           if (!exec.ok) {
             // exitReason stays "exec_rejected"
+            recordEntryRejection(typedExecutionRejectionReason(exec));
             const fresh = await storage.getAiTraderBot(bot.id);
             if (fresh?.status === "analyzing") {
               await releaseInternalAnalysis(bot.id);
@@ -2703,12 +2782,15 @@ export async function runAutoCycle(botId: string): Promise<void> {
             }
             return;
           }
+          recordEntrySuccess();
           if (_obs) _obs.exitReason = "entry_open";
           console.log(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} entered ${clamped.action} ${bot.market} (${exec.mode})`);
           return; // position open — 15s loop takes over
         }
 
         // No-trade or failed call — classify truthfully before trying the next candidate.
+        const rejectedEntryReason = classifyGuardrailEntryRejection(decision);
+        if (rejectedEntryReason !== null) recordEntryRejection(rejectedEntryReason);
         if (_obs) {
           if (!decision.ok) {
             _obs.exitReason = decision.reason === "timeout" ? "llm_timeout"
@@ -2796,6 +2878,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
       // Classify the actual no-trade outcome before the common return so the
       // terminal line is truthful (ok:false=timeout/gateway/malformed,
       // rejected=guardrail, flat action=flat, other action=close_no_position).
+      const rejectedEntryReason = classifyGuardrailEntryRejection(decision);
+      if (rejectedEntryReason !== null) recordEntryRejection(rejectedEntryReason);
       if (_obs) {
         if (!decision.ok) {
           _obs.exitReason = decision.reason === "timeout" ? "llm_timeout"
@@ -2832,6 +2916,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
     if (!exec.ok) {
       // The executor writes terminal statuses (idle/paused) on its abort paths;
       // for result-only rejections make sure the bot isn't stranded in 'analyzing'.
+      recordEntryRejection(typedExecutionRejectionReason(exec));
       const fresh = await storage.getAiTraderBot(bot.id);
       if (fresh?.status === "analyzing") {
         await releaseInternalAnalysis(bot.id);
@@ -2843,6 +2928,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       }
       return;
     }
+    recordEntrySuccess();
     if (_obs) _obs.exitReason = "entry_open";
     console.log(`[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} entered ${decision.clamped.action} ${bot.market} (${exec.mode})`);
     // Position now open — the 15s loop takes over; next auto cycle fires after the close.

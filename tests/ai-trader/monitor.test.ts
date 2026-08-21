@@ -565,6 +565,7 @@ beforeEach(() => {
 afterEach(async () => {
   const { stopAiTraderMonitor } = await importMonitor();
   stopAiTraderMonitor();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -1796,6 +1797,174 @@ describe("runAutoCycle", () => {
     getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: AGENT_PUBKEY, agentPrivateKeyEncryptedV3: "v3" });
     return bot;
   }
+
+  function armEntryCycle(overrides: Partial<AiTraderBot> = {}) {
+    const bot = armAutoBot(overrides);
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("test-key"));
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    return bot;
+  }
+
+  async function completedHeartbeat(): Promise<string> {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    await runMonitorTickOnce();
+    return appendTelemetryMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[AiTraderMonitor] heartbeat tick_completed "))
+      .at(-1) ?? "";
+  }
+
+  it("records the first fatal entry guardrail code, including position-truth authority", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armEntryCycle();
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "dec-guardrail",
+      decision: { action: "long" },
+      clamped: null,
+      rejected: true,
+      violations: [
+        { rule: "G1", code: "leverage_clamped", fatal: false, message: "bounded" },
+        { rule: "CONTRACT", code: "position_truth_unknown", fatal: true, message: "unknown" },
+      ],
+      latencyMs: 5,
+    });
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(await completedHeartbeat()).toMatch(
+      /consec_rejects=1 last_reject=position_truth_unknown$/,
+    );
+  });
+
+  it("sanitizes a nonconforming fatal code instead of emitting it", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armEntryCycle();
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "dec-unsafe-reason",
+      decision: { action: "short" },
+      clamped: null,
+      rejected: true,
+      violations: [{ rule: "G3", code: "api key secret!", fatal: true, message: "private" }],
+      latencyMs: 5,
+    });
+
+    await runAutoCycle("bot-1111-2222");
+
+    const heartbeat = await completedHeartbeat();
+    expect(heartbeat).toMatch(/consec_rejects=1 last_reject=unknown$/);
+    expect(heartbeat).not.toContain("api key secret");
+  });
+
+  it("contains a malformed guardrail shape without changing the counter or cycle behavior", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armEntryCycle();
+    const malformedDecision = {} as Record<string, unknown>;
+    Object.defineProperty(malformedDecision, "action", {
+      get: () => { throw new Error("malformed action getter"); },
+    });
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "dec-malformed",
+      decision: malformedDecision,
+      clamped: null,
+      rejected: true,
+      violations: [],
+      latencyMs: 5,
+    });
+
+    await expect(runAutoCycle("bot-1111-2222")).resolves.toBeUndefined();
+
+    expect(await completedHeartbeat()).toMatch(/consec_rejects=unknown last_reject=none$/);
+    expect(botUpdates().some((update) => update.status === "idle")).toBe(true);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
+
+  it("accumulates typed executor rejections, preserves them across flat, and resets on entry success", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armEntryCycle();
+    const entryDecision = {
+      ok: true,
+      decisionId: "dec-entry",
+      decision: { action: "long" },
+      clamped: { action: "long", sizeBase: 1, marginUsdc: 100, stopLossPrice: 145, takeProfitPrice: 160 },
+      rejected: false,
+      violations: [],
+      latencyMs: 5,
+    };
+    runDecisionMock.mockResolvedValue(entryDecision);
+    executeDecisionMock.mockResolvedValue({ ok: false, reason: "position_unconfirmed", detail: "not visible" });
+
+    await runAutoCycle("bot-1111-2222");
+    await runAutoCycle("bot-1111-2222");
+    runDecisionMock.mockResolvedValue({
+      ...entryDecision,
+      decisionId: "dec-flat",
+      decision: { action: "flat" },
+      clamped: { action: "flat" },
+    });
+    await runAutoCycle("bot-1111-2222");
+
+    expect(await completedHeartbeat()).toMatch(
+      /consec_rejects=2 last_reject=position_unconfirmed$/,
+    );
+
+    vi.setSystemTime(NOW + 5 * 60_000);
+    runDecisionMock.mockResolvedValue(entryDecision);
+    executeDecisionMock.mockResolvedValue({ ok: true, mode: "paper", entryPrice: 150 });
+    await runAutoCycle("bot-1111-2222");
+    expect(await completedHeartbeat()).toMatch(/consec_rejects=0 last_reject=none$/);
+  });
+
+  it("saturates the process-wide rejection counter instead of overflowing", async () => {
+    const realNumber = Number;
+    const cappedNumber = function(value?: unknown) {
+      return realNumber(value);
+    } as unknown as NumberConstructor;
+    Object.setPrototypeOf(cappedNumber, realNumber);
+    Object.defineProperty(cappedNumber, "MAX_SAFE_INTEGER", { value: 2 });
+    vi.stubGlobal("Number", cappedNumber);
+    const { runAutoCycle } = await importMonitor();
+    armEntryCycle();
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "dec-saturate",
+      decision: { action: "long" },
+      clamped: { action: "long", sizeBase: 1, marginUsdc: 100, stopLossPrice: 145, takeProfitPrice: 160 },
+      rejected: false,
+      violations: [],
+      latencyMs: 5,
+    });
+    executeDecisionMock.mockResolvedValue({ ok: false, reason: "order_rejected", detail: "venue refusal" });
+
+    await runAutoCycle("bot-1111-2222");
+    await runAutoCycle("bot-1111-2222");
+    await runAutoCycle("bot-1111-2222");
+
+    expect(await completedHeartbeat()).toMatch(/consec_rejects=2 last_reject=order_rejected$/);
+  });
+
+  it("counts every rejected scanner candidate rather than one rejection per cycle", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    const { runAutoCycle } = await importMonitor();
+    armEntryCycle({ marketSource: "scanner" });
+    getScannerShortlistMock.mockReturnValue([
+      { protocol: "pacifica", market: "BTC-PERP", timeframe: "15m", direction: "long", setup: "W", score: 90, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: NOW },
+      { protocol: "pacifica", market: "ETH-PERP", timeframe: "15m", direction: "long", setup: "W", score: 80, necklineDistancePct: 0.2, parentTrend: "uptrend", evaluatedAt: NOW },
+    ]);
+    runDecisionMock
+      .mockResolvedValueOnce({ ok: true, decisionId: "scan-1", decision: { action: "long" }, clamped: null, rejected: true, violations: [{ rule: "G3", code: "rr_below_floor", fatal: true, message: "low rr" }], latencyMs: 5 })
+      .mockResolvedValueOnce({ ok: true, decisionId: "scan-2", decision: { action: "long" }, clamped: null, rejected: true, violations: [{ rule: "G4", code: "fee_drag", fatal: true, message: "fees" }], latencyMs: 5 });
+
+    await runAutoCycle("bot-1111-2222");
+
+    expect(runDecisionMock).toHaveBeenCalledTimes(2);
+    expect(await completedHeartbeat()).toMatch(/consec_rejects=2 last_reject=fee_drag$/);
+  });
 
   it("does nothing for bots that are not idle+auto+autoNext", async () => {
     const { runAutoCycle } = await importMonitor();
@@ -3179,7 +3348,7 @@ describe("monitor liveness heartbeat", () => {
     expect(consoleHeartbeats()).toHaveLength(1);
     expect(telemetryHeartbeats()).toEqual(consoleHeartbeats());
     expect(consoleHeartbeats()[0]).toMatch(
-      /^\[AiTraderMonitor\] heartbeat tick_completed pid=\d+ boot=[0-9a-f]{8} duration_ms=\d+ active_bots=0$/
+      /^\[AiTraderMonitor\] heartbeat tick_completed pid=\d+ boot=[0-9a-f]{8} duration_ms=\d+ active_bots=0 consec_rejects=unknown last_reject=none$/
     );
   });
 
@@ -3191,7 +3360,7 @@ describe("monitor liveness heartbeat", () => {
     await runMonitorTickOnce();
 
     expect(telemetryHeartbeats()).toHaveLength(1);
-    expect(telemetryHeartbeats()[0]).toMatch(/tick_completed .* active_bots=1$/);
+    expect(telemetryHeartbeats()[0]).toMatch(/tick_completed .* active_bots=1 consec_rejects=unknown last_reject=none$/);
     expect(telemetryHeartbeats()[0]).not.toContain("tick_degraded");
     expect(telemetryHeartbeats()[0]).not.toContain("private-bot-id");
     expect(telemetryHeartbeats()[0]).not.toContain("private bot failure");
