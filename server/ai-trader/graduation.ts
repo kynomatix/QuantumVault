@@ -70,8 +70,8 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "guardrail_risk_policy": {
     "materialVersion": 2,
-    "decisionGeneration": 2,
-    "decision": "bump",
+    "decisionGeneration": 3,
+    "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/guardrails.ts", "server/ai-trader/executor.ts", "server/ai-trader/routes.ts"]
   },
   "paper_execution_simulator": {
