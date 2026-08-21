@@ -19,6 +19,10 @@ import {
   registerRequestTrace,
   getInFlightTracedCount,
   __resetRequestTraceForTests,
+  __createRequestTraceCollectorForTests,
+  __formatRequestTraceSubspansForTests,
+  recordRequestSubspan,
+  REQUEST_TRACE_SUBSPAN_LABELS,
 } from "../../server/request-trace";
 
 type Handler = (req: unknown, res: unknown, next: () => void) => void;
@@ -149,5 +153,67 @@ describe("middleware — settle-once + aborted detection", () => {
     expect(line).toBeDefined();
     expect(line).not.toContain(wallet);
     expect(line).toMatch(/w=[0-9a-f]{8}/);
+  });
+});
+
+describe("request-scoped subspan collector", () => {
+  it("records deterministic fields and derives unattributed time from top-level spans only", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    harness.run(() => {
+      recordRequestSubspan("snapshotDbBotsMs", 90);
+      recordRequestSubspan("snapshotWaitMs", 100);
+      recordRequestSubspan("snapshotVenueMs", 95);
+      recordRequestSubspan("snapshotCreator", 1);
+    });
+    expect(harness.snapshot()).toEqual({
+      snapshotDbBotsMs: 90,
+      snapshotWaitMs: 100,
+      snapshotVenueMs: 95,
+      snapshotCreator: 1,
+    });
+    expect(harness.settle(140)).toBe(
+      " snapshotWaitMs=100 snapshotDbBotsMs=90 snapshotVenueMs=95 snapshotCreator=1 unattributedMs=40",
+    );
+  });
+
+  it("rejects dynamic, nonfinite, negative, duplicate, and non-one flag values", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    harness.run(() => {
+      recordRequestSubspan("botOwnedLoadMs", 1.6);
+      recordRequestSubspan("botOwnedLoadMs", 99);
+      recordRequestSubspan("snapshotCreator", 0);
+      recordRequestSubspan("snapshotCreator", 1);
+      recordRequestSubspan("botDecisionReadMs", Number.NaN);
+      recordRequestSubspan("botVenueMarkMs", -1);
+      recordRequestSubspan("dynamicSecret" as never, 8);
+    });
+    expect(harness.snapshot()).toEqual({ botOwnedLoadMs: 2, snapshotCreator: 1 });
+  });
+
+  it("seals once and ignores late recorder calls", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    harness.run(() => recordRequestSubspan("snapshotWaitMs", 10));
+    expect(harness.settle(25)).toBe(" snapshotWaitMs=10 unattributedMs=15");
+    harness.run(() => recordRequestSubspan("snapshotVenueMs", 20));
+    expect(harness.snapshot()).toEqual({ snapshotWaitMs: 10 });
+  });
+
+  it("caps formatter output through the pure seam", () => {
+    const fields = REQUEST_TRACE_SUBSPAN_LABELS.map((label) => [label, Number.MAX_SAFE_INTEGER] as const);
+    const formatted = __formatRequestTraceSubspansForTests(fields, Number.MAX_SAFE_INTEGER, 96);
+    expect(Buffer.byteLength(formatted, "utf8")).toBeLessThanOrEqual(96);
+    expect(formatted).toMatch(/^ botOwnedLoadMs=/);
+  });
+
+  it("keeps empty collectors byte-identical and isolates overlapping ALS contexts", async () => {
+    expect(__createRequestTraceCollectorForTests().settle(50)).toBe("");
+    const first = __createRequestTraceCollectorForTests();
+    const second = __createRequestTraceCollectorForTests();
+    await Promise.all([
+      first.run(async () => { await Promise.resolve(); recordRequestSubspan("botOwnedLoadMs", 3); }),
+      second.run(async () => { await Promise.resolve(); recordRequestSubspan("snapshotWaitMs", 7); }),
+    ]);
+    expect(first.snapshot()).toEqual({ botOwnedLoadMs: 3 });
+    expect(second.snapshot()).toEqual({ snapshotWaitMs: 7 });
   });
 });

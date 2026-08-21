@@ -21,6 +21,7 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import crypto from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 import { monitorEventLoopDelay } from "perf_hooks";
 import { appendTelemetry } from "./telemetry";
 import { SERVER_BOOT_ID } from "./boot-id";
@@ -37,6 +38,26 @@ const TRACED_PREFIXES = ["/api/ai-trader"];
 
 const MAX_LINES_PER_MIN = 240;
 const SLOW_MS = 3_000;
+const MAX_SUBSPAN_BYTES = 512;
+
+export const REQUEST_TRACE_SUBSPAN_LABELS = [
+  "botOwnedLoadMs", "botDecisionReadMs", "botVenueMarkMs", "botLifetimeStatsMs",
+  "snapshotWaitMs", "snapshotDbBotsMs", "snapshotDbWalletMs", "snapshotParkedHintMs",
+  "snapshotEnrichmentMs", "snapshotVenueMs", "snapshotCreator", "snapshotCacheHit",
+  "snapshotInFlightJoin", "snapshotCapacityUnavailable",
+] as const;
+export type RequestTraceSubspanLabel = (typeof REQUEST_TRACE_SUBSPAN_LABELS)[number];
+type RequestTraceCollector = { readonly values: Map<RequestTraceSubspanLabel, number>; settled: boolean };
+type RequestTraceTestHarness = {
+  run<T>(fn: () => T): T;
+  snapshot(): Readonly<Record<string, number>>;
+  settle(totalDurationMs: number): string;
+};
+const REQUEST_TRACE_SUBSPAN_SET = new Set<string>(REQUEST_TRACE_SUBSPAN_LABELS);
+const TOP_LEVEL_DURATION_LABELS = new Set<RequestTraceSubspanLabel>([
+  "botOwnedLoadMs", "botDecisionReadMs", "botVenueMarkMs", "botLifetimeStatsMs", "snapshotWaitMs",
+]);
+const requestTraceStorage = new AsyncLocalStorage<RequestTraceCollector>();
 
 let inFlight = 0;
 let tracedThisMin = 0;
@@ -51,6 +72,79 @@ export function isTracedPath(path: string): boolean {
 function hashWallet(w: unknown): string {
   if (typeof w !== "string" || w.length === 0) return "-";
   return crypto.createHash("sha256").update(w).digest("hex").slice(0, 8);
+}
+
+function normalizeSubspanValue(label: RequestTraceSubspanLabel, value: number): number | null {
+  if (!Number.isFinite(value) || value < 0) return null;
+  if (!label.endsWith("Ms")) return value === 1 ? 1 : null;
+  return Math.round(value);
+}
+
+export function recordRequestSubspan(label: RequestTraceSubspanLabel, value: number): void {
+  try {
+    if (!REQUEST_TRACE_SUBSPAN_SET.has(label)) return;
+    const collector = requestTraceStorage.getStore();
+    if (!collector || collector.settled || collector.values.has(label)) return;
+    const normalized = normalizeSubspanValue(label, value);
+    if (normalized === null) return;
+    collector.values.set(label, normalized);
+  } catch {
+    // Observability is enrichment and must never alter request behavior.
+  }
+}
+
+function snapshotCollector(collector: RequestTraceCollector): Readonly<Record<string, number>> {
+  return Object.freeze(Object.fromEntries(collector.values));
+}
+
+function formatRequestSubspans(
+  collector: RequestTraceCollector,
+  totalDurationMs: number,
+  byteLimit = MAX_SUBSPAN_BYTES,
+): string {
+  try {
+    if (collector.values.size === 0) return "";
+    const total = Number.isFinite(totalDurationMs) && totalDurationMs >= 0 ? Math.round(totalDurationMs) : 0;
+    let accounted = 0;
+    for (const label of TOP_LEVEL_DURATION_LABELS) accounted += collector.values.get(label) ?? 0;
+    const fields: Array<[string, number]> = [];
+    for (const label of REQUEST_TRACE_SUBSPAN_LABELS) {
+      const value = collector.values.get(label);
+      if (value !== undefined) fields.push([label, value]);
+    }
+    fields.push(["unattributedMs", Math.max(0, total - accounted)]);
+    let suffix = "";
+    for (const [label, value] of fields) {
+      const fragment = ` ${label}=${value}`;
+      if (Buffer.byteLength(suffix + fragment, "utf8") > byteLimit) break;
+      suffix += fragment;
+    }
+    return suffix;
+  } catch {
+    return "";
+  }
+}
+
+/** Test-only: drive the real ALS collector and recorder, then inspect settled output. */
+export function __createRequestTraceCollectorForTests(): RequestTraceTestHarness {
+  const collector: RequestTraceCollector = { values: new Map(), settled: false };
+  return {
+    run<T>(fn: () => T): T { return requestTraceStorage.run(collector, fn); },
+    snapshot(): Readonly<Record<string, number>> { return snapshotCollector(collector); },
+    settle(totalDurationMs: number): string {
+      collector.settled = true;
+      return formatRequestSubspans(collector, totalDurationMs);
+    },
+  };
+}
+
+/** Test-only: exercise the hard byte cap without introducing production labels. */
+export function __formatRequestTraceSubspansForTests(
+  fields: ReadonlyArray<readonly [RequestTraceSubspanLabel, number]>,
+  totalDurationMs: number,
+  byteLimit = MAX_SUBSPAN_BYTES,
+): string {
+  return formatRequestSubspans({ values: new Map(fields), settled: true }, totalDurationMs, byteLimit);
 }
 
 function rollMinuteWindow(now: number): void {
@@ -72,6 +166,7 @@ export function registerRequestTrace(app: Express): void {
   app.use((req, res, next) => {
     if (!isTracedPath(req.path)) return next();
 
+    const collector: RequestTraceCollector = { values: new Map(), settled: false };
     const start = Date.now();
     const reqId = crypto.randomBytes(4).toString("hex");
     inFlight++;
@@ -79,6 +174,7 @@ export function registerRequestTrace(app: Express): void {
 
     const settle = (aborted: boolean) => {
       if (settled) return;
+      collector.settled = true;
       settled = true;
       inFlight = Math.max(0, inFlight - 1);
       const now = Date.now();
@@ -96,7 +192,8 @@ export function registerRequestTrace(app: Express): void {
       );
       const status = aborted ? "ABORTED" : String(res.statusCode);
       const slow = durationMs >= SLOW_MS ? " SLOW" : "";
-      const line = `[ReqTrace] ${reqId} ${req.method} ${req.path} ${status} ${durationMs}ms w=${wallet} boot=${SERVER_BOOT_ID.slice(0, 8)}${slow}`;
+      const subspans = formatRequestSubspans(collector, durationMs);
+      const line = `[ReqTrace] ${reqId} ${req.method} ${req.path} ${status} ${durationMs}ms w=${wallet} boot=${SERVER_BOOT_ID.slice(0, 8)}${subspans}${slow}`;
       appendTelemetry(line);
       if (aborted || durationMs >= SLOW_MS || res.statusCode >= 500) {
         console.log(line);
@@ -108,7 +205,7 @@ export function registerRequestTrace(app: Express): void {
     // 'finish' means the client went away mid-response — the exact signature
     // of a hung/abandoned dashboard read we need to see.
     res.on("close", () => settle(!res.writableFinished));
-    next();
+    requestTraceStorage.run(collector, next);
   });
 }
 
