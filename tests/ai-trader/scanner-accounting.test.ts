@@ -19,6 +19,7 @@ vi.mock("../../server/ai-trader/session-context", () => ({
 
 import {
   ScannerAttemptLedger,
+  classifyScannerSweepIncident,
   countParentCacheDegradation,
   formatScannerSweepAccountingLine,
   settleUnexpectedScannerDispatch,
@@ -215,6 +216,47 @@ describe("scanner attempt terminal accounting", () => {
   });
 });
 
+describe("scanner sweep incident classification", () => {
+  const accounting = (overrides: Partial<{
+    attempted: number;
+    scanned: number;
+    timeoutSkipped: number;
+    errors: number;
+    abandoned: number;
+    accountingValid: boolean;
+  }> = {}) => ({
+    attempted: 10,
+    scanned: 8,
+    timeoutSkipped: 0,
+    errors: 0,
+    abandoned: 0,
+    accountingValid: true,
+    ...overrides,
+  });
+
+  it.each([
+    ["fully successful", accounting({ scanned: 10 }), 0, false, "none"],
+    ["overrun-shaped complete coverage (duration handled independently)", accounting({ scanned: 10 }), 0, false, "none"],
+    ["budget-only bounded partial", accounting(), 2, false, "none"],
+    ["timeout-threshold-only bounded partial", accounting({ timeoutSkipped: 3 }), 0, false, "none"],
+    ["true attempt errors", accounting({ errors: 1 }), 0, false, "partial"],
+    ["abandoned work", accounting({ abandoned: 1 }), 0, false, "partial"],
+    ["mixed errors and bounded skips", accounting({ errors: 1, abandoned: 1 }), 2, false, "partial"],
+    ["attempted blackout", accounting({ attempted: 10, scanned: 0 }), 0, false, "blackout"],
+    ["fully budget-gated blackout", accounting({ attempted: 0, scanned: 0 }), 2, false, "blackout"],
+    ["empty universe", accounting({ attempted: 0, scanned: 0 }), 0, false, "none"],
+    ["invalid accounting plus errors", accounting({ accountingValid: false, errors: 1 }), 0, true, "partial"],
+  ] as const)(
+    "classifies %s without hiding additive accounting invalidity",
+    (_name, input, budgetSkippedUnits, accountingInvalid, coverage) => {
+      expect(classifyScannerSweepIncident(input, budgetSkippedUnits)).toEqual({
+        accountingInvalid,
+        coverage,
+      });
+    },
+  );
+});
+
 describe("scanner runSweep seam pins", () => {
   const source = readFileSync(new URL("../../server/ai-trader/scanner.ts", import.meta.url), "utf8");
 
@@ -279,5 +321,15 @@ describe("scanner runSweep seam pins", () => {
     expect(source).toContain('formatScannerSweepAccountingLine("ABORT"');
     expect(source).toContain("settleUnexpectedScannerDispatch(");
     expect(source).toContain("countParentCacheDegradation(");
+    const incident = between("Formal incident reporting", "// Overrun check is INDEPENDENT");
+    expect(incident).toContain("const incidentClassification = classifyScannerSweepIncident(");
+    expect(incident).toContain('incidentClassification.coverage === "blackout"');
+    expect(incident).toContain('incidentClassification.coverage === "partial"');
+    expect(incident).not.toContain("0.25");
+    expect(incident).not.toContain("budgetSkippedUnits > 0");
+
+    const overrun = between("// Overrun check is INDEPENDENT", "  } catch (err) {");
+    expect(overrun).toContain("sweepDurationMs");
+    expect(overrun).not.toContain("incidentClassification");
   });
 });
