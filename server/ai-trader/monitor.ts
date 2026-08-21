@@ -2576,6 +2576,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           pickUpdates,
           qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
         );
+        const preClaimBotStatus = bot.status;
         const claimed = await claimInternalAnalysis(bot, pickUpdates);
         if (!claimed) {
           if (_obs) _obs.exitReason = "gate_skip";
@@ -2596,6 +2597,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
             timeframe: bot.timeframe as AiTraderTimeframe,
             adapter,
             bot,
+            preClaimBotStatus,
             recentClosedDecisions: recentClosed.slice(0, 5),
             paperPositionRows,
             agentPublicKey: wallet.agentPublicKey,
@@ -2697,6 +2699,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
     }
 
     // Fixed-ticker bot path (scanner bots have already returned above).
+    const preClaimBotStatus = bot.status;
     const claimed = await claimInternalAnalysis(bot);
     if (!claimed) {
       if (_obs) _obs.exitReason = "gate_skip";
@@ -2712,6 +2715,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
         timeframe: bot.timeframe as AiTraderTimeframe,
         adapter,
         bot,
+        preClaimBotStatus,
         recentClosedDecisions: recentClosed.slice(0, 5),
         paperPositionRows,
         agentPublicKey: wallet.agentPublicKey,

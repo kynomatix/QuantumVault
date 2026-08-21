@@ -1010,6 +1010,7 @@ export function registerAiTraderRoutes(app: Express): void {
         if (!authority.allowed) {
           return res.status(409).json({ error: authority.reason, detail: "Durable bot state does not authorize analysis." });
         }
+        const preClaimBotStatus = bot.status;
         const claimedBot = await storage.claimAiTraderAnalysis({
           botId: bot.id,
           expectedStatus: "idle",
@@ -1027,6 +1028,7 @@ export function registerAiTraderRoutes(app: Express): void {
             timeframe: bot.timeframe as "15m" | "1h" | "4h" | "1d",
             adapter,
             bot,
+            preClaimBotStatus,
             recentClosedDecisions,
             paperPositionRows,
             agentPublicKey: wallet.agentPublicKey,

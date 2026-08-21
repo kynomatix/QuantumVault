@@ -508,6 +508,33 @@ describe("AI Trader manual analyze position-authority inputs", () => {
     expect(runDecisionMock).not.toHaveBeenCalled();
   });
 
+  it("paper manual analyze passes idle pre-claim authority with the claimed analyzing bot", async () => {
+    const bot = fixedBot(true);
+    getBotMock.mockResolvedValue(bot);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id },
+      session: { walletAddress: bot.walletAddress },
+      body: {},
+      query: {},
+      headers: {},
+    });
+
+    expect(result.statusCode, JSON.stringify(result.body)).toBe(200);
+    expect(claimAnalysisMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: bot.id,
+      expectedStatus: "idle",
+    }));
+    expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      preClaimBotStatus: "idle",
+      paperPositionRows: [],
+      bot: expect.objectContaining({ status: "analyzing" }),
+    });
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
+  });
+
   it("live manual analyze does not read or supply paper-position rows", async () => {
     const bot = fixedBot(false);
     const closedRows = [{ id: "closed-row", closedAt: new Date() }];
@@ -528,6 +555,7 @@ describe("AI Trader manual analyze position-authority inputs", () => {
     expect(result.statusCode, JSON.stringify(result.body)).toBe(200);
     expect(getOpenDecisionsMock).toHaveBeenCalledWith(bot.id, 2);
     expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      preClaimBotStatus: "idle",
       recentClosedDecisions: closedRows,
       paperPositionRows: [],
     });

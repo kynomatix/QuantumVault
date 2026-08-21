@@ -308,6 +308,33 @@ describe("runDecision — happy path", () => {
     expect(result.ok).toBe(true);
     expect(insertMock.mock.calls[0][0].llmCostUsd).toBeNull();
   });
+
+  it("admits an entry end-to-end when paper-ledger position truth is explicitly flat", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+    const context = makeContext() as any;
+    context.contextDigest = structuredClone(context.contextDigest);
+    context.contextDigest.account = {
+      ...context.contextDigest.account,
+      positionAuthority: "paper_ledger",
+      positionState: "flat",
+      positionReason: null,
+      hasPosition: false,
+    };
+
+    const result = await runDecision({
+      bot: makeBot({ paperMode: true } as Partial<AiTraderBot>),
+      apiKey: "k",
+      context,
+      adapter: makeAdapter(),
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rejected).toBe(false);
+    expect(result.clamped).toMatchObject({ action: "long" });
+    expect(result.violations).not.toContainEqual(expect.objectContaining({ code: "position_truth_unknown" }));
+  });
 });
 
 describe("runDecision — malformed output and the single corrective retry", () => {

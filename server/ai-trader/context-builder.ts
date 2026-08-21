@@ -34,6 +34,13 @@ export interface BuildMarketContextInput {
   timeframe: AiTraderTimeframe;
   adapter: ProtocolAdapter;
   bot: AiTraderBot;
+  /**
+   * Durable bot status observed immediately before the caller won its
+   * analysis claim. Paper-position authority must use this value rather than
+   * the claimed `analyzing` copy; the claimed bot remains authoritative for
+   * market, timeframe, policy, and all later money-safety work.
+   */
+  preClaimBotStatus: AiTraderBot["status"];
   recentClosedDecisions: AiTraderDecision[];
   paperPositionRows: AiTraderDecision[];
   /**
@@ -434,7 +441,16 @@ W/M formations (double bottom/top, when present in this context) mark a complete
 export async function buildMarketContext(
   input: BuildMarketContextInput
 ): Promise<BuildMarketContextResult> {
-  const { market, timeframe, adapter, bot, recentClosedDecisions, paperPositionRows, scannerNote } = input;
+  const {
+    market,
+    timeframe,
+    adapter,
+    bot,
+    preClaimBotStatus,
+    recentClosedDecisions,
+    paperPositionRows,
+    scannerNote,
+  } = input;
 
   const tfMs = TIMEFRAME_MS[timeframe];
   const now = Date.now();
@@ -814,7 +830,7 @@ export async function buildMarketContext(
   let accountDigest: Record<string, unknown>;
 
   if (bot.paperMode) {
-    const resolution = resolvePaperPositionState(bot.status, paperPositionRows);
+    const resolution = resolvePaperPositionState(preClaimBotStatus, paperPositionRows);
     const paperPnl = resolution.view ? computeUnrealizedPnl(resolution.view, price) : null;
     if (resolution.positionState === "open" && resolution.view) {
       const entryLabel = resolution.view.entryPrice === null ? "unavailable" : fmtPrice(resolution.view.entryPrice);

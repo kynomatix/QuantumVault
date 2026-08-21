@@ -1871,9 +1871,11 @@ describe("runAutoCycle", () => {
     expect(buildContextMock.mock.calls[0][0].bot).toMatchObject({
       market: "BTC-PERP",
       timeframe: "1h",
+      status: "analyzing",
       graduationState: "in_trial",
       currentQualificationEraDigest: null,
     });
+    expect(buildContextMock.mock.calls[0][0].preClaimBotStatus).toBe("idle");
     expect(runDecisionMock).toHaveBeenCalledTimes(1);
   });
 
@@ -2005,8 +2007,10 @@ describe("runAutoCycle", () => {
     expect(execArgs.bot.id).toBe(bot.id);
     expect(getOpenDecisionsMock).toHaveBeenCalledWith(bot.id, 2);
     expect(buildContextMock.mock.calls[0][0]).toMatchObject({
+      preClaimBotStatus: "idle",
       recentClosedDecisions: [],
       paperPositionRows: openRows,
+      bot: expect.objectContaining({ status: "analyzing" }),
     });
   });
 

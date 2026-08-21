@@ -46,8 +46,8 @@ describe("resolvePaperPositionState", () => {
     });
   });
 
-  it("marks transient-without-row unknown", () => {
-    expect(resolvePaperPositionState("executing", [])).toMatchObject({
+  it.each(["analyzing", "executing"])("keeps genuinely transient %s-without-row unknown", (status) => {
+    expect(resolvePaperPositionState(status, [])).toMatchObject({
       positionState: "unknown",
       positionAuthority: "unknown",
       reason: "status_requires_open_row",
