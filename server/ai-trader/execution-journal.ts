@@ -116,6 +116,20 @@ function finiteDecimal(value: number | null | undefined, name: string, nonnegati
   return String(value);
 }
 
+function requiredEntryPrice(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new Error("execution_journal_invalid_price");
+  }
+  return value;
+}
+
+function requiredEntryObservedAt(value: unknown): Date {
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+    throw new Error("execution_journal_invalid_observed_at");
+  }
+  return value;
+}
+
 function canonicalize(input: JournalEventInput): CanonicalEvent {
   if (!ACTIONS.has(input.action) || !CAUSES.has(input.cause) || !(input.eventType in PHASE_BY_EVENT)) {
     throw new Error("execution_journal_invalid_literal");
@@ -678,18 +692,20 @@ export async function appendRequiredEntryPrebroadcast(args: {
   clientOrderId: string;
   sizeBase: number;
   /** Fresh venue-authoritative execution price; required by the live executor. */
-  price?: number;
+  price: number;
   /** Timestamp captured immediately after that awaited venue-price read. */
-  observedAt?: Date;
+  observedAt: Date;
 }): Promise<string> {
+  const price = requiredEntryPrice(args.price);
+  const observedAt = requiredEntryObservedAt(args.observedAt);
   const attemptId = entryAttemptId(args.decisionId);
   const base = journalBase(args.bot, args.decisionId);
   await appendExecutionEvents([
     { ...base, attemptId, action: "entry", cause: "decision", eventType: "attempt_claimed",
-      side: args.side, observedAt: args.observedAt },
+      side: args.side, observedAt },
     { ...base, attemptId, action: "entry", cause: "decision", eventType: "prebroadcast_authorized",
       side: args.side, clientOrderId: args.clientOrderId, sizeBase: args.sizeBase,
-      price: args.price, observedAt: args.observedAt },
+      price, observedAt },
   ]);
   return attemptId;
 }

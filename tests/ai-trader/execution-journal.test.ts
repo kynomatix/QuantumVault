@@ -14,6 +14,8 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     protocolSubaccountId: null,
     market: "SOL-PERP",
   } as any;
+  const PREBROADCAST_PRICE = 150;
+  const PREBROADCAST_OBSERVED_AT = new Date("2026-08-19T00:00:00.000Z");
 
   beforeAll(async () => {
     dbModule = await import("../../server/db");
@@ -65,6 +67,35 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     ]);
   });
 
+  it("rejects missing or invalid required entry price and timestamp before appending", async () => {
+    const invalidCases = [
+      { suffix: "missing-price", price: undefined, observedAt: PREBROADCAST_OBSERVED_AT, error: "execution_journal_invalid_price" },
+      { suffix: "nan-price", price: Number.NaN, observedAt: PREBROADCAST_OBSERVED_AT, error: "execution_journal_invalid_price" },
+      { suffix: "zero-price", price: 0, observedAt: PREBROADCAST_OBSERVED_AT, error: "execution_journal_invalid_price" },
+      { suffix: "negative-price", price: -1, observedAt: PREBROADCAST_OBSERVED_AT, error: "execution_journal_invalid_price" },
+      { suffix: "missing-time", price: PREBROADCAST_PRICE, observedAt: undefined, error: "execution_journal_invalid_observed_at" },
+      { suffix: "invalid-time", price: PREBROADCAST_PRICE, observedAt: new Date(Number.NaN), error: "execution_journal_invalid_observed_at" },
+    ] as const;
+
+    for (const testCase of invalidCases) {
+      const decisionId = `decision-invalid-${testCase.suffix}-${RUN}`;
+      await expect(journal.appendRequiredEntryPrebroadcast({
+        bot,
+        decisionId,
+        side: "long",
+        clientOrderId: `client-invalid-${testCase.suffix}-${RUN}`,
+        sizeBase: 1,
+        price: testCase.price,
+        observedAt: testCase.observedAt,
+      } as any)).rejects.toThrow(testCase.error);
+      const rows = await dbModule.pool.query(
+        "SELECT count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1",
+        [`entry:${decisionId}`],
+      );
+      expect(rows.rows[0]?.count).toBe(0);
+    }
+  });
+
   it("requires retained phase-20 venue evidence before an emergency-unwind entry terminal", async () => {
     const observedAt = new Date("2026-08-19T01:00:00.000Z");
     const decisionId = `decision-unwind-lineage-${RUN}`;
@@ -74,6 +105,8 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
       side: "long",
       clientOrderId: `client-unwind-${RUN}`,
       sizeBase: 1.5,
+      price: PREBROADCAST_PRICE,
+      observedAt,
     });
     const base = journal.journalBase(bot, decisionId);
     await journal.appendExecutionEvents([{
@@ -121,6 +154,8 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
       side: "short",
       clientOrderId: `client-unwind-missing-${RUN}`,
       sizeBase: 1,
+      price: PREBROADCAST_PRICE,
+      observedAt,
     });
     await expect(journal.appendExecutionEvents([{
       ...journal.journalBase(bot, missingDecisionId),
@@ -199,6 +234,7 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     const decisionId = `decision-direct-recovery-${RUN}`;
     const attemptId = await journal.appendRequiredEntryPrebroadcast({
       bot, decisionId, side: "long", clientOrderId: `client-direct-${RUN}`, sizeBase: 1,
+      price: PREBROADCAST_PRICE, observedAt: PREBROADCAST_OBSERVED_AT,
     });
     const base = journal.journalBase(bot, decisionId);
     const enteredAt = new Date("2026-08-19T02:00:00.000Z");
@@ -298,6 +334,7 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     const partialDecision = `decision-held-partial-${RUN}`;
     const partialAttempt = await journal.appendRequiredEntryPrebroadcast({
       bot, decisionId: partialDecision, side: "long", clientOrderId: `client-held-${RUN}`, sizeBase: 1,
+      price: PREBROADCAST_PRICE, observedAt: PREBROADCAST_OBSERVED_AT,
     });
     const partialBase = journal.journalBase(bot, partialDecision);
     const exactSuffix = [
@@ -359,6 +396,7 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
       const decisionId = `decision-recovery-${testCase.suffix}-${RUN}`;
       const attemptId = await journal.appendRequiredEntryPrebroadcast({
         bot, decisionId, side: "long", clientOrderId: `client-${testCase.suffix}-${RUN}`, sizeBase: 2,
+        price: PREBROADCAST_PRICE, observedAt: PREBROADCAST_OBSERVED_AT,
       });
       const observedAt = new Date(`2026-08-05T00:00:0${cases.indexOf(testCase)}.000Z`);
       await journal.appendEntryReconciliationTerminal({
@@ -418,6 +456,7 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     const withTwenty = `decision-with-twenty-${RUN}`;
     const withTwentyAttempt = await journal.appendRequiredEntryPrebroadcast({
       bot, decisionId: withTwenty, side: "long", clientOrderId: `client-20-${RUN}`, sizeBase: 1,
+      price: PREBROADCAST_PRICE, observedAt: PREBROADCAST_OBSERVED_AT,
     });
     await journal.appendExecutionEvents([{
       ...journal.journalBase(bot, withTwenty), attemptId: withTwentyAttempt,
@@ -430,6 +469,7 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     const withTerminal = `decision-with-terminal-${RUN}`;
     const withTerminalAttempt = await journal.appendRequiredEntryPrebroadcast({
       bot, decisionId: withTerminal, side: "long", clientOrderId: `client-90-${RUN}`, sizeBase: 1,
+      price: PREBROADCAST_PRICE, observedAt: PREBROADCAST_OBSERVED_AT,
     });
     await dbModule.pool.query(
       `INSERT INTO ai_trader_execution_events
@@ -487,6 +527,7 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     const ambiguous = `decision-ambiguous-${RUN}`;
     const ambiguousAttempt = await journal.appendRequiredEntryPrebroadcast({
       bot, decisionId: ambiguous, side: "long", clientOrderId: `client-ambiguous-${RUN}`, sizeBase: 1,
+      price: PREBROADCAST_PRICE, observedAt: PREBROADCAST_OBSERVED_AT,
     });
     await expect(journal.appendEntryReconciliationTerminal({
       base: journal.journalBase(bot, ambiguous), attemptId: ambiguousAttempt,
@@ -499,6 +540,7 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     const decisionId = `decision-partial-${RUN}`;
     const attemptId = await journal.appendRequiredEntryPrebroadcast({
       bot, decisionId, side: "long", clientOrderId: `client-partial-${RUN}`, sizeBase: 1,
+      price: PREBROADCAST_PRICE, observedAt: PREBROADCAST_OBSERVED_AT,
     });
     const observedAt = new Date("2026-08-05T00:01:00.000Z");
     await journal.appendExecutionEvents([{

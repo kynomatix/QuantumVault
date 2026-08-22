@@ -313,6 +313,8 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
           side: "long",
           clientOrderId: `aitrader-${decision.id}`,
           sizeBase: 2,
+          price: 150.25,
+          observedAt,
         });
         const base = journal.journalBase(atomicBot, decision.id);
         const success = disposition === "open";
@@ -733,6 +735,8 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
           side: "long",
           clientOrderId: `aitrader-${decision.id}`,
           sizeBase: 2,
+          price: 150.25,
+          observedAt,
         });
         const base = journal.journalBase(atomicBot, decision.id);
         const broadcast = {
@@ -843,6 +847,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         const attemptId = await journal.appendRequiredEntryPrebroadcast({
           bot: atomicBot, decisionId: decision.id, side: "long",
           clientOrderId: `aitrader-${decision.id}`, sizeBase: 1.5,
+          price: 151, observedAt,
         });
         const base = journal.journalBase(atomicBot, decision.id);
         const success = disposition === "open";
@@ -929,6 +934,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const adoptDecision = await makeDecision(adoptBot.id, "01", "unconfirmed_landing");
       const adoptAttempt = await journal.appendRequiredEntryPrebroadcast({
         bot: adoptBot, decisionId: adoptDecision.id, side: "long", clientOrderId: `adopt-${WALLET}`, sizeBase: 2,
+        price: 150.25, observedAt,
       });
       const adoptBase = journal.journalBase(adoptBot, adoptDecision.id);
       const adoptEvents = [
@@ -983,6 +989,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const healthyAttempt = await journal.appendRequiredEntryPrebroadcast({
         bot: healthyBot, decisionId: healthyDecision.id, side: "long",
         clientOrderId: `healthy-${WALLET}`, sizeBase: 1,
+        price: 151.25, observedAt,
       });
       const healthyBase = journal.journalBase(healthyBot, healthyDecision.id);
       const healthyObservedAt = new Date("2026-08-19T20:02:00.000Z");
@@ -1042,6 +1049,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const protectDecision = await makeDecision(protectBot.id, "02", "unconfirmed_landing");
       const protectAttempt = await journal.appendRequiredEntryPrebroadcast({
         bot: protectBot, decisionId: protectDecision.id, side: "long", clientOrderId: `protect-${WALLET}`, sizeBase: 1,
+        price: 149.75, observedAt,
       });
       const protectBase = journal.journalBase(protectBot, protectDecision.id);
       const protectEvents = [{ ...protectBase, attemptId: protectAttempt, action: "entry", cause: "decision",
@@ -1070,6 +1078,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const noLandDecision = await makeDecision(noLandBot.id, "03", "unconfirmed_landing");
       const noLandAttempt = await journal.appendRequiredEntryPrebroadcast({
         bot: noLandBot, decisionId: noLandDecision.id, side: "long", clientOrderId: `no-land-${WALLET}`, sizeBase: 1,
+        price: 150, observedAt,
       });
       const noLandEvents = journal.buildEntryReconciliationTerminalEvents({
         base: journal.journalBase(noLandBot, noLandDecision.id), attemptId: noLandAttempt,
@@ -1112,6 +1121,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const unwindDecision = await makeDecision(unwindBot.id, "06", null);
       const entryAttempt = await journal.appendRequiredEntryPrebroadcast({
         bot: unwindBot, decisionId: unwindDecision.id, side: "long", clientOrderId: `unwind-entry-${WALLET}`, sizeBase: 1,
+        price: 150, observedAt,
       });
       const entryBase = journal.journalBase(unwindBot, unwindDecision.id);
       await journal.appendExecutionEvents([{ ...entryBase, attemptId: entryAttempt, action: "entry", cause: "decision",
