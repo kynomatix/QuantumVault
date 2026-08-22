@@ -17,7 +17,7 @@ import { storage, DatabaseStorage } from "./storage";
 import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
 import { normalizeScannerIncidentHoldId } from "./ai-trader/scanner-incident-evidence";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, type Wallet, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db, isConnectionClassError } from "./db";
 import { desc, eq, sql, asc, and } from "drizzle-orm";
@@ -39,6 +39,21 @@ import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 import { initSnapshotModule, getWalletFinancialSnapshot, derivePerBotFinancialDataStatus, mapBotToApiResponse } from './bot-financial-snapshot';
 import { detachTradingBotAfterDriftCustodyHandoff } from './trading-bot-custody-handoff';
+
+type PublicWalletResponse = Pick<
+  Wallet,
+  'address' | 'displayName' | 'driftSubaccount' | 'agentPublicKey' | 'referralCode'
+>;
+
+export function toPublicWalletResponse(wallet: Wallet): PublicWalletResponse {
+  return {
+    address: wallet.address,
+    displayName: wallet.displayName,
+    driftSubaccount: wallet.driftSubaccount,
+    agentPublicKey: wallet.agentPublicKey,
+    referralCode: wallet.referralCode,
+  };
+}
 
 function _subIdStr(subAccountId: number): string | undefined {
   return subAccountId > 0 ? String(subAccountId) : undefined;
@@ -6885,13 +6900,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(401).json({ error: "Wallet not authenticated. Please sign in first." });
       }
 
-      res.json({
-        address: wallet.address,
-        displayName: wallet.displayName,
-        driftSubaccount: wallet.driftSubaccount,
-        agentPublicKey: wallet.agentPublicKey,
-        referralCode: wallet.referralCode,
-      });
+      res.json(toPublicWalletResponse(wallet));
     } catch (error) {
       console.error("Wallet connect error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -6952,7 +6961,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      res.json(wallet);
+      res.json(toPublicWalletResponse(wallet));
     } catch (error) {
       console.error("Get wallet error:", error);
       res.status(500).json({ error: "Internal server error" });

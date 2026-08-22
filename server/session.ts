@@ -2,6 +2,15 @@ import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import pg from "pg";
 
+function requireSessionSecret(env: NodeJS.ProcessEnv = process.env): string {
+  const secret = env.SESSION_SECRET;
+  if (typeof secret !== "string" || secret.trim().length === 0) {
+    throw new Error("SESSION_SECRET environment variable is required");
+  }
+  return secret;
+}
+
+const sessionSecret = requireSessionSecret();
 const PgStore = connectPgSimple(session);
 
 // Mirror the main pool's hardening (server/db.ts): idle timeout below Neon's
@@ -30,7 +39,7 @@ export const sessionMiddleware = session({
     tableName: "user_sessions",
     createTableIfMissing: true,
   }),
-  secret: process.env.SESSION_SECRET || "quantum-vault-secret-change-in-production",
+  secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
   cookie: {
