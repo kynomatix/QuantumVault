@@ -22,11 +22,12 @@
 // recompute — paperMode is outside the HMAC envelope by design).
 
 import type { Express, Response } from "express";
-import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, isNotNull, sql } from "drizzle-orm";
+import Decimal from "decimal.js";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { db } from "../db";
-import { aiTraderDecisions, type AiTraderBot } from "@shared/schema";
+import { aiTraderDecisions, aiTraderExecutionEvents, type AiTraderBot } from "@shared/schema";
 import { storage } from "../storage";
 import {
   getSessionByWalletAddress,
@@ -362,6 +363,109 @@ export function summarizeCandleProvenance(
     proxy: first.proxy,
     timeSemantic: first.timeSemantic,
     finality: [...finality].sort(),
+  };
+}
+
+export type AiTraderPerformanceResponse =
+  | {
+      status: "available";
+      mode: "paper_trial" | "live";
+      points: Array<{ t: string; v: number }>;
+      tradeCount: number;
+      netPnl: number;
+      omittedUnattributedTrades: number;
+      excludedOtherModeTrades: number;
+      omittedInvalidPnlTrades: number;
+    }
+  | { status: "pending"; reason: "qualification_era_unknown" };
+
+type PerformanceCandidateRow = {
+  decisionId: string;
+  closedAt: Date | string | null;
+  realizedPnl: unknown;
+  terminalCause: string | null;
+};
+
+export function projectAiTraderPerformance(
+  rows: PerformanceCandidateRow[],
+  mode: "paper_trial" | "live",
+): Extract<AiTraderPerformanceResponse, { status: "available" }> {
+  const candidates = new Map<string, {
+    decisionId: string;
+    closedAt: Date;
+    realizedPnl: unknown;
+    attributedModes: Set<"paper_trial" | "live">;
+  }>();
+
+  for (const row of rows) {
+    const closedAt = row.closedAt instanceof Date ? row.closedAt : new Date(row.closedAt ?? "");
+    if (!row.decisionId || Number.isNaN(closedAt.getTime())) continue;
+    let candidate = candidates.get(row.decisionId);
+    if (!candidate) {
+      candidate = {
+        decisionId: row.decisionId,
+        closedAt,
+        realizedPnl: row.realizedPnl,
+        attributedModes: new Set(),
+      };
+      candidates.set(row.decisionId, candidate);
+    }
+    if (row.terminalCause !== null) {
+      candidate.attributedModes.add(row.terminalCause === "paper" ? "paper_trial" : "live");
+    }
+  }
+
+  const ordered = [...candidates.values()].sort((a, b) =>
+    a.closedAt.getTime() - b.closedAt.getTime() || a.decisionId.localeCompare(b.decisionId));
+  const points: Array<{ t: string; v: number }> = [];
+  let cumulative = new Decimal(0);
+  let omittedUnattributedTrades = 0;
+  let excludedOtherModeTrades = 0;
+  let omittedInvalidPnlTrades = 0;
+
+  for (const candidate of ordered) {
+    // Multiple terminal causes disagree about paper/live identity. Treat that as
+    // unavailable attribution rather than picking an arbitrary joined row.
+    if (candidate.attributedModes.size !== 1) {
+      omittedUnattributedTrades += 1;
+      continue;
+    }
+    if (!candidate.attributedModes.has(mode)) {
+      excludedOtherModeTrades += 1;
+      continue;
+    }
+    const raw = candidate.realizedPnl;
+    if (raw === null || raw === undefined || (typeof raw === "string" && raw.trim() === "")) {
+      omittedInvalidPnlTrades += 1;
+      continue;
+    }
+    let pnl: Decimal;
+    try {
+      pnl = new Decimal(raw as Decimal.Value);
+    } catch {
+      omittedInvalidPnlTrades += 1;
+      continue;
+    }
+    if (!pnl.isFinite()) {
+      omittedInvalidPnlTrades += 1;
+      continue;
+    }
+    cumulative = cumulative.plus(pnl);
+    points.push({
+      t: candidate.closedAt.toISOString(),
+      v: cumulative.toDecimalPlaces(2).toNumber(),
+    });
+  }
+
+  return {
+    status: "available",
+    mode,
+    points,
+    tradeCount: points.length,
+    netPnl: cumulative.toDecimalPlaces(2).toNumber(),
+    omittedUnattributedTrades,
+    excludedOtherModeTrades,
+    omittedInvalidPnlTrades,
   };
 }
 
@@ -1906,6 +2010,53 @@ export function registerAiTraderRoutes(app: Express): void {
       res.json({ ...page, events });
     } catch (err) {
       console.error("[AiTrader] execution journal read error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // --- Current qualification-era performance -------------------------------------------
+  app.get("/api/ai-trader/:id/performance", requireWallet, async (req: any, res) => {
+    try {
+      const bot = await loadOwnedBot(req, res);
+      if (!bot) return;
+      if (!bot.currentQualificationEraDigest || !bot.trialStartedAt) {
+        const pending: AiTraderPerformanceResponse = {
+          status: "pending",
+          reason: "qualification_era_unknown",
+        };
+        return res.json(pending);
+      }
+
+      const rows = await db
+        .select({
+          decisionId: aiTraderDecisions.id,
+          closedAt: aiTraderDecisions.closedAt,
+          realizedPnl: aiTraderDecisions.realizedPnl,
+          terminalCause: aiTraderExecutionEvents.cause,
+        })
+        .from(aiTraderDecisions)
+        .leftJoin(
+          aiTraderExecutionEvents,
+          and(
+            eq(aiTraderExecutionEvents.decisionId, aiTraderDecisions.id),
+            eq(aiTraderExecutionEvents.eventType, "close_terminal_confirmed"),
+          ),
+        )
+        .where(
+          and(
+            eq(aiTraderDecisions.botId, bot.id),
+            eq(aiTraderDecisions.outcome, "executed"),
+            isNotNull(aiTraderDecisions.closedAt),
+            gte(aiTraderDecisions.closedAt, bot.trialStartedAt),
+            eq(aiTraderDecisions.qualificationEraDigest, bot.currentQualificationEraDigest),
+          ),
+        )
+        .orderBy(asc(aiTraderDecisions.closedAt), asc(aiTraderDecisions.id));
+
+      const mode = bot.paperMode ? "paper_trial" : "live";
+      res.json(projectAiTraderPerformance(rows, mode));
+    } catch (err) {
+      console.error("[AiTrader] performance error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });

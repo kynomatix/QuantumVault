@@ -51,7 +51,10 @@ vi.mock("../../server/protocol/adapter-registry", () => ({
   getAdapter: (...a: unknown[]) => getAdapterMock(...a),
   getDefaultAdapter: vi.fn(),
 }));
-vi.mock("../../server/db", () => ({ db: {} }));
+const dbSelectMock = vi.fn();
+vi.mock("../../server/db", () => ({
+  db: { select: (...a: unknown[]) => dbSelectMock(...a) },
+}));
 vi.mock("../../server/market-registry", () => ({ getMarketInfo: vi.fn() }));
 vi.mock("../../server/ai-assistant/models-catalog", () => ({ isSelectableModel: vi.fn(() => true) }));
 
@@ -126,7 +129,11 @@ vi.mock("../../server/ai-trader/multiplier-market-quarantine", () => ({
   MULTIPLIER_UNQUALIFIED_REASON: "multiplier_unqualified",
 }));
 
-import { registerAiTraderRoutes, summarizeCandleProvenance } from "../../server/ai-trader/routes";
+import {
+  projectAiTraderPerformance,
+  registerAiTraderRoutes,
+  summarizeCandleProvenance,
+} from "../../server/ai-trader/routes";
 
 describe("AI Trader chart provenance summary", () => {
   const row = (finality: "finalized" | "forming") => ({
@@ -791,5 +798,151 @@ describe("AI Trader execution journal route", () => {
     expect(allowed.statusCode).toBe(200);
     expect(allowed.body.events[0]).not.toHaveProperty("accountRef");
     expect(readJournalMock).toHaveBeenCalledWith({ botId: "bot-route-journal", limit: 20 });
+  });
+});
+
+function performanceBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
+  return {
+    id: "performance-bot",
+    walletAddress: "owner-wallet",
+    protocol: "pacifica",
+    market: "SOL-PERP",
+    timeframe: "15m",
+    marketSource: "fixed",
+    status: "idle",
+    paperMode: true,
+    currentQualificationEraDigest: "E".repeat(64),
+    trialStartedAt: new Date("2026-08-01T00:00:00.000Z"),
+    ...overrides,
+  } as unknown as AiTraderBot;
+}
+
+function mockPerformanceQuery(rows: unknown[]) {
+  const orderBy = vi.fn().mockResolvedValue(rows);
+  const where = vi.fn(() => ({ orderBy }));
+  const leftJoin = vi.fn(() => ({ where }));
+  const from = vi.fn(() => ({ leftJoin }));
+  dbSelectMock.mockReturnValue({ from });
+  return { from, leftJoin, where, orderBy };
+}
+
+describe("AI Trader current qualification-era performance", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("deduplicates, orders, rounds after exact accumulation, and exposes every exclusion class", () => {
+    const projected = projectAiTraderPerformance([
+      { decisionId: "b", closedAt: "2026-08-03T00:00:00.000Z", realizedPnl: "-0.225", terminalCause: "paper" },
+      { decisionId: "a", closedAt: "2026-08-02T00:00:00.000Z", realizedPnl: "1.235", terminalCause: "paper" },
+      { decisionId: "a", closedAt: "2026-08-02T00:00:00.000Z", realizedPnl: "1.235", terminalCause: "paper" },
+      { decisionId: "no-attribution", closedAt: "2026-08-04T00:00:00.000Z", realizedPnl: "9", terminalCause: null },
+      { decisionId: "other-mode", closedAt: "2026-08-05T00:00:00.000Z", realizedPnl: "8", terminalCause: "venue_detected" },
+      { decisionId: "invalid", closedAt: "2026-08-06T00:00:00.000Z", realizedPnl: "NaN", terminalCause: "paper" },
+      { decisionId: "conflict", closedAt: "2026-08-07T00:00:00.000Z", realizedPnl: "7", terminalCause: "paper" },
+      { decisionId: "conflict", closedAt: "2026-08-07T00:00:00.000Z", realizedPnl: "7", terminalCause: "protective" },
+    ], "paper_trial");
+
+    expect(projected).toEqual({
+      status: "available",
+      mode: "paper_trial",
+      points: [
+        { t: "2026-08-02T00:00:00.000Z", v: 1.24 },
+        { t: "2026-08-03T00:00:00.000Z", v: 1.01 },
+      ],
+      tradeCount: 2,
+      netPnl: 1.01,
+      omittedUnattributedTrades: 2,
+      excludedOtherModeTrades: 1,
+      omittedInvalidPnlTrades: 1,
+    });
+  });
+
+  it("enforces wallet ownership and returns pending without reading the ledger", async () => {
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const key = "GET /api/ai-trader/:id/performance";
+
+    getBotMock.mockResolvedValueOnce(performanceBot({ walletAddress: "another-wallet" }));
+    const denied = await invoke(built.routes, key, {
+      params: { id: "performance-bot" }, query: {}, body: {}, headers: {}, session: { walletAddress: "owner-wallet" },
+    });
+    expect(denied).toMatchObject({ statusCode: 404 });
+    expect(dbSelectMock).not.toHaveBeenCalled();
+
+    getBotMock.mockResolvedValueOnce(performanceBot({ currentQualificationEraDigest: null }));
+    const pending = await invoke(built.routes, key, {
+      params: { id: "performance-bot" }, query: {}, body: {}, headers: {}, session: { walletAddress: "owner-wallet" },
+    });
+    expect(pending).toEqual({
+      statusCode: 200,
+      body: { status: "pending", reason: "qualification_era_unknown" },
+    });
+    expect(dbSelectMock).not.toHaveBeenCalled();
+  });
+
+  it("binds the direct query and returns only current paper mode without exposing its era digest", async () => {
+    const query = mockPerformanceQuery([
+      { decisionId: "paper-1", closedAt: new Date("2026-08-02T00:00:00.000Z"), realizedPnl: "2.50", terminalCause: "paper" },
+      { decisionId: "live-1", closedAt: new Date("2026-08-03T00:00:00.000Z"), realizedPnl: "4.00", terminalCause: "protective" },
+      { decisionId: "unattributed", closedAt: new Date("2026-08-04T00:00:00.000Z"), realizedPnl: "6.00", terminalCause: null },
+    ]);
+    const bot = performanceBot();
+    getBotMock.mockResolvedValue(bot);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id/performance", {
+      params: { id: bot.id }, query: {}, body: {}, headers: {}, session: { walletAddress: bot.walletAddress },
+    });
+
+    expect(result).toEqual({
+      statusCode: 200,
+      body: {
+        status: "available",
+        mode: "paper_trial",
+        points: [{ t: "2026-08-02T00:00:00.000Z", v: 2.5 }],
+        tradeCount: 1,
+        netPnl: 2.5,
+        omittedUnattributedTrades: 1,
+        excludedOtherModeTrades: 1,
+        omittedInvalidPnlTrades: 0,
+      },
+    });
+    expect(dbSelectMock).toHaveBeenCalledWith(expect.objectContaining({
+      decisionId: expect.anything(), closedAt: expect.anything(),
+      realizedPnl: expect.anything(), terminalCause: expect.anything(),
+    }));
+    expect(query.from).toHaveBeenCalledTimes(1);
+    expect(query.leftJoin).toHaveBeenCalledTimes(1);
+    expect(query.where).toHaveBeenCalledTimes(1);
+    expect(query.orderBy).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result.body)).not.toContain(bot.currentQualificationEraDigest);
+  });
+
+  it("keeps a promoted bot's unchanged era mode-separated with exact class counts", async () => {
+    mockPerformanceQuery([
+      { decisionId: "paper-before-promotion", closedAt: new Date("2026-08-02T00:00:00.000Z"), realizedPnl: "3", terminalCause: "paper" },
+      { decisionId: "live-after-promotion", closedAt: new Date("2026-08-03T00:00:00.000Z"), realizedPnl: "5", terminalCause: "user_requested" },
+      { decisionId: "unknown-after-promotion", closedAt: new Date("2026-08-04T00:00:00.000Z"), realizedPnl: "7", terminalCause: null },
+      { decisionId: "bad-live-pnl", closedAt: new Date("2026-08-05T00:00:00.000Z"), realizedPnl: null, terminalCause: "protective" },
+    ]);
+    const bot = performanceBot({ paperMode: false, graduationState: "graduated" });
+    getBotMock.mockResolvedValue(bot);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id/performance", {
+      params: { id: bot.id }, query: {}, body: {}, headers: {}, session: { walletAddress: bot.walletAddress },
+    });
+
+    expect(result.body).toEqual({
+      status: "available",
+      mode: "live",
+      points: [{ t: "2026-08-03T00:00:00.000Z", v: 5 }],
+      tradeCount: 1,
+      netPnl: 5,
+      omittedUnattributedTrades: 1,
+      excludedOtherModeTrades: 1,
+      omittedInvalidPnlTrades: 1,
+    });
   });
 });

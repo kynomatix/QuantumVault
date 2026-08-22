@@ -68,6 +68,14 @@ import { safeResponseJson } from '@/lib/safe-fetch';
 import { useToast } from '@/hooks/use-toast';
 import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
 import { AiTraderDecisionChart, type AiChartLevel } from './AiTraderDecisionChart';
+import {
+  Line,
+  LineChart,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  YAxis,
+} from 'recharts';
 
 const DEGEN_CONFIRM_PHRASE = "send it";
 
@@ -205,6 +213,56 @@ interface AiTraderDrawerProps {
   walletAddress: string;
   onBotUpdated: () => void;
   onOpenDeposit?: () => void;
+}
+
+type PerformanceResponse =
+  | {
+      status: 'available';
+      mode: 'paper_trial' | 'live';
+      points: Array<{ t: string; v: number }>;
+      tradeCount: number;
+      netPnl: number;
+      omittedUnattributedTrades: number;
+      excludedOtherModeTrades: number;
+      omittedInvalidPnlTrades: number;
+    }
+  | { status: 'pending'; reason: 'qualification_era_unknown' };
+
+type PerformanceState = PerformanceResponse | { status: 'loading' } | { status: 'error' };
+
+function parsePerformanceResponse(value: unknown): PerformanceResponse | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  if (record.status === 'pending') {
+    return record.reason === 'qualification_era_unknown'
+      ? { status: 'pending', reason: 'qualification_era_unknown' }
+      : null;
+  }
+  if (record.status !== 'available' || (record.mode !== 'paper_trial' && record.mode !== 'live')) return null;
+  if (!Array.isArray(record.points)) return null;
+  const points: Array<{ t: string; v: number }> = [];
+  for (const point of record.points) {
+    if (!point || typeof point !== 'object') return null;
+    const candidate = point as Record<string, unknown>;
+    if (typeof candidate.t !== 'string' || typeof candidate.v !== 'number' || !Number.isFinite(candidate.v)) return null;
+    points.push({ t: candidate.t, v: candidate.v });
+  }
+  const integer = (candidate: unknown): candidate is number =>
+    typeof candidate === 'number' && Number.isInteger(candidate) && candidate >= 0;
+  if (!integer(record.tradeCount) || record.tradeCount !== points.length ||
+      typeof record.netPnl !== 'number' || !Number.isFinite(record.netPnl) ||
+      !integer(record.omittedUnattributedTrades) || !integer(record.excludedOtherModeTrades) ||
+      !integer(record.omittedInvalidPnlTrades)) return null;
+  return {
+    status: 'available',
+    mode: record.mode,
+    points,
+    tradeCount: record.tradeCount,
+    netPnl: record.netPnl,
+    omittedUnattributedTrades: record.omittedUnattributedTrades,
+    excludedOtherModeTrades: record.excludedOtherModeTrades,
+    omittedInvalidPnlTrades: record.omittedInvalidPnlTrades,
+  };
 }
 
 // Shape returned by server/ai-trader/monitor.ts parseOpenDecision() — a
@@ -386,11 +444,108 @@ function PreflightRow({ loading, available, needed, onOpenDeposit }: {
   );
 }
 
-function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTrial, goLiveLoading, restartLoading, preflight, onOpenDeposit }: {
+function PerformancePanel({ performance, scannerBot }: {
+  performance: PerformanceState;
+  scannerBot: boolean;
+}) {
+  if (performance.status === 'loading') return null;
+  if (performance.status === 'pending') {
+    return (
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground" data-testid="ai-trader-performance">
+        <p data-testid="ai-trader-performance-pending">
+          Performance starts after the next completed analysis establishes this qualification era.
+        </p>
+      </div>
+    );
+  }
+  if (performance.status === 'error') {
+    return (
+      <div className="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground" data-testid="ai-trader-performance">
+        <p data-testid="ai-trader-performance-error">Performance temporarily unavailable.</p>
+      </div>
+    );
+  }
+
+  const paper = performance.mode === 'paper_trial';
+  const title = paper
+    ? 'Current paper qualification-era performance'
+    : 'Current live qualification-era performance';
+  const pnlText = performance.netPnl === 0
+    ? '$0.00'
+    : `${performance.netPnl > 0 ? '+' : '-'}$${Math.abs(performance.netPnl).toFixed(2)}`;
+  const chartPoints = performance.tradeCount === 1
+    ? [{ t: 'start', v: 0 }, ...performance.points]
+    : performance.points;
+  const plural = (count: number, singular: string, multiple = `${singular}s`) =>
+    count === 1 ? singular : multiple;
+
+  return (
+    <div className="rounded-xl border border-border/60 bg-muted/20 p-3 space-y-2" data-testid="ai-trader-performance">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium">{title}</p>
+          <p className="text-[10px] text-muted-foreground">{performance.tradeCount} closed {plural(performance.tradeCount, 'trade')}</p>
+        </div>
+        <p
+          className={`text-sm font-semibold ${performance.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+          data-testid="ai-trader-performance-net-pnl"
+        >
+          {pnlText}
+        </p>
+      </div>
+
+      {performance.tradeCount > 0 ? (
+        <div className="h-36 w-full" data-testid="ai-trader-performance-chart">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={chartPoints} margin={{ top: 6, right: 6, bottom: 0, left: 0 }}>
+              <YAxis
+                width={46}
+                tick={{ fontSize: 10 }}
+                domain={([dataMin, dataMax]: [number, number]) => [Math.min(0, dataMin), Math.max(0, dataMax)]}
+              />
+              <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
+              <RechartsTooltip />
+              <Line
+                type="monotone"
+                dataKey="v"
+                stroke={performance.netPnl >= 0 ? '#34d399' : '#f87171'}
+                strokeWidth={2}
+                dot={performance.tradeCount === 1}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <div className="text-xs text-muted-foreground space-y-1" data-testid="ai-trader-performance-empty">
+          <p>{paper ? 'No closed paper trades in this qualification era yet.' : 'No closed live trades in this qualification era yet.'}</p>
+          {scannerBot && <p>Scanner market or timeframe changes start a new qualification era.</p>}
+        </div>
+      )}
+
+      {performance.omittedUnattributedTrades > 0 && (
+        <p className="text-[10px] text-amber-400/90">
+          {performance.omittedUnattributedTrades} {plural(performance.omittedUnattributedTrades, 'trade')} omitted because terminal paper/live attribution is unavailable.
+        </p>
+      )}
+      {performance.excludedOtherModeTrades > 0 && (
+        <p className="text-[10px] text-muted-foreground">
+          {performance.excludedOtherModeTrades} {paper ? 'live' : 'paper'} {plural(performance.excludedOtherModeTrades, 'trade')} excluded from this {paper ? 'paper' : 'live'} chart.
+        </p>
+      )}
+      {performance.omittedInvalidPnlTrades > 0 && (
+        <p className="text-[10px] text-amber-400/90">
+          {performance.omittedInvalidPnlTrades} {plural(performance.omittedInvalidPnlTrades, 'trade')} omitted because realized P&amp;L is invalid.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TrialStrip({ bot, tradesCount, netPnl, onGoLive, onRestartTrial, goLiveLoading, restartLoading, preflight, onOpenDeposit }: {
   bot: AiTraderBot;
   tradesCount: number;
   netPnl: number;
-  maxDdPct: number;
   onGoLive: () => void;
   onRestartTrial: () => void;
   goLiveLoading: boolean;
@@ -512,9 +667,8 @@ function TrialStrip({ bot, tradesCount, netPnl, maxDdPct, onGoLive, onRestartTri
   return (
     <div className="px-4 pt-3 pb-2.5 border-b border-border/50 space-y-1.5">
       <div className="flex items-center justify-between text-[11px]">
-        <span className="text-muted-foreground font-medium">
-          Day {daysElapsed}/{periodDays} · {tradesCount} trades · <span className={netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{pnlStr}</span>
-          {maxDdPct > 0 && <span className="text-muted-foreground"> · DD {maxDdPct.toFixed(1)}%</span>}
+        <span className="text-muted-foreground font-medium" data-testid="trial-strip-summary">
+          Loaded timeline · Day {daysElapsed}/{periodDays} · {tradesCount} closed trades · <span className={netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{pnlStr}</span>
         </span>
         <span className="text-muted-foreground">{overallPct}%</span>
       </div>
@@ -528,6 +682,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [activeTab, setActiveTab] = useState<string>('activity');
   const [detail, setDetail] = useState<BotDetailResponse | null>(null);
   const [history, setHistory] = useState<AiDecisionRow[]>([]);
+  const [performance, setPerformance] = useState<PerformanceState>({ status: 'loading' });
   const [loading, setLoading] = useState(false);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -600,6 +755,26 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     } catch { /* silent */ }
   }, [botId, walletAddress, filterMode]);
 
+  const fetchPerformance = useCallback(async () => {
+    if (!botId || !walletAddress) return;
+    try {
+      const res = await fetch(`/api/ai-trader/${botId}/performance`, {
+        credentials: 'include',
+        headers: walletAuthHeaders(),
+      });
+      if (!res.ok) {
+        setPerformance({ status: 'error' });
+        return;
+      }
+      const parsed = parsePerformanceResponse(await safeResponseJson(res));
+      setPerformance(parsed ?? { status: 'error' });
+    } catch {
+      // This callback contains its own failure so the shared Promise.all poll
+      // cannot suppress otherwise healthy detail/history/calibration refreshes.
+      setPerformance({ status: 'error' });
+    }
+  }, [botId, walletAddress]);
+
   const loadOlderHistory = useCallback(async () => {
     if (!historyCursor || !botId || !walletAddress) return;
     setLoadingOlder(true);
@@ -655,19 +830,21 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   useEffect(() => {
     if (!isOpen || !botId) return;
     setLoading(true);
-    Promise.all([fetchDetail(), fetchHistory(), fetchCalibration()]).finally(() => setLoading(false));
+    Promise.all([fetchDetail(), fetchHistory(), fetchCalibration(), fetchPerformance()]).finally(() => setLoading(false));
     const id = setInterval(() => {
       fetchDetail();
       fetchHistory();
       fetchCalibration();
+      fetchPerformance();
     }, 10_000);
     return () => clearInterval(id);
-  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration]);
+  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration, fetchPerformance]);
 
   useEffect(() => {
     if (!isOpen) {
       setDetail(null);
       setHistory([]);
+      setPerformance({ status: 'loading' });
       setCalibration(null);
       setActiveTab('activity');
       setFilterMode('all');
@@ -966,6 +1143,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     } finally {
       setClosePositionLoading(false);
       await Promise.allSettled([fetchDetail(), fetchHistory()]);
+      await Promise.allSettled([fetchPerformance()]);
       onBotUpdated();
     }
   };
@@ -1043,7 +1221,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7"
-                    onClick={() => { fetchDetail(); fetchHistory(); }}
+                    onClick={() => { fetchDetail(); fetchHistory(); fetchPerformance(); }}
                     data-testid="button-ai-trader-refresh"
                   >
                     <RefreshCw className="w-3 h-3" />
@@ -1057,7 +1235,6 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 bot={bot}
                 tradesCount={tradesCount}
                 netPnl={netPnl}
-                maxDdPct={maxDdPct}
                 onGoLive={handleGoLive}
                 onRestartTrial={handleRestartTrial}
                 goLiveLoading={actionLoading === 'go-live'}
@@ -1227,6 +1404,11 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     </div>
                   </div>
                 )}
+
+                <PerformancePanel
+                  performance={performance}
+                  scannerBot={bot.marketSource === 'scanner'}
+                />
 
                 {history.length === 0 && (
                   <div className="py-10 text-center text-sm text-muted-foreground" data-testid="activity-empty">
