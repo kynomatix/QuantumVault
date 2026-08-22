@@ -52,13 +52,13 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "accepted_candle_provenance": {
     "materialVersion": 1,
-    "decisionGeneration": 2,
+    "decisionGeneration": 3,
     "decision": "no_bump",
     "ownerPaths": ["server/lab/datafeed.ts", "server/lab/candle-store.ts", "server/ai-trader/context-builder.ts"]
   },
   "prompt_context_schema": {
-    "materialVersion": 2,
-    "decisionGeneration": 2,
+    "materialVersion": 3,
+    "decisionGeneration": 3,
     "decision": "bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts"]
   },
@@ -69,9 +69,9 @@ export const QUALIFICATION_ERA_REGISTRY = {
     "ownerPaths": ["server/ai-trader/session-context.ts"]
   },
   "guardrail_risk_policy": {
-    "materialVersion": 2,
-    "decisionGeneration": 5,
-    "decision": "no_bump",
+    "materialVersion": 3,
+    "decisionGeneration": 6,
+    "decision": "bump",
     "ownerPaths": ["server/ai-trader/guardrails.ts", "server/ai-trader/executor.ts", "server/ai-trader/routes.ts"]
   },
   "paper_execution_simulator": {

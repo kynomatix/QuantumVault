@@ -604,7 +604,7 @@ describe("runDecision — flat and guardrail rejection", () => {
   });
 });
 
-describe("admission fee-rate authority", () => {
+describe("fee context is non-admission", () => {
   it.each([
     ["missing", (c: any) => { delete c.contextDigest.feeRateQuote; }],
     ["unavailable", (c: any) => { c.contextDigest.feeRateQuote = { availability: "unavailable", reason: "capability_unavailable" }; }],
@@ -612,7 +612,7 @@ describe("admission fee-rate authority", () => {
     ["future", (c: any) => { c.contextDigest.feeRateQuote.observedAt = Date.now() + 60_000; }],
     ["malformed", (c: any) => { c.contextDigest.feeRateQuote.effectiveRate = Number.NaN; }],
     ["identity mismatch", (c: any) => { c.contextDigest.feeRateIdentity.subaccountId = "other"; }],
-  ])("refuses a long with %s retained fee authority before admission", async (_label, mutate) => {
+  ])("admits an otherwise-valid long with %s retained fee context", async (_label, mutate) => {
     const { runDecision } = await importDecide();
     const context = makeContext() as any;
     context.contextDigest = structuredClone(context.contextDigest);
@@ -623,15 +623,14 @@ describe("admission fee-rate authority", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.rejected).toBe(true);
-    expect(result.clamped).toBeNull();
-    expect(result.violations.map((v) => v.code)).toEqual(["fee_rate_unavailable"]);
+    expect(result.rejected).toBe(false);
+    expect(result.clamped?.action).toBe("long");
+    expect(result.violations.map((v) => v.code)).not.toContain("fee_rate_unavailable");
     expect(insertMock.mock.calls[0][0]).toMatchObject({
-      outcome: "rejected_guardrails",
-      clampedDecision: null,
+      outcome: null,
+      clampedDecision: expect.objectContaining({ action: "long" }),
       qualificationEraDigest: expect.stringMatching(/^[0-9A-F]{64}$/),
     });
-    expect(pnlMapMock).not.toHaveBeenCalled();
   });
 
   it("keeps flat available when the retained quote is explicitly unavailable", async () => {
@@ -655,7 +654,7 @@ describe("admission fee-rate authority", () => {
     expect(insertMock.mock.calls[0][0].outcome).toBe("flat");
   });
 
-  it("passes the exact retained effective rate to unchanged G4", async () => {
+  it("does not let an available fee create a G4 or after-fee G3 admission veto", async () => {
     const { runDecision } = await importDecide();
     callMock.mockResolvedValueOnce(toolResponse({
       ...VALID_LONG_ARGS,
@@ -667,8 +666,9 @@ describe("admission fee-rate authority", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const feeViolation = result.violations.find((v) => v.code === "tp_below_fee_floor");
-    expect(feeViolation?.message).toContain("1.120%");
+    expect(result.rejected).toBe(false);
+    expect(result.violations.map((v) => v.code)).not.toContain("tp_below_fee_floor");
+    expect(result.violations.map((v) => v.code)).not.toContain("rr_below_floor");
   });
 });
 

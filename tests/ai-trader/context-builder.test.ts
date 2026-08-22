@@ -513,7 +513,7 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).toContain("Mark/oracle premium: -0.0384%");
     expect(result.user).toContain("HL-vs-Pacifica funding spread:");
     expect(result.user).toContain("Funding rate (Pacifica — this is what your position actually pays):");
-    expect(result.user).toContain("Taker fee: 0.1400% per side, 0.2800% round-trip");
+    expect(result.user).toContain("Taker fee (accounting context only; not an entry gate): 0.1400% per side, 0.2800% round-trip");
     expect(adapter.getFeeRateQuote).toHaveBeenCalledTimes(1);
     expect(adapter.getFeeRateQuote).toHaveBeenCalledWith({
       account: AGENT_PUBKEY,
@@ -613,10 +613,10 @@ describe("buildMarketContext (WO-3)", () => {
       effectiveRate: 0.0014,
       observedAt: quoteObservedAt,
     });
-    expect(result.user).toContain("Taker fee: 0.1400% per side, 0.2800% round-trip");
+    expect(result.user).toContain("Taker fee (accounting context only; not an entry gate): 0.1400% per side, 0.2800% round-trip");
   });
 
-  it("retains an explicit nonnumeric unavailable fee result while keeping flat/close context available", async () => {
+  it("retains an explicit nonnumeric unavailable fee result while keeping entry eligible", async () => {
     const getFeeRateQuote = vi.fn().mockResolvedValue({
       availability: "unavailable",
       reason: "builder_rate_unknown",
@@ -634,9 +634,11 @@ describe("buildMarketContext (WO-3)", () => {
     });
 
     expect("stale" in result).toBe(false);
-    if ("stale" in result) throw new Error("expected unavailable fee authority to preserve non-entry decisions");
+    if ("stale" in result) throw new Error("expected unavailable fee context to preserve the decision cycle");
     expect(getFeeRateQuote).toHaveBeenCalledTimes(1);
     expect(result.user).toContain("Taker fee: unavailable this cycle (builder_rate_unknown)");
+    expect(result.user).toContain("Do not infer a replacement rate. Entry remains eligible; all non-fee guardrails still apply.");
+    expect(result.user).not.toContain("Entries must be refused");
     expect(result.user).not.toMatch(/Taker fee: unavailable[^\n]*\d+\.\d+%/);
     expect((result.contextDigest as any).feeRateQuote).toEqual({
       availability: "unavailable",

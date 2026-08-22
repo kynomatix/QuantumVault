@@ -105,7 +105,7 @@ export type ExecuteFailureReason =
   | "policy_hmac_mismatch" // G15: bot row fails HMAC — paused, nothing sent
   | "scanner_live_execution_disabled" // scanner-source live entry capability is off for this process
   | "insufficient_funding" // G11: free collateral below required margin
-  | "fee_rate_unavailable" // no fresh, identity-bound retained taker quote for this admission
+  | "execution_identity_changed" // wallet execution account changed across the live-entry TOCTOU seam
   | "journal_unavailable"  // required pre-broadcast evidence failed; no entry sent
   | "bot_busy"             // bot already holds (or may hold) a position — refuse to stack a second entry
   | "order_failed"         // entry order rejected/failed, no position confirmed
@@ -145,7 +145,7 @@ const NON_RACE_GUARD_REASONS = new Set<ExecuteFailureReason>([
   "bot_busy",
   "cooldown_active",
   "daily_cap_reached",
-  "fee_rate_unavailable",
+  "execution_identity_changed",
   "capability_missing",
   "auth_unavailable",
   "invalid_clamp",
@@ -329,9 +329,7 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   if (!g6.ok) return unwindRejectedInternalDecision(input, { ok: false, reason: g6.reason, detail: g6.detail });
 
   // Preserve the existing live bracket-capability refusal ahead of any wallet
-  // or fee-authority read. It is a structural property of the adapter and does
-  // not weaken the fee gate: a capable live adapter must still pass that gate
-  // below before setLeverage or placeMarketOrder.
+  // or retained fee-context read. It is a structural property of the adapter.
   if (
     !bot.paperMode &&
     (typeof input.adapter.setTpSl !== "function" || typeof input.adapter.getOpenStopOrders !== "function")
@@ -343,16 +341,28 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     });
   }
 
-  // Stored and pre-change proposals must not bypass the decision-time fee
-  // authority. Load the persisted row by decisionId and validate its retained
-  // quote against the exact bot execution identity before any paper fill,
-  // execution claim, leverage mutation, or venue order. This is deliberately
-  // not a required ExecuteDecisionInput field: every caller shares the same
-  // durable gate, and caller-supplied economics cannot override the ledger.
+  // Paper entries move no funds. Fee truth is retained on the decision for
+  // later accounting, but missing fee context never blocks the atomic paper
+  // entry. The close path records null fee/net-PnL when no truthful rate exists.
+  if (bot.paperMode) {
+    const result = await executePaperEntry(input, side);
+    return result.ok ? result : unwindRejectedInternalDecision(input, result);
+  }
+
+  // Live entries retain the quote only to recover an explicitly validated
+  // builder attach/suppress policy. If it is unavailable or invalid, suppress
+  // the optional builder attachment and continue; never fabricate a fee rate.
   const [persistedDecision, wallet] = await Promise.all([
     storage.getAiTraderDecision(decisionId),
     storage.getWallet(bot.walletAddress),
   ]);
+  if (typeof wallet?.agentPublicKey !== "string" || wallet.agentPublicKey.length === 0) {
+    return unwindRejectedInternalDecision(input, {
+      ok: false,
+      reason: "auth_unavailable",
+      detail: "wallet missing the execution account required for live entry",
+    });
+  }
   const digest = persistedDecision?.contextDigest as Record<string, unknown> | null | undefined;
   const retainedIdentity = digest?.feeRateIdentity as Record<string, unknown> | null | undefined;
   const expectedSubaccountId = bot.protocolSubaccountId ?? null;
@@ -360,7 +370,6 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     persistedDecision?.id === decisionId &&
     persistedDecision?.botId === bot.id &&
     retainedIdentity?.protocol === bot.protocol &&
-    typeof wallet?.agentPublicKey === "string" &&
     retainedIdentity?.account === wallet.agentPublicKey &&
     retainedIdentity?.subaccountId === expectedSubaccountId &&
     retainedIdentity?.liquidityRole === "taker";
@@ -376,13 +385,9 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
         { now: Date.now() },
       )
     : { availability: "unavailable" as const, reason: "identity_mismatch" as const };
-  if (feeRateQuote.availability !== "available") {
-    return unwindRejectedInternalDecision(input, {
-      ok: false,
-      reason: "fee_rate_unavailable",
-      detail: `Entry refused: persisted taker fee authority is unavailable (${feeRateQuote.reason}).`,
-    });
-  }
+  const builderAttachment: BuilderAttachmentPolicy = feeRateQuote.availability === "available"
+    ? builderAttachmentFromFeeQuote(feeRateQuote)
+    : { mode: "suppress" };
 
   const liveJournalObservedAt = persistedDecision?.decidedAt
     ? new Date(persistedDecision.decidedAt)
@@ -395,18 +400,14 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     });
   }
 
-  if (bot.paperMode) {
-    const result = await executePaperEntry(input, side);
-    return result.ok ? result : unwindRejectedInternalDecision(input, result);
-  }
   const result = await executeLiveEntry(input, side, {
     sizeBase: sizeBase as number,
     marginUsdc: marginUsdc as number,
     leverage: leverage as number,
     stopLossPrice: stopLossPrice as number,
     takeProfitPrice: takeProfitPrice as number,
-    feeRateAccount: feeRateQuote.account,
-    builderAttachment: builderAttachmentFromFeeQuote(feeRateQuote),
+    executionAccount: wallet.agentPublicKey,
+    builderAttachment,
     journalObservedAt: liveJournalObservedAt as Date,
     expectedAuthorityStatus,
   });
@@ -483,9 +484,9 @@ interface LiveEntryNumbers {
   leverage: number;
   stopLossPrice: number;
   takeProfitPrice: number;
-  /** Root venue account proven by the retained admission quote. */
-  feeRateAccount: string;
-  /** Exact attach/suppress policy retained by the validated admission quote. */
+  /** Root venue account captured before live mutation for the TOCTOU re-check. */
+  executionAccount: string;
+  /** Exact validated attach policy, or safe suppression when fee context is unavailable. */
   builderAttachment: BuilderAttachmentPolicy;
   /** Durable decision-time anchor used for every event in this entry attempt. */
   journalObservedAt: Date;
@@ -511,11 +512,11 @@ async function executeLiveEntry(
   if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
     return { ok: false, reason: "auth_unavailable", detail: "wallet missing V3 envelope or agent public key" };
   }
-  if (wallet.agentPublicKey !== n.feeRateAccount) {
+  if (wallet.agentPublicKey !== n.executionAccount) {
     return {
       ok: false,
-      reason: "fee_rate_unavailable",
-      detail: "Entry refused: execution account changed after retained fee-authority validation.",
+      reason: "execution_identity_changed",
+      detail: "Entry refused: execution account changed across the live-entry validation seam.",
     };
   }
   let umkResult = await getUmkForWebhook(bot.walletAddress);

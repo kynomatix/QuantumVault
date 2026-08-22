@@ -465,10 +465,14 @@ describe("executeDecision — entry-shape refusals", () => {
   });
 });
 
-describe("executeDecision — retained fee-rate admission authority", () => {
+describe("executeDecision — fee context is non-admission", () => {
   it.each([
-    ["missing decision", () => getAiTraderDecisionMock.mockResolvedValueOnce(undefined)],
     ["pre-change missing quote", () => getAiTraderDecisionMock.mockResolvedValueOnce(makePersistedDecision({ contextDigest: {} }))],
+    ["explicitly unavailable quote", () => {
+      const row = makePersistedDecision();
+      (row.contextDigest as any).feeRateQuote = { availability: "unavailable", reason: "capability_unavailable" };
+      getAiTraderDecisionMock.mockResolvedValueOnce(row);
+    }],
     ["stale quote", () => {
       const row = makePersistedDecision();
       (row.contextDigest as any).feeRateQuote.observedAt = NOW - 10 * 60_000 - 1;
@@ -489,7 +493,7 @@ describe("executeDecision — retained fee-rate admission authority", () => {
       (row.contextDigest as any).feeRateIdentity.subaccountId = "other-sub";
       getAiTraderDecisionMock.mockResolvedValueOnce(row);
     }],
-  ])("refuses %s before paper claim or venue mutation", async (_label, arrange) => {
+  ])("allows a paper entry with %s without wallet, adapter, or key access", async (_label, arrange) => {
     arrange();
     const adapter = makeAdapter();
     const { executeDecision } = await importExecutor();
@@ -503,14 +507,14 @@ describe("executeDecision — retained fee-rate admission authority", () => {
       markPrice: 150,
     });
 
-    expect(result).toMatchObject({ ok: false, reason: "fee_rate_unavailable" });
-    expect(claimExecutionMock).not.toHaveBeenCalled();
-    expect(updateDecisionMock).not.toHaveBeenCalledWith("d-1", expect.objectContaining({ outcome: "executed" }));
+    expect(result).toMatchObject({ ok: true, mode: "paper" });
+    expect(claimExecutionMock).toHaveBeenCalled();
+    expect(getWalletMock).not.toHaveBeenCalled();
     expect(adapter.setLeverage).not.toHaveBeenCalled();
     expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
   });
 
-  it("validates the durable quote without requiring a caller-supplied input field", async () => {
+  it("keeps a valid retained quote for later accounting without making it an executor input", async () => {
     const { executeDecision } = await importExecutor();
     const result = await executeDecision({
       authoritySource: "internal_cycle",
@@ -523,6 +527,7 @@ describe("executeDecision — retained fee-rate admission authority", () => {
 
     expect(result).toMatchObject({ ok: true, mode: "paper" });
     expect(getAiTraderDecisionMock).toHaveBeenCalledWith("d-1");
+    expect(getWalletMock).not.toHaveBeenCalled();
   });
 
   it("refuses live admission if the execution account changes after quote validation", async () => {
@@ -551,7 +556,7 @@ describe("executeDecision — retained fee-rate admission authority", () => {
       markPrice: 150,
     });
 
-    expect(result).toMatchObject({ ok: false, reason: "fee_rate_unavailable" });
+    expect(result).toMatchObject({ ok: false, reason: "execution_identity_changed" });
     expect(adapter.setLeverage).not.toHaveBeenCalled();
     expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
   });
@@ -666,7 +671,7 @@ describe("paper execution", () => {
     // never touch the venue or unwrap key material.
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
     expect((adapter.setTpSl as any)).not.toHaveBeenCalled();
-    expect(getWalletMock).toHaveBeenCalledWith("WALLET_X");
+    expect(getWalletMock).not.toHaveBeenCalled();
     expect(getUmkMock).not.toHaveBeenCalled();
     expect(verifyHmacMock).not.toHaveBeenCalled();
   });
@@ -741,7 +746,7 @@ describe("live execution — pre-flight", () => {
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
   });
 
-  it("fee authority fails closed when the wallet no longer exposes the bound venue account", async () => {
+  it("live auth fails closed when the wallet no longer exposes an execution account", async () => {
     getWalletMock.mockResolvedValue({ address: "WALLET_X", agentPublicKey: null, agentPrivateKeyEncryptedV3: null });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
@@ -752,7 +757,7 @@ describe("live execution — pre-flight", () => {
       adapter: makeAdapter(),
       markPrice: 150,
     });
-    expect(r).toMatchObject({ ok: false, reason: "fee_rate_unavailable" });
+    expect(r).toMatchObject({ ok: false, reason: "auth_unavailable" });
   });
 
   it("auth_unavailable when execution authorization (UMK) is off", async () => {
@@ -856,6 +861,37 @@ describe("live execution — pre-flight", () => {
 // --- Live path: happy path ---------------------------------------------------------
 
 describe("live execution — happy path", () => {
+  it("suppresses optional builder attachment and continues when retained fee context is unavailable", async () => {
+    armLiveAuth();
+    getAiTraderDecisionMock.mockImplementation(async (id: string) => {
+      const row = makePersistedDecision({ id });
+      (row.contextDigest as any).feeRateQuote = {
+        availability: "unavailable",
+        reason: "capability_unavailable",
+      };
+      return row;
+    });
+    const adapter = makeAdapter();
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-live-fee-unavailable",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toEqual({ ok: true, mode: "live", entryPrice: 150.2 });
+    expect(adapter.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+      builderAttachment: { mode: "suppress" },
+    }));
+    expect(adapter.setTpSl).toHaveBeenCalledWith(expect.objectContaining({
+      builderAttachment: { mode: "suppress" },
+    }));
+  });
+
   it("full flow in binding order; decision executed with venue fill price; bot open; keys cleaned up", async () => {
     armLiveAuth();
     updateBotMock.mockImplementation(async (_id: string, updates: Record<string, unknown>) => {

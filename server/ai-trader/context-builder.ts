@@ -744,10 +744,9 @@ export async function buildMarketContext(
   // COT-B: fetch COT snapshot and fundingRate concurrently — both are cached reads.
   // getCotSnapshot() is fail-open; the IIFE applies the omission threshold so
   // cotSnapshot is null whenever the line must be absent from the prompt.
-  // Admission fee authority: one fresh adapter read per built context. An
-  // unavailable result remains explicit and nonnumeric so the LLM can still
-  // choose flat/close; decide.ts independently refuses only risk-increasing
-  // actions that lack a valid retained quote.
+  // Fee accounting context: one fresh adapter read per built context. An
+  // unavailable result remains explicit and nonnumeric; fees are never an
+  // AI Trader admission input, so no fallback rate is needed or permitted.
   const feeRateIdentity = {
     protocol: bot.protocol,
     account: input.agentPublicKey,
@@ -780,8 +779,8 @@ export async function buildMarketContext(
     })(),
   ]);
   const feeRateLine = feeRateQuote.availability === "available"
-    ? `Taker fee: ${(feeRateQuote.effectiveRate * 100).toFixed(4)}% per side, ${(2 * feeRateQuote.effectiveRate * 100).toFixed(4)}% round-trip (source: ${feeRateQuote.provenance}). TP distance must clear this by a wide margin (guardrail G4 requires ≥ 4x).`
-    : `Taker fee: unavailable this cycle (${feeRateQuote.reason}). Entries must be refused; flat and close remain available.`;
+    ? `Taker fee (accounting context only; not an entry gate): ${(feeRateQuote.effectiveRate * 100).toFixed(4)}% per side, ${(2 * feeRateQuote.effectiveRate * 100).toFixed(4)}% round-trip (source: ${feeRateQuote.provenance}).`
+    : `Taker fee: unavailable this cycle (${feeRateQuote.reason}). Do not infer a replacement rate. Entry remains eligible; all non-fee guardrails still apply.`;
   // The ProtocolAdapter contract types nextFundingTime as a required number, but
   // the Pacifica adapter (server/protocol/pacifica/pacifica-adapter.ts) violates
   // it in two paths (fast-path market-cache read and its own catch fallback),
