@@ -157,6 +157,25 @@ describe("middleware — settle-once + aborted detection", () => {
 });
 
 describe("request-scoped subspan collector", () => {
+  it("pins the exact bounded subspan allowlist", () => {
+    expect([...REQUEST_TRACE_SUBSPAN_LABELS]).toEqual([
+      "botOwnedLoadMs",
+      "botDecisionReadMs",
+      "botVenueMarkMs",
+      "botLifetimeStatsMs",
+      "snapshotWaitMs",
+      "snapshotDbBotsMs",
+      "snapshotDbWalletMs",
+      "snapshotParkedHintMs",
+      "snapshotEnrichmentMs",
+      "snapshotVenueMs",
+      "snapshotCreator",
+      "snapshotCacheHit",
+      "snapshotInFlightJoin",
+      "snapshotCapacityUnavailable",
+    ]);
+  });
+
   it("records deterministic fields and derives unattributed time from top-level spans only", () => {
     const harness = __createRequestTraceCollectorForTests();
     harness.run(() => {
@@ -198,11 +217,58 @@ describe("request-scoped subspan collector", () => {
     expect(harness.snapshot()).toEqual({ snapshotWaitMs: 10 });
   });
 
-  it("caps formatter output through the pure seam", () => {
-    const fields = REQUEST_TRACE_SUBSPAN_LABELS.map((label) => [label, Number.MAX_SAFE_INTEGER] as const);
-    const formatted = __formatRequestTraceSubspansForTests(fields, Number.MAX_SAFE_INTEGER, 96);
-    expect(Buffer.byteLength(formatted, "utf8")).toBeLessThanOrEqual(96);
-    expect(formatted).toMatch(/^ botOwnedLoadMs=/);
+  it("fails open when the request-scoped recorder throws", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    const originalSet = Map.prototype.set;
+    const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (key, value) {
+      if (key === "botOwnedLoadMs") throw new Error("injected recorder failure");
+      return originalSet.call(this, key, value);
+    });
+    try {
+      expect(() => harness.run(() => recordRequestSubspan("botOwnedLoadMs", 7))).not.toThrow();
+      expect(harness.snapshot()).toEqual({});
+    } finally {
+      setSpy.mockRestore();
+    }
+  });
+
+  it("fails open when subspan formatting throws and preserves the trace line", () => {
+    const mw = captureMiddleware();
+    const res = fakeRes(500);
+    mw(fakeReq("/api/positions"), res, () => recordRequestSubspan("snapshotWaitMs", 8));
+
+    const originalByteLength = Buffer.byteLength;
+    const byteLengthSpy = vi.spyOn(Buffer, "byteLength").mockImplementation((value: any, encoding?: any) => {
+      if (String(value).includes("snapshotWaitMs=")) throw new Error("injected formatter failure");
+      return originalByteLength(value, encoding);
+    });
+    try {
+      res.writableFinished = true;
+      expect(() => res.emit("finish")).not.toThrow();
+    } finally {
+      byteLengthSpy.mockRestore();
+    }
+
+    expect(getInFlightTracedCount()).toBe(0);
+    const line = logSpy.mock.calls.map((call) => String(call[0])).find((value) => value.includes("[ReqTrace]"));
+    expect(line).toBeDefined();
+    expect(line).toContain(" 500 ");
+    expect(line).not.toContain("snapshotWaitMs=");
+  });
+
+  it("pins the production formatter cap at exactly 512 bytes", () => {
+    const fitsExactly = REQUEST_TRACE_SUBSPAN_LABELS.map((label, index) => [
+      label,
+      index === 0 ? 999_999_999_999_999 : Number.MAX_SAFE_INTEGER,
+    ] as const);
+    const exact = __formatRequestTraceSubspansForTests(fitsExactly, Number.MAX_SAFE_INTEGER);
+    expect(Buffer.byteLength(exact, "utf8")).toBe(512);
+    expect(exact).toContain(" unattributedMs=0");
+
+    const exceedsByOne = REQUEST_TRACE_SUBSPAN_LABELS.map((label) => [label, Number.MAX_SAFE_INTEGER] as const);
+    const capped = __formatRequestTraceSubspansForTests(exceedsByOne, Number.MAX_SAFE_INTEGER);
+    expect(Buffer.byteLength(capped, "utf8")).toBe(496);
+    expect(capped).not.toContain(" unattributedMs=");
   });
 
   it("keeps empty collectors byte-identical and isolates overlapping ALS contexts", async () => {
