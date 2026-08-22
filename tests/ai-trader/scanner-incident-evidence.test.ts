@@ -55,6 +55,50 @@ describe("scanner incident evidence", () => {
     expect(JSON.stringify(input)).not.toContain("rawPayload");
   });
 
+  it("retains the bounded scanner diagnostic context emitted by producers", () => {
+    const input = createScannerIncidentCaptureInput({
+      fingerprint: "diagnostic-context",
+      message: "Scanner partial sweep",
+      context: {
+        uptimeSec: 123,
+        boundaryTfs: ["4h", "15m", "4h", "invalid", "1d", "1h", "15m"],
+        venueClosed: 2,
+        skippedByTimeout: 3,
+        primaryCacheDegraded: 1,
+      },
+    });
+
+    expect(input.context).toEqual({
+      boundaryTfs: ["4h", "15m", "1d", "1h"],
+      primaryCacheDegraded: 1,
+      skippedByTimeout: 3,
+      uptimeSec: 123,
+      venueClosed: 2,
+    });
+  });
+
+  it("drops malformed and unlisted diagnostic lookalikes without widening context retention", () => {
+    const input = createScannerIncidentCaptureInput({
+      fingerprint: "malformed-diagnostic-context",
+      message: "Scanner partial sweep",
+      context: {
+        uptimeSec: "123",
+        venueClosed: false,
+        skippedByTimeout: Number.NaN,
+        primaryCacheDegraded: Number.POSITIVE_INFINITY,
+        boundaryTfs: "15m",
+        uptimeSecRaw: 123,
+        boundaryTimeframes: ["15m"],
+        account: "must-not-survive",
+        walletAddress: "must-not-survive",
+        apiToken: "must-not-survive",
+        nestedPayload: { boundaryTfs: ["15m"] },
+      },
+    });
+
+    expect(input.context).toEqual({});
+  });
+
   it("captures every accepted scanner call before ordinary fingerprint coalescing", async () => {
     recordCriticalError({
       category: "scanner",

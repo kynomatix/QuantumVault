@@ -7,6 +7,13 @@ export const SCANNER_INCIDENT_EXPORT_TIMEOUT_MS = 5_000;
 export const SCANNER_INCIDENT_HOLD_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{2,63}$/;
 
 const SAFE_SOURCES = new Set(["scanner-sweep", "datafeed"]);
+const NUMERIC_ONLY_CONTEXT_KEYS = new Set([
+  "primaryCacheDegraded",
+  "skippedByTimeout",
+  "uptimeSec",
+  "venueClosed",
+]);
+const SCANNER_BOUNDARY_TIMEFRAMES = new Set(["15m", "1h", "4h", "1d"]);
 const SAFE_CONTEXT_KEYS = new Set([
   "accountingValid",
   "abandoned",
@@ -23,11 +30,16 @@ const SAFE_CONTEXT_KEYS = new Set([
   "kind",
   "parentCacheDegraded",
   "pid",
+  "primaryCacheDegraded",
   "scanned",
+  "skippedByTimeout",
   "symbol",
   "timeframe",
   "timeoutSkipped",
   "unclassified",
+  "uptimeSec",
+  "venueClosed",
+  "boundaryTfs",
 ]);
 
 export interface ScannerIncidentCaptureInput {
@@ -105,6 +117,18 @@ export function sanitizeScannerIncidentContext(
   for (const key of Object.keys(context).sort()) {
     if (!SAFE_CONTEXT_KEYS.has(key)) continue;
     const value = context[key];
+    if (NUMERIC_ONLY_CONTEXT_KEYS.has(key)) {
+      if (typeof value === "number" && Number.isFinite(value)) sanitized[key] = value;
+      continue;
+    }
+    if (key === "boundaryTfs") {
+      if (!Array.isArray(value)) continue;
+      sanitized[key] = value
+        .filter((item): item is string => typeof item === "string" && SCANNER_BOUNDARY_TIMEFRAMES.has(item))
+        .filter((item, index, items) => items.indexOf(item) === index)
+        .slice(0, 4);
+      continue;
+    }
     if (typeof value === "boolean") {
       sanitized[key] = value;
     } else if (typeof value === "number" && Number.isFinite(value)) {
