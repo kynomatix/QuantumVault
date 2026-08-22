@@ -60,6 +60,9 @@ vi.mock('../../server/storage', () => ({
 }));
 
 import { storage } from '../../server/storage';
+import {
+  __createRequestTraceCollectorForTests,
+} from '../../server/request-trace';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -245,6 +248,80 @@ describe('in-flight deduplication', () => {
   });
 });
 
+describe('request-trace creator/joiner/cache attribution', () => {
+  it('records creator-only internal spans and subtracts snapshotWaitMs only', async () => {
+    initSnapshotModule(makeDeps());
+    const trace = __createRequestTraceCollectorForTests();
+    await trace.run(() => getWalletFinancialSnapshot(W));
+    const fields = trace.snapshot();
+    expect(fields).toMatchObject({
+      snapshotCreator: 1,
+      snapshotWaitMs: expect.any(Number),
+      snapshotDbBotsMs: expect.any(Number),
+      snapshotDbWalletMs: expect.any(Number),
+      snapshotParkedHintMs: expect.any(Number),
+      snapshotEnrichmentMs: expect.any(Number),
+      snapshotVenueMs: expect.any(Number),
+    });
+    const total = fields.snapshotWaitMs + 40;
+    expect(trace.settle(total)).toContain('unattributedMs=40');
+  });
+
+  it('labels both fresh cache-hit branches without starting another refresh', async () => {
+    initSnapshotModule(makeDeps());
+    await getWalletFinancialSnapshot(W);
+    const trace = __createRequestTraceCollectorForTests();
+    await trace.run(() => getWalletFinancialSnapshot(W));
+    expect(trace.snapshot()).toEqual({ snapshotCacheHit: 1, snapshotWaitMs: expect.any(Number) });
+    expect(storage.getTradingBots).toHaveBeenCalledTimes(1);
+
+    _resetForTest();
+    const partialDeps = makeDeps({ getAgentUsdcBalance: vi.fn().mockResolvedValue(null) });
+    initSnapshotModule(partialDeps);
+    await getWalletFinancialSnapshot('wallet-partial-cache');
+    const partialTrace = __createRequestTraceCollectorForTests();
+    const partial = await partialTrace.run(() => getWalletFinancialSnapshot('wallet-partial-cache'));
+    expect(partial.status).toBe('partial');
+    expect(partialTrace.snapshot()).toEqual({ snapshotCacheHit: 1, snapshotWaitMs: expect.any(Number) });
+  });
+
+  it('keeps joiner attribution separate from the creator work', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    (storage.getTradingBots as any).mockImplementation(() => gate.then(() => []));
+    initSnapshotModule(makeDeps());
+
+    const creator = __createRequestTraceCollectorForTests();
+    const joiner = __createRequestTraceCollectorForTests();
+    const creatorCall = creator.run(() => getWalletFinancialSnapshot(W));
+    await Promise.resolve();
+    const joinerCall = joiner.run(() => getWalletFinancialSnapshot(W));
+    release();
+    await Promise.all([creatorCall, joinerCall]);
+
+    expect(creator.snapshot()).toMatchObject({ snapshotCreator: 1, snapshotDbBotsMs: expect.any(Number) });
+    expect(joiner.snapshot()).toEqual({ snapshotInFlightJoin: 1, snapshotWaitMs: expect.any(Number) });
+  });
+
+  it('seals a caller-deadline trace before late creator spans settle', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    (storage.getTradingBots as any).mockReturnValue(new Promise<any[]>((resolve) => { release = () => resolve([]); }));
+    initSnapshotModule(makeDeps());
+    const trace = __createRequestTraceCollectorForTests();
+    const call = trace.run(() => getWalletFinancialSnapshot(W));
+    await vi.advanceTimersByTimeAsync(10_100);
+    expect((await call).status).toBe('unavailable');
+    expect(trace.snapshot()).toMatchObject({ snapshotCreator: 1, snapshotWaitMs: 10_000 });
+    const settled = trace.settle(10_100);
+    const beforeLateSettlement = trace.snapshot();
+    release();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    expect(trace.snapshot()).toEqual(beforeLateSettlement);
+    expect(settled).not.toContain('snapshotVenueMs');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 3. Freshness TTL, stale window, unavailable after expiry
 // ---------------------------------------------------------------------------
@@ -373,8 +450,13 @@ describe('LRU cache', () => {
     }
 
     // Adding a 101st wallet should fail-closed (all 100 entries in-flight)
-    const snapExtra = await getWalletFinancialSnapshot('wallet-extra');
+    const trace = __createRequestTraceCollectorForTests();
+    const snapExtra = await trace.run(() => getWalletFinancialSnapshot('wallet-extra'));
     expect(snapExtra.status).toBe('unavailable');
+    expect(trace.snapshot()).toMatchObject({
+      snapshotCapacityUnavailable: 1,
+      snapshotWaitMs: expect.any(Number),
+    });
 
     // Clean up
     releaseAll();

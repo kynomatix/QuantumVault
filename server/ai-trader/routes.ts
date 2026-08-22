@@ -68,6 +68,7 @@ import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
+import { recordRequestSubspan } from "../request-trace";
 import {
   AI_TRADER_PROPOSAL_EXPIRY_MS,
   evaluateAiTraderStateAuthority,
@@ -729,9 +730,13 @@ export function registerAiTraderRoutes(app: Express): void {
   // --- Detail -------------------------------------------------------------------------
   app.get("/api/ai-trader/:id", requireWallet, async (req: any, res) => {
     try {
+      const ownedLoadStartedAt = Date.now();
       const bot = await loadOwnedBot(req, res);
+      recordRequestSubspan("botOwnedLoadMs", Date.now() - ownedLoadStartedAt);
       if (!bot) return;
+      const decisionReadStartedAt = Date.now();
       const decisions = await storage.getAiTraderDecisions(bot.id, 10);
+      recordRequestSubspan("botDecisionReadMs", Date.now() - decisionReadStartedAt);
       const openPosition = parseOpenDecision(decisions);
 
       // Live mark price for the open-position PnL banner only — display-grade,
@@ -743,7 +748,9 @@ export function registerAiTraderRoutes(app: Express): void {
       if (openPosition) {
         try {
           const adapter = getAdapter(bot.protocol);
+          const venueMarkStartedAt = Date.now();
           markPrice = await adapter.getPrice(bot.market);
+          recordRequestSubspan("botVenueMarkMs", Date.now() - venueMarkStartedAt);
         } catch {
           markPrice = null;
         }
@@ -752,7 +759,9 @@ export function registerAiTraderRoutes(app: Express): void {
       // PnL block (WO-8g) + lifetime stats (WO-8h item 1).
       // Fetch lifetime stats once; they feed both the pnl block and the lifetimeStats field.
       let pnl: { unrealizedPnl: number; pnlPct: number; totalPnl: number } | null = null;
+      const lifetimeStatsStartedAt = Date.now();
       const rawStats = await storage.getAiTraderBotLifetimeStats([bot.id]);
+      recordRequestSubspan("botLifetimeStatsMs", Date.now() - lifetimeStatsStartedAt);
       const raw = rawStats.get(bot.id) ?? { totalRealized: 0, totalFees: 0, totalLlmCost: 0 };
 
       if (openPosition && markPrice !== null) {

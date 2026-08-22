@@ -19,6 +19,10 @@ import {
   registerRequestTrace,
   getInFlightTracedCount,
   __resetRequestTraceForTests,
+  __createRequestTraceCollectorForTests,
+  __formatRequestTraceSubspansForTests,
+  recordRequestSubspan,
+  REQUEST_TRACE_SUBSPAN_LABELS,
 } from "../../server/request-trace";
 
 type Handler = (req: unknown, res: unknown, next: () => void) => void;
@@ -149,5 +153,139 @@ describe("middleware — settle-once + aborted detection", () => {
     expect(line).toBeDefined();
     expect(line).not.toContain(wallet);
     expect(line).toMatch(/w=[0-9a-f]{8}/);
+  });
+});
+
+describe("request-scoped subspan collector", () => {
+  it("pins the exact bounded subspan allowlist", () => {
+    expect([...REQUEST_TRACE_SUBSPAN_LABELS]).toEqual([
+      "botOwnedLoadMs",
+      "botDecisionReadMs",
+      "botVenueMarkMs",
+      "botLifetimeStatsMs",
+      "snapshotWaitMs",
+      "snapshotDbBotsMs",
+      "snapshotDbWalletMs",
+      "snapshotParkedHintMs",
+      "snapshotEnrichmentMs",
+      "snapshotVenueMs",
+      "snapshotCreator",
+      "snapshotCacheHit",
+      "snapshotInFlightJoin",
+      "snapshotCapacityUnavailable",
+    ]);
+  });
+
+  it("records deterministic fields and derives unattributed time from top-level spans only", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    harness.run(() => {
+      recordRequestSubspan("snapshotDbBotsMs", 90);
+      recordRequestSubspan("snapshotWaitMs", 100);
+      recordRequestSubspan("snapshotVenueMs", 95);
+      recordRequestSubspan("snapshotCreator", 1);
+    });
+    expect(harness.snapshot()).toEqual({
+      snapshotDbBotsMs: 90,
+      snapshotWaitMs: 100,
+      snapshotVenueMs: 95,
+      snapshotCreator: 1,
+    });
+    expect(harness.settle(140)).toBe(
+      " snapshotWaitMs=100 snapshotDbBotsMs=90 snapshotVenueMs=95 snapshotCreator=1 unattributedMs=40",
+    );
+  });
+
+  it("rejects dynamic, nonfinite, negative, duplicate, and non-one flag values", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    harness.run(() => {
+      recordRequestSubspan("botOwnedLoadMs", 1.6);
+      recordRequestSubspan("botOwnedLoadMs", 99);
+      recordRequestSubspan("snapshotCreator", 0);
+      recordRequestSubspan("snapshotCreator", 1);
+      recordRequestSubspan("botDecisionReadMs", Number.NaN);
+      recordRequestSubspan("botVenueMarkMs", -1);
+      recordRequestSubspan("dynamicSecret" as never, 8);
+    });
+    expect(harness.snapshot()).toEqual({ botOwnedLoadMs: 2, snapshotCreator: 1 });
+  });
+
+  it("seals once and ignores late recorder calls", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    harness.run(() => recordRequestSubspan("snapshotWaitMs", 10));
+    expect(harness.settle(25)).toBe(" snapshotWaitMs=10 unattributedMs=15");
+    harness.run(() => recordRequestSubspan("snapshotVenueMs", 20));
+    expect(harness.snapshot()).toEqual({ snapshotWaitMs: 10 });
+  });
+
+  it("fails open when the request-scoped recorder throws", () => {
+    const harness = __createRequestTraceCollectorForTests();
+    const originalSet = Map.prototype.set;
+    const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key: unknown,
+      value: unknown,
+    ) {
+      if (key === "botOwnedLoadMs") throw new Error("injected recorder failure");
+      return originalSet.call(this, key, value);
+    });
+    try {
+      expect(() => harness.run(() => recordRequestSubspan("botOwnedLoadMs", 7))).not.toThrow();
+      expect(harness.snapshot()).toEqual({});
+    } finally {
+      setSpy.mockRestore();
+    }
+  });
+
+  it("fails open when subspan formatting throws and preserves the trace line", () => {
+    const mw = captureMiddleware();
+    const res = fakeRes(500);
+    mw(fakeReq("/api/positions"), res, () => recordRequestSubspan("snapshotWaitMs", 8));
+
+    const originalByteLength = Buffer.byteLength;
+    const byteLengthSpy = vi.spyOn(Buffer, "byteLength").mockImplementation((value: any, encoding?: any) => {
+      if (String(value).includes("snapshotWaitMs=")) throw new Error("injected formatter failure");
+      return originalByteLength(value, encoding);
+    });
+    try {
+      res.writableFinished = true;
+      expect(() => res.emit("finish")).not.toThrow();
+    } finally {
+      byteLengthSpy.mockRestore();
+    }
+
+    expect(getInFlightTracedCount()).toBe(0);
+    const line = logSpy.mock.calls
+      .map((call: readonly unknown[]) => String(call[0]))
+      .find((value: string) => value.includes("[ReqTrace]"));
+    expect(line).toBeDefined();
+    expect(line).toContain(" 500 ");
+    expect(line).not.toContain("snapshotWaitMs=");
+  });
+
+  it("pins the production formatter cap at exactly 512 bytes", () => {
+    const fitsExactly = REQUEST_TRACE_SUBSPAN_LABELS.map((label, index) => [
+      label,
+      index === 0 ? 999_999_999_999_999 : Number.MAX_SAFE_INTEGER,
+    ] as const);
+    const exact = __formatRequestTraceSubspansForTests(fitsExactly, Number.MAX_SAFE_INTEGER);
+    expect(Buffer.byteLength(exact, "utf8")).toBe(512);
+    expect(exact).toContain(" unattributedMs=0");
+
+    const exceedsByOne = REQUEST_TRACE_SUBSPAN_LABELS.map((label) => [label, Number.MAX_SAFE_INTEGER] as const);
+    const capped = __formatRequestTraceSubspansForTests(exceedsByOne, Number.MAX_SAFE_INTEGER);
+    expect(Buffer.byteLength(capped, "utf8")).toBe(496);
+    expect(capped).not.toContain(" unattributedMs=");
+  });
+
+  it("keeps empty collectors byte-identical and isolates overlapping ALS contexts", async () => {
+    expect(__createRequestTraceCollectorForTests().settle(50)).toBe("");
+    const first = __createRequestTraceCollectorForTests();
+    const second = __createRequestTraceCollectorForTests();
+    await Promise.all([
+      first.run(async () => { await Promise.resolve(); recordRequestSubspan("botOwnedLoadMs", 3); }),
+      second.run(async () => { await Promise.resolve(); recordRequestSubspan("snapshotWaitMs", 7); }),
+    ]);
+    expect(first.snapshot()).toEqual({ botOwnedLoadMs: 3 });
+    expect(second.snapshot()).toEqual({ snapshotWaitMs: 7 });
   });
 });

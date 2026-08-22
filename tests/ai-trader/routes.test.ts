@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 
 const getBotMock = vi.fn();
+const getAiTraderDecisionsMock = vi.fn();
+const getAiTraderBotLifetimeStatsMock = vi.fn();
 const updateBotMock = vi.fn();
 const getWalletLlmCiphertextMock = vi.fn();
 const getWalletMock = vi.fn();
@@ -14,6 +16,8 @@ const qualificationEraMutationPatchMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
+    getAiTraderDecisions: (...a: unknown[]) => getAiTraderDecisionsMock(...a),
+    getAiTraderBotLifetimeStats: (...a: unknown[]) => getAiTraderBotLifetimeStatsMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getWalletLlmCiphertextMock(...a),
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -93,6 +97,11 @@ vi.mock("../../server/ai-trader/monitor", () => ({
   nextCycleTimeframe: vi.fn(),
   SCANNER_CANDIDATE_MAX_AGE_MS: 20 * 60_000,
 }));
+const parseOpenDecisionMock = vi.fn();
+vi.mock("../../server/ai-trader/paper-position-authority", () => ({
+  parseOpenDecision: (...a: unknown[]) => parseOpenDecisionMock(...a),
+  computeUnrealizedPnl: vi.fn(() => null),
+}));
 vi.mock("../../server/ai-trader/graduation", () => ({
   sanitizeGraduationCriteria: vi.fn(),
   canGoLive: vi.fn(),
@@ -134,6 +143,7 @@ import {
   registerAiTraderRoutes,
   summarizeCandleProvenance,
 } from "../../server/ai-trader/routes";
+import { __createRequestTraceCollectorForTests } from "../../server/request-trace";
 
 describe("AI Trader chart provenance summary", () => {
   const row = (finality: "finalized" | "forming") => ({
@@ -768,6 +778,68 @@ function journalBot(walletAddress: string): AiTraderBot {
     status: "idle",
   } as unknown as AiTraderBot;
 }
+
+describe("AI Trader detail request subspan attribution", () => {
+  const requestFor = (walletAddress?: string) => ({
+    params: { id: "scanner-bot-route" },
+    query: {}, body: {}, headers: {},
+    session: walletAddress ? { walletAddress } : {},
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getAiTraderDecisionsMock.mockResolvedValue([]);
+    getAiTraderBotLifetimeStatsMock.mockResolvedValue(new Map([
+      ["scanner-bot-route", { totalRealized: 0, totalFees: 0, totalLlmCost: 0 }],
+    ]));
+    parseOpenDecisionMock.mockReturnValue(null);
+  });
+
+  it("auth rejection records no bot-detail fields", async () => {
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    const trace = __createRequestTraceCollectorForTests();
+    const response = await trace.run(() => invoke(built.routes, "GET /api/ai-trader/:id", requestFor()));
+    expect(response.statusCode).toBe(401);
+    expect(trace.snapshot()).toEqual({});
+  });
+
+  it("ownership rejection records only the owned-bot load", async () => {
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    getBotMock.mockResolvedValue({ ...scannerBot(), walletAddress: "another-wallet" });
+    const trace = __createRequestTraceCollectorForTests();
+    const response = await trace.run(() => invoke(built.routes, "GET /api/ai-trader/:id", requestFor("WALLET_ROUTE")));
+    expect(response.statusCode).toBe(404);
+    expect(Object.keys(trace.snapshot())).toEqual(["botOwnedLoadMs"]);
+  });
+
+  it("success without an open position records three non-venue fields", async () => {
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    getBotMock.mockResolvedValue(scannerBot());
+    const trace = __createRequestTraceCollectorForTests();
+    const response = await trace.run(() => invoke(built.routes, "GET /api/ai-trader/:id", requestFor("WALLET_ROUTE")));
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(trace.snapshot())).toEqual([
+      "botOwnedLoadMs", "botDecisionReadMs", "botLifetimeStatsMs",
+    ]);
+  });
+
+  it("success with an open position records all four fields", async () => {
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    getBotMock.mockResolvedValue(scannerBot());
+    parseOpenDecisionMock.mockReturnValue({ side: "long", entryPrice: "100", sizeBase: "1" });
+    getAdapterMock.mockReturnValue({ getPrice: vi.fn().mockResolvedValue(101) });
+    const trace = __createRequestTraceCollectorForTests();
+    const response = await trace.run(() => invoke(built.routes, "GET /api/ai-trader/:id", requestFor("WALLET_ROUTE")));
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(trace.snapshot())).toEqual([
+      "botOwnedLoadMs", "botDecisionReadMs", "botVenueMarkMs", "botLifetimeStatsMs",
+    ]);
+  });
+});
 
 describe("AI Trader execution journal route", () => {
   beforeEach(() => {

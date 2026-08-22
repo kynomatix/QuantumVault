@@ -37,6 +37,19 @@
 import { storage } from './storage';
 import type { BotListEnrichment } from './storage';
 import type { TradingBot } from '../shared/schema';
+import { recordRequestSubspan, type RequestTraceSubspanLabel } from './request-trace';
+
+async function timedSnapshotSubspan<T>(
+  label: RequestTraceSubspanLabel,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    return await operation();
+  } finally {
+    recordRequestSubspan(label, Date.now() - startedAt);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -589,8 +602,8 @@ async function _refresh(
   // Phase-2 venue/RPC calls via _waitAndRun.
   // -------------------------------------------------------------------------
   const [bots, wallet] = await Promise.all([
-    storage.getTradingBots(walletAddress),
-    storage.getWallet(walletAddress),
+    timedSnapshotSubspan('snapshotDbBotsMs', () => storage.getTradingBots(walletAddress)),
+    timedSnapshotSubspan('snapshotDbWalletMs', () => storage.getWallet(walletAddress)),
   ]);
 
   // -------------------------------------------------------------------------
@@ -606,7 +619,10 @@ async function _refresh(
   let parkedHintRows: any[] = [];
   if (Date.now() < deadlineAt) {
     try {
-      parkedHintRows = await storage.getVaultPositionsAllScopes(walletAddress);
+      parkedHintRows = await timedSnapshotSubspan(
+        'snapshotParkedHintMs',
+        () => storage.getVaultPositionsAllScopes(walletAddress),
+      );
     } catch {
       parkedHintSucceeded = false;
     }
@@ -625,8 +641,9 @@ async function _refresh(
   let enrichmentSucceeded = true;
   if (Date.now() < deadlineAt) {
     try {
-      enrichment = await storage.getTradingBotListEnrichment(
-        walletAddress, bots.map((b: any) => b.id),
+      enrichment = await timedSnapshotSubspan(
+        'snapshotEnrichmentMs',
+        () => storage.getTradingBotListEnrichment(walletAddress, bots.map((b: any) => b.id)),
       );
     } catch {
       enrichment = _emptyEnrichment();
@@ -709,6 +726,7 @@ async function _refresh(
   // are started when Phase-1 settled late. perBotFinancials stays empty and
   // is populated entirely by the defensive fill below (DB fallback).
   // -------------------------------------------------------------------------
+  const venueStartedAt = Date.now();
   if (Date.now() < deadlineAt) {
     const wrappers: Promise<void>[] = [];
 
@@ -888,6 +906,7 @@ async function _refresh(
     // Run all wrappers concurrently — they share the two-slot pool.
     await Promise.all(wrappers);
   } // end Phase-2 deadline guard
+  recordRequestSubspan('snapshotVenueMs', Date.now() - venueStartedAt);
 
   // Defensive fill: any bot not written by a wrapper (or Phase-2 skipped
   // entirely due to deadline) gets an appropriate fallback.
@@ -995,12 +1014,15 @@ function _emptyEnrichment(): BotListEnrichment {
 export async function getWalletFinancialSnapshot(
   walletAddress: string,
 ): Promise<WalletFinancialSnapshot> {
+  const callerStartedAt = Date.now();
   if (!_deps) throw new Error('[bot-financial-snapshot] Not initialized — call initSnapshotModule().');
   const deps = _deps;
 
   const entry = _getOrCreate(walletAddress);
   if (entry === null) {
     // Cache at capacity with all entries in-flight — fail closed.
+    recordRequestSubspan('snapshotCapacityUnavailable', 1);
+    recordRequestSubspan('snapshotWaitMs', Date.now() - callerStartedAt);
     return _unavailable();
   }
 
@@ -1008,6 +1030,8 @@ export async function getWalletFinancialSnapshot(
 
   // Fresh cache hit.
   if (entry.lastSuccess && now - entry.lastSuccess.observedAt < FRESH_TTL_MS) {
+    recordRequestSubspan('snapshotCacheHit', 1);
+    recordRequestSubspan('snapshotWaitMs', Date.now() - callerStartedAt);
     return _wrap(entry.lastSuccess);
   }
 
@@ -1015,6 +1039,8 @@ export async function getWalletFinancialSnapshot(
   // last partial result to avoid duplicate DB/RPC work within the window.
   // Does NOT affect lastSuccess (the stale-fallback anchor for the 60 s window).
   if (entry.lastPartial && now - entry.lastPartial.observedAt < FRESH_TTL_MS) {
+    recordRequestSubspan('snapshotCacheHit', 1);
+    recordRequestSubspan('snapshotWaitMs', Date.now() - callerStartedAt);
     return _wrap(entry.lastPartial);
   }
 
@@ -1045,10 +1071,16 @@ export async function getWalletFinancialSnapshot(
 
   // Join existing in-flight refresh.
   if (entry.inFlight !== null) {
-    return awaitWithCallerDeadline(entry.inFlight);
+    recordRequestSubspan('snapshotInFlightJoin', 1);
+    try {
+      return await awaitWithCallerDeadline(entry.inFlight);
+    } finally {
+      recordRequestSubspan('snapshotWaitMs', Date.now() - callerStartedAt);
+    }
   }
 
   // Start a new refresh.
+  recordRequestSubspan('snapshotCreator', 1);
   const inFlight = _refresh(entry, walletAddress, deps);
   entry.inFlight = inFlight;
 
@@ -1069,7 +1101,11 @@ export async function getWalletFinancialSnapshot(
     () => { entry.inFlight = null; },
   );
 
-  return awaitWithCallerDeadline(inFlight);
+  try {
+    return await awaitWithCallerDeadline(inFlight);
+  } finally {
+    recordRequestSubspan('snapshotWaitMs', Date.now() - callerStartedAt);
+  }
 }
 
 function _fallbackToStale(entry: CacheEntry, responseAt: number): WalletFinancialSnapshot {
