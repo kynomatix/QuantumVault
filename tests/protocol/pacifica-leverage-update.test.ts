@@ -86,6 +86,20 @@ function makeAdapter(events: EventLog = []) {
     throw new Error(`unexpected POST ${path}`);
   });
   adapter.post = post;
+  adapter.postRiskIncreasingMarketOrder = vi.fn(async (
+    path: string,
+    _body: unknown,
+    clientOrderId?: string,
+  ) => {
+    events.push(`POST ${path}`);
+    return {
+      success: true,
+      status: 'filled',
+      orderId: 'order-1',
+      clientOrderId,
+      landingDisposition: 'terminal',
+    };
+  });
   return { adapter: adapter as PacificaAdapter, post };
 }
 

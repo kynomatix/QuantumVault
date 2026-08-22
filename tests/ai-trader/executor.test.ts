@@ -1213,6 +1213,77 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(cleanupKey).toHaveBeenCalled();
   });
 
+  it("typed success-shaped acknowledgement quarantines before the normal success path with truthful wording", async () => {
+    armLiveAuth();
+    const getPositionsMock = vi.fn(async () => []);
+    const adapter = makeAdapter({
+      placeMarketOrder: vi.fn(async () => ({
+        success: true,
+        status: "acknowledged" as const,
+        landingDisposition: "unconfirmed" as const,
+        orderId: "pacifica-order-1",
+        error: "venue acknowledgement is nonterminal",
+      })),
+      getPositions: getPositionsMock,
+    });
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "position_unconfirmed" });
+    expect(getPositionsMock).not.toHaveBeenCalled();
+    expect((adapter.closePosition as any)).not.toHaveBeenCalled();
+    expect(commitDirectLiveEntryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "quarantined",
+      journalEvents: [expect.objectContaining({ failureCode: "venue_unconfirmed" })],
+    }));
+    expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({
+      type: "trade_failed",
+      error: expect.stringContaining("acknowledged by the venue but not terminally confirmed"),
+    }));
+  });
+
+  it("typed failure-shaped ambiguity quarantines without relying on the legacy token", async () => {
+    armLiveAuth();
+    const getPositionsMock = vi.fn(async () => []);
+    const adapter = makeAdapter({
+      placeMarketOrder: vi.fn(async () => ({
+        success: false,
+        status: "unknown" as const,
+        landingDisposition: "unconfirmed" as const,
+        error: "transport ended without terminal response",
+      })),
+      getPositions: getPositionsMock,
+    });
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-1",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "position_unconfirmed" });
+    expect(getPositionsMock).not.toHaveBeenCalled();
+    expect(commitDirectLiveEntryMock).toHaveBeenCalledWith(expect.objectContaining({
+      disposition: "quarantined",
+      journalEvents: [expect.objectContaining({ failureCode: "venue_unconfirmed" })],
+    }));
+    expect(notifyMock).toHaveBeenCalledWith("WALLET_X", expect.objectContaining({
+      error: expect.stringContaining("may have reached the venue"),
+    }));
+  });
+
   it("atomic quarantine conflict leaves executing, touches no venue, and emits exactly one failure alert", async () => {
     armLiveAuth();
     const { UNCONFIRMED_LANDING_VERDICT_TOKEN } = await import("../../server/protocol/tx-verdicts");
