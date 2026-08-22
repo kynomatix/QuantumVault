@@ -677,13 +677,19 @@ export async function appendRequiredEntryPrebroadcast(args: {
   side: "long" | "short";
   clientOrderId: string;
   sizeBase: number;
+  /** Fresh venue-authoritative execution price; required by the live executor. */
+  price?: number;
+  /** Timestamp captured immediately after that awaited venue-price read. */
+  observedAt?: Date;
 }): Promise<string> {
   const attemptId = entryAttemptId(args.decisionId);
   const base = journalBase(args.bot, args.decisionId);
   await appendExecutionEvents([
-    { ...base, attemptId, action: "entry", cause: "decision", eventType: "attempt_claimed", side: args.side },
+    { ...base, attemptId, action: "entry", cause: "decision", eventType: "attempt_claimed",
+      side: args.side, observedAt: args.observedAt },
     { ...base, attemptId, action: "entry", cause: "decision", eventType: "prebroadcast_authorized",
-      side: args.side, clientOrderId: args.clientOrderId, sizeBase: args.sizeBase },
+      side: args.side, clientOrderId: args.clientOrderId, sizeBase: args.sizeBase,
+      price: args.price, observedAt: args.observedAt },
   ]);
   return attemptId;
 }

@@ -40,20 +40,28 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
 
   it("required entry prebroadcast appends claim and authorization atomically", async () => {
     const decisionId = `decision-required-${RUN}`;
+    const observedAt = new Date("2026-08-23T00:00:00.000Z");
     await journal.appendRequiredEntryPrebroadcast({
       bot,
       decisionId,
       side: "long",
       clientOrderId: `client-${RUN}`,
       sizeBase: 1.25,
+      price: 150.75,
+      observedAt,
     });
     const rows = await dbModule.pool.query(
-      "SELECT event_type, phase FROM ai_trader_execution_events WHERE attempt_id=$1 ORDER BY phase",
+      "SELECT event_type, phase, price, observed_at FROM ai_trader_execution_events WHERE attempt_id=$1 ORDER BY phase",
       [`entry:${decisionId}`],
     );
-    expect(rows.rows).toEqual([
-      { event_type: "attempt_claimed", phase: 0 },
-      { event_type: "prebroadcast_authorized", phase: 10 },
+    expect(rows.rows.map((row) => ({
+      event_type: row.event_type,
+      phase: row.phase,
+      price: row.price === null ? null : Number(row.price),
+      observed_at: new Date(row.observed_at).toISOString(),
+    }))).toEqual([
+      { event_type: "attempt_claimed", phase: 0, price: null, observed_at: observedAt.toISOString() },
+      { event_type: "prebroadcast_authorized", phase: 10, price: 150.75, observed_at: observedAt.toISOString() },
     ]);
   });
 
