@@ -220,7 +220,11 @@ describe("request-scoped subspan collector", () => {
   it("fails open when the request-scoped recorder throws", () => {
     const harness = __createRequestTraceCollectorForTests();
     const originalSet = Map.prototype.set;
-    const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (key, value) {
+    const setSpy = vi.spyOn(Map.prototype, "set").mockImplementation(function (
+      this: Map<unknown, unknown>,
+      key: unknown,
+      value: unknown,
+    ) {
       if (key === "botOwnedLoadMs") throw new Error("injected recorder failure");
       return originalSet.call(this, key, value);
     });
@@ -250,7 +254,9 @@ describe("request-scoped subspan collector", () => {
     }
 
     expect(getInFlightTracedCount()).toBe(0);
-    const line = logSpy.mock.calls.map((call) => String(call[0])).find((value) => value.includes("[ReqTrace]"));
+    const line = logSpy.mock.calls
+      .map((call: readonly unknown[]) => String(call[0]))
+      .find((value: string) => value.includes("[ReqTrace]"));
     expect(line).toBeDefined();
     expect(line).toContain(" 500 ");
     expect(line).not.toContain("snapshotWaitMs=");
