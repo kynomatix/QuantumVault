@@ -1352,6 +1352,184 @@ const schemaMigrationSql = [
          END IF;
        END
        $qv$`,
+
+      // --- One-time ZEC/LINK close fee and PnL history repair. ---
+      // The three close rows were persisted before exact Pacifica close-fill
+      // accounting was available. Values below are sums of the venue-reported
+      // fee and net realized PnL fields for each exact order group; no price-
+      // movement PnL or fee is calculated here. The block fingerprints every
+      // target, repairs the rows and their derived bot stats atomically, and is
+      // a no-op only when all stored-scale values already match venue truth.
+      `DO $qv$
+       DECLARE
+         target_trade bot_trades%ROWTYPE;
+         target_owner RECORD;
+         canonical_stats RECORD;
+       BEGIN
+         -- Drain every concurrent bot_trades reader/writer before taking the
+         -- production fingerprints or rebuilding the derived owner counters.
+         LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = 'd1d024a2-05b2-4d4b-8648-2ee445534716'
+          FOR UPDATE;
+         IF NOT FOUND
+            OR target_trade.trading_bot_id IS DISTINCT FROM 'cbf14cd4-3243-4ac5-9c6f-e09d0da5f0a0'
+            OR target_trade.market IS DISTINCT FROM 'ZEC-PERP'
+            OR target_trade.side IS DISTINCT FROM 'CLOSE'
+            OR target_trade.size IS DISTINCT FROM 1.57000000
+            OR target_trade.price IS DISTINCT FROM 506.490000
+            OR target_trade.status IS DISTINCT FROM 'executed'
+            OR target_trade.protocol IS DISTINCT FROM 'pacifica'
+            OR target_trade.tx_signature IS DISTINCT FROM '11727250059'
+            OR target_trade.protocol_fill_id IS NOT NULL
+            OR target_trade.execution_method IS DISTINCT FROM 'legacy'
+            OR target_trade.executed_at IS DISTINCT FROM TIMESTAMP '2026-08-19 12:00:11.139238'
+            OR target_trade.error_message IS DISTINCT FROM 'WARNING: Signed close left residual position LONG 1.57'
+            OR md5(COALESCE(target_trade.webhook_payload::text, '')) <> 'f466634d722d4208e08c3fe37954d55d'
+         THEN
+           RAISE EXCEPTION 'ZEC/LINK close repair fingerprint mismatch: d1d024a2';
+         END IF;
+         IF target_trade.fee IS NULL AND target_trade.pnl IS NULL THEN
+           UPDATE bot_trades
+              SET fee = 1.113780,
+                  pnl = -1.215979
+            WHERE id = target_trade.id;
+         ELSIF target_trade.fee = 1.113780 AND target_trade.pnl = -1.22 THEN
+           NULL;
+         ELSE
+           RAISE EXCEPTION 'ZEC/LINK close repair stored values mismatch: d1d024a2';
+         END IF;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = 'e31fba28-bba3-4be1-85a0-b5b5c96d6825'
+          FOR UPDATE;
+         IF NOT FOUND
+            OR target_trade.trading_bot_id IS DISTINCT FROM 'e74e9c11-538b-4ed4-9872-d8157486b784'
+            OR target_trade.market IS DISTINCT FROM 'LINK-PERP'
+            OR target_trade.side IS DISTINCT FROM 'CLOSE'
+            OR target_trade.size IS DISTINCT FROM 12.20000000
+            OR target_trade.price IS DISTINCT FROM 11.473000
+            OR target_trade.status IS DISTINCT FROM 'executed'
+            OR target_trade.protocol IS DISTINCT FROM 'pacifica'
+            OR target_trade.tx_signature IS DISTINCT FROM '11823286221'
+            OR target_trade.protocol_fill_id IS DISTINCT FROM 'tx-11823286221'
+            OR target_trade.execution_method IS DISTINCT FROM 'legacy'
+            OR target_trade.executed_at IS DISTINCT FROM TIMESTAMP '2026-08-21 10:00:30.033300'
+            OR target_trade.error_message IS NOT NULL
+            OR md5(COALESCE(target_trade.webhook_payload::text, '')) <> '97858ab8541444ac14d1a7628f2bee86'
+         THEN
+           RAISE EXCEPTION 'ZEC/LINK close repair fingerprint mismatch: e31fba28';
+         END IF;
+         IF target_trade.fee IS NULL AND target_trade.pnl IS NULL THEN
+           UPDATE bot_trades
+              SET fee = 0.195549,
+                  pnl = -1.391149
+            WHERE id = target_trade.id;
+         ELSIF target_trade.fee = 0.195549 AND target_trade.pnl = -1.39 THEN
+           NULL;
+         ELSE
+           RAISE EXCEPTION 'ZEC/LINK close repair stored values mismatch: e31fba28';
+         END IF;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = 'b35049e2-44d2-4137-9259-6bbd1a7a75d0'
+          FOR UPDATE;
+         IF NOT FOUND
+            OR target_trade.trading_bot_id IS DISTINCT FROM 'cbf14cd4-3243-4ac5-9c6f-e09d0da5f0a0'
+            OR target_trade.market IS DISTINCT FROM 'ZEC-PERP'
+            OR target_trade.side IS DISTINCT FROM 'CLOSE'
+            OR target_trade.size IS DISTINCT FROM 1.72000000
+            OR target_trade.price IS DISTINCT FROM 793.250000
+            OR target_trade.status IS DISTINCT FROM 'executed'
+            OR target_trade.protocol IS DISTINCT FROM 'pacifica'
+            OR target_trade.tx_signature IS DISTINCT FROM '11872514945'
+            OR target_trade.protocol_fill_id IS DISTINCT FROM 'tx-11872514945'
+            OR target_trade.execution_method IS DISTINCT FROM 'legacy'
+            OR target_trade.executed_at IS DISTINCT FROM TIMESTAMP '2026-08-22 06:00:01.886714'
+            OR target_trade.error_message IS NOT NULL
+            OR md5(COALESCE(target_trade.webhook_payload::text, '')) <> 'e058df0387c8d213f3d36e51f52a92fd'
+         THEN
+           RAISE EXCEPTION 'ZEC/LINK close repair fingerprint mismatch: b35049e2';
+         END IF;
+         IF target_trade.fee IS NULL AND target_trade.pnl IS NULL THEN
+           UPDATE bot_trades
+              SET fee = 1.907666,
+                  pnl = 382.030534
+            WHERE id = target_trade.id;
+         ELSIF target_trade.fee = 1.907666 AND target_trade.pnl = 382.03 THEN
+           NULL;
+         ELSE
+           RAISE EXCEPTION 'ZEC/LINK close repair stored values mismatch: b35049e2';
+         END IF;
+
+         FOR target_owner IN
+           SELECT * FROM (VALUES
+             ('cbf14cd4-3243-4ac5-9c6f-e09d0da5f0a0'::text, 'ZEC 2H FLUX MOMENTUM'::text),
+             ('e74e9c11-538b-4ed4-9872-d8157486b784'::text, 'LINK 2H FLUX MOMENTUM'::text)
+           ) AS expected(id, name)
+         LOOP
+           PERFORM 1
+             FROM trading_bots
+            WHERE id = target_owner.id
+              AND name = target_owner.name
+            FOR UPDATE;
+           IF NOT FOUND THEN
+             RAISE EXCEPTION 'ZEC/LINK close repair owner fingerprint mismatch: %', target_owner.id;
+           END IF;
+
+           SELECT
+             COALESCE(SUM(bt.pnl::numeric), 0) AS total_pnl,
+             COUNT(*)::int AS total_trades,
+             COUNT(*) FILTER (WHERE bt.pnl::numeric > 0)::int AS winning_trades,
+             COUNT(*) FILTER (WHERE bt.pnl::numeric < 0)::int AS losing_trades,
+             MAX(bt.executed_at) AS last_trade_at
+             INTO canonical_stats
+             FROM bot_trades bt
+            WHERE bt.trading_bot_id = target_owner.id
+              AND bt.pnl IS NOT NULL
+              AND bt.status IN ('executed', 'liquidated', 'recovered')
+              AND NOT (
+                bt.tx_signature IS NULL
+                AND COALESCE(bt.fee, 0) = 0
+                AND EXISTS (
+                  SELECT 1 FROM bot_trades sibling
+                   WHERE sibling.trading_bot_id = bt.trading_bot_id
+                     AND sibling.market = bt.market
+                     AND sibling.id <> bt.id
+                     AND sibling.pnl IS NOT NULL
+                     AND sibling.status IN ('executed', 'liquidated', 'recovered')
+                     AND ABS(EXTRACT(EPOCH FROM (sibling.executed_at - bt.executed_at))) <= 120
+                     AND ABS(ABS(sibling.size) - ABS(bt.size)) <= 0.01 * ABS(bt.size)
+                     AND (sibling.tx_signature IS NOT NULL OR COALESCE(sibling.fee, 0) > 0)
+                )
+              );
+
+           UPDATE trading_bots
+              SET stats = COALESCE(stats, '{}'::jsonb) || jsonb_build_object(
+                    'totalPnl', canonical_stats.total_pnl,
+                    'totalTrades', canonical_stats.total_trades,
+                    'winningTrades', canonical_stats.winning_trades,
+                    'losingTrades', canonical_stats.losing_trades,
+                    'lastTradeAt', CASE
+                      WHEN canonical_stats.last_trade_at IS NULL THEN NULL
+                      ELSE to_char(canonical_stats.last_trade_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    END
+                  ),
+                  updated_at = NOW()
+            WHERE id = target_owner.id;
+           IF NOT FOUND THEN
+             RAISE EXCEPTION 'ZEC/LINK close repair stats update missed owner: %', target_owner.id;
+           END IF;
+         END LOOP;
+       END
+       $qv$`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -4484,6 +4662,20 @@ const schemaMigrationMetadata = [
         "kind": "data",
         "identity": "rogue-avax-close-491abec1-absent",
         "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM bot_trades WHERE id='491abec1-39c2-42c5-8963-e5f4fb644b3a') AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "177-repair-zec-link-close-fee-pnl",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "zec-link-close-fee-pnl-venue-truth",
+        "checkSql": "SELECT COUNT(*) = 3 AS ok FROM bot_trades WHERE (id='d1d024a2-05b2-4d4b-8648-2ee445534716' AND fee=1.113780 AND pnl=-1.22) OR (id='e31fba28-bba3-4be1-85a0-b5b5c96d6825' AND fee=0.195549 AND pnl=-1.39) OR (id='b35049e2-44d2-4137-9259-6bbd1a7a75d0' AND fee=1.907666 AND pnl=382.03)"
       }
     ],
     "operation": "backfill"

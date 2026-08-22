@@ -122,7 +122,7 @@ describe("schema readiness", () => {
     });
   });
 
-  it("retains all 177 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 178 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -155,25 +155,81 @@ describe("schema readiness", () => {
       requirements: unknown[];
       operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(177);
-    expect(metadata).toHaveLength(177);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(177);
+    expect(sqlEntries).toHaveLength(178);
+    expect(metadata).toHaveLength(178);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(178);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase())
-      .toBe("98CFAE929D0E22C18D73A13DFEDEEF59B116B8AA33173692FCD59DCF18560150");
+      .toBe("9C967DA0D6E32D4F117D80C4019FA256D36663EADB7DBABF926515317174B70D");
 
-    const correctionSql = sqlEntries.at(-1)!;
-    expect(metadata.at(-1)).toMatchObject({
+    const avaxCorrectionSql = sqlEntries.at(-2)!;
+    expect(metadata.at(-2)).toMatchObject({
       id: "176-scrub-rogue-avax-close",
       capabilities: ["signal_bot"],
       operation: "backfill",
     });
-    expect(correctionSql).toContain("491abec1-39c2-42c5-8963-e5f4fb644b3a");
-    expect(correctionSql).toContain("LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE");
-    expect(correctionSql).toContain("FOR UPDATE");
-    expect(correctionSql).toContain("DELETE FROM bot_trades");
-    expect(correctionSql).toContain("jsonb_build_object");
-    expect(correctionSql).toContain("rogue AVAX trade fingerprint mismatch");
+    expect(avaxCorrectionSql).toContain("491abec1-39c2-42c5-8963-e5f4fb644b3a");
+    expect(avaxCorrectionSql).toContain("LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE");
+    expect(avaxCorrectionSql).toContain("FOR UPDATE");
+    expect(avaxCorrectionSql).toContain("DELETE FROM bot_trades");
+    expect(avaxCorrectionSql).toContain("jsonb_build_object");
+    expect(avaxCorrectionSql).toContain("rogue AVAX trade fingerprint mismatch");
+
+    const venueTruthSql = sqlEntries.at(-1)!;
+    expect(metadata.at(-1)).toMatchObject({
+      id: "177-repair-zec-link-close-fee-pnl",
+      capabilities: ["signal_bot"],
+      operation: "backfill",
+      requirements: [{
+        kind: "data",
+        identity: "zec-link-close-fee-pnl-venue-truth",
+        checkSql: expect.stringContaining("fee=1.907666 AND pnl=382.03"),
+      }],
+    });
+    expect(venueTruthSql).toContain("LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE");
+    expect(venueTruthSql.match(/FOR UPDATE/g)).toHaveLength(4);
+    expect(venueTruthSql.match(/UPDATE bot_trades/g)).toHaveLength(3);
+    expect(venueTruthSql).toContain("jsonb_build_object");
+    expect(venueTruthSql).toContain("target_trade.protocol_fill_id IS NOT NULL");
+    expect(venueTruthSql.match(/target_trade.error_message IS NOT NULL/g)).toHaveLength(2);
+    expect(venueTruthSql).toContain("md5(COALESCE(target_trade.webhook_payload::text, ''))");
+
+    for (const identity of [
+      "d1d024a2-05b2-4d4b-8648-2ee445534716",
+      "e31fba28-bba3-4be1-85a0-b5b5c96d6825",
+      "b35049e2-44d2-4137-9259-6bbd1a7a75d0",
+      "cbf14cd4-3243-4ac5-9c6f-e09d0da5f0a0",
+      "e74e9c11-538b-4ed4-9872-d8157486b784",
+      "11727250059",
+      "11823286221",
+      "11872514945",
+    ]) {
+      expect(venueTruthSql).toContain(identity);
+    }
+
+    for (const venueLiteral of [
+      "fee = 1.113780",
+      "pnl = -1.215979",
+      "fee = 0.195549",
+      "pnl = -1.391149",
+      "fee = 1.907666",
+      "pnl = 382.030534",
+    ]) {
+      expect(venueTruthSql).toContain(venueLiteral);
+    }
+
+    for (const storedScaleNoOp of [
+      "target_trade.fee = 1.113780 AND target_trade.pnl = -1.22",
+      "target_trade.fee = 0.195549 AND target_trade.pnl = -1.39",
+      "target_trade.fee = 1.907666 AND target_trade.pnl = 382.03",
+    ]) {
+      expect(venueTruthSql).toContain(storedScaleNoOp);
+    }
+
+    expect(venueTruthSql.match(/close repair fingerprint mismatch:/g)).toHaveLength(3);
+    expect(venueTruthSql.match(/stored values mismatch:/g)).toHaveLength(3);
+    expect(venueTruthSql).toContain("owner fingerprint mismatch:");
+    expect(venueTruthSql).toContain("stats update missed owner:");
   });
 
   it("runs one memoized postcondition-only probe when the Lab child has no snapshot", async () => {
