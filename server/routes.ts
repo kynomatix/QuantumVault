@@ -31,7 +31,7 @@ import {
   type FeeAuthorizedMarketOrderResult,
   type ProtocolAdapter,
 } from './protocol/adapter';
-import { checkSignalBotLeverageAdmission } from './signal-bot-leverage-admission';
+import { checkSignalBotLeverageAdmission, SIGNAL_BOT_LEVERAGE_CAP_UNAVAILABLE } from './signal-bot-leverage-admission';
 import { parseAndValidateAdapterSubaccountId } from './protocol/persist-canonical-subaccount-id';
 import { resolveAgentKeypair } from './agent-wallet';
 import { FLASH_BOT_WALLET_SOL_SEED } from './protocol/flash/flash-constants';
@@ -1668,9 +1668,9 @@ import { getUserFungibleTokens, resolveTokenLogos } from "./swap/helius-tokens.j
 const SWAP_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const MAX_SWAP_SLIPPAGE_BPS = 500;
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
-import { getAllPerpMarkets, getAllPerpMarketsForExchange, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverage } from "./market-liquidity-service";
+import { getAllPerpMarkets, getAllPerpMarketsForExchange, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverageWithSource } from "./market-liquidity-service";
 import { evaluateNotionalFloor } from "./trade-sizing-math";
-import { getAllCachedLeverageLimits, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
+import { getAllCachedLeverageLimits, getAllCachedLeverageSources, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard, sendAutoTopUpNotification } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
@@ -1902,6 +1902,38 @@ interface TradeSizingResult {
   error?: string;
   pauseReason?: string;
   shouldPauseBot?: boolean;
+}
+
+type ExecutableMarketLeverage =
+  | { allowed: true; venueMaxLeverage: number }
+  | { allowed: false; error: string };
+
+function marketLeverageAuthorityError(market: string): string {
+  return `${SIGNAL_BOT_LEVERAGE_CAP_UNAVAILABLE}: venue-published leverage cap is unavailable or invalid for ${market}`;
+}
+
+function resolveExecutableMarketLeverage(
+  market: string,
+  adapter: ProtocolAdapter,
+): ExecutableMarketLeverage {
+  const reading = getMarketMaxLeverageWithSource(market);
+  const defaultProtocolName = getDefaultAdapter().protocolName;
+  if (
+    adapter.protocolName !== defaultProtocolName
+    || reading.maxLeverageSource !== 'venue'
+    || !Number.isFinite(reading.maxLeverage)
+    || reading.maxLeverage <= 0
+  ) {
+    return { allowed: false, error: marketLeverageAuthorityError(market) };
+  }
+  return { allowed: true, venueMaxLeverage: reading.maxLeverage };
+}
+
+export function computeRetryEffectiveLeverage(
+  configuredLeverage: number,
+  venueMaxLeverage: number,
+): number {
+  return Math.min(Number(configuredLeverage) || 10, venueMaxLeverage);
 }
 
 /**
@@ -3052,7 +3084,7 @@ async function runAutoTopUpScan(): Promise<void> {
   }
 }
 
-async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<TradeSizingResult> {
+export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<TradeSizingResult> {
   const {
     agentPublicKey,
     agentPrivateKeyEncrypted,
@@ -3072,14 +3104,28 @@ async function computeTradeSizingAndTopUp(params: TradeSizingParams): Promise<Tr
     vaultAllOut = true,
   } = params;
 
+  const leverageAuthority = resolveExecutableMarketLeverage(market, adapter);
+  if (!leverageAuthority.allowed) {
+    return {
+      success: false,
+      tradeAmountUsd: 0,
+      finalContractSize: 0,
+      freeCollateral: 0,
+      maxTradeableValue: 0,
+      effectiveLeverage: 0,
+      error: leverageAuthority.error,
+      shouldPauseBot: false,
+    };
+  }
+
   // Per-bot (independent_trader, e.g. Flash) vaults park into the bot's OWN
   // wallet and need the bot's signing key + a separate gas funder, so the
   // account-scope auto-unpark below is skipped for them (handled elsewhere).
   const isIndependentTrader = adapter.subaccountCaps?.accountModel === 'independent_trader';
 
-  // Calculate effective leverage (capped by market max)
+  // Calculate effective leverage (capped by an authoritative default-adapter venue maximum).
   const botLeverage = Math.max(1, leverage || 1);
-  const marketMaxLeverage = getMarketMaxLeverage(market);
+  const marketMaxLeverage = leverageAuthority.venueMaxLeverage;
   const effectiveLeverage = Math.min(botLeverage, marketMaxLeverage);
 
   if (botLeverage > marketMaxLeverage) {
@@ -21750,9 +21796,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   app.get("/api/exchange/leverage-limits", async (req, res) => {
     try {
       const leverageMap = getAllCachedLeverageLimits();
+      const leverageSourceMap = getAllCachedLeverageSources();
       const cacheStatus = getLeverageCacheStatus();
       res.json({
         leverageLimits: leverageMap,
+        // `source` below is cache origin; this sibling is per-market authority.
+        leverageLimitSources: leverageSourceMap,
         source: cacheStatus.source,
         lastUpdated: cacheStatus.lastUpdated,
         marketCount: cacheStatus.marketCount,
@@ -24146,8 +24195,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // SIMPLE FORMULA: deposit needed = target equity - current equity
       // Target equity = maxPositionSize / leverage (investment amount user set)
       const subAccountId = bot.driftSubaccountId ?? 0;
+      const retryAdapter = getAdapterForBot(bot);
+      const leverageAuthority = resolveExecutableMarketLeverage(market, retryAdapter);
+      if (!leverageAuthority.allowed) {
+        return res.status(503).json({ error: leverageAuthority.error });
+      }
       const baseCapital = parseFloat(bot.maxPositionSize?.toString() || '0'); // This is leveraged position size
-      const effectiveLeverage = Math.min(Number(bot.leverage) || 10, getMarketMaxLeverage(market) || 10);
+      const effectiveLeverage = computeRetryEffectiveLeverage(Number(bot.leverage), leverageAuthority.venueMaxLeverage);
       const targetEquity = baseCapital / effectiveLeverage; // The investment amount user wants
       
       const retryBotCtxForTopUp = getBotSubaccountContext(bot);
