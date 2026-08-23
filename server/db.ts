@@ -1575,6 +1575,113 @@ const schemaMigrationSql = [
          END IF;
        END
        $qv$`,
+      // --- Pin bot_trades.pnl convention and classify historical evidence. ---
+      // Money values are never rewritten. Historical full-close reconciler
+      // rows are classified from durable provenance; every reader can then
+      // normalize exactly once. Derived trading_bots stats are rebuilt from
+      // the canonical net value in the same transaction.
+      `DO $qv$
+       BEGIN
+         LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE;
+
+         ALTER TABLE bot_trades
+           ADD COLUMN IF NOT EXISTS pnl_convention text,
+           ADD COLUMN IF NOT EXISTS fee_truth_status text;
+
+         UPDATE bot_trades
+            SET pnl_convention = CASE
+                  WHEN execution_method = 'on-chain-detected'
+                   AND webhook_payload->>'reconciled' = 'true'
+                   AND webhook_payload->>'closeReason' IN ('external_close', 'tpsl', 'liquidation')
+                  THEN 'gross_before_close_fee'
+                  ELSE 'net_of_close_fee'
+                END,
+                fee_truth_status = CASE
+                  WHEN id IN (
+                    'd1d024a2-05b2-4d4b-8648-2ee445534716',
+                    'e31fba28-bba3-4be1-85a0-b5b5c96d6825',
+                    'b35049e2-44d2-4137-9259-6bbd1a7a75d0'
+                  )
+                  THEN 'venue_exact_repaired'
+                  ELSE 'legacy_unverified'
+                END
+          WHERE pnl_convention IS NULL
+             OR fee_truth_status IS NULL;
+
+         ALTER TABLE bot_trades
+           ALTER COLUMN pnl_convention SET DEFAULT 'net_of_close_fee',
+           ALTER COLUMN pnl_convention SET NOT NULL,
+           ALTER COLUMN fee_truth_status SET DEFAULT 'current_pipeline',
+           ALTER COLUMN fee_truth_status SET NOT NULL;
+
+         IF NOT EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'bot_trades_pnl_convention_check'
+              AND conrelid = 'bot_trades'::regclass
+         ) THEN
+           ALTER TABLE bot_trades ADD CONSTRAINT bot_trades_pnl_convention_check
+             CHECK (pnl_convention IN ('net_of_close_fee', 'gross_before_close_fee'));
+         END IF;
+
+         IF NOT EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'bot_trades_fee_truth_status_check'
+              AND conrelid = 'bot_trades'::regclass
+         ) THEN
+           ALTER TABLE bot_trades ADD CONSTRAINT bot_trades_fee_truth_status_check
+             CHECK (fee_truth_status IN ('legacy_unverified', 'venue_exact_repaired', 'current_pipeline'));
+         END IF;
+
+         WITH canonical_rows AS (
+           SELECT bt.trading_bot_id,
+                  CASE
+                    WHEN bt.pnl_convention = 'net_of_close_fee'
+                    THEN bt.pnl::numeric
+                    WHEN bt.pnl_convention = 'gross_before_close_fee' AND bt.fee IS NOT NULL
+                    THEN bt.pnl::numeric - bt.fee::numeric
+                    ELSE NULL
+                  END AS net_pnl
+             FROM bot_trades bt
+            WHERE bt.pnl IS NOT NULL
+              AND bt.status IN ('executed', 'liquidated', 'recovered')
+              AND NOT (
+                bt.tx_signature IS NULL
+                AND COALESCE(bt.fee, 0) = 0
+                AND EXISTS (
+                  SELECT 1 FROM bot_trades sibling
+                   WHERE sibling.trading_bot_id = bt.trading_bot_id
+                     AND sibling.market = bt.market
+                     AND sibling.id <> bt.id
+                     AND sibling.pnl IS NOT NULL
+                     AND sibling.status IN ('executed', 'liquidated', 'recovered')
+                     AND ABS(EXTRACT(EPOCH FROM (sibling.executed_at - bt.executed_at))) <= 120
+                     AND ABS(ABS(sibling.size) - ABS(bt.size)) <= 0.01 * ABS(bt.size)
+                     AND (sibling.tx_signature IS NOT NULL OR COALESCE(sibling.fee, 0) > 0)
+                )
+              )
+         ),
+         canonical_stats AS (
+           SELECT bot.id,
+                  COALESCE(SUM(rows.net_pnl), 0) AS total_pnl,
+                  COUNT(rows.net_pnl)::int AS total_trades,
+                  COUNT(rows.net_pnl) FILTER (WHERE rows.net_pnl > 0)::int AS winning_trades,
+                  COUNT(rows.net_pnl) FILTER (WHERE rows.net_pnl < 0)::int AS losing_trades
+             FROM trading_bots bot
+             LEFT JOIN canonical_rows rows ON rows.trading_bot_id = bot.id
+            GROUP BY bot.id
+         )
+         UPDATE trading_bots bot
+            SET stats = COALESCE(bot.stats, '{}'::jsonb) || jsonb_build_object(
+                  'totalPnl', canonical_stats.total_pnl,
+                  'totalTrades', canonical_stats.total_trades,
+                  'winningTrades', canonical_stats.winning_trades,
+                  'losingTrades', canonical_stats.losing_trades
+                ),
+                updated_at = NOW()
+           FROM canonical_stats
+          WHERE bot.id = canonical_stats.id;
+       END
+       $qv$`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -4768,6 +4875,47 @@ const schemaMigrationMetadata = [
       }
     ],
     "operation": "ddl"
+  },
+  {
+    "id": "179-pin-bot-trades-pnl-convention",
+    "capabilities": [
+      "signal_bot",
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "bot_trades",
+        "column": "pnl_convention"
+      },
+      {
+        "kind": "column",
+        "table": "bot_trades",
+        "column": "fee_truth_status"
+      },
+      {
+        "kind": "constraint",
+        "table": "bot_trades",
+        "constraint": "bot_trades_pnl_convention_check",
+        "definitionIncludes": [
+          "pnl_convention IN ('net_of_close_fee', 'gross_before_close_fee')"
+        ]
+      },
+      {
+        "kind": "constraint",
+        "table": "bot_trades",
+        "constraint": "bot_trades_fee_truth_status_check",
+        "definitionIncludes": [
+          "fee_truth_status IN ('legacy_unverified', 'venue_exact_repaired', 'current_pipeline')"
+        ]
+      },
+      {
+        "kind": "data",
+        "identity": "bot-trades-pnl-convention-classified",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM bot_trades WHERE pnl_convention IS NULL OR pnl_convention NOT IN ('net_of_close_fee','gross_before_close_fee') OR fee_truth_status IS NULL OR fee_truth_status NOT IN ('legacy_unverified','venue_exact_repaired','current_pipeline')) AND COUNT(*) FILTER (WHERE id IN ('d1d024a2-05b2-4d4b-8648-2ee445534716','e31fba28-bba3-4be1-85a0-b5b5c96d6825','b35049e2-44d2-4137-9259-6bbd1a7a75d0') AND fee_truth_status='venue_exact_repaired') = COUNT(*) FILTER (WHERE id IN ('d1d024a2-05b2-4d4b-8648-2ee445534716','e31fba28-bba3-4be1-85a0-b5b5c96d6825','b35049e2-44d2-4137-9259-6bbd1a7a75d0')) AS ok FROM bot_trades"
+      }
+    ],
+    "operation": "backfill"
   }
 ] as const;
 

@@ -334,6 +334,8 @@ export const botTrades = pgTable("bot_trades", {
   price: decimal("price", { precision: 20, scale: 6 }).notNull(),
   fee: decimal("fee", { precision: 20, scale: 6 }).default("0"),
   pnl: decimal("pnl", { precision: 20, scale: 2 }),
+  pnlConvention: text("pnl_convention").notNull().default("net_of_close_fee"),
+  feeTruthStatus: text("fee_truth_status").notNull().default("current_pipeline"),
   status: text("status").notNull().default("pending"), // pending, executed, failed, recovered, liquidated
   txSignature: text("tx_signature"),
   webhookPayload: jsonb("webhook_payload"),
@@ -363,6 +365,14 @@ export const botTrades = pgTable("bot_trades", {
   index("idx_bot_trades_protocol_client_order").on(table.protocol, table.clientOrderId),
   index("idx_bot_trades_protocol_order_id").on(table.protocolOrderId),
   index("idx_bot_trades_protocol_status").on(table.protocolStatus),
+  check(
+    "bot_trades_pnl_convention_check",
+    sql`${table.pnlConvention} IN ('net_of_close_fee', 'gross_before_close_fee')`,
+  ),
+  check(
+    "bot_trades_fee_truth_status_check",
+    sql`${table.feeTruthStatus} IN ('legacy_unverified', 'venue_exact_repaired', 'current_pipeline')`,
+  ),
 ]));
 
 export const insertBotTradeSchema = createInsertSchema(botTrades).omit({

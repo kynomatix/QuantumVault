@@ -1071,7 +1071,8 @@ export async function reconcileBotPosition(
             return { synced: true, discrepancy: true };
           }
 
-          const closePnl = closeDetection.pnl ?? 0;
+          const closeFee = closeDetection.fee ?? 0;
+          const closePnl = (closeDetection.pnl ?? 0) - closeFee;
           const closeFillPrice = closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice);
           const closeNotional = closeFillPrice * Math.abs(dbBaseSize);
           const dedupKey = canonicalReconcilerFullCloseId({
@@ -1097,8 +1098,10 @@ export async function reconcileBotPosition(
               fields: {
                 status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
                 price: String(closeFillPrice),
-                fee: String(closeDetection.fee ?? 0),
+                fee: String(closeFee),
                 pnl: String(closePnl),
+                pnlConvention: 'net_of_close_fee',
+                feeTruthStatus: 'current_pipeline',
                 protocolFillId: dedupKey,
                 webhookPayload: {
                   ...existingPayload,
@@ -1120,7 +1123,7 @@ export async function reconcileBotPosition(
               walletAddress,
               market,
               realizedPnlDelta: closePnl,
-              feeDelta: closeDetection.fee ?? 0,
+              feeDelta: closeFee,
             },
           });
           console.log(
@@ -1216,7 +1219,8 @@ export async function reconcileBotPosition(
         // venue-resync paths both preserve lastTradeId, so one continuously
         // open economic position cannot mint a second close identity after a
         // false flatten/reopen cycle.
-        const closePnl = closeDetection.pnl ?? 0;
+        const closeFee = closeDetection.fee ?? 0;
+        const closePnl = (closeDetection.pnl ?? 0) - closeFee;
         const closeFillPrice = closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice);
         const closeNotional = closeFillPrice * Math.abs(dbBaseSize);
         const dedupKey = canonicalReconcilerFullCloseId({
@@ -1249,9 +1253,11 @@ export async function reconcileBotPosition(
             side: dbBaseSize > 0 ? 'short' : 'long',
             size: String(Math.abs(dbBaseSize)),
             price: String(closeFillPrice),
-            fee: String(closeDetection.fee ?? 0),
+            fee: String(closeFee),
             // Canonical close: realized PnL is required (breakeven uses '0', never null).
             pnl: String(closePnl),
+            pnlConvention: 'net_of_close_fee',
+            feeTruthStatus: 'current_pipeline',
             status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
             protocolFillId: dedupKey,
             webhookPayload: {
@@ -1306,7 +1312,7 @@ export async function reconcileBotPosition(
           avgEntryPrice: dbPosition!.avgEntryPrice,
           costBasis: "0",
           realizedPnl: String(parseFloat(dbPosition!.realizedPnl || "0") + closePnl),
-          totalFees: String(parseFloat(dbPosition!.totalFees || "0") + (closeDetection.fee ?? 0)),
+          totalFees: String(parseFloat(dbPosition!.totalFees || "0") + closeFee),
           lastTradeId: dbPosition!.lastTradeId,
           lastTradeAt: new Date(),
         });

@@ -14,6 +14,7 @@ import { Keypair } from "@solana/web3.js";
 import { SERVER_BOOT_ID } from "./boot-id";
 import { appendTelemetry } from "./telemetry";
 import { storage, DatabaseStorage } from "./storage";
+import { resolveBotTradeNetPnl } from "./trading/bot-trade-pnl-convention";
 import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
 import { normalizeScannerIncidentHoldId } from "./ai-trader/scanner-incident-evidence";
@@ -18226,6 +18227,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const allTrades = await storage.getWalletBotTrades(req.walletAddress!, 10000);
       const executed = allTrades.filter(t => {
         if (t.status !== "executed" || t.pnl === null || !t.executedAt) return false;
+        if (resolveBotTradeNetPnl(t) === null) return false;
+
         if (sinceDate && new Date(t.executedAt) < sinceDate) return false;
         return true;
       });
@@ -18245,7 +18248,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const dailyPnl: Record<string, number> = {};
         for (const t of botTradeList) {
           const day = new Date(t.executedAt!).toISOString().slice(0, 10);
-          const net = parseFloat(t.pnl as string || "0") - parseFloat(t.fee as string || "0");
+          const net = resolveBotTradeNetPnl(t);
+          if (net === null) continue;
           dailyPnl[day] = (dailyPnl[day] ?? 0) + net;
         }
         const returns = Object.values(dailyPnl);
@@ -18280,7 +18284,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const sparkline: { t: string; v: number }[] = [];
 
         for (const t of botTradeList) {
-          const net = parseFloat(t.pnl as string || "0") - parseFloat(t.fee as string || "0");
+          const net = resolveBotTradeNetPnl(t);
+          if (net === null) continue;
           cumPnl += net;
           sparkline.push({ t: new Date(t.executedAt!).toISOString().slice(0, 10), v: Math.round(cumPnl * 100) / 100 });
           if (net > 0) wins++;
@@ -18311,7 +18316,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // numbers stay comparable across markets.
       const marketPnl: Record<string, { pnl: number; count: number; wins: number }> = {};
       for (const trade of executed) {
-        const net = parseFloat(trade.pnl as string || "0") - parseFloat(trade.fee as string || "0");
+        const net = resolveBotTradeNetPnl(trade);
+        if (net === null) continue;
         const market = trade.market || "Unknown";
         if (!marketPnl[market]) marketPnl[market] = { pnl: 0, count: 0, wins: 0 };
         marketPnl[market].pnl += net;

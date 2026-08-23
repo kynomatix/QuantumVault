@@ -11,6 +11,7 @@ import {
 } from "./ai-trader/scanner-incident-evidence";
 import Decimal from "decimal.js";
 import { buildConfirmedFlatPosition } from "./trading/signal-bot-close-integrity";
+import { resolveBotTradeNetPnl } from "./trading/bot-trade-pnl-convention";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
 import {
   assessResetBlockerRows,
@@ -2250,25 +2251,29 @@ export class DatabaseStorage implements IStorage {
   /**
    * Canonical "trade" definition: one closed-position lifecycle event with a
    * realized PnL recorded (breakeven uses '0', never NULL). Opens never count.
-   * SQL-derived single source of truth for stats counters.
+   * Unavailable convention/fee evidence is omitted rather than coerced to zero.
    */
   async getCanonicalBotTradeStats(tradingBotId: string): Promise<{ totalTrades: number; winningTrades: number; losingTrades: number }> {
-    const result = await db.execute(sql`
-      SELECT
-        COUNT(*)::int AS "totalTrades",
-        SUM(CASE WHEN ${botTrades.pnl}::numeric > 0 THEN 1 ELSE 0 END)::int AS "winningTrades",
-        SUM(CASE WHEN ${botTrades.pnl}::numeric < 0 THEN 1 ELSE 0 END)::int AS "losingTrades"
-      FROM ${botTrades}
-      WHERE ${botTrades.tradingBotId} = ${tradingBotId}
-        AND ${botTrades.pnl} IS NOT NULL
-        AND ${botTrades.status} IN ('executed','liquidated','recovered')
-        AND ${notPhantomDupClose()}
-    `);
-    const row: any = (result as any).rows?.[0] ?? (result as any)[0] ?? {};
+    const rows = await db
+      .select({
+        pnl: botTrades.pnl,
+        fee: botTrades.fee,
+        pnlConvention: botTrades.pnlConvention,
+      })
+      .from(botTrades)
+      .where(and(
+        eq(botTrades.tradingBotId, tradingBotId),
+        sql`${botTrades.pnl} IS NOT NULL`,
+        sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
+        notPhantomDupClose(),
+      ));
+    const canonical = rows
+      .map(resolveBotTradeNetPnl)
+      .filter((value): value is number => value !== null);
     return {
-      totalTrades: Number(row.totalTrades ?? 0),
-      winningTrades: Number(row.winningTrades ?? 0),
-      losingTrades: Number(row.losingTrades ?? 0),
+      totalTrades: canonical.length,
+      winningTrades: canonical.filter(value => value > 0).length,
+      losingTrades: canonical.filter(value => value < 0).length,
     };
   }
 
@@ -2291,11 +2296,11 @@ export class DatabaseStorage implements IStorage {
     const run = async (tx: any) => {
       // Preserve the global lock order: bot_trades first, then the owner row.
       // Startup corrections use the same order, avoiding a blue/green deadlock.
-      const countsRows = await tx
+      const tradeRows = await tx
         .select({
-          totalTrades: sql<number>`COUNT(*)::int`,
-          winningTrades: sql<number>`SUM(CASE WHEN ${botTrades.pnl}::numeric > 0 THEN 1 ELSE 0 END)::int`,
-          losingTrades: sql<number>`SUM(CASE WHEN ${botTrades.pnl}::numeric < 0 THEN 1 ELSE 0 END)::int`,
+          pnl: botTrades.pnl,
+          fee: botTrades.fee,
+          pnlConvention: botTrades.pnlConvention,
         })
         .from(botTrades)
         .where(and(
@@ -2304,10 +2309,13 @@ export class DatabaseStorage implements IStorage {
           sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
           notPhantomDupClose(),
         ));
+      const canonical = (tradeRows as Array<{ pnl: string | null; fee: string | null; pnlConvention: string | null }>)
+        .map(resolveBotTradeNetPnl)
+        .filter((value): value is number => value !== null);
       const counts = {
-        totalTrades: Number(countsRows[0]?.totalTrades ?? 0),
-        winningTrades: Number(countsRows[0]?.winningTrades ?? 0),
-        losingTrades: Number(countsRows[0]?.losingTrades ?? 0),
+        totalTrades: canonical.length,
+        winningTrades: canonical.filter(value => value > 0).length,
+        losingTrades: canonical.filter(value => value < 0).length,
       };
       // Serialize every JSON read/merge/write on the owner row. The lock must
       // precede reading stats so a waiter merges against the committed winner.
@@ -2739,24 +2747,25 @@ export class DatabaseStorage implements IStorage {
         executedAt: botTrades.executedAt,
         pnl: botTrades.pnl,
         fee: botTrades.fee,
+        pnlConvention: botTrades.pnlConvention,
       })
       .from(botTrades)
       .where(and(...conditions))
       .orderBy(botTrades.executedAt);
 
     let cumulativePnl = 0;
-    return trades.map((trade) => {
-      // Calculate NET PnL: gross pnl minus fee
-      const grossPnl = parseFloat(trade.pnl || '0');
-      const fee = parseFloat(trade.fee || '0');
-      const netPnl = grossPnl - fee;
+    const series: { timestamp: Date; pnl: number; cumulativePnl: number }[] = [];
+    for (const trade of trades) {
+      const netPnl = resolveBotTradeNetPnl(trade);
+      if (netPnl === null) continue;
       cumulativePnl += netPnl;
-      return {
+      series.push({
         timestamp: trade.executedAt,
         pnl: netPnl,
         cumulativePnl,
-      };
-    });
+      });
+    }
+    return series;
   }
 
   async getWalletBotTrades(walletAddress: string, limit: number = 50): Promise<(BotTrade & { botName?: string })[]> {

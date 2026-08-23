@@ -155,15 +155,15 @@ describe("schema readiness", () => {
       requirements: unknown[];
       operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(179);
-    expect(metadata).toHaveLength(179);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(179);
+    expect(sqlEntries).toHaveLength(180);
+    expect(metadata).toHaveLength(180);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(180);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase())
-      .toBe("8A2946FB70EA5D57D0C727F4D9207C32F0E59CA64F7DA78D9EDEF0A52CCD801C");
+      .toBe("F6CBE65BEA409C8E0AD935A37CCC49A7112BF361A4138626D819EC5D8B738FDE");
 
-    const avaxCorrectionSql = sqlEntries.at(-3)!;
-    expect(metadata.at(-3)).toMatchObject({
+    const avaxCorrectionSql = sqlEntries.at(-4)!;
+    expect(metadata.at(-4)).toMatchObject({
       id: "176-scrub-rogue-avax-close",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -175,8 +175,8 @@ describe("schema readiness", () => {
     expect(avaxCorrectionSql).toContain("jsonb_build_object");
     expect(avaxCorrectionSql).toContain("rogue AVAX trade fingerprint mismatch");
 
-    const venueTruthSql = sqlEntries.at(-2)!;
-    expect(metadata.at(-2)).toMatchObject({
+    const venueTruthSql = sqlEntries.at(-3)!;
+    expect(metadata.at(-3)).toMatchObject({
       id: "177-repair-zec-link-close-fee-pnl",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -193,8 +193,8 @@ describe("schema readiness", () => {
     expect(venueTruthSql).toContain("target_trade.protocol_fill_id IS NOT NULL");
     expect(venueTruthSql.match(/target_trade.error_message IS NOT NULL/g)).toHaveLength(2);
     expect(venueTruthSql).toContain("md5(COALESCE(target_trade.webhook_payload::text, ''))");
-    const qualificationRecordSql = sqlEntries.at(-1)!;
-    expect(metadata.at(-1)).toMatchObject({
+    const qualificationRecordSql = sqlEntries.at(-2)!;
+    expect(metadata.at(-2)).toMatchObject({
       id: "178-create-ai-trader-qualification-records",
       capabilities: ["ai_trader"],
       operation: "ddl",
@@ -241,6 +241,32 @@ describe("schema readiness", () => {
     expect(venueTruthSql.match(/stored values mismatch:/g)).toHaveLength(3);
     expect(venueTruthSql).toContain("owner fingerprint mismatch:");
     expect(venueTruthSql).toContain("stats update missed owner:");
+
+    const conventionSql = sqlEntries.at(-1)!;
+    expect(metadata.at(-1)).toMatchObject({
+      id: "179-pin-bot-trades-pnl-convention",
+      capabilities: ["signal_bot", "portfolio"],
+      operation: "backfill",
+    });
+    expect(conventionSql).toContain("LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE");
+    expect(conventionSql).toContain("ADD COLUMN IF NOT EXISTS pnl_convention text");
+    expect(conventionSql).toContain("ADD COLUMN IF NOT EXISTS fee_truth_status text");
+    expect(conventionSql).toContain("pnl_convention = CASE");
+    expect(conventionSql).toContain("webhook_payload->>'closeReason' IN ('external_close', 'tpsl', 'liquidation')");
+    expect(conventionSql).not.toMatch(/closeReason' IN \([^)]*partial_(?:tp|sl)/);
+    expect(conventionSql).toContain("fee_truth_status = CASE");
+    expect(conventionSql).toContain("venue_exact_repaired");
+    expect(conventionSql).toContain("legacy_unverified");
+    expect(conventionSql).toContain("current_pipeline");
+    expect(conventionSql).toContain("ALTER COLUMN pnl_convention SET NOT NULL");
+    expect(conventionSql).toContain("ALTER COLUMN fee_truth_status SET NOT NULL");
+    expect(conventionSql).toContain("WITH canonical_rows AS");
+    expect(conventionSql).toContain("bt.pnl::numeric - bt.fee::numeric");
+    expect(conventionSql).toContain("UPDATE trading_bots bot");
+    expect(conventionSql).not.toMatch(/UPDATE bot_trades[\s\S]*SET\s+(?:pnl|fee)\s*=/);
+    for (const field of ["totalPnl", "totalTrades", "winningTrades", "losingTrades"]) {
+      expect(conventionSql).toContain(`'${field}'`);
+    }
   });
 
   it("runs one memoized postcondition-only probe when the Lab child has no snapshot", async () => {
