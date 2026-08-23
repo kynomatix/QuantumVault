@@ -1461,7 +1461,7 @@ export default function Landing() {
               <a href="/analytics" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-footer-analytics">Analytics</a>
               <a href="/docs" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-footer-docs">Docs</a>
               <a href="https://x.com/QuantumVaultLab" target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-twitter">X</a>
-              <a href="#" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-github">GitHub</a>
+              <a href="https://github.com/kynomatix/QuantumVault" target="_blank" rel="noopener noreferrer" className="text-muted-foreground hover:text-primary transition-colors" data-testid="link-github">GitHub</a>
             </div>
             <p className="text-sm text-muted-foreground">
               © 2026 QuantumVault. Built on Solana.
