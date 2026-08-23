@@ -121,6 +121,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   } | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
+  const [userWebhookSecret, setUserWebhookSecret] = useState<string | null>(null);
   const [isLoadingWebhookUrl, setIsLoadingWebhookUrl] = useState(false);
   const [infoOpen, setInfoOpen] = useState(false);
   const [markets, setMarkets] = useState<MarketInfo[]>([]);
@@ -284,6 +285,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     setVaultValue(null);
     setSolRequirement(null);
     setUserWebhookUrl(null);
+    setUserWebhookSecret(null);
     setInfoOpen(false);
     setNewBot({
       name: '',
@@ -550,6 +552,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
       if (res.ok) {
         const data = await safeResponseJson(res);
         setUserWebhookUrl(data.webhookUrl);
+        setUserWebhookSecret(data.webhookSecret ?? null);
       }
     } catch (error) {
       console.error('Failed to fetch user webhook URL:', error);
@@ -559,8 +562,10 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   };
 
   const getMessageTemplate = (botId: string) => {
+    if (!userWebhookSecret) return null;
     return `{
   "botId": "${botId}",
+  "secret": "${userWebhookSecret}",
   "action": "{{strategy.order.action}}",
   "contracts": "{{strategy.order.contracts}}",
   "symbol": "{{ticker}}",
@@ -1014,6 +1019,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
 
   const renderSuccessStep = () => {
     if (!createdBot) return null;
+    const messageTemplate = getMessageTemplate(createdBot.id);
 
     return (
       <>
@@ -1048,11 +1054,12 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
               Alert Message
             </h3>
             <pre className="p-3 bg-background/80 rounded-lg font-mono text-sm border whitespace-pre-wrap" style={{ wordBreak: 'break-word' }}>
-{getMessageTemplate(createdBot.id)}
+{messageTemplate ?? 'Alert template unavailable until webhook credentials load.'}
             </pre>
             <Button
               className="w-full mt-3"
-              onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
+              onClick={() => messageTemplate && copyToClipboard(messageTemplate, 'Message')}
+              disabled={!messageTemplate}
               data-testid="button-copy-message"
             >
               {copiedField === 'Message' ? <Check className="w-4 h-4 mr-2" /> : <Copy className="w-4 h-4 mr-2" />}

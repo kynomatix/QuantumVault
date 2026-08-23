@@ -4947,6 +4947,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [createdBot, setCreatedBot] = useState<any>(null);
   const [webhookUrl, setWebhookUrl] = useState<string | null>(null);
+  const [webhookSecret, setWebhookSecret] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [deployProtocol, setDeployProtocol] = useState<ProtocolId>('pacifica');
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
@@ -5174,8 +5175,10 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   };
 
   const getMessageTemplate = (botId: string) => {
+    if (!webhookSecret) return null;
     return `{
   "botId": "${botId}",
+  "secret": "${webhookSecret}",
   "action": "{{strategy.order.action}}",
   "contracts": "{{strategy.order.contracts}}",
   "symbol": "{{ticker}}",
@@ -5188,6 +5191,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const handleCreateBot = async () => {
     if (!walletAddress || !ticker) return;
     setCreateError(null);
+    setWebhookUrl(null);
+    setWebhookSecret(null);
 
     const usdcBal = parseFloat(agentBalance || '0');
     const solBal = agentSolBalance ?? 0;
@@ -5299,6 +5304,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         if (webhookRes.ok) {
           const data = await safeResponseJson(webhookRes);
           setWebhookUrl(data.webhookUrl);
+          setWebhookSecret(data.webhookSecret ?? null);
         }
       } catch {}
 
@@ -5338,6 +5344,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     return null;
   };
   const disabledReason = getDisabledReason();
+  const webhookMessageTemplate = createdBot ? getMessageTemplate(createdBot.id) : null;
 
   return (
     <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -5411,12 +5418,13 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
             <div className="space-y-2">
               <p className="text-[10px] text-white/50 font-medium">Alert Message</p>
               <div className="p-2 rounded bg-white/5 border border-white/10">
-                <pre className="text-[9px] text-white/70 font-mono whitespace-pre-wrap break-all leading-relaxed">{getMessageTemplate(createdBot.id)}</pre>
+                <pre className="text-[9px] text-white/70 font-mono whitespace-pre-wrap break-all leading-relaxed">{webhookMessageTemplate ?? 'Alert template unavailable until webhook credentials load.'}</pre>
               </div>
               <Button
                 size="sm"
                 className="w-full h-7 text-[10px] bg-indigo-600 hover:bg-indigo-500"
-                onClick={() => copyToClipboard(getMessageTemplate(createdBot.id), 'Message')}
+                onClick={() => webhookMessageTemplate && copyToClipboard(webhookMessageTemplate, 'Message')}
+                disabled={!webhookMessageTemplate}
                 data-testid={`copy-alert-msg-${leverage}x`}
               >
                 {copiedField === 'Message' ? <Check className="w-3 h-3 mr-1" /> : <Copy className="w-3 h-3 mr-1" />}
