@@ -1719,15 +1719,19 @@ function closeAccounting(
   fillPrice: number,
   size: number,
   closingSide: 'long' | 'short',
-): { fee: number | null; pnl: number | null } {
+): { fee: number | null; pnl: number | null; grossPnl: number | null } {
   const fee = closeFeeAmount(feeEvidence);
-  if (fee === null || entryPrice <= 0 || fillPrice <= 0 || size < 0) {
-    return { fee, pnl: null };
+  if (entryPrice <= 0 || fillPrice <= 0 || size < 0) {
+    return { fee, pnl: null, grossPnl: null };
   }
-  const gross = closingSide === 'short'
+  const grossPnl = closingSide === 'short'
     ? (fillPrice - entryPrice) * size
     : (entryPrice - fillPrice) * size;
-  return { fee, pnl: gross - fee };
+  return {
+    fee,
+    pnl: fee === null ? null : grossPnl - fee,
+    grossPnl,
+  };
 }
 
 declare module "express-session" {
@@ -4835,6 +4839,7 @@ interface CanonicalCloseFinalizationInput {
   fillPrice: number;
   feeEvidence: CloseFeeEvidence;
   pnl: number | null;
+  displayGrossPnl?: number | null;
   canonicalFillSignature?: string;
   fillTimestampMs?: number;
   executionMethod?: string;
@@ -4842,11 +4847,23 @@ interface CanonicalCloseFinalizationInput {
 }
 
 function closeFeeEventPayload(input: CanonicalCloseFinalizationInput): Record<string, unknown> {
+  const displayAccounting = input.pnl === null
+    && input.feeEvidence.kind === 'unavailable'
+    && typeof input.displayGrossPnl === 'number'
+    && Number.isFinite(input.displayGrossPnl)
+    ? {
+        grossPnl: String(input.displayGrossPnl),
+        pnlConvention: 'gross_before_close_fee',
+        feeStatus: 'close_fee_unknown',
+        feeReason: input.feeEvidence.reason,
+      }
+    : undefined;
   return {
     ...(typeof input.webhookPayload === 'object' && input.webhookPayload !== null
       ? input.webhookPayload as Record<string, unknown>
       : {}),
     feeEvidence: input.feeEvidence,
+    ...(displayAccounting ? { displayAccounting } : {}),
   };
 }
 
@@ -18948,15 +18965,21 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
           
           if (result.success && txSignature) {
-            let closeFillPrice = parseFloat(signalPrice) || 0;
+            const authoritativeResultFillPrice = typeof result.fillPrice === 'number'
+              && Number.isFinite(result.fillPrice)
+              && result.fillPrice > 0
+              ? result.fillPrice
+              : null;
+            let closeFillPrice = authoritativeResultFillPrice ?? (parseFloat(signalPrice) || 0);
             console.log(`[Webhook] PnL calculation inputs: entryPrice=${closeEntryPrice}, fillPrice=${closeFillPrice}, closeSide=${closeSide}, closeSize=${closeSize}`);
-            let { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
+            let { fee: closeFee, pnl: closeTradePnl, grossPnl: closeGrossPnl } = closeAccounting(
               result.feeEvidence,
               closeEntryPrice,
               closeFillPrice,
               closeSize,
               closeSide,
             );
+            let displayGrossPnl = authoritativeResultFillPrice === null ? null : closeGrossPnl;
             let effectiveFeeEvidence = result.feeEvidence;
             let canonicalFillSignature: string | undefined;
             let closeFillTimestampMs: number | undefined;
@@ -18991,42 +19014,41 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               finalVerificationUnavailable = finalVerifyErr;
             }
 
-            if (finalVerificationUnavailable || finalPositionRemaining) {
-              const fillConfirmation = closeAdapter.protocolName.toLowerCase() === 'pacifica'
-                ? await readSignalBotCloseFillConfirmation({
-                    adapter: closeAdapter,
-                    account: webhookBotCtx?.botPublicKey ?? wallet.agentPublicKey ?? undefined,
-                    market: bot.market,
-                    openSide: webhookPositionSide,
-                    expectedSize: closeSize,
-                    closeSentAtMs: execStartTime,
-                  })
-                : null;
-              if (fillConfirmation) {
-                closeFillPrice = fillConfirmation.fillPrice;
-                effectiveFeeEvidence = {
-                  kind: 'venue_exact',
-                  amount: fillConfirmation.fee,
-                  protocol: 'pacifica',
-                };
-                closeFee = fillConfirmation.fee;
-                closeTradePnl = fillConfirmation.realizedPnl
-                  ?? closeAccounting(
-                    effectiveFeeEvidence,
-                    closeEntryPrice,
-                    closeFillPrice,
-                    closeSize,
-                    closeSide,
-                  ).pnl;
-                canonicalFillSignature = `history-${fillConfirmation.fillIds[0]}`;
-                closeFillTimestampMs = fillConfirmation.fillTimestampMs;
-                finalPositionRemaining = null;
-                finalVerificationUnavailable = null;
-                console.log(
-                  `[Webhook] Close confirmed by ${fillConfirmation.fillIds.length} venue fill(s): `
-                  + `size=${fillConfirmation.filledSize}, price=${fillConfirmation.fillPrice}`,
-                );
-              }
+            const fillConfirmation = closeAdapter.protocolName.toLowerCase() === 'pacifica'
+              ? await readSignalBotCloseFillConfirmation({
+                  adapter: closeAdapter,
+                  account: webhookBotCtx?.botPublicKey ?? wallet.agentPublicKey ?? undefined,
+                  market: bot.market,
+                  openSide: webhookPositionSide,
+                  expectedSize: closeSize,
+                  closeSentAtMs: execStartTime,
+                })
+              : null;
+            if (fillConfirmation) {
+              closeFillPrice = fillConfirmation.fillPrice;
+              effectiveFeeEvidence = {
+                kind: 'venue_exact',
+                amount: fillConfirmation.fee,
+                protocol: 'pacifica',
+              };
+              closeFee = fillConfirmation.fee;
+              const confirmedAccounting = closeAccounting(
+                effectiveFeeEvidence,
+                closeEntryPrice,
+                closeFillPrice,
+                closeSize,
+                closeSide,
+              );
+              closeTradePnl = fillConfirmation.realizedPnl ?? confirmedAccounting.pnl;
+              displayGrossPnl = confirmedAccounting.grossPnl;
+              canonicalFillSignature = `history-${fillConfirmation.fillIds[0]}`;
+              closeFillTimestampMs = fillConfirmation.fillTimestampMs;
+              finalPositionRemaining = null;
+              finalVerificationUnavailable = null;
+              console.log(
+                `[Webhook] Close confirmed by ${fillConfirmation.fillIds.length} venue fill(s): `
+                + `size=${fillConfirmation.filledSize}, price=${fillConfirmation.fillPrice}`,
+              );
             }
 
             if (finalVerificationUnavailable) {
@@ -19097,6 +19119,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 fillPrice: Number.isFinite(webhookClosePrice) ? webhookClosePrice : 0,
                 feeEvidence: effectiveFeeEvidence,
                 pnl: closeTradePnl,
+                displayGrossPnl,
                 canonicalFillSignature,
                 fillTimestampMs: closeFillTimestampMs,
                 executionMethod: result.executionMethod,
@@ -20386,15 +20409,21 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
           
           if (result.success && result.signature) {
-            let closeFillPrice = parseFloat(signalPrice) || 0;
+            const authoritativeResultFillPrice = typeof result.fillPrice === 'number'
+              && Number.isFinite(result.fillPrice)
+              && result.fillPrice > 0
+              ? result.fillPrice
+              : null;
+            let closeFillPrice = authoritativeResultFillPrice ?? (parseFloat(signalPrice) || 0);
             const closeEntryPrice = onChainPosition.entryPrice || 0;
-            let { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
+            let { fee: closeFee, pnl: closeTradePnl, grossPnl: closeGrossPnl } = closeAccounting(
               result.feeEvidence,
               closeEntryPrice,
               closeFillPrice,
               closeSize,
               closeSide,
             );
+            let displayGrossPnl = authoritativeResultFillPrice === null ? null : closeGrossPnl;
             let effectiveFeeEvidence = result.feeEvidence;
             let canonicalFillSignature: string | undefined;
             let closeFillTimestampMs: number | undefined;
@@ -20424,70 +20453,70 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             const observedResidual = postClosePosition
               && postClosePosition.side !== "FLAT"
               && Math.abs(postClosePosition.size) >= 0.0001;
-            if (postCloseReadError || observedResidual) {
-              const fillConfirmation = userCloseAdapter.protocolName.toLowerCase() === 'pacifica'
-                ? await readSignalBotCloseFillConfirmation({
-                    adapter: userCloseAdapter,
-                    account: userWebhookBotCtx?.botPublicKey ?? wallet.agentPublicKey ?? undefined,
-                    market: bot.market,
-                    openSide: onChainPosition.side === 'LONG' ? 'long' : 'short',
-                    expectedSize: closeSize,
-                    closeSentAtMs: userCloseSentAtMs,
-                  })
-                : null;
-              if (fillConfirmation) {
-                closeFillPrice = fillConfirmation.fillPrice;
-                effectiveFeeEvidence = {
-                  kind: 'venue_exact',
-                  amount: fillConfirmation.fee,
-                  protocol: 'pacifica',
-                };
-                closeFee = fillConfirmation.fee;
-                closeTradePnl = fillConfirmation.realizedPnl
-                  ?? closeAccounting(
-                    effectiveFeeEvidence,
-                    closeEntryPrice,
-                    closeFillPrice,
-                    closeSize,
-                    closeSide,
-                  ).pnl;
-                canonicalFillSignature = `history-${fillConfirmation.fillIds[0]}`;
-                closeFillTimestampMs = fillConfirmation.fillTimestampMs;
-                console.log(
-                  `[User Webhook] Close confirmed by ${fillConfirmation.fillIds.length} venue fill(s): `
-                  + `size=${fillConfirmation.filledSize}, price=${fillConfirmation.fillPrice}`,
-                );
-              } else {
-                const residualDescription = observedResidual
-                  ? `${postClosePosition!.side} ${postClosePosition!.size}`
-                  : 'position read unavailable';
-                await Promise.allSettled([
-                  storage.updateBotTrade(closeTrade.id, {
-                    status: "pending",
-                    txSignature: result.signature,
-                    errorMessage: `Signed close executed; confirmation pending (${residualDescription})`,
-                  }),
-                  storage.updateWebhookLog(log.id, {
-                    processed: true,
-                    tradeExecuted: true,
-                    errorMessage: "Signed close executed; confirmation pending after authoritative reads",
-                  }),
-                ]);
-                const closeResponse = buildSignalBotCloseResponse("confirmation_pending", {
+            const fillConfirmation = userCloseAdapter.protocolName.toLowerCase() === 'pacifica'
+              ? await readSignalBotCloseFillConfirmation({
+                  adapter: userCloseAdapter,
+                  account: userWebhookBotCtx?.botPublicKey ?? wallet.agentPublicKey ?? undefined,
+                  market: bot.market,
+                  openSide: onChainPosition.side === 'LONG' ? 'long' : 'short',
+                  expectedSize: closeSize,
+                  closeSentAtMs: userCloseSentAtMs,
+                })
+              : null;
+            if (fillConfirmation) {
+              closeFillPrice = fillConfirmation.fillPrice;
+              effectiveFeeEvidence = {
+                kind: 'venue_exact',
+                amount: fillConfirmation.fee,
+                protocol: 'pacifica',
+              };
+              closeFee = fillConfirmation.fee;
+              const confirmedAccounting = closeAccounting(
+                effectiveFeeEvidence,
+                closeEntryPrice,
+                closeFillPrice,
+                closeSize,
+                closeSide,
+              );
+              closeTradePnl = fillConfirmation.realizedPnl ?? confirmedAccounting.pnl;
+              displayGrossPnl = confirmedAccounting.grossPnl;
+              canonicalFillSignature = `history-${fillConfirmation.fillIds[0]}`;
+              closeFillTimestampMs = fillConfirmation.fillTimestampMs;
+              console.log(
+                `[User Webhook] Close confirmed by ${fillConfirmation.fillIds.length} venue fill(s): `
+                + `size=${fillConfirmation.filledSize}, price=${fillConfirmation.fillPrice}`,
+              );
+            }
+            if ((postCloseReadError || observedResidual) && !fillConfirmation) {
+              const residualDescription = observedResidual
+                ? `${postClosePosition!.side} ${postClosePosition!.size}`
+                : 'position read unavailable';
+              await Promise.allSettled([
+                storage.updateBotTrade(closeTrade.id, {
                   status: "pending",
-                  type: "close",
-                  trade: closeTrade.id,
                   txSignature: result.signature,
-                  message: "Close was signed; confirmation is pending reconciliation",
-                  ...(observedResidual ? {
-                    observedPosition: {
-                      side: postClosePosition!.side,
-                      size: postClosePosition!.size,
-                    },
-                  } : {}),
-                });
-                return res.status(closeResponse.statusCode).json(closeResponse.body);
-              }
+                  errorMessage: `Signed close executed; confirmation pending (${residualDescription})`,
+                }),
+                storage.updateWebhookLog(log.id, {
+                  processed: true,
+                  tradeExecuted: true,
+                  errorMessage: "Signed close executed; confirmation pending after authoritative reads",
+                }),
+              ]);
+              const closeResponse = buildSignalBotCloseResponse("confirmation_pending", {
+                status: "pending",
+                type: "close",
+                trade: closeTrade.id,
+                txSignature: result.signature,
+                message: "Close was signed; confirmation is pending reconciliation",
+                ...(observedResidual ? {
+                  observedPosition: {
+                    side: postClosePosition!.side,
+                    size: postClosePosition!.size,
+                  },
+                } : {}),
+              });
+              return res.status(closeResponse.statusCode).json(closeResponse.body);
             }
             
             // Atomic close-event update + stats recompute in a single tx.
@@ -20504,6 +20533,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 fillPrice: closeFillPrice,
                 feeEvidence: effectiveFeeEvidence,
                 pnl: closeTradePnl,
+                displayGrossPnl,
                 canonicalFillSignature,
                 fillTimestampMs: closeFillTimestampMs,
                 executionMethod: result.executionMethod,

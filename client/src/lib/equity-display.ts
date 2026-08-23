@@ -371,3 +371,66 @@ export function isBotFinancialUnavailable(
 ): boolean {
   return financialDataStatus === 'unavailable';
 }
+
+export type BotTradeDisplayPnlBasis =
+  | 'persisted_net_of_close_fee'
+  | 'gross_before_close_fee'
+  | 'unavailable';
+
+export interface BotTradeDisplayPnl {
+  value: number | null;
+  basis: BotTradeDisplayPnlBasis;
+  feeUnknown: boolean;
+  includeInNetSummary: boolean;
+}
+
+function finiteAccountingValue(value: unknown): number | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  if (typeof value === 'string' && value.trim() === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+/**
+ * Resolve display-only close accounting without changing persisted money truth.
+ * Persisted pnl is the canonical net value. A gross fallback is accepted only
+ * from the exact, producer-stamped provenance tuple and is never eligible for
+ * a net realized-PnL summary.
+ */
+export function resolveBotTradeDisplayPnl(trade: {
+  pnl?: string | number | null;
+  webhookPayload?: unknown;
+}): BotTradeDisplayPnl {
+  const persisted = finiteAccountingValue(trade.pnl);
+  if (persisted !== null) {
+    return {
+      value: persisted,
+      basis: 'persisted_net_of_close_fee',
+      feeUnknown: false,
+      includeInNetSummary: true,
+    };
+  }
+
+  if (typeof trade.webhookPayload !== 'object' || trade.webhookPayload === null) {
+    return { value: null, basis: 'unavailable', feeUnknown: false, includeInNetSummary: false };
+  }
+  const payload = trade.webhookPayload as Record<string, unknown>;
+  if (typeof payload.displayAccounting !== 'object' || payload.displayAccounting === null) {
+    return { value: null, basis: 'unavailable', feeUnknown: false, includeInNetSummary: false };
+  }
+  const display = payload.displayAccounting as Record<string, unknown>;
+  const grossPnl = finiteAccountingValue(display.grossPnl);
+  if (
+    grossPnl === null
+    || display.pnlConvention !== 'gross_before_close_fee'
+    || display.feeStatus !== 'close_fee_unknown'
+  ) {
+    return { value: null, basis: 'unavailable', feeUnknown: false, includeInNetSummary: false };
+  }
+  return {
+    value: grossPnl,
+    basis: 'gross_before_close_fee',
+    feeUnknown: true,
+    includeInNetSummary: false,
+  };
+}

@@ -161,4 +161,35 @@ describe("close-path integration guards", () => {
     expect(routesSource.slice(tradingViewStart, tradingViewEnd)).not.toContain("syncPositionFromOnChain(");
     expect(routesSource.slice(userStart, userEnd)).not.toContain("syncPositionFromOnChain(");
   });
+
+  it("reads Pacifica fill history once in each full-close path before uncertainty handling", () => {
+    const tradingViewStart = routesSource.indexOf("// === BEGIN CLOSE SIGNAL HANDLING");
+    const tradingViewEnd = routesSource.indexOf("// === END OUTER TRY/CATCH FOR CLOSE SIGNAL HANDLING", tradingViewStart);
+    const tradingViewSource = routesSource.slice(tradingViewStart, tradingViewEnd);
+    const userStart = routesSource.indexOf("// CLOSE SIGNAL HANDLING - mirrors logic");
+    const userEnd = routesSource.indexOf("PARTIAL CLOSE HANDLER (user-webhook path)", userStart);
+    const userSource = routesSource.slice(userStart, userEnd);
+
+    expect(tradingViewSource.match(/const fillConfirmation =/g)).toHaveLength(1);
+    expect(userSource.match(/const fillConfirmation =/g)).toHaveLength(1);
+    expect(tradingViewSource.indexOf("const fillConfirmation =")).toBeLessThan(
+      tradingViewSource.indexOf("if (finalVerificationUnavailable)"),
+    );
+    expect(userSource.indexOf("const fillConfirmation =")).toBeLessThan(
+      userSource.indexOf("if ((postCloseReadError || observedResidual) && !fillConfirmation)"),
+    );
+    expect(routesSource.match(/readSignalBotCloseFillConfirmation\(\{/g)).toHaveLength(2);
+  });
+
+  it("keeps gross fallback separate from persisted pnl with exact provenance", () => {
+    const payloadStart = routesSource.indexOf("function closeFeeEventPayload(");
+    const payloadEnd = routesSource.indexOf("async function finalizePerBotConfirmedClose", payloadStart);
+    const payloadSource = routesSource.slice(payloadStart, payloadEnd);
+
+    expect(payloadSource).toContain("input.pnl === null");
+    expect(payloadSource).toContain("input.feeEvidence.kind === 'unavailable'");
+    expect(payloadSource).toContain("pnlConvention: 'gross_before_close_fee'");
+    expect(payloadSource).toContain("feeStatus: 'close_fee_unknown'");
+    expect(payloadSource).toContain("feeReason: input.feeEvidence.reason");
+  });
 });

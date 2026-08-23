@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { resolveBotTradeDisplayPnl } from '@/lib/equity-display';
 import { useState, useEffect, useRef, type ReactNode, type ElementType } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
 import bs58 from 'bs58';
@@ -177,6 +178,12 @@ interface BotTrade {
     };
     action?: string;
     position_size?: string | number;
+    displayAccounting?: {
+      grossPnl?: string | number;
+      pnlConvention?: string;
+      feeStatus?: string;
+      feeReason?: string;
+    };
   } | null;
 }
 
@@ -2545,6 +2552,7 @@ export function BotManagementDrawer({
                   {trades.map((trade) => {
                     const isFailed = trade.status === 'failed';
                     const isLiquidated = trade.status === 'liquidated';
+                    const displayPnl = resolveBotTradeDisplayPnl(trade);
                     const payload = trade.webhookPayload as any;
                     const action = payload?.data?.action?.toLowerCase() || payload?.action?.toLowerCase() || '';
                     const positionSize = payload?.position_size || payload?.data?.position_size;
@@ -2666,10 +2674,18 @@ export function BotManagementDrawer({
                           <p className="text-xs text-muted-foreground">
                             {isLiquidated ? 'liquidated' : 'contracts'} @ ${parseFloat(trade.price || '0').toFixed(2)}
                           </p>
-                          {trade.pnl !== null && trade.pnl !== undefined && (
-                            <p className={`text-xs font-medium ${isLiquidated ? 'text-orange-500' : parseFloat(trade.pnl) >= 0 ? 'text-emerald-500' : 'text-red-500'}`} title={isLiquidated ? "Estimated liquidation loss" : "Gross PnL (excludes fees, slippage, funding)"}>
-                              {isLiquidated ? 'Est. loss: ' : ''}{parseFloat(trade.pnl) >= 0 ? '+' : ''}${parseFloat(trade.pnl).toFixed(2)}
-                            </p>
+                          {displayPnl.value !== null && (
+                            <div>
+                              <p
+                                className={`text-xs font-medium ${isLiquidated ? 'text-orange-500' : displayPnl.value >= 0 ? 'text-emerald-500' : 'text-red-500'}`}
+                                title={displayPnl.feeUnknown ? 'Gross PnL - close fee unknown' : (isLiquidated ? 'Estimated liquidation loss' : 'Recorded PnL')}
+                              >
+                                {isLiquidated ? 'Est. loss: ' : ''}{displayPnl.value >= 0 ? '+' : ''}${displayPnl.value.toFixed(2)}
+                              </p>
+                              {displayPnl.feeUnknown && (
+                                <p className="text-[10px] text-amber-500">gross; close fee unknown</p>
+                              )}
+                            </div>
                           )}
                         </div>
                       </div>
