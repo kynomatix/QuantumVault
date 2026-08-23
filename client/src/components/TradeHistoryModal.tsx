@@ -10,6 +10,7 @@ import { Input } from '@/components/ui/input';
 import { ArrowUpRight, ArrowDownRight, XCircle, ChevronLeft, ChevronRight, Search, Copy, Download } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useToast } from '@/hooks/use-toast';
+import { resolveBotTradeDisplayPnl } from '@/lib/equity-display';
 
 interface Trade {
   id: string;
@@ -29,6 +30,12 @@ interface Trade {
   webhookPayload?: {
     position_size?: string | number;
     action?: string;
+    displayAccounting?: {
+      grossPnl?: string | number;
+      pnlConvention?: string;
+      feeStatus?: string;
+      feeReason?: string;
+    };
     closeReason?: string;
     data?: {
       position_size?: string | number;
@@ -88,9 +95,10 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     const isExecuted = trade.status === 'executed';
     const isRecovered = trade.status === 'recovered';
     const feeValue = trade.fee ? Number(trade.fee) : 0;
-    const pnlValue = trade.pnl ? Number(trade.pnl) : null;
+    const pnlDisplay = resolveBotTradeDisplayPnl(trade);
+    const pnlValue = pnlDisplay.value;
 
-    return { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue };
+    return { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue, pnlDisplay };
   };
 
   const getSideColor = (isCloseSignal: boolean, isLong: boolean) => {
@@ -118,11 +126,14 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   };
 
   const normalizeForExport = (trade: Trade) => {
-    const { isCloseSignal, feeValue, pnlValue } = getTradeInfo(trade);
+    const { isCloseSignal, feeValue, pnlValue, pnlDisplay } = getTradeInfo(trade);
     const side = isCloseSignal ? 'CLOSE' : (trade.side?.toUpperCase() || '');
     const time = trade.executedAt ? new Date(trade.executedAt).toLocaleString() : '';
     const priceNum = trade.price ? Number(trade.price) : null;
     return {
+      pnlBasis: pnlDisplay.basis,
+      pnlIncludedInNetSummary: pnlDisplay.includeInNetSummary,
+      pnlNote: pnlDisplay.feeUnknown ? 'gross; close fee unknown' : '',
       time,
       bot: trade.botName || '',
       market: trade.market || '',
@@ -141,9 +152,9 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
 
   const buildPlainText = (list: Trade[]) => {
     const rows = list.map(normalizeForExport);
-    const realized = rows.reduce((s, r) => s + (r.pnlNum ?? 0), 0);
+    const realized = rows.reduce((s, r) => s + (r.pnlIncludedInNetSummary ? (r.pnlNum ?? 0) : 0), 0);
     const fees = rows.reduce((s, r) => s + r.feeNum, 0);
-    const closed = rows.filter((r) => r.pnlNum !== null);
+    const closed = rows.filter((r) => r.pnlIncludedInNetSummary && r.pnlNum !== null);
     const wins = closed.filter((r) => (r.pnlNum ?? 0) > 0).length;
     const failed = rows.filter((r) => r.status === 'failed').length;
     const summary =
@@ -154,7 +165,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
       (failed ? ` | failed: ${failed}` : '');
     const lines = rows.map((r) =>
       `${r.time} | ${r.bot} | ${r.market} | ${r.side} | size=${r.size} | price=$${r.price}` +
-      ` | fee=${r.feeNum > 0 ? `-$${r.feeNum.toFixed(4)}` : '--'} | pnl=${pnlLabel(r.pnlNum)} | ${r.status}` +
+      ` | fee=${r.feeNum > 0 ? `-$${r.feeNum.toFixed(4)}` : '--'} | pnl=${pnlLabel(r.pnlNum)}${r.pnlNote ? ` (${r.pnlNote})` : ''} | ${r.status}` +
       (r.error ? ` | error: ${r.error}` : '')
     );
     return `${summary}\n\n${lines.join('\n')}`;
@@ -169,7 +180,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   };
 
   const buildCsv = (list: Trade[]) => {
-    const header = ['Time', 'Bot', 'Market', 'Side', 'Size', 'Price', 'Fee', 'PnL', 'Status', 'Error'];
+    const header = ['Time', 'Bot', 'Market', 'Side', 'Size', 'Price', 'Fee', 'PnL', 'PnL basis', 'Status', 'Error'];
     const rows = list.map(normalizeForExport).map((r) =>
       [
         r.time,
@@ -180,6 +191,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         r.price,
         r.feeNum > 0 ? r.feeNum.toFixed(4) : '',
         r.pnlNum !== null ? r.pnlNum.toFixed(2) : '',
+        r.pnlBasis,
         r.status,
         r.error,
       ].map((v) => csvEscape(String(v))).join(',')
@@ -245,7 +257,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   };
 
   const renderMobileTradeCard = (trade: Trade, index: number) => {
-    const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue } = getTradeInfo(trade);
+    const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue, pnlDisplay } = getTradeInfo(trade);
 
     return (
       <div 
@@ -312,8 +324,13 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           <div className="text-right">
             <span className="text-xs text-muted-foreground mr-1">PnL:</span>
             {pnlValue !== null ? (
-              <span className={`font-mono font-medium ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+              <span>
+                <span className={`font-mono font-medium ${pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+                </span>
+                {pnlDisplay.feeUnknown && (
+                  <span className="block text-[10px] text-amber-400">gross; close fee unknown</span>
+                )}
               </span>
             ) : (
               <span className="text-muted-foreground">--</span>
@@ -325,7 +342,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   };
 
   const renderDesktopTradeRow = (trade: Trade, index: number) => {
-    const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue } = getTradeInfo(trade);
+    const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue, pnlDisplay } = getTradeInfo(trade);
 
     return (
       <tr key={trade.id || index} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-history-trade-${index}`}>
@@ -349,8 +366,13 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         </td>
         <td className="py-3 px-2 text-right font-mono">
           {pnlValue !== null ? (
-            <span className={pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-              {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+            <span>
+              <span className={pnlValue >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                {pnlValue >= 0 ? '+' : ''}${pnlValue.toFixed(2)}
+              </span>
+              {pnlDisplay.feeUnknown && (
+                <span className="block text-[10px] text-amber-400">gross; close fee unknown</span>
+              )}
             </span>
           ) : '--'}
         </td>

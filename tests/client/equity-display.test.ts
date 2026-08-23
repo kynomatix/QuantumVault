@@ -53,6 +53,7 @@ import {
   computeAvailableBalance,
   isWalletTransition,
   normalizeAgentBalance,
+  resolveBotTradeDisplayPnl,
 } from '@/lib/equity-display';
 
 // ── fmtBalance ────────────────────────────────────────────────────────────────
@@ -687,5 +688,59 @@ describe('normalizeAgentBalance — null-truthful modal balance (Defect 4)', () 
 
   it('Infinity → null (not finite)', () => {
     expect(normalizeAgentBalance(Infinity)).toBeNull();
+  });
+});
+
+describe('resolveBotTradeDisplayPnl - close-fee provenance', () => {
+  const fallback = {
+    displayAccounting: {
+      grossPnl: '-1.25',
+      pnlConvention: 'gross_before_close_fee',
+      feeStatus: 'close_fee_unknown',
+      feeReason: 'close_notional_unavailable',
+    },
+  };
+
+  it('prefers persisted net PnL over any display fallback', () => {
+    expect(resolveBotTradeDisplayPnl({ pnl: '2.5', webhookPayload: fallback })).toEqual({
+      value: 2.5,
+      basis: 'persisted_net_of_close_fee',
+      feeUnknown: false,
+      includeInNetSummary: true,
+    });
+  });
+
+  it('accepts an explicitly stamped gross fallback but excludes it from net summaries', () => {
+    expect(resolveBotTradeDisplayPnl({ pnl: null, webhookPayload: fallback })).toEqual({
+      value: -1.25,
+      basis: 'gross_before_close_fee',
+      feeUnknown: true,
+      includeInNetSummary: false,
+    });
+  });
+
+  it('preserves an explicit persisted zero as canonical', () => {
+    expect(resolveBotTradeDisplayPnl({ pnl: '0', webhookPayload: fallback })).toMatchObject({
+      value: 0,
+      basis: 'persisted_net_of_close_fee',
+      includeInNetSummary: true,
+    });
+  });
+
+  it.each([
+    { grossPnl: 'NaN', pnlConvention: 'gross_before_close_fee', feeStatus: 'close_fee_unknown' },
+    { grossPnl: '1', pnlConvention: 'net_after_close_fee', feeStatus: 'close_fee_unknown' },
+    { grossPnl: '1', pnlConvention: 'gross_before_close_fee', feeStatus: 'known' },
+    null,
+  ])('rejects invalid or incompletely proven display accounting %#', displayAccounting => {
+    expect(resolveBotTradeDisplayPnl({
+      pnl: null,
+      webhookPayload: { displayAccounting },
+    })).toEqual({
+      value: null,
+      basis: 'unavailable',
+      feeUnknown: false,
+      includeInNetSummary: false,
+    });
   });
 });
