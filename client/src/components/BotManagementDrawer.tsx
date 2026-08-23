@@ -394,6 +394,7 @@ export function BotManagementDrawer({
   const [editParkDestinationAsset, setEditParkDestinationAsset] = useState<string | null>(null);
   const [saveSettingsLoading, setSaveSettingsLoading] = useState(false);
   const [userWebhookUrl, setUserWebhookUrl] = useState<string | null>(null);
+  const [userWebhookSecret, setUserWebhookSecret] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
   const [dataPartial, setDataPartial] = useState(false);
   const [botPosition, setBotPosition] = useState<BotPosition | null>(null);
@@ -628,6 +629,7 @@ export function BotManagementDrawer({
       if (res.ok) {
         const data = await safeResponseJson(res);
         setUserWebhookUrl(data.webhookUrl);
+        setUserWebhookSecret(data.webhookSecret ?? null);
       }
     } catch (error) {
       console.error('Failed to fetch user webhook URL:', error);
@@ -702,8 +704,11 @@ export function BotManagementDrawer({
       setHasBalanceLoaded(false);
       setHasPositionLoaded(false);
 
-      // Use consolidated endpoint for initial load and refreshes
+      // Load the credential-free URL and secret from the authenticated endpoint.
+      setUserWebhookUrl(null);
+      setUserWebhookSecret(null);
       fetchBotOverview();
+      fetchUserWebhookUrl();
       setActiveTab('overview');
       
       // Auto-refresh every 15 seconds when drawer is open
@@ -717,6 +722,8 @@ export function BotManagementDrawer({
     } else if (!isOpen) {
       setHasBalanceLoaded(false);
       setHasPositionLoaded(false);
+      setUserWebhookUrl(null);
+      setUserWebhookSecret(null);
     }
   }, [isOpen, bot?.id]);
 
@@ -884,9 +891,10 @@ export function BotManagementDrawer({
   };
 
   const getMessageTemplate = () => {
-    if (!bot) return '';
+    if (!bot || !userWebhookSecret) return null;
     return `{
   "botId": "${bot.id}",
+  "secret": "${userWebhookSecret}",
   "action": "{{strategy.order.action}}",
   "contracts": "{{strategy.order.contracts}}",
   "symbol": "{{ticker}}",
@@ -1415,6 +1423,7 @@ export function BotManagementDrawer({
   };
 
   const displayBot = localBot || bot;
+  const webhookMessageTemplate = getMessageTemplate();
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()} modal={false}>
@@ -2425,12 +2434,13 @@ export function BotManagementDrawer({
                 Alert Message
               </h3>
               <pre className="p-3 bg-background/80 rounded-lg font-mono text-xs border whitespace-pre-wrap break-all">
-                {getMessageTemplate()}
+                {webhookMessageTemplate ?? 'Alert template unavailable until webhook credentials load.'}
               </pre>
               <Button
                 className="w-full mt-3"
                 variant="secondary"
-                onClick={() => copyToClipboard(getMessageTemplate(), 'Message')}
+                onClick={() => webhookMessageTemplate && copyToClipboard(webhookMessageTemplate, 'Message')}
+                disabled={!webhookMessageTemplate}
                 data-testid="button-copy-message"
               >
                 {copiedField === 'Message' ? (

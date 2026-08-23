@@ -102,6 +102,8 @@ const ROUTE_BOT_ID = 'bot-close-authority-test';
 const ROUTE_WALLET = 'wallet-close-authority-test';
 const ROUTE_TV_SECRET = 'tradingview-test-secret';
 const ROUTE_USER_SECRET = 'user-webhook-test-secret';
+const ROUTE_ADMIN_PASSWORD = 'route-admin-test-secret';
+const originalAdminPassword = process.env.ADMIN_PASSWORD;
 const routeKeypair = Keypair.generate();
 const routeWallet = {
   walletAddress: ROUTE_WALLET,
@@ -254,6 +256,7 @@ function primeFlipRoute(options: {
 }
 
 beforeAll(async () => {
+  process.env.ADMIN_PASSWORD = ROUTE_ADMIN_PASSWORD;
   const app = express();
   app.use(express.json());
   routeServer = await registerRoutes(createServer(app), app);
@@ -264,9 +267,12 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
-  if (!routeServer) return;
-  (routeServer as { closeAllConnections?: () => void }).closeAllConnections?.();
-  await new Promise<void>((resolve) => routeServer.close(() => resolve()));
+  if (routeServer) {
+    (routeServer as { closeAllConnections?: () => void }).closeAllConnections?.();
+    await new Promise<void>((resolve) => routeServer.close(() => resolve()));
+  }
+  if (originalAdminPassword === undefined) delete process.env.ADMIN_PASSWORD;
+  else process.env.ADMIN_PASSWORD = originalAdminPassword;
 }, 30_000);
 
 function deferred() {
@@ -452,6 +458,121 @@ describe('close-path and restart contract wiring', () => {
     beforeEach(() => {
       vi.clearAllMocks();
     });
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s accepts the body credential, logs only the redacted payload, and preserves nested strategy data',
+      async (endpoint) => {
+        primeCloseRoute(null);
+        if (endpoint === 'tradingview') {
+          vi.mocked(storage.getTradingBotById as any).mockResolvedValue({ ...routeBot, isActive: false });
+        } else {
+          vi.mocked(storage.getWallet as any).mockResolvedValue({ ...routeWallet, executionEnabled: false });
+        }
+        const payload: Record<string, unknown> = {
+          botId: ROUTE_BOT_ID,
+          secret: endpoint === 'tradingview' ? ROUTE_TV_SECRET : ROUTE_USER_SECRET,
+          action: 'buy',
+          position_size: '0',
+          data: { action: 'buy', secret: 'nested-strategy-value' },
+        };
+        const url = endpoint === 'tradingview'
+          ? `${routeBaseUrl}/api/webhook/tradingview/${ROUTE_BOT_ID}`
+          : `${routeBaseUrl}/api/webhook/user/${ROUTE_WALLET}`;
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        expect(response.status).toBe(endpoint === 'tradingview' ? 400 : 403);
+        expect(storage.createWebhookLog).toHaveBeenCalledTimes(1);
+        const logged = vi.mocked(storage.createWebhookLog as any).mock.calls[0][0];
+        expect(logged.payload).not.toHaveProperty('secret');
+        expect(logged.payload.data).toEqual({ action: 'buy', secret: 'nested-strategy-value' });
+      },
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s keeps legacy query authentication when the body credential is absent',
+      async (endpoint) => {
+        primeCloseRoute(null);
+        if (endpoint === 'tradingview') {
+          vi.mocked(storage.getTradingBotById as any).mockResolvedValue({ ...routeBot, isActive: false });
+        } else {
+          vi.mocked(storage.getWallet as any).mockResolvedValue({ ...routeWallet, executionEnabled: false });
+        }
+        const payload: Record<string, unknown> = { botId: ROUTE_BOT_ID, action: 'buy', position_size: '0' };
+        const url = endpoint === 'tradingview'
+          ? `${routeBaseUrl}/api/webhook/tradingview/${ROUTE_BOT_ID}?secret=${ROUTE_TV_SECRET}`
+          : `${routeBaseUrl}/api/webhook/user/${ROUTE_WALLET}?secret=${ROUTE_USER_SECRET}`;
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        expect(response.status).toBe(endpoint === 'tradingview' ? 400 : 403);
+        expect(storage.createWebhookLog).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s rejects a wrong body credential even when the legacy query credential is valid, without writing a log',
+      async (endpoint) => {
+        primeCloseRoute(null);
+        const payload: Record<string, unknown> = {
+          botId: ROUTE_BOT_ID,
+          secret: 'wrong-body-secret',
+          action: 'buy',
+          position_size: '0',
+        };
+        const url = endpoint === 'tradingview'
+          ? `${routeBaseUrl}/api/webhook/tradingview/${ROUTE_BOT_ID}?secret=${ROUTE_TV_SECRET}`
+          : `${routeBaseUrl}/api/webhook/user/${ROUTE_WALLET}?secret=${ROUTE_USER_SECRET}`;
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        expect(response.status).toBe(401);
+        expect(storage.createWebhookLog).not.toHaveBeenCalled();
+        expect(storage.updateWebhookLog).not.toHaveBeenCalled();
+      },
+    );
+
+    it('protects the liquidity refresh endpoint before handler admission', async () => {
+      const missing = await fetch(`${routeBaseUrl}/api/admin/liquidity/refresh`, { method: 'POST' });
+      const wrong = await fetch(`${routeBaseUrl}/api/admin/liquidity/refresh`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer wrong-admin-token' },
+      });
+      expect(missing.status).toBe(401);
+      expect(wrong.status).toBe(401);
+    });
+
+    it('fails the liquidity refresh endpoint closed when ADMIN_PASSWORD is absent', async () => {
+      delete process.env.ADMIN_PASSWORD;
+      const app = express();
+      app.use(express.json());
+      const server = await registerRoutes(createServer(app), app);
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      try {
+        const address = server.address();
+        if (!address || typeof address === 'string') throw new Error('no ephemeral admin test port');
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/admin/liquidity/refresh`, {
+          method: 'POST',
+        });
+        expect(response.status).toBe(503);
+      } finally {
+        (server as { closeAllConnections?: () => void }).closeAllConnections?.();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        process.env.ADMIN_PASSWORD = ROUTE_ADMIN_PASSWORD;
+      }
+    }, 60_000);
 
     it.each([
       ['tradingview', 'short_to_long', '-0.25', 'short', 'long'],

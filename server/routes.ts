@@ -1749,6 +1749,26 @@ function generateWebhookSecret(): string {
   return crypto.randomBytes(32).toString('hex');
 }
 
+function secureTokenMatches(supplied: unknown, expected: unknown): boolean {
+  if (typeof supplied !== 'string' || typeof expected !== 'string') return false;
+  const suppliedDigest = crypto.createHash('sha256').update(supplied).digest();
+  const expectedDigest = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(suppliedDigest, expectedDigest);
+}
+
+function resolveWebhookSecret(body: unknown, querySecret: unknown): unknown {
+  const bodySecret = body && typeof body === 'object' && !Array.isArray(body)
+    ? (body as Record<string, unknown>).secret
+    : undefined;
+  return typeof bodySecret === 'string' && bodySecret.length > 0 ? bodySecret : querySecret;
+}
+
+function redactWebhookSecret(payload: any): any {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return payload;
+  const { secret: _secret, ...safePayload } = payload as Record<string, unknown>;
+  return safePayload;
+}
+
 function generateSignalHash(botId: string, payload: any): string {
   // Create a deterministic hash from botId + key signal data
   // This prevents duplicate orders from the same TradingView alert
@@ -1764,14 +1784,14 @@ function generateSignalHash(botId: string, payload: any): string {
   return crypto.createHash('sha256').update(JSON.stringify(signalData)).digest('hex').substring(0, 32);
 }
 
-function generateWebhookUrl(botId: string, secret: string): string {
+function generateWebhookUrl(botId: string): string {
   // Use production domain for webhooks, falling back to Replit domains for dev
   const baseUrl = process.env.NODE_ENV === 'production' || process.env.REPLIT_DEPLOYMENT_DOMAIN
     ? 'https://myquantumvault.com'
     : process.env.REPLIT_DEV_DOMAIN 
     ? `https://${process.env.REPLIT_DEV_DOMAIN}`
     : 'http://localhost:5000';
-  return `${baseUrl}/api/webhook/tradingview/${botId}?secret=${secret}`;
+  return `${baseUrl}/api/webhook/tradingview/${botId}`;
 }
 
 // Parse trade-execution errors (Drift/Flash/Pacifica) into user-friendly messages
@@ -5943,6 +5963,23 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim();
+  console.log(`[Admin] ADMIN_PASSWORD configured: ${ADMIN_PASSWORD ? 'yes' : 'no'}`);
+
+  const requireAdminAuth = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
+    if (!ADMIN_PASSWORD) {
+      return res.status(503).json({ error: "Admin endpoints disabled - ADMIN_PASSWORD not configured" });
+    }
+    const match = typeof req.headers.authorization === 'string'
+      ? /^Bearer\s+(.+)$/.exec(req.headers.authorization)
+      : null;
+    const providedToken = match?.[1]?.trim();
+    if (!secureTokenMatches(providedToken, ADMIN_PASSWORD)) {
+      console.log(`[Admin] Auth failed - invalid token`);
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+  };
   // WO-15B / WO-15B.2: Strict display-read wrappers used exclusively by the
   // snapshot module (initSnapshotModule below). These propagate errors instead
   // of catching internally, so the snapshot module can distinguish a genuine
@@ -15198,8 +15235,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         : process.env.REPLIT_DEV_DOMAIN 
         ? `https://${process.env.REPLIT_DEV_DOMAIN}`
         : 'http://localhost:5000';
-      const webhookUrl = wallet.userWebhookSecret 
-        ? `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${wallet.userWebhookSecret}`
+      const webhookUrl = wallet.userWebhookSecret
+        ? `${baseUrl}/api/webhook/user/${req.walletAddress}`
         : null;
 
       const overviewBorrowDebtUsdc = await storage.sumOpenBorrowDebtUsdcForBot(bot.walletAddress, bot.id);
@@ -16419,7 +16456,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // The durable trading-account key and reservation transition are more
       // important than the derived webhook URL. Keep this non-custody update after
       // all raw-key handling so a database error cannot bypass key zeroization.
-      const webhookUrl = generateWebhookUrl(bot.id, webhookSecret);
+      const webhookUrl = generateWebhookUrl(bot.id);
       await storage.updateTradingBot(bot.id, { webhookUrl } as any);
 
       // Pacifica atomic-provision: surface funding status so frontend skips the
@@ -18401,61 +18438,51 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   app.post("/api/webhook/tradingview/:botId", async (req, res) => {
     const webhookStartTime = Date.now();
     const { botId } = req.params;
-    const { secret } = req.query;
-    
-    console.log(`[Webhook] ⏱️ START botId=${botId.slice(0, 8)}... at ${new Date().toISOString()}`);
+    const suppliedSecret = resolveWebhookSecret(req.body, req.query.secret);
+    const safePayload = redactWebhookSecret(req.body);
+
+    console.log(`[Webhook] START botId=${botId.slice(0, 8)}... at ${new Date().toISOString()}`);
     console.log(`[WEBHOOK-TRACE] ========== WEBHOOK RECEIVED ==========`);
     console.log(`[WEBHOOK-TRACE] Bot ID: ${botId}`);
     console.log(`[WEBHOOK-TRACE] Timestamp: ${new Date().toISOString()}`);
-    console.log(`[WEBHOOK-TRACE] Payload: ${JSON.stringify(req.body).slice(0, 500)}`);
-    
-    // Generate signal hash for deduplication
+    console.log(`[WEBHOOK-TRACE] Payload: ${JSON.stringify(safePayload).slice(0, 500)}`);
+
     const signalHash = generateSignalHash(botId, req.body);
-    
-    // Log webhook with signal hash - unique index prevents concurrent duplicates
     let log;
     try {
-      log = await storage.createWebhookLog({
-        tradingBotId: botId,
-        payload: req.body,
-        headers: req.headers as any,
-        ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
-        processed: false,
-        signalHash,
-      });
-    } catch (dbError: any) {
-      // Unique constraint violation means this signal was already received
-      if (dbError?.code === '23505') {
-        console.log(`[Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
-        return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
-      }
-      // Foreign key violation means the bot was deleted
-      if (dbError?.code === '23503') {
-        console.log(`[Webhook] Bot ${botId} not found (deleted) - ignoring signal`);
-        return res.status(404).json({ error: "Bot not found - it may have been deleted. Please remove this alert from TradingView." });
-      }
-      throw dbError;
-    }
-
-    try {
-      // Get bot
       const bot = await storage.getTradingBotById(botId);
       if (!bot) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found" });
         return res.status(404).json({ error: "Bot not found" });
       }
-      
+      if (!secureTokenMatches(suppliedSecret, bot.webhookSecret)) {
+        return res.status(401).json({ error: "Invalid secret" });
+      }
+
+      try {
+        log = await storage.createWebhookLog({
+          tradingBotId: botId,
+          payload: safePayload,
+          headers: req.headers as any,
+          ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
+          processed: false,
+          signalHash,
+        });
+      } catch (dbError: any) {
+        if (dbError?.code === '23505') {
+          console.log(`[Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
+          return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
+        }
+        if (dbError?.code === '23503') {
+          console.log(`[Webhook] Bot ${botId} not found (deleted) - ignoring signal`);
+          return res.status(404).json({ error: "Bot not found - it may have been deleted. Please remove this alert from TradingView." });
+        }
+        throw dbError;
+      }
+
       const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
       console.log(`[WEBHOOK-TRACE] Bot found: name="${bot.name}", market=${bot.market}`);
       console.log(`[WEBHOOK-TRACE] Bot publish status: isPublished=${!!botPublishedInfo}, publishedBotId=${botPublishedInfo?.id || 'none'}`);
       console.log(`[WEBHOOK-TRACE] Bot active: ${bot.isActive}`);
-
-      // Validate secret
-      if (secret !== bot.webhookSecret) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid secret" });
-        return res.status(401).json({ error: "Invalid secret" });
-      }
-
       // Check if bot is active
       if (!bot.isActive) {
         // DECOUPLED ROUTING: If source bot is published, still route signal to subscribers
@@ -19926,7 +19953,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
     } catch (error) {
       console.error("Webhook processing error:", error);
-      await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
+      if (log) await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
       // Reaching this catch means the bot passed the isActive + secret gates above, so this is a
       // genuine "webhook failed for an active user" event worth surfacing in the admin Errors tab.
       recordCriticalError({
@@ -19943,72 +19970,54 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // User-level webhook endpoint - single URL for all bots, routes based on botId in payload
   app.post("/api/webhook/user/:walletAddress", async (req, res) => {
     const { walletAddress } = req.params;
-    const { secret } = req.query;
     const payload = req.body;
-
-    // Extract botId early for signal hash generation
+    const suppliedSecret = resolveWebhookSecret(payload, req.query.secret);
+    const safePayload = redactWebhookSecret(payload);
     const botId = payload?.botId;
-    
-    // Generate signal hash for deduplication (only if botId exists)
     const signalHash = botId ? generateSignalHash(botId, payload) : null;
 
-    // Log webhook with signal hash - unique index prevents concurrent duplicates
     let log;
     try {
-      log = await storage.createWebhookLog({
-        tradingBotId: botId || null,
-        payload: payload,
-        headers: req.headers as any,
-        ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
-        processed: false,
-        signalHash,
-      });
-    } catch (dbError: any) {
-      // Unique constraint violation means this signal was already received
-      if (dbError?.code === '23505') {
-        console.log(`[User Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
-        return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
-      }
-      // Foreign key violation means the bot was deleted
-      if (dbError?.code === '23503') {
-        console.log(`[User Webhook] Bot no longer exists: ${botId}`);
-        return res.status(404).json({ error: "Bot not found - it may have been deleted" });
-      }
-      throw dbError;
-    }
-
-    try {
-      // Get wallet
-      const wallet = await storage.getWallet(walletAddress);
-      if (!wallet) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Wallet not found" });
-        return res.status(404).json({ error: "Wallet not found" });
-      }
-
-      // Validate secret
-      if (secret !== wallet.userWebhookSecret) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Invalid secret" });
-        return res.status(401).json({ error: "Invalid secret" });
-      }
-
-      // Verify botId exists
       if (!botId) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Missing botId in payload" });
         return res.status(400).json({ error: "Missing botId in payload" });
       }
 
-      // Get bot and verify ownership
+      const wallet = await storage.getWallet(walletAddress);
+      if (!wallet) {
+        return res.status(404).json({ error: "Wallet not found" });
+      }
+
       const bot = await storage.getTradingBotById(botId);
       if (!bot) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot not found" });
         return res.status(404).json({ error: "Bot not found" });
       }
-
       if (bot.walletAddress !== walletAddress) {
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot does not belong to this wallet" });
         return res.status(403).json({ error: "Bot does not belong to this wallet" });
       }
+      if (!secureTokenMatches(suppliedSecret, wallet.userWebhookSecret)) {
+        return res.status(401).json({ error: "Invalid secret" });
+      }
 
+      try {
+        log = await storage.createWebhookLog({
+          tradingBotId: botId,
+          payload: safePayload,
+          headers: req.headers as any,
+          ipAddress: req.ip || req.headers['x-forwarded-for'] as string,
+          processed: false,
+          signalHash,
+        });
+      } catch (dbError: any) {
+        if (dbError?.code === '23505') {
+          console.log(`[User Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
+          return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
+        }
+        if (dbError?.code === '23503') {
+          console.log(`[User Webhook] Bot no longer exists: ${botId}`);
+          return res.status(404).json({ error: "Bot not found - it may have been deleted" });
+        }
+        throw dbError;
+      }
       const userWebhookBotCtx = getBotSubaccountContext(bot);
 
       // Security v3: Check execution authorization
@@ -21327,7 +21336,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
     } catch (error) {
       console.error("User webhook processing error:", error);
-      await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
+      if (log) await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
       // Reaching this catch means the bot passed the isActive + secret gates above, so this is a
       // genuine "webhook failed for an active user" event worth surfacing in the admin Errors tab.
       recordCriticalError({
@@ -21366,12 +21375,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
         
         return res.json({
-          webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${updatedWallet.userWebhookSecret}`,
+          webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}`,
+          webhookSecret: updatedWallet.userWebhookSecret,
         });
       }
 
       res.json({
-        webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}?secret=${wallet.userWebhookSecret}`,
+        webhookUrl: `${baseUrl}/api/webhook/user/${req.walletAddress}`,
+        webhookSecret: wallet.userWebhookSecret,
       });
     } catch (error) {
       console.error("Get user webhook URL error:", error);
@@ -21859,7 +21870,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // Force refresh market OI data (admin endpoint)
-  app.post("/api/admin/liquidity/refresh", async (req, res) => {
+  app.post("/api/admin/liquidity/refresh", requireAdminAuth, async (req, res) => {
     try {
       console.log('[Admin] Force refreshing market liquidity data...');
       const result = await refreshMarketData();
@@ -23205,7 +23216,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         res.json({
           subscription,
           tradingBot: subscriberBot,
-          webhookUrl: generateWebhookUrl(subscriberBot.id, webhookSecret),
+          webhookUrl: generateWebhookUrl(subscriberBot.id),
           depositTxSignature: provision.provisionMeta.depositTxSignature,
           funded: provision.provisionMeta.funded,
         });
@@ -24650,23 +24661,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   // ===== ADMIN LOGS ENDPOINTS =====
-  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim();
-  console.log(`[Admin] ADMIN_PASSWORD configured: ${ADMIN_PASSWORD ? 'yes' : 'no'}`);
-  
-  // Middleware to check admin password
-  const requireAdminAuth = (req: ExpressRequest, res: ExpressResponse, next: NextFunction) => {
-    if (!ADMIN_PASSWORD) {
-      return res.status(503).json({ error: "Admin endpoints disabled - ADMIN_PASSWORD not configured" });
-    }
-    const authHeader = req.headers.authorization;
-    const providedToken = authHeader?.replace('Bearer ', '').trim();
-    
-    if (!providedToken || providedToken !== ADMIN_PASSWORD) {
-      console.log(`[Admin] Auth failed - invalid token`);
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-    next();
-  };
 
   // ===== Task 201: QuantumLab Assistant hands-off whitelist (admin-only) =====
   // A wallet on this list may run the Assistant's auto-grind loop in "hands-off"
