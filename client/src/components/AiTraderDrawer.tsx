@@ -69,6 +69,11 @@ import { useToast } from '@/hooks/use-toast';
 import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
 import { AiTraderDecisionChart, type AiChartLevel } from './AiTraderDecisionChart';
 import {
+  AiTraderQualificationReview,
+  parseQualificationReviewResponse,
+  type QualificationReviewState,
+} from './AiTraderQualificationReview';
+import {
   Line,
   LineChart,
   ReferenceLine,
@@ -683,6 +688,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const [detail, setDetail] = useState<BotDetailResponse | null>(null);
   const [history, setHistory] = useState<AiDecisionRow[]>([]);
   const [performance, setPerformance] = useState<PerformanceState>({ status: 'loading' });
+  const [qualificationReview, setQualificationReview] = useState<QualificationReviewState>({ status: 'loading' });
   const [loading, setLoading] = useState(false);
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -775,6 +781,24 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     }
   }, [botId, walletAddress]);
 
+  const fetchQualificationReview = useCallback(async () => {
+    if (!botId || !walletAddress) return;
+    try {
+      const res = await fetch(`/api/ai-trader/${botId}/qualification-review`, {
+        credentials: 'include',
+        headers: walletAuthHeaders(),
+      });
+      if (!res.ok) {
+        setQualificationReview({ status: 'error' });
+        return;
+      }
+      const parsed = parseQualificationReviewResponse(await safeResponseJson(res));
+      setQualificationReview(parsed ?? { status: 'error' });
+    } catch {
+      setQualificationReview({ status: 'error' });
+    }
+  }, [botId, walletAddress]);
+
   const loadOlderHistory = useCallback(async () => {
     if (!historyCursor || !botId || !walletAddress) return;
     setLoadingOlder(true);
@@ -831,20 +855,23 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     if (!isOpen || !botId) return;
     setLoading(true);
     Promise.all([fetchDetail(), fetchHistory(), fetchCalibration(), fetchPerformance()]).finally(() => setLoading(false));
+    void fetchQualificationReview();
     const id = setInterval(() => {
       fetchDetail();
       fetchHistory();
       fetchCalibration();
       fetchPerformance();
+      fetchQualificationReview();
     }, 10_000);
     return () => clearInterval(id);
-  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration, fetchPerformance]);
+  }, [isOpen, botId, fetchDetail, fetchHistory, fetchCalibration, fetchPerformance, fetchQualificationReview]);
 
   useEffect(() => {
     if (!isOpen) {
       setDetail(null);
       setHistory([]);
       setPerformance({ status: 'loading' });
+      setQualificationReview({ status: 'loading' });
       setCalibration(null);
       setActiveTab('activity');
       setFilterMode('all');
@@ -1597,6 +1624,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               </TabsContent>
 
               <TabsContent value="track-record" className="space-y-4 mt-3">
+                <AiTraderQualificationReview review={qualificationReview} />
+
                 {/* Net P&L headline — WO-8h item 1 */}
                 <TooltipProvider>
                   <Tooltip>

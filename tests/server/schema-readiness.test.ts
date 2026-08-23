@@ -122,7 +122,7 @@ describe("schema readiness", () => {
     });
   });
 
-  it("retains all 178 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 179 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -155,15 +155,15 @@ describe("schema readiness", () => {
       requirements: unknown[];
       operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(178);
-    expect(metadata).toHaveLength(178);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(178);
+    expect(sqlEntries).toHaveLength(179);
+    expect(metadata).toHaveLength(179);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(179);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase())
-      .toBe("9C967DA0D6E32D4F117D80C4019FA256D36663EADB7DBABF926515317174B70D");
+      .toBe("8A2946FB70EA5D57D0C727F4D9207C32F0E59CA64F7DA78D9EDEF0A52CCD801C");
 
-    const avaxCorrectionSql = sqlEntries.at(-2)!;
-    expect(metadata.at(-2)).toMatchObject({
+    const avaxCorrectionSql = sqlEntries.at(-3)!;
+    expect(metadata.at(-3)).toMatchObject({
       id: "176-scrub-rogue-avax-close",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -175,8 +175,8 @@ describe("schema readiness", () => {
     expect(avaxCorrectionSql).toContain("jsonb_build_object");
     expect(avaxCorrectionSql).toContain("rogue AVAX trade fingerprint mismatch");
 
-    const venueTruthSql = sqlEntries.at(-1)!;
-    expect(metadata.at(-1)).toMatchObject({
+    const venueTruthSql = sqlEntries.at(-2)!;
+    expect(metadata.at(-2)).toMatchObject({
       id: "177-repair-zec-link-close-fee-pnl",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -193,6 +193,17 @@ describe("schema readiness", () => {
     expect(venueTruthSql).toContain("target_trade.protocol_fill_id IS NOT NULL");
     expect(venueTruthSql.match(/target_trade.error_message IS NOT NULL/g)).toHaveLength(2);
     expect(venueTruthSql).toContain("md5(COALESCE(target_trade.webhook_payload::text, ''))");
+    const qualificationRecordSql = sqlEntries.at(-1)!;
+    expect(metadata.at(-1)).toMatchObject({
+      id: "178-create-ai-trader-qualification-records",
+      capabilities: ["ai_trader"],
+      operation: "ddl",
+    });
+    expect(qualificationRecordSql).toContain("CREATE TABLE IF NOT EXISTS ai_trader_qualification_records");
+    expect(qualificationRecordSql).toContain("UNIQUE (bot_id, qualification_era_digest)");
+    expect(qualificationRecordSql).toContain("ON DELETE CASCADE");
+    expect(qualificationRecordSql).toContain("BEFORE UPDATE ON ai_trader_qualification_records");
+    expect(qualificationRecordSql).not.toContain("BEFORE DELETE");
 
     for (const identity of [
       "d1d024a2-05b2-4d4b-8648-2ee445534716",

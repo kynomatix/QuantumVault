@@ -8,6 +8,7 @@ const updateBotMock = vi.fn();
 const getWalletLlmCiphertextMock = vi.fn();
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
+const getQualificationRecordMock = vi.fn();
 const getOpenDecisionsMock = vi.fn();
 const getUnresolvedDecisionsMock = vi.fn();
 const claimAnalysisMock = vi.fn();
@@ -22,6 +23,7 @@ vi.mock("../../server/storage", () => ({
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getWalletLlmCiphertextMock(...a),
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
+    getAiTraderQualificationRecord: (...a: unknown[]) => getQualificationRecordMock(...a),
     getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
     getUnresolvedAiTraderDecisions: (...a: unknown[]) => getUnresolvedDecisionsMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
@@ -1016,5 +1018,80 @@ describe("AI Trader current qualification-era performance", () => {
       excludedOtherModeTrades: 1,
       omittedInvalidPnlTrades: 1,
     });
+  });
+});
+
+describe("AI Trader immutable qualification review route", () => {
+  function request(id = "paper-route", walletAddress = "WALLET_ROUTE") {
+    return {
+      params: { id }, query: {}, body: {}, headers: {}, session: { walletAddress },
+    };
+  }
+
+  it("returns the exact immutable record only to the owning wallet", async () => {
+    vi.clearAllMocks();
+    const bot = {
+      ...fixedBot(true),
+      graduationState: "graduated",
+      graduatedQualificationEraDigest: "ERA-REVIEW",
+    } as AiTraderBot;
+    getBotMock.mockResolvedValue(bot);
+    getQualificationRecordMock.mockResolvedValue({
+      id: "record-1",
+      botId: bot.id,
+      qualificationEraDigest: "ERA-REVIEW",
+      trialStartedAt: new Date("2026-07-01T00:00:00.000Z"),
+      evaluatedAt: new Date("2026-08-01T00:00:00.000Z"),
+      criteria: { periodDays: 30 },
+      allocationUsdc: "1000.00",
+      decisionIds: ["d-1"],
+      equitySeries: [{ kind: "start", at: "2026-07-01T00:00:00.000Z", equity: 1000 }],
+      equitySeriesDigest: "EQUITY-DIGEST",
+      tradeCount: 1,
+      netPnl: "25.000000",
+      fees: { status: "complete", total: 1.25 },
+      profitFactor: { kind: "positive_infinity" },
+      maxDrawdownPct: "0.000000",
+      openPositionMtm: "0.000000",
+      leverageObservation: null,
+      evidenceSourceDigest: "SOURCE-DIGEST",
+      createdAt: new Date("2026-08-01T00:00:01.000Z"),
+    });
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id/qualification-review", request());
+    expect(result.statusCode).toBe(200);
+    expect(result.body).toMatchObject({
+      status: "available",
+      record: {
+        id: "record-1",
+        qualificationEraDigest: "ERA-REVIEW",
+        decisionIds: ["d-1"],
+        equitySeriesDigest: "EQUITY-DIGEST",
+        evidenceSourceDigest: "SOURCE-DIGEST",
+      },
+    });
+    expect(result.body.record).not.toHaveProperty("botId");
+    expect(getQualificationRecordMock).toHaveBeenCalledWith(bot.id, "ERA-REVIEW");
+
+    const denied = await invoke(built.routes, "GET /api/ai-trader/:id/qualification-review", request(bot.id, "OTHER"));
+    expect(denied.statusCode).toBe(404);
+  });
+
+  it("keeps waived, pending, and legacy graduated states explicit", async () => {
+    for (const candidate of [
+      { bot: { ...fixedBot(true), graduationState: "waived" }, expected: { status: "waived" } },
+      { bot: { ...fixedBot(true), graduationState: "in_trial" }, expected: { status: "pending", graduationState: "in_trial" } },
+      { bot: { ...fixedBot(true), graduationState: "graduated", graduatedQualificationEraDigest: null }, expected: { status: "unavailable", reason: "legacy_record_missing" } },
+    ]) {
+      vi.clearAllMocks();
+      getBotMock.mockResolvedValue(candidate.bot);
+      const built = buildApp();
+      registerAiTraderRoutes(built.app);
+      const result = await invoke(built.routes, "GET /api/ai-trader/:id/qualification-review", request());
+      expect(result.body).toEqual(candidate.expected);
+      expect(getQualificationRecordMock).not.toHaveBeenCalled();
+    }
   });
 });

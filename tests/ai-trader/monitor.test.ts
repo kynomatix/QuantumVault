@@ -28,6 +28,8 @@ vi.mock("../../server/boot-id", () => ({
 
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
+const getExactGraduationMock = vi.fn();
+const commitGraduationMock = vi.fn();
 const updateBotMock = vi.fn();
 const updateDecisionMock = vi.fn();
 const getDecisionsMock = vi.fn();
@@ -46,6 +48,8 @@ vi.mock("../../server/storage", () => ({
   storage: {
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
+    getExactAiTraderGraduationDecisions: (...a: unknown[]) => getExactGraduationMock(...a),
+    commitAiTraderGraduation: (...a: unknown[]) => commitGraduationMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     updateAiTraderDecision: (...a: unknown[]) => updateDecisionMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getDecisionsMock(...a),
@@ -430,7 +434,8 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   closeBotState = {};
   for (const m of [
-    getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getDecisionsMock,
+    getWalletMock, getRecentClosedMock, getExactGraduationMock, commitGraduationMock,
+    updateBotMock, updateDecisionMock, getDecisionsMock,
     getOpenDecisionsMock, getUnresolvedDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock,
     claimAnalysisMock, transitionStateMock, commitCloseMock, commitRecoveryMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
@@ -444,6 +449,11 @@ beforeEach(() => {
     m.mockReset();
   }
   getRecentClosedMock.mockResolvedValue([]);
+  getExactGraduationMock.mockResolvedValue([]);
+  commitGraduationMock.mockImplementation(async (params: any) => ({
+    bot: makeBot({ graduationState: "graduated", graduatedAt: params.evaluatedAt }),
+    record: { id: "qualification-record-1", createdAt: params.evaluatedAt, ...params.record },
+  }));
   getOpenDecisionsMock.mockResolvedValue([]);
   getUnresolvedDecisionsMock.mockResolvedValue([]);
   getScannerShortlistMock.mockReturnValue([]);
@@ -1710,17 +1720,34 @@ describe("graduation", () => {
     fetchOHLCVMock.mockResolvedValue([
       candle(ENTRY_CANDLE_OPEN + TF_15M, 150, 161, 150, 160.5), // TP close
     ]);
-    // Record inside the 10-day trial: 4 profitable trades (PF ∞, DD 0).
-    getRecentClosedMock.mockResolvedValue([
-      { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
-      { closedAt: new Date(NOW - 3 * DAY), realizedPnl: "12", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
-      { closedAt: new Date(NOW - 4 * DAY), realizedPnl: "8", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
-      { closedAt: new Date(NOW - 5 * DAY), realizedPnl: "15", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+    getRecentClosedMock.mockResolvedValue([{
+      id: "graduation-latest",
+      contextDigest: ERA_CONTEXT,
+      closedAt: new Date(NOW - 2 * DAY),
+    }]);
+    // Exact unbounded population inside the 10-day trial: 4 profitable trades.
+    getExactGraduationMock.mockResolvedValue([
+      { id: "g-4", outcome: "executed", decidedAt: new Date(NOW - 5 * DAY - 60_000), closedAt: new Date(NOW - 5 * DAY), realizedPnl: "15", feesPaid: "0.10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { id: "g-3", outcome: "executed", decidedAt: new Date(NOW - 4 * DAY - 60_000), closedAt: new Date(NOW - 4 * DAY), realizedPnl: "8", feesPaid: "0.10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { id: "g-2", outcome: "executed", decidedAt: new Date(NOW - 3 * DAY - 60_000), closedAt: new Date(NOW - 3 * DAY), realizedPnl: "12", feesPaid: "0.10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { id: "g-1", outcome: "executed", decidedAt: new Date(NOW - 2 * DAY - 60_000), closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", feesPaid: "0.10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
     ]);
-
     await monitorBotOnce(makeBot());
 
-    expect(botUpdates().some((u) => u.graduationState === "graduated" && u.graduatedAt instanceof Date)).toBe(true);
+    expect(getExactGraduationMock).toHaveBeenCalledWith(
+      "bot-1111-2222",
+      new Date(NOW - 10 * DAY),
+      new Date(NOW),
+    );
+    expect(commitGraduationMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: "bot-1111-2222",
+      expectedQualificationEraDigest: DEFAULT_ERA,
+      record: expect.objectContaining({
+        decisionIds: ["g-4", "g-3", "g-2", "g-1"],
+        equitySeriesDigest: expect.any(String),
+        evidenceSourceDigest: expect.any(String),
+      }),
+    }));
     expect(notifications().some((n) => n.type === "ai_trader_graduation")).toBe(true);
   });
 
@@ -1730,6 +1757,7 @@ describe("graduation", () => {
     getRecentClosedMock.mockResolvedValue([
       { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
     ]);
+    getExactGraduationMock.mockResolvedValue([       { id: "only-trade", outcome: "executed", decidedAt: new Date(NOW - 2 * DAY - 60_000), closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", feesPaid: "0.10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },     ]);
 
     await runGraduationSweep();
 
@@ -1742,14 +1770,17 @@ describe("graduation", () => {
     getActiveBotsMock.mockResolvedValue([makeBot({ status: "idle" })]);
     getRecentClosedMock.mockResolvedValue([
       { closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
-      { closedAt: new Date(NOW - 3 * DAY), realizedPnl: "12", qualificationEraDigest: "PRIOR", contextDigest: ERA_CONTEXT },
-      { closedAt: new Date(NOW - 4 * DAY), realizedPnl: "8", qualificationEraDigest: null, contextDigest: ERA_CONTEXT },
     ]);
-
+    getExactGraduationMock.mockResolvedValue([
+      { id: "current", outcome: "executed", decidedAt: new Date(NOW - 2 * DAY - 60_000), closedAt: new Date(NOW - 2 * DAY), realizedPnl: "10", qualificationEraDigest: DEFAULT_ERA, contextDigest: ERA_CONTEXT },
+      { id: "prior", outcome: "executed", decidedAt: new Date(NOW - 3 * DAY - 60_000), closedAt: new Date(NOW - 3 * DAY), realizedPnl: "12", qualificationEraDigest: "PRIOR", contextDigest: ERA_CONTEXT },
+      { id: "missing", outcome: "executed", decidedAt: new Date(NOW - 4 * DAY - 60_000), closedAt: new Date(NOW - 4 * DAY), realizedPnl: "8", qualificationEraDigest: null, contextDigest: ERA_CONTEXT },
+    ]);
     await runGraduationSweep();
 
     expect(botUpdates().some((u) => u.graduationState === "graduated")).toBe(false);
-    expect(botUpdates().some((u) => u.graduationState === "failed")).toBe(true);
+    expect(botUpdates().some((u) => u.graduationState === "failed")).toBe(false);
+    expect(commitGraduationMock).not.toHaveBeenCalled();
   });
 
   it("invalidates before graduation when the recomputed platform era changed", async () => {

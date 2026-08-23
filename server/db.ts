@@ -1530,6 +1530,51 @@ const schemaMigrationSql = [
          END LOOP;
        END
        $qv$`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_qualification_records (
+         id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+         bot_id varchar NOT NULL REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
+         qualification_era_digest text NOT NULL,
+         trial_started_at timestamp NOT NULL,
+         evaluated_at timestamp NOT NULL,
+         criteria jsonb NOT NULL,
+         allocation_usdc numeric(20,2) NOT NULL,
+         decision_ids jsonb NOT NULL,
+         equity_series jsonb NOT NULL,
+         equity_series_digest text NOT NULL,
+         trade_count integer NOT NULL,
+         net_pnl numeric(20,6) NOT NULL,
+         fees jsonb NOT NULL,
+         profit_factor jsonb NOT NULL,
+         max_drawdown_pct numeric(12,6) NOT NULL,
+         open_position_mtm numeric(20,6) NOT NULL,
+         leverage_observation jsonb,
+         evidence_source_digest text NOT NULL,
+         created_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT ai_trader_qualification_records_bot_era_unique
+           UNIQUE (bot_id, qualification_era_digest)
+       );
+       CREATE INDEX IF NOT EXISTS idx_ai_trader_qualification_records_bot_evaluated
+         ON ai_trader_qualification_records (bot_id, evaluated_at DESC);
+       CREATE OR REPLACE FUNCTION qv_reject_ai_trader_qualification_record_update()
+       RETURNS trigger LANGUAGE plpgsql AS $qv$
+       BEGIN
+         RAISE EXCEPTION 'ai_trader_qualification_records are immutable';
+       END
+       $qv$;
+       DO $qv$
+       BEGIN
+         IF NOT EXISTS (
+           SELECT 1 FROM pg_trigger
+            WHERE tgname = 'ai_trader_qualification_records_no_update'
+              AND tgrelid = 'ai_trader_qualification_records'::regclass
+              AND NOT tgisinternal
+         ) THEN
+           CREATE TRIGGER ai_trader_qualification_records_no_update
+             BEFORE UPDATE ON ai_trader_qualification_records
+             FOR EACH ROW EXECUTE FUNCTION qv_reject_ai_trader_qualification_record_update();
+         END IF;
+       END
+       $qv$`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -4679,6 +4724,50 @@ const schemaMigrationMetadata = [
       }
     ],
     "operation": "backfill"
+  },
+  {
+    "id": "178-create-ai-trader-qualification-records",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_qualification_records",
+        "columns": [
+          "id",
+          "bot_id",
+          "qualification_era_digest",
+          "trial_started_at",
+          "evaluated_at",
+          "criteria",
+          "allocation_usdc",
+          "decision_ids",
+          "equity_series",
+          "equity_series_digest",
+          "trade_count",
+          "net_pnl",
+          "fees",
+          "profit_factor",
+          "max_drawdown_pct",
+          "open_position_mtm",
+          "leverage_observation",
+          "evidence_source_digest",
+          "created_at"
+        ]
+      },
+      {
+        "kind": "index",
+        "table": "ai_trader_qualification_records",
+        "index": "idx_ai_trader_qualification_records_bot_evaluated",
+        "columns": [
+          "bot_id",
+          "evaluated_at DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
   }
 ] as const;
 

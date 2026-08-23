@@ -2191,6 +2191,36 @@ export const aiTraderDecisions = pgTable("ai_trader_decisions", {
   index("idx_ai_trader_decisions_bot_decided").on(table.botId, table.decidedAt.desc()),
 ]);
 
+// Immutable qualification evidence. Application code never updates these rows;
+// bot deletion follows the existing parent-lifetime cascade until the owner
+// separately rules on post-deletion retention.
+export const aiTraderQualificationRecords = pgTable("ai_trader_qualification_records", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  botId: varchar("bot_id").notNull().references(() => aiTraderBots.id, { onDelete: "cascade" }),
+  qualificationEraDigest: text("qualification_era_digest").notNull(),
+  trialStartedAt: timestamp("trial_started_at").notNull(),
+  evaluatedAt: timestamp("evaluated_at").notNull(),
+  criteria: jsonb("criteria").notNull(),
+  allocationUsdc: decimal("allocation_usdc", { precision: 20, scale: 2 }).notNull(),
+  decisionIds: jsonb("decision_ids").notNull(),
+  equitySeries: jsonb("equity_series").notNull(),
+  equitySeriesDigest: text("equity_series_digest").notNull(),
+  tradeCount: integer("trade_count").notNull(),
+  netPnl: decimal("net_pnl", { precision: 20, scale: 6 }).notNull(),
+  fees: jsonb("fees").notNull(),
+  profitFactor: jsonb("profit_factor").notNull(),
+  maxDrawdownPct: decimal("max_drawdown_pct", { precision: 12, scale: 6 }).notNull(),
+  openPositionMtm: decimal("open_position_mtm", { precision: 20, scale: 6 }).notNull(),
+  leverageObservation: jsonb("leverage_observation"),
+  evidenceSourceDigest: text("evidence_source_digest").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ai_trader_qualification_records_bot_era_unique")
+    .on(table.botId, table.qualificationEraDigest),
+  index("idx_ai_trader_qualification_records_bot_evaluated")
+    .on(table.botId, table.evaluatedAt.desc()),
+]);
+
 // Append-only execution evidence. Bot/decision identifiers are snapshots rather
 // than foreign keys: deleting a mutable parent must never cascade venue truth.
 export const aiTraderExecutionEvents = pgTable("ai_trader_execution_events", {
@@ -2300,6 +2330,12 @@ export const insertAiTraderDecisionSchema = createInsertSchema(aiTraderDecisions
 });
 export type AiTraderDecision = typeof aiTraderDecisions.$inferSelect;
 export type InsertAiTraderDecision = z.infer<typeof insertAiTraderDecisionSchema>;
+export const insertAiTraderQualificationRecordSchema = createInsertSchema(aiTraderQualificationRecords).omit({
+  id: true,
+  createdAt: true,
+});
+export type AiTraderQualificationRecord = typeof aiTraderQualificationRecords.$inferSelect;
+export type InsertAiTraderQualificationRecord = z.infer<typeof insertAiTraderQualificationRecordSchema>;
 export type AiTraderExecutionEvent = typeof aiTraderExecutionEvents.$inferSelect;
 
 // COT-A: CFTC Bitcoin Legacy futures-only COT positioning cache.

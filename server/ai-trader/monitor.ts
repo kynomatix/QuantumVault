@@ -85,6 +85,7 @@ import {
   qualificationEraMutationPatch,
   type GraduationTradeRecord,
 } from "./graduation";
+import { buildQualificationRecord } from "./qualification-record";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import {
   resolveFeeRateQuote,
@@ -2287,14 +2288,28 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
  */
 async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number): Promise<void> {
   if (!bot.paperMode || bot.graduationState !== "in_trial") return;
+  const refuse = (reason: string): void => {
+    console.warn(`[AiTraderMonitor] graduation evidence unavailable for bot ${bot.id.slice(0, 8)}: ${reason}`);
+  };
   const allocation = num(bot.allocatedUsdc);
-  if (!allocation || allocation <= 0) return;
-  const trialStartedAt = bot.trialStartedAt ? new Date(bot.trialStartedAt).getTime() : null;
-  if (!trialStartedAt) return;
+  if (!allocation || allocation <= 0) {
+    refuse("allocation is invalid");
+    return;
+  }
+  const trialStartedAt = bot.trialStartedAt ? new Date(bot.trialStartedAt) : null;
+  if (!trialStartedAt || !Number.isFinite(trialStartedAt.getTime())) {
+    refuse("trial start is unavailable");
+    return;
+  }
 
-  const recentClosed = await storage.getRecentClosedDecisions(bot.id, 500);
-  const latestContext = recentClosed.find((decision) => decision.contextDigest)?.contextDigest;
-  if (!latestContext) return;
+  // This one-row read establishes the current era only. Eligibility itself is
+  // evaluated from the complete unbounded trial population below.
+  const [latestClosed] = await storage.getRecentClosedDecisions(bot.id, 1);
+  const latestContext = latestClosed?.contextDigest;
+  if (!latestContext) {
+    refuse("latest retained decision context is unavailable");
+    return;
+  }
   let recomputedEra: string;
   try {
     recomputedEra = computeQualificationEraDigest({
@@ -2302,6 +2317,7 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
       contextDigest: latestContext as Record<string, unknown>,
     });
   } catch {
+    refuse("qualification era cannot be recomputed from retained context");
     return;
   }
   const eraPatch = qualificationEraDecisionPatch(bot, recomputedEra);
@@ -2309,24 +2325,40 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
     await storage.updateAiTraderBot(bot.id, eraPatch as any);
     return;
   }
-  if (!bot.currentQualificationEraDigest) return;
-  const trades: GraduationTradeRecord[] = recentClosed
-    .filter((d) =>
-      d.closedAt &&
-      new Date(d.closedAt).getTime() >= trialStartedAt &&
-      num(d.realizedPnl) !== null &&
-      d.qualificationEraDigest === bot.currentQualificationEraDigest
-    )
-    .map((d) => ({ closedAt: new Date(d.closedAt!).getTime(), netPnl: num(d.realizedPnl)! }));
+  if (!bot.currentQualificationEraDigest) {
+    refuse("current qualification era is unavailable");
+    return;
+  }
+
+  const evaluatedAt = new Date();
+  const exactClosed = await storage.getExactAiTraderGraduationDecisions(
+    bot.id,
+    trialStartedAt,
+    evaluatedAt,
+  );
+  const invalid = exactClosed.find((decision) =>
+    !decision.closedAt
+    || decision.qualificationEraDigest !== bot.currentQualificationEraDigest
+    || num(decision.realizedPnl) === null
+  );
+  if (invalid) {
+    refuse(`decision ${invalid.id} has incomplete or mismatched trial-era evidence`);
+    return;
+  }
+  const trades: GraduationTradeRecord[] = exactClosed.map((decision) => ({
+    closedAt: new Date(decision.closedAt!).getTime(),
+    netPnl: num(decision.realizedPnl)!,
+  }));
 
   let result;
   try {
     result = evaluateGraduation({
       criteria: bot.graduationCriteria,
       trades,
-      trialStartedAt,
+      trialStartedAt: trialStartedAt.getTime(),
       allocation,
       openPositionMtm,
+      now: evaluatedAt.getTime(),
     });
   } catch (err) {
     console.error(`[AiTraderMonitor] graduation evaluation failed for bot ${bot.id.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
@@ -2334,20 +2366,40 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
   }
 
   if (result.verdict === "graduated") {
-    await storage.updateAiTraderBot(bot.id, {
-      graduationState: "graduated",
-      graduatedAt: new Date(),
-      graduatedQualificationEraDigest: bot.currentQualificationEraDigest,
-      qualificationEraInvalidationReason: null,
+    let record;
+    try {
+      record = buildQualificationRecord({
+        botId: bot.id,
+        qualificationEraDigest: bot.currentQualificationEraDigest,
+        trialStartedAt,
+        evaluatedAt,
+        allocationUsdc: allocation,
+        openPositionMtm,
+        decisions: exactClosed,
+        evaluation: result,
+      });
+    } catch (err) {
+      refuse(`immutable record construction failed: ${err instanceof Error ? err.message : err}`);
+      return;
+    }
+    const committed = await storage.commitAiTraderGraduation({
+      botId: bot.id,
+      expectedQualificationEraDigest: bot.currentQualificationEraDigest,
+      evaluatedAt,
+      record,
     });
-    console.log(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)} GRADUATED: ${result.tradeCount} trades, net ${result.netPnl.toFixed(2)}, PF ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : "∞"}, maxDD ${result.maxDrawdownPct.toFixed(1)}%`);
+    if (!committed) {
+      refuse("atomic graduation claim was lost");
+      return;
+    }
+    console.log(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)} GRADUATED: ${result.tradeCount} trades, net ${result.netPnl.toFixed(2)}, PF ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : "infinity"}, maxDD ${result.maxDrawdownPct.toFixed(1)}%`);
     await sendTradeNotification(bot.walletAddress, {
       type: "ai_trader_graduation",
       botName: botLabel(bot),
       market: bot.market,
       pnl: result.netPnl,
       error: undefined,
-      closeReason: `${result.tradeCount} trades, PF ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : "∞"}, max drawdown ${result.maxDrawdownPct.toFixed(1)}%`,
+      closeReason: `${result.tradeCount} trades, PF ${Number.isFinite(result.profitFactor) ? result.profitFactor.toFixed(2) : "infinity"}, max drawdown ${result.maxDrawdownPct.toFixed(1)}%`,
     });
   } else if (result.verdict === "failed") {
     await storage.updateAiTraderBot(bot.id, { graduationState: "failed" });
@@ -2355,7 +2407,6 @@ async function evaluateBotGraduation(bot: AiTraderBot, openPositionMtm: number):
   }
   // 'in_trial' — nothing to persist.
 }
-
 /** Periodic sweep: catches period-elapsed verdicts even for bots that never trade. */
 export async function runGraduationSweep(): Promise<void> {
   const releasePoolLoadOwner = claimPoolLoadOwner(activeGraduation);

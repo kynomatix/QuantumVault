@@ -5,6 +5,8 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
+import { evaluateGraduation } from "../../server/ai-trader/graduation";
+import { buildQualificationRecord } from "../../server/ai-trader/qualification-record";
 
 const HAS_DB = !!process.env.DATABASE_URL;
 const WALLET = "ai-trader-test-" + Math.random().toString(36).slice(2);
@@ -16,10 +18,12 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
   let journal: typeof import("../../server/ai-trader/execution-journal");
   let aiTraderBots: typeof import("@shared/schema")["aiTraderBots"];
   let aiTraderDecisions: typeof import("@shared/schema")["aiTraderDecisions"];
+  let aiTraderQualificationRecords: typeof import("@shared/schema")["aiTraderQualificationRecords"];
 
   let botId: string;
   let decisionId: string;
   let authorityBotId: string;
+  let qualificationBotId: string;
 
   beforeAll(async () => {
     ({ storage } = await import("../../server/storage"));
@@ -27,7 +31,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     ({ db, pool } = dbModule);
     journal = await import("../../server/ai-trader/execution-journal");
     await dbModule.ensureSchema();
-    ({ aiTraderBots, aiTraderDecisions } = await import("@shared/schema"));
+    ({ aiTraderBots, aiTraderDecisions, aiTraderQualificationRecords } = await import("@shared/schema"));
   });
 
   afterAll(async () => {
@@ -41,6 +45,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, authorityBotId));
       await db.delete(aiTraderBots).where(eq(aiTraderBots.id, authorityBotId));
     }
+    if (qualificationBotId) {       await db.delete(aiTraderBots).where(eq(aiTraderBots.id, qualificationBotId));     }
   });
 
   it("createAiTraderBot inserts a row with the given fields", async () => {
@@ -1692,5 +1697,82 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         await db.delete(aiTraderBots).where(eq(aiTraderBots.id, degenBotId));
       }
     }
+  });
+  it("atomically binds graduation to an immutable exact-era record", async () => {
+    const trialStartedAt = new Date(Date.now() - 10 * 86_400_000);
+    const evaluatedAt = new Date();
+    const era = "ROUNDTRIP-QUALIFICATION-ERA";
+    const bot = await storage.createAiTraderBot({
+      walletAddress: WALLET,
+      protocol: "pacifica",
+      market: "SOL-PERP",
+      timeframe: "15m",
+      allocatedUsdc: "1000.00",
+      paperMode: true,
+      graduationState: "in_trial",
+      currentQualificationEraDigest: era,
+      trialStartedAt,
+      graduationCriteria: { periodDays: 7, minTrades: 3, minNetPnl: 0, maxDrawdownPct: 30, minProfitFactor: 1.1 },
+      policyHmac: "qualification-roundtrip-hmac",
+    } as any);
+    qualificationBotId = bot.id;
+
+    const decisionIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const decidedAt = new Date(trialStartedAt.getTime() + (index + 1) * 86_400_000);
+      const row = await storage.insertAiTraderDecision({
+        botId: bot.id,
+        decidedAt,
+        rawDecision: { action: "long" },
+        contextDigest: { guardrailEcho: { maxLeverage: 5, smartLeverageCap: 3 } },
+        outcome: "executed",
+        closedAt: new Date(decidedAt.getTime() + 60_000),
+        realizedPnl: String(index + 1),
+        feesPaid: "0.10",
+        qualificationEraDigest: era,
+      } as any);
+      decisionIds.push(row.id);
+    }
+
+    const exact = await storage.getExactAiTraderGraduationDecisions(bot.id, trialStartedAt, evaluatedAt);
+    expect(exact.map((row) => row.id)).toEqual(decisionIds);
+    const evaluation = evaluateGraduation({
+      criteria: bot.graduationCriteria,
+      trades: exact.map((row) => ({ closedAt: row.closedAt!, netPnl: Number(row.realizedPnl) })),
+      trialStartedAt,
+      allocation: 1000,
+      openPositionMtm: 0,
+      now: evaluatedAt.getTime(),
+    });
+    expect(evaluation.verdict).toBe("graduated");
+    const record = buildQualificationRecord({
+      botId: bot.id,
+      qualificationEraDigest: era,
+      trialStartedAt,
+      evaluatedAt,
+      allocationUsdc: 1000,
+      openPositionMtm: 0,
+      decisions: exact,
+      evaluation,
+    });    const committed = await storage.commitAiTraderGraduation({
+      botId: bot.id,
+      expectedQualificationEraDigest: era,
+      evaluatedAt,
+      record,
+    });
+    expect(committed?.bot).toMatchObject({
+      graduationState: "graduated",
+      graduatedQualificationEraDigest: era,
+    });
+    const retained = await storage.getAiTraderQualificationRecord(bot.id, era);
+    expect(retained).toMatchObject({
+      decisionIds,
+      evidenceSourceDigest: record.evidenceSourceDigest,
+    });
+    await expect(
+      db.update(aiTraderQualificationRecords)
+        .set({ netPnl: "999.000000" })
+        .where(eq(aiTraderQualificationRecords.id, retained!.id)),
+    ).rejects.toThrow("ai_trader_qualification_records are immutable");
   });
 });

@@ -2023,6 +2023,54 @@ export function registerAiTraderRoutes(app: Express): void {
     }
   });
 
+  // --- Immutable graduation review -----------------------------------------------------
+  app.get("/api/ai-trader/:id/qualification-review", requireWallet, async (req: any, res) => {
+    try {
+      const bot = await loadOwnedBot(req, res);
+      if (!bot) return;
+      if (bot.graduationState === "waived") {
+        return res.json({ status: "waived" });
+      }
+      if (bot.graduationState !== "graduated") {
+        return res.json({ status: "pending", graduationState: bot.graduationState });
+      }
+      const era = bot.graduatedQualificationEraDigest;
+      if (!era) {
+        return res.json({ status: "unavailable", reason: "legacy_record_missing" });
+      }
+      const record = await storage.getAiTraderQualificationRecord(bot.id, era);
+      if (!record) {
+        return res.json({ status: "unavailable", reason: "legacy_record_missing" });
+      }
+      return res.json({
+        status: "available",
+        record: {
+          id: record.id,
+          qualificationEraDigest: record.qualificationEraDigest,
+          trialStartedAt: record.trialStartedAt,
+          evaluatedAt: record.evaluatedAt,
+          criteria: record.criteria,
+          allocationUsdc: record.allocationUsdc,
+          decisionIds: record.decisionIds,
+          equitySeries: record.equitySeries,
+          equitySeriesDigest: record.equitySeriesDigest,
+          tradeCount: record.tradeCount,
+          netPnl: record.netPnl,
+          fees: record.fees,
+          profitFactor: record.profitFactor,
+          maxDrawdownPct: record.maxDrawdownPct,
+          openPositionMtm: record.openPositionMtm,
+          leverageObservation: record.leverageObservation,
+          evidenceSourceDigest: record.evidenceSourceDigest,
+          createdAt: record.createdAt,
+        },
+      });
+    } catch (err) {
+      console.error("[AiTrader] qualification review error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // --- Current qualification-era performance -------------------------------------------
   app.get("/api/ai-trader/:id/performance", requireWallet, async (req: any, res) => {
     try {

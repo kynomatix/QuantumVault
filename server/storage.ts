@@ -133,10 +133,13 @@ import {
   type InsertReferralRewardEvent,
   aiTraderBots,
   aiTraderDecisions,
+  aiTraderQualificationRecords,
   type AiTraderBot,
   type InsertAiTraderBot,
   type AiTraderDecision,
   type InsertAiTraderDecision,
+  type AiTraderQualificationRecord,
+  type InsertAiTraderQualificationRecord,
 } from "@shared/schema";
 import {
   acquireExecutionJournalAttemptLocksInTransaction,
@@ -148,6 +151,7 @@ import {
   type JournalEventInput,
 } from "./ai-trader/execution-journal";
 import { appendTelemetry } from "./telemetry";
+import { buildQualificationRecord } from "./ai-trader/qualification-record";
 
 export type AiTraderPaperEntryTransitionConflict =
   | "decision_state_conflict"
@@ -1116,6 +1120,21 @@ export interface IStorage {
   getAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getExecutedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getRecentClosedDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
+  getExactAiTraderGraduationDecisions(
+    botId: string,
+    trialStartedAt: Date,
+    evaluatedAt: Date,
+  ): Promise<AiTraderDecision[]>;
+  commitAiTraderGraduation(params: {
+    botId: string;
+    expectedQualificationEraDigest: string;
+    evaluatedAt: Date;
+    record: InsertAiTraderQualificationRecord;
+  }): Promise<{ bot: AiTraderBot; record: AiTraderQualificationRecord } | undefined>;
+  getAiTraderQualificationRecord(
+    botId: string,
+    qualificationEraDigest?: string,
+  ): Promise<AiTraderQualificationRecord | undefined>;
   getOpenAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   getUnresolvedAiTraderDecisions(botId: string, limit: number): Promise<AiTraderDecision[]>;
   compressOldAiTraderDecisions(olderThanDays: number, batchSize: number): Promise<number>;
@@ -7001,6 +7020,149 @@ export class DatabaseStorage implements IStorage {
       .where(eq(aiTraderDecisions.botId, botId))
       .orderBy(desc(aiTraderDecisions.decidedAt))
       .limit(limit);
+  }
+
+  async getExactAiTraderGraduationDecisions(
+    botId: string,
+    trialStartedAt: Date,
+    evaluatedAt: Date,
+  ): Promise<AiTraderDecision[]> {
+    return db.select().from(aiTraderDecisions)
+      .where(and(
+        eq(aiTraderDecisions.botId, botId),
+        eq(aiTraderDecisions.outcome, "executed"),
+        isNotNull(aiTraderDecisions.closedAt),
+        gte(aiTraderDecisions.closedAt, trialStartedAt),
+        lte(aiTraderDecisions.closedAt, evaluatedAt),
+      ))
+      .orderBy(asc(aiTraderDecisions.closedAt), asc(aiTraderDecisions.id));
+  }
+
+  async commitAiTraderGraduation(params: {
+    botId: string;
+    expectedQualificationEraDigest: string;
+    evaluatedAt: Date;
+    record: InsertAiTraderQualificationRecord;
+  }): Promise<{ bot: AiTraderBot; record: AiTraderQualificationRecord } | undefined> {
+    if (params.record.botId !== params.botId
+        || params.record.qualificationEraDigest !== params.expectedQualificationEraDigest) {
+      throw new Error("qualification record identity does not match graduation claim");
+    }
+    return db.transaction(async (tx) => {
+      const [lockedBot] = await tx.select().from(aiTraderBots)
+        .where(and(
+          eq(aiTraderBots.id, params.botId),
+          eq(aiTraderBots.paperMode, true),
+          eq(aiTraderBots.graduationState, "in_trial"),
+          eq(aiTraderBots.currentQualificationEraDigest, params.expectedQualificationEraDigest),
+        ))
+        .for("update");
+      if (!lockedBot) return undefined;
+
+      // Re-read and lock the exact trial population inside the same transaction
+      // that persists the record and graduates the bot. The monitor's pre-read
+      // is advisory; this prevents a concurrent decision mutation from making
+      // the immutable evidence stale at the instant it becomes authoritative.
+      const exactDecisions = await tx.select().from(aiTraderDecisions)
+        .where(and(
+          eq(aiTraderDecisions.botId, params.botId),
+          eq(aiTraderDecisions.outcome, "executed"),
+          isNotNull(aiTraderDecisions.closedAt),
+          gte(aiTraderDecisions.closedAt, params.record.trialStartedAt),
+          lte(aiTraderDecisions.closedAt, params.evaluatedAt),
+        ))
+        .orderBy(asc(aiTraderDecisions.closedAt), asc(aiTraderDecisions.id))
+        .for("share");
+      const encodedProfitFactor = params.record.profitFactor as { kind?: unknown; value?: unknown };
+      const profitFactor = encodedProfitFactor.kind === "positive_infinity"
+        ? Number.POSITIVE_INFINITY
+        : encodedProfitFactor.kind === "finite" && Number.isFinite(Number(encodedProfitFactor.value))
+          ? Number(encodedProfitFactor.value)
+          : Number.NaN;
+      const netPnl = Number(params.record.netPnl);
+      const maxDrawdownPct = Number(params.record.maxDrawdownPct);
+      const allocationUsdc = Number(params.record.allocationUsdc);
+      const openPositionMtm = Number(params.record.openPositionMtm);
+      if (![netPnl, maxDrawdownPct, allocationUsdc, openPositionMtm].every(Number.isFinite)
+          || Number.isNaN(profitFactor)) {
+        throw new Error("qualification record metrics are malformed");
+      }
+      const rebuilt = buildQualificationRecord({
+        botId: params.botId,
+        qualificationEraDigest: params.expectedQualificationEraDigest,
+        trialStartedAt: params.record.trialStartedAt,
+        evaluatedAt: params.evaluatedAt,
+        allocationUsdc,
+        openPositionMtm,
+        decisions: exactDecisions,
+        evaluation: {
+          verdict: "graduated",
+          periodElapsed: true,
+          daysElapsed: (params.evaluatedAt.getTime() - params.record.trialStartedAt.getTime()) / 86_400_000,
+          tradeCount: params.record.tradeCount,
+          netPnl,
+          profitFactor,
+          maxDrawdownPct,
+          criteriaMet: true,
+          failures: [],
+          criteria: params.record.criteria as any,
+        },
+      });
+      if (rebuilt.evidenceSourceDigest !== params.record.evidenceSourceDigest) {
+        throw new Error("qualification evidence changed before atomic commit");
+      }
+
+      const [record] = await tx.insert(aiTraderQualificationRecords)
+        .values(rebuilt as any)
+        .onConflictDoNothing()
+        .returning();
+      if (!record) {
+        const [existing] = await tx.select().from(aiTraderQualificationRecords)
+          .where(and(
+            eq(aiTraderQualificationRecords.botId, params.botId),
+            eq(aiTraderQualificationRecords.qualificationEraDigest, params.expectedQualificationEraDigest),
+          ));
+        if (!existing || existing.evidenceSourceDigest !== rebuilt.evidenceSourceDigest) {
+          throw new Error("qualification record conflict for bot era");
+        }
+        throw new Error("qualification record already exists while bot remains in trial");
+      }
+
+      const [bot] = await tx.update(aiTraderBots)
+        .set({
+          graduationState: "graduated",
+          graduatedAt: params.evaluatedAt,
+          graduatedQualificationEraDigest: params.expectedQualificationEraDigest,
+          qualificationEraInvalidationReason: null,
+          updatedAt: params.evaluatedAt,
+        } as any)
+        .where(and(
+          eq(aiTraderBots.id, params.botId),
+          eq(aiTraderBots.paperMode, true),
+          eq(aiTraderBots.graduationState, "in_trial"),
+          eq(aiTraderBots.currentQualificationEraDigest, params.expectedQualificationEraDigest),
+        ))
+        .returning();
+      if (!bot) throw new Error("qualification record inserted but graduation claim was lost");
+      return { bot, record };
+    });
+  }
+
+  async getAiTraderQualificationRecord(
+    botId: string,
+    qualificationEraDigest?: string,
+  ): Promise<AiTraderQualificationRecord | undefined> {
+    const where = qualificationEraDigest
+      ? and(
+          eq(aiTraderQualificationRecords.botId, botId),
+          eq(aiTraderQualificationRecords.qualificationEraDigest, qualificationEraDigest),
+        )
+      : eq(aiTraderQualificationRecords.botId, botId);
+    const [record] = await db.select().from(aiTraderQualificationRecords)
+      .where(where)
+      .orderBy(desc(aiTraderQualificationRecords.evaluatedAt))
+      .limit(1);
+    return record;
   }
 
   // Executed decisions only (includes open trades where closedAt is null).
