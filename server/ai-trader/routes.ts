@@ -22,7 +22,7 @@
 // recompute — paperMode is outside the HMAC envelope by design).
 
 import type { Express, Response } from "express";
-import { and, asc, desc, eq, gte, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNotNull, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error";
@@ -367,18 +367,16 @@ export function summarizeCandleProvenance(
   };
 }
 
-export type AiTraderPerformanceResponse =
-  | {
-      status: "available";
-      mode: "paper_trial" | "live";
-      points: Array<{ t: string; v: number }>;
-      tradeCount: number;
-      netPnl: number;
-      omittedUnattributedTrades: number;
-      excludedOtherModeTrades: number;
-      omittedInvalidPnlTrades: number;
-    }
-  | { status: "pending"; reason: "qualification_era_unknown" };
+export type AiTraderPerformanceResponse = {
+  status: "available";
+  mode: "paper_trial" | "live";
+  points: Array<{ t: string; v: number }>;
+  tradeCount: number;
+  netPnl: number;
+  omittedUnattributedTrades: number;
+  excludedOtherModeTrades: number;
+  omittedInvalidPnlTrades: number;
+};
 
 type PerformanceCandidateRow = {
   decisionId: string;
@@ -390,7 +388,7 @@ type PerformanceCandidateRow = {
 export function projectAiTraderPerformance(
   rows: PerformanceCandidateRow[],
   mode: "paper_trial" | "live",
-): Extract<AiTraderPerformanceResponse, { status: "available" }> {
+): AiTraderPerformanceResponse {
   const candidates = new Map<string, {
     decisionId: string;
     closedAt: Date;
@@ -2071,18 +2069,11 @@ export function registerAiTraderRoutes(app: Express): void {
     }
   });
 
-  // --- Current qualification-era performance -------------------------------------------
+  // --- Overall bot performance, separated by paper/live mode -----------------------------
   app.get("/api/ai-trader/:id/performance", requireWallet, async (req: any, res) => {
     try {
       const bot = await loadOwnedBot(req, res);
       if (!bot) return;
-      if (!bot.currentQualificationEraDigest || !bot.trialStartedAt) {
-        const pending: AiTraderPerformanceResponse = {
-          status: "pending",
-          reason: "qualification_era_unknown",
-        };
-        return res.json(pending);
-      }
 
       const rows = await db
         .select({
@@ -2104,8 +2095,6 @@ export function registerAiTraderRoutes(app: Express): void {
             eq(aiTraderDecisions.botId, bot.id),
             eq(aiTraderDecisions.outcome, "executed"),
             isNotNull(aiTraderDecisions.closedAt),
-            gte(aiTraderDecisions.closedAt, bot.trialStartedAt),
-            eq(aiTraderDecisions.qualificationEraDigest, bot.currentQualificationEraDigest),
           ),
         )
         .orderBy(asc(aiTraderDecisions.closedAt), asc(aiTraderDecisions.id));

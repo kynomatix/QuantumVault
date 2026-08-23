@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const getBotMock = vi.fn();
 const getAiTraderDecisionsMock = vi.fn();
@@ -900,7 +902,7 @@ function mockPerformanceQuery(rows: unknown[]) {
   return { from, leftJoin, where, orderBy };
 }
 
-describe("AI Trader current qualification-era performance", () => {
+describe("AI Trader overall mode-scoped performance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -932,7 +934,7 @@ describe("AI Trader current qualification-era performance", () => {
     });
   });
 
-  it("enforces wallet ownership and returns pending without reading the ledger", async () => {
+  it("enforces wallet ownership and reads overall history without qualification-era authority", async () => {
     const built = buildApp();
     registerAiTraderRoutes(built.app as any);
     const key = "GET /api/ai-trader/:id/performance";
@@ -944,18 +946,21 @@ describe("AI Trader current qualification-era performance", () => {
     expect(denied).toMatchObject({ statusCode: 404 });
     expect(dbSelectMock).not.toHaveBeenCalled();
 
-    getBotMock.mockResolvedValueOnce(performanceBot({ currentQualificationEraDigest: null }));
-    const pending = await invoke(built.routes, key, {
+    mockPerformanceQuery([
+      { decisionId: "paper-before-era", closedAt: new Date("2026-07-01T00:00:00.000Z"), realizedPnl: "2.50", terminalCause: "paper" },
+    ]);
+    getBotMock.mockResolvedValueOnce(performanceBot({ currentQualificationEraDigest: null, trialStartedAt: null }));
+    const available = await invoke(built.routes, key, {
       params: { id: "performance-bot" }, query: {}, body: {}, headers: {}, session: { walletAddress: "owner-wallet" },
     });
-    expect(pending).toEqual({
+    expect(available).toMatchObject({
       statusCode: 200,
-      body: { status: "pending", reason: "qualification_era_unknown" },
+      body: { status: "available", mode: "paper_trial", tradeCount: 1, netPnl: 2.5 },
     });
-    expect(dbSelectMock).not.toHaveBeenCalled();
+    expect(dbSelectMock).toHaveBeenCalledTimes(1);
   });
 
-  it("binds the direct query and returns only current paper mode without exposing its era digest", async () => {
+  it("binds the direct query and returns all closed paper history without exposing era data", async () => {
     const query = mockPerformanceQuery([
       { decisionId: "paper-1", closedAt: new Date("2026-08-02T00:00:00.000Z"), realizedPnl: "2.50", terminalCause: "paper" },
       { decisionId: "live-1", closedAt: new Date("2026-08-03T00:00:00.000Z"), realizedPnl: "4.00", terminalCause: "protective" },
@@ -991,9 +996,17 @@ describe("AI Trader current qualification-era performance", () => {
     expect(query.where).toHaveBeenCalledTimes(1);
     expect(query.orderBy).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(result.body)).not.toContain(bot.currentQualificationEraDigest);
+    const source = readFileSync(resolve(process.cwd(), "server/ai-trader/routes.ts"), "utf8");
+    const endpoint = source.slice(
+      source.indexOf('app.get("/api/ai-trader/:id/performance"'),
+      source.indexOf('app.get("/api/ai-trader/:id/history"'),
+    );
+    expect(endpoint).not.toContain("currentQualificationEraDigest");
+    expect(endpoint).not.toContain("trialStartedAt");
+    expect(endpoint).not.toContain("qualificationEraDigest");
   });
 
-  it("keeps a promoted bot's unchanged era mode-separated with exact class counts", async () => {
+  it("keeps a promoted bot's all-time history mode-separated with exact class counts", async () => {
     mockPerformanceQuery([
       { decisionId: "paper-before-promotion", closedAt: new Date("2026-08-02T00:00:00.000Z"), realizedPnl: "3", terminalCause: "paper" },
       { decisionId: "live-after-promotion", closedAt: new Date("2026-08-03T00:00:00.000Z"), realizedPnl: "5", terminalCause: "user_requested" },

@@ -16,7 +16,7 @@ const performancePanel = source.slice(
   source.indexOf("function TrialStrip"),
 );
 
-describe("AI Trader drawer current-era performance", () => {
+describe("AI Trader drawer overall mode-scoped performance", () => {
   it("fetches independently and reuses the existing polling and close-refresh lifecycle", () => {
     expect(performanceFetch).toContain("`/api/ai-trader/${botId}/performance`");
     expect(performanceFetch).toContain("credentials: 'include'");
@@ -47,7 +47,6 @@ describe("AI Trader drawer current-era performance", () => {
       "ai-trader-performance-chart",
       "ai-trader-performance-net-pnl",
       "ai-trader-performance-empty",
-      "ai-trader-performance-pending",
       "ai-trader-performance-error",
     ]) expect(performancePanel).toContain(id);
     for (const component of [
@@ -56,17 +55,18 @@ describe("AI Trader drawer current-era performance", () => {
     expect(performancePanel).toContain("domain={([dataMin, dataMax]: [number, number]) => [Math.min(0, dataMin), Math.max(0, dataMax)]}");
     expect(performancePanel).toContain("performance.tradeCount === 1");
     expect(performancePanel).toContain("[{ t: 'start', v: 0 }, ...performance.points]");
-    expect(performancePanel).toContain("Current paper qualification-era performance");
-    expect(performancePanel).toContain("Current live qualification-era performance");
+    expect(performancePanel).toContain("Overall paper performance");
+    expect(performancePanel).toContain("Overall live performance");
   });
 
-  it("distinguishes available-empty, pending, error, and omission truth", () => {
+  it("distinguishes available-empty, error, and omission truth without era semantics", () => {
     expect(performancePanel).toContain("performance.netPnl === 0");
     expect(performancePanel).toContain("'$0.00'");
-    expect(performancePanel).toContain("No closed paper trades in this qualification era yet.");
-    expect(performancePanel).toContain("No closed live trades in this qualification era yet.");
-    expect(performancePanel).toContain("Scanner market or timeframe changes start a new qualification era.");
-    expect(performancePanel).toContain("Performance starts after the next completed analysis establishes this qualification era.");
+    expect(performancePanel).toContain("No closed paper trades yet.");
+    expect(performancePanel).toContain("No closed live trades yet.");
+    expect(performancePanel).not.toContain("qualification era");
+    expect(performancePanel).not.toContain("scannerBot");
+    expect(performancePanel).not.toContain("pending");
     expect(performancePanel).toContain("Performance temporarily unavailable.");
     expect(performancePanel).toContain("omitted because terminal paper/live attribution is unavailable.");
     expect(performancePanel).toContain("excluded from this {paper ? 'paper' : 'live'} chart.");

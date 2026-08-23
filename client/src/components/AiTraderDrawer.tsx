@@ -221,29 +221,22 @@ interface AiTraderDrawerProps {
   onOpenDeposit?: () => void;
 }
 
-type PerformanceResponse =
-  | {
-      status: 'available';
-      mode: 'paper_trial' | 'live';
-      points: Array<{ t: string; v: number }>;
-      tradeCount: number;
-      netPnl: number;
-      omittedUnattributedTrades: number;
-      excludedOtherModeTrades: number;
-      omittedInvalidPnlTrades: number;
-    }
-  | { status: 'pending'; reason: 'qualification_era_unknown' };
+type PerformanceResponse = {
+  status: 'available';
+  mode: 'paper_trial' | 'live';
+  points: Array<{ t: string; v: number }>;
+  tradeCount: number;
+  netPnl: number;
+  omittedUnattributedTrades: number;
+  excludedOtherModeTrades: number;
+  omittedInvalidPnlTrades: number;
+};
 
 type PerformanceState = PerformanceResponse | { status: 'loading' } | { status: 'error' };
 
 function parsePerformanceResponse(value: unknown): PerformanceResponse | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
-  if (record.status === 'pending') {
-    return record.reason === 'qualification_era_unknown'
-      ? { status: 'pending', reason: 'qualification_era_unknown' }
-      : null;
-  }
   if (record.status !== 'available' || (record.mode !== 'paper_trial' && record.mode !== 'live')) return null;
   if (!Array.isArray(record.points)) return null;
   const points: Array<{ t: string; v: number }> = [];
@@ -482,20 +475,8 @@ function PreflightRow({ loading, available, needed, onOpenDeposit }: {
   );
 }
 
-function PerformancePanel({ performance, scannerBot }: {
-  performance: PerformanceState;
-  scannerBot: boolean;
-}) {
+function PerformancePanel({ performance }: { performance: PerformanceState }) {
   if (performance.status === 'loading') return null;
-  if (performance.status === 'pending') {
-    return (
-      <div className="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground" data-testid="ai-trader-performance">
-        <p data-testid="ai-trader-performance-pending">
-          Performance starts after the next completed analysis establishes this qualification era.
-        </p>
-      </div>
-    );
-  }
   if (performance.status === 'error') {
     return (
       <div className="rounded-xl border border-border/60 bg-muted/20 p-3 text-xs text-muted-foreground" data-testid="ai-trader-performance">
@@ -506,8 +487,8 @@ function PerformancePanel({ performance, scannerBot }: {
 
   const paper = performance.mode === 'paper_trial';
   const title = paper
-    ? 'Current paper qualification-era performance'
-    : 'Current live qualification-era performance';
+    ? 'Overall paper performance'
+    : 'Overall live performance';
   const pnlText = performance.netPnl === 0
     ? '$0.00'
     : `${performance.netPnl > 0 ? '+' : '-'}$${Math.abs(performance.netPnl).toFixed(2)}`;
@@ -556,8 +537,7 @@ function PerformancePanel({ performance, scannerBot }: {
         </div>
       ) : (
         <div className="text-xs text-muted-foreground space-y-1" data-testid="ai-trader-performance-empty">
-          <p>{paper ? 'No closed paper trades in this qualification era yet.' : 'No closed live trades in this qualification era yet.'}</p>
-          {scannerBot && <p>Scanner market or timeframe changes start a new qualification era.</p>}
+          <p>{paper ? 'No closed paper trades yet.' : 'No closed live trades yet.'}</p>
         </div>
       )}
 
@@ -1480,10 +1460,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   </div>
                 )}
 
-                <PerformancePanel
-                  performance={performance}
-                  scannerBot={bot.marketSource === 'scanner'}
-                />
+                <PerformancePanel performance={performance} />
 
                 {history.length === 0 && (
                   <div className="py-10 text-center text-sm text-muted-foreground" data-testid="activity-empty">
