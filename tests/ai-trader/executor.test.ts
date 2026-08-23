@@ -139,6 +139,9 @@ function makePersistedDecision(overrides: Partial<AiTraderDecision> = {}): AiTra
     id: "d-1",
     botId: "bot-1111-2222",
     contextDigest: {
+      price: 150,
+      indicators: { atr14: { value: 5 } },
+      account: { positionAuthority: "venue", positionState: "flat", hasPosition: false },
       feeRateIdentity: {
         protocol: "pacifica",
         account: AGENT_PUBKEY,
@@ -158,6 +161,18 @@ function makePersistedDecision(overrides: Partial<AiTraderDecision> = {}): AiTra
         builder: { status: "included", code: "QuantumVault", rate: 0.0002, provenance: "pacifica:builder_actual" },
       },
     },
+    rawDecision: {
+      action: "long",
+      entryType: "market",
+      leverage: 2,
+      sizePct: 50,
+      stopLossPrice: 145,
+      takeProfitPrice: 160,
+      confidence: 7,
+      invalidation: "loses 145 support",
+      rationale: "uptrend continuation",
+    },
+    clampedDecision: makeClamped(),
     decidedAt: new Date(NOW),
     ...overrides,
   } as unknown as AiTraderDecision;
@@ -172,6 +187,12 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
       callOrder.push("getBalances");
       return { totalEquity: 1000, freeCollateral: 900, totalMarginUsed: 0, unrealizedPnl: 0 };
     }),
+    getPrice: vi.fn(async () => {
+      callOrder.push("getPrice");
+      return 150;
+    }),
+    getMaintenanceMarginWeight: vi.fn(() => 0.05),
+    quantizeOrderSize: vi.fn((_market: string, sizeBase: number) => Math.floor(sizeBase * 100) / 100),
     setLeverage: vi.fn(async () => {
       callOrder.push("setLeverage");
     }),
@@ -669,6 +690,7 @@ describe("paper execution", () => {
     expect(safeJournalMock).not.toHaveBeenCalled();
     // Paper reads the wallet identity only to bind the retained quote; it must
     // never touch the venue or unwrap key material.
+    expect(adapter.getPrice).not.toHaveBeenCalled();
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
     expect((adapter.setTpSl as any)).not.toHaveBeenCalled();
     expect(getWalletMock).not.toHaveBeenCalled();
@@ -835,7 +857,7 @@ describe("live execution — pre-flight", () => {
   it("G11: insufficient free collateral records aborted_funding and returns the bot to idle", async () => {
     armLiveAuth();
     const adapter = makeAdapter({
-      getBalances: vi.fn(async () => ({ totalEquity: 100, freeCollateral: 499.99, totalMarginUsed: 0, unrealizedPnl: 0 })),
+      getBalances: vi.fn(async () => ({ totalEquity: 100, freeCollateral: 499.49, totalMarginUsed: 0, unrealizedPnl: 0 })),
     });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
@@ -861,6 +883,51 @@ describe("live execution — pre-flight", () => {
 // --- Live path: happy path ---------------------------------------------------------
 
 describe("live execution — happy path", () => {
+  it("revalidates a higher venue price and can only reduce the reviewed live exposure", async () => {
+    armLiveAuth();
+    const reviewed = makeClamped({ stopLossPrice: 145, takeProfitPrice: 190 });
+    getAiTraderDecisionMock.mockImplementation(async (id: string) => {
+      const row = makePersistedDecision({ id, clampedDecision: reviewed as any });
+      row.rawDecision = {
+        action: "long",
+        entryType: "market",
+        leverage: 2,
+        sizePct: 50,
+        stopLossPrice: 145,
+        takeProfitPrice: 190,
+        confidence: 7,
+        invalidation: "loses 145 support",
+        rationale: "uptrend continuation",
+      } as any;
+      return row;
+    });
+    const adapter = makeAdapter({
+      getPrice: vi.fn(async () => 160),
+    });
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-price-rise",
+      clamped: reviewed,
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toEqual({ ok: true, mode: "live", entryPrice: 150.2 });
+    expect(adapter.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+      leverage: 2,
+      sizeBase: 6.25,
+    }));
+    expect(appendRequiredJournalMock).toHaveBeenCalledWith(expect.objectContaining({
+      decisionId: "d-price-rise",
+      price: 160,
+      observedAt: new Date(NOW),
+      sizeBase: 6.25,
+    }));
+  });
+
   it("suppresses optional builder attachment and continues when retained fee context is unavailable", async () => {
     armLiveAuth();
     getAiTraderDecisionMock.mockImplementation(async (id: string) => {
@@ -914,6 +981,7 @@ describe("live execution — happy path", () => {
     // position confirm; G10 verification last.
     expect(callOrder).toEqual([
       "getBalances",
+      "getPrice",
       "status:executing",
       "setLeverage",
       "placeMarketOrder",
@@ -985,6 +1053,39 @@ describe("live execution — happy path", () => {
 // --- Live path: failure handling ----------------------------------------------------
 
 describe("live execution — failure handling (fail closed)", () => {
+  it.each([
+    ["throw", async () => { throw new Error("price endpoint unavailable"); }],
+    ["null", async () => null],
+    ["NaN", async () => Number.NaN],
+    ["zero", async () => 0],
+    ["negative", async () => -1],
+  ])("refuses a live entry before claim or venue mutation when fresh price is %s", async (_label, getPrice) => {
+    armLiveAuth();
+    const adapter = makeAdapter({ getPrice: vi.fn(getPrice) });
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-price-refuse",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toMatchObject({ ok: false, reason: "execution_revalidation_failed" });
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+    expect(appendRequiredJournalMock).not.toHaveBeenCalled();
+    expect(transitionStateMock).toHaveBeenCalledWith(expect.objectContaining({
+      expectedStatus: "analyzing",
+      nextStatus: "idle",
+      decisionId: "d-price-refuse",
+      decisionOutcome: "aborted_guard",
+    }));
+  });
+
   it("journal failure refuses live entry before placeMarketOrder", async () => {
     armLiveAuth();
     appendRequiredJournalMock.mockRejectedValueOnce(new Error("journal unavailable"));

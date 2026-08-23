@@ -33,7 +33,12 @@ import {
   type ProtocolAdapter,
 } from "../protocol/adapter";
 import { isUnconfirmedLandingResult } from "../protocol/tx-verdicts";
-import type { ClampedDecision } from "./guardrails";
+import {
+  applyGuardrails,
+  type ClampedDecision,
+  type GuardrailTimeframe,
+  type TradeDecisionLike,
+} from "./guardrails";
 import { paperEntryPrice, type PaperSide } from "./paper-math";
 import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
@@ -71,6 +76,8 @@ const MAX_TRADES_PER_DAY_HTF = 2;
 
 /** Entry-order slippage bound (plan WO-5 step 3, binding). */
 export const ENTRY_MAX_SLIPPAGE_PCT = 0.5;
+/** Definitional mirror of decide.ts: fees are retained for accounting, never entry admission. */
+const NON_ADMISSION_TAKER_FEE_RATE = 0;
 /** Position-confirmation retries (plan WO-5 step 4: 3× / 2s). */
 const POSITION_CONFIRM_ATTEMPTS = 3;
 const POSITION_CONFIRM_DELAY_MS = 2_000;
@@ -106,6 +113,7 @@ export type ExecuteFailureReason =
   | "scanner_live_execution_disabled" // scanner-source live entry capability is off for this process
   | "insufficient_funding" // G11: free collateral below required margin
   | "execution_identity_changed" // wallet execution account changed across the live-entry TOCTOU seam
+  | "execution_revalidation_failed" // fresh venue-price read or repeated guardrail validation refused live entry
   | "journal_unavailable"  // required pre-broadcast evidence failed; no entry sent
   | "bot_busy"             // bot already holds (or may hold) a position — refuse to stack a second entry
   | "order_failed"         // entry order rejected/failed, no position confirmed
@@ -146,6 +154,7 @@ const NON_RACE_GUARD_REASONS = new Set<ExecuteFailureReason>([
   "cooldown_active",
   "daily_cap_reached",
   "execution_identity_changed",
+  "execution_revalidation_failed",
   "capability_missing",
   "auth_unavailable",
   "invalid_clamp",
@@ -155,6 +164,38 @@ const NON_RACE_GUARD_REASONS = new Set<ExecuteFailureReason>([
   "scanner_live_execution_disabled",
   "insufficient_funding",
 ]);
+
+type StoredEntryClamp = ClampedDecision & Required<Pick<
+  ClampedDecision,
+  "leverage" | "marginUsdc" | "notionalUsdc" | "sizeBase" | "stopLossPrice" | "takeProfitPrice"
+>>;
+
+function finitePositive(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function storedEntryClamp(value: unknown, side: PaperSide): StoredEntryClamp | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as ClampedDecision;
+  if (candidate.action !== side
+      || !finitePositive(candidate.leverage)
+      || !finitePositive(candidate.marginUsdc)
+      || !finitePositive(candidate.notionalUsdc)
+      || !finitePositive(candidate.sizeBase)
+      || !finitePositive(candidate.stopLossPrice)
+      || !finitePositive(candidate.takeProfitPrice)) return null;
+  return candidate as StoredEntryClamp;
+}
+
+function storedEntryDecision(value: unknown, side: PaperSide): TradeDecisionLike | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as TradeDecisionLike;
+  if (candidate.action !== side
+      || !Number.isFinite(candidate.confidence)
+      || typeof candidate.invalidation !== "string"
+      || typeof candidate.rationale !== "string") return null;
+  return candidate;
+}
 
 async function unwindRejectedInternalDecision(
   input: ExecuteDecisionInput,
@@ -363,7 +404,20 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
       detail: "wallet missing the execution account required for live entry",
     });
   }
-  const digest = persistedDecision?.contextDigest as Record<string, unknown> | null | undefined;
+  const digest = persistedDecision?.contextDigest as Record<string, any> | null | undefined;
+  const persistedRawDecision = storedEntryDecision(persistedDecision?.rawDecision, side);
+  const persistedClampedDecision = storedEntryClamp(persistedDecision?.clampedDecision, side);
+  if (persistedDecision?.id !== decisionId
+      || persistedDecision.botId !== bot.id
+      || !digest
+      || !persistedRawDecision
+      || !persistedClampedDecision) {
+    return unwindRejectedInternalDecision(input, {
+      ok: false,
+      reason: "invalid_clamp",
+      detail: "persisted live decision is missing its exact raw/clamped/context identity",
+    });
+  }
   const retainedIdentity = digest?.feeRateIdentity as Record<string, unknown> | null | undefined;
   const expectedSubaccountId = bot.protocolSubaccountId ?? null;
   const retainedIdentityMatchesBot =
@@ -410,6 +464,9 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
     builderAttachment,
     journalObservedAt: liveJournalObservedAt as Date,
     expectedAuthorityStatus,
+    persistedRawDecision,
+    persistedClampedDecision,
+    contextDigest: digest,
   });
   return result.ok ? result : unwindRejectedInternalDecision(input, result);
 }
@@ -492,6 +549,12 @@ interface LiveEntryNumbers {
   journalObservedAt: Date;
   /** Exact state that is authorized to fail before the execution claim. */
   expectedAuthorityStatus: "proposed" | "analyzing";
+  /** Exact persisted raw request reviewed by guardrails at decision time. */
+  persistedRawDecision: TradeDecisionLike;
+  /** Exact persisted reviewed clamp; live revalidation may only reduce it. */
+  persistedClampedDecision: StoredEntryClamp;
+  /** Retained non-price guardrail inputs from the reviewed decision context. */
+  contextDigest: Record<string, any>;
 }
 
 async function executeLiveEntry(
@@ -609,6 +672,108 @@ async function executeLiveEntry(
     // Flash parkWhenIdle unpark is deferred with the Flash live path itself,
     // which the capability pre-flight above already blocks).
     const balances = await adapter.getBalances(agentPublicKey, subaccountId);
+
+    // Resolve venue price only after current balances are known and before the
+    // execution claim or any risk-increasing venue mutation.
+    let revalidationPrice: number | null = null;
+    let priceReadError: unknown = null;
+    try {
+      revalidationPrice = await adapter.getPrice(bot.market, { priority: "critical" });
+    } catch (error) {
+      priceReadError = error;
+    }
+    const revalidationObservedAt = new Date();
+    if (!finitePositive(revalidationPrice)) {
+      return {
+        ok: false,
+        reason: "execution_revalidation_failed",
+        detail: `fresh venue price unavailable before live entry${priceReadError ? `: ${priceReadError instanceof Error ? priceReadError.message : String(priceReadError)}` : ""}`,
+      };
+    }
+
+    const accountDigest = n.contextDigest.account as Record<string, unknown> | null | undefined;
+    const positionState = accountDigest?.positionState === "open"
+      || accountDigest?.positionState === "flat"
+      || accountDigest?.positionState === "unknown"
+      ? accountDigest.positionState
+      : "unknown";
+    const positionAuthority = accountDigest?.positionAuthority === "paper_ledger"
+      || accountDigest?.positionAuthority === "venue"
+      || accountDigest?.positionAuthority === "unknown"
+      ? accountDigest.positionAuthority
+      : "unknown";
+    const revalidated = applyGuardrails(n.persistedRawDecision, {
+      entryPrice: revalidationPrice,
+      atr14: Number(n.contextDigest.indicators?.atr14?.value),
+      botMaxLeverage: bot.maxLeverage,
+      timeframe: bot.timeframe as GuardrailTimeframe,
+      takerFeeRate: NON_ADMISSION_TAKER_FEE_RATE,
+      maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
+      allocatedUsdc: Number(bot.allocatedUsdc),
+      positionAuthority,
+      positionState,
+      quantizeOrderSize: (value: number) => adapter.quantizeOrderSize(bot.market, value),
+      sizingMode: bot.sizingMode === "risk_based" ? "risk_based" : "discretionary",
+      riskMinPct: Number(bot.riskMinPct ?? "0.50"),
+      riskMaxPct: Number(bot.riskMaxPct ?? "1.50"),
+      currentEquity: balances.freeCollateral,
+      activeRange: n.contextDigest.activeRange ?? undefined,
+    });
+    if (!revalidated.ok || revalidated.clamped.action !== side) {
+      const codes = revalidated.violations.map((violation) => violation.code).join(",") || "action_changed";
+      console.warn(`[AiTrader] execution revalidation REJECTED bot=${bot.id.slice(0, 8)} market=${bot.market} violations=${codes}`);
+      return {
+        ok: false,
+        reason: "execution_revalidation_failed",
+        detail: `fresh venue-price guardrails rejected live entry (${codes})`,
+      };
+    }
+    const freshClamp = storedEntryClamp(revalidated.clamped, side);
+    if (!freshClamp) {
+      return {
+        ok: false,
+        reason: "execution_revalidation_failed",
+        detail: "fresh venue-price guardrails produced an unusable entry clamp",
+      };
+    }
+
+    const maxLeverage = Math.min(n.persistedClampedDecision.leverage, freshClamp.leverage);
+    const maxMargin = Math.min(n.persistedClampedDecision.marginUsdc, freshClamp.marginUsdc);
+    const maxNotional = Math.min(n.persistedClampedDecision.notionalUsdc, freshClamp.notionalUsdc);
+    const rawSizeCap = Math.min(
+      n.persistedClampedDecision.sizeBase,
+      freshClamp.sizeBase,
+      maxNotional / revalidationPrice,
+      (maxMargin * maxLeverage) / revalidationPrice,
+    );
+    const boundedSize = adapter.quantizeOrderSize(bot.market, rawSizeCap);
+    const tolerance = Math.max(1, Math.abs(rawSizeCap)) * Number.EPSILON * 8;
+    if (!finitePositive(maxLeverage)
+        || !finitePositive(maxMargin)
+        || !finitePositive(maxNotional)
+        || !finitePositive(rawSizeCap)
+        || !finitePositive(boundedSize)
+        || boundedSize > rawSizeCap + tolerance) {
+      return {
+        ok: false,
+        reason: "execution_revalidation_failed",
+        detail: "fresh venue-price exposure bound or venue quantization was invalid",
+      };
+    }
+    const boundedNotional = boundedSize * revalidationPrice;
+    const boundedMargin = boundedNotional / maxLeverage;
+    if (boundedNotional > maxNotional + tolerance || boundedMargin > maxMargin + tolerance) {
+      return {
+        ok: false,
+        reason: "execution_revalidation_failed",
+        detail: "fresh venue-price projection exceeded the reviewed exposure bound",
+      };
+    }
+    n.sizeBase = boundedSize;
+    n.marginUsdc = boundedMargin;
+    n.leverage = maxLeverage;
+
+    // G11 now evaluates the freshly bounded margin, never the stale decision-time amount.
     if (!Number.isFinite(balances.freeCollateral) || balances.freeCollateral < n.marginUsdc) {
       const transitioned = await storage.transitionAiTraderState({
         botId: bot.id,
@@ -674,6 +839,8 @@ async function executeLiveEntry(
         side,
         clientOrderId,
         sizeBase: n.sizeBase,
+        price: revalidationPrice,
+        observedAt: revalidationObservedAt,
       });
     } catch {
       const line = "[AiTraderExecutionJournal] required pre-broadcast append failed action=entry event=prebroadcast_authorized — live entry refused";
