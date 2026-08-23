@@ -65,6 +65,7 @@ import {
 } from '@/components/ui/select';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
+import { reconcileChartTarget } from '@/lib/ai-trader-chart-target';
 import { useToast } from '@/hooks/use-toast';
 import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
 import { AiTraderDecisionChart, type AiChartLevel } from './AiTraderDecisionChart';
@@ -344,6 +345,38 @@ interface ChartTarget {
   slMovedAt?: string | number | null;
   /** W/M formation the AI detected (from contextDigest.wmFormation). */
   wmFormation?: object | null;
+}
+
+function decisionRowToChartTarget(decision: AiDecisionRow): ChartTarget {
+  const clamped = decision.clampedDecision as any;
+  const raw = decision.rawDecision as any;
+  const isCompressed = !!raw?.compressed;
+  const action = isCompressed
+    ? (raw.action ?? 'flat')
+    : (clamped?.action ?? raw?.action ?? 'flat');
+  const breakeven = isCompressed ? null : parseBreakevenInfo(clamped?.breakevenProtect);
+
+  return {
+    decisionId: decision.id,
+    market: (decision.contextDigest as any)?.market,
+    timeframe: (decision.contextDigest as any)?.timeframe,
+    direction: action === 'short' ? 'short' : 'long',
+    entryPrice: Number(decision.entryPrice),
+    exitPrice: (decision as any).exitPrice != null ? Number((decision as any).exitPrice) : null,
+    stopLossPrice: clamped?.stopLossPrice != null ? Number(clamped.stopLossPrice) : null,
+    takeProfitPrice: clamped?.takeProfitPrice != null ? Number(clamped.takeProfitPrice) : null,
+    realizedPnl: decision.realizedPnl != null ? Number(decision.realizedPnl) : null,
+    exitReason: decision.exitReason ?? null,
+    decidedAt: decision.decidedAt,
+    closedAt: decision.closedAt ?? null,
+    markPrice: null,
+    unrealizedPnl: null,
+    sizeBase: null,
+    aiLevels: mapAiLevels((decision.contextDigest as any)?.htfLevels),
+    originalStopLossPrice: breakeven?.originalStopLossPrice ?? null,
+    slMovedAt: breakeven?.movedAt || null,
+    wmFormation: (decision.contextDigest as any)?.wmFormation ?? null,
+  };
 }
 
 /** Maps a decision's stored contextDigest.htfLevels (HtfLevel[] | null) into
@@ -878,6 +911,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
       setHistoryCursor(null);
       setHistoryHasMore(false);
       setPreflight({ loading: false, available: null });
+      setChartTarget(null);
     }
   }, [isOpen]);
 
@@ -912,9 +946,23 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   // readout and entry-line label keep ticking while the owner watches.
   const chartIsLiveOpenPosition =
     chartTarget != null &&
-    chartTarget.realizedPnl === null &&
+    chartTarget.closedAt === null &&
     openDecision != null &&
     chartTarget.decisionId === openDecision.decision.id;
+
+  useEffect(() => {
+    setChartTarget(current => {
+      const result = reconcileChartTarget(
+        current,
+        openDecision?.decision.id ?? null,
+        [...(detail?.recentDecisions ?? []), ...history],
+      );
+      if (result.kind === 'keep') return current;
+      if (result.kind === 'clear') return null;
+      return decisionRowToChartTarget(result.row);
+    });
+  }, [detail?.recentDecisions, history, openDecision?.decision.id]);
+
   // The unresolved decision awaiting user action while status === 'proposed'.
   // NOT the same object as openDecision — parseOpenDecision (server) only ever
   // returns an already-executed, still-open position, so it is always null in
@@ -1570,27 +1618,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                               className="h-6 px-2 text-[10px] gap-1"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setChartTarget({
-                                  decisionId: d.id,
-                                  market: rowDigestMarket,
-                                  timeframe: (d.contextDigest as any)?.timeframe,
-                                  direction: resolvedAction === 'short' ? 'short' : 'long',
-                                  entryPrice: Number(d.entryPrice),
-                                  exitPrice: (d as any).exitPrice != null ? Number((d as any).exitPrice) : null,
-                                  stopLossPrice: clamped?.stopLossPrice != null ? Number(clamped.stopLossPrice) : null,
-                                  takeProfitPrice: clamped?.takeProfitPrice != null ? Number(clamped.takeProfitPrice) : null,
-                                  realizedPnl: d.realizedPnl != null ? Number(d.realizedPnl) : null,
-                                  exitReason: d.exitReason ?? null,
-                                  decidedAt: d.decidedAt,
-                                  closedAt: d.closedAt ?? null,
-                                  markPrice: null,
-                                  unrealizedPnl: null,
-                                  sizeBase: null,
-                                  aiLevels: mapAiLevels((d.contextDigest as any)?.htfLevels),
-                                  originalStopLossPrice: beInfo?.originalStopLossPrice ?? null,
-                                  slMovedAt: beInfo?.movedAt || null,
-                                  wmFormation: (d.contextDigest as any)?.wmFormation ?? null,
-                                });
+                                setChartTarget(decisionRowToChartTarget(d));
                               }}
                               data-testid={`button-view-chart-${d.id}`}
                             >

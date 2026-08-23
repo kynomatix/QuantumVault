@@ -473,7 +473,7 @@ export function AiTraderDecisionChart({
 
     // Entry price line — broker-style when open position (WO-8h.1):
     // solid line in direction color, title carries side + size + live P&L.
-    const isOpen = realizedPnl === null;
+    const isOpen = closedAt === null;
     const entryColor = isOpen
       ? (direction === 'long' ? '#2ec77e' : '#ef5350')
       : '#58a6ff';
@@ -848,7 +848,7 @@ export function AiTraderDecisionChart({
   // PnL every 10s and passes it through — update the label without a rebuild.
   // pnlView is included so toggling $ ↔ % updates the label in place too.
   useEffect(() => {
-    if (!entryLineRef.current || realizedPnl !== null) return;
+    if (!entryLineRef.current || closedAt !== null) return;
     const sizeStr = sizeBase != null ? ' ' + Number(sizeBase).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 }) : '';
     let pnlStr = '';
     if (unrealizedPnl != null) {
@@ -862,7 +862,7 @@ export function AiTraderDecisionChart({
     entryLineRef.current.applyOptions({
       title: `${direction.toUpperCase()}${sizeStr}${pnlStr}`,
     });
-  }, [unrealizedPnl, sizeBase, direction, realizedPnl, pnlView, entryPrice]);
+  }, [unrealizedPnl, sizeBase, direction, closedAt, pnlView, entryPrice]);
 
   // In-place breakeven-protect update: when the ratchet fires mid-trade the
   // drawer's 10s poll brings back updated stopLossPrice/originalStopLossPrice/
@@ -1007,7 +1007,7 @@ export function AiTraderDecisionChart({
     };
   }, [open, botId, decisionId, tf, closedAt, loading, error, hasCandles, candles]);
 
-  const isOpenPosition = realizedPnl === null;
+  const isOpenPosition = closedAt === null;
   const pnlValue = isOpenPosition ? (unrealizedPnl ?? null) : realizedPnl;
   const exitReasonLabel = exitReason ? (EXIT_REASON_LABELS[exitReason] ?? exitReason) : null;
   // % of position notional (entry × size). Available only when sizeBase is
