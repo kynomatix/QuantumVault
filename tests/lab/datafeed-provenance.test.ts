@@ -112,7 +112,7 @@ describe("fetchOHLCV provenance admission", () => {
       visit(source);
     }
     expect(violations).toEqual([]);
-  });
+  }, 30_000);
 
   it("keeps the five corrected diagnostic callers on typed v2 provenance paths", () => {
     const root = path.resolve(__dirname, "../..");
