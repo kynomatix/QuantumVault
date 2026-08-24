@@ -13,7 +13,7 @@
 //   9. keyBuf zeroized via finally even on early return (empty shortlist path).
 //  10. Route tests: POST scanner without market→201; suggest-mode→400; PATCH while open→400.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 
@@ -223,6 +223,14 @@ function armScannerBot(overrides: Partial<AiTraderBot> = {}) {
 async function importMonitor() {
   return await import("../../server/ai-trader/monitor");
 }
+
+// Module transformation is harness setup, not five-second behavior under
+// test. Warm it under real timers, then restore the suite's fake-timer mode.
+beforeAll(async () => {
+  vi.useRealTimers();
+  await importMonitor();
+  vi.useFakeTimers();
+});
 
 const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 
