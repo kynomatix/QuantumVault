@@ -21,6 +21,12 @@ vi.mock("../../server/agent-wallet", () => ({
   getAgentTokenBalanceRaw: vi.fn(),
 }));
 
+vi.mock("@kamino-finance/klend-sdk", () => ({
+  getSingleReserve: vi.fn(() => {
+    throw new Error("getSingleReserve must be unreachable in fail-closed tests");
+  }),
+}));
+
 import { KaminoYieldRoute, KAMINO_PROGRAM_ID } from "../../server/vault/kamino-route";
 import type { YieldAsset } from "../../server/vault/yield-assets";
 
