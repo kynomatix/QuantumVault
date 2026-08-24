@@ -107,5 +107,5 @@ describe.runIf(HAS_DB)("provenance-aware candle cache on real PostgreSQL", () =>
     });
     expect(chartRows).toHaveLength(1);
     expect(chartRows?.[0].provenance.finality).toBe("finalized");
-  });
+  }, 30_000);
 });
