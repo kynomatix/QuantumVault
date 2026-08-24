@@ -133,6 +133,7 @@ import {
   type ReferralRewardEvent,
   type InsertReferralRewardEvent,
   aiTraderBots,
+  aiTraderScannerCandidateClaims,
   aiTraderDecisions,
   aiTraderQualificationRecords,
   type AiTraderBot,
@@ -153,6 +154,38 @@ import {
 } from "./ai-trader/execution-journal";
 import { appendTelemetry } from "./telemetry";
 import { buildQualificationRecord } from "./ai-trader/qualification-record";
+import { isSchemaCapabilityReady } from "./schema-readiness";
+
+export type AiTraderScannerCandidateClaimResult =
+  | { outcome: "claimed"; bot: AiTraderBot }
+  | { outcome: "candidate_claimed" }
+  | { outcome: "bot_busy" }
+  | { outcome: "schema_unavailable" }
+  | { outcome: "database_error" };
+
+export type AiTraderScannerCandidateClaimParams = {
+  botId: string;
+  expectedStatus: "idle";
+  walletAddress: string;
+  boundaryStart: Date;
+  market: string;
+  protocol: string;
+  candidateTimeframe: string;
+  expiresAt: Date;
+  updates?: Partial<InsertAiTraderBot> & {
+    graduatedAt?: Date | null;
+    trialStartedAt?: Date | null;
+    currentQualificationEraDigest?: string | null;
+    graduatedQualificationEraDigest?: string | null;
+    qualificationEraInvalidationReason?: string | null;
+  };
+};
+
+class AiTraderScannerClaimRollback extends Error {
+  constructor() {
+    super("ai_trader_scanner_claim_rollback");
+  }
+}
 
 export type AiTraderPaperEntryTransitionConflict =
   | "decision_state_conflict"
@@ -1093,6 +1126,9 @@ export interface IStorage {
       qualificationEraInvalidationReason?: string | null;
     };
   }): Promise<AiTraderBot | undefined>;
+  claimAiTraderScannerCandidateAnalysis(
+    params: AiTraderScannerCandidateClaimParams,
+  ): Promise<AiTraderScannerCandidateClaimResult>;
   bindAiTraderProposal(params: { botId: string; decisionId: string }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
   claimAiTraderExecution(params: { botId: string; decisionId: string; expectedStatus: "proposed" | "analyzing"; now: Date; expiryMs: number }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
   transitionAiTraderState(params: {
@@ -6149,6 +6185,83 @@ export class DatabaseStorage implements IStorage {
       ))
       .returning();
     return claimed;
+  }
+
+  async claimAiTraderScannerCandidateAnalysis(
+    params: AiTraderScannerCandidateClaimParams,
+  ): Promise<AiTraderScannerCandidateClaimResult> {
+    if (!isSchemaCapabilityReady("ai_trader")) {
+      return { outcome: "schema_unavailable" };
+    }
+
+    try {
+      return await db.transaction(async (tx): Promise<AiTraderScannerCandidateClaimResult> => {
+        await tx.delete(aiTraderScannerCandidateClaims)
+          .where(and(
+            eq(aiTraderScannerCandidateClaims.walletAddress, params.walletAddress),
+            lte(aiTraderScannerCandidateClaims.expiresAt, sql`NOW()`),
+          ));
+
+        const [inserted] = await tx.insert(aiTraderScannerCandidateClaims)
+          .values({
+            walletAddress: params.walletAddress,
+            boundaryStart: params.boundaryStart,
+            market: params.market,
+            botId: params.botId,
+            protocol: params.protocol,
+            candidateTimeframe: params.candidateTimeframe,
+            expiresAt: params.expiresAt,
+          })
+          .onConflictDoNothing()
+          .returning({ id: aiTraderScannerCandidateClaims.id });
+
+        let sameBotReservation = false;
+        if (!inserted) {
+          const [existing] = await tx.select({
+            botId: aiTraderScannerCandidateClaims.botId,
+          }).from(aiTraderScannerCandidateClaims)
+            .where(and(
+              eq(aiTraderScannerCandidateClaims.walletAddress, params.walletAddress),
+              eq(aiTraderScannerCandidateClaims.boundaryStart, params.boundaryStart),
+              eq(aiTraderScannerCandidateClaims.market, params.market),
+            ))
+            .limit(1);
+          if (!existing) {
+            throw new Error("scanner candidate conflict row unavailable");
+          }
+          if (existing.botId !== params.botId) {
+            return { outcome: "candidate_claimed" };
+          }
+          sameBotReservation = true;
+        }
+
+        const [bot] = await tx.update(aiTraderBots)
+          .set({
+            ...(params.updates ?? {}),
+            status: "analyzing",
+            pauseReason: null,
+            updatedAt: sql`NOW()`,
+          } as any)
+          .where(and(
+            eq(aiTraderBots.id, params.botId),
+            eq(aiTraderBots.status, params.expectedStatus),
+            isNull(aiTraderBots.pauseReason),
+          ))
+          .returning();
+
+        if (!bot) {
+          if (!sameBotReservation) throw new AiTraderScannerClaimRollback();
+          return { outcome: "bot_busy" };
+        }
+        return { outcome: "claimed", bot };
+      });
+    } catch (error) {
+      if (error instanceof AiTraderScannerClaimRollback) {
+        return { outcome: "bot_busy" };
+      }
+      console.error("[Storage] scanner candidate claim failed");
+      return { outcome: "database_error" };
+    }
   }
 
   async bindAiTraderProposal(params: {

@@ -75,6 +75,23 @@ const TIMEFRAME_MS: Record<string, number> = {
   "1d":  24 * 60 * 60_000,
 };
 
+const SCANNER_CONSUMPTION_BOUNDARY_MS = 900_000;
+
+export function getScannerConsumptionBoundary(nowMs: number): {
+  boundaryStart: Date;
+  expiresAt: Date;
+} {
+  if (!Number.isFinite(nowMs)) {
+    throw new TypeError("scanner consumption time must be finite");
+  }
+  const boundaryStartMs =
+    Math.floor(nowMs / SCANNER_CONSUMPTION_BOUNDARY_MS) * SCANNER_CONSUMPTION_BOUNDARY_MS;
+  return {
+    boundaryStart: new Date(boundaryStartMs),
+    expiresAt: new Date(boundaryStartMs + SCANNER_CONSUMPTION_BOUNDARY_MS),
+  };
+}
+
 // Parent TF for Dow trend context (same parent map as context-builder.ts).
 // 1d has no parent (null = skip parent check).
 const PARENT_TF: Record<string, string | null> = {

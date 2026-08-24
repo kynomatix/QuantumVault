@@ -45,6 +45,7 @@ const updateBotMock = vi.fn();
 const getBotMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
 const claimAnalysisMock = vi.fn();
+const claimScannerCandidateMock = vi.fn();
 const transitionStateMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
@@ -59,6 +60,7 @@ vi.mock("../../server/storage", () => ({
     getActiveAiTraderBots: vi.fn().mockResolvedValue([]),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
+    claimAiTraderScannerCandidateAnalysis: (...a: unknown[]) => claimScannerCandidateMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
 }));
@@ -112,9 +114,14 @@ vi.mock("../../server/ai-trader/executor", async (importOriginal) => {
 
 const getScannerShortlistMock = vi.fn();
 const getScannerShortlistResultMock = vi.fn();
+const getScannerConsumptionBoundaryMock = vi.fn(() => ({
+  boundaryStart: new Date("2026-08-25T12:00:00.000Z"),
+  expiresAt: new Date("2026-08-25T12:15:00.000Z"),
+}));
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
   getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
+  getScannerConsumptionBoundary: (...a: unknown[]) => getScannerConsumptionBoundaryMock(...a),
 }));
 
 const isMarketAdmittedMock = vi.fn(() => true);
@@ -234,6 +241,13 @@ beforeEach(() => {
     await updateBotMock(botId, patch);
     const fixture = botId === "bot-scanner-2222" ? makeScannerBot() : makeFixedBot();
     return { ...fixture, ...patch };
+  });
+  claimScannerCandidateMock.mockImplementation(async ({ botId, updates }: {
+    botId: string; updates?: Record<string, unknown>;
+  }) => {
+    const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
+    await updateBotMock(botId, patch);
+    return { outcome: "claimed", bot: { ...makeScannerBot(), ...patch } };
   });
   transitionStateMock.mockImplementation(async ({ botId, nextStatus, nextPauseReason, botUpdates }: {
     botId: string; nextStatus: string; nextPauseReason: string | null; botUpdates?: Record<string, unknown>;
@@ -522,6 +536,69 @@ describe("scanner bot: 2-call LLM cap and candidate retry", () => {
     expect(executeDecisionMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBeGreaterThan(0);
   });
+});
+
+describe("scanner bot: durable cross-bot candidate arbitration", () => {
+  it("advances to the next ranked candidate at the inclusive score-90 floor without spending an LLM call on the loss", async () => {
+    armScannerBot();
+    getScannerShortlistMock.mockReturnValue([
+      makeCandidate({ market: "BTC-PERP", score: 110 }),
+      makeCandidate({ market: "ETH-PERP", score: 90 }),
+    ]);
+    claimScannerCandidateMock
+      .mockResolvedValueOnce({ outcome: "candidate_claimed" })
+      .mockImplementationOnce(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {
+        const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
+        await updateBotMock(botId, patch);
+        return { outcome: "claimed", bot: { ...makeScannerBot(), ...patch } };
+      });
+    buildContextMock.mockResolvedValue({ system: "s", user: "u", contextDigest: { price: 3000 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-2", clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+
+    const { runAutoCycle } = await importMonitor();
+    await runAutoCycle("bot-scanner-2222");
+
+    expect(claimScannerCandidateMock).toHaveBeenCalledTimes(2);
+    expect(claimScannerCandidateMock.mock.calls[0][0]).toEqual(expect.objectContaining({ market: "BTC-PERP" }));
+    expect(claimScannerCandidateMock.mock.calls[1][0]).toEqual(expect.objectContaining({ market: "ETH-PERP" }));
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
+    expect(buildContextMock.mock.calls[0][0].market).toBe("ETH-PERP");
+  });
+
+  it("skips the cycle when the next candidate after a claim loss is below 90", async () => {
+    armScannerBot();
+    getScannerShortlistMock.mockReturnValue([
+      makeCandidate({ market: "BTC-PERP", score: 110 }),
+      makeCandidate({ market: "ETH-PERP", score: 89.9 }),
+    ]);
+    claimScannerCandidateMock.mockResolvedValue({ outcome: "candidate_claimed" });
+
+    const { runAutoCycle } = await importMonitor();
+    await runAutoCycle("bot-scanner-2222");
+
+    expect(claimScannerCandidateMock).toHaveBeenCalledTimes(1);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+  });
+
+  it.each(["schema_unavailable", "database_error"] as const)(
+    "fails closed and reschedules when reservation returns %s",
+    async (outcome) => {
+      armScannerBot();
+      getScannerShortlistMock.mockReturnValue([makeCandidate({ market: "BTC-PERP" })]);
+      claimScannerCandidateMock.mockResolvedValue({ outcome });
+
+      const { runAutoCycle } = await importMonitor();
+      await runAutoCycle("bot-scanner-2222");
+
+      expect(updateBotMock).not.toHaveBeenCalled();
+      expect(buildContextMock).not.toHaveBeenCalled();
+      expect(runDecisionMock).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+    },
+  );
 });
 
 describe("scanner bot: happy path — market pick", () => {

@@ -62,7 +62,12 @@ import {
   qualificationEraDecisionPatch,
   qualificationEraMutationPatch,
 } from "./graduation";
-import { getScannerStatus, getScannerShortlistResult } from "./scanner";
+import {
+  getScannerConsumptionBoundary,
+  getScannerStatus,
+  getScannerShortlistResult,
+  type ScannerCandidate,
+} from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import type { ClampedDecision } from "./guardrails";
 import { computeConfidenceCalibration } from "./calibration";
@@ -1005,13 +1010,14 @@ export function registerAiTraderRoutes(app: Express): void {
       // Scanner bots: manual Ask AI does a FRESH scanner pick instead of re-analyzing
       // the bot's saved market (which is the SOL-PERP placeholder until the first
       // auto-cycle pick, or the previous boundary's pick after that). Mirrors the
-      // monitor's boundary pick: same freshness cutoff, top candidate only. G6
+      // monitor's boundary pick: same freshness cutoff and ranked candidates. G6
       // cooldowns are deliberately NOT applied here — the manual fixed-ticker path
       // doesn't apply them either, and the executor still enforces every money-safety
       // gate if the user chooses to execute. Runs BEFORE key resolution so an empty
       // shortlist never burns a free-trial call.
       let scannerNote: string | undefined;
-      let analysisClaimUpdates: Pick<AiTraderBot, "market" | "timeframe" | "policyHmac"> | undefined;
+      let scannerCandidates: ScannerCandidate[] | null = null;
+      let scannerPickUmk: Buffer | null = null;
       if (bot.marketSource === "scanner") {
         const shortlistRead = getScannerShortlistResult(bot.protocol);
         if (shortlistRead.authority !== "tradable") {
@@ -1044,8 +1050,8 @@ export function registerAiTraderRoutes(app: Express): void {
             detail: "Fresh scanner candidates use an unqualified multiplier market. No bot state was changed.",
           });
         }
-        const candidate = multiplierSafe.find((entry) => isAiTraderMarketAdmitted(entry.market));
-        if (!candidate) {
+        const admitted = multiplierSafe.filter((entry) => isAiTraderMarketAdmitted(entry.market));
+        if (admitted.length === 0) {
           console.warn(
             "[AiTrader] manual analyze: " + SCANNER_MARKET_UNADMITTED_REASON
               + " — refusing " + fresh.length + " fresh candidate(s) before bot mutation"
@@ -1055,28 +1061,10 @@ export function registerAiTraderRoutes(app: Express): void {
             detail: "Fresh scanner candidates are not admitted by the current exact AI Trader market registry. No bot state was changed.",
           });
         }
-        // Persist pick + recomputed policyHmac BEFORE building context, exactly like
-        // the monitor path (executor verifies policyHmac on execute).
         const umkForPick = await getInteractiveUmk(req.walletAddress, res);
         if (!umkForPick) return; // getInteractiveUmk already responded 401
-        const newPolicyHmac = computeBotPolicyHmac(
-          umkForPick,
-          aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
-        );
-        const pickUpdates: Record<string, unknown> = {
-          market: candidate.market,
-          timeframe: candidate.timeframe,
-          policyHmac: newPolicyHmac,
-        };
-        Object.assign(
-          pickUpdates,
-          qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
-        );
-        analysisClaimUpdates = pickUpdates as any;
-        // The exact post-claim row becomes the local bot below. Do not expose the
-        // scanner pick or its era invalidation before the guarded durable claim wins.
-        scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
-        console.log(`[AiTrader] manual analyze: scanner picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)}`);
+        scannerPickUmk = umkForPick;
+        scannerCandidates = admitted;
       }
 
       const keyRes = await resolveApiKeyForAnalyze(req.walletAddress, bot, res);
@@ -1134,11 +1122,74 @@ export function registerAiTraderRoutes(app: Express): void {
           return res.status(409).json({ error: authority.reason, detail: "Durable bot state does not authorize analysis." });
         }
         const preClaimBotStatus = bot.status;
-        const claimedBot = await storage.claimAiTraderAnalysis({
-          botId: bot.id,
-          expectedStatus: "idle",
-          updates: analysisClaimUpdates,
-        });
+        let claimedBot: AiTraderBot | undefined;
+        if (scannerCandidates) {
+          const claimBoundary = getScannerConsumptionBoundary(Date.now());
+          for (let index = 0; index < scannerCandidates.length; index++) {
+            const candidate = scannerCandidates[index];
+            if (index > 0 && candidate.score < 90) break;
+            const newPolicyHmac = computeBotPolicyHmac(
+              scannerPickUmk!,
+              aiTraderPolicyObject({
+                market: candidate.market,
+                maxLeverage: bot.maxLeverage,
+                allocatedUsdc: bot.allocatedUsdc,
+              }),
+            );
+            const pickUpdates: Record<string, unknown> = {
+              market: candidate.market,
+              timeframe: candidate.timeframe,
+              policyHmac: newPolicyHmac,
+            };
+            Object.assign(
+              pickUpdates,
+              qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
+            );
+            const claimResult = await storage.claimAiTraderScannerCandidateAnalysis({
+              botId: bot.id,
+              expectedStatus: "idle",
+              walletAddress: bot.walletAddress,
+              boundaryStart: claimBoundary.boundaryStart,
+              market: candidate.market,
+              protocol: candidate.protocol,
+              candidateTimeframe: candidate.timeframe,
+              expiresAt: claimBoundary.expiresAt,
+              updates: pickUpdates as any,
+            });
+            if (claimResult.outcome === "candidate_claimed") {
+              console.log(
+                `[AiTrader] scanner_candidate_claim_loss bot=${bot.id.slice(0, 8)} market=${candidate.market} boundary=${claimBoundary.boundaryStart.toISOString()}`,
+              );
+              continue;
+            }
+            if (claimResult.outcome === "schema_unavailable" || claimResult.outcome === "database_error") {
+              if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
+              return res.status(503).json({
+                error: "scanner_candidate_claim_unavailable",
+                detail: "Scanner candidate reservation is temporarily unavailable. No analysis was started.",
+              });
+            }
+            if (claimResult.outcome === "bot_busy") {
+              return res.status(409).json({ error: "bot_busy", detail: "Another cycle acquired this bot first." });
+            }
+            claimedBot = claimResult.bot;
+            scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
+            console.log(`[AiTrader] manual analyze: scanner picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)}`);
+            break;
+          }
+          if (!claimedBot) {
+            if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
+            return res.status(409).json({
+              error: "scanner_candidates_claimed",
+              detail: "Every fresh scanner candidate is already reserved for this wallet in the current 15-minute boundary, or no remaining alternative meets the score floor.",
+            });
+          }
+        } else {
+          claimedBot = await storage.claimAiTraderAnalysis({
+            botId: bot.id,
+            expectedStatus: "idle",
+          });
+        }
         if (!claimedBot) {
           return res.status(409).json({ error: "bot_busy", detail: "Another cycle acquired this bot first." });
         }

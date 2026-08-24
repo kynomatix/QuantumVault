@@ -122,7 +122,7 @@ describe("schema readiness", () => {
     });
   });
 
-  it("retains all 179 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 182 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -155,15 +155,15 @@ describe("schema readiness", () => {
       requirements: unknown[];
       operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(180);
-    expect(metadata).toHaveLength(180);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(180);
+    expect(sqlEntries).toHaveLength(182);
+    expect(metadata).toHaveLength(182);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(182);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase())
-      .toBe("F6CBE65BEA409C8E0AD935A37CCC49A7112BF361A4138626D819EC5D8B738FDE");
+      .toBe("AC79B78FA9C3D78E3385C4078B46EAC15ED3DEA3F401ABE15D868EC3C20E746D");
 
-    const avaxCorrectionSql = sqlEntries.at(-4)!;
-    expect(metadata.at(-4)).toMatchObject({
+    const avaxCorrectionSql = sqlEntries.at(-6)!;
+    expect(metadata.at(-6)).toMatchObject({
       id: "176-scrub-rogue-avax-close",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -175,8 +175,8 @@ describe("schema readiness", () => {
     expect(avaxCorrectionSql).toContain("jsonb_build_object");
     expect(avaxCorrectionSql).toContain("rogue AVAX trade fingerprint mismatch");
 
-    const venueTruthSql = sqlEntries.at(-3)!;
-    expect(metadata.at(-3)).toMatchObject({
+    const venueTruthSql = sqlEntries.at(-5)!;
+    expect(metadata.at(-5)).toMatchObject({
       id: "177-repair-zec-link-close-fee-pnl",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -193,8 +193,8 @@ describe("schema readiness", () => {
     expect(venueTruthSql).toContain("target_trade.protocol_fill_id IS NOT NULL");
     expect(venueTruthSql.match(/target_trade.error_message IS NOT NULL/g)).toHaveLength(2);
     expect(venueTruthSql).toContain("md5(COALESCE(target_trade.webhook_payload::text, ''))");
-    const qualificationRecordSql = sqlEntries.at(-2)!;
-    expect(metadata.at(-2)).toMatchObject({
+    const qualificationRecordSql = sqlEntries.at(-4)!;
+    expect(metadata.at(-4)).toMatchObject({
       id: "178-create-ai-trader-qualification-records",
       capabilities: ["ai_trader"],
       operation: "ddl",
@@ -242,8 +242,8 @@ describe("schema readiness", () => {
     expect(venueTruthSql).toContain("owner fingerprint mismatch:");
     expect(venueTruthSql).toContain("stats update missed owner:");
 
-    const conventionSql = sqlEntries.at(-1)!;
-    expect(metadata.at(-1)).toMatchObject({
+    const conventionSql = sqlEntries.at(-3)!;
+    expect(metadata.at(-3)).toMatchObject({
       id: "179-pin-bot-trades-pnl-convention",
       capabilities: ["signal_bot", "portfolio"],
       operation: "backfill",
@@ -267,6 +267,50 @@ describe("schema readiness", () => {
     for (const field of ["totalPnl", "totalTrades", "winningTrades", "losingTrades"]) {
       expect(conventionSql).toContain(`'${field}'`);
     }
+
+    const scannerClaimTableSql = sqlEntries.at(-2)!;
+    expect(metadata.at(-2)).toEqual({
+      id: "180-create-ai-trader-scanner-candidate-claims",
+      capabilities: ["ai_trader"],
+      requirements: [{
+        kind: "table",
+        table: "ai_trader_scanner_candidate_claims",
+        columns: [
+          "id", "wallet_address", "boundary_start", "market", "bot_id",
+          "protocol", "candidate_timeframe", "expires_at", "created_at",
+        ],
+        constraintDefinitions: ["PRIMARY KEY (id)"],
+      }],
+      operation: "ddl",
+    });
+    expect(scannerClaimTableSql).toContain("CREATE TABLE IF NOT EXISTS ai_trader_scanner_candidate_claims");
+    expect(scannerClaimTableSql).toContain("boundary_start timestamptz NOT NULL");
+    expect(scannerClaimTableSql).toContain("expires_at timestamptz NOT NULL");
+
+    const scannerClaimIndexSql = sqlEntries.at(-1)!;
+    expect(metadata.at(-1)).toEqual({
+      id: "181-create-ai-trader-scanner-candidate-claim-indexes",
+      capabilities: ["ai_trader"],
+      requirements: [
+        {
+          kind: "index",
+          table: "ai_trader_scanner_candidate_claims",
+          index: "ai_trader_scanner_claims_wallet_boundary_market_unique",
+          columns: ["wallet_address", "boundary_start", "market"],
+          unique: true,
+        },
+        {
+          kind: "index",
+          table: "ai_trader_scanner_candidate_claims",
+          index: "ai_trader_scanner_candidate_claims_expires_at_idx",
+          columns: ["expires_at"],
+          unique: false,
+        },
+      ],
+      operation: "ddl",
+    });
+    expect(scannerClaimIndexSql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS ai_trader_scanner_claims_wallet_boundary_market_unique");
+    expect(scannerClaimIndexSql).toContain("CREATE INDEX IF NOT EXISTS ai_trader_scanner_candidate_claims_expires_at_idx");
   });
 
   it("runs one memoized postcondition-only probe when the Lab child has no snapshot", async () => {
