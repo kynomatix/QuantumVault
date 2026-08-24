@@ -46,7 +46,7 @@ export type QualificationEraRegistry = Record<QualificationEraComponent, Qualifi
 export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
     "materialVersion": 1,
-    "decisionGeneration": 9,
+    "decisionGeneration": 10,
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts"]
   },
@@ -70,7 +70,7 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "guardrail_risk_policy": {
     "materialVersion": 3,
-    "decisionGeneration": 8,
+    "decisionGeneration": 9,
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/guardrails.ts", "server/ai-trader/executor.ts", "server/ai-trader/routes.ts"]
   },

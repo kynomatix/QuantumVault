@@ -367,6 +367,18 @@ export function summarizeCandleProvenance(
   };
 }
 
+function chartCandlesUnavailable(
+  res: Response,
+  context: { span: "trade" | "deep" | "tail"; market: string; timeframe: string },
+) {
+  console.warn("[AiTrader] chart candles unavailable", context);
+  return res.status(503).json({
+    error: "Chart data temporarily unavailable",
+    code: "chart_candles_unavailable",
+    reason: "no_admissible_candles",
+  });
+}
+
 export type AiTraderPerformanceResponse = {
   status: "available";
   mode: "paper_trial" | "live";
@@ -2255,6 +2267,13 @@ export function registerAiTraderRoutes(app: Express): void {
           undefined,
           { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true }
         );
+        if (rawTail.length === 0) {
+          return chartCandlesUnavailable(res, {
+            span: "tail",
+            market: chartMarket,
+            timeframe: chartTf,
+          });
+        }
         return res.json({
           candles: rawTail.map((c) => ({
             time: Math.floor(c.time / 1000),
@@ -2300,6 +2319,13 @@ export function registerAiTraderRoutes(app: Express): void {
         undefined,
         { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true }
       );
+      if (rawCandles.length === 0) {
+        return chartCandlesUnavailable(res, {
+          span: isTradeSpan ? "trade" : "deep",
+          market: chartMarket,
+          timeframe: chartTf,
+        });
+      }
       const candles = rawCandles.map((c) => ({
         time: Math.floor(c.time / 1000),
         open: c.open,

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -71,8 +71,9 @@ vi.mock("../../server/ai-trader/context-builder", () => ({
   buildMarketContext: (...a: unknown[]) => buildContextMock(...a),
   marketToDatafeedTicker: vi.fn(),
 }));
+const fetchOHLCVMock = vi.hoisted(() => vi.fn());
 vi.mock("../../server/lab/datafeed", () => ({
-  fetchOHLCV: vi.fn(),
+  fetchOHLCV: (...args: unknown[]) => fetchOHLCVMock(...args),
   CHART_CANDLE_POLICY: {
     consumer: "chart",
     acceptedBasis: ["perp"],
@@ -475,6 +476,121 @@ function fixedBot(paperMode: boolean): AiTraderBot {
     paperMode,
   } as unknown as AiTraderBot;
 }
+
+describe("AI Trader chart unavailable response", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    getBotMock.mockResolvedValue(fixedBot(true));
+    getAiTraderDecisionsMock.mockResolvedValue([{
+      id: "chart-decision",
+      market: "SOL-PERP",
+      timeframe: "15m",
+      decidedAt: new Date("2026-08-23T00:00:00.000Z"),
+      closedAt: new Date("2026-08-23T01:00:00.000Z"),
+    }]);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it.each(["trade", "deep", "tail"] as const)(
+    "returns a typed 503 when %s has no admissible candles",
+    async (span) => {
+      fetchOHLCVMock.mockResolvedValue([]);
+      const built = buildApp();
+      registerAiTraderRoutes(built.app);
+
+      const result = await invoke(built.routes, "GET /api/ai-trader/:id/chart", {
+        params: { id: "paper-route" },
+        session: { walletAddress: "WALLET_ROUTE" },
+        body: {},
+        query: { span, decisionId: "chart-decision" },
+        headers: {},
+      });
+
+      expect(result).toEqual({
+        statusCode: 503,
+        body: {
+          error: "Chart data temporarily unavailable",
+          code: "chart_candles_unavailable",
+          reason: "no_admissible_candles",
+        },
+      });
+      expect(warnSpy).toHaveBeenCalledWith("[AiTrader] chart candles unavailable", {
+        span,
+        market: "SOL-PERP",
+        timeframe: "15m",
+      });
+    },
+  );
+
+  it("preserves a successful direct-perpetual chart response", async () => {
+    fetchOHLCVMock.mockResolvedValue([{
+      time: Date.parse("2026-08-23T00:00:00.000Z"),
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100.5,
+      provenance: {
+        source: "okx",
+        venue: "okx",
+        basis: "perp",
+        proxy: "direct",
+        finality: "finalized",
+        timeSemantic: "open_time",
+      },
+    }]);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id/chart", {
+      params: { id: "paper-route" },
+      session: { walletAddress: "WALLET_ROUTE" },
+      body: {},
+      query: { span: "trade", decisionId: "chart-decision" },
+      headers: {},
+    });
+
+    expect(result).toMatchObject({
+      statusCode: 200,
+      body: {
+        candles: [expect.objectContaining({ open: 100, close: 100.5 })],
+        candleBasisLabel: {
+          source: "okx",
+          venue: "okx",
+          basis: "perp",
+          proxy: "direct",
+          finality: ["finalized"],
+          timeSemantic: "open_time",
+        },
+      },
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps unexpected fetch failures on the generic 500 path", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    fetchOHLCVMock.mockRejectedValue(new Error("venue transport failed"));
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id/chart", {
+      params: { id: "paper-route" },
+      session: { walletAddress: "WALLET_ROUTE" },
+      body: {},
+      query: { span: "trade", decisionId: "chart-decision" },
+      headers: {},
+    });
+
+    expect(result).toEqual({ statusCode: 500, body: { error: "Internal server error" } });
+    expect(warnSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});
 
 describe("AI Trader manual analyze position-authority inputs", () => {
   beforeEach(() => {
