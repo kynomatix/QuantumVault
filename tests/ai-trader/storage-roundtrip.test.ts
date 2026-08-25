@@ -134,6 +134,31 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       nextPauseReason: null,
     })).toBeUndefined();
 
+    await storage.updateAiTraderBot(authorityBotId, {
+      status: "paused" as any,
+      pauseReason: "consecutive_losses",
+      consecutiveLosses: 3,
+    });
+    const resumed = await storage.transitionAiTraderState({
+      botId: authorityBotId,
+      expectedStatus: "paused",
+      expectedPauseReason: "consecutive_losses",
+      nextStatus: "idle",
+      nextPauseReason: null,
+      botUpdates: { consecutiveLosses: 0 },
+    });
+    expect(resumed).toMatchObject({ status: "idle", pauseReason: null, consecutiveLosses: 0 });
+    expect(await storage.transitionAiTraderState({
+      botId: authorityBotId,
+      expectedStatus: "paused",
+      expectedPauseReason: "consecutive_losses",
+      nextStatus: "idle",
+      nextPauseReason: null,
+      botUpdates: { consecutiveLosses: 0 },
+    })).toBeUndefined();
+    expect(await storage.getAiTraderBot(authorityBotId))
+      .toMatchObject({ status: "idle", pauseReason: null, consecutiveLosses: 0 });
+
     const raceDecision = await storage.insertAiTraderDecision({
       botId: authorityBotId,
       rawDecision: { action: "long" },

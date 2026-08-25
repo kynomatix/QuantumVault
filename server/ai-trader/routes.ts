@@ -1487,6 +1487,9 @@ export function registerAiTraderRoutes(app: Express): void {
         expectedPauseReason: bot.pauseReason,
         nextStatus: resumeStatus,
         nextPauseReason: null,
+        botUpdates: bot.pauseReason === "consecutive_losses"
+          ? { consecutiveLosses: 0 }
+          : undefined,
       });
       // A resumed Auto bot must re-enter the hands-off cadence right away —
       // but only when it lands on 'idle'; an 'open' bot re-arms after close.

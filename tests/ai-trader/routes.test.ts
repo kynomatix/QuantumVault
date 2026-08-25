@@ -94,11 +94,12 @@ vi.mock("../../server/ai-trader/executor", () => ({
   executeDecision: (...a: unknown[]) => executeDecisionMock(...a),
   aiTraderPolicyObject: vi.fn(),
 }));
+const scheduleAutoNextMock = vi.hoisted(() => vi.fn());
 vi.mock("../../server/ai-trader/monitor", () => ({
   userInitiatedClose: vi.fn(),
   parseOpenDecision: vi.fn(),
   computeUnrealizedPnl: vi.fn(),
-  scheduleAutoNext: vi.fn(),
+  scheduleAutoNext: (...a: unknown[]) => scheduleAutoNextMock(...a),
   nextCycleTimeframe: vi.fn(),
   SCANNER_CANDIDATE_MAX_AGE_MS: 20 * 60_000,
 }));
@@ -729,6 +730,78 @@ describe("AI Trader manual analyze position-authority inputs", () => {
       expectedDecisionOutcome: null,
       decisionOutcome: "flat",
     }));
+  });
+});
+
+describe("AI Trader consecutive-loss owner resume", () => {
+  const pausedBot = (): AiTraderBot => ({
+    ...fixedBot(true),
+    id: "consecutive-loss-route",
+    mode: "auto",
+    autoNext: true,
+    status: "paused",
+    pauseReason: "consecutive_losses",
+    consecutiveLosses: 3,
+  } as AiTraderBot);
+
+  const resumeRequest = () => ({
+    params: { id: "consecutive-loss-route" },
+    session: { walletAddress: "WALLET_ROUTE" },
+    body: {}, query: {}, headers: {},
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getBotMock.mockResolvedValue(pausedBot());
+    getAiTraderDecisionsMock.mockResolvedValue([]);
+    getUnresolvedDecisionsMock.mockResolvedValue([]);
+    parseOpenDecisionMock.mockReturnValue(null);
+    transitionStateMock.mockImplementation(async ({ nextStatus, nextPauseReason, botUpdates }: {
+      nextStatus: string; nextPauseReason: string | null; botUpdates?: Record<string, unknown>;
+    }) => ({ ...pausedBot(), ...(botUpdates ?? {}), status: nextStatus, pauseReason: nextPauseReason }));
+  });
+
+  it("atomically releases the exact pause and resets the brake before re-arming Auto", async () => {
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/resume", resumeRequest());
+
+    expect(result.statusCode, JSON.stringify(result.body)).toBe(200);
+    expect(transitionStateMock).toHaveBeenCalledWith({
+      botId: "consecutive-loss-route",
+      expectedStatus: "paused",
+      expectedPauseReason: "consecutive_losses",
+      nextStatus: "idle",
+      nextPauseReason: null,
+      botUpdates: { consecutiveLosses: 0 },
+    });
+    expect(result.body.bot).toEqual(expect.objectContaining({
+      status: "idle", pauseReason: null, consecutiveLosses: 0,
+    }));
+    expect(scheduleAutoNextMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not re-arm when the conditional transition loses its predicate", async () => {
+    transitionStateMock.mockResolvedValue(undefined);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/resume", resumeRequest());
+
+    expect(result).toEqual({ statusCode: 200, body: { bot: null } });
+    expect(scheduleAutoNextMock).not.toHaveBeenCalled();
+  });
+
+  it("denies unresolved work without attempting the state transition", async () => {
+    getUnresolvedDecisionsMock.mockResolvedValue([{ id: "unresolved" }]);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/resume", resumeRequest());
+
+    expect(result.statusCode).toBe(409);
+    expect(transitionStateMock).not.toHaveBeenCalled();
   });
 });
 

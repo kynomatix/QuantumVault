@@ -155,7 +155,7 @@ describe("evaluateAiTraderStateAuthority", () => {
     })).allowed).toBe(false);
   });
 
-  it("requires zero unresolved decisions for both resumable pause classes", () => {
+  it("requires zero unresolved decisions for every resumable pause class", () => {
     expect(evaluateAiTraderStateAuthority(matrixInput("paused", "resume", "external_http")).allowed).toBe(true);
     expect(evaluateAiTraderStateAuthority(input({
       action: "resume",
@@ -170,6 +170,54 @@ describe("evaluateAiTraderStateAuthority", () => {
       decision: decision({ outcome: "aborted_order" }),
       unresolvedDecisionCount: 1,
     })).allowed).toBe(false);
+  });
+
+  it("admits only the exact flat decision-clean consecutive-loss owner resume", () => {
+    const consecutiveLossResume = input({
+      action: "resume",
+      source: "external_http",
+      bot: {
+        id: "bot-1",
+        status: "paused",
+        pauseReason: "consecutive_losses",
+        graduationState: "in_trial",
+        paperMode: true,
+      },
+      unresolvedDecisionCount: 0,
+      positionTruth: "flat",
+    });
+    expect(evaluateAiTraderStateAuthority(consecutiveLossResume)).toEqual({
+      allowed: true,
+      requiredClaim: "conditional_lifecycle_transition",
+    });
+    for (const candidate of [
+      { ...consecutiveLossResume, source: "internal_cycle" as const },
+      { ...consecutiveLossResume, unresolvedDecisionCount: 1 },
+      { ...consecutiveLossResume, positionTruth: "open" as const },
+      { ...consecutiveLossResume, positionTruth: "maybe_open" as const },
+      { ...consecutiveLossResume, positionTruth: "read_failed" as const },
+    ]) {
+      expect(evaluateAiTraderStateAuthority(candidate).allowed).toBe(false);
+    }
+  });
+
+  it("classifies close-policy pauses explicitly without widening generic resume", () => {
+    for (const pauseReason of ["malfunction_ceiling", "daily_loss_breaker"]) {
+      expect(evaluateAiTraderStateAuthority(input({
+        action: "resume",
+        bot: {
+          id: "bot-1", status: "paused", pauseReason,
+          graduationState: "in_trial", paperMode: true,
+        },
+      }))).toEqual({ allowed: false, reason: "state_denied" });
+    }
+    expect(evaluateAiTraderStateAuthority(input({
+      action: "resume",
+      bot: {
+        id: "bot-1", status: "paused", pauseReason: "future_pause_reason",
+        graduationState: "in_trial", paperMode: true,
+      },
+    }))).toEqual({ allowed: false, reason: "malformed_authority" });
   });
 
   it("admits exactly one expired orphan only with its exact terminalization identity", () => {
