@@ -832,7 +832,7 @@ describe('L — scanner / file-system checks', () => {
   });
 
   it('LoopVaultControls uses activeReturn.amountLamports not activeReturn.lamports in JSX', () => {
-    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    const lvc = clientSource(join(clientDir, 'components/LoopVaultControls.tsx'));
     // Must not use the old .lamports field accessor in JSX context (after closing paren = not amountLamports)
     expect(lvc).not.toMatch(/activeReturn\.lamports[^A]/);
     // Must use the correct field name
@@ -840,13 +840,13 @@ describe('L — scanner / file-system checks', () => {
   });
 
   it('LoopVaultControls recovery row condition includes storageUnreadable and malformedKeys checks', () => {
-    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    const lvc = clientSource(join(clientDir, 'components/LoopVaultControls.tsx'));
     expect(lvc).toContain('storageUnreadable');
     expect(lvc).toContain('malformedKeys');
   });
 
   it('LoopVaultControls imports coordinateMigrateLegacy not migrateLegacyPendingReturn for the mount call', () => {
-    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    const lvc = clientSource(join(clientDir, 'components/LoopVaultControls.tsx'));
     expect(lvc).toContain('coordinateMigrateLegacy');
     // coordinateMigrateLegacy should be called in the mount effect
     expect(lvc).toContain('void coordinateMigrateLegacy(');
