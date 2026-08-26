@@ -19,6 +19,7 @@
 import type { OHLCV } from "../lab/engine";
 import {
   fetchOHLCV,
+  prefetchCachedOHLCV,
   isNonCryptoMarketOpen,
   isAbortError,
   isCacheDegradedError,
@@ -31,7 +32,7 @@ import { recordCriticalError } from "../error-log";
 import { marketToDatafeedTicker } from "./context-builder";
 import { getFlashMarketSpecs } from "../protocol/flash/flash-markets";
 import { getAdapter } from "../protocol/adapter-registry";
-import { detectWM } from "./wm-detector";
+import { detectWM, type WMFormation } from "./wm-detector";
 import { detectPivots, classifyDow, type DowClassification } from "./dow-structure";
 import { getSessionContext } from "./session-context";
 import { isMultiplierMarketQuarantined } from "./multiplier-market-quarantine";
@@ -111,6 +112,8 @@ const FETCH_STAGGER_MS        = 150;          // ≥150ms between consecutive di
 const SWEEP_BUDGET_MS         = 55_000;       // abort remaining markets after this
 const TOP_K                   = 3;            // max candidates per protocol per boundary
 const RING_BUFFER_MAX         = 200;          // max telemetry ring-buffer entries
+/** Maximum closed bars allowed after a confirmed neckline break for an unexhausted retest. */
+export const MAX_POST_BREAK_RETURN_AGE_BARS = 4;
 
 // Protocols scanned. Flash scanner bots are paper-only today (go-live is Pacifica-only).
 const PROTOCOLS = ["flash", "pacifica"] as const;
@@ -710,6 +713,96 @@ function allParentFieldsFinite(parentBars: readonly OHLCV[]): boolean {
     Number.isFinite(bar.volume));
 }
 
+export type ScannerFormationLifecycle =
+  | { state: "unknown" }
+  | { state: "pre_break" }
+  | {
+      state: "post_break";
+      breakIndex: number;
+      breakAgeBars: number;
+      measuredTarget: number;
+      targetExhausted: boolean;
+    };
+
+function isFiniteLifecycleFormation(
+  formation: WMFormation,
+  closedLastIndex: number,
+): boolean {
+  return (formation.type === "W" || formation.type === "M")
+    && Number.isInteger(formation.extreme2.index)
+    && formation.extreme2.index >= 0
+    && formation.extreme2.index <= closedLastIndex
+    && Number.isFinite(formation.neckline.price)
+    && formation.neckline.price > 0
+    && Number.isFinite(formation.patternHeight)
+    && formation.patternHeight > 0;
+}
+
+/**
+ * Resolve lifecycle facts that neckline distance alone cannot distinguish.
+ * A break is confirmed only by a closed candle after the second extreme.
+ * Once a break exists, observed highs/lows through the forming candle count
+ * toward measured-move exhaustion because a completed excursion cannot become
+ * unspent merely because the latest candle is still forming.
+ */
+export function classifyScannerFormationLifecycle(
+  bars: readonly OHLCV[],
+  formation: WMFormation,
+): ScannerFormationLifecycle {
+  if (bars.length < 2) return { state: "unknown" };
+
+  const closedLastIndex = bars.length - 2;
+  if (!isFiniteLifecycleFormation(formation, closedLastIndex)) {
+    return { state: "unknown" };
+  }
+
+  let breakIndex: number | null = null;
+  for (let index = formation.extreme2.index + 1; index <= closedLastIndex; index++) {
+    const close = bars[index]?.close;
+    if (!Number.isFinite(close)) return { state: "unknown" };
+    if ((formation.type === "W" && close > formation.neckline.price)
+        || (formation.type === "M" && close < formation.neckline.price)) {
+      breakIndex = index;
+      break;
+    }
+  }
+
+  if (breakIndex === null) return { state: "pre_break" };
+
+  const measuredTarget = formation.type === "W"
+    ? formation.neckline.price + formation.patternHeight
+    : formation.neckline.price - formation.patternHeight;
+  if (!Number.isFinite(measuredTarget)) return { state: "unknown" };
+
+  let targetExhausted = false;
+  for (let index = breakIndex; index < bars.length; index++) {
+    const excursion = formation.type === "W" ? bars[index]?.high : bars[index]?.low;
+    if (!Number.isFinite(excursion)) return { state: "unknown" };
+    if ((formation.type === "W" && excursion >= measuredTarget)
+        || (formation.type === "M" && excursion <= measuredTarget)) {
+      targetExhausted = true;
+      break;
+    }
+  }
+
+  return {
+    state: "post_break",
+    breakIndex,
+    breakAgeBars: closedLastIndex - breakIndex,
+    measuredTarget,
+    targetExhausted,
+  };
+}
+
+export function isActionableScannerFormationLifecycle(
+  lifecycle: ScannerFormationLifecycle,
+): boolean {
+  if (lifecycle.state === "pre_break") return true;
+  return lifecycle.state === "post_break"
+    && !lifecycle.targetExhausted
+    && lifecycle.breakAgeBars <= MAX_POST_BREAK_RETURN_AGE_BARS;
+}
+
 /**
  * Typed evaluator seam. A configured parent that cannot be classified is
  * distinct from an ordinary no-candidate result so missing hard-reject input
@@ -757,6 +850,13 @@ export function evaluateCandidateResult(
   // detectWM already enforces NECKLINE_WINDOW (0.5%) actionability criterion.
   const wm = detectWM(bars);
   if (!wm) return { kind: "no_candidate" };
+
+  // Distance cannot distinguish a first approach from a spent post-break return.
+  // The structural lifecycle gate is deliberately separate from the v1 score.
+  const lifecycle = classifyScannerFormationLifecycle(bars, wm);
+  if (!isActionableScannerFormationLifecycle(lifecycle)) {
+    return { kind: "no_candidate" };
+  }
 
   const setup: "W" | "M" = wm.type;
   const direction: "long" | "short" = setup === "W" ? "long" : "short";
@@ -950,6 +1050,72 @@ async function runSweep(): Promise<void> {
     // Pacifica list BTC-PERP (both map to the same datafeed ticker via marketToDatafeedTicker).
     const candleCache = new Map<string, ProvenancedOHLCV[]>();
 
+    // Resolve both protocol universes once, then collapse their shared
+    // datafeed identities before touching the persistent cache. The finite
+    // union is the reviewed symbol-set bound; no arbitrary cap is added.
+    const universesByProtocol = new Map<string, string[]>();
+    for (const protocol of PROTOCOLS) {
+      requireScannerSweepOwner(owner);
+      const universe = await withSweepOwnership(
+        owner,
+        buildScannerUniverse(protocol, () => ownsScannerSweep(owner)),
+      );
+      requireScannerSweepOwner(owner);
+      universesByProtocol.set(protocol, universe);
+    }
+    const sweepTickers = [...new Set(
+      [...universesByProtocol.values()].flat().map(marketToDatafeedTicker),
+    )];
+    const batchTimeframes = [...new Set([
+      ...boundaryTfs,
+      ...boundaryTfs.map((tf) => PARENT_TF[tf]).filter((tf): tf is string => tf !== null),
+    ])];
+    for (const tf of batchTimeframes) {
+      requireScannerSweepOwner(owner);
+      const remainingMs = fetchDeadlineAt - Date.now();
+      if (sweepTickers.length === 0 || remainingMs < 5_000) {
+        if (sweepTickers.length > 0) {
+          const skippedLine = `[Scanner] BATCH PREFETCH SKIP: ${tf} global budget has ${Math.max(0, remainingMs)}ms remaining`;
+          console.log(skippedLine);
+          appendTelemetry(skippedLine);
+        }
+        continue;
+      }
+      const tfMs = TIMEFRAME_MS[tf];
+      const endMs = now.getTime();
+      const startMs = endMs - (INDICATOR_BARS + 1) * tfMs;
+      const batchStartedAt = Date.now();
+      try {
+        const hits = await withSweepOwnership(owner, prefetchCachedOHLCV(
+          sweepTickers,
+          tf,
+          startMs,
+          endMs,
+          {
+            basisPolicy: MONEY_CANDLE_POLICY,
+            signal: owner.controller.signal,
+            callerClass: "scanner",
+          },
+        ));
+        requireScannerSweepOwner(owner);
+        for (const [ticker, bars] of hits) candleCache.set(`${ticker}:${tf}`, bars);
+        const batchLine =
+          `[Scanner] BATCH PREFETCH: ${tf} requested=${sweepTickers.length} hits=${hits.size} ` +
+          `misses=${sweepTickers.length - hits.size} duration=${Date.now() - batchStartedAt}ms`;
+        console.log(batchLine);
+        appendTelemetry(batchLine);
+      } catch (error) {
+        requireScannerSweepOwner(owner);
+        const fallbackLine =
+          `[Scanner] BATCH PREFETCH FALLBACK: ${tf} requested=${sweepTickers.length} ` +
+          `duration=${Date.now() - batchStartedAt}ms reason=${error instanceof Error ? error.name : "unknown"}`;
+        console.log(fallbackLine);
+        appendTelemetry(fallbackLine);
+        // No retry. Every symbol on this timeframe follows the existing
+        // per-market path, which retains typed cache-degradation semantics.
+      }
+    }
+
     for (const protocol of PROTOCOLS) {
       requireScannerSweepOwner(owner);
       // Genuine wall-clock gate: once the sweep-global fetch budget is spent,
@@ -962,11 +1128,7 @@ async function runSweep(): Promise<void> {
         appendTelemetry(gateLine);
         continue;
       }
-      const universe = await withSweepOwnership(
-        owner,
-        buildScannerUniverse(protocol, () => ownsScannerSweep(owner)),
-      );
-      requireScannerSweepOwner(owner);
+      const universe = universesByProtocol.get(protocol) ?? [];
 
       // Per-protocol budget clock. The budget used to be measured from the GLOBAL
       // sweep start, which let the first protocol (flash) consume the entire 55s on

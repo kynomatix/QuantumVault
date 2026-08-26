@@ -742,7 +742,6 @@ describe('K — lock unavailable: coordination_unavailable, zero money effects',
 
 const clientDir = join(process.cwd(), 'client/src');
 const helperFile = join(clientDir, 'lib/agent-sol-withdraw-client.ts');
-const helperContent = readFileSync(helperFile, 'utf8');
 
 function scanClientFiles(dir: string, results: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -756,25 +755,38 @@ function scanClientFiles(dir: string, results: string[] = []): string[] {
   return results;
 }
 
+const clientSourceFiles = scanClientFiles(clientDir);
+const clientSourceByFile = new Map(
+  clientSourceFiles.map(file => [file, readFileSync(file, 'utf8')] as const),
+);
+
+function clientSource(file: string): string {
+  const source = clientSourceByFile.get(file);
+  if (source === undefined) throw new Error(`client source was not snapshotted: ${file}`);
+  return source;
+}
+
+const helperContent = clientSource(helperFile);
+
 describe('L — scanner / file-system checks', () => {
   it('DURABLE_WITHDRAW_ENDPOINT path appears ONLY in agent-sol-withdraw-client.ts', () => {
-    const allFiles = scanClientFiles(clientDir);
+    const allFiles = clientSourceFiles;
     const withPath = allFiles.filter(f => {
       if (f === helperFile) return false; // exclude the helper itself
-      return readFileSync(f, 'utf8').includes('/api/agent/withdraw-sol');
+      return clientSource(f).includes('/api/agent/withdraw-sol');
     });
     expect(withPath).toHaveLength(0);
   });
 
   it('confirm-sol-withdraw endpoint appears ZERO times in all client files', () => {
-    const allFiles = scanClientFiles(clientDir);
-    const withConfirm = allFiles.filter(f => readFileSync(f, 'utf8').includes('/api/agent/confirm-sol-withdraw'));
+    const allFiles = clientSourceFiles;
+    const withConfirm = allFiles.filter(f => clientSource(f).includes('/api/agent/confirm-sol-withdraw'));
     expect(withConfirm).toHaveLength(0);
   });
 
   it('no provisional qv:solw:v1 key namespace in any client file', () => {
-    const allFiles = scanClientFiles(clientDir);
-    const withProvisional = allFiles.filter(f => readFileSync(f, 'utf8').includes('qv:solw:v1'));
+    const allFiles = clientSourceFiles;
+    const withProvisional = allFiles.filter(f => clientSource(f).includes('qv:solw:v1'));
     expect(withProvisional).toHaveLength(0);
   });
 
@@ -794,7 +806,7 @@ describe('L — scanner / file-system checks', () => {
   });
 
   it('provisional coordinator file is absent from client/src', () => {
-    const allFiles = scanClientFiles(clientDir);
+    const allFiles = clientSourceFiles;
     const provisional = allFiles.filter(f => f.includes('agent-sol-withdraw-coordinator'));
     expect(provisional).toHaveLength(0);
   });
@@ -806,7 +818,7 @@ describe('L — scanner / file-system checks', () => {
     ];
     const banned = ['beginWithdraw(', 'driveWithdraw(', 'recordLoopCloseCredit(', 'noteMissingCloseSignature('];
     for (const f of uiFiles) {
-      const c = readFileSync(f, 'utf8');
+      const c = clientSource(f);
       for (const b of banned) {
         expect(c, `${f} must not contain ${b}`).not.toContain(b);
       }
@@ -820,7 +832,7 @@ describe('L — scanner / file-system checks', () => {
   });
 
   it('LoopVaultControls uses activeReturn.amountLamports not activeReturn.lamports in JSX', () => {
-    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    const lvc = clientSource(join(clientDir, 'components/LoopVaultControls.tsx'));
     // Must not use the old .lamports field accessor in JSX context (after closing paren = not amountLamports)
     expect(lvc).not.toMatch(/activeReturn\.lamports[^A]/);
     // Must use the correct field name
@@ -828,13 +840,13 @@ describe('L — scanner / file-system checks', () => {
   });
 
   it('LoopVaultControls recovery row condition includes storageUnreadable and malformedKeys checks', () => {
-    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    const lvc = clientSource(join(clientDir, 'components/LoopVaultControls.tsx'));
     expect(lvc).toContain('storageUnreadable');
     expect(lvc).toContain('malformedKeys');
   });
 
   it('LoopVaultControls imports coordinateMigrateLegacy not migrateLegacyPendingReturn for the mount call', () => {
-    const lvc = readFileSync(join(process.cwd(), 'client/src/components/LoopVaultControls.tsx'), 'utf8');
+    const lvc = clientSource(join(clientDir, 'components/LoopVaultControls.tsx'));
     expect(lvc).toContain('coordinateMigrateLegacy');
     // coordinateMigrateLegacy should be called in the mount effect
     expect(lvc).toContain('void coordinateMigrateLegacy(');

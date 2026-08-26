@@ -31,12 +31,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { OHLCV } from "../../server/lab/engine";
 import { classifyDow, detectPivots } from "../../server/ai-trader/dow-structure";
+import { detectWM } from "../../server/ai-trader/wm-detector";
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>();
+const prefetchCachedOHLCVMock = vi.fn();
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
+  prefetchCachedOHLCV: (...a: unknown[]) => prefetchCachedOHLCVMock(...a),
   isNonCryptoMarketOpen: () => true,
   isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
   isCacheDegradedError: (err: unknown) =>
@@ -211,6 +214,42 @@ function textbookMBars(nowMs: number, tfMs: number): OHLCV[] {
   return bars;
 }
 
+function withPostBreakReturn(
+  source: OHLCV[],
+  nowMs: number,
+  tfMs: number,
+  type: "W" | "M",
+  closedBarsAfterBreak: number,
+  options: { exhausted?: boolean; formingExhausted?: boolean } = {},
+): OHLCV[] {
+  const bars = source.slice(0, -1).map((bar) => ({ ...bar }));
+  const breakClose = type === "W" ? 56 : 44;
+  bars.push({
+    time: 0, open: 50, high: 56.2, low: 43.8, close: breakClose, volume: 1_000,
+  });
+  for (let index = 0; index < closedBarsAfterBreak; index++) {
+    const exhausted = options.exhausted && index === 0;
+    bars.push({
+      time: 0,
+      open: 50,
+      high: type === "W" && exhausted ? 68 : 56.2,
+      low: type === "M" && exhausted ? 32 : 43.8,
+      close: type === "W" ? 55.8 : 44.2,
+      volume: 1_000,
+    });
+  }
+  bars.push({
+    time: 0,
+    open: 50,
+    high: type === "W" && options.formingExhausted ? 68 : 56.2,
+    low: type === "M" && options.formingExhausted ? 32 : 43.8,
+    close: type === "W" ? 55.6 : 44.6,
+    volume: 1_000,
+  });
+  const baseTime = nowMs - bars.length * tfMs;
+  return bars.map((bar, index) => ({ ...bar, time: baseTime + index * tfMs }));
+}
+
 // ─── Import under test ────────────────────────────────────────────────────────
 
 import {
@@ -228,6 +267,9 @@ import {
   startScanner,
   stopScanner,
   getScannerConsumptionBoundary,
+  MAX_POST_BREAK_RETURN_AGE_BARS,
+  classifyScannerFormationLifecycle,
+  isActionableScannerFormationLifecycle,
 } from "../../server/ai-trader/scanner";
 
 const directPerp = {
@@ -369,6 +411,8 @@ const alignedDownParentBars = (): OHLCV[] => parentBars(DOWN_PARENT_POINTS);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prefetchCachedOHLCVMock.mockReset();
+  prefetchCachedOHLCVMock.mockResolvedValue(new Map());
   // Default: active prime session (no thin-session penalty).
   getSessionContextMock.mockReturnValue({ label: "london_new_york" });
 });
@@ -666,6 +710,122 @@ describe("evaluateCandidate — scoring formula", () => {
 
 // ─── SCANNER_FEED_EXCLUDE membership ─────────────────────────────────────────
 
+describe("evaluateCandidate formation lifecycle", () => {
+  it("does not confirm a break when a closed candle finishes exactly at the neckline", () => {
+    const bars = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 0);
+    const formation = detectWM(bars);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    const closedLastIndex = bars.length - 2;
+    const exactNecklineClose = bars.map((bar, index) => (
+      index > formation.extreme2.index && index <= closedLastIndex)
+      ? { ...bar, close: formation.neckline.price }
+      : bar);
+
+    expect(classifyScannerFormationLifecycle(exactNecklineClose, formation))
+      .toEqual({ state: "pre_break" });
+  });
+
+  it("accepts an unexhausted retest through four bars and rejects the fifth", () => {
+    expect(MAX_POST_BREAK_RETURN_AGE_BARS).toBe(4);
+    const ageFour = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 4);
+    const ageFive = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 5);
+
+    const formation = detectWM(ageFour);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    expect(classifyScannerFormationLifecycle(ageFour, formation)).toMatchObject({
+      state: "post_break", breakAgeBars: 4, targetExhausted: false,
+    });
+    expect(evaluateCandidate(
+      "SOL-PERP", "flash", ageFour, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+    )).not.toBeNull();
+    expect(evaluateCandidate(
+      "SOL-PERP", "flash", ageFive, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+    )).toBeNull();
+  });
+
+  it("rejects the owner-observed class after the measured move is exhausted", () => {
+    const bars = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 5, { exhausted: true });
+    const formation = detectWM(bars);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    expect(classifyScannerFormationLifecycle(bars, formation)).toMatchObject({
+      state: "post_break", breakAgeBars: 5, targetExhausted: true,
+    });
+    expect(evaluateCandidate(
+      "BNB-PERP", "pacifica", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+    )).toBeNull();
+  });
+});
+
+describe("formation lifecycle symmetry and fail-closed inputs", () => {
+  it.each(["W", "M"] as const)(
+    "treats an exact measured-target touch as exhausting a %s formation",
+    (type) => {
+      const source = type === "W"
+        ? textbookWBars(NOW_MS, TF_15M)
+        : textbookMBars(NOW_MS, TF_15M);
+      const bars = withPostBreakReturn(source, NOW_MS, TF_15M, type, 1);
+      const formation = detectWM(bars);
+      expect(formation).not.toBeNull();
+      if (!formation) throw new Error(`expected ${type} formation`);
+      const measuredTarget = type === "W"
+        ? formation.neckline.price + formation.patternHeight
+        : formation.neckline.price - formation.patternHeight;
+      const formingIndex = bars.length - 1;
+      const exactTargetTouch = bars.map((bar, index) => index === formingIndex
+        ? type === "W"
+          ? { ...bar, high: measuredTarget }
+          : { ...bar, low: measuredTarget }
+        : bar);
+
+      const lifecycle = classifyScannerFormationLifecycle(exactTargetTouch, formation);
+      expect(lifecycle).toMatchObject({
+        state: "post_break", measuredTarget, targetExhausted: true,
+      });
+      expect(isActionableScannerFormationLifecycle(lifecycle)).toBe(false);
+    },
+  );
+
+  it.each(["W", "M"] as const)(
+    "rejects an exhausted %s return, including exhaustion in the forming candle",
+    (type) => {
+      const source = type === "W"
+        ? textbookWBars(NOW_MS, TF_15M)
+        : textbookMBars(NOW_MS, TF_15M);
+      for (const options of [{ exhausted: true }, { formingExhausted: true }]) {
+        const bars = withPostBreakReturn(source, NOW_MS, TF_15M, type, 1, options);
+        const formation = detectWM(bars);
+        expect(formation).not.toBeNull();
+        if (!formation) throw new Error(`expected ${type} formation`);
+        const lifecycle = classifyScannerFormationLifecycle(bars, formation);
+        expect(lifecycle).toMatchObject({ state: "post_break", targetExhausted: true });
+        expect(isActionableScannerFormationLifecycle(lifecycle)).toBe(false);
+        expect(evaluateCandidate(
+          "TEST-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+        )).toBeNull();
+      }
+    },
+  );
+
+  it("fails closed when a required lifecycle input is non-finite", () => {
+    const bars = textbookWBars(NOW_MS, TF_15M);
+    const formation = detectWM(bars);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    const lifecycle = classifyScannerFormationLifecycle(
+      bars, { ...formation, patternHeight: Number.NaN },
+    );
+    expect(lifecycle).toEqual({ state: "unknown" });
+    expect(isActionableScannerFormationLifecycle(lifecycle)).toBe(false);
+  });
+});
+
 describe("SCANNER_FEED_EXCLUDE", () => {
   const REQUIRED_EXCLUDES = [
     "NATGAS-PERP",
@@ -882,5 +1042,64 @@ describe("active sweep lifecycle ownership", () => {
     await Promise.resolve();
     expect(getScannerStatus().currentGeneration?.generation).toBe(restartedGeneration);
     stopScanner();
+  });
+});
+
+describe("scanner batch cache prefetch", () => {
+  it("deduplicates shared protocol symbols and seeds both due timeframes without legacy fetches", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({
+        getMarkets: vi.fn(async () => [{ internalSymbol: "BTC-PERP", isActive: true }]),
+      });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => new Map([
+          ["BTC/USDT", textbookWBars(Date.now(), timeframe === "1h" ? TF_1H : TF_15M)
+            .map((bar) => ({ ...bar, provenance: directPerp }))],
+        ]),
+      );
+
+      startScanner();
+      await runScannerSweepForTest();
+
+      expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
+      expect(prefetchCachedOHLCVMock.mock.calls.map((call) => call[0])).toEqual([
+        ["BTC/USDT"], ["BTC/USDT"],
+      ]);
+      expect(prefetchCachedOHLCVMock.mock.calls.map((call) => call[1])).toEqual(["15m", "1h"]);
+      expect(fetchOHLCVMock).not.toHaveBeenCalled();
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("records one visible batch failure per timeframe and falls back to the existing per-market path", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockRejectedValue(new Error("batch unavailable"));
+      fetchOHLCVMock.mockResolvedValue([]);
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({ protocol: "flash", marketsAttempted: 1, errorCount: 1 }),
+      ]));
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
   });
 });

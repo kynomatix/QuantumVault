@@ -19,6 +19,7 @@ export const SCHEMA_FAILURE_CLASSES = [
   "postcondition_missing",
   "backfill_failed",
   "index_missing",
+  "verification_failed",
 ] as const;
 export type SchemaFailureClass = (typeof SCHEMA_FAILURE_CLASSES)[number];
 
@@ -94,6 +95,8 @@ const CAPABILITY_SET = new Set<string>(SCHEMA_CAPABILITIES);
 let registeredManifest: readonly SchemaMigrationDefinition[] | null = null;
 let installedSnapshot: SchemaReadinessSnapshot | null = null;
 const processProbePromises = new Map<SchemaCapability, Promise<SchemaReadinessEvidence[]>>();
+let verificationReprobeAttempted = false;
+let verificationReprobeTimer: ReturnType<typeof setTimeout> | null = null;
 
 function freezeEvidence(evidence: SchemaReadinessEvidence): SchemaReadinessEvidence {
   return Object.freeze({ ...evidence });
@@ -134,8 +137,9 @@ function requirementIdentity(requirement: SchemaRequirement): string {
 function normalizeDefinition(value: unknown): string {
   return String(value ?? "")
     .replace(/["']/g, "")
-    .replace(/::[a-z_ ]+(\[\])?/gi, "")
+    .replace(/::(?:[a-z_][a-z0-9_]*\.)?[a-z_][a-z0-9_]*(?:\s+(?:with|without)\s+time\s+zone|\s+varying|\s+precision)?(?:\[\])?/gi, "")
     .replace(/\b([a-z_][a-z0-9_]*)\s+in\s*\(([^)]*)\)/gi, "$1 = any array $2")
+    .replace(/\b([a-z_][a-z0-9_]*)\s+between\s+(-?\d+(?:\.\d+)?)\s+and\s+(-?\d+(?:\.\d+)?)/gi, "$1 >= $2 and $1 <= $3")
     .replace(/\bcheck\b/gi, "")
     .replace(/[()[\],]/g, " ")
     .replace(/\s+/g, " ")
@@ -199,7 +203,7 @@ async function verifyRequirement(
     }
     case "index": {
       const result = await query(
-        "SELECT t.relname AS table_name, i.indisunique AS is_unique, pg_get_expr(i.indpred, i.indrelid) AS predicate, ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, true) FROM generate_series(1, i.indnkeyatts) AS k ORDER BY k) AS columns FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' AND x.relname=$1",
+        "SELECT t.relname AS table_name, i.indisunique AS is_unique, pg_get_expr(i.indpred, i.indrelid) AS predicate, ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, true) || CASE WHEN (i.indoption[k - 1] & 1) = 1 THEN ' DESC' ELSE '' END FROM generate_series(1, i.indnkeyatts) AS k ORDER BY k) AS columns FROM pg_index i JOIN pg_class x ON x.oid=i.indexrelid JOIN pg_class t ON t.oid=i.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' AND x.relname=$1",
         [requirement.index],
       );
       const row = result.rows[0];
@@ -240,29 +244,82 @@ export function registerSchemaMigrationManifest(
   registeredManifest = Object.freeze([...manifest]);
 }
 
+interface ActiveRequirement {
+  readonly migration: SchemaMigrationDefinition;
+  readonly requirement: SchemaRequirement;
+}
+
+interface RequirementCheck extends ActiveRequirement {
+  readonly ready: boolean;
+  readonly failureClass?: SchemaFailureClass;
+}
+
+function activeRequirements(
+  migrations: readonly SchemaMigrationDefinition[],
+): ActiveRequirement[] {
+  const entries = migrations.flatMap((migration) => migration.requirements.map((requirement) => ({
+    migration,
+    requirement,
+  })));
+  const lastIndex = new Map<string, number>();
+  entries.forEach((entry, index) => lastIndex.set(requirementIdentity(entry.requirement), index));
+  return entries.filter((entry, index) =>
+    lastIndex.get(requirementIdentity(entry.requirement)) === index,
+  );
+}
+
+async function evaluateRequirements(
+  query: CatalogQuery,
+  migrations: readonly SchemaMigrationDefinition[],
+): Promise<RequirementCheck[]> {
+  const checks: RequirementCheck[] = [];
+  for (const entry of activeRequirements(migrations)) {
+    try {
+      const ready = await verifyRequirement(query, entry.requirement);
+      checks.push({
+        ...entry,
+        ready,
+        ...(ready ? {} : {
+          failureClass: entry.requirement.kind === "index"
+            ? "index_missing" as const
+            : "postcondition_missing" as const,
+        }),
+      });
+    } catch {
+      checks.push({ ...entry, ready: false, failureClass: "verification_failed" });
+    }
+  }
+  return checks;
+}
+
+function evidenceFromChecks(checks: readonly RequirementCheck[]): SchemaReadinessEvidence[] {
+  const evidence: SchemaReadinessEvidence[] = [];
+  for (const check of checks) {
+    if (check.ready || !check.failureClass) continue;
+    for (const capability of check.migration.capabilities) {
+      evidence.push({
+        capability,
+        failureClass: check.failureClass,
+        objectIdentity: requirementIdentity(check.requirement),
+      });
+    }
+  }
+  return evidence;
+}
+
 async function checkRequirements(
   query: CatalogQuery,
   migrations: readonly SchemaMigrationDefinition[],
 ): Promise<SchemaReadinessEvidence[]> {
-  const evidence: SchemaReadinessEvidence[] = [];
-  for (const migration of migrations) {
-    for (const requirement of migration.requirements) {
-      let ready = false;
-      try {
-        ready = await verifyRequirement(query, requirement);
-      } catch {
-        ready = false;
-      }
-      if (ready) continue;
-      const failureClass: SchemaFailureClass = requirement.kind === "index"
-        ? "index_missing"
-        : "postcondition_missing";
-      for (const capability of migration.capabilities) {
-        evidence.push({ capability, failureClass, objectIdentity: requirementIdentity(requirement) });
-      }
-    }
-  }
-  return evidence;
+  return evidenceFromChecks(await evaluateRequirements(query, migrations));
+}
+
+export async function probeSchemaMigrationManifest(
+  query: CatalogQuery,
+  manifest: readonly SchemaMigrationDefinition[],
+): Promise<SchemaReadinessSnapshot> {
+  assertManifest(manifest);
+  return makeSnapshot(await checkRequirements(query, manifest));
 }
 
 export async function applySchemaMigrationManifest(
@@ -270,25 +327,59 @@ export async function applySchemaMigrationManifest(
   manifest: readonly SchemaMigrationDefinition[],
 ): Promise<SchemaReadinessSnapshot> {
   assertManifest(manifest);
-  const evidence: SchemaReadinessEvidence[] = [];
+  const executionFailures = new Map<string, SchemaFailureClass>();
   for (const migration of manifest) {
     try {
       await query(migration.sql);
     } catch {
-      const failureClass: SchemaFailureClass = migration.operation === "backfill"
+      executionFailures.set(migration.id, migration.operation === "backfill"
         ? "backfill_failed"
-        : "ddl_failed";
-      for (const capability of migration.capabilities) {
-        evidence.push({ capability, failureClass, objectIdentity: `migration:${migration.id}` });
-      }
+        : "ddl_failed");
     }
-    evidence.push(...await checkRequirements(query, [migration]));
+  }
+
+  const checks = await evaluateRequirements(query, manifest);
+  const evidence = evidenceFromChecks(checks);
+  for (const migration of manifest) {
+    const failureClass = executionFailures.get(migration.id);
+    if (!failureClass) continue;
+    const activeChecks = checks.filter((check) => check.migration.id === migration.id);
+    if (activeChecks.length === 0 || activeChecks.every((check) => check.ready)) continue;
+    for (const capability of migration.capabilities) {
+      evidence.push({ capability, failureClass, objectIdentity: `migration:${migration.id}` });
+    }
   }
   return makeSnapshot(evidence);
 }
 
+export const SCHEMA_READINESS_REPROBE_DELAY_MS = 30_000;
+
 export function installSchemaReadinessSnapshot(snapshot: SchemaReadinessSnapshot): void {
   installedSnapshot = makeSnapshot(snapshot.evidence);
+}
+
+export function scheduleSchemaReadinessVerificationReprobe(
+  initialSnapshot: SchemaReadinessSnapshot,
+  reprobe: () => Promise<SchemaReadinessSnapshot>,
+): boolean {
+  if (verificationReprobeAttempted
+      || !initialSnapshot.evidence.some((item) => item.failureClass === "verification_failed")) {
+    return false;
+  }
+  verificationReprobeAttempted = true;
+  verificationReprobeTimer = setTimeout(() => {
+    verificationReprobeTimer = null;
+    void reprobe()
+      .then(async (snapshot) => {
+        installSchemaReadinessSnapshot(snapshot);
+        await reportSchemaReadiness(snapshot);
+      })
+      .catch(() => {
+        // The original fail-closed snapshot stays authoritative. The retry is one-shot.
+      });
+  }, SCHEMA_READINESS_REPROBE_DELAY_MS);
+  verificationReprobeTimer.unref?.();
+  return true;
 }
 
 export function getInstalledSchemaReadinessSnapshot(): SchemaReadinessSnapshot | null {
@@ -382,4 +473,7 @@ export function resetSchemaReadinessForTests(): void {
   installedSnapshot = null;
   registeredManifest = null;
   processProbePromises.clear();
+  verificationReprobeAttempted = false;
+  if (verificationReprobeTimer) clearTimeout(verificationReprobeTimer);
+  verificationReprobeTimer = null;
 }

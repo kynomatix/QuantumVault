@@ -87,6 +87,8 @@ const NON_GENERIC_PAUSES = new Set([
   "bracket_failed",
   "liquidation",
   "daily_loss_breaker",
+  "malfunction_ceiling",
+  "consecutive_losses",
   "reconcile_orphan_position",
 ]);
 
@@ -165,6 +167,11 @@ export function evaluateAiTraderStateAuthority(input: Readonly<AiTraderAuthority
     }
     if (bot.pauseReason === "position_unconfirmed_expired"
       && input.decision?.outcome === "aborted_order"
+      && input.unresolvedDecisionCount === 0
+      && positionTruth === "flat") {
+      return { allowed: true, requiredClaim: "conditional_lifecycle_transition" };
+    }
+    if (bot.pauseReason === "consecutive_losses"
       && input.unresolvedDecisionCount === 0
       && positionTruth === "flat") {
       return { allowed: true, requiredClaim: "conditional_lifecycle_transition" };

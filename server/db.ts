@@ -7,8 +7,10 @@ import { formatPoolLoadTags, registerPoolLoadTag } from "./pool-load";
 import {
   applySchemaMigrationManifest,
   installSchemaReadinessSnapshot,
+  probeSchemaMigrationManifest,
   registerSchemaMigrationManifest,
   reportSchemaReadiness,
+  scheduleSchemaReadinessVerificationReprobe,
   type SchemaMigrationDefinition,
   type SchemaReadinessSnapshot,
 } from "./schema-readiness";
@@ -419,8 +421,8 @@ const schemaMigrationSql = [
        EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
       `CREATE TABLE IF NOT EXISTS platform_cumulative_stats (
         id text PRIMARY KEY DEFAULT 'singleton',
-        cumulative_volume numeric(20,2) NOT NULL DEFAULT 0,
-        cumulative_trades integer NOT NULL DEFAULT 0,
+        total_volume numeric(30,6) NOT NULL DEFAULT 0,
+        total_trades integer NOT NULL DEFAULT 0,
         updated_at timestamp DEFAULT now()
       )`,
       `CREATE INDEX IF NOT EXISTS idx_lab_opt_runs_user_status ON lab_optimization_runs (user_id, status, id)`,
@@ -674,7 +676,7 @@ const schemaMigrationSql = [
       `DO $$ BEGIN
          ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_wallet_derivation_index_unique
            UNIQUE (wallet_address, derivation_index);
-       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+       EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$`,
 
       // --- HD-derivation metadata on the spare pool (Pacifica agent_hd reuse). ---
       // When a Pacifica bot is deleted its subaccount is swept-empty and pooled as a
@@ -1971,8 +1973,8 @@ const schemaMigrationMetadata = [
         "table": "platform_cumulative_stats",
         "columns": [
           "id",
-          "cumulative_volume",
-          "cumulative_trades",
+          "total_volume",
+          "total_trades",
           "updated_at"
         ],
         "constraintDefinitions": [
@@ -2252,8 +2254,7 @@ const schemaMigrationMetadata = [
           "FOREIGN KEY (earner_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
           "FOREIGN KEY (referee_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
           "UNIQUE (source_type, source_id, earner_wallet, level)",
-          "CHECK (level BETWEEN 1 AND 3)",
-          "CHECK (status IN ('pending','confirmed','paid','failed'))"
+          "CHECK (level BETWEEN 1 AND 3)"
         ]
       }
     ],
@@ -3393,8 +3394,7 @@ const schemaMigrationMetadata = [
         ],
         "constraintDefinitions": [
           "PRIMARY KEY (id)",
-          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE",
-          "UNIQUE (wallet_address, asset_key)"
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
         ]
       }
     ],
@@ -5010,6 +5010,20 @@ export async function ensureSchema(): Promise<SchemaReadinessSnapshot> {
       SCHEMA_MIGRATION_MANIFEST,
     );
     installSchemaReadinessSnapshot(snapshot);
+    scheduleSchemaReadinessVerificationReprobe(snapshot, async () => {
+      const reprobeClient = await pool.connect();
+      try {
+        return await probeSchemaMigrationManifest(
+          async (text, values) => {
+            const result = await reprobeClient.query(text, values ? [...values] : undefined);
+            return { rows: result.rows as readonly Record<string, unknown>[] };
+          },
+          SCHEMA_MIGRATION_MANIFEST,
+        );
+      } finally {
+        reprobeClient.release();
+      }
+    });
     await reportSchemaReadiness(snapshot);
     if (snapshot.unavailableCapabilities.length === 0) {
       console.log("[DB] Schema check complete");
