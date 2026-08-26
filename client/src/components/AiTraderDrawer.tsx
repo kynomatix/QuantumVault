@@ -78,10 +78,14 @@ import {
   Line,
   LineChart,
   ReferenceLine,
-  ResponsiveContainer,
-  Tooltip as RechartsTooltip,
   YAxis,
 } from 'recharts';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
 
 const DEGEN_CONFIRM_PHRASE = "send it";
 
@@ -475,6 +479,16 @@ function PreflightRow({ loading, available, needed, onOpenDeposit }: {
   );
 }
 
+const PERFORMANCE_CHART_CONFIG = {
+  v: { label: 'Cumulative P&L' },
+} satisfies ChartConfig;
+
+function formatPerformancePnl(value: number): string {
+  return value === 0
+    ? '$0.00'
+    : `${value > 0 ? '+' : '-'}$${Math.abs(value).toFixed(2)}`;
+}
+
 function PerformancePanel({ performance }: { performance: PerformanceState }) {
   if (performance.status === 'loading') return null;
   if (performance.status === 'error') {
@@ -489,9 +503,7 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
   const title = paper
     ? 'Overall paper performance'
     : 'Overall live performance';
-  const pnlText = performance.netPnl === 0
-    ? '$0.00'
-    : `${performance.netPnl > 0 ? '+' : '-'}$${Math.abs(performance.netPnl).toFixed(2)}`;
+  const pnlText = formatPerformancePnl(performance.netPnl);
   const chartPoints = performance.tradeCount === 1
     ? [{ t: 'start', v: 0 }, ...performance.points]
     : performance.points;
@@ -515,7 +527,7 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
 
       {performance.tradeCount > 0 ? (
         <div className="h-36 w-full" data-testid="ai-trader-performance-chart">
-          <ResponsiveContainer width="100%" height="100%">
+          <ChartContainer config={PERFORMANCE_CHART_CONFIG} className="h-full w-full aspect-auto">
             <LineChart data={chartPoints} margin={{ top: 6, right: 6, bottom: 0, left: 0 }}>
               <YAxis
                 width={46}
@@ -523,17 +535,32 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
                 domain={([dataMin, dataMax]: [number, number]) => [Math.min(0, dataMin), Math.max(0, dataMax)]}
               />
               <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
-              <RechartsTooltip />
+              <ChartTooltip
+                content={(
+                  <ChartTooltipContent
+                    hideLabel
+                    formatter={(value) => (
+                      <>
+                        <span className="text-muted-foreground">{PERFORMANCE_CHART_CONFIG.v.label}</span>
+                        <span className="ml-auto font-mono font-medium tabular-nums text-foreground">
+                          {formatPerformancePnl(Number(value))}
+                        </span>
+                      </>
+                    )}
+                  />
+                )}
+              />
               <Line
                 type="monotone"
                 dataKey="v"
+                name="Cumulative P&L"
                 stroke={performance.netPnl >= 0 ? '#34d399' : '#f87171'}
                 strokeWidth={2}
                 dot={performance.tradeCount === 1}
                 isAnimationActive={false}
               />
             </LineChart>
-          </ResponsiveContainer>
+          </ChartContainer>
         </div>
       ) : (
         <div className="text-xs text-muted-foreground space-y-1" data-testid="ai-trader-performance-empty">
