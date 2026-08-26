@@ -1684,6 +1684,21 @@ const schemaMigrationSql = [
           WHERE bot.id = canonical_stats.id;
        END
        $qv$`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_scanner_candidate_claims (
+         id serial PRIMARY KEY,
+         wallet_address text NOT NULL,
+         boundary_start timestamptz NOT NULL,
+         market text NOT NULL,
+         bot_id varchar NOT NULL,
+         protocol text NOT NULL,
+         candidate_timeframe text NOT NULL,
+         expires_at timestamptz NOT NULL,
+         created_at timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS ai_trader_scanner_claims_wallet_boundary_market_unique
+         ON ai_trader_scanner_candidate_claims (wallet_address, boundary_start, market);
+       CREATE INDEX IF NOT EXISTS ai_trader_scanner_candidate_claims_expires_at_idx
+         ON ai_trader_scanner_candidate_claims (expires_at)`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -4916,6 +4931,62 @@ const schemaMigrationMetadata = [
       }
     ],
     "operation": "backfill"
+  },
+  {
+    "id": "180-create-ai-trader-scanner-candidate-claims",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_scanner_candidate_claims",
+        "columns": [
+          "id",
+          "wallet_address",
+          "boundary_start",
+          "market",
+          "bot_id",
+          "protocol",
+          "candidate_timeframe",
+          "expires_at",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "181-create-ai-trader-scanner-candidate-claim-indexes",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_scanner_candidate_claims",
+        "index": "ai_trader_scanner_claims_wallet_boundary_market_unique",
+        "columns": [
+          "wallet_address",
+          "boundary_start",
+          "market"
+        ],
+        "unique": true
+      },
+      {
+        "kind": "index",
+        "table": "ai_trader_scanner_candidate_claims",
+        "index": "ai_trader_scanner_candidate_claims_expires_at_idx",
+        "columns": [
+          "expires_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
   }
 ] as const;
 

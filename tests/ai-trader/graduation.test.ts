@@ -395,11 +395,11 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
-  it("declares batch-read recovery as no-bump for policy and accepted provenance", () => {
+  it("declares candidate concentration as a policy bump while retaining the batch-read provenance no-bump", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
-      materialVersion: 2,
-      decisionGeneration: 13,
-      decision: "no_bump",
+      materialVersion: 3,
+      decisionGeneration: 14,
+      decision: "bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
       materialVersion: 1,

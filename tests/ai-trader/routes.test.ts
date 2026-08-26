@@ -14,6 +14,9 @@ const getQualificationRecordMock = vi.fn();
 const getOpenDecisionsMock = vi.fn();
 const getUnresolvedDecisionsMock = vi.fn();
 const claimAnalysisMock = vi.fn();
+const claimScannerCandidateMock = vi.fn();
+const incrementFreeCallsMock = vi.fn();
+const decrementFreeCallsMock = vi.fn();
 const transitionStateMock = vi.fn();
 const qualificationEraMutationPatchMock = vi.fn();
 vi.mock("../../server/storage", () => ({
@@ -29,6 +32,9 @@ vi.mock("../../server/storage", () => ({
     getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
     getUnresolvedAiTraderDecisions: (...a: unknown[]) => getUnresolvedDecisionsMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
+    claimAiTraderScannerCandidateAnalysis: (...a: unknown[]) => claimScannerCandidateMock(...a),
+    incrementAiTraderFreeCalls: (...a: unknown[]) => incrementFreeCallsMock(...a),
+    decrementAiTraderFreeCalls: (...a: unknown[]) => decrementFreeCallsMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
   },
 }));
@@ -117,10 +123,15 @@ vi.mock("../../server/ai-trader/graduation", () => ({
 const getScannerShortlistMock = vi.fn();
 const getScannerShortlistResultMock = vi.fn();
 const getScannerStatusMock = vi.fn();
+const getScannerConsumptionBoundaryMock = vi.fn(() => ({
+  boundaryStart: new Date("2026-08-25T12:00:00.000Z"),
+  expiresAt: new Date("2026-08-25T12:15:00.000Z"),
+}));
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerStatus: (...a: unknown[]) => getScannerStatusMock(...a),
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
   getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
+  getScannerConsumptionBoundary: (...a: unknown[]) => getScannerConsumptionBoundaryMock(...a),
 }));
 const scannerCapabilitiesMock = vi.hoisted(() => ({
   producerEnabled: true,
@@ -268,6 +279,17 @@ describe("AI Trader scanner route market admission", () => {
       status: "analyzing",
       pauseReason: null,
     }));
+    claimScannerCandidateMock.mockImplementation(async ({ updates }: { updates?: Record<string, unknown> }) => ({
+      outcome: "claimed",
+      bot: {
+        ...scannerBot(),
+        ...(updates ?? {}),
+        status: "analyzing",
+        pauseReason: null,
+      },
+    }));
+    incrementFreeCallsMock.mockResolvedValue(1);
+    decrementFreeCallsMock.mockResolvedValue(undefined);
     qualificationEraMutationPatchMock.mockReturnValue({
       graduationState: "in_trial",
       currentQualificationEraDigest: null,
@@ -405,9 +427,12 @@ describe("AI Trader scanner route market admission", () => {
       expect.objectContaining({ market: "BTC-PERP", timeframe: "1h" }),
       "scanner_market_selection_changed",
     );
-    expect(claimAnalysisMock).toHaveBeenCalledWith(expect.objectContaining({
+    expect(claimScannerCandidateMock).toHaveBeenCalledWith(expect.objectContaining({
       botId: bot.id,
       expectedStatus: "idle",
+      walletAddress: bot.walletAddress,
+      boundaryStart: new Date("2026-08-25T12:00:00.000Z"),
+      expiresAt: new Date("2026-08-25T12:15:00.000Z"),
       updates: expect.objectContaining({
         market: "BTC-PERP",
         timeframe: "1h",
@@ -421,6 +446,149 @@ describe("AI Trader scanner route market admission", () => {
       timeframe: "1h",
       graduationState: "in_trial",
     });
+  });
+
+  it("does not divert a manual Ask AI request when the same bot owns the top reservation", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    isMarketAdmittedMock.mockReturnValue(true);
+    const bot = scannerBot();
+    getBotMock.mockResolvedValue(bot);
+    getScannerShortlistMock.mockReturnValue([
+      { protocol: "pacifica", market: "BTC-PERP", timeframe: "1h", direction: "long", setup: "W", score: 95, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: Date.now() },
+      { protocol: "pacifica", market: "ETH-PERP", timeframe: "1h", direction: "long", setup: "W", score: 94, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: Date.now() },
+    ]);
+    getSessionMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getWalletLlmCiphertextMock.mockResolvedValue("ciphertext");
+    decryptLlmApiKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getWalletMock.mockResolvedValue({ agentPublicKey: "agent-public-key" });
+    getRecentClosedMock.mockResolvedValue([]);
+    getOpenDecisionsMock.mockResolvedValue([]);
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "same-bot", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 1 });
+
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id }, session: { walletAddress: bot.walletAddress }, body: {}, query: {}, headers: {},
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(claimScannerCandidateMock).toHaveBeenCalledTimes(1);
+    expect(claimScannerCandidateMock).toHaveBeenCalledWith(expect.objectContaining({ market: "BTC-PERP" }));
+    expect(buildContextMock.mock.calls[0][0].market).toBe("BTC-PERP");
+  });
+
+  it("advances manual Ask AI to the next unclaimed score-90 candidate without an LLM call on the loss", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    isMarketAdmittedMock.mockReturnValue(true);
+    const bot = scannerBot();
+    getBotMock.mockResolvedValue(bot);
+    getScannerShortlistMock.mockReturnValue([
+      { protocol: "pacifica", market: "BTC-PERP", timeframe: "1h", direction: "long", setup: "W", score: 110, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: Date.now() },
+      { protocol: "pacifica", market: "ETH-PERP", timeframe: "1h", direction: "long", setup: "W", score: 90, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: Date.now() },
+    ]);
+    getSessionMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getWalletLlmCiphertextMock.mockResolvedValue("ciphertext");
+    decryptLlmApiKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getWalletMock.mockResolvedValue({ agentPublicKey: "agent-public-key" });
+    getRecentClosedMock.mockResolvedValue([]);
+    getOpenDecisionsMock.mockResolvedValue([]);
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "alternative", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 1 });
+    claimScannerCandidateMock
+      .mockResolvedValueOnce({ outcome: "candidate_claimed" })
+      .mockResolvedValueOnce({
+        outcome: "claimed",
+        bot: { ...bot, market: "ETH-PERP", timeframe: "1h", status: "analyzing" },
+      });
+
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id }, session: { walletAddress: bot.walletAddress }, body: {}, query: {}, headers: {},
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(claimScannerCandidateMock).toHaveBeenCalledTimes(2);
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
+    expect(buildContextMock.mock.calls[0][0].market).toBe("ETH-PERP");
+  });
+
+  it("returns the exact 409 without LLM spend when claims exhaust qualifying candidates", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    isMarketAdmittedMock.mockReturnValue(true);
+    const bot = scannerBot();
+    getBotMock.mockResolvedValue(bot);
+    getScannerShortlistMock.mockReturnValue([
+      { protocol: "pacifica", market: "BTC-PERP", timeframe: "15m", direction: "long", setup: "W", score: 95, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: Date.now() },
+      { protocol: "pacifica", market: "ETH-PERP", timeframe: "15m", direction: "long", setup: "W", score: 89, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: Date.now() },
+    ]);
+    getSessionMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+    getWalletLlmCiphertextMock.mockResolvedValue("ciphertext");
+    decryptLlmApiKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getWalletMock.mockResolvedValue({ agentPublicKey: "agent-public-key" });
+    getRecentClosedMock.mockResolvedValue([]);
+    getOpenDecisionsMock.mockResolvedValue([]);
+    claimScannerCandidateMock.mockResolvedValue({ outcome: "candidate_claimed" });
+
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+      params: { id: bot.id }, session: { walletAddress: bot.walletAddress }, body: {}, query: {}, headers: {},
+    });
+
+    expect(result).toEqual({
+      statusCode: 409,
+      body: {
+        error: "scanner_candidates_claimed",
+        detail: "Every fresh scanner candidate is already reserved for this wallet in the current 15-minute boundary, or no remaining alternative meets the score floor.",
+      },
+    });
+    expect(claimScannerCandidateMock).toHaveBeenCalledTimes(1);
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["schema_unavailable", "database_error"] as const)(
+    "returns the exact 503 and refunds a free call on reservation %s",
+    async (outcome) => {
+    const priorKey = process.env.OPENROUTER_PLATFORM_KEY;
+    process.env.OPENROUTER_PLATFORM_KEY = "platform-test-key";
+    try {
+      scannerCapabilitiesMock.consumersEnabled = true;
+      isMarketAdmittedMock.mockReturnValue(true);
+      const bot = { ...scannerBot(), paperMode: true } as AiTraderBot;
+      getBotMock.mockResolvedValue(bot);
+      getScannerShortlistMock.mockReturnValue([
+        { protocol: "pacifica", market: "BTC-PERP", timeframe: "15m", direction: "long", setup: "W", score: 95, necklineDistancePct: 0.1, parentTrend: "uptrend", evaluatedAt: Date.now() },
+      ]);
+      getSessionMock.mockReturnValue({ session: { umk: Buffer.from("umk") } });
+      getWalletLlmCiphertextMock.mockResolvedValue(null);
+      getWalletMock.mockResolvedValue({ agentPublicKey: "agent-public-key" });
+      getRecentClosedMock.mockResolvedValue([]);
+      getOpenDecisionsMock.mockResolvedValue([]);
+      claimScannerCandidateMock.mockResolvedValue({ outcome });
+
+      const built = buildApp();
+      registerAiTraderRoutes(built.app);
+      const result = await invoke(built.routes, "POST /api/ai-trader/:id/analyze", {
+        params: { id: bot.id }, session: { walletAddress: bot.walletAddress }, body: {}, query: {}, headers: {},
+      });
+
+      expect(result).toEqual({
+        statusCode: 503,
+        body: {
+          error: "scanner_candidate_claim_unavailable",
+          detail: "Scanner candidate reservation is temporarily unavailable. No analysis was started.",
+        },
+      });
+      expect(incrementFreeCallsMock).toHaveBeenCalledTimes(1);
+      expect(decrementFreeCallsMock).toHaveBeenCalledWith(bot.walletAddress);
+      expect(runDecisionMock).not.toHaveBeenCalled();
+    } finally {
+      if (priorKey === undefined) delete process.env.OPENROUTER_PLATFORM_KEY;
+      else process.env.OPENROUTER_PLATFORM_KEY = priorKey;
+    }
   });
 });
 

@@ -40,6 +40,7 @@ const getActiveBotsMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
 const getAiTraderDecisionMock = vi.fn();
 const claimAnalysisMock = vi.fn();
+const claimScannerCandidateMock = vi.fn();
 const transitionStateMock = vi.fn();
 const commitCloseMock = vi.fn();
 const commitRecoveryMock = vi.fn();
@@ -60,6 +61,7 @@ vi.mock("../../server/storage", () => ({
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
     getAiTraderDecision: (...a: unknown[]) => getAiTraderDecisionMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
+    claimAiTraderScannerCandidateAnalysis: (...a: unknown[]) => claimScannerCandidateMock(...a),
     transitionAiTraderState: (...a: unknown[]) => transitionStateMock(...a),
     commitAiTraderConfirmedCloseTransition: (...a: unknown[]) => commitCloseMock(...a),
     commitAiTraderRecoveryTransition: (...a: unknown[]) => commitRecoveryMock(...a),
@@ -194,10 +196,15 @@ vi.mock("../../server/ai-trader/executor", async (importOriginal) => {
 
 const getScannerShortlistMock = vi.fn();
 const getScannerShortlistResultMock = vi.fn();
+const getScannerConsumptionBoundaryMock = vi.fn(() => ({
+  boundaryStart: new Date("2026-08-25T12:00:00.000Z"),
+  expiresAt: new Date("2026-08-25T12:15:00.000Z"),
+}));
 const stopScannerMock = vi.fn();
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
   getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
+  getScannerConsumptionBoundary: (...a: unknown[]) => getScannerConsumptionBoundaryMock(...a),
   stopScanner: (...a: unknown[]) => stopScannerMock(...a),
 }));
 
@@ -437,10 +444,11 @@ beforeEach(() => {
     getWalletMock, getRecentClosedMock, getExactGraduationMock, commitGraduationMock,
     updateBotMock, updateDecisionMock, getDecisionsMock,
     getOpenDecisionsMock, getUnresolvedDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock,
-    claimAnalysisMock, transitionStateMock, commitCloseMock, commitRecoveryMock, getUmkMock,
+    claimAnalysisMock, claimScannerCandidateMock, transitionStateMock, commitCloseMock, commitRecoveryMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
     decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
+    getScannerConsumptionBoundaryMock,
     stopScannerMock, isMarketAdmittedMock, isMultiplierQuarantinedMock,
     schemaCapabilityReadyMock,
     safeJournalMock,
@@ -460,6 +468,10 @@ beforeEach(() => {
   getScannerShortlistResultMock.mockImplementation((...a: unknown[]) => ({
     authority: "tradable", candidates: getScannerShortlistMock(...a),
   }));
+  getScannerConsumptionBoundaryMock.mockReturnValue({
+    boundaryStart: new Date("2026-08-25T12:00:00.000Z"),
+    expiresAt: new Date("2026-08-25T12:15:00.000Z"),
+  });
   isMarketAdmittedMock.mockReturnValue(true);
   isMultiplierQuarantinedMock.mockReturnValue(false);
   schemaCapabilityReadyMock.mockReturnValue(true);
@@ -469,6 +481,13 @@ beforeEach(() => {
     const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
     await updateBotMock(botId, patch);
     return makeBot({ id: botId, ...patch } as Partial<AiTraderBot>);
+  });
+  claimScannerCandidateMock.mockImplementation(async ({ botId, updates }: {
+    botId: string; updates?: Record<string, unknown>;
+  }) => {
+    const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
+    await updateBotMock(botId, patch);
+    return { outcome: "claimed", bot: makeBot({ id: botId, ...patch } as Partial<AiTraderBot>) };
   });
   transitionStateMock.mockImplementation(async ({ botId, nextStatus, nextPauseReason, botUpdates }: {
     botId: string; nextStatus: string; nextPauseReason: string | null; botUpdates?: Record<string, unknown>;
@@ -1993,6 +2012,8 @@ describe("runAutoCycle", () => {
 
     await runAutoCycle("bot-1111-2222");
 
+    expect(claimScannerCandidateMock).toHaveBeenCalledTimes(2);
+    expect(getScannerConsumptionBoundaryMock).toHaveBeenCalledTimes(1);
     expect(runDecisionMock).toHaveBeenCalledTimes(2);
     expect(await completedHeartbeat()).toMatch(/consec_rejects=2 last_reject=fee_drag$/);
   });
@@ -2077,6 +2098,13 @@ describe("runAutoCycle", () => {
 
     await runAutoCycle(bot.id);
 
+    expect(claimScannerCandidateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: bot.id,
+      walletAddress: bot.walletAddress,
+      market: "BTC-PERP",
+      candidateTimeframe: "1h",
+    }));
+    expect(getScannerConsumptionBoundaryMock).toHaveBeenCalledTimes(1);
     expect(updateBotMock.mock.calls[0]).toEqual([
       bot.id,
       expect.objectContaining({

@@ -266,6 +266,7 @@ import {
   runScannerSweepForTest,
   startScanner,
   stopScanner,
+  getScannerConsumptionBoundary,
   MAX_POST_BREAK_RETURN_AGE_BARS,
   classifyScannerFormationLifecycle,
   isActionableScannerFormationLifecycle,
@@ -275,6 +276,34 @@ const directPerp = {
   source: "okx", venue: "okx", basis: "perp", proxy: "direct",
   finality: "finalized", timeSemantic: "open_time",
 } as const;
+
+describe("getScannerConsumptionBoundary", () => {
+  it("floors an ordinary consumption time to its UTC 15-minute boundary", () => {
+    const result = getScannerConsumptionBoundary(Date.parse("2026-08-25T12:07:31.456Z"));
+    expect(result.boundaryStart.toISOString()).toBe("2026-08-25T12:00:00.000Z");
+    expect(result.expiresAt.toISOString()).toBe("2026-08-25T12:15:00.000Z");
+  });
+
+  it("keeps an exact boundary in that boundary and advances expiry by exactly 900000ms", () => {
+    const nowMs = Date.parse("2026-08-25T12:15:00.000Z");
+    const result = getScannerConsumptionBoundary(nowMs);
+    expect(result.boundaryStart.getTime()).toBe(nowMs);
+    expect(result.expiresAt.getTime() - result.boundaryStart.getTime()).toBe(900_000);
+  });
+
+  it("places the next millisecond in the next namespace", () => {
+    const prior = getScannerConsumptionBoundary(Date.parse("2026-08-25T12:14:59.999Z"));
+    const next = getScannerConsumptionBoundary(Date.parse("2026-08-25T12:15:00.000Z"));
+    expect(next.boundaryStart.getTime() - prior.boundaryStart.getTime()).toBe(900_000);
+  });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "rejects non-finite consumer time %s",
+    (nowMs) => {
+      expect(() => getScannerConsumptionBoundary(nowMs)).toThrow(TypeError);
+    },
+  );
+});
 
 describe("scanner generation publication", () => {
   const candidate = {

@@ -75,7 +75,7 @@ import { runDecision } from "./decide";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { executeDecision, checkCooldownAndCaps, aiTraderPolicyObject } from "./executor";
 import { computeBotPolicyHmac } from "../session-v3";
-import { getScannerShortlistResult } from "./scanner";
+import { getScannerConsumptionBoundary, getScannerShortlistResult } from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import { isSchemaCapabilityReady } from "../schema-readiness";
 import {
@@ -139,10 +139,7 @@ type InternalAnalysisClaimUpdates = NonNullable<
   Parameters<typeof storage.claimAiTraderAnalysis>[0]["updates"]
 >;
 
-async function claimInternalAnalysis(
-  bot: AiTraderBot,
-  updates?: InternalAnalysisClaimUpdates,
-): Promise<AiTraderBot | undefined> {
+async function internalAnalysisClaimAllowed(bot: AiTraderBot): Promise<boolean> {
   const [openPositions, unresolved] = await Promise.all([
     storage.getOpenAiTraderDecisions(bot.id, 2),
     storage.getUnresolvedAiTraderDecisions(bot.id, 2),
@@ -159,7 +156,14 @@ async function claimInternalAnalysis(
     nowMs: Date.now(),
     proposalExpiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
   });
-  if (!verdict.allowed) return undefined;
+  return verdict.allowed;
+}
+
+async function claimInternalAnalysis(
+  bot: AiTraderBot,
+  updates?: InternalAnalysisClaimUpdates,
+): Promise<AiTraderBot | undefined> {
+  if (!await internalAnalysisClaimAllowed(bot)) return undefined;
   return storage.claimAiTraderAnalysis({ botId: bot.id, expectedStatus: "idle", updates });
 }
 
@@ -416,6 +420,7 @@ const autoNextTimers = new Map<string, NodeJS.Timeout>();
 type CyclePhase = "initial" | "preflight" | "context" | "llm" | "execution";
 type CycleExitReason =
   | "status_gate" | "adapter_missing" | "gate_skip" | "paused"
+  | "candidate_claimed" | "no_qualifying_alternative"
   | "stale_data" | "candle_basis_unavailable"
   | "llm_timeout" | "llm_gateway" | "llm_malformed"
   | "guardrail_rejected" | "flat" | "close_no_position"
@@ -2727,13 +2732,23 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
       const MAX_LLM_CALLS = 2;
       let llmCalls = 0;
+      let advancingAfterClaimLoss = false;
+      const claimBoundary = getScannerConsumptionBoundary(Date.now());
 
       for (let ci = 0; ci < eligible.length; ci++) {
         if (llmCalls >= MAX_LLM_CALLS) break;
 
         const candidate = eligible[ci];
-        // Candidates after the first must have score >= 70 to be worth retrying.
-        if (ci > 0 && candidate.score < 70) break;
+        if (advancingAfterClaimLoss && candidate.score < 90) {
+          if (_obs) _obs.exitReason = "no_qualifying_alternative";
+          console.log(
+            `[AiTraderMonitor] scanner_candidate_below_floor bot=${bot.id.slice(0, 8)} market=${candidate.market} score=${Math.round(candidate.score)} floor=90 boundary=${claimBoundary.boundaryStart.toISOString()}`,
+          );
+          scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+          return;
+        }
+        // The existing post-LLM no-trade retry threshold remains distinct.
+        if (!advancingAfterClaimLoss && llmCalls > 0 && candidate.score < 70) break;
 
         // Persist pick + recomputed policyHmac BEFORE building context.
         const newPolicyHmac = computeBotPolicyHmac(
@@ -2750,15 +2765,47 @@ export async function runAutoCycle(botId: string): Promise<void> {
           qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
         );
         const preClaimBotStatus = bot.status;
-        const claimed = await claimInternalAnalysis(bot, pickUpdates);
-        if (!claimed) {
+        if (!await internalAnalysisClaimAllowed(bot)) {
           if (_obs) _obs.exitReason = "gate_skip";
           console.warn(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} lost idle-to-analyzing claim`);
           return;
         }
+        const claimResult = await storage.claimAiTraderScannerCandidateAnalysis({
+          botId: bot.id,
+          expectedStatus: "idle",
+          walletAddress: bot.walletAddress,
+          boundaryStart: claimBoundary.boundaryStart,
+          market: candidate.market,
+          protocol: candidate.protocol,
+          candidateTimeframe: candidate.timeframe,
+          expiresAt: claimBoundary.expiresAt,
+          updates: pickUpdates,
+        });
+        if (claimResult.outcome === "candidate_claimed") {
+          if (_obs) _obs.exitReason = "candidate_claimed";
+          console.log(
+            `[AiTraderMonitor] scanner_candidate_claim_loss bot=${bot.id.slice(0, 8)} market=${candidate.market} boundary=${claimBoundary.boundaryStart.toISOString()}`,
+          );
+          advancingAfterClaimLoss = true;
+          continue;
+        }
+        if (claimResult.outcome === "schema_unavailable" || claimResult.outcome === "database_error") {
+          if (_obs) _obs.exitReason = "gate_skip";
+          console.warn(
+            `[AiTraderMonitor] scanner candidate reservation unavailable outcome=${claimResult.outcome} bot=${bot.id.slice(0, 8)}`,
+          );
+          scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+          return;
+        }
+        if (claimResult.outcome === "bot_busy") {
+          if (_obs) _obs.exitReason = "gate_skip";
+          console.warn(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} lost idle-to-analyzing claim`);
+          return;
+        }
+        advancingAfterClaimLoss = false;
         // CRITICAL money-safety: refresh local copy so buildMarketContext, runDecision,
         // and executeDecision all operate on the PICKED market, never the stale placeholder.
-        bot = claimed;
+        bot = claimResult.bot;
         const scannerNote = `Scanner selected: ${candidate.market} ${candidate.timeframe} — setup=${candidate.setup} direction=${candidate.direction} score=${Math.round(candidate.score)} dist=${candidate.necklineDistancePct.toFixed(3)}% parentTrend=${candidate.parentTrend}`;
         console.log(`[AiTraderMonitor] scanner: picked ${candidate.market} ${candidate.timeframe} (score=${Math.round(candidate.score)}) for bot ${bot.id.slice(0, 8)} [call ${ci + 1}/${MAX_LLM_CALLS}]`);
 

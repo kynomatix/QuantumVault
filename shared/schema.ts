@@ -2175,6 +2175,25 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
   index("idx_ai_trader_bots_status").on(table.status),
 ]);
 
+// Cross-instance scanner candidate arbitration. The unique key deliberately
+// excludes bot/protocol/timeframe so one wallet cannot concentrate multiple
+// scanner bots into the same market during one UTC 15-minute boundary.
+export const aiTraderScannerCandidateClaims = pgTable("ai_trader_scanner_candidate_claims", {
+  id: serial("id").primaryKey(),
+  walletAddress: text("wallet_address").notNull(),
+  boundaryStart: timestamp("boundary_start", { withTimezone: true }).notNull(),
+  market: text("market").notNull(),
+  botId: varchar("bot_id").notNull(),
+  protocol: text("protocol").notNull(),
+  candidateTimeframe: text("candidate_timeframe").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("ai_trader_scanner_claims_wallet_boundary_market_unique")
+    .on(table.walletAddress, table.boundaryStart, table.market),
+  index("ai_trader_scanner_candidate_claims_expires_at_idx").on(table.expiresAt),
+]);
+
 export const aiTraderDecisions = pgTable("ai_trader_decisions", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   botId: varchar("bot_id").references(() => aiTraderBots.id, { onDelete: 'cascade' }),
@@ -2332,6 +2351,7 @@ export const insertAiTraderBotSchema = createInsertSchema(aiTraderBots).omit({
   }
 });
 export type AiTraderBot = typeof aiTraderBots.$inferSelect;
+export type AiTraderScannerCandidateClaim = typeof aiTraderScannerCandidateClaims.$inferSelect;
 export type InsertAiTraderBot = z.infer<typeof insertAiTraderBotSchema>;
 
 export const insertAiTraderDecisionSchema = createInsertSchema(aiTraderDecisions).omit({

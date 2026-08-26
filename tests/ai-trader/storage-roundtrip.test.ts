@@ -5,6 +5,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { eq } from "drizzle-orm";
+import type { AiTraderBot } from "@shared/schema";
 import { evaluateGraduation } from "../../server/ai-trader/graduation";
 import { buildQualificationRecord } from "../../server/ai-trader/qualification-record";
 
@@ -73,6 +74,152 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     expect(bot).toBeDefined();
     expect(bot!.id).toBe(botId);
   });
+
+  it("durably arbitrates scanner candidates across concurrent database transactions", async () => {
+    const createdBotIds: string[] = [];
+    const makeBot = async (walletAddress: string, suffix: string) => {
+      const bot = await storage.createAiTraderBot({
+        walletAddress,
+        protocol: "pacifica",
+        market: "SOL-PERP",
+        timeframe: "15m",
+        allocatedUsdc: "100.00",
+        graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+        policyHmac: `scanner-claim-${suffix}`,
+      } as any);
+      createdBotIds.push(bot.id);
+      return bot;
+    };
+    const boundaryStart = new Date("2099-08-25T12:00:00.000Z");
+    const expiresAt = new Date("2099-08-25T12:15:00.000Z");
+    const claim = (
+      bot: AiTraderBot,
+      market = "BTC-PERP",
+      boundary = boundaryStart,
+      expiry = expiresAt,
+      protocol = "pacifica",
+      candidateTimeframe = "15m",
+    ) => storage.claimAiTraderScannerCandidateAnalysis({
+      botId: bot.id,
+      expectedStatus: "idle",
+      walletAddress: bot.walletAddress,
+      boundaryStart: boundary,
+      market,
+      protocol,
+      candidateTimeframe,
+      expiresAt: expiry,
+      updates: { market, timeframe: candidateTimeframe, policyHmac: `claim-${bot.id}` } as any,
+    });
+    const readiness = await import("../../server/schema-readiness");
+    const priorReadiness = readiness.getInstalledSchemaReadinessSnapshot();
+
+    try {
+      const gateBot = await makeBot(`${WALLET}-claim-schema-gate`, "schema-gate");
+      readiness.installSchemaReadinessSnapshot({
+        evidence: [{
+          capability: "ai_trader",
+          failureClass: "postcondition_missing",
+          objectIdentity: "table:ai_trader_scanner_candidate_claims",
+        }],
+      } as any);
+      expect((await claim(gateBot)).outcome).toBe("schema_unavailable");
+      readiness.installSchemaReadinessSnapshot({ evidence: [] } as any);
+
+      const sharedWallet = `${WALLET}-claim-concurrent`;
+      const first = await makeBot(sharedWallet, "first");
+      const second = await makeBot(sharedWallet, "second");
+      const concurrent = await Promise.all([claim(first), claim(second)]);
+      expect(concurrent.map((row) => row.outcome).sort()).toEqual(["candidate_claimed", "claimed"]);
+
+      const winnerIndex = concurrent.findIndex((row) => row.outcome === "claimed");
+      const winner = winnerIndex === 0 ? first : second;
+      const loser = winnerIndex === 0 ? second : first;
+      await storage.transitionAiTraderState({
+        botId: winner.id,
+        expectedStatus: "analyzing",
+        expectedPauseReason: null,
+        nextStatus: "idle",
+        nextPauseReason: null,
+      });
+      const sameBotReentry = await claim(winner);
+      expect(sameBotReentry.outcome).toBe("claimed");
+      await storage.transitionAiTraderState({
+        botId: winner.id,
+        expectedStatus: "analyzing",
+        expectedPauseReason: null,
+        nextStatus: "idle",
+        nextPauseReason: null,
+      });
+      expect((await claim(loser)).outcome).toBe("candidate_claimed");
+
+      const otherWalletBot = await makeBot(`${WALLET}-claim-other-wallet`, "other-wallet");
+      expect((await claim(otherWalletBot)).outcome).toBe("claimed");
+
+      await storage.updateAiTraderBot(loser.id, { status: "idle" as any, pauseReason: null as any });
+      const nextBoundary = new Date(boundaryStart.getTime() + 900_000);
+      const nextExpiry = new Date(expiresAt.getTime() + 900_000);
+      expect((await claim(loser, "BTC-PERP", nextBoundary, nextExpiry)).outcome).toBe("claimed");
+
+      const identityWallet = `${WALLET}-claim-identity`;
+      const identityFirst = await makeBot(identityWallet, "identity-first");
+      const identitySecond = await makeBot(identityWallet, "identity-second");
+      expect((await claim(identityFirst, "ETH-PERP", boundaryStart, expiresAt, "pacifica", "15m")).outcome).toBe("claimed");
+      expect((await claim(identitySecond, "ETH-PERP", boundaryStart, expiresAt, "flash", "4h")).outcome).toBe("candidate_claimed");
+
+      const busyWallet = `${WALLET}-claim-busy`;
+      const busyBot = await makeBot(busyWallet, "busy");
+      await storage.updateAiTraderBot(busyBot.id, { status: "paused" as any, pauseReason: "test_busy" as any });
+      expect((await claim(busyBot, "SOL-PERP")).outcome).toBe("bot_busy");
+      const noOrphan = await pool.query(
+        "SELECT count(*)::int AS count FROM ai_trader_scanner_candidate_claims WHERE wallet_address=$1 AND market=$2",
+        [busyWallet, "SOL-PERP"],
+      );
+      expect(noOrphan.rows[0]?.count).toBe(0);
+
+      await storage.transitionAiTraderState({
+        botId: identityFirst.id,
+        expectedStatus: "analyzing",
+        expectedPauseReason: null,
+        nextStatus: "idle",
+        nextPauseReason: null,
+      });
+      await storage.updateAiTraderBot(identityFirst.id, { status: "paused" as any, pauseReason: "test_busy" as any });
+      expect((await claim(identityFirst, "ETH-PERP")).outcome).toBe("bot_busy");
+      const retained = await pool.query(
+        "SELECT bot_id FROM ai_trader_scanner_candidate_claims WHERE wallet_address=$1 AND boundary_start=$2 AND market=$3",
+        [identityWallet, boundaryStart, "ETH-PERP"],
+      );
+      expect(retained.rows).toEqual([{ bot_id: identityFirst.id }]);
+
+      const errorWallet = `${WALLET}-claim-error`;
+      const errorBot = await makeBot(errorWallet, "error");
+      const functionName = `qv_scanner_claim_error_${Date.now()}_${Math.random().toString(36).slice(2)}`
+        .replace(/[^a-z0-9_]/g, "");
+      const triggerName = `${functionName}_trg`;
+      try {
+        await pool.query(
+          `CREATE FUNCTION ${functionName}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'scanner_claim_test_error'; END; $$`,
+        );
+        await pool.query(
+          `CREATE TRIGGER ${triggerName} BEFORE INSERT ON ai_trader_scanner_candidate_claims FOR EACH ROW WHEN (NEW.wallet_address = '${errorWallet.replace(/'/g, "''")}') EXECUTE FUNCTION ${functionName}()`,
+        );
+        expect((await claim(errorBot, "JUP-PERP")).outcome).toBe("database_error");
+      } finally {
+        await pool.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ai_trader_scanner_candidate_claims`);
+        await pool.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      }
+    } finally {
+      if (priorReadiness) readiness.installSchemaReadinessSnapshot(priorReadiness);
+      await pool.query(
+        "DELETE FROM ai_trader_scanner_candidate_claims WHERE wallet_address LIKE $1",
+        [`${WALLET}-claim-%`],
+      );
+      for (const id of createdBotIds) {
+        await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, id));
+        await db.delete(aiTraderBots).where(eq(aiTraderBots.id, id));
+      }
+    }
+  }, 30_000);
 
   it("serializes analysis, proposal, execution, and terminal release with compare-and-swap guards", async () => {
     const authorityBot = await storage.createAiTraderBot({
