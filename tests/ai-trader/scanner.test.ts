@@ -36,8 +36,10 @@ import { detectWM } from "../../server/ai-trader/wm-detector";
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
 const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>();
+const prefetchCachedOHLCVMock = vi.fn();
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
+  prefetchCachedOHLCV: (...a: unknown[]) => prefetchCachedOHLCVMock(...a),
   isNonCryptoMarketOpen: () => true,
   isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
   isCacheDegradedError: (err: unknown) =>
@@ -380,6 +382,8 @@ const alignedDownParentBars = (): OHLCV[] => parentBars(DOWN_PARENT_POINTS);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prefetchCachedOHLCVMock.mockReset();
+  prefetchCachedOHLCVMock.mockResolvedValue(new Map());
   // Default: active prime session (no thin-session penalty).
   getSessionContextMock.mockReturnValue({ label: "london_new_york" });
 });
@@ -1009,5 +1013,64 @@ describe("active sweep lifecycle ownership", () => {
     await Promise.resolve();
     expect(getScannerStatus().currentGeneration?.generation).toBe(restartedGeneration);
     stopScanner();
+  });
+});
+
+describe("scanner batch cache prefetch", () => {
+  it("deduplicates shared protocol symbols and seeds both due timeframes without legacy fetches", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({
+        getMarkets: vi.fn(async () => [{ internalSymbol: "BTC-PERP", isActive: true }]),
+      });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => new Map([
+          ["BTC/USDT", textbookWBars(Date.now(), timeframe === "1h" ? TF_1H : TF_15M)
+            .map((bar) => ({ ...bar, provenance: directPerp }))],
+        ]),
+      );
+
+      startScanner();
+      await runScannerSweepForTest();
+
+      expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
+      expect(prefetchCachedOHLCVMock.mock.calls.map((call) => call[0])).toEqual([
+        ["BTC/USDT"], ["BTC/USDT"],
+      ]);
+      expect(prefetchCachedOHLCVMock.mock.calls.map((call) => call[1])).toEqual(["15m", "1h"]);
+      expect(fetchOHLCVMock).not.toHaveBeenCalled();
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("records one visible batch failure per timeframe and falls back to the existing per-market path", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockRejectedValue(new Error("batch unavailable"));
+      fetchOHLCVMock.mockResolvedValue([]);
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({ protocol: "flash", marketsAttempted: 1, errorCount: 1 }),
+      ]));
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
   });
 });

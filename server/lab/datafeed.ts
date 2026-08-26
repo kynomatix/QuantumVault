@@ -1,6 +1,7 @@
 import type { OHLCV } from "./engine";
 import {
   getCachedCandles,
+  getCachedCandlesBatch,
   saveCandlesToDb,
   CACHE_BUDGET_ABORT_REASON,
   type CandleReadCallerClass,
@@ -1153,6 +1154,92 @@ export interface FetchOHLCVOptions {
   deadlineMs?: number;
   signal?: AbortSignal;
   callerClass?: CandleReadCallerClass;
+}
+
+export const SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS = 5_000;
+
+export interface PrefetchCachedOHLCVOptions {
+  basisPolicy: CandleBasisPolicy;
+  signal?: AbortSignal;
+  callerClass?: CandleReadCallerClass;
+}
+
+function cacheRangeIsAdmissible(
+  cached: readonly ProvenancedOHLCV[],
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+): boolean {
+  const intervalMs = getTimeframeSeconds(timeframe) * 1000;
+  const expectedBars = Math.floor((endMs - startMs) / intervalMs);
+  const minCacheBars = Math.min(100, Math.max(1, expectedBars - 1));
+  if (cached.length < minCacheBars) return false;
+  const isLiveRequest = endMs > Date.now() - 2 * intervalMs;
+  const newestCachedTs = cached[cached.length - 1].time;
+  return !isLiveRequest || newestCachedTs > endMs - 2 * intervalMs;
+}
+
+/**
+ * Scanner-only cache prefetch. This function never reaches a network source:
+ * misses and any operational failure remain visible to the scanner, which
+ * falls back to the unchanged per-market fetch path.
+ */
+export async function prefetchCachedOHLCV(
+  symbols: readonly string[],
+  timeframe: string,
+  startDate: string | number,
+  endDate: string | number,
+  options: PrefetchCachedOHLCVOptions,
+): Promise<Map<string, ProvenancedOHLCV[]>> {
+  if (!options?.basisPolicy) {
+    throw new Error("prefetchCachedOHLCV requires an explicit basisPolicy");
+  }
+  const normalizedTimeframe = timeframe.toLowerCase();
+  const startMs = new Date(startDate).getTime();
+  const endMs = new Date(endDate).getTime();
+  throwIfAborted(options.signal);
+
+  const batchController = new AbortController();
+  const timeout = setTimeout(
+    () => batchController.abort(CACHE_BUDGET_ABORT_REASON),
+    SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+  );
+  timeout.unref?.();
+  const onCallerAbort = () => batchController.abort(options.signal?.reason);
+  if (options.signal) {
+    if (options.signal.aborted) batchController.abort(options.signal.reason);
+    else options.signal.addEventListener("abort", onCallerAbort, { once: true });
+  }
+
+  try {
+    const grouped = await getCachedCandlesBatch(
+      symbols,
+      normalizedTimeframe,
+      startMs,
+      endMs,
+      {
+        basisPolicy: options.basisPolicy,
+        queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+        signal: batchController.signal,
+        callerClass: options.callerClass ?? "scanner",
+      },
+    );
+    const hits = new Map<string, ProvenancedOHLCV[]>();
+    for (const [symbol, cached] of grouped) {
+      if (cached === null) continue;
+      const policyAdmitted = cached.filter((candle) =>
+        candleMatchesBasisPolicy(candle, options.basisPolicy),
+      );
+      if (policyAdmitted.length > 0
+          && cacheRangeIsAdmissible(policyAdmitted, normalizedTimeframe, startMs, endMs)) {
+        hits.set(symbol, policyAdmitted);
+      }
+    }
+    return hits;
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", onCallerAbort);
+  }
 }
 
 export function fetchOHLCV(

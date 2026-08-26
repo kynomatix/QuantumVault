@@ -10,18 +10,26 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
-const { mockGetCached, mockSave } = vi.hoisted(() => ({
+const { mockGetCached, mockGetCachedBatch, mockSave } = vi.hoisted(() => ({
   mockGetCached: vi.fn<(...args: any[]) => Promise<any[] | null>>(),
+  mockGetCachedBatch: vi.fn<(...args: any[]) => Promise<Map<string, any[] | null>>>(),
   mockSave: vi.fn<(...args: any[]) => Promise<void>>().mockResolvedValue(undefined),
 }));
 
 vi.mock("../../server/lab/candle-store", () => ({
   getCachedCandles: (...a: any[]) => mockGetCached(...a),
+  getCachedCandlesBatch: (...a: any[]) => mockGetCachedBatch(...a),
   saveCandlesToDb: (...a: any[]) => mockSave(...a),
   CACHE_BUDGET_ABORT_REASON: "candle-cache-budget-exceeded",
 }));
 
-import { fetchOHLCV, isCacheDegradedError, MONEY_CANDLE_POLICY } from "../../server/lab/datafeed";
+import {
+  fetchOHLCV,
+  isCacheDegradedError,
+  MONEY_CANDLE_POLICY,
+  prefetchCachedOHLCV,
+  SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+} from "../../server/lab/datafeed";
 
 const TF_MS = 15 * 60 * 1000;
 
@@ -47,6 +55,7 @@ let fetchSpy: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   vi.useFakeTimers();
   mockGetCached.mockReset();
+  mockGetCachedBatch.mockReset();
   mockSave.mockClear();
   wedgeCacheReads();
   fetchSpy = vi.fn().mockImplementation(async (url: unknown) => {
@@ -171,5 +180,85 @@ describe("fetchOHLCV — slow cache under a deadline", () => {
     expect(isCacheDegradedError(caught)).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(mockSave).not.toHaveBeenCalled();
+  });
+});
+
+describe("prefetchCachedOHLCV batch hits", () => {
+  function cachedBars(now: number, provenance = {
+    source: "okx", venue: "okx", basis: "perp", proxy: "direct",
+    finality: "finalized", timeSemantic: "open_time",
+  }) {
+    return Array.from({ length: 101 }, (_, index) => ({
+      time: now - (100 - index) * TF_MS,
+      open: 10, high: 11, low: 9, close: 10, volume: 1, provenance,
+    }));
+  }
+
+  it("passes the exact 5-second SELECT timeout and admits a fresh policy-equivalent hit", async () => {
+    const now = Date.now();
+    mockGetCachedBatch.mockResolvedValue(new Map([
+      ["SOL/USDT", cachedBars(now)],
+      ["MISS/USDT", null],
+    ]));
+
+    const hits = await prefetchCachedOHLCV(
+      ["SOL/USDT", "MISS/USDT"], "15m", now - 100 * TF_MS, now,
+      { basisPolicy: MONEY_CANDLE_POLICY, callerClass: "scanner" },
+    );
+
+    expect([...hits.keys()]).toEqual(["SOL/USDT"]);
+    expect(mockGetCachedBatch).toHaveBeenCalledWith(
+      ["SOL/USDT", "MISS/USDT"], "15m", now - 100 * TF_MS, now,
+      expect.objectContaining({
+        queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+        callerClass: "scanner",
+      }),
+    );
+    expect(SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS).toBe(5_000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("turns policy-ineligible and stale groups into misses without a wrapper-level error", async () => {
+    const now = Date.now();
+    const spot = cachedBars(now, {
+      source: "okx", venue: "okx", basis: "spot", proxy: "direct",
+      finality: "finalized", timeSemantic: "open_time",
+    });
+    const stale = cachedBars(now - 3 * TF_MS);
+    mockGetCachedBatch.mockResolvedValue(new Map([
+      ["SPOT/USDT", spot],
+      ["STALE/USDT", stale],
+    ]));
+
+    await expect(prefetchCachedOHLCV(
+      ["SPOT/USDT", "STALE/USDT"], "15m", now - 100 * TF_MS, now,
+      { basisPolicy: MONEY_CANDLE_POLICY },
+    )).resolves.toEqual(new Map());
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("aborts a wedged batch at the reviewed five-second bound without reaching a provider", async () => {
+    mockGetCachedBatch.mockImplementation(
+      (_symbols, _timeframe, _start, _end, opts?: { signal?: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          const signal = opts?.signal;
+          const fail = () => {
+            const error = new Error(String(signal?.reason ?? "aborted"));
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (signal?.aborted) fail();
+          else signal?.addEventListener("abort", fail, { once: true });
+        }),
+    );
+    const now = Date.now();
+    const pending = prefetchCachedOHLCV(
+      ["SOL/USDT"], "15m", now - 100 * TF_MS, now,
+      { basisPolicy: MONEY_CANDLE_POLICY },
+    );
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(5_100);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

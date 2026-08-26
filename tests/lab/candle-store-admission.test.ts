@@ -35,13 +35,16 @@ vi.mock("../../server/telemetry", () => ({ appendTelemetry: vi.fn() }));
 
 import {
   getCachedCandles,
+  getCachedCandlesBatch,
   saveCandlesToDb,
   getCacheStats,
   clearCandleCache,
   getCandleStoreLoad,
   CandleWriteQueueFullError,
+  CandleBatchReadError,
   CACHE_BUDGET_ABORT_REASON,
   type CandleReadPhases,
+  type CandleBatchReadPhases,
 } from "../../server/lab/candle-store";
 import type { CandleFinality, ProvenancedOHLCV } from "../../server/lab/datafeed";
 import {
@@ -495,5 +498,124 @@ describe("getCachedCandles — cancellation-aware admission", () => {
     expect(result).toBeNull();
     expect(phases?.outcome).toBe("miss");
     expect(release).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("getCachedCandlesBatch — scanner universe admission", () => {
+  const row = (symbol: string, finality: CandleFinality = "finalized", close = 10) => ({
+    symbol,
+    time: "3600000",
+    open: close - 1,
+    high: close + 1,
+    low: close - 2,
+    close,
+    volume: 10,
+    source: "okx",
+    venue: "okx",
+    basis: "perp",
+    proxy: "direct",
+    finality,
+    timeSemantic: "open_time",
+  });
+
+  it("uses one exact-bounded SELECT for deduplicated symbols and returns explicit misses", async () => {
+    const release = vi.fn();
+    const query = vi.fn().mockResolvedValue({ rows: [row("BTC-PERP")] });
+    fakePool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+
+    const result = await getCachedCandlesBatch(
+      ["BTC-PERP", "SOL-PERP", "BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        callerClass: "scanner",
+        onPhases: (value) => (phases = value),
+      },
+    );
+
+    expect(query).toHaveBeenCalledTimes(1);
+    const queryConfig = query.mock.calls[0][0];
+    expect(queryConfig.query_timeout).toBe(5_000);
+    expect(queryConfig.text).toContain('time_semantic AS "timeSemantic"');
+    expect(queryConfig.text).not.toMatch(/time_semantic AS\s+imeSemantic\b/);
+    expect(queryConfig.values.slice(0, 4)).toEqual([
+      ["BTC-PERP", "SOL-PERP"], "1h", "0", "3600000",
+    ]);
+    expect(result.get("BTC-PERP")?.[0].close).toBe(10);
+    expect(result.get("SOL-PERP")).toBeNull();
+    expect(phases).toMatchObject({ requestedSymbols: 2, hits: 1, misses: 1, outcome: "hit" });
+    expect(release).toHaveBeenCalledWith();
+  });
+
+  it("preserves per-symbol strongest-finality semantics", async () => {
+    fakePool.connect.mockResolvedValueOnce({
+      release: vi.fn(),
+      query: vi.fn().mockResolvedValue({
+        rows: [row("BTC-PERP", "forming", 9), row("BTC-PERP", "finalized", 11)],
+      }),
+    });
+
+    const result = await getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner" },
+    );
+    expect(result.get("BTC-PERP")).toMatchObject([
+      { close: 11, provenance: { finality: "finalized" } },
+    ]);
+  });
+
+  it("honors caller cancellation before checkout and during a pending checkout", async () => {
+    const preAborted = new AbortController();
+    preAborted.abort(CACHE_BUDGET_ABORT_REASON);
+    await expect(getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        signal: preAborted.signal,
+        callerClass: "scanner",
+      },
+    )).rejects.toMatchObject({ name: "AbortError" });
+    expect(fakePool.connect).not.toHaveBeenCalled();
+
+    const checkout = deferred<unknown>();
+    fakePool.connect.mockReturnValueOnce(checkout.promise);
+    const controller = new AbortController();
+    const pending = getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        signal: controller.signal,
+        callerClass: "scanner",
+      },
+    );
+    await tick();
+    controller.abort("scanner-stopped");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    const release = vi.fn();
+    const query = vi.fn();
+    checkout.resolve({ release, query });
+    await tick();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(query).not.toHaveBeenCalled();
+    expect(getCandleStoreLoad().activeReads).toBe(0);
+  });
+
+  it("releases a failed SELECT with error and exposes a typed batch failure", async () => {
+    const failure = new Error("query timeout");
+    const release = vi.fn();
+    fakePool.connect.mockResolvedValueOnce({
+      release,
+      query: vi.fn().mockRejectedValue(failure),
+    });
+
+    await expect(getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner" },
+    )).rejects.toBeInstanceOf(CandleBatchReadError);
+    expect(release).toHaveBeenCalledWith(failure);
+    expect(getCandleStoreLoad().activeReads).toBe(0);
   });
 });
