@@ -537,6 +537,8 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(query).toHaveBeenCalledTimes(1);
     const queryConfig = query.mock.calls[0][0];
     expect(queryConfig.query_timeout).toBe(5_000);
+    expect(queryConfig.text).toContain('time_semantic AS "timeSemantic"');
+    expect(queryConfig.text).not.toMatch(/time_semantic AS\s+imeSemantic\b/);
     expect(queryConfig.values.slice(0, 4)).toEqual([
       ["BTC-PERP", "SOL-PERP"], "1h", "0", "3600000",
     ]);

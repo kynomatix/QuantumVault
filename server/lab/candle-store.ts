@@ -456,7 +456,7 @@ export async function getCachedCandlesBatch(
     try {
       const result = await client.query({
         text:
-          "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \timeSemantic\ FROM lab_candle_cache_v2 " +
+          "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
           "WHERE symbol = ANY($1::text[]) AND timeframe = $2 AND time >= $3 AND time <= $4 " +
           "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) " +
           "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
