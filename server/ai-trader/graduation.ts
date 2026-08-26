@@ -47,7 +47,7 @@ export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
     "materialVersion": 3,
     "decisionGeneration": 14,
-    "decision": "bump"
+    "decision": "bump",
     "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts"]
   },
   "accepted_candle_provenance": {
