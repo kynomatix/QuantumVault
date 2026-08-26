@@ -19,6 +19,7 @@
 import type { OHLCV } from "../lab/engine";
 import {
   fetchOHLCV,
+  prefetchCachedOHLCV,
   isNonCryptoMarketOpen,
   isAbortError,
   isCacheDegradedError,
@@ -1032,6 +1033,72 @@ async function runSweep(): Promise<void> {
     // Pacifica list BTC-PERP (both map to the same datafeed ticker via marketToDatafeedTicker).
     const candleCache = new Map<string, ProvenancedOHLCV[]>();
 
+    // Resolve both protocol universes once, then collapse their shared
+    // datafeed identities before touching the persistent cache. The finite
+    // union is the reviewed symbol-set bound; no arbitrary cap is added.
+    const universesByProtocol = new Map<string, string[]>();
+    for (const protocol of PROTOCOLS) {
+      requireScannerSweepOwner(owner);
+      const universe = await withSweepOwnership(
+        owner,
+        buildScannerUniverse(protocol, () => ownsScannerSweep(owner)),
+      );
+      requireScannerSweepOwner(owner);
+      universesByProtocol.set(protocol, universe);
+    }
+    const sweepTickers = [...new Set(
+      [...universesByProtocol.values()].flat().map(marketToDatafeedTicker),
+    )];
+    const batchTimeframes = [...new Set([
+      ...boundaryTfs,
+      ...boundaryTfs.map((tf) => PARENT_TF[tf]).filter((tf): tf is string => tf !== null),
+    ])];
+    for (const tf of batchTimeframes) {
+      requireScannerSweepOwner(owner);
+      const remainingMs = fetchDeadlineAt - Date.now();
+      if (sweepTickers.length === 0 || remainingMs < 5_000) {
+        if (sweepTickers.length > 0) {
+          const skippedLine = `[Scanner] BATCH PREFETCH SKIP: ${tf} global budget has ${Math.max(0, remainingMs)}ms remaining`;
+          console.log(skippedLine);
+          appendTelemetry(skippedLine);
+        }
+        continue;
+      }
+      const tfMs = TIMEFRAME_MS[tf];
+      const endMs = now.getTime();
+      const startMs = endMs - (INDICATOR_BARS + 1) * tfMs;
+      const batchStartedAt = Date.now();
+      try {
+        const hits = await withSweepOwnership(owner, prefetchCachedOHLCV(
+          sweepTickers,
+          tf,
+          startMs,
+          endMs,
+          {
+            basisPolicy: MONEY_CANDLE_POLICY,
+            signal: owner.controller.signal,
+            callerClass: "scanner",
+          },
+        ));
+        requireScannerSweepOwner(owner);
+        for (const [ticker, bars] of hits) candleCache.set(`${ticker}:${tf}`, bars);
+        const batchLine =
+          `[Scanner] BATCH PREFETCH: ${tf} requested=${sweepTickers.length} hits=${hits.size} ` +
+          `misses=${sweepTickers.length - hits.size} duration=${Date.now() - batchStartedAt}ms`;
+        console.log(batchLine);
+        appendTelemetry(batchLine);
+      } catch (error) {
+        requireScannerSweepOwner(owner);
+        const fallbackLine =
+          `[Scanner] BATCH PREFETCH FALLBACK: ${tf} requested=${sweepTickers.length} ` +
+          `duration=${Date.now() - batchStartedAt}ms reason=${error instanceof Error ? error.name : "unknown"}`;
+        console.log(fallbackLine);
+        appendTelemetry(fallbackLine);
+        // No retry. Every symbol on this timeframe follows the existing
+        // per-market path, which retains typed cache-degradation semantics.
+      }
+    }
+
     for (const protocol of PROTOCOLS) {
       requireScannerSweepOwner(owner);
       // Genuine wall-clock gate: once the sweep-global fetch budget is spent,
@@ -1044,11 +1111,7 @@ async function runSweep(): Promise<void> {
         appendTelemetry(gateLine);
         continue;
       }
-      const universe = await withSweepOwnership(
-        owner,
-        buildScannerUniverse(protocol, () => ownsScannerSweep(owner)),
-      );
-      requireScannerSweepOwner(owner);
+      const universe = universesByProtocol.get(protocol) ?? [];
 
       // Per-protocol budget clock. The budget used to be measured from the GLOBAL
       // sweep start, which let the first protocol (flash) consume the entire 55s on

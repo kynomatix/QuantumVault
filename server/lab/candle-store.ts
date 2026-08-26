@@ -195,6 +195,35 @@ type CandleCacheRow = {
   timeSemantic: CandleTimeSemantic;
 };
 
+type CandleCacheBatchRow = CandleCacheRow & { symbol: string };
+
+export type CandleBatchReadOutcome = CandleReadOutcome;
+
+export type CandleBatchReadPhases = {
+  callerClass: CandleReadCallerClass;
+  timeframe: string;
+  outcome: CandleBatchReadOutcome;
+  requestedSymbols: number;
+  hits: number;
+  misses: number;
+  semaphoreWaitMs: number;
+  poolAcquireMs: number;
+  queryMs: number;
+  resultProcessingMs: number;
+  totalMs: number;
+  rows: number;
+  pool: { total: number; idle: number; waiting: number };
+};
+
+export class CandleBatchReadError extends Error {
+  readonly code = "candle_batch_read_failed";
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CandleBatchReadError";
+  }
+}
+
 export type GetCachedCandlesOpts = {
   /** Explicit admission policy. There is intentionally no default. */
   basisPolicy: CandleBasisPolicy;
@@ -222,6 +251,10 @@ export type GetCachedCandlesOpts = {
   callerClass?: CandleReadCallerClass;
   /** Receives the phase breakdown for EVERY read (hit, miss, or failure). */
   onPhases?: (phases: CandleReadPhases) => void;
+};
+
+export type GetCachedCandlesBatchOpts = Omit<GetCachedCandlesOpts, "onPhases"> & {
+  onPhases?: (phases: CandleBatchReadPhases) => void;
 };
 
 export async function getCachedCandles(
@@ -324,6 +357,173 @@ export async function getCachedCandles(
     finish("query_error");
     if (signal) throw err;
     return null;
+  } finally {
+    activeCandleReads--;
+  }
+}
+
+/**
+ * Read one timeframe/range for the scanner's deduplicated protocol-universe
+ * union with one indexed SELECT. Every symbol is still admitted by the exact
+ * per-symbol row processor; a missing or inadmissible group is returned as a
+ * miss so the unchanged per-market path remains authoritative for fallback.
+ */
+export async function getCachedCandlesBatch(
+  symbols: readonly string[],
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+  opts: GetCachedCandlesBatchOpts,
+): Promise<Map<string, ProvenancedOHLCV[] | null>> {
+  if (!opts?.basisPolicy) {
+    throw new Error("getCachedCandlesBatch requires an explicit basisPolicy");
+  }
+  if (!Number.isFinite(opts.queryTimeoutMs) || (opts.queryTimeoutMs ?? 0) <= 0) {
+    throw new Error("getCachedCandlesBatch requires a positive queryTimeoutMs");
+  }
+  const uniqueSymbols = [...new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))];
+  if (uniqueSymbols.length === 0) return new Map();
+
+  await requireCandleCacheSchema();
+  const startedAt = Date.now();
+  const signal = opts.signal;
+  const phases: CandleBatchReadPhases = {
+    callerClass: opts.callerClass ?? "scanner",
+    timeframe,
+    outcome: "miss",
+    requestedSymbols: uniqueSymbols.length,
+    hits: 0,
+    misses: uniqueSymbols.length,
+    semaphoreWaitMs: 0,
+    poolAcquireMs: -1,
+    queryMs: 0,
+    resultProcessingMs: 0,
+    totalMs: 0,
+    rows: 0,
+    pool: poolSnapshot(),
+  };
+  const finish = (outcome: CandleBatchReadOutcome) => {
+    phases.outcome = outcome;
+    phases.totalMs = Date.now() - startedAt;
+    phases.pool = poolSnapshot();
+    try {
+      opts.onPhases?.(phases);
+    } catch {
+      // Observer failures never alter the read path.
+    }
+    const line =
+      `[CandleBatchRead] ${phases.callerClass} ${timeframe} outcome=${outcome} ` +
+      `requested=${phases.requestedSymbols} hits=${phases.hits} misses=${phases.misses} ` +
+      `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
+      `query=${phases.queryMs}ms process=${phases.resultProcessingMs}ms total=${phases.totalMs}ms ` +
+      `pool=${phases.pool.total}/${phases.pool.idle}i/${phases.pool.waiting}w`;
+    console.log(line);
+    appendTelemetry(line);
+  };
+  const abortOutcome = (): CandleBatchReadOutcome =>
+    signal?.reason === CACHE_BUDGET_ABORT_REASON ? "deadline" : "cancelled";
+
+  const semaphoreStartedAt = Date.now();
+  if (isSignalAborted(signal)) {
+    finish(abortOutcome());
+    throw makeAbortError(signal!.reason);
+  }
+  if (activeCandleReads >= MAX_ACTIVE_CANDLE_READS) {
+    queuedCandleReads++;
+    try {
+      while (activeCandleReads >= MAX_ACTIVE_CANDLE_READS) {
+        await abortableSleep(50, signal);
+      }
+    } catch (error) {
+      phases.semaphoreWaitMs = Date.now() - semaphoreStartedAt;
+      finish(abortOutcome());
+      throw error;
+    } finally {
+      queuedCandleReads--;
+    }
+  }
+  phases.semaphoreWaitMs = Date.now() - semaphoreStartedAt;
+
+  activeCandleReads++;
+  try {
+    const policy = opts.basisPolicy;
+    const requireDirectOkxIdentity = policy.consumer !== "lab"
+      && policy.consumer !== "scanner"
+      && policy.consumer !== "ai_context";
+    const client = await acquireClientWithAbort(signal, phases as unknown as CandleReadPhases);
+    const queryStartedAt = Date.now();
+    let rows: CandleCacheBatchRow[];
+    try {
+      const result = await client.query({
+        text:
+          "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \timeSemantic\ FROM lab_candle_cache_v2 " +
+          "WHERE symbol = ANY($1::text[]) AND timeframe = $2 AND time >= $3 AND time <= $4 " +
+          "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) " +
+          "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
+          "AND (NOT $8::boolean OR (source = 'okx' AND venue = 'okx' AND time_semantic = 'open_time')) " +
+          "ORDER BY symbol, time",
+        values: [
+          uniqueSymbols, timeframe, String(startMs), String(endMs),
+          [...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy],
+          requireDirectOkxIdentity,
+        ],
+        query_timeout: Math.max(1, Math.floor(opts.queryTimeoutMs!)),
+      } as any);
+      phases.queryMs = Date.now() - queryStartedAt;
+      client.release();
+      rows = result.rows as CandleCacheBatchRow[];
+    } catch (error) {
+      phases.queryMs = Date.now() - queryStartedAt;
+      client.release(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
+    if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+
+    phases.rows = rows.length;
+    const grouped = new Map(uniqueSymbols.map((symbol) => [symbol, [] as CandleCacheRow[]]));
+    for (const row of rows) grouped.get(row.symbol)?.push(row);
+
+    const processStartedAt = Date.now();
+    const admittedBySymbol = new Map<string, ProvenancedOHLCV[] | null>();
+    for (const symbol of uniqueSymbols) {
+      if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+      const localPhases: CandleReadPhases = {
+        callerClass: phases.callerClass,
+        symbol,
+        timeframe,
+        outcome: "miss",
+        semaphoreWaitMs: phases.semaphoreWaitMs,
+        poolAcquireMs: phases.poolAcquireMs,
+        queryMs: phases.queryMs,
+        resultProcessingMs: 0,
+        totalMs: 0,
+        rows: 0,
+        pool: phases.pool,
+      };
+      const admitted = await processCandleRows(
+        symbol, timeframe, startMs, endMs, grouped.get(symbol) ?? [], localPhases,
+      );
+      admittedBySymbol.set(symbol, admitted);
+      if (admitted !== null) phases.hits++;
+    }
+    phases.misses = phases.requestedSymbols - phases.hits;
+    phases.resultProcessingMs = Date.now() - processStartedAt;
+    finish(phases.hits > 0 ? "hit" : "miss");
+    return admittedBySymbol;
+  } catch (error: any) {
+    if (isSignalAborted(signal)) {
+      finish(abortOutcome());
+      throw makeAbortError(signal!.reason);
+    }
+    if (error?.name === "AbortError") {
+      finish(abortOutcome());
+      throw error;
+    }
+    finish("query_error");
+    throw new CandleBatchReadError(
+      `Batch candle-cache read failed for ${timeframe}`,
+      { cause: error },
+    );
   } finally {
     activeCandleReads--;
   }
