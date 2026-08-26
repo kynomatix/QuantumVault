@@ -395,6 +395,14 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
+  it("declares spent-formation admission as a material scanner-policy bump", () => {
+    expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
+      materialVersion: 2,
+      decisionGeneration: 12,
+      decision: "bump",
+    });
+  });
+
   for (const component of components) {
     const changedPath = QUALIFICATION_ERA_REGISTRY[component].ownerPaths[0];
     it(`${component}: rejects silence`, () => {

@@ -31,6 +31,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { OHLCV } from "../../server/lab/engine";
 import { classifyDow, detectPivots } from "../../server/ai-trader/dow-structure";
+import { detectWM } from "../../server/ai-trader/wm-detector";
 
 // ─── Module mocks ─────────────────────────────────────────────────────────────
 
@@ -211,6 +212,42 @@ function textbookMBars(nowMs: number, tfMs: number): OHLCV[] {
   return bars;
 }
 
+function withPostBreakReturn(
+  source: OHLCV[],
+  nowMs: number,
+  tfMs: number,
+  type: "W" | "M",
+  closedBarsAfterBreak: number,
+  options: { exhausted?: boolean; formingExhausted?: boolean } = {},
+): OHLCV[] {
+  const bars = source.slice(0, -1).map((bar) => ({ ...bar }));
+  const breakClose = type === "W" ? 56 : 44;
+  bars.push({
+    time: 0, open: 50, high: 56.2, low: 43.8, close: breakClose, volume: 1_000,
+  });
+  for (let index = 0; index < closedBarsAfterBreak; index++) {
+    const exhausted = options.exhausted && index === 0;
+    bars.push({
+      time: 0,
+      open: 50,
+      high: type === "W" && exhausted ? 68 : 56.2,
+      low: type === "M" && exhausted ? 32 : 43.8,
+      close: type === "W" ? 55.8 : 44.2,
+      volume: 1_000,
+    });
+  }
+  bars.push({
+    time: 0,
+    open: 50,
+    high: type === "W" && options.formingExhausted ? 68 : 56.2,
+    low: type === "M" && options.formingExhausted ? 32 : 43.8,
+    close: type === "W" ? 55.6 : 44.6,
+    volume: 1_000,
+  });
+  const baseTime = nowMs - bars.length * tfMs;
+  return bars.map((bar, index) => ({ ...bar, time: baseTime + index * tfMs }));
+}
+
 // ─── Import under test ────────────────────────────────────────────────────────
 
 import {
@@ -227,6 +264,9 @@ import {
   runScannerSweepForTest,
   startScanner,
   stopScanner,
+  MAX_POST_BREAK_RETURN_AGE_BARS,
+  classifyScannerFormationLifecycle,
+  isActionableScannerFormationLifecycle,
 } from "../../server/ai-trader/scanner";
 
 const directPerp = {
@@ -636,6 +676,122 @@ describe("evaluateCandidate — scoring formula", () => {
 });
 
 // ─── SCANNER_FEED_EXCLUDE membership ─────────────────────────────────────────
+
+describe("evaluateCandidate formation lifecycle", () => {
+  it("does not confirm a break when a closed candle finishes exactly at the neckline", () => {
+    const bars = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 0);
+    const formation = detectWM(bars);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    const closedLastIndex = bars.length - 2;
+    const exactNecklineClose = bars.map((bar, index) => (
+      index > formation.extreme2.index && index <= closedLastIndex)
+      ? { ...bar, close: formation.neckline.price }
+      : bar);
+
+    expect(classifyScannerFormationLifecycle(exactNecklineClose, formation))
+      .toEqual({ state: "pre_break" });
+  });
+
+  it("accepts an unexhausted retest through four bars and rejects the fifth", () => {
+    expect(MAX_POST_BREAK_RETURN_AGE_BARS).toBe(4);
+    const ageFour = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 4);
+    const ageFive = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 5);
+
+    const formation = detectWM(ageFour);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    expect(classifyScannerFormationLifecycle(ageFour, formation)).toMatchObject({
+      state: "post_break", breakAgeBars: 4, targetExhausted: false,
+    });
+    expect(evaluateCandidate(
+      "SOL-PERP", "flash", ageFour, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+    )).not.toBeNull();
+    expect(evaluateCandidate(
+      "SOL-PERP", "flash", ageFive, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+    )).toBeNull();
+  });
+
+  it("rejects the owner-observed class after the measured move is exhausted", () => {
+    const bars = withPostBreakReturn(
+      textbookWBars(NOW_MS, TF_15M), NOW_MS, TF_15M, "W", 5, { exhausted: true });
+    const formation = detectWM(bars);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    expect(classifyScannerFormationLifecycle(bars, formation)).toMatchObject({
+      state: "post_break", breakAgeBars: 5, targetExhausted: true,
+    });
+    expect(evaluateCandidate(
+      "BNB-PERP", "pacifica", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+    )).toBeNull();
+  });
+});
+
+describe("formation lifecycle symmetry and fail-closed inputs", () => {
+  it.each(["W", "M"] as const)(
+    "treats an exact measured-target touch as exhausting a %s formation",
+    (type) => {
+      const source = type === "W"
+        ? textbookWBars(NOW_MS, TF_15M)
+        : textbookMBars(NOW_MS, TF_15M);
+      const bars = withPostBreakReturn(source, NOW_MS, TF_15M, type, 1);
+      const formation = detectWM(bars);
+      expect(formation).not.toBeNull();
+      if (!formation) throw new Error(`expected ${type} formation`);
+      const measuredTarget = type === "W"
+        ? formation.neckline.price + formation.patternHeight
+        : formation.neckline.price - formation.patternHeight;
+      const formingIndex = bars.length - 1;
+      const exactTargetTouch = bars.map((bar, index) => index === formingIndex
+        ? type === "W"
+          ? { ...bar, high: measuredTarget }
+          : { ...bar, low: measuredTarget }
+        : bar);
+
+      const lifecycle = classifyScannerFormationLifecycle(exactTargetTouch, formation);
+      expect(lifecycle).toMatchObject({
+        state: "post_break", measuredTarget, targetExhausted: true,
+      });
+      expect(isActionableScannerFormationLifecycle(lifecycle)).toBe(false);
+    },
+  );
+
+  it.each(["W", "M"] as const)(
+    "rejects an exhausted %s return, including exhaustion in the forming candle",
+    (type) => {
+      const source = type === "W"
+        ? textbookWBars(NOW_MS, TF_15M)
+        : textbookMBars(NOW_MS, TF_15M);
+      for (const options of [{ exhausted: true }, { formingExhausted: true }]) {
+        const bars = withPostBreakReturn(source, NOW_MS, TF_15M, type, 1, options);
+        const formation = detectWM(bars);
+        expect(formation).not.toBeNull();
+        if (!formation) throw new Error(`expected ${type} formation`);
+        const lifecycle = classifyScannerFormationLifecycle(bars, formation);
+        expect(lifecycle).toMatchObject({ state: "post_break", targetExhausted: true });
+        expect(isActionableScannerFormationLifecycle(lifecycle)).toBe(false);
+        expect(evaluateCandidate(
+          "TEST-PERP", "flash", bars, healthyMixedParentBars(), "15m", new Date(NOW_MS),
+        )).toBeNull();
+      }
+    },
+  );
+
+  it("fails closed when a required lifecycle input is non-finite", () => {
+    const bars = textbookWBars(NOW_MS, TF_15M);
+    const formation = detectWM(bars);
+    expect(formation).not.toBeNull();
+    if (!formation) throw new Error("expected W formation");
+    const lifecycle = classifyScannerFormationLifecycle(
+      bars, { ...formation, patternHeight: Number.NaN },
+    );
+    expect(lifecycle).toEqual({ state: "unknown" });
+    expect(isActionableScannerFormationLifecycle(lifecycle)).toBe(false);
+  });
+});
 
 describe("SCANNER_FEED_EXCLUDE", () => {
   const REQUIRED_EXCLUDES = [

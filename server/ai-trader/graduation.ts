@@ -45,9 +45,9 @@ export type QualificationEraRegistry = Record<QualificationEraComponent, Qualifi
 // QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN
 export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
-    "materialVersion": 1,
-    "decisionGeneration": 11,
-    "decision": "no_bump",
+    "materialVersion": 2,
+    "decisionGeneration": 12,
+    "decision": "bump",
     "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts"]
   },
   "accepted_candle_provenance": {
