@@ -344,9 +344,101 @@ describe("qualification era identity", () => {
     expect(buildQualificationEraObject({ bot: ERA_BOT, contextDigest: finalized }).bot.allocatedUsdc).toBe("100");
   });
 
-  it("invalidates only material bot mutations", () => {
+  it("binds scanner identity to the strategy while retaining the exact reviewed provenance shape", () => {
+    const contextDigest = {
+      candleProvenance: {
+        selected: provenance("forming"),
+        parent: provenance("finalized"),
+      },
+    };
+    const identity = buildQualificationEraObject({ bot: ERA_BOT, contextDigest });
+
+    expect(identity).toEqual({
+      schemaVersion: 1,
+      components: {
+        scanner_capability_policy: 3,
+        accepted_candle_provenance: 1,
+        prompt_context_schema: 3,
+        session_policy: 1,
+        guardrail_risk_policy: 4,
+        paper_execution_simulator: 2,
+      },
+      bot: {
+        protocol: "pacifica",
+        marketSource: "scanner",
+        market: "SCANNER_DYNAMIC",
+        timeframe: "15m",
+        mode: "auto",
+        riskProfile: "guarded",
+        model: "anthropic/claude-opus-4.8",
+        sizingMode: "risk_based",
+        riskMinPct: "0.5",
+        riskMaxPct: "1.5",
+        allocatedUsdc: "100",
+        maxLeverage: 3,
+        stopPolicy: "static",
+      },
+      scannerPick: {
+        timeframe: "15m",
+        marketSource: "scanner",
+        selected: {
+          source: "okx",
+          venue: "okx",
+          basis: "perp",
+          proxy: "direct",
+          finalityClass: "forming_or_finalized",
+        },
+        parent: {
+          source: "okx",
+          venue: "okx",
+          basis: "perp",
+          proxy: "direct",
+          finalityClass: "forming_or_finalized",
+        },
+      },
+      candleProvenance: {
+        selected: {
+          source: "okx",
+          venue: "okx",
+          basis: "perp",
+          proxy: "direct",
+          finalityClass: "forming_or_finalized",
+        },
+        parent: {
+          source: "okx",
+          venue: "okx",
+          basis: "perp",
+          proxy: "direct",
+          finalityClass: "forming_or_finalized",
+        },
+      },
+    });
+    expect(Object.keys(identity.scannerPick!)).toEqual(["timeframe", "marketSource", "selected", "parent"]);
+
+    const scannerOtherMarket = { ...ERA_BOT, market: "SOL-PERP" } as AiTraderBot;
+    expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest }))
+      .toBe(computeQualificationEraDigest({ bot: scannerOtherMarket, contextDigest }));
+
+    const fixed = { ...ERA_BOT, marketSource: "fixed" } as AiTraderBot;
+    const fixedOtherMarket = { ...fixed, market: "SOL-PERP" } as AiTraderBot;
+    expect(computeQualificationEraDigest({ bot: fixed, contextDigest }))
+      .not.toBe(computeQualificationEraDigest({ bot: fixedOtherMarket, contextDigest }));
+  });
+
+  it("keeps scanner market picks inside one era while every other material mutation still invalidates", () => {
     expect(qualificationEraMutationPatch(ERA_BOT, { autoNext: false }, "test")).toBeNull();
     expect(qualificationEraMutationPatch(ERA_BOT, { market: " BTC-PERP ", riskMinPct: ".5" }, "test")).toBeNull();
+    expect(qualificationEraMutationPatch(ERA_BOT, { market: "SOL-PERP" }, "test")).toBeNull();
+
+    const fixed = { ...ERA_BOT, marketSource: "fixed" } as AiTraderBot;
+    expect(qualificationEraMutationPatch(fixed, { market: "SOL-PERP" }, "test"))
+      .toMatchObject({ graduationState: "in_trial", currentQualificationEraDigest: null });
+    expect(qualificationEraMutationPatch(ERA_BOT, { market: "SOL-PERP", timeframe: "1h" }, "test"))
+      .toMatchObject({ graduationState: "in_trial", currentQualificationEraDigest: null });
+    expect(qualificationEraMutationPatch(fixed, { marketSource: "scanner", market: "SOL-PERP" }, "test"))
+      .toMatchObject({ graduationState: "in_trial", currentQualificationEraDigest: null });
+    expect(qualificationEraMutationPatch(ERA_BOT, { marketSource: "fixed", market: "SOL-PERP" }, "test"))
+      .toMatchObject({ graduationState: "in_trial", currentQualificationEraDigest: null });
     expect(qualificationEraMutationPatch(ERA_BOT, { model: "different/model" }, "test"))
       .toMatchObject({ graduationState: "in_trial", currentQualificationEraDigest: null });
   });
@@ -395,10 +487,10 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
-  it("declares scanner cache-tail recovery as reviewed no-bumps for capability and provenance", () => {
+  it("declares scanner strategy-bound market identity as a reviewed no-bump for capability policy", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 15,
+      decisionGeneration: 16,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({

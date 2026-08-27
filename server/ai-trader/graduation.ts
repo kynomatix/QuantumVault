@@ -46,9 +46,9 @@ export type QualificationEraRegistry = Record<QualificationEraComponent, Qualifi
 export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
     "materialVersion": 3,
-    "decisionGeneration": 15,
+    "decisionGeneration": 16,
     "decision": "no_bump",
-    "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts"]
+    "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts", "server/ai-trader/graduation.ts"]
   },
   "accepted_candle_provenance": {
     "materialVersion": 1,
@@ -178,7 +178,8 @@ export function buildQualificationEraObject(input: QualificationEraInput): Quali
   }
   const bot = input.bot;
   const marketSource = canonicalIdentifier(bot.marketSource, "lower");
-  const market = canonicalIdentifier(bot.market, "upper");
+  const selectedMarket = canonicalIdentifier(bot.market, "upper");
+  const market = marketSource === "scanner" ? "SCANNER_DYNAMIC" : selectedMarket;
   const timeframe = canonicalIdentifier(bot.timeframe, "lower");
   return {
     schemaVersion: 1,
@@ -200,7 +201,7 @@ export function buildQualificationEraObject(input: QualificationEraInput): Quali
     },
     scannerPick:
       marketSource === "scanner"
-        ? { market, timeframe, marketSource, selected, parent }
+        ? { timeframe, marketSource, selected, parent }
         : null,
     candleProvenance: { selected, parent },
   };
@@ -240,8 +241,13 @@ export function qualificationEraMutationPatch(
     if (field === "maxLeverage") return canonicalEraInteger(value);
     return canonicalIdentifier(value, "lower");
   };
+  const currentMarketSource = canonicalIdentifier(bot.marketSource, "lower");
+  const effectiveMarketSource = Object.prototype.hasOwnProperty.call(updates, "marketSource")
+    ? canonicalIdentifier(updates.marketSource, "lower")
+    : currentMarketSource;
   const changed = MATERIAL_BOT_FIELDS.some(
     (field) => Object.prototype.hasOwnProperty.call(updates, field) &&
+      !(field === "market" && currentMarketSource === "scanner" && effectiveMarketSource === "scanner") &&
       canonicalField(field, updates[field]) !== canonicalField(field, bot[field]),
   );
   if (!changed) return null;
