@@ -22,7 +22,7 @@
 // recompute — paperMode is outside the HMAC envelope by design).
 
 import type { Express, Response } from "express";
-import { and, asc, desc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import Decimal from "decimal.js";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error";
@@ -395,6 +395,14 @@ export type AiTraderPerformanceResponse = {
   omittedInvalidPnlTrades: number;
 };
 
+type AiTraderModePerformanceSummary =
+  | Omit<AiTraderPerformanceResponse, "points">
+  | {
+      status: "unavailable";
+      mode: "paper_trial" | "live";
+      reason: "projection_unavailable";
+    };
+
 type PerformanceCandidateRow = {
   decisionId: string;
   closedAt: Date | string | null;
@@ -614,6 +622,61 @@ export function registerAiTraderRoutes(app: Express): void {
       const allBotIds = bots.map((b) => b.id);
       const lifetimeStatsMap = await storage.getAiTraderBotLifetimeStats(allBotIds);
 
+      // This projection is display enrichment. Keep it wallet-bounded and
+      // batched, and fail open to an explicit unavailable arm if the read
+      // fails. Never fall back to the mixed lifetime total for a mode label.
+      let performanceRows: Array<PerformanceCandidateRow & { botId: string | null }> | null = [];
+      if (allBotIds.length > 0) {
+        try {
+          performanceRows = await db
+            .select({
+              botId: aiTraderDecisions.botId,
+              decisionId: aiTraderDecisions.id,
+              closedAt: aiTraderDecisions.closedAt,
+              realizedPnl: aiTraderDecisions.realizedPnl,
+              terminalCause: aiTraderExecutionEvents.cause,
+            })
+            .from(aiTraderDecisions)
+            .leftJoin(
+              aiTraderExecutionEvents,
+              and(
+                eq(aiTraderExecutionEvents.decisionId, aiTraderDecisions.id),
+                eq(aiTraderExecutionEvents.eventType, "close_terminal_confirmed"),
+              ),
+            )
+            .where(
+              and(
+                inArray(aiTraderDecisions.botId, allBotIds),
+                eq(aiTraderDecisions.outcome, "executed"),
+                isNotNull(aiTraderDecisions.closedAt),
+              ),
+            )
+            .orderBy(
+              asc(aiTraderDecisions.botId),
+              asc(aiTraderDecisions.closedAt),
+              asc(aiTraderDecisions.id),
+            );
+        } catch {
+          console.warn("[AiTrader] mode-scoped list performance projection unavailable");
+          performanceRows = null;
+        }
+      }
+
+      const performanceRowsByBot = new Map<string, PerformanceCandidateRow[]>();
+      if (performanceRows !== null) {
+        for (const row of performanceRows) {
+          if (!row.botId) continue;
+          const grouped = performanceRowsByBot.get(row.botId) ?? [];
+          grouped.push({
+            decisionId: row.decisionId,
+            closedAt: row.closedAt,
+            realizedPnl: row.realizedPnl,
+            terminalCause: row.terminalCause,
+          });
+          performanceRowsByBot.set(row.botId, grouped);
+        }
+      }
+
       const openBots = bots.filter((b) => b.status === "open");
       if (openBots.length > 0) {
         const openBotIds = openBots.map((b) => b.id);
@@ -671,11 +734,27 @@ export function registerAiTraderRoutes(app: Express): void {
           const raw = lifetimeStatsMap.get(b.id) ?? { totalRealized: 0, totalFees: 0, totalLlmCost: 0 };
           const pnlBlock = pnlMap.get(b.id) ?? null;
           const unrealized = pnlBlock?.unrealizedPnl ?? 0;
+          const mode = b.paperMode ? "paper_trial" : "live";
+          let modePerformance: AiTraderModePerformanceSummary;
+          if (performanceRows === null) {
+            modePerformance = { status: "unavailable", mode, reason: "projection_unavailable" };
+          } else {
+            const projected = projectAiTraderPerformance(performanceRowsByBot.get(b.id) ?? [], mode);
+            modePerformance = {
+              status: projected.status,
+              mode: projected.mode,
+              tradeCount: projected.tradeCount,
+              netPnl: projected.netPnl,
+              omittedUnattributedTrades: projected.omittedUnattributedTrades,
+              excludedOtherModeTrades: projected.excludedOtherModeTrades,
+              omittedInvalidPnlTrades: projected.omittedInvalidPnlTrades,
+            };
+          }
           const lifetimeStats: LifetimeStats = {
             ...raw,
             netPnlAllIn: raw.totalRealized + unrealized - raw.totalLlmCost,
           };
-          return { ...toBotDto(b), pnl: pnlBlock, lifetimeStats };
+          return { ...toBotDto(b), pnl: pnlBlock, lifetimeStats, modePerformance };
         }),
       });
     } catch (err) {
