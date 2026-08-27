@@ -75,6 +75,8 @@ const healUmkMock = vi.fn();
 const getSessionByWalletMock = vi.fn();
 const restoreSecurityMock = vi.fn();
 const decryptLlmKeyMock = vi.fn();
+const classifyLlmFailureMock = vi.fn();
+const fingerprintLlmKeyMock = vi.fn();
 vi.mock("../../server/session-v3", () => ({
   getUmkForWebhook: (...a: unknown[]) => getUmkMock(...a),
   decryptAgentKeyStrict: (...a: unknown[]) => decryptKeyMock(...a),
@@ -85,6 +87,8 @@ vi.mock("../../server/session-v3", () => ({
   restoreWalletSecurityFromStorage: (...a: unknown[]) => restoreSecurityMock(...a),
   restoreWalletSecurityFromStorageOutcome: (...a: unknown[]) => restoreSecurityMock(...a),
   decryptLlmApiKeyV3: (...a: unknown[]) => decryptLlmKeyMock(...a),
+  classifyLlmApiKeyDecryptionFailure: (...a: unknown[]) => classifyLlmFailureMock(...a),
+  fingerprintLlmApiKeyV3: (...a: unknown[]) => fingerprintLlmKeyMock(...a),
   // executor's real module (imported for checkCooldownAndCaps) also pulls this:
   verifyBotPolicyHmac: vi.fn(() => true),
   // WO-B: scanner bot mode — monitor recomputes policyHmac for each picked market.
@@ -446,7 +450,7 @@ beforeEach(() => {
     getOpenDecisionsMock, getUnresolvedDecisionsMock, getBotMock, getActiveBotsMock, getLlmCiphertextMock, getAiTraderDecisionMock,
     claimAnalysisMock, claimScannerCandidateMock, transitionStateMock, commitCloseMock, commitRecoveryMock, getUmkMock,
     decryptKeyMock, decryptSubKeyMock, healUmkMock, getSessionByWalletMock, restoreSecurityMock,
-    decryptLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
+    decryptLlmKeyMock, classifyLlmFailureMock, fingerprintLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
     getScannerConsumptionBoundaryMock,
     stopScannerMock, isMarketAdmittedMock, isMultiplierQuarantinedMock,
@@ -456,6 +460,14 @@ beforeEach(() => {
   ]) {
     m.mockReset();
   }
+  classifyLlmFailureMock.mockReturnValue("authentication_failed");
+  fingerprintLlmKeyMock.mockReturnValue({
+    ciphertextBytes: 48,
+    base64Chars: 64,
+    ciphertextSha16: "1111111111111111",
+    walletAadSha16: "2222222222222222",
+    umkAuthorityTag16: "3333333333333333",
+  });
   getRecentClosedMock.mockResolvedValue([]);
   getExactGraduationMock.mockResolvedValue([]);
   commitGraduationMock.mockImplementation(async (params: any) => ({
@@ -2267,6 +2279,117 @@ describe("runAutoCycle", () => {
     expect(runDecisionMock).not.toHaveBeenCalled();
   });
 
+  it("records one sanitized decrypt-failure event before the unchanged reauth_required pause", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armAutoBot();
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.alloc(32, 7) } });
+    getLlmCiphertextMock.mockResolvedValue("safe-envelope");
+    decryptLlmKeyMock.mockImplementation(() => { throw new Error("raw-secret-provider-detail"); });
+
+    await runAutoCycle("bot-1111-2222");
+
+    const lines = appendTelemetryMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[AIT-OBS] llm_key_decrypt "));
+    expect(lines).toEqual([
+      "[AIT-OBS] llm_key_decrypt outcome=failure class=authentication_failed bot=bot-1111 "
+        + "cipher_bytes=48 base64_chars=64 cipher_sha16=1111111111111111 "
+        + "aad_sha16=2222222222222222 umk_tag16=3333333333333333 boot=abcdef12",
+    ]);
+    expect(lines[0]).not.toContain("raw-secret-provider-detail");
+    expect(lines[0]).not.toContain("WALLET_X");
+    expect(botUpdates().filter((update) =>
+      update.status === "paused" && update.pauseReason === "reauth_required"
+    )).toHaveLength(1);
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(appendTelemetryMock.mock.invocationCallOrder[0]).toBeLessThan(
+      updateBotMock.mock.invocationCallOrder[0],
+    );
+    expect(notifications()[0].error).toBe(
+      "Bot paused: stored LLM API key could not be decrypted — reconnect your wallet and re-save the key",
+    );
+  });
+
+  it("records one healthy fingerprint per bot per boot and never per cycle", async () => {
+    const { runAutoCycle } = await importMonitor();
+    const bot = armAutoBot({ id: "bot-healthy-1111" });
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.alloc(32, 9) } });
+    getLlmCiphertextMock.mockResolvedValue("safe-envelope");
+    decryptLlmKeyMock.mockImplementation(() => Buffer.from("sk"));
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-flat", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+
+    await runAutoCycle(bot.id);
+    await runAutoCycle(bot.id);
+
+    const healthyLines = () => appendTelemetryMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[AIT-OBS] llm_key_fingerprint "));
+    expect(healthyLines()).toEqual([
+      "[AIT-OBS] llm_key_fingerprint outcome=success bot=bot-heal "
+        + "cipher_bytes=48 base64_chars=64 cipher_sha16=1111111111111111 "
+        + "aad_sha16=2222222222222222 umk_tag16=3333333333333333 boot=abcdef12",
+    ]);
+
+    const rejectingBot = makeBot({ id: "bot-fingerprint-reject", status: "idle", mode: "auto", autoNext: true, graduationState: "graduated" });
+    getBotMock.mockResolvedValue(rejectingBot);
+    fingerprintLlmKeyMock.mockImplementationOnce(() => { throw new Error("diagnostic-only"); });
+    await runAutoCycle(rejectingBot.id);
+    expect(healthyLines()).toHaveLength(1);
+    expect(runDecisionMock).toHaveBeenCalledTimes(3);
+
+    const throwingWriterBot = makeBot({ id: "bot-writer-throws", status: "idle", mode: "auto", autoNext: true, graduationState: "graduated" });
+    getBotMock.mockResolvedValue(throwingWriterBot);
+    fingerprintLlmKeyMock.mockReturnValue({
+      ciphertextBytes: 48,
+      base64Chars: 64,
+      ciphertextSha16: "1111111111111111",
+      walletAadSha16: "2222222222222222",
+      umkAuthorityTag16: "3333333333333333",
+    });
+    appendTelemetryMock.mockImplementationOnce(() => { throw new Error("writer-down"); });
+    await runAutoCycle(throwingWriterBot.id);
+    expect(runDecisionMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("a failing fingerprint still records a bounded failure event and performs the unchanged reauth_required pause", async () => {
+    const { runAutoCycle } = await importMonitor();
+    const armFailure = (id: string) => {
+      armAutoBot({ id });
+      getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.alloc(32, 5) } });
+      getLlmCiphertextMock.mockResolvedValue("malformed-envelope");
+      decryptLlmKeyMock.mockImplementation(() => { throw new Error("raw-decrypt-detail"); });
+      fingerprintLlmKeyMock.mockImplementation(() => { throw new Error("raw-fingerprint-detail"); });
+    };
+
+    armFailure("bot-unavailable-1");
+    await runAutoCycle("bot-unavailable-1");
+    const failureLines = () => appendTelemetryMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((line) => line.startsWith("[AIT-OBS] llm_key_decrypt "));
+    expect(failureLines()[0]).toBe(
+      "[AIT-OBS] llm_key_decrypt outcome=failure class=authentication_failed bot=bot-unav "
+        + "cipher_bytes=unavailable base64_chars=unavailable cipher_sha16=unavailable "
+        + "aad_sha16=unavailable umk_tag16=unavailable boot=abcdef12",
+    );
+    expect(failureLines()[0]).not.toMatch(/raw-decrypt-detail|raw-fingerprint-detail|WALLET_X/);
+    expect(botUpdates().filter((update) => update.pauseReason === "reauth_required")).toHaveLength(1);
+
+    updateBotMock.mockClear();
+    classifyLlmFailureMock.mockImplementationOnce(() => { throw new Error("classifier-down"); });
+    armFailure("bot-classifier-2");
+    await runAutoCycle("bot-classifier-2");
+    expect(failureLines().at(-1)).toContain("class=internal_failure");
+    expect(botUpdates().filter((update) => update.pauseReason === "reauth_required")).toHaveLength(1);
+
+    updateBotMock.mockClear();
+    appendTelemetryMock.mockImplementationOnce(() => { throw new Error("writer-down"); });
+    armFailure("bot-writer-3");
+    await expect(runAutoCycle("bot-writer-3")).resolves.toBeUndefined();
+    expect(botUpdates().filter((update) => update.pauseReason === "reauth_required")).toHaveLength(1);
+    expect(runDecisionMock).not.toHaveBeenCalled();
+  });
+
   it("returns to idle and reschedules on stale context (G9) — key zeroized", async () => {
     const { runAutoCycle } = await importMonitor();
     armAutoBot();
@@ -4074,9 +4197,9 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
 
     await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
 
-    // Exactly start + terminal; no extra storage calls from the wrapper
-    expect(obsTelLines()).toHaveLength(2);
-    // Wrapper itself added only 2 telemetry calls; runAutoCycle's own behaviour
+    // Exactly start + one healthy fingerprint + terminal; no extra storage calls from the wrapper
+    expect(obsTelLines()).toHaveLength(3);
+    // The wrapper still adds only start/terminal; runAutoCycle adds the one-time fingerprint
     // (storage reads, mock calls) is unaffected
     expect(getBotMock).toHaveBeenCalledTimes(1);
     expect(buildContextMock).toHaveBeenCalledTimes(1);

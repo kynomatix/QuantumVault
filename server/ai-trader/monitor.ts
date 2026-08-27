@@ -46,6 +46,10 @@ import {
   getSessionByWalletAddress,
   restoreWalletSecurityFromStorageOutcome,
   decryptLlmApiKeyV3,
+  classifyLlmApiKeyDecryptionFailure,
+  fingerprintLlmApiKeyV3,
+  type LlmApiKeyDecryptionClass,
+  type LlmApiKeyDiagnosticFingerprint,
 } from "../session-v3";
 import { fireReflection } from "./reflection-service";
 import { sendTradeNotification, getCloseReasonLabel } from "../notification-service";
@@ -233,6 +237,67 @@ const TICK_WEDGE_MS = 120_000;
 let lastMonitorCompletedHeartbeatAt: number | null = null;
 let lastMonitorDegradedHeartbeatAt: number | null = null;
 const MONITOR_BOOT_TAG = SERVER_BOOT_ID.slice(0, 8).toLowerCase();
+const llmKeyFingerprintRecordedBots = new Set<string>();
+
+function llmKeyFingerprintFields(
+  fingerprint: LlmApiKeyDiagnosticFingerprint | null,
+): string {
+  if (!fingerprint) {
+    return "cipher_bytes=unavailable base64_chars=unavailable cipher_sha16=unavailable "
+      + "aad_sha16=unavailable umk_tag16=unavailable";
+  }
+  return `cipher_bytes=${fingerprint.ciphertextBytes} base64_chars=${fingerprint.base64Chars} `
+    + `cipher_sha16=${fingerprint.ciphertextSha16} aad_sha16=${fingerprint.walletAadSha16} `
+    + `umk_tag16=${fingerprint.umkAuthorityTag16}`;
+}
+
+function recordLlmKeyDecryptFailure(
+  bot: AiTraderBot,
+  umk: Buffer,
+  ciphertext: string,
+  error: unknown,
+): void {
+  let failureClass: LlmApiKeyDecryptionClass = "internal_failure";
+  try {
+    failureClass = classifyLlmApiKeyDecryptionFailure(error);
+  } catch {
+    // Diagnostic enrichment fails open; the fail-closed pause follows regardless.
+  }
+
+  let fingerprint: LlmApiKeyDiagnosticFingerprint | null = null;
+  try {
+    fingerprint = fingerprintLlmApiKeyV3(umk, ciphertext, bot.walletAddress);
+  } catch {
+    // Strict fingerprint rejection is represented by the all-unavailable field set.
+  }
+
+  try {
+    appendTelemetry(
+      `[AIT-OBS] llm_key_decrypt outcome=failure class=${failureClass} bot=${bot.id.slice(0, 8)} `
+      + `${llmKeyFingerprintFields(fingerprint)} boot=${MONITOR_BOOT_TAG}`,
+    );
+  } catch {
+    // Telemetry cannot consume the mandatory credential-safety pause.
+  }
+}
+
+function recordLlmKeyFingerprintOnce(
+  bot: AiTraderBot,
+  umk: Buffer,
+  ciphertext: string,
+): void {
+  if (llmKeyFingerprintRecordedBots.has(bot.id)) return;
+  try {
+    const fingerprint = fingerprintLlmApiKeyV3(umk, ciphertext, bot.walletAddress);
+    appendTelemetry(
+      `[AIT-OBS] llm_key_fingerprint outcome=success bot=${bot.id.slice(0, 8)} `
+      + `${llmKeyFingerprintFields(fingerprint)} boot=${MONITOR_BOOT_TAG}`,
+    );
+    llmKeyFingerprintRecordedBots.add(bot.id);
+  } catch {
+    // A missing healthy baseline is observability degradation, never an entry failure.
+  }
+}
 
 // Process-local, fleet-wide business-outcome signal. Boot starts unknown: a
 // database seed would add hot-path work and would pretend this process-owned
@@ -2671,8 +2736,10 @@ export async function runAutoCycle(botId: string): Promise<void> {
   let keyBuf: Buffer;
   try {
     keyBuf = decryptLlmApiKeyV3(umk, ciphertext, bot.walletAddress);
+    recordLlmKeyFingerprintOnce(bot, umk, ciphertext);
   } catch (err) {
     if (_obs) _obs.exitReason = "paused";
+    recordLlmKeyDecryptFailure(bot, umk, ciphertext, err);
     await pauseBot(bot, "reauth_required", "stored LLM API key could not be decrypted — reconnect your wallet and re-save the key");
     return;
   }
