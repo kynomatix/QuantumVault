@@ -1320,7 +1320,7 @@ export async function completeCachedOHLCVTail(
       overlapStartMs,
       endMs,
       onProgress,
-      { ...options, bypassCache: true },
+      { ...options, basisPolicy: options.basisPolicy, bypassCache: true },
     );
     const merged = mergeScannerCandleTail(orderedPrefix, tail).filter(
       (candle) => candle.time >= startMs

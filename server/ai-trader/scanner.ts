@@ -1265,6 +1265,7 @@ async function runSweep(): Promise<void> {
                     )
                   : await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
                       ...fetchOptions,
+                      basisPolicy: fetchOptions.basisPolicy,
                       bypassCache: batchExactMisses.has(cacheKey),
                     });
                 requireScannerSweepOwner(owner);
@@ -1362,6 +1363,7 @@ async function runSweep(): Promise<void> {
                           undefined,
                           {
                             ...parentFetchOptions,
+                            basisPolicy: parentFetchOptions.basisPolicy,
                             bypassCache: batchExactMisses.has(parentCacheKey),
                           },
                         );
