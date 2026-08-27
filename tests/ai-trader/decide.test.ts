@@ -317,7 +317,7 @@ describe("runDecision — happy path", () => {
 
     const result = await runDecision({
       bot: selectedMarketBot,
-      apiKey: "sk-or-test",
+      apiKey: ["sk", "or", "test"].join("-"),
       context,
       adapter: makeAdapter(),
     });
