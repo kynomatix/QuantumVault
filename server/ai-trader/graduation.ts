@@ -76,7 +76,7 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "paper_execution_simulator": {
     "materialVersion": 2,
-    "decisionGeneration": 8,
+    "decisionGeneration": 7,
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/paper-math.ts", "server/ai-trader/monitor.ts"]
   }
