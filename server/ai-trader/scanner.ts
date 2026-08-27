@@ -20,6 +20,7 @@ import type { OHLCV } from "../lab/engine";
 import {
   fetchOHLCV,
   prefetchCachedOHLCV,
+  completeCachedOHLCVTail,
   isNonCryptoMarketOpen,
   isAbortError,
   isCacheDegradedError,
@@ -1049,6 +1050,8 @@ async function runSweep(): Promise<void> {
     // Ensures BTC/USDT 15m candles are fetched exactly once even when both Flash and
     // Pacifica list BTC-PERP (both map to the same datafeed ticker via marketToDatafeedTicker).
     const candleCache = new Map<string, ProvenancedOHLCV[]>();
+    const candlePrefixes = new Map<string, ProvenancedOHLCV[]>();
+    const batchExactMisses = new Set<string>();
 
     // Resolve both protocol universes once, then collapse their shared
     // datafeed identities before touching the persistent cache. The finite
@@ -1086,7 +1089,7 @@ async function runSweep(): Promise<void> {
       const startMs = endMs - (INDICATOR_BARS + 1) * tfMs;
       const batchStartedAt = Date.now();
       try {
-        const hits = await withSweepOwnership(owner, prefetchCachedOHLCV(
+        const prefetched = await withSweepOwnership(owner, prefetchCachedOHLCV(
           sweepTickers,
           tf,
           startMs,
@@ -1098,10 +1101,13 @@ async function runSweep(): Promise<void> {
           },
         ));
         requireScannerSweepOwner(owner);
-        for (const [ticker, bars] of hits) candleCache.set(`${ticker}:${tf}`, bars);
+        for (const [ticker, bars] of prefetched.complete) candleCache.set(`${ticker}:${tf}`, bars);
+        for (const [ticker, bars] of prefetched.prefixes) candlePrefixes.set(`${ticker}:${tf}`, bars);
+        for (const ticker of prefetched.exactMisses) batchExactMisses.add(`${ticker}:${tf}`);
         const batchLine =
-          `[Scanner] BATCH PREFETCH: ${tf} requested=${sweepTickers.length} hits=${hits.size} ` +
-          `misses=${sweepTickers.length - hits.size} duration=${Date.now() - batchStartedAt}ms`;
+          `[Scanner] BATCH PREFETCH: ${tf} requested=${sweepTickers.length} ` +
+          `complete=${prefetched.complete.size} prefixes=${prefetched.prefixes.size} ` +
+          `misses=${prefetched.exactMisses.size} duration=${Date.now() - batchStartedAt}ms`;
         console.log(batchLine);
         appendTelemetry(batchLine);
       } catch (error) {
@@ -1240,12 +1246,27 @@ async function runSweep(): Promise<void> {
                   remainingMs,
                 );
                 const fetchStartedAt = Date.now();
-                bars = await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
+                const cachedPrefix = candlePrefixes.get(cacheKey);
+                const fetchOptions = {
                   basisPolicy: MONEY_CANDLE_POLICY,
                   deadlineMs: perFetchDeadlineMs,
                   signal: tfAbort.signal,
-                  callerClass: "scanner",
-                });
+                  callerClass: "scanner" as const,
+                };
+                bars = cachedPrefix
+                  ? await completeCachedOHLCVTail(
+                      ticker,
+                      tf,
+                      startDate,
+                      endDate,
+                      cachedPrefix,
+                      undefined,
+                      fetchOptions,
+                    )
+                  : await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
+                      ...fetchOptions,
+                      bypassCache: batchExactMisses.has(cacheKey),
+                    });
                 requireScannerSweepOwner(owner);
                 // If the fetch came back EMPTY after running out its deadline,
                 // treat it as a budget timeout, not a dead feed — a truncated
@@ -1255,6 +1276,8 @@ async function runSweep(): Promise<void> {
                   Date.now() - fetchStartedAt >= perFetchDeadlineMs - 1_000;
                 if (!fetchDeadlineTruncated) {
                   candleCache.set(cacheKey, bars);
+                  candlePrefixes.delete(cacheKey);
+                  batchExactMisses.delete(cacheKey);
                 }
               }
             } catch (err) {
@@ -1313,21 +1336,39 @@ async function runSweep(): Promise<void> {
                     // The typed evaluator reports a configured parent as inconclusive.
                     parentBars = null;
                   } else {
-                    parentBars = await fetchOHLCV(
-                      ticker,
-                      parentTf,
-                      new Date(parentStartMs).toISOString(),
-                      endDate,
-                      undefined,
-                      {
-                        basisPolicy: MONEY_CANDLE_POLICY,
-                        deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs),
-                        signal: tfAbort.signal,
-                        callerClass: "scanner",
-                      },
-                    );
+                    const parentStartDate = new Date(parentStartMs).toISOString();
+                    const parentPrefix = candlePrefixes.get(parentCacheKey);
+                    const parentFetchOptions = {
+                      basisPolicy: MONEY_CANDLE_POLICY,
+                      deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs),
+                      signal: tfAbort.signal,
+                      callerClass: "scanner" as const,
+                    };
+                    parentBars = parentPrefix
+                      ? await completeCachedOHLCVTail(
+                          ticker,
+                          parentTf,
+                          parentStartDate,
+                          endDate,
+                          parentPrefix,
+                          undefined,
+                          parentFetchOptions,
+                        )
+                      : await fetchOHLCV(
+                          ticker,
+                          parentTf,
+                          parentStartDate,
+                          endDate,
+                          undefined,
+                          {
+                            ...parentFetchOptions,
+                            bypassCache: batchExactMisses.has(parentCacheKey),
+                          },
+                        );
                     requireScannerSweepOwner(owner);
                     candleCache.set(parentCacheKey, parentBars);
+                    candlePrefixes.delete(parentCacheKey);
+                    batchExactMisses.delete(parentCacheKey);
                   }
                 }
               } catch (err) {

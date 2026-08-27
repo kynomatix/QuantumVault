@@ -24,8 +24,10 @@ vi.mock("../../server/lab/candle-store", () => ({
 }));
 
 import {
+  completeCachedOHLCVTail,
   fetchOHLCV,
   isCacheDegradedError,
+  mergeScannerCandleTail,
   MONEY_CANDLE_POLICY,
   prefetchCachedOHLCV,
   SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
@@ -189,7 +191,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
     finality: "finalized", timeSemantic: "open_time",
   }) {
     return Array.from({ length: 101 }, (_, index) => ({
-      time: now - (100 - index) * TF_MS,
+      time: now - (101 - index) * TF_MS,
       open: 10, high: 11, low: 9, close: 10, volume: 1, provenance,
     }));
   }
@@ -201,12 +203,14 @@ describe("prefetchCachedOHLCV batch hits", () => {
       ["MISS/USDT", null],
     ]));
 
-    const hits = await prefetchCachedOHLCV(
+    const result = await prefetchCachedOHLCV(
       ["SOL/USDT", "MISS/USDT"], "15m", now - 100 * TF_MS, now,
       { basisPolicy: MONEY_CANDLE_POLICY, callerClass: "scanner" },
     );
 
-    expect([...hits.keys()]).toEqual(["SOL/USDT"]);
+    expect([...result.complete.keys()]).toEqual(["SOL/USDT"]);
+    expect([...result.prefixes.keys()]).toEqual([]);
+    expect([...result.exactMisses]).toEqual(["MISS/USDT"]);
     expect(mockGetCachedBatch).toHaveBeenCalledWith(
       ["SOL/USDT", "MISS/USDT"], "15m", now - 100 * TF_MS, now,
       expect.objectContaining({
@@ -218,7 +222,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("turns policy-ineligible and stale groups into misses without a wrapper-level error", async () => {
+  it("partitions policy-ineligible groups as misses and a natural-boundary stale group as a reusable prefix", async () => {
     const now = Date.now();
     const spot = cachedBars(now, {
       source: "okx", venue: "okx", basis: "spot", proxy: "direct",
@@ -230,11 +234,72 @@ describe("prefetchCachedOHLCV batch hits", () => {
       ["STALE/USDT", stale],
     ]));
 
-    await expect(prefetchCachedOHLCV(
+    const result = await prefetchCachedOHLCV(
       ["SPOT/USDT", "STALE/USDT"], "15m", now - 100 * TF_MS, now,
       { basisPolicy: MONEY_CANDLE_POLICY },
-    )).resolves.toEqual(new Map());
+    );
+    expect([...result.complete.keys()]).toEqual([]);
+    expect([...result.prefixes.keys()]).toEqual(["STALE/USDT"]);
+    expect([...result.exactMisses]).toEqual(["SPOT/USDT"]);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("completes a measured 8-bar stale tail without a second cache read and revalidates the full range", async () => {
+    const now = Date.now();
+    const startMs = now - 101 * TF_MS;
+    const prefix = cachedBars(now).filter((candle) => candle.time <= now - 8 * TF_MS);
+    const responseRows = Array.from({ length: 8 }, (_, index) => {
+      const time = now - (8 - index) * TF_MS;
+      return [String(time), "10", "11", "9", "10", "1", "1", "1", "1"];
+    }).reverse();
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      expect(String(input)).toContain("okx.com");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ code: "0", data: responseRows }),
+        text: async () => "",
+      };
+    });
+
+    const completed = await completeCachedOHLCVTail(
+      "SOL/USDT",
+      "15m",
+      startMs,
+      now,
+      prefix,
+      undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        deadlineMs: 20_000,
+        callerClass: "scanner",
+      },
+    );
+
+    expect(prefix).toHaveLength(94);
+    expect(completed).toHaveLength(101);
+    expect(completed[0].time).toBe(startMs);
+    expect(completed.at(-1)?.time).toBe(now - TF_MS);
+    expect(mockGetCached).not.toHaveBeenCalled();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains the strongest finality deterministically at a tail overlap", () => {
+    const [base] = cachedBars(Date.now());
+    const forming = {
+      ...base,
+      close: 9,
+      provenance: { ...base.provenance, finality: "forming" as const },
+    };
+    const finalized = {
+      ...base,
+      close: 11,
+      provenance: { ...base.provenance, finality: "finalized" as const },
+    };
+
+    expect(mergeScannerCandleTail([forming], [finalized])).toMatchObject([
+      { time: base.time, close: 11, provenance: { finality: "finalized" } },
+    ]);
   });
 
   it("aborts a wedged batch at the reviewed five-second bound without reaching a provider", async () => {

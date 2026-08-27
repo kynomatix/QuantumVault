@@ -1164,6 +1164,25 @@ export interface PrefetchCachedOHLCVOptions {
   callerClass?: CandleReadCallerClass;
 }
 
+export interface PrefetchedOHLCV {
+  complete: Map<string, ProvenancedOHLCV[]>;
+  prefixes: Map<string, ProvenancedOHLCV[]>;
+  exactMisses: Set<string>;
+}
+
+export class CandleTailCompletionError extends Error {
+  readonly code = "candle_tail_completion_failed";
+
+  constructor(
+    public readonly symbol: string,
+    public readonly timeframe: string,
+    public readonly reason: "empty_prefix" | "merged_range_inadmissible",
+  ) {
+    super(`Candle tail completion failed for ${symbol} ${timeframe}: ${reason}`);
+    this.name = "CandleTailCompletionError";
+  }
+}
+
 function cacheRangeIsAdmissible(
   cached: readonly ProvenancedOHLCV[],
   timeframe: string,
@@ -1190,7 +1209,7 @@ export async function prefetchCachedOHLCV(
   startDate: string | number,
   endDate: string | number,
   options: PrefetchCachedOHLCVOptions,
-): Promise<Map<string, ProvenancedOHLCV[]>> {
+): Promise<PrefetchedOHLCV> {
   if (!options?.basisPolicy) {
     throw new Error("prefetchCachedOHLCV requires an explicit basisPolicy");
   }
@@ -1222,23 +1241,108 @@ export async function prefetchCachedOHLCV(
         queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
         signal: batchController.signal,
         callerClass: options.callerClass ?? "scanner",
+        admission: "scanner_prefix",
       },
     );
-    const hits = new Map<string, ProvenancedOHLCV[]>();
+    const complete = new Map<string, ProvenancedOHLCV[]>();
+    const prefixes = new Map<string, ProvenancedOHLCV[]>();
+    const exactMisses = new Set<string>();
     for (const [symbol, cached] of grouped) {
-      if (cached === null) continue;
+      if (cached === null) {
+        exactMisses.add(symbol);
+        continue;
+      }
       const policyAdmitted = cached.filter((candle) =>
         candleMatchesBasisPolicy(candle, options.basisPolicy),
       );
-      if (policyAdmitted.length > 0
-          && cacheRangeIsAdmissible(policyAdmitted, normalizedTimeframe, startMs, endMs)) {
-        hits.set(symbol, policyAdmitted);
+      if (policyAdmitted.length === 0) {
+        exactMisses.add(symbol);
+      } else if (cacheRangeIsAdmissible(policyAdmitted, normalizedTimeframe, startMs, endMs)) {
+        complete.set(symbol, policyAdmitted);
+      } else {
+        prefixes.set(symbol, policyAdmitted);
       }
     }
-    return hits;
+    return { complete, prefixes, exactMisses };
   } finally {
     clearTimeout(timeout);
     options.signal?.removeEventListener("abort", onCallerAbort);
+  }
+}
+
+/** Deterministic strongest-observation merge for a completed scanner tail. */
+export function mergeScannerCandleTail(
+  prefix: readonly ProvenancedOHLCV[],
+  tail: readonly ProvenancedOHLCV[],
+): ProvenancedOHLCV[] {
+  const finalityRank: Record<CandleFinality, number> = { finalized: 0, forming: 1, unknown: 2 };
+  const identity = ({ provenance: p }: ProvenancedOHLCV) =>
+    `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`;
+  const byTime = new Map<number, ProvenancedOHLCV>();
+  for (const candle of [...prefix, ...tail]) {
+    const retained = byTime.get(candle.time);
+    if (!retained
+        || finalityRank[candle.provenance.finality] < finalityRank[retained.provenance.finality]
+        || (finalityRank[candle.provenance.finality] === finalityRank[retained.provenance.finality]
+          && identity(candle) < identity(retained))) {
+      byTime.set(candle.time, candle);
+    }
+  }
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
+
+/**
+ * Complete a batch-admitted scanner prefix without repeating its DB lookup or
+ * refetching its deep history. The merged result is never returned until the
+ * original range passes the unchanged money policy, row floor and freshness.
+ */
+export async function completeCachedOHLCVTail(
+  symbol: string,
+  timeframe: string,
+  startDate: string | number,
+  endDate: string | number,
+  prefix: readonly ProvenancedOHLCV[],
+  onProgress: ((msg: string) => void) | undefined,
+  options: FetchOHLCVOptions,
+): Promise<ProvenancedOHLCV[]> {
+  if (prefix.length === 0) {
+    throw new CandleTailCompletionError(symbol, timeframe, "empty_prefix");
+  }
+  const normalizedTimeframe = timeframe.toLowerCase();
+  const startMs = new Date(startDate).getTime();
+  const endMs = new Date(endDate).getTime();
+  const orderedPrefix = [...prefix].sort((a, b) => a.time - b.time);
+  const overlapStartMs = Math.max(startMs, orderedPrefix[orderedPrefix.length - 1].time);
+  try {
+    const tail = await fetchOHLCV(
+      symbol,
+      normalizedTimeframe,
+      overlapStartMs,
+      endMs,
+      onProgress,
+      { ...options, bypassCache: true },
+    );
+    const merged = mergeScannerCandleTail(orderedPrefix, tail).filter(
+      (candle) => candle.time >= startMs
+        && candle.time <= endMs
+        && candleMatchesBasisPolicy(candle, options.basisPolicy),
+    );
+    if (!cacheRangeIsAdmissible(merged, normalizedTimeframe, startMs, endMs)) {
+      throw new CandleTailCompletionError(symbol, normalizedTimeframe, "merged_range_inadmissible");
+    }
+    const line =
+      `[ScannerTailCompletion] ${symbol} ${normalizedTimeframe} outcome=complete ` +
+      `prefix=${orderedPrefix.length} tail=${tail.length} merged=${merged.length}`;
+    console.log(line);
+    appendTelemetry(line);
+    return merged;
+  } catch (error) {
+    const line =
+      `[ScannerTailCompletion] ${symbol} ${normalizedTimeframe} outcome=failed ` +
+      `reason=${error instanceof Error ? error.name : "unknown"}`;
+    console.log(line);
+    appendTelemetry(line);
+    throw error;
   }
 }
 
@@ -1599,6 +1703,7 @@ export async function fetchOHLCV(
         const oldestTs = parseInt(raw[raw.length - 1][0]);
         if (oldestTs >= currentEndMs) break;
         currentEndMs = oldestTs;
+        if (currentEndMs <= startMs) break;
         page++;
 
         if (page % 5 === 0) {

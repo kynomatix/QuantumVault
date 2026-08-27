@@ -37,9 +37,11 @@ import { detectWM } from "../../server/ai-trader/wm-detector";
 
 const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>();
 const prefetchCachedOHLCVMock = vi.fn();
+const completeCachedOHLCVTailMock = vi.fn();
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
   prefetchCachedOHLCV: (...a: unknown[]) => prefetchCachedOHLCVMock(...a),
+  completeCachedOHLCVTail: (...a: unknown[]) => completeCachedOHLCVTailMock(...a),
   isNonCryptoMarketOpen: () => true,
   isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
   isCacheDegradedError: (err: unknown) =>
@@ -412,7 +414,11 @@ const alignedDownParentBars = (): OHLCV[] => parentBars(DOWN_PARENT_POINTS);
 beforeEach(() => {
   vi.clearAllMocks();
   prefetchCachedOHLCVMock.mockReset();
-  prefetchCachedOHLCVMock.mockResolvedValue(new Map());
+  prefetchCachedOHLCVMock.mockResolvedValue({
+    complete: new Map(), prefixes: new Map(), exactMisses: new Set(),
+  });
+  completeCachedOHLCVTailMock.mockReset();
+  completeCachedOHLCVTailMock.mockResolvedValue([]);
   // Default: active prime session (no thin-session penalty).
   getSessionContextMock.mockReturnValue({ label: "london_new_york" });
 });
@@ -1056,10 +1062,14 @@ describe("scanner batch cache prefetch", () => {
         getMarkets: vi.fn(async () => [{ internalSymbol: "BTC-PERP", isActive: true }]),
       });
       prefetchCachedOHLCVMock.mockImplementation(
-        async (_symbols: string[], timeframe: string) => new Map([
-          ["BTC/USDT", textbookWBars(Date.now(), timeframe === "1h" ? TF_1H : TF_15M)
-            .map((bar) => ({ ...bar, provenance: directPerp }))],
-        ]),
+        async (_symbols: string[], timeframe: string) => ({
+          complete: new Map([
+            ["BTC/USDT", textbookWBars(Date.now(), timeframe === "1h" ? TF_1H : TF_15M)
+              .map((bar) => ({ ...bar, provenance: directPerp }))],
+          ]),
+          prefixes: new Map(),
+          exactMisses: new Set(),
+        }),
       );
 
       startScanner();
@@ -1071,6 +1081,89 @@ describe("scanner batch cache prefetch", () => {
       ]);
       expect(prefetchCachedOHLCVMock.mock.calls.map((call) => call[1])).toEqual(["15m", "1h"]);
       expect(fetchOHLCVMock).not.toHaveBeenCalled();
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("completes one shared stale prefix once and reuses it across protocols", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({
+        getMarkets: vi.fn(async () => [{ internalSymbol: "BTC-PERP", isActive: true }]),
+      });
+      const primary = textbookWBars(Date.now(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map(),
+              prefixes: new Map([["BTC/USDT", primary.slice(0, -8)]]),
+              exactMisses: new Set(),
+            }
+          : {
+              complete: new Map([["BTC/USDT", parent]]),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      completeCachedOHLCVTailMock.mockResolvedValue(primary);
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(1);
+      expect(completeCachedOHLCVTailMock.mock.calls[0].slice(0, 2)).toEqual(["BTC/USDT", "15m"]);
+      expect(fetchOHLCVMock).not.toHaveBeenCalled();
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bypasses a redundant per-symbol cache lookup after a successful batch exact miss", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      const primary = textbookWBars(Date.now(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map(),
+              prefixes: new Map(),
+              exactMisses: new Set(["BTC/USDT"]),
+            }
+          : {
+              complete: new Map([["BTC/USDT", parent]]),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      fetchOHLCVMock.mockResolvedValue(primary);
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      const fetchCall = fetchOHLCVMock.mock.calls[0] as unknown[];
+      expect(fetchCall[5]).toEqual(expect.objectContaining({ bypassCache: true }));
+      expect(completeCachedOHLCVTailMock).not.toHaveBeenCalled();
     } finally {
       stopScanner();
       vi.useRealTimers();
