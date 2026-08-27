@@ -65,6 +65,10 @@ import {
 } from '@/components/ui/select';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
+import {
+  formatDecisionTimeLeverage,
+  readDecisionTimeLeverage,
+} from '@/lib/ai-trader-position-display';
 import { reconcileChartTarget } from '@/lib/ai-trader-chart-target';
 import { useToast } from '@/hooks/use-toast';
 import { AiTraderDecisionCard, violationChipLabels, type AiDecisionRow } from './AiTraderDecisionCard';
@@ -905,6 +909,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const bot = detail?.bot ?? null;
   const openDecision = detail?.openPosition ?? null;
   const markPrice = detail?.markPrice ?? null;
+  const decisionTimeLeverage = readDecisionTimeLeverage(openDecision?.decision.clampedDecision);
   // Prefer the server-computed pnl block (uses the single shared formula and
   // includes accurate lifetime totals from the DB aggregate).  Fall back to
   // client-side MTM only when the block is absent — price feed unavailable,
@@ -1361,7 +1366,12 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       )}
                     </div>
                     <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span data-testid="text-open-position-entry">entry ${formatPrice(openDecision.entryPrice)}</span>
+                      <div className="flex items-center gap-2">
+                        <span data-testid="text-open-position-entry">entry ${formatPrice(openDecision.entryPrice)}</span>
+                        <span data-testid="text-open-position-decision-leverage">
+                          Decision leverage {formatDecisionTimeLeverage(decisionTimeLeverage)}
+                        </span>
+                      </div>
                       <div className="flex items-center gap-2">
                         {openPnlPct !== null && (
                           <span

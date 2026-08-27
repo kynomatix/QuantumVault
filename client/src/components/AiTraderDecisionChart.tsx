@@ -19,6 +19,7 @@ import { Loader2, AlertCircle, BarChart3, Maximize2, Minimize2 } from 'lucide-re
 import { Button } from '@/components/ui/button';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
+import { deriveAiTraderChartPriceFormat } from '@/lib/ai-trader-position-display';
 
 // Mirrors AiTraderDrawer.tsx's formatPrice — kept local since it isn't exported
 // there (same precedent that file already set for BotManagementDrawer), so
@@ -411,6 +412,18 @@ export function AiTraderDecisionChart({
     const times = candles.map((c) => c.time);
     candleTimesRef.current = times;
     const flatSeries = (price: number) => candles.map((c) => ({ time: c.time as UTCTimestamp, value: price }));
+    const chartPriceFormat = deriveAiTraderChartPriceFormat(undefined, [
+      ...candles.flatMap((c) => [c.open, c.high, c.low, c.close]),
+      entryPrice,
+      exitPrice ?? Number.NaN,
+      stopLossPrice ?? Number.NaN,
+      takeProfitPrice ?? Number.NaN,
+      originalStopLossPrice ?? Number.NaN,
+      ...(aiLevels ?? []).map((level) => level.price),
+      ...(wmFormation
+        ? [wmFormation.extreme1.price, wmFormation.extreme2.price, wmFormation.neckline.price]
+        : []),
+    ]);
 
     // Reward/risk zone shading — best-effort, base-library-only (no plugins).
     // A Baseline series filled between the entry price and a flat SL/TP line
@@ -418,6 +431,7 @@ export function AiTraderDecisionChart({
     // baseline so it reads correctly for both long and short trades.
     if (stopLossPrice != null) {
       const riskZone = chart.addBaselineSeries({
+        priceFormat: chartPriceFormat,
         baseValue: { type: 'price', price: entryPrice },
         topFillColor1: 'rgba(120,84,212,0.15)',
         topFillColor2: 'rgba(120,84,212,0.15)',
@@ -434,6 +448,7 @@ export function AiTraderDecisionChart({
     }
     if (takeProfitPrice != null) {
       const rewardZone = chart.addBaselineSeries({
+        priceFormat: chartPriceFormat,
         baseValue: { type: 'price', price: entryPrice },
         topFillColor1: 'rgba(56,189,248,0.13)',
         topFillColor2: 'rgba(56,189,248,0.13)',
@@ -451,6 +466,7 @@ export function AiTraderDecisionChart({
 
     // Sky blue = bullish, violet = bearish — platform color palette.
     const series = chart.addCandlestickSeries({
+      priceFormat: chartPriceFormat,
       upColor: '#38bdf8',
       downColor: '#7854d4',
       wickUpColor: '#38bdf8',
@@ -640,6 +656,7 @@ export function AiTraderDecisionChart({
         const fColor = isW ? '#34d399' : '#f87171';   // green for W, red for M
 
         const fSeries = chart.addLineSeries({
+          priceFormat: chartPriceFormat,
           color: fColor,
           lineWidth: 1,
           lineStyle: LineStyle.Dashed,
@@ -723,6 +740,7 @@ export function AiTraderDecisionChart({
         style: LineStyle,
       ): ISeriesApi<'Line'> => {
         const s = chart.addLineSeries({
+          priceFormat: chartPriceFormat,
           color,
           lineWidth: 1,
           lineStyle: style,
