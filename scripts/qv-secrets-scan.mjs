@@ -139,6 +139,17 @@ function assignmentValue(line, pattern) {
   return match[1].trim().replace(/^["'`]|["'`,;]+$/g, '');
 }
 
+function isNonSecretApiKeyLexicalSyntax(line, value) {
+  const lexicalLine = /^[+-]/.test(line) ? line.slice(1) : line;
+  const labelOffset = lexicalLine.indexOf('apiKey');
+  if (labelOffset === -1 || /["'`]/.test(lexicalLine.slice(labelOffset))) return false;
+  const bufferTypeAnnotation = value === 'Buffer'
+    && /(?:^|[(,])\s*apiKey\s*:\s*Buffer\s*(?=[,);]|$)/.test(lexicalLine);
+  const scannerAssignmentCall = value === 'assignmentValue(line'
+    && /^\s*const\s+apiKey\s*=\s*assignmentValue\s*\(/.test(lexicalLine);
+  return bufferTypeAnnotation || scannerAssignmentCall;
+}
+
 function findingsForLines(lines, resolvedGitObjects = new Set()) {
   const findings = [];
   const seen = new Set();
@@ -156,7 +167,9 @@ function findingsForLines(lines, resolvedGitObjects = new Set()) {
     if (bearer && bearer.length >= 16 && !isPlaceholder(bearer)) add('authorization-bearer', number);
 
     const apiKey = assignmentValue(line, /(?:\bx-api-key\b|\bapi[_ -]?key\b)\s*[:=]\s*([^\s,}]+)/i);
-    if (apiKey && !isPlaceholder(apiKey)) add('api-key-assignment', number);
+    if (apiKey && !isPlaceholder(apiKey) && !isNonSecretApiKeyLexicalSyntax(line, apiKey)) {
+      add('api-key-assignment', number);
+    }
 
     for (const [ruleId, pattern] of VENDOR_RULES) {
       pattern.lastIndex = 0;
