@@ -244,6 +244,28 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("keeps a fresh-tail range with interior gaps on the exact-fetch path", async () => {
+    const now = Date.now();
+    const underCovered = cachedBars(now).filter((_candle, index) =>
+      index < 10 || index > 30,
+    );
+    expect(underCovered).toHaveLength(80);
+    expect(underCovered.at(-1)?.time).toBe(now - TF_MS);
+    mockGetCachedBatch.mockResolvedValue(new Map([
+      ["GAPPED/USDT", underCovered],
+    ]));
+
+    const result = await prefetchCachedOHLCV(
+      ["GAPPED/USDT"], "15m", now - 100 * TF_MS, now,
+      { basisPolicy: MONEY_CANDLE_POLICY, callerClass: "scanner" },
+    );
+
+    expect([...result.complete.keys()]).toEqual([]);
+    expect([...result.prefixes.keys()]).toEqual([]);
+    expect([...result.exactMisses]).toEqual(["GAPPED/USDT"]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("completes a measured 8-bar stale tail without a second cache read and revalidates the full range", async () => {
     const now = Date.now();
     const startMs = now - 101 * TF_MS;
@@ -262,6 +284,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
       };
     });
 
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const completed = await completeCachedOHLCVTail(
       "SOL/USDT",
       "15m",
@@ -282,6 +305,10 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect(completed.at(-1)?.time).toBe(now - TF_MS);
     expect(mockGetCached).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringMatching(
+      /^\[ScannerTailCompletion\] SOL\/USDT 15m outcome=complete .* duration=\d+ms$/,
+    ));
+    consoleSpy.mockRestore();
   });
 
   it("fails closed when tail completion observes forming candles only", async () => {
@@ -359,6 +386,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
       text: async () => "",
     });
 
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     await expect(completeCachedOHLCVTail(
       "STALE/USDT",
       "15m",
@@ -372,6 +400,10 @@ describe("prefetchCachedOHLCV batch hits", () => {
       reason: "merged_range_inadmissible",
     });
     expect(mockGetCached).not.toHaveBeenCalled();
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringMatching(
+      /^\[ScannerTailCompletion\] STALE\/USDT 15m outcome=failed .* duration=\d+ms$/,
+    ));
+    consoleSpy.mockRestore();
   });
 
   it("retains the strongest finality deterministically at a tail overlap", () => {

@@ -46,6 +46,8 @@ vi.mock("../../server/lab/datafeed", () => ({
   isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
   isCacheDegradedError: (err: unknown) =>
     typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CacheDegradedError",
+  isCandleTailCompletionError: (err: unknown) =>
+    typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CandleTailCompletionError",
   setDatafeedIncidentReporter: vi.fn(),
   MONEY_CANDLE_POLICY: {
     consumer: "scanner", acceptedBasis: ["perp"], acceptedFinality: ["finalized"], acceptedProxy: ["direct"],
@@ -1049,6 +1051,87 @@ describe("active sweep lifecycle ownership", () => {
     expect(getScannerStatus().currentGeneration?.generation).toBe(restartedGeneration);
     stopScanner();
   });
+
+  it("abandons six abort-ignoring tail helpers and rejects every late mutation", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      const flashMarkets = ["F0-PERP", "F1-PERP", "F2-PERP"];
+      const pacificaMarkets = ["P0-PERP", "P1-PERP", "P2-PERP"];
+      getFlashMarketSpecsMock.mockReturnValue(
+        flashMarkets.map((internalSymbol) => ({ internalSymbol })),
+      );
+      getAdapterMock.mockReturnValue({
+        getMarkets: vi.fn(async () => pacificaMarkets.map((internalSymbol) => ({
+          internalSymbol,
+          isActive: true,
+        }))),
+      });
+      const pending = deferredBars();
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map(),
+              prefixes: new Map(requested.map((ticker) => [
+                ticker,
+                textbookWBars(Date.now(), TF_15M)
+                  .slice(0, -8)
+                  .map((bar) => ({ ...bar, provenance: directPerp })),
+              ])),
+              exactMisses: new Set(),
+            }
+          : {
+              complete: new Map(requested.map((ticker) => [ticker, parent])),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      // Deliberately ignores the supplied AbortSignal to exercise the bounded
+      // teardown and late-settlement ownership guard around the new helper.
+      completeCachedOHLCVTailMock.mockImplementation(() => pending.promise);
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(140_000);
+      await sweep;
+
+      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(6);
+      const status = getScannerStatus();
+      expect(status.currentGeneration).toMatchObject({
+        verdict: "diagnostic_only",
+        accounting: {
+          attempted: 6,
+          scanned: 0,
+          errors: 0,
+          abandoned: 6,
+          unclassified: 0,
+          accountingValid: true,
+        },
+      });
+      const generation = status.currentGeneration?.generation;
+
+      pending.resolve(textbookWBars(Date.now(), TF_15M));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getScannerStatus().currentGeneration?.generation).toBe(generation);
+      expect(getScannerStatus().currentGeneration?.accounting.abandoned).toBe(6);
+      expect(recordCriticalErrorMock).toHaveBeenCalledTimes(1);
+      expect(recordCriticalErrorMock).toHaveBeenCalledWith(expect.objectContaining({
+        source: "scanner-sweep",
+        severity: "critical",
+        context: expect.objectContaining({
+          attempted: 6,
+          abandoned: 6,
+          accountingValid: true,
+        }),
+      }));
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("scanner batch cache prefetch", () => {
@@ -1144,6 +1227,8 @@ describe("scanner batch cache prefetch", () => {
           timeframe: "15m",
           marketsAttempted: 52,
           marketsScanned: 52,
+          tailCompletionCount: 2,
+          tailCompletionFailureCount: 0,
           accountingValid: true,
         }),
         expect.objectContaining({
@@ -1151,6 +1236,8 @@ describe("scanner batch cache prefetch", () => {
           timeframe: "15m",
           marketsAttempted: 42,
           marketsScanned: 42,
+          tailCompletionCount: 0,
+          tailCompletionFailureCount: 0,
           accountingValid: true,
         }),
       ]));
@@ -1271,6 +1358,85 @@ describe("scanner batch cache prefetch", () => {
       expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(1);
       expect(completeCachedOHLCVTailMock.mock.calls[0].slice(0, 2)).toEqual(["BTC/USDT", "15m"]);
       expect(fetchOHLCVMock).not.toHaveBeenCalled();
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          protocol: "flash",
+          tailCompletionCount: 1,
+          tailCompletionFailureCount: 0,
+        }),
+      ]));
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries an inadmissible completed tail next boundary without poisoning feed health", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      const primary = textbookWBars(Date.now(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map(),
+              prefixes: new Map([["BTC/USDT", primary.slice(0, -8)]]),
+              exactMisses: new Set(),
+            }
+          : {
+              complete: new Map([["BTC/USDT", parent]]),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      completeCachedOHLCVTailMock.mockRejectedValue(Object.assign(
+        new Error("merged scanner tail remains inadmissible"),
+        { name: "CandleTailCompletionError", reason: "merged_range_inadmissible" },
+      ));
+
+      startScanner();
+      const firstSweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await firstSweep;
+      const secondSweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await secondSweep;
+
+      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(2);
+      expect(fetchOHLCVMock).not.toHaveBeenCalled();
+      const attempts = getScannerStatus().recentHistory.filter(
+        (stats) => stats.protocol === "flash" && stats.timeframe === "15m",
+      );
+      expect(attempts).toHaveLength(2);
+      for (const stats of attempts) {
+        expect(stats).toMatchObject({
+          marketsAttempted: 1,
+          marketsScanned: 1,
+          marketsFresh: 0,
+          feedHealthSkipped: 0,
+          errorCount: 0,
+          tailCompletionCount: 0,
+          tailCompletionFailureCount: 1,
+          accountingValid: true,
+        });
+      }
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        verdict: "tradable",
+        accounting: {
+          attempted: 1,
+          scanned: 1,
+          feedHealthSkipped: 0,
+          errors: 0,
+          abandoned: 0,
+          accountingValid: true,
+        },
+      });
     } finally {
       stopScanner();
       vi.useRealTimers();

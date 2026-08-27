@@ -1183,7 +1183,14 @@ export class CandleTailCompletionError extends Error {
   }
 }
 
-function cacheRangeIsAdmissible(
+export function isCandleTailCompletionError(error: unknown): error is CandleTailCompletionError {
+  return error instanceof CandleTailCompletionError
+    || (typeof error === "object"
+      && error !== null
+      && (error as { name?: unknown }).name === "CandleTailCompletionError");
+}
+
+function cacheRowFloorIsSatisfied(
   cached: readonly ProvenancedOHLCV[],
   timeframe: string,
   startMs: number,
@@ -1192,10 +1199,29 @@ function cacheRangeIsAdmissible(
   const intervalMs = getTimeframeSeconds(timeframe) * 1000;
   const expectedBars = Math.floor((endMs - startMs) / intervalMs);
   const minCacheBars = Math.min(100, Math.max(1, expectedBars - 1));
-  if (cached.length < minCacheBars) return false;
+  return cached.length >= minCacheBars;
+}
+
+function cacheTailIsFresh(
+  cached: readonly ProvenancedOHLCV[],
+  timeframe: string,
+  endMs: number,
+): boolean {
+  if (cached.length === 0) return false;
+  const intervalMs = getTimeframeSeconds(timeframe) * 1000;
   const isLiveRequest = endMs > Date.now() - 2 * intervalMs;
   const newestCachedTs = cached[cached.length - 1].time;
   return !isLiveRequest || newestCachedTs > endMs - 2 * intervalMs;
+}
+
+function cacheRangeIsAdmissible(
+  cached: readonly ProvenancedOHLCV[],
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+): boolean {
+  return cacheRowFloorIsSatisfied(cached, timeframe, startMs, endMs)
+    && cacheTailIsFresh(cached, timeframe, endMs);
 }
 
 /**
@@ -1257,9 +1283,18 @@ export async function prefetchCachedOHLCV(
       );
       if (policyAdmitted.length === 0) {
         exactMisses.add(symbol);
-      } else if (cacheRangeIsAdmissible(policyAdmitted, normalizedTimeframe, startMs, endMs)) {
+      } else if (!cacheRowFloorIsSatisfied(policyAdmitted, normalizedTimeframe, startMs, endMs)) {
+        // A newest-tail fetch cannot repair interior gaps or an under-covered
+        // history. Preserve the exact-fetch path so the provider supplies the
+        // full requested range rather than trying an inherently incomplete
+        // prefix merge and then poisoning scanner feed health on rejection.
+        exactMisses.add(symbol);
+      } else if (cacheTailIsFresh(policyAdmitted, normalizedTimeframe, endMs)) {
         complete.set(symbol, policyAdmitted);
       } else {
+        // Prefix completion is valid only when freshness is the sole defect:
+        // the row floor is already proven above, so fetching newest->end can
+        // make the range admissible without repeating its deep history.
         prefixes.set(symbol, policyAdmitted);
       }
     }
@@ -1305,6 +1340,7 @@ export async function completeCachedOHLCVTail(
   onProgress: ((msg: string) => void) | undefined,
   options: FetchOHLCVOptions,
 ): Promise<ProvenancedOHLCV[]> {
+  const startedAt = Date.now();
   if (prefix.length === 0) {
     throw new CandleTailCompletionError(symbol, timeframe, "empty_prefix");
   }
@@ -1332,14 +1368,16 @@ export async function completeCachedOHLCVTail(
     }
     const line =
       `[ScannerTailCompletion] ${symbol} ${normalizedTimeframe} outcome=complete ` +
-      `prefix=${orderedPrefix.length} tail=${tail.length} merged=${merged.length}`;
+      `prefix=${orderedPrefix.length} tail=${tail.length} merged=${merged.length} ` +
+      `duration=${Date.now() - startedAt}ms`;
     console.log(line);
     appendTelemetry(line);
     return merged;
   } catch (error) {
     const line =
       `[ScannerTailCompletion] ${symbol} ${normalizedTimeframe} outcome=failed ` +
-      `reason=${error instanceof Error ? error.name : "unknown"}`;
+      `reason=${error instanceof Error ? error.name : "unknown"} ` +
+      `duration=${Date.now() - startedAt}ms`;
     console.log(line);
     appendTelemetry(line);
     throw error;
