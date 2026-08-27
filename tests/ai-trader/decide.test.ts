@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import { LlmGatewayError, type LlmMessage } from "../../server/ai-assistant/router";
+import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
 
 const callMock = vi.fn();
 // Snapshot messages at call time — decide.ts mutates the same array between
@@ -292,6 +293,39 @@ describe("runDecision — happy path", () => {
       currentQualificationEraDigest: row.qualificationEraDigest,
       graduationState: "in_trial",
     }));
+  });
+
+  it("retains a scanner bot's qualification era when deciding on a different selected market", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+    const context = makeContext();
+    const previousMarketBot = makeBot({
+      marketSource: "scanner",
+      market: "BTC-PERP",
+    });
+    const retainedDigest = computeQualificationEraDigest({
+      bot: previousMarketBot,
+      contextDigest: context.contextDigest,
+    });
+    const selectedMarketBot = makeBot({
+      marketSource: "scanner",
+      market: "SOL-PERP",
+      currentQualificationEraDigest: retainedDigest,
+      trialStartedAt: new Date("2026-08-01T00:00:00.000Z"),
+      graduationState: "in_trial",
+    } as Partial<AiTraderBot>);
+
+    const result = await runDecision({
+      bot: selectedMarketBot,
+      apiKey: "sk-or-test",
+      context,
+      adapter: makeAdapter(),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(insertMock).toHaveBeenCalledTimes(1);
+    expect(insertMock.mock.calls[0][0].qualificationEraDigest).toBe(retainedDigest);
   });
 
   it("records unknown spend (null cost) when pricing is unavailable", async () => {

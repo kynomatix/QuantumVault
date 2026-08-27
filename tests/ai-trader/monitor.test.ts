@@ -2075,7 +2075,7 @@ describe("runAutoCycle", () => {
     expect(executeDecisionMock).not.toHaveBeenCalled();
   });
 
-  it("persists scanner selection with qualification-era invalidation before context or decision", async () => {
+  it("persists scanner selection and still invalidates when the selected timeframe changes", async () => {
     scannerCapabilitiesMock.consumersEnabled = true;
     const { runAutoCycle } = await importMonitor();
     const bot = armAutoBot({ marketSource: "scanner", graduationState: "graduated", graduatedQualificationEraDigest: DEFAULT_ERA });
@@ -2123,6 +2123,81 @@ describe("runAutoCycle", () => {
       status: "analyzing",
       graduationState: "in_trial",
       currentQualificationEraDigest: null,
+    });
+    expect(buildContextMock.mock.calls[0][0].preClaimBotStatus).toBe("idle");
+    expect(runDecisionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists a same-timeframe scanner market pick without resetting its qualification era", async () => {
+    scannerCapabilitiesMock.consumersEnabled = true;
+    const { runAutoCycle } = await importMonitor();
+    const bot = armAutoBot({
+      marketSource: "scanner",
+      market: "SOL-PERP",
+      timeframe: "15m",
+      graduationState: "graduated",
+      currentQualificationEraDigest: DEFAULT_ERA,
+      graduatedQualificationEraDigest: DEFAULT_ERA,
+    });
+    getSessionByWalletMock.mockReturnValue({ sessionId: "s", session: { umk: Buffer.from("umk") } });
+    getLlmCiphertextMock.mockResolvedValue("ct");
+    decryptLlmKeyMock.mockReturnValue(Buffer.from("test-key"));
+    getScannerShortlistMock.mockReturnValue([{
+      protocol: "pacifica",
+      market: "BTC-PERP",
+      timeframe: "15m",
+      direction: "long",
+      setup: "W",
+      score: 90,
+      necklineDistancePct: 0.1,
+      parentTrend: "uptrend",
+      evaluatedAt: NOW,
+    }]);
+    buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "scanner-era-retained",
+      decision: {},
+      clamped: { action: "flat" },
+      rejected: false,
+      violations: [],
+      latencyMs: 5,
+    });
+    claimScannerCandidateMock.mockImplementationOnce(async ({ botId, updates }: {
+      botId: string;
+      updates?: Record<string, unknown>;
+    }) => {
+      const patch = { ...(updates ?? {}), status: "analyzing", pauseReason: null };
+      await updateBotMock(botId, patch);
+      return { outcome: "claimed", bot: { ...bot, ...patch } };
+    });
+
+    await runAutoCycle(bot.id);
+
+    expect(claimScannerCandidateMock).toHaveBeenCalledWith(expect.objectContaining({
+      botId: bot.id,
+      walletAddress: bot.walletAddress,
+      market: "BTC-PERP",
+      candidateTimeframe: "15m",
+    }));
+    const selectionPatch = updateBotMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(selectionPatch).toMatchObject({
+      market: "BTC-PERP",
+      timeframe: "15m",
+      policyHmac: "hmac-scanner-recomputed",
+    });
+    expect(selectionPatch).not.toHaveProperty("currentQualificationEraDigest");
+    expect(selectionPatch).not.toHaveProperty("graduatedQualificationEraDigest");
+    expect(selectionPatch).not.toHaveProperty("qualificationEraInvalidationReason");
+    expect(selectionPatch).not.toHaveProperty("trialStartedAt");
+    expect(selectionPatch).not.toHaveProperty("graduationState");
+    expect(buildContextMock.mock.calls[0][0].bot).toMatchObject({
+      market: "BTC-PERP",
+      timeframe: "15m",
+      status: "analyzing",
+      graduationState: "graduated",
+      currentQualificationEraDigest: DEFAULT_ERA,
+      graduatedQualificationEraDigest: DEFAULT_ERA,
     });
     expect(buildContextMock.mock.calls[0][0].preClaimBotStatus).toBe("idle");
     expect(runDecisionMock).toHaveBeenCalledTimes(1);
