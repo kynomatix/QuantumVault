@@ -284,6 +284,96 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("fails closed when tail completion observes forming candles only", async () => {
+    const now = Date.now();
+    const startMs = now - 101 * TF_MS;
+    const prefix = cachedBars(now).filter((candle) => candle.time <= now - 8 * TF_MS);
+    const responseRows = Array.from({ length: 8 }, (_, index) => {
+      const time = now - (index + 1) * TF_MS;
+      return [String(time), "10", "11", "9", "10", "1", "1", "1", "0"];
+    });
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: "0", data: responseRows }),
+      text: async () => "",
+    });
+
+    await expect(completeCachedOHLCVTail(
+      "FORM/USDT",
+      "15m",
+      startMs,
+      now,
+      prefix,
+      undefined,
+      { basisPolicy: MONEY_CANDLE_POLICY, deadlineMs: 20_000, callerClass: "scanner" },
+    )).rejects.toMatchObject({
+      name: "CandleBasisUnavailableError",
+      reason: "nonfinalized_only",
+    });
+    expect(mockGetCached).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when tail completion observes malformed provenance", async () => {
+    const now = Date.now();
+    const startMs = now - 101 * TF_MS;
+    const prefix = cachedBars(now).filter((candle) => candle.time <= now - 8 * TF_MS);
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: "0",
+        data: [[String(now - 8 * TF_MS), "10", "11", "9", "10", "1", "1", "1", "unknown"]],
+      }),
+      text: async () => "",
+    });
+
+    await expect(completeCachedOHLCVTail(
+      "MALFORM/USDT",
+      "15m",
+      startMs,
+      now,
+      prefix,
+      undefined,
+      { basisPolicy: MONEY_CANDLE_POLICY, deadlineMs: 20_000, callerClass: "scanner" },
+    )).rejects.toMatchObject({
+      name: "CandleBasisUnavailableError",
+      reason: "malformed_provenance",
+    });
+    expect(mockGetCached).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the merged range remains stale and under-covered", async () => {
+    const now = Date.now();
+    const startMs = now - 101 * TF_MS;
+    const prefix = cachedBars(now).filter((candle) => candle.time <= now - 8 * TF_MS);
+    const responseRows = [7, 8].map((barsAgo) => [
+      String(now - barsAgo * TF_MS), "10", "11", "9", "10", "1", "1", "1", "1",
+    ]);
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: "0", data: responseRows }),
+      text: async () => "",
+    });
+
+    await expect(completeCachedOHLCVTail(
+      "STALE/USDT",
+      "15m",
+      startMs,
+      now,
+      prefix,
+      undefined,
+      { basisPolicy: MONEY_CANDLE_POLICY, deadlineMs: 20_000, callerClass: "scanner" },
+    )).rejects.toMatchObject({
+      name: "CandleTailCompletionError",
+      reason: "merged_range_inadmissible",
+    });
+    expect(mockGetCached).not.toHaveBeenCalled();
+  });
+
   it("retains the strongest finality deterministically at a tail overlap", () => {
     const [base] = cachedBars(Date.now());
     const forming = {

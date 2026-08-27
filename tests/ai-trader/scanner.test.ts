@@ -1052,6 +1052,154 @@ describe("active sweep lifecycle ownership", () => {
 });
 
 describe("scanner batch cache prefetch", () => {
+  it("completes a production-shaped 94-attempt sweep from 52 stored histories and 25 exact misses", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+
+      const markets = Array.from(
+        { length: 77 },
+        (_, index) => `S${String(index).padStart(3, "0")}-PERP`,
+      );
+      const tickers = markets.map((market) => market.replace("-PERP", "/USDT"));
+      const flashMarkets = markets.slice(0, 52);
+      const pacificaMarkets = markets.slice(35);
+      const primary = [
+        ...Array.from({ length: 59 }, (_, index) => ({
+          ...flatBarAt(now.getTime() - (101 - index) * TF_15M),
+          provenance: directPerp,
+        })),
+        ...textbookWBars(now.getTime(), TF_15M).map((bar) => ({
+          ...bar,
+          provenance: directPerp,
+        })),
+      ];
+      const parentFixture = healthyMixedParentBars().map((bar, index, bars) => ({
+        ...bar,
+        time: now.getTime() - (bars.length - index) * TF_1H,
+        provenance: directPerp,
+      }));
+      const fullPrimaryByTicker = new Map(tickers.map((ticker) => [ticker, primary]));
+
+      getFlashMarketSpecsMock.mockReturnValue(
+        flashMarkets.map((internalSymbol) => ({ internalSymbol })),
+      );
+      getAdapterMock.mockReturnValue({
+        getMarkets: vi.fn(async () => pacificaMarkets.map((internalSymbol) => ({
+          internalSymbol,
+          isActive: true,
+        }))),
+      });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map(requested.slice(0, 50).map((ticker) => [ticker, primary])),
+              prefixes: new Map(requested.slice(50, 52).map((ticker) => [ticker, primary.slice(0, -8)])),
+              exactMisses: new Set(requested.slice(52)),
+            }
+          : {
+              complete: new Map(requested.map((ticker) => [ticker, parentFixture])),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      completeCachedOHLCVTailMock.mockImplementation(
+        async (ticker: string) => fullPrimaryByTicker.get(ticker) ?? [],
+      );
+      fetchOHLCVMock.mockImplementation(
+        async (ticker: string) => fullPrimaryByTicker.get(ticker) ?? [],
+      );
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await sweep;
+
+      expect(flashMarkets).toHaveLength(52);
+      expect(pacificaMarkets).toHaveLength(42);
+      expect(flashMarkets.filter((market) => pacificaMarkets.includes(market))).toHaveLength(17);
+      expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
+      for (const call of prefetchCachedOHLCVMock.mock.calls) {
+        expect(call[0]).toHaveLength(77);
+        expect(new Set(call[0])).toHaveLength(77);
+      }
+      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(2);
+      expect(new Set(completeCachedOHLCVTailMock.mock.calls.map((call) => call[0]))).toEqual(
+        new Set(tickers.slice(50, 52)),
+      );
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(25);
+      expect(new Set(fetchOHLCVMock.mock.calls.map((call) => call[0]))).toEqual(
+        new Set(tickers.slice(52)),
+      );
+      for (const call of fetchOHLCVMock.mock.calls as unknown[][]) {
+        expect(call[5]).toEqual(expect.objectContaining({ bypassCache: true }));
+      }
+
+      const status = getScannerStatus();
+      expect(status.recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          protocol: "flash",
+          timeframe: "15m",
+          marketsAttempted: 52,
+          marketsScanned: 52,
+          accountingValid: true,
+        }),
+        expect.objectContaining({
+          protocol: "pacifica",
+          timeframe: "15m",
+          marketsAttempted: 42,
+          marketsScanned: 42,
+          accountingValid: true,
+        }),
+      ]));
+      expect(status.currentGeneration).toMatchObject({
+        verdict: "tradable",
+        diagnosticReasons: [],
+        accounting: {
+          attempted: 94,
+          scanned: 94,
+          feedHealthSkipped: 0,
+          venueClosed: 0,
+          timeoutSkipped: 0,
+          primaryCacheDegraded: 0,
+          parentInconclusive: 0,
+          errors: 0,
+          abandoned: 0,
+          unclassified: 0,
+          accountingValid: true,
+        },
+      });
+      expect(status.currentGeneration?.candidateProvenance.length).toBeGreaterThan(0);
+      expect(status.currentGeneration?.candidateProvenance.every(({ selected, requiredParent }) =>
+        selected.source === "okx"
+          && selected.basis === "perp"
+          && selected.proxy === "direct"
+          && selected.finality === "finalized"
+          && requiredParent?.source === "okx"
+          && requiredParent.basis === "perp"
+          && requiredParent.proxy === "direct"
+          && requiredParent.finality === "finalized",
+      )).toBe(true);
+      expect(primary).toHaveLength(101);
+      expect(primary.at(-1)).toMatchObject({
+        time: now.getTime() - TF_15M,
+        provenance: { finality: "finalized" },
+      });
+      expect(parentFixture.at(-1)).toMatchObject({
+        time: now.getTime() - TF_1H,
+        provenance: { finality: "finalized" },
+      });
+      expect(
+        (status.currentGeneration?.finishedAt ?? Number.POSITIVE_INFINITY)
+          - (status.currentGeneration?.startedAt ?? 0),
+      ).toBeLessThan(55_000);
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
   it("deduplicates shared protocol symbols and seeds both due timeframes without legacy fetches", async () => {
     vi.useFakeTimers();
     try {
