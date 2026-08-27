@@ -565,6 +565,42 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     ]);
   });
 
+  it("keeps a 7-bar stale tail fail-closed by default but admits it only as an explicit scanner prefix", async () => {
+    const tfMs = 15 * 60 * 1000;
+    const startMs = 0;
+    const endMs = 100 * tfMs;
+    const rows = Array.from({ length: 94 }, (_, index) => ({
+      ...row("BTC-PERP"),
+      time: String(index * tfMs),
+    }));
+    const client = () => ({
+      release: vi.fn(),
+      query: vi.fn().mockResolvedValue({ rows }),
+    });
+    fakePool.connect.mockResolvedValueOnce(client()).mockResolvedValueOnce(client());
+
+    const ordinary = await getCachedCandlesBatch(
+      ["BTC-PERP"], "15m", startMs, endMs,
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        callerClass: "scanner",
+      },
+    );
+    const prefix = await getCachedCandlesBatch(
+      ["BTC-PERP"], "15m", startMs, endMs,
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        callerClass: "scanner",
+        admission: "scanner_prefix",
+      },
+    );
+
+    expect(ordinary.get("BTC-PERP")).toBeNull();
+    expect(prefix.get("BTC-PERP")).toHaveLength(94);
+  });
+
   it("honors caller cancellation before checkout and during a pending checkout", async () => {
     const preAborted = new AbortController();
     preAborted.abort(CACHE_BUDGET_ABORT_REASON);

@@ -254,6 +254,11 @@ export type GetCachedCandlesOpts = {
 };
 
 export type GetCachedCandlesBatchOpts = Omit<GetCachedCandlesOpts, "onPhases"> & {
+  /**
+   * Retain an otherwise-admissible deep prefix whose only defect is a stale
+   * tail. The scanner must complete and revalidate it before decision use.
+   */
+  admission?: "complete" | "scanner_prefix";
   onPhases?: (phases: CandleBatchReadPhases) => void;
 };
 
@@ -501,7 +506,13 @@ export async function getCachedCandlesBatch(
         pool: phases.pool,
       };
       const admitted = await processCandleRows(
-        symbol, timeframe, startMs, endMs, grouped.get(symbol) ?? [], localPhases,
+        symbol,
+        timeframe,
+        startMs,
+        endMs,
+        grouped.get(symbol) ?? [],
+        localPhases,
+        opts.admission === "scanner_prefix",
       );
       admittedBySymbol.set(symbol, admitted);
       if (admitted !== null) phases.hits++;
@@ -669,7 +680,8 @@ async function processCandleRows(
   startMs: number,
   endMs: number,
   rows: CandleCacheRow[],
-  phases: CandleReadPhases
+  phases: CandleReadPhases,
+  allowStaleTailPrefix = false,
 ): Promise<ProvenancedOHLCV[] | null> {
   // Finality is part of immutable cache identity, so the same bar can be
   // observed first as forming and later as finalized. OHLCV consumers require
@@ -710,7 +722,7 @@ async function processCandleRows(
 
   const lastCachedTime = Number(rows[rows.length - 1].time);
   const tailGapCandles = Math.floor((endMs - lastCachedTime) / tfMs);
-  if (tailGapCandles > 3) {
+  if (tailGapCandles > 3 && !allowStaleTailPrefix) {
     console.log(`[CandleCache] Tail gap: ${tailGapCandles} candles behind for ${symbol} ${timeframe} (last cached: ${new Date(lastCachedTime).toISOString()}, requested end: ${new Date(endMs).toISOString()}) — refetching to append tail`);
     return null;
   }
