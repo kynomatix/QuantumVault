@@ -962,19 +962,6 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     openDecision != null &&
     chartTarget.decisionId === openDecision.decision.id;
 
-  useEffect(() => {
-    setChartTarget(current => {
-      const result = reconcileChartTarget(
-        current,
-        openDecision?.decision.id ?? null,
-        [...(detail?.recentDecisions ?? []), ...history],
-      );
-      if (result.kind === 'keep') return current;
-      if (result.kind === 'clear') return null;
-      return decisionRowToChartTarget(result.row);
-    });
-  }, [detail?.recentDecisions, history, openDecision?.decision.id]);
-
   // The unresolved decision awaiting user action while status === 'proposed'.
   // NOT the same object as openDecision — parseOpenDecision (server) only ever
   // returns an already-executed, still-open position, so it is always null in
@@ -982,6 +969,19 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const latestProposal = bot?.status === 'proposed' && history.length > 0 && history[0].outcome === null
     ? history[0]
     : null;
+
+  useEffect(() => {
+    setChartTarget(current => {
+      const result = reconcileChartTarget(
+        current,
+        openDecision?.decision.id ?? latestProposal?.id ?? null,
+        [...(detail?.recentDecisions ?? []), ...history],
+      );
+      if (result.kind === 'keep') return current;
+      if (result.kind === 'clear') return null;
+      return decisionRowToChartTarget(result.row);
+    });
+  }, [detail?.recentDecisions, history, latestProposal?.id, openDecision?.decision.id]);
 
   // Sync editable settings local state whenever the active bot changes (WO-8e/8h).
   useEffect(() => {

@@ -55,4 +55,13 @@ describe("AI Trader pending proposal chart access", () => {
     expect(proposalSurface).toContain("onSkip={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}");
     expect(proposalSurface).toContain("onAskAgain={handleAnalyze}");
   });
+
+  it("keeps an unresolved proposal chart open across drawer polling", () => {
+    expect(drawerSource).toContain(
+      "openDecision?.decision.id ?? latestProposal?.id ?? null",
+    );
+    expect(drawerSource).toContain(
+      "[detail?.recentDecisions, history, latestProposal?.id, openDecision?.decision.id]",
+    );
+  });
 });
