@@ -1151,6 +1151,7 @@ export interface FetchOHLCVOptions {
   basisPolicy: CandleBasisPolicy;
   skipSpotFallback?: boolean;
   bypassCache?: boolean;
+  cacheWritePolicy?: "background" | "skip";
   deadlineMs?: number;
   signal?: AbortSignal;
   callerClass?: CandleReadCallerClass;
@@ -1402,6 +1403,7 @@ export async function fetchOHLCV(
     basisPolicy: CandleBasisPolicy;
     skipSpotFallback?: boolean;
     bypassCache?: boolean;
+    cacheWritePolicy?: "background" | "skip";
     deadlineMs?: number;
     /**
      * Cooperative cancellation: when the caller aborts (e.g. scanner sweep
@@ -1601,7 +1603,7 @@ export async function fetchOHLCV(
     onProgress?.(`Synthesized ${aggregated.length} ${timeframe} candles from ${synthetic.source}`);
 
     throwIfAborted(signal); // aborted fetches never fire background writes
-    if (aggregated.length > 0) {
+    if (aggregated.length > 0 && options.cacheWritePolicy !== "skip") {
       saveCandlesToDb(symbol, timeframe, aggregated).catch((err) => {
         const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
         console.log(line);
@@ -1654,11 +1656,13 @@ export async function fetchOHLCV(
       emitTrace(deduped.length);
       onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
       throwIfAborted(signal); // aborted fetches never fire background writes
-      saveCandlesToDb(symbol, timeframe, deduped).catch((err) => {
-        const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
-        console.log(line);
-        appendTelemetry(line);
-      });
+      if (options.cacheWritePolicy !== "skip") {
+        saveCandlesToDb(symbol, timeframe, deduped).catch((err) => {
+          const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
+          console.log(line);
+          appendTelemetry(line);
+        });
+      }
       return deduped;
     }
 
@@ -1850,11 +1854,13 @@ export async function fetchOHLCV(
     onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
 
     throwIfAborted(signal); // aborted fetches never fire background writes
-    saveCandlesToDb(symbol, timeframe, deduped).catch((err) => {
-      const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
-      console.log(line);
-      appendTelemetry(line);
-    });
+    if (options.cacheWritePolicy !== "skip") {
+      saveCandlesToDb(symbol, timeframe, deduped).catch((err) => {
+        const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
+        console.log(line);
+        appendTelemetry(line);
+      });
+    }
 
     return deduped;
   }

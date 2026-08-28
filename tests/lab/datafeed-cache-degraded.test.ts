@@ -185,6 +185,58 @@ describe("fetchOHLCV — slow cache under a deadline", () => {
   });
 });
 
+describe("fetchOHLCV cache write policy", () => {
+  async function runDirectFetch(cacheWritePolicy?: "background" | "skip") {
+    const now = Date.now();
+    const start = now - TF_MS;
+    fetchSpy.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        code: "0",
+        data: [[String(start), "10", "11", "9", "10", "1", "1", "1", "1"]],
+      }),
+      text: async () => "",
+    });
+    return fetchOHLCV(
+      "SOL/USDT",
+      "15m",
+      new Date(start).toISOString(),
+      new Date(now).toISOString(),
+      undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy,
+        deadlineMs: 20_000,
+        callerClass: "scanner",
+      },
+    );
+  }
+
+  it("returns admitted provider candles without persistence when writes are suppressed", async () => {
+    const candles = await runDirectFetch("skip");
+    expect(candles).toHaveLength(1);
+    expect(candles[0].provenance).toMatchObject({
+      source: "okx",
+      venue: "okx",
+      basis: "perp",
+      proxy: "direct",
+      finality: "finalized",
+    });
+    expect(mockGetCached).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("retains background persistence by default for the same direct provider result", async () => {
+    const candles = await runDirectFetch();
+    expect(candles).toHaveLength(1);
+    expect(mockGetCached).not.toHaveBeenCalled();
+    expect(mockSave).toHaveBeenCalledTimes(1);
+    expect(mockSave).toHaveBeenCalledWith("SOL/USDT", "15m", candles);
+  });
+});
+
 describe("prefetchCachedOHLCV batch hits", () => {
   function cachedBars(now: number, provenance = {
     source: "okx", venue: "okx", basis: "perp", proxy: "direct",

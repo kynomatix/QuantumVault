@@ -1484,15 +1484,86 @@ describe("scanner batch cache prefetch", () => {
     }
   });
 
-  it("records one visible batch failure per timeframe and falls back to the existing per-market path", async () => {
+  it("opens failover after one batch failure, skips later probes, and bypasses reads plus writes for primary and parent", async () => {
     vi.useFakeTimers();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
       getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
       getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
       prefetchCachedOHLCVMock.mockRejectedValue(new Error("batch unavailable"));
-      fetchOHLCVMock.mockResolvedValue([]);
+      const primary = textbookWBars(Date.now(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      fetchOHLCVMock.mockImplementation(
+        async (_ticker: string, timeframe: string) => timeframe === "15m" ? primary : parent,
+      );
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(1);
+      expect(prefetchCachedOHLCVMock.mock.calls[0][1]).toBe("15m");
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
+      expect(fetchOHLCVMock.mock.calls.map((call) => call[1])).toEqual(["15m", "1h"]);
+      for (const call of fetchOHLCVMock.mock.calls as unknown[][]) {
+        expect(call[5]).toEqual(expect.objectContaining({
+          bypassCache: true,
+          cacheWritePolicy: "skip",
+        }));
+      }
+      expect(logSpy).toHaveBeenCalledWith(expect.stringMatching(
+        /^\[Scanner\] BATCH PREFETCH FALLBACK: 15m requested=1 .*cache-read=bypass cache-write=skip$/,
+      ));
+      expect(logSpy).toHaveBeenCalledWith(
+        "[Scanner] BATCH PREFETCH DEGRADED SKIP: 1h requested=1 cache-read=bypass cache-write=skip",
+      );
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          protocol: "flash",
+          marketsAttempted: 1,
+          marketsScanned: 1,
+          errorCount: 0,
+          accountingValid: true,
+        }),
+      ]));
+    } finally {
+      logSpy.mockRestore();
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an earlier authoritative exact miss writable when a later timeframe becomes unavailable", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => {
+          if (timeframe === "15m") {
+            return {
+              complete: new Map(),
+              prefixes: new Map(),
+              exactMisses: new Set(["BTC/USDT"]),
+            };
+          }
+          throw new Error("parent batch unavailable");
+        },
+      );
+      const primary = textbookWBars(Date.now(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      fetchOHLCVMock.mockImplementation(
+        async (_ticker: string, timeframe: string) => timeframe === "15m" ? primary : parent,
+      );
 
       startScanner();
       const sweep = runScannerSweepForTest();
@@ -1500,9 +1571,17 @@ describe("scanner batch cache prefetch", () => {
       await sweep;
 
       expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
-      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
+      const primaryOptions = fetchOHLCVMock.mock.calls[0][5] as unknown as Record<string, unknown>;
+      const parentOptions = fetchOHLCVMock.mock.calls[1][5] as unknown as Record<string, unknown>;
+      expect(primaryOptions).toEqual(expect.objectContaining({ bypassCache: true }));
+      expect(primaryOptions.cacheWritePolicy).toBeUndefined();
+      expect(parentOptions).toEqual(expect.objectContaining({
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+      }));
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
-        expect.objectContaining({ protocol: "flash", marketsAttempted: 1, errorCount: 1 }),
+        expect.objectContaining({ protocol: "flash", marketsScanned: 1, accountingValid: true }),
       ]));
     } finally {
       stopScanner();

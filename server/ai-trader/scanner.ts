@@ -1067,6 +1067,8 @@ async function runSweep(): Promise<void> {
     const candleCache = new Map<string, ProvenancedOHLCV[]>();
     const candlePrefixes = new Map<string, ProvenancedOHLCV[]>();
     const batchExactMisses = new Set<string>();
+    const batchCacheUnavailable = new Set<string>();
+    let batchFailoverOpen = false;
 
     // Resolve both protocol universes once, then collapse their shared
     // datafeed identities before touching the persistent cache. The finite
@@ -1091,6 +1093,15 @@ async function runSweep(): Promise<void> {
     for (const tf of batchTimeframes) {
       requireScannerSweepOwner(owner);
       const remainingMs = fetchDeadlineAt - Date.now();
+      if (batchFailoverOpen) {
+        for (const ticker of sweepTickers) batchCacheUnavailable.add(`${ticker}:${tf}`);
+        const skippedLine =
+          `[Scanner] BATCH PREFETCH DEGRADED SKIP: ${tf} requested=${sweepTickers.length} ` +
+          "cache-read=bypass cache-write=skip";
+        console.log(skippedLine);
+        appendTelemetry(skippedLine);
+        continue;
+      }
       if (sweepTickers.length === 0 || remainingMs < 5_000) {
         if (sweepTickers.length > 0) {
           const skippedLine = `[Scanner] BATCH PREFETCH SKIP: ${tf} global budget has ${Math.max(0, remainingMs)}ms remaining`;
@@ -1127,13 +1138,17 @@ async function runSweep(): Promise<void> {
         appendTelemetry(batchLine);
       } catch (error) {
         requireScannerSweepOwner(owner);
+        batchFailoverOpen = true;
+        for (const ticker of sweepTickers) batchCacheUnavailable.add(`${ticker}:${tf}`);
         const fallbackLine =
           `[Scanner] BATCH PREFETCH FALLBACK: ${tf} requested=${sweepTickers.length} ` +
-          `duration=${Date.now() - batchStartedAt}ms reason=${error instanceof Error ? error.name : "unknown"}`;
+          `duration=${Date.now() - batchStartedAt}ms reason=${error instanceof Error ? error.name : "unknown"} ` +
+          "cache-read=bypass cache-write=skip";
         console.log(fallbackLine);
         appendTelemetry(fallbackLine);
-        // No retry. Every symbol on this timeframe follows the existing
-        // per-market path, which retains typed cache-degradation semantics.
+        // No retry. Unknown cache authority is not an exact miss: scanner
+        // fetches the provider directly and suppresses cache persistence for
+        // each exact ticker/timeframe key in this sweep.
       }
     }
 
@@ -1283,7 +1298,9 @@ async function runSweep(): Promise<void> {
                   : await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
                       ...fetchOptions,
                       basisPolicy: fetchOptions.basisPolicy,
-                      bypassCache: batchExactMisses.has(cacheKey),
+                      bypassCache:
+                        batchExactMisses.has(cacheKey) || batchCacheUnavailable.has(cacheKey),
+                      cacheWritePolicy: batchCacheUnavailable.has(cacheKey) ? "skip" : undefined,
                     });
                 requireScannerSweepOwner(owner);
                 if (cachedPrefix) tailCompletionCount++;
@@ -1387,7 +1404,11 @@ async function runSweep(): Promise<void> {
                           {
                             ...parentFetchOptions,
                             basisPolicy: parentFetchOptions.basisPolicy,
-                            bypassCache: batchExactMisses.has(parentCacheKey),
+                            bypassCache:
+                              batchExactMisses.has(parentCacheKey)
+                              || batchCacheUnavailable.has(parentCacheKey),
+                            cacheWritePolicy:
+                              batchCacheUnavailable.has(parentCacheKey) ? "skip" : undefined,
                           },
                         );
                     requireScannerSweepOwner(owner);
