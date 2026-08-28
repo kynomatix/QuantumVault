@@ -50,7 +50,7 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
       "ai-trader-performance-error",
     ]) expect(performancePanel).toContain(id);
     for (const component of [
-      "ResponsiveContainer", "LineChart", "Line", "YAxis", "ReferenceLine", "RechartsTooltip",
+      "ChartContainer", "LineChart", "Line", "YAxis", "ReferenceLine", "ChartTooltip", "ChartTooltipContent",
     ]) expect(performancePanel).toContain(`<${component}`);
     expect(performancePanel).toContain("domain={([dataMin, dataMax]: [number, number]) => [Math.min(0, dataMin), Math.max(0, dataMax)]}");
     expect(performancePanel).toContain("performance.tradeCount === 1");
@@ -59,9 +59,25 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(performancePanel).toContain("Overall live performance");
   });
 
+  it("uses the shared themed tooltip with an explicit signed-currency P&L label", () => {
+    expect(source).toContain("type ChartConfig");
+    expect(source).toContain("const PERFORMANCE_CHART_CONFIG = {");
+    expect(source).toContain("v: { label: 'Cumulative P&L' }");
+    expect(source).toContain("function formatPerformancePnl(value: number): string");
+    expect(source).toContain("? '$0.00'");
+    expect(source).toContain("Math.abs(value).toFixed(2)");
+    expect(performancePanel).toContain("config={PERFORMANCE_CHART_CONFIG}");
+    expect(performancePanel).toContain("className=\"h-full w-full aspect-auto\"");
+    expect(performancePanel).toContain("formatPerformancePnl(performance.netPnl)");
+    expect(performancePanel).toContain("formatPerformancePnl(Number(value))");
+    expect(performancePanel).toContain('name="Cumulative P&L"');
+    expect(performancePanel).not.toContain("<RechartsTooltip />");
+    expect(performancePanel).not.toContain("contentStyle=");
+  });
+
   it("distinguishes available-empty, error, and omission truth without era semantics", () => {
-    expect(performancePanel).toContain("performance.netPnl === 0");
-    expect(performancePanel).toContain("'$0.00'");
+    expect(source).toContain("value === 0");
+    expect(source).toContain("'$0.00'");
     expect(performancePanel).toContain("No closed paper trades yet.");
     expect(performancePanel).toContain("No closed live trades yet.");
     expect(performancePanel).not.toContain("qualification era");
