@@ -101,6 +101,34 @@ describe('qv-secrets-scan', () => {
     );
   });
 
+  it('keeps the exact camel-case Buffer type-annotation lexical shape clean', () => {
+    const label = ['api', 'Key'].join('');
+    const result = cli([fixture(`${label}: Buffer,\n`)]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).findingCount).toBe(0);
+  });
+
+  it('keeps the scanner assignmentValue result-local lexical shape clean', () => {
+    const label = ['api', 'Key'].join('');
+    const result = cli([fixture(`const ${label} = assignmentValue(line, pattern);\n`)]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).findingCount).toBe(0);
+  });
+
+  it('keeps unquoted, quoted, and identifier-legal opaque API-key literals red', () => {
+    const camelLabel = ['api', 'Key'].join('');
+    const envLabel = ['API', '_KEY'].join('');
+    const lines = [
+      `${envLabel}=${opaque()}`,
+      `${camelLabel}: "${opaque()}"`,
+      `${camelLabel}: aBcD1234efghIjkl`,
+    ];
+    const result = cli([fixture(`${lines.join('\n')}\n`)]);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout).files[0].findings).toEqual(
+      expect.arrayContaining([1, 2, 3].map(line => ({ ruleId: 'api-key-assignment', line }))),
+    );
+  });
   it('keeps placeholders and measured false-positive controls clean', () => {
     const vitestJson = Buffer.from(JSON.stringify({ numTotalTestSuites: 17, success: true })).toString('base64');
     const hash = createHash('sha256').update('public fixture').digest('hex');
