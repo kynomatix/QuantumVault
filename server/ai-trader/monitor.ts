@@ -304,8 +304,14 @@ function recordLlmKeyFingerprintOnce(
 // counter survived a restart. Scheduled entry outcomes below are the only
 // writers; flat/close/provider/gate outcomes intentionally leave it alone.
 const ENTRY_REJECTION_REASON_TOKEN = /^[a-z][a-z0-9_]{0,39}$/;
+const ENTRY_REJECTION_MONITOR_STARTED_AT = Date.now();
+let entryRejectionAgeClock = () => Date.now();
 let consecutiveEntryRejections: number | null = null;
 let lastEntryRejectionReason: string | null = null;
+
+export function __setEntryRejectionAgeClockForTests(clock: () => number): void {
+  entryRejectionAgeClock = clock;
+}
 
 function safeEntryRejectionReason(reason: unknown): string {
   return typeof reason === "string" && ENTRY_REJECTION_REASON_TOKEN.test(reason)
@@ -372,9 +378,23 @@ function typedExecutionRejectionReason(result: unknown): string {
   }
 }
 
+function safeEntryRejectionAgeMs(): number {
+  try {
+    const elapsed = Math.floor(entryRejectionAgeClock() - ENTRY_REJECTION_MONITOR_STARTED_AT);
+    if (!Number.isFinite(elapsed) || elapsed <= 0) return 0;
+    return Math.min(elapsed, Number.MAX_SAFE_INTEGER);
+  } catch {
+    return 0;
+  }
+}
+
 function entryRejectionHeartbeatFields(): string {
+  const warming = consecutiveEntryRejections === null;
   const count = consecutiveEntryRejections === null ? "unknown" : String(consecutiveEntryRejections);
-  return `consec_rejects=${count} last_reject=${lastEntryRejectionReason ?? "none"}`;
+  const state = warming ? "warming" : "ready";
+  const ageMs = warming ? safeEntryRejectionAgeMs() : 0;
+  return `entry_reject_state=${state} entry_reject_age_ms=${ageMs} `
+    + `consec_rejects=${count} last_reject=${lastEntryRejectionReason ?? "none"}`;
 }
 
 function emitTickObservation(line: string): void {

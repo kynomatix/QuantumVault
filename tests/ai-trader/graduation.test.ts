@@ -490,7 +490,12 @@ describe("qualification era forgotten-declaration gate", () => {
   it("declares scanner strategy-bound market identity as a reviewed no-bump for capability policy", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 18,
+      decisionGeneration: 19,
+      decision: "no_bump",
+    });
+    expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({
+      materialVersion: 2,
+      decisionGeneration: 9,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
