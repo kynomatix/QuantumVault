@@ -956,5 +956,10 @@ describe('close-path and restart contract wiring', () => {
     expect(index).toContain('createGracefulHttpShutdown({');
     expect(index).not.toContain('Shutdown grace period (10s)');
     expect(index).not.toContain('}, 10_000);');
+    expect(index).toContain('[Boot] pid=${process.pid} boot=${bootTag} env=${bootEnv} node=${process.version}');
+    expect(index).toContain('[Lifecycle] exit code=${code} pid=${process.pid} boot=${bootTag} uptime=${Math.round(process.uptime())}s');
+    expect(index).toContain('[Lifecycle] shutdown environment_halt boot=${bootTag} timeoutMs=${timeoutMs}');
+    expect(index).toContain('[Lifecycle] shutdown storage_environment_halt boot=${bootTag} timeoutMs=${timeoutMs}');
+    expect(index).toContain('[Lifecycle] ${signal} received pid=${process.pid} boot=${bootTag} uptime=${Math.round(process.uptime())}s');
   });
 });

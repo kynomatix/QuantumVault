@@ -716,14 +716,15 @@ registerRequestTrace(app);
   // process generations and tell workspace lines from live deployment lines.
   const ownsProductionBackgroundJobs = process.env.REPLIT_DEPLOYMENT === "1";
   const bootEnv = ownsProductionBackgroundJobs ? "production" : "workspace";
-  appendTelemetry(`[Boot] pid=${process.pid} env=${bootEnv} node=${process.version}`);
+  const bootTag = SERVER_BOOT_ID.slice(0, 8).toLowerCase();
+  appendTelemetry(`[Boot] pid=${process.pid} boot=${bootTag} env=${bootEnv} node=${process.version}`);
   process.on("exit", (code) => {
     // Drain the async queue first — lines queued since the last drainer flush
     // would otherwise be silently discarded (async I/O is dead here).
     drainQueueSyncForExit();
     // appendTelemetrySync uses appendFileSync — async cannot run in 'exit'.
     appendTelemetrySync(
-      `[Lifecycle] exit code=${code} pid=${process.pid} uptime=${Math.round(process.uptime())}s`,
+      `[Lifecycle] exit code=${code} pid=${process.pid} boot=${bootTag} uptime=${Math.round(process.uptime())}s`,
     );
   });
 
@@ -753,14 +754,14 @@ registerRequestTrace(app);
     },
     onTimeout: (timeoutMs) => {
       const line =
-        `[Lifecycle] shutdown environment_halt timeoutMs=${timeoutMs} ` +
+        `[Lifecycle] shutdown environment_halt boot=${bootTag} timeoutMs=${timeoutMs} ` +
         "active HTTP connections forced closed";
       console.error(`[Main] ${line}`);
       appendTelemetry(line);
     },
     onStorageTimeout: (timeoutMs) => {
       const line =
-        `[Lifecycle] shutdown storage_environment_halt timeoutMs=${timeoutMs} ` +
+        `[Lifecycle] shutdown storage_environment_halt boot=${bootTag} timeoutMs=${timeoutMs} ` +
         "storage close did not settle before process exit";
       console.error(`[Main] ${line}`);
       appendTelemetry(line);
@@ -771,7 +772,7 @@ registerRequestTrace(app);
     shuttingDown = true;
     console.log(`[Main] ${signal} received -- shutting down...`);
     appendTelemetry(
-      `[Lifecycle] ${signal} received pid=${process.pid} uptime=${Math.round(process.uptime())}s`,
+      `[Lifecycle] ${signal} received pid=${process.pid} boot=${bootTag} uptime=${Math.round(process.uptime())}s`,
     );
     const outcome = await runGracefulShutdown();
     if (outcome === "close_error") {

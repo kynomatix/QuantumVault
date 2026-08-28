@@ -9,12 +9,13 @@
  */
 import express from "express";
 import { createServer, type Server } from "node:http";
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 
 const storageTarget = vi.hoisted(() => ({
   getErrorStats: vi.fn(async () => []),
   listErrors: vi.fn(async () => []),
 }));
+const fsTarget = vi.hoisted(() => ({ readFileSync: vi.fn(), statSync: vi.fn() }));
 const telemetrySnapshotMock = vi.hoisted(() => vi.fn(() => ({
   queueLength: 3,
   queueBytes: 144,
@@ -23,14 +24,21 @@ const telemetrySnapshotMock = vi.hoisted(() => vi.fn(() => ({
   consecutiveFailures: 2,
 })));
 
+vi.mock("node:fs", () => ({ default: fsTarget }));
+vi.mock("../../server/boot-id", () => ({ SERVER_BOOT_ID: "abcdef12-3456-4789-abcd-ef1234567890", SERVER_BOOT_STARTED_AT: "2026-08-28T00:00:00.000Z" }));
 vi.mock("../../server/storage", () => ({ storage: storageTarget }));
 vi.mock("../../server/telemetry", () => ({
   getTelemetryWriterSnapshot: telemetrySnapshotMock,
 }));
 
-import { redactSensitive, registerLogAccessRoutes } from "../../server/log-access";
+import { parseCurrentBootMonitor, redactSensitive, registerLogAccessRoutes } from "../../server/log-access";
 
 let currentServer: Server | undefined;
+
+beforeEach(() => {
+  fsTarget.statSync.mockReset().mockReturnValue({ size: 321 });
+  fsTarget.readFileSync.mockReset().mockReturnValue("");
+});
 
 afterEach(async () => {
   vi.clearAllMocks();
@@ -166,14 +174,162 @@ describe("GET /api/logs/summary telemetry writer health", () => {
     const telemetry = response.body.telemetry;
     expect(Object.keys(telemetry).sort()).toEqual([
       "bytes",
+      "currentBootMonitor",
       "lastLineAt",
       "present",
       "writer",
     ]);
     expect(telemetry.writer).toBeNull();
+    expect(telemetry.currentBootMonitor).toMatchObject({ bootId: "abcdef12", state: "warming", lastHeartbeatAt: null });
     expect(typeof telemetry.present).toBe("boolean");
     expect(typeof telemetry.bytes).toBe("number");
     expect(telemetry.lastLineAt === null || typeof telemetry.lastLineAt === "string").toBe(true);
     expect(JSON.stringify(response.body)).not.toContain("must not escape");
+  });
+
+
+  it("parses exact current-boot heartbeat authority and chooses the newest timestamp", () => {
+    const text = [
+      "2026-08-28T00:03:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=deadbeef durationMs=3",
+      "2026-08-28T00:02:00.000Z [AiTraderMonitor] heartbeat tick_degraded pid=41 boot=abcdef12 reason=x",
+      "2026-08-28T00:04:00.000Z [Lifecycle] boot=abcdef12 [AiTraderMonitor] heartbeat tick_completed pid=41",
+      "2026-08-28T00:05:00.000Z [AiTraderMonitor] heartbeat unsupported pid=41 boot=abcdef12",
+      "2026-08-28T00:01:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=abcdef12 durationMs=4",
+    ].join("\n");
+    expect(parseCurrentBootMonitor(text, "ABCDEF12-3456-4789-abcd-ef1234567890", "start")).toEqual({ bootId: "abcdef12", bootStartedAt: "start", state: "observed", lastHeartbeatAt: "2026-08-28T00:02:00.000Z" });
+  });
+
+  it("keeps malformed, deceptive, and prior-boot lines in warming state", () => {
+    const text = [
+      "2026-02-30T00:01:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=abcdef12",
+      "2026-08-28T00:02:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 note=boot=abcdef12",
+      "2026-08-28T00:03:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=deadbeef",
+    ].join("\n");
+    expect(parseCurrentBootMonitor(text, "abcdef12-3456-4789-abcd-ef1234567890", "start")).toMatchObject({ state: "warming", lastHeartbeatAt: null });
+    expect(parseCurrentBootMonitor(text, "not-a-boot", "start")).toMatchObject({ state: "warming", lastHeartbeatAt: null });
+  });
+
+  it("rejects duplicate pid and boot authority tokens", () => {
+    const text = [
+      "2026-08-28T00:01:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 pid=42 boot=abcdef12",
+      "2026-08-28T00:02:00.000Z [AiTraderMonitor] heartbeat tick_degraded pid=41 boot=abcdef12 boot=abcdef12",
+    ].join("\n");
+    expect(parseCurrentBootMonitor(text, "abcdef12-3456-4789-abcd-ef1234567890", "start")).toMatchObject({
+      state: "warming",
+      lastHeartbeatAt: null,
+    });
+  });
+
+  it("reports a readable prior-boot-only snapshot as current-boot warming", async () => {
+    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+      ? ""
+      : "2026-08-28T00:04:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=deadbeef\n");
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.body.telemetry.currentBootMonitor).toEqual({
+      bootId: "abcdef12",
+      bootStartedAt: "2026-08-28T00:00:00.000Z",
+      state: "warming",
+      lastHeartbeatAt: null,
+    });
+  });
+
+  it("returns currentBootMonitor null when the active-file stat is unavailable", async () => {
+    fsTarget.statSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    });
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.status).toBe(200);
+    expect(response.body.telemetry.currentBootMonitor).toBeNull();
+  });
+
+  it("uses one active-plus-rotated snapshot for both summary consumers", async () => {
+    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+      ? "2026-08-28T00:01:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=abcdef12\n"
+      : "2026-08-28T00:04:00.000Z [AiTraderMonitor] heartbeat tick_degraded pid=41 boot=abcdef12\n");
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.body.telemetry.lastLineAt).toBe("2026-08-28T00:04:00.000Z");
+    expect(response.body.telemetry.currentBootMonitor).toMatchObject({ state: "observed", lastHeartbeatAt: "2026-08-28T00:04:00.000Z" });
+    expect(fsTarget.readFileSync).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an absent not-yet-rotated file transparent to a readable active file", async () => {
+    fsTarget.readFileSync.mockImplementation((file: unknown) => {
+      if (String(file).endsWith(".1")) {
+        throw Object.assign(new Error("not rotated yet"), { code: "ENOENT" });
+      }
+      return "2026-08-28T00:04:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=abcdef12\n";
+    });
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.status).toBe(200);
+    expect(response.body.telemetry.currentBootMonitor).toMatchObject({
+      state: "observed",
+      lastHeartbeatAt: "2026-08-28T00:04:00.000Z",
+    });
+  });
+
+  it("keeps the newest retained telemetry line authoritative after response truncation", async () => {
+    const filler = Array.from({ length: 1100 }, (_, index) =>
+      `2026-08-28T00:00:00.000Z filler=${index} ${"x".repeat(1000)}`,
+    ).join("\n");
+    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+      ? ""
+      : `${filler}\n2026-08-28T00:05:00.000Z [AiTraderMonitor] heartbeat tick_degraded pid=41 boot=abcdef12\n`);
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.body.telemetry.lastLineAt).toBe("2026-08-28T00:05:00.000Z");
+    expect(response.body.telemetry.currentBootMonitor).toMatchObject({
+      state: "observed",
+      lastHeartbeatAt: "2026-08-28T00:05:00.000Z",
+    });
+  });
+
+  it("reports warming when the current-boot heartbeat aged out of the bounded window", async () => {
+    const unrelated = Array.from({ length: 2000 }, (_, index) =>
+      `2026-08-28T00:01:00.000Z unrelated=${index}`,
+    ).join("\n");
+    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+      ? "2026-08-28T00:00:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=abcdef12\n"
+      : `${unrelated}\n`);
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.body.telemetry.currentBootMonitor).toMatchObject({
+      state: "warming",
+      lastHeartbeatAt: null,
+    });
+  });
+
+  it("returns currentBootMonitor null on a non-missing read failure", async () => {
+    fsTarget.readFileSync.mockImplementation(() => { throw Object.assign(new Error("denied"), { code: "EACCES" }); });
+    const base = await startServer(token);
+    const response = await getSummary(base, token);
+    expect(response.status).toBe(200);
+    expect(response.body.telemetry.currentBootMonitor).toBeNull();
+  });
+
+  it("preserves raw-route grep-before-tail ordering", async () => {
+    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+      ? [
+          "2026-08-28T00:01:00.000Z needle first",
+          "2026-08-28T00:02:00.000Z unrelated",
+          "2026-08-28T00:03:00.000Z needle second",
+        ].join("\n") + "\n"
+      : [
+          "2026-08-28T00:04:00.000Z unrelated",
+          "2026-08-28T00:05:00.000Z needle third",
+        ].join("\n") + "\n");
+    const base = await startServer(token);
+    const response = await fetch(`${base}/api/logs/telemetry?lines=2&grep=needle`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe([
+      "2026-08-28T00:03:00.000Z needle second",
+      "2026-08-28T00:05:00.000Z needle third",
+      "",
+    ].join("\n"));
   });
 });

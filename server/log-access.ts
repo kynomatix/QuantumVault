@@ -27,12 +27,13 @@
  *  - /api/logs/telemetry  — tail of logs/telemetry.log(+.1) (plain text)
  */
 
-import fs from "fs";
+import fs from "node:fs";
 import path from "path";
 import crypto from "crypto";
 import type { Express, Request, Response, NextFunction } from "express";
 import { storage } from "./storage";
 import { getTelemetryWriterSnapshot, type TelemetryWriterSnapshot } from "./telemetry";
+import { SERVER_BOOT_ID, SERVER_BOOT_STARTED_AT } from "./boot-id";
 
 const TELEMETRY_FILE = path.join("logs", "telemetry.log");
 const TELEMETRY_ROTATED = path.join("logs", "telemetry.log.1");
@@ -128,29 +129,85 @@ function parseHours(raw: unknown, fallback: number): number {
   return Math.min(n, MAX_WINDOW_HOURS);
 }
 
-function readTelemetryTail(lines: number, grep?: string): string {
+export type CurrentBootMonitor = {
+  bootId: string;
+  bootStartedAt: string;
+  state: "warming" | "observed";
+  lastHeartbeatAt: string | null;
+};
+
+type TelemetryTailSnapshot = { text: string; readable: boolean; activeRead: boolean };
+
+export function parseCurrentBootMonitor(
+  lines: string,
+  bootId: string,
+  bootStartedAt: string,
+): CurrentBootMonitor {
+  const rawBootId = String(bootId ?? "").trim();
+  const tag = rawBootId.toLowerCase().slice(0, 8);
+  const warming: CurrentBootMonitor = {
+    bootId: tag,
+    bootStartedAt,
+    state: "warming",
+    lastHeartbeatAt: null,
+  };
+  try {
+    if (!/^[0-9a-f]{8}$/.test(tag) || !/^[0-9a-f]{8}(?:-|$)/i.test(rawBootId)) {
+      return warming;
+    }
+    let newestMs = -1;
+    let newestIso: string | null = null;
+    for (const line of String(lines ?? "").split(/\r?\n/)) {
+      const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z) \[AiTraderMonitor\] heartbeat (tick_completed|tick_degraded) (.+)$/.exec(line);
+      if (!match) continue;
+      const fields = match[3].trim().split(/\s+/);
+      const pids = fields.filter((field) => /^pid=\d+$/.test(field));
+      const boots = fields.filter((field) => /^boot=[0-9a-f]{8}$/.test(field));
+      if (pids.length !== 1 || boots.length !== 1 || boots[0] !== `boot=${tag}`) continue;
+      const timestampMs = Date.parse(match[1]);
+      if (!Number.isFinite(timestampMs) || new Date(timestampMs).toISOString() !== match[1]) continue;
+      if (timestampMs > newestMs) {
+        newestMs = timestampMs;
+        newestIso = match[1];
+      }
+    }
+    return newestIso === null
+      ? warming
+      : { ...warming, state: "observed", lastHeartbeatAt: newestIso };
+  } catch {
+    return warming;
+  }
+}
+
+function readTelemetryTailSnapshot(lines: number, grep?: string): TelemetryTailSnapshot {
   let raw = "";
+  let readable = true;
+  let activeRead = false;
   for (const file of [TELEMETRY_ROTATED, TELEMETRY_FILE]) {
     try {
       raw += fs.readFileSync(file, "utf8");
-    } catch {
-      // Missing file is normal (fresh boot / not yet rotated).
+      if (file === TELEMETRY_FILE) activeRead = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") readable = false;
     }
   }
-  let all = raw.split("\n").filter((l) => l.length > 0);
+  let all = raw.split("\n").filter((line) => line.length > 0);
   if (grep) {
     const needle = grep.toLowerCase();
-    all = all.filter((l) => l.toLowerCase().includes(needle));
+    all = all.filter((line) => line.toLowerCase().includes(needle));
   }
-  const tail = all.slice(-lines);
-  let text = tail.join("\n");
-  if (text.length > MAX_RESPONSE_BYTES) {
-    text = text.slice(text.length - MAX_RESPONSE_BYTES);
-    const firstNewline = text.indexOf("\n");
-    if (firstNewline > 0) text = text.slice(firstNewline + 1);
-    text = "[...truncated to 1 MB...]\n" + text;
+  let snapshotText = all.slice(-lines).join("\n");
+  if (snapshotText.length > MAX_RESPONSE_BYTES) {
+    snapshotText = snapshotText.slice(snapshotText.length - MAX_RESPONSE_BYTES);
+    const firstNewline = snapshotText.indexOf("\n");
+    if (firstNewline > 0) snapshotText = snapshotText.slice(firstNewline + 1);
+    snapshotText = "[...truncated to 1 MB...]\n" + snapshotText;
   }
-  return text;
+  return { text: snapshotText, readable, activeRead };
+}
+
+function readTelemetryTail(lines: number, grep?: string): string {
+  return readTelemetryTailSnapshot(lines, grep).text;
 }
 
 function errorRowToText(e: {
@@ -200,24 +257,23 @@ export function registerLogAccessRoutes(app: Express): void {
         bytes: number;
         lastLineAt: string | null;
         writer: TelemetryWriterSnapshot | null;
-      } = {
-        present: false,
-        bytes: 0,
-        lastLineAt: null,
-        writer,
-      };
+        currentBootMonitor: CurrentBootMonitor | null;
+      } = { present: false, bytes: 0, lastLineAt: null, writer, currentBootMonitor: null };
       try {
         const { size } = fs.statSync(TELEMETRY_FILE);
-        const tail = readTelemetryTail(1);
-        const tsMatch = tail.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
+        const snapshot = readTelemetryTailSnapshot(MAX_TELEMETRY_LINES);
+        if (!snapshot.readable || !snapshot.activeRead) throw new Error("telemetry snapshot unavailable");
+        const lastLine = snapshot.text.split("\n").filter(Boolean).at(-1) ?? "";
+        const tsMatch = lastLine.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
         telemetry = {
           present: true,
           bytes: size,
           lastLineAt: tsMatch ? tsMatch[1] : null,
           writer,
+          currentBootMonitor: parseCurrentBootMonitor(snapshot.text, SERVER_BOOT_ID, SERVER_BOOT_STARTED_AT),
         };
       } catch {
-        // No telemetry file yet.
+        // Missing, unreadable, or unparseable telemetry remains fail-open and explicitly unavailable.
       }
 
       res.json({
