@@ -520,7 +520,12 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
 
   it("uses one exact-bounded SELECT for deduplicated symbols and returns explicit misses", async () => {
     const release = vi.fn();
-    const query = vi.fn().mockResolvedValue({ rows: [row("BTC-PERP")] });
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn()
+      .mockImplementationOnce(async () => { now += 100; return { rows: [] }; })
+      .mockImplementationOnce(async () => { now += 7; return { rows: [row("BTC-PERP")] }; })
+      .mockImplementationOnce(async () => { now += 200; return { rows: [] }; });
     fakePool.connect.mockResolvedValueOnce({ release, query });
     let phases: CandleBatchReadPhases | undefined;
 
@@ -534,18 +539,32 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       },
     );
 
-    expect(query).toHaveBeenCalledTimes(1);
-    const queryConfig = query.mock.calls[0][0];
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[0][0]).toMatchObject({
+      text: "SELECT set_config('statement_timeout', $1, false)",
+      values: ["5000"],
+      query_timeout: 5_000,
+    });
+    const queryConfig = query.mock.calls[1][0];
     expect(queryConfig.query_timeout).toBe(5_000);
     expect(queryConfig.text).toContain('time_semantic AS "timeSemantic"');
     expect(queryConfig.text).not.toMatch(/time_semantic AS\s+imeSemantic\b/);
     expect(queryConfig.values.slice(0, 4)).toEqual([
       ["BTC-PERP", "SOL-PERP"], "1h", "0", "3600000",
     ]);
+    expect(query.mock.calls[2][0]).toMatchObject({
+      text: "SELECT set_config('statement_timeout', '30000', false)",
+      query_timeout: 5_000,
+    });
+    const dataStatements = query.mock.calls.filter(([value]) =>
+      typeof value === "object" && value !== null && String(value.text).includes("FROM lab_candle_cache_v2")
+    );
+    expect(dataStatements).toHaveLength(1);
     expect(result.get("BTC-PERP")?.[0].close).toBe(10);
     expect(result.get("SOL-PERP")).toBeNull();
-    expect(phases).toMatchObject({ requestedSymbols: 2, hits: 1, misses: 1, outcome: "hit" });
+    expect(phases).toMatchObject({ requestedSymbols: 2, hits: 1, misses: 1, outcome: "hit", termination: "success", sqlstate: null, queryMs: 7 });
     expect(release).toHaveBeenCalledWith();
+    nowSpy.mockRestore();
   });
 
   it("preserves per-symbol strongest-finality semantics", async () => {
@@ -640,18 +659,55 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
   });
 
   it("releases a failed SELECT with error and exposes a typed batch failure", async () => {
-    const failure = new Error("query timeout");
+    const failure = Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
     const release = vi.fn();
-    fakePool.connect.mockResolvedValueOnce({
-      release,
-      query: vi.fn().mockRejectedValue(failure),
-    });
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockRejectedValueOnce(failure);
+    let phases: CandleBatchReadPhases | undefined;
+    fakePool.connect.mockResolvedValueOnce({ release, query });
+
+    await expect(getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    )).rejects.toBeInstanceOf(CandleBatchReadError);
+    expect(release).toHaveBeenCalledWith(failure);
+    expect(release).not.toHaveBeenCalledWith();
+    expect(phases).toMatchObject({ outcome: "query_error", termination: "server_statement_timeout", sqlstate: "57014" });
+    expect(getCandleStoreLoad().activeReads).toBe(0);
+  });
+
+  it("destroys the client when restoring the shared 30-second session default fails", async () => {
+    const failure = new Error("restore failed");
+    const release = vi.fn();
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [row("BTC-PERP")] })
+      .mockRejectedValueOnce(failure);
+    fakePool.connect.mockResolvedValueOnce({ release, query });
 
     await expect(getCachedCandlesBatch(
       ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
       { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner" },
     )).rejects.toBeInstanceOf(CandleBatchReadError);
     expect(release).toHaveBeenCalledWith(failure);
-    expect(getCandleStoreLoad().activeReads).toBe(0);
+    expect(release).not.toHaveBeenCalledWith();
+  });
+
+  it("classifies pg's JavaScript client timeout separately from the server deadline", async () => {
+    const failure = new Error("Query read timeout");
+    const release = vi.fn();
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockRejectedValueOnce(failure);
+    let phases: CandleBatchReadPhases | undefined;
+    fakePool.connect.mockResolvedValueOnce({ release, query });
+
+    await expect(getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    )).rejects.toBeInstanceOf(CandleBatchReadError);
+    expect(release).toHaveBeenCalledWith(failure);
+    expect(phases).toMatchObject({ outcome: "query_error", termination: "client_query_timeout", sqlstate: null });
   });
 });
