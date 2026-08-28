@@ -199,10 +199,20 @@ type CandleCacheBatchRow = CandleCacheRow & { symbol: string };
 
 export type CandleBatchReadOutcome = CandleReadOutcome;
 
+export type CandleBatchReadTermination =
+  | "success"
+  | "server_statement_timeout"
+  | "client_query_timeout"
+  | "connection_error"
+  | "caller_cancelled"
+  | "query_error";
+
 export type CandleBatchReadPhases = {
   callerClass: CandleReadCallerClass;
   timeframe: string;
   outcome: CandleBatchReadOutcome;
+  termination: CandleBatchReadTermination;
+  sqlstate: string | null;
   requestedSymbols: number;
   hits: number;
   misses: number;
@@ -222,6 +232,23 @@ export class CandleBatchReadError extends Error {
     super(message, options);
     this.name = "CandleBatchReadError";
   }
+}
+
+function classifyBatchTermination(error: unknown): {
+  termination: Exclude<CandleBatchReadTermination, "success" | "caller_cancelled">;
+  sqlstate: string | null;
+} {
+  const value = error && typeof error === "object" ? error as Record<string, unknown> : {};
+  const code = typeof value.code === "string" ? value.code : null;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (code === "57014") return { termination: "server_statement_timeout", sqlstate: code };
+  if (error instanceof Error && error.message === "Query read timeout") {
+    return { termination: "client_query_timeout", sqlstate: code };
+  }
+  if (code?.startsWith("08") || /connection|socket|ECONN/i.test(message)) {
+    return { termination: "connection_error", sqlstate: code };
+  }
+  return { termination: "query_error", sqlstate: code };
 }
 
 export type GetCachedCandlesOpts = {
@@ -396,6 +423,8 @@ export async function getCachedCandlesBatch(
     callerClass: opts.callerClass ?? "scanner",
     timeframe,
     outcome: "miss",
+    termination: "success",
+    sqlstate: null,
     requestedSymbols: uniqueSymbols.length,
     hits: 0,
     misses: uniqueSymbols.length,
@@ -421,6 +450,7 @@ export async function getCachedCandlesBatch(
       `requested=${phases.requestedSymbols} hits=${phases.hits} misses=${phases.misses} ` +
       `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
       `query=${phases.queryMs}ms process=${phases.resultProcessingMs}ms total=${phases.totalMs}ms ` +
+      `termination=${phases.termination} sqlstate=${phases.sqlstate ?? "none"} ` +
       `pool=${phases.pool.total}/${phases.pool.idle}i/${phases.pool.waiting}w`;
     console.log(line);
     appendTelemetry(line);
@@ -430,6 +460,7 @@ export async function getCachedCandlesBatch(
 
   const semaphoreStartedAt = Date.now();
   if (isSignalAborted(signal)) {
+    phases.termination = "caller_cancelled";
     finish(abortOutcome());
     throw makeAbortError(signal!.reason);
   }
@@ -441,6 +472,7 @@ export async function getCachedCandlesBatch(
       }
     } catch (error) {
       phases.semaphoreWaitMs = Date.now() - semaphoreStartedAt;
+      phases.termination = "caller_cancelled";
       finish(abortOutcome());
       throw error;
     } finally {
@@ -456,9 +488,17 @@ export async function getCachedCandlesBatch(
       && policy.consumer !== "scanner"
       && policy.consumer !== "ai_context";
     const client = await acquireClientWithAbort(signal, phases as unknown as CandleReadPhases);
-    const queryStartedAt = Date.now();
+    const queryTimeoutMs = Math.max(1, Math.floor(opts.queryTimeoutMs!));
+    let selectStartedAt: number | null = null;
+    let selectCompleted = false;
     let rows: CandleCacheBatchRow[];
     try {
+      await client.query({
+        text: "SELECT set_config('statement_timeout', $1, false)",
+        values: [String(queryTimeoutMs)],
+        query_timeout: queryTimeoutMs,
+      } as any);
+      selectStartedAt = Date.now();
       const result = await client.query({
         text:
           "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
@@ -472,13 +512,24 @@ export async function getCachedCandlesBatch(
           [...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy],
           requireDirectOkxIdentity,
         ],
-        query_timeout: Math.max(1, Math.floor(opts.queryTimeoutMs!)),
+        query_timeout: queryTimeoutMs,
       } as any);
-      phases.queryMs = Date.now() - queryStartedAt;
+      phases.queryMs = Date.now() - selectStartedAt;
+      selectCompleted = true;
+      await client.query({
+        text: "SELECT set_config('statement_timeout', '30000', false)",
+        query_timeout: queryTimeoutMs,
+      } as any);
+      phases.termination = "success";
       client.release();
       rows = result.rows as CandleCacheBatchRow[];
     } catch (error) {
-      phases.queryMs = Date.now() - queryStartedAt;
+      if (selectStartedAt !== null && !selectCompleted) {
+        phases.queryMs = Date.now() - selectStartedAt;
+      }
+      const classified = classifyBatchTermination(error);
+      phases.termination = classified.termination;
+      phases.sqlstate = classified.sqlstate;
       client.release(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
@@ -523,10 +574,12 @@ export async function getCachedCandlesBatch(
     return admittedBySymbol;
   } catch (error: any) {
     if (isSignalAborted(signal)) {
+      phases.termination = "caller_cancelled";
       finish(abortOutcome());
       throw makeAbortError(signal!.reason);
     }
     if (error?.name === "AbortError") {
+      phases.termination = "caller_cancelled";
       finish(abortOutcome());
       throw error;
     }
