@@ -6,6 +6,9 @@ import { resolve } from "node:path";
 const getBotMock = vi.fn();
 const getAiTraderDecisionsMock = vi.fn();
 const getAiTraderBotLifetimeStatsMock = vi.fn();
+const getAiTraderBotsByWalletMock = vi.fn();
+const getAiTraderOpenDecisionsByBotIdsMock = vi.fn();
+const getAiTraderTotalRealizedPnlMapMock = vi.fn();
 const updateBotMock = vi.fn();
 const getWalletLlmCiphertextMock = vi.fn();
 const getWalletMock = vi.fn();
@@ -24,6 +27,9 @@ vi.mock("../../server/storage", () => ({
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getAiTraderDecisionsMock(...a),
     getAiTraderBotLifetimeStats: (...a: unknown[]) => getAiTraderBotLifetimeStatsMock(...a),
+    getAiTraderBotsByWallet: (...a: unknown[]) => getAiTraderBotsByWalletMock(...a),
+    getAiTraderOpenDecisionsByBotIds: (...a: unknown[]) => getAiTraderOpenDecisionsByBotIdsMock(...a),
+    getAiTraderTotalRealizedPnlMap: (...a: unknown[]) => getAiTraderTotalRealizedPnlMapMock(...a),
     updateAiTraderBot: (...a: unknown[]) => updateBotMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getWalletLlmCiphertextMock(...a),
     getWallet: (...a: unknown[]) => getWalletMock(...a),
@@ -1258,6 +1264,79 @@ function mockPerformanceQuery(rows: unknown[]) {
   dbSelectMock.mockReturnValue({ from });
   return { from, leftJoin, where, orderBy };
 }
+
+describe("AI Trader list mode-scoped performance", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getAiTraderBotLifetimeStatsMock.mockResolvedValue(new Map());
+    getAiTraderOpenDecisionsByBotIdsMock.mockResolvedValue([]);
+    getAiTraderTotalRealizedPnlMapMock.mockResolvedValue(new Map());
+  });
+
+  it("uses one joined query and keeps each bot's current mode and rows isolated", async () => {
+    const paperBot = performanceBot({ id: "paper-bot", paperMode: true, status: "idle" });
+    const liveBot = performanceBot({ id: "live-bot", paperMode: false, status: "idle" });
+    getAiTraderBotsByWalletMock.mockResolvedValue([paperBot, liveBot]);
+    const query = mockPerformanceQuery([
+      { botId: "paper-bot", decisionId: "paper-1", closedAt: "2026-08-01T00:00:00.000Z", realizedPnl: "4.50", terminalCause: "paper" },
+      { botId: "paper-bot", decisionId: "paper-live", closedAt: "2026-08-02T00:00:00.000Z", realizedPnl: "9", terminalCause: "venue_detected" },
+      { botId: "live-bot", decisionId: "live-1", closedAt: "2026-08-03T00:00:00.000Z", realizedPnl: "-1.25", terminalCause: "protective" },
+      { botId: "live-bot", decisionId: "live-paper", closedAt: "2026-08-04T00:00:00.000Z", realizedPnl: "7", terminalCause: "paper" },
+      { botId: "live-bot", decisionId: "live-unknown", closedAt: "2026-08-05T00:00:00.000Z", realizedPnl: "8", terminalCause: null },
+    ]);
+
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const result = await invoke(built.routes, "GET /api/ai-trader", {
+      query: {}, body: {}, headers: {}, session: { walletAddress: "owner-wallet" },
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body.bots[0].modePerformance).toEqual({
+      status: "available", mode: "paper_trial", tradeCount: 1, netPnl: 4.5,
+      omittedUnattributedTrades: 0, excludedOtherModeTrades: 1, omittedInvalidPnlTrades: 0,
+    });
+    expect(result.body.bots[1].modePerformance).toEqual({
+      status: "available", mode: "live", tradeCount: 1, netPnl: -1.25,
+      omittedUnattributedTrades: 1, excludedOtherModeTrades: 1, omittedInvalidPnlTrades: 0,
+    });
+    expect(result.body.bots[0].modePerformance).not.toHaveProperty("points");
+    expect(result.body.bots[1].modePerformance).not.toHaveProperty("points");
+    expect(dbSelectMock).toHaveBeenCalledTimes(1);
+    expect(query.from).toHaveBeenCalledTimes(1);
+    expect(query.leftJoin).toHaveBeenCalledTimes(1);
+    expect(query.where).toHaveBeenCalledTimes(1);
+    expect(query.orderBy).toHaveBeenCalledTimes(1);
+    expect(getAiTraderBotsByWalletMock).toHaveBeenCalledWith("owner-wallet");
+  });
+
+  it("keeps the list available with exact unavailable arms when the projection read fails", async () => {
+    const paperBot = performanceBot({ id: "paper-bot", paperMode: true, status: "idle" });
+    const liveBot = performanceBot({ id: "live-bot", paperMode: false, status: "idle" });
+    getAiTraderBotsByWalletMock.mockResolvedValue([paperBot, liveBot]);
+    const orderBy = vi.fn().mockRejectedValue(new Error("projection read failed"));
+    const where = vi.fn(() => ({ orderBy }));
+    const leftJoin = vi.fn(() => ({ where }));
+    const from = vi.fn(() => ({ leftJoin }));
+    dbSelectMock.mockReturnValue({ from });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const result = await invoke(built.routes, "GET /api/ai-trader", {
+      query: {}, body: {}, headers: {}, session: { walletAddress: "owner-wallet" },
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body.bots.map((bot: any) => bot.modePerformance)).toEqual([
+      { status: "unavailable", mode: "paper_trial", reason: "projection_unavailable" },
+      { status: "unavailable", mode: "live", reason: "projection_unavailable" },
+    ]);
+    expect(result.body.bots.every((bot: any) => bot.lifetimeStats)).toBe(true);
+    expect(warn).toHaveBeenCalledWith("[AiTrader] mode-scoped list performance projection unavailable");
+    warn.mockRestore();
+  });
+});
 
 describe("AI Trader overall mode-scoped performance", () => {
   beforeEach(() => {

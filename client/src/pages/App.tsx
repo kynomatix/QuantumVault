@@ -3510,41 +3510,60 @@ export default function AppPage() {
                           </div>
                           <div className="p-2.5 rounded-lg bg-muted/30">
                             {(() => {
-                              const ls = (aiBot as any).lifetimeStats;
-                              const net: number = ls?.netPnlAllIn ?? 0;
-                              const unrealizedForTip: number = (aiBot as any).pnl?.unrealizedPnl ?? 0;
+                              const projection = (aiBot as any).modePerformance;
+                              const projectionAvailable = projection?.status === 'available'
+                                && typeof projection.netPnl === 'number'
+                                && Number.isFinite(projection.netPnl);
+                              const hasOpenPosition = aiBot.status === 'open';
+                              const rawOpen = (aiBot as any).pnl?.unrealizedPnl;
+                              const validOpen = typeof rawOpen === 'number' && Number.isFinite(rawOpen);
+                              const openAvailable = !hasOpenPosition || validOpen;
+                              const overallAvailable = projectionAvailable && openAvailable;
+                              const closedPnl = projectionAvailable ? projection.netPnl : 0;
+                              const openPnl = hasOpenPosition && validOpen ? rawOpen : 0;
+                              const overallPnl = closedPnl + openPnl;
                               return (
                                 <TooltipProvider>
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <div className="cursor-help">
-                                        <p className={`text-sm font-bold ${net >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                          {net >= 0 ? '+' : ''}${Math.abs(net).toFixed(2)}
+                                        <p className={`text-sm font-bold ${!overallAvailable ? 'text-muted-foreground' : overallPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                          {overallAvailable
+                                            ? `${overallPnl >= 0 ? '+' : '-'}$${Math.abs(overallPnl).toFixed(2)}`
+                                            : '--'}
                                         </p>
                                         <div className="flex items-center gap-1 justify-center">
-                                          <p className="text-xs text-muted-foreground">Net P&L</p>
+                                          <p className="text-xs text-muted-foreground">Overall P&L</p>
                                           {!!aiBot.paperMode && (
                                             <span className="text-[9px] px-1 rounded border border-amber-500/40 text-amber-400 leading-tight">PAPER</span>
                                           )}
                                         </div>
                                       </div>
                                     </TooltipTrigger>
-                                    {ls && (
-                                      <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-2.5 space-y-1.5">
-                                        <div className="flex justify-between gap-4">
-                                          <span>Closed P&L</span>
-                                          <span>{Number(ls.totalRealized) >= 0 ? '+' : ''}${Number(ls.totalRealized).toFixed(2)}</span>
-                                        </div>
-                                        <div className="flex justify-between gap-4">
-                                          <span>Live unrealized</span>
-                                          <span>{unrealizedForTip >= 0 ? '+' : ''}${unrealizedForTip.toFixed(2)}</span>
-                                        </div>
-                                        <div className="flex justify-between gap-4">
-                                          <span>AI spend</span>
-                                          <span>−${Number(ls.totalLlmCost).toFixed(4)}</span>
-                                        </div>
-                                      </TooltipContent>
-                                    )}
+                                    <TooltipContent className="max-w-[260px] bg-popover border border-border text-xs p-2.5 space-y-1.5">
+                                      {overallAvailable ? (
+                                        <>
+                                          <div className="flex justify-between gap-4">
+                                            <span>{projection.mode === 'paper_trial' ? 'Paper' : 'Live'} closed P&L</span>
+                                            <span>{closedPnl >= 0 ? '+' : '-'}${Math.abs(closedPnl).toFixed(2)}</span>
+                                          </div>
+                                          <div className="flex justify-between gap-4">
+                                            <span>Current open unrealized</span>
+                                            <span>{openPnl >= 0 ? '+' : '-'}${Math.abs(openPnl).toFixed(2)}</span>
+                                          </div>
+                                          <div className="flex justify-between gap-4">
+                                            <span>Omitted unattributed trades</span>
+                                            <span>{projection.omittedUnattributedTrades}</span>
+                                          </div>
+                                        </>
+                                      ) : (
+                                        <p>
+                                          {!projectionAvailable
+                                            ? 'Current-mode closed P&L is temporarily unavailable.'
+                                            : 'The open position mark price is temporarily unavailable.'}
+                                        </p>
+                                      )}
+                                    </TooltipContent>
                                   </Tooltip>
                                 </TooltipProvider>
                               );
