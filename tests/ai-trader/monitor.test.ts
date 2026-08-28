@@ -1902,6 +1902,50 @@ describe("runAutoCycle", () => {
     );
   });
 
+  it("reports ready with zero age after a real rejection and a later entry success", async () => {
+    const { runAutoCycle } = await importMonitor();
+    armEntryCycle();
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "dec-ready-reject",
+      decision: { action: "long" },
+      clamped: null,
+      rejected: true,
+      violations: [
+        { rule: "G3", code: "rr_below_floor", fatal: true, message: "low rr" },
+      ],
+      latencyMs: 5,
+    });
+
+    await runAutoCycle("bot-1111-2222");
+    expect(await completedHeartbeat()).toMatch(
+      /entry_reject_state=ready entry_reject_age_ms=0 consec_rejects=1 last_reject=rr_below_floor$/,
+    );
+
+    vi.setSystemTime(NOW + 5 * 60_000);
+    runDecisionMock.mockResolvedValue({
+      ok: true,
+      decisionId: "dec-ready-success",
+      decision: { action: "long" },
+      clamped: {
+        action: "long",
+        sizeBase: 1,
+        marginUsdc: 100,
+        stopLossPrice: 145,
+        takeProfitPrice: 160,
+      },
+      rejected: false,
+      violations: [],
+      latencyMs: 5,
+    });
+    executeDecisionMock.mockResolvedValue({ ok: true, mode: "paper", entryPrice: 150 });
+
+    await runAutoCycle("bot-1111-2222");
+    expect(await completedHeartbeat()).toMatch(
+      /entry_reject_state=ready entry_reject_age_ms=0 consec_rejects=0 last_reject=none$/,
+    );
+  });
+
   it("sanitizes a nonconforming fatal code instead of emitting it", async () => {
     const { runAutoCycle } = await importMonitor();
     armEntryCycle();
@@ -3605,8 +3649,59 @@ describe("monitor liveness heartbeat", () => {
     expect(consoleHeartbeats()).toHaveLength(1);
     expect(telemetryHeartbeats()).toEqual(consoleHeartbeats());
     expect(consoleHeartbeats()[0]).toMatch(
-      /^\[AiTraderMonitor\] heartbeat tick_completed pid=\d+ boot=[0-9a-f]{8} duration_ms=\d+ active_bots=0 consec_rejects=unknown last_reject=none$/
+      /^\[AiTraderMonitor\] heartbeat tick_completed pid=\d+ boot=[0-9a-f]{8} duration_ms=\d+ active_bots=0 entry_reject_state=warming entry_reject_age_ms=0 consec_rejects=unknown last_reject=none$/
     );
+  });
+
+  it("reports elapsed warming age on the existing cadence without creating a timer", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    const timerCount = vi.getTimerCount();
+
+    await runMonitorTickOnce();
+    vi.setSystemTime(NOW + 5 * 60_000);
+    await runMonitorTickOnce();
+
+    expect(telemetryHeartbeats()).toHaveLength(2);
+    expect(telemetryHeartbeats()[0]).toMatch(
+      /entry_reject_state=warming entry_reject_age_ms=0 consec_rejects=unknown last_reject=none$/,
+    );
+    expect(telemetryHeartbeats()[1]).toMatch(
+      /entry_reject_state=warming entry_reject_age_ms=300000 consec_rejects=unknown last_reject=none$/,
+    );
+    expect(vi.getTimerCount()).toBe(timerCount);
+  });
+
+  it("clamps a warming age to zero when the wall clock moves backwards", async () => {
+    const { runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    vi.setSystemTime(NOW - 60_000);
+
+    await runMonitorTickOnce();
+
+    expect(telemetryHeartbeats()[0]).toMatch(
+      /entry_reject_state=warming entry_reject_age_ms=0 consec_rejects=unknown last_reject=none$/,
+    );
+  });
+
+  it("contains a throwing age clock after claiming the completed-heartbeat cadence", async () => {
+    const { __setEntryRejectionAgeClockForTests, runMonitorTickOnce } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    __setEntryRejectionAgeClockForTests(() => {
+      throw new Error("private clock failure");
+    });
+
+    await expect(runMonitorTickOnce()).resolves.toBeUndefined();
+    expect(telemetryHeartbeats()).toHaveLength(1);
+    expect(telemetryHeartbeats()[0]).toMatch(
+      /entry_reject_state=warming entry_reject_age_ms=0 consec_rejects=unknown last_reject=none$/,
+    );
+
+    vi.setSystemTime(NOW + 5 * 60_000);
+    await expect(runMonitorTickOnce()).resolves.toBeUndefined();
+    await expect(runMonitorTickOnce()).resolves.toBeUndefined();
+    expect(telemetryHeartbeats()).toHaveLength(2);
+    expect(telemetryHeartbeats()[1]).not.toContain("private clock failure");
   });
 
   it("classifies a caught per-bot failure as completed, never degraded", async () => {
@@ -3617,7 +3712,7 @@ describe("monitor liveness heartbeat", () => {
     await runMonitorTickOnce();
 
     expect(telemetryHeartbeats()).toHaveLength(1);
-    expect(telemetryHeartbeats()[0]).toMatch(/tick_completed .* active_bots=1 consec_rejects=unknown last_reject=none$/);
+    expect(telemetryHeartbeats()[0]).toMatch(/tick_completed .* active_bots=1 entry_reject_state=warming entry_reject_age_ms=0 consec_rejects=unknown last_reject=none$/);
     expect(telemetryHeartbeats()[0]).not.toContain("tick_degraded");
     expect(telemetryHeartbeats()[0]).not.toContain("private-bot-id");
     expect(telemetryHeartbeats()[0]).not.toContain("private bot failure");
