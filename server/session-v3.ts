@@ -1355,6 +1355,98 @@ export function decryptAgentKeyV3(
 // The plaintext is decrypted transiently per request, used, and discarded; it is
 // never returned to the client and never logged.
 
+export type LlmApiKeyDecryptionFailureCode =
+  | 'invalid_umk'
+  | 'invalid_wallet_aad'
+  | 'malformed_ciphertext'
+  | 'authentication_failed';
+
+export type LlmApiKeyDecryptionClass =
+  | LlmApiKeyDecryptionFailureCode
+  | 'internal_failure';
+
+export class LlmApiKeyDecryptionError extends Error {
+  readonly code: LlmApiKeyDecryptionFailureCode;
+
+  constructor(code: LlmApiKeyDecryptionFailureCode) {
+    super(code);
+    this.name = 'LlmApiKeyDecryptionError';
+    this.code = code;
+  }
+}
+
+export interface LlmApiKeyDiagnosticFingerprint {
+  ciphertextBytes: number;
+  base64Chars: number;
+  ciphertextSha16: string;
+  walletAadSha16: string;
+  umkAuthorityTag16: string;
+}
+
+const LLM_API_KEY_DIAGNOSTIC_HMAC_INPUT =
+  'QuantumVault:diagnostic:llm-api-key-umk:v1';
+const LLM_API_KEY_ENVELOPE_MIN_BYTES = 12 + 16;
+
+function decodeLlmApiKeyEnvelope(
+  umk: Buffer,
+  encryptedV3: string,
+  walletAddress: string,
+): { aad: Buffer; ciphertext: Buffer } {
+  if (!Buffer.isBuffer(umk) || umk.length !== 32) {
+    throw new LlmApiKeyDecryptionError('invalid_umk');
+  }
+
+  let aad: Buffer;
+  try {
+    aad = buildAAD(walletAddress, 'LLM_API_KEY');
+  } catch {
+    throw new LlmApiKeyDecryptionError('invalid_wallet_aad');
+  }
+
+  if (
+    typeof encryptedV3 !== 'string'
+    || encryptedV3.length === 0
+    || encryptedV3.length % 4 !== 0
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encryptedV3)
+  ) {
+    throw new LlmApiKeyDecryptionError('malformed_ciphertext');
+  }
+  const ciphertext = Buffer.from(encryptedV3, 'base64');
+  if (
+    ciphertext.toString('base64') !== encryptedV3
+    || ciphertext.length < LLM_API_KEY_ENVELOPE_MIN_BYTES
+  ) {
+    throw new LlmApiKeyDecryptionError('malformed_ciphertext');
+  }
+  return { aad, ciphertext };
+}
+
+export function classifyLlmApiKeyDecryptionFailure(
+  error: unknown,
+): LlmApiKeyDecryptionClass {
+  return error instanceof LlmApiKeyDecryptionError
+    ? error.code
+    : 'internal_failure';
+}
+
+export function fingerprintLlmApiKeyV3(
+  umk: Buffer,
+  encryptedV3: string,
+  walletAddress: string,
+): LlmApiKeyDiagnosticFingerprint {
+  const { aad, ciphertext } = decodeLlmApiKeyEnvelope(umk, encryptedV3, walletAddress);
+  return {
+    ciphertextBytes: ciphertext.length,
+    base64Chars: encryptedV3.length,
+    ciphertextSha16: nodeCrypto.createHash('sha256').update(ciphertext).digest('hex').slice(0, 16),
+    walletAadSha16: nodeCrypto.createHash('sha256').update(aad).digest('hex').slice(0, 16),
+    umkAuthorityTag16: nodeCrypto.createHmac('sha256', umk)
+      .update(LLM_API_KEY_DIAGNOSTIC_HMAC_INPUT)
+      .digest('hex')
+      .slice(0, 16),
+  };
+}
+
 export function encryptLlmApiKeyV3(
   umk: Buffer,
   apiKey: Buffer,
@@ -1375,11 +1467,14 @@ export function decryptLlmApiKeyV3(
   encryptedV3: string,
   walletAddress: string,
 ): Buffer {
+  const { aad, ciphertext } = decodeLlmApiKeyEnvelope(umk, encryptedV3, walletAddress);
   const subkey = deriveSubkey(umk, SUBKEY_PURPOSES.LLM_API_KEY);
   try {
-    const aad = buildAAD(walletAddress, 'LLM_API_KEY');
-    const ciphertext = Buffer.from(encryptedV3, 'base64');
-    return decryptBuffer(ciphertext, subkey, aad);
+    try {
+      return decryptBuffer(ciphertext, subkey, aad);
+    } catch {
+      throw new LlmApiKeyDecryptionError('authentication_failed');
+    }
   } finally {
     zeroizeBuffer(subkey);
   }
