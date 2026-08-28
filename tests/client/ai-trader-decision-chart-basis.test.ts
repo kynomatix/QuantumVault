@@ -6,6 +6,10 @@ const source = readFileSync(
   resolve(process.cwd(), "client/src/components/AiTraderDecisionChart.tsx"),
   "utf8",
 );
+const drawerSource = readFileSync(
+  resolve(process.cwd(), "client/src/components/AiTraderDrawer.tsx"),
+  "utf8",
+);
 
 describe("AI Trader decision chart candle-basis label", () => {
   it("requires a server provenance summary and renders the dedicated badge", () => {
@@ -25,5 +29,30 @@ describe("AI Trader decision chart candle-basis label", () => {
   it("formats the current direct-perpetual identity as source, basis, proxy and finalities", () => {
     expect(source).toContain("[label.source, label.basis, label.proxy, label.finality.join('/')]");
     expect(source).toContain(".join(' \\u00B7 ')");
+  });
+});
+
+describe("AI Trader pending proposal chart access", () => {
+  const proposalSurface = drawerSource.slice(
+    drawerSource.indexOf("{bot.status === 'proposed' && latestProposal && ("),
+    drawerSource.indexOf("{openDecision && ("),
+  );
+
+  it("opens the existing chart modal from the exact unresolved proposal", () => {
+    expect(proposalSurface).toContain('data-testid="button-view-chart-proposal"');
+    expect(proposalSurface).toContain("<CandlestickChart");
+    expect(proposalSurface).toContain("View Chart");
+    expect(proposalSurface).toContain(
+      "onClick={() => setChartTarget(decisionRowToChartTarget(latestProposal))}",
+    );
+    expect(drawerSource).toContain("<AiTraderDecisionChart");
+    expect(drawerSource).toContain("decisionId={chartTarget?.decisionId ?? ''}");
+  });
+
+  it("keeps the proposal execution controls on the existing decision card", () => {
+    expect(proposalSurface).toContain("<AiTraderDecisionCard");
+    expect(proposalSurface).toContain("onExecute={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}");
+    expect(proposalSurface).toContain("onSkip={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}");
+    expect(proposalSurface).toContain("onAskAgain={handleAnalyze}");
   });
 });

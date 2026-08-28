@@ -1364,6 +1364,19 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       onAskAgain={handleAnalyze}
                       analyzeLoading={analyzeLoading}
                     />
+                    <div className="flex justify-end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[10px] gap-1"
+                        onClick={() => setChartTarget(decisionRowToChartTarget(latestProposal))}
+                        data-testid="button-view-chart-proposal"
+                      >
+                        <CandlestickChart className="w-3 h-3" />
+                        View Chart
+                      </Button>
+                    </div>
                   </div>
                 )}
 
