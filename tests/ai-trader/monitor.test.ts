@@ -22,6 +22,19 @@ import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
 import { breakevenStopPrice, paperBreakevenStopPrice } from "../../server/ai-trader/breakeven";
 
+const paperBreakevenStopOverride = vi.hoisted(() => ({
+  value: null as null | { ok: false; reason: "numerical_postcondition_unproven" },
+}));
+
+vi.mock("../../server/ai-trader/breakeven", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../server/ai-trader/breakeven")>();
+  return {
+    ...actual,
+    paperBreakevenStopPrice: (...args: Parameters<typeof actual.paperBreakevenStopPrice>) =>
+      paperBreakevenStopOverride.value ?? actual.paperBreakevenStopPrice(...args),
+  };
+});
+
 vi.mock("../../server/boot-id", () => ({
   SERVER_BOOT_ID: "ABCDEF12-0000-4000-8000-000000000000",
   SERVER_BOOT_STARTED_AT: "2026-07-08T12:00:00.000Z",
@@ -444,6 +457,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
+  paperBreakevenStopOverride.value = null;
   closeBotState = {};
   for (const m of [
     getWalletMock, getRecentClosedMock, getExactGraduationMock, commitGraduationMock,
@@ -4590,10 +4604,125 @@ describe("breakeven protect", () => {
     expect(updateBotMock).not.toHaveBeenCalled(); // still open
   });
 
-  it("paper: missing retained fee authority suppresses the move and warns once with its reason", async () => {
+  it("paper: every retained fee-authority failure suppresses the move and warns once with its exact reason", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { monitorBotOnce } = await importMonitor();
-    getDecisionsMock.mockResolvedValue([makeOpenDecision({ contextDigest: null })]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    const cases: Array<{ reason: string; contextDigest: unknown }> = [
+      { reason: "malformed_quote", contextDigest: null },
+      {
+        reason: "identity_mismatch",
+        contextDigest: { ...ERA_CONTEXT, ...retainedFeeContext({ identity: { protocol: "flash" } }) },
+      },
+      {
+        reason: "stale_quote",
+        contextDigest: {
+          ...ERA_CONTEXT,
+          ...retainedFeeContext({ quote: { observedAt: ENTRY_CANDLE_OPEN - 10 * 60_000 - 1 } }),
+        },
+      },
+      {
+        reason: "future_quote",
+        contextDigest: {
+          ...ERA_CONTEXT,
+          ...retainedFeeContext({ quote: { observedAt: ENTRY_CANDLE_OPEN + 1 } }),
+        },
+      },
+      {
+        reason: "ambiguous_builder",
+        contextDigest: {
+          ...ERA_CONTEXT,
+          ...retainedFeeContext({ quote: { builder: { status: "absent", rate: 0 } } }),
+        },
+      },
+      ...(["capability_unavailable", "read_failed", "builder_rate_unknown"] as const).map((reason) => ({
+        reason,
+        contextDigest: {
+          ...ERA_CONTEXT,
+          ...retainedFeeContext({ quote: { availability: "unavailable", reason } }),
+        },
+      })),
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      getDecisionsMock.mockResolvedValue([
+        makeOpenDecision({ id: "dec-fee-unavailable-" + index, contextDigest: testCase.contextDigest }),
+      ]);
+      await monitorBotOnce(makeBot());
+      await monitorBotOnce(makeBot());
+    }
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    const messages = warn.mock.calls
+      .map((call) => String(call[0]))
+      .filter((message) => message.includes("Breakeven protect (paper) suppressed"));
+    expect(messages).toHaveLength(cases.length);
+    for (const testCase of cases) {
+      expect(messages).toContainEqual(expect.stringContaining("reason=" + testCase.reason));
+    }
+  });
+
+  it("paper: the retained AVAX short remains eligible at 87% progress, while a marginal retrace suppresses the move", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    const entryPrice = 7.32083775;
+    const takeProfitPrice = 7.12;
+    const takerFeeRate = 0.0014;
+    const avaxStop = paperBreakevenStopPrice("short", entryPrice, takerFeeRate);
+    if (!avaxStop.ok) throw new Error("AVAX stop fixture failed: " + avaxStop.reason);
+    const favorableExtremeAt87Pct = entryPrice - 0.87 * (entryPrice - takeProfitPrice);
+    const feeContext = {
+      ...ERA_CONTEXT,
+      ...retainedFeeContext({
+        quote: { baseRate: takerFeeRate, effectiveRate: takerFeeRate },
+      }),
+    };
+    const decision = (id: string) => makeOpenDecision({
+      id,
+      entryPrice: String(entryPrice),
+      contextDigest: feeContext,
+      clampedDecision: {
+        action: "short",
+        sizeBase: 817.95,
+        marginUsdc: 100,
+        stopLossPrice: 7.46,
+        takeProfitPrice,
+      },
+    });
+    const bot = makeBot({ market: "AVAX-PERP" });
+
+    getDecisionsMock.mockResolvedValue([decision("dec-avax-eligible")]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(ENTRY_CANDLE_OPEN + TF_15M, entryPrice, 7.34, favorableExtremeAt87Pct, 7.20),
+    ]);
+    await monitorBotOnce(bot);
+
+    expect(decisionUpdates()).toHaveLength(1);
+    const moved = decisionUpdates()[0].clampedDecision as Record<string, any>;
+    expect(moved.stopLossPrice).toBeCloseTo(avaxStop.stopPrice, 12);
+    expect(moved.breakevenProtect.progressAtFire).toBeCloseTo(0.87, 12);
+
+    updateDecisionMock.mockClear();
+    getDecisionsMock.mockResolvedValue([decision("dec-avax-retraced")]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(
+        ENTRY_CANDLE_OPEN + TF_15M,
+        entryPrice,
+        7.34,
+        favorableExtremeAt87Pct,
+        avaxStop.stopPrice + 0.0001,
+      ),
+    ]);
+    await monitorBotOnce(bot);
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("paper: numerical proof exhaustion suppresses the move and emits the bounded reason", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { monitorBotOnce } = await importMonitor();
+    paperBreakevenStopOverride.value = { ok: false, reason: "numerical_postcondition_unproven" };
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ id: "dec-proof-exhausted" })]);
     fetchOHLCVMock.mockResolvedValue(progressCandles());
 
     await monitorBotOnce(makeBot());
@@ -4603,14 +4732,16 @@ describe("breakeven protect", () => {
     const messages = warn.mock.calls
       .map((call) => String(call[0]))
       .filter((message) => message.includes("Breakeven protect (paper) suppressed"));
-    expect(messages).toEqual([expect.stringContaining("reason=malformed_quote")]);
+    expect(messages).toEqual([
+      expect.stringContaining("reason=numerical_postcondition_unproven"),
+    ]);
   });
 
   it("paper: does NOT fire when price already retraced through breakeven", async () => {
     const { monitorBotOnce } = await importMonitor();
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     fetchOHLCVMock.mockResolvedValue([
-      candle(ENTRY_CANDLE_OPEN + TF_15M, 150.5, 158, 150.4, 150.1), // close back below 150.225
+      candle(ENTRY_CANDLE_OPEN + TF_15M, 150.5, 158, 150.4, NEW_SL - 0.0001), // close just beyond the dynamic paper stop
     ]);
 
     await monitorBotOnce(makeBot());
@@ -4622,7 +4753,7 @@ describe("breakeven protect", () => {
     const { monitorBotOnce } = await importMonitor();
     getDecisionsMock.mockResolvedValue([makeMovedDecision()]);
     fetchOHLCVMock.mockResolvedValue([
-      // Move candle (11:45): low 148 is below the moved stop 150.225 but above
+      // Move candle (11:45): low 148 is below the moved stop but above
       // the original 145 — its extremes predate the move, must not trigger.
       candle(NOW - TF_15M, 150.5, 158, 148, 157.5),
       candle(NOW, 157.5, 158, 151, 152), // post-move: above moved stop
@@ -4825,11 +4956,11 @@ describe("breakeven protect", () => {
   it("classifyLiveExit: a fill at the ORIGINAL stop after a move still classifies as 'sl' (Flash stacking)", async () => {
     const { classifyLiveExit } = await importMonitor();
     expect(
-      classifyLiveExit({ side: "long", avgExitPrice: 145.03, stopLossPrice: NEW_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
+      classifyLiveExit({ side: "long", avgExitPrice: 145.03, stopLossPrice: LIVE_FIXED_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
     ).toBe("sl");
     // And a fill at the MOVED stop is 'sl' too.
     expect(
-      classifyLiveExit({ side: "long", avgExitPrice: 150.2, stopLossPrice: NEW_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
+      classifyLiveExit({ side: "long", avgExitPrice: LIVE_FIXED_SL, stopLossPrice: LIVE_FIXED_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
     ).toBe("sl");
   });
 });
