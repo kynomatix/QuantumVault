@@ -111,6 +111,10 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(trackRecordCalculations).toContain("const trackRecordHasOpenExposure = openDecision !== null");
     expect(trackRecordCalculations).toContain("bot?.status === 'open'");
     expect(trackRecordCalculations).toContain("bot?.status === 'executing'");
+    expect(trackRecordCalculations).toContain("bot?.status === 'analyzing'");
+    expect(trackRecordCalculations).toContain("bot?.status === 'proposed'");
+    expect(trackRecordCalculations).toContain("bot?.status === 'paused' && bot?.pauseReason === 'position_unconfirmed'");
+    expect(trackRecordCalculations).not.toContain("position_unconfirmed_expired");
     expect(trackRecordCalculations).toContain("!trackRecordHasOpenExposure");
     expect(trackRecordCalculations).toContain("Number.isFinite(openUnrealizedPnl)");
     expect(trackRecordCalculations).toContain("trackRecordClosedPnl + trackRecordOpenPnl");
