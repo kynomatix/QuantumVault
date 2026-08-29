@@ -74,6 +74,11 @@ vi.mock("../../server/notification-service", () => ({
   sendTradeNotification: (...a: unknown[]) => notifyMock(...a),
 }));
 
+const appendTelemetryMock = vi.fn();
+vi.mock("../../server/telemetry", () => ({
+  appendTelemetry: (...a: unknown[]) => appendTelemetryMock(...a),
+}));
+
 const appendRequiredJournalMock = vi.fn(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
 const appendJournalMock = vi.fn(async () => undefined);
 const safeJournalMock = vi.fn();
@@ -181,6 +186,22 @@ function makePersistedDecision(overrides: Partial<AiTraderDecision> = {}): AiTra
 /** Call-order recorder shared by the storage + adapter mocks in live tests. */
 let callOrder: string[];
 
+function exactProtectiveStops(orderId = "st-1", triggerPrice = "145") {
+  return [{
+    orderId, internalSymbol: "SOL-PERP", side: "sell" as const, orderType: "stop_loss" as const,
+    triggerPrice, reduceOnly: true, initialSize: "999999", filledSize: "0", cancelledSize: "0",
+  }];
+}
+
+function protectiveSnapshot(orderId = "st-1", triggerPrice = "145") {
+  const orders = exactProtectiveStops(orderId, triggerPrice);
+  return {
+    orders,
+    matchingProtectiveRowCount: orders.length,
+    incompleteProtectiveRowCount: 0,
+  };
+}
+
 function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   return {
     getBalances: vi.fn(async () => {
@@ -193,6 +214,7 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
     }),
     getMaintenanceMarginWeight: vi.fn(() => 0.05),
     quantizeOrderSize: vi.fn((_market: string, sizeBase: number) => Math.floor(sizeBase * 100) / 100),
+    quantizePrice: vi.fn((_market: string, price: number) => price),
     setLeverage: vi.fn(async () => {
       callOrder.push("setLeverage");
     }),
@@ -212,7 +234,11 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
     }),
     getOpenStopOrders: vi.fn(async () => {
       callOrder.push("getOpenStopOrders");
-      return [{ order_id: "st-1", symbol: "SOL-PERP" }];
+      return [{ order_id: "st-1", symbol: "SOL" }];
+    }),
+    getOpenProtectiveOrders: vi.fn(async () => {
+      callOrder.push("getOpenProtectiveOrders");
+      return protectiveSnapshot("st-1");
     }),
     closePosition: vi.fn(async () => {
       callOrder.push("closePosition");
@@ -255,7 +281,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   callOrder = [];
   scannerCapabilitiesMock.liveExecutionEnabled = true;
-  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, commitPaperEntryMock, commitDirectLiveEntryMock, commitRecoveryMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendRequiredJournalMock, safeJournalMock]) {
+  for (const m of [getWalletMock, getRecentClosedMock, updateBotMock, updateDecisionMock, getAiTraderBotMock, getAiTraderDecisionMock, claimExecutionMock, transitionStateMock, commitPaperEntryMock, commitDirectLiveEntryMock, commitRecoveryMock, getUmkMock, decryptKeyMock, decryptSubKeyMock, verifyHmacMock, healUmkMock, notifyMock, appendTelemetryMock, appendRequiredJournalMock, safeJournalMock]) {
     m.mockReset();
   }
   appendRequiredJournalMock.mockImplementation(async ({ decisionId }: { decisionId: string }) => `entry:${decisionId}`);
@@ -987,6 +1013,7 @@ describe("live execution — happy path", () => {
       "placeMarketOrder",
       "getPositions",
       "setTpSl",
+      "getOpenProtectiveOrders",
       "getOpenStopOrders",
       "status:open",
     ]);
@@ -1047,6 +1074,30 @@ describe("live execution — happy path", () => {
       markPrice: 150,
     });
     expect(r).toEqual({ ok: true, mode: "live", entryPrice: 150.21 });
+  });
+
+  it("records semantic disagreement but keeps proven legacy stop presence as initial-entry authority", async () => {
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getOpenProtectiveOrders: vi.fn(async () => protectiveSnapshot("st-loose", "144")),
+    });
+    const { executeDecision } = await importExecutor();
+
+    const result = await executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-semantic-observer",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+
+    expect(result).toEqual({ ok: true, mode: "live", entryPrice: 150.2 });
+    expect(adapter.getOpenStopOrders).toHaveBeenCalled();
+    expect(adapter.closePosition).not.toHaveBeenCalled();
+    expect(appendTelemetryMock).toHaveBeenCalledWith(expect.stringMatching(
+      /event=protective_read_inconclusive seam=initial_entry.*semantic=off_spec.*legacy=1/
+    ));
   });
 });
 
@@ -1143,7 +1194,7 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(result).toMatchObject({ ok: true, mode: "live" });
     expect((adapter.getPositions as any)).toHaveBeenCalled();
     expect((adapter.setTpSl as any)).toHaveBeenCalled();
-    expect((adapter.getOpenStopOrders as any)).toHaveBeenCalled();
+    expect((adapter.getOpenProtectiveOrders as any)).toHaveBeenCalled();
     expect(commitDirectLiveEntryMock).toHaveBeenLastCalledWith(expect.objectContaining({ disposition: "open" }));
   });
 
@@ -1699,6 +1750,21 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(commitRecoveryMock).toHaveBeenCalledWith(expect.objectContaining({
       disposition: "emergency_unwind", botId: "bot-1111-2222", pauseReason: "bracket_failed",
     }));
+  });
+
+  it("G10: protective-order read failures exhaust retries and fail closed", async () => {
+    armLiveAuth();
+    const stopsMock = vi.fn(async () => { throw new Error("protective read unavailable"); });
+    const adapter = makeAdapter({ getOpenStopOrders: stopsMock });
+    const { executeDecision } = await importExecutor();
+    const promise = executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }), decisionId: "d-1", clamped: makeClamped(), adapter, markPrice: 150,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: "bracket_failed" });
+    expect(stopsMock).toHaveBeenCalledTimes(3);
+    expect((adapter.closePosition as any)).toHaveBeenCalled();
   });
 
   it("emergency close FAILURE never masks the original failure and screams in the notification", async () => {

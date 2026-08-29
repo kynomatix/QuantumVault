@@ -173,15 +173,33 @@ const OPEN_POSITION = {
   marginMode: "cross" as const,
 };
 
+function exactProtectiveStops(orderId = "st-1", triggerPrice = "145") {
+  return [{
+    orderId, internalSymbol: "SOL-PERP", side: "sell" as const, orderType: "stop_loss" as const,
+    triggerPrice, reduceOnly: true, initialSize: "999999", filledSize: "0", cancelledSize: "0",
+  }];
+}
+
+function protectiveSnapshot(orderId = "st-1", triggerPrice = "145") {
+  const orders = exactProtectiveStops(orderId, triggerPrice);
+  return {
+    orders,
+    matchingProtectiveRowCount: orders.length,
+    incompleteProtectiveRowCount: 0,
+  };
+}
+
 function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   return {
     getPositions: vi.fn(async () => []),
     getTradeHistory: vi.fn(async () => []),
-    getOpenStopOrders: vi.fn(async () => [{ order_id: "st-1", symbol: "SOL-PERP" }]),
+    getOpenStopOrders: vi.fn(async () => [{ order_id: "st-1", symbol: "SOL" }]),
+    getOpenProtectiveOrders: vi.fn(async () => protectiveSnapshot("st-1")),
     setTpSl: vi.fn(async () => ({ success: true, status: "acknowledged" })),
     cancelTpSlOrders: vi.fn(async () => ({ success: true })),
     closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 150.0 })),
     getPrice: vi.fn(async () => 150),
+    quantizePrice: vi.fn((_market: string, price: number) => price),
     ...overrides,
   } as unknown as ProtocolAdapter;
 }

@@ -1730,6 +1730,79 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
   }
 
+  async getOpenProtectiveOrders(
+    agentPublicKey: string,
+    internalSymbol: string,
+  ): Promise<import('../adapter').OpenProtectiveOrderSnapshot> {
+    const registry = this.getRegistry();
+    const protocolSymbol = registry.internalToProtocol(internalSymbol);
+    const params: Record<string, string> = { account: agentPublicKey };
+    const response = await this.get('/orders', params, {
+      priority: 'critical',
+      cachePolicy: 'fresh-required',
+    });
+    if (!Array.isArray(response)) {
+      throw new Error('Pacifica /orders returned a non-array protective-order response');
+    }
+
+    const decimalText = (value: unknown): string | null => {
+      if (typeof value !== 'string' || value.trim() === '' || !Number.isFinite(Number(value))) {
+        return null;
+      }
+      return value;
+    };
+
+    const orders: import('../adapter').OpenProtectiveOrder[] = [];
+    let matchingProtectiveRowCount = 0;
+    let incompleteProtectiveRowCount = 0;
+    for (const raw of response) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new Error('Pacifica /orders returned a malformed order row');
+      }
+      const row = raw as Record<string, unknown>;
+      if (row.symbol !== protocolSymbol) continue;
+      const rawType = String(row.order_type ?? '').toLowerCase();
+      let orderType: 'stop_loss' | 'take_profit';
+      if (rawType === 'stop_loss_limit' || rawType === 'stop_loss_market') {
+        orderType = 'stop_loss';
+      } else if (rawType === 'take_profit_limit' || rawType === 'take_profit_market') {
+        orderType = 'take_profit';
+      } else {
+        continue;
+      }
+      matchingProtectiveRowCount += 1;
+      const rawSide = String(row.side ?? '').toLowerCase();
+      const side = rawSide === 'ask' || rawSide === 'sell'
+        ? 'sell'
+        : rawSide === 'bid' || rawSide === 'buy'
+          ? 'buy'
+          : null;
+      const orderId = String(row.order_id ?? '').trim();
+      const triggerPrice = decimalText(row.stop_price);
+      const initialSize = decimalText(row.initial_amount);
+      const filledSize = decimalText(row.filled_amount);
+      const cancelledSize = decimalText(row.cancelled_amount);
+      if (!side || typeof row.reduce_only !== 'boolean' || !orderId
+          || triggerPrice === null || initialSize === null
+          || filledSize === null || cancelledSize === null) {
+        incompleteProtectiveRowCount += 1;
+        continue;
+      }
+      orders.push({
+        orderId,
+        internalSymbol,
+        side,
+        orderType,
+        triggerPrice,
+        reduceOnly: row.reduce_only,
+        initialSize,
+        filledSize,
+        cancelledSize,
+      });
+    }
+    return { orders, matchingProtectiveRowCount, incompleteProtectiveRowCount };
+  }
+
   /**
    * List resting (non-stop) open orders for an account. Recycling Plan §7.2/§8 —
    * used to verify a subaccount holds no working orders before pooling it. A 404

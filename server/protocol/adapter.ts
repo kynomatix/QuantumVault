@@ -738,6 +738,11 @@ export interface ProtocolAdapter {
   getOpenOrders?(agentPublicKey: string, subaccountId?: string): Promise<Array<{ orderId: string; symbol: string }>>;
   /** List open stop / TP-SL orders. Used by the recycler's flatten + verify-empty steps (§7.2/§8). */
   getOpenStopOrders?(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string }>>;
+  /** Fresh normalized protective-order authority for live AI Trader G10 verification. */
+  getOpenProtectiveOrders?(
+    agentPublicKey: string,
+    internalSymbol: string,
+  ): Promise<OpenProtectiveOrderSnapshot>;
   /** True only when the subaccount has no equity above dust, no open positions, and no open/stop orders (§8). */
   verifySubaccountEmpty?(input: { agentPublicKey: string; subaccountId?: string }): Promise<boolean>;
   /**
@@ -788,6 +793,24 @@ export interface ProtocolAdapter {
     timestamp: number,
     expiryWindow: number,
   ): Promise<void>;
+}
+
+export interface OpenProtectiveOrder {
+  orderId: string;
+  internalSymbol: string;
+  side: 'buy' | 'sell';
+  orderType: 'stop_loss' | 'take_profit';
+  triggerPrice: string;
+  reduceOnly: boolean;
+  initialSize: string;
+  filledSize: string;
+  cancelledSize: string;
+}
+
+export interface OpenProtectiveOrderSnapshot {
+  orders: OpenProtectiveOrder[];
+  matchingProtectiveRowCount: number;
+  incompleteProtectiveRowCount: number;
 }
 
 export interface UserTransactionBuilder {

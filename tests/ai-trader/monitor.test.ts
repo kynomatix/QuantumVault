@@ -374,16 +374,34 @@ function candle(time: number, open: number, high: number, low: number, close: nu
   return { time, open, high, low, close, volume: 100 };
 }
 
+function exactProtectiveStops(orderId = "st-1", triggerPrice = "145") {
+  return [{
+    orderId, internalSymbol: "SOL-PERP", side: "sell" as const, orderType: "stop_loss" as const,
+    triggerPrice, reduceOnly: true, initialSize: "999999", filledSize: "0", cancelledSize: "0",
+  }];
+}
+
+function protectiveSnapshot(orderId = "st-1", triggerPrice = "145") {
+  const orders = exactProtectiveStops(orderId, triggerPrice);
+  return {
+    orders,
+    matchingProtectiveRowCount: orders.length,
+    incompleteProtectiveRowCount: 0,
+  };
+}
+
 function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   return {
     protocolName: "pacifica",
     getPositions: vi.fn(async () => []),
     getTradeHistory: vi.fn(async () => []),
-    getOpenStopOrders: vi.fn(async () => [{ order_id: "st-1", symbol: "SOL-PERP" }]),
+    getOpenStopOrders: vi.fn(async () => [{ order_id: "st-1", symbol: "SOL" }]),
+    getOpenProtectiveOrders: vi.fn(async () => protectiveSnapshot("st-1")),
     setTpSl: vi.fn(async () => ({ success: true, status: "acknowledged" })),
     cancelTpSlOrders: vi.fn(async () => ({ success: true })),
     closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 150.0 })),
     getPrice: vi.fn(async () => 150),
+    quantizePrice: vi.fn((_market: string, price: number) => price),
     ...overrides,
   } as unknown as ProtocolAdapter;
 }
@@ -1091,7 +1109,7 @@ describe("live close-result consumption", () => {
 
     expect(result).toEqual({
       ok: false,
-      detail: "close execution is not terminal (acknowledged); original bracket restored and resting-order proof returned",
+      detail: "close execution is not terminal (acknowledged); original protective stop restored and legacy authority reports it present",
     });
     expect((adapter as any).setTpSl).toHaveBeenCalledWith(expect.objectContaining({
       stopLossPrice: 145,
@@ -1117,11 +1135,56 @@ describe("live close-result consumption", () => {
 
     expect(result).toEqual({
       ok: false,
-      detail: "closePosition threw: venue timeout; original bracket restored and resting-order proof returned",
+      detail: "closePosition threw: venue timeout; original protective stop restored and legacy authority reports it present",
     });
     expect(updateDecisionMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
     expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it("does not recreate a bracket after an uncertain close when the venue re-read is flat", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const getPositions = vi.fn()
+      .mockResolvedValueOnce([openPosition])
+      .mockResolvedValueOnce([]);
+    exactRestore.mockClear();
+    const adapter = makeAdapter({
+      getPositions,
+      closePosition: vi.fn(async () => { throw new Error("venue timeout"); }),
+      setTpSl: exactRestore,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toEqual({
+      ok: false,
+      detail: "closePosition threw: venue timeout; venue position is flat; no bracket restoration is required pending reconciliation",
+    });
+    expect(getPositions).toHaveBeenCalledTimes(2);
+    expect((adapter as any).setTpSl).not.toHaveBeenCalled();
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(notifyMock).not.toHaveBeenCalled();
+  });
+
+  it("pauses loudly when failed-close restoration cannot read the legacy protective authority", async () => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => { throw new Error("venue timeout"); }),
+      setTpSl: exactRestore,
+      getOpenStopOrders: vi.fn(async () => { throw new Error("protective read unavailable"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    const result = await userInitiatedClose(makeBot({ paperMode: false }));
+
+    expect(result).toMatchObject({ ok: false, detail: expect.stringContaining("bot paused for manual intervention") });
+    expect(botUpdates()).toContainEqual({ status: "paused", pauseReason: "bracket_failed" });
   });
 
   it("pauses loudly when an uncertain user close cannot restore exact protection", async () => {
@@ -1632,7 +1695,7 @@ describe("G10 bracket re-verification", () => {
     armLiveAuth();
     const stopOrdersSeq = vi.fn()
       .mockResolvedValueOnce([]) // check: missing
-      .mockResolvedValueOnce([{ order_id: "st-2", symbol: "SOL-PERP" }]); // verify after re-place
+      .mockResolvedValueOnce(exactProtectiveStops("st-2")); // verify after re-place
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
       getOpenStopOrders: stopOrdersSeq,
@@ -1655,7 +1718,7 @@ describe("G10 bracket re-verification", () => {
     armLiveAuth();
     const stopOrders = vi.fn()
       .mockResolvedValueOnce([]) // tick 1: missing
-      .mockResolvedValueOnce([{ order_id: "st-2", symbol: "SOL-PERP" }]) // tick 1: verified
+      .mockResolvedValueOnce(exactProtectiveStops("st-2")) // tick 1: verified
       .mockResolvedValueOnce([]); // tick 2: missing AGAIN
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
@@ -1679,7 +1742,7 @@ describe("G10 bracket re-verification", () => {
     armLiveAuth();
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
-      getOpenStopOrders: vi.fn(async () => []), // missing before AND after re-place
+      getOpenStopOrders: vi.fn().mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("replacement proof read unavailable")),
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -2633,7 +2696,7 @@ describe("startup reconciliation", () => {
     armLiveAuth();
     const stopOrders = vi.fn()
       .mockResolvedValueOnce([]) // missing on check
-      .mockResolvedValueOnce([{ order_id: "st-9", symbol: "SOL-PERP" }]); // rests after set
+      .mockResolvedValueOnce(exactProtectiveStops("st-9")); // rests after set
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
@@ -2648,6 +2711,24 @@ describe("startup reconciliation", () => {
     expect(resolved).toBe(true);
     expect((adapter as any).setTpSl).toHaveBeenCalledTimes(1);
     expect(botUpdates().some((u) => u.status === "open")).toBe(true);
+  });
+
+  it("startup recovery closes and pauses when exact protective-order reads stay unavailable", async () => {
+    const { reconcileBotOnStartup } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [
+        { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
+      ]),
+      getOpenStopOrders: vi.fn(async () => { throw new Error("startup proof read unavailable"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ outcome: null })]);
+
+    expect(await reconcileBotOnStartup(makeBot({ status: "executing", paperMode: false }))).toBe(true);
+    expect((adapter as any).setTpSl).toHaveBeenCalledTimes(1);
+    expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "bracket_failed")).toBe(true);
   });
 
   it("fails closed on an orphan position (no usable decision): close + pause + alert", async () => {
@@ -2791,7 +2872,7 @@ describe("startup reconciliation", () => {
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.3, markPrice: 150.2, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
       // Bracket already rests — clean adoption.
-      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-9", symbol: "SOL-PERP" }]),
+      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-9")),
       placeMarketOrder: vi.fn(async () => { throw new Error("must never place a second entry"); }),
     });
     getAdapterMock.mockReturnValue(adapter);
@@ -2962,7 +3043,7 @@ describe("startup reconciliation", () => {
       getPositions: vi.fn(async () => [
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.5, markPrice: 150.4, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
-      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-adopts", symbol: "SOL-PERP" }]),
+      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-adopts")),
       placeMarketOrder: vi.fn(async () => { throw new Error("must not place a second entry"); }),
     });
     getAdapterMock.mockReturnValue(adapter);
@@ -2990,7 +3071,7 @@ describe("startup reconciliation", () => {
         { internalSymbol: "SOL-PERP", baseSize: 1.75, entryPrice: 150.25, markPrice: 150.4,
           unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
-      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-restart", symbol: "SOL-PERP" }]),
+      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-restart")),
     }));
     commitRecoveryMock.mockResolvedValueOnce({
       status: "replayed",
@@ -3258,7 +3339,7 @@ describe("unconfirmed-landing reconciliation", () => {
     armLiveAuth();
     const stopOrders = vi.fn()
       .mockResolvedValueOnce([]) // missing on check
-      .mockResolvedValueOnce([{ order_id: "st-9", symbol: "SOL-PERP" }]); // rests after set
+      .mockResolvedValueOnce(exactProtectiveStops("st-9")); // rests after set
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
@@ -3286,7 +3367,7 @@ describe("unconfirmed-landing reconciliation", () => {
         { internalSymbol: "SOL-PERP", baseSize: 1.75, entryPrice: 150.1, markPrice: 150,
           unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
-      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-replayed", symbol: "SOL-PERP" }]),
+      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-replayed")),
     }));
 
     expect(await reconcileUnconfirmedLanding(makeQuarantinedBot())).toBe(true);
@@ -3310,7 +3391,7 @@ describe("unconfirmed-landing reconciliation", () => {
       getPositions: vi.fn(async () => [
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.1, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
-      getOpenStopOrders: vi.fn(async () => []), // never rests
+      getOpenStopOrders: vi.fn().mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("adoption proof read unavailable")),
       setTpSl: vi.fn(async () => ({ success: false, status: "rejected", error: "nope" })),
     });
     getAdapterMock.mockReturnValue(adapter);

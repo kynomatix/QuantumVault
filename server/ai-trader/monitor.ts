@@ -106,6 +106,11 @@ import {
   type CloseFeeEvidence,
 } from "../trading/signal-bot-close-integrity";
 import type { CancelResult, OrderResult, ProtocolPosition, TradeRecord } from "../protocol/protocol-types";
+import {
+  protectiveReadNeedsTelemetry,
+  verifyLiveProtectiveStop,
+  type LiveProtectiveStopProof,
+} from "./bracket-verification";
 import { isTerminalCloseResult } from "./close-truth";
 import { isAiTraderMarketAdmitted, SCANNER_MARKET_UNADMITTED_REASON } from "./market-admission";
 import { isMultiplierMarketQuarantined, MULTIPLIER_UNQUALIFIED_REASON } from "./multiplier-market-quarantine";
@@ -493,6 +498,24 @@ function emitMonitorDegradedHeartbeatIfDue(input: {
 const pendingReconciliation = new Set<string>();
 /** decisionIds whose missing bracket was already re-placed once (2nd miss ⇒ close+pause). */
 const bracketReplaceAttempted = new Set<string>();
+
+function recordProtectiveReadObservation(
+  seam: string,
+  bot: AiTraderBot,
+  view: OpenDecisionView,
+  proof: LiveProtectiveStopProof,
+): void {
+  if (!protectiveReadNeedsTelemetry(proof)) return;
+  const line =
+    `[AiTraderProtectiveRead] event=protective_read_inconclusive seam=${seam}` +
+    ` bot=${bot.id} market=${bot.market} decision=${view.decision.id}` +
+    ` semantic=${proof.semantic.status}` +
+    ` normalized=${proof.semantic.normalizedRowCount}` +
+    ` incomplete=${proof.semantic.incompleteRowCount}` +
+    ` legacy=${proof.legacyRowCount ?? "unavailable"}`;
+  console.warn(line);
+  appendTelemetry(line);
+}
 /** Per-bot auto-next timers (cleared on re-schedule / pause / stop). */
 const autoNextTimers = new Map<string, NodeJS.Timeout>();
 
@@ -930,6 +953,18 @@ async function restoreCloseProtection(
     }
 
     const restored = await withSigningContext(bot, async (keyTrio) => {
+      const positions = await adapter.getPositions(keyTrio.agentPublicKey, undefined);
+      const marketPosition = matchPosition(positions, bot.market);
+      if (!marketPosition) {
+        return {
+          restored: true,
+          detail: "venue position is flat; no bracket restoration is required pending reconciliation",
+        };
+      }
+      const position = matchingClosePosition(positions, bot, currentView);
+      if (!position) {
+        return { restored: false, detail: "venue position side changed while restoring protection" };
+      }
       const applied = await adapter.setTpSl!({
         ...keyTrio,
         internalSymbol: bot.market,
@@ -948,14 +983,17 @@ async function restoreCloseProtection(
           detail: applied.error ?? "venue did not report both exact bracket legs as applied",
         };
       }
-      const resting = await adapter.getOpenStopOrders!(
-        keyTrio.agentPublicKey,
-        undefined,
-        bot.market
-      );
-      return resting.length > 0
-        ? { restored: true, detail: "original bracket restored and resting-order proof returned" }
-        : { restored: false, detail: "resting-order proof returned no open stop orders" };
+      const proof = await verifyLiveProtectiveStop({
+        adapter,
+        agentPublicKey: keyTrio.agentPublicKey,
+        internalSymbol: bot.market,
+        positionBaseSize: position.baseSize,
+        expectedStopLossPrice: currentView.stopLossPrice,
+      });
+      recordProtectiveReadObservation("failed_close_restoration", bot, currentView, proof);
+      return proof.status === "legacy_present"
+        ? { restored: true, detail: "original protective stop restored and legacy authority reports it present" }
+        : { restored: false, detail: `restored protective stop not proven: ${proof.detail}` };
     });
     return restored.ok
       ? restored.value
@@ -2337,17 +2375,24 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
     return;
   }
 
-  // G10 — bracket must stay resting. The minimal getOpenStopOrders shape can't
-  // distinguish legs, so only a fully-EMPTY book counts as "missing".
+  // G10 money authority remains the proven legacy stop-order read while the
+  // semantic /orders observation is calibrated. An unavailable legacy read
+  // skips this cycle; it is never converted into synthetic order evidence.
   if (typeof adapter.getOpenStopOrders === "function" && typeof adapter.setTpSl === "function") {
-    let stopOrders: Array<{ order_id: string; symbol: string }>;
-    try {
-      stopOrders = await adapter.getOpenStopOrders(agentPublicKey, subaccountId, bot.market);
-    } catch (err) {
-      console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: getOpenStopOrders failed (${err instanceof Error ? err.message : err}) — skipping bracket check`);
-      stopOrders = [{ order_id: "unknown", symbol: bot.market }]; // read failure ≠ missing bracket
+    const stopProof = await verifyLiveProtectiveStop({
+      adapter,
+      agentPublicKey,
+      subaccountId,
+      internalSymbol: bot.market,
+      positionBaseSize: position.baseSize,
+      expectedStopLossPrice: view.stopLossPrice,
+    });
+    recordProtectiveReadObservation("periodic_g10", bot, view, stopProof);
+    if (stopProof.status === "legacy_unavailable") {
+      console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: legacy protective-stop read unavailable (${stopProof.detail}) — skipping bracket check`);
+      return;
     }
-    if (stopOrders.length === 0) {
+    if (stopProof.status !== "legacy_present") {
       if (bracketReplaceAttempted.has(view.decision.id)) {
         await closeLivePositionAndPause(bot, view, adapter, {
           pauseReason: "bracket_failed",
@@ -2370,8 +2415,16 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
       let verified = false;
       if (replaceRes.ok && replaceRes.value.success) {
         try {
-          const after = await adapter.getOpenStopOrders(agentPublicKey, subaccountId, bot.market);
-          verified = after.length > 0;
+          const after = await verifyLiveProtectiveStop({
+            adapter,
+            agentPublicKey,
+            subaccountId,
+            internalSymbol: bot.market,
+            positionBaseSize: position.baseSize,
+            expectedStopLossPrice: view.stopLossPrice,
+          });
+          recordProtectiveReadObservation("periodic_replacement", bot, view, after);
+          verified = after.status === "legacy_present";
         } catch {
           verified = false;
         }
@@ -3334,13 +3387,16 @@ async function reconcileUnconfirmedLandingImplementation(bot: AiTraderBot): Prom
       });
       return true;
     }
-    let bracketOk = false;
-    try {
-      const resting = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
-      bracketOk = resting.length > 0;
-    } catch {
-      bracketOk = false;
-    }
+    const initialProof = await verifyLiveProtectiveStop({
+      adapter,
+      agentPublicKey: readAccount,
+      subaccountId,
+      internalSymbol: bot.market,
+      positionBaseSize: position.baseSize,
+      expectedStopLossPrice: view.stopLossPrice,
+    });
+    recordProtectiveReadObservation("uncertain_landing", bot, view, initialProof);
+    let bracketOk = initialProof.status === "legacy_present";
     if (!bracketOk) {
       const placed = await withSigningContext(bot, (keyTrio) =>
         adapter.setTpSl!({
@@ -3354,8 +3410,16 @@ async function reconcileUnconfirmedLandingImplementation(bot: AiTraderBot): Prom
       let verified = false;
       if (placed.ok && placed.value.success) {
         try {
-          const after = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
-          verified = after.length > 0;
+          const after = await verifyLiveProtectiveStop({
+            adapter,
+            agentPublicKey: readAccount,
+            subaccountId,
+            internalSymbol: bot.market,
+            positionBaseSize: position.baseSize,
+            expectedStopLossPrice: view.stopLossPrice,
+          });
+          recordProtectiveReadObservation("uncertain_landing_replacement", bot, view, after);
+          verified = after.status === "legacy_present";
         } catch {
           verified = false;
         }
@@ -3672,13 +3736,16 @@ async function reconcileBotOnStartupImplementation(bot: AiTraderBot): Promise<bo
     });
     return true;
   }
-  let bracketOk = false;
-  try {
-    const resting = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
-    bracketOk = resting.length > 0;
-  } catch {
-    bracketOk = false;
-  }
+  const initialProof = await verifyLiveProtectiveStop({
+    adapter,
+    agentPublicKey: readAccount,
+    subaccountId,
+    internalSymbol: bot.market,
+    positionBaseSize: position.baseSize,
+    expectedStopLossPrice: view.stopLossPrice,
+  });
+  recordProtectiveReadObservation("startup_recovery", bot, view, initialProof);
+  let bracketOk = initialProof.status === "legacy_present";
   if (!bracketOk) {
     const placed = await withSigningContext(bot, (keyTrio) =>
       adapter.setTpSl!({
@@ -3692,8 +3759,16 @@ async function reconcileBotOnStartupImplementation(bot: AiTraderBot): Promise<bo
     let verified = false;
     if (placed.ok && placed.value.success) {
       try {
-        const after = await adapter.getOpenStopOrders(readAccount, subaccountId, bot.market);
-        verified = after.length > 0;
+        const after = await verifyLiveProtectiveStop({
+          adapter,
+          agentPublicKey: readAccount,
+          subaccountId,
+          internalSymbol: bot.market,
+          positionBaseSize: position.baseSize,
+          expectedStopLossPrice: view.stopLossPrice,
+        });
+        recordProtectiveReadObservation("startup_replacement", bot, view, after);
+        verified = after.status === "legacy_present";
       } catch {
         verified = false;
       }

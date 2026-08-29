@@ -31,6 +31,10 @@ function stubRegistry(a: any) {
       if (s.toUpperCase() !== 'SOL-PERP') throw new Error(`unknown internal symbol "${s}"`);
       return 'SOL';
     },
+    protocolToInternal: (s: string) => {
+      if (s.toUpperCase() !== 'SOL') throw new Error(`unknown protocol symbol "${s}"`);
+      return 'SOL-PERP';
+    },
   });
 }
 
@@ -81,6 +85,47 @@ describe('PacificaAdapter.getOpenStopOrders — symbol normalization', () => {
 
     a.get = async () => { throw new Error('HTTP 500 server error'); };
     await expect(a.getOpenStopOrders(ACCT, undefined, 'SOL-PERP')).rejects.toThrow('500');
+  });
+});
+
+describe('PacificaAdapter.getOpenProtectiveOrders — documented /orders authority', () => {
+  it('requests a fresh account order list and normalizes only the requested protective legs', async () => {
+    const a = createAdapter() as any;
+    stubRegistry(a);
+    const get = vi.fn(async () => [
+      { order_id: 41, symbol: 'SOL', side: 'ask', stop_price: '145', order_type: 'stop_loss_market', reduce_only: true, initial_amount: '2', filled_amount: '0', cancelled_amount: '0' },
+      { order_id: 42, symbol: 'SOL', side: 'ask', stop_price: '160', order_type: 'take_profit_market', reduce_only: true, initial_amount: '2', filled_amount: '0', cancelled_amount: '0' },
+      { order_id: 43, symbol: 'SOL', side: 'bid', price: '150', order_type: 'limit', reduce_only: false, initial_amount: '1', filled_amount: '0', cancelled_amount: '0' },
+      { order_id: 44, symbol: 'ETH', side: 'ask', stop_price: '2000', order_type: 'stop_loss_market', reduce_only: true, initial_amount: '1', filled_amount: '0', cancelled_amount: '0' },
+    ]);
+    a.get = get;
+
+    const snapshot = await a.getOpenProtectiveOrders(ACCT, 'SOL-PERP');
+
+    expect(get).toHaveBeenCalledWith('/orders', { account: ACCT }, {
+      priority: 'critical', cachePolicy: 'fresh-required',
+    });
+    expect(snapshot).toEqual({
+      matchingProtectiveRowCount: 2,
+      incompleteProtectiveRowCount: 0,
+      orders: [
+        { orderId: '41', internalSymbol: 'SOL-PERP', side: 'sell', orderType: 'stop_loss', triggerPrice: '145', reduceOnly: true, initialSize: '2', filledSize: '0', cancelledSize: '0' },
+        { orderId: '42', internalSymbol: 'SOL-PERP', side: 'sell', orderType: 'take_profit', triggerPrice: '160', reduceOnly: true, initialSize: '2', filledSize: '0', cancelledSize: '0' },
+      ],
+    });
+  });
+
+  it('marks incomplete matching rows inconclusive and rejects a non-array response', async () => {
+    const a = createAdapter() as any;
+    stubRegistry(a);
+    a.get = vi.fn(async () => [{ order_id: 41, symbol: 'SOL', side: 'ask', stop_price: '145', order_type: 'stop_loss_market', reduce_only: true, initial_amount: '2', filled_amount: '0' }]);
+    await expect(a.getOpenProtectiveOrders(ACCT, 'SOL-PERP')).resolves.toEqual({
+      orders: [],
+      matchingProtectiveRowCount: 1,
+      incompleteProtectiveRowCount: 1,
+    });
+    a.get = vi.fn(async () => ({ orders: [] }));
+    await expect(a.getOpenProtectiveOrders(ACCT, 'SOL-PERP')).rejects.toThrow('non-array');
   });
 });
 

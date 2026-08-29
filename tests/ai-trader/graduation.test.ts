@@ -487,21 +487,21 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
-  it("declares scanner strategy-bound market identity as a reviewed no-bump for capability policy", () => {
+  it("declares live exact-leg bracket verification as no-bump across affected components", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 23,
+      decisionGeneration: 24,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.guardrail_risk_policy).toMatchObject({
       materialVersion: 4,
-      decisionGeneration: 13,
+      decisionGeneration: 14,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 10,
-      decision: "bump",
+      decisionGeneration: 11,
+      decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
       materialVersion: 1,

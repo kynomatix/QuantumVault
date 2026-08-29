@@ -60,6 +60,11 @@ import {
   safeAppendExecutionEvents,
   type JournalEventInput,
 } from "./execution-journal";
+import {
+  protectiveReadNeedsTelemetry,
+  verifyLiveProtectiveStop,
+  type LiveProtectiveStopProof,
+} from "./bracket-verification";
 
 // --- G6 cadence rules (mirror of context-builder's advisory echo; THIS is the
 // enforcement point). Module-private there, so the values are pinned here too —
@@ -1026,7 +1031,7 @@ async function executeLiveEntry(
     }
 
     // Step 4 — confirm the position actually exists (3× / 2s).
-    let confirmed: { entryPrice: number } | null = null;
+    let confirmed: { entryPrice: number; baseSize: number } | null = null;
     for (let attempt = 1; attempt <= POSITION_CONFIRM_ATTEMPTS; attempt++) {
       try {
         const positions = await adapter.getPositions(agentPublicKey, subaccountId);
@@ -1058,6 +1063,8 @@ async function executeLiveEntry(
       stopLossPrice: n.stopLossPrice,
       takeProfitPrice: n.takeProfitPrice,
       builderAttachment: n.builderAttachment,
+      positionBaseSize: confirmed.baseSize,
+      decisionId,
     });
     if (!bracketOk.ok) {
       safeAppendExecutionEvents([entryOrderEvent]);
@@ -1119,11 +1126,11 @@ async function executeLiveEntry(
 function findPosition(
   positions: Array<{ internalSymbol: string; baseSize: number; entryPrice: number }>,
   market: string
-): { entryPrice: number } | null {
+): { entryPrice: number; baseSize: number } | null {
   const pos = positions.find(
     (p) => p.internalSymbol.toUpperCase() === market.toUpperCase() && Math.abs(p.baseSize) > 0
   );
-  return pos ? { entryPrice: pos.entryPrice } : null;
+  return pos ? { entryPrice: pos.entryPrice, baseSize: pos.baseSize } : null;
 }
 
 /**
@@ -1141,8 +1148,20 @@ async function placeAndVerifyBracket(args: {
   stopLossPrice: number;
   takeProfitPrice: number;
   builderAttachment: BuilderAttachmentPolicy;
+  positionBaseSize: number;
+  decisionId: string;
 }): Promise<{ ok: true } | { ok: false; detail: string }> {
-  const { bot, adapter, keyTrio, subaccountId, stopLossPrice, takeProfitPrice, builderAttachment } = args;
+  const {
+    bot,
+    adapter,
+    keyTrio,
+    subaccountId,
+    stopLossPrice,
+    takeProfitPrice,
+    builderAttachment,
+    positionBaseSize,
+    decisionId,
+  } = args;
 
   switch (bot.stopPolicy) {
     case "static":
@@ -1176,15 +1195,42 @@ async function placeAndVerifyBracket(args: {
     }
   }
 
-  // G10 — the bracket must be VISIBLE on the venue, not just acknowledged.
+  // G10 money authority remains the proven legacy stop-order read while the
+  // semantic /orders observation is calibrated against production behavior.
+  let lastDetail = "protective stop not observed";
   for (let attempt = 1; attempt <= BRACKET_VERIFY_ATTEMPTS; attempt++) {
-    try {
-      const stops = await adapter.getOpenStopOrders!(keyTrio.agentPublicKey, subaccountId, bot.market);
-      if (stops.length > 0) return { ok: true };
-    } catch { /* transient read failure — retry */ }
+    const proof = await verifyLiveProtectiveStop({
+      adapter,
+      agentPublicKey: keyTrio.agentPublicKey,
+      subaccountId,
+      internalSymbol: bot.market,
+      positionBaseSize,
+      expectedStopLossPrice: stopLossPrice,
+    });
+    recordProtectiveReadObservation("initial_entry", bot, decisionId, proof);
+    if (proof.status === "legacy_present") return { ok: true };
+    lastDetail = proof.detail;
     if (attempt < BRACKET_VERIFY_ATTEMPTS) await sleep(BRACKET_VERIFY_DELAY_MS);
   }
-  return { ok: false, detail: `G10: no resting stop orders visible for ${bot.market} after ${BRACKET_VERIFY_ATTEMPTS} checks` };
+  return { ok: false, detail: `G10: legacy protective stop presence not proven for ${bot.market} after ${BRACKET_VERIFY_ATTEMPTS} checks (${lastDetail})` };
+}
+
+function recordProtectiveReadObservation(
+  seam: string,
+  bot: AiTraderBot,
+  decisionId: string,
+  proof: LiveProtectiveStopProof,
+): void {
+  if (!protectiveReadNeedsTelemetry(proof)) return;
+  const line =
+    `[AiTraderProtectiveRead] event=protective_read_inconclusive seam=${seam}` +
+    ` bot=${bot.id} market=${bot.market} decision=${decisionId}` +
+    ` semantic=${proof.semantic.status}` +
+    ` normalized=${proof.semantic.normalizedRowCount}` +
+    ` incomplete=${proof.semantic.incompleteRowCount}` +
+    ` legacy=${proof.legacyRowCount ?? "unavailable"}`;
+  console.warn(line);
+  appendTelemetry(line);
 }
 
 /**
