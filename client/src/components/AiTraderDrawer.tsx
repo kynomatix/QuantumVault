@@ -1056,13 +1056,23 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     return alloc > 0 ? (dd / alloc) * 100 : 0;
   })();
 
-  // WO-8h item 1: net P&L = server-computed lifetimeStats with client fallback.
+  // Keep the legacy lifetime aggregate only for the separately-labelled AI-cost
+  // statistic. The Track Record P&L authority is the terminally attributed
+  // current-mode performance projection already fetched for the Activity panel.
   const lifetimeStats = (detail as any)?.lifetimeStats ?? null;
-  const netPnlAllIn: number = lifetimeStats?.netPnlAllIn ?? (netPnl + (openUnrealizedPnl ?? 0) - totalLlmCost);
   // The detail endpoint fetches only the last 10 decisions for display, so client-computed
-  // netPnl / totalLlmCost miss anything older. Use server lifetime totals when available.
-  const displayRealized: number = lifetimeStats?.totalRealized ?? netPnl;
+  // totalLlmCost misses anything older. Use the server lifetime total for that distinct tile.
   const displayLlmCost: number = lifetimeStats?.totalLlmCost ?? totalLlmCost;
+  const trackRecordClosedPnl = performance.status === 'available' ? performance.netPnl : null;
+  const trackRecordOpenPnl = openDecision === null
+    ? 0
+    : (openUnrealizedPnl !== null && Number.isFinite(openUnrealizedPnl) ? openUnrealizedPnl : null);
+  const trackRecordNetPnl = trackRecordClosedPnl !== null && trackRecordOpenPnl !== null
+    ? trackRecordClosedPnl + trackRecordOpenPnl
+    : null;
+  const trackRecordMode = performance.status === 'available'
+    ? (performance.mode === 'paper_trial' ? 'paper' : 'live')
+    : null;
 
   const degenDaysAlive = bot ? Math.floor((Date.now() - new Date(bot.createdAt ?? Date.now()).getTime()) / 86400000) : 0;
   const degenRemaining = alloc + netPnl;
@@ -1682,33 +1692,56 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               <TabsContent value="track-record" className="space-y-4 mt-3">
                 <AiTraderQualificationReview review={qualificationReview} />
 
-                {/* Net P&L headline — WO-8h item 1 */}
+                {/* Current-mode P&L headline; never falls back to mixed lifetime totals. */}
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <div
-                        className={`p-4 rounded-xl border cursor-help ${netPnlAllIn >= 0 ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-red-500/10 border-red-500/20'}`}
+                        className={`p-4 rounded-xl border cursor-help ${trackRecordNetPnl === null
+                          ? 'bg-muted/30 border-border/60'
+                          : trackRecordNetPnl >= 0
+                            ? 'bg-emerald-500/10 border-emerald-500/20'
+                            : 'bg-red-500/10 border-red-500/20'}`}
                         data-testid="track-record-net-pnl"
                       >
-                        <p className="text-xs text-muted-foreground">Net P&L (closed + live − AI cost)</p>
-                        <p className={`text-2xl font-bold mt-0.5 ${netPnlAllIn >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                          {netPnlAllIn >= 0 ? '+' : ''}${Math.abs(netPnlAllIn).toFixed(2)}
+                        <p className="text-xs text-muted-foreground">
+                          {trackRecordMode ? `Overall ${trackRecordMode} P&L (closed + open)` : 'Overall P&L'}
+                        </p>
+                        <p className={`text-2xl font-bold mt-0.5 ${trackRecordNetPnl === null
+                          ? 'text-muted-foreground'
+                          : trackRecordNetPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {trackRecordNetPnl === null ? '—' : formatPerformancePnl(trackRecordNetPnl)}
                         </p>
                       </div>
                     </TooltipTrigger>
                     <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-3 space-y-1.5">
-                      <div className="flex justify-between gap-4">
-                        <span>Closed P&L (fees in)</span>
-                        <span>{displayRealized >= 0 ? '+' : ''}${displayRealized.toFixed(2)}</span>
-                      </div>
-                      <div className="flex justify-between gap-4">
-                        <span>Live unrealized</span>
-                        <span>{openUnrealizedPnl != null ? `${openUnrealizedPnl >= 0 ? '+' : ''}$${openUnrealizedPnl.toFixed(2)}` : '$0.00'}</span>
-                      </div>
-                      <div className="flex justify-between gap-4">
-                        <span>AI spend</span>
-                        <span>−${displayLlmCost.toFixed(4)}</span>
-                      </div>
+                      {trackRecordNetPnl === null ? (
+                        <p>
+                          {performance.status === 'available' && openDecision !== null
+                            ? 'Open-position unrealized P&L is unavailable, so the overall figure is withheld.'
+                            : 'Current-mode performance is temporarily unavailable.'}
+                        </p>
+                      ) : performance.status === 'available' ? (
+                        <>
+                          <div className="flex justify-between gap-4">
+                            <span>Attributed {trackRecordMode} closed P&L (fees in)</span>
+                            <span>{formatPerformancePnl(performance.netPnl)}</span>
+                          </div>
+                          <div className="flex justify-between gap-4">
+                            <span>Open unrealized</span>
+                            <span>{formatPerformancePnl(trackRecordOpenPnl ?? 0)}</span>
+                          </div>
+                          {performance.omittedUnattributedTrades > 0 && (
+                            <p>{performance.omittedUnattributedTrades} closed {performance.omittedUnattributedTrades === 1 ? 'trade' : 'trades'} omitted: paper/live attribution unavailable.</p>
+                          )}
+                          {performance.excludedOtherModeTrades > 0 && (
+                            <p>{performance.excludedOtherModeTrades} other-mode {performance.excludedOtherModeTrades === 1 ? 'trade' : 'trades'} excluded.</p>
+                          )}
+                          {performance.omittedInvalidPnlTrades > 0 && (
+                            <p>{performance.omittedInvalidPnlTrades} closed {performance.omittedInvalidPnlTrades === 1 ? 'trade' : 'trades'} omitted: realized P&L invalid.</p>
+                          )}
+                        </>
+                      ) : null}
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>

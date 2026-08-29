@@ -15,6 +15,14 @@ const performancePanel = source.slice(
   source.indexOf("function PerformancePanel"),
   source.indexOf("function TrialStrip"),
 );
+const trackRecordCalculations = source.slice(
+  source.indexOf("const trackRecordClosedPnl"),
+  source.indexOf("const degenDaysAlive"),
+);
+const trackRecordPanel = source.slice(
+  source.indexOf('<TabsContent value="track-record"'),
+  source.indexOf('<TabsContent value="settings"'),
+);
 
 describe("AI Trader drawer overall mode-scoped performance", () => {
   it("fetches independently and reuses the existing polling and close-refresh lifecycle", () => {
@@ -98,9 +106,30 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(trialStrip).not.toContain("· DD {maxDdPct.toFixed(1)}%");
   });
 
-  it("keeps the Record metric explicitly all-in rather than reusing the current-era label", () => {
-    expect(source).toContain("Net P&L (closed + live − AI cost)");
-    expect(source).toContain('data-testid="track-record-net-pnl"');
+  it("uses the terminally attributed current-mode projection for the Track Record P&L", () => {
+    expect(trackRecordCalculations).toContain("performance.status === 'available' ? performance.netPnl : null");
+    expect(trackRecordCalculations).toContain("openDecision === null");
+    expect(trackRecordCalculations).toContain("Number.isFinite(openUnrealizedPnl)");
+    expect(trackRecordCalculations).toContain("trackRecordClosedPnl + trackRecordOpenPnl");
+    expect(trackRecordPanel).toContain('data-testid="track-record-net-pnl"');
+    expect(trackRecordPanel).toContain("`Overall ${trackRecordMode} P&L (closed + open)`");
+    expect(trackRecordPanel).toContain("formatPerformancePnl(trackRecordNetPnl)");
+    expect(trackRecordPanel).toContain("Attributed {trackRecordMode} closed P&L (fees in)");
+    expect(trackRecordPanel).toContain("formatPerformancePnl(performance.netPnl)");
+    expect(trackRecordPanel).toContain("formatPerformancePnl(trackRecordOpenPnl ?? 0)");
+    expect(trackRecordPanel).not.toContain("lifetimeStats");
+    expect(trackRecordPanel).not.toContain("AI spend");
+    expect(trackRecordPanel).not.toContain("Net P&L (closed + live − AI cost)");
     expect(performancePanel).not.toContain("closed + live − AI cost");
+  });
+
+  it("fails the Track Record enrichment open without presenting partial data as complete", () => {
+    expect(trackRecordPanel).toContain("Open-position unrealized P&L is unavailable, so the overall figure is withheld.");
+    expect(trackRecordPanel).toContain("Current-mode performance is temporarily unavailable.");
+    expect(trackRecordPanel).toContain("omittedUnattributedTrades");
+    expect(trackRecordPanel).toContain("excludedOtherModeTrades");
+    expect(trackRecordPanel).toContain("omittedInvalidPnlTrades");
+    expect(trackRecordPanel).toContain("paper/live attribution unavailable");
+    expect(trackRecordPanel).not.toContain("netPnlAllIn");
   });
 });
