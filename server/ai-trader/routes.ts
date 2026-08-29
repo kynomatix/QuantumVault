@@ -403,6 +403,109 @@ type AiTraderModePerformanceSummary =
       reason: "projection_unavailable";
     };
 
+export type AiTraderQualificationProgress =
+  | {
+      status: "available";
+      tradeCount: number;
+      netPnl: number;
+      trialStartedAt: string;
+      resetReason: string | null;
+    }
+  | {
+      status: "unavailable";
+      reason:
+        | "not_active_paper_trial"
+        | "trial_start_unavailable"
+        | "qualification_era_unavailable"
+        | "trial_evidence_mismatch"
+        | "trial_evidence_unavailable";
+      trialStartedAt: string | null;
+      resetReason: string | null;
+    };
+
+type QualificationProgressDecision = {
+  closedAt: Date | string | null;
+  qualificationEraDigest: string | null;
+  realizedPnl: unknown;
+};
+
+export function projectAiTraderQualificationProgress(
+  bot: Pick<AiTraderBot,
+    "paperMode" | "graduationState" | "trialStartedAt"
+    | "currentQualificationEraDigest" | "qualificationEraInvalidationReason">,
+  rows: QualificationProgressDecision[] | null,
+): AiTraderQualificationProgress {
+  const resetReason = bot.qualificationEraInvalidationReason ?? null;
+  if (!bot.paperMode || bot.graduationState !== "in_trial") {
+    return { status: "unavailable", reason: "not_active_paper_trial", trialStartedAt: null, resetReason };
+  }
+  const trialStartedAt = bot.trialStartedAt instanceof Date
+    ? bot.trialStartedAt
+    : new Date(bot.trialStartedAt ?? "");
+  if (Number.isNaN(trialStartedAt.getTime())) {
+    return { status: "unavailable", reason: "trial_start_unavailable", trialStartedAt: null, resetReason };
+  }
+  if (!bot.currentQualificationEraDigest) {
+    return {
+      status: "unavailable",
+      reason: "qualification_era_unavailable",
+      trialStartedAt: trialStartedAt.toISOString(),
+      resetReason,
+    };
+  }
+  if (!Array.isArray(rows)) {
+    return {
+      status: "unavailable",
+      reason: "trial_evidence_unavailable",
+      trialStartedAt: trialStartedAt.toISOString(),
+      resetReason,
+    };
+  }
+
+  let netPnl = new Decimal(0);
+  for (const row of rows) {
+    const closedAt = row.closedAt instanceof Date ? row.closedAt : new Date(row.closedAt ?? "");
+    if (row.realizedPnl === null || row.realizedPnl === undefined || row.realizedPnl === "") {
+      return {
+        status: "unavailable",
+        reason: "trial_evidence_mismatch",
+        trialStartedAt: trialStartedAt.toISOString(),
+        resetReason,
+      };
+    }
+    let pnl: Decimal;
+    try {
+      pnl = new Decimal(row.realizedPnl as Decimal.Value);
+    } catch {
+      return {
+        status: "unavailable",
+        reason: "trial_evidence_mismatch",
+        trialStartedAt: trialStartedAt.toISOString(),
+        resetReason,
+      };
+    }
+    if (Number.isNaN(closedAt.getTime())
+        || row.qualificationEraDigest !== bot.currentQualificationEraDigest
+        || !pnl.isFinite()) {
+      return {
+        status: "unavailable",
+        reason: "trial_evidence_mismatch",
+        trialStartedAt: trialStartedAt.toISOString(),
+        resetReason,
+      };
+    }
+    netPnl = netPnl.plus(pnl);
+  }
+
+  return {
+    status: "available",
+    tradeCount: rows.length,
+    netPnl: netPnl.toDecimalPlaces(2).toNumber(),
+    trialStartedAt: trialStartedAt.toISOString(),
+    resetReason,
+  };
+}
+
 type PerformanceCandidateRow = {
   decisionId: string;
   closedAt: Date | string | null;
@@ -858,6 +961,28 @@ export function registerAiTraderRoutes(app: Express): void {
       recordRequestSubspan("botLifetimeStatsMs", Date.now() - lifetimeStatsStartedAt);
       const raw = rawStats.get(bot.id) ?? { totalRealized: 0, totalFees: 0, totalLlmCost: 0 };
 
+      let qualificationProgress = projectAiTraderQualificationProgress(bot, []);
+      if (bot.paperMode && bot.graduationState === "in_trial"
+          && bot.trialStartedAt && bot.currentQualificationEraDigest) {
+        const trialStartedAt = bot.trialStartedAt instanceof Date
+          ? bot.trialStartedAt
+          : new Date(bot.trialStartedAt);
+        if (!Number.isNaN(trialStartedAt.getTime())) {
+          try {
+            const evaluatedAt = new Date();
+            const exactRows = await storage.getExactAiTraderGraduationDecisions(
+              bot.id,
+              trialStartedAt,
+              evaluatedAt,
+            );
+            qualificationProgress = projectAiTraderQualificationProgress(bot, exactRows);
+          } catch {
+            console.warn("[AiTrader] qualification progress projection unavailable");
+            qualificationProgress = projectAiTraderQualificationProgress(bot, null);
+          }
+        }
+      }
+
       if (openPosition && markPrice !== null) {
         const unrealizedPnl = computeUnrealizedPnl(openPosition, markPrice);
         if (unrealizedPnl !== null) {
@@ -875,7 +1000,15 @@ export function registerAiTraderRoutes(app: Express): void {
         netPnlAllIn: raw.totalRealized + unrealized - raw.totalLlmCost,
       };
 
-      res.json({ bot: toBotDto(bot), openPosition, recentDecisions: decisions, markPrice, pnl, lifetimeStats });
+      res.json({
+        bot: toBotDto(bot),
+        openPosition,
+        recentDecisions: decisions,
+        markPrice,
+        pnl,
+        lifetimeStats,
+        qualificationProgress,
+      });
     } catch (err) {
       console.error("[AiTrader] get error:", err);
       res.status(500).json({ error: "Internal server error" });

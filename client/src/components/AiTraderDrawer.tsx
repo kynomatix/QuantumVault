@@ -316,6 +316,20 @@ interface BotDetailResponse {
   openPosition: OpenPositionView | null;
   recentDecisions: AiDecisionRow[];
   markPrice: number | null;
+  qualificationProgress:
+    | {
+        status: 'available';
+        tradeCount: number;
+        netPnl: number;
+        trialStartedAt: string;
+        resetReason: string | null;
+      }
+    | {
+        status: 'unavailable';
+        reason: string;
+        trialStartedAt: string | null;
+        resetReason: string | null;
+      };
 }
 
 // Everything AiTraderDecisionChart needs as props, minus open/onOpenChange
@@ -592,10 +606,24 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
   );
 }
 
-function TrialStrip({ bot, tradesCount, netPnl, onGoLive, onRestartTrial, goLiveLoading, restartLoading, preflight, onOpenDeposit }: {
+function formatQualificationResetReason(reason: string): string | null {
+  const suppressedReasons = new Set([
+    'qualification_era_initialized',
+  ]);
+  if (suppressedReasons.has(reason)) return null;
+
+  const labels: Record<string, string> = {
+    scanner_market_selection_changed: 'Scanner market selection changed',
+    material_bot_settings_changed: 'Material bot settings changed',
+    trial_restarted: 'Trial restarted',
+    qualification_era_changed: 'Qualification evidence changed',
+  };
+  return labels[reason] ?? reason.replaceAll('_', ' ').replace(/^./, (value) => value.toUpperCase());
+}
+
+function TrialStrip({ bot, qualificationProgress, onGoLive, onRestartTrial, goLiveLoading, restartLoading, preflight, onOpenDeposit }: {
   bot: AiTraderBot;
-  tradesCount: number;
-  netPnl: number;
+  qualificationProgress: BotDetailResponse['qualificationProgress'];
   onGoLive: () => void;
   onRestartTrial: () => void;
   goLiveLoading: boolean;
@@ -607,11 +635,9 @@ function TrialStrip({ bot, tradesCount, netPnl, onGoLive, onRestartTrial, goLive
   const criteria = bot.graduationCriteria as { periodDays?: number; minTrades?: number } | null;
   const periodDays = criteria?.periodDays ?? 30;
   const minTrades = criteria?.minTrades ?? 10;
-  const trialStartMs = bot.trialStartedAt ? new Date(bot.trialStartedAt).getTime() : Date.now();
-  const daysElapsed = Math.min(periodDays, Math.floor((Date.now() - trialStartMs) / 86400000));
-  const dayPct = (daysElapsed / periodDays) * 100;
-  const tradePct = Math.min(100, (tradesCount / minTrades) * 100);
-  const overallPct = Math.round(Math.min(dayPct, tradePct));
+  const resetReasonLabel = qualificationProgress.resetReason
+    ? formatQualificationResetReason(qualificationProgress.resetReason)
+    : null;
 
   if (bot.graduationState === 'graduated' && bot.qualificationEraStatus !== 'matched') {
     return (
@@ -712,17 +738,45 @@ function TrialStrip({ bot, tradesCount, netPnl, onGoLive, onRestartTrial, goLive
     );
   }
 
+  if (qualificationProgress.status === 'unavailable') {
+    const reason = qualificationProgress.reason.replaceAll('_', ' ');
+    return (
+      <div className="px-4 pt-3 pb-2.5 border-b border-border/50 space-y-1.5">
+        <div className="text-[11px] text-amber-400" data-testid="trial-strip-unavailable">
+          Qualification era unavailable · {reason}
+        </div>
+        {resetReasonLabel && (
+          <div className="text-[10px] text-muted-foreground" data-testid="trial-strip-reset-reason">
+            Reset reason: {resetReasonLabel}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const { tradeCount, netPnl } = qualificationProgress;
+  const trialStartMs = new Date(qualificationProgress.trialStartedAt).getTime();
+  const daysElapsed = Math.max(0, Math.min(periodDays, Math.floor((Date.now() - trialStartMs) / 86400000)));
+  const dayPct = (daysElapsed / periodDays) * 100;
+  const tradePct = Math.min(100, (tradeCount / minTrades) * 100);
+  const overallPct = Math.round(Math.min(dayPct, tradePct));
+
   const pnlStr = `${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`;
 
   return (
     <div className="px-4 pt-3 pb-2.5 border-b border-border/50 space-y-1.5">
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-muted-foreground font-medium" data-testid="trial-strip-summary">
-          Loaded timeline · Day {daysElapsed}/{periodDays} · {tradesCount} closed trades · <span className={netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{pnlStr}</span>
+          Qualification era · Day {daysElapsed}/{periodDays} · {tradeCount} closed trades · <span className={netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{pnlStr}</span>
         </span>
         <span className="text-muted-foreground">{overallPct}%</span>
       </div>
       <Progress value={overallPct} className="h-1" />
+      {resetReasonLabel && (
+        <div className="text-[10px] text-muted-foreground" data-testid="trial-strip-reset-reason">
+          Reset reason: {resetReasonLabel}
+        </div>
+      )}
     </div>
   );
 }
@@ -1344,8 +1398,12 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
             {bot.paperMode && (
               <TrialStrip
                 bot={bot}
-                tradesCount={tradesCount}
-                netPnl={netPnl}
+                qualificationProgress={detail?.qualificationProgress ?? {
+                  status: 'unavailable',
+                  reason: 'detail_unavailable',
+                  trialStartedAt: null,
+                  resetReason: bot.qualificationEraInvalidationReason,
+                }}
                 onGoLive={handleGoLive}
                 onRestartTrial={handleRestartTrial}
                 goLiveLoading={actionLoading === 'go-live'}

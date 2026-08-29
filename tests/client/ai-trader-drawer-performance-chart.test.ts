@@ -99,11 +99,38 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(performancePanel).toContain("omitted because realized P&amp;L is invalid.");
   });
 
-  it("uses the exact loaded-timeline TrialStrip summary and deliberately removes its DD suffix", () => {
+  it("uses exact qualification-era progress rather than the loaded timeline", () => {
     expect(source).toContain('data-testid="trial-strip-summary"');
-    expect(source).toContain("Loaded timeline · Day {daysElapsed}/{periodDays} · {tradesCount} closed trades ·");
+    expect(source).toContain("Qualification era · Day {daysElapsed}/{periodDays} · {tradeCount} closed trades ·");
     const trialStrip = source.slice(source.indexOf("function TrialStrip"), source.indexOf("export function AiTraderDrawer"));
+    expect(trialStrip).toContain("qualificationProgress.status === 'unavailable'");
+    expect(trialStrip).toContain('data-testid="trial-strip-unavailable"');
+    expect(trialStrip).toContain("const { tradeCount, netPnl } = qualificationProgress");
+    expect(trialStrip).toContain("qualificationProgress.trialStartedAt");
+    expect(trialStrip).toContain("Reset reason: {resetReasonLabel}");
+    expect(trialStrip).toContain("const resetReasonLabel = qualificationProgress.resetReason");
+    expect(source).toContain("scanner_market_selection_changed: 'Scanner market selection changed'");
+    expect(source).toContain("material_bot_settings_changed: 'Material bot settings changed'");
+    expect(source).toContain("trial_restarted: 'Trial restarted'");
+    expect(source).toContain("qualification_era_changed: 'Qualification evidence changed'");
+    const resetReasonFormatter = source.slice(
+      source.indexOf("function formatQualificationResetReason"),
+      source.indexOf("function TrialStrip"),
+    );
+    expect(resetReasonFormatter).toContain("const suppressedReasons = new Set([");
+    expect(resetReasonFormatter).toContain("'qualification_era_initialized'");
+    expect(resetReasonFormatter).toContain("if (suppressedReasons.has(reason)) return null");
+    expect(resetReasonFormatter.indexOf("if (suppressedReasons.has(reason)) return null"))
+      .toBeLessThan(resetReasonFormatter.indexOf("return labels[reason] ??"));
+    expect(resetReasonFormatter).not.toContain("labels[reason] ?? null");
+    expect(trialStrip).toContain("const pnlStr = `${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`");
+    expect(trialStrip).not.toContain("Loaded timeline");
     expect(trialStrip).not.toContain("· DD {maxDdPct.toFixed(1)}%");
+    const trialStripStart = source.indexOf("<TrialStrip");
+    const trialStripCall = source.slice(trialStripStart, source.indexOf("/>", trialStripStart) + 2);
+    expect(trialStripCall).toContain("qualificationProgress={detail?.qualificationProgress");
+    expect(trialStripCall).not.toContain("tradesCount={tradesCount}");
+    expect(trialStripCall).not.toContain("netPnl={netPnl}");
   });
 
   it("uses the terminally attributed current-mode projection for the Track Record P&L", () => {

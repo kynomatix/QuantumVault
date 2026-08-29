@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 const getBotMock = vi.fn();
 const getAiTraderDecisionsMock = vi.fn();
+const getExactAiTraderGraduationDecisionsMock = vi.fn();
 const getAiTraderBotLifetimeStatsMock = vi.fn();
 const getAiTraderBotsByWalletMock = vi.fn();
 const getAiTraderOpenDecisionsByBotIdsMock = vi.fn();
@@ -26,6 +27,7 @@ vi.mock("../../server/storage", () => ({
   storage: {
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getAiTraderDecisionsMock(...a),
+    getExactAiTraderGraduationDecisions: (...a: unknown[]) => getExactAiTraderGraduationDecisionsMock(...a),
     getAiTraderBotLifetimeStats: (...a: unknown[]) => getAiTraderBotLifetimeStatsMock(...a),
     getAiTraderBotsByWallet: (...a: unknown[]) => getAiTraderBotsByWalletMock(...a),
     getAiTraderOpenDecisionsByBotIds: (...a: unknown[]) => getAiTraderOpenDecisionsByBotIdsMock(...a),
@@ -162,6 +164,7 @@ vi.mock("../../server/ai-trader/multiplier-market-quarantine", () => ({
 }));
 
 import {
+  projectAiTraderQualificationProgress,
   projectAiTraderPerformance,
   registerAiTraderRoutes,
   summarizeCandleProvenance,
@@ -1205,6 +1208,93 @@ describe("AI Trader detail request subspan attribution", () => {
     expect(Object.keys(trace.snapshot())).toEqual([
       "botOwnedLoadMs", "botDecisionReadMs", "botVenueMarkMs", "botLifetimeStatsMs",
     ]);
+  });
+});
+
+describe("AI Trader exact qualification progress projection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getAiTraderDecisionsMock.mockResolvedValue([]);
+    getAiTraderBotLifetimeStatsMock.mockResolvedValue(new Map());
+    parseOpenDecisionMock.mockReturnValue(null);
+  });
+
+  it("returns the exact unbounded current-era population independently of the recent page", async () => {
+    const bot = performanceBot({
+      graduationState: "in_trial",
+      qualificationEraInvalidationReason: "scanner_market_selection_changed",
+    });
+    getBotMock.mockResolvedValue(bot);
+    getAiTraderDecisionsMock.mockResolvedValue([{ id: "recent-page-row", outcome: "flat" }]);
+    getExactAiTraderGraduationDecisionsMock.mockResolvedValue([
+      { id: "older-1", closedAt: new Date("2026-08-02T00:00:00.000Z"), qualificationEraDigest: bot.currentQualificationEraDigest, realizedPnl: "4.505" },
+      { id: "older-2", closedAt: new Date("2026-08-03T00:00:00.000Z"), qualificationEraDigest: bot.currentQualificationEraDigest, realizedPnl: "-1.25" },
+    ]);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id", {
+      params: { id: bot.id }, query: {}, body: {}, headers: {}, session: { walletAddress: bot.walletAddress },
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.body.qualificationProgress).toEqual({
+      status: "available",
+      tradeCount: 2,
+      netPnl: 3.26,
+      trialStartedAt: "2026-08-01T00:00:00.000Z",
+      resetReason: "scanner_market_selection_changed",
+    });
+    expect(getExactAiTraderGraduationDecisionsMock).toHaveBeenCalledWith(
+      bot.id,
+      new Date("2026-08-01T00:00:00.000Z"),
+      expect.any(Date),
+    );
+    expect(result.body.recentDecisions).toHaveLength(1);
+  });
+
+  it("returns available zero truth for an empty current era", () => {
+    expect(projectAiTraderQualificationProgress(performanceBot({ graduationState: "in_trial" }), [])).toEqual({
+      status: "available",
+      tradeCount: 0,
+      netPnl: 0,
+      trialStartedAt: "2026-08-01T00:00:00.000Z",
+      resetReason: null,
+    });
+  });
+
+  it.each([
+    ["trial_start_unavailable", performanceBot({ graduationState: "in_trial", trialStartedAt: null }), []],
+    ["qualification_era_unavailable", performanceBot({ graduationState: "in_trial", currentQualificationEraDigest: null }), []],
+    ["trial_evidence_mismatch", performanceBot({ graduationState: "in_trial" }), [
+      { closedAt: new Date("2026-08-02T00:00:00.000Z"), qualificationEraDigest: "wrong-era", realizedPnl: "2.5" },
+    ]],
+    ["trial_evidence_mismatch", performanceBot({ graduationState: "in_trial" }), [
+      { closedAt: new Date("2026-08-02T00:00:00.000Z"), qualificationEraDigest: "E".repeat(64), realizedPnl: "NaN" },
+    ]],
+    ["trial_evidence_mismatch", performanceBot({ graduationState: "in_trial" }), [
+      { closedAt: new Date("2026-08-02T00:00:00.000Z"), qualificationEraDigest: "E".repeat(64), realizedPnl: null },
+    ]],
+  ])("classifies %s without silently omitting evidence", (reason, bot, rows) => {
+    expect(projectAiTraderQualificationProgress(bot, rows as any)).toMatchObject({ status: "unavailable", reason });
+  });
+
+  it("keeps detail available when the exact progress read fails", async () => {
+    const bot = performanceBot({ graduationState: "in_trial" });
+    getBotMock.mockResolvedValue(bot);
+    getExactAiTraderGraduationDecisionsMock.mockRejectedValue(new Error("read failed"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app as any);
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id", {
+      params: { id: bot.id }, query: {}, body: {}, headers: {}, session: { walletAddress: bot.walletAddress },
+    });
+    expect(result.statusCode).toBe(200);
+    expect(result.body.qualificationProgress).toMatchObject({
+      status: "unavailable",
+      reason: "trial_evidence_unavailable",
+    });
+    expect(warn).toHaveBeenCalledWith("[AiTrader] qualification progress projection unavailable");
+    warn.mockRestore();
   });
 });
 
