@@ -116,6 +116,11 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(trackRecordCalculations).toContain("bot?.pauseReason === 'consecutive_losses'");
     expect(trackRecordCalculations).toContain("const trackRecordHasOpenExposure = !trackRecordHasProvenNoOpenExposure");
     expect(trackRecordCalculations).not.toContain("reconcile_orphan_position");
+    const exposurePredicateStart = trackRecordCalculations.indexOf("const trackRecordHasProvenNoOpenExposure");
+    const exposurePredicateEnd = trackRecordCalculations.indexOf(";", exposurePredicateStart) + 1;
+    expect(trackRecordCalculations.slice(exposurePredicateStart, exposurePredicateEnd).replace(/\s+/g, " ").trim()).toBe(
+      "const trackRecordHasProvenNoOpenExposure = openDecision === null && ( bot?.status === 'idle' || bot?.status === 'stopped' || (bot?.status === 'paused' && ( bot?.pauseReason === 'user_requested' || bot?.pauseReason === 'position_unconfirmed_expired' || bot?.pauseReason === 'consecutive_losses' )) );",
+    );
     expect(trackRecordCalculations).toContain("!trackRecordHasOpenExposure");
     expect(trackRecordCalculations).toContain("Number.isFinite(openUnrealizedPnl)");
     expect(trackRecordCalculations).toContain("trackRecordClosedPnl + trackRecordOpenPnl");
@@ -132,8 +137,10 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
   });
 
   it("fails the Track Record enrichment open without presenting partial data as complete", () => {
+    expect(trackRecordPanel).toContain("performance.status === 'available' && openDecision !== null");
     expect(trackRecordPanel).toContain("performance.status === 'available' && trackRecordHasOpenExposure");
     expect(trackRecordPanel).toContain("Open-position unrealized P&L is unavailable, so the overall figure is withheld.");
+    expect(trackRecordPanel).toContain("The bot state cannot be proven flat, so the overall figure is withheld.");
     expect(trackRecordPanel).toContain("Current-mode performance is temporarily unavailable.");
     expect(trackRecordPanel).toContain("omittedUnattributedTrades");
     expect(trackRecordPanel).toContain("excludedOtherModeTrades");

@@ -1064,9 +1064,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   // totalLlmCost misses anything older. Use the server lifetime total for that distinct tile.
   const displayLlmCost: number = lifetimeStats?.totalLlmCost ?? totalLlmCost;
   const trackRecordClosedPnl = performance.status === 'available' ? performance.netPnl : null;
-  // Zero is permitted only for states whose persisted transition contract proves
-  // there is no unrepresented venue exposure. Every new or unknown status/reason
-  // defaults to withholding the headline until server authority says otherwise.
+  // Zero is permitted only for states last written under a confirmed-flat
+  // transition. Every new or unknown status/reason defaults to withholding the
+  // headline until the server projects current position authority directly.
   const trackRecordHasProvenNoOpenExposure = openDecision === null && (
     bot?.status === 'idle'
     || bot?.status === 'stopped'
@@ -1730,9 +1730,11 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-3 space-y-1.5">
                       {trackRecordNetPnl === null ? (
                         <p>
-                          {performance.status === 'available' && trackRecordHasOpenExposure
+                          {performance.status === 'available' && openDecision !== null
                             ? 'Open-position unrealized P&L is unavailable, so the overall figure is withheld.'
-                            : 'Current-mode performance is temporarily unavailable.'}
+                            : performance.status === 'available' && trackRecordHasOpenExposure
+                              ? 'The bot state cannot be proven flat, so the overall figure is withheld.'
+                              : 'Current-mode performance is temporarily unavailable.'}
                         </p>
                       ) : performance.status === 'available' ? (
                         <>
