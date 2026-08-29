@@ -935,12 +935,12 @@ describe('close-path and restart contract wiring', () => {
     );
   });
 
-  it('keeps two full-close authority pairs plus one centralized FLIP adapter and three delegations', () => {
+  it('keeps full-close, FLIP, and partial-close authority reads explicit', () => {
     const routes = readFileSync('server/routes.ts', 'utf8');
     const strictReads = routes.match(/getPositionForCloseAuthority\(/g) ?? [];
     const cacheFallbacks = routes.match(/getRiskReducingCachedCloseFallback\(/g) ?? [];
     const flipDelegations = routes.match(/await executeSignalBotFlipClose\(/g) ?? [];
-    expect(strictReads).toHaveLength(3);
+    expect(strictReads).toHaveLength(4);
     expect(cacheFallbacks).toHaveLength(3);
     expect(flipDelegations).toHaveLength(3);
     expect(routes).toContain('executionLabel: "per_bot"');

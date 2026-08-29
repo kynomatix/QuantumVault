@@ -1612,6 +1612,7 @@ import {
   deferSignalBotFlipOpen,
   markSignalBotFlipOpenExecuted,
   rejectSignalBotFlipOpen,
+  resolvePartialClosePositionAuthority,
   resolveSignalBotFlipCloseThenOpen,
   summarizeSignalBotCloseFills,
   type SignalBotFlipAuthorityRead,
@@ -4886,6 +4887,132 @@ function closeFeeEventPayload(input: CanonicalCloseFinalizationInput): Record<st
     feeEvidence: input.feeEvidence,
     ...(displayAccounting ? { displayAccounting } : {}),
   };
+}
+
+type SignedPartialCloseAccountingResult =
+  | { kind: "completed"; tradeId: string; isNew: boolean; remainingSize: number; becameFlat: boolean }
+  | { kind: "incomplete"; tradeId: string; reason: string };
+
+async function finalizeSignedPartialCloseAccounting(input: {
+  bot: TradingBot;
+  queryAccount: string;
+  querySubaccountId: number;
+  botSubaccountPublicKey?: string;
+  preClosePosition: {
+    baseSize: string;
+    avgEntryPrice: string;
+    lastTradeId?: string | null;
+  } | null | undefined;
+  closedSize: number;
+  closedFraction: number;
+  closeSide: "long" | "short";
+  fillPrice: number;
+  fee: number | null;
+  pnl: number | null;
+  feeEvidence: CloseFeeEvidence;
+  signature: string | null | undefined;
+  protocolFillId: string;
+  executionMethod: string;
+  webhookPayload: unknown;
+}): Promise<SignedPartialCloseAccountingResult> {
+  const preCloseBaseSize = Number(input.preClosePosition?.baseSize);
+  const basePayload = typeof input.webhookPayload === "object" && input.webhookPayload !== null
+    ? input.webhookPayload as Record<string, unknown>
+    : { payload: input.webhookPayload };
+  const markerPayload = {
+    ...basePayload,
+    partialClose: true,
+    fraction: input.closedFraction,
+    feeEvidence: input.feeEvidence,
+    partialCloseAccounting: {
+      status: "pending_venue_authority",
+      expectedBaseSize: input.preClosePosition?.baseSize ?? null,
+      expectedLastTradeId: input.preClosePosition?.lastTradeId ?? null,
+      requestedClosedSize: input.closedSize,
+    },
+  };
+  const marker = await storage.createBotTradeIdempotent({
+    tradingBotId: input.bot.id,
+    walletAddress: input.bot.walletAddress,
+    market: input.bot.market,
+    side: input.closeSide,
+    size: String(input.closedSize),
+    price: String(input.fillPrice),
+    fee: null,
+    pnl: null,
+    status: "pending",
+    txSignature: input.signature ?? null,
+    protocolFillId: input.protocolFillId,
+    protocol: input.bot.activeProtocol,
+    webhookPayload: markerPayload,
+    errorMessage: "Partial close executed; awaiting authoritative residual position",
+    executionMethod: input.executionMethod,
+  });
+
+  const authority = await resolvePartialClosePositionAuthority({
+    preCloseBaseSize,
+    readAuthority: async () => PositionService.getPositionForCloseAuthority(
+      input.bot.id,
+      input.queryAccount,
+      input.querySubaccountId,
+      input.bot.market,
+      input.botSubaccountPublicKey,
+      getAdapterForBot(input.bot),
+    ),
+  });
+  if (authority.kind === "unavailable") {
+    return { kind: "incomplete", tradeId: marker.trade.id, reason: authority.reason };
+  }
+
+  try {
+    const accounting = await storage.recordCloseEventAtomic({
+      botId: input.bot.id,
+      update: {
+        tradeId: marker.trade.id,
+        fields: {
+          status: "executed",
+          fee: input.fee === null ? null : String(input.fee),
+          pnl: input.pnl === null ? null : String(input.pnl),
+          errorMessage: null,
+          webhookPayload: {
+            ...markerPayload,
+            partialCloseAccounting: {
+              ...markerPayload.partialCloseAccounting,
+              status: "complete",
+              residualBaseSize: authority.residualBaseSize,
+              residualEntryPrice: authority.residualEntryPrice,
+              becameFlat: authority.becameFlat,
+            },
+          },
+        },
+      },
+      deltas: {
+        totalPnlDelta: input.pnl ?? 0,
+        totalVolumeDelta: input.closedSize * input.fillPrice,
+        lastTradeAt: new Date().toISOString(),
+      },
+      confirmedPositionReduction: {
+        market: input.bot.market,
+        expectedBaseSize: input.preClosePosition?.baseSize ?? "NaN",
+        expectedLastTradeId: input.preClosePosition?.lastTradeId ?? null,
+        residualBaseSize: authority.residualBaseSize,
+        residualEntryPrice: authority.residualEntryPrice,
+        realizedPnlDelta: input.pnl ?? 0,
+        feeDelta: input.fee ?? 0,
+      },
+    });
+    return {
+      kind: "completed",
+      tradeId: accounting.trade?.id ?? marker.trade.id,
+      isNew: accounting.isNew,
+      remainingSize: Math.abs(authority.residualBaseSize),
+      becameFlat: authority.becameFlat,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error(`[PartialClose] Atomic accounting remains incomplete for ${input.bot.id}: ${reason}`);
+    return { kind: "incomplete", tradeId: marker.trade.id, reason };
+  }
 }
 
 async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInput) {
@@ -19497,52 +19624,39 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             timestampMs: Date.now(),
           });
 
-          const pcAtomic = await storage.recordCloseEventAtomic({
-            botId,
-            insert: {
-              tradingBotId: botId,
-              walletAddress: bot.walletAddress,
-              market: bot.market,
-              side: pcPositionSide === 'long' ? 'short' : 'long',
-              size: String(partialCloseSize),
-              price: String(pcFillPrice),
-              fee: pcFee === null ? null : String(pcFee),
-              pnl: pcPnl === null ? null : String(pcPnl),
-              status: 'executed',
-              txSignature: pcResult.signature || null,
-              protocolFillId: pcDedupKey,
-              webhookPayload: { ...payload, partialClose: true, fraction: partialCloseFraction, feeEvidence: pcResult.feeEvidence },
-              executionMethod: pcResult.executionMethod || 'legacy',
-            },
-            deltas: {
-              totalPnlDelta: pcPnl ?? 0,
-              totalVolumeDelta: partialCloseSize * pcFillPrice,
-              lastTradeAt: new Date().toISOString(),
-            },
+          const pcAccounting = await finalizeSignedPartialCloseAccounting({
+            bot,
+            queryAccount: webhookBotCtx?.botPublicKey ?? pcWallet.agentPublicKey!,
+            querySubaccountId: pcSubAccountId,
+            botSubaccountPublicKey: webhookBotCtx?.botPublicKey,
+            preClosePosition: dbPositionForClassification,
+            closedSize: partialCloseSize,
+            closedFraction: partialCloseFraction,
+            closeSide: pcPositionSide === 'long' ? 'short' : 'long',
+            fillPrice: pcFillPrice,
+            fee: pcFee,
+            pnl: pcPnl,
+            feeEvidence: pcResult.feeEvidence,
+            signature: pcResult.signature,
+            protocolFillId: pcDedupKey,
+            executionMethod: pcResult.executionMethod || 'legacy',
+            webhookPayload: payload,
           });
-
-          // Sync the bot_positions cache from on-chain so it reflects the new
-          // reduced size. Full args (fee/fillPrice/side/size) let sync compute
-          // the position-level realizedPnl + reduced baseSize and engage its
-          // stale-read guard; this is a separate ledger from the bot-level
-          // totalPnl booked by recordCloseEventAtomic above, so no double-count.
-          syncPositionFromOnChain(
-            botId,
-            bot.walletAddress,
-            pcWallet.agentPublicKey!,
-            pcSubAccountId,
-            bot.market,
-            pcAtomic.trade?.id ?? '',
-            pcFee ?? 0,
-            pcFillPrice,
-            pcPositionSide === 'long' ? 'short' : 'long',
-            partialCloseSize,
-            webhookBotCtx?.botPublicKey,
-          ).catch(err =>
-            console.error(`[Webhook] Post-partial-close sync error:`, err));
+          if (pcAccounting.kind === "incomplete") {
+            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+            return res.status(200).json({
+              status: "accounting_incomplete",
+              type: "partial_close",
+              fraction: partialCloseFraction,
+              closedSize: partialCloseSize,
+              trade: pcAccounting.tradeId,
+              reason: pcAccounting.reason,
+              signature: pcResult.signature,
+            });
+          }
 
           // Schedule debounced Telegram notification.
-          if (pcPnl !== null) schedulePartialCloseNotification({
+          if (pcPnl !== null && pcAccounting.isNew) schedulePartialCloseNotification({
             walletAddress: bot.walletAddress,
             botId,
             botName: bot.name,
@@ -19554,7 +19668,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
 
           // Fan out to copy-trade subscribers proportionally.
-          if (botPublishedInfo?.isActive) {
+          if (botPublishedInfo?.isActive && pcAccounting.isNew) {
             routeSignalToSubscribers(botId, {
               action: action as 'buy' | 'sell',
               contracts,
@@ -19573,6 +19687,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             fraction: partialCloseFraction,
             closedSize: partialCloseSize,
             pnl: pcPnl,
+            remainingSize: pcAccounting.remainingSize,
             signature: pcResult.signature,
           });
         } catch (pcErr: any) {
@@ -20939,52 +21054,39 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             timestampMs: Date.now(),
           });
 
-          const pcAtomic = await storage.recordCloseEventAtomic({
-            botId,
-            insert: {
-              tradingBotId: botId,
-              walletAddress: bot.walletAddress,
-              market: bot.market,
-              side: pcPositionSide === 'long' ? 'short' : 'long',
-              size: String(uwPartialCloseSize),
-              price: String(pcFillPrice),
-              fee: pcFee === null ? null : String(pcFee),
-              pnl: pcPnl === null ? null : String(pcPnl),
-              status: 'executed',
-              txSignature: pcResult.signature || null,
-              protocolFillId: pcDedupKey,
-              webhookPayload: { ...payload, partialClose: true, fraction: uwPartialCloseFraction, feeEvidence: pcResult.feeEvidence },
-              executionMethod: pcResult.executionMethod || 'legacy',
-            },
-            deltas: {
-              totalPnlDelta: pcPnl ?? 0,
-              totalVolumeDelta: uwPartialCloseSize * pcFillPrice,
-              lastTradeAt: new Date().toISOString(),
-            },
+          const pcAccounting = await finalizeSignedPartialCloseAccounting({
+            bot,
+            queryAccount: userWebhookBotCtx?.botPublicKey ?? pcWallet.agentPublicKey!,
+            querySubaccountId: pcSubAccountId,
+            botSubaccountPublicKey: userWebhookBotCtx?.botPublicKey,
+            preClosePosition: uwDbPosition,
+            closedSize: uwPartialCloseSize,
+            closedFraction: uwPartialCloseFraction,
+            closeSide: pcPositionSide === 'long' ? 'short' : 'long',
+            fillPrice: pcFillPrice,
+            fee: pcFee,
+            pnl: pcPnl,
+            feeEvidence: pcResult.feeEvidence,
+            signature: pcResult.signature,
+            protocolFillId: pcDedupKey,
+            executionMethod: pcResult.executionMethod || 'legacy',
+            webhookPayload: payload,
           });
-
-          // Sync the bot_positions cache from on-chain so it reflects the new
-          // reduced size. Full args (fee/fillPrice/side/size) let sync compute
-          // the position-level realizedPnl + reduced baseSize and engage its
-          // stale-read guard; this is a separate ledger from the bot-level
-          // totalPnl booked by recordCloseEventAtomic above, so no double-count.
-          syncPositionFromOnChain(
-            botId,
-            bot.walletAddress,
-            pcWallet.agentPublicKey!,
-            pcSubAccountId,
-            bot.market,
-            pcAtomic.trade?.id ?? '',
-            pcFee ?? 0,
-            pcFillPrice,
-            pcPositionSide === 'long' ? 'short' : 'long',
-            uwPartialCloseSize,
-            userWebhookBotCtx?.botPublicKey,
-          ).catch(err =>
-            console.error(`[User Webhook] Post-partial-close sync error:`, err));
+          if (pcAccounting.kind === "incomplete") {
+            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
+            return res.status(200).json({
+              status: "accounting_incomplete",
+              type: "partial_close",
+              fraction: uwPartialCloseFraction,
+              closedSize: uwPartialCloseSize,
+              trade: pcAccounting.tradeId,
+              reason: pcAccounting.reason,
+              signature: pcResult.signature,
+            });
+          }
 
           // Schedule debounced Telegram notification.
-          if (pcPnl !== null) schedulePartialCloseNotification({
+          if (pcPnl !== null && pcAccounting.isNew) schedulePartialCloseNotification({
             walletAddress: bot.walletAddress,
             botId,
             botName: bot.name,
@@ -20997,7 +21099,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
           // Fan out to copy-trade subscribers proportionally.
           const pcPublished = await storage.getPublishedBotByTradingBotId(botId);
-          if (pcPublished?.isActive) {
+          if (pcPublished?.isActive && pcAccounting.isNew) {
             routeSignalToSubscribers(botId, {
               action: action as 'buy' | 'sell',
               contracts,
@@ -21016,6 +21118,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             fraction: uwPartialCloseFraction,
             closedSize: uwPartialCloseSize,
             pnl: pcPnl,
+            remainingSize: pcAccounting.remainingSize,
             signature: pcResult.signature,
           });
         } catch (pcErr: any) {

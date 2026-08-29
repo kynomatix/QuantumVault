@@ -820,14 +820,15 @@ async function bookPartialReduction(opts: {
   agentPublicKey: string;
   botSubaccountPublicKey?: string;
   dbBaseSize: number;
-  dbPosition: { avgEntryPrice: string; realizedPnl: string; totalFees: string; lastTradeAt?: Date | null };
+  dbPosition: { avgEntryPrice: string; realizedPnl: string; totalFees: string; lastTradeId?: string | null; lastTradeAt?: Date | null };
   closedSlice: number;
   onChainBaseSize: number;
+  onChainEntryPrice: number;
   adapter: ProtocolAdapter;
 }): Promise<'completed' | 'unknown-symbol-refusal'> {
   const {
     botId, walletAddress, market, agentPublicKey, botSubaccountPublicKey,
-    dbBaseSize, dbPosition, closedSlice, adapter,
+    dbBaseSize, dbPosition, closedSlice, onChainBaseSize, onChainEntryPrice, adapter,
   } = opts;
 
   const positionSide = dbBaseSize > 0 ? 'long' : 'short';
@@ -911,9 +912,52 @@ async function bookPartialReduction(opts: {
 
   console.log(`[Reconcile] Partial reduction for bot ${botId} ${market}: slice=${closedSlice.toFixed(4)}, price=$${avgFillPrice.toFixed(4)}, pnl=$${slicePnl.toFixed(4)}, hasFills=${hasFills}, dedup=${dedupKey}`);
 
+  const pendingPartial = (await storage.getBotTrades(botId, 200)).find((trade) => {
+    const payload = trade.webhookPayload && typeof trade.webhookPayload === 'object'
+      ? trade.webhookPayload as Record<string, unknown>
+      : null;
+    const recordedSize = Math.abs(Number(trade.size));
+    const sizeTolerance = Math.max(0.0001, closedSlice * 0.02);
+    return String(trade.status).toLowerCase() === 'pending'
+      && payload?.partialClose === true
+      && normalizeMarket(trade.market) === normalizedMarket
+      && String(trade.side).toLowerCase() === closeSide
+      && Number.isFinite(recordedSize)
+      && Math.abs(recordedSize - closedSlice) <= sizeTolerance;
+  });
+  const completedPayload = {
+    ...(pendingPartial?.webhookPayload && typeof pendingPartial.webhookPayload === 'object'
+      ? pendingPartial.webhookPayload as Record<string, unknown>
+      : {}),
+    reconciled: true,
+    closeReason: partialSubtype,
+    detectedAt: new Date().toISOString(),
+    matchedFillIds: matchedIds.join(','),
+    hasFills,
+    partialCloseAccounting: {
+      status: 'complete',
+      residualBaseSize: onChainBaseSize,
+      residualEntryPrice: onChainEntryPrice,
+      recoveredBy: 'periodic_reconciler',
+    },
+  };
   const { isNew } = await storage.recordCloseEventAtomic({
     botId,
-    insert: {
+    ...(pendingPartial ? {
+      update: {
+        tradeId: pendingPartial.id,
+        fields: {
+          status: 'executed',
+          price: String(avgFillPrice),
+          fee: String(totalFee),
+          pnl: String(slicePnl),
+          protocolFillId: dedupKey,
+          webhookPayload: completedPayload,
+          errorMessage: null,
+          executionMethod: 'on-chain-detected',
+        },
+      },
+    } : { insert: {
       tradingBotId: botId,
       walletAddress,
       market,
@@ -924,19 +968,22 @@ async function bookPartialReduction(opts: {
       pnl: String(slicePnl),
       status: 'executed',
       protocolFillId: dedupKey,
-      webhookPayload: {
-        reconciled: true,
-        closeReason: partialSubtype,
-        detectedAt: new Date().toISOString(),
-        matchedFillIds: matchedIds.join(','),
-        hasFills,
-      },
+      webhookPayload: completedPayload,
       executionMethod: 'on-chain-detected',
-    },
+    } }),
     deltas: {
       totalPnlDelta: slicePnl,
       totalVolumeDelta: closedSlice * avgFillPrice,
       lastTradeAt: new Date().toISOString(),
+    },
+    confirmedPositionReduction: {
+      market,
+      expectedBaseSize: String(dbBaseSize),
+      expectedLastTradeId: dbPosition.lastTradeId ?? null,
+      residualBaseSize: onChainBaseSize,
+      residualEntryPrice: onChainEntryPrice,
+      realizedPnlDelta: slicePnl,
+      feeDelta: totalFee,
     },
   });
 
@@ -1375,6 +1422,7 @@ export async function reconcileBotPosition(
               dbPosition: dbPosition!,
               closedSlice,
               onChainBaseSize,
+              onChainEntryPrice: onChainPos!.entryPrice,
               adapter,
             });
             if (partialResult === 'unknown-symbol-refusal') {

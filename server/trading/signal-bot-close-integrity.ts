@@ -251,6 +251,132 @@ export function buildConfirmedFlatPosition(
   };
 }
 
+export interface ConfirmedPartialPositionInput {
+  residualBaseSize: number;
+  residualEntryPrice: number;
+  realizedPnlDelta: number;
+  feeDelta: number;
+  tradeId: string;
+  closedAt: Date;
+}
+
+/**
+ * Build the exact position values persisted after fresh venue authority proves
+ * the residual state of a signed partial close. The caller owns row locking
+ * and epoch comparison; this helper owns finite-value validation and Decimal
+ * accounting so an unavailable read can never become calculated position
+ * truth.
+ */
+export function buildConfirmedPartialPosition(
+  existing: ExistingPositionAccounting | undefined,
+  input: ConfirmedPartialPositionInput,
+): {
+  baseSize: string;
+  avgEntryPrice: string;
+  costBasis: string;
+  realizedPnl: string;
+  totalFees: string;
+  lastTradeId: string;
+  lastTradeAt: Date;
+} {
+  if (![input.residualBaseSize, input.residualEntryPrice, input.realizedPnlDelta, input.feeDelta]
+    .every(Number.isFinite)
+      || input.residualEntryPrice < 0 || input.feeDelta < 0
+      || !(input.closedAt instanceof Date) || !Number.isFinite(input.closedAt.getTime())) {
+    throw new Error("confirmed_partial_position_invalid_input");
+  }
+  const residual = new Decimal(input.residualBaseSize);
+  const entry = residual.isZero()
+    ? new Decimal(existing?.avgEntryPrice ?? "0")
+    : new Decimal(input.residualEntryPrice);
+  if (!residual.isZero() && entry.lte(0)) {
+    throw new Error("confirmed_partial_position_invalid_entry_price");
+  }
+  return {
+    baseSize: residual.toFixed(8),
+    avgEntryPrice: entry.toFixed(6),
+    costBasis: residual.abs().times(entry).toFixed(6),
+    realizedPnl: new Decimal(existing?.realizedPnl ?? "0")
+      .plus(input.realizedPnlDelta)
+      .toFixed(6),
+    totalFees: new Decimal(existing?.totalFees ?? "0")
+      .plus(input.feeDelta)
+      .toFixed(6),
+    lastTradeId: input.tradeId,
+    lastTradeAt: input.closedAt,
+  };
+}
+
+export interface PartialClosePositionAuthority {
+  size: number;
+  side: "LONG" | "SHORT" | "FLAT";
+  entryPrice: number;
+}
+
+export type PartialCloseAuthorityOutcome =
+  | { kind: "confirmed"; residualBaseSize: number; residualEntryPrice: number; becameFlat: boolean }
+  | { kind: "unavailable"; reason: string };
+
+export function classifyPartialClosePositionAuthority(input: {
+  preCloseBaseSize: number;
+  authority: PartialClosePositionAuthority;
+}): PartialCloseAuthorityOutcome {
+  const { preCloseBaseSize, authority } = input;
+  if (!Number.isFinite(preCloseBaseSize) || Math.abs(preCloseBaseSize) < 0.0001) {
+    return { kind: "unavailable", reason: "pre_close_position_unavailable" };
+  }
+  if (!Number.isFinite(authority.size) || !Number.isFinite(authority.entryPrice)) {
+    return { kind: "unavailable", reason: "post_close_position_non_finite" };
+  }
+  if (authority.side === "FLAT" || Math.abs(authority.size) < 0.0001) {
+    return { kind: "confirmed", residualBaseSize: 0, residualEntryPrice: 0, becameFlat: true };
+  }
+  const expectedSide = preCloseBaseSize > 0 ? "LONG" : "SHORT";
+  if (authority.side !== expectedSide || Math.sign(authority.size) !== Math.sign(preCloseBaseSize)) {
+    return { kind: "unavailable", reason: "post_close_position_side_mismatch" };
+  }
+  if (authority.entryPrice <= 0) {
+    return { kind: "unavailable", reason: "post_close_entry_price_invalid" };
+  }
+  const reduction = new Decimal(preCloseBaseSize).abs().minus(new Decimal(authority.size).abs());
+  if (reduction.lte("0.00000001")) {
+    return { kind: "unavailable", reason: "post_close_position_not_reduced" };
+  }
+  return {
+    kind: "confirmed",
+    residualBaseSize: authority.size,
+    residualEntryPrice: authority.entryPrice,
+    becameFlat: false,
+  };
+}
+
+export async function resolvePartialClosePositionAuthority(input: {
+  preCloseBaseSize: number;
+  readAuthority: () => Promise<PartialClosePositionAuthority>;
+  retryCount?: number;
+  retryDelayMs?: number;
+  wait?: (delayMs: number) => Promise<void>;
+}): Promise<PartialCloseAuthorityOutcome> {
+  const retryCount = input.retryCount ?? 3;
+  const retryDelayMs = input.retryDelayMs ?? 1_500;
+  const wait = input.wait ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  let lastReason = "post_close_position_unavailable";
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      const outcome = classifyPartialClosePositionAuthority({
+        preCloseBaseSize: input.preCloseBaseSize,
+        authority: await input.readAuthority(),
+      });
+      if (outcome.kind === "confirmed") return outcome;
+      lastReason = outcome.reason;
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : String(error);
+    }
+    if (attempt < retryCount) await wait(retryDelayMs);
+  }
+  return { kind: "unavailable", reason: lastReason };
+}
+
 export interface SignalBotFlipPosition {
   side: "LONG" | "SHORT";
   size: number;

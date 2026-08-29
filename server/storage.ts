@@ -10,7 +10,10 @@ import {
   type ScannerIncidentOccurrenceExportRow,
 } from "./ai-trader/scanner-incident-evidence";
 import Decimal from "decimal.js";
-import { buildConfirmedFlatPosition } from "./trading/signal-bot-close-integrity";
+import {
+  buildConfirmedFlatPosition,
+  buildConfirmedPartialPosition,
+} from "./trading/signal-bot-close-integrity";
 import { resolveBotTradeNetPnl } from "./trading/bot-trade-pnl-convention";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
 import {
@@ -764,6 +767,15 @@ export interface IStorage {
     confirmedPositionClose?: {
       walletAddress: string;
       market: string;
+      realizedPnlDelta: number;
+      feeDelta: number;
+    };
+    confirmedPositionReduction?: {
+      market: string;
+      expectedBaseSize: string;
+      expectedLastTradeId: string | null;
+      residualBaseSize: number;
+      residualEntryPrice: number;
       realizedPnlDelta: number;
       feeDelta: number;
     };
@@ -2455,7 +2467,19 @@ export class DatabaseStorage implements IStorage {
       realizedPnlDelta: number;
       feeDelta: number;
     };
+    confirmedPositionReduction?: {
+      market: string;
+      expectedBaseSize: string;
+      expectedLastTradeId: string | null;
+      residualBaseSize: number;
+      residualEntryPrice: number;
+      realizedPnlDelta: number;
+      feeDelta: number;
+    };
   }): Promise<{ trade?: BotTrade; isNew: boolean }> {
+    if (opts.confirmedPositionClose && opts.confirmedPositionReduction) {
+      throw new Error("recordCloseEventAtomic: conflicting confirmed position transitions");
+    }
     // Defense-in-depth: demote non-deterministic close IDs to pending
     // so the reconciler canonicalizes them later instead of double-counting.
     const isNonDeterministic = (fillId: string | null | undefined): boolean =>
@@ -2528,6 +2552,44 @@ export class DatabaseStorage implements IStorage {
               updatedAt: sql`NOW()`,
             },
           });
+      };
+      const persistConfirmedPositionReduction = async (): Promise<void> => {
+        const reduction = opts.confirmedPositionReduction;
+        if (!reduction) return;
+        if (!trade) {
+          throw new Error("recordCloseEventAtomic: confirmed reduction has no canonical trade");
+        }
+        const positionRows = await tx
+          .select()
+          .from(botPositions)
+          .where(and(
+            eq(botPositions.tradingBotId, opts.botId),
+            eq(botPositions.market, reduction.market),
+          ))
+          .for("update")
+          .limit(1);
+        const position = positionRows[0];
+        if (!position) {
+          throw new Error("partial_close_position_epoch_missing");
+        }
+        const actualBaseSize = new Decimal(position.baseSize).toFixed(8);
+        const expectedBaseSize = new Decimal(reduction.expectedBaseSize).toFixed(8);
+        if (actualBaseSize !== expectedBaseSize
+            || (position.lastTradeId ?? null) !== reduction.expectedLastTradeId) {
+          throw new Error("partial_close_position_epoch_conflict");
+        }
+        const next = buildConfirmedPartialPosition(position, {
+          residualBaseSize: reduction.residualBaseSize,
+          residualEntryPrice: reduction.residualEntryPrice,
+          realizedPnlDelta: reduction.realizedPnlDelta,
+          feeDelta: reduction.feeDelta,
+          tradeId: trade.id,
+          closedAt: new Date(),
+        });
+        await tx
+          .update(botPositions)
+          .set({ ...next, updatedAt: sql`NOW()` })
+          .where(eq(botPositions.id, position.id));
       };
       if (opts.insert) {
         if (opts.insert.protocolFillId) {
@@ -2642,6 +2704,7 @@ export class DatabaseStorage implements IStorage {
         // INTO a canonical status (locked.status was non-canonical above).
         await this.recomputeAndMergeBotStats(opts.botId, opts.deltas, tx);
         await persistConfirmedPositionClose();
+        await persistConfirmedPositionReduction();
         return { trade, isNew: true };
       }
       // Insert path: recompute only when we actually introduced a new
@@ -2650,6 +2713,7 @@ export class DatabaseStorage implements IStorage {
       if (opts.insert && isNew) {
         await this.recomputeAndMergeBotStats(opts.botId, opts.deltas, tx);
         await persistConfirmedPositionClose();
+        await persistConfirmedPositionReduction();
       }
       return { trade, isNew };
     });
