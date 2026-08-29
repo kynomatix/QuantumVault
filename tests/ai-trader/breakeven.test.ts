@@ -161,7 +161,10 @@ describe("paperBreakevenStopPrice", () => {
   });
 
   it("fails shut when a zero-step proof cannot satisfy the exact postcondition", () => {
-    const result = paperBreakevenStopPrice("long", 0.1, 0.0014, 0);
+    // This ordinary-scale pair produces a tiny negative net result from the
+    // closed-form candidate because of binary64 rounding. With correction
+    // disabled, the helper must expose that it cannot prove the postcondition.
+    const result = paperBreakevenStopPrice("long", 260999.1888202015, 0.000001, 0);
     expect(result).toEqual({ ok: false, reason: "numerical_postcondition_unproven" });
   });
 });

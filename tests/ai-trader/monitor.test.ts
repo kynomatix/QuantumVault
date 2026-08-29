@@ -4649,7 +4649,7 @@ describe("breakeven protect", () => {
     expect(du[0].exitReason).toBe("sl");
     const expectedExit = NEW_SL * (1 - PAPER_SLIPPAGE_PER_LEG);
     expect(Number(du[0].exitPrice)).toBeCloseTo(expectedExit, 6);
-    expect(Number(du[0].realizedPnl)).toBeGreaterThan(0); // the whole point of the buffer
+    expect(Number(du[0].realizedPnl)).toBeGreaterThanOrEqual(0); // the dynamic floor guarantees non-negative net PnL
     // G8: an 'sl' exit that MADE money must reset the streak, not extend it.
     const update = botUpdates().find((u) => u.consecutiveLosses !== undefined);
     expect(update?.consecutiveLosses).toBe(0);

@@ -361,7 +361,7 @@ describe("qualification era identity", () => {
         prompt_context_schema: 3,
         session_policy: 1,
         guardrail_risk_policy: 4,
-        paper_execution_simulator: 2,
+        paper_execution_simulator: 3,
       },
       bot: {
         protocol: "pacifica",
