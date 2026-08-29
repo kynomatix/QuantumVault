@@ -1064,15 +1064,19 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   // totalLlmCost misses anything older. Use the server lifetime total for that distinct tile.
   const displayLlmCost: number = lifetimeStats?.totalLlmCost ?? totalLlmCost;
   const trackRecordClosedPnl = performance.status === 'available' ? performance.netPnl : null;
-  // Mirror the persisted exposure-bearing vocabulary used by startup/recovery.
-  // A quarantined unconfirmed landing can still materialize after a flat probe;
-  // its P&L must stay withheld until reconciliation proves the window expired.
-  const trackRecordHasOpenExposure = openDecision !== null
-    || bot?.status === 'open'
-    || bot?.status === 'executing'
-    || bot?.status === 'analyzing'
-    || bot?.status === 'proposed'
-    || (bot?.status === 'paused' && bot?.pauseReason === 'position_unconfirmed');
+  // Zero is permitted only for states whose persisted transition contract proves
+  // there is no unrepresented venue exposure. Every new or unknown status/reason
+  // defaults to withholding the headline until server authority says otherwise.
+  const trackRecordHasProvenNoOpenExposure = openDecision === null && (
+    bot?.status === 'idle'
+    || bot?.status === 'stopped'
+    || (bot?.status === 'paused' && (
+      bot?.pauseReason === 'user_requested'
+      || bot?.pauseReason === 'position_unconfirmed_expired'
+      || bot?.pauseReason === 'consecutive_losses'
+    ))
+  );
+  const trackRecordHasOpenExposure = !trackRecordHasProvenNoOpenExposure;
   const trackRecordOpenPnl = !trackRecordHasOpenExposure
     ? 0
     : (openUnrealizedPnl !== null && Number.isFinite(openUnrealizedPnl) ? openUnrealizedPnl : null);

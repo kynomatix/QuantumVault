@@ -108,13 +108,14 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
 
   it("uses the terminally attributed current-mode projection for the Track Record P&L", () => {
     expect(trackRecordCalculations).toContain("performance.status === 'available' ? performance.netPnl : null");
-    expect(trackRecordCalculations).toContain("const trackRecordHasOpenExposure = openDecision !== null");
-    expect(trackRecordCalculations).toContain("bot?.status === 'open'");
-    expect(trackRecordCalculations).toContain("bot?.status === 'executing'");
-    expect(trackRecordCalculations).toContain("bot?.status === 'analyzing'");
-    expect(trackRecordCalculations).toContain("bot?.status === 'proposed'");
-    expect(trackRecordCalculations).toContain("bot?.status === 'paused' && bot?.pauseReason === 'position_unconfirmed'");
-    expect(trackRecordCalculations).not.toContain("position_unconfirmed_expired");
+    expect(trackRecordCalculations).toContain("const trackRecordHasProvenNoOpenExposure = openDecision === null");
+    expect(trackRecordCalculations).toContain("bot?.status === 'idle'");
+    expect(trackRecordCalculations).toContain("bot?.status === 'stopped'");
+    expect(trackRecordCalculations).toContain("bot?.pauseReason === 'user_requested'");
+    expect(trackRecordCalculations).toContain("bot?.pauseReason === 'position_unconfirmed_expired'");
+    expect(trackRecordCalculations).toContain("bot?.pauseReason === 'consecutive_losses'");
+    expect(trackRecordCalculations).toContain("const trackRecordHasOpenExposure = !trackRecordHasProvenNoOpenExposure");
+    expect(trackRecordCalculations).not.toContain("reconcile_orphan_position");
     expect(trackRecordCalculations).toContain("!trackRecordHasOpenExposure");
     expect(trackRecordCalculations).toContain("Number.isFinite(openUnrealizedPnl)");
     expect(trackRecordCalculations).toContain("trackRecordClosedPnl + trackRecordOpenPnl");
