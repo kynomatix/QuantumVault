@@ -112,8 +112,17 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(source).toContain("scanner_market_selection_changed: 'Scanner market selection changed'");
     expect(source).toContain("material_bot_settings_changed: 'Material bot settings changed'");
     expect(source).toContain("trial_restarted: 'Trial restarted'");
-    expect(source).toContain("qualification_era_initialized: null");
     expect(source).toContain("qualification_era_changed: 'Qualification evidence changed'");
+    const resetReasonFormatter = source.slice(
+      source.indexOf("function formatQualificationResetReason"),
+      source.indexOf("function TrialStrip"),
+    );
+    expect(resetReasonFormatter).toContain("const suppressedReasons = new Set([");
+    expect(resetReasonFormatter).toContain("'qualification_era_initialized'");
+    expect(resetReasonFormatter).toContain("if (suppressedReasons.has(reason)) return null");
+    expect(resetReasonFormatter.indexOf("if (suppressedReasons.has(reason)) return null"))
+      .toBeLessThan(resetReasonFormatter.indexOf("return labels[reason] ??"));
+    expect(resetReasonFormatter).not.toContain("labels[reason] ?? null");
     expect(trialStrip).toContain("const pnlStr = `${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`");
     expect(trialStrip).not.toContain("Loaded timeline");
     expect(trialStrip).not.toContain("· DD {maxDdPct.toFixed(1)}%");

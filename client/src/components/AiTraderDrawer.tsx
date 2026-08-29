@@ -607,11 +607,15 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
 }
 
 function formatQualificationResetReason(reason: string): string | null {
-  const labels: Record<string, string | null> = {
+  const suppressedReasons = new Set([
+    'qualification_era_initialized',
+  ]);
+  if (suppressedReasons.has(reason)) return null;
+
+  const labels: Record<string, string> = {
     scanner_market_selection_changed: 'Scanner market selection changed',
     material_bot_settings_changed: 'Material bot settings changed',
     trial_restarted: 'Trial restarted',
-    qualification_era_initialized: null,
     qualification_era_changed: 'Qualification evidence changed',
   };
   return labels[reason] ?? reason.replaceAll('_', ' ').replace(/^./, (value) => value.toUpperCase());
