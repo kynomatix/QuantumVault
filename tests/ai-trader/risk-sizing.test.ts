@@ -30,7 +30,6 @@ function makeInput(overrides: Partial<GuardrailInput> = {}): GuardrailInput {
     takerFeeRate: 0.0004,
     maintenanceMarginWeight: 0.02,
     allocatedUsdc: 1000,
-    positionAuthority: "paper_ledger",
     positionState: "flat",
     quantizeOrderSize: (s: number) => s, // identity — quantization cases override
     sizingMode: "risk_based",

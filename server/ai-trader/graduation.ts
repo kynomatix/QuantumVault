@@ -58,8 +58,8 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "prompt_context_schema": {
     "materialVersion": 3,
-    "decisionGeneration": 3,
-    "decision": "bump",
+    "decisionGeneration": 4,
+    "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts"]
   },
   "session_policy": {

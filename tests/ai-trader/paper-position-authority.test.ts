@@ -46,6 +46,24 @@ describe("resolvePaperPositionState", () => {
     });
   });
 
+  it("keeps open plus zero rows unknown", () => {
+    expect(resolvePaperPositionState("open", [])).toEqual({
+      positionState: "unknown",
+      positionAuthority: "unknown",
+      view: null,
+      reason: "status_requires_open_row",
+    });
+  });
+
+  it("keeps an unrecognised runtime status unknown", () => {
+    expect(resolvePaperPositionState("future_status" as string, [])).toEqual({
+      positionState: "unknown",
+      positionAuthority: "unknown",
+      view: null,
+      reason: "unrecognised_status",
+    });
+  });
+
   it.each(["analyzing", "executing"])("keeps genuinely transient %s-without-row unknown", (status) => {
     expect(resolvePaperPositionState(status, [])).toMatchObject({
       positionState: "unknown",

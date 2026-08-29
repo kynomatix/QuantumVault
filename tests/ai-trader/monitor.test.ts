@@ -21,6 +21,7 @@ import type { TradeRecord } from "../../server/protocol/protocol-types";
 import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
 import { breakevenStopPrice, paperBreakevenStopPrice } from "../../server/ai-trader/breakeven";
+import { parseOpenDecision } from "../../server/ai-trader/paper-position-authority";
 
 const paperBreakevenStopOverride = vi.hoisted(() => ({
   value: null as null | { ok: false; reason: "numerical_postcondition_unproven" },
@@ -648,14 +649,12 @@ afterEach(async () => {
 
 describe("parseOpenDecision", () => {
   it("returns null when there is no executed-and-open row", async () => {
-    const { parseOpenDecision } = await importMonitor();
     expect(parseOpenDecision([])).toBeNull();
     expect(parseOpenDecision([makeOpenDecision({ closedAt: new Date(NOW) })])).toBeNull();
     expect(parseOpenDecision([makeOpenDecision({ outcome: "rejected_guardrails" })])).toBeNull();
   });
 
   it("parses a valid open decision into numbers", async () => {
-    const { parseOpenDecision } = await importMonitor();
     const view = parseOpenDecision([makeOpenDecision()]);
     expect(view).not.toBeNull();
     expect(view!.side).toBe("long");
@@ -667,7 +666,6 @@ describe("parseOpenDecision", () => {
   });
 
   it("returns null for unusable clamped payloads (flat action, missing bracket)", async () => {
-    const { parseOpenDecision } = await importMonitor();
     expect(
       parseOpenDecision([makeOpenDecision({ clampedDecision: { action: "flat" } })])
     ).toBeNull();

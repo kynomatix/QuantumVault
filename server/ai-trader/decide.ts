@@ -419,13 +419,6 @@ async function finalizeDecision(args: {
         : accountDigest?.hasPosition === false
           ? "flat"
           : "unknown";
-  const positionAuthority =
-    accountDigest?.positionAuthority === "paper_ledger" ||
-    accountDigest?.positionAuthority === "venue" ||
-    accountDigest?.positionAuthority === "unknown"
-      ? accountDigest.positionAuthority
-      : "unknown";
-
   const guardrailResult = applyGuardrails(decision, {
     entryPrice: finiteOrNaN(digest?.price),
     atr14: finiteOrNaN(digest?.indicators?.atr14?.value),
@@ -436,7 +429,6 @@ async function finalizeDecision(args: {
     takerFeeRate: NON_ADMISSION_TAKER_FEE_RATE,
     maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
     allocatedUsdc: parseFloat(bot.allocatedUsdc),
-    positionAuthority,
     positionState,
     quantizeOrderSize: (sizeBase: number) => adapter.quantizeOrderSize(bot.market, sizeBase),
     sizingMode,

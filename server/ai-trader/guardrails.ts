@@ -45,8 +45,6 @@ export interface GuardrailInput {
   maintenanceMarginWeight: number;
   /** The bot's allocated collateral in USDC. */
   allocatedUsdc: number;
-  /** Which durable source established position truth for this decision. */
-  positionAuthority: "paper_ledger" | "venue" | "unknown";
   /** Tri-state position truth; unknown remains potentially open for risk-reducing close. */
   positionState: "open" | "flat" | "unknown";
   /**

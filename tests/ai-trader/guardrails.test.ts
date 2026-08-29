@@ -25,7 +25,6 @@ function makeInput(overrides: Partial<GuardrailInput> = {}): GuardrailInput {
     takerFeeRate: 0.0004,
     maintenanceMarginWeight: 0.02,
     allocatedUsdc: 1000,
-    positionAuthority: "paper_ledger",
     positionState: "flat",
     quantizeOrderSize: (s) => s,
     ...overrides,
@@ -143,7 +142,7 @@ describe("applyGuardrails — degraded position truth", () => {
   it("unknown position truth permits close", () => {
     const result = applyGuardrails(
       { action: "close", confidence: 8, invalidation: "n/a", rationale: "reduce risk" },
-      makeInput({ positionAuthority: "unknown", positionState: "unknown" }),
+      makeInput({ positionState: "unknown" }),
     );
     expect(result.ok).toBe(true);
   });
@@ -151,7 +150,7 @@ describe("applyGuardrails — degraded position truth", () => {
   it("unknown position truth rejects long", () => {
     const result = applyGuardrails(
       makeLong(),
-      makeInput({ positionAuthority: "unknown", positionState: "unknown" }),
+      makeInput({ positionState: "unknown" }),
     );
     expect(result.ok).toBe(false);
     expect(codes(result.violations)).toEqual(["position_truth_unknown"]);
@@ -160,7 +159,7 @@ describe("applyGuardrails — degraded position truth", () => {
   it("unknown position truth rejects short", () => {
     const result = applyGuardrails(
       makeShort(),
-      makeInput({ positionAuthority: "unknown", positionState: "unknown" }),
+      makeInput({ positionState: "unknown" }),
     );
     expect(result.ok).toBe(false);
     expect(codes(result.violations)).toEqual(["position_truth_unknown"]);

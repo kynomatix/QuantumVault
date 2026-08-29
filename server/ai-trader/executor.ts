@@ -702,11 +702,6 @@ async function executeLiveEntry(
       || accountDigest?.positionState === "unknown"
       ? accountDigest.positionState
       : "unknown";
-    const positionAuthority = accountDigest?.positionAuthority === "paper_ledger"
-      || accountDigest?.positionAuthority === "venue"
-      || accountDigest?.positionAuthority === "unknown"
-      ? accountDigest.positionAuthority
-      : "unknown";
     const revalidated = applyGuardrails(n.persistedRawDecision, {
       entryPrice: revalidationPrice,
       atr14: Number(n.contextDigest.indicators?.atr14?.value),
@@ -715,7 +710,6 @@ async function executeLiveEntry(
       takerFeeRate: NON_ADMISSION_TAKER_FEE_RATE,
       maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
       allocatedUsdc: Number(bot.allocatedUsdc),
-      positionAuthority,
       positionState,
       quantizeOrderSize: (value: number) => adapter.quantizeOrderSize(bot.market, value),
       sizingMode: bot.sizingMode === "risk_based" ? "risk_based" : "discretionary",

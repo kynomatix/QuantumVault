@@ -125,7 +125,6 @@ import {
   parseOpenDecision,
   type OpenDecisionView,
 } from "./paper-position-authority";
-export { computeUnrealizedPnl, parseOpenDecision } from "./paper-position-authority";
 import {
   buildEntryReconciliationTerminalEvents,
   entryAttemptId,

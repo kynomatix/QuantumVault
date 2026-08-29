@@ -482,10 +482,8 @@ describe("buildMarketContext (WO-3)", () => {
       },
     });
 
-    // WO-7.1 read model: positions are read from the bot's OWN subaccount
-    // pubkey (liveReadAccount — the sub IS the account on Pacifica's Phase 4b
-    // model), with the adapter subaccountId param always undefined. Never
-    // bot.walletAddress (the old WO-3 placeholder).
+    // Paper-mode position truth comes from the durable paper ledger. Building
+    // this context must not consult venue positions at all.
     expect(adapter.getPositions).not.toHaveBeenCalled();
 
     // Targeted, human-readable assertions on top of the snapshot so intent survives
