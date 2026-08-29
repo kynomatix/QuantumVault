@@ -9,6 +9,8 @@ import { maybeScheduleAutoRepark, cancelAutoRepark } from "./vault/auto-repark";
 import {
   PARTIAL_CLOSE_BASE_DUST,
   partialCloseIdentityMatches,
+  classifyReconcilerCloseAccounting,
+  type ReconcilerCloseAccountingEvidence,
 } from "./trading/signal-bot-close-integrity";
 
 export interface RecoveredCloseRoutingSignal {
@@ -426,6 +428,7 @@ interface CloseDetectionResult {
   fillTimestampMs?: number;
   /** When `reason === 'tpsl'`, which side was hit (used for notification text). */
   tpslSubtype?: 'TP' | 'SL';
+  accountingEvidence?: ReconcilerCloseAccountingEvidence;
 }
 
 function isExpectedClosingTrade(
@@ -621,6 +624,13 @@ async function detectOnChainClose(
         fillPrice: avgFillPrice,
         pnl,
         fee: totalFee,
+        accountingEvidence: classifyReconcilerCloseAccounting({
+          protocolFillId: matchedTradeIds[0],
+          fillPrice: avgFillPrice,
+          pnl,
+          fee: totalFee,
+          observedAt: closingFills[0]?.timestamp ?? Date.now(),
+        }),
         // Canonical: FIRST matched protocol fill ID is a single stable
         // identifier suitable as the cross-path dedup key. Joined IDs
         // are diagnostic-only.
@@ -682,10 +692,11 @@ async function detectOnChainClose(
         return {
           detected: true,
           reason: 'liquidation',
-          fillPrice: entryPrice,
-          pnl: 0,
-          fee: 0,
           fillTimestampMs: fallbackAnchorMs,
+          accountingEvidence: classifyReconcilerCloseAccounting({
+            observedAt: Date.now(),
+            liquidation: true,
+          }),
         };
       }
 
@@ -764,59 +775,49 @@ async function detectOnChainClose(
 
       const hasTpSlConfig = tpPrice > 0 || slPrice > 0;
 
-      const computePnl = (fillPrice: number): number => positionSide === 'long'
-        ? (fillPrice - entryPrice) * absSize
-        : (entryPrice - fillPrice) * absSize;
-
       if (hasTpSlConfig) {
         const marketPrice = await fetchMarketPrice(market, adapter);
 
-        let estimatedFillPrice: number;
         let chosenLabel: string;
 
         if (tpPrice > 0 && slPrice > 0 && marketPrice && marketPrice > 0) {
           const distToTp = Math.abs(marketPrice - tpPrice);
           const distToSl = Math.abs(marketPrice - slPrice);
           if (distToTp <= distToSl) {
-            estimatedFillPrice = tpPrice;
             chosenLabel = 'TP';
           } else {
-            estimatedFillPrice = slPrice;
             chosenLabel = 'SL';
           }
         } else if (tpPrice > 0) {
-          estimatedFillPrice = tpPrice;
           chosenLabel = 'TP';
         } else {
-          estimatedFillPrice = slPrice;
           chosenLabel = 'SL';
         }
 
-        const pnl = computePnl(estimatedFillPrice);
-        console.log(`[Reconcile] Position closed for bot ${botId} with TP/SL configured (no trade history, age=${(positionAgeMs / 1000).toFixed(0)}s, balance=$${accountInfo.balance.toFixed(2)}): classified as tpsl, estimated ${chosenLabel} fill=$${estimatedFillPrice.toFixed(4)}, pnl=$${pnl.toFixed(4)}`);
+        console.log(`[Reconcile] Position closed for bot ${botId} with TP/SL configured but no attributed venue fill (age=${(positionAgeMs / 1000).toFixed(0)}s, balance=$${accountInfo.balance.toFixed(2)}): exposure is flat; close price, fee and PnL remain unavailable`);
         return {
           detected: true,
           reason: 'tpsl',
-          fillPrice: estimatedFillPrice,
-          pnl,
-          fee: 0,
           fillTimestampMs: fallbackAnchorMs,
           tpslSubtype: chosenLabel as 'TP' | 'SL',
+          accountingEvidence: classifyReconcilerCloseAccounting({
+            observedAt: Date.now(),
+            observationPrice: marketPrice,
+          }),
         };
       }
 
       if (accountInfo.balance > 1 || accountInfo.equity > 1) {
         const marketPrice = await fetchMarketPrice(market, adapter);
-        const fillPrice = marketPrice && marketPrice > 0 ? marketPrice : entryPrice;
-        const pnl = marketPrice && marketPrice > 0 ? computePnl(marketPrice) : 0;
-        console.log(`[Reconcile] Position closed for bot ${botId} (no trade history, age=${(positionAgeMs / 1000).toFixed(0)}s, balance=$${accountInfo.balance.toFixed(2)}): classified as external_close, estimated fill=$${fillPrice.toFixed(4)} (${marketPrice ? 'market' : 'entry-fallback'}), pnl=$${pnl.toFixed(4)}`);
+        console.log(`[Reconcile] Position closed for bot ${botId} without an attributed venue fill (age=${(positionAgeMs / 1000).toFixed(0)}s, balance=$${accountInfo.balance.toFixed(2)}): exposure is flat; close price, fee and PnL remain unavailable`);
         return {
           detected: true,
           reason: 'external_close',
-          fillPrice,
-          pnl,
-          fee: 0,
           fillTimestampMs: fallbackAnchorMs,
+          accountingEvidence: classifyReconcilerCloseAccounting({
+            observedAt: Date.now(),
+            observationPrice: marketPrice,
+          }),
         };
       }
     } catch { /* non-critical */ }
@@ -1873,10 +1874,24 @@ export async function reconcileBotPosition(
         // venue-resync paths both preserve lastTradeId, so one continuously
         // open economic position cannot mint a second close identity after a
         // false flatten/reopen cycle.
-        const closeFee = closeDetection.fee ?? 0;
-        const closePnl = (closeDetection.pnl ?? 0) - closeFee;
-        const closeFillPrice = closeDetection.fillPrice ?? parseFloat(dbPosition!.avgEntryPrice);
-        const closeNotional = closeFillPrice * Math.abs(dbBaseSize);
+        const accountingEvidence = closeDetection.accountingEvidence
+          ?? classifyReconcilerCloseAccounting({
+            protocolFillId: closeDetection.protocolFillId,
+            fillPrice: closeDetection.fillPrice,
+            pnl: closeDetection.pnl,
+            fee: closeDetection.fee,
+            observedAt: Date.now(),
+          });
+        const exactAccounting = accountingEvidence.kind === 'venue_exact';
+        const closeFee = exactAccounting ? accountingEvidence.fee : null;
+        const closePnl = exactAccounting ? accountingEvidence.pnl - accountingEvidence.fee : null;
+        // bot_trades.price is structurally non-null. For an incomplete row this
+        // value is observation context only and the typed payload prevents every
+        // consumer from presenting it as a fill.
+        const closeFillPrice = exactAccounting
+          ? accountingEvidence.fillPrice
+          : (accountingEvidence.observationPrice ?? parseFloat(dbPosition!.avgEntryPrice));
+        const closeNotional = exactAccounting ? closeFillPrice * Math.abs(dbBaseSize) : null;
         const dedupKey = canonicalReconcilerFullCloseId({
           protocolFillId: closeDetection.protocolFillId,
           botId,
@@ -1892,7 +1907,9 @@ export async function reconcileBotPosition(
           return { synced: false, discrepancy: true };
         }
 
-        console.log(`[Reconcile] Position closed on-chain for bot ${botId} ${market}: reason=${closeDetection.reason}, fill=$${closeFillPrice.toFixed(4)}, pnl=$${closePnl.toFixed(4)}`);
+        console.log(exactAccounting
+          ? `[Reconcile] Position closed on-chain for bot ${botId} ${market}: reason=${closeDetection.reason}, venue fill=$${closeFillPrice.toFixed(4)}, net pnl=$${closePnl!.toFixed(4)}`
+          : `[Reconcile] Position closed on-chain for bot ${botId} ${market}: reason=${closeDetection.reason}, accounting incomplete (${accountingEvidence.reason})`);
 
         // Atomic: insert canonical close row + recompute stats in ONE
         // DB transaction (task #67 requirement). Idempotency hits skip
@@ -1907,9 +1924,8 @@ export async function reconcileBotPosition(
             side: dbBaseSize > 0 ? 'short' : 'long',
             size: String(Math.abs(dbBaseSize)),
             price: String(closeFillPrice),
-            fee: String(closeFee),
-            // Canonical close: realized PnL is required (breakeven uses '0', never null).
-            pnl: String(closePnl),
+            fee: closeFee === null ? null : String(closeFee),
+            pnl: closePnl === null ? null : String(closePnl),
             pnlConvention: 'net_of_close_fee',
             feeTruthStatus: 'current_pipeline',
             status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
@@ -1920,14 +1936,17 @@ export async function reconcileBotPosition(
               detectedAt: new Date().toISOString(),
               protocolFillId: closeDetection.protocolFillId,
               matchedFillIdsForDiagnostics: closeDetection.matchedFillIdsForDiagnostics,
+              closeAccounting: accountingEvidence,
+              priceRole: exactAccounting ? 'venue_fill' : 'observation_context_only',
             },
             executionMethod: 'on-chain-detected',
           },
-          deltas: {
-            totalPnlDelta: closePnl,
-            totalVolumeDelta: closeNotional,
-            lastTradeAt: new Date().toISOString(),
-          },
+          deltas: exactAccounting
+            ? { totalPnlDelta: closePnl!, totalVolumeDelta: closeNotional!, lastTradeAt: new Date().toISOString() }
+            : { lastTradeAt: new Date().toISOString() },
+          ...(exactAccounting
+            ? { confirmedPositionClose: { walletAddress, market, realizedPnlDelta: closePnl!, feeDelta: closeFee! } }
+            : { confirmedPositionCloseIncomplete: { walletAddress, market } }),
         });
 
         if (!isNew) {
@@ -1944,32 +1963,20 @@ export async function reconcileBotPosition(
           const reasonLabel = getCloseReasonLabel(closeDetection.reason, closeDetection.tpslSubtype);
           const botRow = await storage.getTradingBotById(botId);
           const botName = botRow?.name ?? 'Bot';
-          sendTradeNotification(walletAddress, {
+            sendTradeNotification(walletAddress, {
             type: 'position_closed',
             botName,
             market,
             side: dbBaseSize > 0 ? 'LONG' : 'SHORT',
             size: Math.abs(dbBaseSize),
             price: closeFillPrice,
-            pnl: closePnl,
-            closeReason: reasonLabel,
-          }).catch(err => console.error(`[Reconcile] Notification error for bot ${botId}:`, err));
+              pnl: closePnl ?? undefined,
+              closeReason: reasonLabel,
+              accountingIncomplete: !exactAccounting,
+            }).catch(err => console.error(`[Reconcile] Notification error for bot ${botId}:`, err));
         } catch (notifErr) {
           console.error(`[Reconcile] Failed to dispatch close notification for bot ${botId}:`, notifErr);
         }
-
-        await storage.upsertBotPosition({
-          tradingBotId: botId,
-          walletAddress,
-          market,
-          baseSize: "0",
-          avgEntryPrice: dbPosition!.avgEntryPrice,
-          costBasis: "0",
-          realizedPnl: String(parseFloat(dbPosition!.realizedPnl || "0") + closePnl),
-          totalFees: String(parseFloat(dbPosition!.totalFees || "0") + closeFee),
-          lastTradeId: dbPosition!.lastTradeId,
-          lastTradeAt: new Date(),
-        });
 
         {
           const botForClear = await storage.getTradingBotById(botId);

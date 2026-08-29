@@ -184,6 +184,11 @@ interface BotTrade {
       feeStatus?: string;
       feeReason?: string;
     };
+    closeAccounting?: {
+      kind?: 'venue_exact' | 'unavailable';
+      reason?: string;
+    };
+    priceRole?: 'venue_fill' | 'observation_context_only';
   } | null;
 }
 
@@ -421,6 +426,7 @@ export function BotManagementDrawer({
   const [performanceLoading, setPerformanceLoading] = useState(false);
   const [performanceTotalPnl, setPerformanceTotalPnl] = useState<number>(0);
   const [performanceTradeCount, setPerformanceTradeCount] = useState<number>(0);
+  const [performanceAccountingIncompleteCount, setPerformanceAccountingIncompleteCount] = useState<number>(0);
   const [manualTradeLoading, setManualTradeLoading] = useState<'long' | 'short' | null>(null);
   const [tpslOpen, setTpslOpen] = useState(false);
   const [tpslMode, setTpslMode] = useState<'price' | 'percent'>('percent');
@@ -479,6 +485,7 @@ export function BotManagementDrawer({
         setPerformanceData(data.series || []);
         setPerformanceTotalPnl(data.totalPnl || 0);
         setPerformanceTradeCount(data.tradeCount || 0);
+        setPerformanceAccountingIncompleteCount(data.accountingIncompleteCloseCount || 0);
       }
     } catch (error) {
       console.error('Failed to fetch performance data:', error);
@@ -1721,7 +1728,11 @@ export function BotManagementDrawer({
             </div>
             
             {(() => {
-              const liquidationTrades = trades.filter(t => t.status === 'liquidated');
+              const liquidationTrades = trades.filter(t =>
+                t.status === 'liquidated'
+                && t.pnl !== null
+                && (t.webhookPayload as any)?.closeAccounting?.kind !== 'unavailable'
+              );
               if (liquidationTrades.length === 0) return null;
               const totalLiquidationLoss = liquidationTrades.reduce((sum, t) => sum + parseFloat(t.pnl || '0'), 0);
               return (
@@ -2167,6 +2178,14 @@ export function BotManagementDrawer({
                   }
                 </span>
               </div>
+              {performanceAccountingIncompleteCount > 0 && (
+                <p
+                  className="mt-2 text-xs text-amber-500"
+                  data-testid="performance-accounting-incomplete"
+                >
+                  {performanceAccountingIncompleteCount} confirmed close{performanceAccountingIncompleteCount === 1 ? '' : 's'} excluded because venue PnL is unavailable. The displayed total is partial.
+                </p>
+              )}
               
               <div className="mt-3 pt-3 border-t border-border/50">
                 <Button
@@ -2564,6 +2583,7 @@ export function BotManagementDrawer({
                     const isLiquidated = trade.status === 'liquidated';
                     const displayPnl = resolveBotTradeDisplayPnl(trade);
                     const payload = trade.webhookPayload as any;
+                    const accountingIncomplete = payload?.closeAccounting?.kind === 'unavailable';
                     const action = payload?.data?.action?.toLowerCase() || payload?.action?.toLowerCase() || '';
                     const positionSize = payload?.position_size || payload?.data?.position_size;
                     const closeReason = payload?.closeReason;
@@ -2661,6 +2681,11 @@ export function BotManagementDrawer({
                                   Exit
                                 </span>
                               )}
+                              {accountingIncomplete && (
+                                <span className="text-xs px-1.5 py-0.5 bg-amber-500/20 text-amber-500 rounded" data-testid={`badge-accounting-incomplete-${trade.id}`}>
+                                  Accounting incomplete
+                                </span>
+                              )}
                             </p>
                             <p className="text-xs text-muted-foreground">
                               {formatDate(trade.executedAt)}
@@ -2682,7 +2707,9 @@ export function BotManagementDrawer({
                             {parseFloat(trade.size).toFixed(4)}
                           </span>
                           <p className="text-xs text-muted-foreground">
-                            {isLiquidated ? 'liquidated' : 'contracts'} @ ${parseFloat(trade.price || '0').toFixed(2)}
+                            {accountingIncomplete
+                              ? `${isLiquidated ? 'liquidated' : 'contracts'} @ fill unavailable`
+                              : `${isLiquidated ? 'liquidated' : 'contracts'} @ $${parseFloat(trade.price || '0').toFixed(2)}`}
                           </p>
                           {displayPnl.value !== null && (
                             <div>
@@ -2696,6 +2723,9 @@ export function BotManagementDrawer({
                                 <p className="text-[10px] text-amber-500">gross; close fee unknown</p>
                               )}
                             </div>
+                          )}
+                          {accountingIncomplete && displayPnl.value === null && (
+                            <p className="text-[10px] text-amber-500">PnL and fee unavailable</p>
                           )}
                         </div>
                       </div>

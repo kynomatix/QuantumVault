@@ -90,6 +90,7 @@ function makeBots(count: number, overrides: Record<string, unknown> = {}): any[]
 function makeEnrichment(botIds: string[], overrides: Partial<Record<string, unknown>> = {}): any {
   return {
     tradeCounts: new Map(botIds.map(id => [id, 3])),
+    accountingIncompleteCounts: new Map(),
     positions: new Map(botIds.map(id => [id, [{
       market: 'BTC-PERP',
       baseSize: '0.1',
@@ -3313,6 +3314,20 @@ describe('snapshot-level waiter recovery: post-timeout caller sees cached partia
 // ===========================================================================
 
 describe('mapBotToApiResponse (pure route-mapper, no network)', () => {
+  it('marks realized accounting incomplete and refuses a partial realized value', () => {
+    const bot = makeBot({ id: 'bot-incomplete', market: 'BTC-PERP' }) as any;
+    const enr = makeEnrichment(['bot-incomplete']);
+    enr.positions.set('bot-incomplete', [{
+      tradingBotId: 'bot-incomplete', walletAddress: W, market: bot.market,
+      realizedPnl: '123.45', totalFees: '1.00', baseSize: '0', avgEntryPrice: '100',
+    } as any]);
+    enr.accountingIncompleteCounts.set('bot-incomplete', 2);
+    const result = mapBotToApiResponse(bot, undefined, enr, true, 'fresh', TS);
+    expect(result.realizedPnl).toBeNull();
+    expect(result.accountingIncompleteCloseCount).toBe(2);
+    expect(result.realizedAccountingStatus).toBe('incomplete');
+  });
+
   function makeBot(overrides: Record<string, unknown> = {}): any {
     return {
       id: 'bot-test',

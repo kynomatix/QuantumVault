@@ -109,6 +109,69 @@ export function closeFeePersistence(
   };
 }
 
+export type ReconcilerCloseAccountingEvidence =
+  | {
+      kind: "venue_exact";
+      fillPrice: number;
+      pnl: number;
+      fee: number;
+      protocolFillId: string;
+      observedAt: number;
+    }
+  | {
+      kind: "unavailable";
+      reason: "venue_fill_unattributed" | "liquidation_fill_unattributed";
+      observedAt: number;
+      observationPrice: number | null;
+    };
+
+/**
+ * A confirmed-flat venue position proves exposure, not execution money truth.
+ * Only an attributed venue fill may authorize numeric close price/PnL/fee.
+ */
+export function classifyReconcilerCloseAccounting(input: {
+  protocolFillId?: string | null;
+  fillPrice?: number | null;
+  pnl?: number | null;
+  fee?: number | null;
+  observedAt: number;
+  observationPrice?: number | null;
+  liquidation?: boolean;
+}): ReconcilerCloseAccountingEvidence {
+  const exact = typeof input.protocolFillId === "string" && input.protocolFillId.trim().length > 0
+    && typeof input.fillPrice === "number" && Number.isFinite(input.fillPrice) && input.fillPrice > 0
+    && typeof input.pnl === "number" && Number.isFinite(input.pnl)
+    && typeof input.fee === "number" && Number.isFinite(input.fee) && input.fee >= 0;
+  if (exact) {
+    return {
+      kind: "venue_exact",
+      fillPrice: input.fillPrice as number,
+      pnl: input.pnl as number,
+      fee: input.fee as number,
+      protocolFillId: input.protocolFillId!.trim(),
+      observedAt: input.observedAt,
+    };
+  }
+  const observationPrice = typeof input.observationPrice === "number"
+    && Number.isFinite(input.observationPrice) && input.observationPrice > 0
+    ? input.observationPrice
+    : null;
+  return {
+    kind: "unavailable",
+    reason: input.liquidation ? "liquidation_fill_unattributed" : "venue_fill_unattributed",
+    observedAt: input.observedAt,
+    observationPrice,
+  };
+}
+
+export function isReconcilerAccountingIncompletePayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const closeAccounting = (payload as { closeAccounting?: unknown }).closeAccounting;
+  return !!closeAccounting
+    && typeof closeAccounting === "object"
+    && (closeAccounting as { kind?: unknown }).kind === "unavailable";
+}
+
 export type SignalBotCloseOutcome =
   | "executed"
   | "already_flat"
@@ -250,6 +313,42 @@ export function buildConfirmedFlatPosition(
       .toFixed(6),
     lastTradeId: input.tradeId,
     lastTradeAt: input.closedAt,
+  };
+}
+
+/** Flatten proven exposure while preserving the last exact money totals. */
+export function buildAccountingIncompleteFlatPosition(
+  existing: ExistingPositionAccounting | undefined,
+  input: { tradeId: string; closedAt: Date },
+): ReturnType<typeof buildConfirmedFlatPosition> {
+  return {
+    baseSize: "0",
+    avgEntryPrice: existing?.avgEntryPrice ?? "0",
+    costBasis: "0",
+    realizedPnl: new Decimal(existing?.realizedPnl ?? "0").toFixed(6),
+    totalFees: new Decimal(existing?.totalFees ?? "0").toFixed(6),
+    lastTradeId: input.tradeId,
+    lastTradeAt: input.closedAt,
+  };
+}
+
+/**
+ * Apply later venue money truth without touching current exposure. A bot may
+ * have reopened the same market before remediation runs, so this helper owns
+ * only the cumulative money columns; base size, basis and epoch identity stay
+ * under the current position writer.
+ */
+export function buildRemediatedPositionAccounting(
+  existing: ExistingPositionAccounting | undefined,
+  input: { realizedPnlDelta: number; feeDelta: number },
+): { realizedPnl: string; totalFees: string } {
+  return {
+    realizedPnl: new Decimal(existing?.realizedPnl ?? "0")
+      .plus(input.realizedPnlDelta)
+      .toFixed(6),
+    totalFees: new Decimal(existing?.totalFees ?? "0")
+      .plus(input.feeDelta)
+      .toFixed(6),
   };
 }
 

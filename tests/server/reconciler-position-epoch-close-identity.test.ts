@@ -530,7 +530,26 @@ describe('reconciler full-close position epoch identity', () => {
     const repeatedId = mocks.storage.recordCloseEventAtomic.mock.calls[1][0].insert.protocolFillId;
     expect(repeatedId).toBe(firstId);
     expect(firstId).toContain('entry-epoch-one');
-    expect(mocks.storage.upsertBotPosition).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.upsertBotPosition).not.toHaveBeenCalled();
+    expect(mocks.storage.recordCloseEventAtomic.mock.calls[0][0]).toMatchObject({
+      insert: {
+        fee: null,
+        pnl: null,
+        webhookPayload: {
+          closeAccounting: {
+            kind: 'unavailable',
+            reason: 'venue_fill_unattributed',
+          },
+          priceRole: 'observation_context_only',
+        },
+      },
+      deltas: { lastTradeAt: expect.any(String) },
+      confirmedPositionCloseIncomplete: { walletAddress, market },
+    });
     expect(mocks.sendTradeNotification).toHaveBeenCalledTimes(1);
+    expect(mocks.sendTradeNotification).toHaveBeenCalledWith(walletAddress, expect.objectContaining({
+      pnl: undefined,
+      accountingIncomplete: true,
+    }));
   });
 });

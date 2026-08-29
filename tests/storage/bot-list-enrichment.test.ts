@@ -110,6 +110,7 @@ describe("[A] Empty guard", () => {
 
     expect(mockSelectSpy).not.toHaveBeenCalled();
     expect(result.tradeCounts.size).toBe(0);
+    expect(result.accountingIncompleteCounts.size).toBe(0);
     expect(result.positions.size).toBe(0);
     expect(result.publishedBotMap.size).toBe(0);
     expect(result.equityAgg.size).toBe(0);
@@ -233,6 +234,18 @@ describe("[E] Published bot map", () => {
 // [F] Trade count
 // ---------------------------------------------------------------------------
 describe("[F] Trade count map", () => {
+  it("carries unresolved close counts separately from numeric trade counts", async () => {
+    seedSelectMock([[
+      { botId: "b1", tradeCount: 7, accountingIncompleteCount: 2 },
+      { botId: "b2", tradeCount: 0, accountingIncompleteCount: 0 },
+    ], [], [], [], []]);
+    const storage = makeStorage();
+    const result = await storage.getTradingBotListEnrichment("w", ["b1", "b2"]);
+    expect(result.tradeCounts.get("b1")).toBe(7);
+    expect(result.accountingIncompleteCounts.get("b1")).toBe(2);
+    expect(result.accountingIncompleteCounts.has("b2")).toBe(false);
+  });
+
   it("correctly maps botId → tradeCount number", async () => {
     seedSelectMock([
       [{ botId: "b1", tradeCount: 7 }, { botId: "b2", tradeCount: 0 }],

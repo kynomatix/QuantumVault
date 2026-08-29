@@ -273,6 +273,23 @@ describe("close-path integration guards", () => {
     expect(atomicSource.match(/await persistConfirmedPositionClose\(\)/g)).toHaveLength(2);
   });
 
+  it("remediates incomplete accounting under the trade lock without rewriting exposure", () => {
+    const remediationStart = storageSource.indexOf("async remediateReconcilerCloseAccountingAtomic(opts:");
+    const remediationEnd = storageSource.indexOf("async getBotTrades(", remediationStart);
+    const remediationSource = storageSource.slice(remediationStart, remediationEnd);
+
+    expect(remediationStart).toBeGreaterThan(0);
+    expect(remediationSource).toContain('.for("update")');
+    expect(remediationSource).toContain("conflicting exact venue evidence");
+    expect(remediationSource).toContain("buildRemediatedPositionAccounting(position");
+    expect(remediationSource.indexOf("await this.recomputeAndMergeBotStats")).toBeLessThan(
+      remediationSource.indexOf("const positionRows = await tx"),
+    );
+    expect(remediationSource).not.toContain("buildConfirmedFlatPosition(position");
+    expect(remediationSource).not.toContain("baseSize:");
+    expect(remediationSource).not.toContain("costBasis:");
+  });
+
   it("locks every stats merge while preserving the trade-table-first lock order", () => {
     const updateStart = storageSource.indexOf("async updateTradingBotStats(");
     const updateEnd = storageSource.indexOf("async getCanonicalBotTradeStats(", updateStart);
