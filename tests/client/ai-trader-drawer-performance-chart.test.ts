@@ -99,11 +99,22 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(performancePanel).toContain("omitted because realized P&amp;L is invalid.");
   });
 
-  it("uses the exact loaded-timeline TrialStrip summary and deliberately removes its DD suffix", () => {
+  it("uses exact qualification-era progress rather than the loaded timeline", () => {
     expect(source).toContain('data-testid="trial-strip-summary"');
-    expect(source).toContain("Loaded timeline · Day {daysElapsed}/{periodDays} · {tradesCount} closed trades ·");
+    expect(source).toContain("Qualification era · Day {daysElapsed}/{periodDays} · {tradeCount} closed trades ·");
     const trialStrip = source.slice(source.indexOf("function TrialStrip"), source.indexOf("export function AiTraderDrawer"));
+    expect(trialStrip).toContain("qualificationProgress.status === 'unavailable'");
+    expect(trialStrip).toContain('data-testid="trial-strip-unavailable"');
+    expect(trialStrip).toContain("const { tradeCount, netPnl } = qualificationProgress");
+    expect(trialStrip).toContain("qualificationProgress.trialStartedAt");
+    expect(trialStrip).toContain("Reset reason: {formatQualificationResetReason(qualificationProgress.resetReason)}");
+    expect(trialStrip).not.toContain("Loaded timeline");
     expect(trialStrip).not.toContain("· DD {maxDdPct.toFixed(1)}%");
+    const trialStripStart = source.indexOf("<TrialStrip");
+    const trialStripCall = source.slice(trialStripStart, source.indexOf("/>", trialStripStart) + 2);
+    expect(trialStripCall).toContain("qualificationProgress={detail?.qualificationProgress");
+    expect(trialStripCall).not.toContain("tradesCount={tradesCount}");
+    expect(trialStripCall).not.toContain("netPnl={netPnl}");
   });
 
   it("uses the terminally attributed current-mode projection for the Track Record P&L", () => {
