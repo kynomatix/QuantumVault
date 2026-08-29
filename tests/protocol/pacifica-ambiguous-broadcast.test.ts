@@ -9,6 +9,10 @@ import {
 } from '../../server/protocol/tx-verdicts.js';
 import type { MarketOrderParams } from '../../server/protocol/protocol-types.js';
 
+process.env.DATABASE_URL ??= 'postgresql://test:test@127.0.0.1:1/qv_test';
+process.env.AGENT_ENCRYPTION_KEY ??= '0'.repeat(64);
+const { isTransientError } = await import('../../server/trade-retry-service.js');
+
 function request(overrides: Partial<MarketOrderParams> = {}): MarketOrderParams {
   return {
     agentPublicKey: 'agent-account',
@@ -172,10 +176,7 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
     expectMutationCachesInvalidated();
   });
 
-  it('keeps reduce-only close timeout throwable, token-free, and retryable', async () => {
-    process.env.DATABASE_URL ??= 'postgresql://test:test@127.0.0.1:1/qv_test';
-    process.env.AGENT_ENCRYPTION_KEY ??= '0'.repeat(64);
-    const { isTransientError } = await import('../../server/trade-retry-service.js');
+  it('keeps reduce-only close ambiguity throwable, tokened, and never blindly retryable', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('request timeout'); }));
 
     let caught: unknown;
@@ -186,7 +187,7 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
     }
 
     expect(caught).toBeInstanceOf(Error);
-    expect(isUnconfirmedLandingVerdict(caught)).toBe(false);
-    expect(isTransientError(caught)).toBe(true);
+    expect(isUnconfirmedLandingVerdict(caught)).toBe(true);
+    expect(isTransientError(caught)).toBe(false);
   });
 });

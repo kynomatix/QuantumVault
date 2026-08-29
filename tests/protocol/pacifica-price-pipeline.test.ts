@@ -432,54 +432,40 @@ describe('/api/prices fallback — no upstream work after deadline', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 12. Explicit source/diff assertion — POST transport unchanged from pre-fix
+// 12. Explicit source/diff assertion — GET and POST both hard-settle
 // ---------------------------------------------------------------------------
-describe('POST transport — unchanged from pre-fix base', () => {
-  it('post() does not use fetchBounded', () => {
+describe('POST transport — bounded request, bounded body, explicit ambiguity', () => {
+  const method = (src: string, signature: string): string => {
+    const start = src.indexOf(signature);
+    expect(start).toBeGreaterThan(0);
+    const end = src.indexOf('\n  private ', start + 1);
+    return src.slice(start, end);
+  };
+
+  it('post() uses the same dual-bounded request and body primitives as get()', () => {
     const src = readFileSync(
       new URL('../../server/protocol/pacifica/pacifica-adapter.ts', import.meta.url),
     ).toString();
+    const postMethod = method(src, 'private async post(path: string');
+    const getMethod = method(src, 'private async get(');
 
-    // Isolate the post() method body.
-    const postStart = src.indexOf('private async post(path: string');
-    const postEnd = src.indexOf('\n  private ', postStart + 1);
-    expect(postStart).toBeGreaterThan(0);
-    const postMethod = src.slice(postStart, postEnd);
-
-    expect(postMethod).not.toContain('fetchBounded');
-    expect(postMethod).not.toContain('readBodyBounded');
-  });
-
-  it('post() uses AbortSignal.timeout(30_000) directly on fetch (pre-fix baseline)', () => {
-    const src = readFileSync(
-      new URL('../../server/protocol/pacifica/pacifica-adapter.ts', import.meta.url),
-    ).toString();
-
-    const postStart = src.indexOf('private async post(path: string');
-    const postEnd = src.indexOf('\n  private ', postStart + 1);
-    const postMethod = src.slice(postStart, postEnd);
-
-    expect(postMethod).toContain("AbortSignal.timeout(30_000)");
-    expect(postMethod).toContain("response.text().catch(() => '')");
-    expect(postMethod).toContain("response.json()");
-  });
-
-  it('fetchBounded is used by get() but not by post()', () => {
-    const src = readFileSync(
-      new URL('../../server/protocol/pacifica/pacifica-adapter.ts', import.meta.url),
-    ).toString();
-
-    // get() must reference fetchBounded.
-    const getStart = src.indexOf("private async get(\n    path: string");
-    const getEnd = src.indexOf('\n  private ', getStart + 1);
-    const getMethod = src.slice(getStart, getEnd);
     expect(getMethod).toContain('fetchBounded');
+    expect(postMethod).toContain('fetchBounded');
+    expect(postMethod).toContain('readBodyBounded(response.text()');
+    expect(postMethod).toContain('readBodyBounded(response.json()');
+    expect(postMethod).not.toContain('AbortSignal.timeout(30_000)');
+  });
 
-    // post() must NOT reference fetchBounded.
-    const postStart = src.indexOf('private async post(path: string');
-    const postEnd = src.indexOf('\n  private ', postStart + 1);
-    const postMethod = src.slice(postStart, postEnd);
-    expect(postMethod).not.toContain('fetchBounded');
+  it('post() resolves a declared mutation policy before sending and emits typed ambiguity', () => {
+    const src = readFileSync(
+      new URL('../../server/protocol/pacifica/pacifica-adapter.ts', import.meta.url),
+    ).toString();
+    const postMethod = method(src, 'private async post(path: string');
+
+    expect(postMethod).toContain('pacificaPostSettlementPolicy(path, body)');
+    expect(postMethod).toContain('PacificaPostOutcomeAmbiguousError');
+    expect(postMethod).toContain('policy.mutatesVenue');
+    expect(postMethod).toContain('invalidateMutationCaches()');
   });
 });
 

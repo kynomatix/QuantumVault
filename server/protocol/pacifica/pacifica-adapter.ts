@@ -94,6 +94,138 @@ const MAX_PRICE_CACHE_SIZE = 200;
 const PACIFICA_TRADE_HISTORY_PAGE_SIZE = 200;
 const PACIFICA_TRADE_HISTORY_MAX_PAGES = 10;
 
+export type PacificaPostRetryDisposition = 'after_authoritative_read' | 'never_automatic';
+export type PacificaPostPriority = 'urgent_risk_reducing' | 'normal';
+
+interface PacificaPostSettlementPolicy {
+  mutationClass: string;
+  authoritativeReads: readonly string[];
+  stableIdentity: boolean;
+  retryDisposition: PacificaPostRetryDisposition;
+  priority: PacificaPostPriority;
+  mutatesVenue: boolean;
+}
+
+export class PacificaPostOutcomeAmbiguousError extends Error {
+  readonly code = 'PACIFICA_POST_OUTCOME_AMBIGUOUS';
+  readonly endpoint: string;
+  readonly mutationClass: string;
+  readonly authoritativeReads: readonly string[];
+  readonly stableIdentity: boolean;
+  readonly retryDisposition: PacificaPostRetryDisposition;
+  readonly priority: PacificaPostPriority;
+
+  constructor(endpoint: string, detail: string, policy: PacificaPostSettlementPolicy) {
+    super(
+      `PacificaAdapter POST ${endpoint}: venue outcome ambiguous (${detail}); `
+      + `authoritative_read=${policy.authoritativeReads.join('+') || 'none_conclusive'}; `
+      + `stable_identity=${policy.stableIdentity}; retry=${policy.retryDisposition}; `
+      + `priority=${policy.priority} ${UNCONFIRMED_LANDING_VERDICT_TOKEN}`,
+    );
+    this.name = 'PacificaPostOutcomeAmbiguousError';
+    this.endpoint = endpoint;
+    this.mutationClass = policy.mutationClass;
+    this.authoritativeReads = policy.authoritativeReads;
+    this.stableIdentity = policy.stableIdentity;
+    this.retryDisposition = policy.retryDisposition;
+    this.priority = policy.priority;
+  }
+}
+
+function hasStablePostIdentity(body: unknown, ...fields: string[]): boolean {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const row = body as Record<string, unknown>;
+  return fields.every((field) => {
+    const value = row[field];
+    return value !== null && value !== undefined && String(value).trim().length > 0;
+  });
+}
+
+function pacificaPostSettlementPolicy(path: string, body: unknown): PacificaPostSettlementPolicy {
+  const withIdentity = (
+    mutationClass: string,
+    authoritativeReads: readonly string[],
+    identityFields: string[],
+    priority: PacificaPostPriority = 'normal',
+  ): PacificaPostSettlementPolicy => {
+    const stableIdentity = hasStablePostIdentity(body, ...identityFields);
+    return {
+      mutationClass,
+      authoritativeReads,
+      stableIdentity,
+      retryDisposition: stableIdentity ? 'after_authoritative_read' : 'never_automatic',
+      priority,
+      mutatesVenue: true,
+    };
+  };
+  const noReplay = (
+    mutationClass: string,
+    authoritativeReads: readonly string[] = [],
+    priority: PacificaPostPriority = 'normal',
+  ): PacificaPostSettlementPolicy => ({
+    mutationClass,
+    authoritativeReads,
+    stableIdentity: false,
+    retryDisposition: 'never_automatic',
+    priority,
+    mutatesVenue: true,
+  });
+
+  switch (path) {
+    case '/orders/create_market':
+      return withIdentity('reduce_only_market_close', ['/positions:fresh', '/trades/history:client_order_id'], ['client_order_id'], 'urgent_risk_reducing');
+    case '/orders/create':
+      return withIdentity('limit_order_create', ['/orders/open:client_order_id', '/trades/history:client_order_id'], ['client_order_id']);
+    case '/orders/stop/create':
+      return withIdentity('stop_order_create', ['/orders/stop:client_order_id', '/trades/history:client_order_id'], ['client_order_id']);
+    case '/orders/cancel':
+      return withIdentity('order_cancel', ['/orders/open:order_id', '/orders/stop:order_id'], ['order_id'], 'urgent_risk_reducing');
+    case '/orders/cancel_all': {
+      const allSymbols = Boolean(
+        body && typeof body === 'object' && !Array.isArray(body)
+          && (body as Record<string, unknown>).all_symbols === true,
+      );
+      return withIdentity(
+        'orders_cancel_all',
+        ['/orders/open:scope', '/orders/stop:scope'],
+        allSymbols ? ['account', 'all_symbols'] : ['account', 'all_symbols', 'symbol'],
+        'urgent_risk_reducing',
+      );
+    }
+    case '/orders/stop/cancel':
+      return withIdentity('stop_order_cancel', ['/orders/stop:order_id'], ['order_id'], 'urgent_risk_reducing');
+    case '/account/leverage':
+      return withIdentity('leverage_update', ['/account/settings:symbol+leverage'], ['account', 'symbol', 'leverage']);
+    case '/account/margin':
+      return withIdentity('margin_mode_update', ['/account/settings:margin_mode'], ['account', 'margin_mode']);
+    case '/positions/tpsl':
+      return withIdentity('position_tpsl_update', ['/orders/stop:symbol+legs'], ['account', 'symbol']);
+    case '/account/subaccount/create':
+      return withIdentity('subaccount_create', ['/account/subaccount/list:subaccount'], ['main_account', 'subaccount']);
+    case '/account/builder_codes/approve':
+      return withIdentity('builder_code_approval', ['/account/builder_codes/approvals:builder_code'], ['account', 'builder_code']);
+    case '/referral/user/code/claim':
+      return withIdentity('referral_code_claim', ['/account:referral_code'], ['account', 'code']);
+    case '/account/withdraw':
+      return noReplay('withdrawal');
+    case '/account/subaccount/transfer':
+      return noReplay('subaccount_transfer');
+    case '/agent/bind':
+      return noReplay('agent_binding');
+    case '/account/subaccount/list':
+      return {
+        mutationClass: 'authenticated_subaccount_read',
+        authoritativeReads: [],
+        stableIdentity: true,
+        retryDisposition: 'after_authoritative_read',
+        priority: 'normal',
+        mutatesVenue: false,
+      };
+    default:
+      throw new Error(`PacificaAdapter POST ${path}: settlement policy is not declared`);
+  }
+}
+
 const PACIFICA_TRADE_SIDES = new Set([
   'open_long', 'open_short', 'close_long', 'close_short',
 ]);
@@ -3528,6 +3660,10 @@ export class PacificaAdapter implements ProtocolAdapter {
           console.log(`${logTag} Already enrolled upstream (treating as success): ${msg}`);
           return true;
         }
+        if (err instanceof PacificaPostOutcomeAmbiguousError) {
+          console.error(`${logTag} POST ${path} outcome ambiguous; automatic retry suppressed: ${msg}`);
+          return false;
+        }
         // Retry on 429 with jittered backoff; everything else is a hard fail
         // (we'll retry on the user's next trade).
         if (/\b429\b/.test(msg) && attempt < delays.length - 1) {
@@ -3547,50 +3683,62 @@ export class PacificaAdapter implements ProtocolAdapter {
 
   private async post(path: string, body: unknown): Promise<any> {
     const url = `${this.config.baseUrl}${path}`;
+    const policy = pacificaPostSettlementPolicy(path, body);
+    const ambiguous = (detail: string): PacificaPostOutcomeAmbiguousError => (
+      new PacificaPostOutcomeAmbiguousError(path, detail, policy)
+    );
 
     let response: Response;
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        // Generous (money path — aborting an order POST leaves upstream state
-        // ambiguous, which callers already handle), but bounded: a hang here
-        // stranded auto-cycle bots in 'analyzing' forever. 30s is far beyond
-        // any healthy Pacifica response.
-        signal: AbortSignal.timeout(30_000),
-      });
+      try {
+        response = await this.fetchBounded(
+          url,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          },
+          30_000,
+          30_000,
+          `POST ${path}`,
+        );
+      } catch (error) {
+        if (!policy.mutatesVenue) throw error;
+        throw ambiguous(`transport did not prove a terminal outcome: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      if (!response.ok) {
+        let errorBody = '';
+        try {
+          errorBody = await this.readBodyBounded(response.text(), 10_000, `POST ${path}`);
+        } catch (error) {
+          if (!policy.mutatesVenue) throw error;
+          throw ambiguous(`HTTP ${response.status} response body was unreadable`);
+        }
+        // A received 4xx response is an explicit client-side rejection, not
+        // an unknown landing. In particular, 429 must remain visible to the
+        // existing bounded approval retry loop.
+        const terminalStatus = response.status >= 400 && response.status < 500;
+        if (terminalStatus || !policy.mutatesVenue) {
+          throw new Error(
+            `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
+          );
+        }
+        throw ambiguous(`HTTP ${response.status} did not prove rejection: ${errorBody || response.statusText}`);
+      }
+
+      let json: unknown;
+      try {
+        json = await this.readBodyBounded(response.json(), 10_000, `POST ${path}`);
+      } catch (error) {
+        if (!policy.mutatesVenue) throw error;
+        throw ambiguous(`successful response body was unreadable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return this.unwrapEnvelope(json);
     } finally {
-      // POSTs also consume credits; charge default cost.
       pacificaQuota.record(path);
+      if (policy.mutatesVenue) this.invalidateMutationCaches();
     }
-
-    if (!response.ok) {
-      const errorBody = await response.text().catch(() => '');
-      throw new Error(
-        `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
-      );
-    }
-
-    const json = await response.json();
-    const data = this.unwrapEnvelope(json);
-
-    // Invalidate caches whose contents are mutated by this write so that the
-    // next reader sees post-trade state rather than the pre-trade snapshot.
-    // Path-based heuristic: any order/position/balance-mutating endpoint
-    // invalidates positions + account cache for ALL subaccounts. Aggressive
-    // but safe — worst case is one cold-cache fetch per subaccount.
-    if (
-      path.includes('/orders') ||
-      path.includes('/positions') ||
-      path.includes('/deposit') ||
-      path.includes('/withdraw') ||
-      path.includes('/transfer')
-    ) {
-      this.invalidateMutationCaches();
-    }
-
-    return data;
   }
 
   private invalidateMutationCaches(): void {
