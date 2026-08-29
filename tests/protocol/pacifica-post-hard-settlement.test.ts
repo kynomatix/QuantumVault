@@ -7,7 +7,15 @@ import { pacificaCache } from '../../server/protocol/pacifica/pacifica-cache.js'
 import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota.js';
 import { isUnconfirmedLandingVerdict } from '../../server/protocol/tx-verdicts.js';
 
-function subject(): PacificaAdapter & { post(path: string, body: unknown): Promise<unknown> } {
+function subject(): PacificaAdapter & {
+  post(path: string, body: unknown): Promise<unknown>;
+  postWithApprovalRetry(
+    path: string,
+    buildBody: () => unknown,
+    logTag: string,
+    alreadyMatcher: RegExp,
+  ): Promise<boolean>;
+} {
   return new PacificaAdapter({ baseUrl: 'http://pacifica.test' }) as never;
 }
 
@@ -31,8 +39,12 @@ describe('Pacifica generic POST hard settlement', () => {
     const pending = subject().post('/account/withdraw', {
       account: 'account-1', amount: '10', signature: 'redacted', timestamp: 1,
     }).catch(error => error);
+    let settled = false;
+    void pending.then(() => { settled = true; });
 
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(34_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
     const error = await pending;
 
     expect(error).toBeInstanceOf(PacificaPostOutcomeAmbiguousError);
@@ -73,10 +85,10 @@ describe('Pacifica generic POST hard settlement', () => {
     });
   });
 
-  it('keeps explicit terminal rejections distinct from ambiguous outcomes', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('invalid request', { status: 422 })));
-    const error = await subject().post('/orders/cancel', {
-      account: 'account-1', order_id: 'order-1',
+  it.each([400, 401, 403, 404, 405, 422])('keeps explicit terminal HTTP %s distinct from ambiguous outcomes', async status => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('invalid request', { status })));
+    const error = await subject().post('/account/leverage', {
+      account: 'account-1', symbol: 'BTC', leverage: 5,
     }).catch(value => value);
 
     expect(error).toBeInstanceOf(Error);
@@ -96,27 +108,24 @@ describe('Pacifica generic POST hard settlement', () => {
     expect(isUnconfirmedLandingVerdict(error)).toBe(false);
   });
 
-  it('classifies nonterminal HTTP responses as ambiguous', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('upstream uncertain', { status: 503 })));
-    const error = await subject().post('/orders/cancel', {
-      account: 'account-1', order_id: 'order-1',
+  it.each([408, 409, 425, 499, 500, 503])('classifies nonterminal HTTP %s as ambiguous', async status => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('upstream uncertain', { status })));
+    const error = await subject().post('/account/leverage', {
+      account: 'account-1', symbol: 'BTC', leverage: 5,
     }).catch(value => value);
 
     expect(error).toBeInstanceOf(PacificaPostOutcomeAmbiguousError);
     expect(error).toMatchObject({
-      mutationClass: 'order_cancel',
+      mutationClass: 'leverage_update',
       stableIdentity: true,
       retryDisposition: 'after_authoritative_read',
-      priority: 'urgent_risk_reducing',
+      priority: 'normal',
     });
   });
 
   it.each([
-    ['/orders/create_market', { account: 'a', client_order_id: 'close-1' }, 'reduce_only_market_close', ['/positions:fresh', '/trades/history:client_order_id'], true, 'urgent_risk_reducing'],
     ['/orders/create', { account: 'a' }, 'limit_order_create', ['/orders/open:client_order_id', '/trades/history:client_order_id'], false, 'normal'],
     ['/orders/stop/create', { account: 'a', client_order_id: 'stop-1' }, 'stop_order_create', ['/orders/stop:client_order_id', '/trades/history:client_order_id'], true, 'normal'],
-    ['/orders/cancel_all', { account: 'a', all_symbols: true }, 'orders_cancel_all', ['/orders/open:scope', '/orders/stop:scope'], true, 'urgent_risk_reducing'],
-    ['/orders/stop/cancel', { account: 'a', order_id: 'stop-1' }, 'stop_order_cancel', ['/orders/stop:order_id'], true, 'urgent_risk_reducing'],
     ['/account/margin', { account: 'a', margin_mode: 'cross' }, 'margin_mode_update', ['/account/settings:margin_mode'], true, 'normal'],
     ['/positions/tpsl', { account: 'a', symbol: 'BTC' }, 'position_tpsl_update', ['/orders/stop:symbol+legs'], true, 'normal'],
     ['/account/subaccount/create', { main_account: 'a', subaccount: 'sub' }, 'subaccount_create', ['/account/subaccount/list:subaccount'], true, 'normal'],
@@ -138,18 +147,31 @@ describe('Pacifica generic POST hard settlement', () => {
     });
   });
 
-  it('requires the symbol as part of a symbol-scoped cancel-all identity', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('socket failure'); }));
+  it.each([
+    ['/orders/create_market', { account: 'a', client_order_id: 'close-1' }],
+    ['/orders/cancel', { account: 'a', order_id: 'order-1' }],
+    ['/orders/cancel_all', { account: 'a', all_symbols: true }],
+    ['/orders/stop/cancel', { account: 'a', order_id: 'stop-1' }],
+  ] as const)('keeps risk-reducing %s on the ordinary retry path until an owning caller can reconcile', async (path, body) => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('request timeout'); }));
+    const error = await subject().post(path, body).catch(value => value);
 
-    const incomplete = await subject().post('/orders/cancel_all', {
-      account: 'a', all_symbols: false,
-    }).catch(value => value);
-    const complete = await subject().post('/orders/cancel_all', {
-      account: 'a', all_symbols: false, symbol: 'BTC',
-    }).catch(value => value);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(PacificaPostOutcomeAmbiguousError);
+    expect(isUnconfirmedLandingVerdict(error)).toBe(false);
+  });
 
-    expect(incomplete).toMatchObject({ stableIdentity: false, retryDisposition: 'never_automatic' });
-    expect(complete).toMatchObject({ stableIdentity: true, retryDisposition: 'after_authoritative_read' });
+  it('does not swallow an ambiguous approval response whose body resembles already-enrolled success', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('already approved', { status: 503 })));
+
+    const approved = await subject().postWithApprovalRetry(
+      '/account/builder_codes/approve',
+      () => ({ account: 'a', builder_code: 'QuantumVault' }),
+      '[test]',
+      /already approved/i,
+    );
+
+    expect(approved).toBe(false);
   });
 
   it('keeps the authenticated signed POST read retryable and outside mutation ambiguity', async () => {
@@ -173,6 +195,30 @@ describe('Pacifica generic POST hard settlement', () => {
     expect(pacificaCache.getFresh('/positions?account=account-1')).toBeUndefined();
     expect(pacificaCache.getFresh('/account?account=account-1')).toBeUndefined();
     expect(pacificaQuota.snapshot().requestsServed).toBe(1);
+  });
+
+  it('abandons a late response after the hard deadline without a second quota charge or cache invalidation', async () => {
+    vi.useFakeTimers();
+    let resolveFetch!: (response: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => { resolveFetch = resolve; })));
+    const pending = subject().post('/account/leverage', {
+      account: 'account-1', symbol: 'BTC', leverage: 5,
+    }).catch(error => error);
+
+    await vi.advanceTimersByTimeAsync(35_000);
+    const error = await pending;
+    expect(error).toBeInstanceOf(PacificaPostOutcomeAmbiguousError);
+    expect(pacificaQuota.snapshot().requestsServed).toBe(1);
+
+    pacificaCache.set('/positions?account=account-1', '/positions', [{ symbol: 'BTC' }]);
+    pacificaCache.set('/account?account=account-1', '/account', { equity: '10' });
+    resolveFetch(new Response(JSON.stringify({ success: true }), { status: 200 }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pacificaQuota.snapshot().requestsServed).toBe(1);
+    expect(pacificaCache.getFresh('/positions?account=account-1')).toEqual([{ symbol: 'BTC' }]);
+    expect(pacificaCache.getFresh('/account?account=account-1')).toEqual({ equity: '10' });
   });
 
   it('rejects an undeclared future POST endpoint before sending anything', async () => {

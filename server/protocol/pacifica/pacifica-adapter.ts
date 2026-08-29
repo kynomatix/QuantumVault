@@ -93,6 +93,10 @@ const PRICE_CACHE_TTL_MS = 60 * 1000;
 const MAX_PRICE_CACHE_SIZE = 200;
 const PACIFICA_TRADE_HISTORY_PAGE_SIZE = 200;
 const PACIFICA_TRADE_HISTORY_MAX_PAGES = 10;
+const PACIFICA_POST_SOFT_TIMEOUT_MS = 30_000;
+const PACIFICA_POST_HARD_TIMEOUT_MS = 35_000;
+const PACIFICA_POST_BODY_TIMEOUT_MS = 10_000;
+const PACIFICA_POST_TERMINAL_STATUSES = new Set([400, 401, 403, 404, 405, 422, 429]);
 
 export type PacificaPostRetryDisposition = 'after_authoritative_read' | 'never_automatic';
 export type PacificaPostPriority = 'urgent_risk_reducing' | 'normal';
@@ -104,6 +108,7 @@ interface PacificaPostSettlementPolicy {
   retryDisposition: PacificaPostRetryDisposition;
   priority: PacificaPostPriority;
   mutatesVenue: boolean;
+  quarantineAmbiguity: boolean;
 }
 
 export class PacificaPostOutcomeAmbiguousError extends Error {
@@ -147,6 +152,7 @@ function pacificaPostSettlementPolicy(path: string, body: unknown): PacificaPost
     authoritativeReads: readonly string[],
     identityFields: string[],
     priority: PacificaPostPriority = 'normal',
+    quarantineAmbiguity = true,
   ): PacificaPostSettlementPolicy => {
     const stableIdentity = hasStablePostIdentity(body, ...identityFields);
     return {
@@ -156,6 +162,7 @@ function pacificaPostSettlementPolicy(path: string, body: unknown): PacificaPost
       retryDisposition: stableIdentity ? 'after_authoritative_read' : 'never_automatic',
       priority,
       mutatesVenue: true,
+      quarantineAmbiguity,
     };
   };
   const noReplay = (
@@ -169,17 +176,18 @@ function pacificaPostSettlementPolicy(path: string, body: unknown): PacificaPost
     retryDisposition: 'never_automatic',
     priority,
     mutatesVenue: true,
+    quarantineAmbiguity: true,
   });
 
   switch (path) {
     case '/orders/create_market':
-      return withIdentity('reduce_only_market_close', ['/positions:fresh', '/trades/history:client_order_id'], ['client_order_id'], 'urgent_risk_reducing');
+      return withIdentity('reduce_only_market_close', ['/positions:fresh', '/trades/history:client_order_id'], ['client_order_id'], 'urgent_risk_reducing', false);
     case '/orders/create':
       return withIdentity('limit_order_create', ['/orders/open:client_order_id', '/trades/history:client_order_id'], ['client_order_id']);
     case '/orders/stop/create':
       return withIdentity('stop_order_create', ['/orders/stop:client_order_id', '/trades/history:client_order_id'], ['client_order_id']);
     case '/orders/cancel':
-      return withIdentity('order_cancel', ['/orders/open:order_id', '/orders/stop:order_id'], ['order_id'], 'urgent_risk_reducing');
+      return withIdentity('order_cancel', ['/orders/open:order_id', '/orders/stop:order_id'], ['order_id'], 'urgent_risk_reducing', false);
     case '/orders/cancel_all': {
       const allSymbols = Boolean(
         body && typeof body === 'object' && !Array.isArray(body)
@@ -190,10 +198,11 @@ function pacificaPostSettlementPolicy(path: string, body: unknown): PacificaPost
         ['/orders/open:scope', '/orders/stop:scope'],
         allSymbols ? ['account', 'all_symbols'] : ['account', 'all_symbols', 'symbol'],
         'urgent_risk_reducing',
+        false,
       );
     }
     case '/orders/stop/cancel':
-      return withIdentity('stop_order_cancel', ['/orders/stop:order_id'], ['order_id'], 'urgent_risk_reducing');
+      return withIdentity('stop_order_cancel', ['/orders/stop:order_id'], ['order_id'], 'urgent_risk_reducing', false);
     case '/account/leverage':
       return withIdentity('leverage_update', ['/account/settings:symbol+leverage'], ['account', 'symbol', 'leverage']);
     case '/account/margin':
@@ -220,6 +229,7 @@ function pacificaPostSettlementPolicy(path: string, body: unknown): PacificaPost
         retryDisposition: 'after_authoritative_read',
         priority: 'normal',
         mutatesVenue: false,
+        quarantineAmbiguity: false,
       };
     default:
       throw new Error(`PacificaAdapter POST ${path}: settlement policy is not declared`);
@@ -1394,8 +1404,9 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
 
     if (isReduceOnly) {
-      // Risk-reducing closes retain the existing throw/retry semantics. They
-      // must never be stranded behind entry-only ambiguity quarantine.
+      // Risk-reducing closes retain ordinary throw/retry semantics until an
+      // owning caller can perform an authoritative read before same-identity
+      // replay. Entry-only ambiguity quarantine must never strand an exit.
       const response: PacificaOrderResponse = await this.post('/orders/create_market', body);
       return this.mapOrderResponse(response, params.clientOrderId);
     }
@@ -3656,13 +3667,13 @@ export class PacificaAdapter implements ProtocolAdapter {
         // Tolerate "already approved/claimed" semantic on non-2xx — Pacifica
         // returns this when the user has already enrolled (e.g. from a prior
         // server instance, manual API call, or duplicate POST after restart).
-        if (alreadyMatcher.test(msg)) {
-          console.log(`${logTag} Already enrolled upstream (treating as success): ${msg}`);
-          return true;
-        }
         if (err instanceof PacificaPostOutcomeAmbiguousError) {
           console.error(`${logTag} POST ${path} outcome ambiguous; automatic retry suppressed: ${msg}`);
           return false;
+        }
+        if (alreadyMatcher.test(msg)) {
+          console.log(`${logTag} Already enrolled upstream (treating as success): ${msg}`);
+          return true;
         }
         // Retry on 429 with jittered backoff; everything else is a hard fail
         // (we'll retry on the user's next trade).
@@ -3684,8 +3695,10 @@ export class PacificaAdapter implements ProtocolAdapter {
   private async post(path: string, body: unknown): Promise<any> {
     const url = `${this.config.baseUrl}${path}`;
     const policy = pacificaPostSettlementPolicy(path, body);
-    const ambiguous = (detail: string): PacificaPostOutcomeAmbiguousError => (
-      new PacificaPostOutcomeAmbiguousError(path, detail, policy)
+    const ambiguous = (detail: string): Error => (
+      policy.quarantineAmbiguity
+        ? new PacificaPostOutcomeAmbiguousError(path, detail, policy)
+        : new Error(`PacificaAdapter POST ${path}: ${detail}`)
     );
 
     let response: Response;
@@ -3698,8 +3711,8 @@ export class PacificaAdapter implements ProtocolAdapter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           },
-          30_000,
-          30_000,
+          PACIFICA_POST_SOFT_TIMEOUT_MS,
+          PACIFICA_POST_HARD_TIMEOUT_MS,
           `POST ${path}`,
         );
       } catch (error) {
@@ -3710,15 +3723,16 @@ export class PacificaAdapter implements ProtocolAdapter {
       if (!response.ok) {
         let errorBody = '';
         try {
-          errorBody = await this.readBodyBounded(response.text(), 10_000, `POST ${path}`);
+          errorBody = await this.readBodyBounded(response.text(), PACIFICA_POST_BODY_TIMEOUT_MS, `POST ${path}`);
         } catch (error) {
           if (!policy.mutatesVenue) throw error;
           throw ambiguous(`HTTP ${response.status} response body was unreadable`);
         }
-        // A received 4xx response is an explicit client-side rejection, not
-        // an unknown landing. In particular, 429 must remain visible to the
-        // existing bounded approval retry loop.
-        const terminalStatus = response.status >= 400 && response.status < 500;
+        // Only statuses with established terminal-rejection semantics are
+        // conclusive. Intermediary 4xx responses such as 408/409/425/499 do
+        // not prove that a venue mutation failed to land. 429 stays terminal
+        // so the existing bounded approval retry loop can observe it.
+        const terminalStatus = PACIFICA_POST_TERMINAL_STATUSES.has(response.status);
         if (terminalStatus || !policy.mutatesVenue) {
           throw new Error(
             `PacificaAdapter POST ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
@@ -3729,7 +3743,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
       let json: unknown;
       try {
-        json = await this.readBodyBounded(response.json(), 10_000, `POST ${path}`);
+        json = await this.readBodyBounded(response.json(), PACIFICA_POST_BODY_TIMEOUT_MS, `POST ${path}`);
       } catch (error) {
         if (!policy.mutatesVenue) throw error;
         throw ambiguous(`successful response body was unreadable: ${error instanceof Error ? error.message : String(error)}`);

@@ -176,7 +176,7 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
     expectMutationCachesInvalidated();
   });
 
-  it('keeps reduce-only close ambiguity throwable, tokened, and never blindly retryable', async () => {
+  it('keeps reduce-only close transport failure on the ordinary urgent retry path', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('request timeout'); }));
 
     let caught: unknown;
@@ -187,7 +187,7 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
     }
 
     expect(caught).toBeInstanceOf(Error);
-    expect(isUnconfirmedLandingVerdict(caught)).toBe(true);
-    expect(isTransientError(caught)).toBe(false);
+    expect(isUnconfirmedLandingVerdict(caught)).toBe(false);
+    expect(isTransientError(caught)).toBe(true);
   });
 });
