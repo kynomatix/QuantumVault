@@ -606,11 +606,13 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
   );
 }
 
-function formatQualificationResetReason(reason: string): string {
-  const labels: Record<string, string> = {
+function formatQualificationResetReason(reason: string): string | null {
+  const labels: Record<string, string | null> = {
     scanner_market_selection_changed: 'Scanner market selection changed',
     material_bot_settings_changed: 'Material bot settings changed',
     trial_restarted: 'Trial restarted',
+    qualification_era_initialized: null,
+    qualification_era_changed: 'Qualification evidence changed',
   };
   return labels[reason] ?? reason.replaceAll('_', ' ').replace(/^./, (value) => value.toUpperCase());
 }
@@ -629,6 +631,9 @@ function TrialStrip({ bot, qualificationProgress, onGoLive, onRestartTrial, goLi
   const criteria = bot.graduationCriteria as { periodDays?: number; minTrades?: number } | null;
   const periodDays = criteria?.periodDays ?? 30;
   const minTrades = criteria?.minTrades ?? 10;
+  const resetReasonLabel = qualificationProgress.resetReason
+    ? formatQualificationResetReason(qualificationProgress.resetReason)
+    : null;
 
   if (bot.graduationState === 'graduated' && bot.qualificationEraStatus !== 'matched') {
     return (
@@ -736,9 +741,9 @@ function TrialStrip({ bot, qualificationProgress, onGoLive, onRestartTrial, goLi
         <div className="text-[11px] text-amber-400" data-testid="trial-strip-unavailable">
           Qualification era unavailable · {reason}
         </div>
-        {qualificationProgress.resetReason && (
+        {resetReasonLabel && (
           <div className="text-[10px] text-muted-foreground" data-testid="trial-strip-reset-reason">
-            Reset reason: {formatQualificationResetReason(qualificationProgress.resetReason)}
+            Reset reason: {resetReasonLabel}
           </div>
         )}
       </div>
@@ -763,9 +768,9 @@ function TrialStrip({ bot, qualificationProgress, onGoLive, onRestartTrial, goLi
         <span className="text-muted-foreground">{overallPct}%</span>
       </div>
       <Progress value={overallPct} className="h-1" />
-      {qualificationProgress.resetReason && (
+      {resetReasonLabel && (
         <div className="text-[10px] text-muted-foreground" data-testid="trial-strip-reset-reason">
-          Reset reason: {formatQualificationResetReason(qualificationProgress.resetReason)}
+          Reset reason: {resetReasonLabel}
         </div>
       )}
     </div>

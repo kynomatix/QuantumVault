@@ -107,7 +107,14 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(trialStrip).toContain('data-testid="trial-strip-unavailable"');
     expect(trialStrip).toContain("const { tradeCount, netPnl } = qualificationProgress");
     expect(trialStrip).toContain("qualificationProgress.trialStartedAt");
-    expect(trialStrip).toContain("Reset reason: {formatQualificationResetReason(qualificationProgress.resetReason)}");
+    expect(trialStrip).toContain("Reset reason: {resetReasonLabel}");
+    expect(trialStrip).toContain("const resetReasonLabel = qualificationProgress.resetReason");
+    expect(source).toContain("scanner_market_selection_changed: 'Scanner market selection changed'");
+    expect(source).toContain("material_bot_settings_changed: 'Material bot settings changed'");
+    expect(source).toContain("trial_restarted: 'Trial restarted'");
+    expect(source).toContain("qualification_era_initialized: null");
+    expect(source).toContain("qualification_era_changed: 'Qualification evidence changed'");
+    expect(trialStrip).toContain("const pnlStr = `${netPnl >= 0 ? '+' : ''}$${netPnl.toFixed(2)}`");
     expect(trialStrip).not.toContain("Loaded timeline");
     expect(trialStrip).not.toContain("· DD {maxDdPct.toFixed(1)}%");
     const trialStripStart = source.indexOf("<TrialStrip");
