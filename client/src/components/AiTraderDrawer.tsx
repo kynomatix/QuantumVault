@@ -508,9 +508,10 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
     ? 'Overall paper performance'
     : 'Overall live performance';
   const pnlText = formatPerformancePnl(performance.netPnl);
-  const chartPoints = performance.tradeCount === 1
-    ? [{ t: 'start', v: 0 }, ...performance.points]
-    : performance.points;
+  // parsePerformanceResponse enforces tradeCount === points.length, so every
+  // non-empty series receives exactly one synthetic origin and no real point
+  // can be discarded by this presentation-only branch.
+  const chartPoints = [{ t: 'Baseline', v: 0 }, ...performance.points];
   const plural = (count: number, singular: string, multiple = `${singular}s`) =>
     count === 1 ? singular : multiple;
 
@@ -533,36 +534,36 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
         <div className="h-36 w-full" data-testid="ai-trader-performance-chart">
           <ChartContainer config={PERFORMANCE_CHART_CONFIG} className="h-full w-full aspect-auto">
             <LineChart data={chartPoints} margin={{ top: 6, right: 6, bottom: 0, left: 0 }}>
-              <YAxis
-                width={46}
-                tick={{ fontSize: 10 }}
-                domain={([dataMin, dataMax]: [number, number]) => [Math.min(0, dataMin), Math.max(0, dataMax)]}
-              />
-              <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
-              <ChartTooltip
-                content={(
-                  <ChartTooltipContent
-                    hideLabel
-                    formatter={(value) => (
-                      <>
-                        <span className="text-muted-foreground">{PERFORMANCE_CHART_CONFIG.v.label}</span>
-                        <span className="ml-auto font-mono font-medium tabular-nums text-foreground">
-                          {formatPerformancePnl(Number(value))}
-                        </span>
-                      </>
-                    )}
-                  />
-                )}
-              />
-              <Line
-                type="monotone"
-                dataKey="v"
-                name="Cumulative P&L"
-                stroke={performance.netPnl >= 0 ? '#34d399' : '#f87171'}
-                strokeWidth={2}
-                dot={performance.tradeCount === 1}
-                isAnimationActive={false}
-              />
+            <YAxis
+              width={46}
+              tick={{ fontSize: 10 }}
+              domain={([dataMin, dataMax]: [number, number]) => [Math.min(0, dataMin), Math.max(0, dataMax)]}
+            />
+            <ReferenceLine y={0} stroke="hsl(var(--muted-foreground))" strokeDasharray="3 3" />
+            <ChartTooltip
+              content={(
+                <ChartTooltipContent
+                  hideLabel
+                  formatter={(value) => (
+                    <>
+                      <span className="text-muted-foreground">{PERFORMANCE_CHART_CONFIG.v.label}</span>
+                      <span className="ml-auto font-mono font-medium tabular-nums text-foreground">
+                        {formatPerformancePnl(Number(value))}
+                      </span>
+                    </>
+                  )}
+                />
+              )}
+            />
+            <Line
+              type="monotone"
+              dataKey="v"
+              name="Cumulative P&L"
+              stroke={performance.netPnl >= 0 ? '#34d399' : '#f87171'}
+              strokeWidth={2}
+              dot={performance.tradeCount === 1}
+              isAnimationActive={false}
+            />
             </LineChart>
           </ChartContainer>
         </div>

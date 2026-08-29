@@ -41,7 +41,7 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(filter).toBeLessThan(timeline);
   });
 
-  it("pins the chart, zero domain, one-trade baseline, labels, and stable ids", () => {
+  it("pins the chart, zero domain, non-empty-series baseline, labels, and stable ids", () => {
     for (const id of [
       "ai-trader-performance",
       "ai-trader-performance-chart",
@@ -53,8 +53,10 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
       "ChartContainer", "LineChart", "Line", "YAxis", "ReferenceLine", "ChartTooltip", "ChartTooltipContent",
     ]) expect(performancePanel).toContain(`<${component}`);
     expect(performancePanel).toContain("domain={([dataMin, dataMax]: [number, number]) => [Math.min(0, dataMin), Math.max(0, dataMax)]}");
-    expect(performancePanel).toContain("performance.tradeCount === 1");
-    expect(performancePanel).toContain("[{ t: 'start', v: 0 }, ...performance.points]");
+    expect(performancePanel).toContain("performance.tradeCount > 0");
+    expect(performancePanel).toContain("const chartPoints = [{ t: 'Baseline', v: 0 }, ...performance.points]");
+    expect(performancePanel).not.toContain("const chartPoints = performance.tradeCount === 1");
+    expect(performancePanel).not.toContain("t: 'Current'");
     expect(performancePanel).toContain("Overall paper performance");
     expect(performancePanel).toContain("Overall live performance");
   });
