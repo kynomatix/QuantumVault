@@ -4605,6 +4605,12 @@ describe("breakeven protect", () => {
   });
 
   it("paper: every retained fee-authority failure suppresses the move and warns once with its exact reason", async () => {
+    const actualBreakeven = await vi.importActual<typeof import("../../server/ai-trader/breakeven")>(
+      "../../server/ai-trader/breakeven",
+    );
+    expect(PAPER_STOP).toEqual(
+      actualBreakeven.paperBreakevenStopPrice("long", 150, PAPER_TAKER_FEE_RATE),
+    );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { monitorBotOnce } = await importMonitor();
     fetchOHLCVMock.mockResolvedValue(progressCandles());
@@ -4960,7 +4966,7 @@ describe("breakeven protect", () => {
     ).toBe("sl");
     // And a fill at the MOVED stop is 'sl' too.
     expect(
-      classifyLiveExit({ side: "long", avgExitPrice: LIVE_FIXED_SL, stopLossPrice: LIVE_FIXED_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
+      classifyLiveExit({ side: "long", avgExitPrice: 150.2, stopLossPrice: LIVE_FIXED_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
     ).toBe("sl");
   });
 });
