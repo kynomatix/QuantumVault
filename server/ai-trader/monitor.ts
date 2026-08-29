@@ -61,11 +61,13 @@ import {
   favorableExtreme,
   progressTowardTp,
   breakevenStopPrice,
+  paperBreakevenStopPrice,
   isFavorableSideOf,
   isTighterStop,
   evaluatePaperBracketWithMove,
   countsAsSlLoss,
   type BreakevenProtectState,
+  type PaperBreakevenStopFailureReason,
 } from "./breakeven";
 import {
   fetchOHLCV,
@@ -95,6 +97,7 @@ import {
   resolveFeeRateQuote,
   validateFeeRateQuote,
   type FeeRateQuoteResult,
+  type FeeRateQuoteUnavailableReason,
   type ProtocolAdapter,
 } from "../protocol/adapter";
 import {
@@ -773,33 +776,43 @@ interface CloseRecord {
   closedAt: Date;
 }
 
-function retainedPaperEntryFeeRate(bot: AiTraderBot, view: OpenDecisionView): number | null {
+function retainedFeeUnavailable(reason: FeeRateQuoteUnavailableReason): FeeRateQuoteResult {
+  return { availability: "unavailable", reason };
+}
+
+function retainedPaperEntryFeeQuote(bot: AiTraderBot, view: OpenDecisionView): FeeRateQuoteResult {
   const digest = view.decision.contextDigest;
-  if (!digest || typeof digest !== "object" || Array.isArray(digest)) return null;
+  if (!digest || typeof digest !== "object" || Array.isArray(digest)) return retainedFeeUnavailable("malformed_quote");
   const record = digest as Record<string, unknown>;
   const identityValue = record.feeRateIdentity;
-  if (!identityValue || typeof identityValue !== "object" || Array.isArray(identityValue)) return null;
+  if (!identityValue || typeof identityValue !== "object" || Array.isArray(identityValue)) return retainedFeeUnavailable("malformed_quote");
   const identity = identityValue as Record<string, unknown>;
   const expectedSubaccountId = bot.protocolSubaccountId ?? null;
   const decidedAtMs = view.decision.decidedAt === null
     ? NaN
     : new Date(view.decision.decidedAt).getTime();
+  if (!Number.isFinite(decidedAtMs)) {
+    return retainedFeeUnavailable("malformed_quote");
+  }
   if (
-    !Number.isFinite(decidedAtMs)
-    || identity.protocol !== bot.protocol
+    identity.protocol !== bot.protocol
     || typeof identity.account !== "string"
     || identity.account.trim().length === 0
     || (identity.subaccountId ?? null) !== expectedSubaccountId
     || identity.liquidityRole !== "taker"
   ) {
-    return null;
+    return retainedFeeUnavailable("identity_mismatch");
   }
-  const quote = validateFeeRateQuote(record.feeRateQuote, {
+  return validateFeeRateQuote(record.feeRateQuote, {
     protocol: bot.protocol,
     account: identity.account,
     subaccountId: expectedSubaccountId,
     liquidityRole: "taker",
   }, { now: decidedAtMs });
+}
+
+function retainedPaperEntryFeeRate(bot: AiTraderBot, view: OpenDecisionView): number | null {
+  const quote = retainedPaperEntryFeeQuote(bot, view);
   return quote.availability === "available" ? quote.effectiveRate : null;
 }
 
@@ -1377,6 +1390,25 @@ function buildVenueDetectedCloseJournal(
  */
 const breakevenMoveAttempts = new Map<string, number>();
 const BREAKEVEN_ATTEMPTS_MAP_CAP = 1000;
+type PaperBreakevenSuppressionReason = FeeRateQuoteUnavailableReason | PaperBreakevenStopFailureReason;
+const paperBreakevenSuppressionLogged = new Set<string>();
+
+function warnPaperBreakevenSuppression(
+  bot: AiTraderBot,
+  view: OpenDecisionView,
+  reason: PaperBreakevenSuppressionReason,
+): void {
+  const key = `${view.decision.id}:${reason}`;
+  if (paperBreakevenSuppressionLogged.has(key)) return;
+  if (paperBreakevenSuppressionLogged.size >= BREAKEVEN_ATTEMPTS_MAP_CAP) {
+    const oldest = paperBreakevenSuppressionLogged.values().next().value;
+    if (oldest !== undefined) paperBreakevenSuppressionLogged.delete(oldest);
+  }
+  paperBreakevenSuppressionLogged.add(key);
+  console.warn(
+    `[AiTraderMonitor] Breakeven protect (paper) suppressed: bot ${bot.id.slice(0, 8)} decision ${view.decision.id.slice(0, 8)} reason=${reason}`,
+  );
+}
 
 /**
  * Should the ratchet fire this tick? Pure gate over the candles seen so far
@@ -1385,14 +1417,14 @@ const BREAKEVEN_ATTEMPTS_MAP_CAP = 1000;
  */
 function breakevenCandidate(
   view: OpenDecisionView,
-  candles: readonly PaperCandle[]
+  candles: readonly PaperCandle[],
+  newSl: number,
 ): { newSl: number; progress: number } | null {
   if (view.breakevenProtect || view.entryPrice === null || candles.length === 0) return null;
   const extreme = favorableExtreme(candles, view.side);
   if (extreme === null) return null;
   const progress = progressTowardTp(view.side, view.entryPrice, view.takeProfitPrice, extreme);
   if (progress < BREAKEVEN_TRIGGER_PROGRESS) return null;
-  const newSl = breakevenStopPrice(view.side, view.entryPrice);
   // One-way ratchet: never loosen an already-tighter stop.
   if (!isTighterStop(view.side, newSl, view.stopLossPrice)) return null;
   // Price must still be on the favorable side of the new stop — if it already
@@ -1517,7 +1549,20 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
   // Still open — breakeven-protect fire check (paper: persist-only, no venue).
   // The move takes effect from the NEXT candle boundary via the segmented
   // evaluation above; the currently-forming candle still tests the original.
-  const candidate = breakevenCandidate(view, post);
+  let candidate: { newSl: number; progress: number } | null = null;
+  if (!view.breakevenProtect) {
+    const feeQuote = retainedPaperEntryFeeQuote(bot, view);
+    if (feeQuote.availability === "unavailable") {
+      warnPaperBreakevenSuppression(bot, view, feeQuote.reason);
+    } else {
+      const paperStop = paperBreakevenStopPrice(view.side, view.entryPrice, feeQuote.effectiveRate);
+      if (!paperStop.ok) {
+        warnPaperBreakevenSuppression(bot, view, paperStop.reason);
+      } else {
+        candidate = breakevenCandidate(view, post, paperStop.stopPrice);
+      }
+    }
+  }
   if (candidate) {
     await persistBreakevenMove(view, candidate.newSl, candidate.progress);
     console.log(
@@ -2182,7 +2227,7 @@ async function maybeFireLiveBreakeven(
   }
   if (!Array.isArray(candles)) return false; // defensive: bad datafeed shape ≠ a reason to act
   const post = candles.filter((c) => c.time > entryCandleOpen);
-  const candidate = breakevenCandidate(view, post);
+  const candidate = breakevenCandidate(view, post, breakevenStopPrice(view.side, view.entryPrice));
   if (!candidate) return false;
 
   // Count the attempt BEFORE the venue call — an ambiguous outcome must not

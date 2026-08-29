@@ -9,12 +9,14 @@ import {
   favorableExtreme,
   progressTowardTp,
   breakevenStopPrice,
+  paperBreakevenStopPrice,
+  MAX_PAPER_BREAKEVEN_ULP_CORRECTION_STEPS,
   isFavorableSideOf,
   isTighterStop,
   evaluatePaperBracketWithMove,
   countsAsSlLoss,
 } from "../../server/ai-trader/breakeven";
-import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
+import { PAPER_SLIPPAGE_PER_LEG, paperExitPrice, paperRealizedPnl } from "../../server/ai-trader/paper-math";
 
 function candle(time: number, open: number, high: number, low: number, close: number) {
   return { time, open, high, low, close, volume: 100 };
@@ -118,6 +120,52 @@ describe("breakevenStopPrice / isFavorableSideOf / isTighterStop", () => {
     expect(isTighterStop("long", 150.225, 150.225)).toBe(false);
     expect(isTighterStop("short", 149.775, 155)).toBe(true);
     expect(isTighterStop("short", 149.775, 148)).toBe(false);
+  });
+});
+
+describe("paperBreakevenStopPrice", () => {
+  it("proves non-negative net PnL through the real paper functions for long and short rates", () => {
+    for (const side of ["long", "short"] as const) {
+      for (const takerFeeRate of [0, 0.0004, 0.0014, 0.01]) {
+        const result = paperBreakevenStopPrice(side, 150, takerFeeRate);
+        expect(result.ok).toBe(true);
+        if (!result.ok) continue;
+        const exitPrice = paperExitPrice(result.stopPrice, side);
+        expect(paperRealizedPnl({ side, entryPrice: 150, exitPrice, sizeBase: 1, takerFeeRate }).netPnl).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it("reproduces the exact AVAX fixed-buffer loss and proves the dynamic short floor", () => {
+    const entryPrice = 7.32083775;
+    const sizeBase = 817.95;
+    const takerFeeRate = 0.0014;
+    const fixedExit = paperExitPrice(breakevenStopPrice("short", entryPrice), "short");
+    const fixed = paperRealizedPnl({ side: "short", entryPrice, exitPrice: fixedExit, sizeBase, takerFeeRate });
+    expect(fixedExit).toBeCloseTo(7.313511421622, 12);
+    expect(fixed.fees).toBeCloseTo(16.758232266899, 10);
+    expect(fixed.netPnl).toBeCloseTo(-10.765661969858, 10);
+
+    const dynamic = paperBreakevenStopPrice("short", entryPrice, takerFeeRate);
+    expect(dynamic.ok).toBe(true);
+    if (!dynamic.ok) return;
+    const dynamicExit = paperExitPrice(dynamic.stopPrice, "short");
+    expect(paperRealizedPnl({ side: "short", entryPrice, exitPrice: dynamicExit, sizeBase, takerFeeRate }).netPnl).toBeGreaterThanOrEqual(0);
+  });
+
+  it("rejects malformed fee inputs and keeps the correction seam bounded", () => {
+    expect(paperBreakevenStopPrice("long", 150, Number.NaN)).toEqual({ ok: false, reason: "malformed_quote" });
+    expect(paperBreakevenStopPrice("long", 150, -0.1)).toEqual({ ok: false, reason: "malformed_quote" });
+    expect(paperBreakevenStopPrice("short", 150, 1)).toEqual({ ok: false, reason: "malformed_quote" });
+    expect(paperBreakevenStopPrice("long", 150, 0.0014, MAX_PAPER_BREAKEVEN_ULP_CORRECTION_STEPS + 1)).toEqual({ ok: false, reason: "malformed_quote" });
+  });
+
+  it("fails shut when a zero-step proof cannot satisfy the exact postcondition", () => {
+    // This ordinary-scale pair produces a tiny negative net result from the
+    // closed-form candidate because of binary64 rounding. With correction
+    // disabled, the helper must expose that it cannot prove the postcondition.
+    const result = paperBreakevenStopPrice("long", 260999.1888202015, 0.000001, 0);
+    expect(result).toEqual({ ok: false, reason: "numerical_postcondition_unproven" });
   });
 });
 

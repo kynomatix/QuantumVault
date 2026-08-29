@@ -11,6 +11,9 @@
 
 import {
   evaluatePaperBracket,
+  paperExitPrice,
+  paperRealizedPnl,
+  PAPER_SLIPPAGE_PER_LEG,
   type PaperCandle,
   type PaperSide,
   type PaperBracketHit,
@@ -20,17 +23,30 @@ import {
 export const BREAKEVEN_TRIGGER_PROGRESS = 0.75;
 
 /**
- * New-SL offset from entry, in the favorable direction. Sized so a breakeven
- * stop-out nets slightly POSITIVE after costs on both paths:
+ * Legacy live New-SL offset from entry, in the favorable direction. It was
+ * originally sized from an assumed fee schedule:
  *   2 × 0.04% taker legs + 0.05% stop-fill slippage allowance (matches the
  *   paper synthetic slippage per leg) + 0.02% cushion = 0.15%.
  * A plain entry-price stop would net a small LOSS after fees — the owner
  * explicitly asked for "at least a small amount of profit".
+ * This fixed value remains live-only legacy behavior and does not guarantee
+ * non-negative net PnL at arbitrary effective fee rates.
  */
 export const BREAKEVEN_BUFFER_RATE = 0.0015;
 
 /** Bounded venue-move retries per decision (live only). */
 export const BREAKEVEN_MAX_MOVE_ATTEMPTS = 5;
+
+/** Numerical runaway bound, not an economic cushion. */
+export const MAX_PAPER_BREAKEVEN_ULP_CORRECTION_STEPS = 8;
+
+export type PaperBreakevenStopFailureReason =
+  | "malformed_quote"
+  | "numerical_postcondition_unproven";
+
+export type PaperBreakevenStopResult =
+  | { ok: true; stopPrice: number }
+  | { ok: false; reason: PaperBreakevenStopFailureReason };
 
 /**
  * Audit blob persisted inside clampedDecision when the ratchet fires. Its
@@ -111,6 +127,68 @@ export function breakevenStopPrice(side: PaperSide, entryPrice: number): number 
   return side === "long"
     ? entryPrice * (1 + BREAKEVEN_BUFFER_RATE)
     : entryPrice * (1 - BREAKEVEN_BUFFER_RATE);
+}
+
+const float64Bits = new DataView(new ArrayBuffer(8));
+
+/** Prices are positive, so IEEE-754 bit order matches numeric order. */
+function nextPositiveRepresentable(value: number, direction: "up" | "down"): number {
+  float64Bits.setFloat64(0, value, false);
+  const bits = float64Bits.getBigUint64(0, false);
+  if (direction === "down" && bits === 0n) return Number.NaN;
+  float64Bits.setBigUint64(0, direction === "up" ? bits + 1n : bits - 1n, false);
+  return float64Bits.getFloat64(0, false);
+}
+
+/**
+ * Dynamic paper breakeven floor proven through the exact paper exit and
+ * accounting functions. `maxCorrectionSteps` is an injectable bounded proof
+ * seam for the exhaustion control; production callers use the default.
+ */
+export function paperBreakevenStopPrice(
+  side: PaperSide,
+  entryPrice: number,
+  takerFeeRate: number,
+  maxCorrectionSteps = MAX_PAPER_BREAKEVEN_ULP_CORRECTION_STEPS,
+): PaperBreakevenStopResult {
+  if (
+    !Number.isFinite(entryPrice)
+    || entryPrice <= 0
+    || !Number.isFinite(takerFeeRate)
+    || takerFeeRate < 0
+    || takerFeeRate >= 1
+    || !Number.isInteger(maxCorrectionSteps)
+    || maxCorrectionSteps < 0
+    || maxCorrectionSteps > MAX_PAPER_BREAKEVEN_ULP_CORRECTION_STEPS
+  ) {
+    return { ok: false, reason: "malformed_quote" };
+  }
+
+  const slip = PAPER_SLIPPAGE_PER_LEG;
+  let candidate = side === "long"
+    ? entryPrice * (1 + takerFeeRate) / ((1 - takerFeeRate) * (1 - slip))
+    : entryPrice * (1 - takerFeeRate) / ((1 + takerFeeRate) * (1 + slip));
+  if (!Number.isFinite(candidate) || candidate <= 0) {
+    return { ok: false, reason: "malformed_quote" };
+  }
+
+  for (let step = 0; step <= maxCorrectionSteps; step += 1) {
+    const exitPrice = paperExitPrice(candidate, side);
+    const { netPnl } = paperRealizedPnl({
+      side,
+      entryPrice,
+      exitPrice,
+      sizeBase: 1,
+      takerFeeRate,
+    });
+    if (Number.isFinite(netPnl) && netPnl >= 0) {
+      return { ok: true, stopPrice: candidate };
+    }
+    if (step === maxCorrectionSteps) break;
+    candidate = nextPositiveRepresentable(candidate, side === "long" ? "up" : "down");
+    if (!Number.isFinite(candidate) || candidate <= 0) break;
+  }
+  return { ok: false, reason: "numerical_postcondition_unproven" };
 }
 
 /** Is `price` on the favorable (still-open) side of `level` for this side? */

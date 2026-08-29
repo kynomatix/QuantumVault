@@ -361,7 +361,7 @@ describe("qualification era identity", () => {
         prompt_context_schema: 3,
         session_policy: 1,
         guardrail_risk_policy: 4,
-        paper_execution_simulator: 2,
+        paper_execution_simulator: 3,
       },
       bot: {
         protocol: "pacifica",
@@ -490,7 +490,7 @@ describe("qualification era forgotten-declaration gate", () => {
   it("declares scanner strategy-bound market identity as a reviewed no-bump for capability policy", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 22,
+      decisionGeneration: 23,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.guardrail_risk_policy).toMatchObject({
@@ -499,9 +499,9 @@ describe("qualification era forgotten-declaration gate", () => {
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({
-      materialVersion: 2,
-      decisionGeneration: 9,
-      decision: "no_bump",
+      materialVersion: 3,
+      decisionGeneration: 10,
+      decision: "bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
       materialVersion: 1,

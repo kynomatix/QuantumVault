@@ -20,6 +20,7 @@ import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import type { TradeRecord } from "../../server/protocol/protocol-types";
 import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
+import { breakevenStopPrice, paperBreakevenStopPrice } from "../../server/ai-trader/breakeven";
 
 vi.mock("../../server/boot-id", () => ({
   SERVER_BOOT_ID: "ABCDEF12-0000-4000-8000-000000000000",
@@ -4528,7 +4529,10 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
 // --- Breakeven protect ---------------------------------------------------------------
 
 describe("breakeven protect", () => {
-  const NEW_SL = 150 * 1.0015; // entry 150, long → 150.225
+  const PAPER_STOP = paperBreakevenStopPrice("long", 150, PAPER_TAKER_FEE_RATE);
+  if (!PAPER_STOP.ok) throw new Error(`paper stop fixture failed: ${PAPER_STOP.reason}`);
+  const NEW_SL = PAPER_STOP.stopPrice;
+  const LIVE_FIXED_SL = breakevenStopPrice("long", 150);
   const MOVED_AT = new Date(NOW - TF_15M).toISOString(); // 11:45 candle
 
   /** Open decision whose ratchet has ALREADY fired (stop moved to breakeven). */
@@ -4586,6 +4590,22 @@ describe("breakeven protect", () => {
     expect(updateBotMock).not.toHaveBeenCalled(); // still open
   });
 
+  it("paper: missing retained fee authority suppresses the move and warns once with its reason", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ contextDigest: null })]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot());
+    await monitorBotOnce(makeBot());
+
+    expect(updateDecisionMock).not.toHaveBeenCalled();
+    const messages = warn.mock.calls
+      .map((call) => String(call[0]))
+      .filter((message) => message.includes("Breakeven protect (paper) suppressed"));
+    expect(messages).toEqual([expect.stringContaining("reason=malformed_quote")]);
+  });
+
   it("paper: does NOT fire when price already retraced through breakeven", async () => {
     const { monitorBotOnce } = await importMonitor();
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -4629,7 +4649,7 @@ describe("breakeven protect", () => {
     expect(du[0].exitReason).toBe("sl");
     const expectedExit = NEW_SL * (1 - PAPER_SLIPPAGE_PER_LEG);
     expect(Number(du[0].exitPrice)).toBeCloseTo(expectedExit, 6);
-    expect(Number(du[0].realizedPnl)).toBeGreaterThan(0); // the whole point of the buffer
+    expect(Number(du[0].realizedPnl)).toBeGreaterThanOrEqual(0); // the dynamic floor guarantees non-negative net PnL
     // G8: an 'sl' exit that MADE money must reset the streak, not extend it.
     const update = botUpdates().find((u) => u.consecutiveLosses !== undefined);
     expect(update?.consecutiveLosses).toBe(0);
@@ -4653,13 +4673,13 @@ describe("breakeven protect", () => {
     expect(setTpSl).toHaveBeenCalledTimes(1);
     expect(setTpSl.mock.calls[0][0]).toMatchObject({
       internalSymbol: "SOL-PERP",
-      stopLossPrice: expect.closeTo(NEW_SL, 8),
+      stopLossPrice: expect.closeTo(LIVE_FIXED_SL, 8),
       takeProfitPrice: 160, // Pacifica REPLACES the bracket — TP must ride along
     });
     const du = decisionUpdates();
     expect(du).toHaveLength(1);
     const clamped = du[0].clampedDecision as Record<string, any>;
-    expect(clamped.stopLossPrice).toBeCloseTo(NEW_SL, 8);
+    expect(clamped.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
     expect(clamped.breakevenProtect.originalStopLossPrice).toBe(145);
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
@@ -4680,7 +4700,7 @@ describe("breakeven protect", () => {
     await monitorBotOnce(makeBot({ paperMode: false, protocol: "flash" }));
 
     expect(setTpSl).toHaveBeenCalledTimes(1);
-    expect(setTpSl.mock.calls[0][0].stopLossPrice).toBeCloseTo(NEW_SL, 8);
+    expect(setTpSl.mock.calls[0][0].stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
     expect(setTpSl.mock.calls[0][0].takeProfitPrice).toBeUndefined(); // SL-only on Flash
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
     expect(decisionUpdates()).toHaveLength(1); // persisted
