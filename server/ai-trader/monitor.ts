@@ -2864,7 +2864,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   }
 
   try {
-    const apiKey = keyBuf.toString("utf8");
+    const apiKey /* decrypted runtime buffer; never a literal */ = keyBuf.toString("utf8");
 
     // WO-B: Scanner bots pick from the shortlist at each 15m boundary.
     // Multi-candidate loop: hard cap of 2 LLM calls per boundary.

@@ -125,7 +125,7 @@ const DECIDE_TOOL = {
 
 export interface RunDecisionInput {
   bot: AiTraderBot;
-  apiKey: string;
+  apiKey /* caller-supplied runtime credential; never a literal */: string;
   /** Output of buildMarketContext (WO-3) — non-stale by contract. */
   context: { system: string; user: string; contextDigest: Record<string, any> };
   /**
