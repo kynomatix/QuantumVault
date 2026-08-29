@@ -108,7 +108,10 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
 
   it("uses the terminally attributed current-mode projection for the Track Record P&L", () => {
     expect(trackRecordCalculations).toContain("performance.status === 'available' ? performance.netPnl : null");
-    expect(trackRecordCalculations).toContain("openDecision === null");
+    expect(trackRecordCalculations).toContain("const trackRecordHasOpenExposure = openDecision !== null");
+    expect(trackRecordCalculations).toContain("bot?.status === 'open'");
+    expect(trackRecordCalculations).toContain("bot?.status === 'executing'");
+    expect(trackRecordCalculations).toContain("!trackRecordHasOpenExposure");
     expect(trackRecordCalculations).toContain("Number.isFinite(openUnrealizedPnl)");
     expect(trackRecordCalculations).toContain("trackRecordClosedPnl + trackRecordOpenPnl");
     expect(trackRecordPanel).toContain('data-testid="track-record-net-pnl"');
@@ -124,6 +127,7 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
   });
 
   it("fails the Track Record enrichment open without presenting partial data as complete", () => {
+    expect(trackRecordPanel).toContain("performance.status === 'available' && trackRecordHasOpenExposure");
     expect(trackRecordPanel).toContain("Open-position unrealized P&L is unavailable, so the overall figure is withheld.");
     expect(trackRecordPanel).toContain("Current-mode performance is temporarily unavailable.");
     expect(trackRecordPanel).toContain("omittedUnattributedTrades");

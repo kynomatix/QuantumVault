@@ -1064,7 +1064,10 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   // totalLlmCost misses anything older. Use the server lifetime total for that distinct tile.
   const displayLlmCost: number = lifetimeStats?.totalLlmCost ?? totalLlmCost;
   const trackRecordClosedPnl = performance.status === 'available' ? performance.netPnl : null;
-  const trackRecordOpenPnl = openDecision === null
+  const trackRecordHasOpenExposure = openDecision !== null
+    || bot?.status === 'open'
+    || bot?.status === 'executing';
+  const trackRecordOpenPnl = !trackRecordHasOpenExposure
     ? 0
     : (openUnrealizedPnl !== null && Number.isFinite(openUnrealizedPnl) ? openUnrealizedPnl : null);
   const trackRecordNetPnl = trackRecordClosedPnl !== null && trackRecordOpenPnl !== null
@@ -1717,7 +1720,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-3 space-y-1.5">
                       {trackRecordNetPnl === null ? (
                         <p>
-                          {performance.status === 'available' && openDecision !== null
+                          {performance.status === 'available' && trackRecordHasOpenExposure
                             ? 'Open-position unrealized P&L is unavailable, so the overall figure is withheld.'
                             : 'Current-mode performance is temporarily unavailable.'}
                         </p>
