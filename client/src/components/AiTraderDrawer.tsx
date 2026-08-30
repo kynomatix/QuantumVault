@@ -519,8 +519,8 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
 
   const paper = performance.mode === 'paper_trial';
   const title = paper
-    ? 'Overall paper performance'
-    : 'Overall live performance';
+    ? 'All-time paper closed P&L'
+    : 'All-time live closed P&L';
   const pnlText = formatPerformancePnl(performance.netPnl);
   // parsePerformanceResponse enforces tradeCount === points.length, so every
   // non-empty series receives exactly one synthetic origin and no real point

@@ -37,7 +37,24 @@ describe("AI Trader card mode-scoped P&L truth", () => {
 
   it("labels the headline and available components truthfully", () => {
     const card = cardPerformanceSource();
-    expect(card).toContain("Overall P&L");
+    expect(card).toContain("Paper P&L");
+    expect(card).toContain("Live P&L");
+    expect(card).toContain("const pnlModeLabel = projection?.mode === 'paper_trial'");
+    expect(card).toContain("const pnlScopeLabel = !overallAvailable");
+    const qualifierStart = card.indexOf("const pnlScopeLabel =");
+    expect(qualifierStart).toBeGreaterThan(-1);
+    const qualifierEnd = card.indexOf(";", qualifierStart) + 1;
+    expect(
+      card.slice(qualifierStart, qualifierEnd)
+        .replace(/\s+/g, " ")
+        .trim(),
+    ).toBe(
+      "const pnlScopeLabel = !overallAvailable ? 'scope unavailable' : hasOpenPosition ? 'closed + open' : 'closed';",
+    );
+    expect(card).toContain("'scope unavailable'");
+    expect(card).toContain("{pnlScopeLabel}");
+    expect(card).toContain("{!!aiBot.paperMode && (");
+    expect(card).not.toContain("Overall P&L");
     expect(card).toContain("closed P&L");
     expect(card).toContain("Current open unrealized");
     expect(card).toContain(": '--'");

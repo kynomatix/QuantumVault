@@ -3522,6 +3522,12 @@ export default function AppPage() {
                               const closedPnl = projectionAvailable ? projection.netPnl : 0;
                               const openPnl = hasOpenPosition && validOpen ? rawOpen : 0;
                               const overallPnl = closedPnl + openPnl;
+                              const pnlModeLabel = projection?.mode === 'paper_trial'
+                                ? 'Paper P&L'
+                                : projection?.mode === 'live' ? 'Live P&L' : 'P&L';
+                              const pnlScopeLabel = !overallAvailable
+                                ? 'scope unavailable'
+                                : hasOpenPosition ? 'closed + open' : 'closed';
                               return (
                                 <TooltipProvider>
                                   <Tooltip>
@@ -3533,11 +3539,12 @@ export default function AppPage() {
                                             : '--'}
                                         </p>
                                         <div className="flex items-center gap-1 justify-center">
-                                          <p className="text-xs text-muted-foreground">Overall P&L</p>
+                                          <p className="text-xs text-muted-foreground">{pnlModeLabel}</p>
                                           {!!aiBot.paperMode && (
                                             <span className="text-[9px] px-1 rounded border border-amber-500/40 text-amber-400 leading-tight">PAPER</span>
                                           )}
                                         </div>
+                                        <p className="text-[9px] text-muted-foreground/70">{pnlScopeLabel}</p>
                                       </div>
                                     </TooltipTrigger>
                                     <TooltipContent className="max-w-[260px] bg-popover border border-border text-xs p-2.5 space-y-1.5">

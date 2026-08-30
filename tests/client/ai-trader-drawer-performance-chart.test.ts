@@ -65,8 +65,10 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(performancePanel).toContain("const chartPoints = [{ t: 'Baseline', v: 0 }, ...performance.points]");
     expect(performancePanel).not.toContain("const chartPoints = performance.tradeCount === 1");
     expect(performancePanel).not.toContain("t: 'Current'");
-    expect(performancePanel).toContain("Overall paper performance");
-    expect(performancePanel).toContain("Overall live performance");
+    expect(performancePanel).toContain("All-time paper closed P&L");
+    expect(performancePanel).toContain("All-time live closed P&L");
+    expect(performancePanel).not.toContain("Overall paper performance");
+    expect(performancePanel).not.toContain("Overall live performance");
   });
 
   it("uses the shared themed tooltip with an explicit signed-currency P&L label", () => {
