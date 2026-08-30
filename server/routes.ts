@@ -1615,6 +1615,7 @@ import {
   closeFeePersistence,
   deferSignalBotFlipOpen,
   markSignalBotFlipOpenExecuted,
+  PARTIAL_CLOSE_BASE_DUST,
   rejectSignalBotFlipOpen,
   resolvePartialCloseExecutionPrice,
   resolvePartialClosePositionAuthority,
@@ -4898,6 +4899,51 @@ type SignedPartialCloseAccountingResult =
   | { kind: "completed"; tradeId: string; isNew: boolean; remainingSize: number; becameFlat: boolean }
   | { kind: "incomplete"; tradeId: string; reason: string };
 
+const PARTIAL_CLOSE_TERMINAL_STATUSES = new Set(["executed", "liquidated", "recovered", "superseded"]);
+
+async function completedPartialCloseReplay(
+  bot: TradingBot,
+  trade: Awaited<ReturnType<typeof storage.getBotTrade>>,
+): Promise<Extract<SignedPartialCloseAccountingResult, { kind: "completed" }> | null> {
+  if (!trade || trade.tradingBotId !== bot.id || !PARTIAL_CLOSE_TERMINAL_STATUSES.has(trade.status)) return null;
+  const payload = trade.webhookPayload && typeof trade.webhookPayload === "object"
+    ? trade.webhookPayload as Record<string, unknown>
+    : null;
+  if (payload?.partialClose !== true) return null;
+  const accounting = payload.partialCloseAccounting && typeof payload.partialCloseAccounting === "object"
+    ? payload.partialCloseAccounting as Record<string, unknown>
+    : null;
+  let remainingSize = Number(accounting?.residualBaseSize);
+  if (!Number.isFinite(remainingSize)) {
+    const position = await storage.getBotPosition(bot.id, bot.market);
+    remainingSize = Math.abs(Number(position?.baseSize));
+  } else {
+    remainingSize = Math.abs(remainingSize);
+  }
+  if (!Number.isFinite(remainingSize)) return null;
+  return {
+    kind: "completed",
+    tradeId: trade.id,
+    isNew: false,
+    remainingSize,
+    becameFlat: remainingSize < PARTIAL_CLOSE_BASE_DUST,
+  };
+}
+
+async function readCompletedPartialCloseReplay(
+  bot: TradingBot,
+  tradeId: string,
+): Promise<Extract<SignedPartialCloseAccountingResult, { kind: 'completed' }> | null> {
+  try {
+    return await completedPartialCloseReplay(bot, await storage.getBotTrade(tradeId));
+  } catch (error) {
+    console.error(
+      `[PartialClose] Failed to re-read terminal accounting for ${tradeId}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
 async function finalizeSignedPartialCloseAccounting(input: {
   bot: TradingBot;
   queryAccount: string;
@@ -4965,7 +5011,7 @@ async function finalizeSignedPartialCloseAccounting(input: {
     market: input.bot.market,
     side: input.closeSide,
     size: String(input.closedSize),
-    price: String(input.executionPrice ?? input.signalPriceContext ?? 0),
+    price: String(input.executionPrice ?? 0),
     fee: null,
     pnl: null,
     status: "pending",
@@ -4976,6 +5022,17 @@ async function finalizeSignedPartialCloseAccounting(input: {
     errorMessage: "Partial close executed; awaiting authoritative residual position",
     executionMethod: input.executionMethod,
   });
+  if (!marker.isNew) {
+    const replay = await completedPartialCloseReplay(input.bot, marker.trade);
+    if (replay) return replay;
+    if (marker.trade.status !== "pending") {
+      return {
+        kind: "incomplete",
+        tradeId: marker.trade.id,
+        reason: "partial_close_marker_replay_not_pending",
+      };
+    }
+  }
 
   const authority = await resolvePartialClosePositionAuthority({
     preCloseBaseSize,
@@ -4999,13 +5056,17 @@ async function finalizeSignedPartialCloseAccounting(input: {
       identityAuthority: input.signature ? "signed_transaction" : "unavailable",
       incompleteReason: authority.reason,
     };
-    await storage.updateBotTrade(marker.trade.id, {
+    const updated = await storage.updatePendingBotTrade(marker.trade.id, {
       webhookPayload: {
         ...markerPayload,
         partialCloseAuthorityOutcome: outcome,
       },
       errorMessage: `Partial close accounting incomplete: ${authority.reason}`,
     });
+    if (!updated) {
+      const replay = await readCompletedPartialCloseReplay(input.bot, marker.trade.id);
+      if (replay) return replay;
+    }
     console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(outcome)}`);
     return { kind: "incomplete", tradeId: marker.trade.id, reason: authority.reason };
   }
@@ -5032,13 +5093,17 @@ async function finalizeSignedPartialCloseAccounting(input: {
       identityAuthority: input.signature ? "signed_transaction" : "unavailable",
       incompleteReason: reason,
     };
-    await storage.updateBotTrade(marker.trade.id, {
+    const updated = await storage.updatePendingBotTrade(marker.trade.id, {
       webhookPayload: {
         ...markerPayload,
         partialCloseAuthorityOutcome: outcome,
       },
       errorMessage: `Partial close accounting incomplete: ${reason}`,
     });
+    if (!updated) {
+      const replay = await readCompletedPartialCloseReplay(input.bot, marker.trade.id);
+      if (replay) return replay;
+    }
     console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(outcome)}`);
     return { kind: "incomplete", tradeId: marker.trade.id, reason };
   }
@@ -5100,6 +5165,8 @@ async function finalizeSignedPartialCloseAccounting(input: {
       becameFlat: authority.becameFlat,
     };
   } catch (error) {
+    const replay = await readCompletedPartialCloseReplay(input.bot, marker.trade.id);
+    if (replay) return replay;
     const reason = error instanceof Error ? error.message : String(error);
     console.error(`[PartialClose] Atomic accounting remains incomplete for ${input.bot.id}: ${reason}`);
     return { kind: "incomplete", tradeId: marker.trade.id, reason };
@@ -19757,7 +19824,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
           if (pcAccounting.kind === "incomplete") {
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
-            return res.status(200).json({
+            const closeResponse = buildSignalBotCloseResponse("accounting_incomplete", {
               status: "accounting_incomplete",
               type: "partial_close",
               fraction: partialCloseFraction,
@@ -19766,6 +19833,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               reason: pcAccounting.reason,
               signature: pcResult.signature,
             });
+            return res.status(closeResponse.statusCode).json(closeResponse.body);
           }
           if (pcFillPrice === null) {
             throw new Error("partial_close_completed_without_execution_price");
@@ -21200,7 +21268,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
           if (pcAccounting.kind === "incomplete") {
             await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
-            return res.status(200).json({
+            const closeResponse = buildSignalBotCloseResponse("accounting_incomplete", {
               status: "accounting_incomplete",
               type: "partial_close",
               fraction: uwPartialCloseFraction,
@@ -21209,6 +21277,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               reason: pcAccounting.reason,
               signature: pcResult.signature,
             });
+            return res.status(closeResponse.statusCode).json(closeResponse.body);
           }
           if (pcFillPrice === null) {
             throw new Error("partial_close_completed_without_execution_price");

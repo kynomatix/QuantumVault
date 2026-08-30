@@ -800,6 +800,7 @@ export interface IStorage {
   createBotTrade(trade: InsertBotTrade): Promise<BotTrade>;
   createBotTradeIdempotent(trade: InsertBotTrade): Promise<{ trade: BotTrade; isNew: boolean }>;
   updateBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<void>;
+  updatePendingBotTrade(id: string, updates: Partial<InsertBotTrade>): Promise<BotTrade | undefined>;
   getOrphanedPendingTrades(maxAgeMinutes?: number): Promise<BotTrade[]>;
   getBotPerformanceSeries(tradingBotId: string, since?: Date): Promise<{ timestamp: Date; pnl: number; cumulativePnl: number }[]>;
 
@@ -3044,6 +3045,22 @@ export class DatabaseStorage implements IStorage {
       }
     }
     await db.update(botTrades).set(updates).where(eq(botTrades.id, id));
+  }
+
+  /**
+   * Atomically enrich a pending trade without allowing a late webhook retry
+   * to regress a row that reconciliation has already finalized.
+   */
+  async updatePendingBotTrade(
+    id: string,
+    updates: Partial<InsertBotTrade>,
+  ): Promise<BotTrade | undefined> {
+    const rows = await db
+      .update(botTrades)
+      .set(updates)
+      .where(and(eq(botTrades.id, id), eq(botTrades.status, "pending")))
+      .returning();
+    return rows[0];
   }
 
   async getOrphanedPendingTrades(maxAgeMinutes: number = 5): Promise<BotTrade[]> {

@@ -272,7 +272,8 @@ describe('Signal Bot route choke point', () => {
     expect(source).not.toContain('getExchangeFeeRate()');
     expect(source).toContain('const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(');
     expect(source).toContain('fee: closeFee === null ? null : closeFee.toFixed(6)');
-    expect(source).toContain('fee: pcFee === null ? null : String(pcFee)');
+    expect(source).toContain('fee: String(input.fee)');
+    expect(source).toContain('feeEvidence: input.feeEvidence');
   });
 
   it('uses the admitted quote for every OPEN estimate without changing exact-fee precedence', () => {

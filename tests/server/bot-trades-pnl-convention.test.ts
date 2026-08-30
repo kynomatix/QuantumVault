@@ -69,11 +69,11 @@ describe("bot_trades PnL convention", () => {
     })).toBe("net_of_close_fee");
   });
 
-  it("stamps both reconciler full-close writers net-valued and net-convention", () => {
+  it("stamps both reconciler full-close writers and the fill-backed supersession writer net-valued and net-convention", () => {
     const source = readFileSync("server/reconciliation-service.ts", "utf8");
     expect(source.match(/const closePnl = \(closeDetection\.pnl \?\? 0\) - closeFee;/g)).toHaveLength(2);
-    expect(source.match(/pnlConvention: 'net_of_close_fee'/g)).toHaveLength(2);
-    expect(source.match(/feeTruthStatus: 'current_pipeline'/g)).toHaveLength(2);
+    expect(source.match(/pnlConvention: 'net_of_close_fee'/g)).toHaveLength(3);
+    expect(source.match(/feeTruthStatus: 'current_pipeline'/g)).toHaveLength(3);
   });
 
   it("binds every reader to the shared resolver and the migration to durable provenance", () => {

@@ -202,6 +202,39 @@ describe('reconciler full-close position epoch identity', () => {
     })).toMatchObject({ kind: 'blocked' });
   });
 
+  it('refuses two simultaneously eligible pending partial markers as ambiguous', () => {
+    const first = pendingPartialMarker();
+    const second = { ...pendingPartialMarker(), id: 'pending-partial-row-two' };
+    const fill = {
+      tradeId: 'fill-partial-one',
+      orderId: 'order-partial-one',
+      internalSymbol: market,
+      side: 'short' as const,
+      venueEventKind: 'close_long' as const,
+      price: 101,
+      size: 0.02,
+      fee: 0.01,
+      realizedPnl: 0.5,
+      timestamp: Date.now(),
+    };
+
+    expect(selectPendingPartialCloseMarker({
+      trades: [first, second],
+      protocol: 'pacifica',
+      market,
+      closeSide: 'short',
+      dbBaseSize: 1,
+      dbLastTradeId: 'entry-epoch-one',
+      closedSlice: 0.02,
+      closingFills: [fill],
+      nowMs: Date.now(),
+    })).toEqual({
+      kind: 'blocked',
+      reason: 'pending_partial_marker_ambiguous',
+      markerIds: ['pending-partial-row', 'pending-partial-row-two'],
+    });
+  });
+
   it('requires exact fill identity before a pending partial marker can become a full close', () => {
     const marker = pendingPartialMarker();
     expect(selectPendingPartialMarkerForFullClose({

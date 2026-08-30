@@ -1,5 +1,16 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const dbHarness = vi.hoisted(() => ({
+  transaction: vi.fn(),
+  select: vi.fn(),
+  update: vi.fn(),
+  insert: vi.fn(),
+}));
+
+vi.mock("../../server/db", () => ({
+  db: dbHarness,
+}));
 import {
   buildConfirmedFlatPosition,
   buildConfirmedPartialPosition,
@@ -7,12 +18,34 @@ import {
   confirmedPartialPositionEpochMatches,
   summarizeSignalBotCloseFills,
 } from "../../server/trading/signal-bot-close-integrity";
+import { DatabaseStorage } from "../../server/storage";
+
+function resolvedChain(result: unknown) {
+  const promise = Promise.resolve(result);
+  const chain: any = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (property === "then") return promise.then.bind(promise);
+      if (property === "catch") return promise.catch.bind(promise);
+      if (property === "finally") return promise.finally.bind(promise);
+      return () => chain;
+    },
+  });
+  return chain;
+}
+
+beforeEach(() => {
+  dbHarness.transaction.mockReset();
+  dbHarness.select.mockReset();
+  dbHarness.update.mockReset();
+  dbHarness.insert.mockReset();
+});
 
 describe("Signal Bot close response authority", () => {
   it.each([
     ["position_unavailable", 503],
     ["already_flat", 409],
     ["executed", 200],
+    ["accounting_incomplete", 200],
     ["confirmation_pending", 202],
     ["executed_state_unavailable", 500],
   ] as const)("maps %s to HTTP %i and names the outcome", (outcome, statusCode) => {
@@ -72,6 +105,66 @@ describe("Signal Bot venue-fill close confirmation", () => {
 });
 
 describe("confirmed full-close position accounting", () => {
+  it("rejects a stale partial-close epoch from inside the transaction so no commit occurs", async () => {
+    const lockedMarker = {
+      id: "pending-partial-row",
+      tradingBotId: "bot-one",
+      market: "BTC-PERP",
+      side: "short",
+      size: "0.25",
+      price: "101",
+      pnl: null,
+      status: "pending",
+      executedAt: new Date("2026-08-30T00:00:00.000Z"),
+      webhookPayload: { partialClose: true },
+    };
+    const promotedMarker = { ...lockedMarker, status: "executed", pnl: "1" };
+    const stalePosition = {
+      id: "position-one",
+      baseSize: "0.50",
+      avgEntryPrice: "100",
+      realizedPnl: "0",
+      totalFees: "0",
+      lastTradeId: "newer-entry",
+    };
+    const txSelect = vi.fn()
+      .mockReturnValueOnce(resolvedChain([lockedMarker]))
+      .mockReturnValueOnce(resolvedChain([promotedMarker]))
+      .mockReturnValueOnce(resolvedChain([stalePosition]));
+    const txUpdate = vi.fn(() => resolvedChain([]));
+    let committed = false;
+    dbHarness.transaction.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const result = await callback({ select: txSelect, update: txUpdate, insert: vi.fn() });
+      committed = true;
+      return result;
+    });
+    const storage = new DatabaseStorage();
+    vi.spyOn(storage, "getRecentCanonicalCloseForBot").mockResolvedValue(undefined);
+    vi.spyOn(storage, "recomputeAndMergeBotStats").mockResolvedValue(undefined);
+
+    await expect(storage.recordCloseEventAtomic({
+      botId: "bot-one",
+      update: {
+        tradeId: "pending-partial-row",
+        fields: { status: "executed", protocolFillId: "partial-fill-one", pnl: "1" },
+      },
+      deltas: { totalPnlDelta: 1 },
+      confirmedPositionReduction: {
+        market: "BTC-PERP",
+        expectedBaseSize: "1",
+        expectedLastTradeId: "entry-one",
+        residualBaseSize: 0.75,
+        residualEntryPrice: 100,
+        realizedPnlDelta: 1,
+        feeDelta: 0.1,
+      },
+    })).rejects.toThrow("partial_close_position_epoch_conflict");
+
+    expect(dbHarness.transaction).toHaveBeenCalledTimes(1);
+    expect(committed).toBe(false);
+    expect(txUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it("binds a partial promotion to the exact base-size and last-trade epoch", () => {
     expect(confirmedPartialPositionEpochMatches({
       actualBaseSize: "1.000000000",

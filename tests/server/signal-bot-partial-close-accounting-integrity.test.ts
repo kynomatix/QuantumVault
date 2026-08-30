@@ -186,6 +186,9 @@ describe("partial-close integration guards", () => {
     expect(tradingView).not.toContain("syncPositionFromOnChain(");
     expect(user).not.toContain("syncPositionFromOnChain(");
     expect(routes).toContain("if (pcPnl !== null && pcAccounting.isNew)");
+    expect(routes.match(/buildSignalBotCloseResponse\("accounting_incomplete"/g)).toHaveLength(2);
+    expect(routes).toContain("await storage.updatePendingBotTrade(marker.trade.id");
+    expect(routes).not.toContain("input.executionPrice ?? input.signalPriceContext ?? 0");
   });
 
   it("locks the durable position epoch inside the same canonical transaction", () => {

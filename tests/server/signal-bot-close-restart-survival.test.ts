@@ -223,6 +223,12 @@ function primeCloseRoute(cachedPosition: unknown) {
   vi.mocked(storage.recordCloseEventAtomic as any).mockReset().mockResolvedValue(undefined);
   vi.mocked(storage.updateWebhookLog as any).mockReset().mockResolvedValue(undefined);
   vi.mocked(storage.updateBotTrade as any).mockReset().mockResolvedValue(undefined);
+  vi.mocked(storage.updatePendingBotTrade as any).mockReset().mockImplementation(async (_id, updates) => ({
+    id: 'pending-partial-row',
+    status: 'pending',
+    ...updates,
+  }));
+  vi.mocked(storage.getBotTrade as any).mockReset().mockResolvedValue(undefined);
   vi.mocked(storage.createCloseRetry as any).mockReset().mockResolvedValue(undefined);
   vi.mocked(getUmkForWebhook as any).mockReset().mockResolvedValue({
     umk: Buffer.alloc(32, 7),
@@ -890,6 +896,103 @@ describe('close-path and restart contract wiring', () => {
             residualBaseSize: 0.125,
           }),
         }));
+      },
+      10_000,
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s treats a duplicate terminal partial marker as replay-complete without accounting or external effects',
+      async (endpoint) => {
+        const preClose = {
+          market: 'BTC-PERP',
+          baseSize: '0.25',
+          avgEntryPrice: '64000',
+          lastTradeId: 'entry-epoch-one',
+        };
+        primeCloseRoute(preClose);
+        vi.mocked(storage.createBotTradeIdempotent as any).mockReset().mockResolvedValue({
+          isNew: false,
+          trade: {
+            id: 'pending-partial-row',
+            tradingBotId: ROUTE_BOT_ID,
+            status: 'executed',
+            webhookPayload: {
+              partialClose: true,
+              partialCloseAccounting: { status: 'complete', residualBaseSize: 0.125 },
+            },
+          },
+        });
+        routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
+          success: true,
+          status: 'filled',
+          orderId: 'partial-order-one',
+          fillPrice: 65000,
+          fillSize: 0.125,
+          fee: 0.1,
+        });
+
+        const response = await postPartialClose(endpoint);
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          status: 'success',
+          type: 'partial_close',
+          remainingSize: 0.125,
+        });
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(storage.updatePendingBotTrade).not.toHaveBeenCalled();
+        expect(storage.getSubscriberBotsBySourceId).not.toHaveBeenCalled();
+      },
+      10_000,
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s cannot regress a reconciler-promoted marker when an incomplete authority result arrives late',
+      async (endpoint) => {
+        const preClose = {
+          market: 'BTC-PERP',
+          baseSize: '0.25',
+          avgEntryPrice: '64000',
+          lastTradeId: 'entry-epoch-one',
+        };
+        primeCloseRoute(preClose);
+        const terminal = {
+          id: 'pending-partial-row',
+          tradingBotId: ROUTE_BOT_ID,
+          status: 'executed',
+          webhookPayload: {
+            partialClose: true,
+            partialCloseAccounting: { status: 'complete', residualBaseSize: 0.125 },
+          },
+        };
+        vi.mocked(storage.createBotTradeIdempotent as any).mockReset().mockResolvedValue({
+          isNew: true,
+          trade: { ...terminal, status: 'pending' },
+        });
+        vi.mocked(storage.updatePendingBotTrade as any).mockResolvedValue(undefined);
+        vi.mocked(storage.getBotTrade as any).mockResolvedValue(terminal);
+        routeMocks.adapter.getStrictPositionForMarket.mockReset().mockResolvedValue(null);
+        routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
+          success: true,
+          status: 'filled',
+          orderId: 'partial-order-one',
+          fillPrice: 65000,
+          fillSize: 0.125,
+          fee: 0.1,
+        });
+
+        const response = await postPartialClose(endpoint);
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          status: 'success',
+          type: 'partial_close',
+          remainingSize: 0.125,
+        });
+        expect(storage.updatePendingBotTrade).toHaveBeenCalledTimes(1);
+        expect(storage.updateBotTrade).not.toHaveBeenCalled();
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(storage.getSubscriberBotsBySourceId).not.toHaveBeenCalled();
       },
       10_000,
     );

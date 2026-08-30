@@ -10,8 +10,10 @@ const mocks = vi.hoisted(() => ({
   storage: {
     getTradingBotById: vi.fn(),
     getBotPosition: vi.fn(),
+    getBotTrades: vi.fn(),
     getRecentCanonicalCloseForBot: vi.fn(),
     recordCloseEventAtomic: vi.fn(),
+    updateBotTrade: vi.fn(),
     upsertBotPosition: vi.fn(),
     updateTradingBot: vi.fn(),
   },
@@ -114,6 +116,7 @@ describe('Signal Bot unknown-symbol close authority', () => {
     vi.setSystemTime(new Date('2026-08-04T00:00:00.000Z'));
     mocks.storage.getTradingBotById.mockResolvedValue(bot);
     mocks.storage.getBotPosition.mockResolvedValue(dbPosition);
+    mocks.storage.getBotTrades.mockResolvedValue([]);
     mocks.storage.getRecentCanonicalCloseForBot.mockResolvedValue(null);
     mocks.storage.recordCloseEventAtomic.mockResolvedValue({ isNew: true });
     mocks.storage.upsertBotPosition.mockImplementation(async value => value);

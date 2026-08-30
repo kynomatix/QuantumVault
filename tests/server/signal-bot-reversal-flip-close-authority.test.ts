@@ -198,7 +198,7 @@ describe("FLIP route wiring", () => {
     expect(routes).toContain('executionLabel: "per_bot"');
     expect(routes).toContain('executionLabel: "user_webhook"');
     expect(routes).toContain('executionLabel: "subscriber"');
-    expect(routes.match(/getPositionForCloseAuthority\(/g)).toHaveLength(3);
+    expect(routes.match(/getPositionForCloseAuthority\(/g)).toHaveLength(4);
     expect(routes.match(/getRiskReducingCachedCloseFallback\(/g)).toHaveLength(3);
     expect(routes.match(/confirmedPositionClose:\s*\{/g)).toHaveLength(2);
   });

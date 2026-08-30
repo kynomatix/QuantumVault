@@ -114,6 +114,7 @@ export type SignalBotCloseOutcome =
   | "already_flat"
   | "position_unavailable"
   | "partial"
+  | "accounting_incomplete"
   | "confirmation_pending"
   | "executed_state_unavailable";
 
@@ -122,6 +123,7 @@ const CLOSE_OUTCOME_HTTP_STATUS: Record<SignalBotCloseOutcome, number> = {
   already_flat: 409,
   position_unavailable: 503,
   partial: 200,
+  accounting_incomplete: 200,
   confirmation_pending: 202,
   executed_state_unavailable: 500,
 };
