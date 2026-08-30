@@ -121,7 +121,6 @@ import {
 } from "./state-authority";
 
 import {
-  computeUnrealizedPnl,
   parseOpenDecision,
   type OpenDecisionView,
 } from "./paper-position-authority";
