@@ -65,6 +65,7 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     pacificaCache.invalidateAll();
@@ -177,14 +178,21 @@ describe('Pacifica risk-increasing market-order ambiguity', () => {
   });
 
   it('keeps reduce-only close transport failure on the ordinary urgent retry path', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('request timeout'); }));
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      if (!signal) {
+        reject(new Error('test fixture requires a request signal'));
+        return;
+      }
+      const rejectFromAbort = () => reject(signal.reason);
+      if (signal.aborted) rejectFromAbort();
+      else signal.addEventListener('abort', rejectFromAbort, { once: true });
+    })));
 
-    let caught: unknown;
-    try {
-      await adapter().placeMarketOrder(request({ reduceOnly: true }));
-    } catch (error) {
-      caught = error;
-    }
+    const pending = adapter().placeMarketOrder(request({ reduceOnly: true })).catch(error => error);
+    await vi.advanceTimersByTimeAsync(30_000);
+    const caught = await pending;
 
     expect(caught).toBeInstanceOf(Error);
     expect(isUnconfirmedLandingVerdict(caught)).toBe(false);

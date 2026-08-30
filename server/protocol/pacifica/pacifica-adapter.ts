@@ -3698,7 +3698,10 @@ export class PacificaAdapter implements ProtocolAdapter {
     const ambiguous = (detail: string): Error => (
       policy.quarantineAmbiguity
         ? new PacificaPostOutcomeAmbiguousError(path, detail, policy)
-        : new Error(`PacificaAdapter POST ${path}: ${detail}`)
+        : new Error(
+          `PacificaAdapter POST ${path}: timed out awaiting terminal proof for `
+          + `risk-reducing retry (${detail})`,
+        )
     );
 
     let response: Response;

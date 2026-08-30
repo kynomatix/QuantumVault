@@ -7,6 +7,23 @@ import { pacificaCache } from '../../server/protocol/pacifica/pacifica-cache.js'
 import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota.js';
 import { isUnconfirmedLandingVerdict } from '../../server/protocol/tx-verdicts.js';
 
+process.env.DATABASE_URL ??= 'postgresql://test:test@127.0.0.1:1/qv_test';
+process.env.AGENT_ENCRYPTION_KEY ??= '0'.repeat(64);
+const { isTransientError } = await import('../../server/trade-retry-service.js');
+
+function abortAwarePendingFetch(): ReturnType<typeof vi.fn> {
+  return vi.fn((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) {
+      reject(new Error('test fixture requires a request signal'));
+      return;
+    }
+    const rejectFromAbort = () => reject(signal.reason);
+    if (signal.aborted) rejectFromAbort();
+    else signal.addEventListener('abort', rejectFromAbort, { once: true });
+  }));
+}
+
 function subject(): PacificaAdapter & {
   post(path: string, body: unknown): Promise<unknown>;
   postWithApprovalRetry(
@@ -152,13 +169,36 @@ describe('Pacifica generic POST hard settlement', () => {
     ['/orders/cancel', { account: 'a', order_id: 'order-1' }],
     ['/orders/cancel_all', { account: 'a', all_symbols: true }],
     ['/orders/stop/cancel', { account: 'a', order_id: 'stop-1' }],
-  ] as const)('keeps risk-reducing %s on the ordinary retry path until an owning caller can reconcile', async (path, body) => {
-    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('request timeout'); }));
-    const error = await subject().post(path, body).catch(value => value);
+  ] as const)('keeps risk-reducing %s transient after the real soft-abort path', async (path, body) => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', abortAwarePendingFetch());
+    const pending = subject().post(path, body).catch(value => value);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await pending;
 
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(PacificaPostOutcomeAmbiguousError);
     expect(isUnconfirmedLandingVerdict(error)).toBe(false);
+    expect(isTransientError(error)).toBe(true);
+  });
+
+  it.each([
+    ['/orders/create_market', { account: 'a', client_order_id: 'close-1' }],
+    ['/orders/cancel', { account: 'a', order_id: 'order-1' }],
+    ['/orders/cancel_all', { account: 'a', all_symbols: true }],
+    ['/orders/stop/cancel', { account: 'a', order_id: 'stop-1' }],
+  ] as const)('keeps risk-reducing %s transient after hard abandonment', async (path, body) => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => {})));
+    const pending = subject().post(path, body).catch(value => value);
+    await vi.advanceTimersByTimeAsync(35_000);
+    const error = await pending;
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(PacificaPostOutcomeAmbiguousError);
+    expect(isUnconfirmedLandingVerdict(error)).toBe(false);
+    expect(isTransientError(error)).toBe(true);
   });
 
   it('does not swallow an ambiguous approval response whose body resembles already-enrolled success', async () => {
