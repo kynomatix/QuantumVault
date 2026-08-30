@@ -3,13 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildConfirmedPartialPosition,
   classifyPartialClosePositionAuthority,
+  normalizePartialCloseIdentity,
+  partialCloseIdentityMatches,
   resolvePartialClosePositionAuthority,
+  resolvePartialCloseExecutionPrice,
 } from "../../server/trading/signal-bot-close-integrity";
 
 describe("partial-close residual-position authority", () => {
-  it("accepts only a fresh same-side reduction or authoritative flat", () => {
+  it("accepts only the exact requested same-side reduction", () => {
     expect(classifyPartialClosePositionAuthority({
       preCloseBaseSize: 3,
+      requestedClosedSize: 1,
       authority: { size: 2, side: "LONG", entryPrice: 100 },
     })).toEqual({
       kind: "confirmed",
@@ -19,16 +23,49 @@ describe("partial-close residual-position authority", () => {
     });
     expect(classifyPartialClosePositionAuthority({
       preCloseBaseSize: -3,
+      requestedClosedSize: 1,
       authority: { size: 0, side: "FLAT", entryPrice: 0 },
-    })).toMatchObject({ kind: "confirmed", residualBaseSize: 0, becameFlat: true });
+    })).toEqual({
+      kind: "unavailable",
+      reason: "post_close_position_unexpected_flat",
+      retryable: false,
+    });
     expect(classifyPartialClosePositionAuthority({
       preCloseBaseSize: 3,
+      requestedClosedSize: 1,
       authority: { size: 3, side: "LONG", entryPrice: 100 },
-    })).toEqual({ kind: "unavailable", reason: "post_close_position_not_reduced" });
+    })).toEqual({
+      kind: "unavailable",
+      reason: "post_close_position_not_reduced",
+      retryable: true,
+    });
     expect(classifyPartialClosePositionAuthority({
       preCloseBaseSize: 3,
+      requestedClosedSize: 1,
       authority: { size: -2, side: "SHORT", entryPrice: 100 },
-    })).toEqual({ kind: "unavailable", reason: "post_close_position_side_mismatch" });
+    })).toEqual({
+      kind: "unavailable",
+      reason: "post_close_position_side_mismatch",
+      retryable: false,
+    });
+    expect(classifyPartialClosePositionAuthority({
+      preCloseBaseSize: 3,
+      requestedClosedSize: 1,
+      authority: { size: 2.25, side: "LONG", entryPrice: 100 },
+    })).toMatchObject({
+      kind: "unavailable",
+      reason: "post_close_position_under_delivered",
+      retryable: true,
+    });
+    expect(classifyPartialClosePositionAuthority({
+      preCloseBaseSize: 3,
+      requestedClosedSize: 1,
+      authority: { size: 1.5, side: "LONG", entryPrice: 100 },
+    })).toEqual({
+      kind: "unavailable",
+      reason: "post_close_position_reduction_exceeds_request",
+      retryable: false,
+    });
   });
 
   it("retains the existing three-retry stale-read guard before declaring incomplete", async () => {
@@ -40,11 +77,74 @@ describe("partial-close residual-position authority", () => {
     const wait = vi.fn().mockResolvedValue(undefined);
     await expect(resolvePartialClosePositionAuthority({
       preCloseBaseSize: 3,
+      requestedClosedSize: 1,
       readAuthority,
       wait,
     })).resolves.toMatchObject({ kind: "confirmed", residualBaseSize: 2 });
     expect(readAuthority).toHaveBeenCalledTimes(4);
     expect(wait).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not spend retry budget on a terminal authority contradiction", async () => {
+    const readAuthority = vi.fn().mockResolvedValue({ size: 0, side: "FLAT", entryPrice: 0 });
+    const wait = vi.fn().mockResolvedValue(undefined);
+    await expect(resolvePartialClosePositionAuthority({
+      preCloseBaseSize: 3,
+      requestedClosedSize: 1,
+      readAuthority,
+      wait,
+    })).resolves.toMatchObject({
+      kind: "unavailable",
+      reason: "post_close_position_unexpected_flat",
+      retryable: false,
+      attempts: 1,
+    });
+    expect(readAuthority).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it("uses only a positive adapter-returned execution price and keeps signal price as context", () => {
+    expect(resolvePartialCloseExecutionPrice({
+      protocol: "pacifica",
+      adapterFillPrice: 101.25,
+      signalPrice: 99.5,
+    })).toEqual({
+      price: 101.25,
+      authority: "venue_execution",
+      signalPriceContext: 99.5,
+      reason: null,
+    });
+    expect(resolvePartialCloseExecutionPrice({
+      protocol: "flash",
+      adapterFillPrice: 101.25,
+      signalPrice: 99.5,
+    })).toMatchObject({ price: 101.25, authority: "adapter_submit_oracle_estimate" });
+    expect(resolvePartialCloseExecutionPrice({
+      protocol: "pacifica",
+      adapterFillPrice: 0,
+      signalPrice: 99.5,
+    })).toEqual({
+      price: null,
+      authority: null,
+      signalPriceContext: 99.5,
+      reason: "partial_close_execution_price_unavailable",
+    });
+  });
+
+  it("normalizes transaction wrappers once and matches only exact venue identities", () => {
+    expect(normalizePartialCloseIdentity("tx-partial-fill-7")).toBe("fill-7");
+    expect(normalizePartialCloseIdentity("tx-tx-partial-fill-7")).toBe("fill-7");
+    expect(partialCloseIdentityMatches({
+      transactionSignature: "order-7",
+      protocolFillId: "tx-partial-order-7",
+      orderId: "order-7",
+    })).toBe(true);
+    expect(partialCloseIdentityMatches({
+      transactionSignature: "order-7",
+      protocolFillId: "tx-partial-fill-7",
+      orderId: "other-order",
+      tradeId: "other-fill",
+    })).toBe(false);
   });
 
   it("accumulates money exactly while copying venue residual state", () => {
@@ -94,9 +194,9 @@ describe("partial-close integration guards", () => {
     expect(storage).toContain("await persistConfirmedPositionReduction()");
   });
 
-  it("lets restart reconciliation promote the pending marker using fresh venue residual truth", () => {
-    expect(reconciler).toContain("const pendingPartial = (await storage.getBotTrades(botId, 200)).find");
-    expect(reconciler).toContain("recoveredBy: 'periodic_reconciler'");
+  it("lets restart reconciliation promote only one identity- and epoch-bound marker", () => {
+    expect(reconciler).toContain("selectPendingPartialCloseMarker({");
+    expect(reconciler).toContain("pending_partial_marker_identity_or_money_unavailable");
     expect(reconciler).toContain("confirmedPositionReduction:");
   });
 });

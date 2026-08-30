@@ -1603,7 +1603,11 @@ async function settleAllPnl(
     return { success: false, error: error.message || String(error) };
   }
 }
-import { reconcileBotPosition, syncPositionFromOnChain } from "./reconciliation-service";
+import {
+  reconcileBotPosition,
+  registerRecoveredCloseRoutingCallback,
+  syncPositionFromOnChain,
+} from "./reconciliation-service";
 import {
   buildSignalBotCloseResponse,
   classifyCloseFeeEvidence,
@@ -1612,6 +1616,7 @@ import {
   deferSignalBotFlipOpen,
   markSignalBotFlipOpenExecuted,
   rejectSignalBotFlipOpen,
+  resolvePartialCloseExecutionPrice,
   resolvePartialClosePositionAuthority,
   resolveSignalBotFlipCloseThenOpen,
   summarizeSignalBotCloseFills,
@@ -4906,7 +4911,9 @@ async function finalizeSignedPartialCloseAccounting(input: {
   closedSize: number;
   closedFraction: number;
   closeSide: "long" | "short";
-  fillPrice: number;
+  executionPrice: number | null;
+  executionPriceAuthority: "venue_execution" | "adapter_submit_oracle_estimate" | null;
+  signalPriceContext: number | null;
   fee: number | null;
   pnl: number | null;
   feeEvidence: CloseFeeEvidence;
@@ -4924,6 +4931,27 @@ async function finalizeSignedPartialCloseAccounting(input: {
     partialClose: true,
     fraction: input.closedFraction,
     feeEvidence: input.feeEvidence,
+    executionAccounting: {
+      price: input.executionPrice,
+      priceAuthority: input.executionPriceAuthority,
+      signalPriceContext: input.signalPriceContext,
+      fee: input.fee,
+      pnl: input.pnl,
+    },
+    subscriberRouting: {
+      action: input.closeSide === "short" ? "sell" : "buy",
+      contracts: String(input.closedSize),
+      expectedPreClosePositionSize: input.preClosePosition?.baseSize ?? null,
+      expectedLastTradeId: input.preClosePosition?.lastTradeId ?? null,
+      partialCloseFraction: input.closedFraction,
+      price: input.executionPrice,
+      priceAuthority: input.executionPriceAuthority,
+      transactionSignature: input.signature ?? null,
+      protocolFillId: input.protocolFillId,
+      botId: input.bot.id,
+      protocol: input.bot.activeProtocol,
+      market: input.bot.market,
+    },
     partialCloseAccounting: {
       status: "pending_venue_authority",
       expectedBaseSize: input.preClosePosition?.baseSize ?? null,
@@ -4937,7 +4965,7 @@ async function finalizeSignedPartialCloseAccounting(input: {
     market: input.bot.market,
     side: input.closeSide,
     size: String(input.closedSize),
-    price: String(input.fillPrice),
+    price: String(input.executionPrice ?? input.signalPriceContext ?? 0),
     fee: null,
     pnl: null,
     status: "pending",
@@ -4951,6 +4979,7 @@ async function finalizeSignedPartialCloseAccounting(input: {
 
   const authority = await resolvePartialClosePositionAuthority({
     preCloseBaseSize,
+    requestedClosedSize: input.closedSize,
     readAuthority: async () => PositionService.getPositionForCloseAuthority(
       input.bot.id,
       input.queryAccount,
@@ -4961,18 +4990,78 @@ async function finalizeSignedPartialCloseAccounting(input: {
     ),
   });
   if (authority.kind === "unavailable") {
+    const outcome = {
+      protocol: input.bot.activeProtocol,
+      markerId: marker.trade.id,
+      outcome: "accounting_incomplete",
+      attempts: authority.attempts,
+      elapsedMs: authority.elapsedMs,
+      identityAuthority: input.signature ? "signed_transaction" : "unavailable",
+      incompleteReason: authority.reason,
+    };
+    await storage.updateBotTrade(marker.trade.id, {
+      webhookPayload: {
+        ...markerPayload,
+        partialCloseAuthorityOutcome: outcome,
+      },
+      errorMessage: `Partial close accounting incomplete: ${authority.reason}`,
+    });
+    console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(outcome)}`);
     return { kind: "incomplete", tradeId: marker.trade.id, reason: authority.reason };
   }
 
+  if (input.executionPrice === null
+      || !Number.isFinite(input.executionPrice)
+      || input.executionPrice <= 0
+      || input.executionPriceAuthority === null
+      || input.feeEvidence.kind === "unavailable"
+      || input.fee === null
+      || !Number.isFinite(input.fee)
+      || input.fee < 0
+      || input.pnl === null
+      || !Number.isFinite(input.pnl)) {
+    const reason = input.executionPrice === null
+      ? "partial_close_execution_price_unavailable"
+      : "partial_close_money_truth_unavailable";
+    const outcome = {
+      protocol: input.bot.activeProtocol,
+      markerId: marker.trade.id,
+      outcome: "accounting_incomplete",
+      attempts: authority.attempts,
+      elapsedMs: authority.elapsedMs,
+      identityAuthority: input.signature ? "signed_transaction" : "unavailable",
+      incompleteReason: reason,
+    };
+    await storage.updateBotTrade(marker.trade.id, {
+      webhookPayload: {
+        ...markerPayload,
+        partialCloseAuthorityOutcome: outcome,
+      },
+      errorMessage: `Partial close accounting incomplete: ${reason}`,
+    });
+    console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(outcome)}`);
+    return { kind: "incomplete", tradeId: marker.trade.id, reason };
+  }
+
   try {
+    const outcome = {
+      protocol: input.bot.activeProtocol,
+      markerId: marker.trade.id,
+      outcome: "complete",
+      attempts: authority.attempts,
+      elapsedMs: authority.elapsedMs,
+      identityAuthority: input.signature ? "signed_transaction" : "unavailable",
+      incompleteReason: null,
+    };
     const accounting = await storage.recordCloseEventAtomic({
       botId: input.bot.id,
       update: {
         tradeId: marker.trade.id,
         fields: {
           status: "executed",
-          fee: input.fee === null ? null : String(input.fee),
-          pnl: input.pnl === null ? null : String(input.pnl),
+          price: String(input.executionPrice),
+          fee: String(input.fee),
+          pnl: String(input.pnl),
           errorMessage: null,
           webhookPayload: {
             ...markerPayload,
@@ -4983,24 +5072,26 @@ async function finalizeSignedPartialCloseAccounting(input: {
               residualEntryPrice: authority.residualEntryPrice,
               becameFlat: authority.becameFlat,
             },
+            partialCloseAuthorityOutcome: outcome,
           },
         },
       },
       deltas: {
-        totalPnlDelta: input.pnl ?? 0,
-        totalVolumeDelta: input.closedSize * input.fillPrice,
+        totalPnlDelta: input.pnl,
+        totalVolumeDelta: input.closedSize * input.executionPrice,
         lastTradeAt: new Date().toISOString(),
       },
       confirmedPositionReduction: {
         market: input.bot.market,
-        expectedBaseSize: input.preClosePosition?.baseSize ?? "NaN",
+        expectedBaseSize: input.preClosePosition!.baseSize,
         expectedLastTradeId: input.preClosePosition?.lastTradeId ?? null,
         residualBaseSize: authority.residualBaseSize,
         residualEntryPrice: authority.residualEntryPrice,
-        realizedPnlDelta: input.pnl ?? 0,
-        feeDelta: input.fee ?? 0,
+        realizedPnlDelta: input.pnl,
+        feeDelta: input.fee,
       },
     });
+    console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(outcome)}`);
     return {
       kind: "completed",
       tradeId: accounting.trade?.id ?? marker.trade.id,
@@ -5307,6 +5398,15 @@ export async function routeSignalToSubscribers(
     partialCloseFraction?: number;
   }
 ): Promise<void> {
+  if (!signal.isCloseSignal && signal.partialCloseFraction !== undefined
+      && (!Number.isFinite(signal.partialCloseFraction)
+        || signal.partialCloseFraction <= 0
+        || signal.partialCloseFraction >= 1)) {
+    console.error(
+      `[Subscriber Routing] Refusing invalid partial-close fraction for ${sourceBotId}; routed=false`,
+    );
+    return;
+  }
   try {
     console.log(`[Subscriber Routing] Starting routing for source bot ${sourceBotId}, signal: ${signal.action}, close=${signal.isCloseSignal}`);
     
@@ -6356,6 +6456,9 @@ export async function registerRoutes(
   // Register routing callback for trade retry service
   // This allows successful retries to route signals to subscribers
   registerRoutingCallback(routeSignalToSubscribers);
+  registerRecoveredCloseRoutingCallback(async (sourceBotId, signal) => {
+    await routeSignalToSubscribers(sourceBotId, signal);
+  });
 
   app.get("/llms.txt", (_req, res) => {
     const llmsTxt = `# QuantumVault
@@ -19603,19 +19706,27 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             return res.status(500).json({ error: "Partial close failed", details: pcResult.error });
           }
 
-          // Book realized PnL for the closed slice.
-          const pcFillPrice = pcResult.fillPrice ?? (signalPrice ? parseFloat(signalPrice) : 0);
+          // Only an adapter-returned, strictly-positive execution price may
+          // become money authority. The webhook price remains context only.
+          const pcPrice = resolvePartialCloseExecutionPrice({
+            protocol: bot.activeProtocol,
+            adapterFillPrice: pcResult.fillPrice,
+            signalPrice: signalPrice ? Number(signalPrice) : null,
+          });
+          const pcFillPrice = pcPrice.price;
           const pcEntryPrice = dbPositionForClassification ? parseFloat(dbPositionForClassification.avgEntryPrice) : 0;
-          const { fee: pcFee, pnl: pcPnl } = closeAccounting(
-            pcResult.feeEvidence,
-            pcEntryPrice,
-            pcFillPrice,
-            partialCloseSize,
-            pcPositionSide === 'long' ? 'short' : 'long',
-          );
+          const { fee: pcFee, pnl: pcPnl } = pcFillPrice === null
+            ? { fee: null, pnl: null }
+            : closeAccounting(
+                pcResult.feeEvidence,
+                pcEntryPrice,
+                pcFillPrice,
+                partialCloseSize,
+                pcPositionSide === 'long' ? 'short' : 'long',
+              );
 
           const pcDedupKey = DatabaseStorage.canonicalCloseFillId({
-            signature: pcResult.signature ? `tx-${pcResult.signature}` : undefined,
+            signature: pcResult.signature ?? undefined,
             botId,
             side: pcPositionSide === 'long' ? 'short' : 'long',
             size: partialCloseSize,
@@ -19633,7 +19744,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             closedSize: partialCloseSize,
             closedFraction: partialCloseFraction,
             closeSide: pcPositionSide === 'long' ? 'short' : 'long',
-            fillPrice: pcFillPrice,
+            executionPrice: pcFillPrice,
+            executionPriceAuthority: pcPrice.authority,
+            signalPriceContext: pcPrice.signalPriceContext,
             fee: pcFee,
             pnl: pcPnl,
             feeEvidence: pcResult.feeEvidence,
@@ -19654,6 +19767,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               signature: pcResult.signature,
             });
           }
+          if (pcFillPrice === null) {
+            throw new Error("partial_close_completed_without_execution_price");
+          }
 
           // Schedule debounced Telegram notification.
           if (pcPnl !== null && pcAccounting.isNew) schedulePartialCloseNotification({
@@ -19673,7 +19789,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               action: action as 'buy' | 'sell',
               contracts,
               positionSize,
-              price: signalPrice || String(pcFillPrice),
+              price: String(pcFillPrice),
               isCloseSignal: false,
               strategyPositionSize,
               partialCloseFraction,
@@ -21033,19 +21149,27 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             return res.status(500).json({ error: "Partial close failed", details: pcResult.error });
           }
 
-          // Book realized PnL for the closed slice.
-          const pcFillPrice = pcResult.fillPrice ?? (signalPrice ? parseFloat(signalPrice) : 0);
+          // Only an adapter-returned, strictly-positive execution price may
+          // become money authority. The webhook price remains context only.
+          const pcPrice = resolvePartialCloseExecutionPrice({
+            protocol: bot.activeProtocol,
+            adapterFillPrice: pcResult.fillPrice,
+            signalPrice: signalPrice ? Number(signalPrice) : null,
+          });
+          const pcFillPrice = pcPrice.price;
           const pcEntryPrice = uwDbPosition ? parseFloat(uwDbPosition.avgEntryPrice) : 0;
-          const { fee: pcFee, pnl: pcPnl } = closeAccounting(
-            pcResult.feeEvidence,
-            pcEntryPrice,
-            pcFillPrice,
-            uwPartialCloseSize,
-            pcPositionSide === 'long' ? 'short' : 'long',
-          );
+          const { fee: pcFee, pnl: pcPnl } = pcFillPrice === null
+            ? { fee: null, pnl: null }
+            : closeAccounting(
+                pcResult.feeEvidence,
+                pcEntryPrice,
+                pcFillPrice,
+                uwPartialCloseSize,
+                pcPositionSide === 'long' ? 'short' : 'long',
+              );
 
           const pcDedupKey = DatabaseStorage.canonicalCloseFillId({
-            signature: pcResult.signature ? `tx-${pcResult.signature}` : undefined,
+            signature: pcResult.signature ?? undefined,
             botId,
             side: pcPositionSide === 'long' ? 'short' : 'long',
             size: uwPartialCloseSize,
@@ -21063,7 +21187,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             closedSize: uwPartialCloseSize,
             closedFraction: uwPartialCloseFraction,
             closeSide: pcPositionSide === 'long' ? 'short' : 'long',
-            fillPrice: pcFillPrice,
+            executionPrice: pcFillPrice,
+            executionPriceAuthority: pcPrice.authority,
+            signalPriceContext: pcPrice.signalPriceContext,
             fee: pcFee,
             pnl: pcPnl,
             feeEvidence: pcResult.feeEvidence,
@@ -21083,6 +21209,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               reason: pcAccounting.reason,
               signature: pcResult.signature,
             });
+          }
+          if (pcFillPrice === null) {
+            throw new Error("partial_close_completed_without_execution_price");
           }
 
           // Schedule debounced Telegram notification.
@@ -21104,7 +21233,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               action: action as 'buy' | 'sell',
               contracts,
               positionSize,
-              price: signalPrice || String(pcFillPrice),
+              price: String(pcFillPrice),
               isCloseSignal: false,
               strategyPositionSize,
               partialCloseFraction: uwPartialCloseFraction,

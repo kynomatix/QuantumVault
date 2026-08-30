@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     getBotTrades: vi.fn(),
     getRecentCanonicalCloseForBot: vi.fn(),
     recordCloseEventAtomic: vi.fn(),
+    updateBotTrade: vi.fn(),
     upsertBotPosition: vi.fn(),
     updateTradingBot: vi.fn(),
   },
@@ -22,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   schedulePartialCloseNotification: vi.fn(),
   maybeScheduleAutoRepark: vi.fn(),
   cancelAutoRepark: vi.fn(),
+  recoveredRoute: vi.fn(),
 }));
 
 vi.mock('../../server/storage', () => ({
@@ -48,8 +50,13 @@ vi.mock('../../server/vault/auto-repark', () => ({
 }));
 
 import {
+  buildRecoveredFullCloseRoutingSignal,
+  buildRecoveredPartialCloseRoutingSignal,
   canonicalReconcilerFullCloseId,
   reconcileBotPosition,
+  registerRecoveredCloseRoutingCallback,
+  selectPendingPartialCloseMarker,
+  selectPendingPartialMarkerForFullClose,
 } from '../../server/reconciliation-service';
 
 const walletAddress = 'wallet-public-address';
@@ -77,6 +84,36 @@ function storedPosition(lastTradeId: string | null) {
   };
 }
 
+function pendingPartialMarker(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'pending-partial-row',
+    status: 'pending',
+    side: 'short',
+    market,
+    size: '0.02',
+    executedAt: new Date('2026-08-03T23:59:30.000Z'),
+    txSignature: 'order-partial-one',
+    protocolFillId: 'tx-partial-fill-partial-one',
+    protocol: 'pacifica',
+    webhookPayload: {
+      partialClose: true,
+      partialCloseAccounting: {
+        expectedBaseSize: '1',
+        expectedLastTradeId: 'entry-epoch-one',
+        requestedClosedSize: 0.02,
+      },
+      executionAccounting: {
+        price: 101,
+        priceAuthority: 'venue_execution',
+        fee: 0.01,
+        pnl: 0.5,
+      },
+      feeEvidence: { kind: 'venue_exact' },
+    },
+    ...overrides,
+  };
+}
+
 async function reconcile(botId: string) {
   return reconcileBotPosition(
     botId,
@@ -97,7 +134,11 @@ describe('reconciler full-close position epoch identity', () => {
     mocks.storage.getBotPosition.mockResolvedValue(storedPosition('entry-epoch-one'));
     mocks.storage.getRecentCanonicalCloseForBot.mockResolvedValue(null);
     mocks.storage.getBotTrades.mockResolvedValue([]);
-    mocks.storage.recordCloseEventAtomic.mockResolvedValue({ isNew: true });
+    mocks.storage.recordCloseEventAtomic.mockResolvedValue({
+      isNew: true,
+      trade: { id: 'canonical-close-row' },
+    });
+    mocks.storage.updateBotTrade.mockResolvedValue(undefined);
     mocks.storage.upsertBotPosition.mockImplementation(async value => value);
     mocks.adapter.getPositions.mockResolvedValue([]);
     mocks.adapter.getTradeHistory.mockResolvedValue([]);
@@ -108,6 +149,223 @@ describe('reconciler full-close position epoch identity', () => {
     });
     mocks.adapter.getPrice.mockResolvedValue(117000);
     mocks.sendTradeNotification.mockResolvedValue(undefined);
+    mocks.recoveredRoute.mockResolvedValue(undefined);
+    registerRecoveredCloseRoutingCallback(mocks.recoveredRoute);
+  });
+
+  it('selects one exact Pacifica marker and refuses stale or fill-less recovery', () => {
+    const marker = pendingPartialMarker();
+    const fill = {
+      tradeId: 'fill-partial-one',
+      orderId: 'order-partial-one',
+      internalSymbol: market,
+      side: 'short',
+      venueEventKind: 'close_long',
+      price: 101,
+      size: 0.02,
+      fee: 0.01,
+      realizedPnl: 0.5,
+      timestamp: Date.now(),
+    };
+    expect(selectPendingPartialCloseMarker({
+      trades: [marker],
+      protocol: 'pacifica',
+      market,
+      closeSide: 'short',
+      dbBaseSize: 1,
+      dbLastTradeId: 'entry-epoch-one',
+      closedSlice: 0.02,
+      closingFills: [fill],
+      nowMs: Date.now(),
+    })).toMatchObject({ kind: 'eligible', trade: { id: 'pending-partial-row' } });
+    expect(selectPendingPartialCloseMarker({
+      trades: [marker],
+      protocol: 'pacifica',
+      market,
+      closeSide: 'short',
+      dbBaseSize: 1,
+      dbLastTradeId: 'entry-epoch-one',
+      closedSlice: 0.02,
+      closingFills: [],
+      nowMs: Date.now(),
+    })).toMatchObject({ kind: 'blocked', reason: 'pending_partial_marker_identity_or_money_unavailable' });
+    expect(selectPendingPartialCloseMarker({
+      trades: [marker],
+      protocol: 'pacifica',
+      market,
+      closeSide: 'short',
+      dbBaseSize: 1,
+      dbLastTradeId: 'entry-epoch-one',
+      closedSlice: 0.02,
+      closingFills: [fill],
+      nowMs: Date.now() + 60 * 60 * 1000 + 1,
+    })).toMatchObject({ kind: 'blocked' });
+  });
+
+  it('requires exact fill identity before a pending partial marker can become a full close', () => {
+    const marker = pendingPartialMarker();
+    expect(selectPendingPartialMarkerForFullClose({
+      trades: [marker],
+      market,
+      closeSide: 'short',
+      dbBaseSize: 1,
+      dbLastTradeId: 'entry-epoch-one',
+      fillTradeIds: ['fill-partial-one'],
+      fillOrderIds: [],
+      nowMs: Date.now(),
+    })).toMatchObject({ kind: 'eligible', trade: { id: 'pending-partial-row' } });
+    expect(selectPendingPartialMarkerForFullClose({
+      trades: [marker],
+      market,
+      closeSide: 'short',
+      dbBaseSize: 1,
+      dbLastTradeId: 'entry-epoch-one',
+      fillTradeIds: [],
+      fillOrderIds: [],
+      nowMs: Date.now(),
+    })).toEqual({
+      kind: 'blocked',
+      reason: 'liquidation_pending_fill_identity',
+      markerIds: ['pending-partial-row'],
+    });
+  });
+
+  it('builds typed recovery routing payloads and rejects invalid fractions', () => {
+    expect(buildRecoveredPartialCloseRoutingSignal({
+      preCloseBaseSize: 1,
+      requestedClosedSize: 0.02,
+      residualBaseSize: 0.98,
+      price: 101,
+    })).toMatchObject({
+      action: 'sell',
+      contracts: '0.02',
+      positionSize: '0.98',
+      partialCloseFraction: 0.02,
+      isCloseSignal: false,
+    });
+    expect(buildRecoveredPartialCloseRoutingSignal({
+      preCloseBaseSize: 1,
+      requestedClosedSize: 1,
+      residualBaseSize: 0,
+      price: 101,
+    })).toBeNull();
+    expect(buildRecoveredFullCloseRoutingSignal({ preCloseBaseSize: -1, price: 99 }))
+      .toMatchObject({ action: 'buy', positionSize: '0', isCloseSignal: true });
+  });
+
+  it('recovers a signed below-three-percent partial from its marker and routes effects once', async () => {
+    mocks.storage.getBotPosition.mockResolvedValue({
+      ...storedPosition('entry-epoch-one'),
+      baseSize: '1',
+      avgEntryPrice: '100',
+    });
+    mocks.storage.getBotTrades.mockResolvedValue([pendingPartialMarker()]);
+    mocks.adapter.getPositions.mockResolvedValue([{
+      internalSymbol: market,
+      baseSize: 0.98,
+      entryPrice: 100,
+      markPrice: 101,
+      unrealizedPnl: 0.98,
+    }]);
+    mocks.adapter.getTradeHistory.mockResolvedValue([{
+      tradeId: 'fill-partial-one',
+      orderId: 'order-partial-one',
+      internalSymbol: market,
+      side: 'short',
+      venueEventKind: 'close_long',
+      price: 101,
+      size: 0.02,
+      fee: 0.01,
+      realizedPnl: 0.5,
+      timestamp: Date.now(),
+    }]);
+
+    await expect(reconcile('below-three-percent')).resolves.toEqual({
+      synced: true,
+      discrepancy: true,
+    });
+    expect(mocks.storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({
+      update: expect.objectContaining({ tradeId: 'pending-partial-row' }),
+      confirmedPositionReduction: expect.objectContaining({
+        expectedBaseSize: '1',
+        expectedLastTradeId: 'entry-epoch-one',
+        residualBaseSize: 0.98,
+      }),
+    }));
+    expect(mocks.recoveredRoute).toHaveBeenCalledTimes(1);
+    expect(mocks.recoveredRoute).toHaveBeenCalledWith('below-three-percent', expect.objectContaining({
+      partialCloseFraction: 0.02,
+      isCloseSignal: false,
+    }));
+  });
+
+  it('supersedes a pending partial only with a separate fill-backed full close and routes once', async () => {
+    mocks.storage.getBotPosition.mockResolvedValue({
+      ...storedPosition('entry-epoch-one'),
+      baseSize: '1',
+      avgEntryPrice: '100',
+    });
+    mocks.storage.getBotTrades.mockResolvedValue([pendingPartialMarker()]);
+    mocks.adapter.getTradeHistory.mockResolvedValue([{
+      tradeId: 'fill-partial-one',
+      orderId: 'order-partial-one',
+      internalSymbol: market,
+      side: 'short',
+      venueEventKind: 'close_long',
+      price: 99,
+      size: 1,
+      fee: 0.1,
+      realizedPnl: -1,
+      timestamp: Date.now(),
+    }]);
+
+    await expect(reconcile('fill-backed-full')).resolves.toEqual({
+      synced: true,
+      discrepancy: true,
+      liquidation: false,
+    });
+    expect(mocks.storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({
+      insert: expect.objectContaining({
+        tradingBotId: 'fill-backed-full',
+        status: 'executed',
+        pnlConvention: 'net_of_close_fee',
+      }),
+      confirmedPositionClose: expect.any(Object),
+      supersedePendingPartialTradeId: 'pending-partial-row',
+    }));
+    expect(mocks.recoveredRoute).toHaveBeenCalledTimes(1);
+    expect(mocks.recoveredRoute).toHaveBeenCalledWith('fill-backed-full', expect.objectContaining({
+      isCloseSignal: true,
+      positionSize: '0',
+    }));
+  });
+
+  it('converges exposure flat but leaves a fill-less pending marker incomplete with no money effects', async () => {
+    mocks.storage.getBotPosition.mockResolvedValue({
+      ...storedPosition('entry-epoch-one'),
+      baseSize: '1',
+      avgEntryPrice: '100',
+    });
+    mocks.storage.getBotTrades.mockResolvedValue([pendingPartialMarker()]);
+    mocks.adapter.getTradeHistory.mockResolvedValue([]);
+
+    await expect(reconcile('fill-less-flat')).resolves.toEqual({ synced: true, discrepancy: false });
+    vi.setSystemTime(new Date('2026-08-04T00:01:31.000Z'));
+    await expect(reconcile('fill-less-flat')).resolves.toEqual({
+      synced: true,
+      discrepancy: true,
+      liquidation: false,
+    });
+    expect(mocks.storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+    expect(mocks.storage.updateBotTrade).toHaveBeenCalledWith('pending-partial-row', expect.objectContaining({
+      errorMessage: expect.stringContaining('liquidation_pending_fill_identity'),
+    }));
+    expect(mocks.storage.upsertBotPosition).toHaveBeenCalledWith(expect.objectContaining({
+      baseSize: '0',
+      realizedPnl: '0',
+      totalFees: '0',
+    }));
+    expect(mocks.recoveredRoute).not.toHaveBeenCalled();
   });
 
   it('ignores mutable estimate price and observation time for one entry epoch', () => {

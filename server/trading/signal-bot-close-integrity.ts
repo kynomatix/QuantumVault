@@ -313,34 +313,81 @@ export interface PartialClosePositionAuthority {
   entryPrice: number;
 }
 
+export const PARTIAL_CLOSE_BASE_DUST = 0.0001;
+
+export function confirmedPartialPositionEpochMatches(input: {
+  actualBaseSize: string;
+  actualLastTradeId: string | null;
+  expectedBaseSize: string;
+  expectedLastTradeId: string | null;
+}): boolean {
+  try {
+    return new Decimal(input.actualBaseSize).toFixed(8) === new Decimal(input.expectedBaseSize).toFixed(8)
+      && input.actualLastTradeId === input.expectedLastTradeId;
+  } catch {
+    return false;
+  }
+}
+
 export type PartialCloseAuthorityOutcome =
-  | { kind: "confirmed"; residualBaseSize: number; residualEntryPrice: number; becameFlat: boolean }
-  | { kind: "unavailable"; reason: string };
+  | {
+      kind: "confirmed";
+      residualBaseSize: number;
+      residualEntryPrice: number;
+      becameFlat: false;
+      attempts: number;
+      elapsedMs: number;
+    }
+  | {
+      kind: "unavailable";
+      reason: string;
+      retryable: boolean;
+      attempts: number;
+      elapsedMs: number;
+    };
+
+type ClassifiedPartialCloseAuthority =
+  | Omit<Extract<PartialCloseAuthorityOutcome, { kind: "confirmed" }>, "attempts" | "elapsedMs">
+  | Omit<Extract<PartialCloseAuthorityOutcome, { kind: "unavailable" }>, "attempts" | "elapsedMs">;
 
 export function classifyPartialClosePositionAuthority(input: {
   preCloseBaseSize: number;
+  requestedClosedSize: number;
   authority: PartialClosePositionAuthority;
-}): PartialCloseAuthorityOutcome {
-  const { preCloseBaseSize, authority } = input;
-  if (!Number.isFinite(preCloseBaseSize) || Math.abs(preCloseBaseSize) < 0.0001) {
-    return { kind: "unavailable", reason: "pre_close_position_unavailable" };
+}): ClassifiedPartialCloseAuthority {
+  const { preCloseBaseSize, requestedClosedSize, authority } = input;
+  if (!Number.isFinite(preCloseBaseSize) || Math.abs(preCloseBaseSize) < PARTIAL_CLOSE_BASE_DUST) {
+    return { kind: "unavailable", reason: "pre_close_position_unavailable", retryable: false };
+  }
+  if (!Number.isFinite(requestedClosedSize)
+      || requestedClosedSize < PARTIAL_CLOSE_BASE_DUST
+      || requestedClosedSize >= Math.abs(preCloseBaseSize)) {
+    return { kind: "unavailable", reason: "partial_close_requested_size_invalid", retryable: false };
   }
   if (!Number.isFinite(authority.size) || !Number.isFinite(authority.entryPrice)) {
-    return { kind: "unavailable", reason: "post_close_position_non_finite" };
+    return { kind: "unavailable", reason: "post_close_position_non_finite", retryable: false };
   }
-  if (authority.side === "FLAT" || Math.abs(authority.size) < 0.0001) {
-    return { kind: "confirmed", residualBaseSize: 0, residualEntryPrice: 0, becameFlat: true };
+  if (authority.side === "FLAT" || Math.abs(authority.size) < PARTIAL_CLOSE_BASE_DUST) {
+    return { kind: "unavailable", reason: "post_close_position_unexpected_flat", retryable: false };
   }
   const expectedSide = preCloseBaseSize > 0 ? "LONG" : "SHORT";
   if (authority.side !== expectedSide || Math.sign(authority.size) !== Math.sign(preCloseBaseSize)) {
-    return { kind: "unavailable", reason: "post_close_position_side_mismatch" };
+    return { kind: "unavailable", reason: "post_close_position_side_mismatch", retryable: false };
   }
   if (authority.entryPrice <= 0) {
-    return { kind: "unavailable", reason: "post_close_entry_price_invalid" };
+    return { kind: "unavailable", reason: "post_close_entry_price_invalid", retryable: false };
   }
   const reduction = new Decimal(preCloseBaseSize).abs().minus(new Decimal(authority.size).abs());
-  if (reduction.lte("0.00000001")) {
-    return { kind: "unavailable", reason: "post_close_position_not_reduced" };
+  if (reduction.lte(PARTIAL_CLOSE_BASE_DUST)) {
+    return { kind: "unavailable", reason: "post_close_position_not_reduced", retryable: true };
+  }
+  const requested = new Decimal(requestedClosedSize);
+  const dust = new Decimal(PARTIAL_CLOSE_BASE_DUST);
+  if (reduction.lt(requested.minus(dust))) {
+    return { kind: "unavailable", reason: "post_close_position_under_delivered", retryable: true };
+  }
+  if (reduction.gt(requested.plus(dust))) {
+    return { kind: "unavailable", reason: "post_close_position_reduction_exceeds_request", retryable: false };
   }
   return {
     kind: "confirmed",
@@ -352,29 +399,104 @@ export function classifyPartialClosePositionAuthority(input: {
 
 export async function resolvePartialClosePositionAuthority(input: {
   preCloseBaseSize: number;
+  requestedClosedSize: number;
   readAuthority: () => Promise<PartialClosePositionAuthority>;
   retryCount?: number;
   retryDelayMs?: number;
   wait?: (delayMs: number) => Promise<void>;
+  now?: () => number;
 }): Promise<PartialCloseAuthorityOutcome> {
   const retryCount = input.retryCount ?? 3;
   const retryDelayMs = input.retryDelayMs ?? 1_500;
   const wait = input.wait ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const now = input.now ?? Date.now;
+  const startedAt = now();
   let lastReason = "post_close_position_unavailable";
+  let attempts = 0;
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    attempts = attempt + 1;
     try {
       const outcome = classifyPartialClosePositionAuthority({
         preCloseBaseSize: input.preCloseBaseSize,
+        requestedClosedSize: input.requestedClosedSize,
         authority: await input.readAuthority(),
       });
-      if (outcome.kind === "confirmed") return outcome;
+      if (outcome.kind === "confirmed") {
+        return { ...outcome, attempts, elapsedMs: Math.max(0, now() - startedAt) };
+      }
       lastReason = outcome.reason;
+      if (!outcome.retryable) {
+        return { ...outcome, attempts, elapsedMs: Math.max(0, now() - startedAt) };
+      }
     } catch (error) {
       lastReason = error instanceof Error ? error.message : String(error);
     }
     if (attempt < retryCount) await wait(retryDelayMs);
   }
-  return { kind: "unavailable", reason: lastReason };
+  return {
+    kind: "unavailable",
+    reason: lastReason,
+    retryable: true,
+    attempts,
+    elapsedMs: Math.max(0, now() - startedAt),
+  };
+}
+
+export type PartialClosePriceAuthority = "venue_execution" | "adapter_submit_oracle_estimate";
+
+export function resolvePartialCloseExecutionPrice(input: {
+  protocol: string;
+  adapterFillPrice?: number | null;
+  signalPrice?: number | null;
+}): {
+  price: number | null;
+  authority: PartialClosePriceAuthority | null;
+  signalPriceContext: number | null;
+  reason: string | null;
+} {
+  const adapterPrice = Number(input.adapterFillPrice);
+  const signalPrice = Number(input.signalPrice);
+  const signalPriceContext = Number.isFinite(signalPrice) && signalPrice > 0 ? signalPrice : null;
+  if (!Number.isFinite(adapterPrice) || adapterPrice <= 0) {
+    return {
+      price: null,
+      authority: null,
+      signalPriceContext,
+      reason: "partial_close_execution_price_unavailable",
+    };
+  }
+  const protocol = input.protocol.trim().toLowerCase();
+  return {
+    price: adapterPrice,
+    authority: protocol === "pacifica" ? "venue_execution" : "adapter_submit_oracle_estimate",
+    signalPriceContext,
+    reason: null,
+  };
+}
+
+export function normalizePartialCloseIdentity(value: unknown): string | null {
+  let normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return null;
+  while (normalized.startsWith("tx-")) normalized = normalized.slice(3);
+  if (normalized.startsWith("partial-")) normalized = normalized.slice(8);
+  return normalized.trim() || null;
+}
+
+export function partialCloseIdentityMatches(input: {
+  transactionSignature?: unknown;
+  protocolFillId?: unknown;
+  orderId?: unknown;
+  tradeId?: unknown;
+}): boolean {
+  const signature = typeof input.transactionSignature === "string"
+    ? input.transactionSignature.trim()
+    : "";
+  const orderId = typeof input.orderId === "string" ? input.orderId.trim() : "";
+  if (signature && orderId && signature === orderId) return true;
+  const protocol = normalizePartialCloseIdentity(input.protocolFillId);
+  if (!protocol) return false;
+  return protocol === normalizePartialCloseIdentity(input.orderId)
+    || protocol === normalizePartialCloseIdentity(input.tradeId);
 }
 
 export interface SignalBotFlipPosition {

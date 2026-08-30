@@ -6,6 +6,276 @@ import type { ProtocolAdapter } from "./protocol/adapter";
 import type { TradingBot } from "@shared/schema";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification } from "./notification-service";
 import { maybeScheduleAutoRepark, cancelAutoRepark } from "./vault/auto-repark";
+import {
+  PARTIAL_CLOSE_BASE_DUST,
+  partialCloseIdentityMatches,
+} from "./trading/signal-bot-close-integrity";
+
+export interface RecoveredCloseRoutingSignal {
+  action: 'buy' | 'sell';
+  contracts: string;
+  positionSize: string;
+  price: string;
+  isCloseSignal: boolean;
+  strategyPositionSize: string;
+  partialCloseFraction?: number;
+}
+
+type RecoveredCloseRoutingCallback = (
+  sourceBotId: string,
+  signal: RecoveredCloseRoutingSignal,
+) => Promise<void>;
+
+let recoveredCloseRoutingCallback: RecoveredCloseRoutingCallback | null = null;
+
+export function registerRecoveredCloseRoutingCallback(callback: RecoveredCloseRoutingCallback): void {
+  recoveredCloseRoutingCallback = callback;
+}
+
+export function buildRecoveredPartialCloseRoutingSignal(input: {
+  preCloseBaseSize: number;
+  requestedClosedSize: number;
+  residualBaseSize: number;
+  price: number;
+}): RecoveredCloseRoutingSignal | null {
+  if (![input.preCloseBaseSize, input.requestedClosedSize, input.residualBaseSize, input.price].every(Number.isFinite)
+      || Math.abs(input.preCloseBaseSize) < PARTIAL_CLOSE_BASE_DUST
+      || input.requestedClosedSize < PARTIAL_CLOSE_BASE_DUST
+      || input.price <= 0) return null;
+  const fraction = input.requestedClosedSize / Math.abs(input.preCloseBaseSize);
+  if (!Number.isFinite(fraction) || fraction <= 0 || fraction >= 1) return null;
+  const residual = String(input.residualBaseSize);
+  return {
+    action: input.preCloseBaseSize > 0 ? 'sell' : 'buy',
+    contracts: String(input.requestedClosedSize),
+    positionSize: residual,
+    strategyPositionSize: residual,
+    price: String(input.price),
+    isCloseSignal: false,
+    partialCloseFraction: fraction,
+  };
+}
+
+export function buildRecoveredFullCloseRoutingSignal(input: {
+  preCloseBaseSize: number;
+  price: number;
+}): RecoveredCloseRoutingSignal | null {
+  if (!Number.isFinite(input.preCloseBaseSize)
+      || Math.abs(input.preCloseBaseSize) < PARTIAL_CLOSE_BASE_DUST
+      || !Number.isFinite(input.price)
+      || input.price <= 0) return null;
+  return {
+    action: input.preCloseBaseSize > 0 ? 'sell' : 'buy',
+    contracts: String(Math.abs(input.preCloseBaseSize)),
+    positionSize: '0',
+    strategyPositionSize: '0',
+    price: String(input.price),
+    isCloseSignal: true,
+  };
+}
+
+interface PendingPartialCloseTradeLike {
+  id: string;
+  status: string;
+  market: string;
+  side: string;
+  size: string;
+  executedAt?: Date | string | null;
+  txSignature?: string | null;
+  protocolFillId?: string | null;
+  protocol?: string | null;
+  webhookPayload?: unknown;
+}
+
+interface PartialMarkerPayload {
+  partialClose: true;
+  partialCloseAccounting: {
+    expectedBaseSize: string;
+    expectedLastTradeId: string | null;
+    requestedClosedSize: number;
+  };
+  executionAccounting?: {
+    price?: number | null;
+    priceAuthority?: string | null;
+    fee?: number | null;
+    pnl?: number | null;
+  };
+  subscriberRouting?: Record<string, unknown>;
+  feeEvidence?: { kind?: string };
+}
+
+function partialMarkerPayload(trade: PendingPartialCloseTradeLike): PartialMarkerPayload | null {
+  const payload = trade.webhookPayload && typeof trade.webhookPayload === 'object'
+    ? trade.webhookPayload as Record<string, unknown>
+    : null;
+  const accounting = payload?.partialCloseAccounting;
+  if (String(trade.status).toLowerCase() !== 'pending'
+      || payload?.partialClose !== true
+      || !accounting
+      || typeof accounting !== 'object') return null;
+  return payload as unknown as PartialMarkerPayload;
+}
+
+function markerAgeWithinRecoveryHorizon(trade: PendingPartialCloseTradeLike, nowMs: number): boolean {
+  const executedAt = trade.executedAt ? new Date(trade.executedAt).getTime() : Number.NaN;
+  const ageMs = nowMs - executedAt;
+  return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 60 * 60 * 1000;
+}
+
+function markerMatchesLockedEpoch(input: {
+  trade: PendingPartialCloseTradeLike;
+  payload: PartialMarkerPayload;
+  market: string;
+  closeSide: 'long' | 'short';
+  dbBaseSize: number;
+  dbLastTradeId: string | null;
+  nowMs: number;
+}): boolean {
+  const accounting = input.payload.partialCloseAccounting;
+  const expectedBaseSize = Number(accounting.expectedBaseSize);
+  return normalizeMarket(input.trade.market) === normalizeMarket(input.market)
+    && String(input.trade.side).toLowerCase() === input.closeSide
+    && Number.isFinite(expectedBaseSize)
+    && Math.abs(expectedBaseSize - input.dbBaseSize) <= PARTIAL_CLOSE_BASE_DUST
+    && (accounting.expectedLastTradeId ?? null) === input.dbLastTradeId
+    && markerAgeWithinRecoveryHorizon(input.trade, input.nowMs);
+}
+
+export type PendingPartialMarkerSelection =
+  | { kind: 'none' }
+  | { kind: 'blocked'; reason: string; markerIds: string[] }
+  | { kind: 'eligible'; trade: PendingPartialCloseTradeLike; payload: PartialMarkerPayload; matchedFillIds: string[] };
+
+export function selectPendingPartialCloseMarker(input: {
+  trades: PendingPartialCloseTradeLike[];
+  protocol: string;
+  market: string;
+  closeSide: 'long' | 'short';
+  dbBaseSize: number;
+  dbLastTradeId: string | null;
+  closedSlice: number;
+  closingFills: TradeRecord[];
+  nowMs: number;
+}): PendingPartialMarkerSelection {
+  const pending = input.trades
+    .map((trade) => ({ trade, payload: partialMarkerPayload(trade) }))
+    .filter((item): item is { trade: PendingPartialCloseTradeLike; payload: PartialMarkerPayload } => item.payload !== null)
+    .filter(({ trade }) => normalizeMarket(trade.market) === normalizeMarket(input.market)
+      && String(trade.side).toLowerCase() === input.closeSide);
+  if (pending.length === 0) return { kind: 'none' };
+
+  const eligible = pending.filter(({ trade, payload }) => {
+    const accounting = payload.partialCloseAccounting;
+    const requested = Number(accounting.requestedClosedSize);
+    const execution = payload.executionAccounting;
+    const expectedAuthority = input.protocol.toLowerCase() === 'pacifica'
+      ? 'venue_execution'
+      : 'adapter_submit_oracle_estimate';
+    const moneyValid = execution
+      && Number.isFinite(execution.price) && Number(execution.price) > 0
+      && execution.priceAuthority === expectedAuthority
+      && Number.isFinite(execution.fee) && Number(execution.fee) >= 0
+      && Number.isFinite(execution.pnl)
+      && payload.feeEvidence?.kind !== 'unavailable';
+    if (!markerMatchesLockedEpoch({
+      trade,
+      payload,
+      market: input.market,
+      closeSide: input.closeSide,
+      dbBaseSize: input.dbBaseSize,
+      dbLastTradeId: input.dbLastTradeId,
+      nowMs: input.nowMs,
+    })
+        || !Number.isFinite(requested)
+        || Math.abs(requested - input.closedSlice) > PARTIAL_CLOSE_BASE_DUST
+        || !moneyValid) return false;
+    if (input.protocol.toLowerCase() === 'pacifica') {
+      return input.closingFills.some((fill) => partialCloseIdentityMatches({
+        transactionSignature: trade.txSignature,
+        protocolFillId: trade.protocolFillId,
+        orderId: fill.orderId,
+        tradeId: fill.tradeId,
+      }));
+    }
+    return typeof trade.txSignature === 'string' && trade.txSignature.trim().length > 0;
+  });
+
+  if (eligible.length !== 1) {
+    return {
+      kind: 'blocked',
+      reason: eligible.length === 0
+        ? 'pending_partial_marker_identity_or_money_unavailable'
+        : 'pending_partial_marker_ambiguous',
+      markerIds: pending.map(({ trade }) => trade.id),
+    };
+  }
+  const selected = eligible[0];
+  const matchedFillIds = input.closingFills
+    .filter((fill) => partialCloseIdentityMatches({
+      transactionSignature: selected.trade.txSignature,
+      protocolFillId: selected.trade.protocolFillId,
+      orderId: fill.orderId,
+      tradeId: fill.tradeId,
+    }))
+    .flatMap((fill) => [fill.orderId, fill.tradeId].filter((value): value is string => Boolean(value)));
+  return { kind: 'eligible', ...selected, matchedFillIds };
+}
+
+export function selectPendingPartialMarkerForFullClose(input: {
+  trades: PendingPartialCloseTradeLike[];
+  market: string;
+  closeSide: 'long' | 'short';
+  dbBaseSize: number;
+  dbLastTradeId: string | null;
+  fillTradeIds: string[];
+  fillOrderIds: string[];
+  nowMs: number;
+}): PendingPartialMarkerSelection {
+  const rawPending = input.trades
+    .map((trade) => ({ trade, payload: partialMarkerPayload(trade) }))
+    .filter((item): item is { trade: PendingPartialCloseTradeLike; payload: PartialMarkerPayload } => item.payload !== null)
+    .filter(({ trade }) => normalizeMarket(trade.market) === normalizeMarket(input.market)
+      && String(trade.side).toLowerCase() === input.closeSide);
+  if (rawPending.length === 0) return { kind: 'none' };
+  const pending = rawPending
+    .filter(({ trade, payload }) => markerMatchesLockedEpoch({
+      trade,
+      payload,
+      market: input.market,
+      closeSide: input.closeSide,
+      dbBaseSize: input.dbBaseSize,
+      dbLastTradeId: input.dbLastTradeId,
+      nowMs: input.nowMs,
+    }));
+  if (pending.length === 0) {
+    return {
+      kind: 'blocked',
+      reason: 'liquidation_pending_fill_identity',
+      markerIds: rawPending.map(({ trade }) => trade.id),
+    };
+  }
+  const eligible = pending.filter(({ trade }) => {
+    const pairs = [
+      ...input.fillOrderIds.map((orderId) => ({ orderId, tradeId: undefined })),
+      ...input.fillTradeIds.map((tradeId) => ({ orderId: undefined, tradeId })),
+    ];
+    return pairs.some((pair) => partialCloseIdentityMatches({
+      transactionSignature: trade.txSignature,
+      protocolFillId: trade.protocolFillId,
+      ...pair,
+    }));
+  });
+  if (eligible.length !== 1) {
+    return {
+      kind: 'blocked',
+      reason: eligible.length === 0
+        ? 'liquidation_pending_fill_identity'
+        : 'pending_partial_full_close_ambiguous',
+      markerIds: pending.map(({ trade }) => trade.id),
+    };
+  }
+  return { kind: 'eligible', ...eligible[0], matchedFillIds: [...input.fillOrderIds, ...input.fillTradeIds] };
+}
 
 /**
  * Auto-repark scheduling hook. Called at every position-transition return point:
@@ -148,6 +418,8 @@ interface CloseDetectionResult {
   /** Comma-joined matched fill IDs, for diagnostics ONLY. Never use as
    * a dedup key — joined strings are not stable identifiers. */
   matchedFillIdsForDiagnostics?: string;
+  /** Comma-joined matched order IDs, retained for exact signed-order recovery matching. */
+  matchedOrderIdsForDiagnostics?: string;
   /** Timestamp of the matched closing fill, used for the deterministic
    * nosig fallback hash so repeated reconciler runs against the same
    * close hit the same time bucket. */
@@ -272,12 +544,14 @@ async function detectOnChainClose(
     let weightedPriceSum = 0;
     let totalFee = 0;
     const matchedTradeIds: string[] = [];
+    const matchedOrderIds: string[] = [];
 
     for (const fill of closingFills) {
       aggregatedSize += fill.size;
       weightedPriceSum += fill.price * fill.size;
       totalFee += fill.fee;
       matchedTradeIds.push(fill.tradeId);
+      if (fill.orderId) matchedOrderIds.push(fill.orderId);
       if (aggregatedSize >= absSize * 0.95) break;
     }
 
@@ -352,6 +626,7 @@ async function detectOnChainClose(
         // are diagnostic-only.
         protocolFillId: matchedTradeIds[0],
         matchedFillIdsForDiagnostics: matchedTradeIds.join(','),
+        matchedOrderIdsForDiagnostics: matchedOrderIds.join(','),
         fillTimestampMs: closingFills[0]?.timestamp,
         tpslSubtype,
       };
@@ -825,10 +1100,13 @@ async function bookPartialReduction(opts: {
   onChainBaseSize: number;
   onChainEntryPrice: number;
   adapter: ProtocolAdapter;
-}): Promise<'completed' | 'unknown-symbol-refusal'> {
+  recentTrades: PendingPartialCloseTradeLike[];
+  allowExternalAccounting: boolean;
+}): Promise<'completed' | 'unknown-symbol-refusal' | 'pending-marker-incomplete' | 'no-pending-marker'> {
   const {
     botId, walletAddress, market, agentPublicKey, botSubaccountPublicKey,
     dbBaseSize, dbPosition, closedSlice, onChainBaseSize, onChainEntryPrice, adapter,
+    recentTrades, allowExternalAccounting,
   } = opts;
 
   const positionSide = dbBaseSize > 0 ? 'long' : 'short';
@@ -873,6 +1151,46 @@ async function bookPartialReduction(opts: {
     }
   }
 
+  const markerSelection = selectPendingPartialCloseMarker({
+    trades: recentTrades,
+    protocol: String((await storage.getTradingBotById(botId))?.activeProtocol ?? ''),
+    market,
+    closeSide,
+    dbBaseSize,
+    dbLastTradeId: dbPosition.lastTradeId ?? null,
+    closedSlice,
+    closingFills,
+    nowMs: Date.now(),
+  });
+  if (markerSelection.kind === 'blocked') {
+    const outcome = {
+      protocol: String((await storage.getTradingBotById(botId))?.activeProtocol ?? ''),
+      markerIds: markerSelection.markerIds,
+      outcome: 'accounting_incomplete',
+      attempts: 1,
+      elapsedMs: 0,
+      identityAuthority: 'recovery_marker_selection',
+      incompleteReason: markerSelection.reason,
+      promotionPath: 'periodic_reconciler',
+      externalEffectsRouted: false,
+    };
+    for (const markerId of markerSelection.markerIds) {
+      const marker = recentTrades.find((trade) => trade.id === markerId);
+      const payload = marker?.webhookPayload && typeof marker.webhookPayload === 'object'
+        ? marker.webhookPayload as Record<string, unknown>
+        : {};
+      await storage.updateBotTrade(markerId, {
+        webhookPayload: { ...payload, partialCloseAuthorityOutcome: outcome },
+        errorMessage: `Partial close accounting incomplete: ${markerSelection.reason}`,
+      });
+    }
+    console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(outcome)}`);
+    return 'pending-marker-incomplete';
+  }
+  if (markerSelection.kind === 'none' && !allowExternalAccounting) {
+    return 'no-pending-marker';
+  }
+
   // Accumulate fills that cover the slice.
   let aggregatedSize = 0;
   let weightedPriceSum = 0;
@@ -887,20 +1205,32 @@ async function bookPartialReduction(opts: {
   }
 
   const hasFills = aggregatedSize >= closedSlice * 0.80;
-  const avgFillPrice = hasFills && aggregatedSize > 0
-    ? weightedPriceSum / aggregatedSize
-    : entryPrice; // fallback: assume entry price (breakeven) when no fills
+  const markerExecution = markerSelection.kind === 'eligible'
+    ? markerSelection.payload.executionAccounting
+    : null;
+  const avgFillPrice = markerSelection.kind === 'eligible'
+    ? Number(markerExecution?.price)
+    : hasFills && aggregatedSize > 0
+      ? weightedPriceSum / aggregatedSize
+      : entryPrice; // external reduction fallback; never used for a pending signed marker
 
   // PnL on the closed slice using average-entry semantics.
-  const slicePnl = positionSide === 'long'
-    ? (avgFillPrice - entryPrice) * closedSlice - totalFee
-    : (entryPrice - avgFillPrice) * closedSlice - totalFee;
+  if (markerSelection.kind === 'eligible') {
+    totalFee = Number(markerExecution?.fee);
+  }
+  const slicePnl = markerSelection.kind === 'eligible'
+    ? Number(markerExecution?.pnl)
+    : positionSide === 'long'
+      ? (avgFillPrice - entryPrice) * closedSlice - totalFee
+      : (entryPrice - avgFillPrice) * closedSlice - totalFee;
 
   // Classify as partial_tp or partial_sl based on sign of PnL.
   const partialSubtype = slicePnl >= 0 ? 'partial_tp' : 'partial_sl';
 
   // Canonical dedup key for reconciler-detected partials.
-  const dedupKey = DatabaseStorage.canonicalCloseFillId({
+  const dedupKey = markerSelection.kind === 'eligible' && markerSelection.trade.protocolFillId
+    ? markerSelection.trade.protocolFillId
+    : DatabaseStorage.canonicalCloseFillId({
     signature: matchedIds[0] ? `partial-${matchedIds[0]}` : undefined,
     botId,
     side: closeSide,
@@ -912,19 +1242,7 @@ async function bookPartialReduction(opts: {
 
   console.log(`[Reconcile] Partial reduction for bot ${botId} ${market}: slice=${closedSlice.toFixed(4)}, price=$${avgFillPrice.toFixed(4)}, pnl=$${slicePnl.toFixed(4)}, hasFills=${hasFills}, dedup=${dedupKey}`);
 
-  const pendingPartial = (await storage.getBotTrades(botId, 200)).find((trade) => {
-    const payload = trade.webhookPayload && typeof trade.webhookPayload === 'object'
-      ? trade.webhookPayload as Record<string, unknown>
-      : null;
-    const recordedSize = Math.abs(Number(trade.size));
-    const sizeTolerance = Math.max(0.0001, closedSlice * 0.02);
-    return String(trade.status).toLowerCase() === 'pending'
-      && payload?.partialClose === true
-      && normalizeMarket(trade.market) === normalizedMarket
-      && String(trade.side).toLowerCase() === closeSide
-      && Number.isFinite(recordedSize)
-      && Math.abs(recordedSize - closedSlice) <= sizeTolerance;
-  });
+  const pendingPartial = markerSelection.kind === 'eligible' ? markerSelection.trade : null;
   const completedPayload = {
     ...(pendingPartial?.webhookPayload && typeof pendingPartial.webhookPayload === 'object'
       ? pendingPartial.webhookPayload as Record<string, unknown>
@@ -932,13 +1250,29 @@ async function bookPartialReduction(opts: {
     reconciled: true,
     closeReason: partialSubtype,
     detectedAt: new Date().toISOString(),
-    matchedFillIds: matchedIds.join(','),
+    matchedFillIds: markerSelection.kind === 'eligible'
+      ? markerSelection.matchedFillIds.join(',')
+      : matchedIds.join(','),
     hasFills,
+    priceAuthority: markerSelection.kind === 'eligible'
+      ? markerExecution?.priceAuthority
+      : hasFills ? 'venue_fill_aggregation' : 'external_reduction_estimate',
     partialCloseAccounting: {
       status: 'complete',
       residualBaseSize: onChainBaseSize,
       residualEntryPrice: onChainEntryPrice,
       recoveredBy: 'periodic_reconciler',
+    },
+    partialCloseAuthorityOutcome: {
+      protocol: String((await storage.getTradingBotById(botId))?.activeProtocol ?? ''),
+      markerId: pendingPartial?.id ?? null,
+      outcome: 'complete',
+      attempts: 1,
+      elapsedMs: 0,
+      identityAuthority: pendingPartial ? 'signed_marker' : 'external_reduction',
+      incompleteReason: null,
+      promotionPath: 'periodic_reconciler',
+      externalEffectsRouted: false,
     },
   };
   const { isNew } = await storage.recordCloseEventAtomic({
@@ -989,6 +1323,19 @@ async function bookPartialReduction(opts: {
 
   if (!isNew) {
     console.log(`[Reconcile] Partial reduction already booked for ${botId} ${market} (dedupKey=${dedupKey})`);
+    if (pendingPartial) {
+      console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify({
+        protocol: String((await storage.getTradingBotById(botId))?.activeProtocol ?? ''),
+        markerId: pendingPartial.id,
+        outcome: 'replay',
+        attempts: 1,
+        elapsedMs: 0,
+        identityAuthority: 'signed_marker',
+        incompleteReason: null,
+        promotionPath: 'periodic_reconciler',
+        externalEffectsRouted: false,
+      })}`);
+    }
     return 'completed';
   }
 
@@ -1008,7 +1355,87 @@ async function bookPartialReduction(opts: {
   } catch (notifErr) {
     console.error(`[Reconcile] Partial-reduction notification error for ${botId}:`, notifErr);
   }
+  if (pendingPartial) {
+    const routingSignal = buildRecoveredPartialCloseRoutingSignal({
+      preCloseBaseSize: dbBaseSize,
+      requestedClosedSize: Number(markerSelection.kind === 'eligible'
+        ? markerSelection.payload.partialCloseAccounting.requestedClosedSize
+        : closedSlice),
+      residualBaseSize: onChainBaseSize,
+      price: avgFillPrice,
+    });
+    let externalEffectsRouted = false;
+    let routingReason: string | null = null;
+    if (!routingSignal) {
+      routingReason = 'invalid_recovered_partial_routing_payload';
+    } else if (!recoveredCloseRoutingCallback) {
+      routingReason = 'recovered_close_routing_callback_unregistered';
+    } else {
+      try {
+        await recoveredCloseRoutingCallback(botId, routingSignal);
+        externalEffectsRouted = true;
+      } catch (error) {
+        routingReason = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const routedPayload = {
+      ...completedPayload,
+      partialCloseAuthorityOutcome: {
+        ...(completedPayload.partialCloseAuthorityOutcome as Record<string, unknown>),
+        externalEffectsRouted,
+        routingReason,
+      },
+    };
+    await storage.updateBotTrade(pendingPartial.id, { webhookPayload: routedPayload });
+    console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(routedPayload.partialCloseAuthorityOutcome)}`);
+  }
   return 'completed';
+}
+
+async function convergeFlatWithPendingPartialIncomplete(input: {
+  botId: string;
+  walletAddress: string;
+  market: string;
+  dbPosition: { avgEntryPrice: string; realizedPnl?: string | null; totalFees?: string | null; lastTradeId?: string | null };
+  markerIds: string[];
+  recentTrades: PendingPartialCloseTradeLike[];
+  protocol: string;
+  reason: string;
+}): Promise<void> {
+  const outcome = {
+    protocol: input.protocol,
+    markerIds: input.markerIds,
+    outcome: 'accounting_incomplete',
+    attempts: 1,
+    elapsedMs: 0,
+    identityAuthority: 'fill_backed_full_close_required',
+    incompleteReason: input.reason,
+    promotionPath: 'periodic_reconciler_full_close',
+    externalEffectsRouted: false,
+  };
+  for (const markerId of input.markerIds) {
+    const marker = input.recentTrades.find((trade) => trade.id === markerId);
+    const payload = marker?.webhookPayload && typeof marker.webhookPayload === 'object'
+      ? marker.webhookPayload as Record<string, unknown>
+      : {};
+    await storage.updateBotTrade(markerId, {
+      webhookPayload: { ...payload, partialCloseAuthorityOutcome: outcome },
+      errorMessage: `Partial close accounting incomplete: ${input.reason}`,
+    });
+  }
+  await storage.upsertBotPosition({
+    tradingBotId: input.botId,
+    walletAddress: input.walletAddress,
+    market: input.market,
+    baseSize: '0',
+    avgEntryPrice: input.dbPosition.avgEntryPrice,
+    costBasis: '0',
+    realizedPnl: input.dbPosition.realizedPnl || '0',
+    totalFees: input.dbPosition.totalFees || '0',
+    lastTradeId: input.dbPosition.lastTradeId ?? null,
+    lastTradeAt: new Date(),
+  });
+  console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify(outcome)}`);
 }
 
 export async function reconcileBotPosition(
@@ -1096,7 +1523,187 @@ export async function reconcileBotPosition(
         const positionEpochFloor = dbPosition!.lastTradeAt
           ? new Date(dbPosition!.lastTradeAt).getTime()
           : null;
-        const pendingClose = (await storage.getBotTrades(botId, 200)).find((trade) => {
+        const recentCloseTrades = await storage.getBotTrades(botId, 200) as PendingPartialCloseTradeLike[];
+        const closeSide = dbBaseSize > 0 ? 'short' : 'long';
+        const pendingPartialFullClose = selectPendingPartialMarkerForFullClose({
+          trades: recentCloseTrades,
+          market,
+          closeSide,
+          dbBaseSize,
+          dbLastTradeId: dbPosition!.lastTradeId ?? null,
+          fillTradeIds: (closeDetection.matchedFillIdsForDiagnostics ?? '')
+            .split(',').map((value) => value.trim()).filter(Boolean),
+          fillOrderIds: (closeDetection.matchedOrderIdsForDiagnostics ?? '')
+            .split(',').map((value) => value.trim()).filter(Boolean),
+          nowMs: Date.now(),
+        });
+
+        if (pendingPartialFullClose.kind !== 'none') {
+          const fillBackedMoneyValid = pendingPartialFullClose.kind === 'eligible'
+            && Boolean(closeDetection.protocolFillId)
+            && Number.isFinite(closeDetection.fillPrice)
+            && Number(closeDetection.fillPrice) > 0
+            && Number.isFinite(closeDetection.fee)
+            && Number(closeDetection.fee) >= 0
+            && Number.isFinite(closeDetection.pnl);
+          if (!fillBackedMoneyValid || pendingPartialFullClose.kind !== 'eligible') {
+            const markerIds = pendingPartialFullClose.kind === 'blocked'
+              ? pendingPartialFullClose.markerIds
+              : [pendingPartialFullClose.trade.id];
+            const reason = pendingPartialFullClose.kind === 'blocked'
+              ? pendingPartialFullClose.reason
+              : 'pending_partial_full_close_money_unavailable';
+            await convergeFlatWithPendingPartialIncomplete({
+              botId,
+              walletAddress,
+              market,
+              dbPosition: dbPosition!,
+              markerIds,
+              recentTrades: recentCloseTrades,
+              protocol: String(botRowForAdapter.activeProtocol),
+              reason,
+            });
+            if (botRowForAdapter.riskConfig) {
+              const rc = botRowForAdapter.riskConfig as Record<string, unknown>;
+              delete rc.takeProfitPercent;
+              delete rc.stopLossPercent;
+              delete rc.takeProfitPrice;
+              delete rc.stopLossPrice;
+              await storage.updateTradingBot(botId, { riskConfig: rc } as any);
+            }
+            lastReconcileTime.set(botId, Date.now());
+            return { synced: true, discrepancy: true, liquidation: closeDetection.reason === 'liquidation' };
+          }
+
+          const closeFee = Number(closeDetection.fee);
+          const closePnl = Number(closeDetection.pnl) - closeFee;
+          const closeFillPrice = Number(closeDetection.fillPrice);
+          let dedupKey = canonicalReconcilerFullCloseId({
+            protocolFillId: closeDetection.protocolFillId,
+            botId,
+            market,
+            positionEpochId: dbPosition!.lastTradeId,
+          });
+          if (dedupKey === pendingPartialFullClose.trade.protocolFillId) {
+            dedupKey = DatabaseStorage.canonicalCloseFillId({
+              signature: `reconciler-full-close|${closeDetection.protocolFillId}`,
+              botId,
+              side: 'close',
+              size: Math.abs(dbBaseSize),
+              market,
+            });
+          }
+          if (!dedupKey) throw new Error('pending_partial_full_close_identity_unavailable');
+          const closePayload = {
+            reconciled: true,
+            closeReason: closeDetection.reason,
+            detectedAt: new Date().toISOString(),
+            protocolFillId: closeDetection.protocolFillId,
+            matchedFillIdsForDiagnostics: closeDetection.matchedFillIdsForDiagnostics,
+            matchedOrderIdsForDiagnostics: closeDetection.matchedOrderIdsForDiagnostics,
+            supersededPendingPartialMarkerId: pendingPartialFullClose.trade.id,
+            recoveredSubscriberRouting: { attempted: false, routed: false, reason: null },
+          };
+          const atomic = await storage.recordCloseEventAtomic({
+            botId,
+            insert: {
+              tradingBotId: botId,
+              walletAddress,
+              market,
+              side: closeSide,
+              size: String(Math.abs(dbBaseSize)),
+              price: String(closeFillPrice),
+              fee: String(closeFee),
+              pnl: String(closePnl),
+              pnlConvention: 'net_of_close_fee',
+              feeTruthStatus: 'current_pipeline',
+              status: closeDetection.reason === 'liquidation' ? 'liquidated' : 'executed',
+              protocolFillId: dedupKey,
+              webhookPayload: closePayload,
+              executionMethod: 'on-chain-detected',
+            },
+            deltas: {
+              totalPnlDelta: closePnl,
+              totalVolumeDelta: closeFillPrice * Math.abs(dbBaseSize),
+              lastTradeAt: new Date().toISOString(),
+            },
+            confirmedPositionClose: {
+              walletAddress,
+              market,
+              realizedPnlDelta: closePnl,
+              feeDelta: closeFee,
+            },
+            supersedePendingPartialTradeId: pendingPartialFullClose.trade.id,
+          });
+
+          let routed = false;
+          let routingReason: string | null = null;
+          if (atomic.isNew) {
+            const routingSignal = buildRecoveredFullCloseRoutingSignal({
+              preCloseBaseSize: dbBaseSize,
+              price: closeFillPrice,
+            });
+            if (!routingSignal) routingReason = 'invalid_recovered_full_close_routing_payload';
+            else if (!recoveredCloseRoutingCallback) routingReason = 'recovered_close_routing_callback_unregistered';
+            else {
+              try {
+                await recoveredCloseRoutingCallback(botId, routingSignal);
+                routed = true;
+              } catch (error) {
+                routingReason = error instanceof Error ? error.message : String(error);
+              }
+            }
+            try {
+              const botName = botRowForAdapter.name ?? 'Bot';
+              sendTradeNotification(walletAddress, {
+                type: 'position_closed',
+                botName,
+                market,
+                side: dbBaseSize > 0 ? 'LONG' : 'SHORT',
+                size: Math.abs(dbBaseSize),
+                price: closeFillPrice,
+                pnl: closePnl,
+                closeReason: getCloseReasonLabel(closeDetection.reason, closeDetection.tpslSubtype),
+              }).catch((error) => console.error(`[Reconcile] Notification error for bot ${botId}:`, error));
+            } catch (error) {
+              console.error(`[Reconcile] Failed to dispatch close notification for bot ${botId}:`, error);
+            }
+          } else {
+            routingReason = 'replay';
+          }
+          if (atomic.trade?.id) {
+            await storage.updateBotTrade(atomic.trade.id, {
+              webhookPayload: {
+                ...closePayload,
+                recoveredSubscriberRouting: { attempted: atomic.isNew, routed, reason: routingReason },
+              },
+            });
+          }
+          console.log(`[PartialCloseAuthorityOutcome] ${JSON.stringify({
+            protocol: String(botRowForAdapter.activeProtocol),
+            markerId: pendingPartialFullClose.trade.id,
+            outcome: atomic.isNew ? 'superseded_by_fill_backed_full_close' : 'replay',
+            attempts: 1,
+            elapsedMs: 0,
+            identityAuthority: 'fill_backed_full_close',
+            incompleteReason: null,
+            promotionPath: 'periodic_reconciler_full_close',
+            externalEffectsRouted: routed,
+            routingReason,
+          })}`);
+          if (botRowForAdapter.riskConfig) {
+            const rc = botRowForAdapter.riskConfig as Record<string, unknown>;
+            delete rc.takeProfitPercent;
+            delete rc.stopLossPercent;
+            delete rc.takeProfitPrice;
+            delete rc.stopLossPrice;
+            await storage.updateTradingBot(botId, { riskConfig: rc } as any);
+          }
+          lastReconcileTime.set(botId, Date.now());
+          return { synced: true, discrepancy: true, liquidation: closeDetection.reason === 'liquidation' };
+        }
+
+        const pendingClose = recentCloseTrades.find((trade) => {
           const executedAt = trade.executedAt ? new Date(trade.executedAt).getTime() : Number.NaN;
           return String(trade.status).toLowerCase() === 'pending'
             && String(trade.side).toUpperCase() === 'CLOSE'
@@ -1401,17 +2008,26 @@ export async function reconcileBotPosition(
           (dbBaseSize > 0 && onChainBaseSize > 0) ||
           (dbBaseSize < 0 && onChainBaseSize < 0);
         const closedSlice = Math.abs(dbBaseSize) - Math.abs(onChainBaseSize);
-        const isPartialReduction =
-          sameSide &&
-          closedSlice / Math.abs(dbBaseSize) > 0.03 && // >3% reduction
-          closedSlice > 0.0001;
+        const isAnyPartialReduction = sameSide && closedSlice > PARTIAL_CLOSE_BASE_DUST;
 
-        if (isPartialReduction) {
+        if (isAnyPartialReduction) {
+          // Search for this unit's durable marker before the legacy 3%/3-minute
+          // external-reduction gates. A signed slice can be smaller or newer;
+          // without a marker, the established external path remains unchanged.
+          const recentTrades = await storage.getBotTrades(botId, 200) as PendingPartialCloseTradeLike[];
+          const hasPendingPartialMarker = recentTrades.some((trade) => {
+            const payload = partialMarkerPayload(trade);
+            return payload !== null
+              && normalizeMarket(trade.market) === normalizedMarket
+              && String(trade.side).toLowerCase() === (dbBaseSize > 0 ? 'short' : 'long');
+          });
           const positionAgeMs = dbPosition?.lastTradeAt
             ? Date.now() - new Date(dbPosition.lastTradeAt).getTime()
             : Infinity;
+          const allowExternalAccounting = closedSlice / Math.abs(dbBaseSize) > 0.03
+            && positionAgeMs >= 3 * 60 * 1000;
 
-          if (positionAgeMs >= 3 * 60 * 1000) {
+          if (hasPendingPartialMarker || allowExternalAccounting) {
             const partialResult = await bookPartialReduction({
               botId,
               walletAddress,
@@ -1424,13 +2040,15 @@ export async function reconcileBotPosition(
               onChainBaseSize,
               onChainEntryPrice: onChainPos!.entryPrice,
               adapter,
+              recentTrades,
+              allowExternalAccounting,
             });
             if (partialResult === 'unknown-symbol-refusal') {
               lastReconcileTime.set(botId, Date.now());
               return { synced: false, discrepancy: true };
             }
           } else {
-            console.log(`[Reconcile] Partial reduction detected for bot ${botId} ${market} but position is only ${(positionAgeMs / 1000).toFixed(0)}s old — likely propagation lag, skipping`);
+            console.log(`[Reconcile] Partial reduction detected for bot ${botId} ${market} but no signed marker exists and the external-reduction gates are not met`);
           }
         }
 

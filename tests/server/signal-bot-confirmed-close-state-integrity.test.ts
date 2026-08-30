@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   buildConfirmedFlatPosition,
+  buildConfirmedPartialPosition,
   buildSignalBotCloseResponse,
+  confirmedPartialPositionEpochMatches,
   summarizeSignalBotCloseFills,
 } from "../../server/trading/signal-bot-close-integrity";
 
@@ -70,6 +72,48 @@ describe("Signal Bot venue-fill close confirmation", () => {
 });
 
 describe("confirmed full-close position accounting", () => {
+  it("binds a partial promotion to the exact base-size and last-trade epoch", () => {
+    expect(confirmedPartialPositionEpochMatches({
+      actualBaseSize: "1.000000000",
+      actualLastTradeId: "entry-one",
+      expectedBaseSize: "1",
+      expectedLastTradeId: "entry-one",
+    })).toBe(true);
+    expect(confirmedPartialPositionEpochMatches({
+      actualBaseSize: "0.99",
+      actualLastTradeId: "entry-one",
+      expectedBaseSize: "1",
+      expectedLastTradeId: "entry-one",
+    })).toBe(false);
+    expect(confirmedPartialPositionEpochMatches({
+      actualBaseSize: "1",
+      actualLastTradeId: "entry-two",
+      expectedBaseSize: "1",
+      expectedLastTradeId: "entry-one",
+    })).toBe(false);
+  });
+
+  it("preserves cumulative money while replacing only the venue-authoritative residual exposure", () => {
+    expect(buildConfirmedPartialPosition({
+      avgEntryPrice: "100",
+      realizedPnl: "4.5",
+      totalFees: "0.2",
+    }, {
+      residualBaseSize: 0.98,
+      residualEntryPrice: 101,
+      realizedPnlDelta: 0.5,
+      feeDelta: 0.01,
+      tradeId: "partial-row",
+      closedAt: new Date("2026-08-30T00:00:00.000Z"),
+    })).toMatchObject({
+      baseSize: "0.98000000",
+      avgEntryPrice: "101.000000",
+      realizedPnl: "5.000000",
+      totalFees: "0.210000",
+      lastTradeId: "partial-row",
+    });
+  });
+
   it("zeros exposure and basis while accumulating PnL and fees exactly", () => {
     const closedAt = new Date("2026-08-04T06:00:00.000Z");
     expect(buildConfirmedFlatPosition(

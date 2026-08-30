@@ -159,6 +159,31 @@ async function postFullClose(endpoint: 'tradingview' | 'user') {
   };
 }
 
+async function postPartialClose(endpoint: 'tradingview' | 'user') {
+  const payload: Record<string, unknown> = {
+    action: 'sell',
+    contracts: '0.125',
+    position_size: '0.125',
+    price: '64950',
+    symbol: 'BTCUSD',
+    time: '2026-08-30T00:00:00.000Z',
+  };
+  let url = `${routeBaseUrl}/api/webhook/tradingview/${ROUTE_BOT_ID}?secret=${ROUTE_TV_SECRET}`;
+  if (endpoint === 'user') {
+    payload.botId = ROUTE_BOT_ID;
+    url = `${routeBaseUrl}/api/webhook/user/${ROUTE_WALLET}?secret=${ROUTE_USER_SECRET}`;
+  }
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return {
+    status: response.status,
+    body: await response.json() as Record<string, unknown>,
+  };
+}
+
 async function postFlip(
   endpoint: 'tradingview' | 'user',
   direction: 'short_to_long' | 'long_to_short' = 'short_to_long',
@@ -808,6 +833,85 @@ describe('close-path and restart contract wiring', () => {
         expect(routeMocks.adapter.closePosition).not.toHaveBeenCalled();
         expect(storage.createBotTrade).not.toHaveBeenCalled();
         expect(storage.getBotPosition).toHaveBeenCalledTimes(endpoint === 'tradingview' ? 1 : 0);
+      },
+    );
+
+    it.each(['tradingview', 'user'] as const)(
+      '%s promotes a signed partial close only after fresh residual authority and never opens exposure',
+      async (endpoint) => {
+        const preClose = {
+          market: 'BTC-PERP',
+          baseSize: '0.25',
+          avgEntryPrice: '64000',
+          lastTradeId: 'entry-epoch-one',
+        };
+        primeCloseRoute(preClose);
+        vi.mocked(storage.createBotTradeIdempotent as any).mockReset().mockResolvedValue({
+          isNew: true,
+          trade: { id: 'pending-partial-row' },
+        });
+        vi.mocked(storage.recordCloseEventAtomic as any).mockResolvedValue({
+          isNew: true,
+          trade: { id: 'pending-partial-row' },
+        });
+        routeMocks.adapter.getStrictPositionForMarket.mockReset().mockResolvedValue({
+          internalSymbol: 'BTC-PERP',
+          baseSize: 0.125,
+          entryPrice: 64000,
+        });
+        routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
+          success: true,
+          status: 'filled',
+          orderId: 'partial-order-one',
+          fillPrice: 65000,
+          fillSize: 0.125,
+          fee: 0.1,
+        });
+
+        const response = await postPartialClose(endpoint);
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          status: 'success',
+          type: 'partial_close',
+          remainingSize: 0.125,
+          signature: 'partial-order-one',
+        });
+        expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
+        expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
+          reduceOnly: true,
+          sizeBase: 0.125,
+        }));
+        expect(storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({
+          update: expect.objectContaining({ tradeId: 'pending-partial-row' }),
+          confirmedPositionReduction: expect.objectContaining({
+            expectedBaseSize: '0.25',
+            expectedLastTradeId: 'entry-epoch-one',
+            residualBaseSize: 0.125,
+          }),
+        }));
+      },
+      10_000,
+    );
+
+    it.each([0, 1, -0.1, 1.1, Number.NaN])(
+      'refuses invalid recovered partial fraction %s before subscriber or open routing',
+      async (partialCloseFraction) => {
+        vi.mocked(storage.getPublishedBotByTradingBotId as any).mockClear();
+        routeMocks.adapter.placeMarketOrder.mockClear();
+
+        await routeSignalToSubscribers('published-source-bot', {
+          action: 'sell',
+          contracts: '0.25',
+          positionSize: '0.75',
+          price: '65000',
+          isCloseSignal: false,
+          strategyPositionSize: '0.75',
+          partialCloseFraction,
+        });
+
+        expect(storage.getPublishedBotByTradingBotId).not.toHaveBeenCalled();
+        expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
       },
     );
 

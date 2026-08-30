@@ -13,6 +13,7 @@ import Decimal from "decimal.js";
 import {
   buildConfirmedFlatPosition,
   buildConfirmedPartialPosition,
+  confirmedPartialPositionEpochMatches,
 } from "./trading/signal-bot-close-integrity";
 import { resolveBotTradeNetPnl } from "./trading/bot-trade-pnl-convention";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
@@ -779,6 +780,8 @@ export interface IStorage {
       realizedPnlDelta: number;
       feeDelta: number;
     };
+    /** Pending signed partial marker atomically superseded by a fill-backed full close. */
+    supersedePendingPartialTradeId?: string;
   }): Promise<{ trade?: BotTrade; isNew: boolean }>;
   getRecentCanonicalCloseForBot(opts: {
     botId: string;
@@ -2476,9 +2479,13 @@ export class DatabaseStorage implements IStorage {
       realizedPnlDelta: number;
       feeDelta: number;
     };
+    supersedePendingPartialTradeId?: string;
   }): Promise<{ trade?: BotTrade; isNew: boolean }> {
     if (opts.confirmedPositionClose && opts.confirmedPositionReduction) {
       throw new Error("recordCloseEventAtomic: conflicting confirmed position transitions");
+    }
+    if (opts.supersedePendingPartialTradeId && (!opts.insert || !opts.confirmedPositionClose)) {
+      throw new Error("recordCloseEventAtomic: partial marker supersede requires an inserted confirmed full close");
     }
     // Defense-in-depth: demote non-deterministic close IDs to pending
     // so the reconciler canonicalizes them later instead of double-counting.
@@ -2572,10 +2579,12 @@ export class DatabaseStorage implements IStorage {
         if (!position) {
           throw new Error("partial_close_position_epoch_missing");
         }
-        const actualBaseSize = new Decimal(position.baseSize).toFixed(8);
-        const expectedBaseSize = new Decimal(reduction.expectedBaseSize).toFixed(8);
-        if (actualBaseSize !== expectedBaseSize
-            || (position.lastTradeId ?? null) !== reduction.expectedLastTradeId) {
+        if (!confirmedPartialPositionEpochMatches({
+          actualBaseSize: position.baseSize,
+          actualLastTradeId: position.lastTradeId ?? null,
+          expectedBaseSize: reduction.expectedBaseSize,
+          expectedLastTradeId: reduction.expectedLastTradeId,
+        })) {
           throw new Error("partial_close_position_epoch_conflict");
         }
         const next = buildConfirmedPartialPosition(position, {
@@ -2590,6 +2599,46 @@ export class DatabaseStorage implements IStorage {
           .update(botPositions)
           .set({ ...next, updatedAt: sql`NOW()` })
           .where(eq(botPositions.id, position.id));
+      };
+      const persistSupersededPendingPartial = async (): Promise<void> => {
+        const markerId = opts.supersedePendingPartialTradeId;
+        if (!markerId) return;
+        if (!trade || trade.id === markerId) {
+          throw new Error("partial_close_full_supersede_identity_collision");
+        }
+        const markerRows = await tx
+          .select()
+          .from(botTrades)
+          .where(eq(botTrades.id, markerId))
+          .for("update")
+          .limit(1);
+        const marker = markerRows[0];
+        const payload = marker?.webhookPayload && typeof marker.webhookPayload === "object"
+          ? marker.webhookPayload as Record<string, unknown>
+          : null;
+        if (!marker
+            || marker.tradingBotId !== opts.botId
+            || marker.status !== "pending"
+            || payload?.partialClose !== true) {
+          throw new Error("partial_close_full_supersede_marker_invalid");
+        }
+        await tx
+          .update(botTrades)
+          .set({
+            status: "superseded",
+            errorMessage: `Superseded by fill-backed full close ${trade.protocolFillId ?? trade.id}`,
+            webhookPayload: {
+              ...payload,
+              partialCloseAccounting: {
+                ...(payload.partialCloseAccounting && typeof payload.partialCloseAccounting === "object"
+                  ? payload.partialCloseAccounting as Record<string, unknown>
+                  : {}),
+                status: "superseded_by_fill_backed_full_close",
+                supersededByTradeId: trade.id,
+              },
+            },
+          })
+          .where(eq(botTrades.id, markerId));
       };
       if (opts.insert) {
         if (opts.insert.protocolFillId) {
@@ -2645,7 +2694,11 @@ export class DatabaseStorage implements IStorage {
         // at/after this pending row's creation, supersede our row and defer to
         // it (it already merged the stats deltas). isNew:false keeps callers
         // from re-sending notifications / re-booking IOUs.
-        if (locked.side === 'CLOSE' || locked.pnl != null) {
+        const lockedPayload = locked.webhookPayload && typeof locked.webhookPayload === 'object'
+          ? locked.webhookPayload as Record<string, unknown>
+          : null;
+        const isPendingPartialMarker = lockedPayload?.partialClose === true;
+        if (locked.side === 'CLOSE' || locked.pnl != null || isPendingPartialMarker) {
           const reconcilerWinner = await this.getRecentCanonicalCloseForBot({
             botId: opts.botId,
             market: locked.market,
@@ -2714,6 +2767,9 @@ export class DatabaseStorage implements IStorage {
         await this.recomputeAndMergeBotStats(opts.botId, opts.deltas, tx);
         await persistConfirmedPositionClose();
         await persistConfirmedPositionReduction();
+      }
+      if (opts.insert && opts.supersedePendingPartialTradeId && isNew) {
+        await persistSupersededPendingPartial();
       }
       return { trade, isNew };
     });
