@@ -8329,6 +8329,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const exchangeBalance = exchangeAccountInfo.totalCollateral;
       
       const bots = await storage.getTradingBots(walletAddress);
+      const capitalEnrichment = await storage.getTradingBotListEnrichment(
+        walletAddress,
+        bots.map((bot) => bot.id),
+      );
       
       // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
       const botMarketsCap = [...new Set(bots.map((b) => b.market))];
@@ -8338,66 +8342,76 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         botId: string;
         botName: string;
         subaccountId: number;
-        balance: number;
+        balance: number | null;
+        realizedPnl: number | null;
+        accountingIncompleteCloseCount: number;
+        realizedAccountingStatus: 'complete' | 'incomplete';
       }> = [];
-      
-      let allocatedToBot = 0;
-      
+
+      let allocatedToBot: number | null = 0;
+      let capitalIncompleteCloseCount = 0;
+
       for (const bot of bots) {
-        let botBalance = 0;
+        const accountingIncompleteCloseCount = capitalEnrichment.accountingIncompleteCounts.get(bot.id) ?? 0;
+        capitalIncompleteCloseCount += accountingIncompleteCloseCount;
+        let botBalance: number | null = 0;
+        let realizedPnl: number | null = 0;
         try {
           const capBotCtx = getBotSubaccountContext(bot);
           if (capBotCtx) {
             const capAdapter = getAdapterForBot(bot);
             const liveInfo = await getExchangeAccountInfoForBot('', 0, capBotCtx, capAdapter);
-            // RAW exchange collateral only — capital pool feeds withdraw validation
-            // (mainAccountBalance = exchangeBalance - allocatedToBot). Parked Vault funds
-            // are OFF-exchange and NOT directly withdrawable, so they are excluded here.
+            // RAW exchange collateral only — capital pool feeds withdraw validation.
+            // Venue collateral remains independently authoritative even when the
+            // historical realized prefix is incomplete.
             botBalance = liveInfo.totalCollateral;
+            if (accountingIncompleteCloseCount > 0) realizedPnl = null;
+          } else if (accountingIncompleteCloseCount > 0) {
+            botBalance = null;
+            realizedPnl = null;
           } else {
-          const accountingStats = await storage.getCanonicalBotTradeStats(bot.id);
-          if (accountingStats.accountingIncompleteTrades > 0) {
-            return res.status(409).json({
-              error: 'Bot accounting is incomplete',
-              code: 'bot_accounting_incomplete',
-              botId: bot.id,
-              accountingIncompleteCloseCount: accountingStats.accountingIncompleteTrades,
-            });
-          }
-          const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
-          const netDeposited = sumNetDepositedFromEvents(botEvents);
-          const position = await storage.getBotPosition(bot.id, bot.market);
-          const realizedPnl = parseFloat(position?.realizedPnl || '0');
-          const totalFees = parseFloat(position?.totalFees || '0');
-          
-          let unrealizedPnl = 0;
-          if (position) {
-            const baseSize = parseFloat(position.baseSize);
-            const entryPrice = parseFloat(position.avgEntryPrice);
-            const markPrice = prices[position.market] || entryPrice;
-            if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-              unrealizedPnl = baseSize > 0
-                ? (markPrice - entryPrice) * Math.abs(baseSize)
-                : (entryPrice - markPrice) * Math.abs(baseSize);
+            const botEvents = await storage.getBotEquityEvents(bot.id, 1000);
+            const netDeposited = sumNetDepositedFromEvents(botEvents);
+            const position = await storage.getBotPosition(bot.id, bot.market);
+            realizedPnl = parseFloat(position?.realizedPnl || '0');
+            const totalFees = parseFloat(position?.totalFees || '0');
+
+            let unrealizedPnl = 0;
+            if (position) {
+              const baseSize = parseFloat(position.baseSize);
+              const entryPrice = parseFloat(position.avgEntryPrice);
+              const markPrice = prices[position.market] || entryPrice;
+              if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
+                unrealizedPnl = baseSize > 0
+                  ? (markPrice - entryPrice) * Math.abs(baseSize)
+                  : (entryPrice - markPrice) * Math.abs(baseSize);
+              }
             }
-          }
-          
-          botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+            botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
           }
         } catch (err) {
           console.warn(`[capital] Failed to calc bot balance for ${bot.id}:`, err);
+          botBalance = null;
+          realizedPnl = null;
         }
-        
-        allocatedToBot += botBalance;
+
+        allocatedToBot = allocatedToBot === null || botBalance === null
+          ? null
+          : allocatedToBot + botBalance;
         botAllocations.push({
           botId: bot.id,
           botName: bot.name,
           subaccountId: bot.driftSubaccountId ?? 0,
           balance: botBalance,
+          realizedPnl,
+          accountingIncompleteCloseCount,
+          realizedAccountingStatus: accountingIncompleteCloseCount > 0 ? 'incomplete' : 'complete',
         });
       }
-      
-      const mainAccountBalance = Math.max(0, exchangeBalance - allocatedToBot);
+
+      const mainAccountBalance = allocatedToBot === null
+        ? null
+        : Math.max(0, exchangeBalance - allocatedToBot);
       const totalEquity = exchangeBalance;
       
       res.json({
@@ -8405,6 +8419,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         allocatedToBot,
         totalEquity,
         botAllocations,
+        realizedPnl: capitalIncompleteCloseCount > 0 ? null : 0,
+        accountingIncompleteCloseCount: capitalIncompleteCloseCount,
+        realizedAccountingStatus: capitalIncompleteCloseCount > 0 ? 'incomplete' : 'complete',
         pricesAsOf: capPricesAsOf,
         pricesStale: capPricesStale,
       });
@@ -15369,14 +15386,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const netDeposited = sumNetDepositedFromEvents(botEvents);
       const position = await storage.getBotPosition(bot.id, bot.market);
       const accountingStats = await storage.getCanonicalBotTradeStats(bot.id);
-      if (accountingStats.accountingIncompleteTrades > 0) {
-        return res.status(409).json({
-          error: 'Bot accounting is incomplete',
-          code: 'bot_accounting_incomplete',
-          accountingIncompleteCloseCount: accountingStats.accountingIncompleteTrades,
-        });
-      }
-      const realizedPnl = parseFloat(position?.realizedPnl || '0');
+      const realizedPnl = accountingStats.accountingIncompleteTrades > 0
+        ? null
+        : parseFloat(position?.realizedPnl || '0');
       const totalFees = parseFloat(position?.totalFees || '0');
       
       let unrealizedPnl = 0;
@@ -15392,17 +15404,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
       
-      const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
-      const freeCollateral = netDeposited + realizedPnl - totalFees;
+      const botBalance = realizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
+      const freeCollateral = realizedPnl === null ? null : netDeposited + realizedPnl - totalFees;
       
       res.json({ 
         balance: botBalance,
         usdcBalance: botBalance,
         totalCollateral: botBalance,
-        freeCollateral: Math.max(0, freeCollateral),
+        freeCollateral: freeCollateral === null ? null : Math.max(0, freeCollateral),
         hasOpenPositions,
         subAccountId,
         subaccountExists: netDeposited > 0,
+        realizedPnl,
+        accountingIncompleteCloseCount: accountingStats.accountingIncompleteTrades,
+        realizedAccountingStatus: accountingStats.accountingIncompleteTrades > 0 ? 'incomplete' : 'complete',
         pricesAsOf: balPricesAsOf,
         pricesStale: balPricesStale,
       });
@@ -15490,17 +15505,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           source: 'protocol',
         };
       } else {
-        if (canonicalStats.accountingIncompleteTrades > 0) {
-          return res.status(409).json({
-            error: 'Bot accounting is incomplete',
-            code: 'bot_accounting_incomplete',
-            accountingIncompleteCloseCount: canonicalStats.accountingIncompleteTrades,
-          });
-        }
         const eventsNetDeposited = sumNetDepositedFromEvents(botEvents as any[]);
         if (eventsNetDeposited > 0) netDeposited = eventsNetDeposited;
         
-        const realizedPnl = parseFloat(dbPosition?.realizedPnl || '0');
+        const realizedPnl = canonicalStats.accountingIncompleteTrades > 0
+          ? null
+          : parseFloat(dbPosition?.realizedPnl || '0');
         const totalFees = parseFloat(dbPosition?.totalFees || '0');
         
         let unrealizedPnl = 0;
@@ -15516,8 +15526,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
         }
         
-        const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
-        const botFreeCollateral = Math.max(0, netDeposited + realizedPnl - totalFees);
+        const botBalance = realizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
+        const botFreeCollateral = realizedPnl === null ? null : Math.max(0, netDeposited + realizedPnl - totalFees);
         
         accountInfo = {
           usdcBalance: botBalance,
@@ -22793,6 +22803,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           totalFees: 0,
           tradeCount: canonicalStats.totalTrades,
           accountingIncompleteCloseCount: canonicalStats.accountingIncompleteTrades,
+          realizedAccountingStatus: canonicalStats.accountingIncompleteTrades > 0 ? 'incomplete' : 'complete',
         });
       }
 
@@ -22801,16 +22812,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         storage.getCanonicalBotTradeStats(botId),
         storage.getBotEquityEvents(bot.id, 1000),
       ]);
-      if (canonicalStats.accountingIncompleteTrades > 0) {
-        return res.status(409).json({
-          error: 'Bot accounting is incomplete',
-          code: 'bot_accounting_incomplete',
-          accountingIncompleteCloseCount: canonicalStats.accountingIncompleteTrades,
-        });
-      }
-
       const netDeposited = sumNetDepositedFromEvents(botEvents);
-      const realizedPnl = parseFloat(position?.realizedPnl || "0");
+      const realizedPnl = canonicalStats.accountingIncompleteTrades > 0
+        ? null
+        : parseFloat(position?.realizedPnl || "0");
       const totalFees = parseFloat(position?.totalFees || "0");
       
       // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
@@ -22827,7 +22832,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
       
-      const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+      const botBalance = realizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
       
       res.json({ 
         driftSubaccountId: bot.driftSubaccountId ?? 0,
@@ -22837,6 +22842,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         totalFees,
         tradeCount: canonicalStats.totalTrades,
         accountingIncompleteCloseCount: canonicalStats.accountingIncompleteTrades,
+        realizedAccountingStatus: canonicalStats.accountingIncompleteTrades > 0 ? 'incomplete' : 'complete',
         pricesAsOf: legPricesAsOf,
         pricesStale: legPricesStale,
       });
@@ -26342,12 +26348,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const subscriberTradeChecks = await Promise.all(subscriberBots.map(async (subBot) => {
         const recentTrades = await storage.getBotTrades(subBot.id);
         const latestTrade = recentTrades[0];
-        const isRecent = latestTrade && (Date.now() - new Date(latestTrade.createdAt).getTime()) < 60000; // Within last minute
+        const isRecent = latestTrade && (Date.now() - new Date(latestTrade.executedAt).getTime()) < 60000; // Within last minute
         return {
           botId: subBot.id,
           name: subBot.name,
           totalTrades: recentTrades.length,
-          latestTradeTime: latestTrade?.createdAt,
+          latestTradeTime: latestTrade?.executedAt,
           likelyNewTrade: isRecent,
         };
       }));

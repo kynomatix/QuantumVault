@@ -2332,6 +2332,10 @@ export class DatabaseStorage implements IStorage {
       .where(and(
         eq(botTrades.tradingBotId, tradingBotId),
         sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
+        or(
+          isNotNull(botTrades.pnl),
+          sql`${botTrades.webhookPayload}->'closeAccounting'->>'kind' = 'unavailable'`,
+        ),
         notPhantomDupClose(),
       ));
     const canonical = rows

@@ -58,6 +58,7 @@ import {
   selectPendingPartialCloseMarker,
   selectPendingPartialMarkerForFullClose,
 } from '../../server/reconciliation-service';
+import { buildAccountingIncompleteFlatPosition } from '../../server/trading/signal-bot-close-integrity';
 
 const walletAddress = 'wallet-public-address';
 const agentPublicKey = 'agent-public-address';
@@ -434,6 +435,32 @@ describe('reconciler full-close position epoch identity', () => {
     });
 
     expect(first).not.toBe(second);
+  });
+
+  it('preserves one no-fill close identity across false flatten, resync, and later close', () => {
+    const firstId = canonicalReconcilerFullCloseId({
+      botId: 'bot-one',
+      market,
+      positionEpochId: 'entry-one',
+    });
+    const falseFlatten = buildAccountingIncompleteFlatPosition({
+      avgEntryPrice: '116500',
+      realizedPnl: '0',
+      totalFees: '0',
+      lastTradeId: 'entry-one',
+    }, {
+      tradeId: 'accounting-incomplete-close-row',
+      closedAt: new Date('2026-08-04T00:00:00.000Z'),
+    });
+    const resyncedPosition = storedPosition(falseFlatten.lastTradeId);
+    const laterCloseId = canonicalReconcilerFullCloseId({
+      botId: 'bot-one',
+      market,
+      positionEpochId: resyncedPosition.lastTradeId,
+    });
+
+    expect(falseFlatten.lastTradeId).toBe('entry-one');
+    expect(laterCloseId).toBe(firstId);
   });
 
   it('keeps a protocol fill identifier primary', () => {

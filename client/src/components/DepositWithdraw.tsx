@@ -6,9 +6,15 @@ import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
 
 interface CapitalPool {
-  mainAccountBalance: number;
-  allocatedToBot: number;
+  mainAccountBalance: number | null;
+  allocatedToBot: number | null;
   totalEquity: number;
+  accountingIncompleteCloseCount?: number;
+  realizedAccountingStatus?: 'complete' | 'incomplete';
+}
+
+export function formatCapitalAmount(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '--';
 }
 
 interface DepositWithdrawProps {
@@ -85,7 +91,7 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
                 <span className="text-xs text-muted-foreground">Main Account</span>
               </div>
               <p className="text-base font-mono font-semibold" data-testid="text-main-balance">
-                ${(capitalPool?.mainAccountBalance ?? 0).toFixed(2)}
+                {formatCapitalAmount(capitalPool?.mainAccountBalance)}
               </p>
             </div>
             <div className="bg-muted/30 rounded-lg p-2.5 border border-border/50">
@@ -94,10 +100,16 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
                 <span className="text-xs text-muted-foreground">Allocated to Bots</span>
               </div>
               <p className="text-base font-mono font-semibold" data-testid="text-allocated-balance">
-                ${(capitalPool?.allocatedToBot ?? 0).toFixed(2)}
+                {formatCapitalAmount(capitalPool?.allocatedToBot)}
               </p>
             </div>
           </div>
+
+          {capitalPool?.realizedAccountingStatus === 'incomplete' && (
+            <p className="text-xs text-amber-400" data-testid="text-capital-accounting-incomplete">
+              Realized accounting is incomplete for {capitalPool.accountingIncompleteCloseCount ?? 0} close event(s); derived balances are unavailable.
+            </p>
+          )}
 
           <div className="flex gap-2 pt-1">
             <Button

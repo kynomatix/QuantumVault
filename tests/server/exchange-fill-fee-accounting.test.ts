@@ -59,13 +59,14 @@ describe("close fee evidence", () => {
       avgEntryPrice: "100",
       realizedPnl: "12.500000",
       totalFees: "0.750000",
+      lastTradeId: "entry-epoch",
     }, { tradeId: "incomplete-close", closedAt })).toEqual({
       baseSize: "0",
       avgEntryPrice: "100",
       costBasis: "0",
       realizedPnl: "12.500000",
       totalFees: "0.750000",
-      lastTradeId: "incomplete-close",
+      lastTradeId: "entry-epoch",
       lastTradeAt: closedAt,
     });
     expect(isReconcilerAccountingIncompletePayload({

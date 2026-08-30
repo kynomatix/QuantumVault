@@ -281,6 +281,7 @@ export interface ExistingPositionAccounting {
   avgEntryPrice?: string | null;
   realizedPnl?: string | null;
   totalFees?: string | null;
+  lastTradeId?: string | null;
 }
 
 /**
@@ -327,7 +328,10 @@ export function buildAccountingIncompleteFlatPosition(
     costBasis: "0",
     realizedPnl: new Decimal(existing?.realizedPnl ?? "0").toFixed(6),
     totalFees: new Decimal(existing?.totalFees ?? "0").toFixed(6),
-    lastTradeId: input.tradeId,
+    // An incomplete close proves flat exposure but not a new economic epoch.
+    // Preserve the open position's durable entry identity so a false flatten,
+    // venue resync and later real close all derive the same no-fill dedup key.
+    lastTradeId: existing?.lastTradeId ?? input.tradeId,
     lastTradeAt: input.closedAt,
   };
 }
