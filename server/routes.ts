@@ -8350,6 +8350,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       let allocatedToBot: number | null = 0;
       let capitalIncompleteCloseCount = 0;
+      let capitalBalanceUnavailable = false;
 
       for (const bot of bots) {
         const accountingIncompleteCloseCount = capitalEnrichment.accountingIncompleteCounts.get(bot.id) ?? 0;
@@ -8393,6 +8394,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           console.warn(`[capital] Failed to calc bot balance for ${bot.id}:`, err);
           botBalance = null;
           realizedPnl = null;
+          capitalBalanceUnavailable = true;
         }
 
         allocatedToBot = allocatedToBot === null || botBalance === null
@@ -8405,7 +8407,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           balance: botBalance,
           realizedPnl,
           accountingIncompleteCloseCount,
-          realizedAccountingStatus: accountingIncompleteCloseCount > 0 ? 'incomplete' : 'complete',
+          realizedAccountingStatus: accountingIncompleteCloseCount > 0 || botBalance === null ? 'incomplete' : 'complete',
         });
       }
 
@@ -8419,9 +8421,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         allocatedToBot,
         totalEquity,
         botAllocations,
-        realizedPnl: capitalIncompleteCloseCount > 0 ? null : 0,
         accountingIncompleteCloseCount: capitalIncompleteCloseCount,
-        realizedAccountingStatus: capitalIncompleteCloseCount > 0 ? 'incomplete' : 'complete',
+        realizedAccountingStatus: capitalIncompleteCloseCount > 0 || capitalBalanceUnavailable ? 'incomplete' : 'complete',
+        capitalBalanceStatus: allocatedToBot === null ? 'unavailable' : 'available',
         pricesAsOf: capPricesAsOf,
         pricesStale: capPricesStale,
       });

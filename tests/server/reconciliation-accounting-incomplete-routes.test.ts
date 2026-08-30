@@ -153,10 +153,11 @@ describe("accounting-incomplete read routes", () => {
     expect(response.body).toMatchObject({
       mainAccountBalance: null,
       allocatedToBot: null,
-      realizedPnl: null,
       accountingIncompleteCloseCount: 2,
       realizedAccountingStatus: "incomplete",
+      capitalBalanceStatus: "unavailable",
     });
+    expect(response.body).not.toHaveProperty("realizedPnl");
     expect(response.body.botAllocations[0]).toMatchObject({
       botId: TEST_BOT,
       balance: null,
@@ -166,6 +167,28 @@ describe("accounting-incomplete read routes", () => {
     });
     expect(storage.getTradingBotListEnrichment).toHaveBeenCalledTimes(1);
     expect(storage.getCanonicalBotTradeStats).not.toHaveBeenCalled();
+  });
+
+  it("propagates a per-bot capital read failure to the aggregate status", async () => {
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce({
+      tradeCounts: new Map([[TEST_BOT, 3]]),
+      accountingIncompleteCounts: new Map([[TEST_BOT, 0]]),
+      positions: new Map(), publishedBotMap: new Map(), equityAgg: new Map(), borrowDebts: new Map(),
+    });
+    (storage.getBotEquityEvents as any).mockRejectedValueOnce(new Error("capital read unavailable"));
+    const response = await get("/api/wallet/capital");
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      allocatedToBot: null,
+      realizedAccountingStatus: "incomplete",
+      capitalBalanceStatus: "unavailable",
+    });
+    expect(response.body).not.toHaveProperty("realizedPnl");
+    expect(response.body.botAllocations[0]).toMatchObject({
+      balance: null,
+      realizedPnl: null,
+      realizedAccountingStatus: "incomplete",
+    });
   });
 
   it("returns /api/bots/:botId/balance as labelled null instead of 409", async () => {

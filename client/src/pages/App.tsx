@@ -125,7 +125,7 @@ import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
 import { AiTraderDrawer } from '@/components/AiTraderDrawer';
-import { TradeHistoryModal } from '@/components/TradeHistoryModal';
+import { TradeHistoryModal, resolveTradePriceDisplay } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
 import { SolGasShortfallDialog } from '@/components/SolGasShortfallDialog';
@@ -3167,6 +3167,7 @@ export default function AppPage() {
                             const isShort = !isCloseSignal && trade.side?.toUpperCase() === 'SHORT';
                             const isFailed = trade.status === 'failed';
                             const isExecuted = trade.status === 'executed';
+                            const priceDisplay = resolveTradePriceDisplay(trade);
                             
                             const getSideColor = () => {
                               if (isCloseSignal) return 'text-amber-400';
@@ -3231,7 +3232,9 @@ export default function AppPage() {
                                   </span>
                                 </td>
                                 <td className="py-3 text-right font-mono">{trade.size}</td>
-                                <td className="py-3 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
+                                <td className="py-3 text-right font-mono" title={priceDisplay.note || undefined}>
+                                  {priceDisplay.value === null ? priceDisplay.label : `$${priceDisplay.label}`}
+                                </td>
                                 <td className="py-3 text-right">
                                   <div className="flex items-center justify-end gap-1">
                                     {isFailed && trade.errorMessage ? (

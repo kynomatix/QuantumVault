@@ -81,6 +81,23 @@ import { PublishBotModal } from './PublishBotModal';
 import { SharePnLCard } from './SharePnLCard';
 import { LineChart, Line, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
 
+export function deriveKnownBotEquity(
+  exchangeBalance: number | null,
+  parkedValueUsdc: number,
+  borrowDebtUsdc: number,
+): number | null {
+  return exchangeBalance === null ? null : exchangeBalance + parkedValueUsdc - borrowDebtUsdc;
+}
+
+export function resolveWithdrawalAuthority(
+  freeCollateral: number | null,
+  amount: number,
+): { allowed: boolean; reason: "accounting_unavailable" | "exceeds_available" | null } {
+  if (freeCollateral === null) return { allowed: false, reason: "accounting_unavailable" };
+  if (amount > freeCollateral + 0.000001) return { allowed: false, reason: "exceeds_available" };
+  return { allowed: true, reason: null };
+}
+
 // Smart price formatting: more decimals for prices under $1
 function formatPrice(price: number | undefined): string {
   if (price === undefined || price === null) return '--';
@@ -356,7 +373,7 @@ export function BotManagementDrawer({
   // Settings page, so the growing list of per-bot controls (parking now, borrow
   // management later) doesn't pile into one long scroll.
   const [expandedSettingsPanel, setExpandedSettingsPanel] = useState<string | null>('general');
-  const [botBalance, setBotBalance] = useState<number>(0);
+  const [botBalance, setBotBalance] = useState<number | null>(null);
   // Per-bot Vault-parked value (Flash/independent_trader). OFF-exchange, NOT tradable —
   // folded into the displayed Bot Balance / PnL only, never into sizing or margin math.
   const [parkedValueUsdc, setParkedValueUsdc] = useState<number>(0);
@@ -373,8 +390,8 @@ export function BotManagementDrawer({
   // response for a previous bot/wallet must never overwrite the current one.
   const carryAdvisorReqRef = useRef(0);
   const [mainAccountBalance, setMainAccountBalance] = useState<number>(0);
-  const [exchangeBalance, setExchangeBalance] = useState<number>(0);
-  const [exchangeFreeCollateral, setExchangeFreeCollateral] = useState<number>(0);
+  const [exchangeBalance, setExchangeBalance] = useState<number | null>(null);
+  const [exchangeFreeCollateral, setExchangeFreeCollateral] = useState<number | null>(null);
   const [hasOpenPositions, setHasOpenPositions] = useState<boolean>(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [hasBalanceLoaded, setHasBalanceLoaded] = useState(false);
@@ -561,12 +578,12 @@ export function BotManagementDrawer({
         const data = await safeResponseJson(res);
         
         // Balance data
-        setBotBalance(data.usdcBalance ?? 0);
+        setBotBalance(data.usdcBalance ?? null);
         setParkedValueUsdc(data.parkedValueUsdc ?? 0);
         setBorrowDebtUsdc(data.borrowDebtUsdc ?? 0);
         setMainAccountBalance(data.mainAccountBalance ?? 0);
-        setExchangeBalance(data.totalCollateral ?? 0);
-        setExchangeFreeCollateral(data.freeCollateral ?? 0);
+        setExchangeBalance(data.totalCollateral ?? null);
+        setExchangeFreeCollateral(data.freeCollateral ?? null);
         setHasOpenPositions(data.hasOpenPositions ?? false);
         setNetDeposited(data.netDeposited ?? 0);
         setHasBalanceLoaded(true);
@@ -594,9 +611,18 @@ export function BotManagementDrawer({
             autoTopUp: data.autoTopUp ?? prev.autoTopUp,
           } : prev);
         }
+      } else {
+        setBotBalance(null);
+        setExchangeBalance(null);
+        setExchangeFreeCollateral(null);
+        setHasBalanceLoaded(true);
       }
     } catch (error) {
       console.error('Failed to fetch bot overview:', error);
+      setBotBalance(null);
+      setExchangeBalance(null);
+      setExchangeFreeCollateral(null);
+      setHasBalanceLoaded(true);
     } finally {
       setBalanceLoading(false);
       setPositionLoading(false);
@@ -684,7 +710,9 @@ export function BotManagementDrawer({
 
       if (balanceRes?.ok) {
         const data = await safeResponseJson(balanceRes);
-        setBotBalance(data.usdcBalance ?? 0);
+        setBotBalance(data.usdcBalance ?? null);
+      } else {
+        setBotBalance(null);
       }
 
       if (agentRes?.ok) {
@@ -694,11 +722,14 @@ export function BotManagementDrawer({
 
       if (botDriftRes?.ok) {
         const data = await safeResponseJson(botDriftRes);
-        setExchangeBalance(data.totalCollateral ?? data.balance ?? 0);
-        setExchangeFreeCollateral(data.freeCollateral ?? 0);
+        setExchangeBalance(data.totalCollateral ?? data.balance ?? null);
+        setExchangeFreeCollateral(data.freeCollateral ?? null);
         setHasOpenPositions(data.hasOpenPositions ?? false);
         setParkedValueUsdc(data.parkedValueUsdc ?? 0);
         setBorrowDebtUsdc(data.borrowDebtUsdc ?? 0);
+      } else {
+        setExchangeBalance(null);
+        setExchangeFreeCollateral(null);
       }
 
       if (netDepositedRes?.ok) {
@@ -707,6 +738,9 @@ export function BotManagementDrawer({
       }
     } catch (error) {
       console.error('Failed to fetch balances:', error);
+      setBotBalance(null);
+      setExchangeBalance(null);
+      setExchangeFreeCollateral(null);
     } finally {
       setBalanceLoading(false);
     }
@@ -823,12 +857,21 @@ export function BotManagementDrawer({
       return;
     }
 
-    // Validate amount doesn't exceed withdrawable
-    if (amount > exchangeFreeCollateral + 0.000001) {
-      toast({ 
-        title: 'Amount exceeds withdrawable balance', 
-        description: `Maximum you can withdraw is $${exchangeFreeCollateral.toFixed(2)}`,
-        variant: 'destructive' 
+    // Withdrawal is a money leg: an unknown cap refuses rather than becoming zero.
+    const withdrawalAuthority = resolveWithdrawalAuthority(exchangeFreeCollateral, amount);
+    if (withdrawalAuthority.reason === 'accounting_unavailable') {
+      toast({
+        title: 'Accounting unavailable',
+        description: 'The bot withdrawal limit is unavailable. Refresh the balance before withdrawing.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (withdrawalAuthority.reason === 'exceeds_available') {
+      toast({
+        title: 'Amount exceeds withdrawable balance',
+        description: `Maximum you can withdraw is $${exchangeFreeCollateral!.toFixed(2)}`,
+        variant: 'destructive',
       });
       return;
     }
@@ -1298,19 +1341,28 @@ export function BotManagementDrawer({
     // Use small tolerance (0.01) to handle floating point precision when clicking "Max"
     const investmentValue = editMaxPositionSize ? parseFloat(editMaxPositionSize) : 0;
     const tolerance = 0.01;
-    const maxAvailable = editAutoTopUp ? (botBalance + mainAccountBalance) : botBalance;
+    if (investmentValue > 0 && botBalance === null) {
+      toast({
+        title: 'Accounting unavailable',
+        description: 'Bot equity is unavailable, so the position-size limit cannot be validated safely.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    const knownBotBalance = botBalance ?? 0;
+    const maxAvailable = editAutoTopUp ? (knownBotBalance + mainAccountBalance) : knownBotBalance;
     
     if (investmentValue > 0 && maxAvailable > 0 && investmentValue > maxAvailable + tolerance) {
       if (editAutoTopUp) {
         toast({ 
           title: 'Investment too high', 
-          description: `Total available is $${maxAvailable.toFixed(2)} (bot: $${botBalance.toFixed(2)} + agent wallet: $${mainAccountBalance.toFixed(2)})`,
+          description: `Total available is $${maxAvailable.toFixed(2)} (bot: $${knownBotBalance.toFixed(2)} + agent wallet: $${mainAccountBalance.toFixed(2)})`,
           variant: 'destructive' 
         });
       } else {
         toast({ 
           title: 'Investment too high', 
-          description: `Bot only has $${botBalance.toFixed(2)} available. Enable Auto Top-Up to use agent wallet funds, or click "Max".`,
+          description: `Bot only has $${knownBotBalance.toFixed(2)} available. Enable Auto Top-Up to use agent wallet funds, or click "Max".`,
           variant: 'destructive' 
         });
       }
@@ -1438,6 +1490,12 @@ export function BotManagementDrawer({
 
   const displayBot = localBot || bot;
   const webhookMessageTemplate = getMessageTemplate();
+  const overviewEquity = deriveKnownBotEquity(exchangeBalance, parkedValueUsdc, borrowDebtUsdc);
+  const overviewNetPnl = overviewEquity === null ? null : overviewEquity - netDeposited;
+  const overviewReturnPct = overviewNetPnl === null || netDeposited <= 0
+    ? null
+    : (overviewNetPnl / netDeposited) * 100;
+  const tradingEquity = deriveKnownBotEquity(botBalance, parkedValueUsdc, borrowDebtUsdc);
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()} modal={false}>
@@ -1626,8 +1684,10 @@ export function BotManagementDrawer({
                 <p className="text-2xl font-bold mt-1" data-testid="text-bot-equity">
                   {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : overviewEquity === null ? (
+                    <span title="Accounting unavailable">-- <span className="text-xs text-muted-foreground">(accounting unavailable)</span></span>
                   ) : (
-                    `$${(exchangeBalance + parkedValueUsdc - borrowDebtUsdc).toFixed(2)}`
+                    `$${overviewEquity.toFixed(2)}`
                   )}
                 </p>
               </div>
@@ -1648,14 +1708,16 @@ export function BotManagementDrawer({
                 </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    ((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    overviewNetPnl !== null && overviewNetPnl >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
                   data-testid="text-net-pnl"
                 >
                   {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : overviewNetPnl === null ? (
+                    <span title="Accounting unavailable">-- <span className="text-xs text-muted-foreground">(accounting unavailable)</span></span>
                   ) : (
-                    `${((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) >= 0 ? '+' : ''}$${((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited).toFixed(2)}`
+                    `${overviewNetPnl >= 0 ? '+' : ''}$${overviewNetPnl.toFixed(2)}`
                   )}
                 </p>
               </div>
@@ -1675,16 +1737,16 @@ export function BotManagementDrawer({
                 </div>
                 <p
                   className={`text-2xl font-bold mt-1 ${
-                    ((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                    overviewReturnPct !== null && overviewReturnPct >= 0 ? 'text-emerald-500' : 'text-red-500'
                   }`}
                   data-testid="text-return-pct"
                 >
                   {balanceLoading && !hasBalanceLoaded ? (
                     <Loader2 className="w-5 h-5 animate-spin" />
-                  ) : netDeposited > 0 ? (
-                    `${((((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) / netDeposited) * 100).toFixed(2)}%`
+                  ) : overviewReturnPct === null ? (
+                    <span title="Accounting unavailable">-- <span className="text-xs text-muted-foreground">(accounting unavailable)</span></span>
                   ) : (
-                    '0%'
+                    `${overviewReturnPct.toFixed(2)}%`
                   )}
                 </p>
               </div>
@@ -2244,8 +2306,10 @@ export function BotManagementDrawer({
                     <p className="text-2xl font-bold mt-1 text-emerald-500" data-testid="text-trading-balance">
                       {balanceLoading && !hasBalanceLoaded ? (
                         <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : tradingEquity === null ? (
+                        <span title="Accounting unavailable">-- <span className="text-xs text-muted-foreground">(accounting unavailable)</span></span>
                       ) : (
-                        `$${(botBalance + parkedValueUsdc - borrowDebtUsdc).toFixed(2)}`
+                        `$${tradingEquity.toFixed(2)}`
                       )}
                     </p>
                   </div>
@@ -2254,7 +2318,7 @@ export function BotManagementDrawer({
               </div>
             </div>
 
-            {hasBalanceLoaded && borrowDebtUsdc > 0 && (() => {
+            {hasBalanceLoaded && borrowDebtUsdc > 0 && botBalance !== null && (() => {
               const lev = localBot?.leverage ?? displayBot?.leverage ?? 0;
               const tradingCapital = botBalance + parkedValueUsdc;
               const yours = tradingCapital - borrowDebtUsdc;
@@ -2359,10 +2423,12 @@ export function BotManagementDrawer({
                     size="sm"
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
                     onClick={() => {
+                      if (exchangeFreeCollateral === null) return;
                       // Floor to 2 decimal places (cents) for clean display values
                       const maxWithdrawable = Math.floor(exchangeFreeCollateral * 100) / 100;
                       setRemoveEquityAmount(maxWithdrawable.toString());
                     }}
+                    disabled={exchangeFreeCollateral === null}
                     data-testid="button-remove-max"
                   >
                     Max
@@ -2370,20 +2436,22 @@ export function BotManagementDrawer({
                 </div>
                 <Button
                   onClick={handleRemoveEquity}
-                  disabled={removeEquityLoading || !removeEquityAmount || parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001}
+                  disabled={removeEquityLoading || exchangeFreeCollateral === null || !removeEquityAmount || parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001}
                   variant="outline"
                   data-testid="button-remove-equity"
                 >
                   {removeEquityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Remove'}
                 </Button>
               </div>
-              {removeEquityAmount && parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001 && (
+              {exchangeFreeCollateral !== null && removeEquityAmount && parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001 && (
                 <p className="text-xs text-red-500">
                   Amount exceeds max withdrawable (${exchangeFreeCollateral.toFixed(2)})
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                Withdraw USDC from the bot back to your wallet
+                {exchangeFreeCollateral === null
+                  ? 'Withdrawal unavailable: accounting balance is incomplete.'
+                  : 'Withdraw USDC from the bot back to your wallet'}
               </p>
               {displayBot?.activeProtocol === 'pacifica' && (
                 <div
@@ -2406,7 +2474,7 @@ export function BotManagementDrawer({
                   </span>
                 </div>
               )}
-              {hasOpenPositions && exchangeBalance > exchangeFreeCollateral && (
+              {hasOpenPositions && exchangeBalance !== null && exchangeFreeCollateral !== null && exchangeBalance > exchangeFreeCollateral && (
                 <p className="text-xs text-amber-500">
                   Note: ${(exchangeBalance - exchangeFreeCollateral).toFixed(2)} is locked as margin for open positions
                 </p>
@@ -2909,8 +2977,8 @@ export function BotManagementDrawer({
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => setEditMaxPositionSize(botBalance.toFixed(2))}
-                      disabled={botBalance <= 0}
+                      onClick={() => botBalance !== null && setEditMaxPositionSize(botBalance.toFixed(2))}
+                      disabled={botBalance === null || botBalance <= 0}
                       className="px-3"
                       data-testid="button-max-position-size"
                     >
@@ -2919,10 +2987,12 @@ export function BotManagementDrawer({
                   </div>
                   <p className="text-xs text-muted-foreground flex items-center gap-1">
                     <Info className="w-3 h-3" />
-                    Bot equity: ${botBalance.toFixed(2)}. With {editLeverage}x leverage = ${(botBalance * editLeverage).toFixed(2)} max position.
+                    {botBalance === null
+                      ? 'Bot equity: -- (accounting unavailable). Position sizing is disabled.'
+                      : `Bot equity: $${botBalance.toFixed(2)}. With ${editLeverage}x leverage = $${(botBalance * editLeverage).toFixed(2)} max position.`}
                   </p>
                   {/* Show shortfall warning when Auto Top-Up is enabled and investment exceeds bot balance */}
-                  {editAutoTopUp && editMaxPositionSize && parseFloat(editMaxPositionSize) > botBalance && (
+                  {botBalance !== null && editAutoTopUp && editMaxPositionSize && parseFloat(editMaxPositionSize) > botBalance && (
                     (() => {
                       const investmentValue = parseFloat(editMaxPositionSize);
                       const shortfall = investmentValue - botBalance;
@@ -3320,14 +3390,14 @@ export function BotManagementDrawer({
         />
       )}
 
-      {displayBot && (
+      {displayBot && overviewNetPnl !== null && (
         <SharePnLCard
           isOpen={shareCardOpen}
           onClose={() => setShareCardOpen(false)}
           botName={displayBot.name}
           market={displayBot.market}
-          pnl={(exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited}
-          pnlPercent={netDeposited > 0 ? (((exchangeBalance + parkedValueUsdc - borrowDebtUsdc) - netDeposited) / netDeposited) * 100 : 0}
+          pnl={overviewNetPnl}
+          pnlPercent={overviewReturnPct ?? 0}
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
           winRate={getWinRate()}
