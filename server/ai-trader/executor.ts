@@ -1222,8 +1222,11 @@ function recordProtectiveReadObservation(
   proof: LiveProtectiveStopProof,
 ): void {
   if (!protectiveReadNeedsTelemetry(proof)) return;
+  const event = proof.status === "legacy_missing"
+    ? "protective_stop_missing"
+    : "protective_read_inconclusive";
   const line =
-    `[AiTraderProtectiveRead] event=protective_read_inconclusive seam=${seam}` +
+    `[AiTraderProtectiveRead] event=${event} seam=${seam}` +
     ` bot=${bot.id} market=${bot.market} decision=${decisionId}` +
     ` semantic=${proof.semantic.status}` +
     ` normalized=${proof.semantic.normalizedRowCount}` +

@@ -1099,6 +1099,54 @@ describe("live execution — happy path", () => {
       /event=protective_read_inconclusive seam=initial_entry.*semantic=off_spec.*legacy=1/
     ));
   });
+
+  it("classifies a proven missing legacy stop separately from an inconclusive read", async () => {
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getOpenStopOrders: vi.fn(async () => []),
+    });
+    const { executeDecision } = await importExecutor();
+
+    const pending = executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-legacy-missing",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(result).toMatchObject({ ok: false, reason: "bracket_failed" });
+    expect(appendTelemetryMock).toHaveBeenCalledWith(expect.stringMatching(
+      /event=protective_stop_missing seam=initial_entry.*legacy=0/
+    ));
+  });
+
+  it("classifies an unavailable legacy stop read as inconclusive", async () => {
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getOpenStopOrders: vi.fn(async () => { throw new Error("legacy read unavailable"); }),
+    });
+    const { executeDecision } = await importExecutor();
+
+    const pending = executeDecision({
+      authoritySource: "internal_cycle",
+      bot: makeBot({ paperMode: false }),
+      decisionId: "d-legacy-unavailable",
+      clamped: makeClamped(),
+      adapter,
+      markPrice: 150,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(result).toMatchObject({ ok: false, reason: "bracket_failed" });
+    expect(appendTelemetryMock).toHaveBeenCalledWith(expect.stringMatching(
+      /event=protective_read_inconclusive seam=initial_entry.*legacy=unavailable/
+    ));
+  });
 });
 
 // --- Live path: failure handling ----------------------------------------------------
@@ -1194,6 +1242,7 @@ describe("live execution — failure handling (fail closed)", () => {
     expect(result).toMatchObject({ ok: true, mode: "live" });
     expect((adapter.getPositions as any)).toHaveBeenCalled();
     expect((adapter.setTpSl as any)).toHaveBeenCalled();
+    expect((adapter.getOpenStopOrders as any)).toHaveBeenCalled();
     expect((adapter.getOpenProtectiveOrders as any)).toHaveBeenCalled();
     expect(commitDirectLiveEntryMock).toHaveBeenLastCalledWith(expect.objectContaining({ disposition: "open" }));
   });

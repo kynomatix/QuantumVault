@@ -2380,7 +2380,8 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
 
   // G10 money authority remains the proven legacy stop-order read while the
   // semantic /orders observation is calibrated. An unavailable legacy read
-  // skips this cycle; it is never converted into synthetic order evidence.
+  // skips only the bracket check; G7 and breakeven processing continue, and
+  // the unavailable read is never converted into synthetic order evidence.
   if (typeof adapter.getOpenStopOrders === "function" && typeof adapter.setTpSl === "function") {
     const stopProof = await verifyLiveProtectiveStop({
       adapter,

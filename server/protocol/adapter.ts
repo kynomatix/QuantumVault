@@ -738,7 +738,7 @@ export interface ProtocolAdapter {
   getOpenOrders?(agentPublicKey: string, subaccountId?: string): Promise<Array<{ orderId: string; symbol: string }>>;
   /** List open stop / TP-SL orders. Used by the recycler's flatten + verify-empty steps (§7.2/§8). */
   getOpenStopOrders?(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string }>>;
-  /** Fresh normalized protective-order authority for live AI Trader G10 verification. */
+  /** Fresh normalized protective-order observation snapshot for live AI Trader G10 calibration. */
   getOpenProtectiveOrders?(
     agentPublicKey: string,
     internalSymbol: string,
