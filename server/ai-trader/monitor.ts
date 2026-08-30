@@ -506,8 +506,11 @@ function recordProtectiveReadObservation(
   proof: LiveProtectiveStopProof,
 ): void {
   if (!protectiveReadNeedsTelemetry(proof)) return;
+  const event = proof.status === "legacy_missing"
+    ? "protective_stop_missing"
+    : "protective_read_inconclusive";
   const line =
-    `[AiTraderProtectiveRead] event=protective_read_inconclusive seam=${seam}` +
+    `[AiTraderProtectiveRead] event=${event} seam=${seam}` +
     ` bot=${bot.id} market=${bot.market} decision=${view.decision.id}` +
     ` semantic=${proof.semantic.status}` +
     ` normalized=${proof.semantic.normalizedRowCount}` +
@@ -2390,9 +2393,7 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
     recordProtectiveReadObservation("periodic_g10", bot, view, stopProof);
     if (stopProof.status === "legacy_unavailable") {
       console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: legacy protective-stop read unavailable (${stopProof.detail}) — skipping bracket check`);
-      return;
-    }
-    if (stopProof.status !== "legacy_present") {
+    } else if (stopProof.status !== "legacy_present") {
       if (bracketReplaceAttempted.has(view.decision.id)) {
         await closeLivePositionAndPause(bot, view, adapter, {
           pauseReason: "bracket_failed",

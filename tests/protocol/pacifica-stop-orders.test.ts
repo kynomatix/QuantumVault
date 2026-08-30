@@ -11,9 +11,14 @@
 // (2026-07-08): 7 live 400 errors revealed the correct Pacifica field
 // structure — symbol/side/reduce_only at the top level, amount/stop_price
 // nested under stop_order:{}.
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
+import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function createAdapter(): PacificaAdapter {
   return new PacificaAdapter({
@@ -92,6 +97,7 @@ describe('PacificaAdapter.getOpenProtectiveOrders — documented /orders authori
   it('requests a fresh account order list and normalizes only the requested protective legs', async () => {
     const a = createAdapter() as any;
     stubRegistry(a);
+    vi.spyOn(pacificaQuota, 'canAfford').mockReturnValue(true);
     const get = vi.fn(async () => [
       { order_id: 41, symbol: 'SOL', side: 'ask', stop_price: '145', order_type: 'stop_loss_market', reduce_only: true, initial_amount: '2', filled_amount: '0', cancelled_amount: '0' },
       { order_id: 42, symbol: 'SOL', side: 'ask', stop_price: '160', order_type: 'take_profit_market', reduce_only: true, initial_amount: '2', filled_amount: '0', cancelled_amount: '0' },
@@ -103,7 +109,7 @@ describe('PacificaAdapter.getOpenProtectiveOrders — documented /orders authori
     const snapshot = await a.getOpenProtectiveOrders(ACCT, 'SOL-PERP');
 
     expect(get).toHaveBeenCalledWith('/orders', { account: ACCT }, {
-      priority: 'critical', cachePolicy: 'fresh-required',
+      priority: 'background', cachePolicy: 'fresh-required',
     });
     expect(snapshot).toEqual({
       matchingProtectiveRowCount: 2,
@@ -118,6 +124,7 @@ describe('PacificaAdapter.getOpenProtectiveOrders — documented /orders authori
   it('marks incomplete matching rows inconclusive and rejects a non-array response', async () => {
     const a = createAdapter() as any;
     stubRegistry(a);
+    vi.spyOn(pacificaQuota, 'canAfford').mockReturnValue(true);
     a.get = vi.fn(async () => [{ order_id: 41, symbol: 'SOL', side: 'ask', stop_price: '145', order_type: 'stop_loss_market', reduce_only: true, initial_amount: '2', filled_amount: '0' }]);
     await expect(a.getOpenProtectiveOrders(ACCT, 'SOL-PERP')).resolves.toEqual({
       orders: [],
@@ -126,6 +133,19 @@ describe('PacificaAdapter.getOpenProtectiveOrders — documented /orders authori
     });
     a.get = vi.fn(async () => ({ orders: [] }));
     await expect(a.getOpenProtectiveOrders(ACCT, 'SOL-PERP')).rejects.toThrow('non-array');
+  });
+
+  it('skips the observation immediately when background quota is unavailable', async () => {
+    const a = createAdapter() as any;
+    stubRegistry(a);
+    const get = vi.fn();
+    a.get = get;
+    vi.spyOn(pacificaQuota, 'canAfford').mockReturnValue(false);
+    vi.spyOn(pacificaQuota, 'noteRejection').mockImplementation(() => undefined);
+
+    await expect(a.getOpenProtectiveOrders(ACCT, 'SOL-PERP')).rejects.toThrow('quota');
+    expect(get).not.toHaveBeenCalled();
+    expect(pacificaQuota.noteRejection).toHaveBeenCalledTimes(1);
   });
 });
 

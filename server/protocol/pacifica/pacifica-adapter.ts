@@ -1737,8 +1737,12 @@ export class PacificaAdapter implements ProtocolAdapter {
     const registry = this.getRegistry();
     const protocolSymbol = registry.internalToProtocol(internalSymbol);
     const params: Record<string, string> = { account: agentPublicKey };
+    if (!pacificaQuota.canAfford('/orders', 'background')) {
+      pacificaQuota.noteRejection();
+      throw new QuotaExhaustedError('/orders', pacificaQuota.currentSpend());
+    }
     const response = await this.get('/orders', params, {
-      priority: 'critical',
+      priority: 'background',
       cachePolicy: 'fresh-required',
     });
     if (!Array.isArray(response)) {

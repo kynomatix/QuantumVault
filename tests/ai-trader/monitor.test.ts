@@ -1768,6 +1768,60 @@ describe("G10 bracket re-verification", () => {
     expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
     expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "daily_loss_breaker")).toBe(true);
   });
+
+  it("a degraded periodic stop read still permits the G7 daily-loss exit", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [{ ...openPosition, unrealizedPnl: -200 }]),
+      getOpenStopOrders: vi.fn(async () => { throw new Error("protective read unavailable"); }),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect((adapter as any).setTpSl).not.toHaveBeenCalled();
+    expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "daily_loss_breaker")).toBe(true);
+    expect(botUpdates().some((u) => u.pauseReason === "bracket_failed")).toBe(false);
+  });
+
+  it("a degraded periodic stop read still permits the live breakeven ratchet", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const setTpSl = vi.fn(async (p: { stopLossPrice?: number; takeProfitPrice?: number }) => ({
+      success: true,
+      status: "acknowledged",
+      appliedStopLossPrice: p.stopLossPrice ?? null,
+      appliedTakeProfitPrice: p.takeProfitPrice ?? null,
+    }));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [{
+        ...openPosition,
+        markPrice: 157,
+        unrealizedPnl: 14,
+      }]),
+      getOpenStopOrders: vi.fn(async () => { throw new Error("protective read unavailable"); }),
+      setTpSl,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(ENTRY_CANDLE_OPEN, 150, 151, 149.5, 150.5),
+      candle(ENTRY_CANDLE_OPEN + TF_15M, 150.5, 158, 150.4, 157.5),
+    ]);
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect(setTpSl).toHaveBeenCalledTimes(1);
+    expect(setTpSl.mock.calls[0][0]).toMatchObject({
+      stopLossPrice: expect.closeTo(breakevenStopPrice("long", 150), 8),
+      takeProfitPrice: 160,
+    });
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(botUpdates().some((u) => u.pauseReason === "bracket_failed")).toBe(false);
+  });
 });
 
 // --- Circuit breakers via afterClose ------------------------------------------------------
@@ -2872,7 +2926,7 @@ describe("startup reconciliation", () => {
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.3, markPrice: 150.2, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
       // Bracket already rests — clean adoption.
-      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-9")),
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-9", symbol: "SOL" }]),
       placeMarketOrder: vi.fn(async () => { throw new Error("must never place a second entry"); }),
     });
     getAdapterMock.mockReturnValue(adapter);
@@ -3043,7 +3097,7 @@ describe("startup reconciliation", () => {
       getPositions: vi.fn(async () => [
         { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150.5, markPrice: 150.4, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
-      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-adopts")),
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-adopts", symbol: "SOL" }]),
       placeMarketOrder: vi.fn(async () => { throw new Error("must not place a second entry"); }),
     });
     getAdapterMock.mockReturnValue(adapter);
@@ -3071,7 +3125,7 @@ describe("startup reconciliation", () => {
         { internalSymbol: "SOL-PERP", baseSize: 1.75, entryPrice: 150.25, markPrice: 150.4,
           unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
-      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-restart")),
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-restart", symbol: "SOL" }]),
     }));
     commitRecoveryMock.mockResolvedValueOnce({
       status: "replayed",
@@ -3367,7 +3421,7 @@ describe("unconfirmed-landing reconciliation", () => {
         { internalSymbol: "SOL-PERP", baseSize: 1.75, entryPrice: 150.1, markPrice: 150,
           unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" },
       ]),
-      getOpenStopOrders: vi.fn(async () => exactProtectiveStops("st-replayed")),
+      getOpenStopOrders: vi.fn(async () => [{ order_id: "st-replayed", symbol: "SOL" }]),
     }));
 
     expect(await reconcileUnconfirmedLanding(makeQuarantinedBot())).toBe(true);
