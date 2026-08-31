@@ -4951,6 +4951,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   const [createError, setCreateError] = useState<string | null>(null);
   const [deployProtocol, setDeployProtocol] = useState<ProtocolId>('pacifica');
   const [agentBalance, setAgentBalance] = useState<string | null>(null);
+  const [accountVaultValueUsdc, setAccountVaultValueUsdc] = useState(0);
   const [agentSolBalance, setAgentSolBalance] = useState<number | null>(null);
   const [agentPublicKey, setAgentPublicKey] = useState<string | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
@@ -5011,12 +5012,13 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     const reqId = ++balanceReqId.current;
     setBalanceLoading(true);
     try {
-      const balRes = await fetch(`/api/agent/balance?wallet=${walletAddress}&protocol=${deployProtocol}`, { credentials: 'include' });
+      const balRes = await fetch(`/api/agent/balance?wallet=${walletAddress}&protocol=${deployProtocol}&includeVault=1`, { credentials: 'include' });
       if (reqId !== balanceReqId.current) return null; // superseded by a newer request
       if (balRes.ok) {
         const data = await safeResponseJson(balRes);
         if (reqId !== balanceReqId.current) return null;
         setAgentBalance(data.balance?.toString() || '0');
+        setAccountVaultValueUsdc(typeof data.vaultValueUsdc === 'number' ? data.vaultValueUsdc : 0);
         setAgentSolBalance(data.solBalance ?? null);
         setAgentPublicKey(data.agentPublicKey || null);
         if (data.botCreationSolRequirement?.required) {
@@ -5085,7 +5087,9 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       });
       if (!response.ok) {
         const error = await safeResponseJson(response);
-        throw new Error(error.error || 'USDC deposit failed');
+        const depositError = new Error(error.error || 'USDC deposit failed') as Error & { code?: string };
+        if (typeof error.code === 'string') depositError.code = error.code;
+        throw depositError;
       }
       const { transaction: serializedTx, blockhash, lastValidBlockHeight } = await safeResponseJson(response);
       const transaction = Transaction.from(Buffer.from(serializedTx, 'base64'));
@@ -5111,10 +5115,11 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       }
     } catch (error: any) {
       console.error('USDC deposit failed:', error);
+      const preflightRefusal = typeof error?.code === 'string' && error.code.startsWith('agent_deposit_');
       toast({
-        title: 'USDC Deposit Failed',
+        title: preflightRefusal ? 'Deposit not started' : 'USDC Deposit Failed',
         description: error.message || 'Please try again',
-        variant: 'destructive',
+        ...(preflightRefusal ? {} : { variant: 'destructive' as const }),
       });
     } finally {
       setIsDepositingUsdc(false);
@@ -5194,7 +5199,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     setWebhookUrl(null);
     setWebhookSecret(null);
 
-    const usdcBal = parseFloat(agentBalance || '0');
+    const looseUsdcBal = parseFloat(agentBalance || '0');
+    const usdcBal = looseUsdcBal + accountVaultValueUsdc;
     const solBal = agentSolBalance ?? 0;
 
     const totalCapitalNeeded = effectiveTradeSize + equityBuffer;
@@ -5203,7 +5209,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       return;
     }
     if (totalCapitalNeeded > usdcBal) {
-      setCreateError(`Insufficient USDC. Need $${totalCapitalNeeded.toLocaleString()} ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection), have $${usdcBal.toFixed(2)}`);
+      setCreateError(`Insufficient USDC. Need $${totalCapitalNeeded.toLocaleString()} ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection), have $${usdcBal.toFixed(2)} available across the agent wallet and account Vault`);
       return;
     }
     if (solBal < solRequired) {
@@ -5332,7 +5338,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
 
   const isAuthenticated = !!walletAddress && sessionConnected;
   const hasAgentWallet = !!agentPublicKey;
-  const usdcBal = parseFloat(agentBalance || '0');
+  const looseUsdcBal = parseFloat(agentBalance || '0');
+  const usdcBal = looseUsdcBal + accountVaultValueUsdc;
   const hasSufficientBalance = usdcBal >= (effectiveTradeSize + equityBuffer) && (agentSolBalance ?? 0) >= solRequired;
 
   const getDisabledReason = () => {
@@ -5340,7 +5347,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
     if (balanceLoading) return "Checking wallet balance...";
     if (!hasAgentWallet) return "Set up your agent wallet first (go to Wallet page)";
     if (capitalNum < PACIFICA_MIN_DEPOSIT) return `Minimum capital is $${PACIFICA_MIN_DEPOSIT} (Pacifica minimum deposit). Increase capital to continue.`;
-    if (!hasSufficientBalance) return `Need $${(effectiveTradeSize + equityBuffer).toLocaleString()} USDC ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection) and ${solRequired} SOL in agent wallet`;
+    if (!hasSufficientBalance) return `Need $${(effectiveTradeSize + equityBuffer).toLocaleString()} USDC ($${effectiveTradeSize.toLocaleString()} investment + $${equityBuffer.toLocaleString()} DD protection) across the agent wallet and account Vault, plus ${solRequired} SOL in the agent wallet`;
     return null;
   };
   const disabledReason = getDisabledReason();
@@ -5501,7 +5508,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                   <Button
                     type="button"
                     size="sm"
-                    onClick={() => { setCapital(String(Math.floor(parseFloat(agentBalance!)))); setBufferOverride(null); }}
+                    onClick={() => { setCapital(String(Math.floor(usdcBal))); setBufferOverride(null); }}
                     className="h-7 px-2.5 text-[9px] bg-white/10 hover:bg-white/20 text-white/80 shrink-0"
                     data-testid={`setup-capital-max-${leverage}x`}
                   >
@@ -5510,7 +5517,12 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                 )}
               </div>
               {agentBalance !== null && (
-                <p className="text-[9px] text-white/40 mt-2">Available in agent wallet: ${parseFloat(agentBalance).toFixed(2)} USDC</p>
+                <p className="text-[9px] text-white/40 mt-2">
+                  Available to fund: ${usdcBal.toFixed(2)} USDC
+                  {accountVaultValueUsdc > 0 && (
+                    <> (${looseUsdcBal.toFixed(2)} agent + ${accountVaultValueUsdc.toFixed(2)} account Vault)</>
+                  )}
+                </p>
               )}
               {balanceLoading && (
                 <p className="text-[9px] text-white/30 mt-2">Checking wallet balance…</p>
@@ -5749,7 +5761,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
                     })()}
                     {balanceChecked && isAuthenticated && hasAgentWallet && (
                       <div className="flex justify-between text-[9px] text-white/30 mt-2">
-                        <span>Wallet: ${usdcBal.toFixed(2)} USDC</span>
+                        <span>Available: ${usdcBal.toFixed(2)} USDC</span>
                         <span>{(agentSolBalance ?? 0).toFixed(4)} SOL</span>
                       </div>
                     )}

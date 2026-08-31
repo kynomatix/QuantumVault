@@ -1629,7 +1629,7 @@ import {
   type CloseFeeEvidence,
 } from "./trading/signal-bot-close-integrity";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, agentDepositPreflightHttpResponse, NATIVE_SOL_MINT } from "./agent-wallet";
 import { handleAgentSolWithdraw, handleConfirmSolWithdraw, sweepAbandonedSolWithdrawals } from "./vault/agent-sol-withdraw";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
@@ -8559,6 +8559,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       res.json(txData);
     } catch (error) {
+      const preflight = agentDepositPreflightHttpResponse(error);
+      if (preflight) {
+        console.warn('[AgentDeposit] refusing wallet signing request after preflight', {
+          code: preflight.body.code,
+          status: preflight.status,
+        });
+        return res.status(preflight.status).json(preflight.body);
+      }
       console.error("Build agent deposit error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
