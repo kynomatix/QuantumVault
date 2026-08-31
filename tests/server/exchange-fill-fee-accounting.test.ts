@@ -1,9 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  buildAccountingIncompleteFlatPosition,
+  buildRemediatedPositionAccounting,
+  classifyReconcilerCloseAccounting,
   classifyCloseFeeEvidence,
   closeFeeAmount,
   closeFeePersistence,
+  isReconcilerAccountingIncompletePayload,
 } from "../../server/trading/signal-bot-close-integrity";
+import { formatNotificationMessage } from "../../server/notification-service";
+
+vi.mock("../../server/db", () => ({ db: {} }));
 
 const quote = {
   availability: "available" as const,
@@ -19,6 +26,108 @@ const quote = {
 };
 
 describe("close fee evidence", () => {
+  it("renders the accounting-incomplete close notification as valid UTF-8 truth", () => {
+    expect(formatNotificationMessage({
+      type: "position_closed",
+      botName: "Alpha <One>",
+      market: "BTC-PERP",
+      accountingIncomplete: true,
+      closeReason: "venue fill unavailable",
+    })).toEqual({
+      title: "📊 Position Closed",
+      body: "⚠️ Alpha &lt;One&gt;: BTC-PERP — PnL unavailable; accounting incomplete (venue fill unavailable)",
+    });
+  });
+
+  it("requires an attributed fill and every finite money fact before calling reconciler accounting exact", () => {
+    expect(classifyReconcilerCloseAccounting({
+      protocolFillId: "fill-1",
+      fillPrice: 101,
+      pnl: 7,
+      fee: 0.25,
+      observedAt: 123,
+    })).toEqual({
+      kind: "venue_exact",
+      protocolFillId: "fill-1",
+      fillPrice: 101,
+      pnl: 7,
+      fee: 0.25,
+      observedAt: 123,
+    });
+
+    expect(classifyReconcilerCloseAccounting({
+      fillPrice: 101,
+      pnl: 7,
+      fee: 0,
+      observedAt: 124,
+      observationPrice: 102,
+    })).toEqual({
+      kind: "unavailable",
+      reason: "venue_fill_unattributed",
+      observedAt: 124,
+      observationPrice: 102,
+    });
+  });
+
+  it.each([
+    ["zero fill price", { protocolFillId: "fill-1", fillPrice: 0, pnl: 7, fee: 0.25, observedAt: 125 }, "venue_fill_unattributed"],
+    ["negative fill price", { protocolFillId: "fill-1", fillPrice: -1, pnl: 7, fee: 0.25, observedAt: 126 }, "venue_fill_unattributed"],
+    ["non-finite fill price", { protocolFillId: "fill-1", fillPrice: Number.NaN, pnl: 7, fee: 0.25, observedAt: 127 }, "venue_fill_unattributed"],
+    ["negative fee", { protocolFillId: "fill-1", fillPrice: 101, pnl: 7, fee: -0.01, observedAt: 128 }, "venue_fill_unattributed"],
+    ["unattributed liquidation", { fillPrice: 101, pnl: 7, fee: 0.25, observedAt: 129, liquidation: true }, "liquidation_fill_unattributed"],
+  ] as const)("classifies %s as unavailable", (_label, input, reason) => {
+    expect(classifyReconcilerCloseAccounting(input)).toEqual({
+      kind: "unavailable",
+      reason,
+      observedAt: input.observedAt,
+      observationPrice: null,
+    });
+  });
+
+  it("preserves exact cumulative totals while flattening proven exposure with incomplete accounting", () => {
+    const closedAt = new Date("2026-08-29T00:00:00.000Z");
+    expect(buildAccountingIncompleteFlatPosition({
+      avgEntryPrice: "100",
+      realizedPnl: "12.500000",
+      totalFees: "0.750000",
+      lastTradeId: "entry-epoch",
+    }, { tradeId: "incomplete-close", closedAt })).toEqual({
+      baseSize: "0",
+      avgEntryPrice: "100",
+      costBasis: "0",
+      realizedPnl: "12.500000",
+      totalFees: "0.750000",
+      lastTradeId: "entry-epoch",
+      lastTradeAt: closedAt,
+    });
+    expect(buildAccountingIncompleteFlatPosition(undefined, {
+      tradeId: "fallback-close-epoch",
+      closedAt,
+    })).toMatchObject({
+      lastTradeId: "fallback-close-epoch",
+      realizedPnl: "0.000000",
+      totalFees: "0.000000",
+    });
+    expect(isReconcilerAccountingIncompletePayload({
+      closeAccounting: { kind: "unavailable", reason: "venue_fill_unattributed" },
+    })).toBe(true);
+
+    expect(isReconcilerAccountingIncompletePayload({ closeAccounting: { kind: "venue_exact" } })).toBe(false);
+  });
+
+  it("adds later exact money truth without manufacturing an exposure transition", () => {
+    expect(buildRemediatedPositionAccounting({
+      realizedPnl: "12.500001",
+      totalFees: "0.750002",
+    }, {
+      realizedPnlDelta: -1.234567,
+      feeDelta: 0.012345,
+    })).toEqual({
+      realizedPnl: "11.265434",
+      totalFees: "0.762347",
+    });
+  });
+
   it("preserves a Pacifica exact zero instead of falling through to an estimate", () => {
     const evidence = classifyCloseFeeEvidence({
       protocol: "pacifica",

@@ -14,6 +14,8 @@ export interface TradeNotification {
   error?: string;
   /** Human-readable close reason, only used for `position_closed`. */
   closeReason?: string;
+  /** Close exposure is confirmed flat but venue price/PnL/fee are unavailable. */
+  accountingIncomplete?: boolean;
   /** Fraction of position closed [0,1], only used for `partial_close`. */
   closedFraction?: number;
   /** Original full position size before partial close, only for `partial_close`. */
@@ -544,7 +546,7 @@ export async function sendLoopSafetyNotification(
   }
 }
 
-function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
+export function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
   const { type, size, price, pnl } = notification;
   // Escape user/creator-derived values (bot names, symbols, error text) before
   // they are interpolated into the HTML message body. Bot names in particular
@@ -571,6 +573,13 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
       };
     
     case 'position_closed': {
+      if (notification.accountingIncomplete) {
+        const reasonSuffix = notification.closeReason ? ` (${escapeTelegramHtml(notification.closeReason)})` : '';
+        return {
+          title: `📊 Position Closed`,
+          body: `⚠️ ${botName}: ${market} — PnL unavailable; accounting incomplete${reasonSuffix}`,
+        };
+      }
       const pnlStr = pnl !== undefined 
         ? (pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`)
         : '';

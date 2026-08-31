@@ -37,6 +37,8 @@ interface Trade {
       feeReason?: string;
     };
     closeReason?: string;
+    priceRole?: string;
+    closeAccounting?: { kind?: string };
     data?: {
       position_size?: string | number;
     };
@@ -50,6 +52,23 @@ interface TradeHistoryModalProps {
 }
 
 const TRADES_PER_PAGE = 20;
+
+export function resolveTradePriceDisplay(trade: Pick<Trade, 'price' | 'webhookPayload'>): {
+  value: number | null;
+  label: string;
+  exportValue: string;
+  note: string;
+} {
+  const unavailable = trade.webhookPayload?.priceRole === 'observation_context_only'
+    || trade.webhookPayload?.closeAccounting?.kind === 'unavailable';
+  if (unavailable) {
+    return { value: null, label: '--', exportValue: '', note: 'observation only; venue fill unavailable' };
+  }
+  const value = Number(trade.price);
+  return Number.isFinite(value)
+    ? { value, label: `$${value.toLocaleString()}`, exportValue: String(value), note: '' }
+    : { value: null, label: '--', exportValue: '', note: 'price unavailable' };
+}
 
 export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryModalProps) {
   const [currentPage, setCurrentPage] = useState(1);
@@ -129,7 +148,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
     const { isCloseSignal, feeValue, pnlValue, pnlDisplay } = getTradeInfo(trade);
     const side = isCloseSignal ? 'CLOSE' : (trade.side?.toUpperCase() || '');
     const time = trade.executedAt ? new Date(trade.executedAt).toLocaleString() : '';
-    const priceNum = trade.price ? Number(trade.price) : null;
+    const priceDisplay = resolveTradePriceDisplay(trade);
     return {
       pnlBasis: pnlDisplay.basis,
       pnlIncludedInNetSummary: pnlDisplay.includeInNetSummary,
@@ -139,7 +158,8 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
       market: trade.market || '',
       side,
       size: trade.size || '',
-      price: priceNum !== null ? String(priceNum) : '',
+      price: priceDisplay.exportValue,
+      priceNote: priceDisplay.note,
       feeNum: feeValue > 0 ? feeValue : 0,
       pnlNum: pnlValue,
       status: trade.status || '',
@@ -164,7 +184,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
       ` | wins: ${wins}/${closed.length}` +
       (failed ? ` | failed: ${failed}` : '');
     const lines = rows.map((r) =>
-      `${r.time} | ${r.bot} | ${r.market} | ${r.side} | size=${r.size} | price=$${r.price}` +
+      `${r.time} | ${r.bot} | ${r.market} | ${r.side} | size=${r.size} | price=${r.price ? `$${r.price}` : '--'}${r.priceNote ? ` (${r.priceNote})` : ''}` +
       ` | fee=${r.feeNum > 0 ? `-$${r.feeNum.toFixed(4)}` : '--'} | pnl=${pnlLabel(r.pnlNum)}${r.pnlNote ? ` (${r.pnlNote})` : ''} | ${r.status}` +
       (r.error ? ` | error: ${r.error}` : '')
     );
@@ -180,7 +200,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
   };
 
   const buildCsv = (list: Trade[]) => {
-    const header = ['Time', 'Bot', 'Market', 'Side', 'Size', 'Price', 'Fee', 'PnL', 'PnL basis', 'Status', 'Error'];
+    const header = ['Time', 'Bot', 'Market', 'Side', 'Size', 'Price', 'Price basis', 'Fee', 'PnL', 'PnL basis', 'Status', 'Error'];
     const rows = list.map(normalizeForExport).map((r) =>
       [
         r.time,
@@ -189,6 +209,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
         r.side,
         r.size,
         r.price,
+        r.priceNote,
         r.feeNum > 0 ? r.feeNum.toFixed(4) : '',
         r.pnlNum !== null ? r.pnlNum.toFixed(2) : '',
         r.pnlBasis,
@@ -258,6 +279,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
 
   const renderMobileTradeCard = (trade: Trade, index: number) => {
     const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue, pnlDisplay } = getTradeInfo(trade);
+    const priceDisplay = resolveTradePriceDisplay(trade);
 
     return (
       <div 
@@ -307,7 +329,8 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           </div>
           <div>
             <span className="text-muted-foreground">Price:</span>
-            <span className="ml-1 font-mono">${Number(trade.price).toLocaleString()}</span>
+            <span className="ml-1 font-mono">{priceDisplay.label}</span>
+            {priceDisplay.note && <span className="block text-[10px] text-amber-400">{priceDisplay.note}</span>}
           </div>
           <div className="text-right">
             <span className="text-muted-foreground">Fee:</span>
@@ -343,6 +366,7 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
 
   const renderDesktopTradeRow = (trade: Trade, index: number) => {
     const { isCloseSignal, isLong, isFailed, isExecuted, isRecovered, feeValue, pnlValue, pnlDisplay } = getTradeInfo(trade);
+    const priceDisplay = resolveTradePriceDisplay(trade);
 
     return (
       <tr key={trade.id || index} className="border-b border-border/30 hover:bg-muted/20" data-testid={`row-history-trade-${index}`}>
@@ -360,7 +384,10 @@ export function TradeHistoryModal({ open, onOpenChange, trades }: TradeHistoryMo
           </span>
         </td>
         <td className="py-3 px-2 text-right font-mono">{trade.size}</td>
-        <td className="py-3 px-2 text-right font-mono">${Number(trade.price).toLocaleString()}</td>
+        <td className="py-3 px-2 text-right font-mono">
+          {priceDisplay.label}
+          {priceDisplay.note && <span className="block text-[10px] text-amber-400">{priceDisplay.note}</span>}
+        </td>
         <td className="py-3 px-2 text-right font-mono text-amber-400">
           {feeValue > 0 ? `-$${feeValue.toFixed(4)}` : '--'}
         </td>

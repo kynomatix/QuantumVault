@@ -519,6 +519,7 @@ function _fallbackFinancials(
     };
   }
   const borrowDebtUsdc = enrichment.borrowDebts.get(bot.id) ?? 0;
+  const accountingIncompleteCloseCount = enrichment.accountingIncompleteCounts?.get(bot.id) ?? 0;
 
   // A bot marked 'unavailable' must never emit a numeric DB estimate as equity,
   // even when enrichment data is present. The DB estimate is only safe when the
@@ -526,6 +527,23 @@ function _fallbackFinancials(
   // deadline, adapter-resolution failures, and any other unavailable path all
   // belong here — they tried (or were eligible to try) the live path and failed.
   if (status === 'unavailable') {
+    return {
+      exchangeBalance: null,
+      netPnl: null,
+      netPnlPercent: null,
+      borrowDebtUsdc,
+      parkedValueUsdc: 0,
+      parkedValueIncluded: false,
+      parkedValueUnavailable: false,
+      liveDataAvailable: false,
+      botFinancialStatus: 'unavailable',
+    };
+  }
+
+  // Exposure may be flat while the close fill remains unattributed. In that
+  // state the position's accumulated realized PnL is only a known prefix, not
+  // a complete balance input. DB-only fallbacks therefore fail closed.
+  if (accountingIncompleteCloseCount > 0) {
     return {
       exchangeBalance: null,
       netPnl: null,
@@ -975,6 +993,7 @@ async function _refresh(
 function _emptyEnrichment(): BotListEnrichment {
   return {
     tradeCounts: new Map(),
+    accountingIncompleteCounts: new Map(),
     positions: new Map(),
     publishedBotMap: new Map(),
     equityAgg: new Map(),
@@ -1251,14 +1270,23 @@ export function mapBotToApiResponse(
   const positions = ens ? (enrichment.positions.get(bot.id) ?? []) : [];
   const position = (positions as any[]).find((p: any) => p.market === bot.market) ?? null;
   const publishedBot = ens ? (enrichment.publishedBotMap.get(bot.id) ?? null) : null;
+  const accountingIncompleteCloseCount = ens
+    ? (enrichment.accountingIncompleteCounts?.get(bot.id) ?? 0)
+    : null;
 
   return {
     ...bot,
     // null when enrichment failed — zero when enrichment succeeded but bot has no rows.
     // (successful-empty parity: new bots have zero history, not unknown history)
     actualTradeCount: ens ? (enrichment.tradeCounts.get(bot.id) ?? 0) : null,
-    realizedPnl: ens ? ((position as any)?.realizedPnl ?? '0') : null,
+    realizedPnl: ens && accountingIncompleteCloseCount === 0
+      ? ((position as any)?.realizedPnl ?? '0')
+      : null,
     totalFees: ens ? ((position as any)?.totalFees ?? '0') : null,
+    accountingIncompleteCloseCount,
+    realizedAccountingStatus: ens
+      ? (accountingIncompleteCloseCount! > 0 ? 'incomplete' : 'complete')
+      : 'unavailable',
     exchangeBalance: fin?.exchangeBalance ?? null,
     // null when enrichment failed (debt unknown, not zero).
     borrowDebtUsdc: fin?.borrowDebtUsdc ?? null,

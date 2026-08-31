@@ -5,10 +5,27 @@ import { ArrowDownToLine, ArrowUpFromLine, Loader2, Wallet, Bot, TrendingUp } fr
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
 
-interface CapitalPool {
-  mainAccountBalance: number;
-  allocatedToBot: number;
+export interface CapitalPool {
+  mainAccountBalance: number | null;
+  allocatedToBot: number | null;
   totalEquity: number;
+  accountingIncompleteCloseCount?: number;
+  realizedAccountingStatus?: 'complete' | 'incomplete';
+  capitalBalanceStatus?: 'available' | 'unavailable';
+}
+
+export function formatCapitalAmount(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '--';
+}
+
+export function resolveCapitalAccountingWarning(capitalPool: CapitalPool | null): string | null {
+  if (!capitalPool || capitalPool.realizedAccountingStatus !== 'incomplete') return null;
+  const closeCount = capitalPool.accountingIncompleteCloseCount ?? 0;
+  const balanceUnavailable = capitalPool.capitalBalanceStatus === 'unavailable';
+  if (closeCount > 0) {
+    return `Realized accounting is incomplete for ${closeCount} close event(s)${balanceUnavailable ? '; derived balances are unavailable' : ''}.`;
+  }
+  return balanceUnavailable ? 'Derived balances are unavailable.' : null;
 }
 
 interface DepositWithdrawProps {
@@ -20,6 +37,7 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
   
   const [capitalPool, setCapitalPool] = useState<CapitalPool | null>(null);
   const [capitalLoading, setCapitalLoading] = useState(false);
+  const capitalAccountingWarning = resolveCapitalAccountingWarning(capitalPool);
 
   const fetchCapitalPool = async () => {
     if (!publicKeyString) return;
@@ -85,7 +103,7 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
                 <span className="text-xs text-muted-foreground">Main Account</span>
               </div>
               <p className="text-base font-mono font-semibold" data-testid="text-main-balance">
-                ${(capitalPool?.mainAccountBalance ?? 0).toFixed(2)}
+                {formatCapitalAmount(capitalPool?.mainAccountBalance)}
               </p>
             </div>
             <div className="bg-muted/30 rounded-lg p-2.5 border border-border/50">
@@ -94,10 +112,16 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
                 <span className="text-xs text-muted-foreground">Allocated to Bots</span>
               </div>
               <p className="text-base font-mono font-semibold" data-testid="text-allocated-balance">
-                ${(capitalPool?.allocatedToBot ?? 0).toFixed(2)}
+                {formatCapitalAmount(capitalPool?.allocatedToBot)}
               </p>
             </div>
           </div>
+
+          {capitalAccountingWarning && (
+            <p className="text-xs text-amber-400" data-testid="text-capital-accounting-incomplete">
+              {capitalAccountingWarning}
+            </p>
+          )}
 
           <div className="flex gap-2 pt-1">
             <Button

@@ -69,9 +69,13 @@ describe("bot_trades PnL convention", () => {
     })).toBe("net_of_close_fee");
   });
 
-  it("stamps both reconciler full-close writers and the fill-backed supersession writer net-valued and net-convention", () => {
+  it("stamps exact reconciler writers net-valued while preserving typed unavailable accounting", () => {
     const source = readFileSync("server/reconciliation-service.ts", "utf8");
-    expect(source.match(/const closePnl = \(closeDetection\.pnl \?\? 0\) - closeFee;/g)).toHaveLength(2);
+    expect(source.match(/const closePnl = \(closeDetection\.pnl \?\? 0\) - closeFee;/g)).toHaveLength(1);
+    expect(source).toContain("const closePnl = exactAccounting ? accountingEvidence.pnl - accountingEvidence.fee : null;");
+    expect(source).toContain("fee: closeFee === null ? null : String(closeFee)");
+    expect(source).toContain("pnl: closePnl === null ? null : String(closePnl)");
+    expect(source).toContain("confirmedPositionCloseIncomplete: { walletAddress, market }");
     expect(source.match(/pnlConvention: 'net_of_close_fee'/g)).toHaveLength(3);
     expect(source.match(/feeTruthStatus: 'current_pipeline'/g)).toHaveLength(3);
   });

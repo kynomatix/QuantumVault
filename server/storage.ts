@@ -11,9 +11,13 @@ import {
 } from "./ai-trader/scanner-incident-evidence";
 import Decimal from "decimal.js";
 import {
+  buildAccountingIncompleteFlatPosition,
   buildConfirmedFlatPosition,
   buildConfirmedPartialPosition,
+  buildRemediatedPositionAccounting,
   confirmedPartialPositionEpochMatches,
+  isReconcilerAccountingIncompletePayload,
+  type ReconcilerCloseAccountingEvidence,
 } from "./trading/signal-bot-close-integrity";
 import { resolveBotTradeNetPnl } from "./trading/bot-trade-pnl-convention";
 import { sumNetDepositedFromEvents, VAULT_INTERNAL_EVENT_TYPES } from "./equity-events-util";
@@ -560,6 +564,8 @@ export type ScannerIncidentReleaseOutcome =
 export type BotListEnrichment = {
   /** Canonical trade count per bot (getCanonicalBotTradeCount semantics, phantom-dup excluded). */
   tradeCounts: Map<string, number>;
+  /** Confirmed-close rows whose venue price/PnL/fee remain unresolved. */
+  accountingIncompleteCounts: Map<string, number>;
   /** All bot_positions rows per bot (unique per bot+market; slice by bot.market in route). */
   positions: Map<string, BotPosition[]>;
   /** Published-bot row per bot (unique by schema; absent = not published). */
@@ -753,7 +759,7 @@ export interface IStorage {
   clearTradingBotSubaccount(id: string): Promise<void>;
   deleteTradingBot(id: string): Promise<void>;
   updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void>;
-  getCanonicalBotTradeStats(tradingBotId: string): Promise<{ totalTrades: number; winningTrades: number; losingTrades: number }>;
+  getCanonicalBotTradeStats(tradingBotId: string): Promise<{ totalTrades: number; winningTrades: number; losingTrades: number; accountingIncompleteTrades: number }>;
   getCanonicalBotTradeCount(tradingBotId: string): Promise<number>;
   recomputeAndMergeBotStats(
     tradingBotId: string,
@@ -770,6 +776,7 @@ export interface IStorage {
       market: string;
       realizedPnlDelta: number;
       feeDelta: number;
+      preservePositionEpoch?: boolean;
     };
     confirmedPositionReduction?: {
       market: string;
@@ -782,7 +789,16 @@ export interface IStorage {
     };
     /** Pending signed partial marker atomically superseded by a fill-backed full close. */
     supersedePendingPartialTradeId?: string;
+    confirmedPositionCloseIncomplete?: {
+      walletAddress: string;
+      market: string;
+    };
   }): Promise<{ trade?: BotTrade; isNew: boolean }>;
+  remediateReconcilerCloseAccountingAtomic(opts: {
+    botId: string;
+    tradeId: string;
+    evidence: Extract<ReconcilerCloseAccountingEvidence, { kind: "venue_exact" }>;
+  }): Promise<{ trade: BotTrade; remediated: boolean }>;
   getRecentCanonicalCloseForBot(opts: {
     botId: string;
     market: string;
@@ -2305,27 +2321,33 @@ export class DatabaseStorage implements IStorage {
    * realized PnL recorded (breakeven uses '0', never NULL). Opens never count.
    * Unavailable convention/fee evidence is omitted rather than coerced to zero.
    */
-  async getCanonicalBotTradeStats(tradingBotId: string): Promise<{ totalTrades: number; winningTrades: number; losingTrades: number }> {
+  async getCanonicalBotTradeStats(tradingBotId: string): Promise<{ totalTrades: number; winningTrades: number; losingTrades: number; accountingIncompleteTrades: number }> {
     const rows = await db
       .select({
         pnl: botTrades.pnl,
         fee: botTrades.fee,
         pnlConvention: botTrades.pnlConvention,
+        webhookPayload: botTrades.webhookPayload,
       })
       .from(botTrades)
       .where(and(
         eq(botTrades.tradingBotId, tradingBotId),
-        sql`${botTrades.pnl} IS NOT NULL`,
         sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
+        or(
+          isNotNull(botTrades.pnl),
+          sql`${botTrades.webhookPayload}->'closeAccounting'->>'kind' = 'unavailable'`,
+        ),
         notPhantomDupClose(),
       ));
     const canonical = rows
+      .filter((row) => row.pnl !== null)
       .map(resolveBotTradeNetPnl)
       .filter((value): value is number => value !== null);
     return {
       totalTrades: canonical.length,
       winningTrades: canonical.filter(value => value > 0).length,
       losingTrades: canonical.filter(value => value < 0).length,
+      accountingIncompleteTrades: rows.filter((row) => isReconcilerAccountingIncompletePayload(row.webhookPayload)).length,
     };
   }
 
@@ -2470,6 +2492,7 @@ export class DatabaseStorage implements IStorage {
       market: string;
       realizedPnlDelta: number;
       feeDelta: number;
+      preservePositionEpoch?: boolean;
     };
     confirmedPositionReduction?: {
       market: string;
@@ -2481,8 +2504,17 @@ export class DatabaseStorage implements IStorage {
       feeDelta: number;
     };
     supersedePendingPartialTradeId?: string;
+    confirmedPositionCloseIncomplete?: {
+      walletAddress: string;
+      market: string;
+    };
   }): Promise<{ trade?: BotTrade; isNew: boolean }> {
-    if (opts.confirmedPositionClose && opts.confirmedPositionReduction) {
+    const confirmedTransitions = [
+      opts.confirmedPositionClose,
+      opts.confirmedPositionReduction,
+      opts.confirmedPositionCloseIncomplete,
+    ].filter(Boolean).length;
+    if (confirmedTransitions > 1) {
       throw new Error("recordCloseEventAtomic: conflicting confirmed position transitions");
     }
     if (opts.supersedePendingPartialTradeId && (!opts.insert || !opts.confirmedPositionClose)) {
@@ -2524,7 +2556,8 @@ export class DatabaseStorage implements IStorage {
       let trade: BotTrade | undefined;
       let isNew = true;
       const persistConfirmedPositionClose = async (): Promise<void> => {
-        if (!opts.confirmedPositionClose) return;
+        const authority = opts.confirmedPositionClose ?? opts.confirmedPositionCloseIncomplete;
+        if (!authority) return;
         if (!trade) {
           throw new Error("recordCloseEventAtomic: confirmed close has no canonical trade");
         }
@@ -2534,23 +2567,29 @@ export class DatabaseStorage implements IStorage {
           .from(botPositions)
           .where(and(
             eq(botPositions.tradingBotId, opts.botId),
-            eq(botPositions.market, opts.confirmedPositionClose.market),
+            eq(botPositions.market, authority.market),
           ))
           .for("update")
           .limit(1);
-        const flatPosition = buildConfirmedFlatPosition(positionRows[0], {
-          realizedPnlDelta: opts.confirmedPositionClose.realizedPnlDelta,
-          feeDelta: opts.confirmedPositionClose.feeDelta,
-          tradeId: trade.id,
-          closedAt: new Date(),
-        });
+        const flatPosition = opts.confirmedPositionClose
+          ? buildConfirmedFlatPosition(positionRows[0], {
+              realizedPnlDelta: opts.confirmedPositionClose.realizedPnlDelta,
+              feeDelta: opts.confirmedPositionClose.feeDelta,
+              tradeId: trade.id,
+              closedAt: new Date(),
+              preservePositionEpoch: opts.confirmedPositionClose.preservePositionEpoch,
+            })
+          : buildAccountingIncompleteFlatPosition(positionRows[0], {
+              tradeId: trade.id,
+              closedAt: new Date(),
+            });
 
         await tx
           .insert(botPositions)
           .values({
             tradingBotId: opts.botId,
-            walletAddress: opts.confirmedPositionClose.walletAddress,
-            market: opts.confirmedPositionClose.market,
+            walletAddress: authority.walletAddress,
+            market: authority.market,
             ...flatPosition,
           })
           .onConflictDoUpdate({
@@ -2776,6 +2815,126 @@ export class DatabaseStorage implements IStorage {
     });
   }
 
+  /**
+   * Replace one reconciler NULL-accounting close with later attributed venue
+   * truth. The trade row is the idempotency lock: an identical replay is a
+   * no-op, while conflicting exact evidence fails closed. Position exposure is
+   * deliberately untouched because the bot may have reopened this market.
+   */
+  async remediateReconcilerCloseAccountingAtomic(opts: {
+    botId: string;
+    tradeId: string;
+    evidence: Extract<ReconcilerCloseAccountingEvidence, { kind: "venue_exact" }>;
+  }): Promise<{ trade: BotTrade; remediated: boolean }> {
+    const evidence = opts.evidence;
+    if (
+      !evidence.protocolFillId.trim()
+      || !Number.isFinite(evidence.fillPrice) || evidence.fillPrice <= 0
+      || !Number.isFinite(evidence.pnl)
+      || !Number.isFinite(evidence.fee) || evidence.fee < 0
+      || !Number.isFinite(evidence.observedAt)
+    ) {
+      throw new Error("remediateReconcilerCloseAccountingAtomic: invalid venue evidence");
+    }
+
+    return await db.transaction(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(botTrades)
+        .where(and(eq(botTrades.id, opts.tradeId), eq(botTrades.tradingBotId, opts.botId)))
+        .for("update")
+        .limit(1);
+      const locked = rows[0];
+      if (!locked) {
+        throw new Error(`remediateReconcilerCloseAccountingAtomic: trade ${opts.tradeId} not found`);
+      }
+
+      const payload = locked.webhookPayload && typeof locked.webhookPayload === "object"
+        ? locked.webhookPayload as Record<string, any>
+        : {};
+      const prior = payload.closeAccounting;
+      if (prior?.kind === "venue_exact") {
+        const same = prior.protocolFillId === evidence.protocolFillId
+          && prior.fillPrice === evidence.fillPrice
+          && prior.pnl === evidence.pnl
+          && prior.fee === evidence.fee;
+        if (!same) {
+          throw new Error("remediateReconcilerCloseAccountingAtomic: conflicting exact venue evidence");
+        }
+        return { trade: locked, remediated: false };
+      }
+      if (!isReconcilerAccountingIncompletePayload(payload)) {
+        throw new Error("remediateReconcilerCloseAccountingAtomic: trade is not accounting-incomplete");
+      }
+
+      const netPnl = evidence.pnl - evidence.fee;
+      const remediatedSize = Math.abs(Number(locked.size));
+      if (!Number.isFinite(remediatedSize)) {
+        throw new Error("remediateReconcilerCloseAccountingAtomic: invalid durable trade size");
+      }
+      const remediatedAt = new Date().toISOString();
+      await tx
+        .update(botTrades)
+        .set({
+          price: String(evidence.fillPrice),
+          fee: String(evidence.fee),
+          pnl: String(netPnl),
+          webhookPayload: {
+            ...payload,
+            closeAccounting: evidence,
+            priceRole: "venue_fill",
+            accountingRemediation: {
+              source: "attributed_venue_fill",
+              remediatedAt,
+              prior,
+            },
+          },
+        })
+        .where(eq(botTrades.id, opts.tradeId));
+
+      await this.recomputeAndMergeBotStats(opts.botId, {
+        totalPnlDelta: netPnl,
+        totalVolumeDelta: evidence.fillPrice * remediatedSize,
+      }, tx);
+
+      // Preserve the canonical close-writer lock order: trade, bot stats,
+      // position. Reversing bot/position creates a deadlock with a concurrent
+      // close that follows recordCloseEventAtomic's established order.
+      const positionRows = await tx
+        .select()
+        .from(botPositions)
+        .where(and(
+          eq(botPositions.tradingBotId, opts.botId),
+          eq(botPositions.market, locked.market),
+        ))
+        .for("update")
+        .limit(1);
+      const position = positionRows[0];
+      if (!position) {
+        throw new Error("remediateReconcilerCloseAccountingAtomic: owning position is missing");
+      }
+      await tx
+        .update(botPositions)
+        .set({
+          ...buildRemediatedPositionAccounting(position, {
+            realizedPnlDelta: netPnl,
+            feeDelta: evidence.fee,
+          }),
+          updatedAt: sql`NOW()`,
+        })
+        .where(and(
+          eq(botPositions.tradingBotId, opts.botId),
+          eq(botPositions.market, locked.market),
+        ));
+
+      const updated = await tx.select().from(botTrades).where(eq(botTrades.id, opts.tradeId)).limit(1);
+      if (!updated[0]) {
+        throw new Error("remediateReconcilerCloseAccountingAtomic: updated trade disappeared");
+      }
+      return { trade: updated[0], remediated: true };
+    });
+  }
+
   async getBotTrades(tradingBotId: string, limit: number = 50): Promise<BotTrade[]> {
     return db.select().from(botTrades).where(eq(botTrades.tradingBotId, tradingBotId)).orderBy(desc(botTrades.executedAt)).limit(limit);
   }
@@ -2892,8 +3051,9 @@ export class DatabaseStorage implements IStorage {
       ),
       sql`${botTrades.pnl} IS NOT NULL`,
       // Drop phantom duplicate closes so the series length (tradeCount on the
-      // performance card) matches getCanonicalBotTradeStats. MUST stay in
-      // lockstep with that function's filter.
+      // performance card) matches getCanonicalBotTradeStats. That function
+      // additionally filters null PnL in application code; this query enforces
+      // the same requirement above with IS NOT NULL.
       notPhantomDupClose(),
     ];
     if (since) {
@@ -7635,6 +7795,7 @@ export class DatabaseStorage implements IStorage {
   async getTradingBotListEnrichment(walletAddress: string, botIds: string[]): Promise<BotListEnrichment> {
     const empty: BotListEnrichment = {
       tradeCounts: new Map(),
+      accountingIncompleteCounts: new Map(),
       positions: new Map(),
       publishedBotMap: new Map(),
       equityAgg: new Map(),
@@ -7649,28 +7810,33 @@ export class DatabaseStorage implements IStorage {
     // primary scope guard; this is a secondary application-layer filter.
     const requestedIdSet = new Set(dedupedIds);
 
-    // --- Query 1: canonical trade counts ---
-    // Reproduces getCanonicalBotTradeCount exactly: pnl IS NOT NULL, terminal
-    // statuses, phantom-dup-close exclusion. One GROUP BY replaces N per-bot calls.
+    // --- Query 1: canonical trade counts + incomplete accounting counts ---
+    // One GROUP BY replaces N per-bot calls. Numeric tradeCount keeps the
+    // canonical pnl-not-null semantics; incomplete rows are counted separately.
     const tradeCountRows = await db
       .select({
         botId: botTrades.tradingBotId,
-        tradeCount: sql<number>`COUNT(*)::int`,
+        tradeCount: sql<number>`COUNT(*) FILTER (WHERE ${botTrades.pnl} IS NOT NULL)::int`,
+        accountingIncompleteCount: sql<number>`COUNT(*) FILTER (
+          WHERE ${botTrades.webhookPayload}->'closeAccounting'->>'kind' = 'unavailable'
+        )::int`,
       })
       .from(botTrades)
       .where(and(
         inArray(botTrades.tradingBotId, dedupedIds),
         eq(botTrades.walletAddress, walletAddress),
-        isNotNull(botTrades.pnl),
         sql`${botTrades.status} IN ('executed','liquidated','recovered')`,
         notPhantomDupClose(),
       ))
       .groupBy(botTrades.tradingBotId);
 
     const tradeCounts = new Map<string, number>();
+    const accountingIncompleteCounts = new Map<string, number>();
     for (const row of tradeCountRows) {
       if (!requestedIdSet.has(row.botId)) continue;
       tradeCounts.set(row.botId, Number(row.tradeCount ?? 0));
+      const incomplete = Number(row.accountingIncompleteCount ?? 0);
+      if (incomplete > 0) accountingIncompleteCounts.set(row.botId, incomplete);
     }
 
     // --- Query 2: bot position rows (all markets per bot) ---
@@ -7786,7 +7952,7 @@ export class DatabaseStorage implements IStorage {
       borrowDebts.set(botId, new Decimal(totalRaw.toString()).div(1_000_000).toNumber());
     }
 
-    return { tradeCounts, positions, publishedBotMap, equityAgg, borrowDebts };
+    return { tradeCounts, accountingIncompleteCounts, positions, publishedBotMap, equityAgg, borrowDebts };
   }
 }
 

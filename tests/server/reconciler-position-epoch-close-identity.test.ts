@@ -58,6 +58,10 @@ import {
   selectPendingPartialCloseMarker,
   selectPendingPartialMarkerForFullClose,
 } from '../../server/reconciliation-service';
+import {
+  buildAccountingIncompleteFlatPosition,
+  buildConfirmedFlatPosition,
+} from '../../server/trading/signal-bot-close-integrity';
 
 const walletAddress = 'wallet-public-address';
 const agentPublicKey = 'agent-public-address';
@@ -436,6 +440,70 @@ describe('reconciler full-close position epoch identity', () => {
     expect(first).not.toBe(second);
   });
 
+  it('preserves one no-fill close identity across false flatten, resync, and later close', () => {
+    const firstId = canonicalReconcilerFullCloseId({
+      botId: 'bot-one',
+      market,
+      positionEpochId: 'entry-one',
+    });
+    const falseFlatten = buildAccountingIncompleteFlatPosition({
+      avgEntryPrice: '116500',
+      realizedPnl: '0',
+      totalFees: '0',
+      lastTradeId: 'entry-one',
+    }, {
+      tradeId: 'accounting-incomplete-close-row',
+      closedAt: new Date('2026-08-04T00:00:00.000Z'),
+    });
+    const resyncedPosition = storedPosition(falseFlatten.lastTradeId);
+    const laterCloseId = canonicalReconcilerFullCloseId({
+      botId: 'bot-one',
+      market,
+      positionEpochId: resyncedPosition.lastTradeId,
+    });
+
+    expect(falseFlatten.lastTradeId).toBe('entry-one');
+    expect(laterCloseId).toBe(firstId);
+  });
+
+  it('preserves the entry epoch when exact venue money closes the position', () => {
+    const exactClose = buildConfirmedFlatPosition({
+      avgEntryPrice: '116500',
+      realizedPnl: '2',
+      totalFees: '0.1',
+      lastTradeId: 'entry-one',
+    }, {
+      realizedPnlDelta: 4.86,
+      feeDelta: 0.25,
+      tradeId: 'exact-close-row',
+      closedAt: new Date('2026-08-04T00:00:00.000Z'),
+      preservePositionEpoch: true,
+    });
+
+    expect(exactClose).toMatchObject({
+      baseSize: '0',
+      realizedPnl: '6.860000',
+      totalFees: '0.350000',
+      lastTradeId: 'entry-one',
+    });
+  });
+
+  it('keeps non-reconciler confirmed closes on their close-row identity', () => {
+    const exactClose = buildConfirmedFlatPosition({
+      avgEntryPrice: '116500',
+      realizedPnl: '2',
+      totalFees: '0.1',
+      lastTradeId: 'entry-one',
+    }, {
+      realizedPnlDelta: 4.86,
+      feeDelta: 0.25,
+      tradeId: 'manual-close-row',
+      closedAt: new Date('2026-08-04T00:00:00.000Z'),
+    });
+
+    expect(exactClose.lastTradeId).toBe('manual-close-row');
+  });
+
   it('keeps a protocol fill identifier primary', () => {
     expect(canonicalReconcilerFullCloseId({
       protocolFillId: 'venue-fill-one',
@@ -488,6 +556,7 @@ describe('reconciler full-close position epoch identity', () => {
         walletAddress,
         market,
         feeDelta: 0.25,
+        preservePositionEpoch: true,
       }),
     }));
     expect(mocks.storage.upsertBotPosition).not.toHaveBeenCalled();
@@ -530,7 +599,28 @@ describe('reconciler full-close position epoch identity', () => {
     const repeatedId = mocks.storage.recordCloseEventAtomic.mock.calls[1][0].insert.protocolFillId;
     expect(repeatedId).toBe(firstId);
     expect(firstId).toContain('entry-epoch-one');
-    expect(mocks.storage.upsertBotPosition).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.upsertBotPosition).not.toHaveBeenCalled();
+    const recordedClose = mocks.storage.recordCloseEventAtomic.mock.calls[0][0];
+    expect(recordedClose).toMatchObject({
+      insert: {
+        fee: null,
+        pnl: null,
+        webhookPayload: {
+          closeAccounting: {
+            kind: 'unavailable',
+            reason: 'venue_fill_unattributed',
+          },
+          priceRole: 'observation_context_only',
+        },
+      },
+      confirmedPositionCloseIncomplete: { walletAddress, market },
+    });
+    expect(recordedClose.deltas).toEqual({ lastTradeAt: expect.any(String) });
+    expect(Object.keys(recordedClose.deltas)).toEqual(['lastTradeAt']);
     expect(mocks.sendTradeNotification).toHaveBeenCalledTimes(1);
+    expect(mocks.sendTradeNotification).toHaveBeenCalledWith(walletAddress, expect.objectContaining({
+      pnl: undefined,
+      accountingIncomplete: true,
+    }));
   });
 });

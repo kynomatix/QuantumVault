@@ -109,6 +109,69 @@ export function closeFeePersistence(
   };
 }
 
+export type ReconcilerCloseAccountingEvidence =
+  | {
+      kind: "venue_exact";
+      fillPrice: number;
+      pnl: number;
+      fee: number;
+      protocolFillId: string;
+      observedAt: number;
+    }
+  | {
+      kind: "unavailable";
+      reason: "venue_fill_unattributed" | "liquidation_fill_unattributed";
+      observedAt: number;
+      observationPrice: number | null;
+    };
+
+/**
+ * A confirmed-flat venue position proves exposure, not execution money truth.
+ * Only an attributed venue fill may authorize numeric close price/PnL/fee.
+ */
+export function classifyReconcilerCloseAccounting(input: {
+  protocolFillId?: string | null;
+  fillPrice?: number | null;
+  pnl?: number | null;
+  fee?: number | null;
+  observedAt: number;
+  observationPrice?: number | null;
+  liquidation?: boolean;
+}): ReconcilerCloseAccountingEvidence {
+  const exact = typeof input.protocolFillId === "string" && input.protocolFillId.trim().length > 0
+    && typeof input.fillPrice === "number" && Number.isFinite(input.fillPrice) && input.fillPrice > 0
+    && typeof input.pnl === "number" && Number.isFinite(input.pnl)
+    && typeof input.fee === "number" && Number.isFinite(input.fee) && input.fee >= 0;
+  if (exact) {
+    return {
+      kind: "venue_exact",
+      fillPrice: input.fillPrice as number,
+      pnl: input.pnl as number,
+      fee: input.fee as number,
+      protocolFillId: input.protocolFillId!.trim(),
+      observedAt: input.observedAt,
+    };
+  }
+  const observationPrice = typeof input.observationPrice === "number"
+    && Number.isFinite(input.observationPrice) && input.observationPrice > 0
+    ? input.observationPrice
+    : null;
+  return {
+    kind: "unavailable",
+    reason: input.liquidation ? "liquidation_fill_unattributed" : "venue_fill_unattributed",
+    observedAt: input.observedAt,
+    observationPrice,
+  };
+}
+
+export function isReconcilerAccountingIncompletePayload(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const closeAccounting = (payload as { closeAccounting?: unknown }).closeAccounting;
+  return !!closeAccounting
+    && typeof closeAccounting === "object"
+    && (closeAccounting as { kind?: unknown }).kind === "unavailable";
+}
+
 export type SignalBotCloseOutcome =
   | "executed"
   | "already_flat"
@@ -212,19 +275,23 @@ export interface ConfirmedPositionCloseInput {
   feeDelta: number;
   tradeId: string;
   closedAt: Date;
+  /** Reconciler closes retain the entry epoch used by the no-fill dedup key. */
+  preservePositionEpoch?: boolean;
 }
 
 export interface ExistingPositionAccounting {
   avgEntryPrice?: string | null;
   realizedPnl?: string | null;
   totalFees?: string | null;
+  lastTradeId?: string | null;
 }
 
 /**
  * Produce the position values written when an authoritative venue read has
  * confirmed a full close. The caller owns transactionality and row locking;
- * this helper owns exact decimal accumulation and the invariant that a full
- * close retains the historical entry reference while zeroing exposure/basis.
+ * this helper owns exact decimal accumulation and zeroing exposure/basis.
+ * Reconciler-confirmed no-fill closes may preserve the historical entry
+ * reference explicitly; ordinary close writers advance to the close row.
  */
 export function buildConfirmedFlatPosition(
   existing: ExistingPositionAccounting | undefined,
@@ -248,8 +315,51 @@ export function buildConfirmedFlatPosition(
     totalFees: new Decimal(existing?.totalFees ?? "0")
       .plus(input.feeDelta)
       .toFixed(6),
-    lastTradeId: input.tradeId,
+    // Only the reconciler's no-fill identity is tied to the entry epoch. Other
+    // confirmed-close paths retain their established close-row identity.
+    lastTradeId: input.preservePositionEpoch
+      ? existing?.lastTradeId ?? input.tradeId
+      : input.tradeId,
     lastTradeAt: input.closedAt,
+  };
+}
+
+/** Flatten proven exposure while preserving the last exact money totals. */
+export function buildAccountingIncompleteFlatPosition(
+  existing: ExistingPositionAccounting | undefined,
+  input: { tradeId: string; closedAt: Date },
+): ReturnType<typeof buildConfirmedFlatPosition> {
+  return {
+    baseSize: "0",
+    avgEntryPrice: existing?.avgEntryPrice ?? "0",
+    costBasis: "0",
+    realizedPnl: new Decimal(existing?.realizedPnl ?? "0").toFixed(6),
+    totalFees: new Decimal(existing?.totalFees ?? "0").toFixed(6),
+    // An incomplete close proves flat exposure but not a new economic epoch.
+    // Preserve the open position's durable entry identity so a false flatten,
+    // venue resync and later real close all derive the same no-fill dedup key.
+    lastTradeId: existing?.lastTradeId ?? input.tradeId,
+    lastTradeAt: input.closedAt,
+  };
+}
+
+/**
+ * Apply later venue money truth without touching current exposure. A bot may
+ * have reopened the same market before remediation runs, so this helper owns
+ * only the cumulative money columns; base size, basis and epoch identity stay
+ * under the current position writer.
+ */
+export function buildRemediatedPositionAccounting(
+  existing: ExistingPositionAccounting | undefined,
+  input: { realizedPnlDelta: number; feeDelta: number },
+): { realizedPnl: string; totalFees: string } {
+  return {
+    realizedPnl: new Decimal(existing?.realizedPnl ?? "0")
+      .plus(input.realizedPnlDelta)
+      .toFixed(6),
+    totalFees: new Decimal(existing?.totalFees ?? "0")
+      .plus(input.feeDelta)
+      .toFixed(6),
   };
 }
 

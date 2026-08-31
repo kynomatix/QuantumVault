@@ -20,6 +20,24 @@ import {
 } from "../../server/trading/signal-bot-close-integrity";
 import { DatabaseStorage } from "../../server/storage";
 
+function recordingUpdateChain(writes: unknown[]) {
+  const promise = Promise.resolve([]);
+  let chain: any;
+  chain = new Proxy({}, {
+    get(_target, property: string | symbol) {
+      if (property === "then") return promise.then.bind(promise);
+      if (property === "catch") return promise.catch.bind(promise);
+      if (property === "finally") return promise.finally.bind(promise);
+      if (property === "set") return (value: unknown) => {
+        writes.push(value);
+        return chain;
+      };
+      return () => chain;
+    },
+  });
+  return chain;
+}
+
 function resolvedChain(result: unknown) {
   const promise = Promise.resolve(result);
   const chain: any = new Proxy({}, {
@@ -249,6 +267,122 @@ describe("confirmed full-close position accounting", () => {
   });
 });
 
+describe("reconciler close accounting remediation transaction", () => {
+  const evidence = {
+    kind: "venue_exact" as const,
+    protocolFillId: "venue-fill-1",
+    fillPrice: 101,
+    pnl: 7,
+    fee: 0.25,
+    observedAt: 1_700_000_000_000,
+  };
+  const incompleteTrade = {
+    id: "close-row",
+    tradingBotId: "bot-one",
+    market: "BTC-PERP",
+    size: "2",
+    price: "100",
+    fee: null,
+    pnl: null,
+    status: "executed",
+    webhookPayload: {
+      closeAccounting: { kind: "unavailable", reason: "venue_fill_unattributed" },
+      priceRole: "observation_context_only",
+    },
+  };
+  const position = {
+    id: "position-one",
+    tradingBotId: "bot-one",
+    market: "BTC-PERP",
+    baseSize: "3",
+    avgEntryPrice: "99",
+    costBasis: "297",
+    realizedPnl: "4",
+    totalFees: "1",
+    lastTradeId: "new-entry-epoch",
+    lastTradeAt: new Date("2026-08-30T00:00:00.000Z"),
+  };
+
+  function arrange(selectResults: unknown[][]) {
+    const writes: unknown[] = [];
+    const txSelect = vi.fn();
+    for (const result of selectResults) txSelect.mockReturnValueOnce(resolvedChain(result));
+    const txUpdate = vi.fn(() => recordingUpdateChain(writes));
+    dbHarness.transaction.mockImplementation(async (callback: (tx: unknown) => Promise<unknown>) => (
+      callback({ select: txSelect, update: txUpdate, insert: vi.fn() })
+    ));
+    return { writes, txSelect, txUpdate };
+  }
+
+  it("treats an identical exact-evidence replay as a no-op", async () => {
+    const exactTrade = { ...incompleteTrade, webhookPayload: { closeAccounting: evidence } };
+    const harness = arrange([[exactTrade]]);
+    const storage = new DatabaseStorage();
+    const stats = vi.spyOn(storage, "recomputeAndMergeBotStats").mockResolvedValue(undefined);
+    await expect(storage.remediateReconcilerCloseAccountingAtomic({
+      botId: "bot-one", tradeId: "close-row", evidence,
+    })).resolves.toEqual({ trade: exactTrade, remediated: false });
+    expect(harness.txUpdate).not.toHaveBeenCalled();
+    expect(stats).not.toHaveBeenCalled();
+  });
+
+  it("rejects conflicting exact evidence", async () => {
+    arrange([[{ ...incompleteTrade, webhookPayload: { closeAccounting: { ...evidence, fee: 0.5 } } }]]);
+    const storage = new DatabaseStorage();
+    vi.spyOn(storage, "recomputeAndMergeBotStats").mockResolvedValue(undefined);
+    await expect(storage.remediateReconcilerCloseAccountingAtomic({
+      botId: "bot-one", tradeId: "close-row", evidence,
+    })).rejects.toThrow("conflicting exact venue evidence");
+  });
+
+  it("rejects a row that is not accounting-incomplete", async () => {
+    arrange([[{ ...incompleteTrade, webhookPayload: {} }]]);
+    const storage = new DatabaseStorage();
+    vi.spyOn(storage, "recomputeAndMergeBotStats").mockResolvedValue(undefined);
+    await expect(storage.remediateReconcilerCloseAccountingAtomic({
+      botId: "bot-one", tradeId: "close-row", evidence,
+    })).rejects.toThrow("trade is not accounting-incomplete");
+  });
+
+  it("rejects remediation when the owning position is missing", async () => {
+    arrange([[incompleteTrade], []]);
+    const storage = new DatabaseStorage();
+    vi.spyOn(storage, "recomputeAndMergeBotStats").mockResolvedValue(undefined);
+    await expect(storage.remediateReconcilerCloseAccountingAtomic({
+      botId: "bot-one", tradeId: "close-row", evidence,
+    })).rejects.toThrow("owning position is missing");
+  });
+
+  it("applies money deltas once while preserving exposure, basis, and epoch identity", async () => {
+    const updatedTrade = {
+      ...incompleteTrade,
+      price: "101",
+      fee: "0.25",
+      pnl: "6.75",
+      webhookPayload: { closeAccounting: evidence, priceRole: "venue_fill" },
+    };
+    const harness = arrange([[incompleteTrade], [position], [updatedTrade]]);
+    const storage = new DatabaseStorage();
+    const stats = vi.spyOn(storage, "recomputeAndMergeBotStats").mockResolvedValue(undefined);
+    await expect(storage.remediateReconcilerCloseAccountingAtomic({
+      botId: "bot-one", tradeId: "close-row", evidence,
+    })).resolves.toEqual({ trade: updatedTrade, remediated: true });
+    expect(stats).toHaveBeenCalledTimes(1);
+    expect(stats).toHaveBeenCalledWith("bot-one", {
+      totalPnlDelta: 6.75,
+      totalVolumeDelta: 202,
+    }, expect.anything());
+    expect(harness.writes).toHaveLength(2);
+    expect(harness.writes[0]).toMatchObject({ price: "101", fee: "0.25", pnl: "6.75" });
+    expect(harness.writes[1]).toMatchObject({ realizedPnl: "10.750000", totalFees: "1.250000" });
+    expect(harness.writes[1]).not.toHaveProperty("baseSize");
+    expect(harness.writes[1]).not.toHaveProperty("avgEntryPrice");
+    expect(harness.writes[1]).not.toHaveProperty("costBasis");
+    expect(harness.writes[1]).not.toHaveProperty("lastTradeId");
+    expect(harness.writes[1]).not.toHaveProperty("lastTradeAt");
+  });
+});
+
 describe("close-path integration guards", () => {
   const routesSource = readFileSync(new URL("../../server/routes.ts", import.meta.url), "utf8");
   const storageSource = readFileSync(new URL("../../server/storage.ts", import.meta.url), "utf8");
@@ -271,6 +405,23 @@ describe("close-path integration guards", () => {
     expect(atomicSource.indexOf("if (reconcilerWinner)")).toBeLessThan(firstPersist);
     expect(atomicSource.indexOf("if (updateFailedDueToConflict && wantedFillId)")).toBeLessThan(firstPersist);
     expect(atomicSource.match(/await persistConfirmedPositionClose\(\)/g)).toHaveLength(2);
+  });
+
+  it("remediates incomplete accounting under the trade lock without rewriting exposure", () => {
+    const remediationStart = storageSource.indexOf("async remediateReconcilerCloseAccountingAtomic(opts:");
+    const remediationEnd = storageSource.indexOf("async getBotTrades(", remediationStart);
+    const remediationSource = storageSource.slice(remediationStart, remediationEnd);
+
+    expect(remediationStart).toBeGreaterThan(0);
+    expect(remediationSource).toContain('.for("update")');
+    expect(remediationSource).toContain("conflicting exact venue evidence");
+    expect(remediationSource).toContain("buildRemediatedPositionAccounting(position");
+    expect(remediationSource.indexOf("await this.recomputeAndMergeBotStats")).toBeLessThan(
+      remediationSource.indexOf("const positionRows = await tx"),
+    );
+    expect(remediationSource).not.toContain("buildConfirmedFlatPosition(position");
+    expect(remediationSource).not.toContain("baseSize:");
+    expect(remediationSource).not.toContain("costBasis:");
   });
 
   it("locks every stats merge while preserving the trade-table-first lock order", () => {
