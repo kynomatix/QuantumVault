@@ -57,9 +57,25 @@ describe("scanner attempt terminal accounting", () => {
     expect(manifest(["scanned", "venue-closed"]).verdict).toBe("tradable");
   });
 
-  it("tolerates timeout feed-health primary-cache and parent-inconclusive terminals", () => {
-    expect(manifest(["timeout-skipped", "feed-health-skipped", "primary-cache-degraded", "parent-inconclusive"]).verdict)
+  it("tolerates non-scan terminals when at least one attempt scanned", () => {
+    expect(manifest(["scanned", "timeout-skipped", "feed-health-skipped", "primary-cache-degraded", "parent-inconclusive"]).verdict)
       .toBe("tradable");
+  });
+
+  it("makes every zero-scan generation diagnostic without inventing a coverage threshold", () => {
+    const terminalOnly = manifest([
+      "timeout-skipped", "feed-health-skipped", "primary-cache-degraded", "parent-inconclusive",
+    ]);
+    expect(terminalOnly.verdict).toBe("diagnostic_only");
+    expect(terminalOnly.diagnosticReasons).toContain("zero_scanned_attempts");
+
+    const allBudgetGated = createScannerSweepManifest({
+      generation: 2, boundaryTimeframes: ["15m"], startedAt: 1, finishedAt: 2,
+      accounting: new ScannerAttemptLedger().reconcile(), budgetSkippedUnits: 2,
+      parentCacheDegraded: false, candidatesByProtocol: new Map(), completed: true,
+    });
+    expect(allBudgetGated.verdict).toBe("diagnostic_only");
+    expect(allBudgetGated.diagnosticReasons).toContain("zero_scanned_attempts");
   });
 
   it("rejects unclassified abandoned and unreconciled generations", () => {
@@ -82,7 +98,9 @@ describe("scanner attempt terminal accounting", () => {
       budgetSkippedUnits: 0, parentCacheDegraded: false,
       candidatesByProtocol: new Map(), completed: true,
     });
-    expect(unreconciled.diagnosticReasons).toEqual(["accounting_invalid"]);
+    expect(unreconciled.diagnosticReasons).toEqual(expect.arrayContaining([
+      "accounting_invalid", "zero_scanned_attempts",
+    ]));
   });
   it("reconciles a mixed terminal population exactly once", () => {
     const ledger = new ScannerAttemptLedger();

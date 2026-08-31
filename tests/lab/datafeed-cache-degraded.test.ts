@@ -83,6 +83,88 @@ function runFetch(deadlineMs: number, signal?: AbortSignal) {
   );
 }
 
+describe("provider response-body cancellation lifetime", () => {
+  it("forwards caller abort after headers while the OKX body is pending", async () => {
+    const caller = new AbortController();
+    let internalSignal: AbortSignal | undefined;
+    let bodyStarted!: () => void;
+    const bodyIsPending = new Promise<void>((resolve) => { bodyStarted = resolve; });
+    fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      internalSignal = init?.signal ?? undefined;
+      return {
+        status: 200,
+        ok: true,
+        json: () => new Promise((_resolve, reject) => {
+          bodyStarted();
+          const rejectAborted = () => {
+            const error = new Error("provider body aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (internalSignal?.aborted) rejectAborted();
+          else internalSignal?.addEventListener("abort", rejectAborted, { once: true });
+        }),
+      };
+    });
+
+    const now = Date.now();
+    const pending = fetchOHLCV(
+      "SOL/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        signal: caller.signal,
+      },
+    );
+    pending.catch(() => {});
+    await bodyIsPending;
+    expect(internalSignal).toBeDefined();
+    expect(internalSignal).not.toBe(caller.signal);
+
+    caller.abort("sweep-stopped-after-headers");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("removes the caller relay after successful body consumption", async () => {
+    const caller = new AbortController();
+    let internalSignal: AbortSignal | undefined;
+    const now = Date.now();
+    const candleTime = now - TF_MS;
+    fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      internalSignal = init?.signal ?? undefined;
+      return {
+        status: 200,
+        ok: true,
+        json: async () => ({
+          code: "0",
+          data: [[String(candleTime), "100", "101", "99", "100.5", "10", "0", "0", "1"]],
+        }),
+      };
+    });
+
+    await expect(fetchOHLCV(
+      "SOL/USDT", "15m", candleTime, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        signal: caller.signal,
+      },
+    )).resolves.toHaveLength(1);
+    expect(internalSignal?.aborted).toBe(false);
+
+    caller.abort("late-owner-abort");
+    await Promise.resolve();
+    expect(internalSignal?.aborted).toBe(false);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("fetchOHLCV — slow cache under a deadline", () => {
   it("budget expiry → typed CacheDegradedError; NO network fallback, NO cache write", async () => {
     const p = runFetch(4_000); // cache budget = max(1000, 4000/4) = 1000ms

@@ -160,6 +160,7 @@ export type ScannerDiagnosticReason =
   | "accounting_invalid"
   | "unclassified_attempt"
   | "abandoned_attempt"
+  | "zero_scanned_attempts"
   | "candidate_provenance_invalid";
 
 export type ScannerCandidateProvenance = Readonly<{
@@ -677,6 +678,7 @@ export function createScannerSweepManifest(input: ScannerManifestInput): Scanner
   if (!input.accounting.accountingValid) diagnosticReasons.push("accounting_invalid");
   if (input.accounting.unclassified !== 0) diagnosticReasons.push("unclassified_attempt");
   if (input.accounting.abandoned !== 0) diagnosticReasons.push("abandoned_attempt");
+  if (input.accounting.scanned === 0) diagnosticReasons.push("zero_scanned_attempts");
   if (!provenanceValid) diagnosticReasons.push("candidate_provenance_invalid");
   return Object.freeze({
     generation: input.generation,
