@@ -139,11 +139,11 @@ setInterval(() => {
     .finally(releaseKeepWarm);
 
   // Reuse the existing heartbeat cadence: no new timer. Never queue behind an
-  // active scanner query and never overlap a prior scanner heartbeat. A pool
-  // with zero clients is eligible so the first scanner boundary normally gets
-  // a warm TLS-authenticated connection.
+  // active scanner query, never overlap a prior scanner heartbeat, and never
+  // create a connection solely for keep-warm. The first real scanner batch
+  // establishes the lane; later heartbeats may retain that idle connection.
   const scannerLaneIdle = scannerCandlePool.waitingCount === 0
-    && (scannerCandlePool.totalCount === 0 || scannerCandlePool.idleCount > 0);
+    && scannerCandlePool.idleCount > 0;
   if (hasDedicatedScannerCandlePool && !_scannerKeepWarmActive && scannerLaneIdle) {
     _scannerKeepWarmActive = true;
     scannerCandlePool.query("SELECT 1")

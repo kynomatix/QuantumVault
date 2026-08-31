@@ -564,6 +564,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     });
     const queryConfig = query.mock.calls[1][0];
     expect(queryConfig.query_timeout).toBe(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS);
+    expect(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS).toBe(60_000);
     expect(queryConfig.text).toContain('time_semantic AS "timeSemantic"');
     expect(queryConfig.text).not.toMatch(/time_semantic AS\s+imeSemantic\b/);
     expect(queryConfig.values.slice(0, 4)).toEqual([

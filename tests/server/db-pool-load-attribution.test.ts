@@ -69,7 +69,7 @@ afterEach(() => {
 });
 
 describe("database keep-warm pool-load attribution", () => {
-  it("uses a dedicated max-1 scanner lane with no overlapping scanner heartbeat", async () => {
+  it("keeps only an existing idle scanner connection warm without queuing or overlap", async () => {
     const dbModule = await import("../../server/db");
     const { formatPoolLoadTags } = await import("../../server/pool-load");
     const [web, scanner] = poolInstances;
@@ -81,12 +81,8 @@ describe("database keep-warm pool-load attribution", () => {
     });
     expect(dbModule.scannerCandlePool).not.toBe(dbModule.pool);
 
-    const webFirst = deferred<unknown>();
-    const webSecond = deferred<unknown>();
     const scannerFirst = deferred<unknown>();
-    web.queryMock
-      .mockReturnValueOnce(webFirst.promise)
-      .mockReturnValueOnce(webSecond.promise);
+    web.queryMock.mockResolvedValue({ rows: [{ "?column?": 1 }] });
     scanner.queryMock.mockReturnValueOnce(scannerFirst.promise);
 
     expect(formatPoolLoadTags()).toBe("");
@@ -94,24 +90,29 @@ describe("database keep-warm pool-load attribution", () => {
 
     await vi.advanceTimersByTimeAsync(20_000);
     expect(web.queryMock).toHaveBeenCalledTimes(1);
-    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
     expect(web.queryMock).toHaveBeenLastCalledWith("SELECT 1");
-    expect(scanner.queryMock).toHaveBeenLastCalledWith("SELECT 1");
-    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb1/shb1");
+    expect(scanner.queryMock).not.toHaveBeenCalled();
+    expect(formatPoolLoadTags()).toBe("");
 
+    scanner.totalCount = 1;
+    scanner.idleCount = 0;
     await vi.advanceTimersByTimeAsync(20_000);
     expect(web.queryMock).toHaveBeenCalledTimes(2);
+    expect(scanner.queryMock).not.toHaveBeenCalled();
+    expect(formatPoolLoadTags()).toBe("");
+
+    scanner.idleCount = 1;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(web.queryMock).toHaveBeenCalledTimes(3);
     expect(scanner.queryMock).toHaveBeenCalledTimes(1);
-    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb2/shb1");
-    expect(vi.getTimerCount()).toBe(4);
-
-    webFirst.resolve({ rows: [{ "?column?": 1 }] });
-    await flushPromiseChain();
-    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb1/shb1");
-
-    webSecond.reject(new Error("heartbeat rejected"));
-    await flushPromiseChain();
+    expect(scanner.queryMock).toHaveBeenLastCalledWith("SELECT 1");
     expect(formatPoolLoadTags()).toBe(" db_maintenance=hb0/shb1");
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(web.queryMock).toHaveBeenCalledTimes(4);
+    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
+    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb0/shb1");
+    expect(vi.getTimerCount()).toBe(4);
 
     scannerFirst.resolve({ rows: [{ "?column?": 1 }] });
     await flushPromiseChain();
