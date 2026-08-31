@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveTradePriceDisplay } from "../../client/src/components/TradeHistoryModal";
 import { formatCapitalAmount } from "../../client/src/components/DepositWithdraw";
-import { deriveKnownBotEquity, resolveWithdrawalAuthority } from "../../client/src/components/BotManagementDrawer";
+import {
+  deriveKnownBotEquity,
+  resolveUnknownAccountingSettingsAuthority,
+  resolveWithdrawalAuthority,
+} from "../../client/src/components/BotManagementDrawer";
 
 describe("accounting-incomplete client surfaces", () => {
   it("never presents an observation-context price as a venue fill", () => {
@@ -18,8 +22,9 @@ describe("accounting-incomplete client surfaces", () => {
       exportValue: "",
       note: "observation only; venue fill unavailable",
     });
-    expect(resolveTradePriceDisplay({ price: "101.25", webhookPayload: {} })).toMatchObject({
+    expect(resolveTradePriceDisplay({ price: "101.25", webhookPayload: {} })).toEqual({
       value: 101.25,
+      label: "$101.25",
       exportValue: "101.25",
       note: "",
     });
@@ -47,10 +52,40 @@ describe("accounting-incomplete client surfaces", () => {
     expect(source).not.toContain("setExchangeFreeCollateral(data.freeCollateral ?? 0)");
   });
 
+  it("allows de-risking but refuses leverage or cap increases while accounting is unavailable", () => {
+    const base = {
+      accountingAvailable: false,
+      currentLeverage: 5,
+      currentMaxPositionSize: 1_000,
+    };
+    expect(resolveUnknownAccountingSettingsAuthority({
+      ...base,
+      nextLeverage: 4,
+      nextMaxPositionSize: 800,
+    })).toEqual({ allowed: true, reason: null });
+    expect(resolveUnknownAccountingSettingsAuthority({
+      ...base,
+      nextLeverage: 6,
+      nextMaxPositionSize: 800,
+    })).toEqual({ allowed: false, reason: "accounting_unavailable_for_risk_increase" });
+    expect(resolveUnknownAccountingSettingsAuthority({
+      ...base,
+      nextLeverage: 4,
+      nextMaxPositionSize: 1_200,
+    })).toEqual({ allowed: false, reason: "accounting_unavailable_for_risk_increase" });
+    expect(resolveUnknownAccountingSettingsAuthority({
+      ...base,
+      nextLeverage: 4,
+      nextMaxPositionSize: null,
+    })).toEqual({ allowed: false, reason: "accounting_unavailable_for_risk_increase" });
+  });
+
   it("uses shared price provenance in the dashboard recent-trades table", () => {
     const source = readFileSync("client/src/pages/App.tsx", "utf8");
     expect(source).toContain("TradeHistoryModal, resolveTradePriceDisplay");
     expect(source).toContain("const priceDisplay = resolveTradePriceDisplay(trade)");
+    expect(source).toContain("{priceDisplay.label}");
+    expect(source).not.toContain("`$${priceDisplay.label}`");
     expect(source).not.toContain("${Number(trade.price).toLocaleString()}");
   });
 

@@ -312,7 +312,10 @@ export function buildConfirmedFlatPosition(
     totalFees: new Decimal(existing?.totalFees ?? "0")
       .plus(input.feeDelta)
       .toFixed(6),
-    lastTradeId: input.tradeId,
+    // A close ends exposure; it does not create a new entry epoch. Preserve the
+    // durable entry identity so a later resync/recovery derives the same close
+    // key instead of treating the close row as a fresh position epoch.
+    lastTradeId: existing?.lastTradeId ?? input.tradeId,
     lastTradeAt: input.closedAt,
   };
 }

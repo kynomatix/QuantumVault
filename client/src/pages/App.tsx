@@ -3233,7 +3233,7 @@ export default function AppPage() {
                                 </td>
                                 <td className="py-3 text-right font-mono">{trade.size}</td>
                                 <td className="py-3 text-right font-mono" title={priceDisplay.note || undefined}>
-                                  {priceDisplay.value === null ? priceDisplay.label : `$${priceDisplay.label}`}
+                                  {priceDisplay.label}
                                 </td>
                                 <td className="py-3 text-right">
                                   <div className="flex items-center justify-end gap-1">

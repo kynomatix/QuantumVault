@@ -58,7 +58,10 @@ import {
   selectPendingPartialCloseMarker,
   selectPendingPartialMarkerForFullClose,
 } from '../../server/reconciliation-service';
-import { buildAccountingIncompleteFlatPosition } from '../../server/trading/signal-bot-close-integrity';
+import {
+  buildAccountingIncompleteFlatPosition,
+  buildConfirmedFlatPosition,
+} from '../../server/trading/signal-bot-close-integrity';
 
 const walletAddress = 'wallet-public-address';
 const agentPublicKey = 'agent-public-address';
@@ -461,6 +464,27 @@ describe('reconciler full-close position epoch identity', () => {
 
     expect(falseFlatten.lastTradeId).toBe('entry-one');
     expect(laterCloseId).toBe(firstId);
+  });
+
+  it('preserves the entry epoch when exact venue money closes the position', () => {
+    const exactClose = buildConfirmedFlatPosition({
+      avgEntryPrice: '116500',
+      realizedPnl: '2',
+      totalFees: '0.1',
+      lastTradeId: 'entry-one',
+    }, {
+      realizedPnlDelta: 4.86,
+      feeDelta: 0.25,
+      tradeId: 'exact-close-row',
+      closedAt: new Date('2026-08-04T00:00:00.000Z'),
+    });
+
+    expect(exactClose).toMatchObject({
+      baseSize: '0',
+      realizedPnl: '6.860000',
+      totalFees: '0.350000',
+      lastTradeId: 'entry-one',
+    });
   });
 
   it('keeps a protocol fill identifier primary', () => {

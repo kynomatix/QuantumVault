@@ -98,6 +98,26 @@ export function resolveWithdrawalAuthority(
   return { allowed: true, reason: null };
 }
 
+export function resolveUnknownAccountingSettingsAuthority(input: {
+  accountingAvailable: boolean;
+  currentLeverage: number;
+  nextLeverage: number;
+  currentMaxPositionSize: number | null;
+  nextMaxPositionSize: number | null;
+}): { allowed: boolean; reason: "accounting_unavailable_for_risk_increase" | null } {
+  if (input.accountingAvailable) return { allowed: true, reason: null };
+
+  const leverageIncreases = input.nextLeverage > input.currentLeverage + 0.000001;
+  const positionLimitIncreases = input.currentMaxPositionSize === null
+    ? false
+    : input.nextMaxPositionSize === null
+      || input.nextMaxPositionSize > input.currentMaxPositionSize + 0.000001;
+
+  return leverageIncreases || positionLimitIncreases
+    ? { allowed: false, reason: "accounting_unavailable_for_risk_increase" }
+    : { allowed: true, reason: null };
+}
+
 // Smart price formatting: more decimals for prices under $1
 function formatPrice(price: number | undefined): string {
   if (price === undefined || price === null) return '--';
@@ -1341,10 +1361,20 @@ export function BotManagementDrawer({
     // Use small tolerance (0.01) to handle floating point precision when clicking "Max"
     const investmentValue = editMaxPositionSize ? parseFloat(editMaxPositionSize) : 0;
     const tolerance = 0.01;
-    if (investmentValue > 0 && botBalance === null) {
+    const calculatedMaxPosition = investmentValue * editLeverage;
+    const settingsAuthority = resolveUnknownAccountingSettingsAuthority({
+      accountingAvailable: botBalance !== null,
+      currentLeverage: localBot.leverage,
+      nextLeverage: editLeverage,
+      currentMaxPositionSize: localBot.maxPositionSize === null
+        ? null
+        : Number(localBot.maxPositionSize),
+      nextMaxPositionSize: calculatedMaxPosition > 0 ? calculatedMaxPosition : null,
+    });
+    if (!settingsAuthority.allowed) {
       toast({
         title: 'Accounting unavailable',
-        description: 'Bot equity is unavailable, so the position-size limit cannot be validated safely.',
+        description: 'Bot equity is unavailable, so leverage or position-size limits can only stay the same or be reduced.',
         variant: 'destructive',
       });
       return;
@@ -1369,9 +1399,6 @@ export function BotManagementDrawer({
       return;
     }
     
-    // Calculate leveraged max position size (investment × leverage) for backend
-    const calculatedMaxPosition = investmentValue * editLeverage;
-
     // Money-safety: ONLY send parkDestinationAsset when the user actually changed
     // the picker in THIS drawer session (relative to last-known server truth in
     // localBot). Sending it unconditionally lets a STALE drawer value re-drive the
@@ -2259,10 +2286,12 @@ export function BotManagementDrawer({
                     void fetchPerformanceData();
                     void fetchBotOverview();
                   }}
+                  disabled={overviewNetPnl === null}
+                  title={overviewNetPnl === null ? 'Performance sharing unavailable while accounting is incomplete' : undefined}
                   data-testid="button-share-performance"
                 >
                   <Share2 className="w-3.5 h-3.5" />
-                  Share Performance Card
+                  {overviewNetPnl === null ? 'Sharing unavailable - accounting incomplete' : 'Share Performance Card'}
                 </Button>
               </div>
             </div>
