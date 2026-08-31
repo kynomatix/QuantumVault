@@ -35,6 +35,44 @@ export const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
 export const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
+export type AgentDepositPreflightCode =
+  | 'source_usdc_account_missing'
+  | 'insufficient_source_usdc'
+  | 'insufficient_fee_sol'
+  | 'simulation_rejected'
+  | 'preflight_unavailable';
+
+/**
+ * A bounded, user-safe refusal produced before wallet signing is requested.
+ * The server may retain the underlying RPC/simulation detail in its own logs,
+ * but only this classification and message are allowed across the HTTP edge.
+ */
+export class AgentDepositPreflightError extends Error {
+  constructor(
+    readonly code: AgentDepositPreflightCode,
+    readonly httpStatus: 422 | 503,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = 'AgentDepositPreflightError';
+  }
+}
+
+export function agentDepositPreflightHttpResponse(error: unknown): {
+  status: 422 | 503;
+  body: { error: string; code: `agent_deposit_${AgentDepositPreflightCode}` };
+} | null {
+  if (!(error instanceof AgentDepositPreflightError)) return null;
+  return {
+    status: error.httpStatus,
+    body: {
+      error: error.message,
+      code: `agent_deposit_${error.code}`,
+    },
+  };
+}
+
 function getSolanaRpcUrl(): string {
   if (process.env.SOLANA_RPC_URL) {
     return process.env.SOLANA_RPC_URL;
@@ -348,10 +386,59 @@ export async function buildTransferToAgentTransaction(
   
   const userAta = getAssociatedTokenAddressSync(usdcMint, userPubkey);
   const agentAta = getAssociatedTokenAddressSync(usdcMint, agentPubkey);
-  
+
+  const transferAmountLamports = Math.round(amountUsdc * 1_000_000);
+  if (!Number.isSafeInteger(transferAmountLamports) || transferAmountLamports <= 0) {
+    throw new Error('Invalid transfer amount');
+  }
+
+  const rpc = async <T>(operation: string, fn: () => Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (cause) {
+      console.error(`[AgentDeposit] ${operation} unavailable during preflight`, cause);
+      throw new AgentDepositPreflightError(
+        'preflight_unavailable',
+        503,
+        'The deposit could not be verified safely right now. Please try again in a moment.',
+        { cause },
+      );
+    }
+  };
+
+  const userAtaInfo = await rpc('source account lookup', () => connection.getAccountInfo(userAta));
+  if (!userAtaInfo) {
+    throw new AgentDepositPreflightError(
+      'source_usdc_account_missing',
+      422,
+      'The connected wallet does not have a USDC account to fund this deposit.',
+    );
+  }
+
+  const sourceBalance = await rpc('source balance lookup', () => connection.getTokenAccountBalance(userAta));
+  let sourceAmountRaw: bigint;
+  try {
+    sourceAmountRaw = BigInt(sourceBalance.value.amount);
+  } catch (cause) {
+    console.error('[AgentDeposit] source balance was not a valid raw token amount', cause);
+    throw new AgentDepositPreflightError(
+      'preflight_unavailable',
+      503,
+      'The deposit could not be verified safely right now. Please try again in a moment.',
+      { cause },
+    );
+  }
+  if (sourceAmountRaw < BigInt(transferAmountLamports)) {
+    const availableUsdc = Number(sourceAmountRaw) / 1_000_000;
+    throw new AgentDepositPreflightError(
+      'insufficient_source_usdc',
+      422,
+      `The connected wallet has $${availableUsdc.toFixed(2)} USDC, but this deposit needs $${amountUsdc.toFixed(2)}.`,
+    );
+  }
+
+  const agentAtaInfo = await rpc('destination account lookup', () => connection.getAccountInfo(agentAta));
   const instructions: TransactionInstruction[] = [];
-  
-  const agentAtaInfo = await connection.getAccountInfo(agentAta);
   if (!agentAtaInfo) {
     instructions.push(
       createAssociatedTokenAccountInstruction(
@@ -361,11 +448,6 @@ export async function buildTransferToAgentTransaction(
         usdcMint
       )
     );
-  }
-  
-  const transferAmountLamports = Math.round(amountUsdc * 1_000_000);
-  if (transferAmountLamports <= 0) {
-    throw new Error('Invalid transfer amount');
   }
 
   instructions.push(
@@ -377,7 +459,10 @@ export async function buildTransferToAgentTransaction(
     )
   );
   
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  const { blockhash, lastValidBlockHeight } = await rpc(
+    'blockhash lookup',
+    () => connection.getLatestBlockhash(),
+  );
   
   const transaction = new Transaction({
     feePayer: userPubkey,
@@ -388,12 +473,56 @@ export async function buildTransferToAgentTransaction(
   for (const ix of instructions) {
     transaction.add(ix);
   }
-  
-  const serializedTx = transaction.serialize({ 
+
+  const [feeResult, payerLamports, destinationRentLamports] = await Promise.all([
+    rpc('transaction fee lookup', () => connection.getFeeForMessage(transaction.compileMessage())),
+    rpc('payer SOL balance lookup', () => connection.getBalance(userPubkey)),
+    agentAtaInfo
+      ? Promise.resolve(0)
+      : rpc('destination account rent lookup', () => connection.getMinimumBalanceForRentExemption(SPL_TOKEN_ACCOUNT_SIZE)),
+  ]);
+  if (feeResult.value === null) {
+    throw new AgentDepositPreflightError(
+      'preflight_unavailable',
+      503,
+      'The deposit fee could not be verified safely right now. Please try again in a moment.',
+    );
+  }
+  const requiredPayerLamports = feeResult.value + destinationRentLamports;
+  if (payerLamports < requiredPayerLamports) {
+    throw new AgentDepositPreflightError(
+      'insufficient_fee_sol',
+      422,
+      `The connected wallet needs about ${(requiredPayerLamports / LAMPORTS_PER_SOL).toFixed(6)} SOL for network fees${destinationRentLamports > 0 ? ' and the agent USDC account rent' : ''}.`,
+    );
+  }
+
+  const serializedBytes = transaction.serialize({
     requireAllSignatures: false,
-    verifySignatures: false 
-  }).toString('base64');
-  
+    verifySignatures: false,
+  });
+  const exactUnsignedTransaction = VersionedTransaction.deserialize(serializedBytes);
+  const simulation = await rpc(
+    'exact unsigned transaction simulation',
+    () => connection.simulateTransaction(exactUnsignedTransaction, {
+      commitment: 'confirmed',
+      sigVerify: false,
+    }),
+  );
+  if (simulation.value.err !== null) {
+    console.warn('[AgentDeposit] exact unsigned transaction simulation rejected', {
+      error: simulation.value.err,
+      unitsConsumed: simulation.value.unitsConsumed ?? null,
+    });
+    throw new AgentDepositPreflightError(
+      'simulation_rejected',
+      422,
+      'The deposit transaction could not be simulated safely. Check the connected wallet balances and try again.',
+    );
+  }
+
+  const serializedTx = serializedBytes.toString('base64');
+
   return {
     transaction: serializedTx,
     blockhash,

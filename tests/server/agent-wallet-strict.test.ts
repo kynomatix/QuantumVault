@@ -16,8 +16,15 @@
  *   to the returned Connection object are visible to the function under test.
  */
 
+import { Keypair, VersionedTransaction } from '@solana/web3.js';
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-import { getAgentUsdcBalanceStrict, getServerConnection } from '../../server/agent-wallet';
+import {
+  AgentDepositPreflightError,
+  agentDepositPreflightHttpResponse,
+  buildTransferToAgentTransaction,
+  getAgentUsdcBalanceStrict,
+  getServerConnection,
+} from '../../server/agent-wallet';
 
 // A valid base58-encoded 32-byte public key (System Program / all-zero pubkey).
 // Used as a placeholder agent address — the RPC methods are mocked so no
@@ -101,5 +108,140 @@ describe('getAgentUsdcBalanceStrict — connection seam contract (item 6)', () =
     const result = await getAgentUsdcBalanceStrict(TEST_AGENT_KEY);
 
     expect(result).toBe(0);
+  });
+});
+
+describe('buildTransferToAgentTransaction - fail-before-wallet preflight', () => {
+  let conn: ReturnType<typeof getServerConnection>;
+  const userWallet = Keypair.generate().publicKey.toBase58();
+  const agentWallet = Keypair.generate().publicKey.toBase58();
+  const accountInfo = { data: Buffer.alloc(165), executable: false, lamports: 2_039_280, owner: Keypair.generate().publicKey } as any;
+
+  beforeAll(() => {
+    conn = getServerConnection();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function tokenBalance(amount: string) {
+    return {
+      context: { slot: 1 },
+      value: { amount, decimals: 6, uiAmount: Number(amount) / 1_000_000, uiAmountString: (Number(amount) / 1_000_000).toString() },
+    } as any;
+  }
+
+  function blockhash() {
+    return { blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 123 };
+  }
+
+  it('refuses a missing source USDC account before blockhash or simulation', async () => {
+    vi.spyOn(conn, 'getAccountInfo').mockResolvedValueOnce(null);
+    const blockhashSpy = vi.spyOn(conn, 'getLatestBlockhash');
+    const simulationSpy = vi.spyOn(conn, 'simulateTransaction');
+
+    await expect(buildTransferToAgentTransaction(userWallet, agentWallet, 10)).rejects.toMatchObject({
+      name: 'AgentDepositPreflightError',
+      code: 'source_usdc_account_missing',
+      httpStatus: 422,
+    });
+    expect(blockhashSpy).not.toHaveBeenCalled();
+    expect(simulationSpy).not.toHaveBeenCalled();
+  });
+
+  it('compares exact raw USDC and refuses an insufficient source before building', async () => {
+    vi.spyOn(conn, 'getAccountInfo').mockResolvedValueOnce(accountInfo);
+    vi.spyOn(conn, 'getTokenAccountBalance').mockResolvedValueOnce(tokenBalance('9999999'));
+    const blockhashSpy = vi.spyOn(conn, 'getLatestBlockhash');
+
+    await expect(buildTransferToAgentTransaction(userWallet, agentWallet, 10)).rejects.toMatchObject({
+      code: 'insufficient_source_usdc',
+      httpStatus: 422,
+    });
+    expect(blockhashSpy).not.toHaveBeenCalled();
+  });
+
+  it('includes exact destination ATA rent and message fee in the payer SOL refusal', async () => {
+    vi.spyOn(conn, 'getAccountInfo')
+      .mockResolvedValueOnce(accountInfo)
+      .mockResolvedValueOnce(null);
+    vi.spyOn(conn, 'getTokenAccountBalance').mockResolvedValueOnce(tokenBalance('10000000'));
+    vi.spyOn(conn, 'getLatestBlockhash').mockResolvedValueOnce(blockhash());
+    vi.spyOn(conn, 'getFeeForMessage').mockResolvedValueOnce({ context: { slot: 1 }, value: 5000 });
+    vi.spyOn(conn, 'getBalance').mockResolvedValueOnce(2_040_000);
+    vi.spyOn(conn, 'getMinimumBalanceForRentExemption').mockResolvedValueOnce(2_039_280);
+    const simulationSpy = vi.spyOn(conn, 'simulateTransaction');
+
+    await expect(buildTransferToAgentTransaction(userWallet, agentWallet, 10)).rejects.toMatchObject({
+      code: 'insufficient_fee_sol',
+      httpStatus: 422,
+    });
+    expect(conn.getMinimumBalanceForRentExemption).toHaveBeenCalledWith(165);
+    expect(simulationSpy).not.toHaveBeenCalled();
+  });
+
+  it('simulates the exact unsigned outbound bytes with signature verification disabled', async () => {
+    vi.spyOn(conn, 'getAccountInfo')
+      .mockResolvedValueOnce(accountInfo)
+      .mockResolvedValueOnce(accountInfo);
+    vi.spyOn(conn, 'getTokenAccountBalance').mockResolvedValueOnce(tokenBalance('25000000'));
+    vi.spyOn(conn, 'getLatestBlockhash').mockResolvedValueOnce(blockhash());
+    vi.spyOn(conn, 'getFeeForMessage').mockResolvedValueOnce({ context: { slot: 1 }, value: 5000 });
+    vi.spyOn(conn, 'getBalance').mockResolvedValueOnce(1_000_000_000);
+    let simulatedBytes = '';
+    vi.spyOn(conn, 'simulateTransaction').mockImplementationOnce((async (transaction: VersionedTransaction, config: any) => {
+      simulatedBytes = Buffer.from(transaction.serialize()).toString('base64');
+      expect(config).toMatchObject({ commitment: 'confirmed', sigVerify: false });
+      return { context: { slot: 1 }, value: { err: null, logs: [], unitsConsumed: 2100 } } as any;
+    }) as any);
+
+    const result = await buildTransferToAgentTransaction(userWallet, agentWallet, 10);
+
+    expect(result.transaction).toBe(simulatedBytes);
+    expect(result.blockhash).toBeTruthy();
+    expect(result.lastValidBlockHeight).toBe(123);
+  });
+
+  it('refuses a non-null simulation error and never returns transaction bytes', async () => {
+    vi.spyOn(conn, 'getAccountInfo')
+      .mockResolvedValueOnce(accountInfo)
+      .mockResolvedValueOnce(accountInfo);
+    vi.spyOn(conn, 'getTokenAccountBalance').mockResolvedValueOnce(tokenBalance('25000000'));
+    vi.spyOn(conn, 'getLatestBlockhash').mockResolvedValueOnce(blockhash());
+    vi.spyOn(conn, 'getFeeForMessage').mockResolvedValueOnce({ context: { slot: 1 }, value: 5000 });
+    vi.spyOn(conn, 'getBalance').mockResolvedValueOnce(1_000_000_000);
+    vi.spyOn(conn, 'simulateTransaction').mockResolvedValueOnce({
+      context: { slot: 1 },
+      value: { err: { InstructionError: [0, 'Custom'] }, logs: ['private provider detail'] },
+    } as any);
+
+    await expect(buildTransferToAgentTransaction(userWallet, agentWallet, 10)).rejects.toMatchObject({
+      code: 'simulation_rejected',
+      httpStatus: 422,
+      message: expect.not.stringContaining('private provider detail'),
+    });
+  });
+
+  it('classifies RPC inability separately from deterministic user shortfalls', async () => {
+    vi.spyOn(conn, 'getAccountInfo').mockRejectedValueOnce(new Error('provider-secret-detail'));
+
+    await expect(buildTransferToAgentTransaction(userWallet, agentWallet, 10)).rejects.toMatchObject({
+      code: 'preflight_unavailable',
+      httpStatus: 503,
+      message: expect.not.stringContaining('provider-secret-detail'),
+    });
+  });
+
+  it('maps only typed refusals to bounded HTTP responses', () => {
+    expect(agentDepositPreflightHttpResponse(new AgentDepositPreflightError(
+      'insufficient_source_usdc',
+      422,
+      'safe message',
+    ))).toEqual({
+      status: 422,
+      body: { error: 'safe message', code: 'agent_deposit_insufficient_source_usdc' },
+    });
+    expect(agentDepositPreflightHttpResponse(new Error('unknown'))).toBeNull();
   });
 });
