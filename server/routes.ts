@@ -8351,6 +8351,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       let allocatedToBot: number | null = 0;
       let capitalIncompleteCloseCount = 0;
       let capitalBalanceUnavailable = false;
+      let capitalRealizedAccountingIncomplete = false;
 
       for (const bot of bots) {
         const accountingIncompleteCloseCount = capitalEnrichment.accountingIncompleteCounts.get(bot.id) ?? 0;
@@ -8364,9 +8365,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             const liveInfo = await getExchangeAccountInfoForBot('', 0, capBotCtx, capAdapter);
             // RAW exchange collateral only — capital pool feeds withdraw validation.
             // Venue collateral remains independently authoritative even when the
-            // historical realized prefix is incomplete.
+            // historical realized prefix is unavailable. Never label an initializer
+            // zero as complete realized PnL.
             botBalance = liveInfo.totalCollateral;
-            if (accountingIncompleteCloseCount > 0) realizedPnl = null;
+            realizedPnl = null;
           } else if (accountingIncompleteCloseCount > 0) {
             botBalance = null;
             realizedPnl = null;
@@ -8396,6 +8398,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           realizedPnl = null;
           capitalBalanceUnavailable = true;
         }
+        if (realizedPnl === null) capitalRealizedAccountingIncomplete = true;
 
         allocatedToBot = allocatedToBot === null || botBalance === null
           ? null
@@ -8407,7 +8410,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           balance: botBalance,
           realizedPnl,
           accountingIncompleteCloseCount,
-          realizedAccountingStatus: accountingIncompleteCloseCount > 0 || botBalance === null ? 'incomplete' : 'complete',
+          realizedAccountingStatus: accountingIncompleteCloseCount > 0 || realizedPnl === null || botBalance === null ? 'incomplete' : 'complete',
         });
       }
 
@@ -8422,7 +8425,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         totalEquity,
         botAllocations,
         accountingIncompleteCloseCount: capitalIncompleteCloseCount,
-        realizedAccountingStatus: capitalIncompleteCloseCount > 0 || capitalBalanceUnavailable ? 'incomplete' : 'complete',
+        realizedAccountingStatus: capitalIncompleteCloseCount > 0 || capitalRealizedAccountingIncomplete || capitalBalanceUnavailable ? 'incomplete' : 'complete',
         capitalBalanceStatus: allocatedToBot === null ? 'unavailable' : 'available',
         pricesAsOf: capPricesAsOf,
         pricesStale: capPricesStale,

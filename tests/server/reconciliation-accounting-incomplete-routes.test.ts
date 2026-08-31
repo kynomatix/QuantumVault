@@ -7,6 +7,13 @@ const TEST_BOT = "bot-accounting-incomplete";
 const storageTarget = vi.hoisted(() => ({} as Record<string, ReturnType<typeof vi.fn>>));
 const routeMocks = vi.hoisted(() => ({
   getAgentUsdcBalance: vi.fn(async () => 100),
+  getAccountInfo: vi.fn(async () => ({
+    balance: 125,
+    equity: 125,
+    availableMargin: 100,
+    maintenanceMargin: 0,
+    unrealizedPnl: 0,
+  })),
   getPosition: vi.fn(async () => ({
     position: null,
     source: "database",
@@ -53,7 +60,9 @@ vi.mock("../../server/session-v3", () => ({
   BOT_DERIVATION_PATH_VERSION: 1,
 }));
 vi.mock("../../server/protocol/adapter-registry", () => ({
-  getAdapter: vi.fn(() => ({})), getDefaultAdapter: vi.fn(() => ({})), getAdapterForBot: vi.fn(() => ({})),
+  getAdapter: vi.fn(() => ({})),
+  getDefaultAdapter: vi.fn(() => ({})),
+  getAdapterForBot: vi.fn(() => ({ getAccountInfo: routeMocks.getAccountInfo })),
 }));
 vi.mock("../../server/agent-wallet", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../server/agent-wallet")>();
@@ -187,6 +196,37 @@ describe("accounting-incomplete read routes", () => {
     expect(response.body.botAllocations[0]).toMatchObject({
       balance: null,
       realizedPnl: null,
+      realizedAccountingStatus: "incomplete",
+    });
+  });
+
+  it("labels live collateral realized PnL unavailable instead of fabricating a complete zero", async () => {
+    (storage.getTradingBots as any).mockResolvedValueOnce([{
+      ...bot,
+      subaccountAuthMode: "external_key",
+      subaccountStatus: "active",
+      protocolSubaccountId: "bot-subaccount",
+      botSubaccountKeyEncryptedV3: "ciphertext",
+    }]);
+    (storage.getTradingBotListEnrichment as any).mockResolvedValueOnce({
+      tradeCounts: new Map([[TEST_BOT, 3]]),
+      accountingIncompleteCounts: new Map([[TEST_BOT, 0]]),
+      positions: new Map(), publishedBotMap: new Map(), equityAgg: new Map(), borrowDebts: new Map(),
+    });
+
+    const response = await get("/api/wallet/capital");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      allocatedToBot: 125,
+      realizedAccountingStatus: "incomplete",
+      capitalBalanceStatus: "available",
+    });
+    expect(response.body.botAllocations[0]).toMatchObject({
+      botId: TEST_BOT,
+      balance: 125,
+      realizedPnl: null,
+      accountingIncompleteCloseCount: 0,
       realizedAccountingStatus: "incomplete",
     });
   });

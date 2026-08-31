@@ -477,6 +477,7 @@ describe('reconciler full-close position epoch identity', () => {
       feeDelta: 0.25,
       tradeId: 'exact-close-row',
       closedAt: new Date('2026-08-04T00:00:00.000Z'),
+      preservePositionEpoch: true,
     });
 
     expect(exactClose).toMatchObject({
@@ -485,6 +486,22 @@ describe('reconciler full-close position epoch identity', () => {
       totalFees: '0.350000',
       lastTradeId: 'entry-one',
     });
+  });
+
+  it('keeps non-reconciler confirmed closes on their close-row identity', () => {
+    const exactClose = buildConfirmedFlatPosition({
+      avgEntryPrice: '116500',
+      realizedPnl: '2',
+      totalFees: '0.1',
+      lastTradeId: 'entry-one',
+    }, {
+      realizedPnlDelta: 4.86,
+      feeDelta: 0.25,
+      tradeId: 'manual-close-row',
+      closedAt: new Date('2026-08-04T00:00:00.000Z'),
+    });
+
+    expect(exactClose.lastTradeId).toBe('manual-close-row');
   });
 
   it('keeps a protocol fill identifier primary', () => {
@@ -539,6 +556,7 @@ describe('reconciler full-close position epoch identity', () => {
         walletAddress,
         market,
         feeDelta: 0.25,
+        preservePositionEpoch: true,
       }),
     }));
     expect(mocks.storage.upsertBotPosition).not.toHaveBeenCalled();

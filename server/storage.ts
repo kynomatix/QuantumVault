@@ -776,6 +776,7 @@ export interface IStorage {
       market: string;
       realizedPnlDelta: number;
       feeDelta: number;
+      preservePositionEpoch?: boolean;
     };
     confirmedPositionReduction?: {
       market: string;
@@ -2491,6 +2492,7 @@ export class DatabaseStorage implements IStorage {
       market: string;
       realizedPnlDelta: number;
       feeDelta: number;
+      preservePositionEpoch?: boolean;
     };
     confirmedPositionReduction?: {
       market: string;
@@ -2575,6 +2577,7 @@ export class DatabaseStorage implements IStorage {
               feeDelta: opts.confirmedPositionClose.feeDelta,
               tradeId: trade.id,
               closedAt: new Date(),
+              preservePositionEpoch: opts.confirmedPositionClose.preservePositionEpoch,
             })
           : buildAccountingIncompleteFlatPosition(positionRows[0], {
               tradeId: trade.id,
@@ -3048,8 +3051,9 @@ export class DatabaseStorage implements IStorage {
       ),
       sql`${botTrades.pnl} IS NOT NULL`,
       // Drop phantom duplicate closes so the series length (tradeCount on the
-      // performance card) matches getCanonicalBotTradeStats. MUST stay in
-      // lockstep with that function's filter.
+      // performance card) matches getCanonicalBotTradeStats. That function
+      // additionally filters null PnL in application code; this query enforces
+      // the same requirement above with IS NOT NULL.
       notPhantomDupClose(),
     ];
     if (since) {

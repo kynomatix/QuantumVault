@@ -275,6 +275,8 @@ export interface ConfirmedPositionCloseInput {
   feeDelta: number;
   tradeId: string;
   closedAt: Date;
+  /** Reconciler closes retain the entry epoch used by the no-fill dedup key. */
+  preservePositionEpoch?: boolean;
 }
 
 export interface ExistingPositionAccounting {
@@ -312,10 +314,11 @@ export function buildConfirmedFlatPosition(
     totalFees: new Decimal(existing?.totalFees ?? "0")
       .plus(input.feeDelta)
       .toFixed(6),
-    // A close ends exposure; it does not create a new entry epoch. Preserve the
-    // durable entry identity so a later resync/recovery derives the same close
-    // key instead of treating the close row as a fresh position epoch.
-    lastTradeId: existing?.lastTradeId ?? input.tradeId,
+    // Only the reconciler's no-fill identity is tied to the entry epoch. Other
+    // confirmed-close paths retain their established close-row identity.
+    lastTradeId: input.preservePositionEpoch
+      ? existing?.lastTradeId ?? input.tradeId
+      : input.tradeId,
     lastTradeAt: input.closedAt,
   };
 }

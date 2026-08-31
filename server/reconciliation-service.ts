@@ -1633,6 +1633,7 @@ export async function reconcileBotPosition(
               market,
               realizedPnlDelta: closePnl,
               feeDelta: closeFee,
+              preservePositionEpoch: true,
             },
             supersedePendingPartialTradeId: pendingPartialFullClose.trade.id,
           });
@@ -1665,7 +1666,7 @@ export async function reconcileBotPosition(
                 price: closeFillPrice,
                 pnl: closePnl,
                 closeReason: getCloseReasonLabel(closeDetection.reason, closeDetection.tpslSubtype),
-              }).catch((error) => console.error(`[Reconcile] Notification error for bot ${botId}:`, error));
+          }).catch((error) => console.error(`[Reconcile] Notification error for bot ${botId}:`, error));
             } catch (error) {
               console.error(`[Reconcile] Failed to dispatch close notification for bot ${botId}:`, error);
             }
@@ -1779,6 +1780,7 @@ export async function reconcileBotPosition(
               market,
               realizedPnlDelta: closePnl,
               feeDelta: closeFee,
+              preservePositionEpoch: true,
             },
           });
           console.log(
@@ -1945,7 +1947,7 @@ export async function reconcileBotPosition(
             ? { totalPnlDelta: closePnl!, totalVolumeDelta: closeNotional!, lastTradeAt: new Date().toISOString() }
             : { lastTradeAt: new Date().toISOString() },
           ...(exactAccounting
-            ? { confirmedPositionClose: { walletAddress, market, realizedPnlDelta: closePnl!, feeDelta: closeFee! } }
+            ? { confirmedPositionClose: { walletAddress, market, realizedPnlDelta: closePnl!, feeDelta: closeFee!, preservePositionEpoch: true } }
             : { confirmedPositionCloseIncomplete: { walletAddress, market } }),
         });
 
@@ -1963,17 +1965,17 @@ export async function reconcileBotPosition(
           const reasonLabel = getCloseReasonLabel(closeDetection.reason, closeDetection.tpslSubtype);
           const botRow = await storage.getTradingBotById(botId);
           const botName = botRow?.name ?? 'Bot';
-            sendTradeNotification(walletAddress, {
+          sendTradeNotification(walletAddress, {
             type: 'position_closed',
             botName,
             market,
             side: dbBaseSize > 0 ? 'LONG' : 'SHORT',
             size: Math.abs(dbBaseSize),
             price: closeFillPrice,
-              pnl: closePnl ?? undefined,
-              closeReason: reasonLabel,
-              accountingIncomplete: !exactAccounting,
-            }).catch(err => console.error(`[Reconcile] Notification error for bot ${botId}:`, err));
+            pnl: closePnl ?? undefined,
+            closeReason: reasonLabel,
+            accountingIncomplete: !exactAccounting,
+          }).catch(err => console.error(`[Reconcile] Notification error for bot ${botId}:`, err));
         } catch (notifErr) {
           console.error(`[Reconcile] Failed to dispatch close notification for bot ${botId}:`, notifErr);
         }
