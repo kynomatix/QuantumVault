@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildAccountingIncompleteFlatPosition,
   buildRemediatedPositionAccounting,
@@ -8,6 +8,9 @@ import {
   closeFeePersistence,
   isReconcilerAccountingIncompletePayload,
 } from "../../server/trading/signal-bot-close-integrity";
+import { formatNotificationMessage } from "../../server/notification-service";
+
+vi.mock("../../server/db", () => ({ db: {} }));
 
 const quote = {
   availability: "available" as const,
@@ -23,6 +26,19 @@ const quote = {
 };
 
 describe("close fee evidence", () => {
+  it("renders the accounting-incomplete close notification as valid UTF-8 truth", () => {
+    expect(formatNotificationMessage({
+      type: "position_closed",
+      botName: "Alpha <One>",
+      market: "BTC-PERP",
+      accountingIncomplete: true,
+      closeReason: "venue fill unavailable",
+    })).toEqual({
+      title: "📊 Position Closed",
+      body: "⚠️ Alpha &lt;One&gt;: BTC-PERP — PnL unavailable; accounting incomplete (venue fill unavailable)",
+    });
+  });
+
   it("requires an attributed fill and every finite money fact before calling reconciler accounting exact", () => {
     expect(classifyReconcilerCloseAccounting({
       protocolFillId: "fill-1",

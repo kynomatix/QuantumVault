@@ -1666,7 +1666,7 @@ export async function reconcileBotPosition(
                 price: closeFillPrice,
                 pnl: closePnl,
                 closeReason: getCloseReasonLabel(closeDetection.reason, closeDetection.tpslSubtype),
-          }).catch((error) => console.error(`[Reconcile] Notification error for bot ${botId}:`, error));
+              }).catch((error) => console.error(`[Reconcile] Notification error for bot ${botId}:`, error));
             } catch (error) {
               console.error(`[Reconcile] Failed to dispatch close notification for bot ${botId}:`, error);
             }

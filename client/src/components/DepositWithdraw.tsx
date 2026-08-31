@@ -5,16 +5,27 @@ import { ArrowDownToLine, ArrowUpFromLine, Loader2, Wallet, Bot, TrendingUp } fr
 import { Button } from '@/components/ui/button';
 import { useWallet } from '@/hooks/useWallet';
 
-interface CapitalPool {
+export interface CapitalPool {
   mainAccountBalance: number | null;
   allocatedToBot: number | null;
   totalEquity: number;
   accountingIncompleteCloseCount?: number;
   realizedAccountingStatus?: 'complete' | 'incomplete';
+  capitalBalanceStatus?: 'available' | 'unavailable';
 }
 
 export function formatCapitalAmount(value: number | null | undefined): string {
   return typeof value === 'number' && Number.isFinite(value) ? `$${value.toFixed(2)}` : '--';
+}
+
+export function resolveCapitalAccountingWarning(capitalPool: CapitalPool | null): string | null {
+  if (!capitalPool || capitalPool.realizedAccountingStatus !== 'incomplete') return null;
+  const closeCount = capitalPool.accountingIncompleteCloseCount ?? 0;
+  const balanceUnavailable = capitalPool.capitalBalanceStatus === 'unavailable';
+  if (closeCount > 0) {
+    return `Realized accounting is incomplete for ${closeCount} close event(s)${balanceUnavailable ? '; derived balances are unavailable' : ''}.`;
+  }
+  return balanceUnavailable ? 'Derived balances are unavailable.' : null;
 }
 
 interface DepositWithdrawProps {
@@ -26,6 +37,7 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
   
   const [capitalPool, setCapitalPool] = useState<CapitalPool | null>(null);
   const [capitalLoading, setCapitalLoading] = useState(false);
+  const capitalAccountingWarning = resolveCapitalAccountingWarning(capitalPool);
 
   const fetchCapitalPool = async () => {
     if (!publicKeyString) return;
@@ -105,9 +117,9 @@ export function DepositWithdraw({ onShowWalletTab }: DepositWithdrawProps) {
             </div>
           </div>
 
-          {capitalPool?.realizedAccountingStatus === 'incomplete' && (
+          {capitalAccountingWarning && (
             <p className="text-xs text-amber-400" data-testid="text-capital-accounting-incomplete">
-              Realized accounting is incomplete for {capitalPool.accountingIncompleteCloseCount ?? 0} close event(s); derived balances are unavailable.
+              {capitalAccountingWarning}
             </p>
           )}
 

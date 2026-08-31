@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { resolveTradePriceDisplay } from "../../client/src/components/TradeHistoryModal";
-import { formatCapitalAmount } from "../../client/src/components/DepositWithdraw";
+import {
+  formatCapitalAmount,
+  resolveCapitalAccountingWarning,
+} from "../../client/src/components/DepositWithdraw";
 import {
   deriveKnownBotEquity,
   resolveUnknownAccountingSettingsAuthority,
@@ -93,6 +96,30 @@ describe("accounting-incomplete client surfaces", () => {
     expect(formatCapitalAmount(null)).toBe("--");
     expect(formatCapitalAmount(undefined)).toBe("--");
     expect(formatCapitalAmount(12.5)).toBe("$12.50");
+    expect(resolveCapitalAccountingWarning({
+      mainAccountBalance: 10,
+      allocatedToBot: 5,
+      totalEquity: 15,
+      accountingIncompleteCloseCount: 0,
+      realizedAccountingStatus: "complete",
+      capitalBalanceStatus: "available",
+    })).toBeNull();
+    expect(resolveCapitalAccountingWarning({
+      mainAccountBalance: null,
+      allocatedToBot: null,
+      totalEquity: 15,
+      accountingIncompleteCloseCount: 2,
+      realizedAccountingStatus: "incomplete",
+      capitalBalanceStatus: "unavailable",
+    })).toBe("Realized accounting is incomplete for 2 close event(s); derived balances are unavailable.");
+    expect(resolveCapitalAccountingWarning({
+      mainAccountBalance: null,
+      allocatedToBot: null,
+      totalEquity: 15,
+      accountingIncompleteCloseCount: 0,
+      realizedAccountingStatus: "incomplete",
+      capitalBalanceStatus: "unavailable",
+    })).toBe("Derived balances are unavailable.");
     const source = readFileSync("client/src/components/DepositWithdraw.tsx", "utf8");
     expect(source).toContain("text-capital-accounting-incomplete");
     expect(source).not.toContain("capitalPool?.mainAccountBalance ?? 0");

@@ -546,7 +546,7 @@ export async function sendLoopSafetyNotification(
   }
 }
 
-function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
+export function formatNotificationMessage(notification: TradeNotification): { title: string; body: string } {
   const { type, size, price, pnl } = notification;
   // Escape user/creator-derived values (bot names, symbols, error text) before
   // they are interpolated into the HTML message body. Bot names in particular
@@ -576,8 +576,8 @@ function formatNotificationMessage(notification: TradeNotification): { title: st
       if (notification.accountingIncomplete) {
         const reasonSuffix = notification.closeReason ? ` (${escapeTelegramHtml(notification.closeReason)})` : '';
         return {
-          title: `ðŸ“Š Position Closed`,
-          body: `âš ï¸ ${botName}: ${market} â€” PnL unavailable; accounting incomplete${reasonSuffix}`,
+          title: `📊 Position Closed`,
+          body: `⚠️ ${botName}: ${market} — PnL unavailable; accounting incomplete${reasonSuffix}`,
         };
       }
       const pnlStr = pnl !== undefined 

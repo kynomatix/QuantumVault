@@ -219,7 +219,8 @@ describe("accounting-incomplete read routes", () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
       allocatedToBot: 125,
-      realizedAccountingStatus: "incomplete",
+      accountingIncompleteCloseCount: 0,
+      realizedAccountingStatus: "complete",
       capitalBalanceStatus: "available",
     });
     expect(response.body.botAllocations[0]).toMatchObject({

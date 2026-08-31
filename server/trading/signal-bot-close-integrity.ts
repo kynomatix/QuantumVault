@@ -289,8 +289,9 @@ export interface ExistingPositionAccounting {
 /**
  * Produce the position values written when an authoritative venue read has
  * confirmed a full close. The caller owns transactionality and row locking;
- * this helper owns exact decimal accumulation and the invariant that a full
- * close retains the historical entry reference while zeroing exposure/basis.
+ * this helper owns exact decimal accumulation and zeroing exposure/basis.
+ * Reconciler-confirmed no-fill closes may preserve the historical entry
+ * reference explicitly; ordinary close writers advance to the close row.
  */
 export function buildConfirmedFlatPosition(
   existing: ExistingPositionAccounting | undefined,
