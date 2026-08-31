@@ -530,37 +530,53 @@ export function setDatafeedIncidentReporter(
  *
  * Two independent nets, both with strong references:
  *  1. A manually-managed AbortController + setTimeout closure (strong refs,
- *     immune to the signal-GC class). Deliberately NOT cleared on return, so
- *     a stalled body read (`res.json()` at the call site) is also aborted at
- *     the deadline; aborting an already-consumed response is a no-op.
+ *     immune to the signal-GC class). Its lifetime includes response-body
+ *     consumption, so a stalled `json()` or `text()` read is also aborted at
+ *     the deadline.
  *  2. A Promise.race hard reject at ms+5s, so this await settles even if the
  *     abort plumbing itself wedges.
  *
- * NOTE: the race (net #2) covers only the header phase — body reads at the
- * call site (`res.json()`/`res.text()`) are protected only by net #1. The
- * scanner's sweep-level drain cap is the ultimate guarantor if both fail.
+ * NOTE: the race (net #2) covers only the header phase; body reads are
+ * protected by net #1 and the external caller-abort relay. Callers must use
+ * the returned body readers and release the handle in `finally` so neither
+ * timer nor listener outlives the owning request.
  */
+type BoundedFetchResponse = Readonly<{
+  response: Response;
+  json: <T = any>() => Promise<T>;
+  text: () => Promise<string>;
+  release: () => void;
+}>;
+
 async function fetchWithHardTimeout(
   url: string,
   ms: number,
   init?: RequestInit,
   externalSignal?: AbortSignal,
   transport: 'default' | 'hermes' = 'default',
-): Promise<Response> {
+): Promise<BoundedFetchResponse> {
   throwIfAborted(externalSignal);
   const controller = new AbortController();
-  setTimeout(() => controller.abort(), ms);
+  const controllerTimer = setTimeout(() => controller.abort(), ms);
   // External cancellation is forwarded via a MANUAL listener with strong refs
   // — deliberately NOT AbortSignal.any(), which belongs to the same weak-ref
   // GC class that let AbortSignal.timeout silently never fire (incident above).
-  // Removed in finally so a long-lived sweep signal doesn't accumulate one
-  // listener per request.
+  // Retained through body consumption so cancellation after headers still
+  // reaches a stalled body. `release` removes it exactly once.
   const onExternalAbort = () => controller.abort();
   externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
   let raceTimer: NodeJS.Timeout | undefined;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearTimeout(controllerTimer);
+    if (raceTimer) clearTimeout(raceTimer);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
+  };
   try {
     const request = transport === 'hermes' ? hermesFetch : fetch;
-    return await Promise.race([
+    const response = await Promise.race([
       request(url, { ...init, signal: controller.signal }),
       new Promise<never>((_, reject) => {
         raceTimer = setTimeout(
@@ -569,9 +585,22 @@ async function fetchWithHardTimeout(
         );
       }),
     ]);
-  } finally {
-    if (raceTimer) clearTimeout(raceTimer);
-    externalSignal?.removeEventListener("abort", onExternalAbort);
+    const consume = async <T>(reader: () => Promise<T>): Promise<T> => {
+      try {
+        return await reader();
+      } finally {
+        release();
+      }
+    };
+    return Object.freeze({
+      response,
+      json: <T = any>() => consume(() => response.json() as Promise<T>),
+      text: () => consume(() => response.text()),
+      release,
+    });
+  } catch (error) {
+    release();
+    throw error;
   }
 }
 
@@ -593,42 +622,48 @@ async function fetchGateCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchWithHardTimeout(url, 15000, undefined, signal);
-      if (res.status === 429) {
-        const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
-        console.log(`[Gate Spot] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
-        await abortableSleep(wait, signal);
-        continue;
-      }
-      if (!res.ok) {
-        const text = await res.text();
-        // INVALID_CURRENCY_PAIR ("ORE_USDT") and INVALID_CURRENCY ("XMR") are
-        // both permanent not-listed errors. The bare INVALID_CURRENCY variant
-        // was previously unmatched → retried forever, never negcached (prod
-        // incident 2026-07-18: XMR burned ~40s of sweep budget every 15m).
-        if (res.status === 400 && (text.includes("INVALID_CURRENCY") || text.includes("currency_pair"))) {
-          throw new GatePairNotFoundError(pair, text);
+      const bounded = await fetchWithHardTimeout(url, 15000, undefined, signal);
+      const res = bounded.response;
+      try {
+        if (res.status === 429) {
+          bounded.release();
+          const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
+          console.log(`[Gate Spot] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
+          await abortableSleep(wait, signal);
+          continue;
         }
-        if (res.status === 400 && text.includes("too broad")) {
-          const halfRange = Math.floor((toSec - fromSec) / 2);
-          if (halfRange > 60) {
-            console.log(`[Gate Spot] Range too broad, splitting chunk in half (${halfRange}s)`);
-            const firstHalf = await fetchGateCandles(pair, interval, fromSec, fromSec + halfRange, signal);
-            const secondHalf = await fetchGateCandles(pair, interval, fromSec + halfRange, toSec, signal);
-            return [...firstHalf, ...secondHalf];
+        if (!res.ok) {
+          const text = await bounded.text();
+          // INVALID_CURRENCY_PAIR ("ORE_USDT") and INVALID_CURRENCY ("XMR") are
+          // both permanent not-listed errors. The bare INVALID_CURRENCY variant
+          // was previously unmatched → retried forever, never negcached (prod
+          // incident 2026-07-18: XMR burned ~40s of sweep budget every 15m).
+          if (res.status === 400 && (text.includes("INVALID_CURRENCY") || text.includes("currency_pair"))) {
+            throw new GatePairNotFoundError(pair, text);
           }
+          if (res.status === 400 && text.includes("too broad")) {
+            const halfRange = Math.floor((toSec - fromSec) / 2);
+            if (halfRange > 60) {
+              console.log(`[Gate Spot] Range too broad, splitting chunk in half (${halfRange}s)`);
+              const firstHalf = await fetchGateCandles(pair, interval, fromSec, fromSec + halfRange, signal);
+              const secondHalf = await fetchGateCandles(pair, interval, fromSec + halfRange, toSec, signal);
+              return [...firstHalf, ...secondHalf];
+            }
+          }
+          if (res.status === 400 && text.includes("too long ago")) {
+            console.log(`[Gate Spot] Data too old for ${pair}, skipping this chunk`);
+            return [];
+          }
+          throw new Error(`Gate.io Spot API error ${res.status}: ${text}`);
         }
-        if (res.status === 400 && text.includes("too long ago")) {
-          console.log(`[Gate Spot] Data too old for ${pair}, skipping this chunk`);
-          return [];
+        const json = await bounded.json();
+        if (!Array.isArray(json)) {
+          throw new Error(`Gate.io Spot unexpected response: ${JSON.stringify(json).slice(0, 200)}`);
         }
-        throw new Error(`Gate.io Spot API error ${res.status}: ${text}`);
+        return json;
+      } finally {
+        bounded.release();
       }
-      const json = await res.json();
-      if (!Array.isArray(json)) {
-        throw new Error(`Gate.io Spot unexpected response: ${JSON.stringify(json).slice(0, 200)}`);
-      }
-      return json;
     } catch (err: any) {
       // Cancellation FIRST — before any retry accounting (rule 1 above).
       throwIfAborted(signal);
@@ -833,29 +868,35 @@ async function fetchPythCandlesInner(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchWithHardTimeout(url, 20000, undefined, signal, 'hermes');
-      if ((res.status === 401 || res.status === 403) && !pythBenchmarksAuthWarned) {
-        pythBenchmarksAuthWarned = true;
-        console.error(
-          `[Pyth] Benchmarks returned HTTP ${res.status}: candle source now requires ` +
-            'authentication. Set PYTH_HERMES_API_KEY / PYTH_BENCHMARKS_BASE.',
-        );
-      }
-      if (res.status === 429) {
-        const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
-        console.log(`[Pyth] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
-        await abortableSleep(wait, signal);
-        continue;
-      }
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`Pyth API error ${res.status}: ${text}`);
-      }
-      const json = await res.json();
-      if (json.s === "error" || json.s === "no_data") {
+      const bounded = await fetchWithHardTimeout(url, 20000, undefined, signal, 'hermes');
+      const res = bounded.response;
+      try {
+        if ((res.status === 401 || res.status === 403) && !pythBenchmarksAuthWarned) {
+          pythBenchmarksAuthWarned = true;
+          console.error(
+            `[Pyth] Benchmarks returned HTTP ${res.status}: candle source now requires ` +
+              'authentication. Set PYTH_HERMES_API_KEY / PYTH_BENCHMARKS_BASE.',
+          );
+        }
+        if (res.status === 429) {
+          bounded.release();
+          const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
+          console.log(`[Pyth] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
+          await abortableSleep(wait, signal);
+          continue;
+        }
+        if (!res.ok) {
+          const text = await bounded.text();
+          throw new Error(`Pyth API error ${res.status}: ${text}`);
+        }
+        const json = await bounded.json();
+        if (json.s === "error" || json.s === "no_data") {
+          return json;
+        }
         return json;
+      } finally {
+        bounded.release();
       }
-      return json;
     } catch (err: any) {
       // Cancellation FIRST — before any retry accounting (rule 1 above).
       throwIfAborted(signal);
@@ -1028,26 +1069,32 @@ async function fetchOkxCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const res = await fetchWithHardTimeout(url, 15000, undefined, signal);
-      if (res.status === 429) {
-        const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
-        console.log(`[OKX] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
-        await abortableSleep(wait, signal);
-        continue;
-      }
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`OKX API error ${res.status}: ${text}`);
-      }
-      const json = await res.json();
-      if (json.code !== "0") {
-        // 51001 = "Instrument ID ... doesn't exist" — permanent, non-retryable.
-        if (json.code === "51001" || (typeof json.msg === "string" && json.msg.includes("doesn't exist"))) {
-          throw new OkxInstrumentNotFoundError(instId, json.msg || json.code);
+      const bounded = await fetchWithHardTimeout(url, 15000, undefined, signal);
+      const res = bounded.response;
+      try {
+        if (res.status === 429) {
+          bounded.release();
+          const wait = RETRY_DELAY_MS * (attempt + 1) * 2;
+          console.log(`[OKX] Rate limited, waiting ${wait}ms before retry ${attempt + 1}/${MAX_RETRIES}`);
+          await abortableSleep(wait, signal);
+          continue;
         }
-        throw new Error(`OKX API error: ${json.msg || JSON.stringify(json)}`);
+        if (!res.ok) {
+          const text = await bounded.text();
+          throw new Error(`OKX API error ${res.status}: ${text}`);
+        }
+        const json = await bounded.json();
+        if (json.code !== "0") {
+          // 51001 = "Instrument ID ... doesn't exist" — permanent, non-retryable.
+          if (json.code === "51001" || (typeof json.msg === "string" && json.msg.includes("doesn't exist"))) {
+            throw new OkxInstrumentNotFoundError(instId, json.msg || json.code);
+          }
+          throw new Error(`OKX API error: ${json.msg || JSON.stringify(json)}`);
+        }
+        return json.data || [];
+      } finally {
+        bounded.release();
       }
-      return json.data || [];
     } catch (err: any) {
       // Cancellation FIRST — before any retry accounting (rule 1 above).
       throwIfAborted(signal);
