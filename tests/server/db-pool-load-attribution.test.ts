@@ -1,15 +1,24 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const queryMock = vi.fn();
+const poolInstances: FakePool[] = [];
 
 class FakePool {
   totalCount = 0;
   idleCount = 0;
   waitingCount = 0;
-  options = { max: 8 };
+  queryMock = vi.fn();
+  endMock = vi.fn(async () => {});
+
+  constructor(readonly options: Record<string, unknown> = {}) {
+    poolInstances.push(this);
+  }
 
   query(...args: unknown[]) {
-    return queryMock(...args);
+    return this.queryMock(...args);
+  }
+
+  end() {
+    return this.endMock();
   }
 
   on() {
@@ -45,7 +54,7 @@ async function flushPromiseChain() {
 beforeEach(() => {
   vi.resetModules();
   vi.useFakeTimers();
-  queryMock.mockReset();
+  poolInstances.length = 0;
   process.env.DATABASE_URL = "postgresql://127.0.0.1:1/pool_load_test";
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -60,37 +69,56 @@ afterEach(() => {
 });
 
 describe("database keep-warm pool-load attribution", () => {
-  it("suppresses idle state and follows only overlapping SELECT 1 promise lifetimes", async () => {
-    const first = deferred<unknown>();
-    const second = deferred<unknown>();
-    queryMock
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
-
-    await import("../../server/db");
+  it("uses a dedicated max-1 scanner lane with no overlapping scanner heartbeat", async () => {
+    const dbModule = await import("../../server/db");
     const { formatPoolLoadTags } = await import("../../server/pool-load");
+    const [web, scanner] = poolInstances;
+    expect(poolInstances).toHaveLength(2);
+    expect(web.options).toMatchObject({ max: 8 });
+    expect(scanner.options).toMatchObject({
+      max: 1,
+      application_name: "qv-scanner-candle",
+    });
+    expect(dbModule.scannerCandlePool).not.toBe(dbModule.pool);
+
+    const webFirst = deferred<unknown>();
+    const webSecond = deferred<unknown>();
+    const scannerFirst = deferred<unknown>();
+    web.queryMock
+      .mockReturnValueOnce(webFirst.promise)
+      .mockReturnValueOnce(webSecond.promise);
+    scanner.queryMock.mockReturnValueOnce(scannerFirst.promise);
 
     expect(formatPoolLoadTags()).toBe("");
     expect(vi.getTimerCount()).toBe(4);
 
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(queryMock).toHaveBeenCalledTimes(1);
-    expect(queryMock).toHaveBeenLastCalledWith("SELECT 1");
-    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb1");
+    expect(web.queryMock).toHaveBeenCalledTimes(1);
+    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
+    expect(web.queryMock).toHaveBeenLastCalledWith("SELECT 1");
+    expect(scanner.queryMock).toHaveBeenLastCalledWith("SELECT 1");
+    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb1/shb1");
 
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(queryMock).toHaveBeenCalledTimes(2);
-    expect(queryMock).toHaveBeenLastCalledWith("SELECT 1");
-    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb2");
+    expect(web.queryMock).toHaveBeenCalledTimes(2);
+    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
+    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb2/shb1");
     expect(vi.getTimerCount()).toBe(4);
 
-    first.resolve({ rows: [{ "?column?": 1 }] });
+    webFirst.resolve({ rows: [{ "?column?": 1 }] });
     await flushPromiseChain();
-    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb1");
+    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb1/shb1");
 
-    second.reject(new Error("heartbeat rejected"));
+    webSecond.reject(new Error("heartbeat rejected"));
+    await flushPromiseChain();
+    expect(formatPoolLoadTags()).toBe(" db_maintenance=hb0/shb1");
+
+    scannerFirst.resolve({ rows: [{ "?column?": 1 }] });
     await flushPromiseChain();
     expect(formatPoolLoadTags()).toBe("");
-    expect(queryMock).toHaveBeenCalledTimes(2);
+
+    await dbModule.closePool();
+    expect(web.endMock).toHaveBeenCalledOnce();
+    expect(scanner.endMock).toHaveBeenCalledOnce();
   });
 });

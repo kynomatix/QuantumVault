@@ -19,8 +19,15 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-const { fakePool, fakeDb } = vi.hoisted(() => ({
+const { fakePool, fakeScannerPool, fakeDb } = vi.hoisted(() => ({
   fakePool: {
+    totalCount: 0,
+    idleCount: 0,
+    waitingCount: 0,
+    query: vi.fn(),
+    connect: vi.fn<() => Promise<unknown>>(),
+  },
+  fakeScannerPool: {
     totalCount: 0,
     idleCount: 0,
     waitingCount: 0,
@@ -30,7 +37,11 @@ const { fakePool, fakeDb } = vi.hoisted(() => ({
   fakeDb: { insert: vi.fn() },
 }));
 
-vi.mock("../../server/db", () => ({ db: fakeDb, pool: fakePool }));
+vi.mock("../../server/db", () => ({
+  db: fakeDb,
+  pool: fakePool,
+  scannerCandlePool: fakeScannerPool,
+}));
 vi.mock("../../server/telemetry", () => ({ appendTelemetry: vi.fn() }));
 
 import {
@@ -43,6 +54,7 @@ import {
   CandleWriteQueueFullError,
   CandleBatchReadError,
   CACHE_BUDGET_ABORT_REASON,
+  SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
   type CandleReadPhases,
   type CandleBatchReadPhases,
 } from "../../server/lab/candle-store";
@@ -154,6 +166,11 @@ beforeEach(() => {
   fakePool.query.mockReset();
   installSuccessfulCatalog();
   fakePool.connect.mockReset();
+  fakeScannerPool.query.mockReset();
+  fakeScannerPool.connect.mockReset();
+  fakeScannerPool.totalCount = 0;
+  fakeScannerPool.idleCount = 0;
+  fakeScannerPool.waitingCount = 0;
 });
 
 function candle(
@@ -526,7 +543,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       .mockImplementationOnce(async () => { now += 100; return { rows: [] }; })
       .mockImplementationOnce(async () => { now += 7; return { rows: [row("BTC-PERP")] }; })
       .mockImplementationOnce(async () => { now += 200; return { rows: [] }; });
-    fakePool.connect.mockResolvedValueOnce({ release, query });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
     let phases: CandleBatchReadPhases | undefined;
 
     const result = await getCachedCandlesBatch(
@@ -543,10 +560,10 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(query.mock.calls[0][0]).toMatchObject({
       text: "SELECT set_config('statement_timeout', $1, false)",
       values: ["5000"],
-      query_timeout: 5_000,
+      query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
     });
     const queryConfig = query.mock.calls[1][0];
-    expect(queryConfig.query_timeout).toBe(5_000);
+    expect(queryConfig.query_timeout).toBe(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS);
     expect(queryConfig.text).toContain('time_semantic AS "timeSemantic"');
     expect(queryConfig.text).not.toMatch(/time_semantic AS\s+imeSemantic\b/);
     expect(queryConfig.values.slice(0, 4)).toEqual([
@@ -554,7 +571,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     ]);
     expect(query.mock.calls[2][0]).toMatchObject({
       text: "SELECT set_config('statement_timeout', '30000', false)",
-      query_timeout: 5_000,
+      query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
     });
     const dataStatements = query.mock.calls.filter(([value]) =>
       typeof value === "object" && value !== null && String(value.text).includes("FROM lab_candle_cache_v2")
@@ -562,13 +579,14 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(dataStatements).toHaveLength(1);
     expect(result.get("BTC-PERP")?.[0].close).toBe(10);
     expect(result.get("SOL-PERP")).toBeNull();
-    expect(phases).toMatchObject({ requestedSymbols: 2, hits: 1, misses: 1, outcome: "hit", termination: "success", sqlstate: null, queryMs: 7 });
+    expect(phases).toMatchObject({ poolLane: "scanner-candle", requestedSymbols: 2, hits: 1, misses: 1, outcome: "hit", termination: "success", sqlstate: null, queryMs: 7 });
+    expect(fakePool.connect).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith();
     nowSpy.mockRestore();
   });
 
   it("preserves per-symbol strongest-finality semantics", async () => {
-    fakePool.connect.mockResolvedValueOnce({
+    fakeScannerPool.connect.mockResolvedValueOnce({
       release: vi.fn(),
       query: vi.fn().mockResolvedValue({
         rows: [row("BTC-PERP", "forming", 9), row("BTC-PERP", "finalized", 11)],
@@ -596,7 +614,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       release: vi.fn(),
       query: vi.fn().mockResolvedValue({ rows }),
     });
-    fakePool.connect.mockResolvedValueOnce(client()).mockResolvedValueOnce(client());
+    fakeScannerPool.connect.mockResolvedValueOnce(client()).mockResolvedValueOnce(client());
 
     const ordinary = await getCachedCandlesBatch(
       ["BTC-PERP"], "15m", startMs, endMs,
@@ -632,10 +650,10 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
         callerClass: "scanner",
       },
     )).rejects.toMatchObject({ name: "AbortError" });
-    expect(fakePool.connect).not.toHaveBeenCalled();
+    expect(fakeScannerPool.connect).not.toHaveBeenCalled();
 
     const checkout = deferred<unknown>();
-    fakePool.connect.mockReturnValueOnce(checkout.promise);
+    fakeScannerPool.connect.mockReturnValueOnce(checkout.promise);
     const controller = new AbortController();
     const pending = getCachedCandlesBatch(
       ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
@@ -665,7 +683,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockRejectedValueOnce(failure);
     let phases: CandleBatchReadPhases | undefined;
-    fakePool.connect.mockResolvedValueOnce({ release, query });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
 
     await expect(getCachedCandlesBatch(
       ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
@@ -684,7 +702,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [row("BTC-PERP")] })
       .mockRejectedValueOnce(failure);
-    fakePool.connect.mockResolvedValueOnce({ release, query });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
 
     await expect(getCachedCandlesBatch(
       ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
@@ -701,7 +719,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockRejectedValueOnce(failure);
     let phases: CandleBatchReadPhases | undefined;
-    fakePool.connect.mockResolvedValueOnce({ release, query });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
 
     await expect(getCachedCandlesBatch(
       ["BTC-PERP"], "1h", RANGE.start, RANGE.end,

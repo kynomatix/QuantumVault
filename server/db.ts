@@ -61,9 +61,35 @@ const pool = new Pool({
   keepAlive: true,
 });
 
+// The scanner's one batch candle-cache SELECT is availability-critical but
+// historically competed with every API/monitor query for the web pool's eight
+// slots. Production 2026-08-31 proved both shared-pool admission starvation
+// and event-loop-delayed observation of otherwise bounded backend work. Give
+// that single SELECT an independent max-1 lane in the web process. The Lab
+// child never runs the scanner, so it deliberately aliases the ordinary pool
+// rather than opening a useless extra database connection.
+export const scannerCandlePool = poolName === "web"
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 1,
+      connectionTimeoutMillis: connTimeoutMs,
+      query_timeout: queryTimeoutMs,
+      idleTimeoutMillis: 60_000,
+      keepAlive: true,
+      application_name: "qv-scanner-candle",
+    })
+  : pool;
+const hasDedicatedScannerCandlePool = scannerCandlePool !== pool;
+const SCANNER_POOL_TAG = `[DB Pool:${poolName}:scanner-candle]`;
+
 pool.on("error", (err) => {
   console.error(`${POOL_TAG} Idle client error (suppressed crash):`, err.message);
 });
+if (hasDedicatedScannerCandlePool) {
+  scannerCandlePool.on("error", (err) => {
+    console.error(`${SCANNER_POOL_TAG} Idle client error (suppressed crash):`, err.message);
+  });
+}
 
 // Safety net: no single statement may hold a pool connection indefinitely
 // (pool max is 8 — a few stuck statements would starve every DB consumer).
@@ -74,6 +100,13 @@ pool.on("connect", (client) => {
     console.error(`${POOL_TAG} Failed to set statement_timeout:`, err.message);
   });
 });
+if (hasDedicatedScannerCandlePool) {
+  scannerCandlePool.on("connect", (client) => {
+    client.query("SET statement_timeout = 30000").catch((err) => {
+      console.error(`${SCANNER_POOL_TAG} Failed to set statement_timeout:`, err.message);
+    });
+  });
+}
 
 // ----- keep-warm heartbeat ------------------------------------------------
 // SELECT 1 every 20s keeps at least one connection alive through Neon's idle
@@ -82,8 +115,13 @@ pool.on("connect", (client) => {
 // unhandled rejection; the count surfaces in the [DB Pool] telemetry line.
 let _hbFailCount = 0;
 let _hbFailStreak = 0;
+let _scannerHbFailCount = 0;
+let _scannerKeepWarmActive = false;
 const activeKeepWarm = new Set<symbol>();
-registerPoolLoadTag("db_maintenance", () => ({ hb: activeKeepWarm.size }));
+registerPoolLoadTag("db_maintenance", () => ({
+  hb: activeKeepWarm.size,
+  shb: _scannerKeepWarmActive ? 1 : 0,
+}));
 
 function claimKeepWarm(): () => void {
   const claim = Symbol();
@@ -99,6 +137,19 @@ setInterval(() => {
     .then(() => { _hbFailStreak = 0; })
     .catch(() => { _hbFailCount++; _hbFailStreak++; })
     .finally(releaseKeepWarm);
+
+  // Reuse the existing heartbeat cadence: no new timer. Never queue behind an
+  // active scanner query and never overlap a prior scanner heartbeat. A pool
+  // with zero clients is eligible so the first scanner boundary normally gets
+  // a warm TLS-authenticated connection.
+  const scannerLaneIdle = scannerCandlePool.waitingCount === 0
+    && (scannerCandlePool.totalCount === 0 || scannerCandlePool.idleCount > 0);
+  if (hasDedicatedScannerCandlePool && !_scannerKeepWarmActive && scannerLaneIdle) {
+    _scannerKeepWarmActive = true;
+    scannerCandlePool.query("SELECT 1")
+      .catch(() => { _scannerHbFailCount++; })
+      .finally(() => { _scannerKeepWarmActive = false; });
+  }
 }, 20_000).unref();
 
 // ----- connect-slow visibility --------------------------------------------
@@ -143,8 +194,13 @@ let _lastInfraRecordAt = 0;
 const INFRA_RECORD_COOLDOWN_MS = 10 * 60 * 1000;
 setInterval(() => {
   const hbPart = _hbFailCount > 0 ? ` hb_fail=${_hbFailCount}` : "";
+  const scannerHbPart = _scannerHbFailCount > 0 ? ` scanner_hb_fail=${_scannerHbFailCount}` : "";
   _hbFailCount = 0; // reset window counter after each log
-  const dbLine = `${POOL_TAG} total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}${formatPoolLoadTags()}`;
+  _scannerHbFailCount = 0;
+  const scannerPart = hasDedicatedScannerCandlePool
+    ? ` scanner=${scannerCandlePool.totalCount}/${scannerCandlePool.idleCount}i/${scannerCandlePool.waitingCount}w/1max`
+    : "";
+  const dbLine = `${POOL_TAG} total=${pool.totalCount} idle=${pool.idleCount} waiting=${pool.waitingCount} max=${poolSize}${hbPart}${scannerHbPart}${scannerPart}${formatPoolLoadTags()}`;
   console.log(dbLine);
   appendTelemetry(dbLine);
 
@@ -341,6 +397,10 @@ export const db = drizzle(pool, { schema });
 export { pool };
 
 export async function closePool(): Promise<void> {
+  if (hasDedicatedScannerCandlePool) {
+    await Promise.all([pool.end(), scannerCandlePool.end()]);
+    return;
+  }
   await pool.end();
 }
 const schemaMigrationSql = [

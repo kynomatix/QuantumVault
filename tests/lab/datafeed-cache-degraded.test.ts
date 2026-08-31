@@ -476,7 +476,32 @@ describe("prefetchCachedOHLCV batch hits", () => {
     ]);
   });
 
-  it("aborts a wedged batch at the reviewed five-second bound without reaching a provider", async () => {
+  it("does not manufacture a JavaScript five-second deadline around the backend-bounded batch", async () => {
+    let resolveBatch!: (value: Map<string, any[] | null>) => void;
+    mockGetCachedBatch.mockImplementation(() => new Promise((resolve) => {
+      resolveBatch = resolve;
+    }));
+    const now = Date.now();
+    const pending = prefetchCachedOHLCV(
+      ["SOL/USDT"], "15m", now - 100 * TF_MS, now,
+      { basisPolicy: MONEY_CANDLE_POLICY },
+    );
+    let settled = false;
+    pending.finally(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(settled).toBe(false);
+    expect(mockGetCachedBatch.mock.calls[0][4]).toMatchObject({
+      queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+      signal: undefined,
+    });
+    resolveBatch(new Map([["SOL/USDT", cachedBars(now)]]));
+    await expect(pending).resolves.toMatchObject({
+      complete: new Map([["SOL/USDT", cachedBars(now)]]),
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("passes the owning sweep signal through and cancels promptly without provider fallback", async () => {
     mockGetCachedBatch.mockImplementation(
       (_symbols, _timeframe, _start, _end, opts?: { signal?: AbortSignal }) =>
         new Promise((_resolve, reject) => {
@@ -491,13 +516,15 @@ describe("prefetchCachedOHLCV batch hits", () => {
         }),
     );
     const now = Date.now();
+    const controller = new AbortController();
     const pending = prefetchCachedOHLCV(
       ["SOL/USDT"], "15m", now - 100 * TF_MS, now,
-      { basisPolicy: MONEY_CANDLE_POLICY },
+      { basisPolicy: MONEY_CANDLE_POLICY, signal: controller.signal },
     );
     pending.catch(() => {});
-    await vi.advanceTimersByTimeAsync(5_100);
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    controller.abort("sweep-stopped");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError", message: "sweep-stopped" });
+    expect(mockGetCachedBatch.mock.calls[0][4].signal).toBe(controller.signal);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

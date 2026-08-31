@@ -1245,65 +1245,51 @@ export async function prefetchCachedOHLCV(
   const endMs = new Date(endDate).getTime();
   throwIfAborted(options.signal);
 
-  const batchController = new AbortController();
-  const timeout = setTimeout(
-    () => batchController.abort(CACHE_BUDGET_ABORT_REASON),
-    SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+  const grouped = await getCachedCandlesBatch(
+    symbols,
+    normalizedTimeframe,
+    startMs,
+    endMs,
+    {
+      basisPolicy: options.basisPolicy,
+      queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+      // The caller owns the sweep deadline. The database statement timeout is
+      // the batch query budget; a second JavaScript timer can fire late after
+      // event-loop starvation and falsely discard a completed query.
+      signal: options.signal,
+      callerClass: options.callerClass ?? "scanner",
+      admission: "scanner_prefix",
+    },
   );
-  timeout.unref?.();
-  const onCallerAbort = () => batchController.abort(options.signal?.reason);
-  if (options.signal) {
-    if (options.signal.aborted) batchController.abort(options.signal.reason);
-    else options.signal.addEventListener("abort", onCallerAbort, { once: true });
-  }
-
-  try {
-    const grouped = await getCachedCandlesBatch(
-      symbols,
-      normalizedTimeframe,
-      startMs,
-      endMs,
-      {
-        basisPolicy: options.basisPolicy,
-        queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
-        signal: batchController.signal,
-        callerClass: options.callerClass ?? "scanner",
-        admission: "scanner_prefix",
-      },
-    );
-    const complete = new Map<string, ProvenancedOHLCV[]>();
-    const prefixes = new Map<string, ProvenancedOHLCV[]>();
-    const exactMisses = new Set<string>();
-    for (const [symbol, cached] of grouped) {
-      if (cached === null) {
-        exactMisses.add(symbol);
-        continue;
-      }
-      const policyAdmitted = cached.filter((candle) =>
-        candleMatchesBasisPolicy(candle, options.basisPolicy),
-      );
-      if (policyAdmitted.length === 0) {
-        exactMisses.add(symbol);
-      } else if (!cacheRowFloorIsSatisfied(policyAdmitted, normalizedTimeframe, startMs, endMs)) {
-        // A newest-tail fetch cannot repair interior gaps or an under-covered
-        // history. Preserve the exact-fetch path so the provider supplies the
-        // full requested range rather than trying an inherently incomplete
-        // prefix merge and then poisoning scanner feed health on rejection.
-        exactMisses.add(symbol);
-      } else if (cacheTailIsFresh(policyAdmitted, normalizedTimeframe, endMs)) {
-        complete.set(symbol, policyAdmitted);
-      } else {
-        // Prefix completion is valid only when freshness is the sole defect:
-        // the row floor is already proven above, so fetching newest->end can
-        // make the range admissible without repeating its deep history.
-        prefixes.set(symbol, policyAdmitted);
-      }
+  const complete = new Map<string, ProvenancedOHLCV[]>();
+  const prefixes = new Map<string, ProvenancedOHLCV[]>();
+  const exactMisses = new Set<string>();
+  for (const [symbol, cached] of grouped) {
+    if (cached === null) {
+      exactMisses.add(symbol);
+      continue;
     }
-    return { complete, prefixes, exactMisses };
-  } finally {
-    clearTimeout(timeout);
-    options.signal?.removeEventListener("abort", onCallerAbort);
+    const policyAdmitted = cached.filter((candle) =>
+      candleMatchesBasisPolicy(candle, options.basisPolicy),
+    );
+    if (policyAdmitted.length === 0) {
+      exactMisses.add(symbol);
+    } else if (!cacheRowFloorIsSatisfied(policyAdmitted, normalizedTimeframe, startMs, endMs)) {
+      // A newest-tail fetch cannot repair interior gaps or an under-covered
+      // history. Preserve the exact-fetch path so the provider supplies the
+      // full requested range rather than trying an inherently incomplete
+      // prefix merge and then poisoning scanner feed health on rejection.
+      exactMisses.add(symbol);
+    } else if (cacheTailIsFresh(policyAdmitted, normalizedTimeframe, endMs)) {
+      complete.set(symbol, policyAdmitted);
+    } else {
+      // Prefix completion is valid only when freshness is the sole defect:
+      // the row floor is already proven above, so fetching newest->end can
+      // make the range admissible without repeating its deep history.
+      prefixes.set(symbol, policyAdmitted);
+    }
   }
+  return { complete, prefixes, exactMisses };
 }
 
 /** Deterministic strongest-observation merge for a completed scanner tail. */

@@ -1,5 +1,5 @@
 import { labCandleCacheV2 } from "@shared/schema";
-import { db, pool } from "../db";
+import { db, pool, scannerCandlePool } from "../db";
 import { eq, and, gte, lte, sql, inArray, ne } from "drizzle-orm";
 import type { PoolClient } from "pg";
 import type {
@@ -116,14 +116,21 @@ function emitPhaseLine(p: CandleReadPhases): void {
   appendTelemetry(line);
 }
 
-function poolSnapshot(): { total: number; idle: number; waiting: number } {
-  return { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount };
+type CandleReadPool = Pick<typeof pool, "connect" | "totalCount" | "idleCount" | "waitingCount">;
+
+function poolSnapshot(readPool: CandleReadPool = pool): { total: number; idle: number; waiting: number } {
+  return { total: readPool.totalCount, idle: readPool.idleCount, waiting: readPool.waitingCount };
 }
 
 // Marker attached as AbortSignal.reason by fetchOHLCV's cache-budget timer so
 // this module can classify budget expiry ("deadline") separately from caller
 // cancellation ("cancelled", e.g. sweep teardown).
 export const CACHE_BUDGET_ABORT_REASON = "candle-cache-budget-exceeded";
+
+// The server-side statement budget remains the authoritative five-second
+// query deadline. This longer client guard only detects a dead socket; it must
+// not turn event-loop starvation into a false database timeout.
+export const SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS = 60_000;
 
 function makeAbortError(reason?: unknown): Error {
   const err = new Error(
@@ -209,6 +216,7 @@ export type CandleBatchReadTermination =
 
 export type CandleBatchReadPhases = {
   callerClass: CandleReadCallerClass;
+  poolLane: "scanner-candle";
   timeframe: string;
   outcome: CandleBatchReadOutcome;
   termination: CandleBatchReadTermination;
@@ -421,6 +429,7 @@ export async function getCachedCandlesBatch(
   const signal = opts.signal;
   const phases: CandleBatchReadPhases = {
     callerClass: opts.callerClass ?? "scanner",
+    poolLane: "scanner-candle",
     timeframe,
     outcome: "miss",
     termination: "success",
@@ -434,19 +443,19 @@ export async function getCachedCandlesBatch(
     resultProcessingMs: 0,
     totalMs: 0,
     rows: 0,
-    pool: poolSnapshot(),
+    pool: poolSnapshot(scannerCandlePool),
   };
   const finish = (outcome: CandleBatchReadOutcome) => {
     phases.outcome = outcome;
     phases.totalMs = Date.now() - startedAt;
-    phases.pool = poolSnapshot();
+    phases.pool = poolSnapshot(scannerCandlePool);
     try {
       opts.onPhases?.(phases);
     } catch {
       // Observer failures never alter the read path.
     }
     const line =
-      `[CandleBatchRead] ${phases.callerClass} ${timeframe} outcome=${outcome} ` +
+      `[CandleBatchRead] ${phases.callerClass} ${timeframe} lane=${phases.poolLane} outcome=${outcome} ` +
       `requested=${phases.requestedSymbols} hits=${phases.hits} misses=${phases.misses} ` +
       `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
       `query=${phases.queryMs}ms process=${phases.resultProcessingMs}ms total=${phases.totalMs}ms ` +
@@ -487,16 +496,20 @@ export async function getCachedCandlesBatch(
     const requireDirectOkxIdentity = policy.consumer !== "lab"
       && policy.consumer !== "scanner"
       && policy.consumer !== "ai_context";
-    const client = await acquireClientWithAbort(signal, phases as unknown as CandleReadPhases);
-    const queryTimeoutMs = Math.max(1, Math.floor(opts.queryTimeoutMs!));
+    const client = await acquireClientWithAbort(
+      signal,
+      phases as unknown as CandleReadPhases,
+      scannerCandlePool,
+    );
+    const statementTimeoutMs = Math.max(1, Math.floor(opts.queryTimeoutMs!));
     let selectStartedAt: number | null = null;
     let selectCompleted = false;
     let rows: CandleCacheBatchRow[];
     try {
       await client.query({
         text: "SELECT set_config('statement_timeout', $1, false)",
-        values: [String(queryTimeoutMs)],
-        query_timeout: queryTimeoutMs,
+        values: [String(statementTimeoutMs)],
+        query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
       } as any);
       selectStartedAt = Date.now();
       const result = await client.query({
@@ -512,13 +525,13 @@ export async function getCachedCandlesBatch(
           [...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy],
           requireDirectOkxIdentity,
         ],
-        query_timeout: queryTimeoutMs,
+        query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
       } as any);
       phases.queryMs = Date.now() - selectStartedAt;
       selectCompleted = true;
       await client.query({
         text: "SELECT set_config('statement_timeout', '30000', false)",
-        query_timeout: queryTimeoutMs,
+        query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
       } as any);
       phases.termination = "success";
       client.release();
@@ -601,7 +614,8 @@ export async function getCachedCandlesBatch(
  */
 async function acquireClientWithAbort(
   signal: AbortSignal | undefined,
-  phases: CandleReadPhases
+  phases: CandleReadPhases,
+  readPool: CandleReadPool = pool,
 ): Promise<PoolClient> {
   const acquireStart = Date.now();
   if (isSignalAborted(signal)) {
@@ -609,11 +623,11 @@ async function acquireClientWithAbort(
     throw makeAbortError(signal!.reason);
   }
   if (!signal) {
-    const client = await pool.connect();
+    const client = await readPool.connect();
     phases.poolAcquireMs = Date.now() - acquireStart;
     return client;
   }
-  const checkout = pool.connect();
+  const checkout = readPool.connect();
   const client = await new Promise<PoolClient>((resolve, reject) => {
     let settled = false;
     const onAbort = () => {
