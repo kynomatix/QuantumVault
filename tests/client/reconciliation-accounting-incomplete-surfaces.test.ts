@@ -53,6 +53,10 @@ describe("accounting-incomplete client surfaces", () => {
     expect(source).toContain("Bot equity: -- (accounting unavailable). Position sizing is disabled.");
     expect(source).not.toContain("setBotBalance(data.usdcBalance ?? 0)");
     expect(source).not.toContain("setExchangeFreeCollateral(data.freeCollateral ?? 0)");
+    const appSource = readFileSync("client/src/pages/App.tsx", "utf8");
+    expect(appSource).not.toContain("balance: data.usdcBalance ?? 0");
+    expect(appSource).toContain("delete-bot-balance-unavailable");
+    expect(appSource).toContain("No zero balance is assumed and no withdrawal amount is promised.");
   });
 
   it("allows de-risking but refuses leverage or cap increases while accounting is unavailable", () => {

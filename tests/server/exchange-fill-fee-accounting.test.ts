@@ -69,6 +69,21 @@ describe("close fee evidence", () => {
     });
   });
 
+  it.each([
+    ["zero fill price", { protocolFillId: "fill-1", fillPrice: 0, pnl: 7, fee: 0.25, observedAt: 125 }, "venue_fill_unattributed"],
+    ["negative fill price", { protocolFillId: "fill-1", fillPrice: -1, pnl: 7, fee: 0.25, observedAt: 126 }, "venue_fill_unattributed"],
+    ["non-finite fill price", { protocolFillId: "fill-1", fillPrice: Number.NaN, pnl: 7, fee: 0.25, observedAt: 127 }, "venue_fill_unattributed"],
+    ["negative fee", { protocolFillId: "fill-1", fillPrice: 101, pnl: 7, fee: -0.01, observedAt: 128 }, "venue_fill_unattributed"],
+    ["unattributed liquidation", { fillPrice: 101, pnl: 7, fee: 0.25, observedAt: 129, liquidation: true }, "liquidation_fill_unattributed"],
+  ] as const)("classifies %s as unavailable", (_label, input, reason) => {
+    expect(classifyReconcilerCloseAccounting(input)).toEqual({
+      kind: "unavailable",
+      reason,
+      observedAt: input.observedAt,
+      observationPrice: null,
+    });
+  });
+
   it("preserves exact cumulative totals while flattening proven exposure with incomplete accounting", () => {
     const closedAt = new Date("2026-08-29T00:00:00.000Z");
     expect(buildAccountingIncompleteFlatPosition({
@@ -85,9 +100,18 @@ describe("close fee evidence", () => {
       lastTradeId: "entry-epoch",
       lastTradeAt: closedAt,
     });
+    expect(buildAccountingIncompleteFlatPosition(undefined, {
+      tradeId: "fallback-close-epoch",
+      closedAt,
+    })).toMatchObject({
+      lastTradeId: "fallback-close-epoch",
+      realizedPnl: "0.000000",
+      totalFees: "0.000000",
+    });
     expect(isReconcilerAccountingIncompletePayload({
       closeAccounting: { kind: "unavailable", reason: "venue_fill_unattributed" },
     })).toBe(true);
+
     expect(isReconcilerAccountingIncompletePayload({ closeAccounting: { kind: "venue_exact" } })).toBe(false);
   });
 

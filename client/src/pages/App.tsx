@@ -341,9 +341,9 @@ export default function AppPage() {
   const [showRecoverDialog, setShowRecoverDialog] = useState(false);
   const [orphanSlots, setOrphanSlots] = useState(0);
   const [recoveringStranded, setRecoveringStranded] = useState(false);
-  const [botBalances, setBotBalances] = useState<Record<string, { balance: number; exists: boolean }>>({});
+  const [botBalances, setBotBalances] = useState<Record<string, { balance: number | null; exists: boolean }>>({});
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
-  const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
+  const [botToDelete, setBotToDelete] = useState<{ id: string; name: string; balance: number | null; isLegacy?: boolean; agentPublicKey?: string } | null>(null);
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
   const [manageBotDrawerOpen, setManageBotDrawerOpen] = useState(false);
   const [selectedManagedBot, setSelectedManagedBot] = useState<TradingBot | null>(null);
@@ -1659,14 +1659,20 @@ export default function AppPage() {
     if (!connected || !botsData) return;
     
     const fetchBalances = async () => {
-      const balances: Record<string, { balance: number; exists: boolean }> = {};
+      const balances: Record<string, { balance: number | null; exists: boolean }> = {};
       for (const bot of botsData) {
         if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined) {
           try {
             const res = await fetch(`/api/bot/${bot.id}/balance`, { credentials: 'include', headers: walletAuthHeaders() });
             if (res.ok) {
               const data = await safeResponseJson(res);
-              balances[bot.id] = { balance: data.usdcBalance ?? 0, exists: data.subaccountExists ?? false };
+              const reportedBalance = Number(data.usdcBalance);
+              balances[bot.id] = {
+                balance: data.usdcBalance === null || data.usdcBalance === undefined || !Number.isFinite(reportedBalance)
+                  ? null
+                  : reportedBalance,
+                exists: data.subaccountExists ?? false,
+              };
             }
           } catch (error) {
             console.error(`Error fetching balance for bot ${bot.id}:`, error);
@@ -1819,7 +1825,11 @@ export default function AppPage() {
 
   const handleWithdrawAll = async (botId: string, subaccountId: number) => {
     const botBalance = botBalances[botId];
-    if (!botBalance || botBalance.balance <= 0) {
+    if (!botBalance || botBalance.balance === null) {
+      toast({ title: 'Balance unavailable', description: 'Refresh the bot balance before withdrawing.', variant: 'destructive' });
+      return;
+    }
+    if (botBalance.balance <= 0) {
       toast({ title: 'No funds to withdraw', variant: 'destructive' });
       return;
     }
@@ -1955,8 +1965,7 @@ export default function AppPage() {
   };
 
   const handleDeleteBot = async (botId: string, botName: string) => {
-    const botBalance = botBalances[botId]?.balance ?? 0;
-    
+
     if (!solanaWallet.publicKey) {
       toast({ title: 'Wallet not connected', variant: 'destructive' });
       return;
@@ -1994,7 +2003,14 @@ export default function AppPage() {
 
       // Handle bot with funds
       if (data.requiresSweep) {
-        setBotToDelete({ id: botId, name: botName, balance: data.balance });
+        const reportedBalance = Number(data.balance);
+        setBotToDelete({
+          id: botId,
+          name: botName,
+          balance: data.balance === null || data.balance === undefined || !Number.isFinite(reportedBalance)
+            ? null
+            : reportedBalance,
+        });
         setDeleteModalOpen(true);
         setDeletingBotId(null);
         return;
@@ -6049,11 +6065,19 @@ export default function AppPage() {
                   <div className="flex items-start gap-3">
                     <ArrowUpFromLine className="w-5 h-5 text-primary flex-shrink-0 mt-0.5" />
                     <div>
-                      <p className="text-sm font-medium">Automatic Fund Withdrawal</p>
-                      <p className="text-sm text-muted-foreground mt-1">
-                        This bot has <span className="font-semibold text-primary">${botToDelete.balance.toFixed(2)} USDC</span>. 
-                        Funds will be automatically withdrawn to your agent wallet before deletion.
+                      <p className="text-sm font-medium">
+                        {botToDelete.balance === null ? 'Balance unavailable' : 'Automatic Fund Withdrawal'}
                       </p>
+                      {botToDelete.balance === null ? (
+                        <p className="text-sm text-muted-foreground mt-1" data-testid="delete-bot-balance-unavailable">
+                          This bot's balance could not be verified. No zero balance is assumed and no withdrawal amount is promised.
+                        </p>
+                      ) : (
+                        <p className="text-sm text-muted-foreground mt-1">
+                          This bot has <span className="font-semibold text-primary">${botToDelete.balance.toFixed(2)} USDC</span>.
+                          Funds will be automatically withdrawn to your agent wallet before deletion.
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>

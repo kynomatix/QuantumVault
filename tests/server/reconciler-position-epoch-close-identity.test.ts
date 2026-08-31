@@ -600,7 +600,8 @@ describe('reconciler full-close position epoch identity', () => {
     expect(repeatedId).toBe(firstId);
     expect(firstId).toContain('entry-epoch-one');
     expect(mocks.storage.upsertBotPosition).not.toHaveBeenCalled();
-    expect(mocks.storage.recordCloseEventAtomic.mock.calls[0][0]).toMatchObject({
+    const recordedClose = mocks.storage.recordCloseEventAtomic.mock.calls[0][0];
+    expect(recordedClose).toMatchObject({
       insert: {
         fee: null,
         pnl: null,
@@ -612,9 +613,10 @@ describe('reconciler full-close position epoch identity', () => {
           priceRole: 'observation_context_only',
         },
       },
-      deltas: { lastTradeAt: expect.any(String) },
       confirmedPositionCloseIncomplete: { walletAddress, market },
     });
+    expect(recordedClose.deltas).toEqual({ lastTradeAt: expect.any(String) });
+    expect(Object.keys(recordedClose.deltas)).toEqual(['lastTradeAt']);
     expect(mocks.sendTradeNotification).toHaveBeenCalledTimes(1);
     expect(mocks.sendTradeNotification).toHaveBeenCalledWith(walletAddress, expect.objectContaining({
       pnl: undefined,

@@ -89,6 +89,19 @@ export function deriveKnownBotEquity(
   return exchangeBalance === null ? null : exchangeBalance + parkedValueUsdc - borrowDebtUsdc;
 }
 
+export function resolvePerformanceSharingAuthority(
+  netPnl: number | null,
+  accountingIncompleteCount: number,
+): { allowed: boolean; reason: string | null } {
+  if (netPnl === null) {
+    return { allowed: false, reason: 'Performance sharing unavailable while accounting is incomplete' };
+  }
+  if (accountingIncompleteCount > 0) {
+    return { allowed: false, reason: 'Performance sharing unavailable while the displayed total is partial' };
+  }
+  return { allowed: true, reason: null };
+}
+
 export function resolveWithdrawalAuthority(
   freeCollateral: number | null,
   amount: number,
@@ -1523,6 +1536,10 @@ export function BotManagementDrawer({
     ? null
     : (overviewNetPnl / netDeposited) * 100;
   const tradingEquity = deriveKnownBotEquity(botBalance, parkedValueUsdc, borrowDebtUsdc);
+  const performanceSharingAuthority = resolvePerformanceSharingAuthority(
+    overviewNetPnl,
+    performanceAccountingIncompleteCount,
+  );
 
   return (
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()} modal={false}>
@@ -2286,12 +2303,12 @@ export function BotManagementDrawer({
                     void fetchPerformanceData();
                     void fetchBotOverview();
                   }}
-                  disabled={overviewNetPnl === null}
-                  title={overviewNetPnl === null ? 'Performance sharing unavailable while accounting is incomplete' : undefined}
+                  disabled={!performanceSharingAuthority.allowed}
+                  title={performanceSharingAuthority.reason ?? undefined}
                   data-testid="button-share-performance"
                 >
                   <Share2 className="w-3.5 h-3.5" />
-                  {overviewNetPnl === null ? 'Sharing unavailable - accounting incomplete' : 'Share Performance Card'}
+                  {performanceSharingAuthority.allowed ? 'Share Performance Card' : 'Sharing unavailable - accounting incomplete'}
                 </Button>
               </div>
             </div>
@@ -3419,7 +3436,7 @@ export function BotManagementDrawer({
         />
       )}
 
-      {displayBot && overviewNetPnl !== null && (
+      {displayBot && overviewNetPnl !== null && performanceSharingAuthority.allowed && (
         <SharePnLCard
           isOpen={shareCardOpen}
           onClose={() => setShareCardOpen(false)}
