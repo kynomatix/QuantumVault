@@ -536,10 +536,9 @@ export function setDatafeedIncidentReporter(
  *  2. A Promise.race hard reject at ms+5s, so this await settles even if the
  *     abort plumbing itself wedges.
  *
- * NOTE: the race (net #2) covers only the header phase; body reads are
- * protected by net #1 and the external caller-abort relay. Callers must use
- * the returned body readers and release the handle in `finally` so neither
- * timer nor listener outlives the owning request.
+ * The same race (net #2) covers both the header phase and every body read.
+ * Callers must use the returned body readers and release the handle in
+ * `finally` so neither timer nor listener outlives the owning request.
  */
 type BoundedFetchResponse = Readonly<{
   response: Response;
@@ -557,37 +556,61 @@ async function fetchWithHardTimeout(
 ): Promise<BoundedFetchResponse> {
   throwIfAborted(externalSignal);
   const controller = new AbortController();
+  let rejectTerminal!: (error: Error) => void;
+  let terminalRejected = false;
+  const terminal = new Promise<never>((_resolve, reject) => {
+    rejectTerminal = (error: Error) => {
+      if (terminalRejected) return;
+      terminalRejected = true;
+      reject(error);
+    };
+  });
+  // The terminal can fire after the header race has already resolved but
+  // before a body reader starts. Keep it handled throughout that gap.
+  void terminal.catch(() => {});
+
   const controllerTimer = setTimeout(() => controller.abort(), ms);
+  const raceTimer = setTimeout(() => {
+    // Preserve a non-AbortError for genuine provider failure accounting. The
+    // independent rejection is queued before aborting the transport so it is
+    // authoritative even when the body reader reacts synchronously to abort.
+    rejectTerminal(new Error(`fetch hard-timeout after ${ms + 5000}ms (abort never fired)`));
+    controller.abort();
+  }, ms + 5_000);
   // External cancellation is forwarded via a MANUAL listener with strong refs
   // — deliberately NOT AbortSignal.any(), which belongs to the same weak-ref
   // GC class that let AbortSignal.timeout silently never fire (incident above).
   // Retained through body consumption so cancellation after headers still
   // reaches a stalled body. `release` removes it exactly once.
-  const onExternalAbort = () => controller.abort();
+  const onExternalAbort = () => {
+    rejectTerminal(makeAbortError());
+    controller.abort();
+  };
   externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
-  let raceTimer: NodeJS.Timeout | undefined;
+  if (externalSignal?.aborted) onExternalAbort();
   let released = false;
+  let bodyConsumed = false;
   const release = () => {
     if (released) return;
     released = true;
+    // An unread or failed body may still own a pooled connection. Abort it;
+    // only a successfully consumed body is known to be safe to leave alone.
+    if (!bodyConsumed && !controller.signal.aborted) controller.abort();
     clearTimeout(controllerTimer);
-    if (raceTimer) clearTimeout(raceTimer);
+    clearTimeout(raceTimer);
     externalSignal?.removeEventListener("abort", onExternalAbort);
   };
   try {
     const request = transport === 'hermes' ? hermesFetch : fetch;
     const response = await Promise.race([
       request(url, { ...init, signal: controller.signal }),
-      new Promise<never>((_, reject) => {
-        raceTimer = setTimeout(
-          () => reject(new Error(`fetch hard-timeout after ${ms + 5000}ms (abort never fired)`)),
-          ms + 5_000,
-        );
-      }),
+      terminal,
     ]);
     const consume = async <T>(reader: () => Promise<T>): Promise<T> => {
       try {
-        return await reader();
+        const value = await Promise.race([reader(), terminal]);
+        bodyConsumed = true;
+        return value;
       } finally {
         release();
       }

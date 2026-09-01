@@ -24,6 +24,7 @@ vi.mock("../../server/lab/candle-store", () => ({
 }));
 
 import {
+  __testResetOkxSourceBreaker,
   completeCachedOHLCVTail,
   fetchOHLCV,
   isCacheDegradedError,
@@ -56,6 +57,7 @@ let fetchSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  __testResetOkxSourceBreaker();
   mockGetCached.mockReset();
   mockGetCachedBatch.mockReset();
   mockSave.mockClear();
@@ -124,6 +126,114 @@ describe("provider response-body cancellation lifetime", () => {
     expect(internalSignal).not.toBe(caller.signal);
 
     caller.abort("sweep-stopped-after-headers");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("terminates caller-aborted OKX bodies that ignore the internal signal", async () => {
+    const caller = new AbortController();
+    let internalSignal: AbortSignal | undefined;
+    let bodyStarted!: () => void;
+    const bodyIsPending = new Promise<void>((resolve) => { bodyStarted = resolve; });
+    fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      internalSignal = init?.signal ?? undefined;
+      return {
+        status: 200,
+        ok: true,
+        json: () => {
+          bodyStarted();
+          return new Promise(() => {});
+        },
+      };
+    });
+
+    const now = Date.now();
+    const pending = fetchOHLCV(
+      "SOL/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        signal: caller.signal,
+      },
+    );
+    pending.catch(() => {});
+    await bodyIsPending;
+
+    caller.abort("sweep-stopped-signal-ignored-by-body");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(internalSignal?.aborted).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("hard-terminates each signal-ignoring OKX body and preserves all three retries", async () => {
+    const internalSignals: AbortSignal[] = [];
+    fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      if (init?.signal) internalSignals.push(init.signal);
+      return {
+        status: 200,
+        ok: true,
+        json: () => new Promise(() => {}),
+      };
+    });
+
+    const now = Date.now();
+    const pending = fetchOHLCV(
+      "HARDTERMINAL/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        skipSpotFallback: true,
+        deadlineMs: 62_000,
+      },
+    );
+    pending.catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(65_000);
+    await expect(pending).rejects.toBeDefined();
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    expect(internalSignals).toHaveLength(3);
+    expect(internalSignals.every((signal) => signal.aborted)).toBe(true);
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it("aborts an unread OKX response when a 429 releases it early", async () => {
+    const caller = new AbortController();
+    let internalSignal: AbortSignal | undefined;
+    let responseReturned!: () => void;
+    const responseIsReturned = new Promise<void>((resolve) => { responseReturned = resolve; });
+    fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      internalSignal = init?.signal ?? undefined;
+      responseReturned();
+      return {
+        status: 429,
+        ok: false,
+        json: vi.fn(),
+        text: vi.fn(),
+      };
+    });
+
+    const now = Date.now();
+    const pending = fetchOHLCV(
+      "SOL/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        signal: caller.signal,
+      },
+    );
+    pending.catch(() => {});
+    await responseIsReturned;
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(internalSignal?.aborted).toBe(true);
+    caller.abort("stop-during-429-backoff");
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(mockSave).not.toHaveBeenCalled();
