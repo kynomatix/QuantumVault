@@ -1235,10 +1235,23 @@ async function runSweep(): Promise<void> {
         continue;
       }
       const protocolStart = Date.now();
+      let primaryPrefetchWaitMs = 0;
+      const protocolElapsedMs = (): number =>
+        Math.max(0, Date.now() - protocolStart - primaryPrefetchWaitMs);
+      const protocolDeadlineAt = (): number =>
+        protocolStart + primaryPrefetchWaitMs + protocolBudgetMs;
 
       for (const tf of boundaryTfs) {
         requireScannerSweepOwner(owner);
+        // The primary batch is shared by every protocol. Charge its actual
+        // wait to the unchanged sweep-global deadline, but not to whichever
+        // protocol happens to run first. Parent-prefetch waits remain charged.
+        const primaryPrefetchWaitStartedAt = Date.now();
         await awaitBatchPrefetch(tf);
+        primaryPrefetchWaitMs += Math.max(
+          0,
+          Date.now() - primaryPrefetchWaitStartedAt,
+        );
         // Same wall-clock gate per TF: a budget spent mid-protocol must stop
         // the NEXT timeframe from dispatching, not just the next market.
         if (Date.now() >= fetchDeadlineAt) {
@@ -1319,7 +1332,7 @@ async function runSweep(): Promise<void> {
                 // between-markets budget check (2026-07-19 sweep post-mortem).
                 const remainingMs = Math.min(
                   fetchDeadlineAt - Date.now(),
-                  protocolStart + protocolBudgetMs - Date.now(),
+                  protocolDeadlineAt() - Date.now(),
                 );
                 if (remainingMs < 5_000) {
                   // Sweep fetch budget exhausted — skip without marking the
@@ -1426,7 +1439,7 @@ async function runSweep(): Promise<void> {
                   // Min of both clocks — same rationale as the primary fetch guard.
                   const remainingMs = Math.min(
                     fetchDeadlineAt - Date.now(),
-                    protocolStart + protocolBudgetMs - Date.now(),
+                    protocolDeadlineAt() - Date.now(),
                   );
                   if (remainingMs < 5_000) {
                     // The typed evaluator reports a configured parent as inconclusive.
@@ -1526,7 +1539,7 @@ async function runSweep(): Promise<void> {
           // the protocol clock, so after the global 240s deadline passed it
           // kept iterating (stagger sleeps + slot waits) for ~13s of pure
           // grind before the drain even started — pushing the sweep to 278s.
-          if (Date.now() - protocolStart > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
+          if (protocolElapsedMs() > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
             for (let skipped = i; skipped < universe.length; skipped++) {
               finishAttempt(universe[skipped], "timeout-skipped");
             }
@@ -1542,7 +1555,7 @@ async function runSweep(): Promise<void> {
           while (inFlight >= MAX_CONCURRENT_FETCHES) {
             // Same both-clocks rule as the loop gate above: a slot wait must
             // not outlive the sweep-global fetch deadline either.
-            if (Date.now() - protocolStart > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
+            if (protocolElapsedMs() > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
               slotWaitTimedOut = true;
               break;
             }
@@ -1591,7 +1604,7 @@ async function runSweep(): Promise<void> {
         // wedge clock applied, so one hung fetch let the drain legally sit for
         // ~4 minutes — inside the "240s budget" the summary line claimed.
         const drainDeadlineAt = Math.min(
-          protocolStart + protocolBudgetMs,
+          protocolDeadlineAt(),
           fetchDeadlineAt,
           sweepBeganAt + SWEEP_WEDGE_MS - 30_000,
         );

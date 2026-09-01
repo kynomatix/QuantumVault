@@ -1267,6 +1267,84 @@ describe("scanner batch cache prefetch", () => {
     }
   });
 
+  it("does not charge a shared primary-prefetch wait to the first protocol window", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const flashMarkets = Array.from(
+        { length: 29 },
+        (_, index) => `F${String(index).padStart(3, "0")}-PERP`,
+      );
+      const pacificaMarkets = Array.from(
+        { length: 66 },
+        (_, index) => `P${String(index).padStart(3, "0")}-PERP`,
+      );
+      getFlashMarketSpecsMock.mockReturnValue(
+        flashMarkets.map((internalSymbol) => ({ internalSymbol })),
+      );
+      getAdapterMock.mockReturnValue({
+        getMarkets: vi.fn(async () => pacificaMarkets.map((internalSymbol) => ({
+          internalSymbol,
+          isActive: true,
+        }))),
+      });
+
+      const primary = textbookWBars(now.getTime(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => {
+          if (timeframe === "15m") {
+            await new Promise<void>((resolve) => setTimeout(resolve, 74_000));
+          }
+          const bars = timeframe === "15m" ? primary : parent;
+          return {
+            complete: new Map(requested.map((ticker) => [ticker, bars])),
+            prefixes: new Map(),
+            exactMisses: new Set(),
+          };
+        },
+      );
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(75_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).not.toHaveBeenCalled();
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          protocol: "flash",
+          timeframe: "15m",
+          marketsAttempted: 29,
+          marketsScanned: 29,
+          marketsSkippedByTimeout: 0,
+          accountingValid: true,
+        }),
+      ]));
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        verdict: "tradable",
+        accounting: {
+          attempted: 95,
+          scanned: 95,
+          timeoutSkipped: 0,
+          abandoned: 0,
+          accountingValid: true,
+        },
+      });
+      expect(
+        (getScannerStatus().currentGeneration?.finishedAt ?? Number.POSITIVE_INFINITY)
+          - (getScannerStatus().currentGeneration?.startedAt ?? 0),
+      ).toBeLessThan(240_000);
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
   it("overlaps parent-timeframe batch prefetch with primary provider work", async () => {
     vi.useFakeTimers();
     try {
