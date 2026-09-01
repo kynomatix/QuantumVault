@@ -2583,7 +2583,7 @@ export function registerAiTraderRoutes(app: Express): void {
         new Date(startMs).toISOString(),
         new Date(endMs).toISOString(),
         undefined,
-        { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true }
+        { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true }
       );
       if (rawCandles.length === 0) {
         return chartCandlesUnavailable(res, {
