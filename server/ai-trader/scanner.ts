@@ -109,9 +109,8 @@ const PARENT_TF: Record<string, string | null> = {
 const INDICATOR_BARS          = 400;          // bars fetched per TF per market
 const UNIVERSE_CACHE_TTL_MS   = 60 * 60_000; // 1h universe list cache per protocol
 const FEED_HEALTH_TTL_MS      = 30 * 60_000; // 30-min feed-dead TTL (mirrors datafeed negcaches)
-const MAX_CONCURRENT_FETCHES  = 3;            // max in-flight fetchOHLCV calls
+const MAX_CONCURRENT_FETCHES  = 10;           // provider-bounded in-flight market workers
 const FETCH_STAGGER_MS        = 150;          // ≥150ms between consecutive dispatches
-const SWEEP_BUDGET_MS         = 55_000;       // abort remaining markets after this
 const TOP_K                   = 3;            // max candidates per protocol per boundary
 const RING_BUFFER_MAX         = 200;          // max telemetry ring-buffer entries
 /** Maximum closed bars allowed after a confirmed neckline break for an unexhausted retest. */
@@ -119,6 +118,38 @@ export const MAX_POST_BREAK_RETURN_AGE_BARS = 4;
 
 // Protocols scanned. Flash scanner bots are paper-only today (go-live is Pacifica-only).
 const PROTOCOLS = ["flash", "pacifica"] as const;
+
+/**
+ * Fairly allocate the remaining global fetch window to one protocol using the
+ * actual work still in front of the sweep. The global deadline remains the
+ * authority: this helper only partitions what is left and never creates time.
+ */
+export function allocateScannerProtocolBudgetMs(input: {
+  remainingGlobalMs: number;
+  currentProtocolIndex: number;
+  universeSizes: readonly number[];
+  boundaryTimeframeCount: number;
+}): number {
+  const remainingGlobalMs = Math.max(0, Math.floor(input.remainingGlobalMs));
+  const timeframeCount = Math.max(0, Math.floor(input.boundaryTimeframeCount));
+  if (remainingGlobalMs === 0 || timeframeCount === 0) return 0;
+  if (input.currentProtocolIndex < 0 || input.currentProtocolIndex >= input.universeSizes.length) {
+    return 0;
+  }
+  const weights = input.universeSizes.map((size) =>
+    Math.max(0, Math.floor(size)) * timeframeCount,
+  );
+  const currentWeight = weights[input.currentProtocolIndex] ?? 0;
+  if (currentWeight === 0) return 0;
+  const remainingWeight = weights
+    .slice(input.currentProtocolIndex)
+    .reduce((sum, weight) => sum + weight, 0);
+  if (remainingWeight <= currentWeight) return remainingGlobalMs;
+  return Math.min(
+    remainingGlobalMs,
+    Math.floor((remainingGlobalMs * currentWeight) / remainingWeight),
+  );
+}
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -1092,7 +1123,7 @@ async function runSweep(): Promise<void> {
       ...boundaryTfs,
       ...boundaryTfs.map((tf) => PARENT_TF[tf]).filter((tf): tf is string => tf !== null),
     ])];
-    for (const tf of batchTimeframes) {
+    const prefetchBatchTimeframe = async (tf: string): Promise<void> => {
       requireScannerSweepOwner(owner);
       const remainingMs = fetchDeadlineAt - Date.now();
       if (batchFailoverOpen) {
@@ -1102,7 +1133,7 @@ async function runSweep(): Promise<void> {
           "cache-read=bypass cache-write=skip";
         console.log(skippedLine);
         appendTelemetry(skippedLine);
-        continue;
+        return;
       }
       if (sweepTickers.length === 0 || remainingMs < 5_000) {
         if (sweepTickers.length > 0) {
@@ -1110,7 +1141,7 @@ async function runSweep(): Promise<void> {
           console.log(skippedLine);
           appendTelemetry(skippedLine);
         }
-        continue;
+        return;
       }
       const tfMs = TIMEFRAME_MS[tf];
       const endMs = now.getTime();
@@ -1152,10 +1183,47 @@ async function runSweep(): Promise<void> {
         // fetches the provider directly and suppresses cache persistence for
         // each exact ticker/timeframe key in this sweep.
       }
+    };
+    // Preserve the dedicated scanner-candle lane's serial read order, while
+    // allowing provider work to begin as soon as its own timeframe is ready.
+    // Each consumer awaits the shared task before reading the populated maps.
+    const batchPrefetchTasks = new Map<string, Promise<void>>();
+    let batchPrefetchChain = Promise.resolve();
+    for (const tf of batchTimeframes) {
+      const task = batchPrefetchChain.then(() => prefetchBatchTimeframe(tf));
+      // A revoked sweep can stop before a later task is awaited. Observe the
+      // rejection without changing the original promise seen by its consumer.
+      task.catch(() => {});
+      batchPrefetchTasks.set(tf, task);
+      batchPrefetchChain = task;
     }
-
-    for (const protocol of PROTOCOLS) {
+    const awaitBatchPrefetch = async (tf: string): Promise<void> => {
+      const task = batchPrefetchTasks.get(tf);
+      if (task) await withSweepOwnership(owner, task);
       requireScannerSweepOwner(owner);
+    };
+
+    const universeSizes = PROTOCOLS.map((protocol) =>
+      universesByProtocol.get(protocol)?.length ?? 0,
+    );
+    for (let protocolIndex = 0; protocolIndex < PROTOCOLS.length; protocolIndex++) {
+      const protocol = PROTOCOLS[protocolIndex];
+      requireScannerSweepOwner(owner);
+      const universe = universesByProtocol.get(protocol) ?? [];
+      const remainingGlobalMs = Math.max(0, fetchDeadlineAt - Date.now());
+      const protocolBudgetMs = allocateScannerProtocolBudgetMs({
+        remainingGlobalMs,
+        currentProtocolIndex: protocolIndex,
+        universeSizes,
+        boundaryTimeframeCount: boundaryTfs.length,
+      });
+      const capacityLine =
+        `[Scanner] CAPACITY PLAN: generation=${gen} protocol=${protocol} ` +
+        `timeframes=${boundaryTfs.length} universe=${universe.length} ` +
+        `workers=${MAX_CONCURRENT_FETCHES} remaining=${remainingGlobalMs}ms ` +
+        `allocated=${protocolBudgetMs}ms`;
+      console.log(capacityLine);
+      appendTelemetry(capacityLine);
       // Genuine wall-clock gate: once the sweep-global fetch budget is spent,
       // no further protocol may start dispatching (previously only checked
       // between markets, so a late protocol still burned real time).
@@ -1166,27 +1234,24 @@ async function runSweep(): Promise<void> {
         appendTelemetry(gateLine);
         continue;
       }
-      const universe = universesByProtocol.get(protocol) ?? [];
-
-      // Per-protocol budget clock. The budget used to be measured from the GLOBAL
-      // sweep start, which let the first protocol (flash) consume the entire 55s on
-      // cold sweeps — pacifica's loop then started with the budget already blown and
-      // skipped every market ("Scanning 0 Pacifica markets" in the create modal).
-      // Each protocol gets its own window, SCALED by how many TFs are due at this
-      // boundary: a flat 55s let the (slow, Pyth-heavy) 15m scan eat the whole
-      // window at :00 boundaries, so 1h/4h logged "0 scanned" while ~100s of the
-      // global 240s budget sat unused (prod evidence: 04:02 and 07:02 SWEEP TOTAL
-      // lines with 98–180 skipped-by-timeout). Cap keeps the worst-case dispatch
-      // total at SWEEP_FETCH_DEADLINE_TOTAL_MS across all protocols, preserving
-      // the ≈290s < 300s wedge-window margin documented on the constant.
-      const protocolBudgetMs = Math.min(
-        SWEEP_BUDGET_MS * boundaryTfs.length,
-        Math.floor(SWEEP_FETCH_DEADLINE_TOTAL_MS / PROTOCOLS.length),
-      );
       const protocolStart = Date.now();
+      let primaryPrefetchWaitMs = 0;
+      const protocolElapsedMs = (): number =>
+        Math.max(0, Date.now() - protocolStart - primaryPrefetchWaitMs);
+      const protocolDeadlineAt = (): number =>
+        protocolStart + primaryPrefetchWaitMs + protocolBudgetMs;
 
       for (const tf of boundaryTfs) {
         requireScannerSweepOwner(owner);
+        // The primary batch is shared by every protocol. Charge its actual
+        // wait to the unchanged sweep-global deadline, but not to whichever
+        // protocol happens to run first. Parent-prefetch waits remain charged.
+        const primaryPrefetchWaitStartedAt = Date.now();
+        await awaitBatchPrefetch(tf);
+        primaryPrefetchWaitMs += Math.max(
+          0,
+          Date.now() - primaryPrefetchWaitStartedAt,
+        );
         // Same wall-clock gate per TF: a budget spent mid-protocol must stop
         // the NEXT timeframe from dispatching, not just the next market.
         if (Date.now() >= fetchDeadlineAt) {
@@ -1223,7 +1288,7 @@ async function runSweep(): Promise<void> {
         // reported by NAME, not just a count (formal incident requirement).
         const inFlightMarkets = new Set<string>();
 
-        // Per-market fetch + evaluate, dispatched concurrently (max 3 in flight).
+        // Per-market fetch + evaluate, dispatched concurrently (max 10 in flight).
         const dispatchMarket = (market: string): Promise<void> => {
           return (async () => {
             requireScannerSweepOwner(owner);
@@ -1267,7 +1332,7 @@ async function runSweep(): Promise<void> {
                 // between-markets budget check (2026-07-19 sweep post-mortem).
                 const remainingMs = Math.min(
                   fetchDeadlineAt - Date.now(),
-                  protocolStart + protocolBudgetMs - Date.now(),
+                  protocolDeadlineAt() - Date.now(),
                 );
                 if (remainingMs < 5_000) {
                   // Sweep fetch budget exhausted — skip without marking the
@@ -1363,6 +1428,7 @@ async function runSweep(): Promise<void> {
             // Fetch parent-TF bars (use cache to avoid duplicate fetches).
             let parentBars: ProvenancedOHLCV[] | null = null;
             if (parentTf) {
+              await awaitBatchPrefetch(parentTf);
               const parentTfMs = TIMEFRAME_MS[parentTf];
               const parentStartMs = endMs - (INDICATOR_BARS + 1) * parentTfMs;
               const parentCacheKey = `${ticker}:${parentTf}`;
@@ -1373,7 +1439,7 @@ async function runSweep(): Promise<void> {
                   // Min of both clocks — same rationale as the primary fetch guard.
                   const remainingMs = Math.min(
                     fetchDeadlineAt - Date.now(),
-                    protocolStart + protocolBudgetMs - Date.now(),
+                    protocolDeadlineAt() - Date.now(),
                   );
                   if (remainingMs < 5_000) {
                     // The typed evaluator reports a configured parent as inconclusive.
@@ -1463,7 +1529,7 @@ async function runSweep(): Promise<void> {
           });
         };
 
-        // Dispatch loop: max 3 concurrent + ≥150ms stagger between dispatches.
+        // Dispatch loop: max 10 concurrent + ≥150ms stagger between dispatches.
         for (let i = 0; i < universe.length; i++) {
           requireScannerSweepOwner(owner);
           const market = universe[i];
@@ -1473,7 +1539,7 @@ async function runSweep(): Promise<void> {
           // the protocol clock, so after the global 240s deadline passed it
           // kept iterating (stagger sleeps + slot waits) for ~13s of pure
           // grind before the drain even started — pushing the sweep to 278s.
-          if (Date.now() - protocolStart > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
+          if (protocolElapsedMs() > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
             for (let skipped = i; skipped < universe.length; skipped++) {
               finishAttempt(universe[skipped], "timeout-skipped");
             }
@@ -1481,7 +1547,7 @@ async function runSweep(): Promise<void> {
           }
 
           // Wait for a semaphore slot (busy-wait in 10ms slices). MUST stay
-          // budget-bounded: if all 3 in-flight dispatches hang (2026-07-18: a
+          // budget-bounded: if all in-flight dispatches hang (2026-07-18: a
           // single never-settling OKX fetch), an uncapped wait here would spin
           // forever and the budget check above (only evaluated between
           // markets) could never fire again.
@@ -1489,7 +1555,7 @@ async function runSweep(): Promise<void> {
           while (inFlight >= MAX_CONCURRENT_FETCHES) {
             // Same both-clocks rule as the loop gate above: a slot wait must
             // not outlive the sweep-global fetch deadline either.
-            if (Date.now() - protocolStart > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
+            if (protocolElapsedMs() > protocolBudgetMs || Date.now() >= fetchDeadlineAt) {
               slotWaitTimedOut = true;
               break;
             }
@@ -1514,7 +1580,7 @@ async function runSweep(): Promise<void> {
           // Only pay it when this dispatch can actually hit the network: a market
           // whose primary+parent bars are already in the per-sweep cache (or whose
           // feed is health-skipped) does no fetch, and staggering those burned the
-          // 55s budget at multi-TF boundaries (00:00 UTC: ~400 dispatches × 150ms
+          // former 55s budget at multi-TF boundaries (00:00 UTC: ~400 dispatches × 150ms
           // ≈ 60s of pure sleep → Pacifica 4h/1d systematically skipped).
           const staggerTicker = marketToDatafeedTicker(market);
           const staggerHealth = feedHealthMap.get(staggerTicker);
@@ -1538,7 +1604,7 @@ async function runSweep(): Promise<void> {
         // wedge clock applied, so one hung fetch let the drain legally sit for
         // ~4 minutes — inside the "240s budget" the summary line claimed.
         const drainDeadlineAt = Math.min(
-          protocolStart + protocolBudgetMs,
+          protocolDeadlineAt(),
           fetchDeadlineAt,
           sweepBeganAt + SWEEP_WEDGE_MS - 30_000,
         );
