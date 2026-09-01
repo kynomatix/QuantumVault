@@ -1275,7 +1275,7 @@ async function runSweep(): Promise<void> {
         // reported by NAME, not just a count (formal incident requirement).
         const inFlightMarkets = new Set<string>();
 
-        // Per-market fetch + evaluate, dispatched concurrently (max 3 in flight).
+        // Per-market fetch + evaluate, dispatched concurrently (max 10 in flight).
         const dispatchMarket = (market: string): Promise<void> => {
           return (async () => {
             requireScannerSweepOwner(owner);
@@ -1567,7 +1567,7 @@ async function runSweep(): Promise<void> {
           // Only pay it when this dispatch can actually hit the network: a market
           // whose primary+parent bars are already in the per-sweep cache (or whose
           // feed is health-skipped) does no fetch, and staggering those burned the
-          // 55s budget at multi-TF boundaries (00:00 UTC: ~400 dispatches × 150ms
+          // former 55s budget at multi-TF boundaries (00:00 UTC: ~400 dispatches × 150ms
           // ≈ 60s of pure sleep → Pacifica 4h/1d systematically skipped).
           const staggerTicker = marketToDatafeedTicker(market);
           const staggerHealth = feedHealthMap.get(staggerTicker);
