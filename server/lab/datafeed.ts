@@ -115,6 +115,67 @@ const okxFailedInstruments = new Map<string, number>();
 const gateFailedPairs = new Map<string, number>();
 const pythFailedSymbols = new Map<string, number>();
 
+export type OkxRequestTerminalPhase = "headers" | "body" | "released_unread";
+export type OkxRequestSettlementMechanism =
+  | "success"
+  | "http_release"
+  | "transport_error"
+  | "controller_abort"
+  | "external_abort"
+  | "hard_terminal";
+
+type OkxRequestDiagnosticContext = Readonly<{
+  provider: "okx";
+  callerClass: CandleReadCallerClass;
+  instrument: string;
+  timeframe: string;
+  attempt: number;
+}>;
+
+export type OkxRequestTerminalDiagnostic = OkxRequestDiagnosticContext & Readonly<{
+  kind: "okx_request_terminal";
+  phase: OkxRequestTerminalPhase;
+  settlement: OkxRequestSettlementMechanism;
+  elapsedToHeadersMs: number | null;
+  bodyStartElapsedMs: number | null;
+  bodyEndElapsedMs: number | null;
+  controllerAbortElapsedMs: number | null;
+  externalAbortElapsedMs: number | null;
+  hardTerminalElapsedMs: number | null;
+  settledElapsedMs: number;
+}>;
+
+export type OkxSourceBreakerDiagnostic = OkxRequestDiagnosticContext & Readonly<{
+  kind: "okx_source_breaker_increment";
+  priorConsecutiveFailures: number;
+  resultingConsecutiveFailures: number;
+  opened: boolean;
+  cooldownMs: number;
+}>;
+
+export type OkxDatafeedDiagnostic = OkxRequestTerminalDiagnostic | OkxSourceBreakerDiagnostic;
+type OkxDatafeedDiagnosticReporter = (record: OkxDatafeedDiagnostic) => void;
+let okxDatafeedDiagnosticReporter: OkxDatafeedDiagnosticReporter | null = null;
+
+/** Test/observer seam. The durable sink remains appendTelemetry. */
+export function setOkxDatafeedDiagnosticReporter(
+  reporter: OkxDatafeedDiagnosticReporter | null,
+): void {
+  okxDatafeedDiagnosticReporter = reporter;
+}
+
+function emitOkxDatafeedDiagnostic(record: OkxDatafeedDiagnostic): void {
+  // The record is scrubbed by construction: closed vocabularies, safe market
+  // identity, and elapsed numbers only. Never add URLs, headers, bodies, or
+  // arbitrary error prose to this payload.
+  appendTelemetry(`[OKXDiagnostic] ${JSON.stringify(record)}`);
+  try {
+    okxDatafeedDiagnosticReporter?.(record);
+  } catch {
+    // Observability is enrichment and must never alter a candle read.
+  }
+}
+
 function isNegCached(cache: Map<string, number>, key: string): boolean {
   const ts = cache.get(key);
   if (ts === undefined) return false;
@@ -158,9 +219,12 @@ function recordOkxSourceSuccess(): void {
   okxSourceConsecutiveFailures = 0;
 }
 
-function recordOkxSourceFailure(instId: string): void {
+function recordOkxSourceFailure(context: OkxRequestDiagnosticContext): void {
+  const priorConsecutiveFailures = okxSourceConsecutiveFailures;
   okxSourceConsecutiveFailures++;
+  let opened = false;
   if (okxSourceConsecutiveFailures >= OKX_SOURCE_BREAKER_THRESHOLD) {
+    opened = true;
     okxSourceDownUntil = Date.now() + OKX_SOURCE_BREAKER_COOLDOWN_MS;
     // Leave the counter one below the threshold so a single failed half-open
     // probe after the cooldown re-trips immediately (instead of paying the
@@ -168,11 +232,19 @@ function recordOkxSourceFailure(instId: string): void {
     okxSourceConsecutiveFailures = OKX_SOURCE_BREAKER_THRESHOLD - 1;
     const msg =
       `[OKX] SOURCE DOWN: ${OKX_SOURCE_BREAKER_THRESHOLD} consecutive network failures ` +
-      `(last: ${instId}) — skipping OKX for ALL symbols for ` +
+      `(last: ${context.instrument}) — skipping OKX for ALL symbols for ` +
       `${Math.round(OKX_SOURCE_BREAKER_COOLDOWN_MS / 60000)} min; Gate/Pyth fallbacks take over`;
     console.log(msg);
     appendTelemetry(msg);
   }
+  emitOkxDatafeedDiagnostic(Object.freeze({
+    kind: "okx_source_breaker_increment",
+    ...context,
+    priorConsecutiveFailures,
+    resultingConsecutiveFailures: okxSourceConsecutiveFailures,
+    opened,
+    cooldownMs: OKX_SOURCE_BREAKER_COOLDOWN_MS,
+  }));
 }
 
 /** Test-only: reset the OKX source breaker between test cases. */
@@ -553,8 +625,53 @@ async function fetchWithHardTimeout(
   init?: RequestInit,
   externalSignal?: AbortSignal,
   transport: 'default' | 'hermes' = 'default',
+  diagnosticContext?: OkxRequestDiagnosticContext,
 ): Promise<BoundedFetchResponse> {
   throwIfAborted(externalSignal);
+  // `performance.now()` is monotonic within the process, unlike wall-clock
+  // time, so NTP or host clock corrections cannot invert lifecycle ordering.
+  const nowMonotonic = (): number => performance.now();
+  const startedAt = nowMonotonic();
+  let headersAt: number | null = null;
+  let bodyStartedAt: number | null = null;
+  let bodyEndedAt: number | null = null;
+  let controllerAbortAt: number | null = null;
+  let externalAbortAt: number | null = null;
+  let hardTerminalAt: number | null = null;
+  let diagnosticEmitted = false;
+  const elapsed = (value: number | null): number | null =>
+    value === null ? null : Math.max(0, value - startedAt);
+  const emitTerminal = (
+    phase: OkxRequestTerminalPhase,
+    settlement: OkxRequestSettlementMechanism,
+  ): void => {
+    if (!diagnosticContext || diagnosticEmitted) return;
+    diagnosticEmitted = true;
+    emitOkxDatafeedDiagnostic(Object.freeze({
+      kind: "okx_request_terminal",
+      ...diagnosticContext,
+      phase,
+      settlement,
+      elapsedToHeadersMs: elapsed(headersAt),
+      bodyStartElapsedMs: elapsed(bodyStartedAt),
+      bodyEndElapsedMs: elapsed(bodyEndedAt),
+      controllerAbortElapsedMs: elapsed(controllerAbortAt),
+      externalAbortElapsedMs: elapsed(externalAbortAt),
+      hardTerminalElapsedMs: elapsed(hardTerminalAt),
+      settledElapsedMs: Math.max(0, nowMonotonic() - startedAt),
+    }));
+  };
+  const failureMechanism = (): OkxRequestSettlementMechanism => {
+    // The hard terminal rejects its race before aborting the controller and is
+    // therefore authoritative if it fired. External abort likewise rejects
+    // the shared terminal directly. The controller timer only aborts the
+    // transport, so it owns settlement only when the transport rejects before
+    // the independent terminal fires.
+    if (hardTerminalAt !== null) return "hard_terminal";
+    if (externalAbortAt !== null) return "external_abort";
+    if (controllerAbortAt !== null) return "controller_abort";
+    return "transport_error";
+  };
   const controller = new AbortController();
   let rejectTerminal!: (error: Error) => void;
   let terminalRejected = false;
@@ -569,11 +686,15 @@ async function fetchWithHardTimeout(
   // before a body reader starts. Keep it handled throughout that gap.
   void terminal.catch(() => {});
 
-  const controllerTimer = setTimeout(() => controller.abort(), ms);
+  const controllerTimer = setTimeout(() => {
+    controllerAbortAt ??= nowMonotonic();
+    controller.abort();
+  }, ms);
   const raceTimer = setTimeout(() => {
     // Preserve a non-AbortError for genuine provider failure accounting. The
     // independent rejection is queued before aborting the transport so it is
     // authoritative even when the body reader reacts synchronously to abort.
+    hardTerminalAt ??= nowMonotonic();
     rejectTerminal(new Error(`fetch hard-timeout after ${ms + 5000}ms (abort never fired)`));
     controller.abort();
   }, ms + 5_000);
@@ -583,6 +704,7 @@ async function fetchWithHardTimeout(
   // Retained through body consumption so cancellation after headers still
   // reaches a stalled body. `release` removes it exactly once.
   const onExternalAbort = () => {
+    externalAbortAt ??= nowMonotonic();
     rejectTerminal(makeAbortError());
     controller.abort();
   };
@@ -593,6 +715,14 @@ async function fetchWithHardTimeout(
   const release = () => {
     if (released) return;
     released = true;
+    if (headersAt !== null && bodyStartedAt === null) {
+      const settlement = externalAbortAt !== null
+        ? "external_abort"
+        : controllerAbortAt !== null
+          ? "controller_abort"
+          : "http_release";
+      emitTerminal("released_unread", settlement);
+    }
     // An unread or failed body may still own a pooled connection. Abort it;
     // only a successfully consumed body is known to be safe to leave alone.
     if (!bodyConsumed && !controller.signal.aborted) controller.abort();
@@ -606,11 +736,19 @@ async function fetchWithHardTimeout(
       request(url, { ...init, signal: controller.signal }),
       terminal,
     ]);
+    headersAt = nowMonotonic();
     const consume = async <T>(reader: () => Promise<T>): Promise<T> => {
+      bodyStartedAt ??= nowMonotonic();
       try {
         const value = await Promise.race([reader(), terminal]);
         bodyConsumed = true;
+        bodyEndedAt = nowMonotonic();
+        emitTerminal("body", "success");
         return value;
+      } catch (error) {
+        bodyEndedAt = nowMonotonic();
+        emitTerminal("body", failureMechanism());
+        throw error;
       } finally {
         release();
       }
@@ -622,6 +760,7 @@ async function fetchWithHardTimeout(
       release,
     });
   } catch (error) {
+    emitTerminal("headers", failureMechanism());
     release();
     throw error;
   }
@@ -1083,6 +1222,7 @@ async function fetchOkxCandles(
   afterMs?: number,
   beforeMs?: number,
   signal?: AbortSignal,
+  diagnosticBase?: Omit<OkxRequestDiagnosticContext, "attempt">,
 ): Promise<any[]> {
   const params = new URLSearchParams({ instId, bar, limit: String(OKX_BATCH_SIZE) });
   if (afterMs) params.set("after", String(afterMs));
@@ -1092,7 +1232,14 @@ async function fetchOkxCandles(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const bounded = await fetchWithHardTimeout(url, 15000, undefined, signal);
+      const bounded = await fetchWithHardTimeout(
+        url,
+        15000,
+        undefined,
+        signal,
+        "default",
+        diagnosticBase ? { ...diagnosticBase, attempt: attempt + 1 } : undefined,
+      );
       const res = bounded.response;
       try {
         if (res.status === 429) {
@@ -1729,6 +1876,12 @@ export async function fetchOHLCV(
 
   const okxNegCachedAtEntry = isNegCached(okxFailedInstruments, instId);
   const okxSourceDownAtEntry = isOkxSourceDown();
+  const okxDiagnosticBase: Omit<OkxRequestDiagnosticContext, "attempt"> = {
+    provider: "okx",
+    callerClass: options?.callerClass ?? "lab",
+    instrument: instId,
+    timeframe,
+  };
   if (basisPolicy.acceptedBasis.includes("perp") && !okxNegCachedAtEntry && !okxSourceDownAtEntry) {
     const bar = mapTimeframeToOkx(timeframe);
     onProgress?.(`Fetching ${symbol} ${timeframe} from OKX...`);
@@ -1750,7 +1903,14 @@ export async function fetchOHLCV(
       }
       try {
         attemptedNetwork = true;
-        const raw = await fetchOkxCandles(instId, bar, currentEndMs, undefined, signal);
+        const raw = await fetchOkxCandles(
+          instId,
+          bar,
+          currentEndMs,
+          undefined,
+          signal,
+          okxDiagnosticBase,
+        );
         // Any well-formed API response (even empty data / exhausted 429
         // retries) proves the OKX source is reachable.
         recordOkxSourceSuccess();
@@ -1838,7 +1998,7 @@ export async function fetchOHLCV(
       // Network-type failure (timeouts/refused — NOT a not-found, which
       // resets above): count it toward the source-level breaker.
       if (attemptedNetwork && consecutiveErrors > 0) {
-        recordOkxSourceFailure(instId);
+        recordOkxSourceFailure({ ...okxDiagnosticBase, attempt: MAX_RETRIES });
       }
       // Only negcache the instrument if we actually reached the network for
       // it — a deadline hit before the first attempt proves nothing.

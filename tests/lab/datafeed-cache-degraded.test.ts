@@ -32,6 +32,8 @@ import {
   MONEY_CANDLE_POLICY,
   prefetchCachedOHLCV,
   SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+  setOkxDatafeedDiagnosticReporter,
+  type OkxDatafeedDiagnostic,
 } from "../../server/lab/datafeed";
 
 const TF_MS = 15 * 60 * 1000;
@@ -54,6 +56,7 @@ function wedgeCacheReads(): void {
 }
 
 let fetchSpy: ReturnType<typeof vi.fn>;
+let okxDiagnostics: OkxDatafeedDiagnostic[];
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -66,9 +69,12 @@ beforeEach(() => {
     throw new Error(`network fetch must not run during cache degradation: ${String(url)}`);
   });
   vi.stubGlobal("fetch", fetchSpy);
+  okxDiagnostics = [];
+  setOkxDatafeedDiagnosticReporter((record) => okxDiagnostics.push(record));
 });
 
 afterEach(() => {
+  setOkxDatafeedDiagnosticReporter(null);
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -118,6 +124,7 @@ describe("provider response-body cancellation lifetime", () => {
         cacheWritePolicy: "skip",
         deadlineMs: 45_000,
         signal: caller.signal,
+        callerClass: "scanner",
       },
     );
     pending.catch(() => {});
@@ -129,6 +136,24 @@ describe("provider response-body cancellation lifetime", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(mockSave).not.toHaveBeenCalled();
+    expect(okxDiagnostics).toEqual([
+      expect.objectContaining({
+        kind: "okx_request_terminal",
+        provider: "okx",
+        callerClass: "scanner",
+        instrument: "SOL-USDT-SWAP",
+        timeframe: "15m",
+        attempt: 1,
+        phase: "body",
+        settlement: "external_abort",
+        elapsedToHeadersMs: 0,
+        bodyStartElapsedMs: 0,
+        bodyEndElapsedMs: 0,
+        externalAbortElapsedMs: 0,
+        hardTerminalElapsedMs: null,
+        settledElapsedMs: 0,
+      }),
+    ]);
   });
 
   it("terminates caller-aborted OKX bodies that ignore the internal signal", async () => {
@@ -167,6 +192,14 @@ describe("provider response-body cancellation lifetime", () => {
     expect(internalSignal?.aborted).toBe(true);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(mockSave).not.toHaveBeenCalled();
+    expect(okxDiagnostics).toEqual([
+      expect.objectContaining({
+        kind: "okx_request_terminal",
+        attempt: 1,
+        phase: "body",
+        settlement: "external_abort",
+      }),
+    ]);
   });
 
   it("hard-terminates each signal-ignoring OKX body and preserves all three retries", async () => {
@@ -199,6 +232,88 @@ describe("provider response-body cancellation lifetime", () => {
     expect(internalSignals).toHaveLength(3);
     expect(internalSignals.every((signal) => signal.aborted)).toBe(true);
     expect(mockSave).not.toHaveBeenCalled();
+    expect(okxDiagnostics.filter((record) => record.kind === "okx_request_terminal")).toEqual([
+      expect.objectContaining({ attempt: 1, phase: "body", settlement: "hard_terminal" }),
+      expect.objectContaining({ attempt: 2, phase: "body", settlement: "hard_terminal" }),
+      expect.objectContaining({ attempt: 3, phase: "body", settlement: "hard_terminal" }),
+    ]);
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "okx_source_breaker_increment",
+      instrument: "HARDTERMINAL-USDT-SWAP",
+      timeframe: "15m",
+      attempt: 3,
+      priorConsecutiveFailures: 0,
+      resultingConsecutiveFailures: 1,
+      opened: false,
+      cooldownMs: 15 * 60_000,
+    }));
+  });
+
+  it("attributes a pre-header transport rejection caused by the internal controller deadline", async () => {
+    fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      const signal = init?.signal;
+      return await new Promise((_resolve, reject) => {
+        const rejectAborted = () => {
+          const error = new Error("transport observed internal abort");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (signal?.aborted) rejectAborted();
+        else signal?.addEventListener("abort", rejectAborted, { once: true });
+      });
+    });
+
+    const now = Date.now();
+    const pending = fetchOHLCV(
+      "CONTROLLER/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        skipSpotFallback: true,
+        // One complete three-attempt chain (15s + 1s + 15s + 2s + 15s)
+        // is allowed to finish, then the outer deadline stops pagination.
+        deadlineMs: 45_000,
+        callerClass: "scanner",
+      },
+    );
+    pending.catch(() => {});
+
+    await vi.advanceTimersByTimeAsync(50_000);
+    await expect(pending).rejects.toBeDefined();
+
+    expect(okxDiagnostics.filter((record) => record.kind === "okx_request_terminal")).toEqual([
+      expect.objectContaining({
+        attempt: 1,
+        phase: "headers",
+        settlement: "controller_abort",
+        elapsedToHeadersMs: null,
+        controllerAbortElapsedMs: 15_000,
+        hardTerminalElapsedMs: null,
+        settledElapsedMs: 15_000,
+      }),
+      expect.objectContaining({
+        attempt: 2,
+        phase: "headers",
+        settlement: "controller_abort",
+        controllerAbortElapsedMs: 15_000,
+      }),
+      expect.objectContaining({
+        attempt: 3,
+        phase: "headers",
+        settlement: "controller_abort",
+        controllerAbortElapsedMs: 15_000,
+      }),
+    ]);
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "okx_source_breaker_increment",
+      callerClass: "scanner",
+      instrument: "CONTROLLER-USDT-SWAP",
+      attempt: 3,
+      priorConsecutiveFailures: 0,
+      resultingConsecutiveFailures: 1,
+      opened: false,
+    }));
   });
 
   it("aborts an unread OKX response when a 429 releases it early", async () => {
@@ -237,6 +352,141 @@ describe("provider response-body cancellation lifetime", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(mockSave).not.toHaveBeenCalled();
+    expect(okxDiagnostics[0]).toMatchObject({
+      kind: "okx_request_terminal",
+      attempt: 1,
+      phase: "released_unread",
+      settlement: "http_release",
+      bodyStartElapsedMs: null,
+      bodyEndElapsedMs: null,
+    });
+  });
+
+  it("records header transport failure without retaining URL or arbitrary error prose", async () => {
+    fetchSpy.mockRejectedValue(new Error(
+      "Authorization: Bearer should-never-appear; Cookie=session; https://www.okx.com/private?token=secret",
+    ));
+
+    const now = Date.now();
+    const pending = fetchOHLCV(
+      "SCRUB/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        skipSpotFallback: true,
+        // One immediate three-attempt chain plus its outer retry sleep.
+        deadlineMs: 3_000,
+        callerClass: "scanner",
+      },
+    );
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(4_000);
+    await expect(pending).rejects.toBeDefined();
+
+    const terminals = okxDiagnostics.filter((record) => record.kind === "okx_request_terminal");
+    expect(terminals).toHaveLength(3);
+    expect(terminals).toEqual([
+      expect.objectContaining({ attempt: 1, phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ attempt: 2, phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ attempt: 3, phase: "headers", settlement: "transport_error" }),
+    ]);
+    const retained = JSON.stringify(okxDiagnostics);
+    expect(retained).not.toContain("Authorization");
+    expect(retained).not.toContain("Bearer");
+    expect(retained).not.toContain("Cookie");
+    expect(retained).not.toContain("history-candles");
+    expect(retained).not.toContain("token=secret");
+    expect(retained).not.toContain("stack");
+  });
+
+  it("attributes each source failure and identifies the exact increment that opens the breaker", async () => {
+    fetchSpy.mockRejectedValue(new Error("network unavailable"));
+    const now = Date.now();
+
+    for (const symbol of ["ONE/USDT", "TWO/USDT", "THREE/USDT"]) {
+      const pending = fetchOHLCV(
+        symbol, "15m", now - TF_MS, now, undefined,
+        {
+          basisPolicy: MONEY_CANDLE_POLICY,
+          bypassCache: true,
+          cacheWritePolicy: "skip",
+          skipSpotFallback: true,
+          deadlineMs: 3_000,
+          callerClass: "scanner",
+        },
+      );
+      pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(4_000);
+      await expect(pending).rejects.toBeDefined();
+    }
+
+    expect(okxDiagnostics.filter((record) => record.kind === "okx_source_breaker_increment")).toEqual([
+      expect.objectContaining({
+        instrument: "ONE-USDT-SWAP",
+        priorConsecutiveFailures: 0,
+        resultingConsecutiveFailures: 1,
+        opened: false,
+      }),
+      expect.objectContaining({
+        instrument: "TWO-USDT-SWAP",
+        priorConsecutiveFailures: 1,
+        resultingConsecutiveFailures: 2,
+        opened: false,
+      }),
+      expect.objectContaining({
+        instrument: "THREE-USDT-SWAP",
+        priorConsecutiveFailures: 2,
+        // The established half-open behavior deliberately stores threshold-1.
+        resultingConsecutiveFailures: 2,
+        opened: true,
+        cooldownMs: 15 * 60_000,
+      }),
+    ]);
+  });
+
+  it("records successful OKX body timing once and lets a throwing observer fail open", async () => {
+    setOkxDatafeedDiagnosticReporter((record) => {
+      okxDiagnostics.push(record);
+      throw new Error("observer failure must not alter the fetch");
+    });
+    const now = Date.now();
+    fetchSpy.mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        code: "0",
+        data: [[String(now - TF_MS), "1", "2", "0.5", "1.5", "10", "10", "10", "1"]],
+      }),
+    });
+
+    const result = await fetchOHLCV(
+      "SOL/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        callerClass: "scanner",
+      },
+    );
+
+    expect(result).toHaveLength(1);
+    expect(okxDiagnostics).toEqual([
+      expect.objectContaining({
+        kind: "okx_request_terminal",
+        attempt: 1,
+        phase: "body",
+        settlement: "success",
+        elapsedToHeadersMs: 0,
+        bodyStartElapsedMs: 0,
+        bodyEndElapsedMs: 0,
+        controllerAbortElapsedMs: null,
+        externalAbortElapsedMs: null,
+        hardTerminalElapsedMs: null,
+        settledElapsedMs: 0,
+      }),
+    ]);
   });
 
   it("removes the caller relay after successful body consumption", async () => {
