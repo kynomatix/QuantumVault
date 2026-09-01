@@ -138,6 +138,11 @@ vi.mock("../../server/vault/jupiter-lend-borrow-route", async (importOriginal) =
         if (posId === 777) return h.state.liveBotHealth;
         return null;
       }
+      async readLiveHealthForResolvedConfig(_config: unknown, posId: number) {
+        if (posId === 555) return h.state.liveAcctHealth;
+        if (posId === 777) return h.state.liveBotHealth;
+        return null;
+      }
     },
   };
 });

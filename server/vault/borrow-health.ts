@@ -306,6 +306,10 @@ export interface BotBorrowHealthDeps {
     vaultId: number,
     positionId: number,
   ): Promise<LivePositionHealth | null>;
+  readLiveHealthForResolvedConfig(
+    config: BorrowVaultConfig,
+    positionId: number,
+  ): Promise<LivePositionHealth | null>;
 }
 
 function defaultDeps(): BotBorrowHealthDeps {
@@ -316,6 +320,8 @@ function defaultDeps(): BotBorrowHealthDeps {
     readLivePositionHealth: (m, p) => route.readLivePositionHealth(m, p),
     getLoopVaultConfig: (v) => route.getLoopVaultConfig(v),
     readLoopLivePositionHealth: (v, p) => route.readLoopLivePositionHealth(v, p),
+    readLiveHealthForResolvedConfig: (config, p) =>
+      route.readLiveHealthForResolvedConfig(config, p),
   };
 }
 
@@ -336,6 +342,11 @@ export interface RowHealthDeps {
     vaultId: number,
     positionId: number,
   ): Promise<LivePositionHealth | null>;
+  /** Reuse this pass's already-decoded config; never performs another REST lookup. */
+  readLiveHealthForResolvedConfig(
+    config: BorrowVaultConfig,
+    positionId: number,
+  ): Promise<LivePositionHealth | null>;
 }
 
 export function defaultRowHealthDeps(): RowHealthDeps {
@@ -345,6 +356,8 @@ export function defaultRowHealthDeps(): RowHealthDeps {
     readLivePositionHealth: (m, p) => route.readLivePositionHealth(m, p),
     getLoopVaultConfig: (v) => route.getLoopVaultConfig(v),
     readLoopLivePositionHealth: (v, p) => route.readLoopLivePositionHealth(v, p),
+    readLiveHealthForResolvedConfig: (config, p) =>
+      route.readLiveHealthForResolvedConfig(config, p),
   };
 }
 
@@ -405,9 +418,9 @@ export async function computeRowHealth(
           vault = null;
         }
       }
-      if (Number.isInteger(venueId) && venueId > 0) {
+      if (vault && Number.isInteger(venueId) && venueId > 0) {
         try {
-          live = await deps.readLoopLivePositionHealth(vaultId, venueId);
+          live = await deps.readLiveHealthForResolvedConfig(vault, venueId);
         } catch {
           live = null;
         }
@@ -431,9 +444,9 @@ export async function computeRowHealth(
         vault = null;
       }
     }
-    if (Number.isInteger(venueId) && venueId > 0) {
+    if (vault && Number.isInteger(venueId) && venueId > 0) {
       try {
-        live = await deps.readLivePositionHealth(mint, venueId);
+        live = await deps.readLiveHealthForResolvedConfig(vault, venueId);
       } catch {
         live = null;
       }
