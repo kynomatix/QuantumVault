@@ -487,10 +487,10 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
-  it("declares scanner OKX terminal attribution as reviewed no-bumps for affected policies", () => {
+  it("declares chart cache first-paint recovery as reviewed no-bumps for affected policies", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 29,
+      decisionGeneration: 30,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
@@ -500,7 +500,7 @@ describe("qualification era forgotten-declaration gate", () => {
     });
     expect(QUALIFICATION_ERA_REGISTRY.guardrail_risk_policy).toMatchObject({
       materialVersion: 4,
-      decisionGeneration: 15,
+      decisionGeneration: 16,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({

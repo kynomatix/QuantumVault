@@ -657,6 +657,21 @@ function fixedBot(paperMode: boolean): AiTraderBot {
 
 describe("AI Trader chart unavailable response", () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
+  const directPerpetualCandle = {
+    time: Date.parse("2026-08-23T00:00:00.000Z"),
+    open: 100,
+    high: 101,
+    low: 99,
+    close: 100.5,
+    provenance: {
+      source: "okx",
+      venue: "okx",
+      basis: "perp",
+      proxy: "direct",
+      finality: "finalized",
+      timeSemantic: "open_time",
+    },
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -706,22 +721,54 @@ describe("AI Trader chart unavailable response", () => {
     },
   );
 
+  it.each(["trade", "deep"] as const)(
+    "uses the provenance-qualified persistent cache for the %s first-paint span",
+    async (span) => {
+      fetchOHLCVMock.mockResolvedValue([directPerpetualCandle]);
+      const built = buildApp();
+      registerAiTraderRoutes(built.app);
+
+      const result = await invoke(built.routes, "GET /api/ai-trader/:id/chart", {
+        params: { id: "paper-route" },
+        session: { walletAddress: "WALLET_ROUTE" },
+        body: {},
+        query: { span, decisionId: "chart-decision" },
+        headers: {},
+      });
+
+      expect(result.statusCode).toBe(200);
+      const options = fetchOHLCVMock.mock.calls[0][5];
+      expect(options).toMatchObject({
+        basisPolicy: expect.objectContaining({ consumer: "chart" }),
+        skipSpotFallback: true,
+      });
+      expect(options).not.toHaveProperty("bypassCache");
+    },
+  );
+
+  it("keeps the live tail poll network-fresh instead of serving a cache hit", async () => {
+    fetchOHLCVMock.mockResolvedValue([directPerpetualCandle]);
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id/chart", {
+      params: { id: "paper-route" },
+      session: { walletAddress: "WALLET_ROUTE" },
+      body: {},
+      query: { span: "tail", decisionId: "chart-decision" },
+      headers: {},
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(fetchOHLCVMock.mock.calls[0][5]).toMatchObject({
+      basisPolicy: expect.objectContaining({ consumer: "chart" }),
+      skipSpotFallback: true,
+      bypassCache: true,
+    });
+  });
+
   it("preserves a successful direct-perpetual chart response", async () => {
-    fetchOHLCVMock.mockResolvedValue([{
-      time: Date.parse("2026-08-23T00:00:00.000Z"),
-      open: 100,
-      high: 101,
-      low: 99,
-      close: 100.5,
-      provenance: {
-        source: "okx",
-        venue: "okx",
-        basis: "perp",
-        proxy: "direct",
-        finality: "finalized",
-        timeSemantic: "open_time",
-      },
-    }]);
+    fetchOHLCVMock.mockResolvedValue([directPerpetualCandle]);
     const built = buildApp();
     registerAiTraderRoutes(built.app);
 
