@@ -82,6 +82,13 @@ vi.mock("../../server/error-log", () => ({
   recordCriticalError: (...a: unknown[]) => recordCriticalErrorMock(...a),
 }));
 
+vi.mock("../../server/db", () => ({
+  runSerializedBootWork: async (_tag: string, fn: () => Promise<void>) => {
+    await fn();
+    return { ran: true };
+  },
+}));
+
 // ─── Bar fixture helpers ──────────────────────────────────────────────────────
 //
 // Conventions exactly matching wm-detector.test.ts (H=52/L=48/C=50 for flats).
@@ -271,6 +278,7 @@ import {
   startScanner,
   stopScanner,
   getScannerConsumptionBoundary,
+  allocateScannerProtocolBudgetMs,
   MAX_POST_BREAK_RETURN_AGE_BARS,
   classifyScannerFormationLifecycle,
   isActionableScannerFormationLifecycle,
@@ -307,6 +315,54 @@ describe("getScannerConsumptionBoundary", () => {
       expect(() => getScannerConsumptionBoundary(nowMs)).toThrow(TypeError);
     },
   );
+});
+
+describe("allocateScannerProtocolBudgetMs", () => {
+  it.each([
+    {
+      name: "production-shaped first protocol",
+      input: { remainingGlobalMs: 240_000, currentProtocolIndex: 0, universeSizes: [29, 66], boundaryTimeframeCount: 1 },
+      expected: 73_263,
+    },
+    {
+      name: "production-shaped first protocol after prefetch elapsed",
+      input: { remainingGlobalMs: 208_000, currentProtocolIndex: 0, universeSizes: [29, 66], boundaryTimeframeCount: 1 },
+      expected: 63_494,
+    },
+    {
+      name: "last non-empty protocol receives all remaining time",
+      input: { remainingGlobalMs: 144_321, currentProtocolIndex: 1, universeSizes: [29, 66], boundaryTimeframeCount: 4 },
+      expected: 144_321,
+    },
+    {
+      name: "multiple due timeframes preserve the universe-weight ratio",
+      input: { remainingGlobalMs: 240_000, currentProtocolIndex: 0, universeSizes: [29, 66], boundaryTimeframeCount: 4 },
+      expected: 73_263,
+    },
+    {
+      name: "empty current protocol receives no time",
+      input: { remainingGlobalMs: 240_000, currentProtocolIndex: 0, universeSizes: [0, 66], boundaryTimeframeCount: 1 },
+      expected: 0,
+    },
+    {
+      name: "spent global budget remains spent",
+      input: { remainingGlobalMs: -10, currentProtocolIndex: 0, universeSizes: [29, 66], boundaryTimeframeCount: 1 },
+      expected: 0,
+    },
+    {
+      name: "nearly exhausted global budget cannot be extended",
+      input: { remainingGlobalMs: 4_999, currentProtocolIndex: 0, universeSizes: [29, 66], boundaryTimeframeCount: 1 },
+      expected: 1_526,
+    },
+    {
+      name: "invalid protocol index cannot create a budget",
+      input: { remainingGlobalMs: 240_000, currentProtocolIndex: 2, universeSizes: [29, 66], boundaryTimeframeCount: 1 },
+      expected: 0,
+    },
+  ])("allocates $name deterministically", ({ input, expected }) => {
+    expect(allocateScannerProtocolBudgetMs(input)).toBe(expected);
+    expect(allocateScannerProtocolBudgetMs(input)).toBeLessThanOrEqual(Math.max(0, input.remainingGlobalMs));
+  });
 });
 
 describe("scanner generation publication", () => {
@@ -1095,7 +1151,7 @@ describe("active sweep lifecycle ownership", () => {
 
       startScanner();
       const sweep = runScannerSweepForTest();
-      await vi.advanceTimersByTimeAsync(140_000);
+      await vi.advanceTimersByTimeAsync(270_000);
       await sweep;
 
       expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(6);
@@ -1135,6 +1191,150 @@ describe("active sweep lifecycle ownership", () => {
 });
 
 describe("scanner batch cache prefetch", () => {
+  it("uses ten provider-bounded workers while preserving the 150ms market-dispatch stagger", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const markets = Array.from({ length: 20 }, (_, index) => `C${index}-PERP`);
+      getFlashMarketSpecsMock.mockReturnValue(
+        markets.map((internalSymbol) => ({ internalSymbol })),
+      );
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(async (requested: string[]) => ({
+        complete: new Map(),
+        prefixes: new Map(),
+        exactMisses: new Set(requested),
+      }));
+
+      let activeFetches = 0;
+      let maximumActiveFetches = 0;
+      const primaryDispatchStartedAt: number[] = [];
+      const providerRequestStartedAt: number[] = [];
+      fetchOHLCVMock.mockImplementation(async (_ticker: string, timeframe: string) => {
+        if (timeframe === "15m") primaryDispatchStartedAt.push(Date.now());
+        providerRequestStartedAt.push(Date.now());
+        activeFetches++;
+        maximumActiveFetches = Math.max(maximumActiveFetches, activeFetches);
+        await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+        activeFetches--;
+        return (timeframe === "15m"
+          ? textbookWBars(Date.now(), TF_15M)
+          : healthyMixedParentBars()
+        ).map((bar) => ({ ...bar, provenance: directPerp }));
+      });
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(20_000);
+      await sweep;
+
+      expect(maximumActiveFetches).toBe(10);
+      expect(primaryDispatchStartedAt).toHaveLength(20);
+      for (let index = 1; index < primaryDispatchStartedAt.length; index++) {
+        expect(primaryDispatchStartedAt[index] - primaryDispatchStartedAt[index - 1]).toBeGreaterThanOrEqual(150);
+      }
+      for (const windowStartedAt of providerRequestStartedAt) {
+        const requestsInWindow = providerRequestStartedAt.filter(
+          (startedAt) => startedAt >= windowStartedAt && startedAt < windowStartedAt + 2_000,
+        );
+        expect(requestsInWindow.length).toBeLessThanOrEqual(20);
+      }
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          protocol: "flash",
+          timeframe: "15m",
+          marketsAttempted: 20,
+          marketsScanned: 20,
+          marketsSkippedByTimeout: 0,
+          accountingValid: true,
+        }),
+      ]));
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        verdict: "tradable",
+        accounting: {
+          attempted: 20,
+          scanned: 20,
+          timeoutSkipped: 0,
+          abandoned: 0,
+          accountingValid: true,
+        },
+      });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("overlaps parent-timeframe batch prefetch with primary provider work", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+
+      type BatchResult = {
+        complete: Map<string, Array<OHLCV & { provenance: typeof directPerp }>>;
+        prefixes: Map<string, never>;
+        exactMisses: Set<string>;
+      };
+      let resolveParentPrefetch!: (value: BatchResult) => void;
+      const parentPrefetch = new Promise<BatchResult>((resolve) => {
+        resolveParentPrefetch = resolve;
+      });
+      const primary = textbookWBars(Date.now(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_requested: string[], timeframe: string) => {
+          if (timeframe === "15m") {
+            return {
+              complete: new Map(),
+              prefixes: new Map(),
+              exactMisses: new Set(["BTC/USDT"]),
+            };
+          }
+          return parentPrefetch;
+        },
+      );
+      fetchOHLCVMock.mockResolvedValue(primary);
+
+      startScanner();
+      let completed = false;
+      const sweep = runScannerSweepForTest().then(() => { completed = true; });
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(prefetchCachedOHLCVMock.mock.calls.map((call) => call[1])).toEqual(["15m", "1h"]);
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      expect(fetchOHLCVMock.mock.calls[0][1]).toBe("15m");
+      expect(completed).toBe(false);
+
+      resolveParentPrefetch({
+        complete: new Map([["BTC/USDT", parent]]),
+        prefixes: new Map(),
+        exactMisses: new Set(),
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          protocol: "flash",
+          marketsAttempted: 1,
+          marketsScanned: 1,
+          accountingValid: true,
+        }),
+      ]));
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
   it("completes a production-shaped 94-attempt sweep from 52 stored histories and 25 exact misses", async () => {
     vi.useFakeTimers();
     try {
