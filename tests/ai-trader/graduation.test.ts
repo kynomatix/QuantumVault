@@ -510,7 +510,7 @@ describe("qualification era forgotten-declaration gate", () => {
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
       materialVersion: 1,
-      decisionGeneration: 13,
+      decisionGeneration: 14,
       decision: "no_bump",
     });
   });

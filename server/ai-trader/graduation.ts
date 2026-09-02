@@ -52,7 +52,7 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "accepted_candle_provenance": {
     "materialVersion": 1,
-    "decisionGeneration": 13,
+    "decisionGeneration": 14,
     "decision": "no_bump",
     "ownerPaths": ["server/lab/datafeed.ts", "server/lab/candle-store.ts", "server/ai-trader/context-builder.ts"]
   },
