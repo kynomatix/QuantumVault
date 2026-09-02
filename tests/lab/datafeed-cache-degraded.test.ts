@@ -24,6 +24,7 @@ vi.mock("../../server/lab/candle-store", () => ({
 }));
 
 import {
+  AI_CONTEXT_CANDLE_POLICY,
   __testResetOkxSourceBreaker,
   completeCachedOHLCVTail,
   fetchOHLCV,
@@ -496,6 +497,29 @@ describe("provider response-body cancellation lifetime", () => {
       "openapi.okx.com", "www.okx.com", "openapi.okx.com",
       "openapi.okx.com", "www.okx.com", "openapi.okx.com",
     ]);
+  });
+
+  it("keeps source-unavailable typing scanner-only for existing AI-context consumers", async () => {
+    fetchSpy.mockRejectedValue(new Error("network unavailable"));
+    const now = Date.now();
+    const pending = fetchOHLCV(
+      "CONTEXT/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: AI_CONTEXT_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        skipSpotFallback: true,
+        deadlineMs: 3_000,
+        callerClass: "ai_context",
+      },
+    );
+    pending.catch(() => {});
+    await vi.advanceTimersByTimeAsync(4_000);
+
+    await expect(pending).rejects.toMatchObject({
+      name: "CandleBasisUnavailableError",
+      reason: "no_acceptable_source",
+    });
   });
 
   it("retains authoritative 51001 instrument negative caching without retrying", async () => {

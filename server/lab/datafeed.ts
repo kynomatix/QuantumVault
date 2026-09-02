@@ -1666,7 +1666,8 @@ export async function fetchOHLCV(
       && basisPolicy.acceptedBasis[0] === "perp"
       && basisPolicy.acceptedProxy.length === 1
       && basisPolicy.acceptedProxy[0] === "direct";
-    if (okxSourceUnavailableReason && exactDirectPerpPolicy) {
+    if (okxSourceUnavailableReason && exactDirectPerpPolicy
+        && basisPolicy.consumer === "scanner") {
       throw new CandleSourceUnavailableError(
         okxSourceUnavailableReason,
         "okx",
