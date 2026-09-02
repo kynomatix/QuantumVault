@@ -203,7 +203,7 @@ describe("provider response-body cancellation lifetime", () => {
     ]);
   });
 
-  it("hard-terminates each signal-ignoring OKX body and preserves all three retries", async () => {
+  it("hard-terminates every signal-ignoring direct-perpetual provider opportunity", async () => {
     const internalSignals: AbortSignal[] = [];
     fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
       if (init?.signal) internalSignals.push(init.signal);
@@ -229,24 +229,32 @@ describe("provider response-body cancellation lifetime", () => {
 
     await vi.advanceTimersByTimeAsync(65_000);
     await expect(pending).rejects.toBeDefined();
-    expect(fetchSpy).toHaveBeenCalledTimes(3);
-    expect(internalSignals).toHaveLength(3);
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+    expect(internalSignals).toHaveLength(4);
     expect(internalSignals.every((signal) => signal.aborted)).toBe(true);
     expect(mockSave).not.toHaveBeenCalled();
     expect(okxDiagnostics.filter((record) => record.kind === "okx_request_terminal")).toEqual([
-      expect.objectContaining({ attempt: 1, phase: "body", settlement: "hard_terminal" }),
-      expect.objectContaining({ attempt: 2, phase: "body", settlement: "hard_terminal" }),
-      expect.objectContaining({ attempt: 3, phase: "body", settlement: "hard_terminal" }),
+      expect.objectContaining({ provider: "okx", endpoint: "openapi", attempt: 1, phase: "body", settlement: "hard_terminal" }),
+      expect.objectContaining({ provider: "gate", endpoint: "api", attempt: 1, phase: "body", settlement: "hard_terminal" }),
+      expect.objectContaining({ provider: "okx", endpoint: "legacy", attempt: 1, phase: "body", settlement: "hard_terminal" }),
+      expect.objectContaining({ provider: "gate", endpoint: "fx", attempt: 1, phase: "body", settlement: "hard_terminal" }),
     ]);
     expect(okxDiagnostics).toContainEqual(expect.objectContaining({
       kind: "okx_source_breaker_increment",
       instrument: "HARDTERMINAL-USDT-SWAP",
       timeframe: "15m",
-      attempt: 3,
+      attempt: 1,
       priorConsecutiveFailures: 0,
       resultingConsecutiveFailures: 1,
       opened: false,
       cooldownMs: 15 * 60_000,
+    }));
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "gate_futures_source_breaker_increment",
+      provider: "gate",
+      instrument: "HARDTERMINAL_USDT",
+      priorConsecutiveFailures: 0,
+      resultingConsecutiveFailures: 1,
     }));
   });
 
@@ -289,42 +297,52 @@ describe("provider response-body cancellation lifetime", () => {
         phase: "headers",
         settlement: "controller_abort",
         elapsedToHeadersMs: null,
-        controllerAbortElapsedMs: 15_000,
+        provider: "okx",
+        endpoint: "openapi",
+        controllerAbortElapsedMs: 10_000,
         hardTerminalElapsedMs: null,
-        settledElapsedMs: 15_000,
+        settledElapsedMs: 10_000,
       }),
       expect.objectContaining({
-        attempt: 2,
+        provider: "gate",
+        endpoint: "api",
+        attempt: 1,
         phase: "headers",
         settlement: "controller_abort",
-        controllerAbortElapsedMs: 15_000,
+        controllerAbortElapsedMs: 10_000,
       }),
       expect.objectContaining({
-        attempt: 3,
+        provider: "okx",
+        endpoint: "legacy",
+        attempt: 1,
         phase: "headers",
         settlement: "controller_abort",
-        controllerAbortElapsedMs: 15_000,
+        controllerAbortElapsedMs: 10_000,
+      }),
+      expect.objectContaining({
+        provider: "gate",
+        endpoint: "fx",
+        attempt: 1,
+        phase: "headers",
+        settlement: "controller_abort",
+        controllerAbortElapsedMs: 10_000,
       }),
     ]);
     expect(okxDiagnostics).toContainEqual(expect.objectContaining({
       kind: "okx_source_breaker_increment",
       callerClass: "scanner",
       instrument: "CONTROLLER-USDT-SWAP",
-      attempt: 3,
+      attempt: 1,
       priorConsecutiveFailures: 0,
       resultingConsecutiveFailures: 1,
       opened: false,
     }));
   });
 
-  it("aborts an unread OKX response when a 429 releases it early", async () => {
-    const caller = new AbortController();
-    let internalSignal: AbortSignal | undefined;
-    let responseReturned!: () => void;
-    const responseIsReturned = new Promise<void>((resolve) => { responseReturned = resolve; });
+  it("aborts every unread 429 response without retry backoff inside a provider", async () => {
+    const internalSignals: AbortSignal[] = [];
     fetchSpy.mockImplementation(async (_url: unknown, init?: RequestInit) => {
-      internalSignal = init?.signal ?? undefined;
-      responseReturned();
+      if (init?.signal) internalSignals.push(init.signal);
       return {
         status: 429,
         ok: false,
@@ -341,26 +359,21 @@ describe("provider response-body cancellation lifetime", () => {
         bypassCache: true,
         cacheWritePolicy: "skip",
         deadlineMs: 45_000,
-        signal: caller.signal,
       },
     );
     pending.catch(() => {});
-    await responseIsReturned;
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(internalSignal?.aborted).toBe(true);
-    caller.abort("stop-during-429-backoff");
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(50_000);
+    await expect(pending).rejects.toMatchObject({ name: "CandleSourceUnavailableError" });
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+    expect(internalSignals.every((signal) => signal.aborted)).toBe(true);
     expect(mockSave).not.toHaveBeenCalled();
-    expect(okxDiagnostics[0]).toMatchObject({
-      kind: "okx_request_terminal",
-      attempt: 1,
-      phase: "released_unread",
-      settlement: "http_release",
-      bodyStartElapsedMs: null,
-      bodyEndElapsedMs: null,
-    });
+    expect(okxDiagnostics.filter((record) => record.kind === "okx_request_terminal"))
+      .toHaveLength(4);
+    expect(okxDiagnostics.filter((record) => record.kind === "okx_request_terminal"))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ provider: "okx", phase: "released_unread", settlement: "http_release" }),
+        expect.objectContaining({ provider: "gate", phase: "released_unread", settlement: "http_release" }),
+      ]));
   });
 
   it("records header transport failure without retaining URL or arbitrary error prose", async () => {
@@ -376,7 +389,7 @@ describe("provider response-body cancellation lifetime", () => {
         bypassCache: true,
         cacheWritePolicy: "skip",
         skipSpotFallback: true,
-        // One immediate three-attempt chain plus its outer retry sleep.
+        // Four bounded endpoint opportunities, with no provider-local retry sleep.
         deadlineMs: 3_000,
         callerClass: "scanner",
       },
@@ -386,14 +399,15 @@ describe("provider response-body cancellation lifetime", () => {
     await expect(pending).rejects.toBeDefined();
 
     const terminals = okxDiagnostics.filter((record) => record.kind === "okx_request_terminal");
-    expect(terminals).toHaveLength(3);
+    expect(terminals).toHaveLength(4);
     expect(terminals).toEqual([
-      expect.objectContaining({ attempt: 1, endpoint: "openapi", phase: "headers", settlement: "transport_error" }),
-      expect.objectContaining({ attempt: 2, endpoint: "legacy", phase: "headers", settlement: "transport_error" }),
-      expect.objectContaining({ attempt: 3, endpoint: "openapi", phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ provider: "okx", attempt: 1, endpoint: "openapi", phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ provider: "gate", attempt: 1, endpoint: "api", phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ provider: "okx", attempt: 1, endpoint: "legacy", phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ provider: "gate", attempt: 1, endpoint: "fx", phase: "headers", settlement: "transport_error" }),
     ]);
     expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual([
-      "openapi.okx.com", "www.okx.com", "openapi.okx.com",
+      "openapi.okx.com", "api.gateio.ws", "www.okx.com", "fx-api.gateio.ws",
     ]);
     const retained = JSON.stringify(okxDiagnostics);
     expect(retained).not.toContain("Authorization");
@@ -447,6 +461,11 @@ describe("provider response-body cancellation lifetime", () => {
         cooldownMs: 15 * 60_000,
       }),
     ]);
+    expect(okxDiagnostics.filter((record) => record.kind === "gate_futures_source_breaker_increment")).toEqual([
+      expect.objectContaining({ instrument: "ONE_USDT", priorConsecutiveFailures: 0, resultingConsecutiveFailures: 1, opened: false }),
+      expect.objectContaining({ instrument: "TWO_USDT", priorConsecutiveFailures: 1, resultingConsecutiveFailures: 2, opened: false }),
+      expect.objectContaining({ instrument: "THREE_USDT", priorConsecutiveFailures: 2, resultingConsecutiveFailures: 2, opened: true }),
+    ]);
 
     const networkCallsBeforeOpenCircuitRead = fetchSpy.mock.calls.length;
     await expect(fetchOHLCV(
@@ -462,7 +481,7 @@ describe("provider response-body cancellation lifetime", () => {
     )).rejects.toMatchObject({
       name: "CandleSourceUnavailableError",
       reason: "provider_circuit_open",
-      source: "okx",
+      source: "direct_perp",
     });
     expect(fetchSpy).toHaveBeenCalledTimes(networkCallsBeforeOpenCircuitRead);
   });
@@ -488,14 +507,14 @@ describe("provider response-body cancellation lifetime", () => {
       await expect(pending).rejects.toMatchObject({
         name: "CandleSourceUnavailableError",
         reason: "transport_unavailable",
-        source: "okx",
+        source: "direct_perp",
       });
     }
 
-    expect(fetchSpy).toHaveBeenCalledTimes(6);
+    expect(fetchSpy).toHaveBeenCalledTimes(8);
     expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual([
-      "openapi.okx.com", "www.okx.com", "openapi.okx.com",
-      "openapi.okx.com", "www.okx.com", "openapi.okx.com",
+      "openapi.okx.com", "api.gateio.ws", "www.okx.com", "fx-api.gateio.ws",
+      "openapi.okx.com", "api.gateio.ws", "www.okx.com", "fx-api.gateio.ws",
     ]);
   });
 
@@ -522,12 +541,191 @@ describe("provider response-body cancellation lifetime", () => {
     });
   });
 
+  it("fails over from OKX primary to Gate USDT futures with exact direct provenance", async () => {
+    const now = Date.now();
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.hostname === "openapi.okx.com") throw new Error("OKX egress unavailable");
+      expect(url.hostname).toBe("api.gateio.ws");
+      expect(url.pathname).toBe("/api/v4/futures/usdt/candlesticks");
+      expect(url.searchParams.get("contract")).toBe("SOL_USDT");
+      expect(url.searchParams.get("interval")).toBe("15m");
+      expect(url.searchParams.has("from")).toBe(true);
+      expect(url.searchParams.has("to")).toBe(true);
+      expect(url.searchParams.has("limit")).toBe(false);
+      return {
+        status: 200,
+        ok: true,
+        json: async () => [{
+          t: String((now - TF_MS) / 1000), o: "10", h: "11", l: "9", c: "10.5", v: "7",
+        }],
+      };
+    });
+
+    const candles = await fetchOHLCV(
+      "SOL/USDT", "15m", now - 2 * TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        callerClass: "scanner",
+      },
+    );
+
+    expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual([
+      "openapi.okx.com", "api.gateio.ws",
+    ]);
+    expect(candles).toEqual([
+      expect.objectContaining({
+        time: now - TF_MS,
+        close: 10.5,
+        volume: 7,
+        provenance: {
+          source: "gate",
+          venue: "gate",
+          basis: "perp",
+          proxy: "direct",
+          finality: "finalized",
+          timeSemantic: "open_time",
+        },
+      }),
+    ]);
+  });
+
+  it("discards a partial OKX result before selecting a provider-pure Gate result", async () => {
+    const now = Date.now();
+    let openapiCalls = 0;
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.hostname === "openapi.okx.com") {
+        openapiCalls++;
+        if (openapiCalls === 1) {
+          return {
+            status: 200,
+            ok: true,
+            json: async () => ({
+              code: "0",
+              data: [[String(now - TF_MS), "100", "101", "99", "100.5", "8", "0", "0", "1"]],
+            }),
+          };
+        }
+        throw new Error("OKX second page failed");
+      }
+      expect(url.hostname).toBe("api.gateio.ws");
+      return {
+        status: 200,
+        ok: true,
+        json: async () => [{
+          t: String((now - 2 * TF_MS) / 1000), o: "20", h: "21", l: "19", c: "20.5", v: "9",
+        }],
+      };
+    });
+
+    const candles = await fetchOHLCV(
+      "SOL/USDT", "15m", now - 3 * TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        callerClass: "scanner",
+      },
+    );
+
+    expect(openapiCalls).toBe(2);
+    expect(candles).toHaveLength(1);
+    expect(candles[0]).toMatchObject({
+      close: 20.5,
+      provenance: { source: "gate", venue: "gate", basis: "perp" },
+    });
+    expect(new Set(candles.map((candle) => candle.provenance.source))).toEqual(new Set(["gate"]));
+  });
+
+  it("rejects malformed and forming Gate rows while retaining a finalized direct row", async () => {
+    const now = Date.now();
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.hostname.endsWith("okx.com")) throw new Error("OKX unavailable");
+      return {
+        status: 200,
+        ok: true,
+        json: async () => [
+          { t: String((now - 2 * TF_MS) / 1000), o: "10", h: "11", l: "9", c: "10.5", v: "not-finite" },
+          { t: String(now / 1000), o: "12", h: "13", l: "11", c: "12.5", v: "1" },
+          { t: String((now - 3 * TF_MS) / 1000), o: "NaN", h: "11", l: "9", c: "10", v: "1" },
+          ["array rows belong to Gate spot, not futures"],
+        ],
+      };
+    });
+
+    const candles = await fetchOHLCV(
+      "SOL/USDT", "15m", now - 4 * TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        callerClass: "scanner",
+      },
+    );
+
+    expect(candles).toHaveLength(1);
+    expect(candles[0]).toMatchObject({
+      time: now - 2 * TF_MS,
+      volume: 0,
+      provenance: { source: "gate", finality: "finalized", proxy: "direct" },
+    });
+  });
+
+  it("preserves multiplier identity so a different Gate contract cannot become direct", async () => {
+    const now = Date.now();
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.hostname.endsWith("okx.com")) throw new Error("OKX unavailable");
+      expect(url.searchParams.get("contract")).toBe("1KPEPE_USDT");
+      return {
+        status: 200,
+        ok: true,
+        json: async () => [{
+          t: String((now - TF_MS) / 1000), o: "1", h: "2", l: "0.5", c: "1.5", v: "1",
+        }],
+      };
+    });
+
+    await expect(fetchOHLCV(
+      "1KPEPE/USDT", "15m", now - 2 * TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        deadlineMs: 45_000,
+        callerClass: "scanner",
+      },
+    )).rejects.toMatchObject({
+      name: "CandleBasisUnavailableError",
+      reason: "no_acceptable_source",
+    });
+    expect(fetchSpy.mock.calls.every(([url]) => !String(url).includes("/spot/"))).toBe(true);
+  });
+
   it("retains authoritative 51001 instrument negative caching without retrying", async () => {
-    fetchSpy.mockResolvedValue({
-      status: 200,
-      ok: true,
-      json: async () => ({ code: "51001", msg: "Instrument ID doesn't exist", data: [] }),
-      text: async () => "",
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      const hostname = new URL(String(input)).hostname;
+      if (hostname.endsWith("okx.com")) {
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ code: "51001", msg: "Instrument ID doesn't exist", data: [] }),
+          text: async () => "",
+        };
+      }
+      return {
+        status: 404,
+        ok: false,
+        json: async () => ({}),
+        text: async () => JSON.stringify({ label: "CONTRACT_NOT_FOUND" }),
+      };
     });
     const now = Date.now();
     const options = {
@@ -545,7 +743,10 @@ describe("provider response-body cancellation lifetime", () => {
     await expect(fetchOHLCV(
       "MISSING/USDT", "15m", now - TF_MS, now, undefined, options,
     )).rejects.toMatchObject({ name: "CandleBasisUnavailableError" });
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual([
+      "openapi.okx.com", "api.gateio.ws",
+    ]);
   });
 
   it("records successful OKX body timing once and lets a throwing observer fail open", async () => {
@@ -906,6 +1107,46 @@ describe("prefetchCachedOHLCV batch hits", () => {
       /^\[ScannerTailCompletion\] SOL\/USDT 15m outcome=complete .* duration=\d+ms$/,
     ));
     consoleSpy.mockRestore();
+  });
+
+  it("retains per-candle identity when an OKX cached prefix is completed by a Gate futures tail", async () => {
+    const now = Math.floor(Date.now() / TF_MS) * TF_MS;
+    const startMs = now - 101 * TF_MS;
+    const prefix = cachedBars(now).filter((candle) => candle.time <= now - 8 * TF_MS);
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      const url = new URL(String(input));
+      if (url.hostname.endsWith("okx.com")) throw new Error("OKX unavailable");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => Array.from({ length: 8 }, (_, index) => {
+          const time = now - (8 - index) * TF_MS;
+          return { t: String(time / 1000), o: "10", h: "11", l: "9", c: "10", v: "1" };
+        }),
+        text: async () => "",
+      };
+    });
+
+    const completed = await completeCachedOHLCVTail(
+      "SOL/USDT",
+      "15m",
+      startMs,
+      now,
+      prefix,
+      undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        deadlineMs: 20_000,
+        callerClass: "scanner",
+        cacheWritePolicy: "skip",
+      },
+    );
+
+    expect(completed).toHaveLength(101);
+    expect(completed[0].provenance).toMatchObject({ source: "okx", venue: "okx" });
+    expect(completed.at(-1)?.provenance).toMatchObject({ source: "gate", venue: "gate" });
+    expect(new Set(completed.map((candle) => candle.provenance.source))).toEqual(new Set(["okx", "gate"]));
+    expect(mockSave).not.toHaveBeenCalled();
   });
 
   it("fails closed when tail completion observes forming candles only", async () => {
