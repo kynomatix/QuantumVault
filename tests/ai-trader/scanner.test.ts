@@ -277,6 +277,7 @@ import {
   getScannerShortlist,
   resetScannerPublicationForTest,
   runScannerSweepForTest,
+  waitForScannerBoundaryLaneRelease,
   startScanner,
   stopScanner,
   getScannerConsumptionBoundary,
@@ -1030,6 +1031,54 @@ describe("active sweep lifecycle ownership", () => {
     getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
   }
 
+  it("returns idle immediately when no sweep owns the boundary lane", async () => {
+    stopScanner();
+    await expect(waitForScannerBoundaryLaneRelease()).resolves.toBe("idle");
+  });
+
+  it("releases every concurrent boundary-lane waiter only after the current sweep settles", async () => {
+    stopScanner();
+    oneMarketUniverse();
+    const pending = deferredBars();
+    fetchOHLCVMock.mockImplementation(() => pending.promise);
+
+    startScanner();
+    const sweep = runScannerSweepForTest();
+    await vi.waitFor(() => expect(fetchOHLCVMock).toHaveBeenCalled());
+    const first = waitForScannerBoundaryLaneRelease();
+    const second = waitForScannerBoundaryLaneRelease();
+    let settledCount = 0;
+    void first.then(() => { settledCount++; });
+    void second.then(() => { settledCount++; });
+    await Promise.resolve();
+    expect(settledCount).toBe(0);
+
+    pending.resolve([]);
+    await sweep;
+
+    await expect(first).resolves.toBe("released");
+    await expect(second).resolves.toBe("released");
+    expect(settledCount).toBe(2);
+    stopScanner();
+  });
+
+  it("returns a typed bounded timeout without mutating the active sweep", async () => {
+    stopScanner();
+    oneMarketUniverse();
+    const pending = deferredBars();
+    fetchOHLCVMock.mockImplementation(() => pending.promise);
+    startScanner();
+    const sweep = runScannerSweepForTest();
+    await vi.waitFor(() => expect(fetchOHLCVMock).toHaveBeenCalled());
+
+    await expect(waitForScannerBoundaryLaneRelease(10)).resolves.toBe("timed_out");
+    expect(getScannerStatus().scannerRunning).toBe(true);
+
+    stopScanner();
+    pending.resolve([]);
+    await sweep;
+  });
+
   it("aborts the active fetch and rejects every late mutation after stop", async () => {
     stopScanner();
     oneMarketUniverse();
@@ -1043,8 +1092,12 @@ describe("active sweep lifecycle ownership", () => {
     startScanner();
     const sweep = runScannerSweepForTest();
     await vi.waitFor(() => expect(fetchOHLCVMock).toHaveBeenCalledTimes(1));
+    const firstWaiter = waitForScannerBoundaryLaneRelease();
+    const secondWaiter = waitForScannerBoundaryLaneRelease();
 
     stopScanner();
+    await expect(firstWaiter).resolves.toBe("released");
+    await expect(secondWaiter).resolves.toBe("released");
     await sweep;
     expect(capturedSignal).not.toBeNull();
     expect((capturedSignal as AbortSignal).aborted).toBe(true);
@@ -1077,12 +1130,14 @@ describe("active sweep lifecycle ownership", () => {
       const staleSweep = runScannerSweepForTest();
       await vi.advanceTimersByTimeAsync(0);
       expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      const waiter = waitForScannerBoundaryLaneRelease();
 
       vi.setSystemTime(new Date("2026-08-18T00:20:00.001Z"));
       const replacementSweep = runScannerSweepForTest();
       await vi.advanceTimersByTimeAsync(200);
       await replacementSweep;
       await staleSweep;
+      await expect(waiter).resolves.toBe("released");
 
       const replacementGeneration = getScannerStatus().currentGeneration?.generation;
       expect(replacementGeneration).toBeTypeOf("number");
