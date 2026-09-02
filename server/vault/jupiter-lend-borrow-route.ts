@@ -718,6 +718,18 @@ export class JupiterLendBorrowRoute {
     return this.readLiveHealthForConfig(config, positionId);
   }
 
+  /**
+   * Scan-specific live read for a config that was already resolved and decoded
+   * in the same health pass. This performs no second REST lookup and changes
+   * none of the on-chain position, exchange-price, oracle, or fail-closed work.
+   */
+  async readLiveHealthForResolvedConfig(
+    config: BorrowVaultConfig,
+    positionId: number,
+  ): Promise<LivePositionHealth | null> {
+    return this.readLiveHealthForConfig(config, positionId);
+  }
+
   /** Shared live-position read for an ALREADY-RESOLVED vault config. */
   private async readLiveHealthForConfig(
     config: BorrowVaultConfig,

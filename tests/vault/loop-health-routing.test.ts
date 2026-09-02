@@ -147,6 +147,8 @@ function loopOnlyDeps(overrides: Partial<RowHealthDeps> = {}): RowHealthDeps {
     getLoopVaultConfig: async (vaultId) => (vaultId === 47 ? LOOP_CFG : null),
     readLoopLivePositionHealth: async (vaultId, positionId) =>
       vaultId === 47 && positionId === 3 ? LOOP_LIVE : null,
+    readLiveHealthForResolvedConfig: async (config, positionId) =>
+      config === LOOP_CFG && positionId === 3 ? LOOP_LIVE : null,
     ...overrides,
   };
 }
@@ -218,6 +220,7 @@ describe("computeRowHealth loop routing (money-safety)", () => {
       readLoopLivePositionHealth: async () => {
         throw new Error("loop dep called for a borrow row");
       },
+      readLiveHealthForResolvedConfig: async () => null,
     };
     const h = await computeRowHealth(
       { id: "row-b", venuePositionId: 1, collateralMint: "InfMint", collateralAssetKey: "inf" },
@@ -225,6 +228,65 @@ describe("computeRowHealth loop routing (money-safety)", () => {
     );
     expect(mintCalls).toBe(1);
     expect(h.band).toBe("unavailable"); // null config fails closed as before
+  });
+
+  it("reuses the one resolved loop config and never invokes either refetching live-read helper", async () => {
+    let configReads = 0;
+    let resolvedReads = 0;
+    const h = await computeRowHealth(
+      LOOP_ROW,
+      loopOnlyDeps({
+        getLoopVaultConfig: async () => {
+          configReads++;
+          return LOOP_CFG;
+        },
+        readLoopLivePositionHealth: async () => {
+          throw new Error("vault-id helper would refetch config");
+        },
+        readLiveHealthForResolvedConfig: async (config, positionId) => {
+          resolvedReads++;
+          expect(config).toBe(LOOP_CFG);
+          expect(positionId).toBe(3);
+          return LOOP_LIVE;
+        },
+      }),
+      new Map(),
+    );
+    expect(h.band).toBe("healthy");
+    expect(configReads).toBe(1);
+    expect(resolvedReads).toBe(1);
+  });
+
+  it("reuses the one resolved classic-borrow config and never invokes the mint helper", async () => {
+    let configReads = 0;
+    let resolvedReads = 0;
+    const classicLive = { ...LOOP_LIVE, vaultId: 43, positionId: 185 };
+    const classicConfig = { ...LOOP_CFG, vaultId: 43 };
+    const deps: RowHealthDeps = {
+      getVaultConfig: async () => {
+        configReads++;
+        return classicConfig;
+      },
+      readLivePositionHealth: async () => {
+        throw new Error("mint helper would refetch config");
+      },
+      getLoopVaultConfig: async () => null,
+      readLoopLivePositionHealth: async () => null,
+      readLiveHealthForResolvedConfig: async (config, positionId) => {
+        resolvedReads++;
+        expect(config).toBe(classicConfig);
+        expect(positionId).toBe(185);
+        return classicLive;
+      },
+    };
+    const h = await computeRowHealth(
+      { id: "row-classic", venuePositionId: 185, collateralMint: "InfMint", collateralAssetKey: "inf" },
+      deps,
+      new Map(),
+    );
+    expect(h.status).toBe("available");
+    expect(configReads).toBe(1);
+    expect(resolvedReads).toBe(1);
   });
 });
 
