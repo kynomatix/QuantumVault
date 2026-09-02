@@ -54,6 +54,7 @@ import {
   CandleWriteQueueFullError,
   CandleBatchReadError,
   CACHE_BUDGET_ABORT_REASON,
+  SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS,
   SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
   type CandleReadPhases,
   type CandleBatchReadPhases,
@@ -564,12 +565,15 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     });
     const queryConfig = query.mock.calls[1][0];
     expect(queryConfig.query_timeout).toBe(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS);
-    expect(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS).toBe(60_000);
+    expect(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS).toBe(10_000);
     expect(queryConfig.text).toContain('time_semantic AS "timeSemantic"');
+    expect(queryConfig.text).toContain("basis = $5 AND finality = $6 AND proxy = $7");
+    expect(queryConfig.text).not.toContain("basis = ANY($5::text[])");
     expect(queryConfig.text).not.toMatch(/time_semantic AS\s+imeSemantic\b/);
     expect(queryConfig.values.slice(0, 4)).toEqual([
       ["BTC-PERP", "SOL-PERP"], "1h", "0", "3600000",
     ]);
+    expect(queryConfig.values.slice(4, 7)).toEqual(["perp", "finalized", "direct"]);
     expect(query.mock.calls[2][0]).toMatchObject({
       text: "SELECT set_config('statement_timeout', '30000', false)",
       query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
@@ -584,6 +588,33 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(fakePool.connect).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith();
     nowSpy.mockRestore();
+  });
+
+  it("retains ANY predicates for a genuinely multi-valued admission policy", async () => {
+    const release = vi.fn();
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+
+    await getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      {
+        basisPolicy: {
+          ...TEST_BASIS_POLICY,
+          acceptedFinality: ["finalized", "forming"] as const,
+        },
+        queryTimeoutMs: 5_000,
+        callerClass: "scanner",
+      },
+    );
+
+    const queryConfig = query.mock.calls[1][0];
+    expect(queryConfig.text).toContain(
+      "basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[])",
+    );
+    expect(queryConfig.values.slice(4, 7)).toEqual([
+      ["perp"], ["finalized", "forming"], ["direct"],
+    ]);
+    expect(release).toHaveBeenCalledWith();
   });
 
   it("preserves per-symbol strongest-finality semantics", async () => {
@@ -675,6 +706,44 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(release).toHaveBeenCalledTimes(1);
     expect(query).not.toHaveBeenCalled();
     expect(getCandleStoreLoad().activeReads).toBe(0);
+  });
+
+  it("bounds scanner-pool checkout and self-releases a late client without querying", async () => {
+    vi.useFakeTimers();
+    try {
+      const checkout = deferred<unknown>();
+      fakeScannerPool.connect.mockReturnValueOnce(checkout.promise);
+      let phases: CandleBatchReadPhases | undefined;
+      const pending = getCachedCandlesBatch(
+        ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+        {
+          basisPolicy: TEST_BASIS_POLICY,
+          queryTimeoutMs: 5_000,
+          callerClass: "scanner",
+          onPhases: (value) => (phases = value),
+        },
+      );
+      pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS);
+      await expect(pending).rejects.toBeInstanceOf(CandleBatchReadError);
+      expect(phases).toMatchObject({
+        outcome: "query_error",
+        termination: "pool_acquire_timeout",
+        poolAcquireMs: SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS,
+        sqlstate: null,
+      });
+
+      const release = vi.fn();
+      const query = vi.fn();
+      checkout.resolve({ release, query });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(query).not.toHaveBeenCalled();
+      expect(getCandleStoreLoad().activeReads).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("releases a failed SELECT with error and exposes a typed batch failure", async () => {

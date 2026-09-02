@@ -24,6 +24,7 @@ import {
   isNonCryptoMarketOpen,
   isAbortError,
   isCacheDegradedError,
+  isCandleSourceUnavailableError,
   isCandleTailCompletionError,
   setDatafeedIncidentReporter,
   MONEY_CANDLE_POLICY,
@@ -610,6 +611,7 @@ function sleep(ms: number): Promise<void> {
 export type SweepFetchDisposition =
   | "timeout-skip"
   | "cache-degraded"
+  | "source-unavailable"
   | "tail-incomplete"
   | "feed-error";
 
@@ -619,6 +621,7 @@ export function classifySweepFetchError(
 ): SweepFetchDisposition {
   if (sweepAborted && isAbortError(err)) return "timeout-skip";
   if (isCacheDegradedError(err)) return "cache-degraded";
+  if (isCandleSourceUnavailableError(err)) return "source-unavailable";
   if (isCandleTailCompletionError(err)) return "tail-incomplete";
   return "feed-error";
 }
@@ -1401,6 +1404,13 @@ async function runSweep(): Promise<void> {
               if (disposition === "tail-incomplete") {
                 tailCompletionFailureCount++;
                 finishAttempt(market, "scanned");
+                return;
+              }
+              if (disposition === "source-unavailable") {
+                // A source-wide transport failure is already governed by the
+                // provider breaker. Finalize this attempt as an error, but do
+                // not poison the individual market for another 30 minutes.
+                finishAttempt(market, "error");
                 return;
               }
               feedHealthMap.set(ticker, { failedAt: Date.now() });

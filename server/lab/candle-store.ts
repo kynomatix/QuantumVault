@@ -130,7 +130,8 @@ export const CACHE_BUDGET_ABORT_REASON = "candle-cache-budget-exceeded";
 // The server-side statement budget remains the authoritative five-second
 // query deadline. This longer client guard only detects a dead socket; it must
 // not turn event-loop starvation into a false database timeout.
-export const SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS = 60_000;
+export const SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS = 2_000;
+export const SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS = 10_000;
 
 function makeAbortError(reason?: unknown): Error {
   const err = new Error(
@@ -208,6 +209,7 @@ export type CandleBatchReadOutcome = CandleReadOutcome;
 
 export type CandleBatchReadTermination =
   | "success"
+  | "pool_acquire_timeout"
   | "server_statement_timeout"
   | "client_query_timeout"
   | "connection_error"
@@ -242,6 +244,15 @@ export class CandleBatchReadError extends Error {
   }
 }
 
+class CandlePoolAcquireTimeoutError extends Error {
+  readonly code = "candle_pool_acquire_timeout";
+
+  constructor() {
+    super("Scanner candle pool acquisition timed out");
+    this.name = "CandlePoolAcquireTimeoutError";
+  }
+}
+
 function classifyBatchTermination(error: unknown): {
   termination: Exclude<CandleBatchReadTermination, "success" | "caller_cancelled">;
   sqlstate: string | null;
@@ -249,6 +260,9 @@ function classifyBatchTermination(error: unknown): {
   const value = error && typeof error === "object" ? error as Record<string, unknown> : {};
   const code = typeof value.code === "string" ? value.code : null;
   const message = error instanceof Error ? error.message : String(error ?? "");
+  if (code === "candle_pool_acquire_timeout" || error instanceof CandlePoolAcquireTimeoutError) {
+    return { termination: "pool_acquire_timeout", sqlstate: null };
+  }
   if (code === "57014") return { termination: "server_statement_timeout", sqlstate: code };
   if (error instanceof Error && error.message === "Query read timeout") {
     return { termination: "client_query_timeout", sqlstate: code };
@@ -500,6 +514,7 @@ export async function getCachedCandlesBatch(
       signal,
       phases as unknown as CandleReadPhases,
       scannerCandlePool,
+      SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS,
     );
     const statementTimeoutMs = Math.max(1, Math.floor(opts.queryTimeoutMs!));
     let selectStartedAt: number | null = null;
@@ -512,17 +527,24 @@ export async function getCachedCandlesBatch(
         query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
       } as any);
       selectStartedAt = Date.now();
+      const singletonPolicy = policy.acceptedBasis.length === 1
+        && policy.acceptedFinality.length === 1
+        && policy.acceptedProxy.length === 1;
       const result = await client.query({
         text:
           "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
           "WHERE symbol = ANY($1::text[]) AND timeframe = $2 AND time >= $3 AND time <= $4 " +
-          "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) " +
+          (singletonPolicy
+            ? "AND basis = $5 AND finality = $6 AND proxy = $7 "
+            : "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) ") +
           "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
           "AND (NOT $8::boolean OR (source = 'okx' AND venue = 'okx' AND time_semantic = 'open_time')) " +
           "ORDER BY symbol, time",
         values: [
           uniqueSymbols, timeframe, String(startMs), String(endMs),
-          [...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy],
+          ...(singletonPolicy
+            ? [policy.acceptedBasis[0], policy.acceptedFinality[0], policy.acceptedProxy[0]]
+            : [[...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy]]),
           requireDirectOkxIdentity,
         ],
         query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
@@ -596,6 +618,9 @@ export async function getCachedCandlesBatch(
       finish(abortOutcome());
       throw error;
     }
+    const classified = classifyBatchTermination(error);
+    phases.termination = classified.termination;
+    phases.sqlstate = classified.sqlstate;
     finish("query_error");
     throw new CandleBatchReadError(
       `Batch candle-cache read failed for ${timeframe}`,
@@ -616,13 +641,14 @@ async function acquireClientWithAbort(
   signal: AbortSignal | undefined,
   phases: CandleReadPhases,
   readPool: CandleReadPool = pool,
+  timeoutMs?: number,
 ): Promise<PoolClient> {
   const acquireStart = Date.now();
   if (isSignalAborted(signal)) {
     phases.poolAcquireMs = 0;
     throw makeAbortError(signal!.reason);
   }
-  if (!signal) {
+  if (!signal && !timeoutMs) {
     const client = await readPool.connect();
     phases.poolAcquireMs = Date.now() - acquireStart;
     return client;
@@ -630,31 +656,50 @@ async function acquireClientWithAbort(
   const checkout = readPool.connect();
   const client = await new Promise<PoolClient>((resolve, reject) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const onAbort = () => {
       if (settled) return;
       settled = true;
+      phases.poolAcquireMs = Date.now() - acquireStart;
+      if (timer) clearTimeout(timer);
       // Self-releasing orphan: return the client to the pool untouched the
       // moment the checkout lands (clean release — no query ever ran on it).
       checkout.then((c) => c.release()).catch(() => {});
-      reject(makeAbortError(signal.reason));
+      reject(makeAbortError(signal?.reason));
     };
-    signal.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (timeoutMs) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        phases.poolAcquireMs = Date.now() - acquireStart;
+        signal?.removeEventListener("abort", onAbort);
+        // The checkout itself cannot be cancelled. It owns no query and must
+        // release itself cleanly whenever pg eventually supplies a client.
+        checkout.then((c) => c.release()).catch(() => {});
+        reject(new CandlePoolAcquireTimeoutError());
+      }, timeoutMs);
+      timer.unref?.();
+    }
     checkout.then(
       (c) => {
-        signal.removeEventListener("abort", onAbort);
-        if (settled) return; // abort won the race; client released above
+        signal?.removeEventListener("abort", onAbort);
+        if (timer) clearTimeout(timer);
+        if (settled) return; // abort/timeout won; client released above
         settled = true;
+        phases.poolAcquireMs = Date.now() - acquireStart;
         resolve(c);
       },
       (err) => {
-        signal.removeEventListener("abort", onAbort);
+        signal?.removeEventListener("abort", onAbort);
+        if (timer) clearTimeout(timer);
         if (settled) return;
         settled = true;
+        phases.poolAcquireMs = Date.now() - acquireStart;
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     );
   });
-  phases.poolAcquireMs = Date.now() - acquireStart;
   return client;
 }
 

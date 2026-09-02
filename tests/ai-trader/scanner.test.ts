@@ -46,6 +46,8 @@ vi.mock("../../server/lab/datafeed", () => ({
   isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
   isCacheDegradedError: (err: unknown) =>
     typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CacheDegradedError",
+  isCandleSourceUnavailableError: (err: unknown) =>
+    typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CandleSourceUnavailableError",
   isCandleTailCompletionError: (err: unknown) =>
     typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CandleTailCompletionError",
   setDatafeedIncidentReporter: vi.fn(),
@@ -280,6 +282,7 @@ import {
   getScannerConsumptionBoundary,
   allocateScannerProtocolBudgetMs,
   MAX_POST_BREAK_RETURN_AGE_BARS,
+  classifySweepFetchError,
   classifyScannerFormationLifecycle,
   isActionableScannerFormationLifecycle,
 } from "../../server/ai-trader/scanner";
@@ -288,6 +291,16 @@ const directPerp = {
   source: "okx", venue: "okx", basis: "perp", proxy: "direct",
   finality: "finalized", timeSemantic: "open_time",
 } as const;
+
+describe("scanner fetch failure classification", () => {
+  it("keeps global source unavailability distinct from per-market feed failure", () => {
+    const sourceUnavailable = Object.assign(new Error("source unavailable"), {
+      name: "CandleSourceUnavailableError",
+    });
+    expect(classifySweepFetchError(sourceUnavailable, false)).toBe("source-unavailable");
+    expect(classifySweepFetchError(new Error("malformed market response"), false)).toBe("feed-error");
+  });
+});
 
 describe("getScannerConsumptionBoundary", () => {
   it("floors an ordinary consumption time to its UTC 15-minute boundary", () => {
@@ -1715,6 +1728,61 @@ describe("scanner batch cache prefetch", () => {
           accountingValid: true,
         },
       });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a source-wide failure next boundary without poisoning per-market feed health", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map(),
+              prefixes: new Map(),
+              exactMisses: new Set(["BTC/USDT"]),
+            }
+          : {
+              complete: new Map([["BTC/USDT", parent]]),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      fetchOHLCVMock.mockRejectedValue(Object.assign(
+        new Error("OKX source unavailable"),
+        { name: "CandleSourceUnavailableError", reason: "transport_unavailable" },
+      ));
+
+      startScanner();
+      const firstSweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await firstSweep;
+      const secondSweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await secondSweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
+      const attempts = getScannerStatus().recentHistory.filter(
+        (stats) => stats.protocol === "flash" && stats.timeframe === "15m",
+      );
+      expect(attempts).toHaveLength(2);
+      for (const stats of attempts) {
+        expect(stats).toMatchObject({
+          marketsAttempted: 1,
+          marketsScanned: 0,
+          feedHealthSkipped: 0,
+          errorCount: 1,
+          accountingValid: true,
+        });
+      }
     } finally {
       stopScanner();
       vi.useRealTimers();

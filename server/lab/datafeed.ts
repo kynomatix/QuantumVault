@@ -100,11 +100,36 @@ export function isCandleBasisUnavailableError(err: unknown): err is CandleBasisU
   return err instanceof CandleBasisUnavailableError;
 }
 
+export type CandleSourceUnavailableReason =
+  | "provider_circuit_open"
+  | "transport_unavailable";
+
+export class CandleSourceUnavailableError extends Error {
+  constructor(
+    public readonly reason: CandleSourceUnavailableReason,
+    public readonly source: "okx",
+    public readonly symbol: string,
+    public readonly timeframe: string,
+  ) {
+    super(`Candle source ${source} is unavailable for ${symbol} ${timeframe}: ${reason}`);
+    this.name = "CandleSourceUnavailableError";
+  }
+}
+
+export function isCandleSourceUnavailableError(err: unknown): err is CandleSourceUnavailableError {
+  return err instanceof CandleSourceUnavailableError;
+}
+
 const OKX_BATCH_SIZE = 300;
 const GATE_BATCH_SIZE = 900;
 const PYTH_BATCH_SIZE = 5000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
+type OkxEndpoint = "openapi" | "legacy";
+const OKX_ENDPOINTS: readonly Readonly<{ id: OkxEndpoint; origin: string }>[] = [
+  { id: "openapi", origin: "https://openapi.okx.com" },
+  { id: "legacy", origin: "https://www.okx.com" },
+];
 
 const NEGATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
 
@@ -126,6 +151,7 @@ export type OkxRequestSettlementMechanism =
 
 type OkxRequestDiagnosticContext = Readonly<{
   provider: "okx";
+  endpoint: OkxEndpoint;
   callerClass: CandleReadCallerClass;
   instrument: string;
   timeframe: string;
@@ -251,6 +277,7 @@ function recordOkxSourceFailure(context: OkxRequestDiagnosticContext): void {
 export function __testResetOkxSourceBreaker(): void {
   okxSourceConsecutiveFailures = 0;
   okxSourceDownUntil = 0;
+  okxFailedInstruments.clear();
 }
 
 class GatePairNotFoundError extends Error {
@@ -1222,15 +1249,15 @@ async function fetchOkxCandles(
   afterMs?: number,
   beforeMs?: number,
   signal?: AbortSignal,
-  diagnosticBase?: Omit<OkxRequestDiagnosticContext, "attempt">,
+  diagnosticBase?: Omit<OkxRequestDiagnosticContext, "attempt" | "endpoint">,
 ): Promise<any[]> {
   const params = new URLSearchParams({ instId, bar, limit: String(OKX_BATCH_SIZE) });
   if (afterMs) params.set("after", String(afterMs));
   if (beforeMs) params.set("before", String(beforeMs));
 
-  const url = `https://www.okx.com/api/v5/market/history-candles?${params}`;
-
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const endpoint = OKX_ENDPOINTS[attempt % OKX_ENDPOINTS.length];
+    const url = `${endpoint.origin}/api/v5/market/history-candles?${params}`;
     try {
       const bounded = await fetchWithHardTimeout(
         url,
@@ -1238,7 +1265,7 @@ async function fetchOkxCandles(
         undefined,
         signal,
         "default",
-        diagnosticBase ? { ...diagnosticBase, attempt: attempt + 1 } : undefined,
+        diagnosticBase ? { ...diagnosticBase, endpoint: endpoint.id, attempt: attempt + 1 } : undefined,
       );
       const res = bounded.response;
       try {
@@ -1624,6 +1651,7 @@ export async function fetchOHLCV(
   }
   const basisPolicy = options.basisPolicy;
   let sawMalformedProvenance = false;
+  let okxSourceUnavailableReason: CandleSourceUnavailableReason | null = null;
   const typedFailure = basisPolicy.consumer === "scanner" || basisPolicy.consumer === "ai_context";
   const finishWithPolicy = (candles: ProvenancedOHLCV[]): ProvenancedOHLCV[] => {
     const admitted = candles.filter((c) => candleMatchesBasisPolicy(c, basisPolicy));
@@ -1634,6 +1662,19 @@ export async function fetchOHLCV(
       console.log(`[CandleProvenance] ${symbol} ${timeframe} ${identities || "unavailable"} bars=${admitted.length}`);
     }
     if (admitted.length > 0 || !typedFailure) return admitted;
+    const exactDirectPerpPolicy = basisPolicy.acceptedBasis.length === 1
+      && basisPolicy.acceptedBasis[0] === "perp"
+      && basisPolicy.acceptedProxy.length === 1
+      && basisPolicy.acceptedProxy[0] === "direct";
+    if (okxSourceUnavailableReason && exactDirectPerpPolicy
+        && basisPolicy.consumer === "scanner") {
+      throw new CandleSourceUnavailableError(
+        okxSourceUnavailableReason,
+        "okx",
+        symbol,
+        timeframe,
+      );
+    }
     const sawExcludedFinality = candles.some((c) => {
       const p = c.provenance;
       return p.source !== "unknown"
@@ -1876,7 +1917,7 @@ export async function fetchOHLCV(
 
   const okxNegCachedAtEntry = isNegCached(okxFailedInstruments, instId);
   const okxSourceDownAtEntry = isOkxSourceDown();
-  const okxDiagnosticBase: Omit<OkxRequestDiagnosticContext, "attempt"> = {
+  const okxDiagnosticBase: Omit<OkxRequestDiagnosticContext, "attempt" | "endpoint"> = {
     provider: "okx",
     callerClass: options?.callerClass ?? "lab",
     instrument: instId,
@@ -1998,13 +2039,13 @@ export async function fetchOHLCV(
       // Network-type failure (timeouts/refused — NOT a not-found, which
       // resets above): count it toward the source-level breaker.
       if (attemptedNetwork && consecutiveErrors > 0) {
-        recordOkxSourceFailure({ ...okxDiagnosticBase, attempt: MAX_RETRIES });
-      }
-      // Only negcache the instrument if we actually reached the network for
-      // it — a deadline hit before the first attempt proves nothing.
-      if (attemptedNetwork && !isNegCached(okxFailedInstruments, instId)) {
-        negCache(okxFailedInstruments, instId);
-        console.log(`[OKX] ${instId} not available — will use Gate.io spot fallback for future requests`);
+        const terminalEndpoint = OKX_ENDPOINTS[(MAX_RETRIES - 1) % OKX_ENDPOINTS.length].id;
+        recordOkxSourceFailure({
+          ...okxDiagnosticBase,
+          endpoint: terminalEndpoint,
+          attempt: MAX_RETRIES,
+        });
+        okxSourceUnavailableReason = "transport_unavailable";
       }
       trace.push(`okx=0c/${((Date.now() - netStart) / 1000).toFixed(1)}s(${attemptedNetwork ? "unavailable" : "deadline"})`);
     } else {
@@ -2016,6 +2057,7 @@ export async function fetchOHLCV(
     console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
     trace.push("okx=negcached-skip");
   } else {
+    okxSourceUnavailableReason = "provider_circuit_open";
     console.log(`[OKX] Skipping ${instId} (source circuit breaker OPEN) — trying Gate.io spot`);
     trace.push("okx=source-down-skip");
   }
