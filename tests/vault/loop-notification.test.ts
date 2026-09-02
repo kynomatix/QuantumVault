@@ -13,6 +13,7 @@ describe("SOL-loop notification copy", () => {
       band: "unavailable",
       healthFactor: null,
       ltv: null,
+      reasonCode: "exchange_price_unavailable",
     });
 
     expect(message.title).toBe("Loop Safety Check Unreadable");
@@ -20,7 +21,24 @@ describe("SOL-loop notification copy", () => {
     expect(message.body).toContain("No automatic safety adjustment was attempted");
     expect(message.body).toContain("Monitoring will continue");
     expect(message.body).toContain("review the position manually");
+    expect(message.body).toContain("Cause: the vault accrual prices could not be read.");
     expect(message.body).not.toMatch(/wallet|row|signature|transaction|is safe|closed|liquidat/i);
+  });
+
+  it("adds a bounded cause to classic unreadable loan copy without raw infrastructure detail", () => {
+    const message = formatBorrowHealthMessage({
+      scopeLabel: "Account",
+      collateralLabel: "INF",
+      context: "borrow",
+      band: "unavailable",
+      healthFactor: null,
+      ltv: null,
+      reasonCode: "position_read_failed",
+    });
+
+    expect(message.title).toContain("Loan Health Unreadable");
+    expect(message.body).toContain("Cause: the on-chain position read did not complete.");
+    expect(message.body).not.toMatch(/wallet|row|signature|transaction|rpc|endpoint|exception/i);
   });
 
   it("describes the destination loop as active without claiming continuous vault custody", () => {

@@ -2,6 +2,7 @@ import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { escapeTelegramHtml } from "./telegram-html";
+import type { BorrowHealthUnavailableReasonCode } from "./vault/borrow-health";
 
 export interface TradeNotification {
   type: 'trade_executed' | 'trade_failed' | 'position_closed' | 'partial_close' | 'ai_trader_graduation';
@@ -197,7 +198,30 @@ export interface BorrowHealthNotification {
   band: BorrowHealthAlertBand;
   healthFactor: number | null;
   ltv: number | null;
+  /** Bounded owner-safe cause for an unavailable observation. */
+  reasonCode?: BorrowHealthUnavailableReasonCode;
 }
+
+const BORROW_HEALTH_UNAVAILABLE_CAUSE: Record<
+  BorrowHealthUnavailableReasonCode,
+  string
+> = {
+  position_read_failed: "the on-chain position read did not complete",
+  position_absent: "the on-chain position was not found",
+  position_amounts_absent: "the on-chain position returned incomplete amounts",
+  exchange_price_unavailable: "the vault accrual prices could not be read",
+  invalid_position_amounts: "the on-chain position amounts were invalid",
+  unexpected_live_read_failure: "the live position read could not complete",
+  vault_config_unavailable: "the vault configuration could not be read",
+  vault_identity_invalid: "the saved vault reference was invalid",
+  position_identity_invalid: "the saved position reference was invalid",
+  collateral_identity_missing: "the saved collateral reference was missing",
+  vault_decimals_invalid: "the vault amount scale was invalid",
+  live_position_amounts_unparseable: "the live position amounts could not be decoded",
+  debt_value_invalid: "the debt amount could not be valued",
+  collateral_value_unavailable: "the collateral value could not be read",
+  health_factor_unavailable: "the health factor could not be calculated",
+};
 
 export function formatBorrowHealthMessage(n: BorrowHealthNotification): { title: string; body: string } {
   const scope = escapeTelegramHtml(n.scopeLabel);
@@ -237,6 +261,10 @@ export function formatBorrowHealthMessage(n: BorrowHealthNotification): { title:
       title = '⚪ Loan Health Unreadable';
       lead = `We could not read the health of your ${scope} loan (${collateral}) this cycle. We will keep checking — please review it when you can.`;
       break;
+  }
+
+  if (n.band === 'unavailable' && n.reasonCode) {
+    lead = `${lead}\nCause: ${BORROW_HEALTH_UNAVAILABLE_CAUSE[n.reasonCode]}.`;
   }
 
   const metrics: string[] = [];
