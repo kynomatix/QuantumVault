@@ -81,7 +81,11 @@ import { runDecision } from "./decide";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { executeDecision, checkCooldownAndCaps, aiTraderPolicyObject } from "./executor";
 import { computeBotPolicyHmac } from "../session-v3";
-import { getScannerConsumptionBoundary, getScannerShortlistResult } from "./scanner";
+import {
+  getScannerConsumptionBoundary,
+  getScannerShortlistResult,
+  waitForScannerBoundaryLaneRelease,
+} from "./scanner";
 import { SCANNER_CAPABILITIES } from "./scanner-capabilities";
 import { isSchemaCapabilityReady } from "../schema-readiness";
 import {
@@ -521,8 +525,10 @@ function recordProtectiveReadObservation(
 const autoNextTimers = new Map<string, NodeJS.Timeout>();
 
 // AIT-CYCLE-OBSERVABILITY-01: per-bot in-flight cycle observability state.
-// The autoNextTimers entry is deleted at the START of the callback (before
-// runAutoCycle is called), so the timer itself does not overlap. However, a
+// A fired autoNextTimers entry remains authoritative while it waits for the
+// scanner boundary lane, then is deleted immediately before runAutoCycle.
+// That lets reschedule/shutdown supersede a waiter without starting stale work.
+// However, a
 // slow cycle can remain in-flight while the cadence-audit arms a new boundary
 // timer — that new timer may fire and produce a second, concurrent obs entry
 // for the same bot. Each obs carries its own closure-owned identity and settle
@@ -2652,70 +2658,103 @@ export function nextCycleTimeframe(bot: AiTraderBot): string {
   return bot.marketSource === "scanner" ? "15m" : bot.timeframe;
 }
 
-// Max age of a scanner candidate at consumption time. Bot cycles and scanner sweeps
-// both fire at the 15m boundary (+2s), so a bot normally consumes the PREVIOUS
-// boundary's shortlist (~15 min old — fine: context is rebuilt fresh and the LLM
-// re-decides). But if a sweep crashes or stalls, the shortlist keeps its old
-// entries; without this cutoff a bot would burn LLM calls on arbitrarily stale
-// picks (candles stay fresh, so G9 does not catch it). 20 min admits the normal
-// one-boundary lag and rejects anything two or more boundaries old.
+// Max age of a scanner candidate at consumption time. The scanner owns +2s;
+// bot cycles settle at +10s and then wait for the current sweep to release its
+// lifecycle lane, so a healthy boundary consumes the newly completed generation.
+// If no sweep owns the lane, the latest completed generation may still be read;
+// without this cutoff a bot could burn LLM calls on arbitrarily stale picks
+// (candles stay fresh, so G9 does not catch it). 20 min admits one normal
+// boundary of age and rejects anything two or more boundaries old.
 // Exported: the manual /analyze route (routes.ts) applies the same freshness
 // cutoff when it does its own scanner pick.
 export const SCANNER_CANDIDATE_MAX_AGE_MS = 20 * 60_000;
 
-/** Schedule the next decision cycle at the next candle boundary (+2s settle). */
+/** Scanner owns +2s. Auto cycles settle later, then yield until its sweep ends. */
+export const AUTO_CYCLE_SETTLE_MS = 10_000;
+
+async function runScheduledAutoCycle(
+  botId: string,
+  timeframe: string,
+  ownedTimer: NodeJS.Timeout,
+): Promise<void> {
+  const laneResult = await waitForScannerBoundaryLaneRelease();
+  // A reschedule or shutdown superseded this already-fired timer while it waited.
+  if (autoNextTimers.get(botId) !== ownedTimer) return;
+
+  if (laneResult === "timed_out") {
+    autoNextTimers.delete(botId);
+    appendTelemetry(
+      `[AIT-OBS] cycle_deferred bot=${botId.slice(0, 8)} tf=${timeframe} reason=scanner_boundary_lane_timeout boot=${MONITOR_BOOT_TAG}`
+    );
+    scheduleAutoNext(botId, timeframe);
+    return;
+  }
+
+  autoNextTimers.delete(botId);
+  // AIT-CYCLE-OBSERVABILITY-01: per-cycle observability closure. Each timer
+  // callback owns its obs entry; direct runAutoCycle calls are unobserved.
+  const cycleStart = Date.now();
+  const cycleId = `${botId.slice(0, 8)}-${cycleStart}`;
+  const obs: CycleObs = { id: cycleId, phase: "initial", exitReason: "status_gate", watchdog: null, stopped: false };
+  _cycleObs.set(botId, obs);
+  _allActiveObs.add(obs);
+  appendTelemetry(`[AIT-OBS] cycle_start cid=${cycleId} tf=${timeframe} ts=${cycleStart} boot=${MONITOR_BOOT_TAG}`);
+  // Unref'd slow-cycle watchdog: fires once at 60 s if still unsettled.
+  // Never cancels, retries, or mutates trading state.
+  let settled = false;
+  obs.watchdog = setTimeout(() => {
+    if (!settled && !obs.stopped) {
+      appendTelemetry(
+        `[AIT-OBS] cycle_slow cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} boot=${MONITOR_BOOT_TAG}`
+      );
+    }
+  }, 60_000);
+  if (typeof obs.watchdog.unref === "function") obs.watchdog.unref();
+  const settle = (exitOverride?: CycleExitReason): void => {
+    if (settled || obs.stopped) return; // guard: one terminal per cycle; none after stop
+    settled = true;
+    clearTimeout(obs.watchdog ?? undefined);
+    _allActiveObs.delete(obs);
+    if (_cycleObs.get(botId) === obs) _cycleObs.delete(botId);
+    // rearmed: a future cadence timer exists at settlement time. May have been armed
+    // by this cycle or by a concurrent callback for the same bot (overlap window).
+    const rearmed = autoNextTimers.has(botId);
+    appendTelemetry(
+      `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason} rearmed=${rearmed} boot=${MONITOR_BOOT_TAG}`
+    );
+  };
+  runAutoCycle(botId).then(() => {
+    settle();
+  }).catch((err) => {
+    settle("thrown");
+    // Preserve existing catch behaviour byte-for-byte in effect.
+    console.error(`[AiTraderMonitor] auto cycle crashed for bot ${botId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
+    // A crash mid-cycle (e.g. a venue outage throwing 504s from context build /
+    // execute) strands the bot in 'analyzing' with NO future timer — frozen until
+    // the next server restart. Queue the same venue-verified reconciliation the
+    // startup path uses; the 15s tick retries it until the venue answers, then
+    // resets the bot to idle (or recovers a real position) and re-arms the cadence.
+    pendingReconciliation.add(botId);
+  });
+}
+
+/** Schedule the next decision cycle at the next candle boundary (+10s settle). */
 export function scheduleAutoNext(botId: string, timeframe: string): void {
   const tfMs = TIMEFRAME_MS[timeframe];
   if (!tfMs) return;
   clearAutoNext(botId);
   const now = Date.now();
-  const delay = (Math.floor(now / tfMs) + 1) * tfMs - now + 2_000;
+  const delay = (Math.floor(now / tfMs) + 1) * tfMs - now + AUTO_CYCLE_SETTLE_MS;
   const timer = setTimeout(() => {
-    autoNextTimers.delete(botId);
-    // AIT-CYCLE-OBSERVABILITY-01: per-cycle observability closure. Each timer
-    // callback owns its obs entry; direct runAutoCycle calls are unobserved.
-    const cycleStart = Date.now();
-    const cycleId = `${botId.slice(0, 8)}-${cycleStart}`;
-    const obs: CycleObs = { id: cycleId, phase: "initial", exitReason: "status_gate", watchdog: null, stopped: false };
-    _cycleObs.set(botId, obs);
-    _allActiveObs.add(obs);
-    appendTelemetry(`[AIT-OBS] cycle_start cid=${cycleId} tf=${timeframe} ts=${cycleStart} boot=${MONITOR_BOOT_TAG}`);
-    // Unref'd slow-cycle watchdog: fires once at 60 s if still unsettled.
-    // Never cancels, retries, or mutates trading state.
-    let settled = false;
-    obs.watchdog = setTimeout(() => {
-      if (!settled && !obs.stopped) {
-        appendTelemetry(
-          `[AIT-OBS] cycle_slow cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} boot=${MONITOR_BOOT_TAG}`
-        );
-      }
-    }, 60_000);
-    if (typeof obs.watchdog.unref === "function") obs.watchdog.unref();
-    const settle = (exitOverride?: CycleExitReason): void => {
-      if (settled || obs.stopped) return; // guard: one terminal per cycle; none after stop
-      settled = true;
-      clearTimeout(obs.watchdog ?? undefined);
-      _allActiveObs.delete(obs);
-      if (_cycleObs.get(botId) === obs) _cycleObs.delete(botId);
-      // rearmed: a future cadence timer exists at settlement time. May have been armed
-      // by this cycle or by a concurrent callback for the same bot (overlap window).
-      const rearmed = autoNextTimers.has(botId);
+    void runScheduledAutoCycle(botId, timeframe, timer).catch(() => {
+      // The lane waiter is designed not to reject. Preserve cadence if an
+      // unforeseen infrastructure failure occurs without leaking raw prose.
+      if (autoNextTimers.get(botId) !== timer) return;
+      autoNextTimers.delete(botId);
       appendTelemetry(
-        `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason} rearmed=${rearmed} boot=${MONITOR_BOOT_TAG}`
+        `[AIT-OBS] cycle_deferred bot=${botId.slice(0, 8)} tf=${timeframe} reason=scanner_boundary_lane_wait_failed boot=${MONITOR_BOOT_TAG}`
       );
-    };
-    runAutoCycle(botId).then(() => {
-      settle();
-    }).catch((err) => {
-      settle("thrown");
-      // Preserve existing catch behaviour byte-for-byte in effect.
-      console.error(`[AiTraderMonitor] auto cycle crashed for bot ${botId.slice(0, 8)}: ${err instanceof Error ? err.message : err}`);
-      // A crash mid-cycle (e.g. a venue outage throwing 504s from context build /
-      // execute) strands the bot in 'analyzing' with NO future timer — frozen until
-      // the next server restart. Queue the same venue-verified reconciliation the
-      // startup path uses; the 15s tick retries it until the venue answers, then
-      // resets the bot to idle (or recovers a real position) and re-arms the cadence.
-      pendingReconciliation.add(botId);
+      scheduleAutoNext(botId, timeframe);
     });
   }, delay);
   // Don't hold the process open for a bot timer.

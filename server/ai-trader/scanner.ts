@@ -467,6 +467,46 @@ type ScannerSweepOwner = {
 let activeSweepOwner: ScannerSweepOwner | null = null;
 const SWEEP_WEDGE_MS = 5 * 60_000;
 
+export type ScannerBoundaryLaneWaitResult = "idle" | "released" | "timed_out";
+
+type ScannerBoundaryLaneWaiter = {
+  timeout: ReturnType<typeof setTimeout> | null;
+  settle: (result: ScannerBoundaryLaneWaitResult) => void;
+};
+
+const scannerBoundaryLaneWaiters = new Set<ScannerBoundaryLaneWaiter>();
+
+function releaseScannerBoundaryLaneWaiters(): void {
+  for (const waiter of [...scannerBoundaryLaneWaiters]) {
+    waiter.settle("released");
+  }
+}
+
+/**
+ * Wait until no current or replacement scanner sweep owns the boundary lane.
+ * The existing sweep wedge is also the waiter's hard upper bound: a bot cycle
+ * must defer to its next native boundary rather than wait forever.
+ */
+export function waitForScannerBoundaryLaneRelease(
+  maxWaitMs = SWEEP_WEDGE_MS,
+): Promise<ScannerBoundaryLaneWaitResult> {
+  if (sweepStartedAt === null) return Promise.resolve("idle");
+
+  return new Promise((resolve) => {
+    const waiter: ScannerBoundaryLaneWaiter = {
+      timeout: null,
+      settle: (result) => {
+        if (!scannerBoundaryLaneWaiters.delete(waiter)) return;
+        if (waiter.timeout !== null) clearTimeout(waiter.timeout);
+        resolve(result);
+      },
+    };
+    waiter.timeout = setTimeout(() => waiter.settle("timed_out"), Math.max(0, maxWaitMs));
+    waiter.timeout.unref?.();
+    scannerBoundaryLaneWaiters.add(waiter);
+  });
+}
+
 class ScannerSweepRevokedError extends Error {
   constructor(readonly generation: number) {
     super(`scanner sweep generation ${generation} no longer owns publication`);
@@ -1942,7 +1982,10 @@ async function runSweep(): Promise<void> {
     if (activeSweepOwner === owner) activeSweepOwner = null;
     // Only clear our own claim — a wedged sweep that resumes after an override
     // must not wipe the newer sweep's timestamp.
-    if (gen === sweepGeneration) sweepStartedAt = null;
+    if (gen === sweepGeneration) {
+      sweepStartedAt = null;
+      releaseScannerBoundaryLaneWaiters();
+    }
   }
 }
 
@@ -2111,6 +2154,7 @@ export function stopScanner(): void {
   }
   sweepStartedAt = null;
   sweepGeneration++;
+  releaseScannerBoundaryLaneWaiters();
   scannerPublicationState = Object.freeze({ currentGeneration: null, lastTradableGeneration: null });
   universeCache.clear();
   multiplierQuarantineByProtocol.clear();

@@ -219,11 +219,13 @@ const getScannerConsumptionBoundaryMock = vi.fn(() => ({
   boundaryStart: new Date("2026-08-25T12:00:00.000Z"),
   expiresAt: new Date("2026-08-25T12:15:00.000Z"),
 }));
+const waitForScannerBoundaryLaneReleaseMock = vi.fn();
 const stopScannerMock = vi.fn();
 vi.mock("../../server/ai-trader/scanner", () => ({
   getScannerShortlist: (...a: unknown[]) => getScannerShortlistMock(...a),
   getScannerShortlistResult: (...a: unknown[]) => getScannerShortlistResultMock(...a),
   getScannerConsumptionBoundary: (...a: unknown[]) => getScannerConsumptionBoundaryMock(...a),
+  waitForScannerBoundaryLaneRelease: (...a: unknown[]) => waitForScannerBoundaryLaneReleaseMock(...a),
   stopScanner: (...a: unknown[]) => stopScannerMock(...a),
 }));
 
@@ -261,6 +263,7 @@ vi.mock("../../server/ai-trader/multiplier-market-quarantine", () => ({
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z — 15m boundary
 const TF_15M = 900_000;
+const AUTO_CYCLE_SETTLE_MS = 10_000;
 const DAY = 86_400_000;
 const PAPER_TAKER_FEE_RATE = 0.00015;
 const ERA_CONTEXT = { candleProvenance: { selected: null, parent: null } };
@@ -487,6 +490,7 @@ beforeEach(() => {
     decryptLlmKeyMock, classifyLlmFailureMock, fingerprintLlmKeyMock, notifyMock, getAdapterMock, fetchOHLCVMock, buildContextMock,
     runDecisionMock, executeDecisionMock, appendTelemetryMock, getScannerShortlistMock,
     getScannerConsumptionBoundaryMock,
+    waitForScannerBoundaryLaneReleaseMock,
     stopScannerMock, isMarketAdmittedMock, isMultiplierQuarantinedMock,
     schemaCapabilityReadyMock,
     safeJournalMock,
@@ -518,6 +522,7 @@ beforeEach(() => {
     boundaryStart: new Date("2026-08-25T12:00:00.000Z"),
     expiresAt: new Date("2026-08-25T12:15:00.000Z"),
   });
+  waitForScannerBoundaryLaneReleaseMock.mockResolvedValue("idle");
   isMarketAdmittedMock.mockReturnValue(true);
   isMultiplierQuarantinedMock.mockReturnValue(false);
   schemaCapabilityReadyMock.mockReturnValue(true);
@@ -4013,6 +4018,87 @@ describe("monitor liveness heartbeat", () => {
   });
 });
 
+// --- Scanner boundary lane: auto-cycle work yields to the scanner ---------------------
+
+describe("scanner boundary lane scheduling", () => {
+  const laneLines = () => appendTelemetryMock.mock.calls.map((call) => String(call[0]));
+
+  it("keeps the scanner's +2s priority and starts no cycle work until the active sweep releases", async () => {
+    const lane = deferred<"released">();
+    waitForScannerBoundaryLaneReleaseMock.mockReturnValueOnce(lane.promise);
+    getBotMock.mockResolvedValue(makeBot({ status: "open", mode: "auto", autoNext: true }));
+    const { scheduleAutoNext } = await importMonitor();
+
+    scheduleAutoNext("bot-lane-release", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+
+    expect(waitForScannerBoundaryLaneReleaseMock).not.toHaveBeenCalled();
+    expect(getBotMock).not.toHaveBeenCalled();
+    expect(laneLines().some((line) => line.includes("cycle_start"))).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(AUTO_CYCLE_SETTLE_MS - 2_000);
+    expect(waitForScannerBoundaryLaneReleaseMock).toHaveBeenCalledTimes(1);
+    expect(getBotMock).not.toHaveBeenCalled();
+    expect(laneLines().some((line) => line.includes("cycle_start"))).toBe(false);
+
+    lane.resolve("released");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getBotMock).toHaveBeenCalledTimes(1);
+    expect(laneLines().filter((line) => line.includes("cycle_start"))).toHaveLength(1);
+    expect(laneLines().filter((line) => line.includes("cycle_end"))).toHaveLength(1);
+  });
+
+  it("defers to the next native boundary when the scanner-lane wait reaches its wedge bound", async () => {
+    waitForScannerBoundaryLaneReleaseMock.mockResolvedValueOnce("timed_out");
+    const { scheduleAutoNext } = await importMonitor();
+
+    scheduleAutoNext("bot-lane-timeout", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
+
+    expect(getBotMock).not.toHaveBeenCalled();
+    expect(buildContextMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(laneLines()).toContainEqual(expect.stringContaining(
+      "cycle_deferred bot=bot-lane tf=15m reason=scanner_boundary_lane_timeout",
+    ));
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("does not start stale work when a waiting timer is superseded by a reschedule", async () => {
+    const lane = deferred<"released">();
+    waitForScannerBoundaryLaneReleaseMock.mockReturnValueOnce(lane.promise);
+    const { scheduleAutoNext } = await importMonitor();
+
+    scheduleAutoNext("bot-lane-rearm", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
+    scheduleAutoNext("bot-lane-rearm", "15m");
+    lane.resolve("released");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getBotMock).not.toHaveBeenCalled();
+    expect(laneLines().some((line) => line.includes("cycle_start"))).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it("does not start stale work when the monitor stops during the lane wait", async () => {
+    const lane = deferred<"released">();
+    waitForScannerBoundaryLaneReleaseMock.mockReturnValueOnce(lane.promise);
+    const { scheduleAutoNext, stopAiTraderMonitor } = await importMonitor();
+
+    scheduleAutoNext("bot-lane-stop", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
+    stopAiTraderMonitor();
+    lane.resolve("released");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(getBotMock).not.toHaveBeenCalled();
+    expect(laneLines().some((line) => line.includes("cycle_start"))).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 // --- AIT-CADENCE-SELF-HEAL-01: tick audit restores missing auto-next timers -----------
 
 describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
@@ -4065,10 +4151,10 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
     expect(vi.getTimerCount()).toBe(1);
     expect(repairLines()).toHaveLength(1);
 
-    // The single timer fires exactly once at the ORIGINAL boundary (+2s).
+    // The single timer fires exactly once at the ORIGINAL boundary (+10s).
     // runAutoCycle's fresh-row gate sees 'open' → exits without rescheduling.
     getBotMock.mockResolvedValue(idleAutoBot({ status: "open" }));
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
     expect(getBotMock).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -4157,7 +4243,7 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
     getAdapterMock.mockImplementation(() => {
       throw new Error("no adapter registered for 'pacifica'");
     });
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
     expect(vi.getTimerCount()).toBe(0);
 
     // Next tick: audit re-arms a FUTURE boundary timer; no LLM/decision work runs.
@@ -4180,7 +4266,7 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
     // the map entry, but the cycle's first read never settles.
     let releaseCycle!: (v: unknown) => void;
     getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
     // The auto-next timer was consumed; the AIT-CYCLE-OBSERVABILITY-01 watchdog
     // is now live (unref'd, but still counted by vi.getTimerCount).
     expect(vi.getTimerCount()).toBe(1); // watchdog only; cycle in-flight
@@ -4240,7 +4326,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     scheduleAutoNext("bot-obs-1234", "15m");
     expect(obsTelLines()).toHaveLength(0); // nothing before the timer fires
 
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(startLines()).toHaveLength(1);
     expect(endLines()).toHaveLength(1);
@@ -4271,7 +4357,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     armFlatCycle();
 
     scheduleAutoNext("bot-obs-1234", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000); // cycle settles
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS); // cycle settles
 
     expect(endLines()).toHaveLength(1);
     appendTelemetryMock.mockClear(); // reset so we only see post-settle calls
@@ -4288,7 +4374,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
 
     scheduleAutoNext("bot-obs-slow", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000); // timer fires; cycle hangs at bot read
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS); // timer fires; cycle hangs at bot read
 
     expect(startLines()).toHaveLength(1);
     expect(endLines()).toHaveLength(0);
@@ -4324,7 +4410,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
 
     scheduleAutoNext("bot-obs-rel", "15m");
     // Advance past both the timer fire and the 60 s watchdog in one step
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000 + 60_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS + 60_000);
     expect(slowLines()).toHaveLength(1);
     expect(endLines()).toHaveLength(0);
 
@@ -4343,7 +4429,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getBotMock.mockRejectedValue(new Error(rawMsg));
 
     scheduleAutoNext("bot-obs-throw", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(startLines()).toHaveLength(1);
     expect(endLines()).toHaveLength(1);
@@ -4363,7 +4449,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getBotMock.mockResolvedValue(makeBot({ status: "open", mode: "auto", autoNext: true }));
 
     scheduleAutoNext("bot-obs-gate", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=status_gate");
@@ -4376,7 +4462,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getAdapterMock.mockImplementation(() => { throw new Error("no adapter registered for 'pacifica'"); });
 
     scheduleAutoNext("bot-obs-noadp", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=adapter_missing");
@@ -4397,7 +4483,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     buildContextMock.mockResolvedValue({ stale: true, reason: "price-too-old-RAWLEAK" });
 
     scheduleAutoNext("bot-obs-stale", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=stale_data");
@@ -4420,7 +4506,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     executeDecisionMock.mockResolvedValue({ ok: true, mode: "paper", entryPrice: 150 });
 
     scheduleAutoNext("bot-obs-entry", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=entry_open");
@@ -4438,7 +4524,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     expect(appendTelemetryMock).not.toHaveBeenCalled();
     expect(getBotMock).not.toHaveBeenCalled();
 
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     // Exactly start + one healthy fingerprint + terminal; no extra storage calls from the wrapper
     expect(obsTelLines()).toHaveLength(3);
@@ -4471,7 +4557,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     runDecisionMock.mockResolvedValue({ ok: false, reason: "timeout", detail: "G12 60 s budget exceeded" });
 
     scheduleAutoNext("bot-obs-timeout", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=llm_timeout");
@@ -4485,7 +4571,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     runDecisionMock.mockResolvedValue({ ok: false, reason: "gateway", detail: "502 from provider" });
 
     scheduleAutoNext("bot-obs-gw", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=llm_gateway");
@@ -4499,7 +4585,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     runDecisionMock.mockResolvedValue({ ok: false, reason: "malformed", detail: "zod parse failed after retry" });
 
     scheduleAutoNext("bot-obs-malformed", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=llm_malformed");
@@ -4516,7 +4602,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     });
 
     scheduleAutoNext("bot-obs-guardrail", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=guardrail_rejected");
@@ -4539,7 +4625,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     executeDecisionMock.mockResolvedValue({ ok: false, reason: "rejected", detail: "position size below venue minimum" });
 
     scheduleAutoNext("bot-obs-execrej", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=exec_rejected");
@@ -4554,7 +4640,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     // runDecisionMock returns flat (from armFlatCycle) → scheduleAutoNext called inside runAutoCycle
 
     scheduleAutoNext("bot-obs-rearmed", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("rearmed=true");
@@ -4571,7 +4657,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getLlmCiphertextMock.mockResolvedValue(null);
 
     scheduleAutoNext("bot-obs-paused", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=paused");
@@ -4583,7 +4669,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getBotMock.mockRejectedValue(new Error("venue-outage"));
 
     scheduleAutoNext("bot-obs-thrown-rearmed", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     expect(endLines()).toHaveLength(1);
     expect(endLines()[0]).toContain("exit=thrown");
@@ -4600,7 +4686,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getBotMock.mockImplementationOnce(() => new Promise((res) => { releaseCycle1 = res; }));
 
     scheduleAutoNext("bot-obs-overlap", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     // Only one start line at this point — extract cid1 from it directly.
     expect(startLines()).toHaveLength(1);
@@ -4622,7 +4708,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
 
     await runMonitorTickOnce(); // arms cycle 2 boundary timer
     // Advance to fire cycle 2's timer — cycle 1 is still hanging
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000);
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
     const cid2 = startLines().find((l) => !l.includes(cid1!))?.match(/cid=(\S+)/)?.[1];
     expect(cid2).toBeTruthy();
@@ -4656,7 +4742,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getBotMock.mockImplementation(() => new Promise(() => {})); // never resolves
 
     scheduleAutoNext("bot-obs-stop", "15m");
-    await vi.advanceTimersByTimeAsync(TF_15M + 2_000); // timer fires; watchdog armed; cycle hangs
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS); // timer fires; watchdog armed; cycle hangs
 
     expect(startLines()).toHaveLength(1);
     expect(endLines()).toHaveLength(0);
