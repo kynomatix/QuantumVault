@@ -72,9 +72,9 @@ export const scannerCandlePool = poolName === "web"
   ? new Pool({
       connectionString: process.env.DATABASE_URL,
       max: 1,
-      connectionTimeoutMillis: connTimeoutMs,
+      connectionTimeoutMillis: 5_000,
       query_timeout: queryTimeoutMs,
-      idleTimeoutMillis: 60_000,
+      idleTimeoutMillis: 0,
       keepAlive: true,
       application_name: "qv-scanner-candle",
     })
@@ -117,6 +117,7 @@ let _hbFailCount = 0;
 let _hbFailStreak = 0;
 let _scannerHbFailCount = 0;
 let _scannerKeepWarmActive = false;
+const SCANNER_KEEP_WARM_QUERY_TIMEOUT_MS = 5_000;
 const activeKeepWarm = new Set<symbol>();
 registerPoolLoadTag("db_maintenance", () => ({
   hb: activeKeepWarm.size,
@@ -131,6 +132,30 @@ function claimKeepWarm(): () => void {
   };
 }
 
+function keepScannerCandlePoolWarm(): void {
+  if (!hasDedicatedScannerCandlePool || _scannerKeepWarmActive) return;
+  // A max-one lane is available only when it is empty or has an idle client.
+  // Never queue behind an active scanner read (total=1/idle=0) or an existing
+  // waiter. Unlike the old idle-only condition, total=0 deliberately creates
+  // the connection before a sweep has to pay the TLS/auth handshake.
+  const scannerLaneAvailable = scannerCandlePool.waitingCount === 0
+    && (scannerCandlePool.totalCount === 0 || scannerCandlePool.idleCount > 0);
+  if (!scannerLaneAvailable) return;
+
+  _scannerKeepWarmActive = true;
+  (scannerCandlePool.query({
+    text: "SELECT 1",
+    query_timeout: SCANNER_KEEP_WARM_QUERY_TIMEOUT_MS,
+  } as any) as Promise<unknown>)
+    .catch(() => { _scannerHbFailCount++; })
+    .finally(() => { _scannerKeepWarmActive = false; });
+}
+
+// Establish the dedicated lane at module initialization. The pool's bounded
+// connection timeout and query timeout keep this attempt below the heartbeat
+// cadence, while the active flag prevents overlap if a transport misbehaves.
+keepScannerCandlePoolWarm();
+
 setInterval(() => {
   const releaseKeepWarm = claimKeepWarm();
   pool.query("SELECT 1")
@@ -138,18 +163,9 @@ setInterval(() => {
     .catch(() => { _hbFailCount++; _hbFailStreak++; })
     .finally(releaseKeepWarm);
 
-  // Reuse the existing heartbeat cadence: no new timer. Never queue behind an
-  // active scanner query, never overlap a prior scanner heartbeat, and never
-  // create a connection solely for keep-warm. The first real scanner batch
-  // establishes the lane; later heartbeats may retain that idle connection.
-  const scannerLaneIdle = scannerCandlePool.waitingCount === 0
-    && scannerCandlePool.idleCount > 0;
-  if (hasDedicatedScannerCandlePool && !_scannerKeepWarmActive && scannerLaneIdle) {
-    _scannerKeepWarmActive = true;
-    scannerCandlePool.query("SELECT 1")
-      .catch(() => { _scannerHbFailCount++; })
-      .finally(() => { _scannerKeepWarmActive = false; });
-  }
+  // Reuse the existing heartbeat cadence: no new timer. Re-establish an empty
+  // lane and retain an idle connection, but never queue or overlap.
+  keepScannerCandlePoolWarm();
 }, 20_000).unref();
 
 // ----- connect-slow visibility --------------------------------------------

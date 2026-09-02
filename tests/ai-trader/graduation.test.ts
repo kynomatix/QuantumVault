@@ -490,7 +490,7 @@ describe("qualification era forgotten-declaration gate", () => {
   it("declares scanner throughput recovery as a reviewed capability-policy no-bump", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 31,
+      decisionGeneration: 32,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
@@ -510,7 +510,7 @@ describe("qualification era forgotten-declaration gate", () => {
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
       materialVersion: 1,
-      decisionGeneration: 11,
+      decisionGeneration: 12,
       decision: "no_bump",
     });
   });

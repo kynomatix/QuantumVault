@@ -387,9 +387,12 @@ describe("provider response-body cancellation lifetime", () => {
     const terminals = okxDiagnostics.filter((record) => record.kind === "okx_request_terminal");
     expect(terminals).toHaveLength(3);
     expect(terminals).toEqual([
-      expect.objectContaining({ attempt: 1, phase: "headers", settlement: "transport_error" }),
-      expect.objectContaining({ attempt: 2, phase: "headers", settlement: "transport_error" }),
-      expect.objectContaining({ attempt: 3, phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ attempt: 1, endpoint: "openapi", phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ attempt: 2, endpoint: "legacy", phase: "headers", settlement: "transport_error" }),
+      expect.objectContaining({ attempt: 3, endpoint: "openapi", phase: "headers", settlement: "transport_error" }),
+    ]);
+    expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual([
+      "openapi.okx.com", "www.okx.com", "openapi.okx.com",
     ]);
     const retained = JSON.stringify(okxDiagnostics);
     expect(retained).not.toContain("Authorization");
@@ -443,6 +446,82 @@ describe("provider response-body cancellation lifetime", () => {
         cooldownMs: 15 * 60_000,
       }),
     ]);
+
+    const networkCallsBeforeOpenCircuitRead = fetchSpy.mock.calls.length;
+    await expect(fetchOHLCV(
+      "FOUR/USDT", "15m", now - TF_MS, now, undefined,
+      {
+        basisPolicy: MONEY_CANDLE_POLICY,
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+        skipSpotFallback: true,
+        deadlineMs: 3_000,
+        callerClass: "scanner",
+      },
+    )).rejects.toMatchObject({
+      name: "CandleSourceUnavailableError",
+      reason: "provider_circuit_open",
+      source: "okx",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(networkCallsBeforeOpenCircuitRead);
+  });
+
+  it("does not turn a transport outage into a per-instrument negative cache", async () => {
+    fetchSpy.mockRejectedValue(new Error("network unavailable"));
+    const now = Date.now();
+
+    for (let invocation = 0; invocation < 2; invocation++) {
+      const pending = fetchOHLCV(
+        "RETRYABLE/USDT", "15m", now - TF_MS, now, undefined,
+        {
+          basisPolicy: MONEY_CANDLE_POLICY,
+          bypassCache: true,
+          cacheWritePolicy: "skip",
+          skipSpotFallback: true,
+          deadlineMs: 3_000,
+          callerClass: "scanner",
+        },
+      );
+      pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(4_000);
+      await expect(pending).rejects.toMatchObject({
+        name: "CandleSourceUnavailableError",
+        reason: "transport_unavailable",
+        source: "okx",
+      });
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(6);
+    expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual([
+      "openapi.okx.com", "www.okx.com", "openapi.okx.com",
+      "openapi.okx.com", "www.okx.com", "openapi.okx.com",
+    ]);
+  });
+
+  it("retains authoritative 51001 instrument negative caching without retrying", async () => {
+    fetchSpy.mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({ code: "51001", msg: "Instrument ID doesn't exist", data: [] }),
+      text: async () => "",
+    });
+    const now = Date.now();
+    const options = {
+      basisPolicy: MONEY_CANDLE_POLICY,
+      bypassCache: true,
+      cacheWritePolicy: "skip" as const,
+      skipSpotFallback: true,
+      deadlineMs: 3_000,
+      callerClass: "scanner" as const,
+    };
+
+    await expect(fetchOHLCV(
+      "MISSING/USDT", "15m", now - TF_MS, now, undefined, options,
+    )).rejects.toMatchObject({ name: "CandleBasisUnavailableError" });
+    await expect(fetchOHLCV(
+      "MISSING/USDT", "15m", now - TF_MS, now, undefined, options,
+    )).rejects.toMatchObject({ name: "CandleBasisUnavailableError" });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("records successful OKX body timing once and lets a throwing observer fail open", async () => {

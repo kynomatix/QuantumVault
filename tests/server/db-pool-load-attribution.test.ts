@@ -6,7 +6,7 @@ class FakePool {
   totalCount = 0;
   idleCount = 0;
   waitingCount = 0;
-  queryMock = vi.fn();
+  queryMock = vi.fn(async () => ({ rows: [] }));
   endMock = vi.fn(async () => {});
 
   constructor(readonly options: Record<string, unknown> = {}) {
@@ -69,7 +69,7 @@ afterEach(() => {
 });
 
 describe("database keep-warm pool-load attribution", () => {
-  it("keeps only an existing idle scanner connection warm without queuing or overlap", async () => {
+  it("eagerly establishes and persistently re-establishes the bounded scanner lane without queuing or overlap", async () => {
     const dbModule = await import("../../server/db");
     const { formatPoolLoadTags } = await import("../../server/pool-load");
     const [web, scanner] = poolInstances;
@@ -77,9 +77,19 @@ describe("database keep-warm pool-load attribution", () => {
     expect(web.options).toMatchObject({ max: 8 });
     expect(scanner.options).toMatchObject({
       max: 1,
+      connectionTimeoutMillis: 5_000,
+      idleTimeoutMillis: 0,
       application_name: "qv-scanner-candle",
     });
     expect(dbModule.scannerCandlePool).not.toBe(dbModule.pool);
+
+    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
+    expect(scanner.queryMock).toHaveBeenLastCalledWith({
+      text: "SELECT 1",
+      query_timeout: 5_000,
+    });
+    await flushPromiseChain();
+    scanner.queryMock.mockClear();
 
     const scannerFirst = deferred<unknown>();
     web.queryMock.mockResolvedValue({ rows: [{ "?column?": 1 }] });
@@ -88,35 +98,37 @@ describe("database keep-warm pool-load attribution", () => {
     expect(formatPoolLoadTags()).toBe("");
     expect(vi.getTimerCount()).toBe(4);
 
+    // The lane is empty again: the next heartbeat must actively re-establish
+    // it instead of waiting for a real scanner batch.
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(web.queryMock).toHaveBeenCalledTimes(1);
-    expect(web.queryMock).toHaveBeenLastCalledWith("SELECT 1");
-    expect(scanner.queryMock).not.toHaveBeenCalled();
-    expect(formatPoolLoadTags()).toBe("");
-
-    scanner.totalCount = 1;
-    scanner.idleCount = 0;
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(web.queryMock).toHaveBeenCalledTimes(2);
-    expect(scanner.queryMock).not.toHaveBeenCalled();
-    expect(formatPoolLoadTags()).toBe("");
-
-    scanner.idleCount = 1;
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(web.queryMock).toHaveBeenCalledTimes(3);
     expect(scanner.queryMock).toHaveBeenCalledTimes(1);
-    expect(scanner.queryMock).toHaveBeenLastCalledWith("SELECT 1");
+    expect(scanner.queryMock).toHaveBeenLastCalledWith({
+      text: "SELECT 1",
+      query_timeout: 5_000,
+    });
     expect(formatPoolLoadTags()).toBe(" db_maintenance=hb0/shb1");
 
+    // A still-pending heartbeat never overlaps itself.
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(web.queryMock).toHaveBeenCalledTimes(4);
     expect(scanner.queryMock).toHaveBeenCalledTimes(1);
     expect(formatPoolLoadTags()).toBe(" db_maintenance=hb0/shb1");
-    expect(vi.getTimerCount()).toBe(4);
 
     scannerFirst.resolve({ rows: [{ "?column?": 1 }] });
     await flushPromiseChain();
     expect(formatPoolLoadTags()).toBe("");
+
+    // An active max-one lane is never queued behind.
+    scanner.totalCount = 1;
+    scanner.idleCount = 0;
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
+
+    // Once idle, the same bounded heartbeat retains it.
+    scanner.idleCount = 1;
+    scanner.queryMock.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(scanner.queryMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(4);
 
     await dbModule.closePool();
     expect(web.endMock).toHaveBeenCalledOnce();
