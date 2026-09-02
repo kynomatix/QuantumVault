@@ -107,7 +107,7 @@ export type CandleSourceUnavailableReason =
 export class CandleSourceUnavailableError extends Error {
   constructor(
     public readonly reason: CandleSourceUnavailableReason,
-    public readonly source: "okx",
+    public readonly source: "okx" | "direct_perp",
     public readonly symbol: string,
     public readonly timeframe: string,
   ) {
@@ -122,6 +122,7 @@ export function isCandleSourceUnavailableError(err: unknown): err is CandleSourc
 
 const OKX_BATCH_SIZE = 300;
 const GATE_BATCH_SIZE = 900;
+const GATE_FUTURES_BATCH_SIZE = 2_000;
 const PYTH_BATCH_SIZE = 5000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 1000;
@@ -130,6 +131,13 @@ const OKX_ENDPOINTS: readonly Readonly<{ id: OkxEndpoint; origin: string }>[] = 
   { id: "openapi", origin: "https://openapi.okx.com" },
   { id: "legacy", origin: "https://www.okx.com" },
 ];
+type GateFuturesEndpoint = "api" | "fx";
+const GATE_FUTURES_ENDPOINTS: readonly Readonly<{ id: GateFuturesEndpoint; origin: string }>[] = [
+  { id: "api", origin: "https://api.gateio.ws" },
+  { id: "fx", origin: "https://fx-api.gateio.ws" },
+];
+type DirectPerpProvider = "okx" | "gate";
+type DirectPerpEndpoint = OkxEndpoint | GateFuturesEndpoint;
 
 const NEGATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
 
@@ -138,6 +146,7 @@ let pythBenchmarksAuthWarned = false;
 
 const okxFailedInstruments = new Map<string, number>();
 const gateFailedPairs = new Map<string, number>();
+const gateFuturesFailedContracts = new Map<string, number>();
 const pythFailedSymbols = new Map<string, number>();
 
 export type OkxRequestTerminalPhase = "headers" | "body" | "released_unread";
@@ -150,8 +159,8 @@ export type OkxRequestSettlementMechanism =
   | "hard_terminal";
 
 type OkxRequestDiagnosticContext = Readonly<{
-  provider: "okx";
-  endpoint: OkxEndpoint;
+  provider: DirectPerpProvider;
+  endpoint: DirectPerpEndpoint;
   callerClass: CandleReadCallerClass;
   instrument: string;
   timeframe: string;
@@ -172,7 +181,7 @@ export type OkxRequestTerminalDiagnostic = OkxRequestDiagnosticContext & Readonl
 }>;
 
 export type OkxSourceBreakerDiagnostic = OkxRequestDiagnosticContext & Readonly<{
-  kind: "okx_source_breaker_increment";
+  kind: "okx_source_breaker_increment" | "gate_futures_source_breaker_increment";
   priorConsecutiveFailures: number;
   resultingConsecutiveFailures: number;
   opened: boolean;
@@ -194,7 +203,8 @@ function emitOkxDatafeedDiagnostic(record: OkxDatafeedDiagnostic): void {
   // The record is scrubbed by construction: closed vocabularies, safe market
   // identity, and elapsed numbers only. Never add URLs, headers, bodies, or
   // arbitrary error prose to this payload.
-  appendTelemetry(`[OKXDiagnostic] ${JSON.stringify(record)}`);
+  const prefix = record.provider === "okx" ? "OKXDiagnostic" : "GateFuturesDiagnostic";
+  appendTelemetry(`[${prefix}] ${JSON.stringify(record)}`);
   try {
     okxDatafeedDiagnosticReporter?.(record);
   } catch {
@@ -233,9 +243,13 @@ function negCache(cache: Map<string, number>, key: string): void {
 // ---------------------------------------------------------------------------
 const OKX_SOURCE_BREAKER_THRESHOLD = 3;
 const OKX_SOURCE_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
+const GATE_FUTURES_SOURCE_BREAKER_THRESHOLD = 3;
+const GATE_FUTURES_SOURCE_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
 
 let okxSourceConsecutiveFailures = 0;
 let okxSourceDownUntil = 0;
+let gateFuturesSourceConsecutiveFailures = 0;
+let gateFuturesSourceDownUntil = 0;
 
 function isOkxSourceDown(): boolean {
   return Date.now() < okxSourceDownUntil;
@@ -273,17 +287,60 @@ function recordOkxSourceFailure(context: OkxRequestDiagnosticContext): void {
   }));
 }
 
+function isGateFuturesSourceDown(): boolean {
+  return Date.now() < gateFuturesSourceDownUntil;
+}
+
+function recordGateFuturesSourceSuccess(): void {
+  gateFuturesSourceConsecutiveFailures = 0;
+}
+
+function recordGateFuturesSourceFailure(context: OkxRequestDiagnosticContext): void {
+  const priorConsecutiveFailures = gateFuturesSourceConsecutiveFailures;
+  gateFuturesSourceConsecutiveFailures++;
+  let opened = false;
+  if (gateFuturesSourceConsecutiveFailures >= GATE_FUTURES_SOURCE_BREAKER_THRESHOLD) {
+    opened = true;
+    gateFuturesSourceDownUntil = Date.now() + GATE_FUTURES_SOURCE_BREAKER_COOLDOWN_MS;
+    gateFuturesSourceConsecutiveFailures = GATE_FUTURES_SOURCE_BREAKER_THRESHOLD - 1;
+    const msg =
+      `[Gate Futures] SOURCE DOWN: ${GATE_FUTURES_SOURCE_BREAKER_THRESHOLD} consecutive network failures ` +
+      `(last: ${context.instrument}) - skipping Gate futures for ALL symbols for ` +
+      `${Math.round(GATE_FUTURES_SOURCE_BREAKER_COOLDOWN_MS / 60000)} min`;
+    console.log(msg);
+    appendTelemetry(msg);
+  }
+  emitOkxDatafeedDiagnostic(Object.freeze({
+    kind: "gate_futures_source_breaker_increment",
+    ...context,
+    priorConsecutiveFailures,
+    resultingConsecutiveFailures: gateFuturesSourceConsecutiveFailures,
+    opened,
+    cooldownMs: GATE_FUTURES_SOURCE_BREAKER_COOLDOWN_MS,
+  }));
+}
+
 /** Test-only: reset the OKX source breaker between test cases. */
 export function __testResetOkxSourceBreaker(): void {
   okxSourceConsecutiveFailures = 0;
   okxSourceDownUntil = 0;
+  gateFuturesSourceConsecutiveFailures = 0;
+  gateFuturesSourceDownUntil = 0;
   okxFailedInstruments.clear();
+  gateFuturesFailedContracts.clear();
 }
 
 class GatePairNotFoundError extends Error {
   constructor(pair: string, detail: string) {
     super(`Gate.io pair not found: ${pair} — ${detail}`);
     this.name = "GatePairNotFoundError";
+  }
+}
+
+class GateFuturesContractNotFoundError extends Error {
+  constructor(contract: string) {
+    super(`Gate.io futures contract not found: ${contract}`);
+    this.name = "GateFuturesContractNotFoundError";
   }
 }
 
@@ -653,6 +710,7 @@ async function fetchWithHardTimeout(
   externalSignal?: AbortSignal,
   transport: 'default' | 'hermes' = 'default',
   diagnosticContext?: OkxRequestDiagnosticContext,
+  hardTerminalGraceMs = 5_000,
 ): Promise<BoundedFetchResponse> {
   throwIfAborted(externalSignal);
   // `performance.now()` is monotonic within the process, unlike wall-clock
@@ -722,9 +780,9 @@ async function fetchWithHardTimeout(
     // independent rejection is queued before aborting the transport so it is
     // authoritative even when the body reader reacts synchronously to abort.
     hardTerminalAt ??= nowMonotonic();
-    rejectTerminal(new Error(`fetch hard-timeout after ${ms + 5000}ms (abort never fired)`));
+    rejectTerminal(new Error(`fetch hard-timeout after ${ms + hardTerminalGraceMs}ms (abort never fired)`));
     controller.abort();
-  }, ms + 5_000);
+  }, ms + hardTerminalGraceMs);
   // External cancellation is forwarded via a MANUAL listener with strong refs
   // — deliberately NOT AbortSignal.any(), which belongs to the same weak-ref
   // GC class that let AbortSignal.timeout silently never fire (incident above).
@@ -1309,6 +1367,380 @@ async function fetchOkxCandles(
   return [];
 }
 
+type DirectPerpFetchResult = Readonly<{
+  candles: ProvenancedOHLCV[];
+  sawMalformedProvenance: boolean;
+  unavailableReason: CandleSourceUnavailableReason | null;
+  trace: readonly string[];
+}>;
+
+function symbolToGateFuturesContract(symbol: string): string {
+  // Deliberately preserve multiplier prefixes. A requested 1KPEPE contract
+  // must never be replaced with PEPE and represented as the requested market.
+  return `${symbol.split("/")[0].toUpperCase()}_USDT`;
+}
+
+function directPerpRequestBudget(
+  deadlineAt: number,
+  opportunitiesRemaining: number,
+): Readonly<{ timeoutMs: number; hardTerminalGraceMs: number }> | null {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 200) return null;
+  const fairShareMs = Math.floor(remainingMs / Math.max(1, opportunitiesRemaining));
+  const hardTerminalGraceMs = Math.min(1_000, Math.max(100, Math.floor(fairShareMs / 5)));
+  return {
+    timeoutMs: Math.max(100, Math.min(10_000, fairShareMs - hardTerminalGraceMs)),
+    hardTerminalGraceMs,
+  };
+}
+
+async function fetchOkxCandlesFromEndpoint(
+  endpoint: Readonly<{ id: OkxEndpoint; origin: string }>,
+  instId: string,
+  bar: string,
+  afterMs: number,
+  timeoutMs: number,
+  hardTerminalGraceMs: number,
+  signal: AbortSignal | undefined,
+  diagnosticBase: Omit<OkxRequestDiagnosticContext, "attempt" | "endpoint" | "provider">,
+): Promise<any[]> {
+  const params = new URLSearchParams({
+    instId,
+    bar,
+    limit: String(OKX_BATCH_SIZE),
+    after: String(afterMs),
+  });
+  const bounded = await fetchWithHardTimeout(
+    `${endpoint.origin}/api/v5/market/history-candles?${params}`,
+    timeoutMs,
+    undefined,
+    signal,
+    "default",
+    { ...diagnosticBase, provider: "okx", endpoint: endpoint.id, attempt: 1 },
+    hardTerminalGraceMs,
+  );
+  try {
+    if (bounded.response.status === 429) {
+      bounded.release();
+      throw new Error("OKX rate limited");
+    }
+    if (!bounded.response.ok) {
+      const text = await bounded.text();
+      throw new Error(`OKX HTTP ${bounded.response.status}: ${text}`);
+    }
+    const json = await bounded.json<any>();
+    if (json?.code !== "0") {
+      if (json?.code === "51001" || (typeof json?.msg === "string" && json.msg.includes("doesn't exist"))) {
+        throw new OkxInstrumentNotFoundError(instId, json?.msg || json?.code);
+      }
+      throw new Error(`OKX response rejected`);
+    }
+    if (!Array.isArray(json.data)) throw new Error("OKX response malformed");
+    return json.data;
+  } finally {
+    bounded.release();
+  }
+}
+
+async function fetchGateFuturesCandlesFromEndpoint(
+  endpoint: Readonly<{ id: GateFuturesEndpoint; origin: string }>,
+  contract: string,
+  interval: string,
+  fromSec: number,
+  toSec: number,
+  timeoutMs: number,
+  hardTerminalGraceMs: number,
+  signal: AbortSignal | undefined,
+  diagnosticBase: Omit<OkxRequestDiagnosticContext, "attempt" | "endpoint" | "provider">,
+): Promise<unknown[]> {
+  const params = new URLSearchParams({
+    contract,
+    interval,
+    from: String(fromSec),
+    to: String(toSec),
+  });
+  const bounded = await fetchWithHardTimeout(
+    `${endpoint.origin}/api/v4/futures/usdt/candlesticks?${params}`,
+    timeoutMs,
+    undefined,
+    signal,
+    "default",
+    { ...diagnosticBase, provider: "gate", endpoint: endpoint.id, attempt: 1 },
+    hardTerminalGraceMs,
+  );
+  try {
+    if (bounded.response.status === 429) {
+      bounded.release();
+      throw new Error("Gate futures rate limited");
+    }
+    if (!bounded.response.ok) {
+      const text = await bounded.text();
+      let label = "";
+      try {
+        const parsed = JSON.parse(text);
+        if (typeof parsed?.label === "string") label = parsed.label;
+      } catch {
+        // Error bodies are never retained; an unparseable body is transport/
+        // provider failure, not authoritative contract absence.
+      }
+      if (label === "CONTRACT_NOT_FOUND") {
+        throw new GateFuturesContractNotFoundError(contract);
+      }
+      throw new Error(`Gate futures HTTP ${bounded.response.status}`);
+    }
+    const json = await bounded.json<unknown>();
+    if (!Array.isArray(json)) throw new Error("Gate futures response malformed");
+    return json;
+  } finally {
+    bounded.release();
+  }
+}
+
+async function fetchDirectPerpCandles(
+  symbol: string,
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+  deadlineAt: number,
+  callerClass: CandleReadCallerClass,
+  signal?: AbortSignal,
+): Promise<DirectPerpFetchResult> {
+  const instId = symbolToOkxInstId(symbol);
+  const contract = symbolToGateFuturesContract(symbol);
+  const bar = mapTimeframeToOkx(timeframe);
+  const interval = mapTimeframeToGate(timeframe);
+  const timeframeMs = getTimeframeSeconds(timeframe) * 1000;
+  const finalityCutoffMs = Math.min(endMs, Date.now());
+  const endpoints: readonly Readonly<{
+    provider: DirectPerpProvider;
+    id: DirectPerpEndpoint;
+    origin: string;
+  }>[] = [
+    { provider: "okx", ...OKX_ENDPOINTS[0] },
+    { provider: "gate", ...GATE_FUTURES_ENDPOINTS[0] },
+    { provider: "okx", ...OKX_ENDPOINTS[1] },
+    { provider: "gate", ...GATE_FUTURES_ENDPOINTS[1] },
+  ];
+  const providerReachable = new Set<DirectPerpProvider>();
+  const providerTransportFailed = new Set<DirectPerpProvider>();
+  const providerLastFailure = new Map<DirectPerpProvider, OkxRequestDiagnosticContext>();
+  const trace: string[] = [];
+  let sawMalformedProvenance = false;
+  let lastPureProviderCandles: ProvenancedOHLCV[] = [];
+  let deadlineSkipped = false;
+
+  const finalizeProviderHealth = (): void => {
+    for (const provider of providerTransportFailed) {
+      if (providerReachable.has(provider)) continue;
+      const context = providerLastFailure.get(provider);
+      if (!context) continue;
+      if (provider === "okx") recordOkxSourceFailure(context);
+      else recordGateFuturesSourceFailure(context);
+    }
+  };
+
+  for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex++) {
+    throwIfAborted(signal);
+    const endpoint = endpoints[endpointIndex];
+    const providerDown = endpoint.provider === "okx"
+      ? isOkxSourceDown()
+      : isGateFuturesSourceDown();
+    const instrumentNegCached = endpoint.provider === "okx"
+      ? isNegCached(okxFailedInstruments, instId)
+      : isNegCached(gateFuturesFailedContracts, contract);
+    if (providerDown || instrumentNegCached) {
+      trace.push(`${endpoint.provider}:${endpoint.id}=${providerDown ? "circuit-skip" : "notfound-skip"}`);
+      continue;
+    }
+    const opportunitiesRemaining = endpoints.length - endpointIndex;
+    const requestBudget = directPerpRequestBudget(deadlineAt, opportunitiesRemaining);
+    if (requestBudget === null) {
+      deadlineSkipped = true;
+      trace.push(`${endpoint.provider}:${endpoint.id}=deadline-skip`);
+      continue;
+    }
+    const providerDeadlineAt = Math.min(
+      deadlineAt,
+      Date.now() + Math.max(200, Math.floor((deadlineAt - Date.now()) / opportunitiesRemaining)),
+    );
+    const diagnosticBase = {
+      callerClass,
+      instrument: endpoint.provider === "okx" ? instId : contract,
+      timeframe,
+    };
+    const startedAt = Date.now();
+    try {
+      const providerCandles: ProvenancedOHLCV[] = [];
+      if (endpoint.provider === "okx") {
+        let currentEndMs = endMs;
+        while (currentEndMs > startMs) {
+          const pageBudget = directPerpRequestBudget(providerDeadlineAt, 1);
+          if (pageBudget === null) throw new Error("direct provider deadline exhausted");
+          const raw = await fetchOkxCandlesFromEndpoint(
+            endpoint as Readonly<{ id: OkxEndpoint; origin: string }>,
+            instId,
+            bar,
+            currentEndMs,
+            pageBudget.timeoutMs,
+            pageBudget.hardTerminalGraceMs,
+            signal,
+            diagnosticBase,
+          );
+          providerReachable.add("okx");
+          recordOkxSourceSuccess();
+          if (raw.length === 0) break;
+          for (const candle of raw) {
+            if (!Array.isArray(candle) || candle.length < 9 || (candle[8] !== "0" && candle[8] !== "1")) {
+              sawMalformedProvenance = true;
+              continue;
+            }
+            const ts = Number(candle[0]);
+            const open = Number(candle[1]);
+            const high = Number(candle[2]);
+            const low = Number(candle[3]);
+            const close = Number(candle[4]);
+            if (!Number.isFinite(ts) || ts < startMs || ts > endMs
+                || !isValidNumber(open) || !isValidNumber(high)
+                || !isValidNumber(low) || !isValidNumber(close)) {
+              sawMalformedProvenance = true;
+              continue;
+            }
+            providerCandles.push({
+              time: ts,
+              open,
+              high,
+              low,
+              close,
+              volume: isValidNumber(candle[5]) ? Number(candle[5]) : 0,
+              provenance: {
+                source: "okx",
+                venue: "okx",
+                basis: "perp",
+                proxy: sourceProxy(symbol),
+                finality: candle[8] === "1" ? "finalized" : "forming",
+                timeSemantic: "open_time",
+              },
+            });
+          }
+          const oldestTs = Number(raw.at(-1)?.[0]);
+          if (!Number.isFinite(oldestTs) || oldestTs >= currentEndMs || oldestTs <= startMs) break;
+          currentEndMs = oldestTs;
+        }
+      } else {
+        const startSec = Math.floor(startMs / 1000);
+        const endSec = Math.floor(endMs / 1000);
+        // Gate documents a 2,000-point maximum. With inclusive range bounds,
+        // 1,999 intervals yield no more than 2,000 returned observations.
+        const windowSec = timeframeMs / 1000 * (GATE_FUTURES_BATCH_SIZE - 1);
+        for (let currentFrom = startSec; currentFrom < endSec;) {
+          const currentTo = Math.min(endSec, currentFrom + windowSec);
+          const pageBudget = directPerpRequestBudget(providerDeadlineAt, 1);
+          if (pageBudget === null) throw new Error("direct provider deadline exhausted");
+          const raw = await fetchGateFuturesCandlesFromEndpoint(
+            endpoint as Readonly<{ id: GateFuturesEndpoint; origin: string }>,
+            contract,
+            interval,
+            currentFrom,
+            currentTo,
+            pageBudget.timeoutMs,
+            pageBudget.hardTerminalGraceMs,
+            signal,
+            diagnosticBase,
+          );
+          providerReachable.add("gate");
+          recordGateFuturesSourceSuccess();
+          for (const row of raw) {
+            if (!row || typeof row !== "object" || Array.isArray(row)) {
+              sawMalformedProvenance = true;
+              continue;
+            }
+            const candle = row as Record<string, unknown>;
+            const ts = Number(candle.t) * 1000;
+            const open = Number(candle.o);
+            const high = Number(candle.h);
+            const low = Number(candle.l);
+            const close = Number(candle.c);
+            if (!Number.isFinite(ts) || ts < startMs || ts > endMs
+                || !isValidNumber(open) || !isValidNumber(high)
+                || !isValidNumber(low) || !isValidNumber(close)) {
+              sawMalformedProvenance = true;
+              continue;
+            }
+            providerCandles.push({
+              time: ts,
+              open,
+              high,
+              low,
+              close,
+              volume: isValidNumber(candle.v) ? Number(candle.v) : 0,
+              provenance: {
+                source: "gate",
+                venue: "gate",
+                basis: "perp",
+                proxy: sourceProxy(symbol),
+                finality: ts + timeframeMs <= finalityCutoffMs ? "finalized" : "forming",
+                timeSemantic: "open_time",
+              },
+            });
+          }
+          currentFrom = currentTo;
+        }
+      }
+
+      const eligible = providerCandles.filter((candle) =>
+        candle.provenance.finality === "finalized" && candle.provenance.proxy === "direct",
+      );
+      if (providerCandles.length > 0) lastPureProviderCandles = providerCandles;
+      trace.push(`${endpoint.provider}:${endpoint.id}=${eligible.length}c/${Date.now() - startedAt}ms`);
+      if (eligible.length > 0) {
+        finalizeProviderHealth();
+        return {
+          candles: eligible,
+          sawMalformedProvenance,
+          unavailableReason: null,
+          trace,
+        };
+      }
+    } catch (error) {
+      throwIfAborted(signal);
+      const context: OkxRequestDiagnosticContext = {
+        ...diagnosticBase,
+        provider: endpoint.provider,
+        endpoint: endpoint.id,
+        attempt: 1,
+      };
+      if (error instanceof OkxInstrumentNotFoundError) {
+        providerReachable.add("okx");
+        recordOkxSourceSuccess();
+        negCache(okxFailedInstruments, instId);
+        trace.push(`okx:${endpoint.id}=notfound`);
+        continue;
+      }
+      if (error instanceof GateFuturesContractNotFoundError) {
+        providerReachable.add("gate");
+        recordGateFuturesSourceSuccess();
+        negCache(gateFuturesFailedContracts, contract);
+        trace.push(`gate:${endpoint.id}=notfound`);
+        continue;
+      }
+      providerTransportFailed.add(endpoint.provider);
+      providerLastFailure.set(endpoint.provider, context);
+      trace.push(`${endpoint.provider}:${endpoint.id}=unavailable/${Date.now() - startedAt}ms`);
+    }
+  }
+
+  finalizeProviderHealth();
+  const bothCircuitsOpen = isOkxSourceDown() && isGateFuturesSourceDown();
+  const unavailableReason = providerReachable.size === 0
+    ? providerTransportFailed.size > 0 || deadlineSkipped
+      ? "transport_unavailable"
+      : bothCircuitsOpen
+        ? "provider_circuit_open"
+        : null
+    : null;
+  return { candles: lastPureProviderCandles, sawMalformedProvenance, unavailableReason, trace };
+}
+
 const TIMEFRAME_MS: Record<string, number> = {
   "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
   "45m": 2_700_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000,
@@ -1652,7 +2084,12 @@ export async function fetchOHLCV(
   const basisPolicy = options.basisPolicy;
   let sawMalformedProvenance = false;
   let okxSourceUnavailableReason: CandleSourceUnavailableReason | null = null;
+  let directPerpSourceUnavailableReason: CandleSourceUnavailableReason | null = null;
   const typedFailure = basisPolicy.consumer === "scanner" || basisPolicy.consumer === "ai_context";
+  const exactDirectPerpPolicy = basisPolicy.acceptedBasis.length === 1
+    && basisPolicy.acceptedBasis[0] === "perp"
+    && basisPolicy.acceptedProxy.length === 1
+    && basisPolicy.acceptedProxy[0] === "direct";
   const finishWithPolicy = (candles: ProvenancedOHLCV[]): ProvenancedOHLCV[] => {
     const admitted = candles.filter((c) => candleMatchesBasisPolicy(c, basisPolicy));
     if (basisPolicy.consumer === "lab") {
@@ -1662,15 +2099,11 @@ export async function fetchOHLCV(
       console.log(`[CandleProvenance] ${symbol} ${timeframe} ${identities || "unavailable"} bars=${admitted.length}`);
     }
     if (admitted.length > 0 || !typedFailure) return admitted;
-    const exactDirectPerpPolicy = basisPolicy.acceptedBasis.length === 1
-      && basisPolicy.acceptedBasis[0] === "perp"
-      && basisPolicy.acceptedProxy.length === 1
-      && basisPolicy.acceptedProxy[0] === "direct";
-    if (okxSourceUnavailableReason && exactDirectPerpPolicy
+    if ((directPerpSourceUnavailableReason || okxSourceUnavailableReason) && exactDirectPerpPolicy
         && basisPolicy.consumer === "scanner") {
       throw new CandleSourceUnavailableError(
-        okxSourceUnavailableReason,
-        "okx",
+        directPerpSourceUnavailableReason ?? okxSourceUnavailableReason!,
+        directPerpSourceUnavailableReason ? "direct_perp" : "okx",
         symbol,
         timeframe,
       );
@@ -1878,6 +2311,39 @@ export async function fetchOHLCV(
     console.log(line);
     appendTelemetry(line);
   };
+
+  const directPerpFailoverConsumer = exactDirectPerpPolicy
+    && (basisPolicy.consumer === "scanner" || basisPolicy.consumer === "ai_context")
+    && !nonCrypto;
+  if (directPerpFailoverConsumer) {
+    onProgress?.(`Fetching ${symbol} ${timeframe} from direct perpetual providers...`);
+    const result = await fetchDirectPerpCandles(
+      symbol,
+      timeframe,
+      startMs,
+      endMs,
+      deadlineAt,
+      options?.callerClass ?? (basisPolicy.consumer === "ai_context" ? "context" : "scanner"),
+      signal,
+    );
+    trace.push(...result.trace);
+    sawMalformedProvenance ||= result.sawMalformedProvenance;
+    directPerpSourceUnavailableReason = result.unavailableReason;
+    const deduped = deduplicateCandles(finishWithPolicy(result.candles));
+    emitTrace(deduped.length);
+    if (deduped.length > 0) {
+      onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);
+      throwIfAborted(signal);
+      if (options.cacheWritePolicy !== "skip") {
+        saveCandlesToDb(symbol, timeframe, deduped).catch((err) => {
+          const line = `[CandleCache] Background save error: ${err instanceof Error ? err.message : String(err)}`;
+          console.log(line);
+          appendTelemetry(line);
+        });
+      }
+    }
+    return deduped;
+  }
 
   if (nonCrypto) {
     if (!basisPolicy.acceptedBasis.includes("index")) {

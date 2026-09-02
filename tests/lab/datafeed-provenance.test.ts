@@ -162,13 +162,21 @@ describe("fetchOHLCV provenance admission", () => {
     expect((error as any).reason).toBe("malformed_provenance");
   });
 
-  it("never calls Gate or Pyth under the money policy", async () => {
+  it("permits only the closed direct-perpetual chain under the money policy", async () => {
     const spy = installOkxRows([]);
     await expect(fetchPolicy("DOGE/USDT:USDT")).rejects.toMatchObject({
       name: "CandleBasisUnavailableError",
       reason: "no_acceptable_source",
     });
-    expect(spy.mock.calls.every(([url]) => String(url).includes("okx.com"))).toBe(true);
+    const urls = spy.mock.calls.map(([url]) => String(url));
+    expect(urls.map((url) => new URL(url).hostname)).toEqual([
+      "openapi.okx.com",
+      "api.gateio.ws",
+      "www.okx.com",
+      "fx-api.gateio.ws",
+    ]);
+    expect(urls.every((url) => url.includes("/history-candles") || url.includes("/futures/usdt/candlesticks"))).toBe(true);
+    expect(urls.every((url) => !url.includes("/spot/") && !url.includes("benchmarks.pyth.network"))).toBe(true);
   });
 
   it("marks multiplier base transforms as proxy and rejects them under direct policy", async () => {
