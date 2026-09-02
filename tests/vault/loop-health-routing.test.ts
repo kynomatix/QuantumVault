@@ -148,7 +148,9 @@ function loopOnlyDeps(overrides: Partial<RowHealthDeps> = {}): RowHealthDeps {
     readLoopLivePositionHealth: async (vaultId, positionId) =>
       vaultId === 47 && positionId === 3 ? LOOP_LIVE : null,
     readLiveHealthForResolvedConfig: async (config, positionId) =>
-      config === LOOP_CFG && positionId === 3 ? LOOP_LIVE : null,
+      config === LOOP_CFG && positionId === 3
+        ? { ok: true, health: LOOP_LIVE }
+        : { ok: false, code: "position_absent" },
     ...overrides,
   };
 }
@@ -175,16 +177,19 @@ describe("computeRowHealth loop routing (money-safety)", () => {
     expect(h.debtUsd).toBeCloseTo(6.955, 6);
     expect(h.ltv).toBeCloseTo(0.5, 6);
     expect(h.healthFactor).toBeCloseTo(1.8, 6);
+    expect(h).not.toHaveProperty("reasonCode");
   });
 
   it("a loop row WITHOUT a venueVaultId fails closed to unavailable (never a mint fallback)", async () => {
     const h = await computeRowHealth({ ...LOOP_ROW, venueVaultId: null }, loopOnlyDeps());
     expect(h.band).toBe("unavailable");
+    expect(h.reasonCode).toBe("vault_identity_invalid");
   });
 
   it("a loop row with a non-numeric venueVaultId fails closed to unavailable", async () => {
     const h = await computeRowHealth({ ...LOOP_ROW, venueVaultId: "abc" }, loopOnlyDeps());
     expect(h.band).toBe("unavailable");
+    expect(h.reasonCode).toBe("vault_identity_invalid");
   });
 
   it("an unreadable loop vault config fails closed to unavailable", async () => {
@@ -193,6 +198,43 @@ describe("computeRowHealth loop routing (money-safety)", () => {
       loopOnlyDeps({ getLoopVaultConfig: async () => null }),
     );
     expect(h.band).toBe("unavailable");
+    expect(h.reasonCode).toBe("vault_config_unavailable");
+  });
+
+  it("propagates a bounded resolved-read failure without exposing provider detail", async () => {
+    const h = await computeRowHealth(
+      LOOP_ROW,
+      loopOnlyDeps({
+        readLiveHealthForResolvedConfig: async () => ({
+          ok: false,
+          code: "exchange_price_unavailable",
+        }),
+      }),
+    );
+    expect(h.band).toBe("unavailable");
+    expect(h.reasonCode).toBe("exchange_price_unavailable");
+    expect(h.reason).toBe("Live on-chain position is unreadable.");
+  });
+
+  it.each([
+    "position_read_failed",
+    "position_absent",
+    "position_amounts_absent",
+    "exchange_price_unavailable",
+    "invalid_position_amounts",
+    "unexpected_live_read_failure",
+  ] as const)("maps resolved-read code %s to unavailable", async (code) => {
+    const h = await computeRowHealth(
+      LOOP_ROW,
+      loopOnlyDeps({
+        readLiveHealthForResolvedConfig: async () => ({ ok: false, code }),
+      }),
+    );
+    expect(h.status).toBe("unavailable");
+    expect(h.band).toBe("unavailable");
+    expect(h.reasonCode).toBe(code);
+    expect(h.liveCollateralRaw).toBeNull();
+    expect(h.liveDebtRaw).toBeNull();
   });
 
   it("caches the loop config under 'loop:<vaultId>' — no collision with mint keys", async () => {
@@ -220,7 +262,10 @@ describe("computeRowHealth loop routing (money-safety)", () => {
       readLoopLivePositionHealth: async () => {
         throw new Error("loop dep called for a borrow row");
       },
-      readLiveHealthForResolvedConfig: async () => null,
+      readLiveHealthForResolvedConfig: async () => ({
+        ok: false,
+        code: "position_read_failed",
+      }),
     };
     const h = await computeRowHealth(
       { id: "row-b", venuePositionId: 1, collateralMint: "InfMint", collateralAssetKey: "inf" },
@@ -247,7 +292,7 @@ describe("computeRowHealth loop routing (money-safety)", () => {
           resolvedReads++;
           expect(config).toBe(LOOP_CFG);
           expect(positionId).toBe(3);
-          return LOOP_LIVE;
+          return { ok: true, health: LOOP_LIVE };
         },
       }),
       new Map(),
@@ -276,7 +321,7 @@ describe("computeRowHealth loop routing (money-safety)", () => {
         resolvedReads++;
         expect(config).toBe(classicConfig);
         expect(positionId).toBe(185);
-        return classicLive;
+        return { ok: true, health: classicLive };
       },
     };
     const h = await computeRowHealth(

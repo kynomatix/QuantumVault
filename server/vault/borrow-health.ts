@@ -28,6 +28,8 @@ import {
 import {
   JupiterLendBorrowRoute,
   type BorrowVaultConfig,
+  type LiveHealthReadFailureCode,
+  type LiveHealthReadResult,
   type LivePositionHealth,
 } from "./jupiter-lend-borrow-route";
 import { storage } from "../storage";
@@ -39,6 +41,19 @@ export type BorrowHealthBand =
   | "urgent"
   | "nudge"
   | "healthy";
+
+/** Bounded, privacy-safe reason codes for an unavailable health observation. */
+export type BorrowHealthUnavailableReasonCode =
+  | LiveHealthReadFailureCode
+  | "vault_config_unavailable"
+  | "vault_identity_invalid"
+  | "position_identity_invalid"
+  | "collateral_identity_missing"
+  | "vault_decimals_invalid"
+  | "live_position_amounts_unparseable"
+  | "debt_value_invalid"
+  | "collateral_value_unavailable"
+  | "health_factor_unavailable";
 
 /** Worst-first severity ranking for picking the headline (higher = worse). */
 export const BAND_SEVERITY: Record<BorrowHealthBand, number> = {
@@ -74,6 +89,8 @@ export interface PerBotPositionHealth {
   liveDebtRaw: string | null;
   /** Present only when status === "unavailable". */
   reason?: string;
+  /** Bounded diagnostic; never includes provider or position identity. */
+  reasonCode?: BorrowHealthUnavailableReasonCode;
 }
 
 export interface BotBorrowHealthSummary {
@@ -129,6 +146,7 @@ export function computePerBotPositionHealth(input: {
   collateralMint: string | null;
   live: LivePositionHealth | null;
   vault: BorrowVaultConfig | null;
+  unavailableReasonCode?: BorrowHealthUnavailableReasonCode;
 }): PerBotPositionHealth {
   const base = {
     borrowPositionId: input.borrowPositionId,
@@ -136,7 +154,10 @@ export function computePerBotPositionHealth(input: {
     collateralAssetKey: input.collateralAssetKey,
     collateralMint: input.collateralMint,
   };
-  const unavailable = (reason: string): PerBotPositionHealth => ({
+  const unavailable = (
+    reason: string,
+    reasonCode: BorrowHealthUnavailableReasonCode,
+  ): PerBotPositionHealth => ({
     ...base,
     status: "unavailable",
     collateralValueUsd: null,
@@ -148,15 +169,26 @@ export function computePerBotPositionHealth(input: {
     liveCollateralRaw: null,
     liveDebtRaw: null,
     reason,
+    reasonCode,
   });
 
-  if (!input.vault) return unavailable("Vault config is unreadable.");
-  if (!input.live) return unavailable("Live on-chain position is unreadable.");
+  if (!input.vault) {
+    return unavailable(
+      "Vault config is unreadable.",
+      input.unavailableReasonCode ?? "vault_config_unavailable",
+    );
+  }
+  if (!input.live) {
+    return unavailable(
+      "Live on-chain position is unreadable.",
+      input.unavailableReasonCode ?? "unexpected_live_read_failure",
+    );
+  }
 
   const vault = input.vault;
   const live = input.live;
   if (!isDecimals(vault.collateralDecimals) || !isDecimals(vault.debtDecimals)) {
-    return unavailable("Vault decimals are invalid.");
+    return unavailable("Vault decimals are invalid.", "vault_decimals_invalid");
   }
 
   let collateralRaw: bigint;
@@ -165,12 +197,15 @@ export function computePerBotPositionHealth(input: {
     collateralRaw = BigInt(live.collateralRaw);
     debtRaw = BigInt(live.debtRaw);
   } catch {
-    return unavailable("Live position amounts are unparseable.");
+    return unavailable(
+      "Live position amounts are unparseable.",
+      "live_position_amounts_unparseable",
+    );
   }
 
   const debtUsd = Number(debtRaw) / 10 ** vault.debtDecimals;
   if (!isFiniteNum(debtUsd) || debtUsd < 0) {
-    return unavailable("Debt is unreadable.");
+    return unavailable("Debt is unreadable.", "debt_value_invalid");
   }
   const hasDebt = debtUsd > 0;
 
@@ -200,7 +235,10 @@ export function computePerBotPositionHealth(input: {
 
   // Debt present: an unreadable collateral value or liq threshold ⇒ fail closed.
   if (collateralValueUsd === null || !inUnitRange(vault.liquidationThreshold)) {
-    return unavailable("Collateral USD value is unreadable; cannot size health.");
+    return unavailable(
+      "Collateral USD value is unreadable; cannot size health.",
+      "collateral_value_unavailable",
+    );
   }
 
   const ltv =
@@ -208,7 +246,7 @@ export function computePerBotPositionHealth(input: {
   const healthFactor =
     (collateralValueUsd * vault.liquidationThreshold) / debtUsd;
   if (!isFiniteNum(healthFactor)) {
-    return unavailable("Health factor could not be computed.");
+    return unavailable("Health factor could not be computed.", "health_factor_unavailable");
   }
 
   // The protocol's OWN liquidatable flag is on-chain truth and DOMINATES our
@@ -309,7 +347,7 @@ export interface BotBorrowHealthDeps {
   readLiveHealthForResolvedConfig(
     config: BorrowVaultConfig,
     positionId: number,
-  ): Promise<LivePositionHealth | null>;
+  ): Promise<LiveHealthReadResult>;
 }
 
 function defaultDeps(): BotBorrowHealthDeps {
@@ -346,7 +384,7 @@ export interface RowHealthDeps {
   readLiveHealthForResolvedConfig(
     config: BorrowVaultConfig,
     positionId: number,
-  ): Promise<LivePositionHealth | null>;
+  ): Promise<LiveHealthReadResult>;
 }
 
 export function defaultRowHealthDeps(): RowHealthDeps {
@@ -397,6 +435,7 @@ export async function computeRowHealth(
   const venueId = row.venuePositionId != null ? Number(row.venuePositionId) : NaN;
   let vault: BorrowVaultConfig | null = null;
   let live: LivePositionHealth | null = null;
+  let unavailableReasonCode: BorrowHealthUnavailableReasonCode | undefined;
 
   if ((row.kind ?? "borrow") === "loop") {
     const vaultId = row.venueVaultId != null ? Number(row.venueVaultId) : NaN;
@@ -420,11 +459,19 @@ export async function computeRowHealth(
       }
       if (vault && Number.isInteger(venueId) && venueId > 0) {
         try {
-          live = await deps.readLiveHealthForResolvedConfig(vault, venueId);
+          const result = await deps.readLiveHealthForResolvedConfig(vault, venueId);
+          if (result.ok) live = result.health;
+          else unavailableReasonCode = result.code;
         } catch {
-          live = null;
+          unavailableReasonCode = "unexpected_live_read_failure";
         }
+      } else if (vault) {
+        unavailableReasonCode = "position_identity_invalid";
+      } else {
+        unavailableReasonCode = "vault_config_unavailable";
       }
+    } else {
+      unavailableReasonCode = "vault_identity_invalid";
     }
     // else: no vault id ⇒ vault stays null ⇒ unavailable (fail closed).
   } else if (mint) {
@@ -446,11 +493,19 @@ export async function computeRowHealth(
     }
     if (vault && Number.isInteger(venueId) && venueId > 0) {
       try {
-        live = await deps.readLiveHealthForResolvedConfig(vault, venueId);
+        const result = await deps.readLiveHealthForResolvedConfig(vault, venueId);
+        if (result.ok) live = result.health;
+        else unavailableReasonCode = result.code;
       } catch {
-        live = null;
+        unavailableReasonCode = "unexpected_live_read_failure";
       }
+    } else if (vault) {
+      unavailableReasonCode = "position_identity_invalid";
+    } else {
+      unavailableReasonCode = "vault_config_unavailable";
     }
+  } else {
+    unavailableReasonCode = "collateral_identity_missing";
   }
 
   return computePerBotPositionHealth({
@@ -460,6 +515,7 @@ export async function computeRowHealth(
     collateralMint: mint,
     live,
     vault,
+    unavailableReasonCode,
   });
 }
 

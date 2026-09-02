@@ -9,6 +9,7 @@ import {
 } from "../../server/vault/borrow-health-monitor";
 import type {
   BorrowHealthBand,
+  BorrowHealthUnavailableReasonCode,
   PerBotPositionHealth,
 } from "../../server/vault/borrow-health";
 import type { BorrowPosition } from "@shared/schema";
@@ -271,6 +272,9 @@ function health(
     band,
     liveCollateralRaw: band === "unavailable" ? null : "1000000000",
     liveDebtRaw: band === "unavailable" ? null : "64000000",
+    ...(band === "unavailable"
+      ? { reasonCode: "position_read_failed" as const }
+      : {}),
   };
 }
 
@@ -280,11 +284,19 @@ function statefulDeps(opts: {
   rows: BorrowPosition[];
   healthByRowId: Record<string, PerBotPositionHealth | "throw">;
   notify?: (n: BorrowHealthNotification) => NotifyResult;
+  recordUnavailableOccurrence?: (input: {
+    positionFamily: "borrow" | "managed_loop";
+    reasonCode: BorrowHealthUnavailableReasonCode;
+  }) => void;
   now?: Date;
 }): {
   deps: Partial<BorrowHealthScanDeps>;
   persisted: Array<{ id: string; band: BorrowHealthBand | null }>;
   notifications: Array<{ wallet: string; band: BorrowHealthBand; scope: string }>;
+  diagnosticOccurrences: Array<{
+    positionFamily: "borrow" | "managed_loop";
+    reasonCode: BorrowHealthUnavailableReasonCode;
+  }>;
   rowsById: Map<string, BorrowPosition>;
 } {
   const persisted: Array<{ id: string; band: BorrowHealthBand | null }> = [];
@@ -294,6 +306,10 @@ function statefulDeps(opts: {
     scope: string;
   }> = [];
   const rowsById = new Map(opts.rows.map((r) => [r.id, r]));
+  const diagnosticOccurrences: Array<{
+    positionFamily: "borrow" | "managed_loop";
+    reasonCode: BorrowHealthUnavailableReasonCode;
+  }> = [];
   const deps: Partial<BorrowHealthScanDeps> = {
     getActiveBorrowPositions: async () => opts.rows,
     computeRowHealth: async (r) => {
@@ -320,9 +336,13 @@ function statefulDeps(opts: {
       }
       return res;
     },
+    recordUnavailableOccurrence: (input) => {
+      diagnosticOccurrences.push(input);
+      opts.recordUnavailableOccurrence?.(input);
+    },
     now: () => opts.now ?? T0,
   };
-  return { deps, persisted, notifications, rowsById };
+  return { deps, persisted, notifications, diagnosticOccurrences, rowsById };
 }
 
 describe("runBorrowHealthScan (orchestrator)", () => {
@@ -468,6 +488,9 @@ describe("runBorrowHealthScan (orchestrator)", () => {
     expect(second.loopObservations).toHaveLength(1);
     expect(attempts).toBe(1);
     expect(contexts).toEqual(["managed_loop"]);
+    expect(made.diagnosticOccurrences).toEqual([
+      { positionFamily: "managed_loop", reasonCode: "position_read_failed" },
+    ]);
     expect(made.rowsById.get("loop-unavailable")!.lastHealthAlertBand).toBe("unavailable");
   });
 
@@ -493,6 +516,7 @@ describe("runBorrowHealthScan (orchestrator)", () => {
     expect(second.alerted).toBe(1);
     expect(second.loopObservations).toHaveLength(1);
     expect(attempts).toBe(2);
+    expect(made.diagnosticOccurrences).toHaveLength(1);
     expect(made.rowsById.get("loop-retry")!.lastHealthAlertBand).toBe("unavailable");
   });
 
@@ -579,7 +603,31 @@ describe("runBorrowHealthScan (orchestrator)", () => {
     expect(failedRead.alerted).toBe(1);
     expect(failedRead.loopObservations).toHaveLength(1);
     expect(attempts).toBe(1);
+    expect(made.diagnosticOccurrences).toEqual([
+      { positionFamily: "managed_loop", reasonCode: "position_read_failed" },
+    ]);
     expect(made.rowsById.get("loop-recovered")!.lastHealthAlertBand).toBe("unavailable");
+  });
+
+  it("keeps scanning, notifying, and persisting when diagnostic recording throws", async () => {
+    const classic = row({ id: "classic-unavailable", kind: "borrow" } as Partial<BorrowPosition>);
+    let notificationReason: BorrowHealthNotification["reasonCode"];
+    const made = statefulDeps({
+      rows: [classic],
+      healthByRowId: { "classic-unavailable": health("unavailable", null) },
+      notify: (notification) => {
+        notificationReason = notification.reasonCode;
+        return "sent";
+      },
+      recordUnavailableOccurrence: () => {
+        throw new Error("diagnostic sink unavailable");
+      },
+    });
+
+    const result = await runBorrowHealthScan(made.deps);
+    expect(result).toEqual({ scanned: 1, alerted: 1, failed: 0, loopObservations: [] });
+    expect(notificationReason).toBe("position_read_failed");
+    expect(made.persisted).toEqual([{ id: "classic-unavailable", band: "unavailable" }]);
   });
 
   it("keeps the generic unavailable safety net for a pending loop row", async () => {

@@ -193,6 +193,24 @@ export interface LivePositionHealth {
   oraclePriceUsd: number | null;
 }
 
+/** Bounded scan diagnostics; raw provider errors never cross this seam. */
+export type LiveHealthReadFailureCode =
+  | "position_read_failed"
+  | "position_absent"
+  | "position_amounts_absent"
+  | "exchange_price_unavailable"
+  | "invalid_position_amounts"
+  | "unexpected_live_read_failure";
+
+export type LiveHealthReadResult =
+  | {
+      ok: true;
+      health: LivePositionHealth;
+      /** Non-fatal: reconstructed health remains readable without this value. */
+      diagnosticCode?: "oracle_price_unavailable";
+    }
+  | { ok: false; code: LiveHealthReadFailureCode };
+
 /**
  * Builds a decoded BorrowVaultConfig from a raw REST vault object. Pure (no
  * network), so it is the single, testable decode path shared by every read.
@@ -726,8 +744,8 @@ export class JupiterLendBorrowRoute {
   async readLiveHealthForResolvedConfig(
     config: BorrowVaultConfig,
     positionId: number,
-  ): Promise<LivePositionHealth | null> {
-    return this.readLiveHealthForConfig(config, positionId);
+  ): Promise<LiveHealthReadResult> {
+    return this.readLiveHealthResultForConfig(config, positionId);
   }
 
   /** Shared live-position read for an ALREADY-RESOLVED vault config. */
@@ -735,20 +753,39 @@ export class JupiterLendBorrowRoute {
     config: BorrowVaultConfig,
     positionId: number,
   ): Promise<LivePositionHealth | null> {
+    const result = await this.readLiveHealthResultForConfig(config, positionId);
+    return result.ok ? result.health : null;
+  }
+
+  /** Diagnostic scan seam; executor/recovery callers retain nullable reads. */
+  private async readLiveHealthResultForConfig(
+    config: BorrowVaultConfig,
+    positionId: number,
+  ): Promise<LiveHealthReadResult> {
+    let pos: Awaited<
+      ReturnType<(typeof import("@jup-ag/lend/borrow"))["getCurrentPosition"]>
+    >;
     try {
       const borrow = await import("@jup-ag/lend/borrow");
       const connection = getServerConnection();
 
-      const pos = await borrow.getCurrentPosition({
+      pos = await borrow.getCurrentPosition({
         vaultId: config.vaultId,
         positionId,
         connection,
       });
-      if (!pos) return null;
+    } catch {
+      return { ok: false, code: "position_read_failed" };
+    }
+
+    if (!pos) return { ok: false, code: "position_absent" };
+    try {
       // Money GATE: an unreadable amount is NOT zero. A `?? "0"` fallback would
       // under-report the liability (and falsely pass the repay / empty-reuse
       // gates downstream), so fail CLOSED on a missing colRaw/debtRaw.
-      if (pos.colRaw == null || pos.debtRaw == null) return null;
+      if (pos.colRaw == null || pos.debtRaw == null) {
+        return { ok: false, code: "position_amounts_absent" };
+      }
 
       // The SDK returns RAW LEDGER units (not amounts!) normalized to
       // max(decimals, 9) dp. True owed = raw × vaultBorrowExchangePrice; true
@@ -759,47 +796,63 @@ export class JupiterLendBorrowRoute {
       // health, repay cap, verify, storage) speaks true native amounts:
       // collateral FLOORED (asset), debt CEIL'd (liability).
       const exPrices = await this.getVaultExchangePrices(config);
-      if (!exPrices) return null; // unreadable accrual index ⇒ amounts unknowable ⇒ fail closed
-      const colPositionRaw = BigInt(pos.colRaw.toString());
-      const debtPositionRaw = BigInt(pos.debtRaw.toString());
-      const collateralRaw = positionRawToNativeRaw(
-        scaleByExchangePrice(colPositionRaw, exPrices.vaultSupplyExchangePrice, "floor"),
-        config.collateralDecimals,
-        "floor",
-      );
-      const debtRaw = positionRawToNativeRaw(
-        scaleByExchangePrice(debtPositionRaw, exPrices.vaultBorrowExchangePrice, "ceil"),
-        config.debtDecimals,
-        "ceil",
-      );
+      if (!exPrices) {
+        return { ok: false, code: "exchange_price_unavailable" };
+      }
+      let colPositionRaw: bigint;
+      let debtPositionRaw: bigint;
+      let collateralRaw: bigint;
+      let debtRaw: bigint;
+      let maxRepayNativeRaw: bigint;
+      try {
+        colPositionRaw = BigInt(pos.colRaw.toString());
+        debtPositionRaw = BigInt(pos.debtRaw.toString());
+        collateralRaw = positionRawToNativeRaw(
+          scaleByExchangePrice(colPositionRaw, exPrices.vaultSupplyExchangePrice, "floor"),
+          config.collateralDecimals,
+          "floor",
+        );
+        debtRaw = positionRawToNativeRaw(
+          scaleByExchangePrice(debtPositionRaw, exPrices.vaultBorrowExchangePrice, "ceil"),
+          config.debtDecimals,
+          "ceil",
+        );
+        maxRepayNativeRaw = positionRawToNativeRaw(
+          scaleByExchangePrice(
+            debtPositionRaw > 0n ? debtPositionRaw - 1n : 0n,
+            exPrices.vaultBorrowExchangePrice,
+            "floor",
+          ),
+          config.debtDecimals,
+          "floor",
+        );
+      } catch {
+        return { ok: false, code: "invalid_position_amounts" };
+      }
       // Repay CAP: scale (ledger − 1 unit) and FLOOR. Repaying amount X burns
       // ~X/E_exec + 1 ledger units; E_exec ≥ E_read (E is monotone
       // non-decreasing, and the 30s cache only makes E_read smaller/safer), so
       // the burn ≤ (ledger − 1) + 1 = ledger — an exact cap-sized repay can
       // never trip VaultUserDebtTooLow.
-      const maxRepayNativeRaw = positionRawToNativeRaw(
-        scaleByExchangePrice(
-          debtPositionRaw > 0n ? debtPositionRaw - 1n : 0n,
-          exPrices.vaultBorrowExchangePrice,
-          "floor",
-        ),
-        config.debtDecimals,
-        "floor",
-      );
-
       const oraclePriceUsd = await this.readOraclePriceForConfig(config);
       return {
-        vaultId: config.vaultId,
-        positionId,
-        collateralRaw: collateralRaw.toString(),
-        debtRaw: debtRaw.toString(),
-        maxRepayNativeRaw: maxRepayNativeRaw.toString(),
-        liquidatable: Boolean(pos.userLiquidationStatus),
-        tick: Number(pos.tick),
-        oraclePriceUsd,
+        ok: true,
+        health: {
+          vaultId: config.vaultId,
+          positionId,
+          collateralRaw: collateralRaw.toString(),
+          debtRaw: debtRaw.toString(),
+          maxRepayNativeRaw: maxRepayNativeRaw.toString(),
+          liquidatable: Boolean(pos.userLiquidationStatus),
+          tick: Number(pos.tick),
+          oraclePriceUsd,
+        },
+        ...(oraclePriceUsd === null
+          ? { diagnosticCode: "oracle_price_unavailable" as const }
+          : {}),
       };
     } catch {
-      return null;
+      return { ok: false, code: "unexpected_live_read_failure" };
     }
   }
 

@@ -29,6 +29,7 @@ import {
   computeRowHealth,
   defaultRowHealthDeps,
   type BorrowHealthBand,
+  type BorrowHealthUnavailableReasonCode,
   type PerBotPositionHealth,
 } from "./borrow-health";
 import type { BorrowVaultConfig } from "./jupiter-lend-borrow-route";
@@ -40,6 +41,7 @@ import {
 } from "../notification-service";
 import type { BorrowPosition } from "@shared/schema";
 import type { LoopHealthObservation } from "./loop/loop-safety-tick";
+import { recordCriticalError } from "../error-log";
 
 /**
  * Anti-flap: only LOWER the alert baseline (so a re-worsening can re-alert) once
@@ -208,6 +210,10 @@ export interface BorrowHealthScanDeps {
     walletAddress: string,
     n: BorrowHealthNotification,
   ): Promise<BorrowHealthNotifyResult>;
+  recordUnavailableOccurrence(input: {
+    positionFamily: "borrow" | "managed_loop";
+    reasonCode: BorrowHealthUnavailableReasonCode;
+  }): void;
   now(): Date;
 }
 
@@ -278,6 +284,16 @@ function defaultDeps(): BorrowHealthScanDeps {
       }
     },
     notify: (walletAddress, n) => sendBorrowHealthNotification(walletAddress, n),
+    recordUnavailableOccurrence: ({ positionFamily, reasonCode }) => {
+      recordCriticalError({
+        category: "fund_safety",
+        severity: "error",
+        source: "borrow-health-monitor",
+        message: "Borrow health observation was unreadable",
+        context: { positionFamily, reasonCode },
+        fingerprint: `borrow-health-unavailable|${positionFamily}|${reasonCode}`,
+      });
+    },
     now: () => new Date(),
   };
 }
@@ -324,6 +340,22 @@ export async function runBorrowHealthScan(
       };
 
       const decision = decideHealthAlertTransition(prev, health.band, now);
+      const positionFamily =
+        (row.kind ?? "borrow") === "loop" ? "managed_loop" : "borrow";
+      const isNewUnavailableEpisode =
+        health.band === "unavailable" &&
+        prev.lastObservedHealthBand !== "unavailable" &&
+        decision.shouldAlert;
+      if (isNewUnavailableEpisode && health.reasonCode) {
+        try {
+          deps.recordUnavailableOccurrence({
+            positionFamily,
+            reasonCode: health.reasonCode,
+          });
+        } catch {
+          // Diagnostics are best-effort and must never block the safety scan.
+        }
+      }
 
       // FAIL CLOSED on delivery: only ADVANCE the alert baseline after the
       // notification is actually sent (or permanently skipped — no recipient).
@@ -361,6 +393,7 @@ export async function runBorrowHealthScan(
           band: health.band,
           healthFactor: health.healthFactor,
           ltv: health.ltv,
+          reasonCode: health.reasonCode,
         });
         if (outcome === "sent") {
           alerted++;

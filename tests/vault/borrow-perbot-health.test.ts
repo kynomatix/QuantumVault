@@ -116,21 +116,38 @@ describe("computePerBotPositionHealth (fail closed)", () => {
     expect(r.band).toBe("unavailable");
     expect(r.healthFactor).toBeNull();
     expect(r.reason).toMatch(/vault/i);
+    expect(r.reasonCode).toBe("vault_config_unavailable");
   });
   it("unreadable live position → unavailable", () => {
     const r = compute(null, vault());
     expect(r.status).toBe("unavailable");
     expect(r.band).toBe("unavailable");
+    expect(r.reasonCode).toBe("unexpected_live_read_failure");
+  });
+  it("retains a bounded read-stage reason supplied by the orchestrator", () => {
+    const r = computePerBotPositionHealth({
+      borrowPositionId: "p1",
+      venuePositionId: 7,
+      collateralAssetKey: "inf",
+      collateralMint: "InfMint",
+      live: null,
+      vault: vault(),
+      unavailableReasonCode: "position_read_failed",
+    });
+    expect(r.status).toBe("unavailable");
+    expect(r.reasonCode).toBe("position_read_failed");
   });
   it("debt present but unreadable collateral price → unavailable", () => {
     const r = compute(live(100, 40), vault({ oraclePriceLiquidateUsd: 0 }));
     expect(r.status).toBe("unavailable");
     expect(r.band).toBe("unavailable");
+    expect(r.reasonCode).toBe("collateral_value_unavailable");
   });
   it("zero debt is healthy even when the price is unreadable", () => {
     const r = compute(live(100, 0), vault({ oraclePriceLiquidateUsd: 0 }));
     expect(r.status).toBe("available");
     expect(r.band).toBe("healthy");
+    expect(r).not.toHaveProperty("reasonCode");
     expect(r.healthFactor).toBeNull();
     expect(r.ltv).toBeNull(); // value unreadable, but no liq risk
   });
@@ -159,6 +176,15 @@ describe("computePerBotPositionHealth (fail closed)", () => {
   it("invalid vault decimals → unavailable", () => {
     const r = compute(live(100, 40), vault({ debtDecimals: 99 }));
     expect(r.status).toBe("unavailable");
+    expect(r.reasonCode).toBe("vault_decimals_invalid");
+  });
+  it("unparseable live amounts carry a bounded pure-computation code", () => {
+    const r = compute(
+      { ...live(100, 40), collateralRaw: "not-an-amount" },
+      vault(),
+    );
+    expect(r.status).toBe("unavailable");
+    expect(r.reasonCode).toBe("live_position_amounts_unparseable");
   });
   it("protocol liquidatable flag DOMINATES a computed-healthy HF", () => {
     // HF computes to a healthy 2.0, but the protocol marks it liquidatable
