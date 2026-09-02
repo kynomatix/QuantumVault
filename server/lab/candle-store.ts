@@ -423,7 +423,7 @@ export async function getCachedCandles(
 
 /**
  * Read one timeframe/range for the scanner's deduplicated protocol-universe
- * union with one indexed SELECT. Every symbol is still admitted by the exact
+ * union with serial indexed SELECT chunks. Every symbol is still admitted by the exact
  * per-symbol row processor; a missing or inadmissible group is returned as a
  * miss so the unchanged per-market path remains authoritative for fallback.
  */

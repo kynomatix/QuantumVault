@@ -490,7 +490,7 @@ describe("qualification era forgotten-declaration gate", () => {
   it("declares scanner boundary-lane scheduling as a reviewed no-bump", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 34,
+      decisionGeneration: 35,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
