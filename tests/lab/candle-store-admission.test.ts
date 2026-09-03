@@ -56,6 +56,7 @@ import {
   CACHE_BUDGET_ABORT_REASON,
   SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS,
   SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+  SCANNER_BATCH_SYMBOL_CHUNK_SIZE,
   type CandleReadPhases,
   type CandleBatchReadPhases,
 } from "../../server/lab/candle-store";
@@ -615,6 +616,57 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       ["perp"], ["finalized", "forming"], ["direct"],
     ]);
     expect(release).toHaveBeenCalledWith();
+  });
+
+  it("bounds each wire result to ten symbols, yields between chunks, and aggregates under one batch", async () => {
+    const symbols = Array.from({ length: 21 }, (_, index) => `M${index}-PERP`);
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string; values?: unknown[] }) => {
+      if (!config.text.includes("FROM lab_candle_cache_v2")) return { rows: [] };
+      const chunk = config.values?.[0] as string[];
+      return { rows: chunk.map((symbol, index) => row(symbol, "finalized", index + 1)) };
+    });
+    const immediateSpy = vi.spyOn(globalThis, "setImmediate");
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+
+    const result = await getCachedCandlesBatch(
+      symbols, "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    );
+
+    const dataStatements = query.mock.calls.filter(([value]) => value.text.includes("FROM lab_candle_cache_v2"));
+    expect(SCANNER_BATCH_SYMBOL_CHUNK_SIZE).toBe(10);
+    expect(dataStatements.map(([value]) => (value.values?.[0] as string[]).length)).toEqual([10, 10, 1]);
+    expect(immediateSpy).toHaveBeenCalledTimes(2);
+    expect(result.size).toBe(21);
+    expect(phases).toMatchObject({ requestedSymbols: 21, chunks: 3, hits: 21, misses: 0, termination: "success" });
+    expect(release).toHaveBeenCalledWith();
+    immediateSpy.mockRestore();
+  });
+
+  it("shares one absolute deadline across chunks and destroys the client before starting an expired chunk", async () => {
+    const symbols = Array.from({ length: 11 }, (_, index) => `M${index}-PERP`);
+    const release = vi.fn();
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("FROM lab_candle_cache_v2")) now += 5_001;
+      return { rows: [] };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+
+    await expect(getCachedCandlesBatch(
+      symbols, "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    )).rejects.toBeInstanceOf(CandleBatchReadError);
+
+    const dataStatements = query.mock.calls.filter(([value]) => value.text.includes("FROM lab_candle_cache_v2"));
+    expect(dataStatements).toHaveLength(1);
+    expect(release).toHaveBeenCalledWith(expect.objectContaining({ message: "Query read timeout" }));
+    expect(phases).toMatchObject({ requestedSymbols: 11, chunks: 1, termination: "client_query_timeout" });
+    nowSpy.mockRestore();
   });
 
   it("preserves per-symbol strongest-finality semantics", async () => {

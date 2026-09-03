@@ -132,6 +132,10 @@ export const CACHE_BUDGET_ABORT_REASON = "candle-cache-budget-exceeded";
 // not turn event-loop starvation into a false database timeout.
 export const SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS = 2_000;
 export const SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS = 10_000;
+// Production telemetry showed that one 78-symbol result can synchronously
+// materialize about 31,000 rows in node-postgres and starve the web event loop.
+// Bound each wire response, while retaining one fail-closed batch deadline.
+export const SCANNER_BATCH_SYMBOL_CHUNK_SIZE = 10;
 
 function makeAbortError(reason?: unknown): Error {
   const err = new Error(
@@ -224,6 +228,7 @@ export type CandleBatchReadPhases = {
   termination: CandleBatchReadTermination;
   sqlstate: string | null;
   requestedSymbols: number;
+  chunks: number;
   hits: number;
   misses: number;
   semaphoreWaitMs: number;
@@ -418,7 +423,7 @@ export async function getCachedCandles(
 
 /**
  * Read one timeframe/range for the scanner's deduplicated protocol-universe
- * union with one indexed SELECT. Every symbol is still admitted by the exact
+ * union with serial indexed SELECT chunks. Every symbol is still admitted by the exact
  * per-symbol row processor; a missing or inadmissible group is returned as a
  * miss so the unchanged per-market path remains authoritative for fallback.
  */
@@ -449,6 +454,7 @@ export async function getCachedCandlesBatch(
     termination: "success",
     sqlstate: null,
     requestedSymbols: uniqueSymbols.length,
+    chunks: 0,
     hits: 0,
     misses: uniqueSymbols.length,
     semaphoreWaitMs: 0,
@@ -470,7 +476,7 @@ export async function getCachedCandlesBatch(
     }
     const line =
       `[CandleBatchRead] ${phases.callerClass} ${timeframe} lane=${phases.poolLane} outcome=${outcome} ` +
-      `requested=${phases.requestedSymbols} hits=${phases.hits} misses=${phases.misses} ` +
+      `requested=${phases.requestedSymbols} chunks=${phases.chunks} hits=${phases.hits} misses=${phases.misses} ` +
       `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
       `query=${phases.queryMs}ms process=${phases.resultProcessingMs}ms total=${phases.totalMs}ms ` +
       `termination=${phases.termination} sqlstate=${phases.sqlstate ?? "none"} ` +
@@ -517,50 +523,70 @@ export async function getCachedCandlesBatch(
       SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS,
     );
     const statementTimeoutMs = Math.max(1, Math.floor(opts.queryTimeoutMs!));
+    let batchDeadlineAt = 0;
     let selectStartedAt: number | null = null;
-    let selectCompleted = false;
-    let rows: CandleCacheBatchRow[];
+    let selectCompleted = true;
+    const rows: CandleCacheBatchRow[] = [];
     try {
       await client.query({
         text: "SELECT set_config('statement_timeout', $1, false)",
         values: [String(statementTimeoutMs)],
         query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
       } as any);
-      selectStartedAt = Date.now();
+      batchDeadlineAt = Date.now() + statementTimeoutMs;
       const singletonPolicy = policy.acceptedBasis.length === 1
         && policy.acceptedFinality.length === 1
         && policy.acceptedProxy.length === 1;
-      const result = await client.query({
-        text:
-          "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
-          "WHERE symbol = ANY($1::text[]) AND timeframe = $2 AND time >= $3 AND time <= $4 " +
-          (singletonPolicy
-            ? "AND basis = $5 AND finality = $6 AND proxy = $7 "
-            : "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) ") +
-          "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
-          "AND (NOT $8::boolean OR (source = 'okx' AND venue = 'okx' AND time_semantic = 'open_time')) " +
-          "ORDER BY symbol, time",
-        values: [
-          uniqueSymbols, timeframe, String(startMs), String(endMs),
-          ...(singletonPolicy
-            ? [policy.acceptedBasis[0], policy.acceptedFinality[0], policy.acceptedProxy[0]]
-            : [[...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy]]),
-          requireDirectOkxIdentity,
-        ],
-        query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
-      } as any);
-      phases.queryMs = Date.now() - selectStartedAt;
-      selectCompleted = true;
+      for (let offset = 0; offset < uniqueSymbols.length; offset += SCANNER_BATCH_SYMBOL_CHUNK_SIZE) {
+        if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+        const remainingMs = Math.floor(batchDeadlineAt - Date.now());
+        if (remainingMs <= 0) throw new Error("Query read timeout");
+        if (offset > 0) {
+          await client.query({
+            text: "SELECT set_config('statement_timeout', $1, false)",
+            values: [String(remainingMs)],
+            query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+          } as any);
+        }
+        const symbolChunk = uniqueSymbols.slice(offset, offset + SCANNER_BATCH_SYMBOL_CHUNK_SIZE);
+        selectStartedAt = Date.now();
+        selectCompleted = false;
+        const result = await client.query({
+          text:
+            "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
+            "WHERE symbol = ANY($1::text[]) AND timeframe = $2 AND time >= $3 AND time <= $4 " +
+            (singletonPolicy
+              ? "AND basis = $5 AND finality = $6 AND proxy = $7 "
+              : "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) ") +
+            "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
+            "AND (NOT $8::boolean OR (source = 'okx' AND venue = 'okx' AND time_semantic = 'open_time')) " +
+            "ORDER BY symbol, time",
+          values: [
+            symbolChunk, timeframe, String(startMs), String(endMs),
+            ...(singletonPolicy
+              ? [policy.acceptedBasis[0], policy.acceptedFinality[0], policy.acceptedProxy[0]]
+              : [[...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy]]),
+            requireDirectOkxIdentity,
+          ],
+          query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+        } as any);
+        phases.queryMs += Date.now() - selectStartedAt;
+        selectCompleted = true;
+        phases.chunks++;
+        rows.push(...result.rows as CandleCacheBatchRow[]);
+        if (offset + SCANNER_BATCH_SYMBOL_CHUNK_SIZE < uniqueSymbols.length) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
       await client.query({
         text: "SELECT set_config('statement_timeout', '30000', false)",
         query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
       } as any);
       phases.termination = "success";
       client.release();
-      rows = result.rows as CandleCacheBatchRow[];
     } catch (error) {
       if (selectStartedAt !== null && !selectCompleted) {
-        phases.queryMs = Date.now() - selectStartedAt;
+        phases.queryMs += Date.now() - selectStartedAt;
       }
       const classified = classifyBatchTermination(error);
       phases.termination = classified.termination;
