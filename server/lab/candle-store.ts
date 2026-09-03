@@ -219,6 +219,8 @@ export type CandleBatchReadOutcome = CandleReadOutcome;
 export type CandleBatchReadTermination =
   | "success"
   | "pool_acquire_timeout"
+  | "batch_deadline_exhausted"
+  | "session_restore_failed"
   | "server_statement_timeout"
   | "client_query_timeout"
   | "connection_error"
@@ -280,7 +282,7 @@ export function isCandleBatchPartialReadError(error: unknown): error is CandleBa
       && (error as { code?: unknown }).code === "candle_batch_partial_read"
       && (error as { completed?: unknown }).completed instanceof Map
       && (error as { unresolvedSymbols?: unknown }).unresolvedSymbols instanceof Set
-      && ["pool_acquire_timeout", "server_statement_timeout", "client_query_timeout", "connection_error", "query_error"]
+      && ["pool_acquire_timeout", "batch_deadline_exhausted", "server_statement_timeout", "client_query_timeout", "connection_error", "query_error"]
         .includes(String((error as { termination?: unknown }).termination)));
 }
 
@@ -293,6 +295,27 @@ class CandlePoolAcquireTimeoutError extends Error {
   }
 }
 
+class CandleBatchDeadlineExhaustedError extends Error {
+  readonly code = "candle_batch_deadline_exhausted";
+
+  constructor(options?: ErrorOptions) {
+    super("Candle batch aggregate deadline exhausted", options);
+    this.name = "CandleBatchDeadlineExhaustedError";
+  }
+}
+
+class CandleBatchSessionRestoreError extends Error {
+  readonly code = "candle_batch_session_restore_failed";
+  readonly sqlstate: string | null;
+
+  constructor(cause: unknown) {
+    super("Candle batch session timeout restore failed", { cause });
+    this.name = "CandleBatchSessionRestoreError";
+    const value = cause && typeof cause === "object" ? cause as Record<string, unknown> : {};
+    this.sqlstate = typeof value.code === "string" ? value.code : null;
+  }
+}
+
 function classifyBatchTermination(error: unknown): {
   termination: Exclude<CandleBatchReadTermination, "success" | "caller_cancelled">;
   sqlstate: string | null;
@@ -302,6 +325,15 @@ function classifyBatchTermination(error: unknown): {
   const message = error instanceof Error ? error.message : String(error ?? "");
   if (code === "candle_pool_acquire_timeout" || error instanceof CandlePoolAcquireTimeoutError) {
     return { termination: "pool_acquire_timeout", sqlstate: null };
+  }
+  if (code === "candle_batch_deadline_exhausted" || error instanceof CandleBatchDeadlineExhaustedError) {
+    return { termination: "batch_deadline_exhausted", sqlstate: null };
+  }
+  if (code === "candle_batch_session_restore_failed" || error instanceof CandleBatchSessionRestoreError) {
+    return {
+      termination: "session_restore_failed",
+      sqlstate: error instanceof CandleBatchSessionRestoreError ? error.sqlstate : null,
+    };
   }
   if (message === "timeout exceeded when trying to connect"
       || message === "Connection terminated due to connection timeout") {
@@ -600,7 +632,7 @@ export async function getCachedCandlesBatch(
       for (let offset = 0; offset < uniqueSymbols.length; offset += SCANNER_BATCH_SYMBOL_CHUNK_SIZE) {
         if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
         const remainingMs = Math.floor(batchDeadlineAt - Date.now());
-        if (remainingMs <= 0) throw new Error("Query read timeout");
+        if (remainingMs <= 0) throw new CandleBatchDeadlineExhaustedError();
         const chunkStatementTimeoutMs = Math.min(statementTimeoutMs, remainingMs);
         await client.query({
           text: "SELECT set_config('statement_timeout', $1, false)",
@@ -651,13 +683,39 @@ export async function getCachedCandlesBatch(
       const classified = classifyBatchTermination(error);
       phases.termination = classified.termination;
       phases.sqlstate = classified.sqlstate;
-      client.release(error instanceof Error ? error : new Error(String(error)));
+      let partialCause = error;
+      if (classified.termination === "batch_deadline_exhausted") {
+        // The local clock expired between chunks, not while PostgreSQL was
+        // executing. Restore the shared session default and keep the healthy
+        // max-one scanner-pool connection available to the next timeframe.
+        try {
+          await client.query({
+            text: "SELECT set_config('statement_timeout', '30000', false)",
+            query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+          } as any);
+          client.release();
+        } catch (restoreError) {
+          client.release(restoreError instanceof Error ? restoreError : new Error(String(restoreError)));
+          const sessionRestoreFailure = new CandleBatchSessionRestoreError(restoreError);
+          phases.termination = "session_restore_failed";
+          phases.sqlstate = sessionRestoreFailure.sqlstate;
+          // Session hygiene controls connection reuse, not the truth of SELECTs
+          // that already completed. Retain a strict prefix while preserving the
+          // restore failure in the typed deadline cause for diagnosis.
+          if (completedSymbols.size === 0 || completedSymbols.size === uniqueSymbols.length) {
+            throw sessionRestoreFailure;
+          }
+          partialCause = new CandleBatchDeadlineExhaustedError({ cause: sessionRestoreFailure });
+        }
+      } else {
+        client.release(error instanceof Error ? error : new Error(String(error)));
+      }
       // Preserve only a strict prefix. If no SELECT completed there are no
       // trustworthy bytes to retain; if every SELECT completed, the failure
       // belongs to session cleanup and retains the existing full-failure
       // semantics rather than masquerading as an unresolved-symbol suffix.
       if (completedSymbols.size === 0 || completedSymbols.size === uniqueSymbols.length) throw error;
-      partialFailure = { error, termination: classified.termination };
+      partialFailure = { error: partialCause, termination: classified.termination };
     }
     if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
 

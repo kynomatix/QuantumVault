@@ -23,7 +23,7 @@ vi.mock("../../server/lab/candle-store", () => ({
     && error?.code === "candle_batch_partial_read"
     && error?.completed instanceof Map
     && error?.unresolvedSymbols instanceof Set
-    && ["pool_acquire_timeout", "server_statement_timeout", "client_query_timeout", "connection_error", "query_error"]
+    && ["pool_acquire_timeout", "batch_deadline_exhausted", "server_statement_timeout", "client_query_timeout", "connection_error", "query_error"]
       .includes(String(error?.termination)),
   saveCandlesToDb: (...a: any[]) => mockSave(...a),
   CACHE_BUDGET_ABORT_REASON: "candle-cache-budget-exceeded",
@@ -1042,7 +1042,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
           ["MISS/USDT", null],
         ]),
         unresolvedSymbols: new Set(["BTC/USDT"]),
-        termination: "client_query_timeout",
+        termination: "batch_deadline_exhausted",
       },
     ));
 
@@ -1054,7 +1054,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect([...result.complete.keys()]).toEqual(["SOL/USDT"]);
     expect([...result.exactMisses]).toEqual(["MISS/USDT"]);
     expect([...result.unresolvedSymbols]).toEqual(["BTC/USDT"]);
-    expect(result.partialTermination).toBe("client_query_timeout");
+    expect(result.partialTermination).toBe("batch_deadline_exhausted");
   });
 
   it("partitions policy-ineligible groups as misses and a natural-boundary stale group as a reusable prefix", async () => {
