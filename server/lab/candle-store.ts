@@ -228,7 +228,9 @@ export type CandleBatchReadPhases = {
   termination: CandleBatchReadTermination;
   sqlstate: string | null;
   requestedSymbols: number;
+  plannedChunks: number;
   chunks: number;
+  batchBudgetMs: number;
   hits: number;
   misses: number;
   semaphoreWaitMs: number;
@@ -313,6 +315,13 @@ export type GetCachedCandlesBatchOpts = Omit<GetCachedCandlesOpts, "onPhases"> &
    * tail. The scanner must complete and revalidate it before decision use.
    */
   admission?: "complete" | "scanner_prefix";
+  /**
+   * Absolute caller deadline for the whole batch. The batch also applies its
+   * own finite ceiling of one queryTimeoutMs allowance per serial chunk; the
+   * earlier deadline wins. This is an absolute timestamp so event-loop delay
+   * cannot silently replenish the caller's sweep budget.
+   */
+  batchDeadlineAtMs?: number;
   onPhases?: (phases: CandleBatchReadPhases) => void;
 };
 
@@ -446,6 +455,7 @@ export async function getCachedCandlesBatch(
   await requireCandleCacheSchema();
   const startedAt = Date.now();
   const signal = opts.signal;
+  const plannedChunks = Math.ceil(uniqueSymbols.length / SCANNER_BATCH_SYMBOL_CHUNK_SIZE);
   const phases: CandleBatchReadPhases = {
     callerClass: opts.callerClass ?? "scanner",
     poolLane: "scanner-candle",
@@ -454,7 +464,9 @@ export async function getCachedCandlesBatch(
     termination: "success",
     sqlstate: null,
     requestedSymbols: uniqueSymbols.length,
+    plannedChunks,
     chunks: 0,
+    batchBudgetMs: 0,
     hits: 0,
     misses: uniqueSymbols.length,
     semaphoreWaitMs: 0,
@@ -476,7 +488,8 @@ export async function getCachedCandlesBatch(
     }
     const line =
       `[CandleBatchRead] ${phases.callerClass} ${timeframe} lane=${phases.poolLane} outcome=${outcome} ` +
-      `requested=${phases.requestedSymbols} chunks=${phases.chunks} hits=${phases.hits} misses=${phases.misses} ` +
+      `requested=${phases.requestedSymbols} planned_chunks=${phases.plannedChunks} completed_chunks=${phases.chunks} ` +
+      `batch_budget=${phases.batchBudgetMs}ms hits=${phases.hits} misses=${phases.misses} ` +
       `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
       `query=${phases.queryMs}ms process=${phases.resultProcessingMs}ms total=${phases.totalMs}ms ` +
       `termination=${phases.termination} sqlstate=${phases.sqlstate ?? "none"} ` +
@@ -523,17 +536,19 @@ export async function getCachedCandlesBatch(
       SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS,
     );
     const statementTimeoutMs = Math.max(1, Math.floor(opts.queryTimeoutMs!));
-    let batchDeadlineAt = 0;
+    // Count semaphore and pool acquisition against the aggregate batch clock.
+    // A contended lane must consume the batch allowance rather than silently
+    // minting a fresh per-chunk aggregate after checkout finally succeeds.
+    const internalBatchDeadlineAt = startedAt + statementTimeoutMs * plannedChunks;
+    const callerBatchDeadlineAt = Number.isFinite(opts.batchDeadlineAtMs)
+      ? Math.floor(opts.batchDeadlineAtMs!)
+      : Number.POSITIVE_INFINITY;
+    const batchDeadlineAt = Math.min(internalBatchDeadlineAt, callerBatchDeadlineAt);
+    phases.batchBudgetMs = Math.max(0, batchDeadlineAt - Date.now());
     let selectStartedAt: number | null = null;
     let selectCompleted = true;
     const rows: CandleCacheBatchRow[] = [];
     try {
-      await client.query({
-        text: "SELECT set_config('statement_timeout', $1, false)",
-        values: [String(statementTimeoutMs)],
-        query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
-      } as any);
-      batchDeadlineAt = Date.now() + statementTimeoutMs;
       const singletonPolicy = policy.acceptedBasis.length === 1
         && policy.acceptedFinality.length === 1
         && policy.acceptedProxy.length === 1;
@@ -541,13 +556,12 @@ export async function getCachedCandlesBatch(
         if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
         const remainingMs = Math.floor(batchDeadlineAt - Date.now());
         if (remainingMs <= 0) throw new Error("Query read timeout");
-        if (offset > 0) {
-          await client.query({
-            text: "SELECT set_config('statement_timeout', $1, false)",
-            values: [String(remainingMs)],
-            query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
-          } as any);
-        }
+        const chunkStatementTimeoutMs = Math.min(statementTimeoutMs, remainingMs);
+        await client.query({
+          text: "SELECT set_config('statement_timeout', $1, false)",
+          values: [String(chunkStatementTimeoutMs)],
+          query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+        } as any);
         const symbolChunk = uniqueSymbols.slice(offset, offset + SCANNER_BATCH_SYMBOL_CHUNK_SIZE);
         selectStartedAt = Date.now();
         selectCompleted = false;

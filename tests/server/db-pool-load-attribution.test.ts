@@ -7,6 +7,7 @@ class FakePool {
   idleCount = 0;
   waitingCount = 0;
   queryMock = vi.fn(async () => ({ rows: [] }));
+  connectMock = vi.fn(async () => ({ release: vi.fn() }));
   endMock = vi.fn(async () => {});
 
   constructor(readonly options: Record<string, unknown> = {}) {
@@ -15,6 +16,10 @@ class FakePool {
 
   query(...args: unknown[]) {
     return this.queryMock(...args);
+  }
+
+  connect(...args: unknown[]) {
+    return this.connectMock(...args);
   }
 
   end() {
@@ -69,7 +74,7 @@ afterEach(() => {
 });
 
 describe("database keep-warm pool-load attribution", () => {
-  it("eagerly establishes and persistently re-establishes the bounded scanner lane without queuing or overlap", async () => {
+  it("establishes only a missing scanner connection and never probes an idle max-one lane", async () => {
     const dbModule = await import("../../server/db");
     const { formatPoolLoadTags } = await import("../../server/pool-load");
     const [web, scanner] = poolInstances;
@@ -83,51 +88,63 @@ describe("database keep-warm pool-load attribution", () => {
     });
     expect(dbModule.scannerCandlePool).not.toBe(dbModule.pool);
 
-    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
-    expect(scanner.queryMock).toHaveBeenLastCalledWith({
-      text: "SELECT 1",
-      query_timeout: 5_000,
-    });
+    expect(scanner.connectMock).toHaveBeenCalledTimes(1);
+    expect(scanner.queryMock).not.toHaveBeenCalled();
     await flushPromiseChain();
-    scanner.queryMock.mockClear();
+    scanner.connectMock.mockClear();
 
-    const scannerFirst = deferred<unknown>();
+    const scannerFirst = deferred<{ release: () => void }>();
+    const firstRelease = vi.fn();
     web.queryMock.mockResolvedValue({ rows: [{ "?column?": 1 }] });
-    scanner.queryMock.mockReturnValueOnce(scannerFirst.promise);
+    scanner.connectMock.mockReturnValueOnce(scannerFirst.promise);
 
     expect(formatPoolLoadTags()).toBe("");
     expect(vi.getTimerCount()).toBe(4);
 
-    // The lane is empty again: the next heartbeat must actively re-establish
-    // it instead of waiting for a real scanner batch.
+    // The lane is physically empty: the next heartbeat establishes a client
+    // without issuing a maintenance query.
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
-    expect(scanner.queryMock).toHaveBeenLastCalledWith({
-      text: "SELECT 1",
-      query_timeout: 5_000,
-    });
+    expect(scanner.connectMock).toHaveBeenCalledTimes(1);
+    expect(scanner.queryMock).not.toHaveBeenCalled();
     expect(formatPoolLoadTags()).toBe(" db_maintenance=hb0/shb1");
 
     // A still-pending heartbeat never overlaps itself.
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
+    expect(scanner.connectMock).toHaveBeenCalledTimes(1);
     expect(formatPoolLoadTags()).toBe(" db_maintenance=hb0/shb1");
 
-    scannerFirst.resolve({ rows: [{ "?column?": 1 }] });
+    scannerFirst.resolve({ release: firstRelease });
     await flushPromiseChain();
+    expect(firstRelease).toHaveBeenCalledOnce();
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("warm_connect outcome=success elapsed=20000ms"),
+    );
     expect(formatPoolLoadTags()).toBe("");
 
     // An active max-one lane is never queued behind.
     scanner.totalCount = 1;
     scanner.idleCount = 0;
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(scanner.queryMock).toHaveBeenCalledTimes(1);
+    expect(scanner.connectMock).toHaveBeenCalledTimes(1);
 
-    // Once idle, the same bounded heartbeat retains it.
+    // idleTimeoutMillis=0 retains a healthy idle client without a maintenance
+    // checkout or query that could steal the sole lane from a boundary batch.
     scanner.idleCount = 1;
-    scanner.queryMock.mockResolvedValueOnce({ rows: [{ "?column?": 1 }] });
     await vi.advanceTimersByTimeAsync(20_000);
-    expect(scanner.queryMock).toHaveBeenCalledTimes(2);
+    expect(scanner.connectMock).toHaveBeenCalledTimes(1);
+    expect(scanner.queryMock).not.toHaveBeenCalled();
+
+    // If pg removes a dead idle client, the next cadence establishes a new
+    // physical connection and releases it immediately, still without SQL.
+    scanner.totalCount = 0;
+    scanner.idleCount = 0;
+    const replacementRelease = vi.fn();
+    scanner.connectMock.mockResolvedValueOnce({ release: replacementRelease });
+    await vi.advanceTimersByTimeAsync(20_000);
+    await flushPromiseChain();
+    expect(scanner.connectMock).toHaveBeenCalledTimes(2);
+    expect(replacementRelease).toHaveBeenCalledOnce();
+    expect(scanner.queryMock).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(4);
 
     await dbModule.closePool();

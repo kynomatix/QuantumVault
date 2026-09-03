@@ -1200,6 +1200,7 @@ async function runSweep(): Promise<void> {
             basisPolicy: MONEY_CANDLE_POLICY,
             signal: owner.controller.signal,
             callerClass: "scanner",
+            batchDeadlineAtMs: fetchDeadlineAt,
           },
         ));
         requireScannerSweepOwner(owner);
