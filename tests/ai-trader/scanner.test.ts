@@ -1942,6 +1942,69 @@ describe("scanner batch cache prefetch", () => {
     }
   });
 
+  it("uses completed batch groups and bypasses cache only for unresolved symbols", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
+      getFlashMarketSpecsMock.mockReturnValue([
+        { internalSymbol: "BTC-PERP" },
+        { internalSymbol: "SOL-PERP" },
+      ]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      const primary = textbookWBars(Date.now(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_symbols: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map([["BTC/USDT", primary]]),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+              unresolvedSymbols: new Set(["SOL/USDT"]),
+              partialTermination: "client_query_timeout",
+            }
+          : {
+              complete: new Map([
+                ["BTC/USDT", parent],
+                ["SOL/USDT", parent],
+              ]),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+              unresolvedSymbols: new Set(),
+              partialTermination: null,
+            },
+      );
+      fetchOHLCVMock.mockResolvedValue(primary);
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+      expect(fetchOHLCVMock.mock.calls[0][0]).toBe("SOL/USDT");
+      expect(fetchOHLCVMock.mock.calls[0][5]).toEqual(expect.objectContaining({
+        bypassCache: true,
+        cacheWritePolicy: "skip",
+      }));
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          protocol: "flash",
+          marketsAttempted: 2,
+          marketsScanned: 2,
+          errorCount: 0,
+          accountingValid: true,
+        }),
+      ]));
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps an earlier authoritative exact miss writable when a later timeframe becomes unavailable", async () => {
     vi.useFakeTimers();
     try {

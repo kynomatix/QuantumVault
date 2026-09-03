@@ -2,10 +2,12 @@ import type { OHLCV } from "./engine";
 import {
   getCachedCandles,
   getCachedCandlesBatch,
+  isCandleBatchPartialReadError,
   saveCandlesToDb,
   CACHE_BUDGET_ABORT_REASON,
   type CandleReadCallerClass,
   type CandleReadPhases,
+  type CandleBatchReadTermination,
 } from "./candle-store";
 import { getBenchmarksBase, hermesFetch } from '../pricing/hermes-config.js';
 import { appendTelemetry } from "../telemetry";
@@ -1847,6 +1849,8 @@ export interface PrefetchedOHLCV {
   complete: Map<string, ProvenancedOHLCV[]>;
   prefixes: Map<string, ProvenancedOHLCV[]>;
   exactMisses: Set<string>;
+  unresolvedSymbols: Set<string>;
+  partialTermination: CandleBatchReadTermination | null;
 }
 
 export class CandleTailCompletionError extends Error {
@@ -1923,23 +1927,33 @@ export async function prefetchCachedOHLCV(
   const endMs = new Date(endDate).getTime();
   throwIfAborted(options.signal);
 
-  const grouped = await getCachedCandlesBatch(
-    symbols,
-    normalizedTimeframe,
-    startMs,
-    endMs,
-    {
-      basisPolicy: options.basisPolicy,
-      queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
-      // Each chunk retains the five-second database statement ceiling. The
-      // absolute caller deadline caps their aggregate without a second timer,
-      // whose callback could itself arrive late under event-loop starvation.
-      batchDeadlineAtMs: options.batchDeadlineAtMs,
-      signal: options.signal,
-      callerClass: options.callerClass ?? "scanner",
-      admission: "scanner_prefix",
-    },
-  );
+  let grouped: Map<string, ProvenancedOHLCV[] | null>;
+  let unresolvedSymbols = new Set<string>();
+  let partialTermination: CandleBatchReadTermination | null = null;
+  try {
+    grouped = await getCachedCandlesBatch(
+      symbols,
+      normalizedTimeframe,
+      startMs,
+      endMs,
+      {
+        basisPolicy: options.basisPolicy,
+        queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+        // Each chunk retains the five-second database statement ceiling. The
+        // absolute caller deadline caps their aggregate without a second timer,
+        // whose callback could itself arrive late under event-loop starvation.
+        batchDeadlineAtMs: options.batchDeadlineAtMs,
+        signal: options.signal,
+        callerClass: options.callerClass ?? "scanner",
+        admission: "scanner_prefix",
+      },
+    );
+  } catch (error) {
+    if (!isCandleBatchPartialReadError(error)) throw error;
+    grouped = error.completed;
+    unresolvedSymbols = new Set(error.unresolvedSymbols);
+    partialTermination = error.termination;
+  }
   const complete = new Map<string, ProvenancedOHLCV[]>();
   const prefixes = new Map<string, ProvenancedOHLCV[]>();
   const exactMisses = new Set<string>();
@@ -1968,7 +1982,7 @@ export async function prefetchCachedOHLCV(
       prefixes.set(symbol, policyAdmitted);
     }
   }
-  return { complete, prefixes, exactMisses };
+  return { complete, prefixes, exactMisses, unresolvedSymbols, partialTermination };
 }
 
 /** Deterministic strongest-observation merge for a completed scanner tail. */

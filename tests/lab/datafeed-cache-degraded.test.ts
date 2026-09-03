@@ -19,6 +19,12 @@ const { mockGetCached, mockGetCachedBatch, mockSave } = vi.hoisted(() => ({
 vi.mock("../../server/lab/candle-store", () => ({
   getCachedCandles: (...a: any[]) => mockGetCached(...a),
   getCachedCandlesBatch: (...a: any[]) => mockGetCachedBatch(...a),
+  isCandleBatchPartialReadError: (error: any) => error?.name === "CandleBatchPartialReadError"
+    && error?.code === "candle_batch_partial_read"
+    && error?.completed instanceof Map
+    && error?.unresolvedSymbols instanceof Set
+    && ["pool_acquire_timeout", "server_statement_timeout", "client_query_timeout", "connection_error", "query_error"]
+      .includes(String(error?.termination)),
   saveCandlesToDb: (...a: any[]) => mockSave(...a),
   CACHE_BUDGET_ABORT_REASON: "candle-cache-budget-exceeded",
 }));
@@ -1010,6 +1016,8 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect([...result.complete.keys()]).toEqual(["SOL/USDT"]);
     expect([...result.prefixes.keys()]).toEqual([]);
     expect([...result.exactMisses]).toEqual(["MISS/USDT"]);
+    expect([...result.unresolvedSymbols]).toEqual([]);
+    expect(result.partialTermination).toBeNull();
     expect(mockGetCachedBatch).toHaveBeenCalledWith(
       ["SOL/USDT", "MISS/USDT"], "15m", now - 100 * TF_MS, now,
       expect.objectContaining({
@@ -1020,6 +1028,33 @@ describe("prefetchCachedOHLCV batch hits", () => {
     );
     expect(SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS).toBe(5_000);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("retains completed batch groups while keeping unresolved symbols distinct from exact misses", async () => {
+    const now = Date.now();
+    mockGetCachedBatch.mockRejectedValue(Object.assign(
+      new Error("partial batch"),
+      {
+        name: "CandleBatchPartialReadError",
+        code: "candle_batch_partial_read",
+        completed: new Map([
+          ["SOL/USDT", cachedBars(now)],
+          ["MISS/USDT", null],
+        ]),
+        unresolvedSymbols: new Set(["BTC/USDT"]),
+        termination: "client_query_timeout",
+      },
+    ));
+
+    const result = await prefetchCachedOHLCV(
+      ["SOL/USDT", "MISS/USDT", "BTC/USDT"], "15m", now - 100 * TF_MS, now,
+      { basisPolicy: MONEY_CANDLE_POLICY, callerClass: "scanner" },
+    );
+
+    expect([...result.complete.keys()]).toEqual(["SOL/USDT"]);
+    expect([...result.exactMisses]).toEqual(["MISS/USDT"]);
+    expect([...result.unresolvedSymbols]).toEqual(["BTC/USDT"]);
+    expect(result.partialTermination).toBe("client_query_timeout");
   });
 
   it("partitions policy-ineligible groups as misses and a natural-boundary stale group as a reusable prefix", async () => {
