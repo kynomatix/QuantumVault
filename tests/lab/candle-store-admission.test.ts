@@ -566,7 +566,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     });
     const queryConfig = query.mock.calls[1][0];
     expect(queryConfig.query_timeout).toBe(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS);
-    expect(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS).toBe(10_000);
+    expect(SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS).toBe(60_000);
     expect(queryConfig.text).toContain('time_semantic AS "timeSemantic"');
     expect(queryConfig.text).toContain("basis = $5 AND finality = $6 AND proxy = $7");
     expect(queryConfig.text).not.toContain("basis = ANY($5::text[])");

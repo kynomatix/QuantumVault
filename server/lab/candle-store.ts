@@ -127,11 +127,14 @@ function poolSnapshot(readPool: CandleReadPool = pool): { total: number; idle: n
 // cancellation ("cancelled", e.g. sweep teardown).
 export const CACHE_BUDGET_ABORT_REASON = "candle-cache-budget-exceeded";
 
-// The server-side statement budget remains the authoritative five-second
-// query deadline. This longer client guard only detects a dead socket; it must
-// not turn event-loop starvation into a false database timeout.
+// A cold or reconnecting lane must fail over promptly before it consumes the
+// scanner's provider window; the late checkout self-releases without querying.
 export const SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS = 2_000;
-export const SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS = 10_000;
+// PostgreSQL's five-second statement_timeout is the business deadline. This
+// longer pg client timer is only a dead-socket guard: it is implemented by a
+// JavaScript timer and therefore must not race a completed/backend-cancelled
+// query when the web-process event loop is temporarily stalled.
+export const SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS = 60_000;
 // Production telemetry showed that one 78-symbol result can synchronously
 // materialize about 31,000 rows in node-postgres and starve the web event loop.
 // Bound each wire response, while retaining one fail-closed batch deadline.
