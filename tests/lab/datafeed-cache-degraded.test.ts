@@ -996,6 +996,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
 
   it("passes the exact 5-second SELECT timeout and admits a fresh policy-equivalent hit", async () => {
     const now = Date.now();
+    const batchDeadlineAtMs = now + 42_000;
     mockGetCachedBatch.mockResolvedValue(new Map([
       ["SOL/USDT", cachedBars(now)],
       ["MISS/USDT", null],
@@ -1003,7 +1004,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
 
     const result = await prefetchCachedOHLCV(
       ["SOL/USDT", "MISS/USDT"], "15m", now - 100 * TF_MS, now,
-      { basisPolicy: MONEY_CANDLE_POLICY, callerClass: "scanner" },
+      { basisPolicy: MONEY_CANDLE_POLICY, callerClass: "scanner", batchDeadlineAtMs },
     );
 
     expect([...result.complete.keys()]).toEqual(["SOL/USDT"]);
@@ -1013,6 +1014,7 @@ describe("prefetchCachedOHLCV batch hits", () => {
       ["SOL/USDT", "MISS/USDT"], "15m", now - 100 * TF_MS, now,
       expect.objectContaining({
         queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
+        batchDeadlineAtMs,
         callerClass: "scanner",
       }),
     );

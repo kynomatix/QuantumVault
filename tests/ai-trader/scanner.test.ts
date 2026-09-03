@@ -1909,6 +1909,9 @@ describe("scanner batch cache prefetch", () => {
 
       expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(1);
       expect(prefetchCachedOHLCVMock.mock.calls[0][1]).toBe("15m");
+      expect(prefetchCachedOHLCVMock.mock.calls[0][4]).toEqual(expect.objectContaining({
+        batchDeadlineAtMs: new Date("2026-08-18T00:15:00Z").getTime() + 240_000,
+      }));
       expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
       expect(fetchOHLCVMock.mock.calls.map((call) => call[1])).toEqual(["15m", "1h"]);
       for (const call of fetchOHLCVMock.mock.calls as unknown[][]) {

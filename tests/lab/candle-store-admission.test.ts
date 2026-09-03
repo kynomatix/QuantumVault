@@ -640,12 +640,93 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(dataStatements.map(([value]) => (value.values?.[0] as string[]).length)).toEqual([10, 10, 1]);
     expect(immediateSpy).toHaveBeenCalledTimes(2);
     expect(result.size).toBe(21);
-    expect(phases).toMatchObject({ requestedSymbols: 21, chunks: 3, hits: 21, misses: 0, termination: "success" });
+    expect(phases).toMatchObject({
+      requestedSymbols: 21,
+      plannedChunks: 3,
+      chunks: 3,
+      batchBudgetMs: 15_000,
+      hits: 21,
+      misses: 0,
+      termination: "success",
+    });
     expect(release).toHaveBeenCalledWith();
     immediateSpy.mockRestore();
   });
 
-  it("shares one absolute deadline across chunks and destroys the client before starting an expired chunk", async () => {
+  it("gives each chunk at most five seconds while retaining one finite aggregate deadline", async () => {
+    const symbols = Array.from({ length: 11 }, (_, index) => `M${index}-PERP`);
+    const release = vi.fn();
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("FROM lab_candle_cache_v2")) now += 5_001;
+      return { rows: [] };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+
+    const result = await getCachedCandlesBatch(
+      symbols, "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    );
+
+    const dataStatements = query.mock.calls.filter(([value]) => value.text.includes("FROM lab_candle_cache_v2"));
+    const timeoutStatements = query.mock.calls.filter(([value]) =>
+      value.text.includes("set_config('statement_timeout', $1"),
+    );
+    expect(dataStatements).toHaveLength(2);
+    expect(timeoutStatements.map(([value]) => value.values)).toEqual([["5000"], ["4999"]]);
+    expect(result.size).toBe(11);
+    expect(release).toHaveBeenCalledWith();
+    expect(phases).toMatchObject({
+      requestedSymbols: 11,
+      plannedChunks: 2,
+      chunks: 2,
+      batchBudgetMs: 10_000,
+      termination: "success",
+    });
+    nowSpy.mockRestore();
+  });
+
+  it("counts pool acquisition against the aggregate batch clock", async () => {
+    const symbols = Array.from({ length: 11 }, (_, index) => `M${index}-PERP`);
+    const release = vi.fn();
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn(async () => ({ rows: [] }));
+    fakeScannerPool.connect.mockImplementationOnce(async () => {
+      now += 6_000;
+      return { release, query };
+    });
+    let phases: CandleBatchReadPhases | undefined;
+
+    const result = await getCachedCandlesBatch(
+      symbols, "1h", RANGE.start, RANGE.end,
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        callerClass: "scanner",
+        onPhases: (value) => (phases = value),
+      },
+    );
+
+    const timeoutStatements = query.mock.calls.filter(([value]) =>
+      value.text.includes("set_config('statement_timeout', $1"),
+    );
+    expect(timeoutStatements.map(([value]) => value.values)).toEqual([["4000"], ["4000"]]);
+    expect(result.size).toBe(11);
+    expect(phases).toMatchObject({
+      requestedSymbols: 11,
+      plannedChunks: 2,
+      chunks: 2,
+      batchBudgetMs: 4_000,
+      termination: "success",
+    });
+    expect(release).toHaveBeenCalledWith();
+    nowSpy.mockRestore();
+  });
+
+  it("honors an earlier caller deadline and destroys the client before starting an expired chunk", async () => {
     const symbols = Array.from({ length: 11 }, (_, index) => `M${index}-PERP`);
     const release = vi.fn();
     let now = 1_000;
@@ -659,13 +740,25 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
 
     await expect(getCachedCandlesBatch(
       symbols, "1h", RANGE.start, RANGE.end,
-      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        batchDeadlineAtMs: 6_000,
+        callerClass: "scanner",
+        onPhases: (value) => (phases = value),
+      },
     )).rejects.toBeInstanceOf(CandleBatchReadError);
 
     const dataStatements = query.mock.calls.filter(([value]) => value.text.includes("FROM lab_candle_cache_v2"));
     expect(dataStatements).toHaveLength(1);
     expect(release).toHaveBeenCalledWith(expect.objectContaining({ message: "Query read timeout" }));
-    expect(phases).toMatchObject({ requestedSymbols: 11, chunks: 1, termination: "client_query_timeout" });
+    expect(phases).toMatchObject({
+      requestedSymbols: 11,
+      plannedChunks: 2,
+      chunks: 1,
+      batchBudgetMs: 5_000,
+      termination: "client_query_timeout",
+    });
     nowSpy.mockRestore();
   });
 

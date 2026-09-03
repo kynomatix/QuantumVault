@@ -1839,6 +1839,8 @@ export interface PrefetchCachedOHLCVOptions {
   basisPolicy: CandleBasisPolicy;
   signal?: AbortSignal;
   callerClass?: CandleReadCallerClass;
+  /** Absolute sweep deadline; the batch's per-chunk ceiling remains separate. */
+  batchDeadlineAtMs?: number;
 }
 
 export interface PrefetchedOHLCV {
@@ -1929,9 +1931,10 @@ export async function prefetchCachedOHLCV(
     {
       basisPolicy: options.basisPolicy,
       queryTimeoutMs: SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
-      // The caller owns the sweep deadline. The database statement timeout is
-      // the batch query budget; a second JavaScript timer can fire late after
-      // event-loop starvation and falsely discard a completed query.
+      // Each chunk retains the five-second database statement ceiling. The
+      // absolute caller deadline caps their aggregate without a second timer,
+      // whose callback could itself arrive late under event-loop starvation.
+      batchDeadlineAtMs: options.batchDeadlineAtMs,
       signal: options.signal,
       callerClass: options.callerClass ?? "scanner",
       admission: "scanner_prefix",
