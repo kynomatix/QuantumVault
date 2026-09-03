@@ -1207,10 +1207,14 @@ async function runSweep(): Promise<void> {
         for (const [ticker, bars] of prefetched.complete) candleCache.set(`${ticker}:${tf}`, bars);
         for (const [ticker, bars] of prefetched.prefixes) candlePrefixes.set(`${ticker}:${tf}`, bars);
         for (const ticker of prefetched.exactMisses) batchExactMisses.add(`${ticker}:${tf}`);
+        for (const ticker of prefetched.unresolvedSymbols ?? []) {
+          batchCacheUnavailable.add(`${ticker}:${tf}`);
+        }
         const batchLine =
           `[Scanner] BATCH PREFETCH: ${tf} requested=${sweepTickers.length} ` +
           `complete=${prefetched.complete.size} prefixes=${prefetched.prefixes.size} ` +
-          `misses=${prefetched.exactMisses.size} duration=${Date.now() - batchStartedAt}ms`;
+          `misses=${prefetched.exactMisses.size} unresolved=${prefetched.unresolvedSymbols?.size ?? 0} ` +
+          `termination=${prefetched.partialTermination ?? "success"} duration=${Date.now() - batchStartedAt}ms`;
         console.log(batchLine);
         appendTelemetry(batchLine);
       } catch (error) {

@@ -53,6 +53,7 @@ import {
   getCandleStoreLoad,
   CandleWriteQueueFullError,
   CandleBatchReadError,
+  CandleBatchPartialReadError,
   CACHE_BUDGET_ABORT_REASON,
   SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS,
   SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
@@ -891,6 +892,93 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     }
   });
 
+  it("admits a scanner-pool client that arrives within the physical five-second connection bound", async () => {
+    vi.useFakeTimers();
+    try {
+      const checkout = deferred<unknown>();
+      const release = vi.fn();
+      const query = vi.fn().mockResolvedValue({ rows: [] });
+      fakeScannerPool.connect.mockReturnValueOnce(checkout.promise);
+      const pending = getCachedCandlesBatch(
+        ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+        { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner" },
+      );
+      await vi.advanceTimersByTimeAsync(3_200);
+      checkout.resolve({ release, query });
+      await vi.advanceTimersByTimeAsync(0);
+
+      const result = await pending;
+      expect(SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS).toBe(5_000);
+      expect(result.get("BTC-PERP")).toBeNull();
+      expect(query).toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    "timeout exceeded when trying to connect",
+    "Connection terminated due to connection timeout",
+  ])("classifies pg-pool checkout refusal as pool_acquire_timeout: %s", async (message) => {
+    const failure = new Error(message);
+    let phases: CandleBatchReadPhases | undefined;
+    fakeScannerPool.connect.mockRejectedValueOnce(failure);
+
+    await expect(getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    )).rejects.toBeInstanceOf(CandleBatchReadError);
+    expect(phases).toMatchObject({
+      outcome: "query_error",
+      termination: "pool_acquire_timeout",
+      sqlstate: null,
+      chunks: 0,
+      resolvedSymbols: 0,
+      unresolvedSymbols: 1,
+    });
+  });
+
+  it("preserves completed chunks and names only failed or unexecuted symbols as unresolved", async () => {
+    const symbols = Array.from({ length: 25 }, (_, index) => `M${index}-PERP`);
+    const failure = new Error("Query read timeout");
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string; values?: unknown[] }) => {
+      if (!config.text.includes("FROM lab_candle_cache_v2")) return { rows: [] };
+      const chunk = config.values?.[0] as string[];
+      if (chunk[0] === "M20-PERP") throw failure;
+      return { rows: chunk.map((symbol) => row(symbol)) };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+
+    let partial: CandleBatchPartialReadError | undefined;
+    try {
+      await getCachedCandlesBatch(
+        symbols, "1h", RANGE.start, RANGE.end,
+        { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+      );
+    } catch (error) {
+      expect(error).toBeInstanceOf(CandleBatchPartialReadError);
+      partial = error as CandleBatchPartialReadError;
+    }
+
+    expect([...partial!.completed.keys()]).toEqual(symbols.slice(0, 20));
+    expect([...partial!.unresolvedSymbols]).toEqual(symbols.slice(20));
+    expect(partial!.termination).toBe("client_query_timeout");
+    expect(release).toHaveBeenCalledWith(failure);
+    expect(phases).toMatchObject({
+      outcome: "hit",
+      termination: "client_query_timeout",
+      requestedSymbols: 25,
+      resolvedSymbols: 20,
+      unresolvedSymbols: 5,
+      chunks: 2,
+      hits: 20,
+      misses: 0,
+    });
+  });
+
   it("releases a failed SELECT with error and exposes a typed batch failure", async () => {
     const failure = Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
     const release = vi.fn();
@@ -919,10 +1007,12 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       .mockRejectedValueOnce(failure);
     fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
 
-    await expect(getCachedCandlesBatch(
+    const rejection = await getCachedCandlesBatch(
       ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
       { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner" },
-    )).rejects.toBeInstanceOf(CandleBatchReadError);
+    ).catch((error) => error);
+    expect(rejection).toBeInstanceOf(CandleBatchReadError);
+    expect(rejection).not.toBeInstanceOf(CandleBatchPartialReadError);
     expect(release).toHaveBeenCalledWith(failure);
     expect(release).not.toHaveBeenCalledWith();
   });

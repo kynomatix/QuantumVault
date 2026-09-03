@@ -127,9 +127,11 @@ function poolSnapshot(readPool: CandleReadPool = pool): { total: number; idle: n
 // cancellation ("cancelled", e.g. sweep teardown).
 export const CACHE_BUDGET_ABORT_REASON = "candle-cache-budget-exceeded";
 
-// A cold or reconnecting lane must fail over promptly before it consumes the
-// scanner's provider window; the late checkout self-releases without querying.
-export const SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS = 2_000;
+// Bound checkout to the dedicated pool's physical connection timeout. A
+// reconnect that can still succeed inside that established limit must not be
+// abandoned early and turn one cold lane into all-market provider fan-out.
+// The late-checkout self-release guarantee remains the hard upper bound.
+export const SCANNER_BATCH_POOL_ACQUIRE_TIMEOUT_MS = 5_000;
 // PostgreSQL's five-second statement_timeout is the business deadline. This
 // longer pg client timer is only a dead-socket guard: it is implemented by a
 // JavaScript timer and therefore must not race a completed/backend-cancelled
@@ -231,6 +233,8 @@ export type CandleBatchReadPhases = {
   termination: CandleBatchReadTermination;
   sqlstate: string | null;
   requestedSymbols: number;
+  resolvedSymbols: number;
+  unresolvedSymbols: number;
   plannedChunks: number;
   chunks: number;
   batchBudgetMs: number;
@@ -246,12 +250,38 @@ export type CandleBatchReadPhases = {
 };
 
 export class CandleBatchReadError extends Error {
-  readonly code = "candle_batch_read_failed";
+  readonly code: "candle_batch_read_failed" | "candle_batch_partial_read" = "candle_batch_read_failed";
 
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "CandleBatchReadError";
   }
+}
+
+export class CandleBatchPartialReadError extends CandleBatchReadError {
+  readonly code = "candle_batch_partial_read";
+
+  constructor(
+    public readonly completed: Map<string, ProvenancedOHLCV[] | null>,
+    public readonly unresolvedSymbols: ReadonlySet<string>,
+    public readonly termination: Exclude<CandleBatchReadTermination, "success" | "caller_cancelled">,
+    options?: ErrorOptions,
+  ) {
+    super("Batch candle-cache read completed only a strict symbol prefix", options);
+    this.name = "CandleBatchPartialReadError";
+  }
+}
+
+export function isCandleBatchPartialReadError(error: unknown): error is CandleBatchPartialReadError {
+  return error instanceof CandleBatchPartialReadError
+    || (typeof error === "object"
+      && error !== null
+      && (error as { name?: unknown }).name === "CandleBatchPartialReadError"
+      && (error as { code?: unknown }).code === "candle_batch_partial_read"
+      && (error as { completed?: unknown }).completed instanceof Map
+      && (error as { unresolvedSymbols?: unknown }).unresolvedSymbols instanceof Set
+      && ["pool_acquire_timeout", "server_statement_timeout", "client_query_timeout", "connection_error", "query_error"]
+        .includes(String((error as { termination?: unknown }).termination)));
 }
 
 class CandlePoolAcquireTimeoutError extends Error {
@@ -272,6 +302,10 @@ function classifyBatchTermination(error: unknown): {
   const message = error instanceof Error ? error.message : String(error ?? "");
   if (code === "candle_pool_acquire_timeout" || error instanceof CandlePoolAcquireTimeoutError) {
     return { termination: "pool_acquire_timeout", sqlstate: null };
+  }
+  if (message === "timeout exceeded when trying to connect"
+      || message === "Connection terminated due to connection timeout") {
+    return { termination: "pool_acquire_timeout", sqlstate: code };
   }
   if (code === "57014") return { termination: "server_statement_timeout", sqlstate: code };
   if (error instanceof Error && error.message === "Query read timeout") {
@@ -467,6 +501,8 @@ export async function getCachedCandlesBatch(
     termination: "success",
     sqlstate: null,
     requestedSymbols: uniqueSymbols.length,
+    resolvedSymbols: 0,
+    unresolvedSymbols: uniqueSymbols.length,
     plannedChunks,
     chunks: 0,
     batchBudgetMs: 0,
@@ -492,6 +528,7 @@ export async function getCachedCandlesBatch(
     const line =
       `[CandleBatchRead] ${phases.callerClass} ${timeframe} lane=${phases.poolLane} outcome=${outcome} ` +
       `requested=${phases.requestedSymbols} planned_chunks=${phases.plannedChunks} completed_chunks=${phases.chunks} ` +
+      `resolved_symbols=${phases.resolvedSymbols} unresolved_symbols=${phases.unresolvedSymbols} ` +
       `batch_budget=${phases.batchBudgetMs}ms hits=${phases.hits} misses=${phases.misses} ` +
       `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
       `query=${phases.queryMs}ms process=${phases.resultProcessingMs}ms total=${phases.totalMs}ms ` +
@@ -551,6 +588,11 @@ export async function getCachedCandlesBatch(
     let selectStartedAt: number | null = null;
     let selectCompleted = true;
     const rows: CandleCacheBatchRow[] = [];
+    const completedSymbols = new Set<string>();
+    let partialFailure: {
+      error: unknown;
+      termination: Exclude<CandleBatchReadTermination, "success" | "caller_cancelled">;
+    } | null = null;
     try {
       const singletonPolicy = policy.acceptedBasis.length === 1
         && policy.acceptedFinality.length === 1
@@ -590,6 +632,7 @@ export async function getCachedCandlesBatch(
         phases.queryMs += Date.now() - selectStartedAt;
         selectCompleted = true;
         phases.chunks++;
+        for (const symbol of symbolChunk) completedSymbols.add(symbol);
         rows.push(...result.rows as CandleCacheBatchRow[]);
         if (offset + SCANNER_BATCH_SYMBOL_CHUNK_SIZE < uniqueSymbols.length) {
           await new Promise<void>((resolve) => setImmediate(resolve));
@@ -609,17 +652,25 @@ export async function getCachedCandlesBatch(
       phases.termination = classified.termination;
       phases.sqlstate = classified.sqlstate;
       client.release(error instanceof Error ? error : new Error(String(error)));
-      throw error;
+      // Preserve only a strict prefix. If no SELECT completed there are no
+      // trustworthy bytes to retain; if every SELECT completed, the failure
+      // belongs to session cleanup and retains the existing full-failure
+      // semantics rather than masquerading as an unresolved-symbol suffix.
+      if (completedSymbols.size === 0 || completedSymbols.size === uniqueSymbols.length) throw error;
+      partialFailure = { error, termination: classified.termination };
     }
     if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
 
     phases.rows = rows.length;
-    const grouped = new Map(uniqueSymbols.map((symbol) => [symbol, [] as CandleCacheRow[]]));
+    const symbolsToProcess = partialFailure ? [...completedSymbols] : uniqueSymbols;
+    phases.resolvedSymbols = symbolsToProcess.length;
+    phases.unresolvedSymbols = phases.requestedSymbols - phases.resolvedSymbols;
+    const grouped = new Map(symbolsToProcess.map((symbol) => [symbol, [] as CandleCacheRow[]]));
     for (const row of rows) grouped.get(row.symbol)?.push(row);
 
     const processStartedAt = Date.now();
     const admittedBySymbol = new Map<string, ProvenancedOHLCV[] | null>();
-    for (const symbol of uniqueSymbols) {
+    for (const symbol of symbolsToProcess) {
       if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
       const localPhases: CandleReadPhases = {
         callerClass: phases.callerClass,
@@ -646,11 +697,22 @@ export async function getCachedCandlesBatch(
       admittedBySymbol.set(symbol, admitted);
       if (admitted !== null) phases.hits++;
     }
-    phases.misses = phases.requestedSymbols - phases.hits;
+    phases.misses = phases.resolvedSymbols - phases.hits;
     phases.resultProcessingMs = Date.now() - processStartedAt;
+    if (partialFailure) {
+      const unresolvedSymbols = new Set(uniqueSymbols.filter((symbol) => !completedSymbols.has(symbol)));
+      finish(phases.hits > 0 ? "hit" : "miss");
+      throw new CandleBatchPartialReadError(
+        admittedBySymbol,
+        unresolvedSymbols,
+        partialFailure.termination,
+        { cause: partialFailure.error },
+      );
+    }
     finish(phases.hits > 0 ? "hit" : "miss");
     return admittedBySymbol;
   } catch (error: any) {
+    if (error instanceof CandleBatchPartialReadError) throw error;
     if (isSignalAborted(signal)) {
       phases.termination = "caller_cancelled";
       finish(abortOutcome());
