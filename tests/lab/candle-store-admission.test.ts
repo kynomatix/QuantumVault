@@ -727,7 +727,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     nowSpy.mockRestore();
   });
 
-  it("honors an earlier caller deadline and destroys the client before starting an expired chunk", async () => {
+  it("honors an earlier caller deadline, preserves the prefix, and reuses the healthy client", async () => {
     const symbols = Array.from({ length: 11 }, (_, index) => `M${index}-PERP`);
     const release = vi.fn();
     let now = 1_000;
@@ -736,10 +736,10 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       if (config.text.includes("FROM lab_candle_cache_v2")) now += 5_001;
       return { rows: [] };
     });
-    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    fakeScannerPool.connect.mockResolvedValue({ release, query });
     let phases: CandleBatchReadPhases | undefined;
 
-    await expect(getCachedCandlesBatch(
+    const first = await getCachedCandlesBatch(
       symbols, "1h", RANGE.start, RANGE.end,
       {
         basisPolicy: TEST_BASIS_POLICY,
@@ -748,18 +748,164 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
         callerClass: "scanner",
         onPhases: (value) => (phases = value),
       },
-    )).rejects.toBeInstanceOf(CandleBatchReadError);
+    ).catch((error) => error);
 
     const dataStatements = query.mock.calls.filter(([value]) => value.text.includes("FROM lab_candle_cache_v2"));
     expect(dataStatements).toHaveLength(1);
-    expect(release).toHaveBeenCalledWith(expect.objectContaining({ message: "Query read timeout" }));
+    expect(first).toBeInstanceOf(CandleBatchPartialReadError);
+    expect(first).toMatchObject({ termination: "batch_deadline_exhausted" });
+    expect([...first.completed.keys()]).toEqual(symbols.slice(0, 10));
+    expect([...first.unresolvedSymbols]).toEqual(symbols.slice(10));
+    expect(release).toHaveBeenCalledWith();
+    expect(release).not.toHaveBeenCalledWith(expect.anything());
+    expect(query.mock.calls[2][0]).toMatchObject({
+      text: "SELECT set_config('statement_timeout', '30000', false)",
+      query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+    });
     expect(phases).toMatchObject({
       requestedSymbols: 11,
       plannedChunks: 2,
       chunks: 1,
       batchBudgetMs: 5_000,
-      termination: "client_query_timeout",
+      termination: "batch_deadline_exhausted",
     });
+
+    const reused = await getCachedCandlesBatch(
+      ["NEXT-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner" },
+    );
+    expect(reused.get("NEXT-PERP")).toBeNull();
+    expect(fakeScannerPool.connect).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(2);
+    nowSpy.mockRestore();
+  });
+
+  it("preserves a proven prefix while destroying a client whose deadline restore fails", async () => {
+    const symbols = Array.from({ length: 11 }, (_, index) => `M${index}-PERP`);
+    const restoreFailure = Object.assign(
+      new Error("canceling statement due to statement timeout"),
+      { code: "57014" },
+    );
+    const release = vi.fn();
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("FROM lab_candle_cache_v2")) {
+        now += 5_001;
+        return { rows: [] };
+      }
+      if (config.text.includes("'30000'")) throw restoreFailure;
+      return { rows: [] };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+
+    const rejection = await getCachedCandlesBatch(
+      symbols, "1h", RANGE.start, RANGE.end,
+      {
+        basisPolicy: TEST_BASIS_POLICY,
+        queryTimeoutMs: 5_000,
+        batchDeadlineAtMs: 6_000,
+        callerClass: "scanner",
+        onPhases: (value) => (phases = value),
+      },
+    ).catch((error) => error);
+
+    expect(rejection).toBeInstanceOf(CandleBatchPartialReadError);
+    expect(rejection).toMatchObject({ termination: "batch_deadline_exhausted" });
+    expect([...rejection.completed.keys()]).toEqual(symbols.slice(0, 10));
+    expect([...rejection.unresolvedSymbols]).toEqual(symbols.slice(10));
+    expect((rejection as Error).cause).toMatchObject({
+      code: "candle_batch_deadline_exhausted",
+      cause: expect.objectContaining({
+        code: "candle_batch_session_restore_failed",
+        sqlstate: "57014",
+        cause: restoreFailure,
+      }),
+    });
+    expect(phases).toMatchObject({
+      termination: "session_restore_failed",
+      sqlstate: "57014",
+      chunks: 1,
+    });
+    expect(release).toHaveBeenCalledWith(restoreFailure);
+    expect(release).not.toHaveBeenCalledWith();
+    const restore = query.mock.calls.find(([config]) => config.text.includes("'30000'"));
+    expect(restore?.[0]).toMatchObject({
+      query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+    });
+    nowSpy.mockRestore();
+  });
+
+  it("classifies a zero-prefix deadline restore failure as session_restore_failed", async () => {
+    const restoreFailure = Object.assign(new Error("socket closed during restore"), { code: "08006" });
+    const release = vi.fn();
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("'30000'")) throw restoreFailure;
+      return { rows: [] };
+    });
+    fakeScannerPool.connect.mockImplementationOnce(async () => {
+      now += 6_000;
+      return { release, query };
+    });
+    let phases: CandleBatchReadPhases | undefined;
+
+    const rejection = await getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    ).catch((error) => error);
+
+    expect(rejection).toBeInstanceOf(CandleBatchReadError);
+    expect(rejection).not.toBeInstanceOf(CandleBatchPartialReadError);
+    expect((rejection as Error).cause).toMatchObject({
+      code: "candle_batch_session_restore_failed",
+      sqlstate: "08006",
+      cause: restoreFailure,
+    });
+    expect(phases).toMatchObject({
+      termination: "session_restore_failed",
+      sqlstate: "08006",
+      chunks: 0,
+      resolvedSymbols: 0,
+      unresolvedSymbols: 1,
+    });
+    expect(release).toHaveBeenCalledWith(restoreFailure);
+    expect(release).not.toHaveBeenCalledWith();
+    nowSpy.mockRestore();
+  });
+
+  it("keeps zero-prefix aggregate expiry a full failure but releases the healthy client cleanly", async () => {
+    const release = vi.fn();
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    fakeScannerPool.connect.mockImplementationOnce(async () => {
+      now += 6_000;
+      return { release, query };
+    });
+    let phases: CandleBatchReadPhases | undefined;
+
+    const rejection = await getCachedCandlesBatch(
+      ["BTC-PERP"], "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+    ).catch((error) => error);
+
+    expect(rejection).toBeInstanceOf(CandleBatchReadError);
+    expect(rejection).not.toBeInstanceOf(CandleBatchPartialReadError);
+    expect(phases).toMatchObject({
+      termination: "batch_deadline_exhausted",
+      chunks: 0,
+      resolvedSymbols: 0,
+      unresolvedSymbols: 1,
+    });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0][0]).toMatchObject({
+      text: "SELECT set_config('statement_timeout', '30000', false)",
+    });
+    expect(release).toHaveBeenCalledWith();
+    expect(release).not.toHaveBeenCalledWith(expect.anything());
     nowSpy.mockRestore();
   });
 
