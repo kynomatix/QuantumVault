@@ -33,7 +33,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     journal = await import("../../server/ai-trader/execution-journal");
     await dbModule.ensureSchema();
     ({ aiTraderBots, aiTraderDecisions, aiTraderQualificationRecords } = await import("@shared/schema"));
-  });
+  }, 120_000);
 
   afterAll(async () => {
     // Deleting the bot cascades to its decisions (FK onDelete: 'cascade'),
