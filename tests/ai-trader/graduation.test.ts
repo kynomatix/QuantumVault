@@ -515,7 +515,7 @@ describe("qualification era forgotten-declaration gate", () => {
     });
   });
 
-  it("binds the shared graduation owner path to both reviewed no-bump declarations", () => {
+  it("binds the shared graduation owner path to the reviewed scanner no-bump declaration", () => {
     const base = cloneRegistry();
     base.scanner_capability_policy.decisionGeneration = 39;
 

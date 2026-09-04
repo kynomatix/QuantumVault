@@ -38,11 +38,12 @@ import { detectWM } from "../../server/ai-trader/wm-detector";
 const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>();
 const prefetchCachedOHLCVMock = vi.fn();
 const completeCachedOHLCVTailMock = vi.fn();
+const isNonCryptoMarketOpenMock = vi.fn<[unknown], boolean>(() => true);
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
   prefetchCachedOHLCV: (...a: unknown[]) => prefetchCachedOHLCVMock(...a),
   completeCachedOHLCVTail: (...a: unknown[]) => completeCachedOHLCVTailMock(...a),
-  isNonCryptoMarketOpen: () => true,
+  isNonCryptoMarketOpen: (...a: unknown[]) => isNonCryptoMarketOpenMock(...a),
   isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
   isCacheDegradedError: (err: unknown) =>
     typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CacheDegradedError",
@@ -491,6 +492,8 @@ beforeEach(() => {
   });
   completeCachedOHLCVTailMock.mockReset();
   completeCachedOHLCVTailMock.mockResolvedValue([]);
+  isNonCryptoMarketOpenMock.mockReset();
+  isNonCryptoMarketOpenMock.mockReturnValue(true);
   // Default: active prime session (no thin-session penalty).
   getSessionContextMock.mockReturnValue({ label: "london_new_york" });
 });
@@ -1279,11 +1282,14 @@ describe("scanner batch cache prefetch", () => {
 
       let activeFetches = 0;
       let maximumActiveFetches = 0;
-      const primaryDispatchStartedAt: number[] = [];
-      const providerRequestStartedAt: number[] = [];
+      const marketDispatchStartedAt = new Map<string, number>();
+      isNonCryptoMarketOpenMock.mockImplementation((ticker: unknown) => {
+        if (typeof ticker === "string" && !marketDispatchStartedAt.has(ticker)) {
+          marketDispatchStartedAt.set(ticker, Date.now());
+        }
+        return true;
+      });
       fetchOHLCVMock.mockImplementation(async (_ticker: string, timeframe: string) => {
-        if (timeframe === "15m") primaryDispatchStartedAt.push(Date.now());
-        providerRequestStartedAt.push(Date.now());
         activeFetches++;
         maximumActiveFetches = Math.max(maximumActiveFetches, activeFetches);
         await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
@@ -1300,16 +1306,19 @@ describe("scanner batch cache prefetch", () => {
       await sweep;
 
       expect(maximumActiveFetches).toBe(3);
-      expect(primaryDispatchStartedAt).toHaveLength(20);
-      for (let index = 1; index < primaryDispatchStartedAt.length; index++) {
-        expect(primaryDispatchStartedAt[index] - primaryDispatchStartedAt[index - 1]).toBeGreaterThanOrEqual(150);
+      const dispatchTimes = markets.map((market) => marketDispatchStartedAt.get(
+        market.replace("-PERP", "/USDT"),
+      ));
+      expect(dispatchTimes.every((startedAt) => startedAt !== undefined)).toBe(true);
+      const firstTen = dispatchTimes.slice(0, 10) as number[];
+      expect(firstTen[firstTen.length - 1] - firstTen[0]).toBe(1_350);
+      for (let index = 1; index < firstTen.length; index++) {
+        expect(firstTen[index] - firstTen[index - 1]).toBeGreaterThanOrEqual(150);
       }
-      for (const windowStartedAt of providerRequestStartedAt) {
-        const requestsInWindow = providerRequestStartedAt.filter(
-          (startedAt) => startedAt >= windowStartedAt && startedAt < windowStartedAt + 2_000,
-        );
-        expect(requestsInWindow.length).toBeLessThanOrEqual(3);
-      }
+      // The tenth market worker is dispatched before the first two-second
+      // provider call can finish. This proves the existing ten-worker market
+      // scheduler remains intact while only direct network work is capped at three.
+      expect(firstTen[firstTen.length - 1] - firstTen[0]).toBeLessThan(2_000);
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
           protocol: "flash",
@@ -1330,6 +1339,266 @@ describe("scanner batch cache prefetch", () => {
           accountingValid: true,
         },
       });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { name: "primary full recovery", primary: "miss", parent: "complete", helper: "fetch", timeframe: "15m" },
+    { name: "primary stale-prefix recovery", primary: "prefix", parent: "complete", helper: "tail", timeframe: "15m" },
+    { name: "parent full recovery", primary: "complete", parent: "miss", helper: "fetch", timeframe: "1h" },
+    { name: "parent stale-prefix recovery", primary: "complete", parent: "prefix", helper: "tail", timeframe: "1h" },
+  ] as const)("routes $name through the sweep-local direct-fetch gate", async (scenario) => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      const primary = textbookWBars(now.getTime(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (_requested: string[], timeframe: string) => {
+          const form = timeframe === "15m" ? scenario.primary : scenario.parent;
+          const fixture = timeframe === "15m" ? primary : parent;
+          return {
+            complete: form === "complete" ? new Map([["BTC/USDT", fixture]]) : new Map(),
+            prefixes: form === "prefix"
+              ? new Map([["BTC/USDT", fixture.slice(0, -4)]])
+              : new Map(),
+            exactMisses: form === "miss" ? new Set(["BTC/USDT"]) : new Set(),
+          };
+        },
+      );
+      fetchOHLCVMock.mockImplementation(
+        async (_ticker: string, timeframe: string) => timeframe === "15m" ? primary : parent,
+      );
+      completeCachedOHLCVTailMock.mockImplementation(
+        async (_ticker: string, timeframe: string) => timeframe === "15m" ? primary : parent,
+      );
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await sweep;
+
+      const expectedMock = scenario.helper === "fetch"
+        ? fetchOHLCVMock
+        : completeCachedOHLCVTailMock;
+      const rejectedMock = scenario.helper === "fetch"
+        ? completeCachedOHLCVTailMock
+        : fetchOHLCVMock;
+      expect(expectedMock).toHaveBeenCalledTimes(1);
+      expect(expectedMock.mock.calls[0][1]).toBe(scenario.timeframe);
+      expect(rejectedMock).not.toHaveBeenCalled();
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        accounting: { attempted: 1, scanned: 1, accountingValid: true },
+      });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a queued primary provider call inside the final five seconds as timeout-skipped", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const markets = Array.from({ length: 4 }, (_, index) => `P${index}-PERP`);
+      const primary = textbookWBars(now.getTime(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => timeframe === "15m"
+          ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
+          : {
+              complete: new Map(requested.map((ticker) => [ticker, parent])),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      fetchOHLCVMock.mockImplementation(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 236_000));
+        return primary;
+      });
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(237_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(3);
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        accounting: {
+          attempted: 4,
+          scanned: 3,
+          timeoutSkipped: 1,
+          parentInconclusive: 0,
+          accountingValid: true,
+        },
+      });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses a queued parent provider call inside the final five seconds as parent-inconclusive", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const markets = Array.from({ length: 4 }, (_, index) => `R${index}-PERP`);
+      const primary = textbookWBars(now.getTime(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => timeframe === "15m"
+          ? {
+              complete: new Map(requested.map((ticker) => [ticker, primary])),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            }
+          : { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) },
+      );
+      fetchOHLCVMock.mockImplementation(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 236_000));
+        return parent;
+      });
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(237_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(3);
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        accounting: {
+          attempted: 4,
+          scanned: 3,
+          timeoutSkipped: 0,
+          parentInconclusive: 1,
+          accountingValid: true,
+        },
+      });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases a direct-fetch permit after typed provider failure", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const markets = Array.from({ length: 4 }, (_, index) => `E${index}-PERP`);
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => timeframe === "15m"
+          ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
+          : {
+              complete: new Map(requested.map((ticker) => [ticker, parent])),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      let activeFetches = 0;
+      let maximumActiveFetches = 0;
+      fetchOHLCVMock.mockImplementation(async () => {
+        activeFetches++;
+        maximumActiveFetches = Math.max(maximumActiveFetches, activeFetches);
+        await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+        activeFetches--;
+        throw Object.assign(new Error("typed provider outage"), {
+          name: "CandleSourceUnavailableError",
+          reason: "transport_unavailable",
+        });
+      });
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(4);
+      expect(maximumActiveFetches).toBe(3);
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        accounting: { attempted: 4, errors: 4, unclassified: 0, accountingValid: true },
+      });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("scans at least 38 markets inside 240 seconds across the retained Gate latency range", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const markets = Array.from({ length: 40 }, (_, index) => `G${index}-PERP`);
+      const primary = textbookWBars(now.getTime(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const retainedGateLatencyMs = [300, 1_200, 2_500, 3_600, 4_800, 5_999];
+      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => timeframe === "15m"
+          ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
+          : {
+              complete: new Map(requested.map((ticker) => [ticker, parent])),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      fetchOHLCVMock.mockImplementation(async (ticker: string) => {
+        const index = Number(ticker.match(/G(\d+)/)?.[1] ?? 0);
+        await new Promise<void>((resolve) => setTimeout(
+          resolve,
+          retainedGateLatencyMs[index % retainedGateLatencyMs.length],
+        ));
+        return primary;
+      });
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(90_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(40);
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        accounting: {
+          attempted: 40,
+          scanned: 40,
+          timeoutSkipped: 0,
+          abandoned: 0,
+          accountingValid: true,
+        },
+      });
+      expect(Date.now() - now.getTime()).toBeLessThan(240_000);
     } finally {
       stopScanner();
       vi.useRealTimers();

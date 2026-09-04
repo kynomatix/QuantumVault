@@ -1220,14 +1220,25 @@ async function runSweep(): Promise<void> {
     const runDirectFetch = async <T>(
       signal: AbortSignal,
       deadlineAt: () => number,
-      task: () => Promise<T>,
-    ): Promise<{ started: true; value: T } | { started: false }> => {
+      task: (admission: { startedAt: number; deadlineMs: number }) => Promise<T>,
+    ): Promise<
+      | { started: true; value: T; startedAt: number; deadlineMs: number }
+      | { started: false }
+    > => {
       const release = await directFetchGate.acquire(signal);
       try {
         requireScannerSweepOwner(owner);
         if (signal.aborted) throw scannerAbortError();
-        if (deadlineAt() - Date.now() < 5_000) return { started: false };
-        return { started: true, value: await task() };
+        const startedAt = Date.now();
+        const remainingMs = deadlineAt() - startedAt;
+        if (remainingMs < 5_000) return { started: false };
+        const deadlineMs = Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs);
+        return {
+          started: true,
+          value: await task({ startedAt, deadlineMs }),
+          startedAt,
+          deadlineMs,
+        };
       } finally {
         release();
       }
@@ -1476,38 +1487,35 @@ async function runSweep(): Promise<void> {
                   finishAttempt(market, "timeout-skipped");
                   return;
                 }
-                const perFetchDeadlineMs = Math.min(
-                  SWEEP_PER_FETCH_DEADLINE_MS,
-                  remainingMs,
-                );
-                const fetchStartedAt = Date.now();
                 const cachedPrefix = candlePrefixes.get(cacheKey);
-                const fetchOptions = {
-                  basisPolicy: MONEY_CANDLE_POLICY,
-                  deadlineMs: perFetchDeadlineMs,
-                  signal: tfAbort.signal,
-                  callerClass: "scanner" as const,
-                };
                 const direct = await runDirectFetch(
                   tfAbort.signal,
                   () => Math.min(fetchDeadlineAt, protocolDeadlineAt()),
-                  () => cachedPrefix
-                    ? completeCachedOHLCVTail(
-                        ticker,
-                        tf,
-                        startDate,
-                        endDate,
-                        cachedPrefix,
-                        undefined,
-                        fetchOptions,
-                      )
-                    : fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
-                        ...fetchOptions,
-                        basisPolicy: fetchOptions.basisPolicy,
-                        bypassCache:
-                          batchExactMisses.has(cacheKey) || batchCacheUnavailable.has(cacheKey),
-                        cacheWritePolicy: batchCacheUnavailable.has(cacheKey) ? "skip" : undefined,
-                      }),
+                  ({ deadlineMs }) => {
+                    const fetchOptions = {
+                      basisPolicy: MONEY_CANDLE_POLICY,
+                      deadlineMs,
+                      signal: tfAbort.signal,
+                      callerClass: "scanner" as const,
+                    };
+                    return cachedPrefix
+                      ? completeCachedOHLCVTail(
+                          ticker,
+                          tf,
+                          startDate,
+                          endDate,
+                          cachedPrefix,
+                          undefined,
+                          fetchOptions,
+                        )
+                      : fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
+                          ...fetchOptions,
+                          basisPolicy: fetchOptions.basisPolicy,
+                          bypassCache:
+                            batchExactMisses.has(cacheKey) || batchCacheUnavailable.has(cacheKey),
+                          cacheWritePolicy: batchCacheUnavailable.has(cacheKey) ? "skip" : undefined,
+                        });
+                  },
                 );
                 if (!direct.started) {
                   finishAttempt(market, "timeout-skipped");
@@ -1521,7 +1529,7 @@ async function runSweep(): Promise<void> {
                 // fetch is indistinguishable from a dead feed by bars alone.
                 fetchDeadlineTruncated =
                   bars.length === 0 &&
-                  Date.now() - fetchStartedAt >= perFetchDeadlineMs - 1_000;
+                  Date.now() - direct.startedAt >= direct.deadlineMs - 1_000;
                 if (!fetchDeadlineTruncated) {
                   candleCache.set(cacheKey, bars);
                   candlePrefixes.delete(cacheKey);
@@ -1599,41 +1607,43 @@ async function runSweep(): Promise<void> {
                   } else {
                     const parentStartDate = new Date(parentStartMs).toISOString();
                     const parentPrefix = candlePrefixes.get(parentCacheKey);
-                    const parentFetchOptions = {
-                      basisPolicy: MONEY_CANDLE_POLICY,
-                      deadlineMs: Math.min(SWEEP_PER_FETCH_DEADLINE_MS, remainingMs),
-                      signal: tfAbort.signal,
-                      callerClass: "scanner" as const,
-                    };
                     const direct = await runDirectFetch(
                       tfAbort.signal,
                       () => Math.min(fetchDeadlineAt, protocolDeadlineAt()),
-                      () => parentPrefix
-                        ? completeCachedOHLCVTail(
-                            ticker,
-                            parentTf,
-                            parentStartDate,
-                            endDate,
-                            parentPrefix,
-                            undefined,
-                            parentFetchOptions,
-                          )
-                        : fetchOHLCV(
-                            ticker,
-                            parentTf,
-                            parentStartDate,
-                            endDate,
-                            undefined,
-                            {
-                              ...parentFetchOptions,
-                              basisPolicy: parentFetchOptions.basisPolicy,
-                              bypassCache:
-                                batchExactMisses.has(parentCacheKey)
-                                || batchCacheUnavailable.has(parentCacheKey),
-                              cacheWritePolicy:
-                                batchCacheUnavailable.has(parentCacheKey) ? "skip" : undefined,
-                            },
-                          ),
+                      ({ deadlineMs }) => {
+                        const parentFetchOptions = {
+                          basisPolicy: MONEY_CANDLE_POLICY,
+                          deadlineMs,
+                          signal: tfAbort.signal,
+                          callerClass: "scanner" as const,
+                        };
+                        return parentPrefix
+                          ? completeCachedOHLCVTail(
+                              ticker,
+                              parentTf,
+                              parentStartDate,
+                              endDate,
+                              parentPrefix,
+                              undefined,
+                              parentFetchOptions,
+                            )
+                          : fetchOHLCV(
+                              ticker,
+                              parentTf,
+                              parentStartDate,
+                              endDate,
+                              undefined,
+                              {
+                                ...parentFetchOptions,
+                                basisPolicy: parentFetchOptions.basisPolicy,
+                                bypassCache:
+                                  batchExactMisses.has(parentCacheKey)
+                                  || batchCacheUnavailable.has(parentCacheKey),
+                                cacheWritePolicy:
+                                  batchCacheUnavailable.has(parentCacheKey) ? "skip" : undefined,
+                              },
+                            );
+                      },
                     );
                     if (!direct.started) {
                       parentBars = null;
