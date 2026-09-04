@@ -1176,7 +1176,7 @@ describe("active sweep lifecycle ownership", () => {
     stopScanner();
   });
 
-  it("abandons six abort-ignoring tail helpers and rejects every late mutation", async () => {
+  it("abandons only three admitted abort-ignoring tails and never starts queued provider work", async () => {
     vi.useFakeTimers();
     try {
       stopScanner();
@@ -1222,7 +1222,7 @@ describe("active sweep lifecycle ownership", () => {
       await vi.advanceTimersByTimeAsync(270_000);
       await sweep;
 
-      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(6);
+      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(3);
       const status = getScannerStatus();
       expect(status.currentGeneration).toMatchObject({
         verdict: "diagnostic_only",
@@ -1230,7 +1230,8 @@ describe("active sweep lifecycle ownership", () => {
           attempted: 6,
           scanned: 0,
           errors: 0,
-          abandoned: 6,
+          timeoutSkipped: 3,
+          abandoned: 3,
           unclassified: 0,
           accountingValid: true,
         },
@@ -1240,14 +1241,14 @@ describe("active sweep lifecycle ownership", () => {
       pending.resolve(textbookWBars(Date.now(), TF_15M));
       await vi.advanceTimersByTimeAsync(0);
       expect(getScannerStatus().currentGeneration?.generation).toBe(generation);
-      expect(getScannerStatus().currentGeneration?.accounting.abandoned).toBe(6);
+      expect(getScannerStatus().currentGeneration?.accounting.abandoned).toBe(3);
       expect(recordCriticalErrorMock).toHaveBeenCalledTimes(1);
       expect(recordCriticalErrorMock).toHaveBeenCalledWith(expect.objectContaining({
         source: "scanner-sweep",
         severity: "critical",
         context: expect.objectContaining({
           attempted: 6,
-          abandoned: 6,
+          abandoned: 3,
           accountingValid: true,
         }),
       }));
@@ -1259,7 +1260,7 @@ describe("active sweep lifecycle ownership", () => {
 });
 
 describe("scanner batch cache prefetch", () => {
-  it("uses ten provider-bounded workers while preserving the 150ms market-dispatch stagger", async () => {
+  it("bounds direct-provider work to three while preserving cached worker dispatch and stagger", async () => {
     vi.useFakeTimers();
     try {
       stopScanner();
@@ -1295,10 +1296,10 @@ describe("scanner batch cache prefetch", () => {
 
       startScanner();
       const sweep = runScannerSweepForTest();
-      await vi.advanceTimersByTimeAsync(20_000);
+      await vi.advanceTimersByTimeAsync(40_000);
       await sweep;
 
-      expect(maximumActiveFetches).toBe(10);
+      expect(maximumActiveFetches).toBe(3);
       expect(primaryDispatchStartedAt).toHaveLength(20);
       for (let index = 1; index < primaryDispatchStartedAt.length; index++) {
         expect(primaryDispatchStartedAt[index] - primaryDispatchStartedAt[index - 1]).toBeGreaterThanOrEqual(150);
@@ -1307,7 +1308,7 @@ describe("scanner batch cache prefetch", () => {
         const requestsInWindow = providerRequestStartedAt.filter(
           (startedAt) => startedAt >= windowStartedAt && startedAt < windowStartedAt + 2_000,
         );
-        expect(requestsInWindow.length).toBeLessThanOrEqual(20);
+        expect(requestsInWindow.length).toBeLessThanOrEqual(3);
       }
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({

@@ -110,7 +110,12 @@ const PARENT_TF: Record<string, string | null> = {
 const INDICATOR_BARS          = 400;          // bars fetched per TF per market
 const UNIVERSE_CACHE_TTL_MS   = 60 * 60_000; // 1h universe list cache per protocol
 const FEED_HEALTH_TTL_MS      = 30 * 60_000; // 30-min feed-dead TTL (mirrors datafeed negcaches)
-const MAX_CONCURRENT_FETCHES  = 10;           // provider-bounded in-flight market workers
+const MAX_CONCURRENT_FETCHES  = 10;           // cached/evaluation market workers
+// Production 2026-09-04: direct-perp recovery reached 8-9 simultaneous
+// requests, while each source breaker opens after three failed invocations.
+// Keep cached evaluation wide, but never admit a pre-breaker network wave
+// larger than the breaker threshold.
+export const MAX_CONCURRENT_DIRECT_FETCHES = 3;
 const FETCH_STAGGER_MS        = 150;          // ≥150ms between consecutive dispatches
 const TOP_K                   = 3;            // max candidates per protocol per boundary
 const RING_BUFFER_MAX         = 200;          // max telemetry ring-buffer entries
@@ -634,6 +639,72 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+type DirectFetchRelease = () => void;
+
+type DirectFetchWaiter = {
+  signal: AbortSignal;
+  onAbort: () => void;
+  resolve: (release: DirectFetchRelease) => void;
+  reject: (error: Error) => void;
+};
+
+function scannerAbortError(): Error {
+  return Object.assign(new Error("scanner direct-fetch wait aborted"), { name: "AbortError" });
+}
+
+/** Sweep-local FIFO admission for provider-bound recovery work. */
+class ScannerDirectFetchGate {
+  private active = 0;
+  private readonly waiters: DirectFetchWaiter[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  acquire(signal: AbortSignal): Promise<DirectFetchRelease> {
+    if (signal.aborted) return Promise.reject(scannerAbortError());
+    if (this.active < this.limit) {
+      this.active++;
+      return Promise.resolve(this.releaseOnce());
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: DirectFetchWaiter = {
+        signal,
+        resolve,
+        reject,
+        onAbort: () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          reject(scannerAbortError());
+        },
+      };
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+      this.waiters.push(waiter);
+    });
+  }
+
+  private releaseOnce(): DirectFetchRelease {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active--;
+      this.admitNext();
+    };
+  }
+
+  private admitNext(): void {
+    while (this.active < this.limit && this.waiters.length > 0) {
+      const waiter = this.waiters.shift()!;
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+      if (waiter.signal.aborted) {
+        waiter.reject(scannerAbortError());
+        continue;
+      }
+      this.active++;
+      waiter.resolve(this.releaseOnce());
+    }
+  }
+}
+
 // ─── Sweep fetch-error classification (pure, exported for unit tests) ─────────
 //
 // Ordering is a load-bearing invariant (2026-07-20 incident):
@@ -1145,6 +1216,22 @@ async function runSweep(): Promise<void> {
     const batchExactMisses = new Set<string>();
     const batchCacheUnavailable = new Set<string>();
     let batchFailoverOpen = false;
+    const directFetchGate = new ScannerDirectFetchGate(MAX_CONCURRENT_DIRECT_FETCHES);
+    const runDirectFetch = async <T>(
+      signal: AbortSignal,
+      deadlineAt: () => number,
+      task: () => Promise<T>,
+    ): Promise<{ started: true; value: T } | { started: false }> => {
+      const release = await directFetchGate.acquire(signal);
+      try {
+        requireScannerSweepOwner(owner);
+        if (signal.aborted) throw scannerAbortError();
+        if (deadlineAt() - Date.now() < 5_000) return { started: false };
+        return { started: true, value: await task() };
+      } finally {
+        release();
+      }
+    };
 
     // Resolve both protocol universes once, then collapse their shared
     // datafeed identities before touching the persistent cache. The finite
@@ -1268,7 +1355,8 @@ async function runSweep(): Promise<void> {
       const capacityLine =
         `[Scanner] CAPACITY PLAN: generation=${gen} protocol=${protocol} ` +
         `timeframes=${boundaryTfs.length} universe=${universe.length} ` +
-        `workers=${MAX_CONCURRENT_FETCHES} remaining=${remainingGlobalMs}ms ` +
+        `workers=${MAX_CONCURRENT_FETCHES} directFetchPermits=${MAX_CONCURRENT_DIRECT_FETCHES} ` +
+        `remaining=${remainingGlobalMs}ms ` +
         `allocated=${protocolBudgetMs}ms`;
       console.log(capacityLine);
       appendTelemetry(capacityLine);
@@ -1400,23 +1488,32 @@ async function runSweep(): Promise<void> {
                   signal: tfAbort.signal,
                   callerClass: "scanner" as const,
                 };
-                bars = cachedPrefix
-                  ? await completeCachedOHLCVTail(
-                      ticker,
-                      tf,
-                      startDate,
-                      endDate,
-                      cachedPrefix,
-                      undefined,
-                      fetchOptions,
-                    )
-                  : await fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
-                      ...fetchOptions,
-                      basisPolicy: fetchOptions.basisPolicy,
-                      bypassCache:
-                        batchExactMisses.has(cacheKey) || batchCacheUnavailable.has(cacheKey),
-                      cacheWritePolicy: batchCacheUnavailable.has(cacheKey) ? "skip" : undefined,
-                    });
+                const direct = await runDirectFetch(
+                  tfAbort.signal,
+                  () => Math.min(fetchDeadlineAt, protocolDeadlineAt()),
+                  () => cachedPrefix
+                    ? completeCachedOHLCVTail(
+                        ticker,
+                        tf,
+                        startDate,
+                        endDate,
+                        cachedPrefix,
+                        undefined,
+                        fetchOptions,
+                      )
+                    : fetchOHLCV(ticker, tf, startDate, endDate, undefined, {
+                        ...fetchOptions,
+                        basisPolicy: fetchOptions.basisPolicy,
+                        bypassCache:
+                          batchExactMisses.has(cacheKey) || batchCacheUnavailable.has(cacheKey),
+                        cacheWritePolicy: batchCacheUnavailable.has(cacheKey) ? "skip" : undefined,
+                      }),
+                );
+                if (!direct.started) {
+                  finishAttempt(market, "timeout-skipped");
+                  return;
+                }
+                bars = direct.value;
                 requireScannerSweepOwner(owner);
                 if (cachedPrefix) tailCompletionCount++;
                 // If the fetch came back EMPTY after running out its deadline,
@@ -1508,37 +1605,48 @@ async function runSweep(): Promise<void> {
                       signal: tfAbort.signal,
                       callerClass: "scanner" as const,
                     };
-                    parentBars = parentPrefix
-                      ? await completeCachedOHLCVTail(
-                          ticker,
-                          parentTf,
-                          parentStartDate,
-                          endDate,
-                          parentPrefix,
-                          undefined,
-                          parentFetchOptions,
-                        )
-                      : await fetchOHLCV(
-                          ticker,
-                          parentTf,
-                          parentStartDate,
-                          endDate,
-                          undefined,
-                          {
-                            ...parentFetchOptions,
-                            basisPolicy: parentFetchOptions.basisPolicy,
-                            bypassCache:
-                              batchExactMisses.has(parentCacheKey)
-                              || batchCacheUnavailable.has(parentCacheKey),
-                            cacheWritePolicy:
-                              batchCacheUnavailable.has(parentCacheKey) ? "skip" : undefined,
-                          },
-                        );
+                    const direct = await runDirectFetch(
+                      tfAbort.signal,
+                      () => Math.min(fetchDeadlineAt, protocolDeadlineAt()),
+                      () => parentPrefix
+                        ? completeCachedOHLCVTail(
+                            ticker,
+                            parentTf,
+                            parentStartDate,
+                            endDate,
+                            parentPrefix,
+                            undefined,
+                            parentFetchOptions,
+                          )
+                        : fetchOHLCV(
+                            ticker,
+                            parentTf,
+                            parentStartDate,
+                            endDate,
+                            undefined,
+                            {
+                              ...parentFetchOptions,
+                              basisPolicy: parentFetchOptions.basisPolicy,
+                              bypassCache:
+                                batchExactMisses.has(parentCacheKey)
+                                || batchCacheUnavailable.has(parentCacheKey),
+                              cacheWritePolicy:
+                                batchCacheUnavailable.has(parentCacheKey) ? "skip" : undefined,
+                            },
+                          ),
+                    );
+                    if (!direct.started) {
+                      parentBars = null;
+                    } else {
+                      parentBars = direct.value;
+                    }
                     requireScannerSweepOwner(owner);
-                    if (parentPrefix) tailCompletionCount++;
-                    candleCache.set(parentCacheKey, parentBars);
-                    candlePrefixes.delete(parentCacheKey);
-                    batchExactMisses.delete(parentCacheKey);
+                    if (parentBars) {
+                      if (parentPrefix) tailCompletionCount++;
+                      candleCache.set(parentCacheKey, parentBars);
+                      candlePrefixes.delete(parentCacheKey);
+                      batchExactMisses.delete(parentCacheKey);
+                    }
                   }
                 }
               } catch (err) {
