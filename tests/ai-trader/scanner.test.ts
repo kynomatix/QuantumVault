@@ -1406,6 +1406,138 @@ describe("scanner batch cache prefetch", () => {
     }
   });
 
+  it("never admits queued provider work after its timeframe signal aborts", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const markets = Array.from({ length: 8 }, (_, index) => `A${index}-PERP`);
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => timeframe === "15m"
+          ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
+          : {
+              complete: new Map(requested.map((ticker) => [ticker, parent])),
+              prefixes: new Map(),
+              exactMisses: new Set(),
+            },
+      );
+      let resolvePending!: (bars: OHLCV[]) => void;
+      const pending = new Promise<OHLCV[]>((resolve) => {
+        resolvePending = resolve;
+      });
+      const providerCalls: Array<{ ticker: string; abortedAtCall: boolean }> = [];
+      fetchOHLCVMock.mockImplementation((...args: unknown[]) => {
+        const options = args[5] as { signal: AbortSignal };
+        providerCalls.push({ ticker: String(args[0]), abortedAtCall: options.signal.aborted });
+        return pending;
+      });
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(250_000);
+      await sweep;
+
+      expect(providerCalls).toHaveLength(3);
+      expect(providerCalls.every((call) => call.abortedAtCall === false)).toBe(true);
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        accounting: {
+          attempted: 8,
+          scanned: 0,
+          timeoutSkipped: 5,
+          abandoned: 3,
+          unclassified: 0,
+          accountingValid: true,
+        },
+      });
+      const generation = getScannerStatus().currentGeneration?.generation;
+      resolvePending(textbookWBars(Date.now(), TF_15M));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getScannerStatus().currentGeneration?.generation).toBe(generation);
+      expect(providerCalls).toHaveLength(3);
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
+  it("evaluates exact cache hits before three held uncached fetches settle", async () => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const now = new Date("2026-08-18T00:15:00Z");
+      vi.setSystemTime(now);
+      const cachedMarkets = Array.from({ length: 3 }, (_, index) => `K${index}-PERP`);
+      const uncachedMarkets = Array.from({ length: 3 }, (_, index) => `U${index}-PERP`);
+      const markets = [...cachedMarkets, ...uncachedMarkets];
+      const cachedTickers = new Set(cachedMarkets.map((market) => market.replace("-PERP", "/USDT")));
+      const uncachedTickers = new Set(uncachedMarkets.map((market) => market.replace("-PERP", "/USDT")));
+      const cachedEvaluated = new Set<string>();
+      const primary = textbookWBars(now.getTime(), TF_15M)
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars()
+        .map((bar) => ({ ...bar, provenance: directPerp }));
+      const markOnEvaluation = (ticker: string, bars: typeof primary) => new Proxy(bars, {
+        get(target, property, receiver) {
+          if (property === "length") cachedEvaluated.add(ticker);
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
+      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      prefetchCachedOHLCVMock.mockImplementation(
+        async (requested: string[], timeframe: string) => {
+          const fixture = timeframe === "15m" ? primary : parent;
+          return {
+            complete: new Map([...cachedTickers].map((ticker) => [
+              ticker,
+              markOnEvaluation(ticker, fixture),
+            ])),
+            prefixes: new Map(),
+            exactMisses: new Set(requested.filter((ticker) => uncachedTickers.has(ticker))),
+          };
+        },
+      );
+      let cachedEvaluatedAtFirstProviderCall: number | null = null;
+      fetchOHLCVMock.mockImplementation(async (ticker: string, timeframe: string) => {
+        if (cachedEvaluatedAtFirstProviderCall === null) {
+          cachedEvaluatedAtFirstProviderCall = cachedEvaluated.size;
+        }
+        expect(uncachedTickers.has(ticker)).toBe(true);
+        await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
+        return timeframe === "15m" ? primary : parent;
+      });
+
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(cachedEvaluatedAtFirstProviderCall).toBe(3);
+      expect(cachedEvaluated).toEqual(cachedTickers);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await sweep;
+
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(6);
+      expect(completeCachedOHLCVTailMock).not.toHaveBeenCalled();
+      expect(fetchOHLCVMock.mock.calls.every((call) => uncachedTickers.has(call[0]))).toBe(true);
+      expect(getScannerStatus().currentGeneration).toMatchObject({
+        accounting: {
+          attempted: 6,
+          scanned: 6,
+          timeoutSkipped: 0,
+          abandoned: 0,
+          accountingValid: true,
+        },
+      });
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
   it("refuses a queued primary provider call inside the final five seconds as timeout-skipped", async () => {
     vi.useFakeTimers();
     try {
@@ -1566,21 +1698,19 @@ describe("scanner batch cache prefetch", () => {
       getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
       getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
       prefetchCachedOHLCVMock.mockImplementation(
-        async (requested: string[], timeframe: string) => timeframe === "15m"
-          ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
-          : {
-              complete: new Map(requested.map((ticker) => [ticker, parent])),
-              prefixes: new Map(),
-              exactMisses: new Set(),
-            },
+        async (requested: string[]) => ({
+          complete: new Map(),
+          prefixes: new Map(),
+          exactMisses: new Set(requested),
+        }),
       );
-      fetchOHLCVMock.mockImplementation(async (ticker: string) => {
+      fetchOHLCVMock.mockImplementation(async (ticker: string, timeframe: string) => {
         const index = Number(ticker.match(/G(\d+)/)?.[1] ?? 0);
         await new Promise<void>((resolve) => setTimeout(
           resolve,
           retainedGateLatencyMs[index % retainedGateLatencyMs.length],
         ));
-        return primary;
+        return timeframe === "15m" ? primary : parent;
       });
 
       startScanner();
@@ -1588,7 +1718,7 @@ describe("scanner batch cache prefetch", () => {
       await vi.advanceTimersByTimeAsync(90_000);
       await sweep;
 
-      expect(fetchOHLCVMock).toHaveBeenCalledTimes(40);
+      expect(fetchOHLCVMock).toHaveBeenCalledTimes(80);
       expect(getScannerStatus().currentGeneration).toMatchObject({
         accounting: {
           attempted: 40,
