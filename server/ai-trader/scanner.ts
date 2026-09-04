@@ -656,6 +656,7 @@ function scannerAbortError(): Error {
 class ScannerDirectFetchGate {
   private active = 0;
   private readonly waiters: DirectFetchWaiter[] = [];
+  private readonly releasesBySignal = new Map<AbortSignal, Set<DirectFetchRelease>>();
 
   constructor(private readonly limit: number) {}
 
@@ -663,7 +664,7 @@ class ScannerDirectFetchGate {
     if (signal.aborted) return Promise.reject(scannerAbortError());
     if (this.active < this.limit) {
       this.active++;
-      return Promise.resolve(this.releaseOnce());
+      return Promise.resolve(this.releaseOnce(signal));
     }
     return new Promise((resolve, reject) => {
       const waiter: DirectFetchWaiter = {
@@ -681,14 +682,33 @@ class ScannerDirectFetchGate {
     });
   }
 
-  private releaseOnce(): DirectFetchRelease {
+  /**
+   * Reclaim logical permits held by requests that ignored this signal through
+   * the bounded teardown window. The underlying socket can still be alive,
+   * but it is already outside sweep control and remains covered by the source
+   * breaker. A late settlement calls the same idempotent release and is a no-op.
+   */
+  reclaim(signal: AbortSignal): number {
+    const releases = [...(this.releasesBySignal.get(signal) ?? [])];
+    for (const release of releases) release();
+    return releases.length;
+  }
+
+  private releaseOnce(signal: AbortSignal): DirectFetchRelease {
     let released = false;
-    return () => {
+    const release = () => {
       if (released) return;
       released = true;
+      const signalReleases = this.releasesBySignal.get(signal);
+      signalReleases?.delete(release);
+      if (signalReleases?.size === 0) this.releasesBySignal.delete(signal);
       this.active--;
       this.admitNext();
     };
+    const signalReleases = this.releasesBySignal.get(signal) ?? new Set<DirectFetchRelease>();
+    signalReleases.add(release);
+    this.releasesBySignal.set(signal, signalReleases);
+    return release;
   }
 
   private admitNext(): void {
@@ -700,7 +720,7 @@ class ScannerDirectFetchGate {
         continue;
       }
       this.active++;
-      waiter.resolve(this.releaseOnce());
+      waiter.resolve(this.releaseOnce(waiter.signal));
     }
   }
 }
@@ -1821,6 +1841,12 @@ async function runSweep(): Promise<void> {
             appendTelemetry(hangLine);
             // Swallow any late rejection from abandoned promises.
             for (const p of pendingPromises) p.catch(() => {});
+            // The provider call ignored cancellation through the bounded
+            // teardown window. Reclaim its logical admission permit so this
+            // timeframe cannot starve later timeframes or protocols. The
+            // request may still own a physical socket until it settles; its
+            // eventual finally-release is idempotent and cannot double-credit.
+            directFetchGate.reclaim(tfAbort.signal);
           }
         }
         releaseSweepChildAbort(owner, tfAbort);

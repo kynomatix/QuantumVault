@@ -1179,7 +1179,7 @@ describe("active sweep lifecycle ownership", () => {
     stopScanner();
   });
 
-  it("abandons only three admitted abort-ignoring tails and never starts queued provider work", async () => {
+  it("reclaims three abandoned permits so the next protocol reaches the provider", async () => {
     vi.useFakeTimers();
     try {
       stopScanner();
@@ -1225,7 +1225,7 @@ describe("active sweep lifecycle ownership", () => {
       await vi.advanceTimersByTimeAsync(270_000);
       await sweep;
 
-      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(3);
+      expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(6);
       const status = getScannerStatus();
       expect(status.currentGeneration).toMatchObject({
         verdict: "diagnostic_only",
@@ -1233,8 +1233,8 @@ describe("active sweep lifecycle ownership", () => {
           attempted: 6,
           scanned: 0,
           errors: 0,
-          timeoutSkipped: 3,
-          abandoned: 3,
+          timeoutSkipped: 0,
+          abandoned: 6,
           unclassified: 0,
           accountingValid: true,
         },
@@ -1244,14 +1244,14 @@ describe("active sweep lifecycle ownership", () => {
       pending.resolve(textbookWBars(Date.now(), TF_15M));
       await vi.advanceTimersByTimeAsync(0);
       expect(getScannerStatus().currentGeneration?.generation).toBe(generation);
-      expect(getScannerStatus().currentGeneration?.accounting.abandoned).toBe(3);
+      expect(getScannerStatus().currentGeneration?.accounting.abandoned).toBe(6);
       expect(recordCriticalErrorMock).toHaveBeenCalledTimes(1);
       expect(recordCriticalErrorMock).toHaveBeenCalledWith(expect.objectContaining({
         source: "scanner-sweep",
         severity: "critical",
         context: expect.objectContaining({
           attempted: 6,
-          abandoned: 3,
+          abandoned: 6,
           accountingValid: true,
         }),
       }));
@@ -1350,7 +1350,7 @@ describe("scanner batch cache prefetch", () => {
     { name: "primary stale-prefix recovery", primary: "prefix", parent: "complete", helper: "tail", timeframe: "15m" },
     { name: "parent full recovery", primary: "complete", parent: "miss", helper: "fetch", timeframe: "1h" },
     { name: "parent stale-prefix recovery", primary: "complete", parent: "prefix", helper: "tail", timeframe: "1h" },
-  ] as const)("routes $name through the sweep-local direct-fetch gate", async (scenario) => {
+  ] as const)("routes $name through the expected recovery helper", async (scenario) => {
     vi.useFakeTimers();
     try {
       stopScanner();
