@@ -98,7 +98,7 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(performancePanel).toContain("Performance temporarily unavailable.");
     expect(performancePanel).toContain("omitted because terminal paper/live attribution is unavailable.");
     expect(performancePanel).toContain("excluded from this {paper ? 'paper' : 'live'} chart.");
-    expect(performancePanel).toContain("omitted because realized P&amp;L is invalid.");
+    expect(performancePanel).toContain("omitted because realized P&amp;L is unavailable or invalid.");
   });
 
   it("uses exact qualification-era progress rather than the loaded timeline", () => {
@@ -176,5 +176,31 @@ describe("AI Trader drawer overall mode-scoped performance", () => {
     expect(trackRecordPanel).toContain("omittedInvalidPnlTrades");
     expect(trackRecordPanel).toContain("paper/live attribution unavailable");
     expect(trackRecordPanel).not.toContain("netPnlAllIn");
+  });
+
+  it("never turns a confirmed unpriced close into zero P&L or an empty population", () => {
+    const timeline = source.slice(source.indexOf('data-testid="activity-timeline"'), source.indexOf('<TabsContent value="track-record"'));
+    expect(timeline).toContain('const pnl = accountingNumber(d.realizedPnl)');
+    expect(timeline).toContain("const isClosed = !!d.closedAt && d.outcome === 'executed'");
+    expect(timeline).toContain('isClosed && pnl !== null');
+    expect(timeline).toContain('isClosed && pnl === null');
+    expect(timeline).toContain('Closed · P&amp;L unavailable');
+    expect(timeline).not.toContain('Number(d.realizedPnl ?? 0)');
+    expect(performancePanel).toContain('completeness.hasPricedSubtotal');
+    expect(performancePanel).toContain('Incomplete — known results only');
+    expect(performancePanel).toContain('Closed trades exist, but attributable P&L is unavailable.');
+    expect(trackRecordCalculations).toContain('trackRecordCompleteness?.hasPricedSubtotal');
+    expect(trackRecordPanel).toContain("trackRecordCompleteness.missingPnl ?? '?'");
+    expect(trackRecordPanel).toContain("trackRecordCompleteness.unattributed ?? '?'");
+    expect(trackRecordPanel).toContain('Incomplete — known subtotal only');
+  });
+
+  it("keeps unknown outcomes out of priced win rate and withholds dependent loaded-history totals", () => {
+    expect(source).toContain('const loadedPnlIncomplete = pricedClosedDecisions.length !== closedDecisions.length');
+    expect(source).toContain('const netPnl = loadedPnlIncomplete ? null');
+    expect(source).toContain('wins / pricedClosedDecisions.length');
+    expect(source).toContain('if (loadedPnlIncomplete) return null');
+    expect(trackRecordPanel).toContain('Win rate (priced, loaded)');
+    expect(trackRecordPanel).toContain('Unavailable — closed P&amp;L incomplete');
   });
 });

@@ -59,4 +59,17 @@ describe("AI Trader card mode-scoped P&L truth", () => {
     expect(card).toContain("Current open unrealized");
     expect(card).toContain(": '--'");
   });
+
+  it('discloses missing closed accounting on the card itself, not only in a tooltip', () => {
+    const card = cardPerformanceSource();
+    expect(card).toContain('const completeness = performanceCompleteness(projection ?? {})');
+    expect(card).toContain('&& completeness.hasPricedSubtotal');
+    expect(card).toContain('data-testid="card-pnl-incomplete"');
+    expect(card).toContain('Incomplete — known subtotal');
+    expect(card).toContain('Incomplete — P&L unavailable');
+    expect(card).toContain("completeness.missingPnl ?? '?'");
+    expect(card).toContain("completeness.unattributed ?? '?'");
+    expect(card).toContain('projection.omittedInvalidPnlTrades');
+    expect(card).toContain('Missing P&L is not zero.');
+  });
 });

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import { accountingNumber, performanceCompleteness } from '@/lib/ai-trader-accounting-display';
 import {
   Sheet,
   SheetContent,
@@ -518,10 +519,11 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
   }
 
   const paper = performance.mode === 'paper_trial';
+  const completeness = performanceCompleteness(performance);
   const title = paper
     ? 'All-time paper closed P&L'
     : 'All-time live closed P&L';
-  const pnlText = formatPerformancePnl(performance.netPnl);
+  const pnlText = completeness.hasPricedSubtotal ? formatPerformancePnl(performance.netPnl) : 'Unavailable';
   // parsePerformanceResponse enforces tradeCount === points.length, so every
   // non-empty series receives exactly one synthetic origin and no real point
   // can be discarded by this presentation-only branch.
@@ -534,10 +536,11 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-xs font-medium">{title}</p>
-          <p className="text-[10px] text-muted-foreground">{performance.tradeCount} closed {plural(performance.tradeCount, 'trade')}</p>
+          <p className="text-[10px] text-muted-foreground">{performance.tradeCount} priced closed {plural(performance.tradeCount, 'trade')}</p>
+          {completeness.incomplete && <p className="text-[10px] text-amber-400" data-testid="performance-incomplete">Incomplete — known results only</p>}
         </div>
         <p
-          className={`text-sm font-semibold ${performance.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+          className={`text-sm font-semibold ${!completeness.hasPricedSubtotal ? 'text-muted-foreground' : performance.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
           data-testid="ai-trader-performance-net-pnl"
         >
           {pnlText}
@@ -583,7 +586,7 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
         </div>
       ) : (
         <div className="text-xs text-muted-foreground space-y-1" data-testid="ai-trader-performance-empty">
-          <p>{paper ? 'No closed paper trades yet.' : 'No closed live trades yet.'}</p>
+          <p>{completeness.incomplete ? 'Closed trades exist, but attributable P&L is unavailable.' : paper ? 'No closed paper trades yet.' : 'No closed live trades yet.'}</p>
         </div>
       )}
 
@@ -599,7 +602,7 @@ function PerformancePanel({ performance }: { performance: PerformanceState }) {
       )}
       {performance.omittedInvalidPnlTrades > 0 && (
         <p className="text-[10px] text-amber-400/90">
-          {performance.omittedInvalidPnlTrades} {plural(performance.omittedInvalidPnlTrades, 'trade')} omitted because realized P&amp;L is invalid.
+          {performance.omittedInvalidPnlTrades} closed {plural(performance.omittedInvalidPnlTrades, 'trade')} omitted because realized P&amp;L is unavailable or invalid. These trades are closed, not zero-P&amp;L trades.
         </p>
       )}
     </div>
@@ -1091,18 +1094,21 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   };
 
   const closedDecisions = history.filter((d) => d.closedAt && d.outcome === 'executed');
+  const pricedClosedDecisions = closedDecisions.filter(d => accountingNumber(d.realizedPnl) !== null);
+  const loadedPnlIncomplete = pricedClosedDecisions.length !== closedDecisions.length;
   const tradesCount = closedDecisions.length;
-  const netPnl = closedDecisions.reduce((sum, d) => sum + Number(d.realizedPnl ?? 0), 0);
+  const netPnl = loadedPnlIncomplete ? null : pricedClosedDecisions.reduce((sum, d) => sum + accountingNumber(d.realizedPnl)!, 0);
   const totalFees = history.reduce((sum, d) => sum + Number(d.feesPaid ?? 0), 0);
   const totalLlmCost = history.reduce((sum, d) => sum + Number(d.llmCostUsd ?? 0), 0);
-  const wins = closedDecisions.filter((d) => Number(d.realizedPnl ?? 0) > 0).length;
-  const winRate = tradesCount > 0 ? Math.round((wins / tradesCount) * 100) : null;
+  const wins = pricedClosedDecisions.filter((d) => accountingNumber(d.realizedPnl)! > 0).length;
+  const winRate = pricedClosedDecisions.length > 0 ? Math.round((wins / pricedClosedDecisions.length) * 100) : null;
   const alloc = Number(bot?.allocatedUsdc ?? 0);
   const maxDdPct = (() => {
+    if (loadedPnlIncomplete) return null;
     if (!closedDecisions.length) return 0;
     let peak = 0, equity = 0, dd = 0;
     for (const d of closedDecisions) {
-      equity += Number(d.realizedPnl ?? 0);
+      equity += accountingNumber(d.realizedPnl)!;
       if (equity > peak) peak = equity;
       const draw = peak - equity;
       if (draw > dd) dd = draw;
@@ -1118,6 +1124,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   // totalLlmCost misses anything older. Use the server lifetime total for that distinct tile.
   const displayLlmCost: number = lifetimeStats?.totalLlmCost ?? totalLlmCost;
   const trackRecordClosedPnl = performance.status === 'available' ? performance.netPnl : null;
+  const trackRecordCompleteness = performance.status === 'available' ? performanceCompleteness(performance) : null;
   // Zero is permitted only for states last written under a confirmed-flat
   // transition. Every new or unknown status/reason defaults to withholding the
   // headline until the server projects current position authority directly.
@@ -1134,7 +1141,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
   const trackRecordOpenPnl = !trackRecordHasOpenExposure
     ? 0
     : (openUnrealizedPnl !== null && Number.isFinite(openUnrealizedPnl) ? openUnrealizedPnl : null);
-  const trackRecordNetPnl = trackRecordClosedPnl !== null && trackRecordOpenPnl !== null
+  const trackRecordNetPnl = trackRecordCompleteness?.hasPricedSubtotal && trackRecordClosedPnl !== null && trackRecordOpenPnl !== null
     ? trackRecordClosedPnl + trackRecordOpenPnl
     : null;
   const trackRecordMode = performance.status === 'available'
@@ -1142,8 +1149,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     : null;
 
   const degenDaysAlive = bot ? Math.floor((Date.now() - new Date(bot.createdAt ?? Date.now()).getTime()) / 86400000) : 0;
-  const degenRemaining = alloc + netPnl;
-  const degenPct = alloc > 0 ? Math.max(0, Math.round((degenRemaining / alloc) * 100)) : 0;
+  const degenRemaining = netPnl === null ? null : alloc + netPnl;
+  const degenPct = degenRemaining !== null && alloc > 0 ? Math.max(0, Math.round((degenRemaining / alloc) * 100)) : null;
 
   const handleAnalyze = async () => {
     if (!bot) return;
@@ -1646,8 +1653,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     const violations = violationChipLabels(d.guardrailViolations);
                     const rowDigestMarket = (d.contextDigest as any)?.market as string | undefined;
                     const rowMarketLabel = rowDigestMarket ? rowDigestMarket.replace(/-PERP$/i, '') : null;
-                    const pnl = Number(d.realizedPnl ?? 0);
-                    const hasPnl = d.closedAt && d.outcome === 'executed';
+                    const pnl = accountingNumber(d.realizedPnl);
+                    const isClosed = !!d.closedAt && d.outcome === 'executed';
                     const beInfo = isCompressed ? null : parseBreakevenInfo(clamped?.breakevenProtect);
                     return (
                       <div
@@ -1678,12 +1685,13 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                             )}
                           </div>
                           <div className="flex items-center gap-2">
-                            {hasPnl && (
+                            {isClosed && pnl !== null && (
                               <span className={`text-xs font-semibold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                 {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
                               </span>
                             )}
                             <span className="text-[10px] text-muted-foreground">{formatRelTime(d.decidedAt)}</span>
+                            {isClosed && pnl === null && <span className="text-xs text-amber-400" data-testid={`activity-unpriced-${d.id}`}>Closed · P&amp;L unavailable</span>}
                           </div>
                         </div>
                         {violations.length > 0 && (
@@ -1778,6 +1786,10 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                         <p className="text-xs text-muted-foreground">
                           {trackRecordMode ? `Overall ${trackRecordMode} P&L (closed + open)` : 'Overall P&L'}
                         </p>
+                        {trackRecordCompleteness?.incomplete && <p className="text-xs text-amber-400" data-testid="track-record-incomplete">
+                          {trackRecordCompleteness.hasPricedSubtotal ? 'Incomplete — known subtotal only' : 'Incomplete — P&L unavailable'}
+                          {' · '}{trackRecordCompleteness.missingPnl ?? '?'} unpriced · {trackRecordCompleteness.unattributed ?? '?'} unattributed
+                        </p>}
                         <p className={`text-2xl font-bold mt-0.5 ${trackRecordNetPnl === null
                           ? 'text-muted-foreground'
                           : trackRecordNetPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -1788,7 +1800,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <TooltipContent className="max-w-[240px] bg-popover border border-border text-xs p-3 space-y-1.5">
                       {trackRecordNetPnl === null ? (
                         <p>
-                          {performance.status === 'available' && openDecision !== null
+                          {trackRecordCompleteness && !trackRecordCompleteness.hasPricedSubtotal
+                            ? 'Closed trades exist, but their attributable P&L is unavailable; no zero result is assumed.'
+                            : performance.status === 'available' && openDecision !== null
                             ? 'Open-position unrealized P&L is unavailable, so the overall figure is withheld.'
                             : performance.status === 'available' && trackRecordHasOpenExposure
                               ? 'The bot state cannot be proven flat, so the overall figure is withheld.'
@@ -1811,7 +1825,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                             <p>{performance.excludedOtherModeTrades} other-mode {performance.excludedOtherModeTrades === 1 ? 'trade' : 'trades'} excluded.</p>
                           )}
                           {performance.omittedInvalidPnlTrades > 0 && (
-                            <p>{performance.omittedInvalidPnlTrades} closed {performance.omittedInvalidPnlTrades === 1 ? 'trade' : 'trades'} omitted: realized P&L invalid.</p>
+                            <p>{performance.omittedInvalidPnlTrades} closed {performance.omittedInvalidPnlTrades === 1 ? 'trade' : 'trades'} omitted: realized P&L unavailable or invalid.</p>
                           )}
                         </>
                       ) : null}
@@ -1821,10 +1835,10 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
 
                 <div className="grid grid-cols-2 gap-3">
                   {[
-                    { label: 'Win rate', value: winRate !== null ? `${winRate}%` : '—' },
-                    { label: 'Closed trades', value: String(tradesCount) },
-                    { label: 'Max drawdown', value: maxDdPct > 0 ? `${maxDdPct.toFixed(1)}%` : '—' },
-                    { label: 'Fees paid', value: `$${totalFees.toFixed(4)}` },
+                    { label: 'Win rate (priced, loaded)', value: winRate !== null ? `${winRate}%` : '—' },
+                    { label: 'Closed trades (loaded)', value: String(tradesCount) },
+                    { label: 'Max drawdown (loaded)', value: maxDdPct !== null && maxDdPct > 0 ? `${maxDdPct.toFixed(1)}%` : '—' },
+                    { label: 'Known fees (loaded)', value: `$${totalFees.toFixed(4)}` },
                     { label: 'AI cost', value: `$${displayLlmCost.toFixed(4)}` },
                   ].map((item) => (
                     <div key={item.label} className="p-3 rounded-xl bg-muted/30 space-y-0.5">
@@ -1864,7 +1878,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <div>
                       <p className="text-xs font-semibold text-red-400">Full Send survival</p>
                       <p className="text-sm text-muted-foreground">
-                        {degenDaysAlive}d · <span className={degenPct > 50 ? 'text-emerald-400' : degenPct > 20 ? 'text-amber-400' : 'text-red-400'}>{degenPct}%</span> of allocation remaining
+                        {degenDaysAlive}d · {degenPct === null ? <span className="text-amber-400">Unavailable — closed P&amp;L incomplete</span> : <><span className={degenPct > 50 ? 'text-emerald-400' : degenPct > 20 ? 'text-amber-400' : 'text-red-400'}>{degenPct}%</span> of allocation remaining (loaded history)</>}
                       </p>
                     </div>
                   </div>
