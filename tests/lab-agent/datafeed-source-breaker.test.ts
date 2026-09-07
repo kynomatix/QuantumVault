@@ -15,6 +15,8 @@
 //   C. Any successful OKX response resets the streak.
 //   D. Half-open: after the cooldown, ONE probe is allowed; a single failed
 //      probe re-trips immediately (no fresh 3-symbol penalty).
+//   E. A concurrent general-fetch peer cannot join the half-open probe and
+//      preserves its established Gate spot fallback.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
@@ -221,5 +223,73 @@ describe("fetchOHLCV — OKX source-level circuit breaker", () => {
     // …and its single failure re-trips the breaker (no 3-symbol penalty).
     await runFetch("BRKD6/USDT");
     expect(callsTo(fetchSpy, "okx.com")).toBe(okxAfterProbe);
+  });
+
+  it("E: admits one general-fetch half-open owner while a peer falls through without an OKX request", async () => {
+    const rangeStart = Date.now() - 100 * TF_MS;
+    const fetchSpy = makeFetch(() => "network-down", rangeStart);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await runFetch("BRKE1/USDT");
+    await runFetch("BRKE2/USDT");
+    await runFetch("BRKE3/USDT");
+    vi.setSystemTime(Date.now() + 16 * 60 * 1000);
+
+    let resolveOwner!: (response: unknown) => void;
+    fetchSpy.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.includes("okx.com")) {
+        return new Promise((resolve) => { resolveOwner = resolve; });
+      }
+      if (u.includes("gateio.ws")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [],
+          text: async () => "",
+        };
+      }
+      throw new Error(`unexpected source ${u}`);
+    });
+
+    const startFetch = (symbol: string) => {
+      const now = Date.now();
+      return fetchOHLCV(
+        symbol,
+        "15m",
+        new Date(now - 100 * TF_MS).toISOString(),
+        new Date(now).toISOString(),
+        undefined,
+        {
+          basisPolicy: {
+            ...LAB_ALL_KNOWN_CANDLE_POLICY,
+            acceptedBasis: ["perp", "spot"] as const,
+          },
+        },
+      );
+    };
+
+    const owner = startFetch("BRKE-OWNER/USDT");
+    owner.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    const okxCallsWithOwnerPending = callsTo(fetchSpy, "okx.com");
+    expect(okxCallsWithOwnerPending).toBeGreaterThan(0);
+
+    await expect(startFetch("BRKE-PEER/USDT")).resolves.toEqual([]);
+    expect(callsTo(fetchSpy, "okx.com")).toBe(okxCallsWithOwnerPending);
+    expect(callsTo(fetchSpy, "gateio.ws")).toBeGreaterThan(0);
+
+    const now = Date.now();
+    const data = [[
+      String(now - 100 * TF_MS),
+      "100", "101", "99", "100", "1000", "1000", "1000", "1",
+    ]];
+    resolveOwner({
+      ok: true,
+      status: 200,
+      json: async () => ({ code: "0", data }),
+      text: async () => "",
+    });
+    await expect(owner).resolves.toEqual(expect.any(Array));
   });
 });

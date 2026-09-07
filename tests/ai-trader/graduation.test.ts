@@ -487,10 +487,10 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
-  it("declares scanner direct-tail concurrency recovery as a reviewed no-bump", () => {
+  it("declares scanner half-open probe recovery as a reviewed no-bump", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 40,
+      decisionGeneration: 41,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
@@ -510,19 +510,20 @@ describe("qualification era forgotten-declaration gate", () => {
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
       materialVersion: 1,
-      decisionGeneration: 18,
+      decisionGeneration: 19,
       decision: "no_bump",
     });
   });
 
   it("binds the shared graduation owner path to the reviewed scanner no-bump declaration", () => {
     const base = cloneRegistry();
-    base.scanner_capability_policy.decisionGeneration = 39;
+    base.scanner_capability_policy.decisionGeneration = 40;
+    base.accepted_candle_provenance.decisionGeneration = 18;
 
     expect(validateQualificationEraDeclarationChanges({
       base,
       current: cloneRegistry(),
-      changedPaths: ["server/ai-trader/scanner.ts", "server/ai-trader/graduation.ts"],
+      changedPaths: ["server/lab/datafeed.ts", "server/ai-trader/graduation.ts"],
     })).toEqual([]);
   });
 

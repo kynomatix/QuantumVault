@@ -190,7 +190,33 @@ export type OkxSourceBreakerDiagnostic = OkxRequestDiagnosticContext & Readonly<
   cooldownMs: number;
 }>;
 
-export type OkxDatafeedDiagnostic = OkxRequestTerminalDiagnostic | OkxSourceBreakerDiagnostic;
+export type SourceHalfOpenLifecycleAction =
+  | "claim"
+  | "reject_active_owner"
+  | "release_success"
+  | "release_failure"
+  | "release_cancellation"
+  | "release_exception"
+  | "ignore_unowned_success"
+  | "ignore_unowned_failure"
+  | "ignore_stale_token";
+
+export type SourceHalfOpenLifecycleDiagnostic = Readonly<{
+  kind:
+    | "source_half_open_claim"
+    | "source_half_open_reject"
+    | "source_half_open_release"
+    | "source_half_open_stale_settlement";
+  provider: DirectPerpProvider;
+  action: SourceHalfOpenLifecycleAction;
+  probeOrdinal: number;
+  activeOwnerCount: 0 | 1;
+}>;
+
+export type OkxDatafeedDiagnostic =
+  | OkxRequestTerminalDiagnostic
+  | OkxSourceBreakerDiagnostic
+  | SourceHalfOpenLifecycleDiagnostic;
 type OkxDatafeedDiagnosticReporter = (record: OkxDatafeedDiagnostic) => void;
 let okxDatafeedDiagnosticReporter: OkxDatafeedDiagnosticReporter | null = null;
 
@@ -253,15 +279,122 @@ let okxSourceDownUntil = 0;
 let gateFuturesSourceConsecutiveFailures = 0;
 let gateFuturesSourceDownUntil = 0;
 
-function isOkxSourceDown(): boolean {
-  return Date.now() < okxSourceDownUntil;
+type SourceHalfOpenLease = Readonly<{
+  provider: DirectPerpProvider;
+  ordinal: number;
+}>;
+type SourceAdmission = Readonly<{
+  admitted: boolean;
+  lease: SourceHalfOpenLease | null;
+  denial: "open" | "active_owner" | null;
+}>;
+
+let sourceHalfOpenOrdinal = 0;
+let okxSourceHalfOpenOwner: SourceHalfOpenLease | null = null;
+let gateFuturesSourceHalfOpenOwner: SourceHalfOpenLease | null = null;
+
+function sourceDownUntil(provider: DirectPerpProvider): number {
+  return provider === "okx" ? okxSourceDownUntil : gateFuturesSourceDownUntil;
 }
 
-function recordOkxSourceSuccess(): void {
+function sourceHalfOpenOwner(provider: DirectPerpProvider): SourceHalfOpenLease | null {
+  return provider === "okx" ? okxSourceHalfOpenOwner : gateFuturesSourceHalfOpenOwner;
+}
+
+function setSourceHalfOpenOwner(
+  provider: DirectPerpProvider,
+  owner: SourceHalfOpenLease | null,
+): void {
+  if (provider === "okx") okxSourceHalfOpenOwner = owner;
+  else gateFuturesSourceHalfOpenOwner = owner;
+}
+
+function emitSourceHalfOpenLifecycle(
+  kind: SourceHalfOpenLifecycleDiagnostic["kind"],
+  provider: DirectPerpProvider,
+  action: SourceHalfOpenLifecycleAction,
+  lease: SourceHalfOpenLease,
+): void {
+  emitOkxDatafeedDiagnostic(Object.freeze({
+    kind,
+    provider,
+    action,
+    probeOrdinal: lease.ordinal,
+    activeOwnerCount: sourceHalfOpenOwner(provider) === null ? 0 : 1,
+  }));
+}
+
+function admitSourceRequest(provider: DirectPerpProvider): SourceAdmission {
+  const downUntil = sourceDownUntil(provider);
+  if (downUntil === 0) return { admitted: true, lease: null, denial: null };
+  if (downUntil > Date.now()) return { admitted: false, lease: null, denial: "open" };
+  const owner = sourceHalfOpenOwner(provider);
+  if (owner) {
+    emitSourceHalfOpenLifecycle(
+      "source_half_open_reject",
+      provider,
+      "reject_active_owner",
+      owner,
+    );
+    return { admitted: false, lease: null, denial: "active_owner" };
+  }
+  const lease = Object.freeze({ provider, ordinal: ++sourceHalfOpenOrdinal });
+  setSourceHalfOpenOwner(provider, lease);
+  emitSourceHalfOpenLifecycle("source_half_open_claim", provider, "claim", lease);
+  return { admitted: true, lease, denial: null };
+}
+
+function mutationOwnsSource(
+  provider: DirectPerpProvider,
+  lease: SourceHalfOpenLease | null,
+  outcome: "success" | "failure",
+): boolean {
+  const owner = sourceHalfOpenOwner(provider);
+  if (lease === null && owner === null) return true;
+  if (lease !== null && owner === lease) return true;
+  const diagnosticLease = lease ?? owner;
+  if (diagnosticLease) {
+    emitSourceHalfOpenLifecycle(
+      "source_half_open_stale_settlement",
+      provider,
+      lease === null ? `ignore_unowned_${outcome}` : "ignore_stale_token",
+      diagnosticLease,
+    );
+  }
+  return false;
+}
+
+function releaseSourceHalfOpenOwner(
+  lease: SourceHalfOpenLease | null,
+  action: "release_success" | "release_failure" | "release_cancellation" | "release_exception",
+): boolean {
+  if (!lease) return false;
+  if (sourceHalfOpenOwner(lease.provider) !== lease) {
+    emitSourceHalfOpenLifecycle(
+      "source_half_open_stale_settlement",
+      lease.provider,
+      "ignore_stale_token",
+      lease,
+    );
+    return false;
+  }
+  setSourceHalfOpenOwner(lease.provider, null);
+  emitSourceHalfOpenLifecycle("source_half_open_release", lease.provider, action, lease);
+  return true;
+}
+
+function recordOkxSourceSuccess(lease: SourceHalfOpenLease | null = null): void {
+  if (!mutationOwnsSource("okx", lease, "success")) return;
   okxSourceConsecutiveFailures = 0;
+  okxSourceDownUntil = 0;
+  releaseSourceHalfOpenOwner(lease, "release_success");
 }
 
-function recordOkxSourceFailure(context: OkxRequestDiagnosticContext): void {
+function recordOkxSourceFailure(
+  context: OkxRequestDiagnosticContext,
+  lease: SourceHalfOpenLease | null = null,
+): void {
+  if (!mutationOwnsSource("okx", lease, "failure")) return;
   const priorConsecutiveFailures = okxSourceConsecutiveFailures;
   okxSourceConsecutiveFailures++;
   let opened = false;
@@ -287,17 +420,21 @@ function recordOkxSourceFailure(context: OkxRequestDiagnosticContext): void {
     opened,
     cooldownMs: OKX_SOURCE_BREAKER_COOLDOWN_MS,
   }));
+  releaseSourceHalfOpenOwner(lease, "release_failure");
 }
 
-function isGateFuturesSourceDown(): boolean {
-  return Date.now() < gateFuturesSourceDownUntil;
-}
-
-function recordGateFuturesSourceSuccess(): void {
+function recordGateFuturesSourceSuccess(lease: SourceHalfOpenLease | null = null): void {
+  if (!mutationOwnsSource("gate", lease, "success")) return;
   gateFuturesSourceConsecutiveFailures = 0;
+  gateFuturesSourceDownUntil = 0;
+  releaseSourceHalfOpenOwner(lease, "release_success");
 }
 
-function recordGateFuturesSourceFailure(context: OkxRequestDiagnosticContext): void {
+function recordGateFuturesSourceFailure(
+  context: OkxRequestDiagnosticContext,
+  lease: SourceHalfOpenLease | null = null,
+): void {
+  if (!mutationOwnsSource("gate", lease, "failure")) return;
   const priorConsecutiveFailures = gateFuturesSourceConsecutiveFailures;
   gateFuturesSourceConsecutiveFailures++;
   let opened = false;
@@ -320,6 +457,7 @@ function recordGateFuturesSourceFailure(context: OkxRequestDiagnosticContext): v
     opened,
     cooldownMs: GATE_FUTURES_SOURCE_BREAKER_COOLDOWN_MS,
   }));
+  releaseSourceHalfOpenOwner(lease, "release_failure");
 }
 
 /** Test-only: reset the OKX source breaker between test cases. */
@@ -328,6 +466,9 @@ export function __testResetOkxSourceBreaker(): void {
   okxSourceDownUntil = 0;
   gateFuturesSourceConsecutiveFailures = 0;
   gateFuturesSourceDownUntil = 0;
+  sourceHalfOpenOrdinal = 0;
+  okxSourceHalfOpenOwner = null;
+  gateFuturesSourceHalfOpenOwner = null;
   okxFailedInstruments.clear();
   gateFuturesFailedContracts.clear();
 }
@@ -1530,28 +1671,45 @@ async function fetchDirectPerpCandles(
   let sawMalformedProvenance = false;
   let lastPureProviderCandles: ProvenancedOHLCV[] = [];
   let deadlineSkipped = false;
+  const providerAdmissions = new Map<DirectPerpProvider, SourceAdmission>();
+  const providerOtherwiseAdmissible = new Set<DirectPerpProvider>();
+  const providerCircuitBlocked = new Set<DirectPerpProvider>();
+
+  const clearSettledLease = (provider: DirectPerpProvider): void => {
+    const admission = providerAdmissions.get(provider);
+    if (admission?.lease) {
+      providerAdmissions.set(provider, { admitted: true, lease: null, denial: null });
+    }
+  };
+
+  const settleProviderSuccess = (provider: DirectPerpProvider): void => {
+    const lease = providerAdmissions.get(provider)?.lease ?? null;
+    if (provider === "okx") recordOkxSourceSuccess(lease);
+    else recordGateFuturesSourceSuccess(lease);
+    clearSettledLease(provider);
+  };
 
   const finalizeProviderHealth = (): void => {
     for (const provider of providerTransportFailed) {
       if (providerReachable.has(provider)) continue;
       const context = providerLastFailure.get(provider);
       if (!context) continue;
-      if (provider === "okx") recordOkxSourceFailure(context);
-      else recordGateFuturesSourceFailure(context);
+      const lease = providerAdmissions.get(provider)?.lease ?? null;
+      if (provider === "okx") recordOkxSourceFailure(context, lease);
+      else recordGateFuturesSourceFailure(context, lease);
+      clearSettledLease(provider);
     }
   };
 
+  try {
   for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex++) {
     throwIfAborted(signal);
     const endpoint = endpoints[endpointIndex];
-    const providerDown = endpoint.provider === "okx"
-      ? isOkxSourceDown()
-      : isGateFuturesSourceDown();
     const instrumentNegCached = endpoint.provider === "okx"
       ? isNegCached(okxFailedInstruments, instId)
       : isNegCached(gateFuturesFailedContracts, contract);
-    if (providerDown || instrumentNegCached) {
-      trace.push(`${endpoint.provider}:${endpoint.id}=${providerDown ? "circuit-skip" : "notfound-skip"}`);
+    if (instrumentNegCached) {
+      trace.push(`${endpoint.provider}:${endpoint.id}=notfound-skip`);
       continue;
     }
     const opportunitiesRemaining = endpoints.length - endpointIndex;
@@ -1559,6 +1717,17 @@ async function fetchDirectPerpCandles(
     if (requestBudget === null) {
       deadlineSkipped = true;
       trace.push(`${endpoint.provider}:${endpoint.id}=deadline-skip`);
+      continue;
+    }
+    providerOtherwiseAdmissible.add(endpoint.provider);
+    let admission = providerAdmissions.get(endpoint.provider);
+    if (!admission) {
+      admission = admitSourceRequest(endpoint.provider);
+      providerAdmissions.set(endpoint.provider, admission);
+    }
+    if (!admission.admitted) {
+      providerCircuitBlocked.add(endpoint.provider);
+      trace.push(`${endpoint.provider}:${endpoint.id}=${admission.denial === "active_owner" ? "half-open-peer-skip" : "circuit-skip"}`);
       continue;
     }
     const providerDeadlineAt = Math.min(
@@ -1589,7 +1758,7 @@ async function fetchDirectPerpCandles(
             diagnosticBase,
           );
           providerReachable.add("okx");
-          recordOkxSourceSuccess();
+          settleProviderSuccess("okx");
           if (raw.length === 0) break;
           for (const candle of raw) {
             if (!Array.isArray(candle) || candle.length < 9 || (candle[8] !== "0" && candle[8] !== "1")) {
@@ -1650,7 +1819,7 @@ async function fetchDirectPerpCandles(
             diagnosticBase,
           );
           providerReachable.add("gate");
-          recordGateFuturesSourceSuccess();
+          settleProviderSuccess("gate");
           for (const row of raw) {
             if (!row || typeof row !== "object" || Array.isArray(row)) {
               sawMalformedProvenance = true;
@@ -1713,14 +1882,14 @@ async function fetchDirectPerpCandles(
       };
       if (error instanceof OkxInstrumentNotFoundError) {
         providerReachable.add("okx");
-        recordOkxSourceSuccess();
+        settleProviderSuccess("okx");
         negCache(okxFailedInstruments, instId);
         trace.push(`okx:${endpoint.id}=notfound`);
         continue;
       }
       if (error instanceof GateFuturesContractNotFoundError) {
         providerReachable.add("gate");
-        recordGateFuturesSourceSuccess();
+        settleProviderSuccess("gate");
         negCache(gateFuturesFailedContracts, contract);
         trace.push(`gate:${endpoint.id}=notfound`);
         continue;
@@ -1732,15 +1901,25 @@ async function fetchDirectPerpCandles(
   }
 
   finalizeProviderHealth();
-  const bothCircuitsOpen = isOkxSourceDown() && isGateFuturesSourceDown();
+  const everyOtherwiseAdmissibleProviderCircuitBlocked = providerOtherwiseAdmissible.size > 0
+    && [...providerOtherwiseAdmissible].every((provider) => providerCircuitBlocked.has(provider));
   const unavailableReason = providerReachable.size === 0
     ? providerTransportFailed.size > 0 || deadlineSkipped
       ? "transport_unavailable"
-      : bothCircuitsOpen
+      : everyOtherwiseAdmissibleProviderCircuitBlocked
         ? "provider_circuit_open"
         : null
     : null;
   return { candles: lastPureProviderCandles, sawMalformedProvenance, unavailableReason, trace };
+  } finally {
+    for (const admission of providerAdmissions.values()) {
+      if (!admission.lease) continue;
+      releaseSourceHalfOpenOwner(
+        admission.lease,
+        signal?.aborted ? "release_cancellation" : "release_exception",
+      );
+    }
+  }
 }
 
 const TIMEFRAME_MS: Record<string, number> = {
@@ -2399,14 +2578,13 @@ export async function fetchOHLCV(
   }
 
   const okxNegCachedAtEntry = isNegCached(okxFailedInstruments, instId);
-  const okxSourceDownAtEntry = isOkxSourceDown();
   const okxDiagnosticBase: Omit<OkxRequestDiagnosticContext, "attempt" | "endpoint"> = {
     provider: "okx",
     callerClass: options?.callerClass ?? "lab",
     instrument: instId,
     timeframe,
   };
-  if (basisPolicy.acceptedBasis.includes("perp") && !okxNegCachedAtEntry && !okxSourceDownAtEntry) {
+  if (basisPolicy.acceptedBasis.includes("perp") && !okxNegCachedAtEntry) {
     const bar = mapTimeframeToOkx(timeframe);
     onProgress?.(`Fetching ${symbol} ${timeframe} from OKX...`);
     console.log(`Fetching OHLCV for ${instId} ${bar} from ${startDate} to ${endDate} via OKX`);
@@ -2416,14 +2594,28 @@ export async function fetchOHLCV(
     let emptyPages = 0;
     let consecutiveErrors = 0;
     let attemptedNetwork = false;
+    let okxAdmission: SourceAdmission | null = null;
 
-    while (currentEndMs > startMs) {
+    try {
+      while (currentEndMs > startMs) {
       throwIfAborted(signal);
       if (Date.now() >= deadlineAt) {
         const okxDeadlineMsg = `[OKX] Fetch deadline reached — stopping with ${allCandles.length} candles for ${instId} ${bar}`;
         console.log(okxDeadlineMsg);
         appendTelemetry(okxDeadlineMsg);
         break;
+      }
+      if (!okxAdmission) {
+        // Claim synchronously immediately before the first transport. When
+        // cooldown has elapsed, peers retain the established source-down
+        // fallback path until this one half-open owner settles.
+        okxAdmission = admitSourceRequest("okx");
+        if (!okxAdmission.admitted) {
+          okxSourceUnavailableReason = "provider_circuit_open";
+          console.log(`[OKX] Skipping ${instId} (source circuit breaker OPEN) — trying Gate.io spot`);
+          trace.push("okx=source-down-skip");
+          break;
+        }
       }
       try {
         attemptedNetwork = true;
@@ -2437,7 +2629,8 @@ export async function fetchOHLCV(
         );
         // Any well-formed API response (even empty data / exhausted 429
         // retries) proves the OKX source is reachable.
-        recordOkxSourceSuccess();
+        recordOkxSourceSuccess(okxAdmission.lease);
+        okxAdmission = { admitted: true, lease: null, denial: null };
         consecutiveErrors = 0;
 
         if (!raw || raw.length === 0) {
@@ -2501,7 +2694,8 @@ export async function fetchOHLCV(
         // path retried 5 more pages with escalating sleeps before negcaching.
         // The API answered authoritatively, so the SOURCE is reachable.
         if (err instanceof OkxInstrumentNotFoundError) {
-          recordOkxSourceSuccess();
+          recordOkxSourceSuccess(okxAdmission.lease);
+          okxAdmission = { admitted: true, lease: null, denial: null };
           negCache(okxFailedInstruments, instId);
           console.log(`[OKX] ${instId} does not exist — negcached, falling through to Gate.io spot`);
           break;
@@ -2514,9 +2708,9 @@ export async function fetchOHLCV(
         }
         await abortableSleep(RETRY_DELAY_MS * consecutiveErrors, signal);
       }
-    }
+      }
 
-    console.log(`[OKX] Fetch complete: ${allCandles.length} candles over ${page} pages for ${instId} ${bar}`);
+      console.log(`[OKX] Fetch complete: ${allCandles.length} candles over ${page} pages for ${instId} ${bar}`);
 
     if (allCandles.length === 0) {
       // Network-type failure (timeouts/refused — NOT a not-found, which
@@ -2527,22 +2721,27 @@ export async function fetchOHLCV(
           ...okxDiagnosticBase,
           endpoint: terminalEndpoint,
           attempt: MAX_RETRIES,
-        });
+        }, okxAdmission?.lease ?? null);
+        okxAdmission = { admitted: true, lease: null, denial: null };
         okxSourceUnavailableReason = "transport_unavailable";
       }
-      trace.push(`okx=0c/${((Date.now() - netStart) / 1000).toFixed(1)}s(${attemptedNetwork ? "unavailable" : "deadline"})`);
+      if (!okxSourceUnavailableReason) {
+        trace.push(`okx=0c/${((Date.now() - netStart) / 1000).toFixed(1)}s(${attemptedNetwork ? "unavailable" : "deadline"})`);
+      }
     } else {
       trace.push(`okx=${allCandles.length}c/${((Date.now() - netStart) / 1000).toFixed(1)}s`);
+    }
+    } finally {
+      releaseSourceHalfOpenOwner(
+        okxAdmission?.lease ?? null,
+        signal?.aborted ? "release_cancellation" : "release_exception",
+      );
     }
   } else if (!basisPolicy.acceptedBasis.includes("perp")) {
     trace.push("okx=policy-skip");
   } else if (okxNegCachedAtEntry) {
     console.log(`[OKX] Skipping ${instId} (recently failed) — trying Gate.io spot`);
     trace.push("okx=negcached-skip");
-  } else {
-    okxSourceUnavailableReason = "provider_circuit_open";
-    console.log(`[OKX] Skipping ${instId} (source circuit breaker OPEN) — trying Gate.io spot`);
-    trace.push("okx=source-down-skip");
   }
 
   throwIfAborted(signal); // no NEW source attempt after cancellation

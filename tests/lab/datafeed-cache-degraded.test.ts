@@ -98,6 +98,36 @@ function runFetch(deadlineMs: number, signal?: AbortSignal) {
   );
 }
 
+function runDirectPerp(symbol: string, signal?: AbortSignal) {
+  const now = Date.now();
+  return fetchOHLCV(
+    symbol,
+    "15m",
+    now - 2 * TF_MS,
+    now,
+    undefined,
+    {
+      basisPolicy: MONEY_CANDLE_POLICY,
+      bypassCache: true,
+      cacheWritePolicy: "skip",
+      skipSpotFallback: true,
+      deadlineMs: 45_000,
+      callerClass: "scanner",
+      signal,
+    },
+  );
+}
+
+async function openDirectPerpSourceBreakers(): Promise<void> {
+  fetchSpy.mockRejectedValue(new Error("provider unavailable"));
+  for (const symbol of ["OPEN1/USDT", "OPEN2/USDT", "OPEN3/USDT"]) {
+    await expect(runDirectPerp(symbol)).rejects.toMatchObject({
+      name: "CandleSourceUnavailableError",
+      reason: "transport_unavailable",
+    });
+  }
+}
+
 describe("provider response-body cancellation lifetime", () => {
   it("forwards caller abort after headers while the OKX body is pending", async () => {
     const caller = new AbortController();
@@ -832,6 +862,221 @@ describe("provider response-body cancellation lifetime", () => {
     await Promise.resolve();
     expect(internalSignal?.aborted).toBe(false);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("admits one half-open owner per direct provider and keeps each lease across endpoint fallback", async () => {
+    await openDirectPerpSourceBreakers();
+    okxDiagnostics.length = 0;
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+
+    let rejectGateApi!: (error: Error) => void;
+    let rejectOkxLegacy!: (error: Error) => void;
+    let resolveGateFx!: (response: unknown) => void;
+    fetchSpy.mockImplementation((input: unknown) => {
+      const host = new URL(String(input)).hostname;
+      if (host === "openapi.okx.com") return Promise.reject(new Error("openapi unavailable"));
+      if (host === "api.gateio.ws") {
+        return new Promise((_resolve, reject) => { rejectGateApi = reject; });
+      }
+      if (host === "www.okx.com") {
+        return new Promise((_resolve, reject) => { rejectOkxLegacy = reject; });
+      }
+      if (host === "fx-api.gateio.ws") {
+        return new Promise((resolve) => { resolveGateFx = resolve; });
+      }
+      throw new Error(`unexpected host ${host}`);
+    });
+
+    const owner = runDirectPerp("OWNER/USDT");
+    owner.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname).slice(-2)).toEqual([
+      "openapi.okx.com",
+      "api.gateio.ws",
+    ]);
+
+    const callsWhileGateApiPending = fetchSpy.mock.calls.length;
+    await expect(runDirectPerp("PEER1/USDT")).rejects.toMatchObject({
+      name: "CandleSourceUnavailableError",
+      reason: "provider_circuit_open",
+      source: "direct_perp",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(callsWhileGateApiPending);
+
+    rejectGateApi(new Error("gate api unavailable"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(new URL(String(fetchSpy.mock.calls.at(-1)?.[0])).hostname).toBe("www.okx.com");
+    const callsWhileOkxLegacyPending = fetchSpy.mock.calls.length;
+    await expect(runDirectPerp("PEER2/USDT")).rejects.toMatchObject({
+      reason: "provider_circuit_open",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(callsWhileOkxLegacyPending);
+
+    rejectOkxLegacy(new Error("okx legacy unavailable"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(new URL(String(fetchSpy.mock.calls.at(-1)?.[0])).hostname).toBe("fx-api.gateio.ws");
+    const callsWhileGateFxPending = fetchSpy.mock.calls.length;
+    await expect(runDirectPerp("PEER3/USDT")).rejects.toMatchObject({
+      reason: "provider_circuit_open",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(callsWhileGateFxPending);
+
+    const candleTime = Date.now() - TF_MS;
+    resolveGateFx({
+      status: 200,
+      ok: true,
+      json: async () => [{
+        t: String(candleTime / 1000), o: "10", h: "11", l: "9", c: "10.5", v: "7",
+      }],
+    });
+    await expect(owner).resolves.toEqual([
+      expect.objectContaining({
+        time: candleTime,
+        provenance: expect.objectContaining({ source: "gate", venue: "gate", basis: "perp" }),
+      }),
+    ]);
+
+    const lifecycle = okxDiagnostics.filter((record) => record.kind.startsWith("source_half_open_"));
+    expect(lifecycle.filter((record) => record.kind === "source_half_open_claim")).toEqual([
+      expect.objectContaining({ provider: "okx", action: "claim", activeOwnerCount: 1 }),
+      expect.objectContaining({ provider: "gate", action: "claim", activeOwnerCount: 1 }),
+    ]);
+    expect(lifecycle.filter((record) => record.kind === "source_half_open_release")).toEqual([
+      expect.objectContaining({ provider: "gate", action: "release_success", activeOwnerCount: 0 }),
+      expect.objectContaining({ provider: "okx", action: "release_failure", activeOwnerCount: 0 }),
+    ]);
+    expect(lifecycle.filter((record) => record.kind === "source_half_open_reject")).toHaveLength(6);
+    for (const record of lifecycle) {
+      expect(Object.keys(record).sort()).toEqual([
+        "action", "activeOwnerCount", "kind", "probeOrdinal", "provider",
+      ]);
+    }
+  });
+
+  it("reopens and releases a failed half-open parse probe exactly once per provider", async () => {
+    await openDirectPerpSourceBreakers();
+    okxDiagnostics.length = 0;
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+    fetchSpy.mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => { throw new Error("unparseable provider body"); },
+    });
+
+    await expect(runDirectPerp("PARSE/USDT")).rejects.toMatchObject({
+      name: "CandleSourceUnavailableError",
+      reason: "transport_unavailable",
+    });
+    const releases = okxDiagnostics.filter((record) => record.kind === "source_half_open_release");
+    expect(releases).toEqual([
+      expect.objectContaining({ provider: "okx", action: "release_failure" }),
+      expect.objectContaining({ provider: "gate", action: "release_failure" }),
+    ]);
+
+    const callsAfterFailedProbe = fetchSpy.mock.calls.length;
+    await expect(runDirectPerp("BLOCKED/USDT")).rejects.toMatchObject({
+      reason: "provider_circuit_open",
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(callsAfterFailedProbe);
+    expect(okxDiagnostics.filter((record) => record.kind === "source_half_open_release")).toHaveLength(2);
+  });
+
+  it("releases an externally cancelled half-open owner without mutating source health", async () => {
+    await openDirectPerpSourceBreakers();
+    okxDiagnostics.length = 0;
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+    fetchSpy.mockImplementation(() => new Promise(() => {}));
+    const controller = new AbortController();
+    const cancelled = runDirectPerp("CANCEL/USDT", controller.signal);
+    cancelled.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "source_half_open_release",
+      provider: "okx",
+      action: "release_cancellation",
+    }));
+
+    fetchSpy.mockRejectedValue(new Error("provider still unavailable"));
+    await expect(runDirectPerp("NEXT/USDT")).rejects.toMatchObject({
+      reason: "transport_unavailable",
+    });
+    expect(okxDiagnostics.filter((record) =>
+      record.kind === "source_half_open_claim" && record.provider === "okx",
+    )).toHaveLength(2);
+  });
+
+  it("ignores an older unowned success while a newer half-open token owns the source", async () => {
+    let resolveOld!: (response: unknown) => void;
+    let resolveProbe!: (response: unknown) => void;
+    let phase: "old" | "open" | "probe" | "peer" = "old";
+    fetchSpy.mockImplementation((input: unknown) => {
+      const url = new URL(String(input));
+      if (phase === "old") {
+        return new Promise((resolve) => { resolveOld = resolve; });
+      }
+      if (phase === "open") return Promise.reject(new Error("provider unavailable"));
+      if (phase === "probe") {
+        return new Promise((resolve) => { resolveProbe = resolve; });
+      }
+      if (url.hostname.endsWith("okx.com")) {
+        throw new Error("peer must not start an OKX request while the probe owns it");
+      }
+      return Promise.resolve({
+        status: 404,
+        ok: false,
+        text: async () => JSON.stringify({ label: "CONTRACT_NOT_FOUND" }),
+      });
+    });
+
+    const oldCandleTime = Date.now() - TF_MS;
+    const old = runDirectPerp("OLD/USDT");
+    old.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    phase = "open";
+    for (const symbol of ["STALE1/USDT", "STALE2/USDT", "STALE3/USDT"]) {
+      await expect(runDirectPerp(symbol)).rejects.toMatchObject({ reason: "transport_unavailable" });
+    }
+    okxDiagnostics.length = 0;
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+
+    const controller = new AbortController();
+    phase = "probe";
+    const probe = runDirectPerp("PROBE/USDT", controller.signal);
+    probe.catch(() => {});
+    await vi.advanceTimersByTimeAsync(0);
+    const okxCallsWithProbePending = fetchSpy.mock.calls.filter(([input]) =>
+      new URL(String(input)).hostname.endsWith("okx.com"),
+    ).length;
+
+    resolveOld({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        code: "0",
+        data: [[String(oldCandleTime), "1", "2", "0.5", "1.5", "10", "0", "0", "1"]],
+      }),
+    });
+    await Promise.allSettled([old]);
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "source_half_open_stale_settlement",
+      provider: "okx",
+      action: "ignore_unowned_success",
+      activeOwnerCount: 1,
+    }));
+
+    phase = "peer";
+    await expect(runDirectPerp("STALE-PEER/USDT")).rejects.toBeDefined();
+    expect(fetchSpy.mock.calls.filter(([input]) =>
+      new URL(String(input)).hostname.endsWith("okx.com"),
+    )).toHaveLength(okxCallsWithProbePending);
+
+    controller.abort();
+    await expect(probe).rejects.toMatchObject({ name: "AbortError" });
+    // Resolve the abandoned transport only to prove it cannot settle a token
+    // after the owning invocation has unwound.
+    resolveProbe({ status: 200, ok: true, json: async () => ({ code: "0", data: [] }) });
   });
 });
 
