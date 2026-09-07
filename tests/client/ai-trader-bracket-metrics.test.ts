@@ -130,4 +130,3 @@ describe('independently calculated decision bracket metrics', () => {
     expect(source).not.toContain('decisionBracketMetrics(');
   });
 });
-

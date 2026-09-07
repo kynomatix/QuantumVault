@@ -35,4 +35,3 @@ export function AiTraderBracketMetrics({ decision }: { decision: DecisionInput }
     </details>
   );
 }
-

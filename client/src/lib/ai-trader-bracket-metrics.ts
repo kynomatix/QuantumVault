@@ -97,4 +97,3 @@ export function decisionBracketMetrics(decision: {
   return { version: 1, side: clamp.action, originalStop: stop, target, usesPreBreakevenStop: hasBreakeven,
     decisionSnapshot: at(digest.price), recordedFill: decision.outcome === 'executed' ? at(decision.entryPrice) : null, fee };
 }
-
