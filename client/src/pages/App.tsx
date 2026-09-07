@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { performanceCompleteness } from "@/lib/ai-trader-accounting-display";
 import { coreReadJson, CoreReadError, useServerDegraded, useSessionExpired, reportCoreAuthSuccess } from "@/lib/server-health";
 import { deriveDashboardSectionState, staleDataLabel, type DashboardSectionState } from "@/lib/dashboard-state";
 import { EquityPoller, type EquityPollResult, type EquitySnapshot } from "@/lib/equity-poller";
@@ -3530,7 +3531,9 @@ export default function AppPage() {
                           <div className="p-2.5 rounded-lg bg-muted/30">
                             {(() => {
                               const projection = (aiBot as any).modePerformance;
+                              const completeness = performanceCompleteness(projection ?? {});
                               const projectionAvailable = projection?.status === 'available'
+                                && completeness.hasPricedSubtotal
                                 && typeof projection.netPnl === 'number'
                                 && Number.isFinite(projection.netPnl);
                               const hasOpenPosition = aiBot.status === 'open';
@@ -3564,6 +3567,10 @@ export default function AppPage() {
                                           )}
                                         </div>
                                         <p className="text-[9px] text-muted-foreground/70">{pnlScopeLabel}</p>
+                                        {projection?.status === 'available' && completeness.incomplete && <p className="text-[9px] text-amber-400" data-testid="card-pnl-incomplete">
+                                          {completeness.hasPricedSubtotal ? 'Incomplete — known subtotal' : 'Incomplete — P&L unavailable'}
+                                          {' · '}{completeness.missingPnl ?? '?'} unpriced · {completeness.unattributed ?? '?'} unattributed
+                                        </p>}
                                       </div>
                                     </TooltipTrigger>
                                     <TooltipContent className="max-w-[260px] bg-popover border border-border text-xs p-2.5 space-y-1.5">
@@ -3581,10 +3588,16 @@ export default function AppPage() {
                                             <span>Omitted unattributed trades</span>
                                             <span>{projection.omittedUnattributedTrades}</span>
                                           </div>
+                                          <div className="flex justify-between gap-4">
+                                            <span>Closed trades with unavailable or invalid P&amp;L</span>
+                                            <span>{projection.omittedInvalidPnlTrades}</span>
+                                          </div>
                                         </>
                                       ) : (
                                         <p>
-                                          {!projectionAvailable
+                                          {projection?.status === 'available' && !completeness.hasPricedSubtotal
+                                            ? 'Attributable closed P&L is unavailable. Missing P&L is not zero.'
+                                            : !projectionAvailable
                                             ? 'Current-mode closed P&L is temporarily unavailable.'
                                             : 'The open position mark price is temporarily unavailable.'}
                                         </p>
