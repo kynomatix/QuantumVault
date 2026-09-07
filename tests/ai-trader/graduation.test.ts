@@ -487,10 +487,10 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
-  it("declares scanner half-open probe recovery as a reviewed no-bump", () => {
+  it("declares observation-only monitor instrumentation as a reviewed no-bump", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 42,
+      decisionGeneration: 43,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
@@ -505,7 +505,7 @@ describe("qualification era forgotten-declaration gate", () => {
     });
     expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 13,
+      decisionGeneration: 14,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
@@ -517,7 +517,7 @@ describe("qualification era forgotten-declaration gate", () => {
 
   it("binds the shared graduation owner path to the reviewed scanner no-bump declaration", () => {
     const base = cloneRegistry();
-    base.scanner_capability_policy.decisionGeneration = 41;
+    base.scanner_capability_policy.decisionGeneration = 42;
     base.accepted_candle_provenance.decisionGeneration = 19;
 
     expect(validateQualificationEraDeclarationChanges({
@@ -525,6 +525,21 @@ describe("qualification era forgotten-declaration gate", () => {
       current: cloneRegistry(),
       changedPaths: ["server/lab/datafeed.ts", "server/ai-trader/graduation.ts"],
     })).toEqual([]);
+  });
+
+  it("declares monitor observation without changing any material qualification component", () => {
+    const base = cloneRegistry();
+    base.scanner_capability_policy.decisionGeneration = 42;
+    base.paper_execution_simulator.decisionGeneration = 13;
+    expect(validateQualificationEraDeclarationChanges({
+      base, current: cloneRegistry(), changedPaths: ["server/ai-trader/monitor.ts"],
+    })).toEqual([]);
+    expect(Object.fromEntries(components.map(component =>
+      [component, QUALIFICATION_ERA_REGISTRY[component].materialVersion]))).toEqual({
+      scanner_capability_policy: 3, accepted_candle_provenance: 1,
+      prompt_context_schema: 3, session_policy: 1,
+      guardrail_risk_policy: 4, paper_execution_simulator: 3,
+    });
   });
 
   for (const component of components) {
