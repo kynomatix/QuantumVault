@@ -25,6 +25,13 @@ const trackRecordPanel = source.slice(
 );
 
 describe("AI Trader drawer overall mode-scoped performance", () => {
+  it("uses the shared calculated bracket metrics for history without model arithmetic", () => {
+    const timeline = source.slice(source.indexOf('data-testid="activity-timeline"'), source.indexOf('{/* Load older'));
+    expect(timeline).toContain('<AiTraderBracketMetrics decision={d} />');
+    expect(timeline.indexOf('<AiTraderBracketMetrics')).toBeLessThan(timeline.indexOf('{resolvedRationale &&'));
+    expect(timeline).not.toContain('decisionBracketMetrics(');
+  });
+
   it("fetches independently and reuses the existing polling and close-refresh lifecycle", () => {
     expect(performanceFetch).toContain("`/api/ai-trader/${botId}/performance`");
     expect(performanceFetch).toContain("credentials: 'include'");

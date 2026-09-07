@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { AiTraderBracketMetrics } from './AiTraderBracketMetrics';
 import { Button } from '@/components/ui/button';
 import { Loader2, TrendingUp, TrendingDown, Minus, Clock, ShieldAlert } from 'lucide-react';
 import { walletAuthHeaders } from '@/lib/queryClient';
@@ -250,6 +251,8 @@ export function AiTraderDecisionCard({
           ))}
         </div>
       )}
+
+      <AiTraderBracketMetrics decision={decision} />
 
       {clamped?.rationale && (
         <blockquote className="text-xs text-muted-foreground leading-relaxed border-l-2 border-primary/40 pl-3 italic" data-testid="text-rationale">
