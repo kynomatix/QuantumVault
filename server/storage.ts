@@ -2,6 +2,7 @@ import { eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArr
 import { createHash, randomBytes } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
+import { readPriceExcursion } from "@shared/ai-trader-excursion";
 import {
   buildScannerIncidentExport,
   SCANNER_INCIDENT_EXPORT_TIMEOUT_MS,
@@ -256,6 +257,8 @@ export type AiTraderConfirmedCloseTransitionResult =
   | { status: "conflict"; reason: AiTraderConfirmedCloseTransitionConflict };
 
 export interface AiTraderConfirmedCloseTransitionParams {
+  /** Optional bounded diagnostic evidence. Invalid data is discarded, never a close gate. */
+  priceExcursion?: unknown;
   botId: string;
   decisionId: string;
   expectedBotStatus: string;
@@ -7000,6 +7003,10 @@ export class DatabaseStorage implements IStorage {
             realizedPnl: expectedClose.realizedPnl,
             feesPaid: expectedClose.feesPaid,
             closedAt: params.close.closedAt,
+            priceExcursion: readPriceExcursion(params.priceExcursion, {
+              decisionStartedAtMs: decision.decidedAt ? new Date(decision.decidedAt).getTime() : NaN,
+              closedAtMs: params.close.closedAt.getTime(),
+            }),
           } as any)
           .where(and(
             eq(aiTraderDecisions.id, params.decisionId),

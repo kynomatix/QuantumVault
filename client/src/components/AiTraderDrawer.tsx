@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { accountingNumber, performanceCompleteness } from '@/lib/ai-trader-accounting-display';
+import { AiTraderExcursion } from './AiTraderExcursion';
 import { AiTraderBracketMetrics } from './AiTraderBracketMetrics';
 import {
   Sheet,
@@ -1717,6 +1718,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           </p>
                         )}
                         <AiTraderBracketMetrics decision={d} />
+                        <AiTraderExcursion decision={d} />
                         {resolvedRationale && (
                           <p className="text-[11px] text-muted-foreground leading-relaxed border-l-2 border-primary/30 pl-2 italic">
                             {resolvedRationale}

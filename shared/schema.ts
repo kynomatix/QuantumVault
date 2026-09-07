@@ -2202,6 +2202,8 @@ export const aiTraderDecisions = pgTable("ai_trader_decisions", {
   qualificationEraDigest: text("qualification_era_digest"), // null = legacy/unknown; never inferred
   rawDecision: jsonb("raw_decision").notNull(),          // as returned by the model
   clampedDecision: jsonb("clamped_decision"),            // after guardrails (null if rejected)
+  // Optional close-time diagnostic observations, never a model or trading-policy input.
+  priceExcursion: jsonb("price_excursion"),
   guardrailViolations: jsonb("guardrail_violations"),    // which G-rules fired
   outcome: text("outcome"),
   // 'executed'|'user_skipped'|'rejected_guardrails'|'flat'|'aborted_malformed'|'aborted_stale'|'aborted_funding'|'expired'
