@@ -30,6 +30,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { OHLCV } from "../../server/lab/engine";
+import type { ProvenancedOHLCV } from "../../server/lab/datafeed";
 import { classifyDow, detectPivots } from "../../server/ai-trader/dow-structure";
 import { detectWM } from "../../server/ai-trader/wm-detector";
 
@@ -39,23 +40,26 @@ const fetchOHLCVMock = vi.fn<[string, string, string, string], Promise<OHLCV[]>>
 const prefetchCachedOHLCVMock = vi.fn();
 const completeCachedOHLCVTailMock = vi.fn();
 const isNonCryptoMarketOpenMock = vi.fn<[unknown], boolean>(() => true);
-vi.mock("../../server/lab/datafeed", () => ({
-  fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
-  prefetchCachedOHLCV: (...a: unknown[]) => prefetchCachedOHLCVMock(...a),
-  completeCachedOHLCVTail: (...a: unknown[]) => completeCachedOHLCVTailMock(...a),
-  isNonCryptoMarketOpen: (...a: unknown[]) => isNonCryptoMarketOpenMock(...a),
-  isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
-  isCacheDegradedError: (err: unknown) =>
-    typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CacheDegradedError",
-  isCandleSourceUnavailableError: (err: unknown) =>
-    typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CandleSourceUnavailableError",
-  isCandleTailCompletionError: (err: unknown) =>
-    typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CandleTailCompletionError",
-  setDatafeedIncidentReporter: vi.fn(),
-  MONEY_CANDLE_POLICY: {
-    consumer: "scanner", acceptedBasis: ["perp"], acceptedFinality: ["finalized"], acceptedProxy: ["direct"],
-  },
-}));
+vi.mock("../../server/lab/datafeed", async () => {
+  const actual = await vi.importActual<typeof import("../../server/lab/datafeed")>(
+    "../../server/lab/datafeed",
+  );
+  return {
+    ...actual,
+    fetchOHLCV: (...a: unknown[]) => fetchOHLCVMock(...(a as Parameters<typeof fetchOHLCVMock>)),
+    prefetchCachedOHLCV: (...a: unknown[]) => prefetchCachedOHLCVMock(...a),
+    completeCachedOHLCVTail: (...a: unknown[]) => completeCachedOHLCVTailMock(...a),
+    isNonCryptoMarketOpen: (...a: unknown[]) => isNonCryptoMarketOpenMock(...a),
+    isAbortError: (err: unknown) => err instanceof Error && err.name === "AbortError",
+    isCacheDegradedError: (err: unknown) =>
+      typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CacheDegradedError",
+    isCandleSourceUnavailableError: (err: unknown) =>
+      typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CandleSourceUnavailableError",
+    isCandleTailCompletionError: (err: unknown) =>
+      typeof err === "object" && err !== null && (err as { name?: unknown }).name === "CandleTailCompletionError",
+    setDatafeedIncidentReporter: vi.fn(),
+  };
+});
 
 vi.mock("../../server/ai-trader/context-builder", () => ({
   marketToDatafeedTicker: (market: string) => market.replace("-PERP", "/USDT"),
@@ -286,6 +290,7 @@ import {
   MAX_POST_BREAK_RETURN_AGE_BARS,
   classifySweepFetchError,
   classifyScannerFormationLifecycle,
+  completeParentPrefixFromPrimaryBars,
   isActionableScannerFormationLifecycle,
 } from "../../server/ai-trader/scanner";
 
@@ -293,6 +298,101 @@ const directPerp = {
   source: "okx", venue: "okx", basis: "perp", proxy: "direct",
   finality: "finalized", timeSemantic: "open_time",
 } as const;
+
+const hyperliquidDirectPerp = {
+  source: "hyperliquid", venue: "hyperliquid", basis: "perp", proxy: "direct",
+  finality: "finalized", timeSemantic: "open_time",
+} as const;
+
+describe("completeParentPrefixFromPrimaryBars", () => {
+  const primaryMs = 15 * 60_000;
+  const parentMs = 60 * 60_000;
+  const base = Date.parse("2026-09-01T00:00:00.000Z");
+  const row = (time: number, provenance = hyperliquidDirectPerp): ProvenancedOHLCV => ({
+    time,
+    open: 100,
+    high: 102,
+    low: 99,
+    close: 101,
+    volume: 10,
+    provenance,
+  });
+  const prefix = Array.from({ length: 100 }, (_, index) => row(base + index * parentMs));
+  const firstNeeded = prefix[prefix.length - 1].time + parentMs;
+  const primary = Array.from({ length: 8 }, (_, index) => row(firstNeeded + index * primaryMs));
+  const endMs = firstNeeded + 2 * parentMs + 30 * 60_000;
+
+  it("completes the exact contiguous closed parent tail with real range predicates", () => {
+    const result = completeParentPrefixFromPrimaryBars({
+      parentPrefix: prefix,
+      primaryBars: primary,
+      primaryTimeframe: "15m",
+      parentTimeframe: "1h",
+      startMs: base,
+      endMs,
+      nowMs: endMs,
+    });
+    expect(result.reason).toBe("complete");
+    expect(result.derivedCount).toBe(2);
+    expect(result.bars).toHaveLength(102);
+    expect(result.bars?.slice(-2).map((bar) => bar.time)).toEqual([
+      firstNeeded,
+      firstNeeded + parentMs,
+    ]);
+  });
+
+  it("falls back when cached non-Hyperliquid rows occupy the first required bucket", () => {
+    const mixed = [...primary];
+    mixed[0] = row(mixed[0].time, directPerp);
+    const result = completeParentPrefixFromPrimaryBars({
+      parentPrefix: prefix,
+      primaryBars: mixed,
+      primaryTimeframe: "15m",
+      parentTimeframe: "1h",
+      startMs: base,
+      endMs,
+      nowMs: endMs,
+    });
+    expect(result).toEqual({ bars: null, reason: "primary_not_hyperliquid", derivedCount: 0 });
+  });
+
+  it("falls back rather than returning a mixed-provider parent series", () => {
+    const okxPrefix = prefix.map((bar) => row(bar.time, directPerp));
+    expect(completeParentPrefixFromPrimaryBars({
+      parentPrefix: okxPrefix,
+      primaryBars: primary,
+      primaryTimeframe: "15m",
+      parentTimeframe: "1h",
+      startMs: base,
+      endMs,
+      nowMs: endMs,
+    })).toEqual({ bars: null, reason: "range_inadmissible", derivedCount: 0 });
+  });
+
+  it("never admits an interior gap from either the retained prefix or derived run", () => {
+    const gappedPrefix = prefix.filter((_, index) => index !== 50);
+    expect(completeParentPrefixFromPrimaryBars({
+      parentPrefix: gappedPrefix,
+      primaryBars: primary,
+      primaryTimeframe: "15m",
+      parentTimeframe: "1h",
+      startMs: base,
+      endMs,
+      nowMs: endMs,
+    }).reason).toBe("invalid_prefix");
+
+    const gappedPrimary = primary.filter((_, index) => index !== 3);
+    expect(completeParentPrefixFromPrimaryBars({
+      parentPrefix: prefix,
+      primaryBars: gappedPrimary,
+      primaryTimeframe: "15m",
+      parentTimeframe: "1h",
+      startMs: base,
+      endMs,
+      nowMs: endMs,
+    }).reason).toBe("incomplete_bucket");
+  });
+});
 
 describe("scanner fetch failure classification", () => {
   it("keeps global source unavailability distinct from per-market feed failure", () => {

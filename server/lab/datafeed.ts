@@ -12,8 +12,8 @@ import {
 import { getBenchmarksBase, hermesFetch } from '../pricing/hermes-config.js';
 import { appendTelemetry } from "../telemetry";
 
-export type CandleSource = "okx" | "gate" | "pyth" | "unknown";
-export type CandleVenue = "okx" | "gate" | "none" | "unknown";
+export type CandleSource = "okx" | "gate" | "pyth" | "hyperliquid" | "unknown";
+export type CandleVenue = "okx" | "gate" | "hyperliquid" | "none" | "unknown";
 export type CandleBasis = "perp" | "spot" | "index" | "unknown";
 export type CandleProxy = "direct" | "proxy" | "unknown";
 export type CandleFinality = "finalized" | "forming" | "unknown";
@@ -138,8 +138,16 @@ const GATE_FUTURES_ENDPOINTS: readonly Readonly<{ id: GateFuturesEndpoint; origi
   { id: "api", origin: "https://api.gateio.ws" },
   { id: "fx", origin: "https://fx-api.gateio.ws" },
 ];
-type DirectPerpProvider = "okx" | "gate";
-type DirectPerpEndpoint = OkxEndpoint | GateFuturesEndpoint;
+type DirectPerpProvider = "okx" | "gate" | "hyperliquid";
+type DirectPerpEndpoint = OkxEndpoint | GateFuturesEndpoint | "info";
+
+const HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info";
+const HYPERLIQUID_REQUEST_TIMEOUT_MS = 2_500;
+const HYPERLIQUID_HARD_TERMINAL_GRACE_MS = 500;
+const HYPERLIQUID_CATALOG_TTL_MS = 15 * 60 * 1000;
+const HYPERLIQUID_MAX_CANDLES = 5_000;
+const HYPERLIQUID_WEIGHT_CAPACITY = 960;
+const HYPERLIQUID_WEIGHT_REFILL_PER_SECOND = 16;
 
 const NEGATIVE_CACHE_TTL_MS = 30 * 60 * 1000;
 
@@ -183,7 +191,10 @@ export type OkxRequestTerminalDiagnostic = OkxRequestDiagnosticContext & Readonl
 }>;
 
 export type OkxSourceBreakerDiagnostic = OkxRequestDiagnosticContext & Readonly<{
-  kind: "okx_source_breaker_increment" | "gate_futures_source_breaker_increment";
+  kind:
+    | "okx_source_breaker_increment"
+    | "gate_futures_source_breaker_increment"
+    | "hyperliquid_source_breaker_increment";
   priorConsecutiveFailures: number;
   resultingConsecutiveFailures: number;
   opened: boolean;
@@ -197,6 +208,7 @@ export type SourceHalfOpenLifecycleAction =
   | "release_failure"
   | "release_cancellation"
   | "release_exception"
+  | "release_rate_limited"
   | "ignore_unowned_success"
   | "ignore_unowned_failure"
   | "ignore_stale_token";
@@ -213,10 +225,18 @@ export type SourceHalfOpenLifecycleDiagnostic = Readonly<{
   activeOwnerCount: 0 | 1;
 }>;
 
+export type HyperliquidWeightDiagnostic = OkxRequestDiagnosticContext & Readonly<{
+  kind: "hyperliquid_budget_event";
+  action: "reserve" | "refund" | "budget_skip" | "rate_limited";
+  weight: number;
+  availableWeight: number;
+}>;
+
 export type OkxDatafeedDiagnostic =
   | OkxRequestTerminalDiagnostic
   | OkxSourceBreakerDiagnostic
-  | SourceHalfOpenLifecycleDiagnostic;
+  | SourceHalfOpenLifecycleDiagnostic
+  | HyperliquidWeightDiagnostic;
 type OkxDatafeedDiagnosticReporter = (record: OkxDatafeedDiagnostic) => void;
 let okxDatafeedDiagnosticReporter: OkxDatafeedDiagnosticReporter | null = null;
 
@@ -231,7 +251,11 @@ function emitOkxDatafeedDiagnostic(record: OkxDatafeedDiagnostic): void {
   // The record is scrubbed by construction: closed vocabularies, safe market
   // identity, and elapsed numbers only. Never add URLs, headers, bodies, or
   // arbitrary error prose to this payload.
-  const prefix = record.provider === "okx" ? "OKXDiagnostic" : "GateFuturesDiagnostic";
+  const prefix = record.provider === "okx"
+    ? "OKXDiagnostic"
+    : record.provider === "gate"
+      ? "GateFuturesDiagnostic"
+      : "HyperliquidDiagnostic";
   appendTelemetry(`[${prefix}] ${JSON.stringify(record)}`);
   try {
     okxDatafeedDiagnosticReporter?.(record);
@@ -273,11 +297,15 @@ const OKX_SOURCE_BREAKER_THRESHOLD = 3;
 const OKX_SOURCE_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
 const GATE_FUTURES_SOURCE_BREAKER_THRESHOLD = 3;
 const GATE_FUTURES_SOURCE_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
+const HYPERLIQUID_SOURCE_BREAKER_THRESHOLD = 3;
+const HYPERLIQUID_SOURCE_BREAKER_COOLDOWN_MS = 15 * 60 * 1000;
 
 let okxSourceConsecutiveFailures = 0;
 let okxSourceDownUntil = 0;
 let gateFuturesSourceConsecutiveFailures = 0;
 let gateFuturesSourceDownUntil = 0;
+let hyperliquidSourceConsecutiveFailures = 0;
+let hyperliquidSourceDownUntil = 0;
 
 type SourceHalfOpenLease = Readonly<{
   provider: DirectPerpProvider;
@@ -292,13 +320,18 @@ type SourceAdmission = Readonly<{
 let sourceHalfOpenOrdinal = 0;
 let okxSourceHalfOpenOwner: SourceHalfOpenLease | null = null;
 let gateFuturesSourceHalfOpenOwner: SourceHalfOpenLease | null = null;
+let hyperliquidSourceHalfOpenOwner: SourceHalfOpenLease | null = null;
 
 function sourceDownUntil(provider: DirectPerpProvider): number {
-  return provider === "okx" ? okxSourceDownUntil : gateFuturesSourceDownUntil;
+  if (provider === "okx") return okxSourceDownUntil;
+  if (provider === "gate") return gateFuturesSourceDownUntil;
+  return hyperliquidSourceDownUntil;
 }
 
 function sourceHalfOpenOwner(provider: DirectPerpProvider): SourceHalfOpenLease | null {
-  return provider === "okx" ? okxSourceHalfOpenOwner : gateFuturesSourceHalfOpenOwner;
+  if (provider === "okx") return okxSourceHalfOpenOwner;
+  if (provider === "gate") return gateFuturesSourceHalfOpenOwner;
+  return hyperliquidSourceHalfOpenOwner;
 }
 
 function setSourceHalfOpenOwner(
@@ -306,7 +339,8 @@ function setSourceHalfOpenOwner(
   owner: SourceHalfOpenLease | null,
 ): void {
   if (provider === "okx") okxSourceHalfOpenOwner = owner;
-  else gateFuturesSourceHalfOpenOwner = owner;
+  else if (provider === "gate") gateFuturesSourceHalfOpenOwner = owner;
+  else hyperliquidSourceHalfOpenOwner = owner;
 }
 
 function emitSourceHalfOpenLifecycle(
@@ -366,7 +400,12 @@ function mutationOwnsSource(
 
 function releaseSourceHalfOpenOwner(
   lease: SourceHalfOpenLease | null,
-  action: "release_success" | "release_failure" | "release_cancellation" | "release_exception",
+  action:
+    | "release_success"
+    | "release_failure"
+    | "release_cancellation"
+    | "release_exception"
+    | "release_rate_limited",
 ): boolean {
   if (!lease) return false;
   if (sourceHalfOpenOwner(lease.provider) !== lease) {
@@ -460,17 +499,58 @@ function recordGateFuturesSourceFailure(
   releaseSourceHalfOpenOwner(lease, "release_failure");
 }
 
+function recordHyperliquidSourceSuccess(lease: SourceHalfOpenLease | null = null): void {
+  if (!mutationOwnsSource("hyperliquid", lease, "success")) return;
+  hyperliquidSourceConsecutiveFailures = 0;
+  hyperliquidSourceDownUntil = 0;
+  releaseSourceHalfOpenOwner(lease, "release_success");
+}
+
+function recordHyperliquidSourceFailure(
+  context: OkxRequestDiagnosticContext,
+  lease: SourceHalfOpenLease | null = null,
+): void {
+  if (!mutationOwnsSource("hyperliquid", lease, "failure")) return;
+  const priorConsecutiveFailures = hyperliquidSourceConsecutiveFailures;
+  hyperliquidSourceConsecutiveFailures++;
+  let opened = false;
+  if (hyperliquidSourceConsecutiveFailures >= HYPERLIQUID_SOURCE_BREAKER_THRESHOLD) {
+    opened = true;
+    hyperliquidSourceDownUntil = Date.now() + HYPERLIQUID_SOURCE_BREAKER_COOLDOWN_MS;
+    hyperliquidSourceConsecutiveFailures = HYPERLIQUID_SOURCE_BREAKER_THRESHOLD - 1;
+    const msg =
+      `[Hyperliquid] SOURCE DOWN: ${HYPERLIQUID_SOURCE_BREAKER_THRESHOLD} consecutive failures ` +
+      `(last: ${context.instrument}) - skipping Hyperliquid candles for ` +
+      `${Math.round(HYPERLIQUID_SOURCE_BREAKER_COOLDOWN_MS / 60_000)} min`;
+    console.log(msg);
+    appendTelemetry(msg);
+  }
+  emitOkxDatafeedDiagnostic(Object.freeze({
+    kind: "hyperliquid_source_breaker_increment",
+    ...context,
+    priorConsecutiveFailures,
+    resultingConsecutiveFailures: hyperliquidSourceConsecutiveFailures,
+    opened,
+    cooldownMs: HYPERLIQUID_SOURCE_BREAKER_COOLDOWN_MS,
+  }));
+  releaseSourceHalfOpenOwner(lease, "release_failure");
+}
+
 /** Test-only: reset the OKX source breaker between test cases. */
 export function __testResetOkxSourceBreaker(): void {
   okxSourceConsecutiveFailures = 0;
   okxSourceDownUntil = 0;
   gateFuturesSourceConsecutiveFailures = 0;
   gateFuturesSourceDownUntil = 0;
+  hyperliquidSourceConsecutiveFailures = 0;
+  hyperliquidSourceDownUntil = 0;
   sourceHalfOpenOrdinal = 0;
   okxSourceHalfOpenOwner = null;
   gateFuturesSourceHalfOpenOwner = null;
+  hyperliquidSourceHalfOpenOwner = null;
   okxFailedInstruments.clear();
   gateFuturesFailedContracts.clear();
+  resetHyperliquidState();
 }
 
 class GatePairNotFoundError extends Error {
@@ -508,6 +588,310 @@ function isValidNumber(v: unknown): v is number {
   if (typeof v === "number") return Number.isFinite(v);
   if (typeof v === "string") return v.length > 0 && Number.isFinite(Number(v));
   return false;
+}
+
+type HyperliquidWeightAction = HyperliquidWeightDiagnostic["action"];
+type HyperliquidWeightWaiter = {
+  weight: number;
+  deadlineAt: number;
+  signal?: AbortSignal;
+  context: OkxRequestDiagnosticContext;
+  resolve: (reserved: boolean) => void;
+  reject: (error: Error) => void;
+  onAbort?: () => void;
+};
+
+let hyperliquidAvailableWeight = HYPERLIQUID_WEIGHT_CAPACITY;
+let hyperliquidWeightRefilledAt = Date.now();
+let hyperliquidWeightQueue: HyperliquidWeightWaiter[] = [];
+let hyperliquidWeightTimer: ReturnType<typeof setTimeout> | null = null;
+let hyperliquidCatalogCache: Readonly<{ names: ReadonlySet<string>; expiresAt: number }> | null = null;
+let hyperliquidCatalogRefresh: Promise<ReadonlySet<string> | null> | null = null;
+
+function refillHyperliquidWeight(): void {
+  const now = Date.now();
+  const elapsedMs = Math.max(0, now - hyperliquidWeightRefilledAt);
+  hyperliquidAvailableWeight = Math.min(
+    HYPERLIQUID_WEIGHT_CAPACITY,
+    hyperliquidAvailableWeight + elapsedMs * HYPERLIQUID_WEIGHT_REFILL_PER_SECOND / 1000,
+  );
+  hyperliquidWeightRefilledAt = now;
+}
+
+function emitHyperliquidWeightDiagnostic(
+  action: HyperliquidWeightAction,
+  weight: number,
+  context: OkxRequestDiagnosticContext,
+): void {
+  emitOkxDatafeedDiagnostic(Object.freeze({
+    kind: "hyperliquid_budget_event",
+    ...context,
+    action,
+    weight: Math.max(0, Math.trunc(weight)),
+    availableWeight: Math.max(0, Math.floor(hyperliquidAvailableWeight)),
+  }));
+}
+
+function removeHyperliquidWeightWaiter(waiter: HyperliquidWeightWaiter): boolean {
+  const index = hyperliquidWeightQueue.indexOf(waiter);
+  if (index < 0) return false;
+  hyperliquidWeightQueue.splice(index, 1);
+  if (waiter.signal && waiter.onAbort) {
+    waiter.signal.removeEventListener("abort", waiter.onAbort);
+  }
+  return true;
+}
+
+function drainHyperliquidWeightQueue(): void {
+  if (hyperliquidWeightTimer) {
+    clearTimeout(hyperliquidWeightTimer);
+    hyperliquidWeightTimer = null;
+  }
+  refillHyperliquidWeight();
+  while (hyperliquidWeightQueue.length > 0) {
+    const waiter = hyperliquidWeightQueue[0];
+    if (waiter.signal?.aborted) {
+      removeHyperliquidWeightWaiter(waiter);
+      waiter.reject(makeAbortError());
+      continue;
+    }
+    const now = Date.now();
+    if (now >= waiter.deadlineAt) {
+      removeHyperliquidWeightWaiter(waiter);
+      emitHyperliquidWeightDiagnostic("budget_skip", waiter.weight, waiter.context);
+      waiter.resolve(false);
+      continue;
+    }
+    if (hyperliquidAvailableWeight >= waiter.weight) {
+      hyperliquidAvailableWeight -= waiter.weight;
+      removeHyperliquidWeightWaiter(waiter);
+      emitHyperliquidWeightDiagnostic("reserve", waiter.weight, waiter.context);
+      waiter.resolve(true);
+      continue;
+    }
+    const deficitMs = Math.ceil(
+      (waiter.weight - hyperliquidAvailableWeight) / HYPERLIQUID_WEIGHT_REFILL_PER_SECOND * 1000,
+    );
+    const waitMs = Math.max(1, Math.min(deficitMs, waiter.deadlineAt - now));
+    hyperliquidWeightTimer = setTimeout(drainHyperliquidWeightQueue, waitMs);
+    hyperliquidWeightTimer.unref?.();
+    return;
+  }
+}
+
+async function reserveHyperliquidWeightWithinWindow(
+  weight: number,
+  deadlineAt: number,
+  signal: AbortSignal | undefined,
+  context: OkxRequestDiagnosticContext,
+): Promise<boolean> {
+  throwIfAborted(signal);
+  const boundedWeight = Math.max(0, Math.ceil(weight));
+  if (boundedWeight > HYPERLIQUID_WEIGHT_CAPACITY || deadlineAt <= Date.now()) {
+    refillHyperliquidWeight();
+    emitHyperliquidWeightDiagnostic("budget_skip", boundedWeight, context);
+    return false;
+  }
+  return new Promise<boolean>((resolve, reject) => {
+    const waiter: HyperliquidWeightWaiter = {
+      weight: boundedWeight,
+      deadlineAt,
+      signal,
+      context,
+      resolve,
+      reject,
+    };
+    waiter.onAbort = () => {
+      if (!removeHyperliquidWeightWaiter(waiter)) return;
+      reject(makeAbortError());
+      drainHyperliquidWeightQueue();
+    };
+    signal?.addEventListener("abort", waiter.onAbort, { once: true });
+    hyperliquidWeightQueue.push(waiter);
+    drainHyperliquidWeightQueue();
+  });
+}
+
+function refundHyperliquidWeight(
+  weight: number,
+  context: OkxRequestDiagnosticContext,
+): void {
+  const refund = Math.max(0, Math.ceil(weight));
+  if (refund === 0) return;
+  refillHyperliquidWeight();
+  hyperliquidAvailableWeight = Math.min(
+    HYPERLIQUID_WEIGHT_CAPACITY,
+    hyperliquidAvailableWeight + refund,
+  );
+  emitHyperliquidWeightDiagnostic("refund", refund, context);
+  drainHyperliquidWeightQueue();
+}
+
+function drainHyperliquidWeightAfterRateLimit(
+  weight: number,
+  context: OkxRequestDiagnosticContext,
+): void {
+  refillHyperliquidWeight();
+  hyperliquidAvailableWeight = 0;
+  hyperliquidWeightRefilledAt = Date.now();
+  emitHyperliquidWeightDiagnostic("rate_limited", weight, context);
+  drainHyperliquidWeightQueue();
+}
+
+function hyperliquidRequestWeight(expectedRows: number): number {
+  return 20 + Math.ceil(Math.max(0, expectedRows) / 60);
+}
+
+function activeHyperliquidCatalog(): ReadonlySet<string> | null {
+  if (!hyperliquidCatalogCache || hyperliquidCatalogCache.expiresAt <= Date.now()) return null;
+  return hyperliquidCatalogCache.names;
+}
+
+async function awaitSharedHyperliquidCatalog(
+  promise: Promise<ReadonlySet<string> | null>,
+  deadlineAt: number,
+  signal?: AbortSignal,
+): Promise<ReadonlySet<string> | null> {
+  throwIfAborted(signal);
+  const remainingMs = Math.min(HYPERLIQUID_REQUEST_TIMEOUT_MS, deadlineAt - Date.now());
+  if (remainingMs <= 0) return null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let onAbort: (() => void) | null = null;
+  const localTerminal = new Promise<null>((resolve, reject) => {
+    timer = setTimeout(() => resolve(null), remainingMs);
+    timer.unref?.();
+    onAbort = () => reject(makeAbortError());
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, localTerminal]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+function parseHyperliquidCatalog(value: unknown): ReadonlySet<string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Hyperliquid metadata malformed");
+  }
+  const universe = (value as Record<string, unknown>).universe;
+  if (!Array.isArray(universe)) throw new Error("Hyperliquid metadata malformed");
+  const names = new Set<string>();
+  for (const raw of universe) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("Hyperliquid metadata malformed");
+    }
+    const row = raw as Record<string, unknown>;
+    if (typeof row.name !== "string" || row.name.length === 0) {
+      throw new Error("Hyperliquid metadata malformed");
+    }
+    if (row.isDelisted !== true) names.add(row.name);
+  }
+  return names;
+}
+
+async function initiateHyperliquidCatalogRefresh(
+  callerClass: CandleReadCallerClass,
+): Promise<ReadonlySet<string> | null> {
+  const context: OkxRequestDiagnosticContext = {
+    provider: "hyperliquid",
+    endpoint: "info",
+    callerClass,
+    instrument: "catalog",
+    timeframe: "meta",
+    attempt: 1,
+  };
+  if (sourceDownUntil("hyperliquid") > Date.now()) return null;
+  const reserveDeadline = Date.now() + HYPERLIQUID_REQUEST_TIMEOUT_MS;
+  const reserved = await reserveHyperliquidWeightWithinWindow(20, reserveDeadline, undefined, context);
+  if (!reserved) return null;
+  const admission = admitSourceRequest("hyperliquid");
+  if (!admission.admitted) {
+    refundHyperliquidWeight(20, context);
+    return null;
+  }
+  try {
+    const bounded = await fetchWithHardTimeout(
+      HYPERLIQUID_INFO_URL,
+      HYPERLIQUID_REQUEST_TIMEOUT_MS,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "meta" }),
+      },
+      undefined,
+      "default",
+      context,
+      HYPERLIQUID_HARD_TERMINAL_GRACE_MS,
+    );
+    try {
+      if (bounded.response.status === 429) {
+        drainHyperliquidWeightAfterRateLimit(20, context);
+        releaseSourceHalfOpenOwner(admission.lease, "release_rate_limited");
+        return null;
+      }
+      if (!bounded.response.ok) throw new Error(`Hyperliquid metadata HTTP ${bounded.response.status}`);
+      const names = parseHyperliquidCatalog(await bounded.json<unknown>());
+      recordHyperliquidSourceSuccess(admission.lease);
+      hyperliquidCatalogCache = Object.freeze({
+        names,
+        expiresAt: Date.now() + HYPERLIQUID_CATALOG_TTL_MS,
+      });
+      return names;
+    } finally {
+      bounded.release();
+    }
+  } catch (error) {
+    if (admission.lease && sourceHalfOpenOwner("hyperliquid") === admission.lease) {
+      recordHyperliquidSourceFailure(context, admission.lease);
+    } else if (!admission.lease) {
+      recordHyperliquidSourceFailure(context, null);
+    }
+    return null;
+  }
+}
+
+async function getHyperliquidCatalog(
+  deadlineAt: number,
+  callerClass: CandleReadCallerClass,
+  signal?: AbortSignal,
+): Promise<ReadonlySet<string> | null> {
+  const cached = activeHyperliquidCatalog();
+  if (cached) return cached;
+  if (!hyperliquidCatalogRefresh) {
+    const refresh = initiateHyperliquidCatalogRefresh(callerClass);
+    const shared = refresh.finally(() => {
+      if (hyperliquidCatalogRefresh === shared) hyperliquidCatalogRefresh = null;
+    });
+    hyperliquidCatalogRefresh = shared;
+  }
+  return awaitSharedHyperliquidCatalog(hyperliquidCatalogRefresh, deadlineAt, signal);
+}
+
+/** Test-only exact catalog seam; no alias or multiplier normalization occurs. */
+export function __testSetHyperliquidCatalog(names: readonly string[]): void {
+  hyperliquidCatalogCache = Object.freeze({
+    names: new Set(names),
+    expiresAt: Number.POSITIVE_INFINITY,
+  });
+  hyperliquidCatalogRefresh = null;
+}
+
+function resetHyperliquidState(): void {
+  if (hyperliquidWeightTimer) clearTimeout(hyperliquidWeightTimer);
+  hyperliquidWeightTimer = null;
+  for (const waiter of hyperliquidWeightQueue) {
+    if (waiter.signal && waiter.onAbort) {
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+    }
+    waiter.resolve(false);
+  }
+  hyperliquidWeightQueue = [];
+  hyperliquidAvailableWeight = HYPERLIQUID_WEIGHT_CAPACITY;
+  hyperliquidWeightRefilledAt = Date.now();
+  hyperliquidCatalogCache = null;
+  hyperliquidCatalogRefresh = null;
 }
 
 export function stripMultiplierPrefix(base: string): string {
@@ -1639,6 +2023,207 @@ async function fetchGateFuturesCandlesFromEndpoint(
   }
 }
 
+type HyperliquidCandleAttempt = Readonly<{
+  candles: ProvenancedOHLCV[];
+  reachable: boolean;
+  transportFailed: boolean;
+  otherwiseAdmissible: boolean;
+  circuitBlocked: boolean;
+  sawMalformedProvenance: boolean;
+  trace: string;
+}>;
+
+function parseHyperliquidCandles(
+  value: unknown,
+  coin: string,
+  timeframe: string,
+  timeframeMs: number,
+  startMs: number,
+  endMs: number,
+): ProvenancedOHLCV[] {
+  if (!Array.isArray(value)) throw new Error("Hyperliquid candle response malformed");
+  const finalityCutoffMs = Math.min(endMs, Date.now());
+  const parsed: ProvenancedOHLCV[] = [];
+  let priorTime = Number.NEGATIVE_INFINITY;
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw new Error("Hyperliquid candle response malformed");
+    }
+    const row = raw as Record<string, unknown>;
+    const time = Number(row.t);
+    const closeTime = Number(row.T);
+    const open = Number(row.o);
+    const high = Number(row.h);
+    const low = Number(row.l);
+    const close = Number(row.c);
+    const volume = row.v === undefined ? 0 : Number(row.v);
+    if (row.s !== coin || row.i !== timeframe
+        || !Number.isInteger(time) || !Number.isInteger(closeTime)
+        || time < startMs || time > endMs || time % timeframeMs !== 0
+        || closeTime !== time + timeframeMs - 1
+        || !Number.isFinite(open) || !Number.isFinite(high)
+        || !Number.isFinite(low) || !Number.isFinite(close)
+        || !Number.isFinite(volume) || time <= priorTime) {
+      throw new Error("Hyperliquid candle response malformed");
+    }
+    priorTime = time;
+    parsed.push({
+      time,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      provenance: {
+        source: "hyperliquid",
+        venue: "hyperliquid",
+        basis: "perp",
+        proxy: "direct",
+        finality: closeTime <= finalityCutoffMs ? "finalized" : "forming",
+        timeSemantic: "open_time",
+      },
+    });
+  }
+  return parsed;
+}
+
+async function tryHyperliquidCandles(
+  symbol: string,
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+  deadlineAt: number,
+  callerClass: CandleReadCallerClass,
+  signal?: AbortSignal,
+): Promise<HyperliquidCandleAttempt> {
+  const coin = symbol.split("/")[0].toUpperCase();
+  const timeframeMs = getTimeframeSeconds(timeframe) * 1000;
+  const expectedRows = Math.floor((endMs - startMs) / timeframeMs) + 1;
+  const unavailable = (trace: string): HyperliquidCandleAttempt => ({
+    candles: [],
+    reachable: false,
+    transportFailed: false,
+    otherwiseAdmissible: false,
+    circuitBlocked: false,
+    sawMalformedProvenance: false,
+    trace,
+  });
+  if (!["15m", "1h", "4h", "1d"].includes(timeframe) || expectedRows > HYPERLIQUID_MAX_CANDLES) {
+    return unavailable("hyperliquid:catalog-miss");
+  }
+
+  const catalog = await getHyperliquidCatalog(deadlineAt, callerClass, signal);
+  throwIfAborted(signal);
+  if (!catalog) return unavailable("hyperliquid:catalog-unavailable");
+  if (!catalog.has(coin)) return unavailable("hyperliquid:catalog-miss");
+
+  const context: OkxRequestDiagnosticContext = {
+    provider: "hyperliquid",
+    endpoint: "info",
+    callerClass,
+    instrument: coin,
+    timeframe,
+    attempt: 1,
+  };
+  if (sourceDownUntil("hyperliquid") > Date.now()) {
+    return { ...unavailable("hyperliquid:info=circuit-skip"), otherwiseAdmissible: true, circuitBlocked: true };
+  }
+  const requestDeadlineAt = Math.min(deadlineAt, Date.now() + HYPERLIQUID_REQUEST_TIMEOUT_MS);
+  const reservedWeight = hyperliquidRequestWeight(expectedRows);
+  const reserved = await reserveHyperliquidWeightWithinWindow(
+    reservedWeight,
+    requestDeadlineAt,
+    signal,
+    context,
+  );
+  if (!reserved) return unavailable("hyperliquid:budget-skip");
+
+  const admission = admitSourceRequest("hyperliquid");
+  if (!admission.admitted) {
+    refundHyperliquidWeight(reservedWeight, context);
+    return {
+      ...unavailable(
+        `hyperliquid:info=${admission.denial === "active_owner" ? "half-open-peer-skip" : "circuit-skip"}`,
+      ),
+      otherwiseAdmissible: true,
+      circuitBlocked: true,
+    };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const timeoutMs = Math.max(1, Math.min(
+      HYPERLIQUID_REQUEST_TIMEOUT_MS,
+      requestDeadlineAt - Date.now(),
+    ));
+    const bounded = await fetchWithHardTimeout(
+      HYPERLIQUID_INFO_URL,
+      timeoutMs,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "candleSnapshot",
+          req: { coin, interval: timeframe, startTime: startMs, endTime: endMs },
+        }),
+      },
+      signal,
+      "default",
+      context,
+      HYPERLIQUID_HARD_TERMINAL_GRACE_MS,
+    );
+    try {
+      if (bounded.response.status === 429) {
+        drainHyperliquidWeightAfterRateLimit(reservedWeight, context);
+        releaseSourceHalfOpenOwner(admission.lease, "release_rate_limited");
+        return unavailable("hyperliquid:rate-limited");
+      }
+      if (!bounded.response.ok) throw new Error(`Hyperliquid candles HTTP ${bounded.response.status}`);
+      const raw = await bounded.json<unknown>();
+      const candles = parseHyperliquidCandles(
+        raw,
+        coin,
+        timeframe,
+        timeframeMs,
+        startMs,
+        endMs,
+      );
+      const actualWeight = hyperliquidRequestWeight(candles.length);
+      if (reservedWeight > actualWeight) {
+        refundHyperliquidWeight(reservedWeight - actualWeight, context);
+      }
+      recordHyperliquidSourceSuccess(admission.lease);
+      return {
+        candles,
+        reachable: true,
+        transportFailed: false,
+        otherwiseAdmissible: true,
+        circuitBlocked: false,
+        sawMalformedProvenance: false,
+        trace: `hyperliquid:info=${candles.filter((row) => row.provenance.finality === "finalized").length}c/${Date.now() - startedAt}ms`,
+      };
+    } finally {
+      bounded.release();
+    }
+  } catch (error) {
+    if (signal?.aborted) {
+      releaseSourceHalfOpenOwner(admission.lease, "release_cancellation");
+      throwIfAborted(signal);
+    }
+    recordHyperliquidSourceFailure(context, admission.lease);
+    return {
+      candles: [],
+      reachable: false,
+      transportFailed: true,
+      otherwiseAdmissible: true,
+      circuitBlocked: false,
+      sawMalformedProvenance: error instanceof Error
+        && error.message === "Hyperliquid candle response malformed",
+      trace: `hyperliquid:info=unavailable/${Date.now() - startedAt}ms`,
+    };
+  }
+}
+
 async function fetchDirectPerpCandles(
   symbol: string,
   timeframe: string,
@@ -1685,7 +2270,8 @@ async function fetchDirectPerpCandles(
   const settleProviderSuccess = (provider: DirectPerpProvider): void => {
     const lease = providerAdmissions.get(provider)?.lease ?? null;
     if (provider === "okx") recordOkxSourceSuccess(lease);
-    else recordGateFuturesSourceSuccess(lease);
+    else if (provider === "gate") recordGateFuturesSourceSuccess(lease);
+    else recordHyperliquidSourceSuccess(lease);
     clearSettledLease(provider);
   };
 
@@ -1696,12 +2282,40 @@ async function fetchDirectPerpCandles(
       if (!context) continue;
       const lease = providerAdmissions.get(provider)?.lease ?? null;
       if (provider === "okx") recordOkxSourceFailure(context, lease);
-      else recordGateFuturesSourceFailure(context, lease);
+      else if (provider === "gate") recordGateFuturesSourceFailure(context, lease);
+      else recordHyperliquidSourceFailure(context, lease);
       clearSettledLease(provider);
     }
   };
 
   try {
+  const hyperliquid = await tryHyperliquidCandles(
+    symbol,
+    timeframe,
+    startMs,
+    endMs,
+    deadlineAt,
+    callerClass,
+    signal,
+  );
+  trace.push(hyperliquid.trace);
+  sawMalformedProvenance ||= hyperliquid.sawMalformedProvenance;
+  if (hyperliquid.reachable) providerReachable.add("hyperliquid");
+  if (hyperliquid.transportFailed) providerTransportFailed.add("hyperliquid");
+  if (hyperliquid.otherwiseAdmissible) providerOtherwiseAdmissible.add("hyperliquid");
+  if (hyperliquid.circuitBlocked) providerCircuitBlocked.add("hyperliquid");
+  if (hyperliquid.candles.length > 0) lastPureProviderCandles = hyperliquid.candles;
+  const hyperliquidEligible = hyperliquid.candles.filter((candle) =>
+    candle.provenance.finality === "finalized" && candle.provenance.proxy === "direct",
+  );
+  if (hyperliquidEligible.length > 0) {
+    return {
+      candles: hyperliquidEligible,
+      sawMalformedProvenance,
+      unavailableReason: null,
+      trace,
+    };
+  }
   for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex++) {
     throwIfAborted(signal);
     const endpoint = endpoints[endpointIndex];
@@ -2076,7 +2690,7 @@ function cacheTailIsFresh(
   return !isLiveRequest || newestCachedTs > endMs - 2 * intervalMs;
 }
 
-function cacheRangeIsAdmissible(
+export function cacheRangeIsAdmissible(
   cached: readonly ProvenancedOHLCV[],
   timeframe: string,
   startMs: number,

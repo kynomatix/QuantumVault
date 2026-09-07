@@ -438,8 +438,8 @@ const schemaMigrationSql = [
         low real NOT NULL,
         close real NOT NULL,
         volume real NOT NULL,
-        source text NOT NULL CHECK (source IN ('okx', 'gate', 'pyth', 'unknown')),
-        venue text NOT NULL CHECK (venue IN ('okx', 'gate', 'none', 'unknown')),
+        source text NOT NULL CHECK (source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown')),
+        venue text NOT NULL CHECK (venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')),
         basis text NOT NULL CHECK (basis IN ('perp', 'spot', 'index', 'unknown')),
         proxy text NOT NULL CHECK (proxy IN ('direct', 'proxy', 'unknown')),
         finality text NOT NULL CHECK (finality IN ('finalized', 'forming', 'unknown')),
@@ -1783,6 +1783,38 @@ const schemaMigrationSql = [
          ON ai_trader_scanner_candidate_claims (wallet_address, boundary_start, market);
        CREATE INDEX IF NOT EXISTS ai_trader_scanner_candidate_claims_expires_at_idx
          ON ai_trader_scanner_candidate_claims (expires_at)`,
+      `DO $qv$
+       DECLARE
+         source_definition text;
+         venue_definition text;
+       BEGIN
+         SELECT pg_get_constraintdef(oid)
+           INTO source_definition
+           FROM pg_constraint
+          WHERE conrelid = 'lab_candle_cache_v2'::regclass
+            AND conname = 'lab_candle_cache_v2_source_check';
+         IF source_definition IS NULL OR position('hyperliquid' in source_definition) = 0 THEN
+           ALTER TABLE lab_candle_cache_v2
+             DROP CONSTRAINT IF EXISTS lab_candle_cache_v2_source_check;
+           ALTER TABLE lab_candle_cache_v2
+             ADD CONSTRAINT lab_candle_cache_v2_source_check
+             CHECK (source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown'));
+         END IF;
+
+         SELECT pg_get_constraintdef(oid)
+           INTO venue_definition
+           FROM pg_constraint
+          WHERE conrelid = 'lab_candle_cache_v2'::regclass
+            AND conname = 'lab_candle_cache_v2_venue_check';
+         IF venue_definition IS NULL OR position('hyperliquid' in venue_definition) = 0 THEN
+           ALTER TABLE lab_candle_cache_v2
+             DROP CONSTRAINT IF EXISTS lab_candle_cache_v2_venue_check;
+           ALTER TABLE lab_candle_cache_v2
+             ADD CONSTRAINT lab_candle_cache_v2_venue_check
+             CHECK (venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown'));
+         END IF;
+       END
+       $qv$`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -1814,8 +1846,8 @@ const schemaMigrationMetadata = [
         ],
         "constraintDefinitions": [
           "PRIMARY KEY (id)",
-          "source IN ('okx', 'gate', 'pyth', 'unknown')",
-          "venue IN ('okx', 'gate', 'none', 'unknown')",
+          "source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown')",
+          "venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')",
           "basis IN ('perp', 'spot', 'index', 'unknown')",
           "proxy IN ('direct', 'proxy', 'unknown')",
           "finality IN ('finalized', 'forming', 'unknown')",
@@ -5068,6 +5100,31 @@ const schemaMigrationMetadata = [
           "expires_at"
         ],
         "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "182-extend-lab-candle-cache-hyperliquid-provenance",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "lab_candle_cache_v2",
+        "constraint": "lab_candle_cache_v2_source_check",
+        "definitionIncludes": [
+          "source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown')"
+        ]
+      },
+      {
+        "kind": "constraint",
+        "table": "lab_candle_cache_v2",
+        "constraint": "lab_candle_cache_v2_venue_check",
+        "definitionIncludes": [
+          "venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')"
+        ]
       }
     ],
     "operation": "ddl"

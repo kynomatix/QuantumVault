@@ -21,6 +21,9 @@ import {
   fetchOHLCV,
   prefetchCachedOHLCV,
   completeCachedOHLCVTail,
+  cacheRangeIsAdmissible,
+  candleMatchesBasisPolicy,
+  mergeScannerCandleTail,
   isNonCryptoMarketOpen,
   isAbortError,
   isCacheDegradedError,
@@ -896,6 +899,142 @@ function allParentFieldsFinite(parentBars: readonly OHLCV[]): boolean {
     Number.isFinite(bar.volume));
 }
 
+export type ParentPrefixCompletionReason =
+  | "complete"
+  | "no_prefix"
+  | "primary_not_hyperliquid"
+  | "invalid_ratio"
+  | "invalid_prefix"
+  | "invalid_primary"
+  | "incomplete_bucket"
+  | "range_inadmissible";
+
+export type ParentPrefixCompletionResult = Readonly<{
+  bars: ProvenancedOHLCV[] | null;
+  reason: ParentPrefixCompletionReason;
+  derivedCount: number;
+}>;
+
+const HYPERLIQUID_PARENT_PROVENANCE: Readonly<CandleProvenance> = Object.freeze({
+  source: "hyperliquid",
+  venue: "hyperliquid",
+  basis: "perp",
+  proxy: "direct",
+  finality: "finalized",
+  timeSemantic: "open_time",
+});
+
+function isExactHyperliquidParentInput(row: ProvenancedOHLCV): boolean {
+  const p = row.provenance;
+  return p.source === HYPERLIQUID_PARENT_PROVENANCE.source
+    && p.venue === HYPERLIQUID_PARENT_PROVENANCE.venue
+    && p.basis === HYPERLIQUID_PARENT_PROVENANCE.basis
+    && p.proxy === HYPERLIQUID_PARENT_PROVENANCE.proxy
+    && p.finality === HYPERLIQUID_PARENT_PROVENANCE.finality
+    && p.timeSemantic === HYPERLIQUID_PARENT_PROVENANCE.timeSemantic;
+}
+
+/**
+ * Complete only the contiguous closed parent tail after an admitted prefix.
+ * Any failed proof returns a fallback result; no partial derived series escapes.
+ */
+export function completeParentPrefixFromPrimaryBars(input: Readonly<{
+  parentPrefix: readonly ProvenancedOHLCV[];
+  primaryBars: readonly ProvenancedOHLCV[];
+  primaryTimeframe: string;
+  parentTimeframe: string;
+  startMs: number;
+  endMs: number;
+  nowMs: number;
+}>): ParentPrefixCompletionResult {
+  const fallback = (reason: ParentPrefixCompletionReason): ParentPrefixCompletionResult => ({
+    bars: null,
+    reason,
+    derivedCount: 0,
+  });
+  if (input.parentPrefix.length === 0) return fallback("no_prefix");
+  const primaryMs = TIMEFRAME_MS[input.primaryTimeframe];
+  const parentMs = TIMEFRAME_MS[input.parentTimeframe];
+  if (!primaryMs || !parentMs || parentMs % primaryMs !== 0) return fallback("invalid_ratio");
+  const ratio = parentMs / primaryMs;
+
+  const prefix = [...input.parentPrefix].sort((a, b) => a.time - b.time);
+  for (let i = 0; i < prefix.length; i++) {
+    const row = prefix[i];
+    if (!candleMatchesBasisPolicy(row, MONEY_CANDLE_POLICY)
+        || !allParentFieldsFinite([row])
+        || row.time % parentMs !== 0
+        || (i > 0 && row.time - prefix[i - 1].time !== parentMs)) {
+      return fallback("invalid_prefix");
+    }
+  }
+
+  const primaryByTime = new Map<number, ProvenancedOHLCV>();
+  for (const row of input.primaryBars) {
+    if (primaryByTime.has(row.time) || row.time % primaryMs !== 0 || !allParentFieldsFinite([row])) {
+      return fallback("invalid_primary");
+    }
+    primaryByTime.set(row.time, row);
+  }
+
+  const firstBucketStart = prefix[prefix.length - 1].time + parentMs;
+  const finalityCutoff = Math.min(input.endMs, input.nowMs);
+  const lastClosedBucketStart = Math.floor((finalityCutoff - (parentMs - 1)) / parentMs) * parentMs;
+  const derived: ProvenancedOHLCV[] = [];
+  for (let bucketStart = firstBucketStart; bucketStart <= lastClosedBucketStart; bucketStart += parentMs) {
+    const bucket: ProvenancedOHLCV[] = [];
+    for (let index = 0; index < ratio; index++) {
+      const row = primaryByTime.get(bucketStart + index * primaryMs);
+      if (!row) return fallback("incomplete_bucket");
+      if (!candleMatchesBasisPolicy(row, MONEY_CANDLE_POLICY)) return fallback("invalid_primary");
+      if (!isExactHyperliquidParentInput(row)) return fallback("primary_not_hyperliquid");
+      bucket.push(row);
+    }
+    const aggregated: ProvenancedOHLCV = {
+      time: bucketStart,
+      open: bucket[0].open,
+      high: Math.max(...bucket.map((row) => row.high)),
+      low: Math.min(...bucket.map((row) => row.low)),
+      close: bucket[bucket.length - 1].close,
+      volume: bucket.reduce((sum, row) => sum + row.volume, 0),
+      provenance: { ...HYPERLIQUID_PARENT_PROVENANCE },
+    };
+    if (!allParentFieldsFinite([aggregated])) return fallback("invalid_primary");
+    derived.push(aggregated);
+  }
+
+  if (derived.length === 0) return fallback("range_inadmissible");
+  const merged = mergeScannerCandleTail(prefix, derived).filter((row) =>
+    row.time >= input.startMs
+      && row.time <= input.endMs
+      && candleMatchesBasisPolicy(row, MONEY_CANDLE_POLICY),
+  );
+  const identity = merged[0]?.provenance;
+  if (!identity || merged.some(({ provenance }) =>
+    provenance.source !== identity.source
+      || provenance.venue !== identity.venue
+      || provenance.basis !== identity.basis
+      || provenance.proxy !== identity.proxy
+      || provenance.finality !== identity.finality
+      || provenance.timeSemantic !== identity.timeSemantic)) {
+    return fallback("range_inadmissible");
+  }
+  for (let i = 1; i < merged.length; i++) {
+    if (merged[i].time - merged[i - 1].time !== parentMs) {
+      return fallback("range_inadmissible");
+    }
+  }
+  if (!cacheRangeIsAdmissible(
+    merged,
+    input.parentTimeframe,
+    input.startMs,
+    input.endMs,
+  )) {
+    return fallback("range_inadmissible");
+  }
+  return { bars: merged, reason: "complete", derivedCount: derived.length };
+}
+
 export type ScannerFormationLifecycle =
   | { state: "unknown" }
   | { state: "pre_break" }
@@ -1616,6 +1755,30 @@ async function runSweep(): Promise<void> {
                 if (candleCache.has(parentCacheKey)) {
                   parentBars = candleCache.get(parentCacheKey)!;
                 } else {
+                  const parentPrefix = candlePrefixes.get(parentCacheKey);
+                  const derivation = parentPrefix
+                    ? completeParentPrefixFromPrimaryBars({
+                        parentPrefix,
+                        primaryBars: bars,
+                        primaryTimeframe: tf,
+                        parentTimeframe: parentTf,
+                        startMs: parentStartMs,
+                        endMs,
+                        nowMs: now.getTime(),
+                      })
+                    : { bars: null, reason: "no_prefix" as const, derivedCount: 0 };
+                  const derivationLine =
+                    `[ScannerParentDerivation] ${ticker} ${parentTf} ` +
+                    `outcome=${derivation.bars ? "derived" : "fallback"} reason=${derivation.reason} ` +
+                    `prefix=${parentPrefix?.length ?? 0} primary=${bars.length} derived=${derivation.derivedCount}`;
+                  console.log(derivationLine);
+                  appendTelemetry(derivationLine);
+                  if (derivation.bars) {
+                    parentBars = derivation.bars;
+                    candleCache.set(parentCacheKey, parentBars);
+                    candlePrefixes.delete(parentCacheKey);
+                    batchExactMisses.delete(parentCacheKey);
+                  } else {
                   // Min of both clocks — same rationale as the primary fetch guard.
                   const remainingMs = Math.min(
                     fetchDeadlineAt - Date.now(),
@@ -1626,7 +1789,6 @@ async function runSweep(): Promise<void> {
                     parentBars = null;
                   } else {
                     const parentStartDate = new Date(parentStartMs).toISOString();
-                    const parentPrefix = candlePrefixes.get(parentCacheKey);
                     const direct = await runDirectFetch(
                       tfAbort.signal,
                       () => Math.min(fetchDeadlineAt, protocolDeadlineAt()),
@@ -1677,6 +1839,7 @@ async function runSweep(): Promise<void> {
                       candlePrefixes.delete(parentCacheKey);
                       batchExactMisses.delete(parentCacheKey);
                     }
+                  }
                   }
                 }
               } catch (err) {
