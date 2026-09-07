@@ -67,8 +67,8 @@ function parseCandleBasisLabel(value: unknown): CandleBasisLabel | null {
   if (!value || typeof value !== 'object') return null;
   const v = value as Record<string, unknown>;
   const accepted = {
-    source: ['okx', 'gate', 'pyth'],
-    venue: ['okx', 'gate', 'none'],
+    source: ['okx', 'gate', 'pyth', 'hyperliquid'],
+    venue: ['okx', 'gate', 'hyperliquid', 'none'],
     basis: ['perp', 'spot', 'index'],
     proxy: ['direct', 'proxy'],
     timeSemantic: ['open_time'],

@@ -1623,8 +1623,8 @@ export const labCandleCacheV2 = pgTable("lab_candle_cache_v2", {
   index("lab_candle_cache_v2_lookup").on(
     table.symbol, table.timeframe, table.basis, table.finality, table.proxy, table.time,
   ),
-  check("lab_candle_cache_v2_source_check", sql`${table.source} IN ('okx', 'gate', 'pyth', 'unknown')`),
-  check("lab_candle_cache_v2_venue_check", sql`${table.venue} IN ('okx', 'gate', 'none', 'unknown')`),
+  check("lab_candle_cache_v2_source_check", sql`${table.source} IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown')`),
+  check("lab_candle_cache_v2_venue_check", sql`${table.venue} IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')`),
   check("lab_candle_cache_v2_basis_check", sql`${table.basis} IN ('perp', 'spot', 'index', 'unknown')`),
   check("lab_candle_cache_v2_proxy_check", sql`${table.proxy} IN ('direct', 'proxy', 'unknown')`),
   check("lab_candle_cache_v2_finality_check", sql`${table.finality} IN ('finalized', 'forming', 'unknown')`),

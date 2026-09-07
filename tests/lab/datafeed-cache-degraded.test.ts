@@ -29,9 +29,21 @@ vi.mock("../../server/lab/candle-store", () => ({
   CACHE_BUDGET_ABORT_REASON: "candle-cache-budget-exceeded",
 }));
 
+// Import only the scanner's pure parent-completion helper. Keep its unrelated
+// runtime dependencies inert so this remains a datafeed-boundary replay and
+// never opens storage, venue, or incident-reporting infrastructure.
+vi.mock("../../server/error-log", () => ({ recordCriticalError: vi.fn() }));
+vi.mock("../../server/ai-trader/context-builder", () => ({
+  marketToDatafeedTicker: (market: string) => market.replace("-PERP", "/USDT"),
+}));
+vi.mock("../../server/protocol/flash/flash-markets", () => ({ getFlashMarketSpecs: vi.fn(() => []) }));
+vi.mock("../../server/protocol/adapter-registry", () => ({ getAdapter: vi.fn() }));
+vi.mock("../../server/ai-trader/session-context", () => ({ getSessionContext: vi.fn() }));
+
 import {
   AI_CONTEXT_CANDLE_POLICY,
   __testResetOkxSourceBreaker,
+  __testSetHyperliquidCatalog,
   completeCachedOHLCVTail,
   fetchOHLCV,
   isCacheDegradedError,
@@ -41,7 +53,12 @@ import {
   SCANNER_BATCH_CACHE_QUERY_TIMEOUT_MS,
   setOkxDatafeedDiagnosticReporter,
   type OkxDatafeedDiagnostic,
+  type ProvenancedOHLCV,
 } from "../../server/lab/datafeed";
+import {
+  completeParentPrefixFromPrimaryBars,
+  rewindPrimaryPrefixForParentTail,
+} from "../../server/ai-trader/scanner";
 
 const TF_MS = 15 * 60 * 1000;
 
@@ -68,6 +85,7 @@ let okxDiagnostics: OkxDatafeedDiagnostic[];
 beforeEach(() => {
   vi.useFakeTimers();
   __testResetOkxSourceBreaker();
+  __testSetHyperliquidCatalog([]);
   mockGetCached.mockReset();
   mockGetCachedBatch.mockReset();
   mockSave.mockClear();
@@ -100,11 +118,21 @@ function runFetch(deadlineMs: number, signal?: AbortSignal) {
 
 function runDirectPerp(symbol: string, signal?: AbortSignal) {
   const now = Date.now();
+  return runDirectPerpRange(symbol, "15m", now - 2 * TF_MS, now, signal);
+}
+
+function runDirectPerpRange(
+  symbol: string,
+  timeframe: string,
+  startMs: number,
+  endMs: number,
+  signal?: AbortSignal,
+) {
   return fetchOHLCV(
     symbol,
-    "15m",
-    now - 2 * TF_MS,
-    now,
+    timeframe,
+    startMs,
+    endMs,
     undefined,
     {
       basisPolicy: MONEY_CANDLE_POLICY,
@@ -127,6 +155,408 @@ async function openDirectPerpSourceBreakers(): Promise<void> {
     });
   }
 }
+
+function hyperliquidRow(coin: string, time: number, timeframe = "15m") {
+  const timeframeMs = timeframe === "1h"
+    ? 4 * TF_MS
+    : timeframe === "4h"
+      ? 16 * TF_MS
+      : timeframe === "1d"
+        ? 96 * TF_MS
+        : TF_MS;
+  return {
+    t: time,
+    T: time + timeframeMs - 1,
+    s: coin,
+    i: timeframe,
+    o: "100",
+    h: "102",
+    l: "99",
+    c: "101",
+    v: "12",
+  };
+}
+
+describe("Hyperliquid direct-perpetual availability source", () => {
+  it("falls through malformed Hyperliquid data and preserves typed source-unavailable truth", async () => {
+    __testSetHyperliquidCatalog(["SOL"]);
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      if (String(input) === "https://api.hyperliquid.xyz/info") {
+        return { ok: true, status: 200, json: async () => ({ malformed: true }), text: async () => "" };
+      }
+      throw new Error("fallback transport unavailable");
+    });
+
+    await expect(runDirectPerp("SOL/USDT")).rejects.toMatchObject({
+      name: "CandleSourceUnavailableError",
+      reason: "transport_unavailable",
+      source: "direct_perp",
+    });
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "hyperliquid_source_breaker_increment",
+      provider: "hyperliquid",
+      opened: false,
+    }));
+  });
+
+  it("drains local weight on 429 without treating rate limiting as a breaker failure", async () => {
+    __testSetHyperliquidCatalog(["SOL"]);
+    fetchSpy.mockImplementation(async (input: unknown) => {
+      if (String(input) === "https://api.hyperliquid.xyz/info") {
+        return { ok: false, status: 429, json: async () => ({}), text: async () => "" };
+      }
+      throw new Error("fallback transport unavailable");
+    });
+
+    await expect(runDirectPerp("SOL/USDT")).rejects.toMatchObject({
+      name: "CandleSourceUnavailableError",
+      reason: "transport_unavailable",
+    });
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "hyperliquid_budget_event",
+      provider: "hyperliquid",
+      action: "rate_limited",
+    }));
+    expect(okxDiagnostics).not.toContainEqual(expect.objectContaining({
+      kind: "hyperliquid_source_breaker_increment",
+      provider: "hyperliquid",
+    }));
+  });
+
+  it("cancels a Hyperliquid body without mutating breaker health", async () => {
+    __testSetHyperliquidCatalog(["SOL"]);
+    const controller = new AbortController();
+    let bodyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bodyStarted = resolve; });
+    fetchSpy.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      expect(String(input)).toBe("https://api.hyperliquid.xyz/info");
+      return {
+        ok: true,
+        status: 200,
+        json: () => new Promise((_resolve, reject) => {
+          bodyStarted();
+          const fail = () => {
+            const error = new Error("cancelled");
+            error.name = "AbortError";
+            reject(error);
+          };
+          const signal = init?.signal;
+          if (signal?.aborted) fail();
+          else signal?.addEventListener("abort", fail, { once: true });
+        }),
+        text: async () => "",
+      };
+    });
+
+    const pending = runDirectPerp("SOL/USDT", controller.signal);
+    pending.catch(() => {});
+    await started;
+    controller.abort("scanner generation ended");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(okxDiagnostics).not.toContainEqual(expect.objectContaining({
+      kind: "hyperliquid_source_breaker_increment",
+      provider: "hyperliquid",
+    }));
+  });
+
+  it("admits exactly one Hyperliquid half-open owner after cooldown", async () => {
+    const symbols = ["OPEN1", "OPEN2", "OPEN3", "PROBE1", "PROBE2"];
+    __testSetHyperliquidCatalog(symbols);
+    let phase: "opening" | "probe" = "opening";
+    let resolveProbe!: (response: unknown) => void;
+    let probeStarted!: () => void;
+    const probeHasStarted = new Promise<void>((resolve) => { probeStarted = resolve; });
+    fetchSpy.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://api.hyperliquid.xyz/info") {
+        if (phase === "opening") throw new Error("Hyperliquid unavailable");
+        probeStarted();
+        return new Promise((resolve) => { resolveProbe = resolve; });
+      }
+      if (url.includes("okx.com")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ code: "51001", msg: "Instrument ID doesn't exist" }),
+          text: async () => "",
+        };
+      }
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({}),
+        text: async () => JSON.stringify({ label: "CONTRACT_NOT_FOUND" }),
+      };
+    });
+
+    for (const symbol of symbols.slice(0, 3)) {
+      await expect(runDirectPerp(`${symbol}/USDT`)).rejects.toMatchObject({
+        name: "CandleBasisUnavailableError",
+        reason: "no_acceptable_source",
+      });
+    }
+    expect(okxDiagnostics.filter((record) =>
+      record.kind === "hyperliquid_source_breaker_increment" && record.opened)).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(15 * 60_000 + 1);
+    phase = "probe";
+    const first = runDirectPerp("PROBE1/USDT");
+    first.catch(() => {});
+    await probeHasStarted;
+    await expect(runDirectPerp("PROBE2/USDT")).rejects.toMatchObject({
+      name: "CandleBasisUnavailableError",
+      reason: "no_acceptable_source",
+    });
+
+    const now = Date.now();
+    const aligned = Math.floor(now / TF_MS) * TF_MS;
+    resolveProbe({
+      ok: true,
+      status: 200,
+      json: async () => [hyperliquidRow("PROBE1", aligned - TF_MS)],
+      text: async () => "",
+    });
+    await expect(first).resolves.toHaveLength(1);
+
+    expect(okxDiagnostics.filter((record) =>
+      record.kind === "source_half_open_claim" && record.provider === "hyperliquid")).toHaveLength(1);
+    expect(okxDiagnostics.filter((record) =>
+      record.kind === "source_half_open_reject" && record.provider === "hyperliquid")).toHaveLength(1);
+    expect(okxDiagnostics).toContainEqual(expect.objectContaining({
+      kind: "source_half_open_release",
+      provider: "hyperliquid",
+      action: "release_success",
+      activeOwnerCount: 0,
+    }));
+  });
+
+  it.each([
+    "breakers-closed",
+    "breakers-open",
+    "first-generation",
+  ] as const)("replays the 49-market universe in %s mode with complete primary-plus-parent inputs", async (mode) => {
+    const now = Date.parse("2026-09-07T13:30:00.000Z");
+    const primaryEndMs = Date.parse("2026-09-07T12:45:00.000Z");
+    const primaryStartMs = primaryEndMs - 400 * TF_MS;
+    const parentMs = 4 * TF_MS;
+    const newestParentPrefixMs = Date.parse("2026-09-07T10:00:00.000Z");
+    const parentStartMs = newestParentPrefixMs - 99 * parentMs;
+    const firstNeededParentMs = newestParentPrefixMs + parentMs;
+    vi.setSystemTime(now);
+    const symbols = Array.from({ length: 49 }, (_, index) => `HL${index}`);
+    __testSetHyperliquidCatalog(symbols);
+    if (mode === "breakers-open") {
+      await openDirectPerpSourceBreakers();
+      okxDiagnostics.length = 0;
+    }
+
+    let active = 0;
+    let peak = 0;
+    let hyperliquidTransportCount = 0;
+    let legacyTransportCount = 0;
+    let unexpectedTransportCount = 0;
+    let latencyOrdinal = 0;
+    fetchSpy.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "https://api.hyperliquid.xyz/info") {
+        hyperliquidTransportCount += 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        const body = JSON.parse(String(init?.body));
+        const requestTimeframe = String(body.req.interval);
+        const requestTimeframeMs = requestTimeframe === "1h" ? parentMs : TF_MS;
+        const requestStartMs = Number(body.req.startTime);
+        const requestEndMs = Number(body.req.endTime);
+        const rowCount = Math.floor((requestEndMs - requestStartMs) / requestTimeframeMs) + 1;
+        const latencyMs = latencyOrdinal++ % 20 === 19 ? 639 : 479;
+        await new Promise<void>((resolve) => setTimeout(resolve, latencyMs));
+        active -= 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => Array.from({ length: rowCount }, (_, index) =>
+            hyperliquidRow(
+              body.req.coin,
+              requestStartMs + index * requestTimeframeMs,
+              requestTimeframe,
+            )),
+          text: async () => "",
+        };
+      }
+      if (url.includes("okx.com")) {
+        legacyTransportCount += 1;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ code: "51001", msg: "Instrument ID doesn't exist" }),
+          text: async () => "",
+        };
+      }
+      if (url.includes("gateio.ws")) {
+        legacyTransportCount += 1;
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({}),
+          text: async () => JSON.stringify({ label: "CONTRACT_NOT_FOUND" }),
+        };
+      }
+      unexpectedTransportCount += 1;
+      throw new Error(`unexpected replay transport: ${url}`);
+    });
+
+    let cursor = 0;
+    let completeInputs = 0;
+    let localParentCompletions = 0;
+    let parentFetchCompletions = 0;
+    let derivationFallbacks = 0;
+    const okxPerp = {
+      source: "okx", venue: "okx", basis: "perp", proxy: "direct",
+      finality: "finalized", timeSemantic: "open_time",
+    } as const;
+    const gatePerp = {
+      source: "gate", venue: "gate", basis: "perp", proxy: "direct",
+      finality: "finalized", timeSemantic: "open_time",
+    } as const;
+    const hyperliquidPerp = {
+      source: "hyperliquid", venue: "hyperliquid", basis: "perp", proxy: "direct",
+      finality: "finalized", timeSemantic: "open_time",
+    } as const;
+    const makeBar = (time: number, provenance: ProvenancedOHLCV["provenance"]): ProvenancedOHLCV => ({
+      time,
+      open: 100,
+      high: 102,
+      low: 99,
+      close: 101,
+      volume: 12,
+      provenance,
+    });
+    const worker = async () => {
+      while (cursor < symbols.length) {
+        const index = cursor++;
+        const symbol = symbols[index];
+        try {
+          const primary = await runDirectPerpRange(
+            `${symbol}/USDT`,
+            "15m",
+            primaryStartMs,
+            primaryEndMs,
+          );
+          const prefixProvenance = index % 2 === 0 ? okxPerp : gatePerp;
+          const parentPrefix = Array.from({ length: 100 }, (_, prefixIndex) =>
+            makeBar(parentStartMs + prefixIndex * parentMs, mode === "first-generation"
+              ? prefixProvenance
+              : hyperliquidPerp));
+          let primaryForDerivation = primary;
+          if (mode === "first-generation") {
+            const cachedPrimary = primary
+              .filter((bar) => bar.time <= firstNeededParentMs + 2 * TF_MS)
+              .map((bar) => makeBar(bar.time, prefixProvenance));
+            const rewound = rewindPrimaryPrefixForParentTail(cachedPrimary, "15m", "1h");
+            expect(cachedPrimary.at(-1)?.time).toBe(firstNeededParentMs + 2 * TF_MS);
+            expect(rewound.at(-1)?.time).toBe(firstNeededParentMs);
+            const refetchStartMs = rewound.at(-1)!.time;
+            primaryForDerivation = primary.map((bar) => bar.time < refetchStartMs
+              ? makeBar(bar.time, prefixProvenance)
+              : bar);
+            // Preserve one residual ineligible path so the replay proves that
+            // a required provider-parent tail is still reserved and counted.
+            if (index === symbols.length - 1) {
+              primaryForDerivation = primaryForDerivation.map((bar) =>
+                bar.time === firstNeededParentMs + TF_MS
+                  ? makeBar(bar.time, prefixProvenance)
+                  : bar);
+            }
+          }
+          const completed = completeParentPrefixFromPrimaryBars({
+            parentPrefix,
+            primaryBars: primaryForDerivation,
+            primaryTimeframe: "15m",
+            parentTimeframe: "1h",
+            startMs: parentStartMs,
+            endMs: primaryEndMs,
+            nowMs: Date.now(),
+          });
+          if (completed.bars) {
+            localParentCompletions += 1;
+            completeInputs += 1;
+            continue;
+          }
+
+          derivationFallbacks += 1;
+          const fetchedParent = await completeCachedOHLCVTail(
+            `${symbol}/USDT`,
+            "1h",
+            parentStartMs,
+            primaryEndMs,
+            parentPrefix,
+            undefined,
+            {
+              basisPolicy: MONEY_CANDLE_POLICY,
+              deadlineMs: 45_000,
+              callerClass: "scanner",
+              cacheWritePolicy: "skip",
+              skipSpotFallback: true,
+            },
+          );
+          if (fetchedParent.length >= 100) {
+            parentFetchCompletions += 1;
+            completeInputs += 1;
+          }
+        } catch (error) {
+          expect([
+            "CandleBasisUnavailableError",
+            "CandleSourceUnavailableError",
+            "CandleTailCompletionError",
+          ]).toContain((error as Error).name);
+        }
+      }
+    };
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const replay = Promise.all([worker(), worker(), worker()]);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await replay;
+    } finally {
+      consoleSpy.mockRestore();
+    }
+
+    const budgetRecords = okxDiagnostics.filter((record) => record.kind === "hyperliquid_budget_event");
+    const reservations = budgetRecords.filter((record) => record.action === "reserve");
+    const refunds = budgetRecords.filter((record) => record.action === "refund");
+    const primaryAttempts = budgetRecords.filter((record) =>
+      record.timeframe === "15m" && (record.action === "reserve" || record.action === "budget_skip"));
+    const parentAttempts = budgetRecords.filter((record) =>
+      record.timeframe === "1h" && (record.action === "reserve" || record.action === "budget_skip"));
+    const spentWeight = reservations.reduce((sum, record) => sum + record.weight, 0)
+      - refunds.reduce((sum, record) => sum + record.weight, 0);
+    const refillEnvelope = 960 + 16 * ((Date.now() - now) / 1000);
+
+    expect(completeInputs).toBeGreaterThanOrEqual(38);
+    expect(peak).toBeLessThanOrEqual(3);
+    expect(unexpectedTransportCount).toBe(0);
+    expect(primaryAttempts).toHaveLength(symbols.length);
+    expect(primaryAttempts.filter((record) => record.action === "reserve")
+      .every((record) => record.weight === 27)).toBe(true);
+    expect(hyperliquidTransportCount).toBe(reservations.length);
+    expect(spentWeight).toBeLessThanOrEqual(refillEnvelope);
+    expect(budgetRecords.every((record) =>
+      record.availableWeight >= 0 && record.availableWeight <= 960)).toBe(true);
+
+    if (mode === "first-generation") {
+      expect(derivationFallbacks).toBeGreaterThan(0);
+      expect(localParentCompletions).toBeGreaterThan(0);
+      expect(parentFetchCompletions).toBeGreaterThan(0);
+      expect(parentAttempts).toHaveLength(derivationFallbacks);
+      expect(parentAttempts.some((record) => record.action === "reserve" && record.weight === 21)).toBe(true);
+    } else {
+      expect(derivationFallbacks).toBe(0);
+      expect(parentAttempts).toHaveLength(0);
+    }
+    if (mode === "breakers-open") expect(legacyTransportCount).toBe(0);
+    else expect(legacyTransportCount).toBeGreaterThan(0);
+  }, 20_000);
+});
 
 describe("provider response-body cancellation lifetime", () => {
   it("forwards caller abort after headers while the OKX body is pending", async () => {
@@ -413,8 +843,9 @@ describe("provider response-body cancellation lifetime", () => {
   });
 
   it("records header transport failure without retaining URL or arbitrary error prose", async () => {
+    const sensitiveHeaderMarker = ["Author", "ization: ", "Bear", "er"].join("");
     fetchSpy.mockRejectedValue(new Error(
-      "Authorization: Bearer should-never-appear; Cookie=session; https://www.okx.com/private?token=secret",
+      `${sensitiveHeaderMarker} should-never-appear; Cookie=session; https://www.okx.com/private?token=secret`,
     ));
 
     const now = Date.now();

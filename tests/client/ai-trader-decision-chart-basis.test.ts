@@ -20,7 +20,8 @@ describe("AI Trader decision chart candle-basis label", () => {
   });
 
   it("does not render an optimistic label when provenance is unknown", () => {
-    expect(source).toContain("source: ['okx', 'gate', 'pyth']");
+    expect(source).toContain("source: ['okx', 'gate', 'pyth', 'hyperliquid']");
+    expect(source).toContain("venue: ['okx', 'gate', 'hyperliquid', 'none']");
     expect(source).toContain("timeSemantic: ['open_time']");
     expect(source).toContain("x !== 'finalized' && x !== 'forming'");
     expect(source).toContain("candleBasisLabel && (");

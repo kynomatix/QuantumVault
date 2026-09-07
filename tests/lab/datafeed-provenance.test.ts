@@ -20,6 +20,8 @@ import {
   LIVE_MONITOR_CANDLE_POLICY,
   MONEY_CANDLE_POLICY,
   PAPER_MONITOR_CANDLE_POLICY,
+  __testResetOkxSourceBreaker,
+  __testSetHyperliquidCatalog,
   aggregateCandles,
   candleMatchesBasisPolicy,
   fetchOHLCV,
@@ -64,6 +66,8 @@ async function fetchPolicy(symbol: string, policy = MONEY_CANDLE_POLICY) {
 }
 
 beforeEach(() => {
+  __testResetOkxSourceBreaker();
+  __testSetHyperliquidCatalog([]);
   mockGetCached.mockReset();
   mockGetCached.mockResolvedValue(null);
   mockSave.mockClear();
@@ -143,6 +147,148 @@ describe("fetchOHLCV provenance admission", () => {
       proxy: "direct",
       finality: "finalized",
       timeSemantic: "open_time",
+    });
+  });
+
+  it("uses an exact Hyperliquid catalog hit first and excludes only the forming tail", async () => {
+    __testSetHyperliquidCatalog(["SOL"]);
+    const alignedNow = Math.floor(Date.now() / TF_MS) * TF_MS;
+    const row = (time: number) => ({
+      t: time,
+      T: time + TF_MS - 1,
+      s: "SOL",
+      i: "15m",
+      o: "100",
+      h: "102",
+      l: "99",
+      c: "101",
+      v: "12",
+    });
+    const fetchSpy = vi.fn(async (input: unknown, init?: RequestInit) => {
+      expect(String(input)).toBe("https://api.hyperliquid.xyz/info");
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        type: "candleSnapshot",
+        req: { coin: "SOL", interval: "15m" },
+      });
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          row(alignedNow),
+          row(alignedNow - 2 * TF_MS),
+          row(alignedNow - TF_MS),
+        ],
+        text: async () => "",
+      };
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const candles = await fetchPolicy("SOL/USDT:USDT");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(candles).toHaveLength(2);
+    expect(candles.map((candle) => candle.time)).toEqual([
+      alignedNow - 2 * TF_MS,
+      alignedNow - TF_MS,
+    ]);
+    expect(candles.every((candle) => candle.provenance.finality === "finalized")).toBe(true);
+    expect(candles[0].provenance).toEqual({
+      source: "hyperliquid",
+      venue: "hyperliquid",
+      basis: "perp",
+      proxy: "direct",
+      finality: "finalized",
+      timeSemantic: "open_time",
+    });
+  });
+
+  it("does not alias a multiplier market onto a differently named Hyperliquid contract", async () => {
+    __testSetHyperliquidCatalog(["kPEPE"]);
+    const spy = installOkxRows([]);
+    await expect(fetchPolicy("1KPEPE/USDT:USDT")).rejects.toMatchObject({
+      name: "CandleBasisUnavailableError",
+      reason: "no_acceptable_source",
+    });
+    expect(spy.mock.calls.some(([input]) => String(input).includes("api.hyperliquid.xyz"))).toBe(false);
+  });
+
+  it("keeps transport_unavailable when an exact catalog miss precedes failed legacy transports", async () => {
+    __testSetHyperliquidCatalog(["BTC"]);
+    const spy = vi.fn(async () => { throw new Error("transport unavailable"); });
+    vi.stubGlobal("fetch", spy);
+    await expect(fetchPolicy("SOL/USDT:USDT")).rejects.toMatchObject({
+      name: "CandleSourceUnavailableError",
+      reason: "transport_unavailable",
+      source: "direct_perp",
+    });
+    expect(spy.mock.calls.some(([input]) => String(input).includes("api.hyperliquid.xyz"))).toBe(false);
+  });
+
+  it("falls through to the existing chain when the dynamic catalog is malformed", async () => {
+    __testResetOkxSourceBreaker();
+    const now = Date.now();
+    const spy = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("api.hyperliquid.xyz")) {
+        return { ok: true, status: 200, json: async () => ({ universe: [{ nope: "SOL" }] }), text: async () => "" };
+      }
+      if (url.includes("okx.com")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ code: "0", data: [okxRow(now - TF_MS, "1")] }),
+          text: async () => "",
+        };
+      }
+      throw new Error(`unexpected fallback: ${url}`);
+    });
+    vi.stubGlobal("fetch", spy);
+
+    const candles = await fetchPolicy("SOL/USDT:USDT");
+    expect(candles).toHaveLength(1);
+    expect(candles[0].provenance).toMatchObject({ source: "okx", venue: "okx" });
+    const calledUrls = spy.mock.calls.map(([input]) => String(input));
+    expect(calledUrls[0]).toBe("https://api.hyperliquid.xyz/info");
+    expect(calledUrls.slice(1)).not.toHaveLength(0);
+    expect(calledUrls.slice(1).every((url) => url.includes("openapi.okx.com"))).toBe(true);
+  });
+
+  it.each([
+    ["wrong symbol", (row: any) => ({ ...row, s: "BTC" })],
+    ["wrong interval", (row: any) => ({ ...row, i: "1h" })],
+    ["misaligned time", (row: any) => ({ ...row, t: row.t + 1, T: row.T + 1 })],
+    ["invalid OHLCV", (row: any) => ({ ...row, o: "not-a-number" })],
+    ["duplicate timestamp", (row: any) => [row, { ...row }]],
+  ])("rejects Hyperliquid %s without admitting money input", async (_name, mutate) => {
+    __testResetOkxSourceBreaker();
+    __testSetHyperliquidCatalog(["SOL"]);
+    const alignedNow = Math.floor(Date.now() / TF_MS) * TF_MS;
+    const valid = {
+      t: alignedNow - TF_MS,
+      T: alignedNow - 1,
+      s: "SOL",
+      i: "15m",
+      o: "100",
+      h: "102",
+      l: "99",
+      c: "101",
+      v: "12",
+    };
+    const changed = mutate(valid);
+    const rows = Array.isArray(changed) ? changed : [changed];
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("api.hyperliquid.xyz")) {
+        return { ok: true, status: 200, json: async () => rows, text: async () => "" };
+      }
+      if (url.includes("okx.com")) {
+        return { ok: true, status: 200, json: async () => ({ code: "0", data: [] }), text: async () => "" };
+      }
+      return { ok: true, status: 200, json: async () => [], text: async () => "" };
+    }));
+
+    await expect(fetchPolicy("SOL/USDT:USDT")).rejects.toMatchObject({
+      name: "CandleBasisUnavailableError",
+      reason: "malformed_provenance",
     });
   });
 
