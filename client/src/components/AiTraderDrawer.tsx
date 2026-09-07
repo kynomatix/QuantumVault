@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { accountingNumber, performanceCompleteness } from '@/lib/ai-trader-accounting-display';
+import { AiTraderBracketMetrics } from './AiTraderBracketMetrics';
 import {
   Sheet,
   SheetContent,
@@ -1715,6 +1716,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                             Position too small for the venue minimum — increase the allocation or widen the risk band.
                           </p>
                         )}
+                        <AiTraderBracketMetrics decision={d} />
                         {resolvedRationale && (
                           <p className="text-[11px] text-muted-foreground leading-relaxed border-l-2 border-primary/30 pl-2 italic">
                             {resolvedRationale}
