@@ -174,9 +174,9 @@ describe("fetchOHLCV provenance admission", () => {
         ok: true,
         status: 200,
         json: async () => [
+          row(alignedNow),
           row(alignedNow - 2 * TF_MS),
           row(alignedNow - TF_MS),
-          row(alignedNow),
         ],
         text: async () => "",
       };
@@ -186,6 +186,10 @@ describe("fetchOHLCV provenance admission", () => {
     const candles = await fetchPolicy("SOL/USDT:USDT");
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(candles).toHaveLength(2);
+    expect(candles.map((candle) => candle.time)).toEqual([
+      alignedNow - 2 * TF_MS,
+      alignedNow - TF_MS,
+    ]);
     expect(candles.every((candle) => candle.provenance.finality === "finalized")).toBe(true);
     expect(candles[0].provenance).toEqual({
       source: "hyperliquid",

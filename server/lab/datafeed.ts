@@ -2045,11 +2045,13 @@ function parseHyperliquidCandles(
   const finalityCutoffMs = Math.min(endMs, Date.now());
   const parsed: ProvenancedOHLCV[] = [];
   let priorTime = Number.NEGATIVE_INFINITY;
-  for (const raw of value) {
+  const orderedRows = [...value].map((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       throw new Error("Hyperliquid candle response malformed");
     }
-    const row = raw as Record<string, unknown>;
+    return raw as Record<string, unknown>;
+  }).sort((left, right) => Number(left.t) - Number(right.t));
+  for (const row of orderedRows) {
     const time = Number(row.t);
     const closeTime = Number(row.T);
     const open = Number(row.o);

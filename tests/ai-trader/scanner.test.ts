@@ -291,6 +291,7 @@ import {
   classifySweepFetchError,
   classifyScannerFormationLifecycle,
   completeParentPrefixFromPrimaryBars,
+  rewindPrimaryPrefixForParentTail,
   isActionableScannerFormationLifecycle,
 } from "../../server/ai-trader/scanner";
 
@@ -356,9 +357,9 @@ describe("completeParentPrefixFromPrimaryBars", () => {
     expect(result).toEqual({ bars: null, reason: "primary_not_hyperliquid", derivedCount: 0 });
   });
 
-  it("falls back rather than returning a mixed-provider parent series", () => {
+  it("retains individually admissible prefix provenance when the derived tail changes provider", () => {
     const okxPrefix = prefix.map((bar) => row(bar.time, directPerp));
-    expect(completeParentPrefixFromPrimaryBars({
+    const result = completeParentPrefixFromPrimaryBars({
       parentPrefix: okxPrefix,
       primaryBars: primary,
       primaryTimeframe: "15m",
@@ -366,7 +367,13 @@ describe("completeParentPrefixFromPrimaryBars", () => {
       startMs: base,
       endMs,
       nowMs: endMs,
-    })).toEqual({ bars: null, reason: "range_inadmissible", derivedCount: 0 });
+    });
+    expect(result.reason).toBe("complete");
+    expect(result.derivedCount).toBe(2);
+    expect(result.bars).toHaveLength(102);
+    expect(new Set(result.bars?.map((bar) => bar.provenance.source))).toEqual(
+      new Set(["okx", "hyperliquid"]),
+    );
   });
 
   it("never admits an interior gap from either the retained prefix or derived run", () => {
@@ -391,6 +398,44 @@ describe("completeParentPrefixFromPrimaryBars", () => {
       endMs,
       nowMs: endMs,
     }).reason).toBe("incomplete_bucket");
+  });
+});
+
+describe("rewindPrimaryPrefixForParentTail", () => {
+  it("refetches the whole parent bucket when the cached primary tail ends thirty minutes past the hour", () => {
+    const primaryMs = 15 * 60_000;
+    const parentMs = 60 * 60_000;
+    const base = Date.parse("2026-09-01T00:00:00.000Z");
+    const prefix = Array.from({ length: 99 }, (_, index): ProvenancedOHLCV => ({
+      time: base + index * primaryMs,
+      open: 100,
+      high: 102,
+      low: 99,
+      close: 101,
+      volume: 10,
+      provenance: directPerp,
+    }));
+    const newest = prefix[prefix.length - 1].time;
+    expect(newest % parentMs).toBe(2 * primaryMs);
+
+    const rewound = rewindPrimaryPrefixForParentTail(prefix, "15m", "1h");
+
+    expect(rewound.at(-1)?.time).toBe(newest - 2 * primaryMs);
+    expect(rewound.at(-1)!.time % parentMs).toBe(0);
+    expect(rewound.length).toBe(prefix.length - 2);
+  });
+
+  it("leaves the prefix unchanged when the timeframe ratio is not derivable", () => {
+    const prefix: ProvenancedOHLCV[] = [{
+      time: Date.parse("2026-09-01T00:15:00.000Z"),
+      open: 100,
+      high: 102,
+      low: 99,
+      close: 101,
+      volume: 10,
+      provenance: directPerp,
+    }];
+    expect(rewindPrimaryPrefixForParentTail(prefix, "15m", "45m")).toEqual(prefix);
   });
 });
 

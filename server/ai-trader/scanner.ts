@@ -935,6 +935,28 @@ function isExactHyperliquidParentInput(row: ProvenancedOHLCV): boolean {
 }
 
 /**
+ * Rewind a cached primary prefix to the parent bucket containing its newest
+ * row. Tail completion will refetch that whole bucket, so a generation whose
+ * cache predates Hyperliquid does not leave mixed-provider inputs inside the
+ * first parent bucket that must be derived.
+ */
+export function rewindPrimaryPrefixForParentTail(
+  primaryPrefix: readonly ProvenancedOHLCV[],
+  primaryTimeframe: string,
+  parentTimeframe: string,
+): ProvenancedOHLCV[] {
+  const ordered = [...primaryPrefix].sort((a, b) => a.time - b.time);
+  if (ordered.length === 0) return ordered;
+  const primaryMs = TIMEFRAME_MS[primaryTimeframe];
+  const parentMs = TIMEFRAME_MS[parentTimeframe];
+  if (!primaryMs || !parentMs || parentMs % primaryMs !== 0) return ordered;
+  const newestParentBucketStart = Math.floor(ordered[ordered.length - 1].time / parentMs) * parentMs;
+  let retainedEnd = ordered.length - 1;
+  while (retainedEnd > 0 && ordered[retainedEnd].time > newestParentBucketStart) retainedEnd--;
+  return ordered.slice(0, retainedEnd + 1);
+}
+
+/**
  * Complete only the contiguous closed parent tail after an admitted prefix.
  * Any failed proof returns a fallback result; no partial derived series escapes.
  */
@@ -1009,16 +1031,6 @@ export function completeParentPrefixFromPrimaryBars(input: Readonly<{
       && row.time <= input.endMs
       && candleMatchesBasisPolicy(row, MONEY_CANDLE_POLICY),
   );
-  const identity = merged[0]?.provenance;
-  if (!identity || merged.some(({ provenance }) =>
-    provenance.source !== identity.source
-      || provenance.venue !== identity.venue
-      || provenance.basis !== identity.basis
-      || provenance.proxy !== identity.proxy
-      || provenance.finality !== identity.finality
-      || provenance.timeSemantic !== identity.timeSemantic)) {
-    return fallback("range_inadmissible");
-  }
   for (let i = 1; i < merged.length; i++) {
     if (merged[i].time - merged[i - 1].time !== parentMs) {
       return fallback("range_inadmissible");
@@ -1657,13 +1669,16 @@ async function runSweep(): Promise<void> {
                       signal: tfAbort.signal,
                       callerClass: "scanner" as const,
                     };
-                    return cachedPrefix
+                    const completionPrefix = cachedPrefix && parentTf
+                      ? rewindPrimaryPrefixForParentTail(cachedPrefix, tf, parentTf)
+                      : cachedPrefix;
+                    return completionPrefix
                       ? completeCachedOHLCVTail(
                           ticker,
                           tf,
                           startDate,
                           endDate,
-                          cachedPrefix,
+                          completionPrefix,
                           undefined,
                           fetchOptions,
                         )
