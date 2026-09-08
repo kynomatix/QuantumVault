@@ -619,6 +619,19 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         outcome: "executed", entryPrice: "150.00000000", decidedAt: new Date("2026-08-19T01:00:00.000Z"),
       } as any);
       const closedAt = new Date("2026-08-19T02:00:00.000Z");
+      expect(decision.priceExcursion).toBeNull(); // legacy/new open rows have no invented observation
+      const priceExcursion = {
+        version: 1, status: "observed", bootId: "fixture-boot", coverage: "partial",
+        basis: "paper_closed_candles", decisionStartedAtMs: decision.decidedAt!.getTime(),
+        fromMs: Date.parse("2026-08-19T01:15:00.000Z"), throughMs: Date.parse("2026-08-19T01:30:00.000Z"),
+        sampleCount: 2, timeframeMs: 900_000, expectedInteriorBars: 3, missingInteriorBars: 1,
+        high: { price: 160, atMs: Date.parse("2026-08-19T01:15:00.000Z") },
+        low: { price: 146, atMs: Date.parse("2026-08-19T01:30:00.000Z") },
+        source: { provider: "okx", venue: "okx", basis: "perp", proxy: "direct", timeSemantic: "open_time" },
+      };
+      const ratcheted = { action: "long", stopLossPrice: 150, breakevenProtect: { originalStopLossPrice: 145 } };
+      // A separately persisted ratchet must survive the close-time observation update.
+      await storage.updateAiTraderDecision(decision.id, { clampedDecision: ratcheted } as any);
       const attemptId = journal.newMutationAttemptId("close", decision.id);
       const base = journal.journalBase(closeBot, decision.id);
       const close = { exitPrice: 145, exitReason: "sl", realizedPnl: -10, feesPaid: 0.2, closedAt };
@@ -633,20 +646,24 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         botId: closeBot.id, decisionId: decision.id, expectedBotStatus: "open", expectedPauseReason: null,
         side: "long" as const, sizeBase: 2, close, isStopLossLoss: true, forcedPauseReason: null,
         dayStart: new Date("2026-08-19T00:00:00.000Z"),
+        priceExcursion,
         policy: { recentClosedLimit: 60 as const, malfunctionTradesPerDay: 20, consecutiveSlLimit: 3, dailyLossBreakerPct: 15 },
         journalEvents,
       };
 
       const applied = await storage.commitAiTraderConfirmedCloseTransition(params);
       expect(applied).toMatchObject({
-        status: "applied", decision: { closedAt, realizedPnl: "-10.00", feesPaid: "0.200000" },
+        status: "applied", decision: { closedAt, realizedPnl: "-10.00", feesPaid: "0.200000", priceExcursion, clampedDecision: ratcheted },
         bot: { status: "paused", pauseReason: "consecutive_losses", consecutiveLosses: 3, dailyRealizedPnl: "-10.00" },
         closedTodayCount: 1, knownDailyRealizedPnl: -10, dailyRealizedComplete: true,
         journal: { status: "appended", failureCode: null },
       });
-      const replayed = await storage.commitAiTraderConfirmedCloseTransition(params);
+      const replayed = await storage.commitAiTraderConfirmedCloseTransition({ ...params,
+        priceExcursion: { version: 1, status: "unavailable", bootId: "later-boot", reason: "empty_window" },
+      });
       expect(replayed).toMatchObject({
-        status: "replayed", bot: { consecutiveLosses: 3, dailyRealizedPnl: "-10.00" },
+        status: "replayed", decision: { priceExcursion, clampedDecision: ratcheted },
+        bot: { consecutiveLosses: 3, dailyRealizedPnl: "-10.00" },
         journal: { status: "replayed", failureCode: null },
       });
       const rows = await pool.query(
@@ -654,6 +671,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         [attemptId],
       );
       expect(rows.rows[0]?.count).toBe(3);
+      expect((await storage.getAiTraderDecision(decision.id))?.priceExcursion).toEqual(priceExcursion);
 
       const otherAttempt = journalEvents.map((event) => ({ ...event, attemptId: journal.newMutationAttemptId("close", decision.id) }));
       expect(await storage.commitAiTraderConfirmedCloseTransition({ ...params, journalEvents: otherAttempt }))
@@ -753,9 +771,10 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         dayStart: new Date("2026-08-19T00:00:00.000Z"),
         policy: { recentClosedLimit: 60, malfunctionTradesPerDay: 20, consecutiveSlLimit: 3, dailyLossBreakerPct: 15 },
         journalEvents: malformed,
+        priceExcursion: { get version() { throw new Error("synthetic optional observation failure"); } },
       });
       expect(result).toMatchObject({
-        status: "applied", decision: { closedAt, realizedPnl: null, feesPaid: null },
+        status: "applied", decision: { closedAt, realizedPnl: null, feesPaid: null, priceExcursion: null },
         bot: { status: "idle", pauseReason: null, dailyRealizedPnl: null },
         dailyRealizedComplete: false,
         journal: { status: "degraded", failureCode: "validation_conflict" },

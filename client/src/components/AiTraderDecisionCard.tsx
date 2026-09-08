@@ -22,6 +22,7 @@ interface ClampedDecision {
 }
 
 export interface AiDecisionRow {
+  priceExcursion?: unknown;
   id: string;
   rawDecision: unknown;
   clampedDecision: unknown;

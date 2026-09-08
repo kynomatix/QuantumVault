@@ -38,6 +38,7 @@
 import { storage } from "../storage";
 import { appendTelemetry } from "../telemetry";
 import { SERVER_BOOT_ID } from "../boot-id";
+import { ExcursionObservations } from "./excursion-observation";
 import { getAdapter } from "../protocol/adapter-registry";
 import {
   getUmkForWebhook,
@@ -1103,6 +1104,8 @@ type ConfirmedCloseCommit = Exclude<
   Awaited<ReturnType<typeof storage.commitAiTraderConfirmedCloseTransition>>,
   { status: "conflict" }
 >;
+// Same reads, no I/O/timer: durably copied only in the already-required close UPDATE.
+const priceObservations = new ExcursionObservations(SERVER_BOOT_ID);
 type ConfirmedCloseResult = Awaited<ReturnType<typeof storage.commitAiTraderConfirmedCloseTransition>>;
 
 async function commitConfirmedClose(args: {
@@ -1132,12 +1135,16 @@ async function commitConfirmedClose(args: {
       dailyLossBreakerPct: DAILY_LOSS_BREAKER_PCT,
     },
     journalEvents: args.journalEvents,
+    priceExcursion: priceObservations.forClose(
+      args.view.decision.id, args.view.decidedAtMs, args.close.closedAt.getTime(),
+    ),
   });
   if (result.status === "conflict") {
     appendTelemetry(`[AiTraderCloseTransition] conflict family=${args.family} reason=${result.reason}`);
     return result;
   }
   breakevenMoveAttempts.delete(args.view.decision.id);
+  priceObservations.forget(args.view.decision.id);
   if (result.journal.status === "degraded") {
     appendTelemetry(`[AiTraderCloseTransition] journal degraded code=${result.journal.failureCode}`);
   }
@@ -1565,6 +1572,7 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
         Math.floor(new Date(be.movedAt).getTime() / tfMs) * tfMs
       )
     : evaluatePaperBracket(post, view.side, view.stopLossPrice, view.takeProfitPrice);
+  priceObservations.paper(view.decision.id, candles, view.decidedAtMs, tfMs, now, hit?.candleTime ?? null);
   if (hit) {
     const accounting = paperCloseAccounting(bot, view, hit.exitPrice);
     const close: CloseRecord = {
@@ -2381,6 +2389,7 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
     await handleLiveClose(bot, view, adapter, agentPublicKey);
     return;
   }
+  priceObservations.live(view.decision.id, position.markPrice, view.decidedAtMs, Date.now(), bot.protocol);
 
   // G10 money authority remains the proven legacy stop-order read while the
   // semantic /orders observation is calibrated. An unavailable legacy read
@@ -4225,6 +4234,7 @@ export function stopAiTraderMonitor(): void {
   for (const t of autoNextTimers.values()) clearTimeout(t);
   autoNextTimers.clear();
   pendingReconciliation.clear();
+  priceObservations.clear();
   bracketReplaceAttempted.clear();
   botInFlight.clear();
   closeInFlight.clear();

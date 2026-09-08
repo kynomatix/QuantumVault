@@ -1815,6 +1815,7 @@ const schemaMigrationSql = [
          END IF;
        END
        $qv$`,
+      `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS price_excursion jsonb`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5125,6 +5126,19 @@ const schemaMigrationMetadata = [
         "definitionIncludes": [
           "venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')"
         ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "183-add-ai-trader-price-excursion-observation",
+    "capabilities": ["ai_trader"],
+    "requirements": [
+      { "kind": "column", "table": "ai_trader_decisions", "column": "price_excursion" },
+      {
+        "kind": "data",
+        "identity": "ai-trader-price-excursion-nullable-jsonb",
+        "checkSql": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ai_trader_decisions' AND column_name = 'price_excursion' AND data_type = 'jsonb' AND is_nullable = 'YES') AS ok"
       }
     ],
     "operation": "ddl"

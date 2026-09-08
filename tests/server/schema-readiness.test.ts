@@ -140,7 +140,7 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 183 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 184 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -173,11 +173,12 @@ describe("schema readiness", () => {
       requirements: unknown[];
       operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(183);
-    expect(metadata).toHaveLength(183);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(183);
+    expect(sqlEntries).toHaveLength(184);
+    expect(metadata).toHaveLength(184);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(184);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
-    const sqlDigest = createHash("sha256").update(sqlEntries.join("\u0000"), "utf8").digest("hex").toUpperCase();
+    // Preserve the entire pre-existing SQL byte identity; independently pin the appended entry.
+    const sqlDigest = createHash("sha256").update(sqlEntries.slice(0, 183).join("\u0000"), "utf8").digest("hex").toUpperCase();
     expect(sqlDigest).toBe("B1C4E6ECD900DD859CF18D912B9A2C07C4CD4AE03997BB26B802C26A8BAB40D1");
 
     expect(sqlEntries[11]).toContain("total_volume numeric(30,6)");
@@ -197,8 +198,8 @@ describe("schema readiness", () => {
       }],
     });
 
-    const avaxCorrectionSql = sqlEntries.at(-7)!;
-    expect(metadata.at(-7)).toMatchObject({
+    const avaxCorrectionSql = sqlEntries[176];
+    expect(metadata[176]).toMatchObject({
       id: "176-scrub-rogue-avax-close",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -210,8 +211,8 @@ describe("schema readiness", () => {
     expect(avaxCorrectionSql).toContain("jsonb_build_object");
     expect(avaxCorrectionSql).toContain("rogue AVAX trade fingerprint mismatch");
 
-    const venueTruthSql = sqlEntries.at(-6)!;
-    expect(metadata.at(-6)).toMatchObject({
+    const venueTruthSql = sqlEntries[177];
+    expect(metadata[177]).toMatchObject({
       id: "177-repair-zec-link-close-fee-pnl",
       capabilities: ["signal_bot"],
       operation: "backfill",
@@ -228,8 +229,8 @@ describe("schema readiness", () => {
     expect(venueTruthSql).toContain("target_trade.protocol_fill_id IS NOT NULL");
     expect(venueTruthSql.match(/target_trade.error_message IS NOT NULL/g)).toHaveLength(2);
     expect(venueTruthSql).toContain("md5(COALESCE(target_trade.webhook_payload::text, ''))");
-    const qualificationRecordSql = sqlEntries.at(-5)!;
-    expect(metadata.at(-5)).toMatchObject({
+    const qualificationRecordSql = sqlEntries[178];
+    expect(metadata[178]).toMatchObject({
       id: "178-create-ai-trader-qualification-records",
       capabilities: ["ai_trader"],
       operation: "ddl",
@@ -277,8 +278,8 @@ describe("schema readiness", () => {
     expect(venueTruthSql).toContain("owner fingerprint mismatch:");
     expect(venueTruthSql).toContain("stats update missed owner:");
 
-    const conventionSql = sqlEntries.at(-4)!;
-    expect(metadata.at(-4)).toMatchObject({
+    const conventionSql = sqlEntries[179];
+    expect(metadata[179]).toMatchObject({
       id: "179-pin-bot-trades-pnl-convention",
       capabilities: ["signal_bot", "portfolio"],
       operation: "backfill",
@@ -303,8 +304,8 @@ describe("schema readiness", () => {
       expect(conventionSql).toContain(`'${field}'`);
     }
 
-    const scannerClaimTableSql = sqlEntries.at(-3)!;
-    expect(metadata.at(-3)).toEqual({
+    const scannerClaimTableSql = sqlEntries[180];
+    expect(metadata[180]).toEqual({
       id: "180-create-ai-trader-scanner-candidate-claims",
       capabilities: ["ai_trader"],
       requirements: [{
@@ -322,8 +323,8 @@ describe("schema readiness", () => {
     expect(scannerClaimTableSql).toContain("boundary_start timestamptz NOT NULL");
     expect(scannerClaimTableSql).toContain("expires_at timestamptz NOT NULL");
 
-    const scannerClaimIndexSql = sqlEntries.at(-2)!;
-    expect(metadata.at(-2)).toEqual({
+    const scannerClaimIndexSql = sqlEntries[181];
+    expect(metadata[181]).toEqual({
       id: "181-create-ai-trader-scanner-candidate-claim-indexes",
       capabilities: ["ai_trader"],
       requirements: [
@@ -347,8 +348,8 @@ describe("schema readiness", () => {
     expect(scannerClaimIndexSql).toContain("CREATE UNIQUE INDEX IF NOT EXISTS ai_trader_scanner_claims_wallet_boundary_market_unique");
     expect(scannerClaimIndexSql).toContain("CREATE INDEX IF NOT EXISTS ai_trader_scanner_candidate_claims_expires_at_idx");
 
-    const hyperliquidConstraintSql = sqlEntries.at(-1)!;
-    expect(metadata.at(-1)).toEqual({
+    const hyperliquidConstraintSql = sqlEntries[182];
+    expect(metadata[182]).toEqual({
       id: "182-extend-lab-candle-cache-hyperliquid-provenance",
       capabilities: ["lab_scanner"],
       requirements: [
@@ -374,6 +375,19 @@ describe("schema readiness", () => {
     expect(hyperliquidConstraintSql).toContain("DROP CONSTRAINT IF EXISTS lab_candle_cache_v2_source_check");
     expect(hyperliquidConstraintSql).toContain("DROP CONSTRAINT IF EXISTS lab_candle_cache_v2_venue_check");
     expect(hyperliquidConstraintSql).toContain("'hyperliquid'");
+    expect(sqlEntries[183]).toBe("ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS price_excursion jsonb");
+    expect(metadata[183]).toEqual({
+      id: "183-add-ai-trader-price-excursion-observation",
+      capabilities: ["ai_trader"],
+      requirements: [
+        { kind: "column", table: "ai_trader_decisions", column: "price_excursion" },
+        {
+          kind: "data", identity: "ai-trader-price-excursion-nullable-jsonb",
+          checkSql: "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ai_trader_decisions' AND column_name = 'price_excursion' AND data_type = 'jsonb' AND is_nullable = 'YES') AS ok",
+        },
+      ],
+      operation: "ddl",
+    });
   });
 
   it("matches exact production CHECK renderings without consuming SQL after casts", async () => {

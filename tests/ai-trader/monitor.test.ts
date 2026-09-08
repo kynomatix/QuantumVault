@@ -751,6 +751,125 @@ describe("extractExitFills", () => {
 
 // --- Paper monitoring ---------------------------------------------------------------
 
+describe("close-time price-path observation wiring", () => {
+  const finalized = (time: number, open: number, high: number, low: number, close: number) => ({
+    ...candle(time, open, high, low, close),
+    provenance: { source: "okx", venue: "okx", basis: "perp", proxy: "direct", timeSemantic: "open_time", finality: "finalized" },
+  });
+
+  it("copies only interior paper candles before the hit, with no new market read or changed close money", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      finalized(ENTRY_CANDLE_OPEN, 150, 180, 100, 150),
+      finalized(ENTRY_CANDLE_OPEN + TF_15M, 150, 155, 147, 153),
+      finalized(NOW, 153, 165, 148, 160),
+      finalized(NOW + TF_15M, 160, 200, 90, 150),
+    ]);
+    await monitorBotOnce(makeBot());
+    expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+    expect(commitCloseMock).toHaveBeenCalledTimes(1);
+    const params = commitCloseMock.mock.calls[0][0];
+    expect(params.priceExcursion).toEqual({
+      version: 1, status: "observed", bootId: "ABCDEF12-0000-4000-8000-000000000000",
+      coverage: "partial", basis: "paper_closed_candles", decisionStartedAtMs: ENTRY_CANDLE_OPEN,
+      fromMs: ENTRY_CANDLE_OPEN + TF_15M, throughMs: ENTRY_CANDLE_OPEN + TF_15M,
+      sampleCount: 1, timeframeMs: TF_15M, expectedInteriorBars: 1, missingInteriorBars: 0,
+      high: { price: 155, atMs: ENTRY_CANDLE_OPEN + TF_15M },
+      low: { price: 147, atMs: ENTRY_CANDLE_OPEN + TF_15M },
+      source: { provider: "okx", venue: "okx", basis: "perp", proxy: "direct", timeSemantic: "open_time" },
+    });
+    const expectedExit = 160 * (1 - PAPER_SLIPPAGE_PER_LEG);
+    expect(params.close.exitPrice).toBeCloseTo(expectedExit, 10);
+    expect(params.close.realizedPnl).toBeCloseTo((expectedExit - 150) * 2 - PAPER_TAKER_FEE_RATE * (150 + expectedExit) * 2, 10);
+    expect(params.close.closedAt).toEqual(new Date(NOW));
+  });
+
+  it("a malformed optional observation cannot block a protective paper close", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(ENTRY_CANDLE_OPEN, 150, 151, 149, 150),
+      { ...candle(ENTRY_CANDLE_OPEN + TF_15M, 150, 155, 147, 153),
+        get provenance() { throw new Error("synthetic optional provenance failure"); } },
+      candle(NOW, 153, 165, 148, 160),
+    ]);
+    await monitorBotOnce(makeBot());
+    expect(commitCloseMock).toHaveBeenCalledTimes(1);
+    expect(commitCloseMock.mock.calls[0][0].priceExcursion).toMatchObject({ status: "unavailable", reason: "malformed_window" });
+    expect(commitCloseMock.mock.calls[0][0].close.exitReason).toBe("tp");
+    expect(notifications().some(n => n.type === "position_closed")).toBe(true);
+  });
+
+  it("manual paper close uses the retained partial observation without another candle fetch", async () => {
+    const { monitorBotOnce, userInitiatedClose } = await importMonitor();
+    const bot = makeBot(), decision = makeOpenDecision();
+    getBotMock.mockResolvedValue(bot);getAiTraderDecisionMock.mockResolvedValue(decision);
+    getDecisionsMock.mockResolvedValue([decision]);
+    fetchOHLCVMock.mockResolvedValue([
+      finalized(ENTRY_CANDLE_OPEN, 150, 151, 149, 150),
+      finalized(ENTRY_CANDLE_OPEN + TF_15M, 150, 155, 147, 153),
+    ]);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    await monitorBotOnce(bot);
+    expect(commitCloseMock).not.toHaveBeenCalled();
+    vi.setSystemTime(NOW + 15_000);
+    expect(await userInitiatedClose(bot)).toMatchObject({ ok: true, closed: true });
+    expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+    expect(commitCloseMock.mock.calls[0][0].priceExcursion).toMatchObject({
+      status: "observed", basis: "paper_closed_candles", coverage: "partial",
+      throughMs: ENTRY_CANDLE_OPEN + TF_15M, high: { price: 155 }, low: { price: 147 },
+    });
+  });
+
+  it("monitor shutdown clears retained price observations before a later manual close", async () => {
+    const { monitorBotOnce, userInitiatedClose, stopAiTraderMonitor } = await importMonitor();
+    const bot = makeBot(), decision = makeOpenDecision();
+    getBotMock.mockResolvedValue(bot);getAiTraderDecisionMock.mockResolvedValue(decision);
+    getDecisionsMock.mockResolvedValue([decision]);
+    fetchOHLCVMock.mockResolvedValue([
+      finalized(ENTRY_CANDLE_OPEN, 150, 151, 149, 150),
+      finalized(ENTRY_CANDLE_OPEN + TF_15M, 150, 155, 147, 153),
+    ]);
+    getAdapterMock.mockReturnValue(makeAdapter());
+    await monitorBotOnce(bot);expect(commitCloseMock).not.toHaveBeenCalled();
+    stopAiTraderMonitor();vi.setSystemTime(NOW + 15_000);
+    expect(await userInitiatedClose(bot)).toMatchObject({ ok: true, closed: true });
+    expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+    expect(commitCloseMock.mock.calls[0][0].priceExcursion).toMatchObject({status:'unavailable',reason:'no_retained_observation'});
+  });
+
+  it("records existing live marks after breakeven fired and preserves sparse coverage on manual close", async () => {
+    const { monitorBotOnce, userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const bot = makeBot({ paperMode: false }), decision = makeOpenDecision({
+      clampedDecision: { action: "long", sizeBase: 2, marginUsdc: 100, stopLossPrice: 150.2, takeProfitPrice: 160,
+        breakevenProtect: { originalStopLossPrice: 145, movedStopLossPrice: 150.2,
+          movedAt: new Date(NOW - TF_15M).toISOString(), progressAtFire: 0.8 } },
+    });
+    getBotMock.mockResolvedValue(bot);getAiTraderDecisionMock.mockResolvedValue(decision);
+    getDecisionsMock.mockResolvedValue([decision]);
+    let markPrice = 156;
+    const getPositions = vi.fn(async () => [{ internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150,
+      markPrice, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" as const }]);
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions }));
+    await monitorBotOnce(bot);
+    vi.setSystemTime(NOW + 15_000);markPrice = 153;
+    await monitorBotOnce(bot);
+    expect(fetchOHLCVMock).not.toHaveBeenCalled();
+    expect(commitCloseMock).not.toHaveBeenCalled();
+    vi.setSystemTime(NOW + 30_000);
+    expect(await userInitiatedClose(bot)).toMatchObject({ ok: true, closed: true });
+    expect(commitCloseMock.mock.calls[0][0].priceExcursion).toMatchObject({
+      status: "observed", basis: "live_sampled_marks", coverage: "partial", sampleCount: 2,
+      fromMs: NOW, throughMs: NOW + 15_000,
+      high: { price: 156, atMs: NOW }, low: { price: 153, atMs: NOW + 15_000 },
+      source: { provider: "pacifica", basis: "mark", timeSemantic: "monitor_read_time" },
+    });
+    expect(fetchOHLCVMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("paper close detection", () => {
   it("closes on a TP hit in a later candle with the paper fill convention", async () => {
     const { monitorBotOnce } = await importMonitor();
