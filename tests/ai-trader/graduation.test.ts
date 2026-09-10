@@ -490,7 +490,7 @@ describe("qualification era forgotten-declaration gate", () => {
   it("declares observation-only monitor instrumentation as a reviewed no-bump", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 43,
+      decisionGeneration: 44,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
@@ -500,7 +500,7 @@ describe("qualification era forgotten-declaration gate", () => {
     });
     expect(QUALIFICATION_ERA_REGISTRY.guardrail_risk_policy).toMatchObject({
       materialVersion: 4,
-      decisionGeneration: 16,
+      decisionGeneration: 17,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({
@@ -517,7 +517,7 @@ describe("qualification era forgotten-declaration gate", () => {
 
   it("binds the shared graduation owner path to the reviewed scanner no-bump declaration", () => {
     const base = cloneRegistry();
-    base.scanner_capability_policy.decisionGeneration = 42;
+    base.scanner_capability_policy.decisionGeneration = 43;
     base.accepted_candle_provenance.decisionGeneration = 19;
 
     expect(validateQualificationEraDeclarationChanges({
@@ -529,7 +529,7 @@ describe("qualification era forgotten-declaration gate", () => {
 
   it("declares monitor observation without changing any material qualification component", () => {
     const base = cloneRegistry();
-    base.scanner_capability_policy.decisionGeneration = 42;
+    base.scanner_capability_policy.decisionGeneration = 43;
     base.paper_execution_simulator.decisionGeneration = 13;
     expect(validateQualificationEraDeclarationChanges({
       base, current: cloneRegistry(), changedPaths: ["server/ai-trader/monitor.ts"],
@@ -582,6 +582,53 @@ describe("qualification era forgotten-declaration gate", () => {
       expect(validateQualificationEraDeclarationChanges({ base, current, changedPaths: [changedPath] })).toEqual([]);
     });
   }
+
+  it("declares historical pagination with unchanged material versions and exact route-owner generations", () => {
+    const current = cloneRegistry();
+    const base = cloneRegistry();
+    base.scanner_capability_policy.decisionGeneration = 43;
+    base.guardrail_risk_policy.decisionGeneration = 16;
+    const changedPaths = [
+      "server/storage.ts", "server/ai-trader/routes.ts",
+      "tests/ai-trader/routes.test.ts", "tests/ai-trader/history-cursor.test.ts",
+      "server/ai-trader/graduation.ts", "tests/ai-trader/graduation.test.ts",
+    ];
+    expect(current.scanner_capability_policy).toMatchObject({ materialVersion: 3, decisionGeneration: 44, decision: "no_bump" });
+    expect(current.guardrail_risk_policy).toMatchObject({ materialVersion: 4, decisionGeneration: 17, decision: "no_bump" });
+    expect(validateQualificationEraDeclarationChanges({ base, current, changedPaths })).toEqual([]);
+    expect(validateQualificationEraDeclarationChanges({ base, current: base, changedPaths })).toEqual([
+      "scanner_capability_policy: changed owner requires decisionGeneration + 1",
+      "guardrail_risk_policy: changed owner requires decisionGeneration + 1",
+    ]);
+    expect(Object.fromEntries(components.map(component => [component, current[component].materialVersion])))
+      .toEqual(Object.fromEntries(components.map(component => [component, base[component].materialVersion])));
+  });
+
+  it("pagination declaration generations preserve the era digest and an existing trial", () => {
+    const input = { bot: ERA_BOT, contextDigest: { candleProvenance: { selected: provenance(), parent: provenance() } } };
+    const identity = buildQualificationEraObject(input);
+    const digest = computeQualificationEraDigest(input);
+    const trialStartedAt = new Date(NOW - 2 * DAY);
+    const existing = { ...ERA_BOT, currentQualificationEraDigest: digest, trialStartedAt } as AiTraderBot;
+    // Exercise the actual pure module with the previous declaration generations.
+    // No material version changes; restore both fields even if an assertion fails.
+    const registry = QUALIFICATION_ERA_REGISTRY as unknown as QualificationEraRegistry;
+    const scannerGeneration = registry.scanner_capability_policy.decisionGeneration;
+    const guardrailGeneration = registry.guardrail_risk_policy.decisionGeneration;
+    try {
+      registry.scanner_capability_policy.decisionGeneration = 43;
+      registry.guardrail_risk_policy.decisionGeneration = 16;
+      expect(buildQualificationEraObject(input)).toEqual(identity);
+      expect(computeQualificationEraDigest(input)).toBe(digest);
+      expect(qualificationEraDecisionPatch(existing, computeQualificationEraDigest(input))).toBeNull();
+      expect(existing.trialStartedAt).toBe(trialStartedAt);
+    } finally {
+      registry.scanner_capability_policy.decisionGeneration = scannerGeneration;
+      registry.guardrail_risk_policy.decisionGeneration = guardrailGeneration;
+    }
+    expect(registry.scanner_capability_policy.decisionGeneration).toBe(44);
+    expect(registry.guardrail_risk_policy.decisionGeneration).toBe(17);
+  });
 
   it("binds the real changed-path inventory to the base registry", () => {
     const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();

@@ -3,6 +3,7 @@ import type { AiTraderBot } from "@shared/schema";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+const getPagedHistoryMock = vi.fn();
 const getBotMock = vi.fn();
 const getAiTraderDecisionsMock = vi.fn();
 const getExactAiTraderGraduationDecisionsMock = vi.fn();
@@ -24,7 +25,9 @@ const decrementFreeCallsMock = vi.fn();
 const transitionStateMock = vi.fn();
 const qualificationEraMutationPatchMock = vi.fn();
 vi.mock("../../server/storage", () => ({
+  AiTraderHistoryCursorError: class extends Error { constructor(){super("Invalid or expired history cursor");this.name="AiTraderHistoryCursorError";} },
   storage: {
+    getAiTraderDecisionsPaged: (...a: unknown[]) => getPagedHistoryMock(...a),
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getAiTraderDecisionsMock(...a),
     getExactAiTraderGraduationDecisions: (...a: unknown[]) => getExactAiTraderGraduationDecisionsMock(...a),
@@ -1680,4 +1683,37 @@ describe("AI Trader immutable qualification review route", () => {
       expect(getQualificationRecordMock).not.toHaveBeenCalled();
     }
   });
+});
+
+describe('AI Trader history exact cursor transport',()=>{
+ beforeEach(()=>{vi.clearAllMocks();getBotMock.mockResolvedValue(scannerBot());getPagedHistoryMock.mockResolvedValue({rows:[],nextCursor:null});});
+ const request=async(query:Record<string,unknown>)=>{const built=buildApp();registerAiTraderRoutes(built.app);return invoke(built.routes,'GET /api/ai-trader/:id/history',{params:{id:'scanner-bot-route'},session:{walletAddress:'WALLET_ROUTE'},headers:{},body:{},query});};
+ it('passes exact six-digit cursor unchanged through actual registered route',async()=>{
+  const before='2026-01-02T03:04:05.123456Z';expect((await request({before,beforeId:'not-a-uuid',outcomes:'executed'})).statusCode).toBe(200);
+  expect(getPagedHistoryMock).toHaveBeenCalledWith('scanner-bot-route',50,{outcomes:'executed',before,beforeId:'not-a-uuid'});
+ });
+ for(const q of [{before:'invalid',beforeId:'x'},{before:'2026-01-02T03:04:05.123456Z'},{beforeId:'x'},{before:['2026-01-02T03:04:05.123456Z'],beforeId:'x'}])it('malformed/partial query refuses before storage '+JSON.stringify(q),async()=>{
+  expect(await request(q)).toEqual({statusCode:400,body:{error:'Invalid or expired history cursor'}});expect(getPagedHistoryMock).not.toHaveBeenCalled();
+ });
+ it('maps only the explicit cursor error to a private-safe 400',async()=>{
+  const {AiTraderHistoryCursorError}=await import('../../server/storage');getPagedHistoryMock.mockRejectedValue(new AiTraderHistoryCursorError());
+  expect(await request({before:'2026-01-02T03:04:05.123456Z',beforeId:'x'})).toEqual({statusCode:400,body:{error:'Invalid or expired history cursor'}});
+ });
+ it('retains a generic 500 for an unrelated storage failure',async()=>{
+  const spy=vi.spyOn(console,'error').mockImplementation(()=>{});try{getPagedHistoryMock.mockRejectedValue(new Error('private DSN must not appear'));expect(await request({})).toEqual({statusCode:500,body:{error:'Internal server error'}});}finally{spy.mockRestore();}
+ });
+ it('first page omits both cursor keys before calling storage',async()=>{
+  expect((await request({outcomes:'all'})).statusCode).toBe(200);
+  expect(getPagedHistoryMock).toHaveBeenCalledTimes(1);
+  expect(getPagedHistoryMock).toHaveBeenCalledWith('scanner-bot-route',50,{outcomes:'all'});
+ });
+ for(const [label,query] of [
+  ['array-valued boundary ID',{before:'2026-01-02T03:04:05.123456Z',beforeId:['x']}],
+  ['empty boundary ID',{before:'2026-01-02T03:04:05.123456Z',beforeId:''}],
+  ['noncanonical timezone offset',{before:'2026-01-02T03:04:05.123456+00:00',beforeId:'x'}],
+ ] as const)it('rejects '+label+' before any storage call',async()=>{
+  expect(await request(query)).toEqual({statusCode:400,body:{error:'Invalid or expired history cursor'}});
+  expect(getPagedHistoryMock).not.toHaveBeenCalled();
+ });
+
 });

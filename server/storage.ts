@@ -1,4 +1,4 @@
-import { eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
+import { getTableColumns, eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
 import { createHash, randomBytes } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
@@ -1220,7 +1220,7 @@ export interface IStorage {
   getAiTraderDecisionsPaged(
     botId: string,
     limit: number,
-    opts?: { outcomes?: 'all' | 'executed' | 'non_flat'; before?: Date; beforeId?: string },
+    opts?: { outcomes?: 'all' | 'executed' | 'non_flat'; before?: Date | string; beforeId?: string },
   ): Promise<{ rows: AiTraderDecision[]; nextCursor: { before: string; beforeId: string } | null }>;
   // WO-7 additions.
   getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined>;
@@ -7663,46 +7663,43 @@ export class DatabaseStorage implements IStorage {
   async getAiTraderDecisionsPaged(
     botId: string,
     limit: number,
-    opts?: { outcomes?: 'all' | 'executed' | 'non_flat'; before?: Date; beforeId?: string },
+    opts?: { outcomes?: 'all' | 'executed' | 'non_flat'; before?: Date | string; beforeId?: string },
   ): Promise<{ rows: AiTraderDecision[]; nextCursor: { before: string; beforeId: string } | null }> {
     const { outcomes = 'all', before, beforeId } = opts ?? {};
-
-    const outcomesCond =
-      outcomes === 'executed' ? eq(aiTraderDecisions.outcome, 'executed') :
-      outcomes === 'non_flat' ? ne(aiTraderDecisions.outcome, 'flat') :
-      undefined;
-
-    const cursorCond =
-      before && beforeId
-        ? or(
-            lt(aiTraderDecisions.decidedAt, before),
-            and(
-              eq(aiTraderDecisions.decidedAt, before),
-              lt(aiTraderDecisions.id, beforeId),
-            ),
-          )
-        : undefined;
-
-    const whereCond = and(
-      eq(aiTraderDecisions.botId, botId),
-      outcomesCond,
-      cursorCond,
-    );
-
-    const fetched = await db.select().from(aiTraderDecisions)
-      .where(whereCond)
-      .orderBy(desc(aiTraderDecisions.decidedAt), desc(aiTraderDecisions.id))
-      .limit(limit + 1);
-
-    const hasMore = fetched.length > limit;
-    const rows = hasMore ? fetched.slice(0, limit) : fetched;
-    const lastRow = rows[rows.length - 1];
-    const nextCursor =
-      hasMore && lastRow && lastRow.decidedAt != null
-        ? { before: lastRow.decidedAt.toISOString(), beforeId: lastRow.id }
-        : null;
-
-    return { rows, nextCursor };
+    const hasCursor = before !== undefined || beforeId !== undefined;
+    let exact: string | undefined;
+    if (hasCursor) {
+      if (!beforeId || (typeof before !== 'string' && !(before instanceof Date))) throw new AiTraderHistoryCursorError();
+      const supplied = before instanceof Date ? (Number.isFinite(before.getTime()) ? before.toISOString() : '') : before;
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(?:\d{3}|\d{6})Z$/.test(supplied)) throw new AiTraderHistoryCursorError();
+      const parsed = new Date(supplied);
+      if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== supplied.slice(0,23)+'Z') throw new AiTraderHistoryCursorError();
+      const precise = typeof before === 'string' && supplied.length === 27;
+      const [boundary] = await db.select({botId:aiTraderDecisions.botId,
+        exact:sql<string>`to_char(${aiTraderDecisions.decidedAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+        millis:sql<string>`to_char(${aiTraderDecisions.decidedAt}, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+      }).from(aiTraderDecisions).where(eq(aiTraderDecisions.id,beforeId)).limit(1);
+      if (boundary && boundary.botId !== botId) throw new AiTraderHistoryCursorError();
+      if (precise) {
+        if (boundary && boundary.exact !== supplied) throw new AiTraderHistoryCursorError();
+        exact=supplied; // Exact cursor survives boundary deletion.
+      } else {
+        if (!boundary || boundary.millis !== supplied) throw new AiTraderHistoryCursorError();
+        exact=boundary.exact; // Legacy Date/ms callers must recover the original precision.
+      }
+    }
+    const outcomesCond = outcomes === 'executed' ? eq(aiTraderDecisions.outcome,'executed')
+      : outcomes === 'non_flat' ? ne(aiTraderDecisions.outcome,'flat') : undefined;
+    const cursorCond = exact && beforeId ? or(
+      sql`${aiTraderDecisions.decidedAt} < ${exact.slice(0,-1)}::timestamp`,
+      and(sql`${aiTraderDecisions.decidedAt} = ${exact.slice(0,-1)}::timestamp`,lt(aiTraderDecisions.id,beforeId)),
+    ) : undefined;
+    const fetched=await db.select({row:getTableColumns(aiTraderDecisions),
+      cursorBefore:sql<string>`to_char(${aiTraderDecisions.decidedAt}, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+    }).from(aiTraderDecisions).where(and(eq(aiTraderDecisions.botId,botId),outcomesCond,cursorCond))
+      .orderBy(desc(aiTraderDecisions.decidedAt),desc(aiTraderDecisions.id)).limit(limit+1);
+    const hasMore=fetched.length>limit, page=hasMore?fetched.slice(0,limit):fetched,last=page.at(-1);
+    return {rows:page.map(x=>x.row),nextCursor:hasMore&&last?.cursorBefore?{before:last.cursorBefore,beforeId:last.row.id}:null};
   }
 
   // --- AI Trader (WO-7) ---
@@ -7964,3 +7961,7 @@ export class DatabaseStorage implements IStorage {
 }
 
 export const storage = new DatabaseStorage();
+
+export class AiTraderHistoryCursorError extends Error {
+  constructor() { super("Invalid or expired history cursor"); this.name = "AiTraderHistoryCursorError"; }
+}

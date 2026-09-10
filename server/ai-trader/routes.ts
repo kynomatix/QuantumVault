@@ -28,7 +28,7 @@ import { z } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { db } from "../db";
 import { aiTraderDecisions, aiTraderExecutionEvents, type AiTraderBot } from "@shared/schema";
-import { storage } from "../storage";
+import { storage, AiTraderHistoryCursorError } from "../storage";
 import {
   getSessionByWalletAddress,
   restoreWalletSecurityFromStorage,
@@ -2405,19 +2405,21 @@ export function registerAiTraderRoutes(app: Express): void {
         outcomesRaw === 'non_flat' ? 'non_flat' :
         'all';
 
-      // Keyset cursor.
-      const beforeRaw = String(req.query.before ?? '');
-      const beforeId = String(req.query.beforeId ?? '');
-      const before = beforeRaw ? new Date(beforeRaw) : undefined;
-      const cursorOpts = before && beforeId && !Number.isNaN(before.getTime())
-        ? { before, beforeId }
-        : {};
+      // Preserve exact cursor precision; partial and malformed cursors are errors.
+      const hasBefore = req.query.before !== undefined, hasId = req.query.beforeId !== undefined;
+      if ((hasBefore || hasId) && (!hasBefore || !hasId || typeof req.query.before !== 'string'
+          || typeof req.query.beforeId !== 'string' || !req.query.beforeId
+          || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.(?:\d{3}|\d{6})Z$/.test(req.query.before))) {
+        return res.status(400).json({ error: "Invalid or expired history cursor" });
+      }
+      const cursorOpts = hasBefore ? { before: req.query.before as string, beforeId: req.query.beforeId as string } : {};
 
       const { rows: decisions, nextCursor } = await storage.getAiTraderDecisionsPaged(
         bot.id, limit, { outcomes, ...cursorOpts },
       );
       res.json({ decisions, nextCursor });
     } catch (err) {
+      if (err instanceof AiTraderHistoryCursorError) return res.status(400).json({ error: "Invalid or expired history cursor" });
       console.error("[AiTrader] history error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
