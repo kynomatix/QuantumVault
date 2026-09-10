@@ -3780,7 +3780,7 @@ export class PacificaAdapter implements ProtocolAdapter {
             body: JSON.stringify(body),
           },
           30_000,
-          30_000,
+          35_000,
           `POST ${path}`,
         );
       } catch (error) {
