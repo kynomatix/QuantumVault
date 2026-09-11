@@ -110,20 +110,61 @@ async function fetchWholeUniverse(): Promise<Map<string, RawAssetCtx> | null> {
   if (inflightFetch) {
     return inflightFetch;
   }
-  inflightFetch = (async (): Promise<Map<string, RawAssetCtx> | null> => {
+
+  let resolveAttempt!: (value: Map<string, RawAssetCtx> | null) => void;
+  const attempt = new Promise<Map<string, RawAssetCtx> | null>((resolve) => {
+    resolveAttempt = resolve;
+  });
+  inflightFetch = attempt;
+
+  let settled = false;
+  const controller = new AbortController();
+  const finish = (value: Map<string, RawAssetCtx> | null) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    if (inflightFetch === attempt) inflightFetch = null;
+    resolveAttempt(value);
+    if (value === null) {
+      try {
+        controller.abort();
+      } catch {
+        // Abort is best effort. The public attempt is already settled.
+      }
+    }
+  };
+  const timer = setTimeout(() => {
+    console.warn(
+      `[hl-context] market context attempt exceeded ${FETCH_TIMEOUT_MS} ms; returning unavailable`,
+    );
+    finish(null);
+  }, FETCH_TIMEOUT_MS);
+
+  void (async () => {
     try {
       const res = await fetch(HL_INFO_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: "metaAndAssetCtxs" }),
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: controller.signal,
       });
-      if (!res.ok) return null;
+      if (settled || inflightFetch !== attempt) return;
+      if (!res.ok) {
+        finish(null);
+        return;
+      }
       const body = (await res.json()) as unknown;
-      if (!Array.isArray(body) || body.length < 2) return null;
+      if (settled || inflightFetch !== attempt) return;
+      if (!Array.isArray(body) || body.length < 2) {
+        finish(null);
+        return;
+      }
       const meta = body[0] as { universe?: RawUniverseEntry[] } | undefined;
       const ctxs = body[1] as RawAssetCtx[] | undefined;
-      if (!meta || !Array.isArray(meta.universe) || !Array.isArray(ctxs)) return null;
+      if (!meta || !Array.isArray(meta.universe) || !Array.isArray(ctxs)) {
+        finish(null);
+        return;
+      }
       const byCoin = new Map<string, RawAssetCtx>();
       for (let i = 0; i < meta.universe.length; i++) {
         const name = meta.universe[i]?.name;
@@ -131,16 +172,12 @@ async function fetchWholeUniverse(): Promise<Map<string, RawAssetCtx> | null> {
         if (typeof name === "string" && ctx) byCoin.set(name, ctx);
       }
       cachedUniverse = { byCoin, fetchedAt: Date.now() };
-      return byCoin;
+      finish(byCoin);
     } catch {
-      // Timeout (AbortSignal fires), network error, non-JSON body, etc. —
-      // all fold into "no data this cycle", never a throw.
-      return null;
-    } finally {
-      inflightFetch = null;
+      finish(null);
     }
   })();
-  return inflightFetch;
+  return attempt;
 }
 
 function parseFiniteNumber(raw: unknown): number | null {

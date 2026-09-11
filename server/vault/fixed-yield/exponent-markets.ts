@@ -173,13 +173,49 @@ export async function getEligibleFixedYieldMarkets(): Promise<ExponentMarketView
   if (cache && now - cache.fetchedAt < CACHE_TTL_MS) return cache.markets;
   if (inFlight) return inFlight;
 
-  inFlight = (async () => {
+  let resolveAttempt!: (value: ExponentMarketView[]) => void;
+  let rejectAttempt!: (error: unknown) => void;
+  const attempt = new Promise<ExponentMarketView[]>((resolve, reject) => {
+    resolveAttempt = resolve;
+    rejectAttempt = reject;
+  });
+  inFlight = attempt;
+
+  let settled = false;
+  const controller = new AbortController();
+  const clearOwn = () => {
+    settled = true;
+    clearTimeout(timer);
+    if (inFlight === attempt) inFlight = null;
+  };
+  const fail = (error: unknown) => {
+    if (settled) return;
+    clearOwn();
+    if (cache) resolveAttempt(cache.markets);
+    else rejectAttempt(error);
     try {
-      const res = await fetch(EXPONENT_MARKETS_API, {
-        signal: AbortSignal.timeout(10_000),
-      });
+      controller.abort();
+    } catch {
+      // Abort is best effort. The public attempt is already settled.
+    }
+  };
+  const timer = setTimeout(
+    () => {
+      console.warn(
+        "[exponent-markets] market request exceeded 10000 ms; using stale cache or failing closed",
+      );
+      fail(new Error("Exponent markets attempt timed out"));
+    },
+    10_000,
+  );
+
+  void (async () => {
+    try {
+      const res = await fetch(EXPONENT_MARKETS_API, { signal: controller.signal });
+      if (settled || inFlight !== attempt) return;
       if (!res.ok) throw new Error(`Exponent markets API HTTP ${res.status}`);
       const body = await res.json();
+      if (settled || inFlight !== attempt) return;
       if (!Array.isArray(body)) throw new Error("Exponent markets API: unexpected shape");
       const nowSec = Math.floor(Date.now() / 1000);
       const markets: ExponentMarketView[] = [];
@@ -207,17 +243,13 @@ export async function getEligibleFixedYieldMarkets(): Promise<ExponentMarketView
         }
       }
       cache = { fetchedAt: Date.now(), markets, quotes };
-      return markets;
-    } catch (err) {
-      // Stale-but-real beats fabricated: serve an expired cache on transient
-      // API failure, otherwise fail closed.
-      if (cache) return cache.markets;
-      throw err;
-    } finally {
-      inFlight = null;
+      clearOwn();
+      resolveAttempt(markets);
+    } catch (error) {
+      fail(error);
     }
   })();
-  return inFlight;
+  return attempt;
 }
 
 /** Best eligible market = highest fixed rate. Null when none qualify. */
