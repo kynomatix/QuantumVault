@@ -487,10 +487,10 @@ function cloneRegistry(): QualificationEraRegistry {
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
-  it("declares observation-only monitor instrumentation as a reviewed no-bump", () => {
+  it("declares live breakeven monitor policy as a reviewed no-bump", () => {
     expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 44,
+      decisionGeneration: 45,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
@@ -505,7 +505,7 @@ describe("qualification era forgotten-declaration gate", () => {
     });
     expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({
       materialVersion: 3,
-      decisionGeneration: 14,
+      decisionGeneration: 15,
       decision: "no_bump",
     });
     expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
@@ -517,7 +517,7 @@ describe("qualification era forgotten-declaration gate", () => {
 
   it("binds the shared graduation owner path to the reviewed scanner no-bump declaration", () => {
     const base = cloneRegistry();
-    base.scanner_capability_policy.decisionGeneration = 43;
+    base.scanner_capability_policy.decisionGeneration = 44;
     base.accepted_candle_provenance.decisionGeneration = 19;
 
     expect(validateQualificationEraDeclarationChanges({
@@ -529,8 +529,8 @@ describe("qualification era forgotten-declaration gate", () => {
 
   it("declares monitor observation without changing any material qualification component", () => {
     const base = cloneRegistry();
-    base.scanner_capability_policy.decisionGeneration = 43;
-    base.paper_execution_simulator.decisionGeneration = 13;
+    base.scanner_capability_policy.decisionGeneration = 44;
+    base.paper_execution_simulator.decisionGeneration = 14;
     expect(validateQualificationEraDeclarationChanges({
       base, current: cloneRegistry(), changedPaths: ["server/ai-trader/monitor.ts"],
     })).toEqual([]);
@@ -586,14 +586,14 @@ describe("qualification era forgotten-declaration gate", () => {
   it("declares historical pagination with unchanged material versions and exact route-owner generations", () => {
     const current = cloneRegistry();
     const base = cloneRegistry();
-    base.scanner_capability_policy.decisionGeneration = 43;
+    base.scanner_capability_policy.decisionGeneration = 44;
     base.guardrail_risk_policy.decisionGeneration = 16;
     const changedPaths = [
       "server/storage.ts", "server/ai-trader/routes.ts",
       "tests/ai-trader/routes.test.ts", "tests/ai-trader/history-cursor.test.ts",
       "server/ai-trader/graduation.ts", "tests/ai-trader/graduation.test.ts",
     ];
-    expect(current.scanner_capability_policy).toMatchObject({ materialVersion: 3, decisionGeneration: 44, decision: "no_bump" });
+    expect(current.scanner_capability_policy).toMatchObject({ materialVersion: 3, decisionGeneration: 45, decision: "no_bump" });
     expect(current.guardrail_risk_policy).toMatchObject({ materialVersion: 4, decisionGeneration: 17, decision: "no_bump" });
     expect(validateQualificationEraDeclarationChanges({ base, current, changedPaths })).toEqual([]);
     expect(validateQualificationEraDeclarationChanges({ base, current: base, changedPaths })).toEqual([
@@ -616,7 +616,7 @@ describe("qualification era forgotten-declaration gate", () => {
     const scannerGeneration = registry.scanner_capability_policy.decisionGeneration;
     const guardrailGeneration = registry.guardrail_risk_policy.decisionGeneration;
     try {
-      registry.scanner_capability_policy.decisionGeneration = 43;
+      registry.scanner_capability_policy.decisionGeneration = 44;
       registry.guardrail_risk_policy.decisionGeneration = 16;
       expect(buildQualificationEraObject(input)).toEqual(identity);
       expect(computeQualificationEraDigest(input)).toBe(digest);
@@ -626,7 +626,7 @@ describe("qualification era forgotten-declaration gate", () => {
       registry.scanner_capability_policy.decisionGeneration = scannerGeneration;
       registry.guardrail_risk_policy.decisionGeneration = guardrailGeneration;
     }
-    expect(registry.scanner_capability_policy.decisionGeneration).toBe(44);
+    expect(registry.scanner_capability_policy.decisionGeneration).toBe(45);
     expect(registry.guardrail_risk_policy.decisionGeneration).toBe(17);
   });
 
