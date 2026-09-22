@@ -419,6 +419,7 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
 function liveBreakevenSnapshot(
   price: string | null = "157.5",
   stopTriggerBasis: "last_trade_price" | "target_internal_oracle" = "last_trade_price",
+  stopTriggerPrice = "145",
 ) {
   const triggerBasisStatus = stopTriggerBasis === "last_trade_price"
     ? "last_trade_price" as const
@@ -436,7 +437,7 @@ function liveBreakevenSnapshot(
       orderType: "stop_loss" as const,
       side: "sell" as const,
       triggerBasis: stopTriggerBasis,
-      triggerPrice: "145",
+      triggerPrice: stopTriggerPrice,
       initialSize: "2",
       remainingSize: "2",
       reduceOnly: true as const,
@@ -507,6 +508,16 @@ function echoLiveBreakevenMove() {
     const claim = await params.claimAttempt();
     if (claim.status !== "claimed") {
       return { success: false, status: "rejected" as const, error: `claim_${claim.status}` };
+    }
+    if (!params.recordPendingPersistence || !await params.recordPendingPersistence({
+      attemptId: claim.attemptId,
+      ordinal: claim.ordinal,
+    })) {
+      return {
+        success: false,
+        status: "rejected" as const,
+        error: "live_breakeven_persistence_intent_unavailable",
+      };
     }
     return {
       success: true,
@@ -5279,9 +5290,14 @@ describe("breakeven protect", () => {
       triggerBasis: "last_trade_price",
     });
     const du = decisionUpdates();
-    expect(du).toHaveLength(1);
-    const clamped = du[0].clampedDecision as Record<string, any>;
+    expect(du).toHaveLength(2);
+    expect((du[0].clampedDecision as Record<string, any>).liveBreakevenPending).toMatchObject({
+      schemaVersion: 1,
+      newSl: LIVE_FIXED_SL,
+    });
+    const clamped = du[1].clampedDecision as Record<string, any>;
     expect(clamped.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
+    expect(clamped.liveBreakevenPending).toBeUndefined();
     expect(clamped.breakevenProtect.originalStopLossPrice).toBe(145);
     expect(clamped.breakevenProtect.liveAuthority).toMatchObject({
       positionEpochFingerprint: "A".repeat(64),
@@ -5411,18 +5427,101 @@ describe("breakeven protect", () => {
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     fetchOHLCVMock.mockResolvedValue(progressCandles());
-    updateDecisionMock.mockRejectedValueOnce(new Error("audit write unavailable"));
+    updateDecisionMock
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error("audit write unavailable"));
 
     const bot = makeBot({ paperMode: false });
     await monitorBotOnce(bot);
     await monitorBotOnce(bot);
 
     expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
-    expect(updateDecisionMock).toHaveBeenCalledTimes(2);
+    expect(updateDecisionMock).toHaveBeenCalledTimes(3);
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
     expect(botUpdates().some((u) => u.status === "paused")).toBe(false);
     expect(appendTelemetryMock.mock.calls.flat().join("\n")).toContain("persistence_degraded");
     expect(appendTelemetryMock.mock.calls.flat().join("\n")).toContain("persistence_reconciliation_resolved");
+  });
+
+  it("live (pacifica): a pending audit write never suppresses the G7 daily-loss force-flat", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const breachedPosition = { ...openPosition, unrealizedPnl: -200 };
+    const getPositions = vi.fn()
+      .mockResolvedValueOnce([openPosition])
+      .mockResolvedValue([breachedPosition]);
+    const adapter = makeAdapter({
+      getPositions,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    updateDecisionMock
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error("final audit write unavailable"))
+      .mockRejectedValueOnce(new Error("audit retry unavailable"))
+      .mockResolvedValue({});
+
+    const bot = makeBot({ paperMode: false, allocatedUsdc: "1000", riskProfile: "guarded" });
+    await monitorBotOnce(bot);
+    await monitorBotOnce(bot);
+
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(botUpdates()).toContainEqual(expect.objectContaining({
+      status: "paused",
+      pauseReason: "daily_loss_breaker",
+    }));
+  });
+
+  it("live (pacifica): recovers a verified venue move from the durable intent after monitor state is cleared", async () => {
+    const { monitorBotOnce, stopAiTraderMonitor } = await importMonitor();
+    armLiveAuth();
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const getLiveBreakevenAuthoritySnapshot = vi.fn()
+      .mockResolvedValueOnce(liveBreakevenSnapshot())
+      .mockResolvedValueOnce(liveBreakevenSnapshot(
+        "157.5",
+        "last_trade_price",
+        String(LIVE_FIXED_SL),
+      ));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getLiveBreakevenAuthoritySnapshot,
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    updateDecisionMock
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error("final audit write unavailable"))
+      .mockResolvedValue({});
+
+    const bot = makeBot({ paperMode: false });
+    await monitorBotOnce(bot);
+    const durableClamped = decisionUpdates()[0].clampedDecision as Record<string, unknown>;
+    expect(durableClamped.liveBreakevenPending).toBeTruthy();
+
+    stopAiTraderMonitor();
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ clampedDecision: durableClamped }),
+    ]);
+    await monitorBotOnce(bot);
+
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect(getLiveBreakevenAuthoritySnapshot).toHaveBeenCalledTimes(2);
+    const recovered = decisionUpdates().at(-1)?.clampedDecision as Record<string, any>;
+    expect(recovered.liveBreakevenPending).toBeUndefined();
+    expect(recovered.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
+    expect(recovered.breakevenProtect.liveAuthority).toMatchObject({
+      attemptId: "protective:dec-1:1",
+      appliedStopLossPrice: LIVE_FIXED_SL,
+      postVerificationBracketFingerprint: expect.stringMatching(/^[0-9A-F]{64}$/),
+    });
   });
 
   it("live (flash): remains dormant until exact native trigger rows can be revalidated", async () => {

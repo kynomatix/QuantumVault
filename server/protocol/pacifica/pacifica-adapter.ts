@@ -2302,6 +2302,12 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (Date.now() > permit.binding.expiresAtMs) {
       return denied('live_breakeven_permit_expired_after_claim', claimDetails);
     }
+    if (!params.recordPendingPersistence || !await params.recordPendingPersistence({
+      attemptId: claim.attemptId,
+      ordinal: claim.ordinal,
+    })) {
+      return denied('live_breakeven_persistence_intent_unavailable', claimDetails);
+    }
     const closingSide = permit.binding.side === 'long' ? 'ask' : 'bid';
     const buildOperationData = (takeProfitPrice: string, stopLossPrice: string): Record<string, unknown> => {
       const tpLimitRaw = permit.binding.side === 'long'
@@ -4436,8 +4442,8 @@ export class PacificaAdapter implements ProtocolAdapter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           },
-          35_000,
           30_000,
+          35_000,
           `POST ${path}`,
         );
       } catch (error) {

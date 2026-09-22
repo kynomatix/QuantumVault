@@ -298,6 +298,16 @@ export interface MoveLiveBreakevenStopParams {
   subaccountId?: string;
   permit: LiveBreakevenAuthorityPermit;
   claimAttempt: () => Promise<LiveBreakevenAttemptClaimResult>;
+  /**
+   * Durable write-ahead record installed after the atomic claim and immediately
+   * before any venue mutation. A false result consumes the claim but forbids
+   * signing/broadcast, so a successful move can always be recovered after a
+   * monitor restart.
+   */
+  recordPendingPersistence?: (claim: {
+    attemptId: string;
+    ordinal: number;
+  }) => Promise<boolean>;
   builderAttachment?: BuilderAttachmentPolicy;
 }
 

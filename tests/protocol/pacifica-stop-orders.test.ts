@@ -585,6 +585,10 @@ describe('PacificaAdapter live breakeven authority', () => {
         internalSymbol: 'SOL-PERP',
         permit: p,
         claimAttempt,
+        recordPendingPersistence: async () => {
+          order.push('persist');
+          return true;
+        },
       });
       expect(result).toMatchObject({
         success: true,
@@ -598,7 +602,7 @@ describe('PacificaAdapter live breakeven authority', () => {
       sign.mockRestore();
     }
 
-    expect(order).toEqual(['snapshot-pre', 'claim', 'sign', 'post', 'snapshot-post']);
+    expect(order).toEqual(['snapshot-pre', 'claim', 'persist', 'sign', 'post', 'snapshot-post']);
     expect(operationData?.take_profit?.trigger_price_type).toBe('last_trade_price');
     expect(operationData?.stop_loss?.trigger_price_type).toBe('last_trade_price');
     expect(a.post).toHaveBeenCalledWith('/positions/tpsl', expect.any(Object));
@@ -624,6 +628,47 @@ describe('PacificaAdapter live breakeven authority', () => {
     });
 
     expect(result).toMatchObject({ success: false, error: 'live_breakeven_claim_duplicate' });
+    expect(sign).not.toHaveBeenCalled();
+    expect(a.post).not.toHaveBeenCalled();
+  });
+
+  it('consumes the claim but does not sign or post when the durable persistence intent cannot be recorded', async () => {
+    const a = createAdapter() as any;
+    stubRegistry(a);
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+    const p = permit();
+    a.readBreakevenBuilderApproval = vi.fn(async () => false);
+    a.getLiveBreakevenAuthoritySnapshot = vi.fn(async () => authoritySnapshot(p, p.binding.currentStopPrice));
+    a.post = vi.fn();
+    const sign = vi.spyOn(PacificaSigner.prototype, 'buildRequestBody');
+    const claimAttempt = vi.fn(async () => ({
+      status: 'claimed' as const,
+      attemptId: 'protective:decision-1:1',
+      ordinal: 1,
+    }));
+    const recordPendingPersistence = vi.fn(async () => false);
+
+    const result = await a.moveLiveBreakevenStop({
+      agentPublicKey: ACCT,
+      agentSecretKey: new Uint8Array(64),
+      mainWalletAddress: 'main-wallet-1',
+      internalSymbol: 'SOL-PERP',
+      permit: p,
+      claimAttempt,
+      recordPendingPersistence,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: 'live_breakeven_persistence_intent_unavailable',
+      attemptId: 'protective:decision-1:1',
+      attemptOrdinal: 1,
+    });
+    expect(claimAttempt).toHaveBeenCalledTimes(1);
+    expect(recordPendingPersistence).toHaveBeenCalledWith({
+      attemptId: 'protective:decision-1:1',
+      ordinal: 1,
+    });
     expect(sign).not.toHaveBeenCalled();
     expect(a.post).not.toHaveBeenCalled();
   });
@@ -800,6 +845,7 @@ describe('PacificaAdapter live breakeven authority', () => {
       internalSymbol: 'SOL-PERP',
       permit: p,
       claimAttempt,
+      recordPendingPersistence: async () => true,
     });
 
     expect(result).toMatchObject({
@@ -848,6 +894,7 @@ describe('PacificaAdapter live breakeven authority', () => {
       internalSymbol: 'SOL-PERP',
       permit: p,
       claimAttempt,
+      recordPendingPersistence: async () => true,
     });
 
     expect(result).toMatchObject({
@@ -896,6 +943,7 @@ describe('PacificaAdapter live breakeven authority', () => {
         attemptId: 'protective:decision-1:1',
         ordinal: 1,
       }),
+      recordPendingPersistence: async () => true,
     });
 
     expect(result).toMatchObject({
@@ -937,6 +985,7 @@ describe('PacificaAdapter live breakeven authority', () => {
         attemptId: 'protective:decision-1:1',
         ordinal: 1,
       }),
+      recordPendingPersistence: async () => true,
     });
 
     expect(result).toMatchObject({
