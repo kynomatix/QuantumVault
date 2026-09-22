@@ -411,7 +411,7 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
     cancelTpSlOrders: vi.fn(async () => ({ success: true })),
     closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 150.0 })),
     getPrice: vi.fn(async () => 150),
-    quantizePrice: vi.fn((_market: string, price: number) => price),
+    quantizePrice: vi.fn((_market: string, price: number) => Math.round(price * 1_000) / 1_000),
     ...overrides,
   } as unknown as ProtocolAdapter;
 }
@@ -421,6 +421,7 @@ function liveBreakevenSnapshot(
   stopTriggerBasis: "last_trade_price" | "target_internal_oracle" = "last_trade_price",
   stopTriggerPrice = "145",
   protectiveOrderCount = 2,
+  takeProfitTriggerPrice = "160",
 ) {
   const triggerBasisStatus = stopTriggerBasis === "last_trade_price"
     ? "last_trade_price" as const
@@ -449,7 +450,7 @@ function liveBreakevenSnapshot(
       orderType: "take_profit" as const,
       side: "sell" as const,
       triggerBasis: "last_trade_price" as const,
-      triggerPrice: "160",
+      triggerPrice: takeProfitTriggerPrice,
       initialSize: "2",
       remainingSize: "2",
       reduceOnly: true as const,
@@ -5020,6 +5021,7 @@ describe("breakeven protect", () => {
   if (!PAPER_STOP.ok) throw new Error(`paper stop fixture failed: ${PAPER_STOP.reason}`);
   const NEW_SL = PAPER_STOP.stopPrice;
   const LIVE_FIXED_SL = breakevenStopPrice("long", 150);
+  const LIVE_VENUE_SL = Math.round(LIVE_FIXED_SL * 1_000) / 1_000;
   const MOVED_AT = new Date(NOW - TF_15M).toISOString(); // 11:45 candle
 
   /** Open decision whose ratchet has ALREADY fired (stop moved to breakeven). */
@@ -5294,10 +5296,10 @@ describe("breakeven protect", () => {
     expect(du).toHaveLength(2);
     expect((du[0].clampedDecision as Record<string, any>).liveBreakevenPending).toMatchObject({
       schemaVersion: 1,
-      newSl: LIVE_FIXED_SL,
+      newSl: LIVE_VENUE_SL,
     });
     const clamped = du[1].clampedDecision as Record<string, any>;
-    expect(clamped.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
+    expect(clamped.stopLossPrice).toBeCloseTo(LIVE_VENUE_SL, 8);
     expect(clamped.liveBreakevenPending).toBeUndefined();
     expect(clamped.breakevenProtect.originalStopLossPrice).toBe(145);
     expect(clamped.breakevenProtect.liveAuthority).toMatchObject({
@@ -5308,6 +5310,45 @@ describe("breakeven protect", () => {
     });
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
+  });
+
+  it("live (pacifica): compares off-grid decision brackets using venue-quantized prices", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () =>
+        liveBreakevenSnapshot("157.5", "last_trade_price", "145", 2, "160")),
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({
+      clampedDecision: {
+        action: "long",
+        sizeBase: 2,
+        marginUsdc: 100,
+        stopLossPrice: 145.0004,
+        takeProfitPrice: 160.0004,
+      },
+    })]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+
+    await monitorBotOnce(makeBot({ paperMode: false }));
+
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop.mock.calls[0][0].permit.binding).toMatchObject({
+      takeProfitPrice: "160",
+      currentStopPrice: "145",
+    });
+    const pending = decisionUpdates()[0].clampedDecision as Record<string, any>;
+    expect(pending.liveBreakevenPending).toMatchObject({
+      originalStopLossPrice: 145,
+      authority: { requestedTakeProfitPrice: 160 },
+    });
+    const settled = decisionUpdates().at(-1)?.clampedDecision as Record<string, any>;
+    expect(settled.breakevenProtect.originalStopLossPrice).toBe(145);
+    expect(settled.breakevenProtect.liveAuthority.requestedTakeProfitPrice).toBe(160);
   });
 
   it("live: memoizes structural bracket suppression across ten ticks while G10 remains available", async () => {
@@ -5487,7 +5528,7 @@ describe("breakeven protect", () => {
       .mockResolvedValueOnce(liveBreakevenSnapshot(
         "157.5",
         "last_trade_price",
-        String(LIVE_FIXED_SL),
+        String(LIVE_VENUE_SL),
       ));
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
@@ -5517,10 +5558,10 @@ describe("breakeven protect", () => {
     expect(getLiveBreakevenAuthoritySnapshot).toHaveBeenCalledTimes(2);
     const recovered = decisionUpdates().at(-1)?.clampedDecision as Record<string, any>;
     expect(recovered.liveBreakevenPending).toBeUndefined();
-    expect(recovered.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
+    expect(recovered.stopLossPrice).toBeCloseTo(LIVE_VENUE_SL, 8);
     expect(recovered.breakevenProtect.liveAuthority).toMatchObject({
       attemptId: "protective:dec-1:1",
-      appliedStopLossPrice: LIVE_FIXED_SL,
+      appliedStopLossPrice: LIVE_VENUE_SL,
       postVerificationBracketFingerprint: expect.stringMatching(/^[0-9A-F]{64}$/),
     });
   });
@@ -5568,7 +5609,7 @@ describe("breakeven protect", () => {
     const harness = await beginDurableRecovery(liveBreakevenSnapshot(
       "157.5",
       "last_trade_price",
-      String(LIVE_FIXED_SL),
+      String(LIVE_VENUE_SL),
       1,
     ), []);
 
@@ -5586,7 +5627,7 @@ describe("breakeven protect", () => {
     const harness = await beginDurableRecovery(liveBreakevenSnapshot(
       "157.5",
       "last_trade_price",
-      String(LIVE_FIXED_SL),
+      String(LIVE_VENUE_SL),
     ), []);
 
     await harness.monitorBotOnce(harness.bot);
@@ -5595,14 +5636,14 @@ describe("breakeven protect", () => {
     expect((harness.adapter as any).closePosition).not.toHaveBeenCalled();
     const recovered = decisionUpdates().at(-1)?.clampedDecision as Record<string, any>;
     expect(recovered.liveBreakevenPending).toBeUndefined();
-    expect(recovered.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
+    expect(recovered.stopLossPrice).toBeCloseTo(LIVE_VENUE_SL, 8);
   });
 
   it("live (pacifica): closes and pauses on the tenth inconclusive durable recovery observation", async () => {
     const harness = await beginDurableRecovery(liveBreakevenSnapshot(
       "157.5",
       "target_internal_oracle",
-      String(LIVE_FIXED_SL),
+      String(LIVE_VENUE_SL),
     ));
 
     for (let observation = 1; observation < 10; observation += 1) {
@@ -5647,7 +5688,7 @@ describe("breakeven protect", () => {
     await monitorBotOnce(bot);
 
     expect((adapter as any).setTpSl).toHaveBeenCalledWith(expect.objectContaining({
-      stopLossPrice: LIVE_FIXED_SL,
+      stopLossPrice: LIVE_VENUE_SL,
     }));
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
   });

@@ -17,7 +17,6 @@ describe("resolveLiveBreakevenClaim", () => {
   it("allocates the fifth and final attempt", () => {
     expect(resolveLiveBreakevenClaim([row(1), row(2), row(3), row(4)], FP, NOW)).toEqual({
       status: "claimed",
-      attemptId: "",
       ordinal: 5,
     });
   });

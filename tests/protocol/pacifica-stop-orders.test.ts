@@ -543,6 +543,59 @@ describe('PacificaAdapter live breakeven authority', () => {
     expect(snapshot.sourceFingerprint).toMatch(/^[0-9A-F]{64}$/);
   });
 
+  it('returns malformed side and reduce-only evidence for structural classification instead of throwing', async () => {
+    const a = createAdapter() as any;
+    stubRegistry(a);
+    vi.spyOn(Date, 'now').mockReturnValue(NOW);
+    a.strictBreakevenGet = vi.fn(async (path: string) => {
+      if (path === '/positions') return {
+        envelope: {
+          success: true,
+          last_order_id: '41',
+          data: [{
+            symbol: 'SOL', side: 'bid', amount: '2.00000000',
+            entry_price: '100.00000000', created_at: NOW,
+          }],
+        },
+        readStartedAtMs: NOW,
+        readCompletedAtMs: NOW,
+      };
+      if (path === '/orders') return {
+        envelope: {
+          success: true,
+          last_order_id: '42',
+          data: [
+            { order_id: 41, symbol: 'SOL', side: 'unknown', stop_price: '95.00000000', order_type: 'stop_loss_market', reduce_only: true, trigger_price_type: 'last_trade_price', initial_amount: '2.00000000', filled_amount: '0.00000000', cancelled_amount: '0.00000000' },
+            { order_id: 42, symbol: 'SOL', side: 'ask', stop_price: '110.00000000', order_type: 'take_profit_market', reduce_only: false, trigger_price_type: 'last_trade_price', initial_amount: '2.00000000', filled_amount: '0.00000000', cancelled_amount: '0.00000000' },
+          ],
+        },
+        readStartedAtMs: NOW,
+        readCompletedAtMs: NOW,
+      };
+      return {
+        envelope: {
+          success: true,
+          last_order_id: '4001',
+          data: [{ price: '108.00000000', created_at: NOW }],
+        },
+        readStartedAtMs: NOW,
+        readCompletedAtMs: NOW,
+      };
+    });
+
+    const snapshot = await a.getLiveBreakevenAuthoritySnapshot({
+      agentPublicKey: ACCT,
+      internalSymbol: 'SOL-PERP',
+      deadlineAtMs: NOW + 5_000,
+    });
+
+    expect(snapshot.protectiveOrders).toEqual([
+      expect.objectContaining({ orderId: '41', side: 'malformed', reduceOnly: true }),
+      expect.objectContaining({ orderId: '42', side: 'sell', reduceOnly: false }),
+    ]);
+    expect(snapshot.bracketFingerprint).toMatch(/^[0-9A-F]{64}$/);
+  });
+
   it('claims immediately before signing and sends both legs with explicit LTP basis', async () => {
     const a = createAdapter() as any;
     stubRegistry(a);

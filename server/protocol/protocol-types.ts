@@ -206,12 +206,12 @@ export interface LiveBreakevenProtectiveOrderRow {
   orderId: string;
   orderAccount: string;
   orderType: 'stop_loss' | 'take_profit';
-  side: 'buy' | 'sell';
+  side: 'buy' | 'sell' | 'malformed';
   triggerBasis: LiveBreakevenTriggerBasis;
   triggerPrice: string;
   initialSize: string;
   remainingSize: string;
-  reduceOnly: true;
+  reduceOnly: boolean;
 }
 
 export interface LiveBreakevenNativeSnapshot {

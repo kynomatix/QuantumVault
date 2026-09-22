@@ -1991,9 +1991,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         const triggerBasis = classifyTriggerBasis(row.trigger_price_type);
         const mappedSide: 'sell' | 'buy' | null = rawSide === 'ask' || rawSide === 'sell'
           ? 'sell' : rawSide === 'bid' || rawSide === 'buy' ? 'buy' : null;
-        if (!mappedSide || row.reduce_only !== true) {
-          throw new Error('Pacifica live-breakeven protective order malformed');
-        }
+        const normalizedSide: 'sell' | 'buy' | 'malformed' = mappedSide ?? 'malformed';
         const initialSize = this.strictBreakevenDecimal(row.initial_amount, 'initial amount');
         const filledSize = this.strictBreakevenDecimal(row.filled_amount, 'filled amount');
         const cancelledSize = this.strictBreakevenDecimal(row.cancelled_amount, 'cancelled amount');
@@ -2005,12 +2003,12 @@ export class PacificaAdapter implements ProtocolAdapter {
           orderId: this.strictBreakevenInteger(row.order_id, 'order id'),
           orderAccount: params.agentPublicKey,
           orderType: rawType.startsWith('stop_loss') ? 'stop_loss' as const : 'take_profit' as const,
-          side: mappedSide,
+          side: normalizedSide,
           triggerBasis,
           triggerPrice: this.strictBreakevenDecimal(row.stop_price, 'trigger price'),
           initialSize,
           remainingSize: remaining.toFixed(),
-          reduceOnly: true as const,
+          reduceOnly: row.reduce_only === true,
         };
       })
       .sort((left, right) => left.orderType.localeCompare(right.orderType)

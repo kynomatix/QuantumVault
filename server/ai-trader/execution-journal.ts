@@ -564,11 +564,15 @@ export type LiveBreakevenJournalClaim =
   | { status: "claimed"; attemptId: string; ordinal: number }
   | { status: "duplicate" | "exhausted" | "clock_regression" | "unavailable" };
 
+export type LiveBreakevenClaimResolution =
+  | { status: "claimed"; ordinal: number }
+  | { status: "duplicate" | "exhausted" | "clock_regression" | "unavailable" };
+
 export function resolveLiveBreakevenClaim(existing: readonly {
   authorityFingerprint: string | null;
   attemptOrdinal: number | null;
   observedAt: Date;
-}[], authorityFingerprint: string, now: Date): LiveBreakevenJournalClaim {
+}[], authorityFingerprint: string, now: Date): LiveBreakevenClaimResolution {
   if (!FINGERPRINT.test(authorityFingerprint) || !(now instanceof Date)
       || !Number.isFinite(now.getTime())) return { status: "unavailable" };
   if (existing.some((row) => row.authorityFingerprint === authorityFingerprint)) {
@@ -580,7 +584,7 @@ export function resolveLiveBreakevenClaim(existing: readonly {
   }
   const ordinal = existing.reduce((max, row) =>
     Number.isSafeInteger(row.attemptOrdinal) ? Math.max(max, row.attemptOrdinal as number) : max, 0) + 1;
-  return ordinal > 5 ? { status: "exhausted" } : { status: "claimed", attemptId: "", ordinal };
+  return ordinal > 5 ? { status: "exhausted" } : { status: "claimed", ordinal };
 }
 
 export async function claimLiveBreakevenAttempt(args: {

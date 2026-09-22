@@ -533,6 +533,7 @@ const liveBreakevenSuppressionMemos = new Map<string, LiveBreakevenSuppressionMe
 type PendingLiveBreakevenPersistence = {
   positionObservationFingerprint: string;
   view: OpenDecisionView;
+  originalStopLossPrice: number;
   newSl: number;
   nativeProgress: number;
   analyticalProgress: number;
@@ -541,6 +542,25 @@ type PendingLiveBreakevenPersistence = {
 };
 const pendingLiveBreakevenPersistence = new Map<string, PendingLiveBreakevenPersistence>();
 const liveBreakevenRecoveryObservations = new Map<string, number>();
+
+function rememberBoundedLiveBreakevenValue<T>(
+  values: Map<string, T>,
+  decisionId: string,
+  value: T,
+): void {
+  if (!values.has(decisionId) && values.size >= LIVE_BREAKEVEN_SUPPRESSION_CAP) {
+    const oldest = values.keys().next().value;
+    if (oldest !== undefined) values.delete(oldest);
+  }
+  values.delete(decisionId);
+  values.set(decisionId, value);
+}
+
+function clearLiveBreakevenDecisionState(decisionId: string): void {
+  liveBreakevenSuppressionMemos.delete(decisionId);
+  pendingLiveBreakevenPersistence.delete(decisionId);
+  liveBreakevenRecoveryObservations.delete(decisionId);
+}
 
 type DurableLiveBreakevenPersistenceIntent = {
   schemaVersion: 1;
@@ -667,6 +687,7 @@ const LIVE_BREAKEVEN_STRUCTURAL_DENIALS = new Set<LiveBreakevenAuthorityDenial>(
   "position_or_bracket_mismatch",
   "protective_pair_not_proven",
   "trigger_basis_mismatch",
+  "candidate_outside_trade_range",
 ]);
 
 function recordProtectiveReadObservation(
@@ -1189,6 +1210,7 @@ async function recordClose(bot: AiTraderBot, view: OpenDecisionView, close: Clos
     feesPaid: close.feesPaid !== null ? close.feesPaid.toFixed(6) : null,
     closedAt: close.closedAt,
   });
+  clearLiveBreakevenDecisionState(view.decision.id);
 }
 
 /**
@@ -1309,6 +1331,7 @@ async function commitConfirmedClose(args: {
     appendTelemetry(`[AiTraderCloseTransition] conflict family=${args.family} reason=${result.reason}`);
     return result;
   }
+  clearLiveBreakevenDecisionState(args.view.decision.id);
   priceObservations.forget(args.view.decision.id);
   if (result.journal.status === "degraded") {
     appendTelemetry(`[AiTraderCloseTransition] journal degraded code=${result.journal.failureCode}`);
@@ -1771,7 +1794,11 @@ async function reconcilePendingLiveBreakevenPersistence(
       );
       return result(true, "recovery_observation_limit");
     }
-    liveBreakevenRecoveryObservations.set(view.decision.id, observations);
+    rememberBoundedLiveBreakevenValue(
+      liveBreakevenRecoveryObservations,
+      view.decision.id,
+      observations,
+    );
     emitTickObservation(
       `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=restart_recovery_retry observations=${observations}`,
     );
@@ -1802,6 +1829,7 @@ async function reconcilePendingLiveBreakevenPersistence(
         pending.analyticalProgress,
         pending.liveAuthority,
         pending.movedAt,
+        pending.originalStopLossPrice,
       );
       pendingLiveBreakevenPersistence.delete(view.decision.id);
       liveBreakevenSuppressionMemos.delete(view.decision.id);
@@ -2735,8 +2763,12 @@ async function maybeFireLiveBreakeven(
     quantizedCandidate = adapter.quantizePrice(bot.market, candidate.newSl);
     candidateStopPrice = new Decimal(quantizedCandidate).toFixed();
     expectedEntryPrice = new Decimal(view.entryPrice).toFixed();
-    expectedTakeProfitPrice = new Decimal(view.takeProfitPrice).toFixed();
-    expectedCurrentStopPrice = new Decimal(view.stopLossPrice).toFixed();
+    expectedTakeProfitPrice = new Decimal(
+      adapter.quantizePrice(bot.market, view.takeProfitPrice),
+    ).toFixed();
+    expectedCurrentStopPrice = new Decimal(
+      adapter.quantizePrice(bot.market, view.stopLossPrice),
+    ).toFixed();
   } catch {
     rememberLiveBreakevenSuppression(view.decision.id, {
       kind: "transient",
@@ -2824,7 +2856,7 @@ async function maybeFireLiveBreakeven(
         const durableIntent: DurableLiveBreakevenPersistenceIntent = {
           schemaVersion: 1,
           positionObservationFingerprint,
-          originalStopLossPrice: view.stopLossPrice,
+          originalStopLossPrice: Number(expectedCurrentStopPrice),
           newSl: quantizedCandidate,
           nativeProgress: authority.nativeProgress,
           analyticalProgress: candidate.progress,
@@ -2846,7 +2878,7 @@ async function maybeFireLiveBreakeven(
             readCompletedAtMs: authority.permit.binding.readCompletedAtMs,
             attemptId: claim.attemptId,
             attemptOrdinal: claim.ordinal,
-            requestedTakeProfitPrice: view.takeProfitPrice,
+            requestedTakeProfitPrice: Number(expectedTakeProfitPrice),
             requestedStopLossPrice: quantizedCandidate,
           },
         };
@@ -2910,8 +2942,12 @@ async function maybeFireLiveBreakeven(
   const appliedTakeProfitPrice = move.value.appliedTakeProfitPrice;
   const postVerificationReadCompletedAtMs = move.value.postVerificationReadCompletedAtMs;
   if (!move.value.success
+      || typeof appliedStopLossPrice !== "number"
+      || !Number.isFinite(appliedStopLossPrice)
       || appliedStopLossPrice !== quantizedCandidate
-      || appliedTakeProfitPrice !== view.takeProfitPrice
+      || typeof appliedTakeProfitPrice !== "number"
+      || !Number.isFinite(appliedTakeProfitPrice)
+      || !new Decimal(appliedTakeProfitPrice).eq(expectedTakeProfitPrice)
       || move.value.postCallVerified !== true
       || move.value.restorationOutcome !== "not_needed"
       || !move.value.postVerificationSourceFingerprint
@@ -2930,7 +2966,7 @@ async function maybeFireLiveBreakeven(
     readCompletedAtMs: authority.permit.binding.readCompletedAtMs,
     attemptId: move.value.attemptId,
     attemptOrdinal: move.value.attemptOrdinal,
-    requestedTakeProfitPrice: view.takeProfitPrice,
+    requestedTakeProfitPrice: Number(expectedTakeProfitPrice),
     requestedStopLossPrice: quantizedCandidate,
     appliedTakeProfitPrice,
     appliedStopLossPrice,
@@ -2948,11 +2984,13 @@ async function maybeFireLiveBreakeven(
       candidate.progress,
       liveAuthority,
       movedAt,
+      Number(expectedCurrentStopPrice),
     );
   } catch {
-    pendingLiveBreakevenPersistence.set(view.decision.id, {
+    rememberBoundedLiveBreakevenValue(pendingLiveBreakevenPersistence, view.decision.id, {
       positionObservationFingerprint,
       view,
+      originalStopLossPrice: Number(expectedCurrentStopPrice),
       newSl: quantizedCandidate,
       nativeProgress: authority.nativeProgress,
       analyticalProgress: candidate.progress,
