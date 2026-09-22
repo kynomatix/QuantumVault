@@ -1816,6 +1816,50 @@ const schemaMigrationSql = [
        END
        $qv$`,
       `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS price_excursion jsonb`,
+      `ALTER TABLE ai_trader_execution_events
+        ADD COLUMN IF NOT EXISTS authority_fingerprint text,
+        ADD COLUMN IF NOT EXISTS position_fingerprint text,
+        ADD COLUMN IF NOT EXISTS bracket_fingerprint text,
+        ADD COLUMN IF NOT EXISTS attempt_ordinal smallint;
+       ALTER TABLE ai_trader_execution_events
+         DROP CONSTRAINT IF EXISTS ai_trader_execution_events_action_check;
+       ALTER TABLE ai_trader_execution_events
+         DROP CONSTRAINT IF EXISTS ai_trader_execution_action_check;
+       ALTER TABLE ai_trader_execution_events
+         ADD CONSTRAINT ai_trader_execution_events_action_check
+         CHECK (action IN ('entry','close','cancel','protective'));
+       ALTER TABLE ai_trader_execution_events
+         DROP CONSTRAINT IF EXISTS ai_trader_execution_phase_check;
+       ALTER TABLE ai_trader_execution_events
+         ADD CONSTRAINT ai_trader_execution_phase_check CHECK (
+           (event_type = 'attempt_claimed' AND phase = 0) OR
+           (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR
+           (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR
+           (event_type = 'broadcast_result' AND phase = 20) OR
+           (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR
+           (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR
+           (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR
+           (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90)
+         );
+       ALTER TABLE ai_trader_execution_events
+         DROP CONSTRAINT IF EXISTS ai_trader_execution_events_cause_check;
+       ALTER TABLE ai_trader_execution_events
+         DROP CONSTRAINT IF EXISTS ai_trader_execution_cause_check;
+       ALTER TABLE ai_trader_execution_events
+         ADD CONSTRAINT ai_trader_execution_events_cause_check
+         CHECK (cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg'));
+       ALTER TABLE ai_trader_execution_events
+         DROP CONSTRAINT IF EXISTS ai_trader_execution_protective_claim_check;
+       ALTER TABLE ai_trader_execution_events
+         ADD CONSTRAINT ai_trader_execution_protective_claim_check CHECK (
+           (action = 'protective' AND cause = 'protective' AND event_type = 'attempt_claimed' AND phase = 0 AND decision_id IS NOT NULL
+             AND authority_fingerprint ~ '^[0-9A-F]{64}$' AND position_fingerprint ~ '^[0-9A-F]{64}$'
+             AND bracket_fingerprint ~ '^[0-9A-F]{64}$' AND attempt_ordinal BETWEEN 1 AND 5)
+           OR
+           (action <> 'protective'
+             AND authority_fingerprint IS NULL AND position_fingerprint IS NULL
+             AND bracket_fingerprint IS NULL AND attempt_ordinal IS NULL)
+         )`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5139,6 +5183,55 @@ const schemaMigrationMetadata = [
         "kind": "data",
         "identity": "ai-trader-price-excursion-nullable-jsonb",
         "checkSql": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ai_trader_decisions' AND column_name = 'price_excursion' AND data_type = 'jsonb' AND is_nullable = 'YES') AS ok"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "184-add-live-breakeven-protective-journal-claim",
+    "capabilities": ["ai_trader"],
+    "requirements": [
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "authority_fingerprint" },
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "position_fingerprint" },
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "bracket_fingerprint" },
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "attempt_ordinal" },
+      {
+        "kind": "data",
+        "identity": "ai-trader-live-breakeven-claim-column-shape",
+        "checkSql": "SELECT COUNT(*) = 4 AS ok FROM (VALUES ('authority_fingerprint','text'),('position_fingerprint','text'),('bracket_fingerprint','text'),('attempt_ordinal','smallint')) AS expected(column_name,data_type) JOIN information_schema.columns actual ON actual.column_name=expected.column_name AND actual.table_schema='public' AND actual.table_name='ai_trader_execution_events' AND actual.data_type=expected.data_type AND actual.is_nullable='YES'"
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_events_action_check",
+        "definitionIncludes": ["action IN ('entry', 'close', 'cancel', 'protective')"]
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_phase_check",
+        "definitionIncludes": [
+          "event_type = 'attempt_claimed'",
+          "phase = 0"
+        ]
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_events_cause_check",
+        "definitionIncludes": ["cause IN ('decision', 'paper', 'emergency_unwind', 'protective'"]
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_protective_claim_check",
+        "definitionIncludes": [
+          "action = 'protective'",
+          "phase = 0",
+          "action <> 'protective'",
+          "attempt_ordinal >= 1",
+          "attempt_ordinal <= 5"
+        ]
       }
     ],
     "operation": "ddl"

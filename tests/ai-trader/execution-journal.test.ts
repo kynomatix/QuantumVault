@@ -1,4 +1,47 @@
+import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import {
+  appendExecutionEvents,
+  resolveLiveBreakevenClaim,
+} from "../../server/ai-trader/execution-journal";
+
+describe("resolveLiveBreakevenClaim", () => {
+  const FP = "A".repeat(64);
+  const NOW = new Date("2026-09-13T00:00:00.000Z");
+  const row = (ordinal: number, fingerprint = String(ordinal).padStart(64, "B"), observedAt = NOW) => ({
+    authorityFingerprint: fingerprint,
+    attemptOrdinal: ordinal,
+    observedAt,
+  });
+
+  it("allocates the fifth and final attempt", () => {
+    expect(resolveLiveBreakevenClaim([row(1), row(2), row(3), row(4)], FP, NOW)).toEqual({
+      status: "claimed",
+      attemptId: "",
+      ordinal: 5,
+    });
+  });
+
+  it("fails closed after five attempts and on duplicate authority", () => {
+    expect(resolveLiveBreakevenClaim([row(1), row(2), row(3), row(4), row(5)], FP, NOW)).toEqual({ status: "exhausted" });
+    expect(resolveLiveBreakevenClaim([row(1, FP)], FP, NOW)).toEqual({ status: "duplicate" });
+  });
+
+  it("rejects clock regression and malformed claim input", () => {
+    expect(resolveLiveBreakevenClaim(
+      [row(1, "B".repeat(64), new Date(NOW.getTime() + 1))],
+      FP,
+      NOW,
+    )).toEqual({ status: "clock_regression" });
+    expect(resolveLiveBreakevenClaim([], "not-a-fingerprint", NOW)).toEqual({ status: "unavailable" });
+  });
+
+  it("reserves protective claims for the atomic claim API before database access", async () => {
+    await expect(appendExecutionEvents([{
+      action: "protective",
+    } as any])).rejects.toThrow("execution_journal_protective_claim_requires_atomic_api");
+  });
+});
 
 const HAS_DB = !!process.env.DATABASE_URL;
 const RUN = `journal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -38,6 +81,212 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     );
     expect(table.rows[0]?.name).toBe("ai_trader_execution_events");
     expect(trigger.rows.map((row) => row.tgname)).toContain("ai_trader_execution_events_append_only");
+  }, 30_000);
+
+  it("claims five durable live-breakeven ordinals and rejects duplicate, exhausted, and regressed claims", async () => {
+    await dbModule.ensureSchema();
+    const decisionId = `decision-protective-${RUN}`;
+    const positionFingerprint = "1".repeat(64);
+    const bracketFingerprint = "2".repeat(64);
+    const observedAt = new Date("2026-09-13T00:00:00.000Z");
+    const authorities = ["A", "B", "C", "D", "E", "F"].map((value) => value.repeat(64));
+    const claim = (authorityFingerprint: string, at = observedAt) => journal.claimLiveBreakevenAttempt({
+      bot,
+      decisionId,
+      side: "long",
+      authorityFingerprint,
+      positionFingerprint,
+      bracketFingerprint,
+      observedAt: at,
+    });
+
+    const firstClaim = await claim(authorities[0]);
+    expect(firstClaim).toMatchObject({ status: "claimed", ordinal: 1 });
+    await expect(claim(authorities[0])).resolves.toEqual({ status: "duplicate" });
+    for (let index = 1; index < 5; index += 1) {
+      await expect(claim(authorities[index])).resolves.toMatchObject({
+        status: "claimed",
+        ordinal: index + 1,
+      });
+    }
+    await expect(claim(authorities[5])).resolves.toEqual({ status: "exhausted" });
+    await expect(claim("9".repeat(64), new Date(observedAt.getTime() - 1))).resolves.toEqual({
+      status: "clock_regression",
+    });
+
+    const rows = await dbModule.pool.query(
+      "SELECT action, cause, event_type, phase, authority_fingerprint, position_fingerprint, bracket_fingerprint, attempt_ordinal FROM ai_trader_execution_events WHERE decision_id=$1 ORDER BY attempt_ordinal",
+      [decisionId],
+    );
+    expect(rows.rows).toHaveLength(5);
+    expect(rows.rows.map((row) => Number(row.attempt_ordinal))).toEqual([1, 2, 3, 4, 5]);
+    expect(rows.rows.every((row) => row.action === "protective"
+      && row.cause === "protective" && row.event_type === "attempt_claimed"
+      && Number(row.phase) === 0 && row.position_fingerprint === positionFingerprint
+      && row.bracket_fingerprint === bracketFingerprint)).toBe(true);
+
+    const nextEpochClaim = await journal.claimLiveBreakevenAttempt({
+      bot,
+      decisionId,
+      side: "long",
+      authorityFingerprint: "9".repeat(64),
+      positionFingerprint: "3".repeat(64),
+      bracketFingerprint,
+      observedAt,
+    });
+    expect(nextEpochClaim).toMatchObject({ status: "claimed", ordinal: 1 });
+    if (firstClaim.status === "claimed" && nextEpochClaim.status === "claimed") {
+      expect(nextEpochClaim.attemptId).not.toBe(firstClaim.attemptId);
+    }
+  }, 30_000);
+
+  it("orders epoch then attempt locks without deadlocking a concurrent close claim", async () => {
+    await dbModule.ensureSchema();
+    const decisionId = `decision-protective-concurrent-${RUN}`;
+    const positionFingerprint = "4".repeat(64);
+    const bracketFingerprint = "5".repeat(64);
+    const authorityFingerprint = "6".repeat(64);
+    const closeAttemptId = `close:concurrent-${RUN}`;
+    const observedAt = new Date("2026-09-13T00:05:00.000Z");
+    const protective = () => journal.claimLiveBreakevenAttempt({
+      bot,
+      decisionId,
+      side: "long",
+      authorityFingerprint,
+      positionFingerprint,
+      bracketFingerprint,
+      observedAt,
+    });
+    const close = journal.appendExecutionEvents([{
+      ...journal.journalBase(bot, decisionId),
+      attemptId: closeAttemptId,
+      action: "close",
+      cause: "user_requested",
+      eventType: "attempt_claimed",
+      side: "long",
+      observedAt,
+    }]);
+
+    const [first, second] = await Promise.all([protective(), protective(), close]);
+    expect([first.status, second.status].sort()).toEqual(["claimed", "duplicate"]);
+    const rows = await dbModule.pool.query(
+      "SELECT action, attempt_id, attempt_ordinal FROM ai_trader_execution_events WHERE decision_id=$1 ORDER BY action, attempt_id",
+      [decisionId],
+    );
+    expect(rows.rows.filter((row) => row.action === "protective")).toHaveLength(1);
+    expect(rows.rows.filter((row) => row.action === "close")).toHaveLength(1);
+    expect(Number(rows.rows.find((row) => row.action === "protective")?.attempt_ordinal)).toBe(1);
+  }, 30_000);
+
+  it("migrates the exact old action constraint and retains append-only enforcement", async () => {
+    const schemaName = `qv_old_execution_${Date.now()}_${Math.random().toString(36).slice(2)}`
+      .replace(/[^a-z0-9_]/g, "_");
+    const client = await dbModule.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`CREATE SCHEMA "${schemaName}"`);
+      await client.query(`SET LOCAL search_path TO "${schemaName}"`);
+      await client.query(`CREATE TABLE ai_trader_execution_events (
+        action text NOT NULL CHECK (action IN ('entry','close','cancel')),
+        cause text NOT NULL CHECK (cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')),
+        event_type text NOT NULL,
+        phase smallint,
+        decision_id varchar,
+        CONSTRAINT ai_trader_execution_phase_check CHECK (
+          (event_type = 'attempt_claimed' AND phase = 0) OR
+          (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR
+          (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR
+          (event_type = 'broadcast_result' AND phase = 20) OR
+          (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR
+          (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR
+          (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR
+          (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90)
+        )
+      )`);
+      await client.query(`CREATE FUNCTION reject_execution_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          RAISE EXCEPTION 'append-only';
+        END $$`);
+      await client.query(`CREATE TRIGGER ai_trader_execution_events_append_only
+        BEFORE UPDATE OR DELETE ON ai_trader_execution_events
+        FOR EACH ROW EXECUTE FUNCTION reject_execution_mutation()`);
+      const migration = dbModule.SCHEMA_MIGRATION_MANIFEST.find(
+        (entry) => entry.id === "184-add-live-breakeven-protective-journal-claim",
+      );
+      if (!migration) throw new Error("live breakeven migration missing");
+      await client.query(migration.sql);
+
+      await expect(client.query(`INSERT INTO ai_trader_execution_events
+        (action,cause,event_type,phase,decision_id,authority_fingerprint,position_fingerprint,bracket_fingerprint,attempt_ordinal)
+        VALUES ('protective','protective','attempt_claimed',0,'decision-old',$1,$2,$3,1)`,
+      ["A".repeat(64), "B".repeat(64), "C".repeat(64)])).resolves.toMatchObject({ rowCount: 1 });
+      for (const [action, cause] of [["entry", "decision"], ["close", "user_requested"], ["cancel", "pre_close_bracket"]]) {
+        await expect(client.query(
+          "INSERT INTO ai_trader_execution_events (action,cause,event_type,phase,decision_id) VALUES ($1,$2,'attempt_claimed',0,'legacy')",
+          [action, cause],
+        )).resolves.toMatchObject({ rowCount: 1 });
+      }
+      const constraints = await client.query(`SELECT conname, pg_get_constraintdef(oid) AS definition
+        FROM pg_constraint WHERE conrelid='ai_trader_execution_events'::regclass ORDER BY conname`);
+      const byName = new Map(constraints.rows.map((row) => [row.conname, row.definition]));
+      expect(byName.get("ai_trader_execution_events_action_check")).toContain("protective");
+      expect(byName.get("ai_trader_execution_phase_check")).toContain("attempt_claimed");
+      expect(byName.get("ai_trader_execution_protective_claim_check")).toContain("phase = 0");
+      expect(constraints.rows.filter((row) => /action_check$/.test(row.conname))).toHaveLength(1);
+      await client.query("SAVEPOINT update_probe");
+      await expect(client.query("UPDATE ai_trader_execution_events SET decision_id='mutated' WHERE decision_id='legacy'"))
+        .rejects.toThrow(/append-only/i);
+      await client.query("ROLLBACK TO SAVEPOINT update_probe");
+      await client.query("SAVEPOINT delete_probe");
+      await expect(client.query("DELETE FROM ai_trader_execution_events WHERE decision_id='legacy'"))
+        .rejects.toThrow(/append-only/i);
+      await client.query("ROLLBACK TO SAVEPOINT delete_probe");
+      await client.query("ROLLBACK");
+    } finally {
+      try { await client.query("ROLLBACK"); } catch { /* already rolled back */ }
+      client.release();
+    }
+  }, 30_000);
+
+  it("retains the protective close cause while keeping claim-only fields exclusive to the protective action", async () => {
+    await dbModule.ensureSchema();
+    const typedAttemptId = `close-protective-cause-${RUN}`;
+    await expect(journal.appendExecutionEvents([{
+      ...journal.journalBase(bot, null),
+      attemptId: typedAttemptId,
+      action: "close",
+      cause: "protective",
+      eventType: "attempt_claimed",
+    }])).resolves.toBeUndefined();
+
+    const rawAttemptId = `raw-close-protective-cause-${RUN}`;
+    await expect(dbModule.pool.query(
+      `INSERT INTO ai_trader_execution_events
+        (event_identity, attempt_id, bot_id, decision_id, action, cause, event_type, phase,
+         protocol, account_scope, account_ref, market, observed_at)
+       VALUES ($1,$2,$3,NULL,'close','protective','attempt_claimed',0,
+         'pacifica','main',$4,'SOL-PERP',now())`,
+      [`identity-${rawAttemptId}`, rawAttemptId, bot.id, bot.walletAddress],
+    )).resolves.toMatchObject({ rowCount: 1 });
+
+    await expect(journal.appendExecutionEvents([{
+      ...journal.journalBase(bot, null),
+      attemptId: `typed-close-with-claim-field-${RUN}`,
+      action: "close",
+      cause: "protective",
+      eventType: "attempt_claimed",
+      authorityFingerprint: "A".repeat(64),
+    }])).rejects.toThrow("execution_journal_invalid_protective_claim");
+
+    const invalidRawAttemptId = `raw-close-with-claim-field-${RUN}`;
+    await expect(dbModule.pool.query(
+      `INSERT INTO ai_trader_execution_events
+        (event_identity, attempt_id, bot_id, decision_id, action, cause, event_type, phase,
+         protocol, account_scope, account_ref, market, authority_fingerprint, observed_at)
+       VALUES ($1,$2,$3,NULL,'close','protective','attempt_claimed',0,
+         'pacifica','main',$4,'SOL-PERP',$5,now())`,
+      [`identity-${invalidRawAttemptId}`, invalidRawAttemptId, bot.id, bot.walletAddress, "A".repeat(64)],
+    )).rejects.toThrow(/protective_claim_check/i);
   }, 30_000);
 
   it("required entry prebroadcast appends claim and authorization atomically", async () => {
@@ -180,10 +429,18 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
     await journal.appendExecutionEvents([event]);
     await journal.appendExecutionEvents([event]);
     const count = await dbModule.pool.query(
-      "SELECT count(*)::int AS count FROM ai_trader_execution_events WHERE attempt_id=$1",
+      "SELECT count(*) OVER ()::int AS count, event_identity FROM ai_trader_execution_events WHERE attempt_id=$1",
       [attemptId],
     );
     expect(count.rows[0]?.count).toBe(1);
+    const legacyPreimage = [
+      attemptId, bot.id, null, "close", "startup_orphan", "attempt_claimed", 0,
+      "pacifica", "main", bot.walletAddress, "SOL-PERP", null, null, null, null,
+      null, null, null, null, null, null, false, observedAt.toISOString(),
+    ];
+    const legacyIdentity = createHash("sha256")
+      .update(JSON.stringify(legacyPreimage)).digest("hex").toUpperCase();
+    expect(count.rows[0]?.event_identity).toBe(legacyIdentity);
     await expect(journal.appendExecutionEvents([
       { ...event, cause: "unconfirmed_orphan" },
     ])).rejects.toThrow("execution_journal_command_phase_conflict");

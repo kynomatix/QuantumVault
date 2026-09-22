@@ -35,6 +35,10 @@ import type {
   Unsubscribe,
   TransactionBuildResult,
   BuilderAttachmentPolicy,
+  LiveBreakevenNativeSnapshot,
+  LiveBreakevenSnapshotParams,
+  MoveLiveBreakevenStopParams,
+  LiveBreakevenMoveResult,
 } from './protocol-types.js';
 
 export interface CreateSubaccountInput {
@@ -706,6 +710,14 @@ export interface ProtocolAdapter {
 
   placeStopOrder?(params: StopOrderParams): Promise<OrderResult>;
   setTpSl?(params: TpSlParams): Promise<OrderResult>;
+  /** Strict compound position/bracket/trigger-basis snapshot for the optional live ratchet. */
+  getLiveBreakevenAuthoritySnapshot?(
+    params: LiveBreakevenSnapshotParams,
+  ): Promise<LiveBreakevenNativeSnapshot>;
+  /** Dedicated permit-bearing live ratchet; generic setTpSl is invalid at this boundary. */
+  moveLiveBreakevenStop?(
+    params: MoveLiveBreakevenStopParams,
+  ): Promise<LiveBreakevenMoveResult>;
   cancelStopOrder?(params: CancelStopOrderParams): Promise<CancelResult>;
   cancelTpSlOrders?(params: { agentPublicKey: string; agentSecretKey: Uint8Array; mainWalletAddress: string; internalSymbol: string; subaccountId?: string }): Promise<CancelResult>;
 

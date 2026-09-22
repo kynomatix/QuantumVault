@@ -15,8 +15,13 @@ import {
   isTighterStop,
   evaluatePaperBracketWithMove,
   countsAsSlLoss,
+  qualifyLiveBreakevenAuthority,
 } from "../../server/ai-trader/breakeven";
 import { PAPER_SLIPPAGE_PER_LEG, paperExitPrice, paperRealizedPnl } from "../../server/ai-trader/paper-math";
+import {
+  liveBreakevenFingerprint,
+  type LiveBreakevenNativeSnapshot,
+} from "../../server/protocol/protocol-types";
 
 function candle(time: number, open: number, high: number, low: number, close: number) {
   return { time, open, high, low, close, volume: 100 };
@@ -60,6 +65,290 @@ describe("parseBreakevenProtect", () => {
     expect(parsed!.movedStopLossPrice).toBe(150);
     expect(new Date(parsed!.movedAt).getTime()).toBe(T0);
     expect(parsed!.progressAtFire).toBe(0.9);
+  });
+
+  it("preserves valid live authority audit metadata and drops malformed optional metadata", () => {
+    const fingerprint = "A".repeat(64);
+    const valid = parseBreakevenProtect({
+      originalStopLossPrice: 95,
+      movedStopLossPrice: 100.15,
+      movedAt: "2026-07-08T11:45:00.000Z",
+      progressAtFire: 0.75,
+      analyticalProgressAtFire: 0.8,
+      liveAuthority: {
+        protocol: "pacifica",
+        basis: "last_trade_price",
+        sourceFingerprint: fingerprint,
+        positionEpochFingerprint: fingerprint,
+        positionStateFingerprint: fingerprint,
+        bracketFingerprint: fingerprint,
+        sourceTimeMs: T0,
+        readCompletedAtMs: T0 + 1,
+        attemptId: "protective:decision-1:3",
+        attemptOrdinal: 3,
+        requestedTakeProfitPrice: 110,
+        requestedStopLossPrice: 100.15,
+        appliedTakeProfitPrice: 110,
+        appliedStopLossPrice: 100.15,
+        postCallVerified: true,
+        postVerificationSourceFingerprint: fingerprint,
+        postVerificationBracketFingerprint: fingerprint,
+        postVerificationReadCompletedAtMs: T0 + 2,
+        restorationOutcome: "not_needed",
+      },
+    }, 100.15, T0);
+    expect(valid?.analyticalProgressAtFire).toBe(0.8);
+    expect(valid?.liveAuthority?.attemptOrdinal).toBe(3);
+
+    const malformed = parseBreakevenProtect({
+      originalStopLossPrice: 95,
+      movedStopLossPrice: 100.15,
+      movedAt: "2026-07-08T11:45:00.000Z",
+      progressAtFire: 0.75,
+      analyticalProgressAtFire: Number.NaN,
+      liveAuthority: { protocol: "pacifica", attemptOrdinal: 99 },
+    }, 100.15, T0);
+    expect(malformed).not.toHaveProperty("analyticalProgressAtFire");
+    expect(malformed).not.toHaveProperty("liveAuthority");
+  });
+});
+
+function sealLiveSnapshot(snapshot: LiveBreakevenNativeSnapshot): LiveBreakevenNativeSnapshot {
+  const positionBody = {
+    protocol: snapshot.protocol,
+    account: snapshot.account,
+    subaccountId: snapshot.subaccountId,
+    internalSymbol: snapshot.internalSymbol,
+    protocolSymbol: snapshot.protocolSymbol,
+    position: snapshot.position,
+  };
+  const bracketBody = {
+    protocol: snapshot.protocol,
+    account: snapshot.account,
+    subaccountId: snapshot.subaccountId,
+    internalSymbol: snapshot.internalSymbol,
+    protocolSymbol: snapshot.protocolSymbol,
+    triggerBasisStatus: snapshot.triggerBasisStatus,
+    protectiveOrders: snapshot.protectiveOrders,
+  };
+  const stateBody = {
+    ...positionBody,
+    positionLastOrderId: snapshot.positionLastOrderId,
+    ordersLastOrderId: snapshot.ordersLastOrderId,
+    triggerBasisStatus: snapshot.triggerBasisStatus,
+    protectiveOrders: snapshot.protectiveOrders,
+  };
+  const sourceBody = {
+    ...stateBody,
+    readStartedAtMs: snapshot.readStartedAtMs,
+    readCompletedAtMs: snapshot.readCompletedAtMs,
+    recentTrades: snapshot.recentTrades,
+  };
+  snapshot.positionFingerprint = liveBreakevenFingerprint(positionBody);
+  snapshot.bracketFingerprint = liveBreakevenFingerprint(bracketBody);
+  snapshot.stateFingerprint = liveBreakevenFingerprint(stateBody);
+  snapshot.sourceFingerprint = liveBreakevenFingerprint(sourceBody);
+  return snapshot;
+}
+
+function validLiveSnapshot(nowMs = T0): LiveBreakevenNativeSnapshot {
+  return sealLiveSnapshot({
+    schemaVersion: 1,
+    protocol: "pacifica",
+    account: "pacifica-agent-1",
+    subaccountId: null,
+    internalSymbol: "SOL-PERP",
+    protocolSymbol: "SOL",
+    readStartedAtMs: nowMs - 100,
+    readCompletedAtMs: nowMs,
+    position: {
+      sourceRecordId: "C".repeat(64),
+      side: "long",
+      baseSize: "2.00000000",
+      entryPrice: "100.00000000",
+    },
+    positionLastOrderId: "41",
+    ordersLastOrderId: "42",
+    triggerBasisStatus: "last_trade_price",
+    protectiveOrders: [
+      {
+        orderId: "41",
+        orderAccount: "pacifica-agent-1",
+        orderType: "stop_loss",
+        side: "sell",
+        triggerBasis: "last_trade_price",
+        triggerPrice: "95.00000000",
+        initialSize: "2.00000000",
+        remainingSize: "2.00000000",
+        reduceOnly: true,
+      },
+      {
+        orderId: "42",
+        orderAccount: "pacifica-agent-1",
+        orderType: "take_profit",
+        side: "sell",
+        triggerBasis: "last_trade_price",
+        triggerPrice: "110.00000000",
+        initialSize: "2.00000000",
+        remainingSize: "2.00000000",
+        reduceOnly: true,
+      },
+    ],
+    recentTrades: {
+      lastOrderId: "4001",
+      rows: [{
+        symbol: "SOL",
+        price: "107.50000000",
+        createdAtMs: nowMs,
+        sourceRecordFingerprint: "D".repeat(64),
+      }],
+    },
+    positionFingerprint: "",
+    bracketFingerprint: "",
+    stateFingerprint: "",
+    sourceFingerprint: "",
+  });
+}
+
+function qualifySnapshot(
+  snapshot: LiveBreakevenNativeSnapshot,
+  nowMs = T0,
+  candidateStopPrice = "100.15000000",
+) {
+  return qualifyLiveBreakevenAuthority({
+    decisionId: "decision-1",
+    botId: "bot-1",
+    side: "long",
+    candidateStopPrice,
+    expectedEntryPrice: "100",
+    expectedTakeProfitPrice: "110",
+    expectedCurrentStopPrice: "95",
+    analyticalProgress: 0.75,
+    analyticalWindowFingerprint: "B".repeat(64),
+    expectedAccount: "pacifica-agent-1",
+    expectedInternalSymbol: "SOL-PERP",
+    snapshot,
+    nowMs,
+  });
+}
+
+describe("qualifyLiveBreakevenAuthority", () => {
+  it("authorizes an exact Pacifica LTP snapshot at both inclusive 75% thresholds", () => {
+    const result = qualifySnapshot(validLiveSnapshot());
+    expect(result.authorized).toBe(true);
+    if (!result.authorized) return;
+    expect(result.nativeProgress).toBe(0.75);
+    expect(result.permit.binding.triggerBasis).toBe("last_trade_price");
+    expect(result.permit.binding.positionEpochFingerprint).toBe("C".repeat(64));
+    expect(result.permit.binding.expiresAtMs).toBe(T0 + 5_000);
+    expect(result.permit.fingerprint).toBe(liveBreakevenFingerprint(result.permit.binding));
+  });
+
+  it("accepts an exactly five-second-old snapshot and rejects older or future snapshots", () => {
+    expect(qualifySnapshot(validLiveSnapshot(T0 - 5_000), T0).authorized).toBe(true);
+    expect(qualifySnapshot(validLiveSnapshot(T0 - 5_001), T0)).toEqual({ authorized: false, reason: "stale_snapshot" });
+    expect(qualifySnapshot(validLiveSnapshot(T0 + 1), T0)).toEqual({ authorized: false, reason: "future_snapshot" });
+    const futureAtReceipt = validLiveSnapshot();
+    futureAtReceipt.recentTrades.rows[0].createdAtMs = T0 + 1;
+    sealLiveSnapshot(futureAtReceipt);
+    expect(qualifySnapshot(futureAtReceipt, T0 + 100)).toEqual({ authorized: false, reason: "future_snapshot" });
+  });
+
+  it("rejects equal-time conflicting trade prices", () => {
+    const snapshot = validLiveSnapshot();
+    snapshot.recentTrades.rows.push({
+      symbol: "SOL",
+      price: "107.50000001",
+      createdAtMs: T0,
+      sourceRecordFingerprint: "E".repeat(64),
+    });
+    sealLiveSnapshot(snapshot);
+    expect(qualifySnapshot(snapshot)).toEqual({ authorized: false, reason: "ambiguous_trade" });
+  });
+
+  it("rejects unknown snapshot fields even when the known-field fingerprints are valid", () => {
+    const snapshot = validLiveSnapshot() as LiveBreakevenNativeSnapshot & { unreviewed?: boolean };
+    snapshot.unreviewed = true;
+    expect(qualifySnapshot(snapshot)).toEqual({ authorized: false, reason: "malformed_snapshot" });
+  });
+
+  it("rejects number-coerced venue identities even when their fingerprints are recomputed", () => {
+    const snapshot = validLiveSnapshot();
+    (snapshot as unknown as { ordersLastOrderId: number }).ordersLastOrderId = 42;
+    sealLiveSnapshot(snapshot);
+    expect(qualifySnapshot(snapshot)).toEqual({ authorized: false, reason: "malformed_snapshot" });
+  });
+
+  it("keeps the bracket fingerprint stable across unrelated exchange nonce changes", () => {
+    const snapshot = validLiveSnapshot();
+    const bracket = snapshot.bracketFingerprint;
+    const state = snapshot.stateFingerprint;
+    snapshot.positionLastOrderId = "99";
+    snapshot.ordersLastOrderId = "100";
+    sealLiveSnapshot(snapshot);
+    expect(snapshot.bracketFingerprint).toBe(bracket);
+    expect(snapshot.stateFingerprint).not.toBe(state);
+    expect(qualifySnapshot(snapshot).authorized).toBe(true);
+  });
+
+  it("rejects mixed trigger bases and a protective leg smaller than the position", () => {
+    const mixedBasis = validLiveSnapshot();
+    mixedBasis.protectiveOrders[0].triggerBasis = "target_internal_oracle";
+    sealLiveSnapshot(mixedBasis);
+    expect(qualifySnapshot(mixedBasis)).toEqual({ authorized: false, reason: "trigger_basis_mismatch" });
+
+    const insufficient = validLiveSnapshot();
+    insufficient.protectiveOrders[1].remainingSize = "1.99999999";
+    sealLiveSnapshot(insufficient);
+    expect(qualifySnapshot(insufficient)).toEqual({ authorized: false, reason: "protective_pair_not_proven" });
+  });
+
+  it("rejects native threshold misses, price retrace, and a forged state fingerprint", () => {
+    const belowThreshold = validLiveSnapshot();
+    belowThreshold.recentTrades.rows[0].price = "107.49999999";
+    sealLiveSnapshot(belowThreshold);
+    expect(qualifySnapshot(belowThreshold)).toEqual({ authorized: false, reason: "native_threshold_not_met" });
+
+    const retraced = validLiveSnapshot();
+    expect(qualifySnapshot(retraced, T0, "107.50000001")).toEqual({ authorized: false, reason: "price_retraced" });
+
+    const forged = validLiveSnapshot();
+    forged.stateFingerprint = "C".repeat(64);
+    expect(qualifySnapshot(forged)).toEqual({ authorized: false, reason: "malformed_snapshot" });
+
+    const malformedEpoch = validLiveSnapshot();
+    malformedEpoch.position.sourceRecordId = "position-row-1";
+    sealLiveSnapshot(malformedEpoch);
+    expect(qualifySnapshot(malformedEpoch)).toEqual({ authorized: false, reason: "malformed_snapshot" });
+  });
+
+  it("rejects a candidate beyond the take-profit boundary", () => {
+    const snapshot = validLiveSnapshot();
+    snapshot.recentTrades.rows[0].price = "112.00000000";
+    sealLiveSnapshot(snapshot);
+    expect(qualifySnapshot(snapshot, T0, "111.00000000")).toEqual({
+      authorized: false,
+      reason: "candidate_outside_trade_range",
+    });
+  });
+
+  it("rejects local decision prices that differ from the native position or bracket", () => {
+    const snapshot = validLiveSnapshot();
+    expect(qualifyLiveBreakevenAuthority({
+      decisionId: "decision-1",
+      botId: "bot-1",
+      side: "long",
+      candidateStopPrice: "100.15000000",
+      expectedEntryPrice: "100",
+      expectedTakeProfitPrice: "111",
+      expectedCurrentStopPrice: "95",
+      analyticalProgress: 0.75,
+      analyticalWindowFingerprint: "B".repeat(64),
+      expectedAccount: "pacifica-agent-1",
+      expectedInternalSymbol: "SOL-PERP",
+      snapshot,
+      nowMs: T0,
+    })).toEqual({ authorized: false, reason: "position_or_bracket_mismatch" });
   });
 });
 

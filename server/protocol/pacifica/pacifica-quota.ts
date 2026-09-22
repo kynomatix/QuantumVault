@@ -31,6 +31,7 @@ export type RequestPriority = 'critical' | 'normal' | 'background';
 const ENDPOINT_COSTS: Record<string, number> = {
   '/account': 3,
   '/positions': 3,
+  '/trades': 3,
   '/trades/history': 3,
   '/account/equity_history': 3,
   '/account/funding/history': 3,
@@ -92,6 +93,21 @@ class PacificaQuota {
     }
 
     return used + cost <= cap;
+  }
+
+  /**
+   * Reserve a strict read immediately. Recording before dispatch prevents
+   * concurrent readers from overbooking the rolling credit budget. Callers
+   * choose the priority; optional work should preserve critical headroom.
+   * A failed transport stays charged conservatively.
+   */
+  tryClaimImmediate(path: string, priority: RequestPriority): boolean {
+    if (!this.canAfford(path, priority)) {
+      this.noteRejection();
+      return false;
+    }
+    this.record(path);
+    return true;
   }
 
   /**

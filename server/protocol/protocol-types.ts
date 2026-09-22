@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 export type RiskTier = 'recommended' | 'caution' | 'high_risk';
 
 export interface ProtocolMarket {
@@ -168,6 +170,7 @@ export interface StopOrderParams {
   side: 'long' | 'short';
   sizeBase: number;
   triggerPrice: number;
+  reduceOnly?: boolean;
   clientOrderId?: string;
   subaccountId?: string;
   builderCode?: string;
@@ -182,6 +185,147 @@ export interface TpSlParams {
   stopLossPrice?: number;
   subaccountId?: string;
   builderAttachment?: BuilderAttachmentPolicy;
+}
+
+export type LiveBreakevenTriggerBasis =
+  | 'last_trade_price'
+  | 'target_internal_oracle'
+  | 'absent'
+  | 'mixed'
+  | 'unsupported'
+  | 'malformed';
+
+export interface LiveBreakevenRecentTradeRow {
+  symbol: string;
+  price: string;
+  createdAtMs: number;
+  sourceRecordFingerprint: string;
+}
+
+export interface LiveBreakevenProtectiveOrderRow {
+  orderId: string;
+  orderAccount: string;
+  orderType: 'stop_loss' | 'take_profit';
+  side: 'buy' | 'sell';
+  triggerBasis: LiveBreakevenTriggerBasis;
+  triggerPrice: string;
+  initialSize: string;
+  remainingSize: string;
+  reduceOnly: true;
+}
+
+export interface LiveBreakevenNativeSnapshot {
+  schemaVersion: 1;
+  protocol: 'pacifica' | 'flash';
+  account: string;
+  subaccountId: string | null;
+  internalSymbol: string;
+  protocolSymbol: string;
+  readStartedAtMs: number;
+  readCompletedAtMs: number;
+  position: {
+    sourceRecordId: string;
+    side: 'long' | 'short';
+    baseSize: string;
+    entryPrice: string;
+  };
+  positionLastOrderId: string;
+  ordersLastOrderId: string;
+  triggerBasisStatus: LiveBreakevenTriggerBasis;
+  protectiveOrders: LiveBreakevenProtectiveOrderRow[];
+  recentTrades: {
+    lastOrderId: string;
+    rows: LiveBreakevenRecentTradeRow[];
+  };
+  positionFingerprint: string;
+  bracketFingerprint: string;
+  stateFingerprint: string;
+  sourceFingerprint: string;
+}
+
+export interface LiveBreakevenAuthorityPermit {
+  schemaVersion: 1;
+  fingerprint: string;
+  binding: {
+    policyVersion: 'owner-accepted-v1.1';
+    decisionId: string;
+    botId: string;
+    protocol: 'pacifica';
+    account: string;
+    subaccountId: null;
+    internalSymbol: string;
+    protocolSymbol: string;
+    side: 'long' | 'short';
+    entryPrice: string;
+    takeProfitPrice: string;
+    currentStopPrice: string;
+    candidateStopPrice: string;
+    positionSize: string;
+    analyticalProgress: string;
+    nativeProgress: string;
+    analyticalWindowFingerprint: string;
+    nativeSourceFingerprint: string;
+    positionEpochFingerprint: string;
+    positionStateFingerprint: string;
+    bracketFingerprint: string;
+    positionLastOrderId: string;
+    ordersLastOrderId: string;
+    tradesLastOrderId: string;
+    sourceTimeMs: number;
+    readStartedAtMs: number;
+    readCompletedAtMs: number;
+    issuedAtMs: number;
+    expiresAtMs: number;
+    triggerBasis: 'last_trade_price';
+  };
+}
+
+export type LiveBreakevenAttemptClaimResult =
+  | { status: 'claimed'; attemptId: string; ordinal: number }
+  | { status: 'duplicate' | 'exhausted' | 'clock_regression' | 'unavailable' };
+
+export interface LiveBreakevenSnapshotParams {
+  agentPublicKey: string;
+  internalSymbol: string;
+  deadlineAtMs: number;
+}
+
+export interface MoveLiveBreakevenStopParams {
+  agentPublicKey: string;
+  agentSecretKey: Uint8Array;
+  mainWalletAddress: string;
+  internalSymbol: string;
+  subaccountId?: string;
+  permit: LiveBreakevenAuthorityPermit;
+  claimAttempt: () => Promise<LiveBreakevenAttemptClaimResult>;
+  builderAttachment?: BuilderAttachmentPolicy;
+}
+
+export interface LiveBreakevenMoveResult extends OrderResult {
+  attemptId?: string;
+  attemptOrdinal?: number;
+  authorityFingerprint?: string;
+  postCallVerified?: boolean;
+  postVerificationSourceFingerprint?: string;
+  postVerificationBracketFingerprint?: string;
+  postVerificationReadCompletedAtMs?: number;
+  restorationOutcome?: 'not_needed' | 'restored_verified' | 'restoration_unverified';
+  requiresCloseAndPause?: boolean;
+}
+
+function sortForLiveBreakevenFingerprint(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortForLiveBreakevenFingerprint);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, child]) => [key, sortForLiveBreakevenFingerprint(child)]));
+}
+
+export function liveBreakevenFingerprint(value: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(sortForLiveBreakevenFingerprint(value)))
+    .digest('hex')
+    .toUpperCase();
 }
 
 export interface CancelStopOrderParams {

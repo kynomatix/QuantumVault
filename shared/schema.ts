@@ -2279,14 +2279,18 @@ export const aiTraderExecutionEvents = pgTable("ai_trader_execution_events", {
   realizedPnl: decimal("realized_pnl", { precision: 30, scale: 12 }),
   failureCode: text("failure_code"),
   recordedAfterBroadcast: boolean("recorded_after_broadcast").notNull().default(false),
+  authorityFingerprint: text("authority_fingerprint"),
+  positionFingerprint: text("position_fingerprint"),
+  bracketFingerprint: text("bracket_fingerprint"),
+  attemptOrdinal: smallint("attempt_ordinal"),
   observedAt: timestamp("observed_at").notNull(),
   recordedAt: timestamp("recorded_at").notNull().defaultNow(),
 }, (table) => [
   index("idx_ai_trader_execution_attempt").on(table.attemptId, table.phase, table.observedAt, table.id),
   index("idx_ai_trader_execution_bot").on(table.botId, table.recordedAt.desc(), table.id.desc()),
   index("idx_ai_trader_execution_decision").on(table.decisionId, table.recordedAt, table.id),
-  check("ai_trader_execution_action_check", sql`${table.action} IN ('entry','close','cancel')`),
-  check("ai_trader_execution_cause_check", sql`${table.cause} IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')`),
+  check("ai_trader_execution_events_action_check", sql`${table.action} IN ('entry','close','cancel','protective')`),
+  check("ai_trader_execution_events_cause_check", sql`${table.cause} IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')`),
   check("ai_trader_execution_account_scope_check", sql`${table.accountScope} IN ('main','bot_subaccount','unknown')`),
   check("ai_trader_execution_side_check", sql`${table.side} IS NULL OR ${table.side} IN ('long','short')`),
   check("ai_trader_execution_status_check", sql`${table.venueStatus} IS NULL OR ${table.venueStatus} IN ('submitted','acknowledged','filled','partial_fill','canceled','expired','rejected','unknown')`),
@@ -2302,6 +2306,19 @@ export const aiTraderExecutionEvents = pgTable("ai_trader_execution_events", {
     (${table.eventType} = 'entry_terminal_unwound' AND ${table.action} = 'entry' AND ${table.phase} = 90) OR
     (${table.eventType} IN ('close_terminal_confirmed','close_terminal_failed') AND ${table.action} = 'close' AND ${table.phase} = 90) OR
     (${table.eventType} IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND ${table.action} = 'cancel' AND ${table.phase} = 90)
+  )`),
+  check("ai_trader_execution_protective_claim_check", sql`(
+    (${table.action} = 'protective' AND ${table.cause} = 'protective'
+      AND ${table.eventType} = 'attempt_claimed' AND ${table.phase} = 0 AND ${table.decisionId} IS NOT NULL
+      AND ${table.authorityFingerprint} ~ '^[0-9A-F]{64}$'
+      AND ${table.positionFingerprint} ~ '^[0-9A-F]{64}$'
+      AND ${table.bracketFingerprint} ~ '^[0-9A-F]{64}$'
+      AND ${table.attemptOrdinal} BETWEEN 1 AND 5)
+    OR
+    (${table.action} <> 'protective'
+      AND ${table.authorityFingerprint} IS NULL
+      AND ${table.positionFingerprint} IS NULL AND ${table.bracketFingerprint} IS NULL
+      AND ${table.attemptOrdinal} IS NULL)
   )`),
   check("ai_trader_execution_size_check", sql`${table.sizeBase} IS NULL OR (${table.sizeBase} >= 0 AND ${table.sizeBase} <> 'NaN'::numeric)`),
   check("ai_trader_execution_fee_check", sql`${table.fee} IS NULL OR (${table.fee} >= 0 AND ${table.fee} <> 'NaN'::numeric)`),

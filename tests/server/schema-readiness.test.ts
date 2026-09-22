@@ -140,7 +140,7 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 184 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 185 SQL entries exactly once, in order, with explicit metadata", () => {
     const sourcePath = new URL("../../server/db.ts", import.meta.url);
     const sourceText = readFileSync(sourcePath, "utf8");
     const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
@@ -173,13 +173,13 @@ describe("schema readiness", () => {
       requirements: unknown[];
       operation: "ddl" | "backfill";
     }>;
-    expect(sqlEntries).toHaveLength(184);
-    expect(metadata).toHaveLength(184);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(184);
+    expect(sqlEntries).toHaveLength(185);
+    expect(metadata).toHaveLength(185);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(185);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // Preserve the entire pre-existing SQL byte identity; independently pin the appended entry.
-    const sqlDigest = createHash("sha256").update(sqlEntries.slice(0, 183).join("\u0000"), "utf8").digest("hex").toUpperCase();
-    expect(sqlDigest).toBe("B1C4E6ECD900DD859CF18D912B9A2C07C4CD4AE03997BB26B802C26A8BAB40D1");
+    const sqlDigest = createHash("sha256").update(sqlEntries.slice(0, 184).join("\u0000"), "utf8").digest("hex").toUpperCase();
+    expect(sqlDigest).toBe("DE274BF660321202EC9433C82C5914ECAD67FBDEE51EEAEEFC2F330B3269F7E9");
 
     expect(sqlEntries[11]).toContain("total_volume numeric(30,6)");
     expect(sqlEntries[11]).toContain("total_trades integer");
@@ -388,6 +388,31 @@ describe("schema readiness", () => {
       ],
       operation: "ddl",
     });
+    const liveBreakevenJournalSql = sqlEntries[184];
+    expect(metadata[184]).toMatchObject({
+      id: "184-add-live-breakeven-protective-journal-claim",
+      capabilities: ["ai_trader"],
+      operation: "ddl",
+    });
+    expect(metadata[184].requirements).toHaveLength(9);
+    expect(metadata[184].requirements).toContainEqual({
+      kind: "data",
+      identity: "ai-trader-live-breakeven-claim-column-shape",
+      checkSql: expect.stringContaining("('attempt_ordinal','smallint')"),
+    });
+    expect(liveBreakevenJournalSql).toContain("ADD COLUMN IF NOT EXISTS authority_fingerprint text");
+    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_events_action_check");
+    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_action_check");
+    expect(liveBreakevenJournalSql).toContain("CHECK (action IN ('entry','close','cancel','protective'))");
+    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_phase_check");
+    expect(liveBreakevenJournalSql).toContain("ADD CONSTRAINT ai_trader_execution_phase_check CHECK");
+    expect(liveBreakevenJournalSql).toContain("event_type = 'attempt_claimed' AND phase = 0");
+    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_events_cause_check");
+    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_cause_check");
+    expect(liveBreakevenJournalSql).toContain("CHECK (cause IN ('decision','paper','emergency_unwind','protective'");
+    expect(liveBreakevenJournalSql).toContain("event_type = 'attempt_claimed' AND phase = 0 AND decision_id IS NOT NULL");
+    expect(liveBreakevenJournalSql).toContain("attempt_ordinal BETWEEN 1 AND 5");
+    expect(liveBreakevenJournalSql).toContain("action <> 'protective'\n             AND authority_fingerprint IS NULL");
   });
 
   it("matches exact production CHECK renderings without consuming SQL after casts", async () => {

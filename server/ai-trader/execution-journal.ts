@@ -6,8 +6,9 @@ import type { OrderResult, OrderStatus } from "../protocol/protocol-types";
 
 // Explicit subsystem namespace; distinct from every storage.ts namespace.
 export const AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE = 927413;
+export const AI_TRADER_EXECUTION_JOURNAL_EPOCH_LOCK_NAMESPACE = 927414;
 
-export type JournalAction = "entry" | "close" | "cancel";
+export type JournalAction = "entry" | "close" | "cancel" | "protective";
 export type JournalCause =
   | "decision" | "paper" | "emergency_unwind" | "protective" | "user_requested"
   | "venue_detected" | "unconfirmed_orphan" | "startup_orphan"
@@ -41,7 +42,7 @@ const PHASE_BY_EVENT: Readonly<Record<JournalEventType, 0 | 10 | 20 | 90 | null>
   cancel_terminal_failed: 90,
 });
 
-const ACTIONS = new Set<JournalAction>(["entry", "close", "cancel"]);
+const ACTIONS = new Set<JournalAction>(["entry", "close", "cancel", "protective"]);
 const PROTOCOLS = new Set(["pacifica", "flash", "drift"]);
 const CAUSES = new Set<JournalCause>([
   "decision", "paper", "emergency_unwind", "protective", "user_requested",
@@ -58,6 +59,7 @@ const FAILURE_CODES = new Set<JournalFailureCode>([
 const INTERNAL_ID = /^[A-Za-z0-9:_-]{1,200}$/;
 const MARKET = /^[A-Za-z0-9:_-]{1,80}$/;
 const PRINTABLE_ID = /^[\x21-\x7E]{1,180}$/;
+const FINGERPRINT = /^[0-9A-F]{64}$/;
 
 export interface JournalEventInput {
   attemptId: string;
@@ -81,13 +83,18 @@ export interface JournalEventInput {
   realizedPnl?: number | null;
   failureCode?: JournalFailureCode | null;
   recordedAfterBroadcast?: boolean;
+  authorityFingerprint?: string | null;
+  positionFingerprint?: string | null;
+  bracketFingerprint?: string | null;
+  attemptOrdinal?: number | null;
   observedAt?: Date;
 }
 
 type CanonicalEvent = Omit<JournalEventInput,
   "observedAt" | "accountRef" | "side" | "clientOrderId" | "venueOrderId" |
   "transactionSignature" | "venueStatus" | "price" | "sizeBase" | "fee" |
-  "realizedPnl" | "failureCode" | "recordedAfterBroadcast"
+  "realizedPnl" | "failureCode" | "recordedAfterBroadcast" | "authorityFingerprint" |
+  "positionFingerprint" | "bracketFingerprint" | "attemptOrdinal"
 > & {
   phase: 0 | 10 | 20 | 90 | null;
   accountRef: string | null;
@@ -102,6 +109,10 @@ type CanonicalEvent = Omit<JournalEventInput,
   realizedPnl: string | null;
   failureCode: JournalFailureCode | null;
   recordedAfterBroadcast: boolean;
+  authorityFingerprint: string | null;
+  positionFingerprint: string | null;
+  bracketFingerprint: string | null;
+  attemptOrdinal: number | null;
 };
 
 function bounded(value: string | null | undefined, pattern: RegExp, name: string): string | null {
@@ -151,6 +162,17 @@ function canonicalize(input: JournalEventInput): CanonicalEvent {
     throw new Error("execution_journal_invalid_failure_code");
   }
   const phase = PHASE_BY_EVENT[input.eventType];
+  const protectiveFields = [input.authorityFingerprint, input.positionFingerprint, input.bracketFingerprint];
+  const protectiveClaim = input.action === "protective" && input.cause === "protective"
+    && input.eventType === "attempt_claimed" && input.decisionId !== null
+    && protectiveFields.every((field) => typeof field === "string" && FINGERPRINT.test(field))
+    && Number.isSafeInteger(input.attemptOrdinal) && (input.attemptOrdinal as number) >= 1
+    && (input.attemptOrdinal as number) <= 5;
+  if (input.action === "protective" ? !protectiveClaim
+    : protectiveFields.some((field) => field !== null && field !== undefined)
+      || (input.attemptOrdinal !== null && input.attemptOrdinal !== undefined)) {
+    throw new Error("execution_journal_invalid_protective_claim");
+  }
   if (input.eventType === "prebroadcast_authorized" && input.action !== "entry") throw new Error("execution_journal_invalid_event_action");
   if (input.eventType === "broadcast_attempted" && input.action === "entry") throw new Error("execution_journal_invalid_event_action");
   if (input.eventType.startsWith("entry_terminal_") && input.action !== "entry") throw new Error("execution_journal_invalid_event_action");
@@ -180,16 +202,27 @@ function canonicalize(input: JournalEventInput): CanonicalEvent {
     realizedPnl: finiteDecimal(input.realizedPnl, "realized_pnl"),
     failureCode: input.failureCode ?? null,
     recordedAfterBroadcast: input.recordedAfterBroadcast === true,
+    authorityFingerprint: input.authorityFingerprint ?? null,
+    positionFingerprint: input.positionFingerprint ?? null,
+    bracketFingerprint: input.bracketFingerprint ?? null,
+    attemptOrdinal: input.attemptOrdinal ?? null,
   };
 }
 
 function eventIdentity(event: CanonicalEvent, observedAt: Date): string {
-  const ordered = [
+  const ordered: unknown[] = [
     event.attemptId, event.botId, event.decisionId, event.action, event.cause, event.eventType, event.phase,
     event.protocol, event.accountScope, event.accountRef, event.market, event.side, event.clientOrderId,
     event.venueOrderId, event.transactionSignature, event.venueStatus, event.price, event.sizeBase,
-    event.fee, event.realizedPnl, event.failureCode, event.recordedAfterBroadcast, observedAt.toISOString(),
+    event.fee, event.realizedPnl, event.failureCode, event.recordedAfterBroadcast,
   ];
+  // Preserve the deployed identity preimage exactly for existing actions so
+  // retries across this schema upgrade continue to deduplicate old records.
+  if (event.action === "protective") {
+    ordered.push(event.authorityFingerprint, event.positionFingerprint,
+      event.bracketFingerprint, event.attemptOrdinal);
+  }
+  ordered.push(observedAt.toISOString());
   return createHash("sha256").update(JSON.stringify(ordered)).digest("hex").toUpperCase();
 }
 
@@ -389,6 +422,9 @@ export async function prepareExecutionJournalEventsInTransaction(
   if (inputs.length === 0) {
     return { status: "replayed", insert: async () => undefined };
   }
+  if (inputs.some((input) => input.action === "protective")) {
+    throw new Error("execution_journal_protective_claim_requires_atomic_api");
+  }
   const attemptId = inputs[0].attemptId;
   if (inputs.some((input) => input.attemptId !== attemptId)) throw new Error("execution_journal_mixed_attempt_batch");
   const values = inputs.map((input) => rowValues(canonicalize(input), input.observedAt ?? new Date()));
@@ -524,8 +560,92 @@ export async function prepareExecutionJournalEventsInTransaction(
   };
 }
 
+export type LiveBreakevenJournalClaim =
+  | { status: "claimed"; attemptId: string; ordinal: number }
+  | { status: "duplicate" | "exhausted" | "clock_regression" | "unavailable" };
+
+export function resolveLiveBreakevenClaim(existing: readonly {
+  authorityFingerprint: string | null;
+  attemptOrdinal: number | null;
+  observedAt: Date;
+}[], authorityFingerprint: string, now: Date): LiveBreakevenJournalClaim {
+  if (!FINGERPRINT.test(authorityFingerprint) || !(now instanceof Date)
+      || !Number.isFinite(now.getTime())) return { status: "unavailable" };
+  if (existing.some((row) => row.authorityFingerprint === authorityFingerprint)) {
+    return { status: "duplicate" };
+  }
+  if (existing.some((row) => !(row.observedAt instanceof Date)
+      || !Number.isFinite(row.observedAt.getTime()) || row.observedAt.getTime() > now.getTime())) {
+    return { status: "clock_regression" };
+  }
+  const ordinal = existing.reduce((max, row) =>
+    Number.isSafeInteger(row.attemptOrdinal) ? Math.max(max, row.attemptOrdinal as number) : max, 0) + 1;
+  return ordinal > 5 ? { status: "exhausted" } : { status: "claimed", attemptId: "", ordinal };
+}
+
+export async function claimLiveBreakevenAttempt(args: {
+  bot: Pick<AiTraderBot, "id" | "protocol" | "protocolSubaccountId" | "walletAddress" | "market">;
+  decisionId: string;
+  side: "long" | "short";
+  authorityFingerprint: string;
+  positionFingerprint: string;
+  bracketFingerprint: string;
+  observedAt?: Date;
+}): Promise<LiveBreakevenJournalClaim> {
+  if (!INTERNAL_ID.test(args.decisionId) || !FINGERPRINT.test(args.authorityFingerprint)
+      || !FINGERPRINT.test(args.positionFingerprint) || !FINGERPRINT.test(args.bracketFingerprint)) {
+    return { status: "unavailable" };
+  }
+  const observedAt = args.observedAt ?? new Date();
+  const epochLockIdentity = `${args.decisionId.length}:${args.decisionId}${args.positionFingerprint.length}:${args.positionFingerprint}`;
+  const { db } = await import("../db");
+  try {
+    return await db.transaction(async (tx) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_EPOCH_LOCK_NAMESPACE}, hashtext(${epochLockIdentity}))`);
+      const existing = await tx.select({
+        authorityFingerprint: aiTraderExecutionEvents.authorityFingerprint,
+        attemptOrdinal: aiTraderExecutionEvents.attemptOrdinal,
+        observedAt: aiTraderExecutionEvents.observedAt,
+      }).from(aiTraderExecutionEvents).where(and(
+        eq(aiTraderExecutionEvents.decisionId, args.decisionId),
+        eq(aiTraderExecutionEvents.action, "protective"),
+        eq(aiTraderExecutionEvents.eventType, "attempt_claimed"),
+        eq(aiTraderExecutionEvents.positionFingerprint, args.positionFingerprint),
+      ));
+      const resolved = resolveLiveBreakevenClaim(existing, args.authorityFingerprint, observedAt);
+      if (resolved.status !== "claimed") return resolved;
+      const epochIdentity = createHash("sha256")
+        .update(JSON.stringify([args.decisionId, args.positionFingerprint]))
+        .digest("hex")
+        .toUpperCase();
+      const attemptId = `protective:${epochIdentity}:${resolved.ordinal}`;
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(${AI_TRADER_EXECUTION_JOURNAL_LOCK_NAMESPACE}, hashtext(${attemptId}))`);
+      const input: JournalEventInput = {
+        ...journalBase(args.bot, args.decisionId),
+        attemptId,
+        action: "protective",
+        cause: "protective",
+        eventType: "attempt_claimed",
+        side: args.side,
+        authorityFingerprint: args.authorityFingerprint,
+        positionFingerprint: args.positionFingerprint,
+        bracketFingerprint: args.bracketFingerprint,
+        attemptOrdinal: resolved.ordinal,
+        observedAt,
+      };
+      await tx.insert(aiTraderExecutionEvents).values(rowValues(canonicalize(input), observedAt));
+      return { status: "claimed", attemptId, ordinal: resolved.ordinal };
+    });
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
 export async function appendExecutionEvents(inputs: readonly JournalEventInput[]): Promise<void> {
   if (inputs.length === 0) return;
+  if (inputs.some((input) => input.action === "protective")) {
+    throw new Error("execution_journal_protective_claim_requires_atomic_api");
+  }
   const { db } = await import("../db");
   await db.transaction(async (tx) => {
     const prepared = await prepareExecutionJournalEventsInTransaction(tx, inputs);

@@ -35,6 +35,8 @@
 // HMAC check (which gates new entries in the executor). A tampered bot row
 // must never block an emergency close.
 
+import { createHash } from "node:crypto";
+import Decimal from "decimal.js";
 import { storage } from "../storage";
 import { appendTelemetry } from "../telemetry";
 import { SERVER_BOOT_ID } from "../boot-id";
@@ -58,7 +60,6 @@ import { resolveAiTraderSubaccountSigner, liveReadAccount } from "./signing";
 import { evaluatePaperBracket, paperRealizedPnl, paperExitPrice, type PaperSide, type PaperCandle } from "./paper-math";
 import {
   BREAKEVEN_TRIGGER_PROGRESS,
-  BREAKEVEN_MAX_MOVE_ATTEMPTS,
   favorableExtreme,
   progressTowardTp,
   breakevenStopPrice,
@@ -67,7 +68,9 @@ import {
   isTighterStop,
   evaluatePaperBracketWithMove,
   countsAsSlLoss,
+  qualifyLiveBreakevenAuthority,
   type BreakevenProtectState,
+  type LiveBreakevenAuthorityDenial,
   type PaperBreakevenStopFailureReason,
 } from "./breakeven";
 import {
@@ -131,6 +134,7 @@ import {
 } from "./paper-position-authority";
 import {
   buildEntryReconciliationTerminalEvents,
+  claimLiveBreakevenAttempt,
   entryAttemptId,
   journalBase,
   newMutationAttemptId,
@@ -501,6 +505,71 @@ function emitMonitorDegradedHeartbeatIfDue(input: {
 const pendingReconciliation = new Set<string>();
 /** decisionIds whose missing bracket was already re-placed once (2nd miss ⇒ close+pause). */
 const bracketReplaceAttempted = new Set<string>();
+const LIVE_BREAKEVEN_SUPPRESSION_CAP = 1000;
+const LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS = 60_000;
+type LiveBreakevenSuppressionMemo =
+  | {
+      kind: "structural";
+      positionObservationFingerprint: string;
+      bracketFingerprint: string;
+      independentBracketObservationFingerprint: string | null;
+    }
+  | {
+      kind: "claim_exhausted";
+      positionObservationFingerprint: string;
+    }
+  | {
+      kind: "transient";
+      positionObservationFingerprint: string;
+      retryAtMs: number;
+    };
+const liveBreakevenSuppressionMemos = new Map<string, LiveBreakevenSuppressionMemo>();
+type PendingLiveBreakevenPersistence = {
+  positionObservationFingerprint: string;
+  view: OpenDecisionView;
+  newSl: number;
+  nativeProgress: number;
+  analyticalProgress: number;
+  liveAuthority: NonNullable<BreakevenProtectState["liveAuthority"]>;
+  movedAt: string;
+};
+const pendingLiveBreakevenPersistence = new Map<string, PendingLiveBreakevenPersistence>();
+
+function liveBreakevenPositionObservationFingerprint(
+  view: OpenDecisionView,
+  agentPublicKey: string,
+  bot: AiTraderBot,
+  position: ProtocolPosition,
+): string {
+  return liveBreakevenFingerprintForMonitor({
+    decisionId: view.decision.id,
+    account: agentPublicKey,
+    internalSymbol: bot.market,
+    side: position.baseSize > 0 ? "long" : "short",
+    baseSize: position.baseSize,
+    entryPrice: position.entryPrice,
+  });
+}
+
+function rememberLiveBreakevenSuppression(
+  decisionId: string,
+  memo: LiveBreakevenSuppressionMemo,
+): void {
+  if (!liveBreakevenSuppressionMemos.has(decisionId)
+      && liveBreakevenSuppressionMemos.size >= LIVE_BREAKEVEN_SUPPRESSION_CAP) {
+    const oldest = liveBreakevenSuppressionMemos.keys().next().value;
+    if (oldest !== undefined) liveBreakevenSuppressionMemos.delete(oldest);
+  }
+  liveBreakevenSuppressionMemos.delete(decisionId);
+  liveBreakevenSuppressionMemos.set(decisionId, memo);
+}
+
+const LIVE_BREAKEVEN_STRUCTURAL_DENIALS = new Set<LiveBreakevenAuthorityDenial>([
+  "malformed_snapshot",
+  "position_or_bracket_mismatch",
+  "protective_pair_not_proven",
+  "trigger_basis_mismatch",
+]);
 
 function recordProtectiveReadObservation(
   seam: string,
@@ -1015,7 +1084,6 @@ async function restoreCloseProtection(
 }
 
 async function recordClose(bot: AiTraderBot, view: OpenDecisionView, close: CloseRecord): Promise<void> {
-  breakevenMoveAttempts.delete(view.decision.id);
   await storage.updateAiTraderDecision(view.decision.id, {
     exitPrice: close.exitPrice !== null ? close.exitPrice.toFixed(8) : null,
     exitReason: close.exitReason,
@@ -1143,7 +1211,6 @@ async function commitConfirmedClose(args: {
     appendTelemetry(`[AiTraderCloseTransition] conflict family=${args.family} reason=${result.reason}`);
     return result;
   }
-  breakevenMoveAttempts.delete(args.view.decision.id);
   priceObservations.forget(args.view.decision.id);
   if (result.journal.status === "degraded") {
     appendTelemetry(`[AiTraderCloseTransition] journal degraded code=${result.journal.failureCode}`);
@@ -1436,12 +1503,7 @@ function buildVenueDetectedCloseJournal(
 
 // --- Breakeven protect (shared paper + live) --------------------------------------------
 
-/**
- * Bounded per-decision venue-move attempts (live only). Cleared in
- * recordClose; hard cap keeps the map bounded even if closes are missed.
- */
-const breakevenMoveAttempts = new Map<string, number>();
-const BREAKEVEN_ATTEMPTS_MAP_CAP = 1000;
+const PAPER_BREAKEVEN_SUPPRESSION_CAP = 1000;
 type PaperBreakevenSuppressionReason = FeeRateQuoteUnavailableReason | PaperBreakevenStopFailureReason;
 const paperBreakevenSuppressionLogged = new Set<string>();
 
@@ -1452,7 +1514,7 @@ function warnPaperBreakevenSuppression(
 ): void {
   const key = `${view.decision.id}:${reason}`;
   if (paperBreakevenSuppressionLogged.has(key)) return;
-  if (paperBreakevenSuppressionLogged.size >= BREAKEVEN_ATTEMPTS_MAP_CAP) {
+  if (paperBreakevenSuppressionLogged.size >= PAPER_BREAKEVEN_SUPPRESSION_CAP) {
     const oldest = paperBreakevenSuppressionLogged.values().next().value;
     if (oldest !== undefined) paperBreakevenSuppressionLogged.delete(oldest);
   }
@@ -1491,17 +1553,71 @@ function breakevenCandidate(
  * existing readers see the CURRENT stop) and breakevenProtect records the
  * original for the audit trail + paper segmentation + exit classification.
  */
-async function persistBreakevenMove(view: OpenDecisionView, newSl: number, progress: number): Promise<void> {
+async function persistBreakevenMove(
+  view: OpenDecisionView,
+  newSl: number,
+  progress: number,
+  analyticalProgress?: number,
+  liveAuthority?: BreakevenProtectState["liveAuthority"],
+  movedAt = new Date().toISOString(),
+): Promise<void> {
   const clamped = (view.decision.clampedDecision ?? {}) as Record<string, unknown>;
   const state: BreakevenProtectState = {
     originalStopLossPrice: view.stopLossPrice,
     movedStopLossPrice: newSl,
-    movedAt: new Date().toISOString(),
+    movedAt,
     progressAtFire: progress,
+    ...(analyticalProgress === undefined ? {} : { analyticalProgressAtFire: analyticalProgress }),
+    ...(liveAuthority === undefined ? {} : { liveAuthority }),
   };
   await storage.updateAiTraderDecision(view.decision.id, {
     clampedDecision: { ...clamped, stopLossPrice: newSl, breakevenProtect: state },
   });
+}
+
+async function reconcilePendingLiveBreakevenPersistence(
+  bot: AiTraderBot,
+  view: OpenDecisionView,
+  agentPublicKey: string,
+  position: ProtocolPosition,
+): Promise<boolean> {
+  const pending = pendingLiveBreakevenPersistence.get(view.decision.id);
+  if (!pending) return false;
+  const positionObservationFingerprint = liveBreakevenPositionObservationFingerprint(
+    view,
+    agentPublicKey,
+    bot,
+    position,
+  );
+  if (pending.positionObservationFingerprint !== positionObservationFingerprint) {
+    pendingLiveBreakevenPersistence.delete(view.decision.id);
+    emitTickObservation(
+      `[AIT-BREAKEVEN] persistence_reconciliation_abandoned bot=${bot.id} decision=${view.decision.id} reason=position_changed`,
+    );
+    return false;
+  }
+  try {
+    await persistBreakevenMove(
+      pending.view,
+      pending.newSl,
+      pending.nativeProgress,
+      pending.analyticalProgress,
+      pending.liveAuthority,
+      pending.movedAt,
+    );
+    pendingLiveBreakevenPersistence.delete(view.decision.id);
+    liveBreakevenSuppressionMemos.delete(view.decision.id);
+    emitTickObservation(
+      `[AIT-BREAKEVEN] persistence_reconciliation_resolved bot=${bot.id} decision=${view.decision.id}`,
+    );
+  } catch {
+    emitTickObservation(
+      `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=retry`,
+    );
+  }
+  // The database view is stale for this entire tick, even when the retry just
+  // succeeded. Skip G10 and every later stop mutation until a fresh view loads.
+  return true;
 }
 
 // --- Paper monitoring -----------------------------------------------------------------
@@ -2227,32 +2343,59 @@ async function handleLiveClose(
   }
 }
 
+function liveBreakevenFingerprintForMonitor(value: unknown): string {
+  const stable = (candidate: unknown): unknown => Array.isArray(candidate)
+    ? candidate.map(stable)
+    : candidate && typeof candidate === 'object'
+      ? Object.fromEntries(Object.entries(candidate as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, stable(child)]))
+      : candidate;
+  return createHash('sha256').update(JSON.stringify(stable(value))).digest('hex').toUpperCase();
+}
+
 /**
- * Live breakeven-protect fire check. Venue FIRST, persist ONLY on verified
- * venue success — the DB must never claim a stop the exchange doesn't hold.
- * Returns true when the move landed and was persisted.
- *
- * Venue semantics differ and are handled explicitly:
- *  - Flash: triggers STACK (no per-order cancel exists). Send the tighter SL
- *    only; the old stop stays resting harmlessly (tighter fires first).
- *    NEVER call cancelTpSlOrders here — it cancels ALL triggers incl. the TP.
- *  - Pacifica: SET_POSITION_TPSL REPLACES the position bracket. Send SL+TP
- *    together, require appliedStopLossPrice === newSl with no dropped legs;
- *    on a partial replace restore the original bracket or fail closed.
- *  - Any other venue: never move blind — skip.
+ * Analytical candles nominate only. Pacifica supplies a strict compound
+ * snapshot; the adapter repeats state checks and owns the durable claim.
+ * Flash stays dormant until exact trigger rows can be decoded.
  */
 async function maybeFireLiveBreakeven(
   bot: AiTraderBot,
   view: OpenDecisionView,
-  adapter: ProtocolAdapter
+  adapter: ProtocolAdapter,
+  agentPublicKey: string,
+  position: ProtocolPosition,
+  independentBracketObservationFingerprint: string | null,
 ): Promise<boolean> {
   const tfMs = TIMEFRAME_MS[bot.timeframe];
-  if (!tfMs || view.entryPrice === null) return false;
-  const decisionId = view.decision.id;
-  const attempts = breakevenMoveAttempts.get(decisionId) ?? 0;
-  if (attempts >= BREAKEVEN_MAX_MOVE_ATTEMPTS) return false;
-
+  if (!tfMs || view.entryPrice === null || bot.protocol !== 'pacifica'
+      || typeof adapter.getLiveBreakevenAuthoritySnapshot !== 'function'
+      || typeof adapter.moveLiveBreakevenStop !== 'function') return false;
   const now = Date.now();
+  const positionObservationFingerprint = liveBreakevenPositionObservationFingerprint(
+    view,
+    agentPublicKey,
+    bot,
+    position,
+  );
+  const previousSuppression = liveBreakevenSuppressionMemos.get(view.decision.id);
+  if (previousSuppression) {
+    const positionChanged = previousSuppression.positionObservationFingerprint
+      !== positionObservationFingerprint;
+    const independentlyObservedBracketChanged = previousSuppression.kind === "structural"
+      && independentBracketObservationFingerprint !== null
+      && previousSuppression.independentBracketObservationFingerprint
+        !== independentBracketObservationFingerprint;
+    if (positionChanged || independentlyObservedBracketChanged) {
+      liveBreakevenSuppressionMemos.delete(view.decision.id);
+    } else if (previousSuppression.kind === "structural"
+        || previousSuppression.kind === "claim_exhausted"
+        || now < previousSuppression.retryAtMs) {
+      return false;
+    } else {
+      liveBreakevenSuppressionMemos.delete(view.decision.id);
+    }
+  }
   const entryCandleOpen = Math.floor(view.decidedAtMs / tfMs) * tfMs;
   let candles;
   try {
@@ -2265,100 +2408,207 @@ async function maybeFireLiveBreakeven(
       {
         basisPolicy: LIVE_MONITOR_CANDLE_POLICY,
         deadlineMs: 30_000,
-        callerClass: "live_monitor",
-      }
+        callerClass: 'live_monitor',
+      },
     );
-  } catch (err) {
-    // Degraded cache = fail fast (no network fallback); breakeven is a
-    // ratchet enhancement, the venue-side bracket still protects the position.
-    if (isCacheDegradedError(err)) {
-      console.warn(`[AiTraderMonitor] Breakeven candle cache degraded (DB pressure) — retrying next tick`);
-      return false;
-    }
-    console.warn(`[AiTraderMonitor] Breakeven candle fetch failed (${err instanceof Error ? err.message : err}) — retrying next tick`);
+  } catch {
+    rememberLiveBreakevenSuppression(view.decision.id, {
+      kind: "transient",
+      positionObservationFingerprint,
+      retryAtMs: Date.now() + LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS,
+    });
     return false;
   }
-  if (!Array.isArray(candles)) return false; // defensive: bad datafeed shape ≠ a reason to act
+  if (!Array.isArray(candles)) return false;
   const post = candles.filter((c) => c.time > entryCandleOpen);
   const candidate = breakevenCandidate(view, post, breakevenStopPrice(view.side, view.entryPrice));
   if (!candidate) return false;
-
-  // Count the attempt BEFORE the venue call — an ambiguous outcome must not
-  // grant unlimited retries. Bounded map: FIFO-evict when at cap.
-  if (!breakevenMoveAttempts.has(decisionId) && breakevenMoveAttempts.size >= BREAKEVEN_ATTEMPTS_MAP_CAP) {
-    const oldest = breakevenMoveAttempts.keys().next().value;
-    if (oldest !== undefined) breakevenMoveAttempts.delete(oldest);
-  }
-  breakevenMoveAttempts.set(decisionId, attempts + 1);
-
-  const subaccountId = undefined; // WO-7.1: bot signs AS its own account
-  const label = `bot ${bot.id.slice(0, 8)} ${view.side} ${bot.market}`;
-
-  if (bot.protocol === "flash") {
-    const res = await withSigningContext(bot, (keyTrio) =>
-      adapter.setTpSl!({
-        ...keyTrio,
-        internalSymbol: bot.market,
-        stopLossPrice: candidate.newSl,
-        subaccountId,
-      })
-    );
-    if (!res.ok || !res.value.success) {
-      console.warn(`[AiTraderMonitor] Breakeven move failed (flash, attempt ${attempts + 1}/${BREAKEVEN_MAX_MOVE_ATTEMPTS}) ${label}: ${res.ok ? res.value.error : res.detail}`);
-      return false;
-    }
-  } else if (bot.protocol === "pacifica") {
-    const res = await withSigningContext(bot, (keyTrio) =>
-      adapter.setTpSl!({
-        ...keyTrio,
-        internalSymbol: bot.market,
-        stopLossPrice: candidate.newSl,
-        takeProfitPrice: view.takeProfitPrice,
-        subaccountId,
-      })
-    );
-    const v = res.ok ? res.value : null;
-    const dropped = v?.droppedLegs ?? [];
-    const slApplied = !!v?.success && v.appliedStopLossPrice === candidate.newSl;
-    if (!(slApplied && dropped.length === 0)) {
-      if (v?.success && dropped.length > 0) {
-        // Partial replace: the position bracket was REWRITTEN with a leg
-        // missing. Restore the original; if the restore cannot be verified
-        // the position may be unprotected — close it (fail closed).
-        console.warn(`[AiTraderMonitor] Breakeven move dropped legs (${dropped.map((d) => d.leg).join(",")}) ${label} — restoring original bracket`);
-        const restore = await withSigningContext(bot, (keyTrio) =>
-          adapter.setTpSl!({
-            ...keyTrio,
-            internalSymbol: bot.market,
-            stopLossPrice: view.stopLossPrice,
-            takeProfitPrice: view.takeProfitPrice,
-            subaccountId,
-          })
-        );
-        const rv = restore.ok ? restore.value : null;
-        const restored = !!rv?.success && rv.appliedStopLossPrice === view.stopLossPrice;
-        if (!restored) {
-          await closeLivePositionAndPause(bot, view, adapter, {
-            pauseReason: "bracket_failed",
-            exitReason: "circuit_breaker",
-            detail: "breakeven-protect move left the bracket incomplete and the original could not be restored — position closed for safety",
-          });
-        }
-      } else {
-        // Pre-flight rejection or transport failure — nothing was replaced,
-        // the old bracket is intact. Retry next tick (bounded).
-        console.warn(`[AiTraderMonitor] Breakeven move failed (pacifica, attempt ${attempts + 1}/${BREAKEVEN_MAX_MOVE_ATTEMPTS}) ${label}: ${v ? v.error : !res.ok ? res.detail : "unknown"}`);
-      }
-      return false;
-    }
-  } else {
+  let quantizedCandidate: number;
+  let candidateStopPrice: string;
+  let expectedEntryPrice: string;
+  let expectedTakeProfitPrice: string;
+  let expectedCurrentStopPrice: string;
+  try {
+    quantizedCandidate = adapter.quantizePrice(bot.market, candidate.newSl);
+    candidateStopPrice = new Decimal(quantizedCandidate).toFixed();
+    expectedEntryPrice = new Decimal(view.entryPrice).toFixed();
+    expectedTakeProfitPrice = new Decimal(view.takeProfitPrice).toFixed();
+    expectedCurrentStopPrice = new Decimal(view.stopLossPrice).toFixed();
+  } catch {
+    rememberLiveBreakevenSuppression(view.decision.id, {
+      kind: "transient",
+      positionObservationFingerprint,
+      retryAtMs: Date.now() + LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS,
+    });
     return false;
   }
-
-  await persistBreakevenMove(view, candidate.newSl, candidate.progress);
-  console.log(
-    `[AiTraderMonitor] Breakeven protect (live): ${label} SL ${view.stopLossPrice.toFixed(6)} → ${candidate.newSl.toFixed(6)} at ${(candidate.progress * 100).toFixed(0)}% of the way to TP`
-  );
+  const analyticalWindowFingerprint = liveBreakevenFingerprintForMonitor({
+    decisionId: view.decision.id,
+    entryCandleOpen,
+    candles: post.map((c) => ({
+      time: c.time, open: c.open, high: c.high, low: c.low, close: c.close,
+    })),
+  });
+  let snapshot;
+  try {
+    snapshot = await adapter.getLiveBreakevenAuthoritySnapshot({
+      agentPublicKey,
+      internalSymbol: bot.market,
+      deadlineAtMs: Date.now() + 5_000,
+    });
+  } catch {
+    rememberLiveBreakevenSuppression(view.decision.id, {
+      kind: "transient",
+      positionObservationFingerprint,
+      retryAtMs: Date.now() + LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS,
+    });
+    return false;
+  }
+  const authority = qualifyLiveBreakevenAuthority({
+    decisionId: view.decision.id,
+    botId: bot.id,
+    side: view.side,
+    candidateStopPrice,
+    expectedEntryPrice,
+    expectedTakeProfitPrice,
+    expectedCurrentStopPrice,
+    analyticalProgress: candidate.progress,
+    analyticalWindowFingerprint,
+    expectedAccount: agentPublicKey,
+    expectedInternalSymbol: bot.market,
+    snapshot,
+    nowMs: Date.now(),
+  });
+  if (!authority.authorized) {
+    if (LIVE_BREAKEVEN_STRUCTURAL_DENIALS.has(authority.reason)
+        && typeof snapshot.positionFingerprint === "string"
+        && /^[0-9A-F]{64}$/.test(snapshot.positionFingerprint)
+        && typeof snapshot.bracketFingerprint === "string"
+        && /^[0-9A-F]{64}$/.test(snapshot.bracketFingerprint)) {
+      rememberLiveBreakevenSuppression(view.decision.id, {
+        kind: "structural",
+        positionObservationFingerprint,
+        bracketFingerprint: snapshot.bracketFingerprint,
+        independentBracketObservationFingerprint,
+      });
+    } else {
+      rememberLiveBreakevenSuppression(view.decision.id, {
+        kind: "transient",
+        positionObservationFingerprint,
+        retryAtMs: Date.now() + LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS,
+      });
+    }
+    return false;
+  }
+  liveBreakevenSuppressionMemos.delete(view.decision.id);
+  let move;
+  try {
+    move = await withSigningContext(bot, (keyTrio) => adapter.moveLiveBreakevenStop!({
+      ...keyTrio,
+      internalSymbol: bot.market,
+      permit: authority.permit,
+      claimAttempt: () => claimLiveBreakevenAttempt({
+        bot,
+        decisionId: view.decision.id,
+        side: view.side,
+        authorityFingerprint: authority.permit.fingerprint,
+        positionFingerprint: authority.permit.binding.positionEpochFingerprint,
+        bracketFingerprint: authority.permit.binding.bracketFingerprint,
+      }),
+    }));
+  } catch {
+    rememberLiveBreakevenSuppression(view.decision.id, {
+      kind: "transient",
+      positionObservationFingerprint,
+      retryAtMs: Date.now() + LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS,
+    });
+    return false;
+  }
+  if (!move.ok) {
+    rememberLiveBreakevenSuppression(view.decision.id, {
+      kind: "transient",
+      positionObservationFingerprint,
+      retryAtMs: Date.now() + LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS,
+    });
+    return false;
+  }
+  if (move.value.requiresCloseAndPause) {
+    await closeLivePositionAndPause(bot, view, adapter, {
+      pauseReason: "bracket_failed",
+      exitReason: "circuit_breaker",
+      detail: `Live breakeven bracket restoration could not be verified (${move.value.error ?? "unknown"})`,
+    });
+    return false;
+  }
+  if (!move.value.success) {
+    rememberLiveBreakevenSuppression(view.decision.id, move.value.error === "live_breakeven_claim_exhausted"
+      ? { kind: "claim_exhausted", positionObservationFingerprint }
+      : {
+          kind: "transient",
+          positionObservationFingerprint,
+          retryAtMs: Date.now() + LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS,
+        });
+    return false;
+  }
+  const appliedStopLossPrice = move.value.appliedStopLossPrice;
+  const appliedTakeProfitPrice = move.value.appliedTakeProfitPrice;
+  const postVerificationReadCompletedAtMs = move.value.postVerificationReadCompletedAtMs;
+  if (!move.value.success
+      || appliedStopLossPrice !== quantizedCandidate
+      || appliedTakeProfitPrice !== view.takeProfitPrice
+      || move.value.postCallVerified !== true
+      || move.value.restorationOutcome !== "not_needed"
+      || !move.value.postVerificationSourceFingerprint
+      || !move.value.postVerificationBracketFingerprint
+      || typeof postVerificationReadCompletedAtMs !== "number"
+      || !Number.isSafeInteger(postVerificationReadCompletedAtMs)
+      || !move.value.attemptId || !move.value.attemptOrdinal) return false;
+  const liveAuthority: NonNullable<BreakevenProtectState["liveAuthority"]> = {
+    protocol: 'pacifica',
+    basis: 'last_trade_price',
+    sourceFingerprint: authority.permit.binding.nativeSourceFingerprint,
+    positionEpochFingerprint: authority.permit.binding.positionEpochFingerprint,
+    positionStateFingerprint: authority.permit.binding.positionStateFingerprint,
+    bracketFingerprint: authority.permit.binding.bracketFingerprint,
+    sourceTimeMs: authority.permit.binding.sourceTimeMs,
+    readCompletedAtMs: authority.permit.binding.readCompletedAtMs,
+    attemptId: move.value.attemptId,
+    attemptOrdinal: move.value.attemptOrdinal,
+    requestedTakeProfitPrice: view.takeProfitPrice,
+    requestedStopLossPrice: quantizedCandidate,
+    appliedTakeProfitPrice,
+    appliedStopLossPrice,
+    postCallVerified: true,
+    postVerificationSourceFingerprint: move.value.postVerificationSourceFingerprint,
+    postVerificationBracketFingerprint: move.value.postVerificationBracketFingerprint,
+    postVerificationReadCompletedAtMs,
+    restorationOutcome: "not_needed",
+  };
+  const movedAt = new Date().toISOString();
+  try {
+    await persistBreakevenMove(
+      view,
+      quantizedCandidate,
+      authority.nativeProgress,
+      candidate.progress,
+      liveAuthority,
+      movedAt,
+    );
+  } catch {
+    pendingLiveBreakevenPersistence.set(view.decision.id, {
+      positionObservationFingerprint,
+      view,
+      newSl: quantizedCandidate,
+      nativeProgress: authority.nativeProgress,
+      analyticalProgress: candidate.progress,
+      liveAuthority,
+      movedAt,
+    });
+    emitTickObservation(
+      `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=retry`,
+    );
+    return false;
+  }
   return true;
 }
 
@@ -2391,10 +2641,18 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
   }
   priceObservations.live(view.decision.id, position.markPrice, view.decidedAtMs, Date.now(), bot.protocol);
 
+  if (await reconcilePendingLiveBreakevenPersistence(
+    bot,
+    view,
+    agentPublicKey,
+    position,
+  )) return;
+
   // G10 money authority remains the proven legacy stop-order read while the
   // semantic /orders observation is calibrated. An unavailable legacy read
   // skips only the bracket check; G7 and breakeven processing continue, and
   // the unavailable read is never converted into synthetic order evidence.
+  let liveBreakevenBracketObservationFingerprint: string | null = null;
   if (typeof adapter.getOpenStopOrders === "function" && typeof adapter.setTpSl === "function") {
     const stopProof = await verifyLiveProtectiveStop({
       adapter,
@@ -2404,6 +2662,7 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
       positionBaseSize: position.baseSize,
       expectedStopLossPrice: view.stopLossPrice,
     });
+    liveBreakevenBracketObservationFingerprint = liveBreakevenFingerprintForMonitor(stopProof);
     recordProtectiveReadObservation("periodic_g10", bot, view, stopProof);
     if (stopProof.status === "legacy_unavailable") {
       console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: legacy protective-stop read unavailable (${stopProof.detail}) — skipping bracket check`);
@@ -2456,29 +2715,39 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
     }
   }
 
-  // Breakeven protect — after G10 (bracket confirmed resting), before G7.
-  // Once fired the ratchet is done for this position: skip entirely (no
-  // candle fetch). Runs for EVERY live bot, every profile — always-on.
-  if (!view.breakevenProtect && typeof adapter.setTpSl === "function") {
-    await maybeFireLiveBreakeven(bot, view, adapter);
+  // G7 runs before the optional ratchet so a slow quote/key/storage path can
+  // never delay a known daily-loss breach. Degen profiles deliberately skip G7.
+  if (bot.riskProfile !== "degen") {
+    const allocation = num(bot.allocatedUsdc) ?? 0;
+    if (allocation > 0) {
+      const dayStart = utcDayStartMs(Date.now());
+      const recentClosed = await storage.getRecentClosedDecisions(bot.id, 60);
+      const dailyRealized = recentClosed
+        .filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= dayStart)
+        .reduce((sum, d) => sum + (num(d.realizedPnl) ?? 0), 0);
+      const unrealized = Number.isFinite(position.unrealizedPnl) ? position.unrealizedPnl : 0;
+      if (dailyRealized + unrealized <= -(DAILY_LOSS_BREAKER_PCT / 100) * allocation) {
+        await closeLivePositionAndPause(bot, view, adapter, {
+          pauseReason: "daily_loss_breaker",
+          exitReason: "circuit_breaker",
+          detail: `G7 daily-loss breaker: realized ${dailyRealized.toFixed(2)} + open MTM ${unrealized.toFixed(2)} breached −${DAILY_LOSS_BREAKER_PCT}% of allocation — force-flat`,
+        });
+        return;
+      }
+    }
   }
 
-  // G7 — daily loss breaker with open-position MTM ('guarded' only).
-  if (bot.riskProfile === "degen") return;
-  const allocation = num(bot.allocatedUsdc) ?? 0;
-  if (allocation <= 0) return;
-  const dayStart = utcDayStartMs(Date.now());
-  const recentClosed = await storage.getRecentClosedDecisions(bot.id, 60);
-  const dailyRealized = recentClosed
-    .filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= dayStart)
-    .reduce((sum, d) => sum + (num(d.realizedPnl) ?? 0), 0);
-  const unrealized = Number.isFinite(position.unrealizedPnl) ? position.unrealizedPnl : 0;
-  if (dailyRealized + unrealized <= -(DAILY_LOSS_BREAKER_PCT / 100) * allocation) {
-    await closeLivePositionAndPause(bot, view, adapter, {
-      pauseReason: "daily_loss_breaker",
-      exitReason: "circuit_breaker",
-      detail: `G7 daily-loss breaker: realized ${dailyRealized.toFixed(2)} + open MTM ${unrealized.toFixed(2)} breached −${DAILY_LOSS_BREAKER_PCT}% of allocation — force-flat`,
-    });
+  // Breakeven protect runs only after G10 and G7 have completed. Once fired,
+  // skip entirely (including candles). It remains always-on for every profile.
+  if (!view.breakevenProtect && typeof adapter.moveLiveBreakevenStop === "function") {
+    await maybeFireLiveBreakeven(
+      bot,
+      view,
+      adapter,
+      agentPublicKey,
+      position,
+      liveBreakevenBracketObservationFingerprint,
+    );
   }
 }
 
@@ -4236,6 +4505,8 @@ export function stopAiTraderMonitor(): void {
   pendingReconciliation.clear();
   priceObservations.clear();
   bracketReplaceAttempted.clear();
+  liveBreakevenSuppressionMemos.clear();
+  pendingLiveBreakevenPersistence.clear();
   botInFlight.clear();
   closeInFlight.clear();
   preOpenFirstSeen.clear();

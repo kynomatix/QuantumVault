@@ -17,7 +17,11 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
-import type { TradeRecord } from "../../server/protocol/protocol-types";
+import {
+  liveBreakevenFingerprint,
+  type MoveLiveBreakevenStopParams,
+  type TradeRecord,
+} from "../../server/protocol/protocol-types";
 import { PAPER_SLIPPAGE_PER_LEG } from "../../server/ai-trader/paper-math";
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
 import { breakevenStopPrice, paperBreakevenStopPrice } from "../../server/ai-trader/breakeven";
@@ -131,6 +135,7 @@ vi.mock("../../server/notification-service", () => ({
 
 const safeJournalMock = vi.fn();
 const safeReconciliationTerminalMock = vi.fn();
+const claimLiveBreakevenAttemptMock = vi.fn();
 vi.mock("../../server/ai-trader/execution-journal", () => ({
   entryAttemptId: (decisionId: string) => `entry:${decisionId}`,
   newMutationAttemptId: (action: string, decisionId: string | null) => `${action}:${decisionId ?? "unattributed"}:test-attempt`,
@@ -150,6 +155,7 @@ vi.mock("../../server/ai-trader/execution-journal", () => ({
   }),
   safeAppendExecutionEvents: (...a: unknown[]) => safeJournalMock(...a),
   safeAppendEntryReconciliationTerminal: (...a: unknown[]) => safeReconciliationTerminalMock(...a),
+  claimLiveBreakevenAttempt: (...a: unknown[]) => claimLiveBreakevenAttemptMock(...a),
   buildEntryReconciliationTerminalEvents: (args: any) => {
     const observedAt = args.observedAt ?? new Date();
     if (args.proof.kind === "flat_after_landing_window") {
@@ -410,6 +416,116 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   } as unknown as ProtocolAdapter;
 }
 
+function liveBreakevenSnapshot(
+  price: string | null = "157.5",
+  stopTriggerBasis: "last_trade_price" | "target_internal_oracle" = "last_trade_price",
+) {
+  const triggerBasisStatus = stopTriggerBasis === "last_trade_price"
+    ? "last_trade_price" as const
+    : "mixed" as const;
+  const position = {
+    sourceRecordId: "A".repeat(64),
+    side: "long" as const,
+    baseSize: "2",
+    entryPrice: "150",
+  };
+  const protectiveOrders = [
+    {
+      orderId: "41",
+      orderAccount: "sub-1",
+      orderType: "stop_loss" as const,
+      side: "sell" as const,
+      triggerBasis: stopTriggerBasis,
+      triggerPrice: "145",
+      initialSize: "2",
+      remainingSize: "2",
+      reduceOnly: true as const,
+    },
+    {
+      orderId: "42",
+      orderAccount: "sub-1",
+      orderType: "take_profit" as const,
+      side: "sell" as const,
+      triggerBasis: "last_trade_price" as const,
+      triggerPrice: "160",
+      initialSize: "2",
+      remainingSize: "2",
+      reduceOnly: true as const,
+    },
+  ];
+  const positionBody = {
+    protocol: "pacifica" as const,
+    account: "sub-1",
+    subaccountId: null,
+    internalSymbol: "SOL-PERP",
+    protocolSymbol: "SOL",
+    position,
+  };
+  const bracketBody = {
+    protocol: "pacifica" as const,
+    account: "sub-1",
+    subaccountId: null,
+    internalSymbol: "SOL-PERP",
+    protocolSymbol: "SOL",
+    triggerBasisStatus,
+    protectiveOrders,
+  };
+  const stateBody = {
+    ...positionBody,
+    positionLastOrderId: "40",
+    ordersLastOrderId: "42",
+    triggerBasisStatus,
+    protectiveOrders,
+  };
+  const recentTrades = {
+    lastOrderId: "4001",
+    rows: price === null ? [] : [{
+      symbol: "SOL",
+      price,
+      createdAtMs: NOW,
+      sourceRecordFingerprint: "B".repeat(64),
+    }],
+  };
+  const sourceBody = {
+    ...stateBody,
+    readStartedAtMs: NOW,
+    readCompletedAtMs: NOW,
+    recentTrades,
+  };
+  return {
+    schemaVersion: 1 as const,
+    ...sourceBody,
+    positionFingerprint: liveBreakevenFingerprint(positionBody),
+    bracketFingerprint: liveBreakevenFingerprint(bracketBody),
+    stateFingerprint: liveBreakevenFingerprint(stateBody),
+    sourceFingerprint: liveBreakevenFingerprint(sourceBody),
+  };
+}
+
+function echoLiveBreakevenMove() {
+  return vi.fn(async (params: MoveLiveBreakevenStopParams) => {
+    const claim = await params.claimAttempt();
+    if (claim.status !== "claimed") {
+      return { success: false, status: "rejected" as const, error: `claim_${claim.status}` };
+    }
+    return {
+      success: true,
+      status: "acknowledged" as const,
+      appliedTakeProfitPrice: Number(params.permit.binding.takeProfitPrice),
+      appliedStopLossPrice: Number(params.permit.binding.candidateStopPrice),
+      attemptId: claim.attemptId,
+      attemptOrdinal: claim.ordinal,
+      authorityFingerprint: params.permit.fingerprint,
+      postCallVerified: true,
+      postVerificationSourceFingerprint: "C".repeat(64),
+      postVerificationBracketFingerprint: "D".repeat(64),
+      postVerificationReadCompletedAtMs: NOW,
+      restorationOutcome: "not_needed" as const,
+      requiresCloseAndPause: false,
+    };
+  });
+}
+
 const AGENT_PUBKEY = "AgEntPubKey1111111111111111111111111111111";
 let cleanupUmk: ReturnType<typeof vi.fn>;
 let cleanupKey: ReturnType<typeof vi.fn>;
@@ -495,6 +611,7 @@ beforeEach(() => {
     schemaCapabilityReadyMock,
     safeJournalMock,
     safeReconciliationTerminalMock,
+    claimLiveBreakevenAttemptMock,
   ]) {
     m.mockReset();
   }
@@ -526,6 +643,11 @@ beforeEach(() => {
   isMarketAdmittedMock.mockReturnValue(true);
   isMultiplierQuarantinedMock.mockReturnValue(false);
   schemaCapabilityReadyMock.mockReturnValue(true);
+  claimLiveBreakevenAttemptMock.mockResolvedValue({
+    status: "claimed",
+    attemptId: "protective:dec-1:1",
+    ordinal: 1,
+  });
   updateBotMock.mockResolvedValue({});
   updateDecisionMock.mockResolvedValue({});
   claimAnalysisMock.mockImplementation(async ({ botId, updates }: { botId: string; updates?: Record<string, unknown> }) => {
@@ -1879,8 +2001,11 @@ describe("G10 bracket re-verification", () => {
   it("G7 live: force-flattens when realized + venue unrealized breaches −15%", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
+    const moveLiveBreakevenStop = vi.fn();
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [{ ...openPosition, unrealizedPnl: -200 }]),
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -1888,6 +2013,7 @@ describe("G10 bracket re-verification", () => {
     await monitorBotOnce(makeBot({ paperMode: false }));
 
     expect((adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop).not.toHaveBeenCalled();
     expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "daily_loss_breaker")).toBe(true);
   });
 
@@ -1912,12 +2038,7 @@ describe("G10 bracket re-verification", () => {
   it("a degraded periodic stop read still permits the live breakeven ratchet", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
-    const setTpSl = vi.fn(async (p: { stopLossPrice?: number; takeProfitPrice?: number }) => ({
-      success: true,
-      status: "acknowledged",
-      appliedStopLossPrice: p.stopLossPrice ?? null,
-      appliedTakeProfitPrice: p.takeProfitPrice ?? null,
-    }));
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [{
         ...openPosition,
@@ -1925,7 +2046,8 @@ describe("G10 bracket re-verification", () => {
         unrealizedPnl: 14,
       }]),
       getOpenStopOrders: vi.fn(async () => { throw new Error("protective read unavailable"); }),
-      setTpSl,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -1936,10 +2058,11 @@ describe("G10 bracket re-verification", () => {
 
     await monitorBotOnce(makeBot({ paperMode: false }));
 
-    expect(setTpSl).toHaveBeenCalledTimes(1);
-    expect(setTpSl.mock.calls[0][0]).toMatchObject({
-      stopLossPrice: expect.closeTo(breakevenStopPrice("long", 150), 8),
-      takeProfitPrice: 160,
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop.mock.calls[0][0].permit.binding).toMatchObject({
+      protocol: "pacifica",
+      triggerBasis: "last_trade_price",
+      takeProfitPrice: "160",
     });
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
     expect(botUpdates().some((u) => u.pauseReason === "bracket_failed")).toBe(false);
@@ -5131,13 +5254,15 @@ describe("breakeven protect", () => {
     expect(botUpdates().some((u) => u.status === "idle")).toBe(true);
   });
 
-  it("live (pacifica): fires venue-first — setTpSl SL+TP together, persists on verified apply", async () => {
+  it("live (pacifica): uses the dedicated authority permit and persists only a verified apply", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
-    const setTpSl = echoSetTpSl();
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
-      setTpSl,
+      setTpSl: undefined,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -5145,22 +5270,162 @@ describe("breakeven protect", () => {
 
     await monitorBotOnce(makeBot({ paperMode: false }));
 
-    expect(setTpSl).toHaveBeenCalledTimes(1);
-    expect(setTpSl.mock.calls[0][0]).toMatchObject({
-      internalSymbol: "SOL-PERP",
-      stopLossPrice: expect.closeTo(LIVE_FIXED_SL, 8),
-      takeProfitPrice: 160, // Pacifica REPLACES the bracket — TP must ride along
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop.mock.calls[0][0]).toMatchObject({ internalSymbol: "SOL-PERP" });
+    expect(moveLiveBreakevenStop.mock.calls[0][0].permit.binding).toMatchObject({
+      takeProfitPrice: "160",
+      currentStopPrice: "145",
+      positionEpochFingerprint: "A".repeat(64),
+      triggerBasis: "last_trade_price",
     });
     const du = decisionUpdates();
     expect(du).toHaveLength(1);
     const clamped = du[0].clampedDecision as Record<string, any>;
     expect(clamped.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
     expect(clamped.breakevenProtect.originalStopLossPrice).toBe(145);
+    expect(clamped.breakevenProtect.liveAuthority).toMatchObject({
+      positionEpochFingerprint: "A".repeat(64),
+      attemptId: "protective:dec-1:1",
+      postCallVerified: true,
+      postVerificationBracketFingerprint: "D".repeat(64),
+    });
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
   });
 
-  it("live (flash): sends the tighter SL ONLY (triggers stack) and never cancels", async () => {
+  it("live: memoizes structural bracket suppression across ten ticks while G10 remains available", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const getLiveBreakevenAuthoritySnapshot = vi.fn(async () =>
+      liveBreakevenSnapshot("157.5", "target_internal_oracle"));
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const getOpenStopOrders = vi.fn(async () => [{ order_id: "st-1", symbol: "SOL" }]);
+    const getOpenProtectiveOrders = vi.fn(async () => protectiveSnapshot("st-1"));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getOpenStopOrders,
+      getOpenProtectiveOrders,
+      getLiveBreakevenAuthoritySnapshot,
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    const bot = makeBot({ paperMode: false });
+
+    for (let tick = 0; tick < 10; tick += 1) await monitorBotOnce(bot);
+
+    expect(getLiveBreakevenAuthoritySnapshot).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop).not.toHaveBeenCalled();
+    expect(claimLiveBreakevenAttemptMock).not.toHaveBeenCalled();
+    expect(getOpenStopOrders).toHaveBeenCalledTimes(10);
+    expect(getOpenProtectiveOrders).toHaveBeenCalledTimes(10);
+  });
+
+  it("live: backs off a quiet-market authority suppression for one quota window", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const getLiveBreakevenAuthoritySnapshot = vi.fn(async () => liveBreakevenSnapshot(null));
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const getOpenStopOrders = vi.fn(async () => [{ order_id: "st-1", symbol: "SOL" }]);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getOpenStopOrders,
+      getLiveBreakevenAuthoritySnapshot,
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    const bot = makeBot({ paperMode: false });
+
+    for (let tick = 0; tick < 10; tick += 1) await monitorBotOnce(bot);
+    expect(getLiveBreakevenAuthoritySnapshot).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop).not.toHaveBeenCalled();
+    expect(claimLiveBreakevenAttemptMock).not.toHaveBeenCalled();
+    expect(getOpenStopOrders).toHaveBeenCalledTimes(10);
+
+    vi.setSystemTime(NOW + 60_000);
+    await monitorBotOnce(bot);
+    expect(getLiveBreakevenAuthoritySnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it("live: backs off native authority read failures across ten ticks", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const getLiveBreakevenAuthoritySnapshot = vi.fn(async () => {
+      throw new Error("quota or HTTP unavailable");
+    });
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getLiveBreakevenAuthoritySnapshot,
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    const bot = makeBot({ paperMode: false });
+
+    for (let tick = 0; tick < 10; tick += 1) await monitorBotOnce(bot);
+
+    expect(getLiveBreakevenAuthoritySnapshot).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop).not.toHaveBeenCalled();
+  });
+
+  it("live: backs off pre-sign recheck denials across ten ticks", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const getLiveBreakevenAuthoritySnapshot = vi.fn(async () => liveBreakevenSnapshot());
+    const moveLiveBreakevenStop = vi.fn(async () => ({
+      success: false,
+      status: "rejected" as const,
+      error: "live_breakeven_trade_stale_or_future",
+    }));
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getLiveBreakevenAuthoritySnapshot,
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    const bot = makeBot({ paperMode: false });
+
+    for (let tick = 0; tick < 10; tick += 1) await monitorBotOnce(bot);
+
+    expect(getLiveBreakevenAuthoritySnapshot).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect(claimLiveBreakevenAttemptMock).not.toHaveBeenCalled();
+  });
+
+  it("live (pacifica): preserves a verified tighter stop and retries a degraded audit write", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    updateDecisionMock.mockRejectedValueOnce(new Error("audit write unavailable"));
+
+    const bot = makeBot({ paperMode: false });
+    await monitorBotOnce(bot);
+    await monitorBotOnce(bot);
+
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect(updateDecisionMock).toHaveBeenCalledTimes(2);
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
+    expect(botUpdates().some((u) => u.status === "paused")).toBe(false);
+    expect(appendTelemetryMock.mock.calls.flat().join("\n")).toContain("persistence_degraded");
+    expect(appendTelemetryMock.mock.calls.flat().join("\n")).toContain("persistence_reconciliation_resolved");
+  });
+
+  it("live (flash): remains dormant until exact native trigger rows can be revalidated", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
     const setTpSl = echoSetTpSl();
@@ -5174,20 +5439,24 @@ describe("breakeven protect", () => {
 
     await monitorBotOnce(makeBot({ paperMode: false, protocol: "flash" }));
 
-    expect(setTpSl).toHaveBeenCalledTimes(1);
-    expect(setTpSl.mock.calls[0][0].stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
-    expect(setTpSl.mock.calls[0][0].takeProfitPrice).toBeUndefined(); // SL-only on Flash
+    expect(setTpSl).not.toHaveBeenCalled();
     expect((adapter as any).cancelTpSlOrders).not.toHaveBeenCalled();
-    expect(decisionUpdates()).toHaveLength(1); // persisted
+    expect(decisionUpdates()).toHaveLength(0);
   });
 
   it("live: a venue rejection keeps the OLD stop — nothing persisted, position untouched", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
-    const setTpSl = vi.fn(async () => ({ success: false, status: "rejected", error: "venue said no" }));
+    const moveLiveBreakevenStop = vi.fn(async () => ({
+      success: false,
+      status: "rejected" as const,
+      error: "venue said no",
+      requiresCloseAndPause: false,
+    }));
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
-      setTpSl,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -5195,7 +5464,7 @@ describe("breakeven protect", () => {
 
     await monitorBotOnce(makeBot({ paperMode: false }));
 
-    expect(setTpSl).toHaveBeenCalledTimes(1);
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
     expect(updateDecisionMock).not.toHaveBeenCalled();
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();
@@ -5204,23 +5473,18 @@ describe("breakeven protect", () => {
   it("live (pacifica): a dropped SL leg restores the ORIGINAL bracket and does not persist", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
-    const setTpSl = vi.fn()
-      .mockResolvedValueOnce({
-        success: true,
-        status: "acknowledged",
-        appliedStopLossPrice: null,
-        appliedTakeProfitPrice: 160,
-        droppedLegs: [{ leg: "sl", reason: "would trigger immediately" }],
-      })
-      .mockImplementation(async (p: { stopLossPrice?: number; takeProfitPrice?: number }) => ({
-        success: true,
-        status: "acknowledged",
-        appliedStopLossPrice: p.stopLossPrice ?? null,
-        appliedTakeProfitPrice: p.takeProfitPrice ?? null,
-      }));
+    const moveLiveBreakevenStop = vi.fn(async () => ({
+      success: false,
+      status: "rejected" as const,
+      error: "live_breakeven_post_verification_failed_original_restored",
+      postCallVerified: false,
+      restorationOutcome: "restored_verified" as const,
+      requiresCloseAndPause: false,
+    }));
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
-      setTpSl,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -5228,9 +5492,7 @@ describe("breakeven protect", () => {
 
     await monitorBotOnce(makeBot({ paperMode: false }));
 
-    expect(setTpSl).toHaveBeenCalledTimes(2);
-    // Restore call carries the ORIGINAL bracket.
-    expect(setTpSl.mock.calls[1][0]).toMatchObject({ stopLossPrice: 145, takeProfitPrice: 160 });
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
     expect(updateDecisionMock).not.toHaveBeenCalled();
     expect((adapter as any).closePosition).not.toHaveBeenCalled();
   });
@@ -5238,18 +5500,18 @@ describe("breakeven protect", () => {
   it("live (pacifica): dropped leg + failed restore closes the position (fail closed)", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
-    const setTpSl = vi.fn()
-      .mockResolvedValueOnce({
-        success: true,
-        status: "acknowledged",
-        appliedStopLossPrice: null,
-        appliedTakeProfitPrice: 160,
-        droppedLegs: [{ leg: "sl", reason: "would trigger immediately" }],
-      })
-      .mockResolvedValueOnce({ success: false, status: "rejected", error: "restore failed" });
+    const moveLiveBreakevenStop = vi.fn(async () => ({
+      success: false,
+      status: "rejected" as const,
+      error: "live_breakeven_restoration_unverified",
+      postCallVerified: false,
+      restorationOutcome: "restoration_unverified" as const,
+      requiresCloseAndPause: true,
+    }));
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
-      setTpSl,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
@@ -5261,22 +5523,32 @@ describe("breakeven protect", () => {
     expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "bracket_failed")).toBe(true);
   });
 
-  it("live: venue-move retries are bounded per decision", async () => {
+  it("live: an exhausted durable claim suppresses the remaining ticks for the decision epoch", async () => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
-    const setTpSl = vi.fn(async () => ({ success: false, status: "rejected", error: "always no" }));
+    claimLiveBreakevenAttemptMock.mockResolvedValue({ status: "exhausted" });
+    const moveLiveBreakevenStop = vi.fn(async (params: MoveLiveBreakevenStopParams) => {
+      const claim = await params.claimAttempt();
+      return {
+        success: false,
+        status: "rejected" as const,
+        error: `live_breakeven_claim_${claim.status}`,
+      };
+    });
     const adapter = makeAdapter({
       getPositions: vi.fn(async () => [openPosition]),
-      setTpSl,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop,
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     fetchOHLCVMock.mockResolvedValue(progressCandles());
     const bot = makeBot({ paperMode: false });
 
-    for (let i = 0; i < 8; i++) await monitorBotOnce(bot);
+    for (let i = 0; i < 10; i++) await monitorBotOnce(bot);
 
-    expect(setTpSl).toHaveBeenCalledTimes(5); // BREAKEVEN_MAX_MOVE_ATTEMPTS
+    expect(moveLiveBreakevenStop).toHaveBeenCalledTimes(1);
+    expect(claimLiveBreakevenAttemptMock).toHaveBeenCalledTimes(1);
   });
 
   it("live: an unknown venue never moves the stop blind", async () => {

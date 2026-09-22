@@ -135,6 +135,19 @@ export interface PacificaTradeHistoryEnvelope {
   has_more: boolean;
 }
 
+export interface PacificaRecentTradeResponse {
+  symbol?: string;
+  price: string;
+  created_at: number;
+  [key: string]: unknown;
+}
+
+export interface PacificaStrictEnvelope<T> {
+  success: true;
+  data: T[];
+  last_order_id?: string | number;
+}
+
 export interface PacificaEquityHistoryPoint {
   equity: string;
   timestamp: number;

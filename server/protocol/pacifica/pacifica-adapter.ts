@@ -43,7 +43,12 @@ import type {
   SettleResult,
   AdapterCapabilities,
   Unsubscribe,
+  LiveBreakevenNativeSnapshot,
+  LiveBreakevenSnapshotParams,
+  MoveLiveBreakevenStopParams,
+  LiveBreakevenMoveResult,
 } from '../protocol-types.js';
+import { liveBreakevenFingerprint } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
 import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
 import { PACIFICA_USDC_MINT, PACIFICA_MIN_TRANSFER_USDC, PACIFICA_RECYCLE_EMPTY_USDC } from './pacifica-constants.js';
@@ -80,12 +85,15 @@ import type {
   PacificaSubaccountResponse,
   PacificaOrderbookLevel,
   PacificaFundingResponse,
+  PacificaRecentTradeResponse,
+  PacificaStrictEnvelope,
 } from './pacifica-types.js';
 import { mapToProtocolSide } from './pacifica-types.js';
 import { pacificaQuota, QuotaExhaustedError, type RequestPriority } from './pacifica-quota.js';
 import { pacificaCache } from './pacifica-cache.js';
 import { appendTelemetry } from '../../telemetry.js';
 import { UNCONFIRMED_LANDING_VERDICT_TOKEN } from '../tx-verdicts.js';
+import Decimal from 'decimal.js';
 
 const MAX_MARKET_CACHE_SIZE = 200;
 const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -1704,8 +1712,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     // (TP=0, SL=0) which is used by /cancel-tpsl to clear existing triggers.
     //
     // Note: callers of setTpSl are the user-facing /set-tpsl and /cancel-tpsl
-    // routes plus the AI Trader monitor (G10 bracket re-place and the
-    // breakeven-protect move). All of them observe the structured
+    // routes plus the AI Trader monitor's G10 bracket re-place. The dedicated
+    // breakeven ratchet does not use this generic path. All callers observe the structured
     // { success: false } / droppedLegs result and apply their own bounded
     // retry or fail-closed handling — no retry loop belongs here.
     let droppedLegMessage: string | null = null;
@@ -1846,6 +1854,655 @@ export class PacificaAdapter implements ProtocolAdapter {
       ...(droppedLegs.length ? { droppedLegs } : {}),
       ...(droppedLegMessage ? { error: droppedLegMessage } : {}),
     };
+  }
+
+  private strictBreakevenDecimal(value: unknown, field: string): string {
+    if (typeof value !== 'string' || value.length === 0 || value.length > 80
+        || !/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(value)) {
+      throw new Error(`Pacifica live-breakeven ${field} malformed`);
+    }
+    try {
+      if (!new Decimal(value).isFinite()) throw new Error('non-finite');
+    } catch {
+      throw new Error(`Pacifica live-breakeven ${field} malformed`);
+    }
+    return value;
+  }
+
+  private strictBreakevenInteger(value: unknown, field: string): string {
+    if (typeof value === 'number' && (!Number.isSafeInteger(value) || value < 0)) {
+      throw new Error(`Pacifica live-breakeven ${field} malformed`);
+    }
+    const text = typeof value === 'number' ? String(value) : value;
+    if (typeof text !== 'string' || text.length === 0 || text.length > 80
+        || !/^(?:0|[1-9][0-9]*)$/.test(text)) {
+      throw new Error(`Pacifica live-breakeven ${field} malformed`);
+    }
+    return text;
+  }
+
+  private async strictBreakevenGet<T>(
+    path: string,
+    params: Record<string, string>,
+    deadlineAtMs: number,
+  ): Promise<{ envelope: PacificaStrictEnvelope<T>; readStartedAtMs: number; readCompletedAtMs: number }> {
+    const readStartedAtMs = Date.now();
+    const remainingMs = deadlineAtMs - readStartedAtMs;
+    if (!Number.isSafeInteger(deadlineAtMs) || remainingMs <= 0 || remainingMs > 5_000) {
+      throw new Error('Pacifica live-breakeven deadline invalid');
+    }
+    if (!pacificaQuota.tryClaimImmediate(path, 'normal')) {
+      throw new QuotaExhaustedError(path, pacificaQuota.currentSpend());
+    }
+    const query = new URLSearchParams(params);
+    const url = `${this.config.baseUrl}${path}${query.size > 0 ? `?${query.toString()}` : ''}`;
+    const response = await this.fetchBounded(
+      url,
+      { method: 'GET', headers: { 'Content-Type': 'application/json' } },
+      remainingMs,
+      remainingMs,
+      `GET ${path} live-breakeven`,
+    );
+    if (!response.ok) throw new Error(`Pacifica live-breakeven ${path} HTTP ${response.status}`);
+    const bodyRemainingMs = deadlineAtMs - Date.now();
+    if (bodyRemainingMs <= 0) throw new Error('Pacifica live-breakeven deadline elapsed');
+    const json = await this.readBodyBounded(response.json(), bodyRemainingMs, `GET ${path} live-breakeven`);
+    const readCompletedAtMs = Date.now();
+    const envelope = json as Record<string, unknown> | null;
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+        || envelope.success !== true
+        || !Array.isArray(envelope.data)
+        || (envelope.error !== undefined && envelope.error !== null)
+        || (envelope.code !== undefined && envelope.code !== null)
+        || readCompletedAtMs > deadlineAtMs) {
+      throw new Error(`Pacifica live-breakeven ${path} envelope malformed`);
+    }
+    return { envelope: json as PacificaStrictEnvelope<T>, readStartedAtMs, readCompletedAtMs };
+  }
+
+  private async readBreakevenBuilderApproval(agentPublicKey: string): Promise<boolean> {
+    try {
+      const { storage } = await import('../../storage.js');
+      const wallet = await storage.getWalletByAgentPublicKey(agentPublicKey);
+      const bot = wallet ? null : await storage.getBotByAgentPublicKey(agentPublicKey);
+      return (wallet ?? bot)?.pacificaBuilderApproved === true;
+    } catch {
+      return false;
+    }
+  }
+
+  async getLiveBreakevenAuthoritySnapshot(
+    params: LiveBreakevenSnapshotParams,
+  ): Promise<LiveBreakevenNativeSnapshot> {
+    const startedAtMs = Date.now();
+    if (params.deadlineAtMs <= startedAtMs || params.deadlineAtMs - startedAtMs > 5_000) {
+      throw new Error('Pacifica live-breakeven compound deadline invalid');
+    }
+    const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
+    const positions = await this.strictBreakevenGet<PacificaPositionResponse>(
+      '/positions', { account: params.agentPublicKey }, params.deadlineAtMs,
+    );
+    const orders = await this.strictBreakevenGet<Record<string, unknown>>(
+      '/orders', { account: params.agentPublicKey }, params.deadlineAtMs,
+    );
+    const trades = await this.strictBreakevenGet<PacificaRecentTradeResponse>(
+      '/trades', { symbol: protocolSymbol }, params.deadlineAtMs,
+    );
+    const positionRows = positions.envelope.data.filter((row) => row?.symbol === protocolSymbol);
+    if (positionRows.length !== 1) throw new Error('Pacifica live-breakeven position not unique');
+    const positionRow = positionRows[0];
+    const sideText = String(positionRow.side).toLowerCase();
+    const side = sideText === 'bid' || sideText === 'long'
+      ? 'long' : sideText === 'ask' || sideText === 'short' ? 'short' : null;
+    if (!side) throw new Error('Pacifica live-breakeven position side malformed');
+    const positionCreatedAtMs = this.strictBreakevenInteger(
+      positionRow.created_at,
+      'position created at',
+    );
+    const position = {
+      sourceRecordId: liveBreakevenFingerprint({
+        protocol: 'pacifica',
+        account: params.agentPublicKey,
+        protocolSymbol,
+        side,
+        createdAtMs: positionCreatedAtMs,
+      }),
+      side,
+      baseSize: this.strictBreakevenDecimal(positionRow.amount ?? positionRow.size, 'position amount'),
+      entryPrice: this.strictBreakevenDecimal(positionRow.entry_price, 'position entry'),
+    } as const;
+    const classifyTriggerBasis = (value: unknown): import('../protocol-types.js').LiveBreakevenTriggerBasis => {
+      if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+        return 'absent';
+      }
+      if (typeof value !== 'string') return 'malformed';
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'last_trade_price' || normalized === 'target_internal_oracle') {
+        return normalized;
+      }
+      return 'unsupported';
+    };
+    const protectiveOrders = orders.envelope.data
+      .filter((row) => row?.symbol === protocolSymbol)
+      .filter((row) => /^(?:stop_loss|take_profit)_(?:market|limit)$/.test(String(row.order_type ?? '').toLowerCase()))
+      .map((row) => {
+        const rawType = String(row.order_type).toLowerCase();
+        const rawSide = String(row.side ?? '').toLowerCase();
+        const triggerBasis = classifyTriggerBasis(row.trigger_price_type);
+        const mappedSide: 'sell' | 'buy' | null = rawSide === 'ask' || rawSide === 'sell'
+          ? 'sell' : rawSide === 'bid' || rawSide === 'buy' ? 'buy' : null;
+        if (!mappedSide || row.reduce_only !== true) {
+          throw new Error('Pacifica live-breakeven protective order malformed');
+        }
+        const initialSize = this.strictBreakevenDecimal(row.initial_amount, 'initial amount');
+        const filledSize = this.strictBreakevenDecimal(row.filled_amount, 'filled amount');
+        const cancelledSize = this.strictBreakevenDecimal(row.cancelled_amount, 'cancelled amount');
+        const remaining = new Decimal(initialSize).minus(filledSize).minus(cancelledSize);
+        if (!remaining.isFinite() || remaining.lt(0)) {
+          throw new Error('Pacifica live-breakeven remaining amount malformed');
+        }
+        return {
+          orderId: this.strictBreakevenInteger(row.order_id, 'order id'),
+          orderAccount: params.agentPublicKey,
+          orderType: rawType.startsWith('stop_loss') ? 'stop_loss' as const : 'take_profit' as const,
+          side: mappedSide,
+          triggerBasis,
+          triggerPrice: this.strictBreakevenDecimal(row.stop_price, 'trigger price'),
+          initialSize,
+          remainingSize: remaining.toFixed(),
+          reduceOnly: true as const,
+        };
+      })
+      .sort((left, right) => left.orderType.localeCompare(right.orderType)
+        || left.orderId.localeCompare(right.orderId));
+    const observedTriggerBases = new Set(protectiveOrders.map((row) => row.triggerBasis));
+    const triggerBasisStatus: import('../protocol-types.js').LiveBreakevenTriggerBasis =
+      observedTriggerBases.has('malformed') ? 'malformed'
+        : observedTriggerBases.has('unsupported') ? 'unsupported'
+          : observedTriggerBases.size === 0 ? 'absent'
+            : observedTriggerBases.size > 1 ? 'mixed'
+              : [...observedTriggerBases][0];
+    const recentTrades = {
+      lastOrderId: this.strictBreakevenInteger(trades.envelope.last_order_id, 'trade watermark'),
+      rows: trades.envelope.data.map((row) => {
+        if ((row?.symbol !== undefined && row.symbol !== protocolSymbol)
+            || !Number.isSafeInteger(row.created_at)) {
+          throw new Error('Pacifica live-breakeven recent trade malformed');
+        }
+        return {
+          symbol: protocolSymbol,
+          price: this.strictBreakevenDecimal(row.price, 'recent trade price'),
+          createdAtMs: row.created_at,
+          sourceRecordFingerprint: liveBreakevenFingerprint(row),
+        };
+      }),
+    };
+    const ordersLastOrderId = this.strictBreakevenInteger(
+      orders.envelope.last_order_id,
+      'orders watermark',
+    );
+    const positionLastOrderId = this.strictBreakevenInteger(
+      positions.envelope.last_order_id,
+      'position watermark',
+    );
+    const positionBody = {
+      protocol: 'pacifica' as const,
+      account: params.agentPublicKey,
+      subaccountId: null,
+      internalSymbol: params.internalSymbol,
+      protocolSymbol,
+      position,
+    };
+    const bracketBody = {
+      protocol: 'pacifica' as const,
+      account: params.agentPublicKey,
+      subaccountId: null,
+      internalSymbol: params.internalSymbol,
+      protocolSymbol,
+      triggerBasisStatus,
+      protectiveOrders,
+    };
+    const stateBody = {
+      ...positionBody,
+      positionLastOrderId,
+      ordersLastOrderId,
+      triggerBasisStatus,
+      protectiveOrders,
+    };
+    const sourceBody = {
+      ...stateBody,
+      readStartedAtMs: startedAtMs,
+      readCompletedAtMs: trades.readCompletedAtMs,
+      recentTrades,
+    };
+    return {
+      schemaVersion: 1,
+      ...sourceBody,
+      positionFingerprint: liveBreakevenFingerprint(positionBody),
+      bracketFingerprint: liveBreakevenFingerprint(bracketBody),
+      stateFingerprint: liveBreakevenFingerprint(stateBody),
+      sourceFingerprint: liveBreakevenFingerprint(sourceBody),
+    };
+  }
+
+  async moveLiveBreakevenStop(
+    params: MoveLiveBreakevenStopParams,
+  ): Promise<LiveBreakevenMoveResult> {
+    const permit = params.permit;
+    const exactKeys = (value: unknown, keys: readonly string[]): boolean => Boolean(value)
+      && typeof value === 'object' && !Array.isArray(value)
+      && Object.keys(value as Record<string, unknown>).sort().join('\u0000')
+        === [...keys].sort().join('\u0000');
+    const denied = (
+      error: string,
+      details: Partial<LiveBreakevenMoveResult> = {},
+    ): LiveBreakevenMoveResult => ({ success: false, status: 'rejected', error, ...details });
+    if (!exactKeys(permit, ['schemaVersion', 'fingerprint', 'binding'])
+        || !exactKeys(permit.binding, [
+          'policyVersion', 'decisionId', 'botId', 'protocol', 'account',
+          'subaccountId', 'internalSymbol', 'protocolSymbol', 'side', 'entryPrice',
+          'takeProfitPrice', 'currentStopPrice', 'candidateStopPrice', 'positionSize',
+          'analyticalProgress', 'nativeProgress', 'analyticalWindowFingerprint',
+          'nativeSourceFingerprint', 'positionEpochFingerprint',
+          'positionStateFingerprint', 'bracketFingerprint',
+          'positionLastOrderId', 'ordersLastOrderId', 'tradesLastOrderId',
+          'sourceTimeMs', 'readStartedAtMs', 'readCompletedAtMs', 'issuedAtMs',
+          'expiresAtMs', 'triggerBasis',
+        ])
+        || permit.schemaVersion !== 1 || liveBreakevenFingerprint(permit.binding) !== permit.fingerprint
+        || permit.binding.policyVersion !== 'owner-accepted-v1.1'
+        || permit.binding.protocol !== 'pacifica' || permit.binding.account !== params.agentPublicKey
+        || permit.binding.subaccountId !== null || params.subaccountId !== undefined
+        || permit.binding.internalSymbol !== params.internalSymbol
+        || typeof permit.binding.decisionId !== 'string' || permit.binding.decisionId.length === 0
+        || permit.binding.decisionId.length > 200
+        || typeof permit.binding.botId !== 'string' || permit.binding.botId.length === 0
+        || permit.binding.botId.length > 200
+        || typeof permit.binding.account !== 'string' || permit.binding.account.length === 0
+        || permit.binding.account.length > 200
+        || typeof permit.binding.internalSymbol !== 'string' || permit.binding.internalSymbol.length === 0
+        || permit.binding.internalSymbol.length > 80
+        || typeof permit.binding.protocolSymbol !== 'string' || permit.binding.protocolSymbol.length === 0
+        || permit.binding.protocolSymbol.length > 80
+        || (permit.binding.side !== 'long' && permit.binding.side !== 'short')
+        || permit.binding.triggerBasis !== 'last_trade_price') {
+      return denied('live_breakeven_permit_invalid');
+    }
+    let expectedProtocolSymbol: string;
+    try {
+      expectedProtocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
+    } catch {
+      return denied('live_breakeven_permit_invalid');
+    }
+    if (permit.binding.protocolSymbol !== expectedProtocolSymbol) {
+      return denied('live_breakeven_permit_invalid');
+    }
+    const fingerprints = [
+      permit.fingerprint,
+      permit.binding.analyticalWindowFingerprint,
+      permit.binding.nativeSourceFingerprint,
+      permit.binding.positionEpochFingerprint,
+      permit.binding.positionStateFingerprint,
+      permit.binding.bracketFingerprint,
+    ];
+    const times = [
+      permit.binding.sourceTimeMs,
+      permit.binding.readStartedAtMs,
+      permit.binding.readCompletedAtMs,
+      permit.binding.issuedAtMs,
+      permit.binding.expiresAtMs,
+    ];
+    if (fingerprints.some((value) => typeof value !== 'string' || !/^[0-9A-F]{64}$/.test(value))
+        || times.some((value) => !Number.isSafeInteger(value))
+        || permit.binding.readStartedAtMs > permit.binding.readCompletedAtMs
+        || permit.binding.readCompletedAtMs > permit.binding.issuedAtMs
+        || permit.binding.sourceTimeMs > permit.binding.issuedAtMs
+        || permit.binding.readCompletedAtMs - permit.binding.readStartedAtMs > 5_000
+        || permit.binding.issuedAtMs - permit.binding.readCompletedAtMs > 5_000
+        || permit.binding.issuedAtMs - permit.binding.sourceTimeMs > 5_000
+        || permit.binding.expiresAtMs < permit.binding.issuedAtMs
+        || permit.binding.expiresAtMs - permit.binding.issuedAtMs > 5_000) {
+      return denied('live_breakeven_permit_invalid');
+    }
+    const permitWatermarks = [
+      permit.binding.positionLastOrderId,
+      permit.binding.ordersLastOrderId,
+      permit.binding.tradesLastOrderId,
+    ];
+    if (permitWatermarks.some((value) => typeof value !== 'string' || value.length === 0
+        || value.length > 80 || !/^(?:0|[1-9][0-9]*)$/.test(value))) {
+      return denied('live_breakeven_permit_invalid');
+    }
+    try {
+      for (const field of [
+        permit.binding.entryPrice,
+        permit.binding.takeProfitPrice,
+        permit.binding.currentStopPrice,
+        permit.binding.candidateStopPrice,
+        permit.binding.positionSize,
+      ]) {
+        if (typeof field !== 'string' || field.length === 0 || field.length > 80
+            || !/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(field)
+            || !new Decimal(field).isFinite() || !new Decimal(field).gt(0)) {
+          return denied('live_breakeven_permit_invalid');
+        }
+      }
+      if (typeof permit.binding.analyticalProgress !== 'string'
+          || typeof permit.binding.nativeProgress !== 'string'
+          || permit.binding.analyticalProgress.length > 80
+          || permit.binding.nativeProgress.length > 80
+          || !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(permit.binding.analyticalProgress)
+          || !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(permit.binding.nativeProgress)
+          || new Decimal(permit.binding.analyticalProgress).lt(0.75)
+          || new Decimal(permit.binding.nativeProgress).lt(0.75)) {
+        return denied('live_breakeven_permit_invalid');
+      }
+      const entry = new Decimal(permit.binding.entryPrice);
+      const takeProfit = new Decimal(permit.binding.takeProfitPrice);
+      const currentStop = new Decimal(permit.binding.currentStopPrice);
+      const candidateStop = new Decimal(permit.binding.candidateStopPrice);
+      const validGeometry = permit.binding.side === 'long'
+        ? takeProfit.gt(candidateStop) && candidateStop.gt(entry) && candidateStop.gt(currentStop)
+        : takeProfit.lt(candidateStop) && candidateStop.lt(entry) && candidateStop.lt(currentStop);
+      if (!validGeometry) return denied('live_breakeven_permit_invalid');
+    } catch {
+      return denied('live_breakeven_permit_invalid');
+    }
+    if (Date.now() > permit.binding.expiresAtMs) return denied('live_breakeven_permit_expired');
+    let signer: PacificaSigner;
+    try {
+      signer = new PacificaSigner(params.agentSecretKey);
+      if (signer.getPublicKey() !== params.agentPublicKey) {
+        return denied('live_breakeven_signer_account_mismatch');
+      }
+    } catch {
+      return denied('live_breakeven_signer_account_mismatch');
+    }
+    const builderApproved = await this.readBreakevenBuilderApproval(params.agentPublicKey);
+    if (Date.now() > permit.binding.expiresAtMs) return denied('live_breakeven_permit_expired');
+    const current = await this.getLiveBreakevenAuthoritySnapshot({
+      agentPublicKey: params.agentPublicKey,
+      internalSymbol: params.internalSymbol,
+      deadlineAtMs: permit.binding.expiresAtMs,
+    });
+    if (current.positionFingerprint !== permit.binding.positionStateFingerprint
+        || current.bracketFingerprint !== permit.binding.bracketFingerprint
+        || current.account !== permit.binding.account || current.subaccountId !== null
+        || current.internalSymbol !== permit.binding.internalSymbol
+        || current.protocolSymbol !== permit.binding.protocolSymbol
+        || current.position.sourceRecordId !== permit.binding.positionEpochFingerprint
+        || current.position.side !== permit.binding.side
+        || current.position.baseSize !== permit.binding.positionSize
+        || current.position.entryPrice !== permit.binding.entryPrice
+        || current.protectiveOrders.length !== 2) {
+      return denied('live_breakeven_position_or_bracket_changed');
+    }
+    if (BigInt(current.positionLastOrderId) < BigInt(permit.binding.positionLastOrderId)
+        || BigInt(current.ordersLastOrderId) < BigInt(permit.binding.ordersLastOrderId)
+        || BigInt(current.recentTrades.lastOrderId) < BigInt(permit.binding.tradesLastOrderId)) {
+      return denied('live_breakeven_source_watermark_regressed');
+    }
+    const expectedSide = permit.binding.side === 'long' ? 'sell' : 'buy';
+    const currentStops = current.protectiveOrders.filter((row) => row.orderType === 'stop_loss');
+    const currentTakeProfits = current.protectiveOrders.filter((row) => row.orderType === 'take_profit');
+    try {
+      if (currentStops.length !== 1 || currentTakeProfits.length !== 1
+          || !current.protectiveOrders.every((row) => row.orderAccount === permit.binding.account
+            && row.side === expectedSide && row.reduceOnly === true
+            && row.triggerBasis === 'last_trade_price'
+            && new Decimal(row.remainingSize).gte(permit.binding.positionSize))
+          || !new Decimal(currentStops[0].triggerPrice).eq(permit.binding.currentStopPrice)
+          || !new Decimal(currentTakeProfits[0].triggerPrice).eq(permit.binding.takeProfitPrice)) {
+        return denied('live_breakeven_position_or_bracket_changed');
+      }
+    } catch {
+      return denied('live_breakeven_position_or_bracket_changed');
+    }
+    const newestAt = Math.max(...current.recentTrades.rows.map((row) => row.createdAtMs));
+    const newestPrices = new Set(current.recentTrades.rows
+      .filter((row) => row.createdAtMs === newestAt).map((row) => row.price));
+    const preClaimNow = Date.now();
+    if (newestPrices.size !== 1) return denied('live_breakeven_trade_ambiguous');
+    if (!Number.isSafeInteger(newestAt) || newestAt > current.readCompletedAtMs
+        || newestAt > preClaimNow || preClaimNow - newestAt > 5_000) {
+      return denied('live_breakeven_trade_stale_or_future');
+    }
+    let currentPrice: Decimal;
+    let candidateStop: Decimal;
+    try {
+      currentPrice = new Decimal([...newestPrices][0]);
+      candidateStop = new Decimal(permit.binding.candidateStopPrice);
+    } catch {
+      return denied('live_breakeven_trade_malformed');
+    }
+    const stillFavorable = permit.binding.side === 'long'
+      ? currentPrice.gt(candidateStop) : currentPrice.lt(candidateStop);
+    if (!currentPrice.isFinite() || !candidateStop.isFinite() || !stillFavorable) {
+      return denied('live_breakeven_price_retraced');
+    }
+    const entryPrice = new Decimal(permit.binding.entryPrice);
+    const takeProfitPrice = new Decimal(permit.binding.takeProfitPrice);
+    const nativeDistance = permit.binding.side === 'long'
+      ? takeProfitPrice.minus(entryPrice) : entryPrice.minus(takeProfitPrice);
+    const currentNativeProgress = permit.binding.side === 'long'
+      ? currentPrice.minus(entryPrice).div(nativeDistance)
+      : entryPrice.minus(currentPrice).div(nativeDistance);
+    if (!nativeDistance.gt(0) || !currentNativeProgress.isFinite()
+        || currentNativeProgress.lt(0.75)) {
+      return denied('live_breakeven_native_threshold_not_met_preclaim');
+    }
+    if (Date.now() > permit.binding.expiresAtMs) return denied('live_breakeven_permit_expired');
+    const claim = await params.claimAttempt();
+    if (claim.status !== 'claimed') return denied(`live_breakeven_claim_${claim.status}`);
+    const claimDetails = {
+      attemptId: claim.attemptId,
+      attemptOrdinal: claim.ordinal,
+      authorityFingerprint: permit.fingerprint,
+    };
+    if (Date.now() > permit.binding.expiresAtMs) {
+      return denied('live_breakeven_permit_expired_after_claim', claimDetails);
+    }
+    const closingSide = permit.binding.side === 'long' ? 'ask' : 'bid';
+    const buildOperationData = (takeProfitPrice: string, stopLossPrice: string): Record<string, unknown> => {
+      const tpLimitRaw = permit.binding.side === 'long'
+        ? new Decimal(takeProfitPrice).mul('0.999')
+        : new Decimal(takeProfitPrice).mul('1.001');
+      const operationData: Record<string, unknown> = {
+        symbol: permit.binding.protocolSymbol,
+        side: closingSide,
+        take_profit: {
+          stop_price: takeProfitPrice,
+          limit_price: String(this.quantizePrice(params.internalSymbol, tpLimitRaw.toNumber())),
+          trigger_price_type: 'last_trade_price',
+        },
+        stop_loss: {
+          stop_price: stopLossPrice,
+          trigger_price_type: 'last_trade_price',
+        },
+      };
+      if (params.builderAttachment?.mode === 'attach') {
+        operationData.builder_code = params.builderAttachment.code;
+      } else if (params.builderAttachment?.mode !== 'suppress'
+          && builderApproved && this.config.builderCode) {
+        operationData.builder_code = this.config.builderCode;
+      }
+      return operationData;
+    };
+    const snapshotMatches = (
+      snapshot: LiveBreakevenNativeSnapshot,
+      expectedTakeProfit: string,
+      expectedStop: string,
+    ): boolean => {
+      if (snapshot.positionFingerprint !== permit.binding.positionStateFingerprint
+          || snapshot.account !== permit.binding.account || snapshot.subaccountId !== null
+          || snapshot.internalSymbol !== permit.binding.internalSymbol
+          || snapshot.protocolSymbol !== permit.binding.protocolSymbol
+          || snapshot.position.side !== permit.binding.side
+          || snapshot.position.baseSize !== permit.binding.positionSize
+          || snapshot.position.entryPrice !== permit.binding.entryPrice
+          || snapshot.triggerBasisStatus !== 'last_trade_price'
+          || snapshot.protectiveOrders.length !== 2) return false;
+      const expectedSide = permit.binding.side === 'long' ? 'sell' : 'buy';
+      const stop = snapshot.protectiveOrders.filter((row) => row.orderType === 'stop_loss');
+      const takeProfit = snapshot.protectiveOrders.filter((row) => row.orderType === 'take_profit');
+      if (stop.length !== 1 || takeProfit.length !== 1) return false;
+      return [stop[0], takeProfit[0]].every((row) => row.orderAccount === permit.binding.account
+          && row.side === expectedSide && row.reduceOnly === true
+          && row.triggerBasis === 'last_trade_price'
+          && new Decimal(row.remainingSize).gte(permit.binding.positionSize))
+        && new Decimal(stop[0].triggerPrice).eq(expectedStop)
+        && new Decimal(takeProfit[0].triggerPrice).eq(expectedTakeProfit);
+    };
+    const snapshotSafeForOriginalRestoration = (
+      snapshot: LiveBreakevenNativeSnapshot,
+    ): boolean => {
+      if (snapshot.positionFingerprint !== permit.binding.positionStateFingerprint
+          || snapshot.account !== permit.binding.account || snapshot.subaccountId !== null
+          || snapshot.internalSymbol !== permit.binding.internalSymbol
+          || snapshot.protocolSymbol !== permit.binding.protocolSymbol
+          || snapshot.position.side !== permit.binding.side
+          || snapshot.position.baseSize !== permit.binding.positionSize
+          || snapshot.position.entryPrice !== permit.binding.entryPrice
+          || snapshot.triggerBasisStatus !== 'last_trade_price'
+          || snapshot.protectiveOrders.length === 0
+          || snapshot.protectiveOrders.length > 2) return false;
+      const expectedSide = permit.binding.side === 'long' ? 'sell' : 'buy';
+      const stops = snapshot.protectiveOrders.filter((row) => row.orderType === 'stop_loss');
+      const takeProfits = snapshot.protectiveOrders.filter((row) => row.orderType === 'take_profit');
+      if (stops.length > 1 || takeProfits.length > 1) return false;
+      try {
+        if (!snapshot.protectiveOrders.every((row) => row.orderAccount === permit.binding.account
+            && row.side === expectedSide && row.reduceOnly === true
+            && row.triggerBasis === 'last_trade_price'
+            && new Decimal(row.remainingSize).gte(permit.binding.positionSize))) return false;
+        if (takeProfits.length === 1
+            && !new Decimal(takeProfits[0].triggerPrice).eq(permit.binding.takeProfitPrice)) return false;
+        if (stops.length === 1
+            && !new Decimal(stops[0].triggerPrice).eq(permit.binding.currentStopPrice)
+            && !new Decimal(stops[0].triggerPrice).eq(permit.binding.candidateStopPrice)) return false;
+      } catch {
+        return false;
+      }
+      return true;
+    };
+    const freshSnapshot = async (): Promise<LiveBreakevenNativeSnapshot | null> => {
+      try {
+        return await this.getLiveBreakevenAuthoritySnapshot({
+          agentPublicKey: params.agentPublicKey,
+          internalSymbol: params.internalSymbol,
+          deadlineAtMs: Date.now() + 5_000,
+        });
+      } catch {
+        return null;
+      }
+    };
+    let response: any = null;
+    try {
+      const operationData = buildOperationData(
+        permit.binding.takeProfitPrice,
+        permit.binding.candidateStopPrice,
+      );
+      const body = signer.buildRequestBody(
+        OPERATION_TYPES.SET_POSITION_TPSL,
+        operationData,
+        params.agentPublicKey,
+        null,
+      );
+      if (Date.now() > permit.binding.expiresAtMs) {
+        return denied('live_breakeven_permit_expired_after_claim', claimDetails);
+      }
+      response = await this.post('/positions/tpsl', body);
+    } catch {
+      // The call may have landed despite an ambiguous transport failure. Verify
+      // the bracket before deciding whether restoration is required.
+    }
+    const postSnapshot = await freshSnapshot();
+    if (postSnapshot && snapshotMatches(
+      postSnapshot,
+      permit.binding.takeProfitPrice,
+      permit.binding.candidateStopPrice,
+    )) {
+      return {
+        success: true,
+        orderId: response?.order_id ?? response?.id,
+        status: 'acknowledged',
+        rawResponse: response,
+        appliedTakeProfitPrice: Number(permit.binding.takeProfitPrice),
+        appliedStopLossPrice: Number(permit.binding.candidateStopPrice),
+        ...claimDetails,
+        postCallVerified: true,
+        postVerificationSourceFingerprint: postSnapshot.sourceFingerprint,
+        postVerificationBracketFingerprint: postSnapshot.bracketFingerprint,
+        postVerificationReadCompletedAtMs: postSnapshot.readCompletedAtMs,
+        restorationOutcome: 'not_needed',
+        requiresCloseAndPause: false,
+      };
+    }
+    if (postSnapshot && snapshotMatches(
+      postSnapshot,
+      permit.binding.takeProfitPrice,
+      permit.binding.currentStopPrice,
+    )) {
+      return denied('live_breakeven_post_verification_failed_original_restored', {
+        ...claimDetails,
+        postCallVerified: false,
+        postVerificationSourceFingerprint: postSnapshot.sourceFingerprint,
+        postVerificationBracketFingerprint: postSnapshot.bracketFingerprint,
+        postVerificationReadCompletedAtMs: postSnapshot.readCompletedAtMs,
+        restorationOutcome: 'restored_verified',
+        requiresCloseAndPause: false,
+      });
+    }
+    if (!postSnapshot || !snapshotSafeForOriginalRestoration(postSnapshot)) {
+      return denied('live_breakeven_post_state_unsafe_for_restoration', {
+        ...claimDetails,
+        postCallVerified: false,
+        ...(postSnapshot ? {
+          postVerificationSourceFingerprint: postSnapshot.sourceFingerprint,
+          postVerificationBracketFingerprint: postSnapshot.bracketFingerprint,
+          postVerificationReadCompletedAtMs: postSnapshot.readCompletedAtMs,
+        } : {}),
+        restorationOutcome: 'restoration_unverified',
+        requiresCloseAndPause: true,
+      });
+    }
+    try {
+      const restoreData = buildOperationData(
+        permit.binding.takeProfitPrice,
+        permit.binding.currentStopPrice,
+      );
+      const restoreBody = signer.buildRequestBody(
+        OPERATION_TYPES.SET_POSITION_TPSL,
+        restoreData,
+        params.agentPublicKey,
+        null,
+      );
+      await this.post('/positions/tpsl', restoreBody);
+    } catch {
+      // A restoration transport error is also ambiguous; verify below.
+    }
+    const restoredSnapshot = await freshSnapshot();
+    if (restoredSnapshot && snapshotMatches(
+      restoredSnapshot,
+      permit.binding.takeProfitPrice,
+      permit.binding.currentStopPrice,
+    )) {
+      return denied('live_breakeven_post_verification_failed_original_restored', {
+        ...claimDetails,
+        postCallVerified: false,
+        postVerificationSourceFingerprint: restoredSnapshot.sourceFingerprint,
+        postVerificationBracketFingerprint: restoredSnapshot.bracketFingerprint,
+        postVerificationReadCompletedAtMs: restoredSnapshot.readCompletedAtMs,
+        restorationOutcome: 'restored_verified',
+        requiresCloseAndPause: false,
+      });
+    }
+    return denied('live_breakeven_restoration_unverified', {
+      ...claimDetails,
+      postCallVerified: false,
+      restorationOutcome: 'restoration_unverified',
+      requiresCloseAndPause: true,
+    });
   }
 
   async getOpenStopOrders(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string; side: string; stop_price: string; limit_price?: string; order_type?: string }>> {
@@ -3779,8 +4436,8 @@ export class PacificaAdapter implements ProtocolAdapter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           },
-          30_000,
           35_000,
+          30_000,
           `POST ${path}`,
         );
       } catch (error) {

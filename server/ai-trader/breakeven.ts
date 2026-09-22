@@ -9,6 +9,10 @@
 // tightens, never loosens. Applies to ALL AI Trader bots (paper + live,
 // scanner included) — always-on, no user knob (defaults over choices).
 
+import Decimal from 'decimal.js';
+import type { LiveBreakevenAuthorityPermit, LiveBreakevenNativeSnapshot } from '../protocol/protocol-types';
+import { liveBreakevenFingerprint } from '../protocol/protocol-types';
+
 import {
   evaluatePaperBracket,
   paperExitPrice,
@@ -62,6 +66,29 @@ export interface BreakevenProtectState {
   movedAt: string;
   /** Progress toward TP (0..1+) measured when the ratchet fired. */
   progressAtFire: number;
+  /** Historical analytical progress, retained separately from mutation authority. */
+  analyticalProgressAtFire?: number;
+  liveAuthority?: {
+    protocol: 'pacifica';
+    basis: 'last_trade_price';
+    sourceFingerprint: string;
+    positionEpochFingerprint: string;
+    positionStateFingerprint: string;
+    bracketFingerprint: string;
+    sourceTimeMs: number;
+    readCompletedAtMs: number;
+    attemptId: string;
+    attemptOrdinal: number;
+    requestedTakeProfitPrice: number;
+    requestedStopLossPrice: number;
+    appliedTakeProfitPrice: number;
+    appliedStopLossPrice: number;
+    postCallVerified: true;
+    postVerificationSourceFingerprint: string;
+    postVerificationBracketFingerprint: string;
+    postVerificationReadCompletedAtMs: number;
+    restorationOutcome: 'not_needed';
+  };
 }
 
 /**
@@ -79,11 +106,70 @@ export function parseBreakevenProtect(
   const o = raw as Record<string, unknown>;
   const numOk = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
   const movedAtMs = typeof o.movedAt === "string" ? new Date(o.movedAt).getTime() : NaN;
+  const analyticalProgressAtFire = numOk(o.analyticalProgressAtFire)
+    ? o.analyticalProgressAtFire
+    : undefined;
+  const authority = o.liveAuthority && typeof o.liveAuthority === "object"
+    ? o.liveAuthority as Record<string, unknown>
+    : null;
+  const liveAuthority = authority
+    && authority.protocol === "pacifica"
+    && authority.basis === "last_trade_price"
+    && typeof authority.sourceFingerprint === "string"
+    && LIVE_BREAKEVEN_HEX.test(authority.sourceFingerprint)
+    && typeof authority.positionEpochFingerprint === "string"
+    && LIVE_BREAKEVEN_HEX.test(authority.positionEpochFingerprint)
+    && typeof authority.positionStateFingerprint === "string"
+    && LIVE_BREAKEVEN_HEX.test(authority.positionStateFingerprint)
+    && typeof authority.bracketFingerprint === "string"
+    && LIVE_BREAKEVEN_HEX.test(authority.bracketFingerprint)
+    && Number.isSafeInteger(authority.sourceTimeMs)
+    && Number.isSafeInteger(authority.readCompletedAtMs)
+    && typeof authority.attemptId === "string"
+    && authority.attemptId.length > 0
+    && Number.isSafeInteger(authority.attemptOrdinal)
+    && Number(authority.attemptOrdinal) >= 1
+    && Number(authority.attemptOrdinal) <= BREAKEVEN_MAX_MOVE_ATTEMPTS
+    && numOk(authority.requestedTakeProfitPrice)
+    && numOk(authority.requestedStopLossPrice)
+    && numOk(authority.appliedTakeProfitPrice)
+    && numOk(authority.appliedStopLossPrice)
+    && authority.postCallVerified === true
+    && typeof authority.postVerificationSourceFingerprint === "string"
+    && LIVE_BREAKEVEN_HEX.test(authority.postVerificationSourceFingerprint)
+    && typeof authority.postVerificationBracketFingerprint === "string"
+    && LIVE_BREAKEVEN_HEX.test(authority.postVerificationBracketFingerprint)
+    && Number.isSafeInteger(authority.postVerificationReadCompletedAtMs)
+    && authority.restorationOutcome === "not_needed"
+    ? {
+        protocol: "pacifica" as const,
+        basis: "last_trade_price" as const,
+        sourceFingerprint: authority.sourceFingerprint,
+        positionEpochFingerprint: authority.positionEpochFingerprint,
+        positionStateFingerprint: authority.positionStateFingerprint,
+        bracketFingerprint: authority.bracketFingerprint,
+        sourceTimeMs: Number(authority.sourceTimeMs),
+        readCompletedAtMs: Number(authority.readCompletedAtMs),
+        attemptId: authority.attemptId,
+        attemptOrdinal: Number(authority.attemptOrdinal),
+        requestedTakeProfitPrice: authority.requestedTakeProfitPrice,
+        requestedStopLossPrice: authority.requestedStopLossPrice,
+        appliedTakeProfitPrice: authority.appliedTakeProfitPrice,
+        appliedStopLossPrice: authority.appliedStopLossPrice,
+        postCallVerified: true as const,
+        postVerificationSourceFingerprint: authority.postVerificationSourceFingerprint,
+        postVerificationBracketFingerprint: authority.postVerificationBracketFingerprint,
+        postVerificationReadCompletedAtMs: Number(authority.postVerificationReadCompletedAtMs),
+        restorationOutcome: "not_needed" as const,
+      }
+    : undefined;
   return {
     originalStopLossPrice: numOk(o.originalStopLossPrice) ? o.originalStopLossPrice : currentStopLossPrice,
     movedStopLossPrice: numOk(o.movedStopLossPrice) ? o.movedStopLossPrice : currentStopLossPrice,
     movedAt: Number.isFinite(movedAtMs) ? (o.movedAt as string) : new Date(fallbackMovedAtMs).toISOString(),
     progressAtFire: numOk(o.progressAtFire) ? o.progressAtFire : BREAKEVEN_TRIGGER_PROGRESS,
+    ...(analyticalProgressAtFire !== undefined ? { analyticalProgressAtFire } : {}),
+    ...(liveAuthority ? { liveAuthority } : {}),
   };
 }
 
@@ -203,6 +289,305 @@ export function isFavorableSideOf(side: PaperSide, price: number, level: number)
  */
 export function isTighterStop(side: PaperSide, candidateSl: number, currentSl: number): boolean {
   return side === "long" ? candidateSl > currentSl : candidateSl < currentSl;
+}
+
+export type LiveBreakevenAuthorityDenial =
+  | 'unsupported_protocol' | 'identity_mismatch' | 'malformed_snapshot'
+  | 'position_or_bracket_mismatch'
+  | 'stale_snapshot' | 'future_snapshot' | 'ambiguous_trade'
+  | 'no_recent_trade'
+  | 'protective_pair_not_proven' | 'trigger_basis_mismatch'
+  | 'analytical_threshold_not_met' | 'native_threshold_not_met'
+  | 'candidate_not_tighter' | 'candidate_outside_trade_range' | 'price_retraced';
+
+export type LiveBreakevenAuthorityResult =
+  | { authorized: true; permit: LiveBreakevenAuthorityPermit; nativeProgress: number }
+  | { authorized: false; reason: LiveBreakevenAuthorityDenial };
+
+const LIVE_BREAKEVEN_MAX_AGE_MS = 5_000;
+const LIVE_BREAKEVEN_HEX = /^[0-9A-F]{64}$/;
+const LIVE_BREAKEVEN_DECIMAL = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/;
+const LIVE_BREAKEVEN_INTEGER = /^(?:0|[1-9][0-9]*)$/;
+
+function exactLiveKeys(value: unknown, keys: readonly string[]): boolean {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value as Record<string, unknown>).sort().join('\u0000')
+      === [...keys].sort().join('\u0000');
+}
+
+function exactLiveDecimal(value: unknown, positive = true): Decimal | null {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 80
+      || !LIVE_BREAKEVEN_DECIMAL.test(value)) return null;
+  try {
+    const parsed = new Decimal(value);
+    if (!parsed.isFinite() || (positive ? !parsed.gt(0) : parsed.lt(0))) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function liveStateBody(snapshot: LiveBreakevenNativeSnapshot): unknown {
+  return {
+    protocol: snapshot.protocol,
+    account: snapshot.account,
+    subaccountId: snapshot.subaccountId,
+    internalSymbol: snapshot.internalSymbol,
+    protocolSymbol: snapshot.protocolSymbol,
+    positionLastOrderId: snapshot.positionLastOrderId,
+    ordersLastOrderId: snapshot.ordersLastOrderId,
+    triggerBasisStatus: snapshot.triggerBasisStatus,
+    position: snapshot.position,
+    protectiveOrders: snapshot.protectiveOrders,
+  };
+}
+
+function livePositionBody(snapshot: LiveBreakevenNativeSnapshot): unknown {
+  return {
+    protocol: snapshot.protocol,
+    account: snapshot.account,
+    subaccountId: snapshot.subaccountId,
+    internalSymbol: snapshot.internalSymbol,
+    protocolSymbol: snapshot.protocolSymbol,
+    position: snapshot.position,
+  };
+}
+
+function liveBracketBody(snapshot: LiveBreakevenNativeSnapshot): unknown {
+  return {
+    protocol: snapshot.protocol,
+    account: snapshot.account,
+    subaccountId: snapshot.subaccountId,
+    internalSymbol: snapshot.internalSymbol,
+    protocolSymbol: snapshot.protocolSymbol,
+    triggerBasisStatus: snapshot.triggerBasisStatus,
+    protectiveOrders: snapshot.protectiveOrders,
+  };
+}
+
+function liveSourceBody(snapshot: LiveBreakevenNativeSnapshot): unknown {
+  return {
+    ...(liveStateBody(snapshot) as Record<string, unknown>),
+    readStartedAtMs: snapshot.readStartedAtMs,
+    readCompletedAtMs: snapshot.readCompletedAtMs,
+    recentTrades: snapshot.recentTrades,
+  };
+}
+
+export function qualifyLiveBreakevenAuthority(input: {
+  decisionId: string;
+  botId: string;
+  side: PaperSide;
+  candidateStopPrice: string;
+  expectedEntryPrice: string;
+  expectedTakeProfitPrice: string;
+  expectedCurrentStopPrice: string;
+  analyticalProgress: number;
+  analyticalWindowFingerprint: string;
+  expectedAccount: string;
+  expectedInternalSymbol: string;
+  snapshot: LiveBreakevenNativeSnapshot;
+  nowMs: number;
+}): LiveBreakevenAuthorityResult {
+  const snapshot = input.snapshot;
+  if (!exactLiveKeys(snapshot, [
+    'schemaVersion', 'protocol', 'account', 'subaccountId', 'internalSymbol',
+    'protocolSymbol', 'readStartedAtMs', 'readCompletedAtMs', 'position',
+    'positionLastOrderId', 'ordersLastOrderId', 'triggerBasisStatus', 'protectiveOrders', 'recentTrades', 'positionFingerprint',
+    'bracketFingerprint', 'stateFingerprint', 'sourceFingerprint',
+  ]) || !exactLiveKeys(snapshot.position, ['sourceRecordId', 'side', 'baseSize', 'entryPrice'])
+      || !exactLiveKeys(snapshot.recentTrades, ['lastOrderId', 'rows'])
+      || !Array.isArray(snapshot.protectiveOrders)
+      || snapshot.protectiveOrders.some((row) => !exactLiveKeys(row, [
+        'orderId', 'orderAccount', 'orderType', 'side', 'triggerBasis',
+        'triggerPrice', 'initialSize', 'remainingSize', 'reduceOnly',
+      ])) || !Array.isArray(snapshot.recentTrades.rows)
+      || snapshot.recentTrades.rows.some((row) => !exactLiveKeys(
+        row,
+        ['symbol', 'price', 'createdAtMs', 'sourceRecordFingerprint'],
+      ))) return { authorized: false, reason: 'malformed_snapshot' };
+  if (snapshot.protocol !== 'pacifica') return { authorized: false, reason: 'unsupported_protocol' };
+  if (snapshot.schemaVersion !== 1
+      || typeof snapshot.positionLastOrderId !== 'string'
+      || typeof snapshot.ordersLastOrderId !== 'string'
+      || typeof snapshot.recentTrades.lastOrderId !== 'string'
+      || snapshot.positionLastOrderId.length > 80
+      || snapshot.ordersLastOrderId.length > 80
+      || snapshot.recentTrades.lastOrderId.length > 80
+      || !LIVE_BREAKEVEN_INTEGER.test(snapshot.positionLastOrderId)
+      || !LIVE_BREAKEVEN_INTEGER.test(snapshot.ordersLastOrderId)
+      || !LIVE_BREAKEVEN_INTEGER.test(snapshot.recentTrades.lastOrderId)) {
+    return { authorized: false, reason: 'malformed_snapshot' };
+  }
+  if (typeof input.decisionId !== 'string' || input.decisionId.length === 0
+      || typeof input.botId !== 'string' || input.botId.length === 0
+      || typeof input.expectedAccount !== 'string' || input.expectedAccount.length === 0
+      || typeof input.expectedInternalSymbol !== 'string' || input.expectedInternalSymbol.length === 0
+      || typeof snapshot.account !== 'string' || typeof snapshot.internalSymbol !== 'string'
+      || typeof snapshot.protocolSymbol !== 'string'
+      || snapshot.account !== input.expectedAccount || snapshot.subaccountId !== null
+      || snapshot.internalSymbol !== input.expectedInternalSymbol || snapshot.protocolSymbol.length === 0
+      || snapshot.position.side !== input.side) return { authorized: false, reason: 'identity_mismatch' };
+  if (!Number.isSafeInteger(input.nowMs) || !Number.isSafeInteger(snapshot.readStartedAtMs)
+      || !Number.isSafeInteger(snapshot.readCompletedAtMs)
+      || snapshot.readStartedAtMs > snapshot.readCompletedAtMs
+      || typeof input.analyticalWindowFingerprint !== 'string'
+      || typeof snapshot.positionFingerprint !== 'string'
+      || typeof snapshot.bracketFingerprint !== 'string'
+      || typeof snapshot.stateFingerprint !== 'string'
+      || typeof snapshot.sourceFingerprint !== 'string'
+      || !LIVE_BREAKEVEN_HEX.test(input.analyticalWindowFingerprint)
+      || !LIVE_BREAKEVEN_HEX.test(snapshot.positionFingerprint)
+      || !LIVE_BREAKEVEN_HEX.test(snapshot.bracketFingerprint)
+      || !LIVE_BREAKEVEN_HEX.test(snapshot.stateFingerprint)
+      || !LIVE_BREAKEVEN_HEX.test(snapshot.sourceFingerprint)
+      || snapshot.positionFingerprint !== liveBreakevenFingerprint(livePositionBody(snapshot))
+      || snapshot.bracketFingerprint !== liveBreakevenFingerprint(liveBracketBody(snapshot))
+      || snapshot.stateFingerprint !== liveBreakevenFingerprint(liveStateBody(snapshot))
+      || snapshot.sourceFingerprint !== liveBreakevenFingerprint(liveSourceBody(snapshot))) {
+    return { authorized: false, reason: 'malformed_snapshot' };
+  }
+  if (snapshot.readCompletedAtMs > input.nowMs) return { authorized: false, reason: 'future_snapshot' };
+  if (input.nowMs - snapshot.readCompletedAtMs > LIVE_BREAKEVEN_MAX_AGE_MS
+      || snapshot.readCompletedAtMs - snapshot.readStartedAtMs > LIVE_BREAKEVEN_MAX_AGE_MS) {
+    return { authorized: false, reason: 'stale_snapshot' };
+  }
+  if (!Number.isFinite(input.analyticalProgress)
+      || input.analyticalProgress < BREAKEVEN_TRIGGER_PROGRESS) {
+    return { authorized: false, reason: 'analytical_threshold_not_met' };
+  }
+  const entry = exactLiveDecimal(snapshot.position.entryPrice);
+  const positionSize = exactLiveDecimal(snapshot.position.baseSize);
+  const candidate = exactLiveDecimal(input.candidateStopPrice);
+  const expectedEntry = exactLiveDecimal(input.expectedEntryPrice);
+  const expectedTakeProfit = exactLiveDecimal(input.expectedTakeProfitPrice);
+  const expectedCurrentStop = exactLiveDecimal(input.expectedCurrentStopPrice);
+  if (!entry || !positionSize || !candidate || !expectedEntry || !expectedTakeProfit
+      || !expectedCurrentStop
+      || typeof snapshot.position.sourceRecordId !== 'string'
+      || !LIVE_BREAKEVEN_HEX.test(snapshot.position.sourceRecordId)) {
+    return { authorized: false, reason: 'malformed_snapshot' };
+  }
+  if (!Array.isArray(snapshot.protectiveOrders) || snapshot.protectiveOrders.length !== 2) {
+    return { authorized: false, reason: 'protective_pair_not_proven' };
+  }
+  if (snapshot.triggerBasisStatus !== 'last_trade_price') {
+    return { authorized: false, reason: 'trigger_basis_mismatch' };
+  }
+  const expectedSide = input.side === 'long' ? 'sell' : 'buy';
+  for (const order of snapshot.protectiveOrders) {
+    const trigger = exactLiveDecimal(order.triggerPrice);
+    const initial = exactLiveDecimal(order.initialSize);
+    const remaining = exactLiveDecimal(order.remainingSize, false);
+    if (typeof order.orderId !== 'string' || order.orderId.length > 80
+        || !LIVE_BREAKEVEN_INTEGER.test(order.orderId)
+        || order.orderAccount !== snapshot.account || order.side !== expectedSide
+        || order.reduceOnly !== true || !trigger || !initial || !remaining || remaining.gt(initial)) {
+      return { authorized: false, reason: 'protective_pair_not_proven' };
+    }
+    if (order.triggerBasis !== 'last_trade_price') {
+      return { authorized: false, reason: 'trigger_basis_mismatch' };
+    }
+    if (remaining.lt(positionSize)) return { authorized: false, reason: 'protective_pair_not_proven' };
+  }
+  const stops = snapshot.protectiveOrders.filter((order) => order.orderType === 'stop_loss');
+  const takeProfits = snapshot.protectiveOrders.filter((order) => order.orderType === 'take_profit');
+  if (stops.length !== 1 || takeProfits.length !== 1) {
+    return { authorized: false, reason: 'protective_pair_not_proven' };
+  }
+  const currentStop = new Decimal(stops[0].triggerPrice);
+  const takeProfit = new Decimal(takeProfits[0].triggerPrice);
+  if (!entry.eq(expectedEntry) || !takeProfit.eq(expectedTakeProfit)
+      || !currentStop.eq(expectedCurrentStop)) {
+    return { authorized: false, reason: 'position_or_bracket_mismatch' };
+  }
+  const candidateInTradeRange = input.side === 'long'
+    ? candidate.gt(entry) && candidate.lt(takeProfit)
+    : candidate.lt(entry) && candidate.gt(takeProfit);
+  if (!candidateInTradeRange) {
+    return { authorized: false, reason: 'candidate_outside_trade_range' };
+  }
+  const tighter = input.side === 'long' ? candidate.gt(currentStop) : candidate.lt(currentStop);
+  if (!tighter) return { authorized: false, reason: 'candidate_not_tighter' };
+  if (!snapshot.recentTrades || !snapshot.recentTrades.lastOrderId
+      || !Array.isArray(snapshot.recentTrades.rows)) {
+    return { authorized: false, reason: 'malformed_snapshot' };
+  }
+  if (snapshot.recentTrades.rows.length === 0) {
+    return { authorized: false, reason: 'no_recent_trade' };
+  }
+  let newest = -1;
+  const newestPrices = new Set<string>();
+  for (const row of snapshot.recentTrades.rows) {
+    if (row.symbol !== snapshot.protocolSymbol || !Number.isSafeInteger(row.createdAtMs)
+        || typeof row.sourceRecordFingerprint !== 'string'
+        || !LIVE_BREAKEVEN_HEX.test(row.sourceRecordFingerprint)
+        || row.createdAtMs < 0 || !exactLiveDecimal(row.price)) {
+      return { authorized: false, reason: 'malformed_snapshot' };
+    }
+    if (row.createdAtMs > newest) {
+      newest = row.createdAtMs;
+      newestPrices.clear();
+      newestPrices.add(row.price);
+    } else if (row.createdAtMs === newest) {
+      newestPrices.add(row.price);
+    }
+  }
+  if (newest > snapshot.readCompletedAtMs || newest > input.nowMs) {
+    return { authorized: false, reason: 'future_snapshot' };
+  }
+  if (input.nowMs - newest > LIVE_BREAKEVEN_MAX_AGE_MS) return { authorized: false, reason: 'stale_snapshot' };
+  if (newestPrices.size !== 1) return { authorized: false, reason: 'ambiguous_trade' };
+  const price = new Decimal([...newestPrices][0]);
+  const distance = input.side === 'long' ? takeProfit.minus(entry) : entry.minus(takeProfit);
+  if (!distance.gt(0)) return { authorized: false, reason: 'malformed_snapshot' };
+  const nativeProgressDecimal = input.side === 'long'
+    ? price.minus(entry).div(distance)
+    : entry.minus(price).div(distance);
+  if (nativeProgressDecimal.lt(BREAKEVEN_TRIGGER_PROGRESS)) {
+    return { authorized: false, reason: 'native_threshold_not_met' };
+  }
+  const stillFavorable = input.side === 'long' ? price.gt(candidate) : price.lt(candidate);
+  if (!stillFavorable) return { authorized: false, reason: 'price_retraced' };
+  const expiresAtMs = Math.min(newest + LIVE_BREAKEVEN_MAX_AGE_MS,
+    snapshot.readCompletedAtMs + LIVE_BREAKEVEN_MAX_AGE_MS);
+  const binding: LiveBreakevenAuthorityPermit['binding'] = {
+    policyVersion: 'owner-accepted-v1.1',
+    decisionId: input.decisionId,
+    botId: input.botId,
+    protocol: 'pacifica',
+    account: snapshot.account,
+    subaccountId: null,
+    internalSymbol: snapshot.internalSymbol,
+    protocolSymbol: snapshot.protocolSymbol,
+    side: input.side,
+    entryPrice: snapshot.position.entryPrice,
+    takeProfitPrice: takeProfits[0].triggerPrice,
+    currentStopPrice: stops[0].triggerPrice,
+    candidateStopPrice: input.candidateStopPrice,
+    positionSize: snapshot.position.baseSize,
+    analyticalProgress: new Decimal(input.analyticalProgress).toFixed(),
+    nativeProgress: nativeProgressDecimal.toFixed(),
+    analyticalWindowFingerprint: input.analyticalWindowFingerprint,
+    nativeSourceFingerprint: snapshot.sourceFingerprint,
+    positionEpochFingerprint: snapshot.position.sourceRecordId,
+    positionStateFingerprint: snapshot.positionFingerprint,
+    bracketFingerprint: snapshot.bracketFingerprint,
+    positionLastOrderId: snapshot.positionLastOrderId,
+    ordersLastOrderId: snapshot.ordersLastOrderId,
+    tradesLastOrderId: snapshot.recentTrades.lastOrderId,
+    sourceTimeMs: newest,
+    readStartedAtMs: snapshot.readStartedAtMs,
+    readCompletedAtMs: snapshot.readCompletedAtMs,
+    issuedAtMs: input.nowMs,
+    expiresAtMs,
+    triggerBasis: 'last_trade_price',
+  };
+  return {
+    authorized: true,
+    permit: { schemaVersion: 1, binding, fingerprint: liveBreakevenFingerprint(binding) },
+    nativeProgress: nativeProgressDecimal.toNumber(),
+  };
 }
 
 /**
