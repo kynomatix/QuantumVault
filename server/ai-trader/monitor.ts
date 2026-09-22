@@ -513,6 +513,7 @@ const pendingReconciliation = new Set<string>();
 const bracketReplaceAttempted = new Set<string>();
 const LIVE_BREAKEVEN_SUPPRESSION_CAP = 1000;
 const LIVE_BREAKEVEN_TRANSIENT_BACKOFF_MS = 60_000;
+const LIVE_BREAKEVEN_RECOVERY_OBSERVATION_LIMIT = 10;
 type LiveBreakevenSuppressionMemo =
   | {
       kind: "structural";
@@ -539,6 +540,7 @@ type PendingLiveBreakevenPersistence = {
   movedAt: string;
 };
 const pendingLiveBreakevenPersistence = new Map<string, PendingLiveBreakevenPersistence>();
+const liveBreakevenRecoveryObservations = new Map<string, number>();
 
 type DurableLiveBreakevenPersistenceIntent = {
   schemaVersion: 1;
@@ -573,6 +575,9 @@ type DurableLiveBreakevenPersistenceIntent = {
 type LiveBreakevenReconciliation = {
   staleForTick: boolean;
   expectedStopLossPrice: number;
+  originalStopLossPrice: number;
+  recoveredProtectiveStopLossPrice: number | null;
+  terminalRecoveryReason: "incomplete_protective_pair" | "recovery_observation_limit" | null;
 };
 
 const LIVE_BREAKEVEN_HEX = /^[0-9A-F]{64}$/;
@@ -1679,7 +1684,7 @@ async function clearDurableLiveBreakevenIntent(view: OpenDecisionView): Promise<
 function recoveredLiveBreakevenSnapshotState(
   snapshot: LiveBreakevenNativeSnapshot,
   pending: DurableLiveBreakevenPersistenceIntent,
-): "candidate" | "original" | null {
+): "candidate" | "original" | "incomplete" | null {
   const expectedSide = pending.authority.side === "long" ? "sell" : "buy";
   if (snapshot.schemaVersion !== 1
       || snapshot.protocol !== "pacifica"
@@ -1691,8 +1696,9 @@ function recoveredLiveBreakevenSnapshotState(
       || snapshot.position.baseSize !== pending.authority.positionSize
       || snapshot.position.entryPrice !== pending.authority.entryPrice
       || snapshot.positionFingerprint !== pending.authority.positionStateFingerprint
-      || snapshot.triggerBasisStatus !== "last_trade_price"
-      || snapshot.protectiveOrders.length !== 2) return null;
+      || snapshot.triggerBasisStatus !== "last_trade_price") return null;
+  if (snapshot.protectiveOrders.length < 2) return "incomplete";
+  if (snapshot.protectiveOrders.length !== 2) return null;
   const stops = snapshot.protectiveOrders.filter((row) => row.orderType === "stop_loss");
   const takeProfits = snapshot.protectiveOrders.filter((row) => row.orderType === "take_profit");
   if (stops.length !== 1 || takeProfits.length !== 1) return null;
@@ -1726,7 +1732,14 @@ async function reconcilePendingLiveBreakevenPersistence(
   const durableRaw = clamped.liveBreakevenPending;
   const durable = durableLiveBreakevenIntent(durableRaw);
   if (!pending && durableRaw === undefined) {
-    return { staleForTick: false, expectedStopLossPrice: view.stopLossPrice };
+    liveBreakevenRecoveryObservations.delete(view.decision.id);
+    return {
+      staleForTick: false,
+      expectedStopLossPrice: view.stopLossPrice,
+      originalStopLossPrice: view.stopLossPrice,
+      recoveredProtectiveStopLossPrice: null,
+      terminalRecoveryReason: null,
+    };
   }
   const positionObservationFingerprint = liveBreakevenPositionObservationFingerprint(
     view,
@@ -1735,10 +1748,40 @@ async function reconcilePendingLiveBreakevenPersistence(
     position,
   );
   const expectedStopLossPrice = pending?.newSl ?? durable?.newSl ?? view.stopLossPrice;
+  const originalStopLossPrice = durable?.originalStopLossPrice
+    ?? pending?.view.stopLossPrice
+    ?? view.stopLossPrice;
+  const result = (
+    staleForTick: boolean,
+    terminalRecoveryReason: LiveBreakevenReconciliation["terminalRecoveryReason"] = null,
+    recoveredProtectiveStopLossPrice: number | null = null,
+  ): LiveBreakevenReconciliation => ({
+    staleForTick,
+    expectedStopLossPrice,
+    originalStopLossPrice,
+    recoveredProtectiveStopLossPrice,
+    terminalRecoveryReason,
+  });
+  const inconclusive = (): LiveBreakevenReconciliation => {
+    const observations = (liveBreakevenRecoveryObservations.get(view.decision.id) ?? 0) + 1;
+    if (observations >= LIVE_BREAKEVEN_RECOVERY_OBSERVATION_LIMIT) {
+      liveBreakevenRecoveryObservations.delete(view.decision.id);
+      emitTickObservation(
+        `[AIT-BREAKEVEN] persistence_recovery_terminal bot=${bot.id} decision=${view.decision.id} observations=${observations}`,
+      );
+      return result(true, "recovery_observation_limit");
+    }
+    liveBreakevenRecoveryObservations.set(view.decision.id, observations);
+    emitTickObservation(
+      `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=restart_recovery_retry observations=${observations}`,
+    );
+    return result(true);
+  };
   const expectedPositionFingerprint = pending?.positionObservationFingerprint
     ?? durable?.positionObservationFingerprint;
   if (expectedPositionFingerprint && expectedPositionFingerprint !== positionObservationFingerprint) {
     pendingLiveBreakevenPersistence.delete(view.decision.id);
+    liveBreakevenRecoveryObservations.delete(view.decision.id);
     try {
       if (durableRaw !== undefined) await clearDurableLiveBreakevenIntent(view);
     } catch {
@@ -1747,9 +1790,10 @@ async function reconcilePendingLiveBreakevenPersistence(
     emitTickObservation(
       `[AIT-BREAKEVEN] persistence_reconciliation_abandoned bot=${bot.id} decision=${view.decision.id} reason=position_changed`,
     );
-    return { staleForTick: true, expectedStopLossPrice };
+    return result(true);
   }
   if (pending) {
+    liveBreakevenRecoveryObservations.delete(view.decision.id);
     try {
       await persistBreakevenMove(
         pending.view,
@@ -1769,22 +1813,35 @@ async function reconcilePendingLiveBreakevenPersistence(
         `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=retry`,
       );
     }
-    return { staleForTick: true, expectedStopLossPrice };
+    return result(true);
   }
   if (!durable || typeof adapter.getLiveBreakevenAuthoritySnapshot !== "function") {
     emitTickObservation(
       `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=restart_recovery_unavailable`,
     );
-    return { staleForTick: true, expectedStopLossPrice };
+    return inconclusive();
   }
+  let snapshot: LiveBreakevenNativeSnapshot;
   try {
-    const snapshot = await adapter.getLiveBreakevenAuthoritySnapshot({
+    snapshot = await adapter.getLiveBreakevenAuthoritySnapshot({
       agentPublicKey,
       internalSymbol: bot.market,
       deadlineAtMs: Date.now() + 5_000,
     });
-    const state = recoveredLiveBreakevenSnapshotState(snapshot, durable);
-    if (state === "candidate") {
+  } catch {
+    return inconclusive();
+  }
+  const state = recoveredLiveBreakevenSnapshotState(snapshot, durable);
+  if (state === "incomplete") {
+    liveBreakevenRecoveryObservations.delete(view.decision.id);
+    emitTickObservation(
+      `[AIT-BREAKEVEN] persistence_recovery_terminal bot=${bot.id} decision=${view.decision.id} reason=incomplete_protective_pair`,
+    );
+    return result(true, "incomplete_protective_pair");
+  }
+  if (state === "candidate") {
+    liveBreakevenRecoveryObservations.delete(view.decision.id);
+    try {
       const liveAuthority: NonNullable<BreakevenProtectState["liveAuthority"]> = {
         protocol: "pacifica",
         basis: "last_trade_price",
@@ -1819,25 +1876,34 @@ async function reconcilePendingLiveBreakevenPersistence(
       emitTickObservation(
         `[AIT-BREAKEVEN] persistence_reconciliation_resolved bot=${bot.id} decision=${view.decision.id} source=durable_intent`,
       );
-    } else if (state === "original") {
+    } catch {
+      emitTickObservation(
+        `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=retry`,
+      );
+    }
+  } else if (state === "original") {
+    liveBreakevenRecoveryObservations.delete(view.decision.id);
+    try {
       await clearDurableLiveBreakevenIntent(view);
       emitTickObservation(
         `[AIT-BREAKEVEN] persistence_reconciliation_abandoned bot=${bot.id} decision=${view.decision.id} reason=venue_original`,
       );
-    } else {
+    } catch {
       emitTickObservation(
-        `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=restart_recovery_retry`,
+        `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=retry`,
       );
     }
-  } catch {
-    emitTickObservation(
-      `[AIT-BREAKEVEN] persistence_degraded bot=${bot.id} decision=${view.decision.id} action=restart_recovery_retry`,
-    );
+  } else {
+    return inconclusive();
   }
-  // The database view is stale for this entire tick, even when reconciliation
-  // succeeds. G10 may observe protection and G7 may close, but no stop mutation
-  // may use this view until the next tick reloads the decision.
-  return { staleForTick: true, expectedStopLossPrice };
+  // The database view is stale for optional ratchet decisions after recovery.
+  // G10 remains active and may use only the reconciled candidate/original stop
+  // inputs returned here; the next tick reloads the authoritative decision.
+  return result(
+    true,
+    null,
+    state === "candidate" ? durable.newSl : durable.originalStopLossPrice,
+  );
 }
 
 // --- Paper monitoring -----------------------------------------------------------------
@@ -2937,6 +3003,16 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
     agentPublicKey,
     position,
   );
+  if (liveBreakevenReconciliation.terminalRecoveryReason !== null) {
+    await closeLivePositionAndPause(bot, view, adapter, {
+      pauseReason: "bracket_failed",
+      exitReason: "circuit_breaker",
+      detail: liveBreakevenReconciliation.terminalRecoveryReason === "incomplete_protective_pair"
+        ? "Live breakeven recovery proved an incomplete protective pair — position closed for safety"
+        : `Live breakeven recovery remained inconclusive for ${LIVE_BREAKEVEN_RECOVERY_OBSERVATION_LIMIT} observations — position closed for safety`,
+    });
+    return;
+  }
 
   // G10 money authority remains the proven legacy stop-order read while the
   // semantic /orders observation is calibrated. An unavailable legacy read
@@ -2944,7 +3020,7 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
   // the unavailable read is never converted into synthetic order evidence.
   let liveBreakevenBracketObservationFingerprint: string | null = null;
   if (typeof adapter.getOpenStopOrders === "function" && typeof adapter.setTpSl === "function") {
-    const stopProof = await verifyLiveProtectiveStop({
+    let stopProof = await verifyLiveProtectiveStop({
       adapter,
       agentPublicKey,
       subaccountId,
@@ -2957,19 +3033,52 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
       liveBreakevenReconciliation.expectedStopLossPrice,
     );
     recordProtectiveReadObservation("periodic_g10", bot, view, stopProof);
+    if (stopProof.status === "legacy_missing"
+        && liveBreakevenReconciliation.originalStopLossPrice !== liveBreakevenReconciliation.expectedStopLossPrice) {
+      const originalStopProof = await verifyLiveProtectiveStop({
+        adapter,
+        agentPublicKey,
+        subaccountId,
+        internalSymbol: bot.market,
+        positionBaseSize: position.baseSize,
+        expectedStopLossPrice: liveBreakevenReconciliation.originalStopLossPrice,
+      });
+      recordProtectiveReadObservation("periodic_g10_original", bot, view, originalStopProof);
+      if (originalStopProof.status === "legacy_present"
+          || originalStopProof.status === "legacy_unavailable") {
+        stopProof = originalStopProof;
+        liveBreakevenBracketObservationFingerprint = liveProtectiveStopObservationFingerprint(
+          originalStopProof,
+          liveBreakevenReconciliation.originalStopLossPrice,
+        );
+      }
+    }
     if (stopProof.status === "legacy_unavailable") {
       console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: legacy protective-stop read unavailable (${stopProof.detail}) — skipping bracket check`);
-    } else if (stopProof.status !== "legacy_present") {
-      if (liveBreakevenReconciliation.staleForTick) {
-        emitTickObservation(
-          `[AIT-BREAKEVEN] persistence_reconciliation_g10_read_only bot=${bot.id} decision=${view.decision.id} status=${stopProof.status}`,
-        );
-      } else {
-        if (bracketReplaceAttempted.has(view.decision.id)) {
+    } else if (stopProof.status !== "legacy_present"
+        && liveBreakevenReconciliation.recoveredProtectiveStopLossPrice === null) {
+      if (bracketReplaceAttempted.has(view.decision.id)) {
         await closeLivePositionAndPause(bot, view, adapter, {
           pauseReason: "bracket_failed",
           exitReason: "circuit_breaker",
           detail: "G10: bracket missing again after one re-place — position closed for safety",
+        });
+        return;
+      }
+      const stopCandidates = [
+        liveBreakevenReconciliation.expectedStopLossPrice,
+        liveBreakevenReconciliation.originalStopLossPrice,
+      ].filter((value) => Number.isFinite(value) && value > 0);
+      const replacementStopLossPrice = stopCandidates.length === 0
+        ? null
+        : view.side === "long"
+          ? Math.max(...stopCandidates)
+          : Math.min(...stopCandidates);
+      if (replacementStopLossPrice === null) {
+        await closeLivePositionAndPause(bot, view, adapter, {
+          pauseReason: "bracket_failed",
+          exitReason: "circuit_breaker",
+          detail: "G10: bracket missing and no valid stop price could be proved — position closed for safety",
         });
         return;
       }
@@ -2979,7 +3088,7 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
         adapter.setTpSl!({
           ...keyTrio,
           internalSymbol: bot.market,
-          stopLossPrice: view.stopLossPrice,
+          stopLossPrice: replacementStopLossPrice,
           takeProfitPrice: view.takeProfitPrice,
           subaccountId,
         })
@@ -2993,7 +3102,7 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
             subaccountId,
             internalSymbol: bot.market,
             positionBaseSize: position.baseSize,
-            expectedStopLossPrice: view.stopLossPrice,
+            expectedStopLossPrice: replacementStopLossPrice,
           });
           recordProtectiveReadObservation("periodic_replacement", bot, view, after);
           verified = after.status === "legacy_present";
@@ -3010,7 +3119,6 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
         return;
       }
       console.log(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: bracket re-placed and verified (G10)`);
-      }
     }
   }
 
@@ -4808,6 +4916,7 @@ export function stopAiTraderMonitor(): void {
   bracketReplaceAttempted.clear();
   liveBreakevenSuppressionMemos.clear();
   pendingLiveBreakevenPersistence.clear();
+  liveBreakevenRecoveryObservations.clear();
   botInFlight.clear();
   closeInFlight.clear();
   preOpenFirstSeen.clear();

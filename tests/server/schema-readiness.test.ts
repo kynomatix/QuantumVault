@@ -401,18 +401,25 @@ describe("schema readiness", () => {
       checkSql: expect.stringContaining("('attempt_ordinal','smallint')"),
     });
     expect(liveBreakevenJournalSql).toContain("ADD COLUMN IF NOT EXISTS authority_fingerprint text");
+    expect(liveBreakevenJournalSql).toContain("DO $qv$");
+    expect(liveBreakevenJournalSql).toContain("SELECT pg_get_constraintdef(oid, true)");
+    expect(liveBreakevenJournalSql).toContain("action_definition IS DISTINCT FROM $constraint$");
+    expect(liveBreakevenJournalSql).toContain("phase_definition IS DISTINCT FROM $constraint$");
+    expect(liveBreakevenJournalSql).toContain("cause_definition IS DISTINCT FROM $constraint$");
+    expect(liveBreakevenJournalSql).toContain("protective_claim_definition IS DISTINCT FROM $constraint$");
     expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_events_action_check");
-    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_action_check");
+    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT ai_trader_execution_action_check");
     expect(liveBreakevenJournalSql).toContain("CHECK (action IN ('entry','close','cancel','protective'))");
     expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_phase_check");
     expect(liveBreakevenJournalSql).toContain("ADD CONSTRAINT ai_trader_execution_phase_check CHECK");
     expect(liveBreakevenJournalSql).toContain("event_type = 'attempt_claimed' AND phase = 0");
     expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_events_cause_check");
-    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT IF EXISTS ai_trader_execution_cause_check");
+    expect(liveBreakevenJournalSql).toContain("DROP CONSTRAINT ai_trader_execution_cause_check");
     expect(liveBreakevenJournalSql).toContain("CHECK (cause IN ('decision','paper','emergency_unwind','protective'");
     expect(liveBreakevenJournalSql).toContain("event_type = 'attempt_claimed' AND phase = 0 AND decision_id IS NOT NULL");
     expect(liveBreakevenJournalSql).toContain("attempt_ordinal BETWEEN 1 AND 5");
-    expect(liveBreakevenJournalSql).toContain("action <> 'protective'\n             AND authority_fingerprint IS NULL");
+    expect(liveBreakevenJournalSql).toContain("action <> 'protective'");
+    expect(liveBreakevenJournalSql).toContain("AND authority_fingerprint IS NULL AND position_fingerprint IS NULL");
   });
 
   it("matches exact production CHECK renderings without consuming SQL after casts", async () => {

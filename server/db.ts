@@ -1821,45 +1821,97 @@ const schemaMigrationSql = [
         ADD COLUMN IF NOT EXISTS position_fingerprint text,
         ADD COLUMN IF NOT EXISTS bracket_fingerprint text,
         ADD COLUMN IF NOT EXISTS attempt_ordinal smallint;
-       ALTER TABLE ai_trader_execution_events
-         DROP CONSTRAINT IF EXISTS ai_trader_execution_events_action_check;
-       ALTER TABLE ai_trader_execution_events
-         DROP CONSTRAINT IF EXISTS ai_trader_execution_action_check;
-       ALTER TABLE ai_trader_execution_events
-         ADD CONSTRAINT ai_trader_execution_events_action_check
-         CHECK (action IN ('entry','close','cancel','protective'));
-       ALTER TABLE ai_trader_execution_events
-         DROP CONSTRAINT IF EXISTS ai_trader_execution_phase_check;
-       ALTER TABLE ai_trader_execution_events
-         ADD CONSTRAINT ai_trader_execution_phase_check CHECK (
-           (event_type = 'attempt_claimed' AND phase = 0) OR
-           (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR
-           (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR
-           (event_type = 'broadcast_result' AND phase = 20) OR
-           (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR
-           (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR
-           (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR
-           (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90)
-         );
-       ALTER TABLE ai_trader_execution_events
-         DROP CONSTRAINT IF EXISTS ai_trader_execution_events_cause_check;
-       ALTER TABLE ai_trader_execution_events
-         DROP CONSTRAINT IF EXISTS ai_trader_execution_cause_check;
-       ALTER TABLE ai_trader_execution_events
-         ADD CONSTRAINT ai_trader_execution_events_cause_check
-         CHECK (cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg'));
-       ALTER TABLE ai_trader_execution_events
-         DROP CONSTRAINT IF EXISTS ai_trader_execution_protective_claim_check;
-       ALTER TABLE ai_trader_execution_events
-         ADD CONSTRAINT ai_trader_execution_protective_claim_check CHECK (
-           (action = 'protective' AND cause = 'protective' AND event_type = 'attempt_claimed' AND phase = 0 AND decision_id IS NOT NULL
-             AND authority_fingerprint ~ '^[0-9A-F]{64}$' AND position_fingerprint ~ '^[0-9A-F]{64}$'
-             AND bracket_fingerprint ~ '^[0-9A-F]{64}$' AND attempt_ordinal BETWEEN 1 AND 5)
-           OR
-           (action <> 'protective'
-             AND authority_fingerprint IS NULL AND position_fingerprint IS NULL
-             AND bracket_fingerprint IS NULL AND attempt_ordinal IS NULL)
-         )`,
+       DO $qv$
+       DECLARE
+         action_definition text;
+         phase_definition text;
+         cause_definition text;
+         protective_claim_definition text;
+       BEGIN
+         IF EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'ai_trader_execution_events'::regclass
+              AND conname = 'ai_trader_execution_action_check'
+         ) THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT ai_trader_execution_action_check;
+         END IF;
+         SELECT pg_get_constraintdef(oid, true)
+           INTO action_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_events_action_check';
+         IF action_definition IS DISTINCT FROM $constraint$CHECK (action = ANY (ARRAY['entry'::text, 'close'::text, 'cancel'::text, 'protective'::text]))$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_events_action_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_events_action_check
+             CHECK (action IN ('entry','close','cancel','protective'));
+         END IF;
+
+         SELECT pg_get_constraintdef(oid, true)
+           INTO phase_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_phase_check';
+         IF phase_definition IS DISTINCT FROM $constraint$CHECK (event_type = 'attempt_claimed'::text AND phase = 0 OR event_type = 'prebroadcast_authorized'::text AND action = 'entry'::text AND phase = 10 OR event_type = 'broadcast_attempted'::text AND (action = ANY (ARRAY['close'::text, 'cancel'::text])) AND phase = 10 OR event_type = 'broadcast_result'::text AND phase = 20 OR (event_type = ANY (ARRAY['position_observed'::text, 'fill_observed'::text, 'bracket_verified'::text, 'reconciliation_observed'::text])) AND phase IS NULL OR (event_type = ANY (ARRAY['entry_terminal_open'::text, 'entry_terminal_no_land'::text, 'entry_terminal_unwound'::text])) AND action = 'entry'::text AND phase = 90 OR (event_type = ANY (ARRAY['close_terminal_confirmed'::text, 'close_terminal_failed'::text])) AND action = 'close'::text AND phase = 90 OR (event_type = ANY (ARRAY['cancel_terminal_confirmed'::text, 'cancel_terminal_failed'::text])) AND action = 'cancel'::text AND phase = 90)$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_phase_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_phase_check CHECK (
+               (event_type = 'attempt_claimed' AND phase = 0) OR
+               (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR
+               (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR
+               (event_type = 'broadcast_result' AND phase = 20) OR
+               (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR
+               (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR
+               (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR
+               (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90)
+             );
+         END IF;
+
+         IF EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'ai_trader_execution_events'::regclass
+              AND conname = 'ai_trader_execution_cause_check'
+         ) THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT ai_trader_execution_cause_check;
+         END IF;
+         SELECT pg_get_constraintdef(oid, true)
+           INTO cause_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_events_cause_check';
+         IF cause_definition IS DISTINCT FROM $constraint$CHECK (cause = ANY (ARRAY['decision'::text, 'paper'::text, 'emergency_unwind'::text, 'protective'::text, 'user_requested'::text, 'venue_detected'::text, 'unconfirmed_orphan'::text, 'startup_orphan'::text, 'pre_close_bracket'::text, 'survivor_leg'::text]))$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_events_cause_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_events_cause_check
+             CHECK (cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg'));
+         END IF;
+
+         SELECT pg_get_constraintdef(oid, true)
+           INTO protective_claim_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_protective_claim_check';
+         IF protective_claim_definition IS DISTINCT FROM $constraint$CHECK (action = 'protective'::text AND cause = 'protective'::text AND event_type = 'attempt_claimed'::text AND phase = 0 AND decision_id IS NOT NULL AND authority_fingerprint ~ '^[0-9A-F]{64}$'::text AND position_fingerprint ~ '^[0-9A-F]{64}$'::text AND bracket_fingerprint ~ '^[0-9A-F]{64}$'::text AND attempt_ordinal >= 1 AND attempt_ordinal <= 5 OR action <> 'protective'::text AND authority_fingerprint IS NULL AND position_fingerprint IS NULL AND bracket_fingerprint IS NULL AND attempt_ordinal IS NULL)$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_protective_claim_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_protective_claim_check CHECK (
+               (action = 'protective' AND cause = 'protective' AND event_type = 'attempt_claimed' AND phase = 0 AND decision_id IS NOT NULL
+                 AND authority_fingerprint ~ '^[0-9A-F]{64}$' AND position_fingerprint ~ '^[0-9A-F]{64}$'
+                 AND bracket_fingerprint ~ '^[0-9A-F]{64}$' AND attempt_ordinal BETWEEN 1 AND 5)
+               OR
+               (action <> 'protective'
+                 AND authority_fingerprint IS NULL AND position_fingerprint IS NULL
+                 AND bracket_fingerprint IS NULL AND attempt_ordinal IS NULL)
+             );
+         END IF;
+       END
+       $qv$`,
     ] as const;
 
 const schemaMigrationMetadata = [

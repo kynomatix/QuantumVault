@@ -215,6 +215,24 @@ describe.skipIf(!HAS_DB)("AI Trader immutable execution journal", () => {
       );
       if (!migration) throw new Error("live breakeven migration missing");
       await client.query(migration.sql);
+      const canonicalConstraintNames = [
+        "ai_trader_execution_events_action_check",
+        "ai_trader_execution_phase_check",
+        "ai_trader_execution_events_cause_check",
+        "ai_trader_execution_protective_claim_check",
+      ];
+      const constraintOids = async () => (await client.query(
+        `SELECT conname, oid::text AS oid
+           FROM pg_constraint
+          WHERE conrelid='ai_trader_execution_events'::regclass
+            AND conname = ANY($1::text[])
+          ORDER BY conname`,
+        [canonicalConstraintNames],
+      )).rows;
+      const firstConstraintOids = await constraintOids();
+      expect(firstConstraintOids.map((row) => row.conname)).toEqual([...canonicalConstraintNames].sort());
+      await client.query(migration.sql);
+      expect(await constraintOids()).toEqual(firstConstraintOids);
 
       await expect(client.query(`INSERT INTO ai_trader_execution_events
         (action,cause,event_type,phase,decision_id,authority_fingerprint,position_fingerprint,bracket_fingerprint,attempt_ordinal)

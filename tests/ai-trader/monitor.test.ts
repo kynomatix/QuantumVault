@@ -420,6 +420,7 @@ function liveBreakevenSnapshot(
   price: string | null = "157.5",
   stopTriggerBasis: "last_trade_price" | "target_internal_oracle" = "last_trade_price",
   stopTriggerPrice = "145",
+  protectiveOrderCount = 2,
 ) {
   const triggerBasisStatus = stopTriggerBasis === "last_trade_price"
     ? "last_trade_price" as const
@@ -453,7 +454,7 @@ function liveBreakevenSnapshot(
       remainingSize: "2",
       reduceOnly: true as const,
     },
-  ];
+  ].slice(0, protectiveOrderCount);
   const positionBody = {
     protocol: "pacifica" as const,
     account: "sub-1",
@@ -5522,6 +5523,133 @@ describe("breakeven protect", () => {
       appliedStopLossPrice: LIVE_FIXED_SL,
       postVerificationBracketFingerprint: expect.stringMatching(/^[0-9A-F]{64}$/),
     });
+  });
+
+  async function beginDurableRecovery(
+    recoverySnapshot: ReturnType<typeof liveBreakevenSnapshot>,
+    recoveryLegacyRows: Array<Record<string, unknown>> = [{ order_id: "st-1", symbol: "SOL" }],
+  ) {
+    const { monitorBotOnce, stopAiTraderMonitor } = await importMonitor();
+    armLiveAuth();
+    const moveLiveBreakevenStop = echoLiveBreakevenMove();
+    const getLiveBreakevenAuthoritySnapshot = vi.fn()
+      .mockResolvedValueOnce(liveBreakevenSnapshot())
+      .mockResolvedValue(recoverySnapshot);
+    const getOpenStopOrders = vi.fn()
+      .mockResolvedValueOnce([{ order_id: "st-1", symbol: "SOL" }])
+      .mockResolvedValue(recoveryLegacyRows);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getOpenStopOrders,
+      getLiveBreakevenAuthoritySnapshot,
+      moveLiveBreakevenStop,
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    updateDecisionMock
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error("final audit write unavailable"))
+      .mockResolvedValue({});
+
+    const bot = makeBot({ paperMode: false });
+    await monitorBotOnce(bot);
+    const durableClamped = decisionUpdates()[0].clampedDecision as Record<string, unknown>;
+    expect(durableClamped.liveBreakevenPending).toBeTruthy();
+
+    stopAiTraderMonitor();
+    getDecisionsMock.mockResolvedValue([
+      makeOpenDecision({ clampedDecision: durableClamped }),
+    ]);
+    return { monitorBotOnce, bot, adapter, getOpenStopOrders, getLiveBreakevenAuthoritySnapshot };
+  }
+
+  it("live (pacifica): closes and pauses when durable recovery proves only one protective leg", async () => {
+    const harness = await beginDurableRecovery(liveBreakevenSnapshot(
+      "157.5",
+      "last_trade_price",
+      String(LIVE_FIXED_SL),
+      1,
+    ), []);
+
+    await harness.monitorBotOnce(harness.bot);
+
+    expect((harness.adapter as any).setTpSl).not.toHaveBeenCalled();
+    expect((harness.adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(botUpdates()).toContainEqual(expect.objectContaining({
+      status: "paused",
+      pauseReason: "bracket_failed",
+    }));
+  });
+
+  it("live (pacifica): accepts a recovered candidate bracket without a looser G10 replacement", async () => {
+    const harness = await beginDurableRecovery(liveBreakevenSnapshot(
+      "157.5",
+      "last_trade_price",
+      String(LIVE_FIXED_SL),
+    ), []);
+
+    await harness.monitorBotOnce(harness.bot);
+
+    expect((harness.adapter as any).setTpSl).not.toHaveBeenCalled();
+    expect((harness.adapter as any).closePosition).not.toHaveBeenCalled();
+    const recovered = decisionUpdates().at(-1)?.clampedDecision as Record<string, any>;
+    expect(recovered.liveBreakevenPending).toBeUndefined();
+    expect(recovered.stopLossPrice).toBeCloseTo(LIVE_FIXED_SL, 8);
+  });
+
+  it("live (pacifica): closes and pauses on the tenth inconclusive durable recovery observation", async () => {
+    const harness = await beginDurableRecovery(liveBreakevenSnapshot(
+      "157.5",
+      "target_internal_oracle",
+      String(LIVE_FIXED_SL),
+    ));
+
+    for (let observation = 1; observation < 10; observation += 1) {
+      await harness.monitorBotOnce(harness.bot);
+      expect((harness.adapter as any).closePosition).not.toHaveBeenCalled();
+    }
+    await harness.monitorBotOnce(harness.bot);
+
+    expect((harness.adapter as any).closePosition).toHaveBeenCalledTimes(1);
+    expect(botUpdates()).toContainEqual(expect.objectContaining({
+      status: "paused",
+      pauseReason: "bracket_failed",
+    }));
+    expect(appendTelemetryMock.mock.calls.flat().join("\n")).toContain("observations=10");
+  });
+
+  it("live (pacifica): an in-memory persistence retry cannot suppress G10 and re-places only the tighter stop", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    armLiveAuth();
+    const getOpenStopOrders = vi.fn()
+      .mockResolvedValueOnce([{ order_id: "st-1", symbol: "SOL" }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ order_id: "st-2", symbol: "SOL" }]);
+    const adapter = makeAdapter({
+      getPositions: vi.fn(async () => [openPosition]),
+      getOpenStopOrders,
+      getLiveBreakevenAuthoritySnapshot: vi.fn(async () => liveBreakevenSnapshot()),
+      moveLiveBreakevenStop: echoLiveBreakevenMove(),
+    });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockResolvedValue(progressCandles());
+    updateDecisionMock
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error("final audit write unavailable"))
+      .mockRejectedValueOnce(new Error("audit retry unavailable"))
+      .mockResolvedValue({});
+
+    const bot = makeBot({ paperMode: false });
+    await monitorBotOnce(bot);
+    await monitorBotOnce(bot);
+
+    expect((adapter as any).setTpSl).toHaveBeenCalledWith(expect.objectContaining({
+      stopLossPrice: LIVE_FIXED_SL,
+    }));
+    expect((adapter as any).closePosition).not.toHaveBeenCalled();
   });
 
   it("live (flash): remains dormant until exact native trigger rows can be revalidated", async () => {
