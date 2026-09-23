@@ -5271,7 +5271,7 @@ const schemaMigrationMetadata = [
         "kind": "constraint",
         "table": "ai_trader_execution_events",
         "constraint": "ai_trader_execution_events_cause_check",
-        "definitionIncludes": ["cause IN ('decision', 'paper', 'emergency_unwind', 'protective'"]
+        "definitionIncludes": ["cause IN ('decision', 'paper', 'emergency_unwind', 'protective', 'user_requested', 'venue_detected', 'unconfirmed_orphan', 'startup_orphan', 'pre_close_bracket', 'survivor_leg')"]
       },
       {
         "kind": "constraint",

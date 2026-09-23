@@ -103,6 +103,45 @@ function makeCatalog(options: {
   }) as CatalogQuery & ReturnType<typeof vi.fn>;
 }
 
+function readDbSchemaMigrationManifest(): {
+  sqlEntries: string[];
+  metadata: Array<Omit<SchemaMigrationDefinition, "sql">>;
+  manifest: SchemaMigrationDefinition[];
+} {
+  const sourcePath = new URL("../../server/db.ts", import.meta.url);
+  const sourceText = readFileSync(sourcePath, "utf8");
+  const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
+  let sqlArray: ts.ArrayLiteralExpression | undefined;
+  let metadataArray: ts.ArrayLiteralExpression | undefined;
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node)) {
+      const name = node.name.getText(source);
+      const expression = node.initializer && ts.isAsExpression(node.initializer)
+        ? node.initializer.expression
+        : node.initializer;
+      if (expression && ts.isArrayLiteralExpression(expression)) {
+        if (name === "schemaMigrationSql") sqlArray = expression;
+        if (name === "schemaMigrationMetadata") metadataArray = expression;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  if (!sqlArray || !metadataArray) throw new Error("schema migration arrays missing from server/db.ts");
+  const sqlEntries = sqlArray.elements.map((element) => {
+    if (!ts.isNoSubstitutionTemplateLiteral(element) && !ts.isStringLiteral(element)) {
+      throw new Error("schemaMigrationSql contains a non-literal entry");
+    }
+    return element.text;
+  });
+  const metadata = JSON.parse(metadataArray.getText(source)) as Array<Omit<SchemaMigrationDefinition, "sql">>;
+  return {
+    sqlEntries,
+    metadata,
+    manifest: metadata.map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
+  };
+}
+
 describe("schema readiness", () => {
   beforeEach(async () => {
     resetSchemaReadinessForTests();
@@ -141,38 +180,7 @@ describe("schema readiness", () => {
   });
 
   it("retains all 185 SQL entries exactly once, in order, with explicit metadata", () => {
-    const sourcePath = new URL("../../server/db.ts", import.meta.url);
-    const sourceText = readFileSync(sourcePath, "utf8");
-    const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
-    let sqlArray: ts.ArrayLiteralExpression | undefined;
-    let metadataArray: ts.ArrayLiteralExpression | undefined;
-    const visit = (node: ts.Node): void => {
-      if (ts.isVariableDeclaration(node)) {
-        const name = node.name.getText(source);
-        const expression = node.initializer && ts.isAsExpression(node.initializer)
-          ? node.initializer.expression
-          : node.initializer;
-        if (expression && ts.isArrayLiteralExpression(expression)) {
-          if (name === "schemaMigrationSql") sqlArray = expression;
-          if (name === "schemaMigrationMetadata") metadataArray = expression;
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-    expect(sqlArray).toBeDefined();
-    expect(metadataArray).toBeDefined();
-
-    const sqlEntries = sqlArray!.elements.map((element) => {
-      expect(ts.isNoSubstitutionTemplateLiteral(element) || ts.isStringLiteral(element)).toBe(true);
-      return (element as ts.NoSubstitutionTemplateLiteral).text;
-    });
-    const metadata = JSON.parse(metadataArray!.getText(source)) as Array<{
-      id: string;
-      capabilities: string[];
-      requirements: unknown[];
-      operation: "ddl" | "backfill";
-    }>;
+    const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
     expect(sqlEntries).toHaveLength(185);
     expect(metadata).toHaveLength(185);
     expect(new Set(metadata.map((entry) => entry.id)).size).toBe(185);
@@ -400,6 +408,14 @@ describe("schema readiness", () => {
       identity: "ai-trader-live-breakeven-claim-column-shape",
       checkSql: expect.stringContaining("('attempt_ordinal','smallint')"),
     });
+    expect(metadata[184].requirements).toContainEqual({
+      kind: "constraint",
+      table: "ai_trader_execution_events",
+      constraint: "ai_trader_execution_events_cause_check",
+      definitionIncludes: [
+        "cause IN ('decision', 'paper', 'emergency_unwind', 'protective', 'user_requested', 'venue_detected', 'unconfirmed_orphan', 'startup_orphan', 'pre_close_bracket', 'survivor_leg')",
+      ],
+    });
     expect(liveBreakevenJournalSql).toContain("ADD COLUMN IF NOT EXISTS authority_fingerprint text");
     expect(liveBreakevenJournalSql).toContain("DO $qv$");
     expect(liveBreakevenJournalSql).toContain("SELECT pg_get_constraintdef(oid, true)");
@@ -495,6 +511,62 @@ describe("schema readiness", () => {
     const snapshot = await applySchemaMigrationManifest(query, manifest);
     expect(snapshot.unavailableCapabilities).toEqual([]);
     expect(snapshot.evidence).toEqual([]);
+  });
+
+  it("matches the complete migration 184 cause vocabulary against PostgreSQL ANY ARRAY rendering", async () => {
+    const { manifest, sqlEntries } = readDbSchemaMigrationManifest();
+    const migration184 = manifest[184];
+    expect(migration184.id).toBe("184-add-live-breakeven-protective-journal-claim");
+    const sql = sqlEntries[184];
+    const canonicalDefinition = (variable: string): string => {
+      const escaped = variable.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = sql.match(new RegExp(`${escaped} IS DISTINCT FROM \\$constraint\\$(CHECK \\([\\s\\S]*?\\))\\$constraint\\$ THEN`));
+      if (!match) throw new Error(`canonical definition missing for ${variable}`);
+      return match[1];
+    };
+    const definitions: Record<string, string> = {
+      ai_trader_execution_events_action_check: canonicalDefinition("action_definition"),
+      ai_trader_execution_phase_check: canonicalDefinition("phase_definition"),
+      ai_trader_execution_events_cause_check: canonicalDefinition("cause_definition"),
+      ai_trader_execution_protective_claim_check: canonicalDefinition("protective_claim_definition"),
+    };
+    const narrowerCause = definitions.ai_trader_execution_events_cause_check
+      .replace(", 'survivor_leg'::text", "");
+    const catalog = (causeDefinition: string | null): CatalogQuery => async (text, values) => {
+      if (text.includes("information_schema.columns") && values?.length === 2) {
+        return { rows: [{ present: 1 }] };
+      }
+      if (text === migration184.requirements.find((entry) => entry.kind === "data")?.checkSql) {
+        return { rows: [{ ok: true }] };
+      }
+      if (text.includes("c.conname=$2")) {
+        const constraint = String(values?.[1] ?? "");
+        if (constraint === "ai_trader_execution_events_cause_check" && causeDefinition === null) {
+          return { rows: [] };
+        }
+        const definition = constraint === "ai_trader_execution_events_cause_check"
+          ? causeDefinition
+          : definitions[constraint];
+        return { rows: definition ? [{ definition }] : [] };
+      }
+      throw new Error(`unexpected migration 184 catalog SQL: ${text}`);
+    };
+
+    const ready = await probeSchemaMigrationManifest(catalog(definitions.ai_trader_execution_events_cause_check), [migration184]);
+    const narrower = await probeSchemaMigrationManifest(catalog(narrowerCause), [migration184]);
+    const absent = await probeSchemaMigrationManifest(catalog(null), [migration184]);
+    const expectedFailure = {
+      capability: "ai_trader" as const,
+      failureClass: "postcondition_missing" as const,
+      objectIdentity: "constraint:ai_trader_execution_events.ai_trader_execution_events_cause_check",
+    };
+
+    expect(ready.unavailableCapabilities).toEqual([]);
+    expect(ready.evidence).toEqual([]);
+    expect(narrower.unavailableCapabilities).toEqual(["ai_trader"]);
+    expect(narrower.evidence).toEqual([expectedFailure]);
+    expect(absent.unavailableCapabilities).toEqual(["ai_trader"]);
+    expect(absent.evidence).toEqual([expectedFailure]);
   });
 
   it("uses only the latest requirement for the same final object identity", async () => {
