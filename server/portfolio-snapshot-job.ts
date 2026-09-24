@@ -1,4 +1,5 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { type Connection, PublicKey } from "@solana/web3.js";
+import { createSolanaRpcConnection } from "./rpc-config";
 import { storage } from "./storage";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import type { ProtocolAdapter } from "./protocol/adapter";
@@ -12,17 +13,9 @@ const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ
 const _IS_MAINNET = (process.env.DRIFT_ENV || process.env.SOLANA_ENV || "mainnet-beta") === "mainnet-beta";
 const _USDC_MINT = new PublicKey(_IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT);
 
-function _getSnapshotRpcUrl(): string {
-  if (process.env.SOLANA_RPC_URL) return process.env.SOLANA_RPC_URL;
-  if (_IS_MAINNET && process.env.HELIUS_API_KEY) {
-    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-  }
-  return _IS_MAINNET ? "https://api.mainnet-beta.solana.com" : "https://api.devnet.solana.com";
-}
-
 let _snapshotConnection: Connection | null = null;
 function _getSnapshotConnection(): Connection {
-  if (!_snapshotConnection) _snapshotConnection = new Connection(_getSnapshotRpcUrl(), "confirmed");
+  if (!_snapshotConnection) _snapshotConnection = createSolanaRpcConnection("confirmed");
   return _snapshotConnection;
 }
 

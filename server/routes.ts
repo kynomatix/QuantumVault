@@ -40,6 +40,7 @@ import { reconcileWalletDeposits } from './deposit-reconciler';
 import { publicPortfolioHandler } from './public-portfolio';
 import { initSnapshotModule, getWalletFinancialSnapshot, derivePerBotFinancialDataStatus, mapBotToApiResponse } from './bot-financial-snapshot';
 import { detachTradingBotAfterDriftCustodyHandoff } from './trading-bot-custody-handoff';
+import { createSolanaRpcConnection, fetchSolanaRpc } from './rpc-config';
 
 type PublicWalletResponse = Pick<
   Wallet,
@@ -20288,9 +20289,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             try {
               const tradeTxSig = orderResult.txSignature || orderResult.signature;
               if (tradeTxSig) {
-                const { Connection } = await import('@solana/web3.js');
-                const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
-                const conn = new Connection(rpcUrl, 'confirmed');
+                const conn = createSolanaRpcConnection('confirmed');
                 const txStatus = await conn.getSignatureStatus(tradeTxSig);
                 const confirmationStatus = txStatus?.value?.confirmationStatus;
                 const txErr = txStatus?.value?.err;
@@ -22713,17 +22712,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   
   app.post("/api/solana-rpc", async (req, res) => {
     try {
-      const IS_MAINNET = process.env.DRIFT_ENV !== 'devnet';
-      let rpcUrl: string;
-      
-      if (process.env.SOLANA_RPC_URL) {
-        rpcUrl = process.env.SOLANA_RPC_URL;
-      } else if (IS_MAINNET && process.env.HELIUS_API_KEY) {
-        rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-      } else {
-        rpcUrl = IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
-      }
-      
       // Create cache key from request body (excluding id which changes per request)
       const { id, ...bodyWithoutId } = req.body;
       const cacheKey = JSON.stringify(bodyWithoutId);
@@ -22757,13 +22745,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       rpcRequestCount++;
       
-      const response = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(req.body),
-      });
-      
-      const data = await response.json();
+      const clientAbort = new AbortController();
+      let rpcCompleted = false;
+      const abortRpc = () => {
+        if (!rpcCompleted) clientAbort.abort(new DOMException('RPC client disconnected', 'AbortError'));
+      };
+      req.once('aborted', abortRpc);
+      res.once('close', abortRpc);
+      let data: any;
+      try {
+        const response = await fetchSolanaRpc(req.body, { signal: clientAbort.signal });
+        data = await response.json();
+        rpcCompleted = true;
+      } finally {
+        req.removeListener('aborted', abortRpc);
+        res.removeListener('close', abortRpc);
+      }
       
       // Cache successful responses for read-only methods
       if (readOnlyMethods.includes(method) && !data.error) {
@@ -22779,6 +22776,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
       
+      // JSON-RPC errors stay in the JSON envelope. Keeping HTTP 200 here prevents
+      // the browser's web3 client from multiplying the transport's bounded 429 retries.
       res.json(data);
     } catch (error: any) {
       console.error("RPC proxy error:", error);

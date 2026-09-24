@@ -1,4 +1,4 @@
-import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import { type Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
 import BN from 'bn.js';
 import bs58 from 'bs58';
 import {
@@ -12,7 +12,7 @@ import {
   BASE_PRECISION,
 } from '@drift-labs/sdk';
 import { SWIFT_CONFIG, classifySwiftError, recordSwiftSuccess, recordSwiftFailure, type SwiftErrorClassification } from './swift-config';
-import { getPrimaryRpcUrl } from './rpc-config';
+import { createSolanaRpcConnection } from './rpc-config';
 
 const DRIFT_PROGRAM_ID = new PublicKey('dRiftyHA39MWEi3m9aunc5MzRF1JYuBsbn6VPcn33UH');
 const SIGNED_MSG_NUM_ORDERS = 16;
@@ -306,9 +306,8 @@ export async function executeSwiftOrder(params: SwiftOrderParams): Promise<Swift
     const keyBytes = bs58.decode(params.privateKeyBase58);
     const keypair = Keypair.fromSecretKey(keyBytes);
 
-    const rpcUrl = getPrimaryRpcUrl();
-    swiftLog(`RPC URL: ${rpcUrl?.substring(0, 50)}...`);
-    const connection = new Connection(rpcUrl, 'confirmed');
+    const connection = createSolanaRpcConnection('confirmed');
+    swiftLog('RPC connection ready');
 
     const slot = await connection.getSlot('confirmed');
     swiftLog(`Got slot: ${slot}`);

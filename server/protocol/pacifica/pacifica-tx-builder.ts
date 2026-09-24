@@ -10,7 +10,7 @@ import type { UserTransactionBuilder } from '../adapter.js';
 import type { TransactionBuildResult } from '../protocol-types.js';
 import { PacificaSigner, OPERATION_TYPES } from './pacifica-signer.js';
 import { PACIFICA_USDC_MINT, PACIFICA_MIN_TRANSFER_USDC } from './pacifica-constants.js';
-import { getPrimaryRpcUrl } from '../../rpc-config.js';
+import { createSolanaRpcConnection } from '../../rpc-config.js';
 
 const PACIFICA_PROGRAM_ID = new PublicKey('PCFA5iYgmqK6MqPhWNKg7Yv7auX7VZ4Cx7T1eJyrAMH');
 const PACIFICA_CENTRAL_STATE = new PublicKey('9Gdmhq4Gv1LnNMp7aiS1HSVd7pNnXNMsbuXALCQRmGjY');
@@ -82,7 +82,7 @@ export class PacificaTxBuilder implements UserTransactionBuilder {
   }
 
   private getConnection(): Connection {
-    return new Connection(getPrimaryRpcUrl(), 'confirmed');
+    return createSolanaRpcConnection('confirmed');
   }
 
   private async getRecentBlockhash(): Promise<{

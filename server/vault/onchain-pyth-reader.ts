@@ -13,8 +13,8 @@
  * to readFeedsAll, regardless of how many feeds are requested).
  */
 
-import { PublicKey, Connection } from '@solana/web3.js';
-import { getPrimaryRpcUrl } from '../rpc-config.js';
+import { PublicKey, type Connection } from '@solana/web3.js';
+import { createSolanaRpcConnection } from '../rpc-config.js';
 
 export interface OnchainPricePoint {
   priceUsd: number;
@@ -116,7 +116,7 @@ export function parsePriceUpdateV2(data: Buffer): OnchainPricePoint | null {
 let _conn: Connection | null = null;
 function getConn(): Connection {
   if (!_conn) {
-    _conn = new Connection(getPrimaryRpcUrl(), 'confirmed');
+    _conn = createSolanaRpcConnection('confirmed');
   }
   return _conn;
 }

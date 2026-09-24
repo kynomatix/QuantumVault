@@ -1,4 +1,5 @@
-import { Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, Keypair, LAMPORTS_PER_SOL, VersionedTransaction, TransactionMessage } from '@solana/web3.js';
+import { type Connection, PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, Keypair, LAMPORTS_PER_SOL, VersionedTransaction, TransactionMessage } from '@solana/web3.js';
+import { createSolanaRpcConnection } from './rpc-config';
 import { createHash } from 'crypto';
 import { createRequire } from 'module';
 import { spawn } from 'child_process';
@@ -424,22 +425,11 @@ async function getPlatformReferrerInfo(): Promise<{ authority: PublicKey; userSt
   return cachedReferrerInfo;
 }
 
-function getSolanaRpcUrl(): string {
-  if (process.env.SOLANA_RPC_URL) {
-    return process.env.SOLANA_RPC_URL;
-  }
-  if (IS_MAINNET && process.env.HELIUS_API_KEY) {
-    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-  }
-  return IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
-}
-const SOLANA_RPC = getSolanaRpcUrl();
-
 let connectionInstance: Connection | null = null;
 
 function getConnection(): Connection {
   if (!connectionInstance) {
-    connectionInstance = new Connection(SOLANA_RPC, 'confirmed');
+    connectionInstance = createSolanaRpcConnection('confirmed');
   }
   return connectionInstance;
 }

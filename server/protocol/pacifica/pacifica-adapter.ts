@@ -71,7 +71,7 @@ import {
   Transaction,
   sendAndConfirmTransaction,
 } from '@solana/web3.js';
-import { getPrimaryRpcUrl } from '../../rpc-config.js';
+import { createSolanaRpcConnection } from '../../rpc-config.js';
 import type {
   PacificaMarketInfo,
   PacificaPositionResponse,
@@ -1183,7 +1183,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
   async getWalletCollateralBalance(walletAddress: string): Promise<number> {
     try {
-      const connection = new Connection(getPrimaryRpcUrl(), 'confirmed');
+      const connection = createSolanaRpcConnection('confirmed');
       const ownerPubkey = new PublicKey(walletAddress);
       const collateralMintPubkey = new PublicKey(this.collateralMint);
       const ata = getAssociatedTokenAddress(collateralMintPubkey, ownerPubkey);
@@ -2826,7 +2826,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         };
       }
 
-      const connection = new Connection(getPrimaryRpcUrl(), 'confirmed');
+      const connection = createSolanaRpcConnection('confirmed');
 
       const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 
