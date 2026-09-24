@@ -89,14 +89,14 @@ import { getFreshLoopRates, sampleAndPersistLoopRates, netCarryAt, LOOP_RATE_REG
 // and the close-time guard re-verifies with it (never a second derivation).
 import { decideHoldAllocationTarget } from "./loop-hold-allocation";
 import type { BorrowPosition, BorrowOperation } from "@shared/schema";
+import { jupiterRequestJson } from "../../swap/jupiter-runtime.js";
+import type { QuotePurpose } from "../../swap/types.js";
 
 // --- Constants ---------------------------------------------------------------
 
 /** Same venue string as the borrow engine — loop rows differ by `kind`, not venue. */
 const DEBT_VENUE = "jupiter_lend";
 
-const QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote";
-const SWAP_IX_URL = "https://lite-api.jup.ag/swap/v1/swap-instructions";
 const TOKEN_PROGRAM = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 
@@ -208,31 +208,38 @@ function cuIxs(limit: number): TransactionInstruction[] {
   ];
 }
 
-async function fetchJson(url: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(url, { ...init, signal: AbortSignal.timeout(20_000) });
-  const body = await res.text();
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${url.split("?")[0]}: ${body.slice(0, 300)}`);
-  return JSON.parse(body);
-}
-
 /**
  * Quote with the route constraints that keep the atomic sandwich under the
  * 1232-byte tx limit (unconstrained routes measured OVER the limit in P1).
  * LST<->SOL pairs always have deep direct pools.
  */
-async function jupQuote(inputMint: string, outputMint: string, amountRaw: bigint, slippageBps: number): Promise<any> {
-  const u =
-    `${QUOTE_URL}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw.toString()}` +
-    `&slippageBps=${slippageBps}&restrictIntermediateTokens=true&onlyDirectRoutes=true&maxAccounts=28`;
-  return fetchJson(u);
+async function jupQuote(inputMint: string, outputMint: string, amountRaw: bigint, slippageBps: number, purpose: QuotePurpose): Promise<any> {
+  const result = await jupiterRequestJson({
+    operation: "quote",
+    purpose,
+    query: {
+      inputMint,
+      outputMint,
+      amount: amountRaw.toString(),
+      slippageBps: String(slippageBps),
+      restrictIntermediateTokens: "true",
+      onlyDirectRoutes: "true",
+      maxAccounts: "28",
+    },
+  });
+  if (result.kind !== "success") throw new Error(result.kind === "no_route" ? "Jupiter direct route unavailable" : `Jupiter quote unavailable (${result.failure.failureClass})`);
+  const expectedInAmount = amountRaw.toString();
+  const body = result.body as { inAmount?: unknown; outAmount?: unknown } | null;
+  if (!body || typeof body.inAmount !== "string" || typeof body.outAmount !== "string" || !/^\d+$/.test(body.inAmount) || !/^\d+$/.test(body.outAmount) || body.inAmount !== expectedInAmount || BigInt(body.outAmount) <= BigInt(0)) throw new Error("Jupiter quote returned a malformed response");
+  return body;
 }
 
-async function jupSwapIxs(quote: any, userPublicKey: string): Promise<any> {
-  return fetchJson(SWAP_IX_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ quoteResponse: quote, userPublicKey, wrapAndUnwrapSol: false }),
-  });
+async function jupSwapIxs(quote: any, userPublicKey: string, purpose: QuotePurpose): Promise<any> {
+  const result = await jupiterRequestJson({ operation: "swap-instructions", purpose, body: { quoteResponse: quote, userPublicKey, wrapAndUnwrapSol: false } });
+  if (result.kind !== "success") throw new Error(result.kind === "no_route" ? "Jupiter route unavailable before build" : `Jupiter instruction build unavailable (${result.failure.failureClass})`);
+  const body = result.body as { swapInstruction?: unknown } | null;
+  if (!body || typeof body !== "object" || !body.swapInstruction) throw new Error("Jupiter instruction build returned a malformed response");
+  return body;
 }
 
 async function loadAlts(connection: Connection, addresses: string[]): Promise<AddressLookupTableAccount[]> {
@@ -887,6 +894,7 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       label: "Loop Open",
       extraRentLamports,
       allowUsdcRefill: false,
+      purpose: "execution",
     });
     // PREFLIGHT: return the exact bar without executing anything — even when
     // the wallet technically holds enough. The client always collects the FULL
@@ -970,7 +978,7 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
       }
 
       // Swap quote (WSOL -> LST) — its REAL market rate feeds the policy gate.
-      const quote = await jupQuote(WSOL_MINT, cfg.collateralMint, totalSwapLamports, slippageBps);
+      const quote = await jupQuote(WSOL_MINT, cfg.collateralMint, totalSwapLamports, slippageBps, "execution");
       const minOut = BigInt(quote.otherAmountThreshold);
       if (minOut <= 0n) {
         await failOp(opId, "quote_failed", "Swap quote returned a zero min-out.");
@@ -1006,7 +1014,7 @@ export async function executeLoopOpen(params: LoopOpenParams): Promise<LoopOpenR
         };
       }
 
-      const swapResp = await jupSwapIxs(quote, agentPublicKey);
+      const swapResp = await jupSwapIxs(quote, agentPublicKey, "execution");
       if ((swapResp.setupInstructions || []).length > 0) {
         // Creates inside the loop tx blow the 1232-byte limit — abort clean.
         await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s) despite ATAs existing.`);
@@ -2647,6 +2655,10 @@ async function executeLoopCloseInternal(
 ): Promise<LoopCloseInternalResult> {
   const { walletAddress, agentPublicKey, agentSecretKey, borrowPositionId } = params;
   const slippageBps = params.slippageBps ?? DEFAULT_SLIPPAGE_BPS;
+  // A direct close is an exit and must outrank new work. A close performed as
+  // one leg of a voluntary hop is ordinary execution and must not jump ahead of
+  // genuine exit/unwind traffic.
+  const closePurpose: QuotePurpose = hopGuard ? "execution" : "risk_reducing";
 
   const loadedRes = await loadOpenLoopPosition(walletAddress, borrowPositionId);
   if (!loadedRes.ok) return { success: false, error: loadedRes.error };
@@ -2773,6 +2785,7 @@ async function executeLoopCloseInternal(
         destMint: null,
         label: "Loop Close",
         extraRentLamports: prepIxs.length * ATA_RENT_LAMPORTS + LOOP_FEE_HEADROOM_LAMPORTS,
+        purpose: closePurpose,
       });
       if (!gas.ok) {
         await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
@@ -2806,7 +2819,7 @@ async function executeLoopCloseInternal(
       }
 
       // Swap the withdrawn LST back to WSOL; proceeds must cover the flash payback.
-      const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, liveCol, slippageBps);
+      const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, liveCol, slippageBps, closePurpose);
       const minOut = BigInt(quote.otherAmountThreshold);
       if (!isHoldExit && minOut <= liveDebt) {
         await failOp(opId, "swap_would_not_cover_payback", `minOut ${minOut} <= live debt ${liveDebt}`);
@@ -2854,7 +2867,7 @@ async function executeLoopCloseInternal(
         if (!committed.ok) return committed.result;
       }
 
-      const swapResp = await jupSwapIxs(quote, agentPublicKey);
+      const swapResp = await jupSwapIxs(quote, agentPublicKey, closePurpose);
       if ((swapResp.setupInstructions || []).length > 0) {
         await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s).`);
         return { success: false, error: "Loop Close: swap route needs extra account setup — aborted. Retry shortly." };
@@ -3724,7 +3737,7 @@ async function preflightHoldRotation(args: {
     // Dust debt still flash-repays on the close (isHoldExit is debt ≤ 0) —
     // mirror that sizing exactly so the provisional floor matches the real one.
     const flashRepay = liveDebt <= 0n ? 0n : (liveDebt * CLOSE_FLASH_BUFFER_NUM) / CLOSE_FLASH_BUFFER_DEN;
-    const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, liveCol, args.slippageBps);
+    const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, liveCol, args.slippageBps, "read");
     const minOut = BigInt(quote.otherAmountThreshold);
     if (liveDebt > 0n && minOut <= liveDebt) {
       return { ok: false, error: "the worst-case unwind output would not cover the residual debt repayment." };
@@ -5328,6 +5341,7 @@ export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams):
         destMint: null,
         label: "Loop Unwind",
         extraRentLamports: prepIxs.length * ATA_RENT_LAMPORTS + LOOP_FEE_HEADROOM_LAMPORTS,
+        purpose: "risk_reducing",
       });
       if (!gas.ok) {
         await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
@@ -5362,7 +5376,7 @@ export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams):
 
       // Swap the withdrawn slice back to WSOL; must cover the flash payback
       // (including the rounded-up repay pull — see UNWIND_MIN_OUT_MARGIN).
-      const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, withdrawRaw, slippageBps);
+      const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, withdrawRaw, slippageBps, "risk_reducing");
       const minOut = BigInt(quote.otherAmountThreshold);
       if (minOut <= repayRaw + UNWIND_MIN_OUT_MARGIN_LAMPORTS) {
         await failOp(opId, "swap_would_not_cover_payback", `minOut ${minOut} <= repay ${repayRaw} + margin ${UNWIND_MIN_OUT_MARGIN_LAMPORTS}`);
@@ -5371,7 +5385,7 @@ export async function executeLoopPartialUnwind(params: LoopPartialUnwindParams):
           error: "Loop Unwind: the swap's worst-case output would not cover the repayment (slippage/depeg). Nothing was moved.",
         };
       }
-      const swapResp = await jupSwapIxs(quote, agentPublicKey);
+      const swapResp = await jupSwapIxs(quote, agentPublicKey, "risk_reducing");
       if ((swapResp.setupInstructions || []).length > 0) {
         await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s).`);
         return { success: false, error: "Loop Unwind: swap route needs extra account setup — aborted. Retry shortly." };
@@ -5717,6 +5731,7 @@ export async function executeLoopDeleverToHold(params: LoopDeleverParams): Promi
         destMint: null,
         label: "Loop Delever",
         extraRentLamports: prepIxs.length * ATA_RENT_LAMPORTS + LOOP_FEE_HEADROOM_LAMPORTS,
+        purpose: "risk_reducing",
       });
       if (!gas.ok) {
         await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
@@ -5751,7 +5766,7 @@ export async function executeLoopDeleverToHold(params: LoopDeleverParams): Promi
 
       // Swap the withdrawn LST slice to WSOL; worst case must clear the TRUE
       // debt pull (repay MAX) with margin — the cushion rides back via ATA close.
-      const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, withdrawRaw, slippageBps);
+      const quote = await jupQuote(cfg.collateralMint, WSOL_MINT, withdrawRaw, slippageBps, "risk_reducing");
       const minOut = BigInt(quote.otherAmountThreshold);
       if (minOut <= liveDebt + UNWIND_MIN_OUT_MARGIN_LAMPORTS) {
         await failOp(opId, "swap_would_not_cover_payback", `minOut ${minOut} <= debt ${liveDebt} + margin ${UNWIND_MIN_OUT_MARGIN_LAMPORTS}`);
@@ -5760,7 +5775,7 @@ export async function executeLoopDeleverToHold(params: LoopDeleverParams): Promi
           error: "Loop Delever: the swap's worst-case output would not cover the repayment (slippage/depeg). Nothing was moved.",
         };
       }
-      const swapResp = await jupSwapIxs(quote, agentPublicKey);
+      const swapResp = await jupSwapIxs(quote, agentPublicKey, "risk_reducing");
       if ((swapResp.setupInstructions || []).length > 0) {
         await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s).`);
         return { success: false, error: "Loop Delever: swap route needs extra account setup — aborted. Retry shortly." };
@@ -6171,6 +6186,7 @@ export async function executeLoopRelever(params: LoopReleverParams): Promise<Loo
         destMint: null,
         label: "Loop Re-Lever",
         extraRentLamports: prepIxs.length * ATA_RENT_LAMPORTS + LOOP_FEE_HEADROOM_LAMPORTS,
+        purpose: "execution",
       });
       if (!gas.ok) {
         await failOp(opId, "gas_failed", gas.error || "insufficient SOL for fees");
@@ -6204,7 +6220,7 @@ export async function executeLoopRelever(params: LoopReleverParams): Promise<Loo
       }
 
       // Swap quote (WSOL -> LST) — its REAL market rate feeds the policy gate.
-      const quote = await jupQuote(WSOL_MINT, cfg.collateralMint, flashLamports, slippageBps);
+      const quote = await jupQuote(WSOL_MINT, cfg.collateralMint, flashLamports, slippageBps, "execution");
       const minOut = BigInt(quote.otherAmountThreshold);
       if (minOut <= 0n) {
         await failOp(opId, "quote_failed", "Swap quote returned a zero min-out.");
@@ -6237,7 +6253,7 @@ export async function executeLoopRelever(params: LoopReleverParams): Promise<Loo
         };
       }
 
-      const swapResp = await jupSwapIxs(quote, agentPublicKey);
+      const swapResp = await jupSwapIxs(quote, agentPublicKey, "execution");
       if ((swapResp.setupInstructions || []).length > 0) {
         await failOp(opId, "swap_setup_ixs", `Swap returned ${swapResp.setupInstructions.length} setup ix(s).`);
         return { success: false, error: "Loop Re-Lever: swap route needs extra account setup — aborted. Retry shortly." };

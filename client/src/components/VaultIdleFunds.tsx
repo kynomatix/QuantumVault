@@ -15,6 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import { isSessionError, showReconnectToast } from "@/lib/reconnect-toast";
 import { walletAuthHeaders } from "@/lib/queryClient";
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { previewActionReady, shouldRetryVaultPreview, vaultPreviewForDisplay, vaultPreviewRequestKey } from "@/lib/vault-preview-availability";
 import LoopVaultControls from "@/components/LoopVaultControls";
 import FixedYieldVault from "@/components/FixedYieldVault";
 import { Button } from "@/components/ui/button";
@@ -128,18 +129,29 @@ interface PositionView {
   onChainAmountRaw: string;
   onChainAmount: number;
   currentValueUsdc: number | null;
+  pricingReasonCode?: "no_route" | "quote_provider_unavailable";
   costBasisUsdc: number | null;
   unrealizedPnl: number | null;
   costBasisMissing: boolean;
 }
 
 interface PreviewResponse {
+  assetKey: string;
+  direction: "park" | "unpark";
   expectedOut: number | null;
   priceImpactPct: number | null;
   /** False for direct deposit/mint routes (Kamino, Jupiter Lend) — no market price impact. */
   impactApplies?: boolean;
   wouldReject: boolean;
   reason?: string;
+  reasonCode?: "no_route" | "quote_provider_unavailable";
+  clientRequestKey?: string;
+}
+
+class VaultPreviewQueryError extends Error {
+  constructor(readonly reasonCode: string | undefined, readonly preview: PreviewResponse) {
+    super(preview.reason || "Preview failed");
+  }
 }
 
 /** One bot that has funds parked inside it (independent_trader, e.g. Flash). */
@@ -192,37 +204,45 @@ function usePreview(args: {
   wallet: string | null;
 }) {
   const { open, assetKey, direction, amount, wallet } = args;
-  return useQuery<PreviewResponse>({
+  const identity = { assetKey: assetKey ?? "", direction, amount, wallet: wallet ?? "" };
+  const requestKey = vaultPreviewRequestKey(identity);
+  return useQuery<PreviewResponse, VaultPreviewQueryError>({
     queryKey: ["vault-preview", assetKey, direction, amount, wallet],
     queryFn: async () => {
       const res = await fetch(
         `/api/vault/preview?assetKey=${encodeURIComponent(assetKey!)}&direction=${direction}&amount=${amount}`,
         { credentials: "include", headers: walletAuthHeaders() },
       );
-      const data = await safeResponseJson(res);
-      if (!res.ok) throw new Error(data.error || "Preview failed");
-      return data as PreviewResponse;
+      const data = await safeResponseJson(res) as PreviewResponse & { error?: string };
+      const preview = { ...data, clientRequestKey: requestKey };
+      if (!res.ok) throw new VaultPreviewQueryError(data.reasonCode, preview);
+      return preview;
     },
     enabled: open && !!assetKey && !!wallet && amount > 0,
     staleTime: 8000,
-    retry: false,
+    retry: (failureCount, error) => shouldRetryVaultPreview(failureCount, error),
   });
 }
 
 function PreviewBox({
   loading,
   preview,
+  error,
+  onRefresh,
   outLabel,
   cap,
 }: {
   loading: boolean;
   preview: PreviewResponse | undefined;
+  error?: VaultPreviewQueryError | null;
+  onRefresh?: () => void;
   outLabel: string;
   cap: number;
 }) {
   if (loading) {
     return <Skeleton className="h-16 w-full" data-testid="skeleton-preview" />;
   }
+  preview = vaultPreviewForDisplay(preview, error?.preview);
   if (!preview) return null;
   const impactPct = preview.priceImpactPct === null ? null : preview.priceImpactPct * 100;
   return (
@@ -254,6 +274,9 @@ function PreviewBox({
         <div className="flex items-start gap-2 text-destructive pt-1" data-testid="text-preview-reject">
           <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
           <span>{preview.reason || "This swap would move the price too much. Try again later."}</span>
+          {preview.reasonCode === "quote_provider_unavailable" && onRefresh && (
+            <Button type="button" variant="ghost" size="sm" onClick={onRefresh}>Refresh</Button>
+          )}
         </div>
       )}
     </div>
@@ -484,6 +507,25 @@ export default function VaultIdleFunds({
     amount: embHeld,
     wallet: publicKeyString,
   });
+  const previewReady = (
+    query: { data?: PreviewResponse; isFetching: boolean; isError: boolean },
+    assetKey: string | null,
+    direction: "park" | "unpark",
+    amount: number,
+    busy: boolean,
+    enabled: boolean,
+  ) => previewActionReady({
+    enabled,
+    busy,
+    fetching: query.isFetching,
+    errored: query.isError,
+    currentRequestKey: vaultPreviewRequestKey({ assetKey: assetKey ?? "", direction, amount, wallet: publicKeyString ?? "" }),
+    preview: query.data,
+  });
+  const canPark = previewReady(parkPreview, detailAsset?.key ?? null, "park", spareUsdc, parking, !!detailAsset && spareUsdc > 0);
+  const canUnpark = previewReady(unparkPreview, detailAsset?.key ?? null, "unpark", detailHeld, unparking, !!detailAsset && detailHeld > 0);
+  const canEmbPark = previewReady(embParkPreview, embAsset?.key ?? null, "park", spareUsdc, parking, embedded && !!embAsset && spareUsdc > 0);
+  const canEmbUnpark = previewReady(embUnparkPreview, embAsset?.key ?? null, "unpark", embHeld, unparking, embedded && !!embAsset && embHeld > 0);
 
   // Close the detail sheet when the tab is hidden.
   useEffect(() => {
@@ -956,13 +998,15 @@ export default function VaultIdleFunds({
                   <PreviewBox
                     loading={embParkPreview.isFetching}
                     preview={embParkPreview.data}
+                    error={embParkPreview.error}
+                    onRefresh={() => void embParkPreview.refetch()}
                     outLabel={embAsset.displayName}
                     cap={maxImpact}
                   />
                 )}
                 <Button
                   onClick={() => handleParkAll(embAsset)}
-                  disabled={parking || !(spareUsdc > 0) || (embParkPreview.data?.wouldReject ?? false)}
+                  disabled={!canEmbPark}
                   className="w-full"
                   data-testid="button-embedded-park-all"
                 >
@@ -979,10 +1023,19 @@ export default function VaultIdleFunds({
                 )}
 
                 {embHeld > 0 && (
-                  <Button
+                  <div className="space-y-2">
+                    <PreviewBox
+                      loading={embUnparkPreview.isFetching}
+                      preview={embUnparkPreview.data}
+                      error={embUnparkPreview.error}
+                      onRefresh={() => void embUnparkPreview.refetch()}
+                      outLabel="USDC"
+                      cap={maxImpact}
+                    />
+                    <Button
                     variant="outline"
                     onClick={() => handleUnparkAll(embAsset.key, embAsset.displayName)}
-                    disabled={unparking || (embUnparkPreview.data?.wouldReject ?? false)}
+                    disabled={!canEmbUnpark}
                     className="w-full"
                     data-testid="button-embedded-unpark-all"
                   >
@@ -994,6 +1047,7 @@ export default function VaultIdleFunds({
                       "Unpark all to USDC"
                     )}
                   </Button>
+                  </div>
                 )}
               </>
             )}
@@ -1055,6 +1109,9 @@ export default function VaultIdleFunds({
                     <div>
                       <div className="text-muted-foreground">Value</div>
                       <div className="font-medium tabular-nums">{usd(detailPosition.currentValueUsdc)}</div>
+                      {detailPosition.pricingReasonCode === "quote_provider_unavailable" && (
+                        <div className="text-[10px] text-amber-500">Pricing temporarily unavailable</div>
+                      )}
                     </div>
                     <div>
                       <div className="text-muted-foreground">Cost</div>
@@ -1091,13 +1148,15 @@ export default function VaultIdleFunds({
                     <PreviewBox
                       loading={parkPreview.isFetching}
                       preview={parkPreview.data}
+                      error={parkPreview.error}
+                      onRefresh={() => void parkPreview.refetch()}
                       outLabel={detailAsset.displayName}
                       cap={maxImpact}
                     />
                   )}
                   <Button
                     onClick={() => handleParkAll()}
-                    disabled={parking || !(spareUsdc > 0) || (parkPreview.data?.wouldReject ?? false)}
+                    disabled={!canPark}
                     className="w-full"
                     data-testid="button-park-all"
                   >
@@ -1124,13 +1183,15 @@ export default function VaultIdleFunds({
                     <PreviewBox
                       loading={unparkPreview.isFetching}
                       preview={unparkPreview.data}
+                      error={unparkPreview.error}
+                      onRefresh={() => void unparkPreview.refetch()}
                       outLabel="USDC"
                       cap={maxImpact}
                     />
                     <Button
                       variant="outline"
                       onClick={() => handleUnparkAll(detailAsset.key, detailAsset.displayName)}
-                      disabled={unparking || (unparkPreview.data?.wouldReject ?? false)}
+                      disabled={!canUnpark}
                       className="w-full"
                       data-testid="button-unpark-all"
                     >

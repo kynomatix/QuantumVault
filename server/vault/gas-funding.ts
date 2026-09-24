@@ -46,6 +46,7 @@ import {
 } from "../agent-wallet";
 import { VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
 import { getBestQuote } from "../swap/index.js";
+import type { QuotePurpose } from "../swap/types.js";
 
 /** Overshoot the SOL we buy by 20% so price/slippage drift can't leave us short. */
 const SOL_REFILL_OVERBUY = 1.2;
@@ -81,6 +82,13 @@ export interface EnsureVaultGasParams {
    * account's trading USDC into loop principal). Default true (hands-off refill).
    */
   allowUsdcRefill?: boolean;
+  /**
+   * Admission priority inherited from the money leg that needs gas. Gas
+   * preparation can itself quote and execute a refill swap, so it is never a
+   * read-only operation. Exit/unwind callers pass `risk_reducing`; all other
+   * callers default to `execution`.
+   */
+  purpose?: Exclude<QuotePurpose, "read">;
 }
 
 export interface EnsureVaultGasResult {
@@ -111,6 +119,7 @@ const pendingTransfers = new Map<string, { signature: string; lastValidBlockHeig
  * `ok: true` only when the chain confirms the wallet now meets the required bar.
  */
 export async function ensureVaultGas(p: EnsureVaultGasParams): Promise<EnsureVaultGasResult> {
+  const purpose = p.purpose ?? "execution";
   const connection = getServerConnection();
   const payer = new PublicKey(p.payingPublicKey);
   const sameWallet = p.payingPublicKey === p.funderPublicKey;
@@ -134,7 +143,7 @@ export async function ensureVaultGas(p: EnsureVaultGasParams): Promise<EnsureVau
         error: `${p.label}: not enough SOL (have ${(payerLamportsBefore / LAMPORTS_PER_SOL).toFixed(4)}, need ${(requiredLamports / LAMPORTS_PER_SOL).toFixed(4)}). Deposit SOL to continue.`,
       };
     }
-    const refill = await refillFunderSol(connection, p, requiredLamports);
+    const refill = await refillFunderSol(connection, p, requiredLamports, purpose);
     if (!refill.ok) {
       return { ok: false, requiredLamports, payerLamportsBefore, error: refill.error };
     }
@@ -198,7 +207,7 @@ export async function ensureVaultGas(p: EnsureVaultGasParams): Promise<EnsureVau
         error: `${p.label}: not enough SOL (have ${(payerLamportsBefore / LAMPORTS_PER_SOL).toFixed(4)}, need ${(requiredLamports / LAMPORTS_PER_SOL).toFixed(4)}). Deposit SOL to continue.`,
       };
     }
-    const refill = await refillFunderSol(connection, p, funderNeed);
+    const refill = await refillFunderSol(connection, p, funderNeed, purpose);
     if (!refill.ok) {
       return { ok: false, requiredLamports, payerLamportsBefore, error: refill.error };
     }
@@ -261,6 +270,7 @@ async function refillFunderSol(
   connection: Connection,
   p: EnsureVaultGasParams,
   goalLamports: number,
+  purpose: Exclude<QuotePurpose, "read">,
 ): Promise<{ ok: true; signature?: string; acquiredLamports: number } | { ok: false; error: string }> {
   const funderPk = new PublicKey(p.funderPublicKey);
   let lastSignature: string | undefined;
@@ -291,15 +301,18 @@ async function refillFunderSol(
     }
 
     // Derive lamports-per-USDC-unit from a fresh quote on the full balance.
-    const probe = await getBestQuote({
+    const probeResult = await getBestQuote({
       inputMint: USDC_MINT,
       outputMint: NATIVE_SOL_MINT,
       amountRaw: usdcRawFull.toString(),
       slippageBps: REFILL_SLIPPAGE_BPS,
+      purpose,
     });
-    if (!probe || !probe.outAmountRaw) {
-      return { ok: false, error: `${p.label}: no USDC -> SOL route available to buy gas.` };
+    if (probeResult.kind !== "quote") {
+      const message = probeResult.kind === "unavailable" ? "USDC -> SOL pricing is temporarily unavailable" : "no USDC -> SOL route is available";
+      return { ok: false, error: `${p.label}: ${message} to buy gas.` };
     }
+    const probe = probeResult.quote;
     const lamportsPerUsdcUnit = Number(probe.outAmountRaw) / Number(usdcRawFull);
     if (!(lamportsPerUsdcUnit > 0)) {
       return { ok: false, error: `${p.label}: could not price USDC -> SOL to buy gas.` };
@@ -321,6 +334,7 @@ async function refillFunderSol(
       amountRaw: usdcToSell.toString(),
       slippageBps: REFILL_SLIPPAGE_BPS,
       maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT,
+      purpose,
     });
     if (!swap.success || !swap.outputReceivedRaw) {
       return { ok: false, error: `${p.label}: ${swap.error || "USDC -> SOL gas swap failed"}` };

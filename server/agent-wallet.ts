@@ -2,6 +2,7 @@ import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, Tran
 import bs58 from 'bs58';
 import BN from 'bn.js';
 import { getBestQuote, getProviderByName } from './swap/index.js';
+import type { QuotePurpose } from './swap/types.js';
 import { createSolanaRpcConnection } from './rpc-config.js';
 
 /** Wrapped-SOL mint — also how Jupiter represents native SOL as a swap input. */
@@ -1427,6 +1428,8 @@ export interface AgentSwapParams {
   /** Exact input amount to sell, raw base units (ExactIn). */
   amountRaw: string;
   slippageBps?: number;
+  /** Admission priority at the shared Jupiter request-start coordinator. */
+  purpose?: Exclude<QuotePurpose, 'read'>;
   /**
    * Reject the swap when the router's price impact exceeds this fraction
    * (0.005 = 0.5%). When set, a null/unavailable price impact is also rejected
@@ -1492,6 +1495,7 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     outputMint,
     amountRaw,
     slippageBps = 100,
+    purpose = 'execution',
     maxPriceImpactPct,
     minSolGas,
   } = params;
@@ -1525,15 +1529,20 @@ export async function executeAgentSwap(params: AgentSwapParams): Promise<AgentSw
     }
 
     // 2) Quote the exact input into the output mint.
-    const quote = await getBestQuote({
+    const quoteResult = await getBestQuote({
       inputMint,
       outputMint,
       amountRaw: amount.toString(),
       slippageBps,
+      purpose,
     });
-    if (!quote) {
+    if (quoteResult.kind === 'no_route') {
       return { success: false, error: 'No swap route available for this token' };
     }
+    if (quoteResult.kind === 'unavailable') {
+      return { success: false, error: 'Swap pricing is temporarily unavailable. Please try again.' };
+    }
+    const quote = quoteResult.quote;
 
     // 3) Price-impact gate. Reject above the cap, and reject a null impact when a
     //    cap is set: moving idle capital must never proceed on an unknown impact.

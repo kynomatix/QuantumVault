@@ -18,6 +18,7 @@
 
 import { executeAgentSwap, USDC_MINT } from "../agent-wallet";
 import { getBestQuote } from "../swap/index.js";
+import type { QuotePurpose } from "../swap/types.js";
 import { KaminoYieldRoute } from "./kamino-route";
 import { JupiterLendYieldRoute } from "./jupiter-lend-route";
 import type { YieldAsset } from "./yield-assets";
@@ -33,6 +34,7 @@ export interface YieldRoutePreview {
   priceImpactPct: number | null;
   wouldReject: boolean;
   reason?: string;
+  reasonCode?: "no_route" | "quote_provider_unavailable";
   /** "market_quote" | "redemption_rate" */
   valuationSource: string;
 }
@@ -55,6 +57,7 @@ export interface YieldRouteValuation {
   /** USDC value of the holding in raw base units, or null when unavailable/stale. */
   valueUsdcRaw: string | null;
   source: string;
+  reasonCode?: "no_route" | "quote_provider_unavailable";
 }
 
 export interface ParkArgs {
@@ -79,7 +82,7 @@ export interface YieldRoute {
   park(args: ParkArgs): Promise<YieldRouteExecResult>;
   unpark(args: UnparkArgs): Promise<YieldRouteExecResult>;
   /** Live USDC value of an on-chain holding of `amountTokenRaw`, or null when unknown. */
-  valueInUsdc(amountTokenRaw: bigint): Promise<YieldRouteValuation>;
+  valueInUsdc(amountTokenRaw: bigint, purpose?: QuotePurpose): Promise<YieldRouteValuation>;
 }
 
 /**
@@ -108,22 +111,25 @@ class SwapYieldRoute implements YieldRoute {
         valuationSource: this.valuationSource,
       };
     }
-    const quote = await getBestQuote({
+    const quoteResult = await getBestQuote({
       inputMint,
       outputMint,
       amountRaw: amountRaw.toString(),
       slippageBps,
+      purpose: "read",
     });
-    if (!quote) {
+    if (quoteResult.kind !== "quote") {
+      const unavailable = quoteResult.kind === "unavailable";
       return {
         expectedOutRaw: null,
         priceImpactPct: null,
         wouldReject: true,
-        reason: "No swap route available for this asset",
+        reason: unavailable ? "Pricing service is temporarily unavailable. Try again shortly." : "No swap route available for this asset",
+        reasonCode: unavailable ? "quote_provider_unavailable" : "no_route",
         valuationSource: this.valuationSource,
       };
     }
-
+    const quote = quoteResult.quote;
     const impact = quote.priceImpactPct;
     let wouldReject = false;
     let reason: string | undefined;
@@ -183,6 +189,7 @@ class SwapYieldRoute implements YieldRoute {
       outputMint: USDC_MINT,
       amountRaw: args.amountTokenRaw.toString(),
       slippageBps: args.slippageBps,
+      purpose: "risk_reducing",
       maxPriceImpactPct: VAULT_MAX_PRICE_IMPACT,
     });
     // Raw measured delta is the source of truth; a route that cannot report it fails closed.
@@ -199,17 +206,20 @@ class SwapYieldRoute implements YieldRoute {
     };
   }
 
-  async valueInUsdc(amountTokenRaw: bigint): Promise<YieldRouteValuation> {
+  async valueInUsdc(amountTokenRaw: bigint, purpose: QuotePurpose = "execution"): Promise<YieldRouteValuation> {
     if (amountTokenRaw <= BigInt(0)) return { valueUsdcRaw: "0", source: this.valuationSource };
     try {
-      const q = await getBestQuote({
+      const result = await getBestQuote({
         inputMint: this.asset.mint,
         outputMint: USDC_MINT,
         amountRaw: amountTokenRaw.toString(),
         slippageBps: DEFAULT_VALUATION_SLIPPAGE_BPS,
+        purpose,
       });
-      if (!q) return { valueUsdcRaw: null, source: this.valuationSource };
-      return { valueUsdcRaw: q.outAmountRaw, source: this.valuationSource };
+      if (result.kind !== "quote") {
+        return { valueUsdcRaw: null, source: this.valuationSource, reasonCode: result.kind === "unavailable" ? "quote_provider_unavailable" : "no_route" };
+      }
+      return { valueUsdcRaw: result.quote.outAmountRaw, source: this.valuationSource };
     } catch {
       return { valueUsdcRaw: null, source: this.valuationSource };
     }

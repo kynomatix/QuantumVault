@@ -88,7 +88,7 @@ function setupCommon() {
 }
 
 function setupSwapProvider(agentPublicKey: string) {
-  swapMocks.getBestQuote.mockResolvedValue({ provider: "test", priceImpactPct: 0 });
+  swapMocks.getBestQuote.mockResolvedValue({ kind: "quote", quote: { provider: "test", priceImpactPct: 0 } });
   swapMocks.getProviderByName.mockReturnValue({
     buildSwapTransaction: vi.fn(async () => {
       const message = new TransactionMessage({
@@ -271,6 +271,14 @@ describe("executeAgentInstructions broadcast provenance", () => {
 });
 
 describe("executeAgentSwap broadcast provenance", () => {
+  it("typed provider unavailability stays before build, sign, and broadcast", async () => {
+    const s = signer();
+    swapMocks.getBestQuote.mockResolvedValue({ kind: "unavailable", failure: { provider: "jupiter", failureClass: "rate_limited", status: 429, retryAfterMs: 1000 } });
+    const result = await executeAgentSwap({ agentPublicKey: s.publicKey, agentSecretKey: s.secretKey, inputMint: INPUT_MINT, outputMint: NATIVE_SOL_MINT, amountRaw: "10" });
+    expect(result).toMatchObject({ success: false, error: "Swap pricing is temporarily unavailable. Please try again." });
+    expect(swapMocks.getProviderByName).not.toHaveBeenCalled();
+    expect(connectionMocks.sendRawTransaction).not.toHaveBeenCalled();
+  });
   it("a no-hook preflight rejection is proven unsent and returns no signature", async () => {
     const s = signer();
     setupSwapProvider(s.publicKey);

@@ -25,6 +25,7 @@ import { getYieldRoute, VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
 import { ensureVaultGas } from "./gas-funding";
 import { vaultLockKey } from "./scope";
 import type { VaultPosition } from "@shared/schema";
+import type { QuotePurpose } from "../swap/types.js";
 
 export { VAULT_MAX_PRICE_IMPACT } from "./yield-routes";
 
@@ -89,6 +90,7 @@ export interface VaultPreview {
   impactApplies: boolean;
   wouldReject: boolean;
   reason?: string;
+  reasonCode?: "no_route" | "quote_provider_unavailable";
 }
 
 /** Read-only: quote a hypothetical park/unpark and report what the real swap would do. */
@@ -136,6 +138,7 @@ export async function previewVaultSwap(params: {
     impactApplies: route.kind === "jupiter",
     wouldReject: p.wouldReject,
     reason: p.reason,
+    reasonCode: p.reasonCode,
   };
 }
 
@@ -187,6 +190,7 @@ export async function parkUsdc(params: {
       funderSecretKey: params.funderSecretKey ?? params.agentSecretKey,
       destMint: asset.mint,
       label: "Park",
+      purpose: "execution",
     });
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this park." };
 
@@ -336,6 +340,7 @@ export async function unparkToUsdc(params: {
       funderSecretKey: params.funderSecretKey ?? params.agentSecretKey,
       destMint: USDC_MINT,
       label: "Unpark",
+      purpose: "risk_reducing",
     });
     if (!gas.ok) return { success: false, error: gas.error || "Could not cover the network gas for this unpark." };
 
@@ -465,6 +470,7 @@ export interface VaultPositionView {
   onChainAmount: number;
   /** Live USDC value of the on-chain holding, or null when no quote is available. */
   currentValueUsdc: number | null;
+  pricingReasonCode?: "no_route" | "quote_provider_unavailable";
   /** Recorded average-cost basis, or null when there is no DB row for it. */
   costBasisUsdc: number | null;
   /** currentValue - costBasis, when both are known. */
@@ -486,9 +492,10 @@ export async function getVaultPositionViews(
   // were parked while an asset was enabled and later disabled are still surfaced.
   // Default false keeps the original enabled-only view for existing callers; only
   // the carry advisor needs the detectable set (to fail closed on a disabled park).
-  opts?: { includeDisabled?: boolean },
+  opts?: { includeDisabled?: boolean; purpose?: QuotePurpose },
 ): Promise<VaultPositionView[]> {
   const assetSet = opts?.includeDisabled ? getDetectableYieldAssets() : getEnabledYieldAssets();
+  const purpose = opts?.purpose ?? "read";
   const dbRows = await storage.getVaultPositions(walletAddress, tradingBotId ?? null);
   const dbByKey = new Map(dbRows.map((r) => [r.assetKey, r] as const));
 
@@ -509,9 +516,11 @@ export async function getVaultPositionViews(
     if (!hasOnChain && !dbRow) continue;
 
     let currentValueUsdc: number | null = hasOnChain ? null : 0;
+    let pricingReasonCode: VaultPositionView["pricingReasonCode"];
     if (hasOnChain) {
-      const val = await getYieldRoute(asset).valueInUsdc(onChainRaw);
+      const val = await getYieldRoute(asset).valueInUsdc(onChainRaw, purpose);
       currentValueUsdc = val.valueUsdcRaw === null ? null : fromRaw(BigInt(val.valueUsdcRaw), USDC_DECIMALS);
+      pricingReasonCode = val.reasonCode;
     }
 
     const costBasisUsdc = dbRow ? Number(dbRow.usdcCostBasis) : null;
@@ -531,6 +540,7 @@ export async function getVaultPositionViews(
       onChainAmountRaw: onChainRaw.toString(),
       onChainAmount,
       currentValueUsdc,
+      pricingReasonCode,
       costBasisUsdc,
       unrealizedPnl,
       costBasisMissing,
@@ -557,6 +567,7 @@ export async function getVaultPositionViews(
  */
 export async function sumVaultPositionValueUsdc(
   agentPublicKey: string,
+  purpose: QuotePurpose = "read",
 ): Promise<{ valueUsdc: number; ok: boolean }> {
   let valueUsdc = 0;
   for (const asset of getDetectableYieldAssets()) {
@@ -569,7 +580,7 @@ export async function sumVaultPositionValueUsdc(
     }
     if (raw <= BigInt(0)) continue;
     try {
-      const val = await getYieldRoute(asset).valueInUsdc(raw);
+      const val = await getYieldRoute(asset).valueInUsdc(raw, purpose);
       if (val.valueUsdcRaw === null) return { valueUsdc: 0, ok: false }; // held but unpriceable
       valueUsdc += fromRaw(BigInt(val.valueUsdcRaw), USDC_DECIMALS);
     } catch {
@@ -597,6 +608,7 @@ export async function sumVaultPositionValueUsdc(
 export async function valueVaultRowsForWallet(
   agentPublicKey: string,
   rows: VaultPosition[],
+  purpose: QuotePurpose = "read",
 ): Promise<{ views: VaultPositionView[]; warnings: string[] }> {
   const byKey = new Map(getDetectableYieldAssets().map((a) => [a.key, a] as const));
   const views: VaultPositionView[] = [];
@@ -624,10 +636,12 @@ export async function valueVaultRowsForWallet(
     if (!unreadable && onChainRaw <= BigInt(0)) continue;
 
     let currentValueUsdc: number | null = null;
+    let pricingReasonCode: VaultPositionView["pricingReasonCode"];
     if (!unreadable) {
       try {
-        const val = await getYieldRoute(asset).valueInUsdc(onChainRaw);
+        const val = await getYieldRoute(asset).valueInUsdc(onChainRaw, purpose);
         currentValueUsdc = val.valueUsdcRaw === null ? null : fromRaw(BigInt(val.valueUsdcRaw), USDC_DECIMALS);
+        pricingReasonCode = val.reasonCode;
       } catch {
         currentValueUsdc = null;
       }
@@ -651,6 +665,7 @@ export async function valueVaultRowsForWallet(
       onChainAmountRaw: onChainRaw.toString(),
       onChainAmount,
       currentValueUsdc,
+      pricingReasonCode,
       costBasisUsdc,
       unrealizedPnl,
       costBasisMissing: false,

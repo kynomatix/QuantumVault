@@ -153,13 +153,15 @@ async function samplePrice(asset: YieldAsset): Promise<number | null> {
 
     if (asset.valuation === "market_quote") {
       // Fixed-notional buy quote: $1,000 USDC -> token. price = 1000 / tokensOut.
-      const q = await getBestQuote({
+      const result = await getBestQuote({
         inputMint: USDC_MINT,
         outputMint: asset.mint,
         amountRaw: QUOTE_NOTIONAL_USDC_RAW.toString(),
         slippageBps: QUOTE_SLIPPAGE_BPS,
+        purpose: "read",
       });
-      if (!q || !q.outAmountRaw) return null;
+      if (result.kind !== "quote") return null;
+      const q = result.quote;
       // Reject distorted/unverifiable samples. A thin or liquidity-impaired route
       // would persist a wrong price that later surfaces a plausible-but-false APY
       // (the broad clamp would not catch it). Mirror the money path's impact gate
@@ -176,7 +178,7 @@ async function samplePrice(asset: YieldAsset): Promise<number | null> {
     // redemption_rate: USDC value of a fixed reference token amount via the route.
     const route = getYieldRoute(asset);
     const referenceRaw = BigInt(REDEMPTION_REFERENCE_WHOLE_TOKENS) * BigInt(10) ** BigInt(asset.decimals);
-    const val = await route.valueInUsdc(referenceRaw);
+    const val = await route.valueInUsdc(referenceRaw, "read");
     if (!val || val.valueUsdcRaw == null) return null;
     const usdc = Number(BigInt(val.valueUsdcRaw)) / 1e6; // USDC is 6dp
     const price = usdc / REDEMPTION_REFERENCE_WHOLE_TOKENS;

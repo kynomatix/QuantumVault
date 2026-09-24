@@ -2005,7 +2005,7 @@ async function autoUnparkAccountVaultForUsdc(args: {
   const { walletAddress, agentPublicKey, agentSecretKey, neededUsdc, logPrefix, all } = args;
   if (!(neededUsdc > 0)) return 0;
   try {
-    const views = await getVaultPositionViews(walletAddress, agentPublicKey, null);
+    const views = await getVaultPositionViews(walletAddress, agentPublicKey, null, { purpose: "execution" });
     const routable = views
       .filter(
         (v) =>
@@ -2137,7 +2137,7 @@ async function autoUnparkPerBotVaultForUsdc(args: {
   }
 
   try {
-    const views = await getVaultPositionViews(walletAddress, botCtx.botPublicKey, botCtx.botId);
+    const views = await getVaultPositionViews(walletAddress, botCtx.botPublicKey, botCtx.botId, { purpose: "execution" });
     const routable = views
       .filter(
         (v) =>
@@ -3022,7 +3022,7 @@ async function defendOneLoanAutonomously(
         if (repayDecision.action !== "skip" && !idleCoversFully) {
           let parkedUsdcValueRaw = 0n;
           try {
-            const views = await getVaultPositionViews(bot.walletAddress, botCtx.botPublicKey, bot.id);
+            const views = await getVaultPositionViews(bot.walletAddress, botCtx.botPublicKey, bot.id, { purpose: "risk_reducing" });
             for (const v of views) {
               let heldRaw = 0n;
               try { heldRaw = BigInt(v.onChainAmountRaw ?? "0"); } catch { continue; }
@@ -10540,16 +10540,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
-      const quote = await getBestQuote({
+      const quoteResult = await getBestQuote({
         inputMint,
         outputMint: SWAP_USDC_MINT,
         amountRaw,
         slippageBps,
+        purpose: "read",
       });
-      if (!quote) {
-        return res.status(404).json({ error: "No swap route available for this token" });
+      if (quoteResult.kind === "no_route") {
+        return res.status(404).json({ error: "No swap route available for this token", reasonCode: "no_route" });
       }
-
+      if (quoteResult.kind === "unavailable") {
+        return res.status(503).json({ error: "Swap pricing is temporarily unavailable", reasonCode: "quote_provider_unavailable" });
+      }
+      const quote = quoteResult.quote;
       res.json({
         provider: quote.provider,
         inAmountRaw: quote.inAmountRaw,
@@ -10981,6 +10985,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       const preview = await previewVaultSwap({ assetKey, direction, amount, slippageBps });
+      if (preview.reasonCode === "quote_provider_unavailable") return res.status(503).json(preview);
       res.json(preview);
     } catch (error: any) {
       console.error("[Vault] preview error:", error);

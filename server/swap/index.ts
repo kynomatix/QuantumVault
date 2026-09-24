@@ -1,39 +1,66 @@
-/**
- * Swap aggregation entry point.
- *
- * Currently routes through Jupiter only (per Task #181: Titan deferred — it
- * needs a paid subscription). The provider list is the only thing that changes
- * when a venue is added; callers depend on getBestQuote / the SwapProvider
- * interface, never on a concrete provider.
- */
+import type { BestQuoteResult, ProviderQuoteResult, QuoteParams, SwapProvider, SwapQuote } from "./types.js";
+import { JupiterProvider } from "./jupiter.js";
 
-import type { SwapProvider, SwapQuote, QuoteParams } from './types.js';
-import { JupiterProvider } from './jupiter.js';
-
-export type { SwapProvider, SwapQuote, QuoteParams } from './types.js';
+export type { BestQuoteResult, ProviderQuoteResult, QuoteParams, QuoteUnavailable, QuoteUnavailableClass, SwapProvider, SwapQuote } from "./types.js";
 
 const providers: SwapProvider[] = [new JupiterProvider()];
+const readInFlight = new Map<string, Promise<BestQuoteResult>>();
 
-/**
- * Returns the highest-output quote across all configured providers, or null if
- * none can route the pair. Provider transport failures are isolated so one bad
- * venue can't sink the whole quote.
- */
-export async function getBestQuote(params: QuoteParams): Promise<SwapQuote | null> {
-  const settled = await Promise.allSettled(providers.map((p) => p.getQuote(params)));
-
-  let best: SwapQuote | null = null;
-  for (const r of settled) {
-    if (r.status !== 'fulfilled' || !r.value) continue;
-    const q = r.value;
-    if (!best || BigInt(q.outAmountRaw) > BigInt(best.outAmountRaw)) {
-      best = q;
-    }
-  }
-  return best;
+function readKey(params: QuoteParams): string {
+  return JSON.stringify([
+    providers.map((provider) => `${provider.name}:${provider.quoteIdentity()}`).sort(),
+    params.inputMint,
+    params.outputMint,
+    params.amountRaw,
+    params.slippageBps,
+    params.restrictIntermediateTokens ?? true,
+    params.onlyDirectRoutes ?? null,
+    params.maxAccounts ?? null,
+    params.purpose ?? "read",
+  ]);
 }
 
-/** Resolves the provider that produced a quote so callers can build its tx. */
+export function selectBestQuoteResult(settled: ReadonlyArray<PromiseSettledResult<ProviderQuoteResult>>): BestQuoteResult {
+  let best: SwapQuote | null = null;
+  let unavailable: BestQuoteResult | null = null;
+  const noRoutes: Array<Extract<BestQuoteResult, { kind: "no_route" }>> = [];
+  for (const item of settled) {
+    if (item.status === "rejected") {
+      unavailable ??= { kind: "unavailable", failure: { provider: "unknown", failureClass: "network", status: null, retryAfterMs: null } };
+      continue;
+    }
+    if (item.value.kind === "quote") {
+      const quote = item.value.quote;
+      if (!best || BigInt(quote.outAmountRaw) > BigInt(best.outAmountRaw)) best = quote;
+    } else if (item.value.kind === "unavailable") {
+      unavailable ??= item.value;
+    } else {
+      noRoutes.push(item.value);
+    }
+  }
+  if (best) return { kind: "quote", quote: best };
+  if (unavailable) return unavailable;
+  const first = noRoutes[0];
+  return first ?? { kind: "unavailable", failure: { provider: "none", failureClass: "configuration", status: null, retryAfterMs: null } };
+}
+
+async function collect(params: QuoteParams): Promise<BestQuoteResult> {
+  const settled = await Promise.allSettled(providers.map((provider) => provider.getQuote(params)));
+  return selectBestQuoteResult(settled);
+}
+
+export async function getBestQuote(params: QuoteParams): Promise<BestQuoteResult> {
+  const purpose = params.purpose ?? "read";
+  if (purpose !== "read") return collect({ ...params, purpose });
+  const normalized = { ...params, purpose: "read" as const };
+  const key = readKey(normalized);
+  const existing = readInFlight.get(key);
+  if (existing) return existing;
+  const pending = collect(normalized).finally(() => readInFlight.delete(key));
+  readInFlight.set(key, pending);
+  return pending;
+}
+
 export function getProviderByName(name: string): SwapProvider | null {
-  return providers.find((p) => p.name === name) ?? null;
+  return providers.find((provider) => provider.name === name) ?? null;
 }

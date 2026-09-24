@@ -58,6 +58,25 @@ vi.mock("../../server/vault/gas-funding", () => ({
   ensureVaultGas: vi.fn(),
 }));
 
+vi.mock("../../server/swap/jupiter-runtime.js", () => ({
+  jupiterRequestJson: vi.fn(async (request: any) => {
+    const url = new URL(`https://api.jup.ag/swap/v1/${request.operation}`);
+    for (const [key, value] of Object.entries(request.query ?? {})) url.searchParams.set(key, String(value));
+    const response = await fetch(url, request.body === undefined ? undefined : {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request.body),
+    });
+    const parsed = JSON.parse(await response.text());
+    const body = request.operation === "quote" && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { inAmount: String(request.query?.amount ?? ""), ...parsed }
+      : parsed;
+    return response.ok
+      ? { kind: "success", body }
+      : { kind: "unavailable", failure: { failureClass: "upstream_server", status: response.status, retryAfterMs: null, code: null } };
+  }),
+}));
+
 // REAL keyed-mutex semantics (not a passthrough): same-key sections are
 // mutually exclusive, so (a) the parallel-retry test below actually exercises
 // serialization, and (b) any nested same-key acquisition self-deadlocks into a
