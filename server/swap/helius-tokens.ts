@@ -8,8 +8,8 @@
  * back to the plain RPC token-account scan (no metadata: symbol = short mint).
  */
 
-import { Connection, PublicKey } from '@solana/web3.js';
-import { getPrimaryRpcUrl } from './../rpc-config.js';
+import { PublicKey } from '@solana/web3.js';
+import { createSolanaRpcConnection } from './../rpc-config.js';
 
 const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -139,7 +139,7 @@ function mapDasResult(result: any): UserToken[] {
 }
 
 async function fallbackRpcTokens(ownerAddress: string): Promise<UserToken[]> {
-  const connection = new Connection(getPrimaryRpcUrl(), 'confirmed');
+  const connection = createSolanaRpcConnection('confirmed');
   const owner = new PublicKey(ownerAddress);
 
   const [lamports, parsed] = await Promise.all([

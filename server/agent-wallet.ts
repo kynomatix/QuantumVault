@@ -2,6 +2,7 @@ import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, Tran
 import bs58 from 'bs58';
 import BN from 'bn.js';
 import { getBestQuote, getProviderByName } from './swap/index.js';
+import { createSolanaRpcConnection } from './rpc-config.js';
 
 /** Wrapped-SOL mint — also how Jupiter represents native SOL as a swap input. */
 export const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -73,22 +74,11 @@ export function agentDepositPreflightHttpResponse(error: unknown): {
   };
 }
 
-function getSolanaRpcUrl(): string {
-  if (process.env.SOLANA_RPC_URL) {
-    return process.env.SOLANA_RPC_URL;
-  }
-  if (IS_MAINNET && process.env.HELIUS_API_KEY) {
-    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-  }
-  return IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
-}
-const SOLANA_RPC = getSolanaRpcUrl();
-
 let connectionInstance: Connection | null = null;
 
 function getConnection(): Connection {
   if (!connectionInstance) {
-    connectionInstance = new Connection(SOLANA_RPC, 'confirmed');
+    connectionInstance = createSolanaRpcConnection('confirmed');
   }
   return connectionInstance;
 }

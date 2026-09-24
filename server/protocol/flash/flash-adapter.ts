@@ -139,7 +139,7 @@ import {
   FLASH_SIDE_SHORT,
   FLASH_PRIVILEGE_REFERRAL,
 } from './flash-referral.js';
-import { getPrimaryRpcUrl } from '../../rpc-config.js';
+import { createSolanaRpcConnection } from '../../rpc-config.js';
 import { confirmTxLanded } from './flash-confirm.js';
 import { hermesFetch, hermesUrl } from '../../pricing/hermes-config.js';
 
@@ -2130,7 +2130,7 @@ export class FlashAdapter implements ProtocolAdapter {
 
   private _getConnection(): Connection {
     if (!this._connection) {
-      this._connection = new Connection(getPrimaryRpcUrl(), 'confirmed');
+      this._connection = createSolanaRpcConnection('confirmed');
     }
     return this._connection;
   }

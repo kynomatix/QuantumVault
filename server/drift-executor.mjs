@@ -1958,11 +1958,7 @@ async function depositToDrift(command) {
 
   console.error(`[Executor] Deposit ${amountUsdc} USDC to subaccount ${subAccountId}`);
 
-  const rpcUrl = process.env.SOLANA_RPC_URL ||
-    (process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}` :
-    'https://api.mainnet-beta.solana.com');
-
-  const connection = new Connection(rpcUrl, { commitment: 'confirmed' });
+  const { connection } = await getWorkingConnection();
 
   // V3 Phase 4c: wire format only carries plaintext base58.
   if (!privateKeyBase58) {

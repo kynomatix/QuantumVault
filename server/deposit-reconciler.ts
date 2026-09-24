@@ -1,5 +1,6 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { storage } from './storage';
+import { createSolanaRpcConnection } from './rpc-config';
 
 const SOLANA_ENV = (process.env.DRIFT_ENV || process.env.SOLANA_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
 const IS_MAINNET = SOLANA_ENV === 'mainnet-beta';
@@ -11,17 +12,9 @@ const USDC_MINT = IS_MAINNET ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
 const TOKEN_PROGRAM_ID = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
 const ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
 
-function getRpcUrl(): string {
-  if (process.env.SOLANA_RPC_URL) return process.env.SOLANA_RPC_URL;
-  if (IS_MAINNET && process.env.HELIUS_API_KEY) {
-    return `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
-  }
-  return IS_MAINNET ? 'https://api.mainnet-beta.solana.com' : 'https://api.devnet.solana.com';
-}
-
 let connection: Connection | null = null;
 function getConnection(): Connection {
-  if (!connection) connection = new Connection(getRpcUrl(), 'confirmed');
+  if (!connection) connection = createSolanaRpcConnection('confirmed');
   return connection;
 }
 
