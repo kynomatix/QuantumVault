@@ -179,15 +179,48 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 185 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 186 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(185);
-    expect(metadata).toHaveLength(185);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(185);
+    expect(sqlEntries).toHaveLength(186);
+    expect(metadata).toHaveLength(186);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(186);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
-    // Preserve the entire pre-existing SQL byte identity; independently pin the appended entry.
-    const sqlDigest = createHash("sha256").update(sqlEntries.slice(0, 184).join("\u0000"), "utf8").digest("hex").toUpperCase();
-    expect(sqlDigest).toBe("DE274BF660321202EC9433C82C5914ECAD67FBDEE51EEAEEFC2F330B3269F7E9");
+    // Entry 028 is intentionally guarded so a later superset constraint survives
+    // every boot. Preserve every other pre-existing SQL byte exactly.
+    const preExistingUnchanged = sqlEntries.slice(0, 185).filter((_, index) => index !== 28);
+    const sqlDigest = createHash("sha256").update(preExistingUnchanged.join("\u0000"), "utf8").digest("hex").toUpperCase();
+    expect(sqlDigest).toBe("5161C4D9D2A3DDB9B1AE9302A5C438B919A32EEB2898C9B919754A081E1C42C4");
+    const normalizedMigration028 = sqlEntries[28].split("\n").map((line) => line.trim()).join("\n");
+    expect(normalizedMigration028).toBe([
+      "DO $$",
+      "DECLARE",
+      "current_definition text;",
+      "BEGIN",
+      "SELECT pg_get_constraintdef(oid, true)",
+      "INTO current_definition",
+      "FROM pg_constraint",
+      "WHERE conrelid = 'referral_reward_events'::regclass",
+      "AND conname = 'referral_reward_events_status_valid';",
+      "IF current_definition IS NULL OR position('awaiting_creator' in current_definition) = 0 THEN",
+      "ALTER TABLE referral_reward_events",
+      "DROP CONSTRAINT IF EXISTS referral_reward_events_status_valid;",
+      "ALTER TABLE referral_reward_events",
+      "ADD CONSTRAINT referral_reward_events_status_valid",
+      "CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'));",
+      "END IF;",
+      "END $$;",
+    ].join("\n"));
+    expect(metadata[28]).toEqual({
+      id: "028-do--begin-if",
+      capabilities: ["referrals"],
+      requirements: [{
+        kind: "constraint",
+        table: "referral_reward_events",
+        constraint: "referral_reward_events_status_valid",
+        definitionIncludes: ["CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'))"],
+      }],
+      operation: "ddl",
+    });
 
     expect(sqlEntries[11]).toContain("total_volume numeric(30,6)");
     expect(sqlEntries[11]).toContain("total_trades integer");
@@ -436,6 +469,93 @@ describe("schema readiness", () => {
     expect(liveBreakevenJournalSql).toContain("attempt_ordinal BETWEEN 1 AND 5");
     expect(liveBreakevenJournalSql).toContain("action <> 'protective'");
     expect(liveBreakevenJournalSql).toContain("AND authority_fingerprint IS NULL AND position_fingerprint IS NULL");
+
+    const signedSubmitSql = sqlEntries[185];
+    expect(metadata[185]).toMatchObject({
+      id: "185-add-solana-signed-submit-durability",
+      capabilities: ["referrals"],
+      operation: "ddl",
+    });
+    expect(signedSubmitSql).toContain("CREATE TABLE IF NOT EXISTS solana_signed_submit_attempts");
+    expect(signedSubmitSql).toContain("UNIQUE (operation_type, operation_id, deterministic_signature)");
+    expect(signedSubmitSql).toContain("WHERE status = 'confirmation_pending'");
+    expect(signedSubmitSql).toContain("'awaiting_creator'");
+    expect(signedSubmitSql).toContain("ADD COLUMN IF NOT EXISTS processing_claimed_from_status text");
+    expect(signedSubmitSql).toContain("referral_reward_events_processing_claimed_from_status_valid");
+    expect(metadata[185].requirements).toContainEqual({
+      kind: "column",
+      table: "referral_reward_events",
+      column: "processing_claimed_from_status",
+    });
+    expect(metadata[185].requirements).toContainEqual({
+      kind: "constraint",
+      table: "referral_reward_events",
+      constraint: "referral_reward_events_processing_claimed_from_status_valid",
+      definitionIncludes: ["processing_claimed_from_status IS NULL", "processing_claimed_from_status IN ('pending', 'failed')"],
+    });
+    expect(metadata[185].requirements).toContainEqual({
+      kind: "index",
+      table: "solana_signed_submit_attempts",
+      index: "solana_signed_submit_attempts_active_unique",
+      columns: ["operation_type", "operation_id"],
+      unique: true,
+      predicateIncludes: ["status = 'confirmation_pending'"],
+    });
+  });
+
+  it("re-runs migration 028 with an awaiting_creator row and preserves the forward seven-state constraint", async () => {
+    const { manifest } = readDbSchemaMigrationManifest();
+    let constraintDefinition = "CHECK (status IN ('pending','confirmed','paid','failed','processing','voided','awaiting_creator'))";
+    let awaitingCreatorRowPresent = true;
+    const query: CatalogQuery = async (text, values) => {
+      if (text === manifest[28].sql) {
+        expect(text).toContain("position('awaiting_creator' in current_definition) = 0");
+        if (!text.includes("position('awaiting_creator' in current_definition) = 0")) {
+          awaitingCreatorRowPresent = false;
+          throw new Error("legacy constraint replacement rejected awaiting_creator fixture");
+        }
+        return { rows: [] };
+      }
+      if (text === manifest[185].sql) {
+        constraintDefinition = "CHECK (status IN ('pending','confirmed','paid','failed','processing','voided','awaiting_creator'))";
+        return { rows: [] };
+      }
+      if (text.includes("information_schema.columns") && text.includes("column_name=$2")) return { rows: [{ present: 1 }] };
+      if (text.includes("information_schema.columns")) return { rows: [
+        "id", "operation_type", "operation_id", "deterministic_signature", "blockhash",
+        "last_valid_block_height", "rpc_provider", "status", "last_error", "created_at", "updated_at",
+      ].map((column_name) => ({ column_name })) };
+      if (text.includes("to_regclass")) return { rows: [{ relation: "solana_signed_submit_attempts" }] };
+      if (text.includes("c.conname=$2")) {
+        const name = String(values?.[1] ?? "");
+        if (name === "referral_reward_events_status_valid") return { rows: [{ definition: constraintDefinition }] };
+        if (name === "pending_profit_shares_processing_claimed_from_status_valid") {
+          return { rows: [{ definition: "CHECK (processing_claimed_from_status IS NULL OR processing_claimed_from_status IN ('pending','deferred'))" }] };
+        }
+        if (name === "referral_reward_events_processing_claimed_from_status_valid") {
+          return { rows: [{ definition: "CHECK (processing_claimed_from_status IS NULL OR processing_claimed_from_status IN ('pending','failed'))" }] };
+        }
+        return { rows: [] };
+      }
+      if (text.includes("pg_get_constraintdef") && !text.includes("c.conname=$2")) {
+        return { rows: [
+          { definition: "PRIMARY KEY (id)" },
+          { definition: "CHECK (operation_type IN ('profit_share_creator','referral_reward'))" },
+          { definition: "CHECK (rpc_provider = 'configured_primary')" },
+          { definition: "CHECK (status IN ('confirmation_pending','confirmed_success','confirmed_failure','expired_without_status'))" },
+          { definition: "UNIQUE (operation_type, operation_id, deterministic_signature)" },
+        ] };
+      }
+      if (text.includes("FROM pg_index")) return { rows: [{
+        table_name: "solana_signed_submit_attempts", is_unique: true,
+        predicate: "status = 'confirmation_pending'", columns: ["operation_type", "operation_id"],
+      }] };
+      throw new Error(`unexpected signed-submit manifest fixture SQL: ${text}`);
+    };
+
+    const result = await applySchemaMigrationManifest(query, [manifest[28], manifest[185]]);
+    expect(awaitingCreatorRowPresent).toBe(true);
+    expect(result.unavailableCapabilities).toEqual([]);
   });
 
   it("matches exact production CHECK renderings without consuming SQL after casts", async () => {

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, integer, smallint, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, uuid, integer, smallint, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -1278,9 +1278,16 @@ export const pendingProfitShares = pgTable("pending_profit_shares", {
   retryCount: integer("retry_count").notNull().default(0),
   lastError: text("last_error"),
   lastAttemptAt: timestamp("last_attempt_at"),
+  referralLegsInitializedAt: timestamp("referral_legs_initialized_at"),
+  processingClaimToken: uuid("processing_claim_token"),
+  processingClaimedFromStatus: text("processing_claimed_from_status"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
   uniqueSubscriberTrade: unique("pending_profit_shares_unique").on(table.subscriberBotId, table.tradeId),
+  processingClaimedFromStatusValid: check(
+    "pending_profit_shares_processing_claimed_from_status_valid",
+    sql`${table.processingClaimedFromStatus} IS NULL OR ${table.processingClaimedFromStatus} IN ('pending', 'deferred')`,
+  ),
 }));
 
 export const insertPendingProfitShareSchema = createInsertSchema(pendingProfitShares).omit({
@@ -1289,6 +1296,9 @@ export const insertPendingProfitShareSchema = createInsertSchema(pendingProfitSh
   retryCount: true,
   lastError: true,
   lastAttemptAt: true,
+  referralLegsInitializedAt: true,
+  processingClaimToken: true,
+  processingClaimedFromStatus: true,
   createdAt: true,
 });
 export type InsertPendingProfitShare = z.infer<typeof insertPendingProfitShareSchema>;
@@ -1331,20 +1341,57 @@ export const referralRewardEvents = pgTable("referral_reward_events", {
   retryCount: integer("retry_count").notNull().default(0),
   lastError: text("last_error"),
   lastAttemptAt: timestamp("last_attempt_at"),
+  processingClaimToken: uuid("processing_claim_token"),
+  processingClaimedFromStatus: text("processing_claimed_from_status"),
+  releasedAt: timestamp("released_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ([
   unique("referral_reward_events_unique").on(table.sourceType, table.sourceId, table.earnerWallet, table.level),
   index("idx_referral_reward_events_earner").on(table.earnerWallet),
   index("idx_referral_reward_events_status_created").on(table.status, table.createdAt),
   check("referral_reward_events_level_range", sql`${table.level} BETWEEN 1 AND 3`),
+  check(
+    "referral_reward_events_processing_claimed_from_status_valid",
+    sql`${table.processingClaimedFromStatus} IS NULL OR ${table.processingClaimedFromStatus} IN ('pending', 'failed')`,
+  ),
 ]));
 
 export const insertReferralRewardEventSchema = createInsertSchema(referralRewardEvents).omit({
   id: true,
+  processingClaimToken: true,
+  processingClaimedFromStatus: true,
   createdAt: true,
 });
 export type InsertReferralRewardEvent = z.infer<typeof insertReferralRewardEventSchema>;
 export type ReferralRewardEvent = typeof referralRewardEvents.$inferSelect;
+
+export const solanaSignedSubmitAttempts = pgTable("solana_signed_submit_attempts", {
+  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+  operationType: text("operation_type").notNull(),
+  operationId: varchar("operation_id").notNull(),
+  deterministicSignature: text("deterministic_signature").notNull(),
+  blockhash: text("blockhash").notNull(),
+  lastValidBlockHeight: decimal("last_valid_block_height", { precision: 20, scale: 0 }).notNull(),
+  rpcProvider: text("rpc_provider").notNull(),
+  status: text("status").notNull().default("confirmation_pending"),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => ([
+  unique("solana_signed_submit_attempts_identity_unique").on(
+    table.operationType,
+    table.operationId,
+    table.deterministicSignature,
+  ),
+  uniqueIndex("solana_signed_submit_attempts_active_unique")
+    .on(table.operationType, table.operationId)
+    .where(sql`${table.status} = 'confirmation_pending'`),
+  check("solana_signed_submit_attempts_operation_type_valid", sql`${table.operationType} IN ('profit_share_creator', 'referral_reward')`),
+  check("solana_signed_submit_attempts_provider_valid", sql`${table.rpcProvider} = 'configured_primary'`),
+  check("solana_signed_submit_attempts_status_valid", sql`${table.status} IN ('confirmation_pending', 'confirmed_success', 'confirmed_failure', 'expired_without_status')`),
+]));
+
+export type SolanaSignedSubmitAttempt = typeof solanaSignedSubmitAttempts.$inferSelect;
 
 export const protocolOrderEvents = pgTable("protocol_order_events", {
   id: serial("id").primaryKey(),

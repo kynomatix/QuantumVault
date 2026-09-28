@@ -76,6 +76,7 @@ export function agentDepositPreflightHttpResponse(error: unknown): {
 }
 
 let connectionInstance: Connection | null = null;
+let finalizedPrimaryConnectionInstance: Connection | null = null;
 
 function getConnection(): Connection {
   if (!connectionInstance) {
@@ -1082,7 +1083,16 @@ export async function getAgentSolBalanceLamportsStrict(agentPublicKey: string): 
  */
 export async function getSignatureStatusStrict(
   signature: string,
-): Promise<{ err: unknown; confirmationStatus: string | null } | null> {
+  options: { withContext: true },
+): Promise<{ contextSlot: number; status: { err: unknown; confirmationStatus: string | null } | null }>;
+export async function getSignatureStatusStrict(
+  signature: string,
+  options?: { withContext?: false },
+): Promise<{ err: unknown; confirmationStatus: string | null } | null>;
+export async function getSignatureStatusStrict(
+  signature: string,
+  options?: { withContext?: boolean },
+): Promise<{ err: unknown; confirmationStatus: string | null } | null | { contextSlot: number; status: { err: unknown; confirmationStatus: string | null } | null }> {
   const connection = getConnection();
   const res = await connection.getSignatureStatuses([signature], {
     searchTransactionHistory: true,
@@ -1090,9 +1100,35 @@ export async function getSignatureStatusStrict(
   if (!res || !Array.isArray(res.value)) {
     throw new Error('Malformed signature status response from RPC');
   }
-  const status = res.value[0] ?? null;
-  if (!status) return null;
-  return { err: status.err ?? null, confirmationStatus: status.confirmationStatus ?? null };
+  const rawStatus = res.value[0] ?? null;
+  const status = rawStatus
+    ? { err: rawStatus.err ?? null, confirmationStatus: rawStatus.confirmationStatus ?? null }
+    : null;
+  if (!options?.withContext) return status;
+  const contextSlot = res.context?.slot;
+  if (!Number.isSafeInteger(contextSlot) || Number(contextSlot) < 0) {
+    throw new Error(`Malformed signature status context slot from RPC: ${String(contextSlot)}`);
+  }
+  return { contextSlot: Number(contextSlot), status };
+}
+
+export async function getFinalizedEpochPositionStrict(): Promise<{ blockHeight: number; contextSlot: number }> {
+  if (!finalizedPrimaryConnectionInstance) {
+    finalizedPrimaryConnectionInstance = createSolanaRpcConnection('finalized', {
+      backupUrl: null,
+      pinPrimary: true,
+    });
+  }
+  const epoch = await finalizedPrimaryConnectionInstance.getEpochInfo('finalized');
+  const blockHeight = epoch?.blockHeight;
+  const contextSlot = epoch?.absoluteSlot;
+  if (!Number.isSafeInteger(blockHeight) || Number(blockHeight) < 0) {
+    throw new Error(`Malformed finalized block height from RPC: ${String(blockHeight)}`);
+  }
+  if (!Number.isSafeInteger(contextSlot) || Number(contextSlot) < 0) {
+    throw new Error(`Malformed finalized absolute slot from RPC: ${String(contextSlot)}`);
+  }
+  return { blockHeight: Number(blockHeight), contextSlot: Number(contextSlot) };
 }
 
 /**
@@ -1114,7 +1150,22 @@ export async function transferUsdcToWallet(
   fromEncryptedPrivateKey: Uint8Array,
   toWalletAddress: string,
   amountUsdc: number,
-): Promise<{ success: boolean; signature?: string; error?: string; solBalance?: number }> {
+  onBeforeBroadcast?: (info: {
+    signature: string;
+    blockhash: string;
+    lastValidBlockHeight: number;
+    rpcProvider: 'configured_primary';
+  }) => void | Promise<void>,
+): Promise<{
+  success: boolean;
+  outcome: 'rejected_before_broadcast' | 'confirmed_success' | 'confirmed_failure' | 'ambiguous';
+  signature?: string;
+  error?: string;
+  solBalance?: number;
+}> {
+  let signature: string | undefined;
+  let sendInvoked = false;
+  let solBalance: number | undefined;
   try {
     const connection = getConnection();
     const fromKeypair = resolveAgentKeypair(fromEncryptedPrivateKey);
@@ -1127,7 +1178,7 @@ export async function transferUsdcToWallet(
     
     const amountLamports = Math.round(amountUsdc * 1_000_000);
     if (amountLamports <= 0) {
-      return { success: false, error: 'Invalid amount' };
+      return { success: false, outcome: 'rejected_before_broadcast', error: 'Invalid amount' };
     }
     
     // RPC OPTIMIZATION: Batch fetch agent SOL balance + destination ATA in 1 call
@@ -1137,9 +1188,9 @@ export async function transferUsdcToWallet(
     ]);
     
     // Check SOL balance for gas fees (~0.003 SOL needed)
-    const solBalance = (agentAccountInfo?.lamports || 0) / LAMPORTS_PER_SOL;
+    solBalance = (agentAccountInfo?.lamports || 0) / LAMPORTS_PER_SOL;
     if (solBalance < 0.003) {
-      return { success: false, error: `Insufficient SOL for gas: ${solBalance.toFixed(6)}`, solBalance };
+      return { success: false, outcome: 'rejected_before_broadcast', error: `Insufficient SOL for gas: ${solBalance.toFixed(6)}`, solBalance };
     }
     
     const instructions: TransactionInstruction[] = [];
@@ -1174,14 +1225,38 @@ export async function transferUsdcToWallet(
     }
     
     transaction.sign(fromKeypair);
-    
-    const signature = await connection.sendRawTransaction(
-      transaction.serialize(),
+    if (!transaction.signature) throw new Error('Signing produced no signature');
+    signature = bs58.encode(transaction.signature);
+    const serializedTransaction = transaction.serialize();
+
+    try {
+      await onBeforeBroadcast?.({
+        signature,
+        blockhash,
+        lastValidBlockHeight,
+        rpcProvider: 'configured_primary',
+      });
+    } catch (error: any) {
+      return {
+        success: false,
+        outcome: 'rejected_before_broadcast',
+        signature,
+        error: `Before-broadcast persistence failed: ${error?.message ?? String(error)}`,
+        solBalance,
+      };
+    }
+
+    sendInvoked = true;
+    const returnedSignature = await connection.sendRawTransaction(
+      serializedTransaction,
       { skipPreflight: false, preflightCommitment: 'confirmed' }
     );
+    if (typeof returnedSignature !== 'string' || returnedSignature !== signature) {
+      return { success: false, outcome: 'ambiguous', signature, error: 'RPC returned an unreadable or mismatched signature', solBalance };
+    }
     
     const confirmation = await connection.confirmTransaction({
-      signature,
+      signature: returnedSignature,
       blockhash,
       lastValidBlockHeight,
     }, 'confirmed');
@@ -1189,16 +1264,23 @@ export async function transferUsdcToWallet(
     if (confirmation.value.err) {
       return {
         success: false,
+        outcome: 'confirmed_failure',
         error: `Transaction failed on-chain: ${JSON.stringify(confirmation.value.err)}`,
         signature,
         solBalance,
       };
     }
     
-    return { success: true, signature, solBalance };
+    return { success: true, outcome: 'confirmed_success', signature, solBalance };
   } catch (error: any) {
     console.error('[TransferToWallet] Error:', error.message);
-    return { success: false, error: error.message };
+    return {
+      success: false,
+      outcome: sendInvoked ? 'ambiguous' : 'rejected_before_broadcast',
+      signature,
+      error: error.message,
+      solBalance,
+    };
   }
 }
 

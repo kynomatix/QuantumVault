@@ -613,21 +613,23 @@ const schemaMigrationSql = [
         CONSTRAINT referral_reward_events_status_valid CHECK (status IN ('pending','confirmed','paid','failed'))
       )`,
       `CREATE INDEX IF NOT EXISTS idx_referral_reward_events_earner ON referral_reward_events (earner_wallet)`,
-      `DO $$ BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'referral_reward_events_status_valid'
-        ) THEN
-          ALTER TABLE referral_reward_events
-            ADD CONSTRAINT referral_reward_events_status_valid
-            CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'));
-        ELSE
-          ALTER TABLE referral_reward_events
-            DROP CONSTRAINT referral_reward_events_status_valid;
-          ALTER TABLE referral_reward_events
-            ADD CONSTRAINT referral_reward_events_status_valid
-            CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'));
-        END IF;
-      END $$;`,
+      `DO $$
+       DECLARE
+         current_definition text;
+       BEGIN
+         SELECT pg_get_constraintdef(oid, true)
+           INTO current_definition
+           FROM pg_constraint
+          WHERE conrelid = 'referral_reward_events'::regclass
+            AND conname = 'referral_reward_events_status_valid';
+         IF current_definition IS NULL OR position('awaiting_creator' in current_definition) = 0 THEN
+           ALTER TABLE referral_reward_events
+             DROP CONSTRAINT IF EXISTS referral_reward_events_status_valid;
+           ALTER TABLE referral_reward_events
+             ADD CONSTRAINT referral_reward_events_status_valid
+             CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'));
+         END IF;
+       END $$;`,
       `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS funding_wallet text`,
       `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS transfer_signature text`,
       `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS retry_count integer NOT NULL DEFAULT 0`,
@@ -1912,6 +1914,51 @@ const schemaMigrationSql = [
          END IF;
        END
        $qv$`,
+      `ALTER TABLE pending_profit_shares
+         ADD COLUMN IF NOT EXISTS referral_legs_initialized_at timestamp,
+         ADD COLUMN IF NOT EXISTS processing_claim_token uuid,
+         ADD COLUMN IF NOT EXISTS processing_claimed_from_status text;
+       ALTER TABLE pending_profit_shares
+         DROP CONSTRAINT IF EXISTS pending_profit_shares_processing_claimed_from_status_valid;
+       ALTER TABLE pending_profit_shares
+         ADD CONSTRAINT pending_profit_shares_processing_claimed_from_status_valid
+         CHECK (processing_claimed_from_status IS NULL OR processing_claimed_from_status IN ('pending','deferred'));
+
+       ALTER TABLE referral_reward_events
+          ADD COLUMN IF NOT EXISTS processing_claim_token uuid,
+          ADD COLUMN IF NOT EXISTS processing_claimed_from_status text,
+          ADD COLUMN IF NOT EXISTS released_at timestamp;
+       ALTER TABLE referral_reward_events
+         DROP CONSTRAINT IF EXISTS referral_reward_events_processing_claimed_from_status_valid;
+       ALTER TABLE referral_reward_events
+         ADD CONSTRAINT referral_reward_events_processing_claimed_from_status_valid
+         CHECK (processing_claimed_from_status IS NULL OR processing_claimed_from_status IN ('pending','failed'));
+       ALTER TABLE referral_reward_events
+         DROP CONSTRAINT IF EXISTS referral_reward_events_status_valid;
+       ALTER TABLE referral_reward_events
+         ADD CONSTRAINT referral_reward_events_status_valid
+         CHECK (status IN ('pending','confirmed','paid','failed','processing','voided','awaiting_creator'));
+
+       CREATE TABLE IF NOT EXISTS solana_signed_submit_attempts (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         operation_type text NOT NULL,
+         operation_id varchar NOT NULL,
+         deterministic_signature text NOT NULL,
+         blockhash text NOT NULL,
+         last_valid_block_height numeric(20,0) NOT NULL,
+         rpc_provider text NOT NULL,
+         status text NOT NULL DEFAULT 'confirmation_pending',
+         last_error text,
+         created_at timestamp NOT NULL DEFAULT now(),
+         updated_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT solana_signed_submit_attempts_operation_type_valid CHECK (operation_type IN ('profit_share_creator','referral_reward')),
+         CONSTRAINT solana_signed_submit_attempts_provider_valid CHECK (rpc_provider = 'configured_primary'),
+         CONSTRAINT solana_signed_submit_attempts_status_valid CHECK (status IN ('confirmation_pending','confirmed_success','confirmed_failure','expired_without_status')),
+         CONSTRAINT solana_signed_submit_attempts_identity_unique UNIQUE (operation_type, operation_id, deterministic_signature)
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS solana_signed_submit_attempts_active_unique
+         ON solana_signed_submit_attempts (operation_type, operation_id)
+         WHERE status = 'confirmation_pending'`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5285,6 +5332,35 @@ const schemaMigrationMetadata = [
           "attempt_ordinal <= 5"
         ]
       }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "185-add-solana-signed-submit-durability",
+    "capabilities": ["referrals"],
+    "requirements": [
+      { "kind": "column", "table": "pending_profit_shares", "column": "referral_legs_initialized_at" },
+      { "kind": "column", "table": "pending_profit_shares", "column": "processing_claim_token" },
+      { "kind": "column", "table": "pending_profit_shares", "column": "processing_claimed_from_status" },
+      { "kind": "constraint", "table": "pending_profit_shares", "constraint": "pending_profit_shares_processing_claimed_from_status_valid", "definitionIncludes": ["processing_claimed_from_status IS NULL", "processing_claimed_from_status IN ('pending', 'deferred')"] },
+      { "kind": "column", "table": "referral_reward_events", "column": "processing_claim_token" },
+      { "kind": "column", "table": "referral_reward_events", "column": "processing_claimed_from_status" },
+      { "kind": "column", "table": "referral_reward_events", "column": "released_at" },
+      { "kind": "constraint", "table": "referral_reward_events", "constraint": "referral_reward_events_processing_claimed_from_status_valid", "definitionIncludes": ["processing_claimed_from_status IS NULL", "processing_claimed_from_status IN ('pending', 'failed')"] },
+      { "kind": "constraint", "table": "referral_reward_events", "constraint": "referral_reward_events_status_valid", "definitionIncludes": ["status IN ('pending', 'confirmed', 'paid', 'failed', 'processing', 'voided', 'awaiting_creator')"] },
+      {
+        "kind": "table",
+        "table": "solana_signed_submit_attempts",
+        "columns": ["id", "operation_type", "operation_id", "deterministic_signature", "blockhash", "last_valid_block_height", "rpc_provider", "status", "last_error", "created_at", "updated_at"],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "operation_type IN ('profit_share_creator', 'referral_reward')",
+          "rpc_provider = 'configured_primary'",
+          "status IN ('confirmation_pending', 'confirmed_success', 'confirmed_failure', 'expired_without_status')",
+          "UNIQUE (operation_type, operation_id, deterministic_signature)"
+        ]
+      },
+      { "kind": "index", "table": "solana_signed_submit_attempts", "index": "solana_signed_submit_attempts_active_unique", "columns": ["operation_type", "operation_id"], "unique": true, "predicateIncludes": ["status = 'confirmation_pending'"] }
     ],
     "operation": "ddl"
   }

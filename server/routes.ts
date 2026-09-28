@@ -1630,8 +1630,9 @@ import {
   type CloseFeeEvidence,
 } from "./trading/signal-bot-close-integrity";
 import { PositionService } from "./position-service";
-import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, transferUsdcToWallet, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, agentDepositPreflightHttpResponse, NATIVE_SOL_MINT } from "./agent-wallet";
+import { getAgentUsdcBalance, getAgentSolBalance, getAgentUsdcBalanceStrict, getAgentUsdcBalanceRawStrict, getAgentSolBalanceStrict, getAgentSolBalanceLamportsStrict, buildTransferToAgentTransaction, buildWithdrawFromAgentTransaction, buildSolTransferToAgentTransaction, buildSolDepositToAgentTransaction, executeAgentWithdraw, executeAgentSolWithdraw, buildTokenTransferToAgentTransaction, executeAgentSwapToUsdc, getAgentTokenBalanceRawStrict, transferTokenToWalletExact, recoverEmptyTokenAccountRents, agentDepositPreflightHttpResponse, NATIVE_SOL_MINT } from "./agent-wallet";
 import { handleAgentSolWithdraw, handleConfirmSolWithdraw, sweepAbandonedSolWithdrawals } from "./vault/agent-sol-withdraw";
+import { REFERRAL_LEVEL_PERCENTS, payCreatorAndReferrals as payCreatorAndReferralsDurable, settleManagementProfitShare, type ProfitShareObligationInput } from "./profit-share-payment";
 import { getBestQuote } from "./swap/index.js";
 import { previewVaultSwap, parkUsdc, unparkToUsdc, getVaultPositionViews, valueVaultRowsForWallet, sumVaultPositionValueUsdc, type VaultPositionView, VAULT_MAX_PRICE_IMPACT } from "./vault/vault-service";
 import { cancelAutoRepark, maybeScheduleAutoRepark } from "./vault/auto-repark";
@@ -4352,9 +4353,9 @@ async function distributeCreatorProfitShare(params: {
     // never settled/withdrawn for these venues) never picks it up; the
     // accumulate+claim flow settles these later. The deterministic tradeId +
     // unique(subscriberBotId,tradeId) makes this idempotent on close replays.
-    const iou = await createIouOnFailure(`Deferred: ${profitShareAdapter.protocolName} accumulate+claim venue`);
-    if (iou && iou.status === 'pending') {
-      await storage.updatePendingProfitShareStatus(iou.id, { status: 'deferred' });
+    const deferredIou = await createDeferredIou();
+    if (!deferredIou || deferredIou.status !== 'deferred') {
+      return { success: false, error: 'Failed to persist deferred creator profit-share obligation' };
     }
     console.log(`[ProfitShare] Deferred (accumulate+claim venue ${profitShareAdapter.protocolName}) for trade ${tradeId}, bot ${subscriberBotId}, owed $${profitShareAmount.toFixed(4)} to ${creatorWalletAddress} — durable IOU recorded (status=deferred), immediate payout skipped`);
     return { success: true };
@@ -4416,11 +4417,44 @@ async function distributeCreatorProfitShare(params: {
   // the creator their NET amount, then distributes the reserved cut to up to 3
   // upline ancestors. All transfers come out of the subscriber's agent wallet,
   // which already holds the full `profitShareAmount` post-Drift-withdrawal.
-  const payoutResult = await payCreatorAndReferrals({
+  const obligation: ProfitShareObligationInput = {
+    subscriberBotId,
+    subscriberWalletAddress,
+    creatorWalletAddress,
+    amount: profitShareAmount.toString(),
+    realizedPnl: realizedPnl.toString(),
+    profitSharePercent: profitSharePercent.toString(),
+    tradeId,
+    publishedBotId: publishedBot.id,
+    driftSubaccountId,
+    protocolSubaccountId: canonicalProtocolSubaccountId,
+    protocol: profitShareAdapter.protocolName,
+  };
+
+  async function createDeferredIou() {
+    try {
+      return await storage.createDeferredProfitShare({
+        subscriberBotId,
+        subscriberWalletAddress,
+        creatorWalletAddress,
+        amount: profitShareAmount.toString(),
+        realizedPnl: realizedPnl.toString(),
+        profitSharePercent: profitSharePercent.toString(),
+        tradeId,
+        publishedBotId: publishedBot.id,
+        driftSubaccountId,
+        protocolSubaccountId: canonicalProtocolSubaccountId,
+        protocol: profitShareAdapter.protocolName,
+      });
+    } catch (iouErr: any) {
+      console.error(`[ProfitShare] Failed to create deferred IOU: ${iouErr.message}`);
+      return undefined;
+    }
+  }
+  const payoutResult = await payCreatorAndReferralsDurable({
+    obligation,
     subscriberAgentPublicKey,
     subscriberEncryptedPrivateKey,
-    creatorWalletAddress,
-    profitShareAmount,
     sourceType: 'profit_share_paid',
     sourceId: tradeId,
     fundingWallet: subscriberWalletAddress,
@@ -4451,231 +4485,6 @@ async function distributeCreatorProfitShare(params: {
 
 // MLM referral reward percentages per level, applied to the creator's profit-share amount.
 // L1 = direct referrer of the creator, L2 = L1's referrer, L3 = L2's referrer.
-const REFERRAL_LEVEL_PERCENTS: Record<1 | 2 | 3, number> = { 1: 5, 2: 2, 3: 1 };
-const MIN_PAYABLE_MICRO_USDC = 10_000; // $0.01
-
-type ReferralLeg = {
-  level: 1 | 2 | 3;
-  earnerWallet: string;
-  amountMicro: number;
-};
-
-/**
- * Compute the per-ancestor referral cuts for a given gross profit-share amount.
- * Operates in integer micro-USDC to avoid floating-point drift. Skips dust legs
- * (< $0.01) and de-duplicates ancestors so the same wallet can't double-claim
- * across levels in a single source event.
- */
-function computeReferralLegs(
-  chain: { ancestorWallet: string; level: number }[],
-  refereeWallet: string,
-  profitShareAmount: number,
-): { legs: ReferralLeg[]; totalCutMicro: number } {
-  const grossMicro = Math.round(profitShareAmount * 1_000_000);
-  if (grossMicro <= 0) return { legs: [], totalCutMicro: 0 };
-  const seenEarners = new Set<string>([refereeWallet]);
-  const legs: ReferralLeg[] = [];
-  let totalCutMicro = 0;
-  for (const link of chain) {
-    const lvl = link.level as 1 | 2 | 3;
-    const pct = REFERRAL_LEVEL_PERCENTS[lvl];
-    if (!pct) continue;
-    if (seenEarners.has(link.ancestorWallet)) {
-      console.warn(`[ReferralRewards] Skipping duplicate ancestor ${link.ancestorWallet} at L${lvl} (referee=${refereeWallet})`);
-      continue;
-    }
-    const cutMicro = Math.floor((grossMicro * pct) / 100);
-    if (cutMicro < MIN_PAYABLE_MICRO_USDC) continue;
-    seenEarners.add(link.ancestorWallet);
-    legs.push({ level: lvl, earnerWallet: link.ancestorWallet, amountMicro: cutMicro });
-    totalCutMicro += cutMicro;
-  }
-  return { legs, totalCutMicro };
-}
-
-/**
- * Pay a single referral leg: upsert the pending event, then attempt the on-chain
- * transfer. Idempotent — if the row already exists with status='paid', this is a
- * no-op. Updates row status based on outcome and returns the final status.
- */
-async function payOneReferralLeg(params: {
-  sourceType: string;
-  sourceId: string;
-  refereeWallet: string;
-  fundingWallet: string;
-  subscriberAgentPublicKey: string;
-  // V3 Phase 3b: string for legacy callers, Uint8Array for live subscriber
-  // fan-out (post-decryptAgentKeyStrict). transferUsdcToWallet handles both.
-  subscriberEncryptedPrivateKey: Uint8Array;
-  leg: ReferralLeg;
-}): Promise<{ status: 'paid' | 'pending' | 'skipped'; signature?: string; error?: string }> {
-  const { sourceType, sourceId, refereeWallet, fundingWallet, subscriberAgentPublicKey, subscriberEncryptedPrivateKey, leg } = params;
-  const amountUsdc = leg.amountMicro / 1_000_000;
-
-  const event = await storage.upsertReferralRewardEventPending({
-    sourceType,
-    sourceId,
-    earnerWallet: leg.earnerWallet,
-    refereeWallet,
-    fundingWallet,
-    level: leg.level,
-    amountUsdc: amountUsdc.toFixed(6),
-    status: 'pending',
-  });
-
-  if (event.status === 'paid') {
-    return { status: 'paid', signature: event.transferSignature ?? undefined };
-  }
-
-  const transferResult = await transferUsdcToWallet(
-    subscriberAgentPublicKey,
-    subscriberEncryptedPrivateKey,
-    leg.earnerWallet,
-    amountUsdc,
-  );
-
-  if (transferResult.success) {
-    await storage.updateReferralRewardEventStatus(event.id, {
-      status: 'paid',
-      transferSignature: transferResult.signature ?? null,
-      lastError: null,
-      lastAttemptAt: new Date(),
-    });
-    console.log(`[ReferralRewards] PAID L${leg.level} +$${amountUsdc.toFixed(4)} to ${leg.earnerWallet} (referee=${refereeWallet}, source=${sourceType}:${sourceId}, sig=${transferResult.signature})`);
-    return { status: 'paid', signature: transferResult.signature };
-  }
-
-  const errMsg = transferResult.error || 'Unknown transfer error';
-  await storage.updateReferralRewardEventStatus(event.id, {
-    status: 'pending',
-    retryCount: (event.retryCount ?? 0) + 1,
-    lastError: errMsg,
-    lastAttemptAt: new Date(),
-  });
-  console.warn(`[ReferralRewards] PENDING (will retry) L${leg.level} $${amountUsdc.toFixed(4)} earner=${leg.earnerWallet}: ${errMsg}`);
-  return { status: 'pending', error: errMsg };
-}
-
-/**
- * Shared payout pipeline (Model A). Splits a gross profit-share amount into a
- * net creator payment and per-level referral payments, then transfers each from
- * the subscriber's agent wallet sequentially. Returns success based on the
- * creator transfer; referral leg failures are tracked on referral_reward_events
- * and retried by the referral-rewards-retry-job worker.
- *
- * Called from both the live profit-share path and the IOU retry job, so it is
- * fully idempotent on (sourceType, sourceId).
- */
-async function payCreatorAndReferrals(params: {
-  subscriberAgentPublicKey: string;
-  // V3 Phase 3b: string for legacy/IOU-retry callers, Uint8Array for live
-  // subscriber fan-out (post-decryptAgentKeyStrict).
-  subscriberEncryptedPrivateKey: Uint8Array;
-  creatorWalletAddress: string;
-  profitShareAmount: number;
-  sourceType: string;
-  sourceId: string;
-  fundingWallet: string;
-}): Promise<{
-  success: boolean;
-  creatorAmount?: number;
-  creatorSignature?: string;
-  referralSummary?: string;
-  error?: string;
-}> {
-  const {
-    subscriberAgentPublicKey,
-    subscriberEncryptedPrivateKey,
-    creatorWalletAddress,
-    profitShareAmount,
-    sourceType,
-    sourceId,
-    fundingWallet,
-  } = params;
-
-  if (!(profitShareAmount > 0)) {
-    return { success: false, error: 'Non-positive profit share amount' };
-  }
-
-  // Validate creator wallet
-  try {
-    new PublicKey(creatorWalletAddress);
-  } catch {
-    return { success: false, error: `Invalid creator wallet address: ${creatorWalletAddress}` };
-  }
-
-  const grossMicro = Math.round(profitShareAmount * 1_000_000);
-
-  // Compute referral split. Self-referrals against the creator are excluded by
-  // computeReferralLegs (creator is added to seenEarners up front).
-  const chain = await storage.getReferralChain(creatorWalletAddress);
-  const { legs, totalCutMicro } = computeReferralLegs(chain, creatorWalletAddress, profitShareAmount);
-
-  let creatorMicro = grossMicro - totalCutMicro;
-  let payableLegs = legs;
-
-  // Edge case: if netting referrals would leave the creator with dust (<$0.01),
-  // pay creator the full gross and skip referrals entirely. This mostly applies
-  // when profit share itself is tiny (e.g. <$0.10).
-  if (creatorMicro < MIN_PAYABLE_MICRO_USDC) {
-    console.warn(`[Payout] Creator net would be dust ($${(creatorMicro / 1_000_000).toFixed(6)}); paying full gross and skipping ${legs.length} referral legs (source=${sourceType}:${sourceId})`);
-    creatorMicro = grossMicro;
-    payableLegs = [];
-  }
-
-  const creatorAmount = creatorMicro / 1_000_000;
-
-  // Step 1: pay the creator (sequential — must succeed before we touch referrals).
-  const creatorTransfer = await transferUsdcToWallet(
-    subscriberAgentPublicKey,
-    subscriberEncryptedPrivateKey,
-    creatorWalletAddress,
-    creatorAmount,
-  );
-
-  if (!creatorTransfer.success) {
-    return {
-      success: false,
-      error: creatorTransfer.error || 'Creator transfer failed',
-      creatorAmount,
-    };
-  }
-
-  // Step 2: pay referral legs sequentially. Failures here do NOT roll back the
-  // creator payment — they're tracked on referral_reward_events and retried by
-  // the dedicated worker. Sequential is required: parallel transfers from the
-  // same agent wallet would collide on blockhash/nonce.
-  let paidLegs = 0;
-  let pendingLegs = 0;
-  for (const leg of payableLegs) {
-    try {
-      const r = await payOneReferralLeg({
-        sourceType,
-        sourceId,
-        refereeWallet: creatorWalletAddress,
-        fundingWallet,
-        subscriberAgentPublicKey,
-        subscriberEncryptedPrivateKey,
-        leg,
-      });
-      if (r.status === 'paid') paidLegs++;
-      else if (r.status === 'pending') pendingLegs++;
-    } catch (err: any) {
-      pendingLegs++;
-      console.error(`[ReferralRewards] payOneReferralLeg threw L${leg.level} earner=${leg.earnerWallet}: ${err?.message || err}`);
-    }
-  }
-
-  return {
-    success: true,
-    creatorAmount,
-    creatorSignature: creatorTransfer.signature,
-    referralSummary: `${paidLegs} paid, ${pendingLegs} pending (of ${payableLegs.length})`,
-  };
-}
-
-export { payCreatorAndReferrals };
-
 /**
  * Write the referral chain (up to 3 levels) for a newly-referred descendant.
  * Performs a cycle check: refuses to write if the referrer is itself a descendant
@@ -8963,23 +8772,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           let allPaid = true;
           for (const iou of pendingIOUs) {
             const iouAmount = parseFloat(iou.amount);
-            const transferResult = await transferUsdcToWallet(
-              wallet.agentPublicKey,
+            const transferResult = await settleManagementProfitShare({
+              share: iou,
+              agentPublicKey: wallet.agentPublicKey,
               agentSecret,
-              iou.creatorWalletAddress,
-              iouAmount
-            );
+              allowedSourceStatuses: ['pending'],
+            });
             
             if (transferResult.success) {
-              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
               console.log(`[Drift Withdraw] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
             } else {
               allPaid = false;
               console.error(`[Drift Withdraw] Failed to pay IOU ${iou.id}: ${transferResult.error}`);
               // Check if it's SOL starvation
+              if (transferResult.outcome === 'ambiguous') {
+                return res.status(409).json({
+                  error: 'Cannot withdraw yet - a prior creator payout submission is awaiting on-chain resolution.',
+                  pendingIOUs: pendingIOUs.length,
+                  totalOwed,
+                });
+              }
               if (transferResult.error?.includes('Insufficient SOL')) {
                 return res.status(400).json({
-                  error: `Cannot withdraw - pending creator profit share of $${totalOwed.toFixed(2)} cannot be paid. Agent wallet needs more SOL for transaction fees (current: ${transferResult.solBalance?.toFixed(4) || '0'} SOL)`,
+                  error: `Cannot withdraw - pending creator profit share of $${totalOwed.toFixed(2)} cannot be paid. Agent wallet needs more SOL for transaction fees.`,
                   pendingIOUs: pendingIOUs.length,
                   totalOwed
                 });
@@ -8995,6 +8810,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               totalOwed
             });
           }
+        }
+        if (await storage.hasBotJoinedActiveSignedSubmitAttempt(botId)) {
+          return res.status(409).json({ error: 'Cannot withdraw yet - a payout submission is awaiting on-chain resolution.' });
         }
       }
 
@@ -17282,7 +17100,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       // Check for pending profit share IOUs before allowing deletion
-      const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(req.params.id);
+      const pendingIOUs = await storage.getPendingProfitSharesByBot(req.params.id);
       if (pendingIOUs.length > 0) {
         const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
         console.log(`[Delete] Bot ${req.params.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
@@ -17292,19 +17110,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           let allPaid = true;
           for (const iou of pendingIOUs) {
             const iouAmount = parseFloat(iou.amount);
-            const transferResult = await transferUsdcToWallet(
-              wallet.agentPublicKey,
+            const transferResult = await settleManagementProfitShare({
+              share: iou,
+              agentPublicKey: wallet.agentPublicKey,
               agentSecret,
-              iou.creatorWalletAddress,
-              iouAmount
-            );
+              allowedSourceStatuses: ['pending'],
+            });
             
             if (transferResult.success) {
-              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
               console.log(`[Delete] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
             } else {
               allPaid = false;
               console.error(`[Delete] Failed to pay IOU ${iou.id}: ${transferResult.error}`);
+              if (transferResult.outcome === 'ambiguous') {
+                return res.status(409).json({
+                  error: 'Cannot delete bot yet - a prior creator payout submission is awaiting on-chain resolution.',
+                  pendingIOUs: pendingIOUs.length,
+                  totalOwed,
+                });
+              }
               break;
             }
           }
@@ -17323,6 +17147,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             totalOwed
           });
         }
+      }
+      if (await storage.hasBotJoinedActiveSignedSubmitAttempt(req.params.id)) {
+        return res.status(409).json({ error: 'Cannot delete bot yet - a payout submission is awaiting on-chain resolution.' });
       }
       
       // Flash per-bot wallet sweep — Flash bots are external_key bots so they ALSO
@@ -18191,7 +18018,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       // Check for pending profit share IOUs before allowing deletion
-      const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(req.params.id);
+      const pendingIOUs = await storage.getPendingProfitSharesByBot(req.params.id);
       if (pendingIOUs.length > 0) {
         const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
         console.log(`[ForceDelete] Bot ${req.params.id} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
@@ -18201,19 +18028,25 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           let allPaid = true;
           for (const iou of pendingIOUs) {
             const iouAmount = parseFloat(iou.amount);
-            const transferResult = await transferUsdcToWallet(
-              wallet.agentPublicKey,
+            const transferResult = await settleManagementProfitShare({
+              share: iou,
+              agentPublicKey: wallet.agentPublicKey,
               agentSecret,
-              iou.creatorWalletAddress,
-              iouAmount
-            );
+              allowedSourceStatuses: ['pending'],
+            });
             
             if (transferResult.success) {
-              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
               console.log(`[ForceDelete] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
             } else {
               allPaid = false;
               console.error(`[ForceDelete] Failed to pay IOU ${iou.id}: ${transferResult.error}`);
+              if (transferResult.outcome === 'ambiguous') {
+                return res.status(409).json({
+                  error: 'Cannot delete bot yet - a prior creator payout submission is awaiting on-chain resolution.',
+                  pendingIOUs: pendingIOUs.length,
+                  totalOwed,
+                });
+              }
               break;
             }
           }
@@ -18232,6 +18065,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             totalOwed
           });
         }
+      }
+      if (await storage.hasBotJoinedActiveSignedSubmitAttempt(req.params.id)) {
+        return res.status(409).json({ error: 'Cannot delete bot yet - a payout submission is awaiting on-chain resolution.' });
       }
       
       // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
@@ -23744,18 +23580,27 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           console.log(`[Unsubscribe] Bot ${bot.id} has ${owedIOUs.length} owed IOUs totaling $${totalOwed.toFixed(4)}`);
           for (const iou of owedIOUs) {
             const iouAmount = parseFloat(iou.amount);
-            const transferResult = await transferUsdcToWallet(wallet.agentPublicKey, agentSecret, iou.creatorWalletAddress, iouAmount);
+            const transferResult = await settleManagementProfitShare({
+              share: iou,
+              agentPublicKey: wallet.agentPublicKey,
+              agentSecret,
+              allowedSourceStatuses: ['pending', 'deferred'],
+            });
             if (transferResult.success) {
-              await storage.updatePendingProfitShareStatus(iou.id, { status: 'paid', lastAttemptAt: new Date() });
               console.log(`[Unsubscribe] Paid IOU ${iou.id}: $${iouAmount.toFixed(4)} to ${iou.creatorWalletAddress}`);
             } else {
-              return res.status(400).json({
-                error: `Cannot unsubscribe yet — $${totalOwed.toFixed(2)} in creator profit share still needs to be paid. Ensure your agent wallet has enough USDC and SOL for fees, then try again.`,
+              return res.status(transferResult.outcome === 'ambiguous' ? 409 : 400).json({
+                error: transferResult.outcome === 'ambiguous'
+                  ? 'Cannot unsubscribe yet - a prior creator payout submission is awaiting on-chain resolution.'
+                  : `Cannot unsubscribe yet — $${totalOwed.toFixed(2)} in creator profit share still needs to be paid. Ensure your agent wallet has enough USDC and SOL for fees, then try again.`,
                 pendingIOUs: owedIOUs.length,
                 totalOwed,
               });
             }
           }
+        }
+        if (await storage.hasBotJoinedActiveSignedSubmitAttempt(bot.id)) {
+          return res.status(409).json({ error: 'Cannot unsubscribe yet - a payout submission is awaiting on-chain resolution.' });
         }
 
         // 3. Recover the copy bot's capital back to the agent wallet (protocol-aware,

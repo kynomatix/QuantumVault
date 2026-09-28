@@ -2,7 +2,8 @@ import { sendTradeNotification } from "./notification-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
 import { storage, DatabaseStorage } from "./storage";
 import { getMarketBySymbol } from "./market-liquidity-service";
-import { transferUsdcToWallet, resolveAgentKeypair } from "./agent-wallet";
+import { resolveAgentKeypair } from "./agent-wallet";
+import { payGrossCreatorObligation, type ProfitShareObligationInput } from "./profit-share-payment";
 import { PublicKey } from "@solana/web3.js";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import {
@@ -1124,6 +1125,19 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                     }
                     
                     console.log(`[TradeRetry] Processing profit share: $${profitShareAmount.toFixed(4)} (${profitSharePercent}%) to ${creatorWallet}`);
+                    const obligation: ProfitShareObligationInput = {
+                      subscriberBotId: job.botId,
+                      subscriberWalletAddress: job.walletAddress,
+                      creatorWalletAddress: creatorWallet,
+                      amount: profitShareAmount.toString(),
+                      realizedPnl: closePnl.toString(),
+                      profitSharePercent: profitSharePercent.toString(),
+                      tradeId: tradeId || `retry-${job.id}`,
+                      publishedBotId: subscription.publishedBot.id,
+                      driftSubaccountId: job.subAccountId,
+                      protocolSubaccountId: job.protocolSubaccountId ?? null,
+                      protocol: jobAdapter.protocolName,
+                    };
                     
                     // Helper to create IOU on failure
                     const createIouOnFailure = async (errorMsg: string) => {
@@ -1137,18 +1151,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                         if (!job.protocolSubaccountId) {
                           console.warn(`[TradeRetry] IOU for trade ${tradeId} missing canonical protocolSubaccountId (job.botId=${job.botId}, subAccountId=${job.subAccountId}); storing NULL`);
                         }
-                        await storage.createPendingProfitShare({
-                          subscriberBotId: job.botId,
-                          subscriberWalletAddress: job.walletAddress,
-                          creatorWalletAddress: creatorWallet,
-                          amount: profitShareAmount.toString(),
-                          realizedPnl: closePnl.toString(),
-                          profitSharePercent: profitSharePercent.toString(),
-                          tradeId: tradeId || `retry-${job.id}`,
-                          publishedBotId: subscription.publishedBot.id,
-                          driftSubaccountId: job.subAccountId,
-                          protocolSubaccountId: job.protocolSubaccountId ?? null,
-                        });
+                        await storage.createPendingProfitShare(obligation);
                         console.log(`[TradeRetry] IOU created for $${profitShareAmount.toFixed(4)} to ${creatorWallet}`);
                       } catch (iouErr: any) {
                         console.error(`[TradeRetry] Failed to create IOU: ${iouErr.message}`);
@@ -1174,19 +1177,19 @@ async function processRetryJob(job: RetryJob): Promise<void> {
                         console.error(`[TradeRetry] Drift withdrawal failed: ${withdrawResult.error}`);
                         await createIouOnFailure(`Drift withdrawal failed: ${withdrawResult.error}`);
                       } else {
-                        // Step 3: Transfer to creator
-                        const transferResult = await transferUsdcToWallet(
-                          job.agentPublicKey,
-                          agentSecretKey,
-                          creatorWallet,
-                          profitShareAmount
-                        );
-                        
-                        if (transferResult.success) {
+                        // Step 3: Preserve the existing gross creator-only economics,
+                        // but bind the signature to a durable creator obligation.
+                        const transferResult = await payGrossCreatorObligation({
+                          obligation,
+                          subscriberAgentPublicKey: job.agentPublicKey,
+                          subscriberEncryptedPrivateKey: agentSecretKey,
+                        });
+                        if (transferResult.outcome === 'confirmed_success') {
                           console.log(`[TradeRetry] Profit share SUCCESS: $${profitShareAmount.toFixed(4)} sent to ${creatorWallet}, tx: ${transferResult.signature}`);
+                        } else if (transferResult.outcome === 'ambiguous') {
+                          console.warn(`[TradeRetry] Profit share submission is awaiting on-chain resolution: ${transferResult.signature ?? transferResult.error}`);
                         } else {
-                          console.error(`[TradeRetry] Transfer failed: ${transferResult.error}`);
-                          await createIouOnFailure(`Transfer failed: ${transferResult.error}`);
+                          console.error(`[TradeRetry] Transfer failed before/at terminal confirmation: ${transferResult.error}`);
                         }
                       }
                     }
