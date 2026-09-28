@@ -93,6 +93,8 @@ export interface SolanaRpcTransportOptions {
   signedTotalTimeoutMs?: number;
   signed429BackoffMs?: readonly number[];
   observe?: (event: SolanaRpcTransportEvent) => void;
+  /** Force every request to the configured primary without changing shared selection. */
+  pinPrimary?: boolean;
 }
 
 export interface SolanaRpcTransport {
@@ -397,6 +399,7 @@ export function createSolanaRpcTransport(options: SolanaRpcTransportOptions = {}
     DEFAULT_SIGNED_TOTAL_TIMEOUT_MS,
   );
   const signed429BackoffMs = boundedBackoffs(options.signed429BackoffMs);
+  const pinPrimary = options.pinPrimary === true;
   const rpcFetch: FetchLike = async (_input, init) => {
     const shape = requestShape(init?.body);
     const method = firstMethod(shape);
@@ -449,11 +452,11 @@ export function createSolanaRpcTransport(options: SolanaRpcTransportOptions = {}
       throw new SolanaRpcTransportError(label, 'ambiguous');
     }
 
-    const selectionAtStart = providerSelection.active;
+    const selectionAtStart: RpcEndpoint = pinPrimary ? 'primary' : providerSelection.active;
     const generationAtStart = providerSelection.generation;
-    const first: RpcEndpoint = historyAuthoritative ? 'primary' : selectionAtStart;
+    const first: RpcEndpoint = pinPrimary || historyAuthoritative ? 'primary' : selectionAtStart;
     const alternate: RpcEndpoint = first === 'primary' ? 'backup' : 'primary';
-    const labels: RpcEndpoint[] = !historyAuthoritative && backupUrl ? [first, alternate] : [first];
+    const labels: RpcEndpoint[] = !pinPrimary && !historyAuthoritative && backupUrl ? [first, alternate] : [first];
     const started = Date.now();
     let lastError: unknown = null;
 
@@ -545,7 +548,7 @@ export function createSolanaRpcTransport(options: SolanaRpcTransportOptions = {}
     };
 
     const maybePromote = (result: ReadAttempt) => {
-      if (historyAuthoritative || result.label === selectionAtStart) return;
+      if (pinPrimary || historyAuthoritative || result.label === selectionAtStart) return;
       if (providerSelection.active !== selectionAtStart || providerSelection.generation !== generationAtStart) return;
       providerSelection.active = result.label;
       providerSelection.generation += 1;
@@ -586,7 +589,7 @@ export function createSolanaRpcTransport(options: SolanaRpcTransportOptions = {}
 
   return {
     fetch: rpcFetch,
-    activeEndpoint: () => providerSelection.active,
+    activeEndpoint: () => pinPrimary ? 'primary' : providerSelection.active,
   };
 }
 

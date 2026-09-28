@@ -1,5 +1,5 @@
 import { getTableColumns, eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
-import { createHash, randomBytes } from "crypto";
+import { createHash, randomBytes, randomUUID } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { db } from "./db";
 import { readPriceExcursion } from "@shared/ai-trader-excursion";
@@ -137,10 +137,12 @@ import {
   type PlatformCumulativeStats,
   referralLinks,
   referralRewardEvents,
+  solanaSignedSubmitAttempts,
   type ReferralLink,
   type InsertReferralLink,
   type ReferralRewardEvent,
   type InsertReferralRewardEvent,
+  type SolanaSignedSubmitAttempt,
   aiTraderBots,
   aiTraderScannerCandidateClaims,
   aiTraderDecisions,
@@ -171,6 +173,18 @@ export type AiTraderScannerCandidateClaimResult =
   | { outcome: "bot_busy" }
   | { outcome: "schema_unavailable" }
   | { outcome: "database_error" };
+
+export type SignedSubmitOperationType = "profit_share_creator" | "referral_reward";
+export type SignedSubmitTerminalStatus = "confirmed_success" | "confirmed_failure" | "expired_without_status";
+
+export interface SignedSubmitAttemptInput {
+  operationType: SignedSubmitOperationType;
+  operationId: string;
+  deterministicSignature: string;
+  blockhash: string;
+  lastValidBlockHeight: number;
+  rpcProvider: "configured_primary";
+}
 
 export type AiTraderScannerCandidateClaimParams = {
   botId: string;
@@ -1093,11 +1107,30 @@ export interface IStorage {
 
   // Profit Sharing: IOU records for failed profit share transfers
   createPendingProfitShare(data: InsertPendingProfitShare): Promise<PendingProfitShare>;
+  createDeferredProfitShare(data: InsertPendingProfitShare): Promise<PendingProfitShare>;
+  getProfitShareByBotAndTrade(subscriberBotId: string, tradeId: string): Promise<PendingProfitShare | undefined>;
+  createOrClaimPendingProfitShare(
+    data: InsertPendingProfitShare,
+    initialization?: { referralLegs: readonly InsertReferralRewardEvent[] },
+    allowedSourceStatuses?: readonly ("pending" | "deferred")[],
+  ): Promise<{ share: PendingProfitShare; claimed: boolean; claimToken: string | null }>;
+  persistCreatorSignedSubmitAttempt(shareId: string, claimToken: string, attempt: SignedSubmitAttemptInput): Promise<boolean>;
+  persistReferralSignedSubmitAttempt(eventId: string, claimToken: string, attempt: SignedSubmitAttemptInput): Promise<boolean>;
+  getActiveSignedSubmitAttempt(operationType: SignedSubmitOperationType, operationId: string): Promise<SolanaSignedSubmitAttempt | undefined>;
+  settleSignedSubmitAttempt(attempt: SolanaSignedSubmitAttempt, status: SignedSubmitTerminalStatus, lastError?: string | null): Promise<boolean>;
+  resetCreatorClaimBeforeBroadcast(shareId: string, claimToken: string, error: string): Promise<boolean>;
+  resetReferralClaimBeforeBroadcast(eventId: string, claimToken: string, error: string): Promise<boolean>;
+  resetStaleProfitShareClaim(shareId: string, staleBefore: Date): Promise<boolean>;
+  resetStaleReferralClaim(eventId: string, staleBefore: Date): Promise<boolean>;
+  voidProfitShareWithReferrals(shareId: string, error: string): Promise<boolean>;
+  hasJoinedActiveSignedSubmitAttempt(shareId: string): Promise<boolean>;
+  hasBotJoinedActiveSignedSubmitAttempt(subscriberBotId: string): Promise<boolean>;
+  getReferralRewardEventsForSource(sourceType: string, sourceId: string): Promise<ReferralRewardEvent[]>;
   getPendingProfitSharesBySubscriber(subscriberWalletAddress: string): Promise<PendingProfitShare[]>;
   getPendingProfitSharesByBot(subscriberBotId: string): Promise<PendingProfitShare[]>;
   getUnsettledProfitSharesByBot(subscriberBotId: string): Promise<PendingProfitShare[]>;
   getAllPendingProfitShares(): Promise<PendingProfitShare[]>;
-  updatePendingProfitShareStatus(id: string, updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date }): Promise<PendingProfitShare | undefined>;
+  updatePendingProfitShareStatus(id: string, updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date | null; processingClaimToken?: string | null; processingClaimedFromStatus?: string | null; referralLegsInitializedAt?: Date | null }): Promise<PendingProfitShare | undefined>;
   deletePendingProfitShare(id: string): Promise<void>;
 
   upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot): Promise<PortfolioDailySnapshot>;
@@ -1119,8 +1152,9 @@ export interface IStorage {
   getReferralDescendantsByLevel(ancestorWallet: string, level: number): Promise<{ descendantWallet: string; createdAt: Date }[]>;
   insertReferralRewardEvent(event: InsertReferralRewardEvent): Promise<ReferralRewardEvent | null>;
   upsertReferralRewardEventPending(event: InsertReferralRewardEvent): Promise<ReferralRewardEvent>;
-  updateReferralRewardEventStatus(id: string, patch: { status?: string; transferSignature?: string | null; lastError?: string | null; retryCount?: number; lastAttemptAt?: Date | null }): Promise<void>;
-  claimReferralRewardEventForProcessing(id: string, expectedStatus: string[]): Promise<boolean>;
+  updateReferralRewardEventStatus(id: string, patch: { status?: string; transferSignature?: string | null; lastError?: string | null; retryCount?: number; lastAttemptAt?: Date | null; processingClaimToken?: string | null; processingClaimedFromStatus?: string | null; releasedAt?: Date | null }): Promise<void>;
+  claimReferralRewardEventForProcessing(id: string, expectedStatus: string[]): Promise<string | null>;
+  voidReferralRewardEvent(id: string, error: string): Promise<boolean>;
   getPendingReferralRewardEvents(): Promise<ReferralRewardEvent[]>;
   getProcessingReferralRewardEvents(): Promise<ReferralRewardEvent[]>;
   getReferralEarnings(earnerWallet: string): Promise<{ l1: number; l2: number; l3: number; total: number }>;
@@ -2298,6 +2332,18 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteTradingBot(id: string): Promise<void> {
+    const obligations = await db.select({ id: pendingProfitShares.id })
+      .from(pendingProfitShares)
+      .where(and(
+        eq(pendingProfitShares.subscriberBotId, id),
+        inArray(pendingProfitShares.status, ['pending', 'processing']),
+      ));
+    if (obligations.length > 0) {
+      throw new Error('Trading bot has an unsettled creator payout obligation');
+    }
+    if (await this.hasBotJoinedActiveSignedSubmitAttempt(id)) {
+      throw new Error('Trading bot has a prior payout submission awaiting on-chain resolution');
+    }
     await this.snapshotBotStatsBeforeDeletion(id);
     await db.delete(tradingBots).where(eq(tradingBots.id, id));
   }
@@ -5705,6 +5751,381 @@ export class DatabaseStorage implements IStorage {
     return result[0];
   }
 
+  async createDeferredProfitShare(data: InsertPendingProfitShare): Promise<PendingProfitShare> {
+    const result = await db.insert(pendingProfitShares).values({ ...data, status: 'deferred' })
+      .onConflictDoNothing({ target: [pendingProfitShares.subscriberBotId, pendingProfitShares.tradeId] })
+      .returning();
+    if (result[0]) return result[0];
+    const existing = await db.select().from(pendingProfitShares)
+      .where(and(
+        eq(pendingProfitShares.subscriberBotId, data.subscriberBotId),
+        eq(pendingProfitShares.tradeId, data.tradeId),
+      ))
+      .limit(1);
+    if (!existing[0]) throw new Error('Deferred profit-share obligation was not persisted');
+    if (existing[0].status === 'pending') {
+      const deferred = await db.update(pendingProfitShares)
+        .set({ status: 'deferred' })
+        .where(and(eq(pendingProfitShares.id, existing[0].id), eq(pendingProfitShares.status, 'pending')))
+        .returning();
+      if (deferred[0]) return deferred[0];
+      const current = await db.select().from(pendingProfitShares)
+        .where(eq(pendingProfitShares.id, existing[0].id))
+        .limit(1);
+      if (current[0]) return current[0];
+    }
+    return existing[0];
+  }
+
+  async getProfitShareByBotAndTrade(subscriberBotId: string, tradeId: string): Promise<PendingProfitShare | undefined> {
+    const rows = await db.select().from(pendingProfitShares).where(and(
+      eq(pendingProfitShares.subscriberBotId, subscriberBotId),
+      eq(pendingProfitShares.tradeId, tradeId),
+    )).limit(1);
+    return rows[0];
+  }
+
+  async createOrClaimPendingProfitShare(
+    data: InsertPendingProfitShare,
+    initialization?: { referralLegs: readonly InsertReferralRewardEvent[] },
+    allowedSourceStatuses: readonly ('pending' | 'deferred')[] = ['pending'],
+  ): Promise<{ share: PendingProfitShare; claimed: boolean; claimToken: string | null }> {
+    return db.transaction(async (tx) => {
+      const existingRows = await tx.select().from(pendingProfitShares)
+        .where(and(
+          eq(pendingProfitShares.subscriberBotId, data.subscriberBotId),
+          eq(pendingProfitShares.tradeId, data.tradeId),
+        ))
+        .for('update')
+        .limit(1);
+      let share = existingRows[0];
+      const claimToken = randomUUID();
+      const now = new Date();
+
+      if (!share) {
+        const inserted = await tx.insert(pendingProfitShares).values({
+          ...data,
+          status: 'processing',
+          processingClaimToken: claimToken,
+          processingClaimedFromStatus: 'pending',
+          lastAttemptAt: now,
+          referralLegsInitializedAt: initialization ? now : null,
+        }).onConflictDoNothing({
+          target: [pendingProfitShares.subscriberBotId, pendingProfitShares.tradeId],
+        }).returning();
+        if (inserted[0]) {
+          share = inserted[0];
+          if (initialization?.referralLegs.length) {
+            await tx.insert(referralRewardEvents).values(
+              initialization.referralLegs.map((leg) => ({ ...leg, status: 'awaiting_creator' })),
+            ).onConflictDoNothing();
+          }
+          return { share, claimed: true, claimToken };
+        }
+        const racedRows = await tx.select().from(pendingProfitShares)
+          .where(and(
+            eq(pendingProfitShares.subscriberBotId, data.subscriberBotId),
+            eq(pendingProfitShares.tradeId, data.tradeId),
+          ))
+          .for('update')
+          .limit(1);
+        share = racedRows[0];
+        if (!share) throw new Error('profit-share row vanished after concurrent insert');
+      }
+
+      if (share.status === 'paid' || share.status === 'processing') {
+        return { share, claimed: false, claimToken: null };
+      }
+      if (!allowedSourceStatuses.includes(share.status as 'pending' | 'deferred')) {
+        return { share, claimed: false, claimToken: null };
+      }
+
+      const sourceStatus = share.status as 'pending' | 'deferred';
+      const shouldInitialize = !share.referralLegsInitializedAt ? initialization : undefined;
+      if (shouldInitialize?.referralLegs.length) {
+        await tx.insert(referralRewardEvents).values(
+          shouldInitialize.referralLegs.map((leg) => ({ ...leg, status: 'awaiting_creator' })),
+        ).onConflictDoNothing();
+      }
+      const claimed = await tx.update(pendingProfitShares).set({
+        status: 'processing',
+        processingClaimToken: claimToken,
+        processingClaimedFromStatus: sourceStatus,
+        lastAttemptAt: now,
+        ...(shouldInitialize ? { referralLegsInitializedAt: now } : {}),
+      }).where(and(
+        eq(pendingProfitShares.id, share.id),
+        eq(pendingProfitShares.status, sourceStatus),
+      )).returning();
+      if (!claimed[0]) return { share, claimed: false, claimToken: null };
+      return { share: claimed[0], claimed: true, claimToken };
+    });
+  }
+
+  async persistCreatorSignedSubmitAttempt(
+    shareId: string,
+    claimToken: string,
+    attempt: SignedSubmitAttemptInput,
+  ): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const owned = await tx.update(pendingProfitShares)
+        .set({ lastAttemptAt: new Date() })
+        .where(and(
+          eq(pendingProfitShares.id, shareId),
+          eq(pendingProfitShares.status, 'processing'),
+          eq(pendingProfitShares.processingClaimToken, claimToken),
+        ))
+        .returning({ id: pendingProfitShares.id });
+      if (!owned[0]) return false;
+      const inserted = await tx.insert(solanaSignedSubmitAttempts).values({
+        ...attempt,
+        lastValidBlockHeight: String(attempt.lastValidBlockHeight),
+        status: 'confirmation_pending',
+      }).onConflictDoNothing().returning({ id: solanaSignedSubmitAttempts.id });
+      if (!inserted[0]) throw new Error('active signed-submit attempt already exists');
+      return true;
+    }).catch(() => false);
+  }
+
+  async persistReferralSignedSubmitAttempt(
+    eventId: string,
+    claimToken: string,
+    attempt: SignedSubmitAttemptInput,
+  ): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const owned = await tx.update(referralRewardEvents)
+        .set({ lastAttemptAt: new Date() })
+        .where(and(
+          eq(referralRewardEvents.id, eventId),
+          eq(referralRewardEvents.status, 'processing'),
+          eq(referralRewardEvents.processingClaimToken, claimToken),
+        ))
+        .returning({ id: referralRewardEvents.id });
+      if (!owned[0]) return false;
+      const inserted = await tx.insert(solanaSignedSubmitAttempts).values({
+        ...attempt,
+        lastValidBlockHeight: String(attempt.lastValidBlockHeight),
+        status: 'confirmation_pending',
+      }).onConflictDoNothing().returning({ id: solanaSignedSubmitAttempts.id });
+      if (!inserted[0]) throw new Error('active signed-submit attempt already exists');
+      return true;
+    }).catch(() => false);
+  }
+
+  async getActiveSignedSubmitAttempt(
+    operationType: SignedSubmitOperationType,
+    operationId: string,
+  ): Promise<SolanaSignedSubmitAttempt | undefined> {
+    const rows = await db.select().from(solanaSignedSubmitAttempts).where(and(
+      eq(solanaSignedSubmitAttempts.operationType, operationType),
+      eq(solanaSignedSubmitAttempts.operationId, operationId),
+      eq(solanaSignedSubmitAttempts.status, 'confirmation_pending'),
+    )).limit(1);
+    return rows[0];
+  }
+
+  async settleSignedSubmitAttempt(
+    attempt: SolanaSignedSubmitAttempt,
+    status: SignedSubmitTerminalStatus,
+    lastError: string | null = null,
+  ): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const terminal = await tx.update(solanaSignedSubmitAttempts).set({
+        status,
+        lastError,
+        updatedAt: new Date(),
+      }).where(and(
+        eq(solanaSignedSubmitAttempts.id, attempt.id),
+        eq(solanaSignedSubmitAttempts.status, 'confirmation_pending'),
+      )).returning({ id: solanaSignedSubmitAttempts.id });
+      if (!terminal[0]) return false;
+      const now = new Date();
+      if (attempt.operationType === 'profit_share_creator') {
+        if (status === 'confirmed_success') {
+          const paid = await tx.update(pendingProfitShares).set({
+            status: 'paid',
+            processingClaimToken: null,
+            processingClaimedFromStatus: null,
+            lastError: null,
+            lastAttemptAt: now,
+          }).where(eq(pendingProfitShares.id, attempt.operationId)).returning();
+          if (paid[0]?.referralLegsInitializedAt) {
+            await tx.update(referralRewardEvents).set({ status: 'pending', releasedAt: now })
+              .where(and(
+                eq(referralRewardEvents.sourceType, 'profit_share_paid'),
+                eq(referralRewardEvents.sourceId, paid[0].tradeId),
+                eq(referralRewardEvents.status, 'awaiting_creator'),
+              ));
+          }
+        } else {
+          await tx.update(pendingProfitShares).set({
+            status: sql`COALESCE(${pendingProfitShares.processingClaimedFromStatus}, 'pending')`,
+            processingClaimToken: null,
+            processingClaimedFromStatus: null,
+            retryCount: sql`${pendingProfitShares.retryCount} + 1`,
+            lastError,
+            lastAttemptAt: now,
+          }).where(eq(pendingProfitShares.id, attempt.operationId));
+        }
+      } else if (status === 'confirmed_success') {
+        await tx.update(referralRewardEvents).set({
+          status: 'paid',
+          transferSignature: attempt.deterministicSignature,
+          processingClaimToken: null,
+          processingClaimedFromStatus: null,
+          lastError: null,
+          lastAttemptAt: now,
+        }).where(eq(referralRewardEvents.id, attempt.operationId));
+      } else {
+        await tx.update(referralRewardEvents).set({
+          status: sql`COALESCE(${referralRewardEvents.processingClaimedFromStatus}, 'pending')`,
+          processingClaimToken: null,
+          processingClaimedFromStatus: null,
+          retryCount: sql`${referralRewardEvents.retryCount} + 1`,
+          lastError,
+          lastAttemptAt: now,
+        }).where(eq(referralRewardEvents.id, attempt.operationId));
+      }
+      return true;
+    });
+  }
+
+  async resetCreatorClaimBeforeBroadcast(shareId: string, claimToken: string, error: string): Promise<boolean> {
+    const rows = await db.update(pendingProfitShares).set({
+      status: sql`COALESCE(${pendingProfitShares.processingClaimedFromStatus}, 'pending')`,
+      processingClaimToken: null,
+      processingClaimedFromStatus: null,
+      lastError: error,
+      lastAttemptAt: new Date(),
+      retryCount: sql`${pendingProfitShares.retryCount} + 1`,
+    }).where(and(
+      eq(pendingProfitShares.id, shareId),
+      eq(pendingProfitShares.status, 'processing'),
+      eq(pendingProfitShares.processingClaimToken, claimToken),
+      sql`NOT EXISTS (SELECT 1 FROM solana_signed_submit_attempts a WHERE a.operation_type='profit_share_creator' AND a.operation_id=${shareId} AND a.status='confirmation_pending')`,
+    )).returning({ id: pendingProfitShares.id });
+    return rows.length === 1;
+  }
+
+  async resetReferralClaimBeforeBroadcast(eventId: string, claimToken: string, error: string): Promise<boolean> {
+    const rows = await db.update(referralRewardEvents).set({
+      status: sql`COALESCE(${referralRewardEvents.processingClaimedFromStatus}, 'pending')`,
+      processingClaimToken: null,
+      processingClaimedFromStatus: null,
+      lastError: error,
+      lastAttemptAt: new Date(),
+      retryCount: sql`${referralRewardEvents.retryCount} + 1`,
+    }).where(and(
+      eq(referralRewardEvents.id, eventId),
+      eq(referralRewardEvents.status, 'processing'),
+      eq(referralRewardEvents.processingClaimToken, claimToken),
+      sql`NOT EXISTS (SELECT 1 FROM solana_signed_submit_attempts a WHERE a.operation_type='referral_reward' AND a.operation_id=${eventId} AND a.status='confirmation_pending')`,
+    )).returning({ id: referralRewardEvents.id });
+    return rows.length === 1;
+  }
+
+  async resetStaleProfitShareClaim(shareId: string, staleBefore: Date): Promise<boolean> {
+    const rows = await db.update(pendingProfitShares).set({
+      status: sql`COALESCE(${pendingProfitShares.processingClaimedFromStatus}, 'pending')`,
+      processingClaimToken: null,
+      processingClaimedFromStatus: null,
+      lastError: 'Reset from stale processing state',
+    }).where(and(
+      eq(pendingProfitShares.id, shareId),
+      eq(pendingProfitShares.status, 'processing'),
+      lt(sql`COALESCE(${pendingProfitShares.lastAttemptAt}, ${pendingProfitShares.createdAt})`, staleBefore),
+      sql`NOT EXISTS (SELECT 1 FROM solana_signed_submit_attempts a WHERE a.operation_type='profit_share_creator' AND a.operation_id=${shareId} AND a.status='confirmation_pending')`,
+    )).returning({ id: pendingProfitShares.id });
+    return rows.length === 1;
+  }
+
+  async resetStaleReferralClaim(eventId: string, staleBefore: Date): Promise<boolean> {
+    const rows = await db.update(referralRewardEvents).set({
+      status: sql`COALESCE(${referralRewardEvents.processingClaimedFromStatus}, 'pending')`,
+      processingClaimToken: null,
+      processingClaimedFromStatus: null,
+      lastError: 'Reset from stale processing state',
+    }).where(and(
+      eq(referralRewardEvents.id, eventId),
+      eq(referralRewardEvents.status, 'processing'),
+      lt(sql`COALESCE(${referralRewardEvents.lastAttemptAt}, ${referralRewardEvents.createdAt})`, staleBefore),
+      sql`NOT EXISTS (SELECT 1 FROM solana_signed_submit_attempts a WHERE a.operation_type='referral_reward' AND a.operation_id=${eventId} AND a.status='confirmation_pending')`,
+    )).returning({ id: referralRewardEvents.id });
+    return rows.length === 1;
+  }
+
+  async voidProfitShareWithReferrals(shareId: string, error: string): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const shares = await tx.update(pendingProfitShares).set({
+        status: 'voided', lastError: error, lastAttemptAt: new Date(),
+        processingClaimToken: null, processingClaimedFromStatus: null,
+      }).where(and(
+        eq(pendingProfitShares.id, shareId),
+        eq(pendingProfitShares.status, 'pending'),
+        sql`NOT EXISTS (SELECT 1 FROM solana_signed_submit_attempts a WHERE a.operation_type='profit_share_creator' AND a.operation_id=${shareId} AND a.status='confirmation_pending')`,
+      )).returning();
+      if (!shares[0]) return false;
+      await tx.update(referralRewardEvents).set({ status: 'voided' }).where(and(
+        eq(referralRewardEvents.sourceType, 'profit_share_paid'),
+        eq(referralRewardEvents.sourceId, shares[0].tradeId),
+        eq(referralRewardEvents.status, 'awaiting_creator'),
+      ));
+      return true;
+    });
+  }
+
+  async hasJoinedActiveSignedSubmitAttempt(shareId: string): Promise<boolean> {
+    const rows = await db.select({ id: solanaSignedSubmitAttempts.id })
+      .from(solanaSignedSubmitAttempts)
+      .where(and(
+        eq(solanaSignedSubmitAttempts.status, 'confirmation_pending'),
+        or(
+          and(eq(solanaSignedSubmitAttempts.operationType, 'profit_share_creator'), eq(solanaSignedSubmitAttempts.operationId, shareId)),
+          and(
+            eq(solanaSignedSubmitAttempts.operationType, 'referral_reward'),
+            sql`EXISTS (SELECT 1 FROM referral_reward_events r JOIN pending_profit_shares p ON p.trade_id=r.source_id WHERE p.id=${shareId} AND r.id=${solanaSignedSubmitAttempts.operationId} AND r.source_type='profit_share_paid')`,
+          ),
+        ),
+      )).limit(1);
+    return rows.length > 0;
+  }
+
+  async hasBotJoinedActiveSignedSubmitAttempt(subscriberBotId: string): Promise<boolean> {
+    const rows = await db.select({ id: solanaSignedSubmitAttempts.id })
+      .from(solanaSignedSubmitAttempts)
+      .innerJoin(
+        pendingProfitShares,
+        or(
+          and(
+            eq(solanaSignedSubmitAttempts.operationType, 'profit_share_creator'),
+            eq(solanaSignedSubmitAttempts.operationId, pendingProfitShares.id),
+          ),
+          and(
+            eq(solanaSignedSubmitAttempts.operationType, 'referral_reward'),
+            sql`EXISTS (
+              SELECT 1 FROM referral_reward_events r
+               WHERE r.id = ${solanaSignedSubmitAttempts.operationId}
+                 AND r.source_type = 'profit_share_paid'
+                 AND r.source_id = ${pendingProfitShares.tradeId}
+            )`,
+          ),
+        ),
+      )
+      .where(and(
+        eq(pendingProfitShares.subscriberBotId, subscriberBotId),
+        eq(solanaSignedSubmitAttempts.status, 'confirmation_pending'),
+      ))
+      .limit(1);
+    return rows.length > 0;
+  }
+
+  async getReferralRewardEventsForSource(sourceType: string, sourceId: string): Promise<ReferralRewardEvent[]> {
+    return db.select().from(referralRewardEvents).where(and(
+      eq(referralRewardEvents.sourceType, sourceType),
+      eq(referralRewardEvents.sourceId, sourceId),
+    )).orderBy(referralRewardEvents.level);
+  }
+
   async getPendingProfitSharesBySubscriber(subscriberWalletAddress: string): Promise<PendingProfitShare[]> {
     return db.select().from(pendingProfitShares)
       .where(and(
@@ -5764,7 +6185,7 @@ export class DatabaseStorage implements IStorage {
 
   async updatePendingProfitShareStatus(
     id: string, 
-    updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date }
+    updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date | null; processingClaimToken?: string | null; processingClaimedFromStatus?: string | null; referralLegsInitializedAt?: Date | null }
   ): Promise<PendingProfitShare | undefined> {
     const result = await db.update(pendingProfitShares)
       .set(updates)
@@ -6027,7 +6448,7 @@ export class DatabaseStorage implements IStorage {
 
   async updateReferralRewardEventStatus(
     id: string,
-    patch: { status?: string; transferSignature?: string | null; lastError?: string | null; retryCount?: number; lastAttemptAt?: Date | null }
+    patch: { status?: string; transferSignature?: string | null; lastError?: string | null; retryCount?: number; lastAttemptAt?: Date | null; processingClaimToken?: string | null; processingClaimedFromStatus?: string | null; releasedAt?: Date | null }
   ): Promise<void> {
     const update: Record<string, any> = {};
     if (patch.status !== undefined) update.status = patch.status;
@@ -6035,21 +6456,45 @@ export class DatabaseStorage implements IStorage {
     if (patch.lastError !== undefined) update.lastError = patch.lastError;
     if (patch.retryCount !== undefined) update.retryCount = patch.retryCount;
     if (patch.lastAttemptAt !== undefined) update.lastAttemptAt = patch.lastAttemptAt;
+    if (patch.processingClaimToken !== undefined) update.processingClaimToken = patch.processingClaimToken;
+    if (patch.processingClaimedFromStatus !== undefined) update.processingClaimedFromStatus = patch.processingClaimedFromStatus;
+    if (patch.releasedAt !== undefined) update.releasedAt = patch.releasedAt;
     if (Object.keys(update).length === 0) return;
     await db.update(referralRewardEvents).set(update).where(eq(referralRewardEvents.id, id));
   }
 
-  async claimReferralRewardEventForProcessing(id: string, expectedStatus: string[]): Promise<boolean> {
+  async claimReferralRewardEventForProcessing(id: string, expectedStatus: string[]): Promise<string | null> {
     // Atomic compare-and-set: only one worker can transition a row from
-    // pending/failed -> processing. Returns true if this caller won the claim.
+    // pending/failed -> processing. Returns the caller's fresh claim token on success.
+    const claimToken = randomUUID();
     const result = await db.update(referralRewardEvents)
-      .set({ status: 'processing', lastAttemptAt: new Date() })
+      .set({
+        status: 'processing',
+        lastAttemptAt: new Date(),
+        processingClaimToken: claimToken,
+        processingClaimedFromStatus: sql`${referralRewardEvents.status}`,
+      })
       .where(and(
         eq(referralRewardEvents.id, id),
         inArray(referralRewardEvents.status, expectedStatus),
       ))
       .returning({ id: referralRewardEvents.id });
-    return result.length > 0;
+    return result.length > 0 ? claimToken : null;
+  }
+
+  async voidReferralRewardEvent(id: string, error: string): Promise<boolean> {
+    const rows = await db.update(referralRewardEvents).set({
+      status: 'voided',
+      processingClaimToken: null,
+      processingClaimedFromStatus: null,
+      lastError: error,
+      lastAttemptAt: new Date(),
+    }).where(and(
+      eq(referralRewardEvents.id, id),
+      inArray(referralRewardEvents.status, ['pending', 'failed']),
+      sql`NOT EXISTS (SELECT 1 FROM solana_signed_submit_attempts a WHERE a.operation_type='referral_reward' AND a.operation_id=${id} AND a.status='confirmation_pending')`,
+    )).returning({ id: referralRewardEvents.id });
+    return rows.length === 1;
   }
 
   async getPendingReferralRewardEvents(): Promise<ReferralRewardEvent[]> {

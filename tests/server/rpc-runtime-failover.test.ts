@@ -44,6 +44,40 @@ describe('Solana RPC runtime failover', () => {
     expect(transport.activeEndpoint()).toBe('primary');
   });
 
+  it('pins a dedicated resolver transport to primary even after shared reads promote backup', async () => {
+    const sharedFetch = vi.fn()
+      .mockResolvedValueOnce(new Response('{}', { status: 503 }))
+      .mockResolvedValueOnce(rpcResult({ value: 11 }));
+    const shared = createSolanaRpcTransport({ primaryUrl: PRIMARY, backupUrl: BACKUP, fetchImpl: sharedFetch });
+    await shared.fetch(PRIMARY, request('getBalance'));
+    expect(shared.activeEndpoint()).toBe('backup');
+
+    const originalRpcUrl = process.env.SOLANA_RPC_URL;
+    process.env.SOLANA_RPC_URL = PRIMARY;
+    const pinnedFetch = vi.fn().mockResolvedValueOnce(rpcResult({
+      absoluteSlot: 7_001,
+      blockHeight: 6_901,
+      blockTime: null,
+      epoch: 1,
+      slotIndex: 1,
+      slotsInEpoch: 432_000,
+      transactionCount: 1,
+    }));
+    vi.stubGlobal('fetch', pinnedFetch);
+    try {
+      const { getFinalizedEpochPositionStrict } = await import('../../server/agent-wallet.js');
+      await expect(getFinalizedEpochPositionStrict()).resolves.toEqual({ blockHeight: 6_901, contextSlot: 7_001 });
+      expect(pinnedFetch).toHaveBeenCalledTimes(1);
+      expect(pinnedFetch.mock.calls[0][0]).toBe(PRIMARY);
+      expect(JSON.parse(String(pinnedFetch.mock.calls[0][1]?.body))).toMatchObject({ method: 'getEpochInfo' });
+      expect(shared.activeEndpoint()).toBe('backup');
+    } finally {
+      vi.unstubAllGlobals();
+      if (originalRpcUrl === undefined) delete process.env.SOLANA_RPC_URL;
+      else process.env.SOLANA_RPC_URL = originalRpcUrl;
+    }
+  });
+
   it('fails a replay-safe read over to backup and promotes only its valid response', async () => {
     const nativeFetch = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'unavailable' }), { status: 503 }))
