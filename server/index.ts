@@ -20,7 +20,7 @@ import { startTelegramDailySummaryJob } from "./telegram-daily-summary-job";
 import { recordCriticalError, flushErrorLog } from "./error-log";
 import { registerRequestTrace, startSelfStats } from "./request-trace";
 import { SERVER_BOOT_ID } from "./boot-id";
-import { createRuntimeHealthPayload } from "./runtime-deployment-identity";
+import { createRuntimeHealthHandler, createRuntimeReadinessMiddleware } from "./runtime-deployment-identity";
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as nodePath from "node:path";
@@ -193,9 +193,7 @@ declare module "http" {
 }
 
 // Health check endpoint - must respond quickly for deployment health checks
-app.get("/health", (_req, res) => {
-  res.status(200).json({ status: "ok", timestamp: Date.now() });
-});
+app.get("/health", createRuntimeHealthHandler(() => appFullyReady));
 
 // Boot-id header: every response carries X-Boot-Id so the client can detect
 // server restarts (changed id) and trigger query recovery automatically.
@@ -232,9 +230,7 @@ app.use((req, res, next) => {
 // ---------------------------------------------------------------------------
 let appFullyReady = false;
 
-app.get("/api/health", (_req, res) => {
-  res.status(200).json(createRuntimeHealthPayload(appFullyReady));
-});
+app.get("/api/health", createRuntimeHealthHandler(() => appFullyReady));
 
 const STARTING_PAGE = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -244,19 +240,7 @@ const STARTING_PAGE = `<!doctype html>
 @keyframes s{to{transform:rotate(360deg)}}p{color:#64748b;font-size:14px}</style></head>
 <body><div class="box"><div class="spin"></div><div>QuantumVault is starting</div><p>This page will refresh automatically.</p></div></body></html>`;
 
-app.use((req, res, next) => {
-  if (appFullyReady) return next();
-  if (req.path.startsWith("/api/")) {
-    res.set("Retry-After", "5");
-    return res.status(503).json({ message: "Server is starting up — please retry shortly" });
-  }
-  if (req.method === "GET" || req.method === "HEAD") {
-    res.set("Cache-Control", "no-store");
-    return res.status(200).type("html").send(STARTING_PAGE);
-  }
-  res.set("Retry-After", "5");
-  return res.status(503).json({ message: "Server is starting up — please retry shortly" });
-});
+app.use(createRuntimeReadinessMiddleware(() => appFullyReady, STARTING_PAGE));
 
 // PRODUCTION PRE-FLIGHT (guards the early bind below): serveStatic()
 // deliberately throws on a missing/corrupt SPA shell so a broken build never

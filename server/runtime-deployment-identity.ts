@@ -1,3 +1,5 @@
+import type { RequestHandler } from "express";
+import { getDatabaseReadiness } from "./database-readiness";
 import { SERVER_BOOT_ID, SERVER_BOOT_STARTED_AT } from "./boot-id";
 import {
   getSchemaReadinessHealth,
@@ -74,9 +76,11 @@ export function createRuntimeHealthPayload(
   identity: RuntimeDeploymentIdentity = RUNTIME_DEPLOYMENT_IDENTITY,
   schemaReadiness: SchemaReadinessHealth = getSchemaReadinessHealth(),
 ) {
+  const database = getDatabaseReadiness();
   return {
     status: "ok" as const,
-    ready,
+    ready: ready && !database.degraded,
+    ...(database.degraded ? { reason: database.reason } : {}),
     timestamp,
     commitSha: identity.commitSha,
     treeSha: identity.treeSha,
@@ -87,5 +91,34 @@ export function createRuntimeHealthPayload(
       evaluated: schemaReadiness.evaluated,
       unavailableCapabilities: [...schemaReadiness.unavailableCapabilities],
     },
+  };
+}
+
+// Health routes precede the readiness guard. Keep their HTTP 200 liveness
+// contract even when the database is unavailable; readiness is in the payload.
+export function createRuntimeHealthHandler(isBootReady: () => boolean): RequestHandler {
+  return (_req, res) => {
+    res.status(200).json(createRuntimeHealthPayload(isBootReady()));
+  };
+}
+
+export function createRuntimeReadinessMiddleware(
+  isBootReady: () => boolean,
+  startingPage: string,
+): RequestHandler {
+  return (req, res, next) => {
+    // Admission is boot-only. Post-boot database readiness is diagnostic.
+    if (isBootReady()) return next();
+    const message = "Server is starting up — please retry shortly";
+    if (req.path.startsWith("/api/")) {
+      res.set("Retry-After", "5");
+      return res.status(503).json({ message });
+    }
+    if (req.method === "GET" || req.method === "HEAD") {
+      res.set("Cache-Control", "no-store");
+      return res.status(200).type("html").send(startingPage);
+    }
+    res.set("Retry-After", "5");
+    return res.status(503).json({ message });
   };
 }

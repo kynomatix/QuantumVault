@@ -1,3 +1,4 @@
+import { recordDatabaseCheck, recordDatabaseConnectionError } from "./database-readiness";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pkg from "pg";
 const { Pool } = pkg;
@@ -83,6 +84,7 @@ const hasDedicatedScannerCandlePool = scannerCandlePool !== pool;
 const SCANNER_POOL_TAG = `[DB Pool:${poolName}:scanner-candle]`;
 
 pool.on("error", (err) => {
+  recordDatabaseConnectionError();
   console.error(`${POOL_TAG} Idle client error (suppressed crash):`, err.message);
 });
 if (hasDedicatedScannerCandlePool) {
@@ -96,12 +98,21 @@ if (hasDedicatedScannerCandlePool) {
 // 30s matches the acquire timeout above. DATABASE_URL is a direct connection
 // (verified non-pooler), so a session-level SET on connect is safe.
 pool.on("connect", (client) => {
+  // Checked-out clients can emit errors between queries; keep the process alive.
+  client.on("error", (err) => {
+    recordDatabaseConnectionError();
+    console.error(`${POOL_TAG} Client connection error:`, err.message);
+  });
   client.query("SET statement_timeout = 30000").catch((err) => {
     console.error(`${POOL_TAG} Failed to set statement_timeout:`, err.message);
   });
 });
 if (hasDedicatedScannerCandlePool) {
   scannerCandlePool.on("connect", (client) => {
+    // Checked-out clients can emit errors between queries; keep the process alive.
+    client.on("error", (err) => {
+      console.error(`${SCANNER_POOL_TAG} Client connection error:`, err.message);
+    });
     client.query("SET statement_timeout = 30000").catch((err) => {
       console.error(`${SCANNER_POOL_TAG} Failed to set statement_timeout:`, err.message);
     });
@@ -164,11 +175,14 @@ function keepScannerCandlePoolWarm(): void {
 keepScannerCandlePoolWarm();
 
 setInterval(() => {
-  const releaseKeepWarm = claimKeepWarm();
-  pool.query("SELECT 1")
-    .then(() => { _hbFailStreak = 0; })
-    .catch(() => { _hbFailCount++; _hbFailStreak++; })
-    .finally(releaseKeepWarm);
+  // Serialize evidence: a slow check must not create overlapping failures.
+  if (activeKeepWarm.size === 0) {
+    const releaseKeepWarm = claimKeepWarm();
+    pool.query("SELECT 1")
+      .then(() => { _hbFailStreak = 0; recordDatabaseCheck(true); })
+      .catch(() => { _hbFailCount++; _hbFailStreak++; recordDatabaseCheck(false); })
+      .finally(releaseKeepWarm);
+  }
 
   // Reuse the existing heartbeat cadence: no new timer. Re-establish only a
   // physically empty lane; a healthy idle lane is left untouched for scanner
