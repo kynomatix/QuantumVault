@@ -9996,127 +9996,13 @@ describe('Flash order-specific fee authority', () => {
     invalidateAllCaches();
   });
 
-  it.each(['long', 'short'] as const)('reproduces the captured %s fee through real SDK helpers', async (side) => {
-    const fixture = cloneFixture();
-    const adapter = new FlashAdapter();
-    const client = installFixtureReads(adapter, fixture);
-    const helperSpies = [
-      vi.spyOn(client, 'getAssetsUnderManagementUsdSync'),
-      vi.spyOn(client, 'getSwapAmountAndFeesSync'),
-      vi.spyOn(client, 'getMinAndMaxOraclePriceSync'),
-      vi.spyOn(client, 'getEntryPriceAndFeeSyncV2'),
-    ];
-
-    const result = await resolveOrderFeeRateQuote(adapter, order(side), { now: FIXTURE_NOW_MS });
-    expect(result.availability).toBe('available');
-    if (result.availability !== 'available') throw new Error(result.reason);
-    const expected = fixture.expected.find((entry: any) => entry.side === side);
-    expect(result.audit).toMatchObject({
-      entryFeeUsd: expected.entryFeeUsd,
-      volatilityFeeUsd: expected.volatilityFeeUsd,
-      swapFeeUsd: expected.swapFeeUsd,
-      totalFeeUsd: expected.totalFeeUsd,
-      sizeUsd: expected.sizeUsd,
-      swappedCollateralBaseUnits: side === 'long' ? expected.openCollateralAmountBaseUnits : null,
-      pricePublishTime: fixture.pyth.find((entry: any) => entry.symbol === 'SOL').current.publishTime,
-      emaPublishTime: fixture.pyth.find((entry: any) => entry.symbol === 'SOL').ema.publishTime,
-    });
-    expect(result.effectiveRate).toBe(expected.effectiveRate);
-    expect(helperSpies[0]).toHaveBeenCalledTimes(1);
-    expect(helperSpies[1]).toHaveBeenCalledTimes(side === 'long' ? 1 : 0);
-    expect(helperSpies[2]).toHaveBeenCalled();
-    expect(helperSpies[3]).toHaveBeenCalledTimes(1);
+  it.each(['long','short'] as const)('blocks %s order fee reads before SDK or RPC work',async side=>{
+    const adapter=new FlashAdapter(), read=vi.spyOn(adapter as any,'_getReadClient'),fetchSpy=vi.fn();vi.stubGlobal('fetch',fetchSpy);
+    await expect(adapter.getOrderFeeRateQuote(order(side))).rejects.toThrow('Flash');
+    expect(read).not.toHaveBeenCalled();expect(fetchSpy).not.toHaveBeenCalled();
+    await expect(resolveOrderFeeRateQuote(adapter,order(side))).resolves.toMatchObject({availability:'unavailable'});
   });
-
-  it('covers the conditional volatility component without mocking fee arithmetic', async () => {
-    const fixture = cloneFixture();
-    const sol = fixture.pyth.find((entry: any) => entry.symbol === 'SOL');
-    sol.ema.price = '1';
-    const adapter = new FlashAdapter();
-    installFixtureReads(adapter, fixture);
-
-    const result = await resolveOrderFeeRateQuote(adapter, order('long'), { now: FIXTURE_NOW_MS });
-    expect(result.availability).toBe('available');
-    if (result.availability !== 'available') throw new Error(result.reason);
-    expect(BigInt(result.audit.volatilityFeeUsd)).toBeGreaterThan(0n);
-  });
-
-  it.each([
-    ['current stale', 'current', -Math.floor(FEE_RATE_QUOTE_MAX_AGE_MS / 1000) - 1, 'stale_quote'],
-    ['EMA stale', 'ema', -Math.floor(FEE_RATE_QUOTE_MAX_AGE_MS / 1000) - 1, 'stale_quote'],
-    ['current future', 'current', 1, 'future_quote'],
-    ['EMA future', 'ema', 1, 'future_quote'],
-  ] as const)('converts Unix seconds to milliseconds at the %s boundary', async (_label, field, offset, reason) => {
-    const fixture = cloneFixture();
-    const first = fixture.pyth.find((entry: any) => entry.pythPriceHash);
-    first[field].publishTime = Number(fixture.input.currentTimestampSeconds) + offset;
-    const adapter = new FlashAdapter();
-    installFixtureReads(adapter, fixture);
-
-    await expect(resolveOrderFeeRateQuote(adapter, order(), { now: FIXTURE_NOW_MS })).resolves.toEqual({
-      availability: 'unavailable',
-      reason,
-    });
-  });
-
-  it('samples observedAt after every awaited read and validates it against the post-read clock', async () => {
-    vi.useRealTimers();
-    const fixture = cloneFixture();
-    const publishMs = Number(fixture.input.currentTimestampSeconds) * 1000;
-    let tick = publishMs;
-    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => (tick += 1_000));
-    let custodyReadCompletedAt = 0;
-    const adapter = new FlashAdapter();
-    installFixtureReads(adapter, fixture, () => { custodyReadCompletedAt = Date.now(); });
-
-    const result = await resolveOrderFeeRateQuote(adapter, order());
-    expect(result.availability).toBe('available');
-    if (result.availability !== 'available') throw new Error(result.reason);
-    expect(result.observedAt).toBeGreaterThan(custodyReadCompletedAt);
-    expect(nowSpy).toHaveBeenCalled();
-    expect(validateOrderFeeRateQuote(result, {
-      protocol: 'flash',
-      ...order(),
-    })).toMatchObject({ availability: 'available', observedAt: result.observedAt });
-  });
-
-  it('fails closed on malformed BN data and a failed Solana read', async () => {
-    const malformed = cloneFixture();
-    malformed.pyth.find((entry: any) => entry.pythPriceHash).current.price = 'not-a-bn';
-    const malformedAdapter = new FlashAdapter();
-    installFixtureReads(malformedAdapter, malformed);
-    await expect(resolveOrderFeeRateQuote(malformedAdapter, order(), { now: FIXTURE_NOW_MS })).resolves.toEqual({
-      availability: 'unavailable',
-      reason: 'malformed_quote',
-    });
-
-    const failedAdapter = new FlashAdapter();
-    const failedClient = (failedAdapter as any)._getReadClient();
-    vi.spyOn(failedClient, 'getPool').mockRejectedValue(new Error('RPC unavailable'));
-    await expect(resolveOrderFeeRateQuote(failedAdapter, order(), { now: FIXTURE_NOW_MS })).resolves.toEqual({
-      availability: 'unavailable',
-      reason: 'read_failed',
-    });
-  });
-
-  it('fails closed if an unconfigured custody begins carrying assets', async () => {
-    const fixture = cloneFixture();
-    const retired = fixture.custodyAccounts.find((entry: any) => entry.symbol.startsWith('onchain-custody-'));
-    retired.raw.assets.owned.$bn = '1';
-    const adapter = new FlashAdapter();
-    installFixtureReads(adapter, fixture);
-    await expect(resolveOrderFeeRateQuote(adapter, order(), { now: FIXTURE_NOW_MS })).resolves.toEqual({
-      availability: 'unavailable',
-      reason: 'malformed_quote',
-    });
-  });
-
-  it('rejects zero notional and expected identity mismatch', async () => {
-    const adapter = new FlashAdapter();
-    expect(await adapter.getOrderFeeRateQuote(order('long', {
-      order: { ...order().order, sizeBase: 0 },
-    }))).toEqual({ availability: 'unavailable', reason: 'malformed_quote' });
-
+  it('retains historical quote identity validation',()=>{
     const valid = {
       availability: 'available',
       protocol: 'flash',

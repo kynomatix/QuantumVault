@@ -126,7 +126,7 @@ const RING_BUFFER_MAX         = 200;          // max telemetry ring-buffer entri
 export const MAX_POST_BREAK_RETURN_AGE_BARS = 4;
 
 // Protocols scanned. Flash scanner bots are paper-only today (go-live is Pacifica-only).
-const PROTOCOLS = ["flash", "pacifica"] as const;
+const PROTOCOLS: readonly string[] = ["pacifica"];
 
 /**
  * Fairly allocate the remaining global fetch window to one protocol using the
@@ -1276,6 +1276,7 @@ export async function buildScannerUniverse(
   protocol: string,
   mayMutate: () => boolean = () => true,
 ): Promise<string[]> {
+  if (protocol === 'flash') return []; // no cached or fresh Flash scanner work
   const cached = universeCache.get(protocol);
   if (cached && Date.now() < cached.expiresAt) return cached.data;
 

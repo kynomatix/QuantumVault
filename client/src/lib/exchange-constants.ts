@@ -37,7 +37,6 @@ export interface ProtocolMeta {
 // are the white monochrome marks in client/public/images/exchange/.
 export const SELECTABLE_PROTOCOLS: ProtocolMeta[] = [
   { id: 'pacifica', label: 'Pacifica', icon: '/images/exchange/Pacifica.webp', minDeposit: 10 },
-  { id: 'flash', label: 'Flash', icon: '/images/exchange/Flash.webp', minDeposit: 0 },
 ];
 
 // Minimum funding (USDC) required to create a bot on the given protocol.

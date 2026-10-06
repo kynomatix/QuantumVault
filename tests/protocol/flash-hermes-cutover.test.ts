@@ -31,33 +31,33 @@ describe('FlashAdapter Hermes cutover behavior', () => {
     resetHermesCounters();
   });
 
-  it('cold-cache HTTP 401 rejects the Flash price read with zero egress', async () => {
+  it('retirement rejects a cold-cache price read without a Hermes attempt', async () => {
     const nativeFetch = vi.fn();
     vi.stubGlobal('fetch', nativeFetch);
 
     await expect(new FlashAdapter().getPrice('SOL-PERP')).rejects.toThrow(
-      'Pyth Hermes HTTP 401: Unauthorized',
+      'Flash',
     );
 
-    expect(getHermesAttemptCount()).toBe(1);
+    expect(getHermesAttemptCount()).toBe(0);
     expect(getHermesEgressCount()).toBe(0);
     expect(nativeFetch).not.toHaveBeenCalled();
   });
 
-  it('warm cache masks cutover for at most 30 seconds, then the next read rejects', async () => {
+  it('retirement rejects warm and expired cached prices without Hermes attempts', async () => {
     const nativeFetch = vi.fn();
     vi.stubGlobal('fetch', nativeFetch);
     const adapter = new FlashAdapter();
     setCachedPrice('SOL-PERP', 147.25);
 
-    expect(await adapter.getPrice('SOL-PERP')).toBe(147.25);
+    await expect(adapter.getPrice('SOL-PERP')).rejects.toThrow('Flash');
     vi.advanceTimersByTime(29_999);
-    expect(await adapter.getPrice('SOL-PERP')).toBe(147.25);
+    await expect(adapter.getPrice('SOL-PERP')).rejects.toThrow('Flash');
     expect(getHermesAttemptCount()).toBe(0);
 
     vi.advanceTimersByTime(2);
-    await expect(adapter.getPrice('SOL-PERP')).rejects.toThrow('Pyth Hermes HTTP 401');
-    expect(getHermesAttemptCount()).toBe(1);
+    await expect(adapter.getPrice('SOL-PERP')).rejects.toThrow('Flash');
+    expect(getHermesAttemptCount()).toBe(0);
     expect(getHermesEgressCount()).toBe(0);
     expect(nativeFetch).not.toHaveBeenCalled();
   });

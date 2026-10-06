@@ -3338,6 +3338,7 @@ export async function runGraduationSweep(): Promise<void> {
     return;
   }
   for (const bot of bots) {
+    if (bot.protocol === 'flash') continue; // no retired-venue timers or reconciliation
     if (!bot.paperMode || bot.graduationState !== "in_trial") continue;
     try {
       let mtm = 0;
@@ -3501,6 +3502,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   // obs entry is present; direct/manual callers leave it undefined (no-ops below).
   const _obs = _cycleObs.get(botId);
   let bot = await storage.getAiTraderBot(botId);
+  if (bot?.protocol === "flash") return; // old queued cycle: no reschedule or venue work
   if (!bot) return; // exitReason stays "status_gate" (default)
   if (bot.status !== "idle" || bot.mode !== "auto" || !bot.autoNext) return;
 
@@ -4605,6 +4607,7 @@ export async function reconcileOnStartup(): Promise<void> {
     return;
   }
   for (const bot of bots) {
+    if (bot.protocol === 'flash') continue; // no retired-venue timers or reconciliation
     try {
       const resolved = await reconcileBotOnStartup(bot);
       if (!resolved) pendingReconciliation.add(bot.id);
@@ -4628,6 +4631,7 @@ export async function reconcileOnStartup(): Promise<void> {
   // a timer on a quarantined bot. Re-read just that small set and gate on the
   // post-reconciliation row; all other bots arm from the snapshot as before.
   for (const bot of bots) {
+    if (bot.protocol === 'flash') continue; // no retired-venue timers or reconciliation
     if (bot.mode !== "auto" || !bot.autoNext) continue;
     const wasPreOpenTransient = bot.status === "executing" || bot.status === "analyzing" || bot.status === "proposed";
     let effective: AiTraderBot | undefined = bot;
@@ -4650,6 +4654,7 @@ export async function reconcileOnStartup(): Promise<void> {
 
 /** One monitoring pass for a single bot (exported for tests). */
 export async function monitorBotOnce(bot: AiTraderBot): Promise<void> {
+  if (bot.protocol === "flash") return;
   // Quarantined unconfirmed-landing entries are actively reconciled every
   // tick — the pause is a quarantine from NEW entries, not from monitoring.
   if (bot.status === "paused" && bot.pauseReason === "position_unconfirmed") {
@@ -4767,6 +4772,7 @@ async function tick(): Promise<void> {
       return;
     }
     for (const bot of bots) {
+    if (bot.protocol === 'flash') continue; // no retired-venue timers or reconciliation
       // Stale pre-open watchdog (see preOpenFirstSeen above): queue a forced
       // reconciliation for bots stranded mid-cycle so a stuck 'Analyzing…'
       // badge heals at runtime instead of waiting for the next deploy.

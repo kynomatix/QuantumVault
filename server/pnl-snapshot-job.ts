@@ -50,7 +50,7 @@ export async function takePnlSnapshots(): Promise<void> {
       
       try {
         const sourceTradingBot = await storage.getTradingBotById(publishedBot.tradingBotId);
-        if (!sourceTradingBot) continue;
+        if (!sourceTradingBot || sourceTradingBot.activeProtocol === 'flash') continue;
         
         const wallet = await storage.getWallet(sourceTradingBot.walletAddress);
         if (!wallet) continue;

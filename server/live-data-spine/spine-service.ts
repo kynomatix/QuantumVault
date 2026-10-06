@@ -141,7 +141,7 @@ export function initLiveDataSpine(): void {
   };
 
   pacifica.connect();
-  flash.connect();
+  // Flash retired: do not open its SSE connection or reconnect timers.
 
   const timer = setInterval(() => {
     try {
@@ -155,7 +155,7 @@ export function initLiveDataSpine(): void {
   state.logTimer = timer;
 
   console.log(
-    `[Spine] started — Pacifica prices WS + Flash Pyth SSE (${Object.keys(FLASH_PYTH_PRICE_IDS).length} Flash feeds). READ-ONLY shadow mode.`,
+    `[Spine] started — Pacifica prices WS; Flash feed retired. READ-ONLY shadow mode.`,
   );
 }
 

@@ -1,3 +1,4 @@
+import { FLASH_RETIRED_MESSAGE } from '../protocol/flash-retirement.js';
 // HTTP layer for the AI Trader (Agentic Trader plan, WO-7).
 //
 // Registered from server/routes.ts (registerAiTraderRoutes(app), called right
@@ -645,6 +646,7 @@ export function registerAiTraderRoutes(app: Express): void {
       }
       const allocatedUsdc = allocatedNum.toFixed(2);
 
+      if (String(body.protocol).toLowerCase() === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       let protocol: string;
       if (body.protocol) {
         try {
@@ -1205,6 +1207,7 @@ export function registerAiTraderRoutes(app: Express): void {
     try {
       let bot = await loadOwnedBot(req, res);
       if (!bot) return;
+      if (bot.protocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (bot.status === "executing" || bot.status === "analyzing") {
         return res.status(409).json({ error: "An operation is already in flight for this bot." });
       }

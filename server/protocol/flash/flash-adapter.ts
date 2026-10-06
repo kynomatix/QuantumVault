@@ -1,3 +1,5 @@
+import bs58 from 'bs58';
+import { assertProtocolRuntimeAvailable } from '../flash-retirement.js';
 /**
  * Flash Trade protocol adapter — Phase 2 (Adapter Core).
  *
@@ -63,10 +65,20 @@ import BN from 'bn.js';
 import {
   getAssociatedTokenAddressSync,
   getAccount,
+  TOKEN_PROGRAM_ID,
   createTransferInstruction,
   createAssociatedTokenAccountInstruction,
   createCloseAccountInstruction,
 } from '@solana/spl-token';
+import * as splToken from '@solana/spl-token';
+// The resolved dependency declarations omit these runtime exports. Keep this
+// narrow view typed; strict inventory tests exercise both exports against SPL.
+const { unpackAccount, TOKEN_2022_PROGRAM_ID } = splToken as typeof splToken & {
+  TOKEN_2022_PROGRAM_ID: PublicKey;
+  unpackAccount(address: PublicKey, info: import('@solana/web3.js').AccountInfo<Buffer> | null, programId?: PublicKey): {
+    owner: PublicKey; mint: PublicKey; amount: bigint; isInitialized: boolean;
+  };
+};
 import { PerpetualsClient, PoolConfig, PoolAccount, CustodyAccount, OraclePrice } from 'flash-sdk';
 import type { ContractOraclePrice, Side, Privilege } from 'flash-sdk';
 
@@ -197,6 +209,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
   async initialize(): Promise<void> {
+    assertProtocolRuntimeAvailable('flash');
     if (this.initialized) return;
     await this.getMarkets();
     this.initialized = true;
@@ -212,6 +225,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async healthCheck(): Promise<{ healthy: boolean; latencyMs: number; error?: string }> {
+    assertProtocolRuntimeAvailable('flash');
     const start = Date.now();
     try {
       const price = await this._fetchPriceFromHermes(['SOL-PERP']);
@@ -258,6 +272,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Markets ─────────────────────────────────────────────────────────────────
 
   async getMarkets(): Promise<ProtocolMarket[]> {
+    assertProtocolRuntimeAvailable('flash');
     const cached = getCachedMarkets();
     if (cached) return cached;
 
@@ -303,6 +318,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Prices ──────────────────────────────────────────────────────────────────
 
   async getPrice(internalSymbol: string, _opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null> {
+    assertProtocolRuntimeAvailable('flash');
     const cached = getCachedPrice(internalSymbol);
     if (cached !== null) return cached;
 
@@ -314,6 +330,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async getAllPrices(): Promise<Record<string, number>> {
+    assertProtocolRuntimeAvailable('flash');
     const symbols = Object.keys(FLASH_PYTH_PRICE_IDS);
     const cachedAll: Record<string, number> = {};
     const missing: string[] = [];
@@ -336,6 +353,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Orderbook / funding ─────────────────────────────────────────────────────
 
   async getOrderbook(internalSymbol: string, _depth?: number): Promise<OrderbookSnapshot> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash is an oracle/AMM venue with no central limit order book. We synthesize
     // a single-level book around the Pyth oracle price using the market's
     // estimated slippage band, which is what downstream slippage estimation needs.
@@ -354,6 +372,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async getFundingRate(internalSymbol: string): Promise<FundingRateInfo> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash "funding" is a ONE-WAY, asymmetric borrow rate accrued continuously to
     // the side that borrows pool liquidity — NOT a symmetric periodic funding
     // payment. A precise read (getBorrowRateSync against the decoded custody
@@ -371,6 +390,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Account / position reads ────────────────────────────────────────────────
 
   async getPositions(agentPublicKey: string, subaccountId?: string): Promise<ProtocolPosition[]> {
+    assertProtocolRuntimeAvailable('flash');
     const wallet = new PublicKey(subaccountId ?? agentPublicKey);
     const raw = await this._readRawPositions(wallet);
     const idx = this._getMarketIndex();
@@ -405,6 +425,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async getAccountInfo(agentPublicKey: string, subaccountId?: string): Promise<AccountInfo> {
+    assertProtocolRuntimeAvailable('flash');
     const wallet = new PublicKey(subaccountId ?? agentPublicKey);
     const [raw, walletUsdc] = await Promise.all([
       this._readRawPositions(wallet),
@@ -439,6 +460,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async getBalances(agentPublicKey: string, subaccountId?: string): Promise<BalanceInfo> {
+    assertProtocolRuntimeAvailable('flash');
     const info = await this.getAccountInfo(agentPublicKey, subaccountId);
     // totalMarginUsed = collateral locked in positions = equity − freeUsdc − pnl.
     return {
@@ -450,6 +472,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async getEquityHistory(_agentPublicKey: string, _params?: HistoryParams): Promise<EquityPoint[]> {
+    assertProtocolRuntimeAvailable('flash');
     // No on-chain source for historical equity curves; a Flash indexer feed is a
     // Phase 3 item. Returns empty (no data available) rather than throwing so
     // charting callers degrade gracefully.
@@ -457,12 +480,14 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async getTradeHistory(_agentPublicKey: string, _params?: HistoryParams): Promise<TradeRecord[]> {
+    assertProtocolRuntimeAvailable('flash');
     // No on-chain cheap source for fill history; a Flash indexer feed is a Phase 3
     // item. Returns empty (no data available) rather than throwing.
     return [];
   }
 
   async getBatchAccountInfo(agentPublicKey: string, subaccountIds: string[]): Promise<AccountInfo[]> {
+    assertProtocolRuntimeAvailable('flash');
     return Promise.all(subaccountIds.map((id) => this.getAccountInfo(agentPublicKey, id)));
   }
 
@@ -470,6 +495,7 @@ export class FlashAdapter implements ProtocolAdapter {
     agentPublicKey: string,
     subaccountIds: string[],
   ): Promise<Map<string, ProtocolPosition[]>> {
+    assertProtocolRuntimeAvailable('flash');
     const results = await Promise.all(subaccountIds.map((id) => this.getPositions(agentPublicKey, id)));
     const map = new Map<string, ProtocolPosition[]>();
     subaccountIds.forEach((id, i) => map.set(id, results[i]));
@@ -483,6 +509,7 @@ export class FlashAdapter implements ProtocolAdapter {
    * state, so it cannot be represented by the account-wide fee capability.
    */
   async getOrderFeeRateQuote(input: OrderFeeRateQuoteRequest): Promise<OrderFeeRateQuoteResult> {
+    assertProtocolRuntimeAvailable('flash');
     const unavailable = (reason: Extract<OrderFeeRateQuoteResult, { availability: 'unavailable' }>['reason']) => ({
       availability: 'unavailable' as const,
       reason,
@@ -718,6 +745,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async placeMarketOrder(params: MarketOrderParams): Promise<OrderResult> {
+    assertProtocolRuntimeAvailable('flash');
     try {
       const spec = this._specBySymbol(params.internalSymbol);
       if (!spec) return this._reject(`Unknown market ${params.internalSymbol}`);
@@ -857,6 +885,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async placeLimitOrder(_params: LimitOrderParams): Promise<OrderResult> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash is an oracle/AMM perp venue without resting maker limit orders. Use
     // placeMarketOrder for entries and placeStopOrder/setTpSl for conditional
     // execution. Explicit rejection (never a silent no-op).
@@ -867,6 +896,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async cancelOrder(_params: CancelOrderParams): Promise<CancelResult> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash open orders are on-chain trigger orders, not id-addressable resting
     // orders in our flow. Cancel via cancelTpSlOrders(symbol) or cancelAllOrders.
     return {
@@ -877,6 +907,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async cancelAllOrders(params: CancelAllOrdersParams): Promise<CancelResult> {
+    assertProtocolRuntimeAvailable('flash');
     try {
       const signer = new FlashKeypairSigner(params.agentSecretKey);
       const botWallet = signer.publicKey;
@@ -925,6 +956,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async closePosition(params: ClosePositionParams): Promise<OrderResult> {
+    assertProtocolRuntimeAvailable('flash');
     try {
       const spec = this._specBySymbol(params.internalSymbol);
       if (!spec) return this._reject(`Unknown market ${params.internalSymbol}`);
@@ -997,17 +1029,20 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async setLeverage(_params: SetLeverageParams): Promise<void> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash applies leverage per-trade via the collateral/notional ratio at open
     // (collateralWithfee in openPosition/swapAndOpen). There is no standalone
     // set-leverage instruction — placeMarketOrder honors params.leverage. No-op.
   }
 
   async setMarginMode(_params: SetMarginModeParams): Promise<void> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash margin mode is fixed per market by custody configuration (isolated).
     // No-op.
   }
 
   async placeStopOrder(params: StopOrderParams): Promise<OrderResult> {
+    assertProtocolRuntimeAvailable('flash');
     try {
       const spec = this._specBySymbol(params.internalSymbol);
       if (!spec) return this._reject(`Unknown market ${params.internalSymbol}`);
@@ -1044,6 +1079,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async setTpSl(params: TpSlParams): Promise<OrderResult> {
+    assertProtocolRuntimeAvailable('flash');
     try {
       const spec = this._specBySymbol(params.internalSymbol);
       if (!spec) return this._reject(`Unknown market ${params.internalSymbol}`);
@@ -1282,6 +1318,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async cancelStopOrder(_params: CancelStopOrderParams): Promise<CancelResult> {
+    assertProtocolRuntimeAvailable('flash');
     // No id-addressable cancel in our flow — cancel via cancelTpSlOrders(symbol)
     // or cancelAllOrders.
     return {
@@ -1298,6 +1335,7 @@ export class FlashAdapter implements ProtocolAdapter {
     internalSymbol: string;
     subaccountId?: string;
   }): Promise<CancelResult> {
+    assertProtocolRuntimeAvailable('flash');
     try {
       const spec = this._specBySymbol(params.internalSymbol);
       if (!spec) return { success: false, error: `Unknown market ${params.internalSymbol}` };
@@ -1342,6 +1380,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Deposits / withdrawals ──────────────────────────────────────────────────
 
   async executeDeposit(_params: AgentDepositParams): Promise<DepositResult> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash (independent_trader) has NO trader collateral-deposit instruction —
     // collateral is wallet-resident USDC committed atomically inside
     // openPosition/swapAndOpen at trade time. "Depositing" means USDC already
@@ -1351,7 +1390,8 @@ export class FlashAdapter implements ProtocolAdapter {
     return { success: true };
   }
 
-  async executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult> {
+  async executeWithdraw(params: AgentWithdrawParams): Promise<WithdrawResult & { outcome?: 'unconfirmed' }> {
+    let submittedSignature: string | undefined;
     try {
       if (params.amount < this.minTransferAmount) {
         return { success: false, error: `Amount ${params.amount} below minimum ${this.minTransferAmount} USDC` };
@@ -1386,7 +1426,10 @@ export class FlashAdapter implements ProtocolAdapter {
       tx.recentBlockhash = blockhash;
       tx.add(...instructions);
       await signer.signTransaction(tx);
+      if (!tx.signature) throw new Error('Withdrawal transaction has no signature');
+      submittedSignature = bs58.encode(tx.signature);
       const signature = await connection.sendRawTransaction(tx.serialize());
+      if (signature !== submittedSignature) throw new Error('RPC returned a different withdrawal signature');
       const conf = await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'confirmed');
       if (conf.value.err) {
         // Confirmed-with-error ⇒ no USDC moved. Fail closed so the caller never
@@ -1396,7 +1439,7 @@ export class FlashAdapter implements ProtocolAdapter {
 
       return { success: true, txSignature: signature };
     } catch (err: unknown) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
+      return { success: false, txSignature: submittedSignature, ...(submittedSignature ? { outcome: 'unconfirmed' as const } : {}), error: submittedSignature ? 'Withdrawal is unconfirmed. The transfer may still land. Check your bot wallet and agent wallet balances before trying again.' : err instanceof Error ? err.message : String(err) };
     }
   }
 
@@ -1414,6 +1457,7 @@ export class FlashAdapter implements ProtocolAdapter {
     botWalletAddress: string;
     amount: number;
   }): Promise<{ success: boolean; txSignature?: string; ambiguous?: boolean; error?: string }> {
+    assertProtocolRuntimeAvailable('flash');
     if (!input.mainSecretKey || input.mainSecretKey.length !== 64) {
       return { success: false, error: 'fundBotWalletCollateral requires a 64-byte agent mainSecretKey' };
     }
@@ -1520,6 +1564,7 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async transferBetweenSubaccounts(_params: TransferParams): Promise<TransferResult> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash independent_trader model: there is no inter-subaccount transfer.
     // Fund/defund each bot wallet via executeDeposit/executeWithdraw.
     return {
@@ -1532,6 +1577,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Subaccount lifecycle (mapped to the bot wallet) ─────────────────────────
 
   async createSubaccount(input: CreateSubaccountInput): Promise<SubaccountInfo> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash independent_trader: each bot owns its OWN minted Solana wallet — the
     // `subSecretKey` minted by the caller — which is distinct from the user's
     // shared agent wallet. THAT wallet is the on-chain trader; its USDC ATA holds
@@ -1586,6 +1632,7 @@ export class FlashAdapter implements ProtocolAdapter {
     // to persist a recovery record because the tx MAY have committed.
     ambiguous?: boolean;
   }> {
+    assertProtocolRuntimeAvailable('flash');
     if (!input.subSecretKey || input.subSecretKey.length !== 64) {
       throw new Error('provisionBotWallet requires a 64-byte per-bot subSecretKey');
     }
@@ -1747,6 +1794,7 @@ export class FlashAdapter implements ProtocolAdapter {
     solTxSignature?: string;
     error?: string;
   }> {
+    assertProtocolRuntimeAvailable('flash');
     if (!input.subSecretKey || input.subSecretKey.length !== 64) {
       throw new Error('sweepBotWallet requires a 64-byte per-bot subSecretKey');
     }
@@ -1856,6 +1904,7 @@ export class FlashAdapter implements ProtocolAdapter {
     botWalletAddress: string;
     targetSol?: number;
   }): Promise<{ topped: boolean; lamportsSent: number; txSignature?: string; error?: string }> {
+    assertProtocolRuntimeAvailable('flash');
     if (!input.mainSecretKey || input.mainSecretKey.length !== 64) {
       throw new Error('topUpBotWalletGas requires a 64-byte agent mainSecretKey');
     }
@@ -1920,15 +1969,18 @@ export class FlashAdapter implements ProtocolAdapter {
   }
 
   async listSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {
+    assertProtocolRuntimeAvailable('flash');
     const equity = await this.getWalletCollateralBalance(agentPublicKey).catch(() => 0);
     return [{ subaccountId: agentPublicKey, equity, status: 'confirmed' }];
   }
 
   async discoverSubaccounts(agentPublicKey: string): Promise<SubaccountInfo[]> {
+    assertProtocolRuntimeAvailable('flash');
     return this.listSubaccounts(agentPublicKey);
   }
 
   async subaccountExists(walletAddress: string, _subaccountId: string): Promise<boolean> {
+    assertProtocolRuntimeAvailable('flash');
     const bal = await this.getWalletCollateralBalance(walletAddress).catch(() => 0);
     if (bal > 0) return true;
     const positions = await this._readRawPositions(new PublicKey(walletAddress)).catch(() => []);
@@ -1961,11 +2013,39 @@ export class FlashAdapter implements ProtocolAdapter {
       return Number(acc.amount.toString()) / 1e6;
     } catch (err: any) {
       const name = err?.name || '';
-      if (name === 'TokenAccountNotFoundError' || name === 'TokenInvalidAccountOwnerError') {
+      if (name === 'TokenAccountNotFoundError') {
         return 0; // genuinely no account → zero balance
       }
       throw err; // RPC/other error → caller MUST fail closed
     }
+  }
+
+  /**
+   * Retired-wallet portfolio read: enumerate both token programs, including
+   * non-associated accounts. Unknown nonzero assets cannot be valued as zero.
+   * Native SOL is excluded consistently with the existing portfolio job.
+   */
+  async getWalletPortfolioBalanceStrict(walletAddress: string): Promise<number> {
+    const owner = new PublicKey(walletAddress);
+    const usdc = new PublicKey(FLASH_USDC_MINT);
+    let amount = 0n;
+    for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      const accounts = await this._getConnection().getTokenAccountsByOwner(owner, { programId });
+      for (const { pubkey, account } of accounts.value) {
+        const decoded = unpackAccount(pubkey, account, programId);
+        if (!decoded.owner.equals(owner) || !decoded.isInitialized) {
+          throw new Error('Invalid Flash wallet token account');
+        }
+        if (decoded.mint.equals(usdc) && programId.equals(TOKEN_PROGRAM_ID)) {
+          amount += decoded.amount;
+        } else if (decoded.amount !== 0n) {
+          throw new Error('Flash wallet has an unvalued non-USDC asset');
+        }
+      }
+    }
+    const balance = Number(amount) / 1e6;
+    if (!Number.isFinite(balance) || balance < 0) throw new Error('Invalid Flash wallet balance');
+    return balance;
   }
 
   /**
@@ -1980,6 +2060,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── PnL settlement ──────────────────────────────────────────────────────────
 
   async settlePnl(_params: SettlePnlParams): Promise<SettleResult> {
+    assertProtocolRuntimeAvailable('flash');
     // Flash settles realized PnL atomically inside closePosition/closeAndSwap;
     // there is no standalone settle instruction. Reported as auto-settled.
     return { success: true, settledAmount: 0 };
@@ -1988,6 +2069,7 @@ export class FlashAdapter implements ProtocolAdapter {
   // ── Diagnostics ─────────────────────────────────────────────────────────────
 
   async getAdapterDiagnostics(): Promise<Record<string, unknown>> {
+    assertProtocolRuntimeAvailable('flash');
     const prices = await this.getAllPrices().catch(() => ({}));
     return {
       protocolName: this.protocolName,

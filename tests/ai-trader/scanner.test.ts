@@ -65,6 +65,7 @@ vi.mock("../../server/ai-trader/context-builder", () => ({
   marketToDatafeedTicker: (market: string) => market.replace("-PERP", "/USDT"),
 }));
 
+function setLiveMarkets(markets: {internalSymbol:string}[]) { getAdapterMock.mockReturnValue({getMarkets:vi.fn(async()=>markets.map(m=>({...m,isActive:true}))) }); }
 const getFlashMarketSpecsMock = vi.fn<[], { internalSymbol: string }[]>();
 vi.mock("../../server/protocol/flash/flash-markets", () => ({
   getFlashMarketSpecs: () => getFlashMarketSpecsMock(),
@@ -1174,9 +1175,10 @@ describe("active sweep lifecycle ownership", () => {
     return { promise, resolve };
   }
 
+  it('returns an empty retired Flash universe without reading its markets',async()=>{getFlashMarketSpecsMock.mockClear();expect(await buildScannerUniverse('flash')).toEqual([]);expect(getFlashMarketSpecsMock).not.toHaveBeenCalled();});
   function oneMarketUniverse() {
-    getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-    getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+    setLiveMarkets([]);
+    getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => [{ internalSymbol: "BTC-PERP", isActive: true }]) });
   }
 
   it("returns idle immediately when no sweep owns the boundary lane", async () => {
@@ -1325,21 +1327,15 @@ describe("active sweep lifecycle ownership", () => {
   });
 
   it("reclaims three abandoned permits so the next protocol reaches the provider", async () => {
+    const { startScanner, stopScanner, runScannerSweepForTest, getScannerStatus } =
+      await scannerWithSecondLiveProtocol();
     vi.useFakeTimers();
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      const flashMarkets = ["F0-PERP", "F1-PERP", "F2-PERP"];
+      const testMarkets = ["F0-PERP", "F1-PERP", "F2-PERP"];
       const pacificaMarkets = ["P0-PERP", "P1-PERP", "P2-PERP"];
-      getFlashMarketSpecsMock.mockReturnValue(
-        flashMarkets.map((internalSymbol) => ({ internalSymbol })),
-      );
-      getAdapterMock.mockReturnValue({
-        getMarkets: vi.fn(async () => pacificaMarkets.map((internalSymbol) => ({
-          internalSymbol,
-          isActive: true,
-        }))),
-      });
+      setTwoLiveProtocols(testMarkets, pacificaMarkets);
       const pending = deferredBars();
       const parent = healthyMixedParentBars()
         .map((bar) => ({ ...bar, provenance: directPerp }));
@@ -1371,6 +1367,9 @@ describe("active sweep lifecycle ownership", () => {
       await sweep;
 
       expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(6);
+      expect(completeCachedOHLCVTailMock.mock.calls.map((call) => call[0])).toEqual([
+        "F0/USDT", "F1/USDT", "F2/USDT", "P0/USDT", "P1/USDT", "P2/USDT",
+      ]);
       const status = getScannerStatus();
       expect(status.currentGeneration).toMatchObject({
         verdict: "diagnostic_only",
@@ -1415,10 +1414,9 @@ describe("scanner batch cache prefetch", () => {
       const now = new Date("2026-08-18T00:15:00Z");
       vi.setSystemTime(now);
       const markets = Array.from({ length: 20 }, (_, index) => `C${index}-PERP`);
-      getFlashMarketSpecsMock.mockReturnValue(
+      setLiveMarkets(
         markets.map((internalSymbol) => ({ internalSymbol })),
       );
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
       prefetchCachedOHLCVMock.mockImplementation(async (requested: string[]) => ({
         complete: new Map(),
         prefixes: new Map(),
@@ -1466,7 +1464,7 @@ describe("scanner batch cache prefetch", () => {
       expect(firstTen[firstTen.length - 1] - firstTen[0]).toBeLessThan(2_000);
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          protocol: "flash",
+          protocol: "pacifica",
           timeframe: "15m",
           marketsAttempted: 20,
           marketsScanned: 20,
@@ -1501,8 +1499,7 @@ describe("scanner batch cache prefetch", () => {
       stopScanner();
       const now = new Date("2026-08-18T00:15:00Z");
       vi.setSystemTime(now);
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }]);
       const primary = textbookWBars(now.getTime(), TF_15M)
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const parent = healthyMixedParentBars()
@@ -1560,8 +1557,7 @@ describe("scanner batch cache prefetch", () => {
       const markets = Array.from({ length: 8 }, (_, index) => `A${index}-PERP`);
       const parent = healthyMixedParentBars()
         .map((bar) => ({ ...bar, provenance: directPerp }));
-      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets(markets.map((internalSymbol) => ({ internalSymbol })));
       prefetchCachedOHLCVMock.mockImplementation(
         async (requested: string[], timeframe: string) => timeframe === "15m"
           ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
@@ -1632,8 +1628,7 @@ describe("scanner batch cache prefetch", () => {
           return Reflect.get(target, property, receiver);
         },
       });
-      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets(markets.map((internalSymbol) => ({ internalSymbol })));
       prefetchCachedOHLCVMock.mockImplementation(
         async (requested: string[], timeframe: string) => {
           const fixture = timeframe === "15m" ? primary : parent;
@@ -1694,8 +1689,7 @@ describe("scanner batch cache prefetch", () => {
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const parent = healthyMixedParentBars()
         .map((bar) => ({ ...bar, provenance: directPerp }));
-      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets(markets.map((internalSymbol) => ({ internalSymbol })));
       prefetchCachedOHLCVMock.mockImplementation(
         async (requested: string[], timeframe: string) => timeframe === "15m"
           ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
@@ -1742,8 +1736,7 @@ describe("scanner batch cache prefetch", () => {
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const parent = healthyMixedParentBars()
         .map((bar) => ({ ...bar, provenance: directPerp }));
-      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets(markets.map((internalSymbol) => ({ internalSymbol })));
       prefetchCachedOHLCVMock.mockImplementation(
         async (requested: string[], timeframe: string) => timeframe === "15m"
           ? {
@@ -1788,8 +1781,7 @@ describe("scanner batch cache prefetch", () => {
       const markets = Array.from({ length: 4 }, (_, index) => `E${index}-PERP`);
       const parent = healthyMixedParentBars()
         .map((bar) => ({ ...bar, provenance: directPerp }));
-      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets(markets.map((internalSymbol) => ({ internalSymbol })));
       prefetchCachedOHLCVMock.mockImplementation(
         async (requested: string[], timeframe: string) => timeframe === "15m"
           ? { complete: new Map(), prefixes: new Map(), exactMisses: new Set(requested) }
@@ -1840,8 +1832,7 @@ describe("scanner batch cache prefetch", () => {
       const parent = healthyMixedParentBars()
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const retainedGateLatencyMs = [300, 1_200, 2_500, 3_600, 4_800, 5_999];
-      getFlashMarketSpecsMock.mockReturnValue(markets.map((internalSymbol) => ({ internalSymbol })));
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets(markets.map((internalSymbol) => ({ internalSymbol })));
       prefetchCachedOHLCVMock.mockImplementation(
         async (requested: string[]) => ({
           complete: new Map(),
@@ -1887,14 +1878,14 @@ describe("scanner batch cache prefetch", () => {
       const now = new Date("2026-08-18T00:15:00Z");
       vi.setSystemTime(now);
       const flashMarkets = Array.from(
-        { length: 29 },
+        { length: 66 },
         (_, index) => `F${String(index).padStart(3, "0")}-PERP`,
       );
       const pacificaMarkets = Array.from(
         { length: 66 },
         (_, index) => `P${String(index).padStart(3, "0")}-PERP`,
       );
-      getFlashMarketSpecsMock.mockReturnValue(
+      setLiveMarkets(
         flashMarkets.map((internalSymbol) => ({ internalSymbol })),
       );
       getAdapterMock.mockReturnValue({
@@ -1924,16 +1915,16 @@ describe("scanner batch cache prefetch", () => {
 
       startScanner();
       const sweep = runScannerSweepForTest();
-      await vi.advanceTimersByTimeAsync(75_000);
+      await vi.advanceTimersByTimeAsync(90_000);
       await sweep;
 
       expect(fetchOHLCVMock).not.toHaveBeenCalled();
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          protocol: "flash",
+          protocol: "pacifica",
           timeframe: "15m",
-          marketsAttempted: 29,
-          marketsScanned: 29,
+          marketsAttempted: 66,
+          marketsScanned: 66,
           marketsSkippedByTimeout: 0,
           accountingValid: true,
         }),
@@ -1941,8 +1932,8 @@ describe("scanner batch cache prefetch", () => {
       expect(getScannerStatus().currentGeneration).toMatchObject({
         verdict: "tradable",
         accounting: {
-          attempted: 95,
-          scanned: 95,
+          attempted: 66,
+          scanned: 66,
           timeoutSkipped: 0,
           abandoned: 0,
           accountingValid: true,
@@ -1963,8 +1954,7 @@ describe("scanner batch cache prefetch", () => {
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }]);
 
       type BatchResult = {
         complete: Map<string, Array<OHLCV & { provenance: typeof directPerp }>>;
@@ -2014,7 +2004,7 @@ describe("scanner batch cache prefetch", () => {
       expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          protocol: "flash",
+          protocol: "pacifica",
           marketsAttempted: 1,
           marketsScanned: 1,
           accountingValid: true,
@@ -2027,6 +2017,8 @@ describe("scanner batch cache prefetch", () => {
   });
 
   it("completes a production-shaped 94-attempt sweep from 52 stored histories and 25 exact misses", async () => {
+    const { startScanner, stopScanner, runScannerSweepForTest, getScannerStatus } =
+      await scannerWithSecondLiveProtocol();
     vi.useFakeTimers();
     try {
       stopScanner();
@@ -2038,7 +2030,7 @@ describe("scanner batch cache prefetch", () => {
         (_, index) => `S${String(index).padStart(3, "0")}-PERP`,
       );
       const tickers = markets.map((market) => market.replace("-PERP", "/USDT"));
-      const flashMarkets = markets.slice(0, 52);
+      const testMarkets = markets.slice(0, 52);
       const pacificaMarkets = markets.slice(35);
       const primary = [
         ...Array.from({ length: 59 }, (_, index) => ({
@@ -2057,15 +2049,7 @@ describe("scanner batch cache prefetch", () => {
       }));
       const fullPrimaryByTicker = new Map(tickers.map((ticker) => [ticker, primary]));
 
-      getFlashMarketSpecsMock.mockReturnValue(
-        flashMarkets.map((internalSymbol) => ({ internalSymbol })),
-      );
-      getAdapterMock.mockReturnValue({
-        getMarkets: vi.fn(async () => pacificaMarkets.map((internalSymbol) => ({
-          internalSymbol,
-          isActive: true,
-        }))),
-      });
+      setTwoLiveProtocols(testMarkets, pacificaMarkets);
       prefetchCachedOHLCVMock.mockImplementation(
         async (requested: string[], timeframe: string) => timeframe === "15m"
           ? {
@@ -2091,9 +2075,9 @@ describe("scanner batch cache prefetch", () => {
       await vi.advanceTimersByTimeAsync(10_000);
       await sweep;
 
-      expect(flashMarkets).toHaveLength(52);
+      expect(testMarkets).toHaveLength(52);
       expect(pacificaMarkets).toHaveLength(42);
-      expect(flashMarkets.filter((market) => pacificaMarkets.includes(market))).toHaveLength(17);
+      expect(testMarkets.filter((market) => pacificaMarkets.includes(market))).toHaveLength(17);
       expect(prefetchCachedOHLCVMock).toHaveBeenCalledTimes(2);
       for (const call of prefetchCachedOHLCVMock.mock.calls) {
         expect(call[0]).toHaveLength(77);
@@ -2114,7 +2098,7 @@ describe("scanner batch cache prefetch", () => {
       const status = getScannerStatus();
       expect(status.recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          protocol: "flash",
+          protocol: "test-only-live",
           timeframe: "15m",
           marketsAttempted: 52,
           marketsScanned: 52,
@@ -2179,14 +2163,13 @@ describe("scanner batch cache prefetch", () => {
     }
   });
   it("deduplicates shared protocol symbols and seeds both due timeframes without legacy fetches", async () => {
+    const { startScanner, stopScanner, runScannerSweepForTest, getScannerStatus } =
+      await scannerWithSecondLiveProtocol();
     vi.useFakeTimers();
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({
-        getMarkets: vi.fn(async () => [{ internalSymbol: "BTC-PERP", isActive: true }]),
-      });
+      setTwoLiveProtocols(["BTC-PERP"], ["BTC-PERP"]);
       prefetchCachedOHLCVMock.mockImplementation(
         async (_symbols: string[], timeframe: string) => ({
           complete: new Map([
@@ -2207,6 +2190,11 @@ describe("scanner batch cache prefetch", () => {
       ]);
       expect(prefetchCachedOHLCVMock.mock.calls.map((call) => call[1])).toEqual(["15m", "1h"]);
       expect(fetchOHLCVMock).not.toHaveBeenCalled();
+      expect(getScannerStatus().currentGeneration?.accounting.attempted).toBe(2);
+      expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+        expect.objectContaining({ protocol: "test-only-live", marketsAttempted: 1 }),
+        expect.objectContaining({ protocol: "pacifica", marketsAttempted: 1 }),
+      ]));
     } finally {
       stopScanner();
       vi.useRealTimers();
@@ -2214,14 +2202,13 @@ describe("scanner batch cache prefetch", () => {
   });
 
   it("completes one shared stale prefix once and reuses it across protocols", async () => {
+    const { startScanner, stopScanner, runScannerSweepForTest, getScannerStatus } =
+      await scannerWithSecondLiveProtocol();
     vi.useFakeTimers();
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({
-        getMarkets: vi.fn(async () => [{ internalSymbol: "BTC-PERP", isActive: true }]),
-      });
+      setTwoLiveProtocols(["BTC-PERP"], ["BTC-PERP"]);
       const primary = textbookWBars(Date.now(), TF_15M)
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const parent = healthyMixedParentBars()
@@ -2251,11 +2238,14 @@ describe("scanner batch cache prefetch", () => {
       expect(fetchOHLCVMock).not.toHaveBeenCalled();
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          protocol: "flash",
+          protocol: "test-only-live",
+          marketsScanned: 1,
           tailCompletionCount: 1,
           tailCompletionFailureCount: 0,
         }),
+        expect.objectContaining({ protocol: "pacifica", marketsScanned: 1, tailCompletionCount: 0 }),
       ]));
+      expect(getScannerStatus().currentGeneration?.accounting.attempted).toBe(2);
     } finally {
       stopScanner();
       vi.useRealTimers();
@@ -2267,8 +2257,7 @@ describe("scanner batch cache prefetch", () => {
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }]);
       const primary = textbookWBars(Date.now(), TF_15M)
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const parent = healthyMixedParentBars()
@@ -2302,7 +2291,7 @@ describe("scanner batch cache prefetch", () => {
       expect(completeCachedOHLCVTailMock).toHaveBeenCalledTimes(2);
       expect(fetchOHLCVMock).not.toHaveBeenCalled();
       const attempts = getScannerStatus().recentHistory.filter(
-        (stats) => stats.protocol === "flash" && stats.timeframe === "15m",
+        (stats) => stats.protocol === "pacifica" && stats.timeframe === "15m",
       );
       expect(attempts).toHaveLength(2);
       for (const stats of attempts) {
@@ -2339,8 +2328,7 @@ describe("scanner batch cache prefetch", () => {
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }]);
       const parent = healthyMixedParentBars()
         .map((bar) => ({ ...bar, provenance: directPerp }));
       prefetchCachedOHLCVMock.mockImplementation(
@@ -2371,7 +2359,7 @@ describe("scanner batch cache prefetch", () => {
 
       expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
       const attempts = getScannerStatus().recentHistory.filter(
-        (stats) => stats.protocol === "flash" && stats.timeframe === "15m",
+        (stats) => stats.protocol === "pacifica" && stats.timeframe === "15m",
       );
       expect(attempts).toHaveLength(2);
       for (const stats of attempts) {
@@ -2394,8 +2382,7 @@ describe("scanner batch cache prefetch", () => {
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }]);
       const primary = textbookWBars(Date.now(), TF_15M)
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const parent = healthyMixedParentBars()
@@ -2436,8 +2423,7 @@ describe("scanner batch cache prefetch", () => {
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }]);
       prefetchCachedOHLCVMock.mockRejectedValue(new Error("batch unavailable"));
       const primary = textbookWBars(Date.now(), TF_15M)
         .map((bar) => ({ ...bar, provenance: directPerp }));
@@ -2473,7 +2459,7 @@ describe("scanner batch cache prefetch", () => {
       );
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          protocol: "flash",
+          protocol: "pacifica",
           marketsAttempted: 1,
           marketsScanned: 1,
           errorCount: 0,
@@ -2492,11 +2478,10 @@ describe("scanner batch cache prefetch", () => {
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([
+      setLiveMarkets([
         { internalSymbol: "BTC-PERP" },
         { internalSymbol: "SOL-PERP" },
       ]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
       const primary = textbookWBars(Date.now(), TF_15M)
         .map((bar) => ({ ...bar, provenance: directPerp }));
       const parent = healthyMixedParentBars()
@@ -2537,7 +2522,7 @@ describe("scanner batch cache prefetch", () => {
       }));
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
         expect.objectContaining({
-          protocol: "flash",
+          protocol: "pacifica",
           marketsAttempted: 2,
           marketsScanned: 2,
           errorCount: 0,
@@ -2555,8 +2540,7 @@ describe("scanner batch cache prefetch", () => {
     try {
       stopScanner();
       vi.setSystemTime(new Date("2026-08-18T00:15:00Z"));
-      getFlashMarketSpecsMock.mockReturnValue([{ internalSymbol: "BTC-PERP" }]);
-      getAdapterMock.mockReturnValue({ getMarkets: vi.fn(async () => []) });
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }]);
       prefetchCachedOHLCVMock.mockImplementation(
         async (_symbols: string[], timeframe: string) => {
           if (timeframe === "15m") {
@@ -2593,7 +2577,7 @@ describe("scanner batch cache prefetch", () => {
         cacheWritePolicy: "skip",
       }));
       expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
-        expect.objectContaining({ protocol: "flash", marketsScanned: 1, accountingValid: true }),
+        expect.objectContaining({ protocol: "pacifica", marketsScanned: 1, accountingValid: true }),
       ]));
     } finally {
       stopScanner();
@@ -2601,3 +2585,49 @@ describe("scanner batch cache prefetch", () => {
     }
   });
 });
+
+
+// The production allowlist has only Pacifica after Flash retirement. These four
+// cross-protocol tests evaluate the real scanner with one test-only live consumer.
+// Only the allowlist literal changes; gates, cache, budgets and lifecycle code do
+// not. No production registration, Flash bypass or on-disk source edit is used.
+async function scannerWithSecondLiveProtocol(): Promise<typeof import("../../server/ai-trader/scanner")> {
+  const { readFileSync } = await import("node:fs");
+  const { transpileModule, ModuleKind, ScriptTarget } = await import("typescript");
+  const source = readFileSync(new URL("../../server/ai-trader/scanner.ts", import.meta.url), "utf8");
+  const allowlist = 'const PROTOCOLS: readonly string[] = ["pacifica"];';
+  expect(source.split(allowlist)).toHaveLength(2);
+  const code = transpileModule(source.replace(allowlist,
+    'const PROTOCOLS: readonly string[] = ["test-only-live", "pacifica"];'), {
+    compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 },
+  }).outputText;
+  const dependencies: Record<string, unknown> = {
+    "../lab/datafeed": await import("../../server/lab/datafeed"),
+    "../error-log": await import("../../server/error-log"),
+    "./context-builder": await import("../../server/ai-trader/context-builder"),
+    "../protocol/flash/flash-markets": await import("../../server/protocol/flash/flash-markets"),
+    "../protocol/adapter-registry": await import("../../server/protocol/adapter-registry"),
+    "./wm-detector": await import("../../server/ai-trader/wm-detector"),
+    "./dow-structure": await import("../../server/ai-trader/dow-structure"),
+    "./session-context": await import("../../server/ai-trader/session-context"),
+    "./multiplier-market-quarantine": await import("../../server/ai-trader/multiplier-market-quarantine"),
+    "../telemetry": await import("../../server/telemetry"),
+    "../db": await import("../../server/db"),
+  };
+  const exports = {};
+  const requireDependency = (name: string) => {
+    if (!(name in dependencies)) throw new Error("Unexpected scanner dependency: " + name);
+    return dependencies[name];
+  };
+  return new Function("require", "exports", code + "\nreturn exports;")(requireDependency, exports);
+}
+
+function setTwoLiveProtocols(testMarkets: string[], pacificaMarkets: string[]): void {
+  getAdapterMock.mockImplementation((protocol: string) => {
+    if (protocol !== "test-only-live" && protocol !== "pacifica") {
+      throw new Error("Unexpected fixture protocol: " + protocol);
+    }
+    const markets = protocol === "test-only-live" ? testMarkets : pacificaMarkets;
+    return { getMarkets: vi.fn(async () => markets.map((internalSymbol) => ({ internalSymbol, isActive: true }))) };
+  });
+}

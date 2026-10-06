@@ -2114,6 +2114,7 @@ export async function reconcileAllBotsForWallet(walletAddress: string): Promise<
   let discrepancies = 0;
   
   for (const bot of bots) {
+    if (bot.activeProtocol === 'flash') continue;
     const subAccountId = bot.driftSubaccountId ?? 0;
     const botSubPubKey = (bot.subaccountAuthMode === 'external_key' && bot.subaccountStatus === 'active' && bot.protocolSubaccountId)
       ? bot.protocolSubaccountId
@@ -2185,6 +2186,7 @@ export function startPeriodicReconciliation(): void {
         
         const botsWithPositions = await Promise.all(
           bots.map(async (bot) => {
+            if (bot.activeProtocol === 'flash') return null;
             if (bot.isActive) return bot;
             const pos = await storage.getBotPosition(bot.id, bot.market);
             if (pos && Math.abs(parseFloat(pos.baseSize)) > 0.0001) return bot;

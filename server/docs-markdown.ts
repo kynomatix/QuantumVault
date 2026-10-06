@@ -138,14 +138,13 @@ QuantumVault routes each bot to a perpetual exchange on Solana. You choose the e
 | Exchange            | Minimum transfer | Withdrawal fee | SOL to create a bot | Wallet model |
 |---------------------|------------------|----------------|---------------------|--------------|
 | Pacifica (default)  | $10 USDC         | $1 USDC        | ~0.005 SOL          | Isolated subaccount under your agent wallet |
-| Flash               | 0.1 USDC         | None           | ~0.025 SOL (reclaimed on delete) | Isolated per-bot wallet (recoverable from your 24-word phrase) |
 | Drift (legacy)      | 0.1 USDC         | None           | n/a (no new bots)   | Isolated subaccount |
 
-> **Note:** Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), so QuantumVault batches small amounts into larger withdrawals. Flash and Drift transfers carry no fee and only a small 0.1 USDC floor.
+> **Note:** Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), so QuantumVault batches small amounts into larger withdrawals. Legacy Drift transfers carry no fee and only a small 0.1 USDC floor.
 
-> **Drift is legacy:** Existing Drift bots keep running, but you can no longer create new ones. New bots are created on Pacifica or Flash.
+> **Drift is legacy:** Existing Drift bots keep running, but you can no longer create new ones. New bots are created on Pacifica.
 
-**Which should you pick?** Pacifica is the simple default. Flash is better for smaller amounts (no $10 floor) and frequent profit-taking (no withdrawal fee), and each Flash bot runs from its own wallet that you can always recover from your 24-word recovery phrase — it just needs a bit more SOL up front to create. Creators who publish Flash bots are also paid their profit share immediately as trades close, rather than in a later batch.
+**Flash has closed:** New bots and trading are disabled. Existing bot records remain available. You can manually withdraw USDC held in a Flash bot wallet to your agent wallet; its wallet balance is checked at withdrawal. This does not close venue positions or recover venue-held funds.
 
 ---
 
@@ -155,13 +154,12 @@ Bots are automated trading agents that execute trades based on TradingView webho
 
 ### Bot Settings
 
-- **Exchange** — Choose where the bot trades: **Pacifica** (default) or **Flash**. Your choice sets the fees, minimums, and how much SOL is needed to create the bot (see Funding → Supported Exchanges). If your agent wallet is low on SOL, QuantumVault prompts you to top up before the bot can be created.
+- **Exchange** — Choose where the bot trades: **Pacifica** (default). Your choice sets the fees, minimums, and how much SOL is needed to create the bot (see Funding → Supported Exchanges). If your agent wallet is low on SOL, QuantumVault prompts you to top up before the bot can be created.
 - **Market** — Choose which perpetual market to trade (e.g., SOL-PERP, BTC-PERP, ETH-PERP). Each bot trades one market only.
 - **Leverage** — Set your leverage multiplier (1x to 20x depending on market). Higher leverage amplifies both gains and losses.
 - **Investment Amount** — The USDC amount allocated to this bot. This is your maximum position size before leverage.
 - **Direction** — Choose "Both" for long and short signals, or restrict to "Long Only" or "Short Only".
 
-> **Flash TP/SL note:** On Flash, very small positions can be too small to attach automatic take-profit / stop-loss orders. If you rely on TP/SL, give the bot enough capital (and leverage) so each position clears Flash's minimum size.
 
 ### Automated Capital Management
 

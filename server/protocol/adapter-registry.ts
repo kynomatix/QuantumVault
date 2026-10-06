@@ -1,3 +1,4 @@
+import { assertProtocolRuntimeAvailable } from './flash-retirement.js';
 import type { ProtocolAdapter } from './adapter.js';
 
 export type AdapterHealth = 'initializing' | 'ready' | 'degraded' | 'unavailable';
@@ -9,6 +10,7 @@ const adapterHealth = new Map<string, AdapterHealth>();
 let defaultAdapterId: string = 'pacifica';
 
 export function registerAdapter(adapter: ProtocolAdapter): void {
+  assertProtocolRuntimeAvailable(adapter.protocolName);
   if (adapters.size >= MAX_ADAPTERS && !adapters.has(adapter.protocolName)) {
     throw new Error(
       `AdapterRegistry: max adapters (${MAX_ADAPTERS}) reached — cannot register "${adapter.protocolName}"`,
@@ -38,6 +40,7 @@ export function getDefaultAdapter(): ProtocolAdapter {
 }
 
 export function getAdapterForBot(bot: { id?: number | string; activeProtocol: 'pacifica' | 'drift' | 'flash' }): ProtocolAdapter {
+  assertProtocolRuntimeAvailable(bot.activeProtocol);
   // Group D item 18 (April 17, 2026) made trading_bots.active_protocol NOT NULL with
   // a CHECK constraint locking it to ('pacifica','drift'), and the four routes.ts
   // insert sites that previously emitted NULL were fixed in the same atomic diff.
@@ -56,6 +59,7 @@ export function getAdapterForBot(bot: { id?: number | string; activeProtocol: 'p
 }
 
 export function getAdapter(protocolName: string): ProtocolAdapter {
+  assertProtocolRuntimeAvailable(protocolName);
   const adapter = adapters.get(protocolName);
   if (!adapter) {
     throw new Error(`AdapterRegistry: no adapter registered for "${protocolName}"`);
