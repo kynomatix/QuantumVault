@@ -892,7 +892,9 @@ export function BotManagementDrawer({
 
     // Withdrawal is a money leg: an unknown cap refuses rather than becoming zero.
     const withdrawalAuthority = resolveWithdrawalAuthority(exchangeFreeCollateral, amount);
-    if (withdrawalAuthority.reason === 'accounting_unavailable') {
+    // Flash manual withdrawals validate the bot wallet's SPL balance server-side.
+    // Retired exchange collateral is unavailable and is not a wallet balance.
+    if (bot?.activeProtocol !== 'flash' && withdrawalAuthority.reason === 'accounting_unavailable') {
       toast({
         title: 'Accounting unavailable',
         description: 'The bot withdrawal limit is unavailable. Refresh the balance before withdrawing.',
@@ -900,7 +902,7 @@ export function BotManagementDrawer({
       });
       return;
     }
-    if (withdrawalAuthority.reason === 'exceeds_available') {
+    if (bot?.activeProtocol !== 'flash' && withdrawalAuthority.reason === 'exceeds_available') {
       toast({
         title: 'Amount exceeds withdrawable balance',
         description: `Maximum you can withdraw is $${exchangeFreeCollateral!.toFixed(2)}`,
@@ -920,6 +922,10 @@ export function BotManagementDrawer({
 
       const data = await safeResponseJson(res);
       
+      if (data.outcome === 'unconfirmed') {
+        toast({ title: 'Withdrawal unconfirmed', description: data.error + (data.signature ? ' Transaction: ' + data.signature : '') });
+        return;
+      }
       if (!res.ok) {
         let friendlyMessage = data.error || 'Failed to remove from bot';
         if (data.error?.includes('InsufficientCollateral') || data.error?.includes('0x1773')) {
@@ -930,7 +936,7 @@ export function BotManagementDrawer({
         throw new Error(friendlyMessage);
       }
 
-      toast({ title: `Successfully removed $${amount} from bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Withdrawal complete' });
+      toast({ title: `Successfully removed ${amount} from bot`, description: data.signature ? `Transaction: ${data.signature.slice(0, 8)}...` : 'Withdrawal complete' });
       setRemoveEquityAmount('');
 
       for (let i = 0; i < 3; i++) {
@@ -2469,33 +2475,35 @@ export function BotManagementDrawer({
                     size="sm"
                     className="absolute right-1 top-1/2 -translate-y-1/2 h-7 px-2 text-xs"
                     onClick={() => {
-                      if (exchangeFreeCollateral === null) return;
+                      if (displayBot?.activeProtocol === 'flash' || exchangeFreeCollateral === null) return;
                       // Floor to 2 decimal places (cents) for clean display values
                       const maxWithdrawable = Math.floor(exchangeFreeCollateral * 100) / 100;
                       setRemoveEquityAmount(maxWithdrawable.toString());
                     }}
-                    disabled={exchangeFreeCollateral === null}
+                    disabled={displayBot?.activeProtocol === 'flash' || exchangeFreeCollateral === null}
                     data-testid="button-remove-max"
                   >
-                    Max
+                    {displayBot?.activeProtocol === 'flash' ? 'Max unavailable' : 'Max'}
                   </Button>
                 </div>
                 <Button
                   onClick={handleRemoveEquity}
-                  disabled={removeEquityLoading || exchangeFreeCollateral === null || !removeEquityAmount || parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001}
+                  disabled={removeEquityLoading || !removeEquityAmount || (displayBot?.activeProtocol !== 'flash' && (exchangeFreeCollateral === null || parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001))}
                   variant="outline"
                   data-testid="button-remove-equity"
                 >
                   {removeEquityLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Remove'}
                 </Button>
               </div>
-              {exchangeFreeCollateral !== null && removeEquityAmount && parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001 && (
+              {displayBot?.activeProtocol !== 'flash' && exchangeFreeCollateral !== null && removeEquityAmount && parseFloat(removeEquityAmount) > exchangeFreeCollateral + 0.000001 && (
                 <p className="text-xs text-red-500">
                   Amount exceeds max withdrawable (${exchangeFreeCollateral.toFixed(2)})
                 </p>
               )}
               <p className="text-xs text-muted-foreground">
-                {exchangeFreeCollateral === null
+                {displayBot?.activeProtocol === 'flash'
+                  ? 'Flash trading has closed. Withdraw USDC from this bot wallet to your agent wallet. Its available balance is checked when you withdraw; SOL is needed for the network fee.'
+                  : exchangeFreeCollateral === null
                   ? 'Withdrawal unavailable: accounting balance is incomplete.'
                   : 'Withdraw USDC from the bot back to your wallet'}
               </p>

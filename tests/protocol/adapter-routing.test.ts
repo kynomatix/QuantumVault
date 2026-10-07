@@ -69,50 +69,55 @@ async function readBalanceLikeHelper(adapter = getDefaultAdapter()): Promise<str
 
 describe('Phase 4 per-bot adapter routing', () => {
   let pacifica: StubAdapter;
-  let flash: StubAdapter;
+  let drift: StubAdapter;
 
   beforeEach(() => {
     pacifica = makeStubAdapter('pacifica', { supportsSettlePnl: false, minTransferAmount: 10 });
-    flash = makeStubAdapter('flash', { supportsSettlePnl: true, minTransferAmount: 0 });
+    drift = makeStubAdapter('drift', { supportsSettlePnl: true, minTransferAmount: 0 });
     registerAdapter(pacifica);
-    registerAdapter(flash);
+    registerAdapter(drift);
     setDefaultAdapter('pacifica');
   });
 
   afterEach(() => {
     unregisterAdapter('pacifica');
-    unregisterAdapter('flash');
+    unregisterAdapter('drift');
   });
 
   it('default adapter is pacifica', () => {
     expect(getDefaultAdapter().protocolName).toBe('pacifica');
   });
 
-  it('routes a flash bot to the flash adapter, distinct from the default', () => {
-    const bot = { id: '1', activeProtocol: 'flash' as const };
+  it('routes a drift bot to the drift adapter, distinct from the default', () => {
+    const bot = { id: '1', activeProtocol: 'drift' as const };
     const adapter = getAdapterForBot(bot);
-    expect(adapter.protocolName).toBe('flash');
+    expect(adapter.protocolName).toBe('drift');
     expect(adapter).not.toBe(getDefaultAdapter());
   });
 
+  it('rejects retired flash registration and bot routing', () => {
+    const flash = makeStubAdapter('flash', { supportsSettlePnl: true, minTransferAmount: 0 });
+    expect(() => registerAdapter(flash)).toThrow(/Flash trading has closed/);
+    expect(() => getAdapterForBot({ id: 'flash', activeProtocol: 'flash' })).toThrow(/Flash trading has closed/);
+  });
   it('routes a pacifica bot to the default adapter (no-op for the live protocol)', () => {
     const bot = { id: '2', activeProtocol: 'pacifica' as const };
     expect(getAdapterForBot(bot)).toBe(getDefaultAdapter());
   });
 
   it('fails closed when a bot is on a protocol with no registered adapter', () => {
-    unregisterAdapter('flash');
-    const bot = { id: '3', activeProtocol: 'flash' as const };
-    expect(() => getAdapterForBot(bot)).toThrow(/active_protocol="flash"/);
+    unregisterAdapter('drift');
+    const bot = { id: '3', activeProtocol: 'drift' as const };
+    expect(() => getAdapterForBot(bot)).toThrow(/active_protocol="drift"/);
     // Must NOT silently return the default adapter.
     expect(() => getAdapterForBot(bot)).toThrow(/do not silently fall back/);
   });
 
   it('threaded helper resolves reads to the bot adapter, not the default', async () => {
-    const flashBot = { id: '4', activeProtocol: 'flash' as const };
-    const resolved = await readBalanceLikeHelper(getAdapterForBot(flashBot));
-    expect(resolved).toBe('flash');
-    expect(flash.__calls).toContain('getAccountInfo');
+    const driftBot = { id: '4', activeProtocol: 'drift' as const };
+    const resolved = await readBalanceLikeHelper(getAdapterForBot(driftBot));
+    expect(resolved).toBe('drift');
+    expect(drift.__calls).toContain('getAccountInfo');
     expect(pacifica.__calls).not.toContain('getAccountInfo');
   });
 
@@ -120,15 +125,15 @@ describe('Phase 4 per-bot adapter routing', () => {
     const resolved = await readBalanceLikeHelper();
     expect(resolved).toBe('pacifica');
     expect(pacifica.__calls).toContain('getAccountInfo');
-    expect(flash.__calls).not.toContain('getAccountInfo');
+    expect(drift.__calls).not.toContain('getAccountInfo');
   });
 
   it('economic capability + minTransfer gates read from the bot adapter', () => {
-    const flashBot = { id: '5', activeProtocol: 'flash' as const };
+    const driftBot = { id: '5', activeProtocol: 'drift' as const };
     const pacificaBot = { id: '6', activeProtocol: 'pacifica' as const };
-    expect(getAdapterForBot(flashBot).getCapabilities().supportsSettlePnl).toBe(true);
+    expect(getAdapterForBot(driftBot).getCapabilities().supportsSettlePnl).toBe(true);
     expect(getAdapterForBot(pacificaBot).getCapabilities().supportsSettlePnl).toBe(false);
-    expect(getAdapterForBot(flashBot).minTransferAmount).toBe(0);
+    expect(getAdapterForBot(driftBot).minTransferAmount).toBe(0);
     expect(getAdapterForBot(pacificaBot).minTransferAmount).toBe(10);
   });
 });

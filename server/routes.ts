@@ -1,3 +1,5 @@
+import { FLASH_RETIRED_MESSAGE, assertProtocolRuntimeAvailable } from './protocol/flash-retirement.js';
+import { getManualFlashWithdrawalAdapter } from './protocol/flash/manual-withdrawal';
 import type { Express } from "express";
 import { createServer, type Server } from "http";
 import bcrypt from "bcryptjs";
@@ -83,6 +85,14 @@ interface BotSubaccountContext {
   walletAddress: string;
 }
 
+function getFlashWithdrawalContext(bot: TradingBot): BotSubaccountContext | null {
+  // Wallet identity survives error/recovery states. The resolver validates the
+  // public key and can rederive an HD key even if its encrypted cache is absent.
+  if (!bot.protocolSubaccountId) return null;
+  return { useBotKeypair: true, botPublicKey: bot.protocolSubaccountId,
+    botId: bot.id, walletAddress: bot.walletAddress };
+}
+
 function getBotSubaccountContext(bot: TradingBot): BotSubaccountContext | null {
   if (
     bot.subaccountAuthMode === 'external_key' &&
@@ -137,10 +147,10 @@ async function _resolveBotSubaccountSecretKey(
   const attempt = async (): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> => {
     const umkResult = await getUmkForWebhook(botCtx.walletAddress);
     if (!umkResult) {
-      throw new Error(
+      throw Object.assign(new Error(
         `Cannot decrypt bot subaccount key for ${botCtx.botId.slice(0, 8)}...: ` +
         `no active execution authorization for owner ${botCtx.walletAddress.slice(0, 8)}...`,
-      );
+      ), { code: 'EXECUTION_AUTHORIZATION_REQUIRED' });
     }
     try {
       return await decryptBotSubaccountKey(botKeyArgs, umkResult.umk);
@@ -2242,6 +2252,8 @@ async function parkBotIdleFundsAutonomously(
   bot: TradingBot,
   opts?: { authorizePostBorrow?: boolean; borrowedUsdc?: number },
 ): Promise<void> {
+  // Keep the retired branch below for now without narrowing the retained code.
+  if (['flash'].includes(bot.activeProtocol ?? '')) return;
   const postBorrow = opts?.authorizePostBorrow === true;
   // On a post-borrow join with auto-park OFF, the bounded park moves ONLY this much
   // (the freshly-borrowed USDC). It is ignored on the auto-park bank-sweep branch.
@@ -3830,6 +3842,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
   provisionMeta: { funded: boolean; depositTxSignature?: string; fundedAmount: number; wasNewAccount?: boolean; warning?: string; solSeeded?: number };
 }> {
   const { walletAddress, agentKeypair, adapter, fundingAmount } = params;
+  assertProtocolRuntimeAvailable(adapter.protocolName);
   let agentMnemonic = params.agentMnemonic;
   const caps = adapter.getCapabilities();
   if (!caps.requiresExternalSubaccountKey) {
@@ -8708,10 +8721,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
-  app.post("/api/exchange/withdraw", requireWallet, async (req, res) => {
+  const withdrawFromExchange = async (req: any, res: any) => {
     try {
       const { amount, botId } = req.body;
-      if (!amount || amount <= 0) {
+      if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
 
@@ -8719,21 +8732,26 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
       }
-      if (!wallet.agentPublicKey || !wallet.agentPrivateKeyEncryptedV3) {
+      const ownedBot = botId ? await storage.getTradingBotById(botId) : null;
+      if (botId && (!ownedBot || ownedBot.walletAddress !== req.walletAddress)) {
+        return res.status(403).json({ error: "Bot not found or not owned" });
+      }
+      const isFlashWithdrawal = ownedBot?.activeProtocol === 'flash';
+      if (!wallet.agentPublicKey || (!isFlashWithdrawal && !wallet.agentPrivateKeyEncryptedV3)) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
       }
 
-      const umkResult = await getUmkForWebhook(req.walletAddress!);
-      if (!umkResult) {
+      const umkResult = isFlashWithdrawal ? null : await getUmkForWebhook(req.walletAddress!);
+      if (!isFlashWithdrawal && !umkResult) {
         return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
       }
-      const agentKeyResult = await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey);
-      if (!agentKeyResult) {
-        umkResult.cleanup();
+      const agentKeyResult = umkResult ? await decryptAgentKeyStrict(req.walletAddress!, umkResult.umk, wallet, wallet.agentPublicKey) : null;
+      if (!isFlashWithdrawal && !agentKeyResult) {
+        umkResult?.cleanup();
         return res.status(400).json({ error: "Your wallet needs to be re-keyed — please sign out and sign back in." });
       }
       try {
-      const agentSecret = agentKeyResult.secretKey;
+      const agentSecret = agentKeyResult?.secretKey;
 
       // If botId provided, verify ownership and get subaccount
       let tradingBotId: string | null = null;
@@ -8747,12 +8765,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: `${withdrawRoutedAdapter.protocolName} minimum transfer is $${withdrawRoutedAdapter.minTransferAmount}` });
       }
       if (botId) {
-        const bot = await storage.getTradingBotById(botId);
+        const bot = ownedBot;
         if (!bot || bot.walletAddress !== req.walletAddress) {
           return res.status(403).json({ error: "Bot not found or not owned" });
         }
         tradingBotId = botId;
-        withdrawRoutedAdapter = getAdapterForBot(bot);
+        if (bot.activeProtocol === 'flash' && !getFlashWithdrawalContext(bot)) {
+          return res.status(409).json({ error: 'Flash bot wallet access is unavailable. Keep the bot record and use the recovery process.' });
+        }
+        withdrawRoutedAdapter = bot.activeProtocol === 'flash'
+          ? await getManualFlashWithdrawalAdapter() : getAdapterForBot(bot);
         // Gate on the bot's own protocol minimum before any IOU payout below.
         if (amount < withdrawRoutedAdapter.minTransferAmount) {
           return res.status(400).json({ error: `${withdrawRoutedAdapter.protocolName} minimum transfer is $${withdrawRoutedAdapter.minTransferAmount}` });
@@ -8764,7 +8786,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         
         // Check for pending profit share IOUs before allowing withdrawal
         const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(botId);
+        if (bot.activeProtocol === 'flash' && pendingIOUs.length > 0) {
+          return res.status(409).json({ error: 'Withdrawal is blocked by an outstanding creator profit share. Contact support for owner-directed review. The liability and wallet link are preserved; no payout or withdrawal was attempted.' });
+        }
         if (pendingIOUs.length > 0) {
+          if (!agentSecret) return res.status(400).json({ error: "Agent wallet not initialized" });
           const totalOwed = pendingIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
           console.log(`[Drift Withdraw] Bot ${botId} has ${pendingIOUs.length} pending IOUs totaling $${totalOwed.toFixed(4)}`);
           
@@ -8818,11 +8844,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       let withdrawFromMain = false;
       if (botId) {
-        const bot = await storage.getTradingBotById(botId);
-        const withdrawBotCtx = bot ? getBotSubaccountContext(bot) : null;
+        const bot = ownedBot;
+        const withdrawBotCtx = bot ? (bot.activeProtocol === 'flash' ? getFlashWithdrawalContext(bot) : getBotSubaccountContext(bot)) : null;
         if (withdrawBotCtx && bot) {
           try {
-            const adapter = getAdapterForBot(bot);
+            const adapter = bot.activeProtocol === 'flash'
+              ? withdrawRoutedAdapter : getAdapterForBot(bot);
             const decrypted = await _resolveBotSubaccountSecretKey(withdrawBotCtx);
             try {
               // Independent-trader adapters (e.g. Flash): the bot's OWN wallet IS the
@@ -8841,6 +8868,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                   amount,
                   subaccountId: withdrawBotCtx.botPublicKey,
                 });
+                if ('outcome' in wr && wr.outcome === 'unconfirmed') {
+                  return res.status(202).json({ success: false, outcome: 'unconfirmed', signature: wr.txSignature, error: wr.error });
+                }
                 if (!wr.success) {
                   return res.status(400).json({ error: wr.error || 'Withdraw from bot wallet failed' });
                 }
@@ -8894,6 +8924,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               decrypted.cleanup();
             }
           } catch (transferErr: any) {
+            if (bot.activeProtocol === 'flash' && transferErr?.code === 'EXECUTION_AUTHORIZATION_REQUIRED') {
+              return res.status(400).json({ error: 'Re-enable or re-authorize execution in the app, then withdraw. Execution authorization is required to sign the transfer from your Flash bot wallet to your agent wallet.' });
+            }
             return res.status(500).json({ error: `Subaccount transfer failed: ${transferErr.message}` });
           }
         } else if (bot?.subaccountAuthMode === 'external_key') {
@@ -8909,6 +8942,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
+      if (!agentSecret) return res.status(400).json({ error: "Agent wallet not initialized" });
       const result = await executeAgentDriftWithdraw(
         wallet.agentPublicKey,
         agentSecret,
@@ -8958,14 +8992,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       res.json(result);
       } finally {
-        agentKeyResult.cleanup();
-        umkResult.cleanup();
+        agentKeyResult?.cleanup();
+        umkResult?.cleanup();
       }
     } catch (error) {
       console.error("Agent drift withdraw error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
-  });
+  };
+  app.post("/api/exchange/withdraw", requireWallet, withdrawFromExchange);
 
   app.get("/api/exchange/balance", requireWallet, async (req, res) => {
     try {
@@ -9218,6 +9253,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     console.log(`[ClosePosition] *** CLOSE POSITION REQUEST RECEIVED *** botId=${req.params.id}`);
     try {
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -9657,6 +9693,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   app.post("/api/trading-bots/:id/set-tpsl", requireWallet, async (req, res) => {
     try {
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) return res.status(404).json({ error: "Bot not found" });
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
@@ -9779,6 +9816,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   app.post("/api/trading-bots/:id/cancel-tpsl", requireWallet, async (req, res) => {
     try {
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) return res.status(404).json({ error: "Bot not found" });
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
@@ -9871,6 +9909,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -9976,6 +10015,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -10760,8 +10800,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       for (const [bId, rows] of rowsByBot) {
         const bot = await storage.getTradingBotById(bId);
         if (!bot || bot.walletAddress !== req.walletAddress!) continue; // ownership / deleted bot
-        const adapter = getAdapterForBot(bot);
-        if (adapter.subaccountCaps?.accountModel !== 'independent_trader') continue; // shares account vault
+        // Retired Flash wallets remain readable without entering the adapter registry.
+        if (bot.activeProtocol !== 'flash') {
+          const adapter = getAdapterForBot(bot);
+          if (adapter.subaccountCaps?.accountModel !== 'independent_trader') continue; // shares account vault
+        }
         if (!bot.protocolSubaccountId) continue; // not funded yet → no on-chain wallet to read
         const { views, warnings: w } = await valueVaultRowsForWallet(bot.protocolSubaccountId, rows);
         for (const msg of w) warnings.push(`${bot.name}: ${msg}`);
@@ -15543,6 +15586,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   app.post("/api/trading-bots", requireWallet, async (req, res) => {
+    if (String(req.body.activeProtocol).toLowerCase() === "flash") return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
     try {
       const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig } = req.body;
       
@@ -17071,6 +17115,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     let _deleteOwnerUmk: Buffer | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
+      if (['flash'].includes(bot?.activeProtocol ?? '')) return res.status(409).json({ error: FLASH_RETIRED_MESSAGE + ' Keep this bot record until recovery is verified.' });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -17736,6 +17781,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     let _recoverCleanup: (() => void) | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -17990,6 +18036,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     let _forceDeleteCleanup: (() => void) | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(409).json({ error: FLASH_RETIRED_MESSAGE + ' Keep this bot record until recovery is verified.' });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -18266,6 +18313,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     let _confirmDeleteCleanup: (() => void) | null = null;
     try {
       const bot = await storage.getTradingBotById(req.params.id);
+      if (bot?.activeProtocol === 'flash') return res.status(409).json({ error: FLASH_RETIRED_MESSAGE + ' Keep this bot record until recovery is verified.' });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -18673,6 +18721,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     let log;
     try {
       const bot = await storage.getTradingBotById(botId);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -20216,6 +20265,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       const bot = await storage.getTradingBotById(botId);
+      if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
@@ -22397,6 +22447,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "Valid amount required" });
       }
 
+      if (bot.activeProtocol === 'flash') {
+        req.body = { ...req.body, botId };
+        return withdrawFromExchange(req, res);
+      }
       const botCtx = getBotSubaccountContext(bot);
       if (!botCtx) {
         return res.status(400).json({ error: "Bot has no active trading subaccount" });
@@ -22708,6 +22762,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   // ==================== MARKETPLACE ROUTES ====================
 
+  const retirementListing = async (listing: any) => {
+    const source = await storage.getTradingBotById(listing.tradingBotId);
+    return source?.activeProtocol === 'flash'
+      ? { ...listing, name: listing.name + ' (Retired — Flash)', isActive: false, retired: true, retirementMessage: FLASH_RETIRED_MESSAGE, creatorCapital: null }
+      : listing;
+  };
   // Get marketplace listings
   app.get("/api/marketplace", async (req, res) => {
     try {
@@ -22718,7 +22778,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         sortBy: sortBy as string,
         limit: limit ? parseInt(limit as string) : undefined,
       });
-      res.json(bots);
+      res.json(await Promise.all(bots.map(retirementListing)));
     } catch (error) {
       console.error("Get marketplace error:", error);
       res.status(500).json({ error: "Failed to fetch marketplace" });
@@ -22739,7 +22799,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         };
       }));
       
-      res.json(botsWithEarnings);
+      res.json(await Promise.all(botsWithEarnings.map(retirementListing)));
     } catch (error) {
       console.error("Get my published bots error:", error);
       res.status(500).json({ error: "Failed to fetch published bots" });
@@ -22753,7 +22813,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
       }
-      res.json(bot);
+      res.json(await retirementListing(bot));
     } catch (error) {
       console.error("Get published bot error:", error);
       res.status(500).json({ error: "Failed to fetch bot" });
@@ -22963,6 +23023,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       // Check if already published
+      if (tradingBot.activeProtocol === 'flash') {
+        return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
+      }
       const existing = await storage.getPublishedBotByTradingBotId(id);
       if (existing) {
         // If previously unpublished (inactive), allow republishing
@@ -23166,6 +23229,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       //      it from the creator-protocol adapter and re-validate the amounts the
       //      caller passed (the early $10 checks above are just a cheap pre-filter).
       const creatorProtocol = (originalBot.activeProtocol ?? getDefaultAdapter().protocolName);
+      if (creatorProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (creatorProtocol === 'drift') {
         return res.status(400).json({
           error: "This bot runs on a retired protocol and is no longer available for new subscriptions.",
@@ -23515,6 +23579,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         await storage.incrementPublishedBotSubscribers(req.params.id, -1, -capitalInvested);
       };
 
+      const listing = await storage.getPublishedBotById(req.params.id);
+      const creatorBot = listing ? await storage.getTradingBotById(listing.tradingBotId) : null;
+      if (creatorBot?.activeProtocol === 'flash') {
+        return res.status(409).json({ code: 'FLASH_RETIRED', error: 'Flash subscriptions require owner-directed recovery. Contact support. Links and liabilities are preserved; no funds were moved.' });
+      }
+
       // No copy bot linked (legacy/partial row) — nothing to recover or tear down.
       const bot = subscriberBotId ? await storage.getTradingBotById(subscriberBotId) : null;
       if (!bot) {
@@ -23524,6 +23594,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Subscriber bot not owned by this wallet" });
+      }
+
+      if (['flash'].includes(bot.activeProtocol ?? '')) {
+        return res.status(409).json({ code: 'FLASH_RETIRED', error: 'Flash subscriptions cannot be automatically unwound. Contact support for owner-directed recovery. The subscription, wallet link and outstanding profit shares are preserved; no funds were moved.' });
       }
 
       const wallet = await storage.getWallet(req.walletAddress!);

@@ -146,9 +146,8 @@ export class FlashPythSseManager {
   }
 
   connect(): void {
-    if (this.shouldRun) return;
-    this.shouldRun = true;
-    void this.runLoop();
+    // Retired venue: direct callers must not arm network/reconnect work either.
+    return;
   }
 
   disconnect(): void {

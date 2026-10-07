@@ -300,108 +300,13 @@ describe('processExpiredReservation — decision matrix (§5.1.4)', () => {
   });
 });
 
-describe('Flash expired reservation recovery', () => {
-  function flashRow(overrides: Partial<any> = {}) {
-    return makeRow({ protocol: 'flash', ...overrides });
-  }
-
-  it('deletes an already-empty Flash reservation without decrypting or sweeping', async () => {
-    adapter = makeFlashAdapter();
-    storageMock.findExpiredReservations.mockResolvedValue([flashRow()]);
-
-    await runLeaseRecoveryOnce();
-
-    expect(adapter.sweepBotWallet).not.toHaveBeenCalled();
-    expect(decryptRetainedSubaccountKeyV3).not.toHaveBeenCalled();
-    expect(storageMock.deleteReservedSubaccount).toHaveBeenCalledWith({
-      protocol: 'flash', protocolSubaccountId: SUB, claimToken: 'tok-1',
-    });
-  });
-
-  it('sweeps a funded Flash wallet to the still-current agent and deletes only after strict empty verification', async () => {
-    adapter = makeFlashAdapter();
-    adapter.getWalletCollateralBalanceStrict
-      .mockResolvedValueOnce(5)
-      .mockResolvedValueOnce(0);
-    adapter.getWalletSolBalance
-      .mockResolvedValueOnce(0.02)
-      .mockResolvedValueOnce(0.001);
-    const umkCleanup = vi.fn();
-    const keyCleanup = vi.fn();
-    getUmkForWebhook.mockResolvedValue({ umk: Buffer.alloc(32), cleanup: umkCleanup });
-    decryptRetainedSubaccountKeyV3.mockReturnValue({ secretKey: new Uint8Array(64), cleanup: keyCleanup });
-    storageMock.findExpiredReservations.mockResolvedValue([flashRow()]);
-
-    await runLeaseRecoveryOnce();
-
-    expect(adapter.sweepBotWallet).toHaveBeenCalledWith({
-      subSecretKey: expect.any(Uint8Array),
-      destWalletAddress: AGENT,
-    });
-    expect(storageMock.deleteReservedSubaccount).toHaveBeenCalledTimes(1);
-    expect(storageMock.markSubaccountStuckFunds).not.toHaveBeenCalled();
-    expect(keyCleanup).toHaveBeenCalledTimes(1);
-    expect(umkCleanup).toHaveBeenCalledTimes(1);
-  });
-
-  it('defers unreadable Flash state without deleting or quarantining', async () => {
-    adapter = makeFlashAdapter({
-      getWalletCollateralBalanceStrict: vi.fn(async () => { throw new Error('rpc unavailable'); }),
-    });
-    storageMock.findExpiredReservations.mockResolvedValue([flashRow()]);
-
-    await runLeaseRecoveryOnce();
-
-    expect(adapter.sweepBotWallet).not.toHaveBeenCalled();
-    expect(storageMock.deleteReservedSubaccount).not.toHaveBeenCalled();
-    expect(storageMock.markSubaccountStuckFunds).not.toHaveBeenCalled();
-  });
-
-  it('treats malformed Flash balances as unreadable and leaves the lease intact', async () => {
-    adapter = makeFlashAdapter({
-      getWalletCollateralBalanceStrict: vi.fn(async () => Number.NaN),
-    });
-    storageMock.findExpiredReservations.mockResolvedValue([flashRow()]);
-
-    await runLeaseRecoveryOnce();
-
-    expect(adapter.sweepBotWallet).not.toHaveBeenCalled();
-    expect(storageMock.deleteReservedSubaccount).not.toHaveBeenCalled();
-    expect(storageMock.markSubaccountStuckFunds).not.toHaveBeenCalled();
-  });
-
-  it('quarantines definitive Flash sweep failure and retains the pooled key trail', async () => {
-    adapter = makeFlashAdapter({
-      getWalletCollateralBalanceStrict: vi.fn(async () => 5),
-      getWalletSolBalance: vi.fn(async () => 0.02),
-      sweepBotWallet: vi.fn(async () => ({ error: 'definitive failure', usdcSwept: 0, solReclaimed: 0 })),
-    });
-    getUmkForWebhook.mockResolvedValue({ umk: Buffer.alloc(32), cleanup: vi.fn() });
-    decryptRetainedSubaccountKeyV3.mockReturnValue({ secretKey: new Uint8Array(64), cleanup: vi.fn() });
-    storageMock.findExpiredReservations.mockResolvedValue([flashRow()]);
-
-    await runLeaseRecoveryOnce();
-
-    expect(storageMock.markSubaccountStuckFunds).toHaveBeenCalledWith(expect.objectContaining({
-      protocol: 'flash',
-      claimToken: 'tok-1',
-    }));
-    expect(storageMock.deleteReservedSubaccount).not.toHaveBeenCalled();
-  });
-
-  it('never sweeps a Flash reservation to a retired agent generation', async () => {
-    adapter = makeFlashAdapter({
-      getWalletCollateralBalanceStrict: vi.fn(async () => 5),
-      getWalletSolBalance: vi.fn(async () => 0.02),
-    });
-    storageMock.getWallet.mockResolvedValueOnce({ address: 'wallet', agentPublicKey: 'new-agent' });
-    storageMock.findExpiredReservations.mockResolvedValue([flashRow()]);
-
-    await runLeaseRecoveryOnce();
-
-    expect(adapter.sweepBotWallet).not.toHaveBeenCalled();
-    expect(storageMock.markSubaccountStuckFunds).toHaveBeenCalledTimes(1);
-  });
+describe('Flash expired reservation recovery remains retired',()=>{
+ it.each([0,5,NaN])('preserves the lease and keys without reading or sweeping balance %s',async balance=>{
+  adapter=makeFlashAdapter({getWalletCollateralBalanceStrict:vi.fn(async()=>balance)});
+  storageMock.findExpiredReservations.mockResolvedValue([makeRow({protocol:'flash'})]);
+  await runLeaseRecoveryOnce();
+  expect(adapter.getWalletCollateralBalanceStrict).not.toHaveBeenCalled();expect(adapter.sweepBotWallet).not.toHaveBeenCalled();expect(decryptRetainedSubaccountKeyV3).not.toHaveBeenCalled();expect(storageMock.deleteReservedSubaccount).not.toHaveBeenCalled();expect(storageMock.markSubaccountStuckFunds).not.toHaveBeenCalled();
+ });
 });
 
 describe('runLeaseRecoveryOnce', () => {

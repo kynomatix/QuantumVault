@@ -470,6 +470,7 @@ export async function runLeaseRecoveryOnce(): Promise<void> {
   // path sleeps for the indexing wait. Throughput is irrelevant (rare event); we
   // care about not hammering the RPC / Pacifica rate budget.
   for (const row of expired) {
+    if (row.protocol === 'flash') continue; // preserve reservations; no automatic sweep
     try {
       // Resolve the adapter for THIS row's own protocol, not the global default.
       // A reservation can only be verified/swept/pooled by its own protocol's

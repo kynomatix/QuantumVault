@@ -1,3 +1,4 @@
+import { FLASH_RETIRED_MESSAGE } from './protocol/flash-retirement.js';
 import { sendTradeNotification } from "./notification-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
 import { storage, DatabaseStorage } from "./storage";
@@ -665,6 +666,13 @@ async function rejectRetryAtLeverageAdmission(job: RetryJob, error: string): Pro
 }
 
 async function processRetryJob(job: RetryJob): Promise<void> {
+  // Includes close jobs: retire before keys, admission, RPC or another attempt.
+  const retirementBot = await storage.getTradingBotById(job.botId);
+  if (retirementBot?.activeProtocol === 'flash') {
+    await storage.markTradeRetryJobFailed(job.id, FLASH_RETIRED_MESSAGE);
+    retryQueue.delete(job.id);
+    return;
+  }
   // Resolve the product adapter and perform unsigned Pacifica admission before
   // UMK lookup or key decryption. Close jobs intentionally bypass this gate.
   let preAuthJobBot: Awaited<ReturnType<typeof storage.getTradingBotById>> | null = null;

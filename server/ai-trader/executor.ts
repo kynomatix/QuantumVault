@@ -1,3 +1,4 @@
+import { FLASH_RETIRED_MESSAGE } from '../protocol/flash-retirement.js';
 // Agentic Trader Plan Part B, WO-5 — the execution layer. Takes a guardrail-
 // clamped entry decision (WO-4 output, already persisted as a decision row) and
 // either executes it live on the bot's venue or records a hypothetical paper
@@ -107,6 +108,7 @@ export function aiTraderPolicyObject(bot: Pick<AiTraderBot, "market" | "maxLever
 }
 
 export type ExecuteFailureReason =
+  | "venue_retired"
   | "not_entry"            // clamped.action is not long/short — nothing to execute
   | "invalid_clamp"        // ClampedDecision missing required numeric fields
   | "cooldown_active"      // G6: one-candle cooldown since last close not elapsed
@@ -302,6 +304,7 @@ export function checkCooldownAndCaps(
  */
 export async function executeDecision(input: ExecuteDecisionInput): Promise<ExecuteDecisionResult> {
   const { bot, decisionId, clamped } = input;
+  if (bot.protocol === "flash") return { ok: false, reason: "venue_retired", detail: FLASH_RETIRED_MESSAGE };
 
   if (clamped.action !== "long" && clamped.action !== "short") {
     return unwindRejectedInternalDecision(input, { ok: false, reason: "not_entry", detail: `action '${clamped.action}' is not an entry` });

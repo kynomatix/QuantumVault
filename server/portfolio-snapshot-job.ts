@@ -1,6 +1,7 @@
 import { type Connection, PublicKey } from "@solana/web3.js";
 import { createSolanaRpcConnection } from "./rpc-config";
 import { storage } from "./storage";
+import { getManualFlashWithdrawalAdapter } from "./protocol/flash/manual-withdrawal";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import type { ProtocolAdapter } from "./protocol/adapter";
 import { reconcileWalletDeposits } from "./deposit-reconciler";
@@ -144,10 +145,16 @@ export async function computeWalletTotalBalance(
   let activeBotCount = 0;
   let ok = true;
 
+  const agentIsFlashWallet = bots.some(bot => bot.activeProtocol === 'flash'
+    && bot.protocolSubaccountId === wallet.agentPublicKey);
   if (wallet.agentPublicKey) {
-    const spl = await getAgentSplBalance(wallet.agentPublicKey);
-    if (spl == null) ok = false;
-    else totalBalance += spl;
+    // An aliased Flash wallet is valued once by the strict whole-wallet inventory
+    // below, including non-associated USDC accounts and unknown-asset checks.
+    if (!agentIsFlashWallet) {
+      const spl = await getAgentSplBalance(wallet.agentPublicKey);
+      if (spl == null) ok = false;
+      else totalBalance += spl;
+    }
 
     // Parked ACCOUNT-vault funds are still the user's equity (idle USDC swapped
     // into a yield token off-exchange), just not on the agent wallet as USDC.
@@ -162,7 +169,24 @@ export async function computeWalletTotalBalance(
     }
   }
 
+  const flashWalletsRead = new Set<string>();
   for (const bot of bots) {
+    if (bot.activeProtocol === 'flash') {
+      // Retired venue collateral is excluded. The bot's OWN wallet remains equity,
+      // even when its old subaccount status is inactive or awaiting recovery.
+      if (bot.protocolSubaccountId && !flashWalletsRead.has(bot.protocolSubaccountId)) {
+        flashWalletsRead.add(bot.protocolSubaccountId);
+        try {
+          const adapter = await getManualFlashWithdrawalAdapter();
+          const balance = await adapter.getWalletPortfolioBalanceStrict(bot.protocolSubaccountId);
+          if (!Number.isFinite(balance) || balance < 0) ok = false;
+          // This is also the sole USDC source for an agent alias.
+          // Repeated bot identities are read once.
+          else totalBalance += balance;
+        } catch { ok = false; }
+      }
+      continue;
+    }
     if (bot.isActive) activeBotCount++;
     const adapterArgs = resolveBotAdapterArgs(bot, wallet);
     if (!adapterArgs) continue;
@@ -204,7 +228,7 @@ export async function computeWalletTotalBalance(
   return { totalBalance, activeBotCount, ok };
 }
 
-async function processWalletSnapshot(walletAddress: string): Promise<void> {
+export async function processWalletSnapshot(walletAddress: string): Promise<void> {
   const wallet = await storage.getWallet(walletAddress);
   if (!wallet) return;
 

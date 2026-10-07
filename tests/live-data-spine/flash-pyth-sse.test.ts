@@ -92,108 +92,13 @@ function sseResponse(chunks: string[]): Response {
   return { ok: true, status: 200, body } as unknown as Response;
 }
 
-// A Response whose body opens but never sends data and never closes (stalls).
-function pendingSseResponse(): Response {
-  const body = new ReadableStream<Uint8Array>({
-    start() {
-      /* never enqueue, never close -> reader.read() pends until cancelled */
-    },
-  });
-  return { ok: true, status: 200, body } as unknown as Response;
-}
-
-describe("FlashPythSseManager", () => {
-  beforeEach(() => {
-    vi.stubEnv("PYTH_HERMES_MODE", "live");
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    vi.unstubAllEnvs();
-  });
-
-  it("streams ticks from an SSE body and reports health", async () => {
-    const ticks: PriceTick[] = [];
-    const health: boolean[] = [];
-    const event =
-      "data: " +
-      JSON.stringify({
-        parsed: [{ id: SOL_ID, price: { price: "15000000000", expo: -8, publish_time: 1 } }],
-      }) +
-      "\n\n";
-
-    const fetchImpl = vi.fn().mockResolvedValue(sseResponse([event]));
-    vi.stubGlobal("fetch", fetchImpl);
-    const mgr = new FlashPythSseManager({
-      feedMap: { "SOL-PERP": SOL_ID },
-      onTick: (t) => ticks.push(t),
-      onHealth: (h) => health.push(h),
-    });
-
-    mgr.connect();
-    // Allow the async stream loop to consume the body.
-    await vi.waitFor(() => expect(ticks.length).toBe(1));
-    mgr.disconnect();
-
-    expect(ticks[0].internalSymbol).toBe("SOL-PERP");
-    expect(ticks[0].mark).toBeCloseTo(150, 6);
-    expect(health).toContain(true);
-    const url = fetchImpl.mock.calls[0][0] as string;
-    expect(url).toContain(`ids[]=${SOL_ID}`);
-    expect(url).toContain("/v2/updates/price/stream");
-    expect(url).toContain("parsed=true");
-  });
-
-  it("does not start when no feed ids are configured", async () => {
-    const fetchImpl = vi.fn();
-    vi.stubGlobal("fetch", fetchImpl);
-    const mgr = new FlashPythSseManager({
-      feedMap: { "SOL-PERP": "" },
-      onTick: () => {},
-    });
-    mgr.connect();
-    await new Promise((r) => setTimeout(r, 10));
-    expect(fetchImpl).not.toHaveBeenCalled();
-    mgr.disconnect();
-  });
-
-  it("reports an HTTP error and can be stopped cleanly", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValue({ ok: false, status: 503, body: null } as unknown as Response);
-    vi.stubGlobal("fetch", fetchImpl);
-    const mgr = new FlashPythSseManager({
-      feedMap: { "SOL-PERP": SOL_ID },
-      onTick: () => {},
-    });
-    mgr.connect();
-    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalled());
-    mgr.disconnect();
-    expect(mgr.isConnected()).toBe(false);
-  });
-
-  it("reconnects when the stream goes idle (stale watchdog)", async () => {
-    const health: boolean[] = [];
-    const fetchImpl = vi
-      .fn()
-      .mockImplementation(() => Promise.resolve(pendingSseResponse()));
-    vi.stubGlobal("fetch", fetchImpl);
-    const mgr = new FlashPythSseManager({
-      feedMap: { "SOL-PERP": SOL_ID },
-      onTick: () => {},
-      onHealth: (h) => health.push(h),
-      staleTimeoutMs: 20,
-    });
-    mgr.connect();
-    // First stream connects (health true) then stalls; the watchdog fires after
-    // ~20ms, cancels the reader, and forces a reconnect.
-    await vi.waitFor(
-      () => expect(mgr.getStatus().reconnectCount).toBeGreaterThanOrEqual(1),
-      { timeout: 2_000 },
-    );
-    mgr.disconnect();
-    expect(health).toContain(true);
-    expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(1);
-  });
+describe('retired FlashPythSseManager',()=>{
+ afterEach(()=>{vi.useRealTimers();vi.unstubAllGlobals();});
+ it.each([{'SOL-PERP':SOL_ID},{'SOL-PERP':''}])('never connects or schedules reconnects for %j',async feedMap=>{
+  vi.useFakeTimers();const fetchImpl=vi.fn(),onTick=vi.fn();vi.stubGlobal('fetch',fetchImpl);
+  const mgr=new FlashPythSseManager({feedMap,onTick,staleTimeoutMs:20});
+  mgr.connect();mgr.connect();await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetchImpl).not.toHaveBeenCalled();expect(onTick).not.toHaveBeenCalled();expect(mgr.isConnected()).toBe(false);expect(mgr.getStatus().reconnectCount).toBe(0);
+  mgr.disconnect();expect(vi.getTimerCount()).toBe(0);
+ });
 });

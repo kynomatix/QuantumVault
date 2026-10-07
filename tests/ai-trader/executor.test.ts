@@ -779,6 +779,27 @@ describe("paper execution", () => {
 
 describe("live execution — pre-flight", () => {
   it("capability pre-flight: adapter without setTpSl/getOpenStopOrders refuses BEFORE any order or key access", async () => {
+    for (const missing of ["setTpSl", "getOpenStopOrders"]) {
+      const adapter = makeAdapter({ [missing]: undefined });
+      const { executeDecision } = await importExecutor();
+      const r = await executeDecision({
+          authoritySource: "internal_cycle",
+        bot: makeBot({ paperMode: false, protocol: "pacifica" }),
+        decisionId: "d-1",
+        clamped: makeClamped(),
+        adapter,
+        markPrice: 150,
+      });
+      expect(r).toMatchObject({ ok: false, reason: "capability_missing" });
+      expect(getWalletMock).not.toHaveBeenCalled();
+      expect(getUmkMock).not.toHaveBeenCalled();
+      expect(decryptKeyMock).not.toHaveBeenCalled();
+      expect(decryptSubKeyMock).not.toHaveBeenCalled();
+      expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("retired Flash refuses BEFORE capability checks, orders or key access", async () => {
     const adapter = makeAdapter({ setTpSl: undefined });
     const { executeDecision } = await importExecutor();
     const r = await executeDecision({
@@ -789,7 +810,7 @@ describe("live execution — pre-flight", () => {
       adapter,
       markPrice: 150,
     });
-    expect(r).toMatchObject({ ok: false, reason: "capability_missing" });
+    expect(r).toMatchObject({ ok: false, reason: "venue_retired" });
     expect(getWalletMock).not.toHaveBeenCalled();
     expect((adapter.placeMarketOrder as any)).not.toHaveBeenCalled();
   });
