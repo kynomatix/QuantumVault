@@ -1,6 +1,20 @@
 import type { BotTrade, BotPosition } from "@shared/schema";
 import type { ProvenancedOHLCV } from "../lab/datafeed";
 import { resolveBotTradeNetPnl } from "./bot-trade-pnl-convention";
+import { SIGNAL_CHART_BAR_MS, signalChartTimeframe, type SignalChartTimeframe } from "@shared/signal-trade-chart";
+
+/** Signal Bots retain the original signal in webhookPayload, not a timeframe column. */
+export function chartDefaultTimeframe(rows: readonly BotTrade[]): SignalChartTimeframe {
+  const newest = [...rows].sort((a, b) => +new Date(b.executedAt) - +new Date(a.executedAt) || b.id.localeCompare(a.id));
+  for (const row of newest) {
+    let payload = row.webhookPayload as any;
+    if (typeof payload === "string") { try { payload = JSON.parse(payload); } catch { continue; } }
+    const interval = payload?.data?.timeframe ?? payload?.data?.interval ?? payload?.timeframe ?? payload?.interval;
+    if (interval != null) return signalChartTimeframe(interval) ?? "4h";
+  }
+  return "4h";
+}
+
 export type ChartTradePair = { entryId: string; exitId: string; direction: "Long" | "Short"; entryTime: string; exitTime: string; entryPrice: number; exitPrice: number; size: number; addCount: number; liquidated: boolean; netPnl: number; pnlPercent: number; timeHeldMs: number; pairingStatus: "sequential" };
 export type ChartExecution = { id: string; market: string; side: string; status: string; protocol: string | null; protocolMismatch: boolean; kind: "entry" | "close" | "unknown"; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: "venue_fill" | "recorded_execution"; netPnl: number | null; accountingStatus: "resolved" | "accounting unavailable"; feeTruthStatus: string; pairingStatus: "unproven" | "sequential"; pair?: ChartTradePair };
 export type ChartBand = { barTime: string; rowIds: string[]; pairingStatus: "unproven" };
@@ -13,7 +27,7 @@ function chartExecutionKind(row: BotTrade): ChartExecution["kind"] {
   const canonicalClose = row.pnl != null || payload?.closeAccounting?.kind === "unavailable";
   return canonicalClose || side === "CLOSE" || action === "close" || !!payload?.closeReason || row.status === "liquidated" ? "close" : row.executionMethod === "on-chain-detected" || payload?.reconciled === true ? "unknown" : ["LONG", "SHORT", "BUY", "SELL"].includes(side) ? "entry" : "unknown";
 }
-export function toChartExecution(row: BotTrade, timeframe: "1d" | "4h", activeProtocol?: string | null): ChartExecution | null {
+export function toChartExecution(row: BotTrade, timeframe: SignalChartTimeframe, activeProtocol?: string | null): ChartExecution | null {
   if (!["executed", "liquidated", "recovered"].includes(row.status)) return null;
   const filled = validTime(row.filledAt), recorded = validTime(row.executedAt);
   const fillPrice = positive(row.averageFillPrice), fillSize = positive(row.filledSizeBase);
@@ -44,7 +58,7 @@ export function alignChartExecutions(executions: ChartExecution[], candles: read
  * missing coordinates and unreconciled P&L stay neutral and never block later trades;
  * unclassified rows are ignored for pairing.
  */
-export function pairChartTradeHistory(rows: BotTrade[], timeframe: "1d" | "4h", activeProtocol?: string | null) {
+export function pairChartTradeHistory(rows: BotTrade[], timeframe: SignalChartTimeframe, activeProtocol?: string | null) {
   const history = rows.filter(row => ["executed", "liquidated", "recovered"].includes(row.status))
     .map(row => ({ row, execution: toChartExecution(row, timeframe, activeProtocol) }));
   const executions = history.flatMap(item => item.execution ? [item.execution] : []);
@@ -132,11 +146,10 @@ export function chartOpenPosition(position: Pick<BotPosition, "baseSize" | "avgE
 }
 
 /** Admit one known direct perpetual series; never bridge an internal candle gap. */
-export function chartPriceSeries(fetched: readonly ProvenancedOHLCV[], timeframe: "1d" | "4h") {
-  const barMs = timeframe === "1d" ? 86_400_000 : 14_400_000;
-  const budget = timeframe === "1d" ? 120 : 720;
+export function chartPriceSeries(fetched: readonly ProvenancedOHLCV[], timeframe: SignalChartTimeframe) {
+  const barMs = SIGNAL_CHART_BAR_MS[timeframe];
   const empty = { candles: [] as Array<{ time: number; open: number; high: number; low: number; close: number }>, provenance: null };
-  if (!fetched.length || fetched.length > budget) return empty;
+  if (!fetched.length) return empty;
   const first = fetched[0].provenance;
   if (!first || !["okx", "gate", "hyperliquid"].includes(first.source) || !["okx", "gate", "hyperliquid"].includes(first.venue) || first.basis !== "perp" || first.proxy !== "direct" || first.timeSemantic !== "open_time") return empty;
   const usable = fetched.every((c, i) => {

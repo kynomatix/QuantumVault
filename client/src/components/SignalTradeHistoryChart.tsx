@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { createSharedTradePriceChart } from './SharedTradePriceChart';
-import { earlierChartWindow, mergeNeutralBands } from './signalTradeHistoryWindow';
+import { SIGNAL_CHART_TIMEFRAMES, SIGNAL_CHART_BAR_MS, type SignalChartTimeframe } from '@shared/signal-trade-chart';
 import { attachTradeBoxes, formatTradePnl as formatPnl, tradeChartMarkers, tradeEntryDirection, type SequentialTradePair } from './signalTradeChartMarkers';
 import type { UTCTimestamp } from 'lightweight-charts';
 import { BarChart3, Loader2 } from 'lucide-react';
@@ -15,14 +15,13 @@ type Execution = { id: string; status: string; side: string; protocol: string | 
 type Band = { barTime: string; rowIds: string[]; pairingStatus: 'unproven' };
 const NEUTRAL_SPAN = 'rgba(100,116,139,0.25)';
 type ChartResponse = {
-  market: string; timeframe: string; range: { from: string; to: string; firstEligibleTradeAt: string | null };
+  market: string; timeframe: SignalChartTimeframe; range: { from: string; to: string; firstEligibleTradeAt: string | null };
   complete: boolean; nextCursor: string | null;
   price: { availability: string; reason: string | null; basisLabel: string; candles: Array<{ time: number; open: number; high: number; low: number; close: number }> };
   executions: Execution[]; bands: Band[]; pairs: SequentialTradePair[];
   totals: { totalTrades: number; winningTrades: number; losingTrades: number; accountingIncompleteTrades: number };
   openPosition: { size: number | null; entryPrice: number | null; attribution: string; unrealizedPnl: null } | null;
 };
-const DAY = 86_400_000;
 export function SignalTradeHistoryChart({ botId }: { botId: string }) {
   return <Dialog>
     <DialogTrigger asChild>
@@ -46,7 +45,7 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
         </div>
       </DialogHeader>
       <div className="min-h-0 overflow-y-auto">
-        <TradeHistoryChartContent botId={botId} />
+        <TradeHistoryChartContent key={botId} botId={botId} />
       </div>
     </DialogContent>
   </Dialog>;
@@ -108,22 +107,16 @@ function formatTimeHeld(ms: number) {
 }
 
 function TradeHistoryChartContent({ botId }: { botId: string }) {
-  const initialTo = useRef(Date.now());
-  const [range, setRange] = useState(() => ({ from: new Date(initialTo.current - 90 * DAY).toISOString(), to: new Date(initialTo.current).toISOString() }));
-  const [tf, setTf] = useState<'1d' | '4h'>('1d');
+  const [tf, setTf] = useState<SignalChartTimeframe | null>(null);
+  const [visibleRows, setVisibleRows] = useState(250);
   const [data, setData] = useState<ChartResponse | null>(null);
   const [selected, setSelected] = useState<Execution | null>(null);
   const [pinned, setPinned] = useState<Execution | null>(null);
   const [hovered, setHovered] = useState<Execution | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [paging, setPaging] = useState(false);
   const priceRef = useRef<HTMLDivElement>(null);
   const detailRef = useRef<HTMLDListElement>(null);
-  const requestKey = [botId, tf, range.from, range.to].join(':');
-  const currentRequest = useRef({ key: requestKey, generation: 0 });
-  if (currentRequest.current.key !== requestKey) currentRequest.current = { key: requestKey, generation: currentRequest.current.generation + 1 };
-  const pagingRequest = useRef<number | null>(null);
   function selectExecution(execution: Execution) {
     setSelected(execution);
     setPinned(null); setHovered(null);
@@ -132,16 +125,16 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
-    pagingRequest.current = null; setPaging(false);
+    setVisibleRows(250);
     setLoading(true); setData(null); setError(''); setSelected(null); setPinned(null); setHovered(null);
-    const query = new URLSearchParams({ tf, from: range.from, to: range.to });
+    const query = new URLSearchParams({ allTrades: '1', ...(tf ? { tf } : {}) });
     fetch(`/api/trading-bots/${encodeURIComponent(botId)}/trade-chart?${query}`, { credentials: 'include', headers: walletAuthHeaders(), signal: controller.signal })
       .then(async r => { const body = await safeResponseJson(r); if (!r.ok) throw Error(body?.code === 'MARKET_INVARIANT_VIOLATION' ? 'Market invariant violation: stored trades span another market' : body?.error || 'Chart unavailable'); return body as ChartResponse; })
       .then(body => { if (!cancelled) setData(body); })
       .catch(e => { if (!cancelled) setError(e.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; controller.abort(); };
-  }, [botId, range.from, range.to, tf]);
+  }, [botId, tf]);
   useEffect(() => {
     if (!data || !priceRef.current || data.price.availability !== 'available') return;
     const chart = createSharedTradePriceChart(priceRef.current);
@@ -149,7 +142,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
     const series = chart.addCandlestickSeries({ upColor: '#38bdf8', downColor: '#7854d4', wickUpColor: '#38bdf8', wickDownColor: '#7854d4', borderVisible: false, priceFormat: deriveAiTraderChartPriceFormat(undefined, data.price.candles.flatMap(c => [c.open, c.high, c.low, c.close])) });
     series.setData(data.price.candles.map(c => ({ ...c, time: c.time as UTCTimestamp })));
     series.setMarkers(tradeChartMarkers(data.executions).map(marker => ({ ...marker, time: marker.time as UTCTimestamp })));
-    const detachBoxes = attachTradeBoxes(chart, series, data.pairs, data.price.candles.map(c => c.time), tf === '1d' ? 86_400 : 14_400);
+    const detachBoxes = attachTradeBoxes(chart, series, data.pairs, data.price.candles.map(c => c.time), SIGNAL_CHART_BAR_MS[data.timeframe] / 1000);
     const byId = new Map(data.executions.map(row => [row.id, row]));
     chart.subscribeCrosshairMove(param => {
       setHovered(param.point && typeof param.hoveredObjectId === 'string' ? byId.get(param.hoveredObjectId) ?? null : null);
@@ -165,7 +158,12 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
     const bandSeries = chart.addHistogramSeries({ priceScaleId: 'trade-lane', base: 0, color: NEUTRAL_SPAN, priceLineVisible: false, lastValueVisible: false });
     bandSeries.priceScale().applyOptions({ visible: false, scaleMargins: { top: 0.975, bottom: 0.01 } });
     bandSeries.setData(data.bands.map(b => ({ time: (Date.parse(b.barTime) / 1000) as UTCTimestamp, value: 1, color: NEUTRAL_SPAN })));
-    chart.timeScale().fitContent();
+    // All candles stay loaded; only the initial viewport is focused on recent trades.
+    const latest = data.executions.reduce((time, row) => Math.max(time, Date.parse(row.exactTime) / 1000), 0);
+    const anchor = latest || data.price.candles[data.price.candles.length - 1].time;
+    let last = data.price.candles.length - 1;
+    while (last > 0 && data.price.candles[last].time > anchor) last--;
+    chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, last - 120), to: last + 10 });
     let resizeFrame = 0;
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(resizeFrame);
@@ -176,45 +174,17 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
     observer.observe(priceRef.current);
     return () => { observer.disconnect(); cancelAnimationFrame(resizeFrame); detachBoxes(); chart.remove(); };
   }, [data?.price.candles, data?.bands, data?.executions, data?.pairs, tf]);
-  async function loadMore() {
-    if (!data?.nextCursor || pagingRequest.current === currentRequest.current.generation) return;
-    const key = currentRequest.current.generation;
-    pagingRequest.current = key;
-    setPaging(true); setError('');
-    try {
-      const query = new URLSearchParams({ tf, from: range.from, to: range.to, cursor: data.nextCursor });
-      const r = await fetch(`/api/trading-bots/${encodeURIComponent(botId)}/trade-chart?${query}`, { credentials: 'include', headers: walletAuthHeaders() });
-      const body = await safeResponseJson(r) as ChartResponse;
-      if (currentRequest.current.generation !== key) return;
-      if (!r.ok) {
-        if ((body as unknown as { code?: string }).code === 'MARKET_INVARIANT_VIOLATION') {
-          setData(null);
-          throw Error('Market invariant violation: stored trades span another market');
-        }
-        throw Error('More history unavailable. Retry loading the remaining rows.');
-      }
-      setData(prev => prev ? { ...prev, complete: body.complete, nextCursor: body.nextCursor, executions: [...prev.executions, ...body.executions], bands: mergeNeutralBands(prev.bands, body.bands) } : body);
-    } catch (e) { if (currentRequest.current.generation === key) setError(e instanceof Error ? e.message : 'More history unavailable'); }
-    finally { if (pagingRequest.current === key) { pagingRequest.current = null; setPaging(false); } }
-  }
-  function older() {
-    if (data?.nextCursor) return;
-    const next = earlierChartWindow(range.from, data?.range.firstEligibleTradeAt ?? null);
-    if (next) setRange(next);
-  }
-  const fromMs = new Date(range.from).getTime();
+  const activeTf = tf ?? data?.timeframe;
   const priceVenue = data?.price.basisLabel.match(/^Reference price\s*[—–-]\s*([^\s(]+)/i)?.[1];
   return <section aria-label="Signal Bot trade history chart" className="min-w-0 space-y-3 text-xs">
     <div className="flex flex-wrap gap-2 items-center px-0.5"><strong className="text-sm font-medium mr-auto">{data?.market ?? 'Trade chart'}</strong>
       <div className="flex gap-0.5 rounded-md border border-border/50 p-0.5">
-        {(['1d', '4h'] as const).map(timeframe => <Button key={timeframe} type="button" size="sm" variant="ghost" onClick={() => setTf(timeframe)} aria-pressed={tf === timeframe} className={`min-h-0 h-6 px-2 text-xs ${tf === timeframe ? 'bg-primary/15 text-primary' : 'text-muted-foreground'}`}>{timeframe}</Button>)}
+        {SIGNAL_CHART_TIMEFRAMES.map(timeframe => <Button key={timeframe} type="button" size="sm" variant="ghost" onClick={() => setTf(timeframe)} aria-pressed={activeTf === timeframe} className={`min-h-0 h-6 px-2 text-xs ${activeTf === timeframe ? 'bg-primary/15 text-primary' : 'text-muted-foreground'}`}>{timeframe === '1d' ? 'D' : timeframe.toUpperCase()}</Button>)}
       </div>
-      <Button type="button" size="sm" variant="outline" onClick={older} disabled={!data || !!data.nextCursor || !data.range.firstEligibleTradeAt || fromMs <= new Date(data.range.firstEligibleTradeAt).getTime()}>Earlier 90 days</Button>
-      <Button type="button" size="sm" variant="outline" onClick={() => setRange({ from: new Date(initialTo.current - 90 * DAY).toISOString(), to: new Date(initialTo.current).toISOString() })} disabled={range.to === new Date(initialTo.current).toISOString()}>Recent 90 days</Button>
     </div>
     <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground">
       <p role="status">{priceVenue ? `Price: ${priceVenue.toUpperCase()} reference` : data ? 'Price unavailable' : 'Loading price…'}</p>
-      <p>{new Date(range.from).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} – {new Date(range.to).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</p>
+      <p>{data && <>{new Date(data.range.from).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} – {new Date(data.range.to).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</>}</p>
     </div>
     {loading && <p role="status" className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" />Loading chart…</p>}{error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     {data && <>
@@ -235,7 +205,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
       {data.openPosition && <p className="rounded-md border bg-muted/20 px-3 py-2 text-xs tabular-nums">Open: {data.openPosition.size === null ? 'Size unavailable' : `${data.openPosition.size < 0 ? 'SHORT' : 'LONG'} ${formatSize(data.openPosition.size)}`} @ {data.openPosition.entryPrice === null ? 'Price unavailable' : formatPrice(data.openPosition.entryPrice)}</p>}
       <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Arrows show direction · Circles show exit P&L</span></div>
       <div aria-label="Trade execution rows" className="max-h-48 overflow-y-auto rounded-lg border">
-        <ul className="divide-y divide-border">{data.executions.map(e => {
+        <ul className="divide-y divide-border">{data.executions.slice(0, visibleRows).map(e => {
           const pnl = e.kind === 'close' && e.accountingStatus === 'resolved' ? e.netPnl : null;
           const side = e.kind === 'close' ? 'CLOSE' : ['LONG', 'BUY'].includes(e.side.toUpperCase()) ? 'LONG' : ['SHORT', 'SELL'].includes(e.side.toUpperCase()) ? 'SHORT' : e.side.toUpperCase();
           return <li key={e.id}><Button type="button" size="sm" variant="ghost" onClick={() => selectExecution(e)} className={`h-auto w-full justify-start flex-wrap whitespace-normal rounded-none px-3 py-2 text-left text-xs font-normal gap-x-3 gap-y-1 ${pnl !== null && pnl > 0 ? 'bg-emerald-500/5' : pnl !== null && pnl < 0 ? 'bg-red-500/5' : 'bg-muted/20'} ${selected?.id === e.id ? 'ring-1 ring-inset ring-primary' : ''}`} aria-label={`${e.status} ${e.side} at ${e.exactTime}`} aria-pressed={selected?.id === e.id}>
@@ -265,7 +235,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
           <dt className="text-muted-foreground">Time held</dt><dd>{formatTimeHeld(selected.pair.timeHeldMs)}</dd>
         </>}
       </dl>}
-      {data.nextCursor && <div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="outline" disabled={paging} onClick={loadMore}>Load more trade rows</Button><span className="text-muted-foreground">More trades available in this range</span></div>}
+      {visibleRows < data.executions.length && <div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="outline" onClick={() => setVisibleRows(count => count + 250)}>Load more trade rows</Button><span className="text-muted-foreground">All trades are already shown on the chart</span></div>}
     </>}
   </section>;
 }
