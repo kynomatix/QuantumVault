@@ -93,7 +93,19 @@ import { pacificaQuota, QuotaExhaustedError, type RequestPriority } from './paci
 import { pacificaCache } from './pacifica-cache.js';
 import { appendTelemetry } from '../../telemetry.js';
 import { UNCONFIRMED_LANDING_VERDICT_TOKEN } from '../tx-verdicts.js';
+import {
+  observePacificaConstraints, parseVenueDecimal, checkEntryConstraints, evaluateOpeningMinimum,
+  isValidMultiple, ConstraintAdmissionError, marketConstraintView, refreshMarketConstraintView,
+  checkMarkPrice, unavailableMark, MARK_MAX_AGE_MS, type MarkPriceAuthority,
+  type MarketConstraintObservation,
+  type ConstraintAdmission, type OpeningPriceCandidates,
+} from '../market-constraints.js';
 import Decimal from 'decimal.js';
+import type { PacificaReductionContext } from '../protocol-types.js';
+
+class PacificaHttpError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
 
 const MAX_MARKET_CACHE_SIZE = 200;
 const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -429,6 +441,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   private marketCache: CacheEntry<ProtocolMarket[]> | null = null;
   private priceCache: Map<string, CacheEntry<number>> = new Map();
   private marketDetailsMap: Map<string, ProtocolMarket> = new Map();
+  private exitObservations = new Map<string, Partial<Record<'lot' | 'tick', MarketConstraintObservation>>>();
   private initialized = false;
   private telemetryInterval: NodeJS.Timeout | null = null;
   private builderSuppressionCounts = new Map<BuilderSuppressionReason, number>();
@@ -452,11 +465,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const mappings = buildPacificaMappings(pacificaSymbols);
     this.registry = new SymbolRegistry(mappings);
 
-    this.marketCache = { data: markets, fetchedAt: Date.now() };
-    this.marketDetailsMap.clear();
-    for (const market of markets) {
-      this.marketDetailsMap.set(market.internalSymbol.toUpperCase(), market);
-    }
+    this.installMarkets(markets);
 
     this.initialized = true;
 
@@ -474,6 +483,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   async shutdown(): Promise<void> {
     this.priceCache.clear();
     this.marketCache = null;
+    this.exitObservations.clear();
     this.marketDetailsMap.clear();
     this.initialized = false;
     if (this.telemetryInterval) {
@@ -570,15 +580,22 @@ export class PacificaAdapter implements ProtocolAdapter {
       this.marketCache &&
       Date.now() - this.marketCache.fetchedAt < MARKET_CACHE_TTL_MS
     ) {
+      for (const market of this.marketCache.data) refreshMarketConstraintView(market, Date.now());
       return this.marketCache.data;
     }
 
-    const markets = await this.fetchMarkets();
-    this.marketCache = { data: markets, fetchedAt: Date.now() };
-    this.marketDetailsMap.clear();
-    for (const market of markets) {
-      this.marketDetailsMap.set(market.internalSymbol.toUpperCase(), market);
+    // Display copies retain a successful observation. Only a failed refresh
+    // revokes that observation; money paths validate their own fresh read.
+    let markets: ProtocolMarket[];
+    try { markets = await this.fetchMarkets(); }
+    catch (error) {
+      for (const market of this.marketCache?.data ?? []) {
+        if (market.constraintObservation) market.constraintObservation.refreshFailed = true;
+        refreshMarketConstraintView(market, Date.now());
+      }
+      throw error;
     }
+    this.installMarkets(markets);
     return markets;
   }
 
@@ -840,7 +857,11 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!market) {
       throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
     }
+    const authority = checkEntryConstraints(market.constraintObservation, internalSymbol, Date.now());
+    if (!authority.ok) throw new ConstraintAdmissionError(authority);
     const lotSize = market.lotSize;
+    if (lotSize === undefined) throw new ConstraintAdmissionError({ ok: false,
+      code: 'constraint_unavailable', reason: `${internalSymbol}: lot unavailable` });
     const decimals = countDecimals(lotSize);
     // +epsilon before floor: float division of a clean lot multiple can yield e.g.
     // 0.3 / 0.1 === 2.9999999999999996, which would wrongly floor DOWN a whole lot
@@ -851,19 +872,17 @@ export class PacificaAdapter implements ProtocolAdapter {
     return parseFloat(raw.toFixed(decimals));
   }
 
-  quantizeOrderSizeCeil(internalSymbol: string, size: number): number {
+  async quantizeOrderSizeCeil(internalSymbol: string, size: number): Promise<number> {
     this.ensureInitialized();
     if (!Number.isFinite(size) || size <= 0) {
       throw new Error(`PacificaAdapter: invalid order size ${size}`);
     }
-    const market = this.marketDetailsMap.get(internalSymbol.toUpperCase());
-    if (!market) {
-      throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
+    const lotSize = await this.getExitStep(internalSymbol, 'lot');
+    if (lotSize === null) {
+      throw new ConstraintAdmissionError({ ok: false, code: 'constraint_unavailable',
+        reason: `${internalSymbol}: reduction lot unavailable after fresh /info and saved observation` });
     }
-    const lotSize = market.lotSize;
-    const decimals = countDecimals(lotSize);
-    const raw = Math.ceil(size / lotSize) * lotSize;
-    return parseFloat(raw.toFixed(decimals));
+    return new Decimal(String(size)).div(String(lotSize)).ceil().mul(String(lotSize)).toNumber();
   }
 
   quantizePrice(internalSymbol: string, price: number): number {
@@ -875,10 +894,222 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!market) {
       throw new Error(`PacificaAdapter: unknown market "${internalSymbol}"`);
     }
+    const authority = checkEntryConstraints(market.constraintObservation, internalSymbol, Date.now());
+    if (!authority.ok) throw new ConstraintAdmissionError(authority);
     const tickSize = market.tickSize;
+    if (tickSize === undefined) throw new ConstraintAdmissionError({ ok: false,
+      code: 'constraint_unavailable', reason: `${internalSymbol}: tick unavailable` });
     const decimals = countDecimals(tickSize);
     const raw = Math.round(price / tickSize) * tickSize;
     return parseFloat(raw.toFixed(decimals));
+  }
+
+  private installMarkets(markets: ProtocolMarket[]): void {
+    const now = Date.now();
+    const next = new Map(markets.map(m => [m.internalSymbol.toUpperCase(), m]));
+    for (const [key, previous] of this.marketDetailsMap) {
+      if (!checkEntryConstraints(next.get(key)?.constraintObservation, previous.internalSymbol, now).ok) {
+        if (previous.constraintObservation) previous.constraintObservation.refreshFailed = true;
+        refreshMarketConstraintView(previous, now);
+      }
+    }
+    // Retain applicable exit fields independently, with their original clocks.
+    for (const [key, fields] of this.exitObservations) {
+      for (const field of ['lot', 'tick'] as const) {
+        if (fields[field] && now > fields[field]!.expiresAt) delete fields[field];
+      }
+      if (!fields.lot && !fields.tick) this.exitObservations.delete(key);
+    }
+    for (const [key, market] of next) {
+      const observation = market.constraintObservation;
+      if (!observation) continue;
+      const fields = this.exitObservations.get(key) ?? {};
+      for (const field of ['lot', 'tick'] as const) {
+        if (observation[field]) fields[field] = { ...observation };
+      }
+      if (fields.lot || fields.tick) this.exitObservations.set(key, fields);
+    }
+    this.marketDetailsMap = next;
+    this.marketCache = { data: markets, fetchedAt: now };
+  }
+
+  /** Exit fields are independent: a market close needs a lot, while a priced
+   * reduction or protective leg also needs a tick. A failed refresh can still
+   * use the same-market observation for at most five minutes from its origin. */
+  private async getExitStep(internalSymbol: string, field: 'lot' | 'tick'): Promise<number | null> {
+    const key = internalSymbol.toUpperCase();
+    const saved = this.marketDetailsMap.get(key)?.constraintObservation;
+    const usable = (observation: typeof saved): number | null => {
+      if (!observation || observation.market !== internalSymbol || observation.source !== '/info'
+          || observation.venue !== 'pacifica' || !Number.isFinite(observation.observedAt)
+          || observation.observedAt > Date.now()
+          || Date.now() > observation.observedAt + 5 * 60 * 1000) return null;
+      return observation[field]?.value ?? null;
+    };
+    if (saved && !saved.refreshFailed && usable(saved) !== null) return usable(saved);
+    if (saved) saved.refreshFailed = true;
+    try {
+      const markets = await this.fetchMarkets();
+      this.installMarkets(markets);
+      const fresh = usable(this.marketDetailsMap.get(key)?.constraintObservation);
+      if (fresh !== null) return fresh;
+    } catch {
+      // The bounded saved observation below is the declared exit fallback.
+    }
+    return usable(this.exitObservations.get(key)?.[field]);
+  }
+
+  async quantizeReductionPrice(internalSymbol: string, price: number): Promise<number> {
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new ConstraintAdmissionError({ ok: false, code: 'invalid_intended_order',
+        reason: `${internalSymbol}: reduction price invalid` });
+    }
+    const tick = await this.getExitStep(internalSymbol, 'tick');
+    if (tick === null) {
+      throw new ConstraintAdmissionError({ ok: false, code: 'constraint_unavailable',
+        reason: `${internalSymbol}: reduction tick unavailable after fresh /info and saved observation` });
+    }
+    return parseFloat((Math.round(price / tick) * tick).toFixed(countDecimals(tick)));
+  }
+
+  private async prepareReduction(
+    params: Pick<MarketOrderParams, 'agentPublicKey' | 'internalSymbol' | 'side' | 'sizeBase' | 'subaccountId' | 'reductionContext'>,
+    needsTick: boolean,
+  ): Promise<{ ok: true; size: number; tick: number | null } | { ok: false; rejection: Extract<ConstraintAdmission, { ok: false }> }> {
+    const denied = (reason: string) => ({ ok: false as const,
+      rejection: { ok: false as const, code: 'constraint_unavailable' as const, reason } });
+    const resolved = await this.resolveReductionPosition(params);
+    if (!resolved.ok) return resolved;
+    const position = resolved.position;
+    const positionSize = position?.baseSize;
+    if (positionSize === undefined || !Number.isFinite(positionSize) || positionSize === 0
+        || (positionSize > 0 ? params.side !== 'short' : params.side !== 'long')
+        || !Number.isFinite(params.sizeBase) || params.sizeBase <= 0) {
+      return denied(`${params.internalSymbol}: reduce-only side or position bound failed`);
+    }
+    const lot = await this.getExitStep(params.internalSymbol, 'lot');
+    if (lot === null) return denied(`${params.internalSymbol}: reduction lot unavailable after fresh /info and saved observation`);
+    const tick = needsTick ? await this.getExitStep(params.internalSymbol, 'tick') : null;
+    if (needsTick && tick === null) return denied(`${params.internalSymbol}: reduction tick unavailable after fresh /info and saved observation`);
+    const rounded = new Decimal(String(params.sizeBase)).div(String(lot)).ceil().mul(String(lot)).toNumber();
+    // Ordinary reductions round up; only a strict read establishes a position cap.
+    // A full close constructed from fallback evidence has its own request limit.
+    const positionCap = resolved.current === true ? Math.abs(positionSize) : Infinity;
+    const cap = Math.min(positionCap, resolved.fallbackFullCloseLimit ?? Infinity);
+    const size = Math.min(rounded, cap);
+    const residual = resolved.current === true ? Math.max(0, Math.abs(positionSize) - size) : null;
+    if (residual !== null && residual > 0) {
+      console.info(`[Pacifica] reduce-only ${params.internalSymbol}: residual base size ${residual}`);
+    }
+    if (!Number.isFinite(size) || size <= 0
+        || size > cap) {
+      return denied(`${params.internalSymbol}: quantized reduction would exceed position bound`);
+    }
+    return { ok: true, size, tick };
+  }
+
+  private async preflightOpeningOrder(
+    internalSymbol: string,
+    intended: Omit<OpeningPriceCandidates, 'mark'>,
+  ): Promise<ConstraintAdmission> {
+    try {
+      await this.getMarkets();
+    } catch {
+      // getMarkets revokes retained entry observations when its refresh fails.
+      return { ok: false, code: 'constraint_unavailable',
+        reason: `${internalSymbol}: Pacifica /info refresh failed` };
+    }
+    const observation = this.marketDetailsMap.get(internalSymbol.toUpperCase())?.constraintObservation;
+    const authority = checkEntryConstraints(observation, internalSymbol, Date.now());
+    if (!authority.ok) return authority;
+    if (!observation?.lot || !observation.tick || !observation.openingMinimum) {
+      return { ok: false, code: 'constraint_unavailable', reason: `${internalSymbol}: /info fields unavailable` };
+    }
+    if (!isValidMultiple(intended.quantityBase, observation.lot.exact)
+        || (intended.limit !== undefined && !isValidMultiple(intended.limit, observation.tick.exact))
+        || (intended.trigger !== undefined && !isValidMultiple(intended.trigger, observation.tick.exact))) {
+      return { ok: false, code: 'invalid_intended_order',
+        reason: `${internalSymbol}: intended quantity or price is not on the current /info lot or tick` };
+    }
+
+    const mark = await this.getMarkPrice(internalSymbol);
+    if (mark.kind === 'unavailable') return { ok: false, ...mark,
+      floorUsd: observation.openingMinimum.value };
+    const stillValid = checkEntryConstraints(observation, internalSymbol, Date.now());
+    if (!stillValid.ok) return stillValid;
+    return evaluateOpeningMinimum({ ...intended, mark: mark.exact }, observation.openingMinimum.exact);
+  }
+
+  async getMarkPrice(internalSymbol: string): Promise<MarkPriceAuthority> {
+    const protocolSymbol = this.getRegistry().internalToProtocol(internalSymbol);
+    const fail = (reason: Parameters<typeof unavailableMark>[2], status?: number) =>
+      unavailableMark(internalSymbol, protocolSymbol, reason, status);
+    let envelope: unknown;
+    const startedAt = Date.now();
+    try {
+      envelope = await this.get('/info/prices', undefined, {
+        priority: 'normal', cachePolicy: 'fresh-required', responseShape: 'envelope',
+      });
+    } catch (error) {
+      if (error instanceof QuotaExhaustedError) return fail('quota_unavailable');
+      if (error instanceof PacificaHttpError) return fail(error.status === 429 ? 'rate_limited' : 'http_error', error.status);
+      return fail('transport_failed');
+    }
+    const receivedAt = Date.now();
+    if (receivedAt < startedAt) return fail('clock_regression');
+    if (!envelope || typeof envelope !== 'object' || !('success' in envelope)
+        || envelope.success !== true || !('data' in envelope) || !Array.isArray(envelope.data))
+      return fail('invalid_envelope');
+    const matches = envelope.data.filter(row => row && typeof row === 'object' && row.symbol === protocolSymbol);
+    if (!matches.length) return fail('symbol_missing');
+    if (matches.length !== 1) return fail('symbol_ambiguous');
+    const row = matches[0];
+    const mark = parseVenueDecimal(row.mark, 'price');
+    if (!mark) return fail('invalid_mark');
+    if (!Number.isSafeInteger(row.timestamp) || row.timestamp < 0) return fail('invalid_timestamp');
+    return checkMarkPrice({ kind: 'available', venue: 'pacifica', internalSymbol, protocolSymbol,
+      source: '/info/prices', field: 'mark', exact: mark.exact, observedAt: row.timestamp,
+      receivedAt, expiresAt: row.timestamp + MARK_MAX_AGE_MS }, internalSymbol, receivedAt);
+  }
+
+  private readonly reductionObservations = new Map<string, PacificaReductionContext>();
+  private readonly resolvedReductions = new WeakMap<object, { position: ProtocolPosition; current: boolean; fallbackFullCloseLimit?: number }>();
+
+  private reductionKey(account: string, market: string, subaccountId?: string): string {
+    return JSON.stringify([account, subaccountId ?? null, market]);
+  }
+
+  private async resolveReductionPosition(params: Pick<MarketOrderParams,
+    'agentPublicKey' | 'internalSymbol' | 'subaccountId' | 'reductionContext'>): Promise<
+      { ok: true; position: ProtocolPosition | null; current?: boolean; fallbackFullCloseLimit?: number } |
+      { ok: false; rejection: Extract<ConstraintAdmission, { ok: false }> }> {
+    const previouslyResolved = this.resolvedReductions.get(params);
+    if (previouslyResolved) return { ok: true, ...previouslyResolved };
+    const key = this.reductionKey(params.agentPublicKey, params.internalSymbol, params.subaccountId);
+    try {
+      const position = await this.getStrictPositionForMarket(params.agentPublicKey, params.internalSymbol, params.subaccountId);
+      return position ? { ok: true, position, current: true } : { ok: true, position: null };
+    } catch { /* Exhaust construction evidence; venue enforcement remains mandatory. */ }
+    const retained = this.reductionObservations.get(key);
+    const valid = (context: PacificaReductionContext | undefined): context is PacificaReductionContext =>
+      !!context && context.venue === 'pacifica' && context.source === '/positions'
+      && context.account === params.agentPublicKey && context.subaccountId === params.subaccountId
+      && context.internalSymbol === params.internalSymbol && Number.isSafeInteger(context.observedAt)
+      && context.observedAt <= Date.now() && Number.isFinite(context.baseSize) && context.baseSize !== 0;
+    const caller = params.reductionContext;
+    const evidence = valid(caller) && (!retained || caller.observedAt >= retained.observedAt)
+      ? caller : valid(retained) ? retained : undefined;
+    if (!evidence) return { ok: false, rejection: { ok: false, code: 'exit_position_sources_exhausted',
+      reason: `${params.internalSymbol}: position construction sources exhausted`,
+      missing: ['side', 'amount'], sourcesAttempted: ['strict /positions', 'caller venue context', 'retained venue observation'] } };
+    return { ok: true, current: false, position: { internalSymbol: evidence.internalSymbol, baseSize: evidence.baseSize,
+      reductionContext: evidence, entryPrice: 0, markPrice: 0, unrealizedPnl: 0, leverage: 0,
+      liquidationPrice: null, marginMode: 'cross', subaccountId: evidence.subaccountId } };
+  }
+
+  private constraintOrderResult(rejection: Extract<ConstraintAdmission, { ok: false }>): OrderResult {
+    return { success: false, status: 'rejected', error: rejection.reason,
+      constraintRejection: rejection };
   }
 
   /**
@@ -1126,6 +1357,9 @@ export class PacificaAdapter implements ProtocolAdapter {
       if (hasUnclassifiedRow) {
         throw new Error('PacificaAdapter: strict /positions cannot prove the requested market is absent');
       }
+      this.reductionObservations.set(this.reductionKey(agentPublicKey, internalSymbol, subaccountId), {
+        venue: 'pacifica', source: '/positions', account: agentPublicKey, internalSymbol, subaccountId,
+        observedAt: Date.now(), baseSize: 0 });
       return null;
     }
     if (matches.length !== 1) {
@@ -1168,6 +1402,9 @@ export class PacificaAdapter implements ProtocolAdapter {
       mapped.markPrice = mapped.entryPrice;
     }
     if (!Number.isFinite(mapped.unrealizedPnl)) mapped.unrealizedPnl = 0;
+    mapped.reductionContext = { venue: 'pacifica', source: '/positions', account: agentPublicKey,
+      internalSymbol, subaccountId, observedAt: Date.now(), baseSize: mapped.baseSize };
+    this.reductionObservations.set(this.reductionKey(agentPublicKey, internalSymbol, subaccountId), mapped.reductionContext);
     return mapped;
   }
 
@@ -1302,7 +1539,32 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async placeMarketOrder(params: MarketOrderParams): Promise<OrderResult> {
-    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
+    const completedEffects: string[] = [];
+    const openingAmount = String(params.sizeBase);
+    const reduction = params.reduceOnly ? await this.prepareReduction(params, false) : null;
+    if (reduction && !reduction.ok) return this.constraintOrderResult(reduction.rejection);
+    if (!params.reduceOnly) {
+      const admission = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'market', quantityBase: Number(openingAmount),
+      });
+      if (!admission.ok) return this.constraintOrderResult(admission);
+    }
+    const beforeEnrollmentEffect = params.reduceOnly ? undefined : async () => {
+      const admission = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'market', quantityBase: Number(openingAmount),
+      });
+      if (!admission.ok) throw new ConstraintAdmissionError(admission);
+    };
+    let enrollment: { builderApproved: boolean; referralClaimed?: boolean };
+    try {
+      enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey,
+        { beforeEffect: beforeEnrollmentEffect, completedEffects });
+    } catch (error) {
+      if (error instanceof ConstraintAdmissionError)
+        return { ...this.constraintOrderResult(error.rejection), completedEffects: [...completedEffects] };
+      throw error;
+    }
+    completedEffects.push(`enrollment returned builderApproved=${enrollment.builderApproved}; referralClaimed=${enrollment.referralClaimed ?? false}`);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
@@ -1354,6 +1616,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       }
 
       if (shouldSetLeverage) {
+    if (!params.reduceOnly) {
+      const recheck = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'market', quantityBase: Number(openingAmount),
+      });
+      if (!recheck.ok) return { ...this.constraintOrderResult(recheck), completedEffects: [...completedEffects] };
+    }
         await this.setLeverage({
           agentPublicKey: params.agentPublicKey,
           agentSecretKey: params.agentSecretKey,
@@ -1362,22 +1630,21 @@ export class PacificaAdapter implements ProtocolAdapter {
           leverage: params.leverage,
           subaccountId: params.subaccountId,
         });
+        completedEffects.push('leverage update completed');
         console.log(`[PacificaAdapter] Set leverage to ${params.leverage}x for ${params.internalSymbol} before order`);
       }
     }
 
     const slippagePct = params.maxSlippagePct ?? 0.5;
     const isReduceOnly = params.reduceOnly ?? false;
-    const orderSize = isReduceOnly
-      ? this.quantizeOrderSizeCeil(params.internalSymbol, params.sizeBase)
-      : this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
-    if (orderSize <= 0) {
+    const signedAmount = reduction && reduction.ok ? String(reduction.size) : openingAmount;
+    if (Number(signedAmount) <= 0) {
       throw new Error(`Order size ${params.sizeBase} rounds to zero for ${params.internalSymbol} (lot size too large)`);
     }
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      amount: String(orderSize),
+      amount: signedAmount,
       side: mapToProtocolSide(params.side),
       reduce_only: isReduceOnly,
       slippage_percent: String(slippagePct),
@@ -1400,6 +1667,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       operationData.builder_code = this.config.builderCode;
     }
 
+    if (!params.reduceOnly) {
+      const recheck = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'market', quantityBase: Number(openingAmount),
+      });
+      if (!recheck.ok) return { ...this.constraintOrderResult(recheck), completedEffects: [...completedEffects] };
+    }
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_MARKET_ORDER,
       operationData,
@@ -1427,22 +1700,49 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async placeLimitOrder(params: LimitOrderParams): Promise<OrderResult> {
-    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
+    const completedEffects: string[] = [];
+    const openingAmount = String(params.sizeBase);
+    const openingPrice = String(params.price);
+    const reduction = params.reduceOnly ? await this.prepareReduction(params, true) : null;
+    if (reduction && !reduction.ok) return this.constraintOrderResult(reduction.rejection);
+    if (!params.reduceOnly) {
+      const admission = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'limit', quantityBase: Number(openingAmount), limit: Number(openingPrice),
+      });
+      if (!admission.ok) return this.constraintOrderResult(admission);
+    }
+    const beforeEnrollmentEffect = params.reduceOnly ? undefined : async () => {
+      const admission = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'limit', quantityBase: Number(openingAmount), limit: Number(openingPrice),
+      });
+      if (!admission.ok) throw new ConstraintAdmissionError(admission);
+    };
+    let enrollment: { builderApproved: boolean; referralClaimed?: boolean };
+    try {
+      enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey,
+        { beforeEffect: beforeEnrollmentEffect, completedEffects });
+    } catch (error) {
+      if (error instanceof ConstraintAdmissionError)
+        return { ...this.constraintOrderResult(error.rejection), completedEffects: [...completedEffects] };
+      throw error;
+    }
+    completedEffects.push(`enrollment returned builderApproved=${enrollment.builderApproved}; referralClaimed=${enrollment.referralClaimed ?? false}`);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
     const isReduceOnly = params.reduceOnly ?? false;
-    const quantizedSize = isReduceOnly
-      ? this.quantizeOrderSizeCeil(params.internalSymbol, params.sizeBase)
-      : this.quantizeOrderSize(params.internalSymbol, params.sizeBase);
-    if (quantizedSize <= 0) {
+    const signedAmount = reduction && reduction.ok ? String(reduction.size) : openingAmount;
+    if (Number(signedAmount) <= 0) {
       throw new Error(`Order size ${params.sizeBase} rounds to zero for ${params.internalSymbol} (lot size too large)`);
     }
-    const quantizedPrice = this.quantizePrice(params.internalSymbol, params.price);
+    const tick = reduction && reduction.ok ? reduction.tick : null;
+    const signedPrice = reduction && reduction.ok && tick !== null
+      ? String(parseFloat((Math.round(params.price / tick) * tick).toFixed(countDecimals(tick))))
+      : openingPrice;
 
     const operationData: Record<string, unknown> = {
       symbol: protocolSymbol,
-      price: String(quantizedPrice),
-      amount: String(quantizedSize),
+      price: signedPrice,
+      amount: signedAmount,
       side: mapToProtocolSide(params.side),
       tif: params.timeInForce,
       reduce_only: params.reduceOnly ?? false,
@@ -1459,6 +1759,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       operationData.builder_code = this.config.builderCode;
     }
 
+    if (!params.reduceOnly) {
+      const recheck = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'limit', quantityBase: Number(openingAmount), limit: Number(openingPrice),
+      });
+      if (!recheck.ok) return { ...this.constraintOrderResult(recheck), completedEffects: [...completedEffects] };
+    }
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_ORDER,
       operationData,
@@ -1534,14 +1840,9 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async closePosition(params: ClosePositionParams): Promise<OrderResult> {
-    const positions = await this.getPositions(
-      params.agentPublicKey,
-      params.subaccountId,
-    );
-
-    const position = positions.find(
-      (p) => p.internalSymbol.toUpperCase() === params.internalSymbol.toUpperCase(),
-    );
+    const resolved = await this.resolveReductionPosition(params);
+    if (!resolved.ok) return this.constraintOrderResult(resolved.rejection);
+    const position = resolved.position;
 
     if (!position || position.baseSize === 0) {
       return {
@@ -1556,7 +1857,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const closeSide: 'long' | 'short' = position.baseSize > 0 ? 'short' : 'long';
     const closeSize = Math.abs(position.baseSize);
 
-    const result = await this.placeMarketOrder({
+    const order: MarketOrderParams = {
       agentPublicKey: params.agentPublicKey,
       agentSecretKey: params.agentSecretKey,
       mainWalletAddress: params.mainWalletAddress,
@@ -1568,7 +1869,10 @@ export class PacificaAdapter implements ProtocolAdapter {
       subaccountId: params.subaccountId,
       builderCode: params.builderCode,
       maxSlippagePct: params.maxSlippagePct,
-    });
+    };
+    this.resolvedReductions.set(order, { position, current: resolved.current === true,
+      fallbackFullCloseLimit: resolved.current === true ? undefined : closeSize });
+    const result = await this.placeMarketOrder(order);
 
     if (result.success && result.status === 'filled') return result;
     return {
@@ -1623,7 +1927,33 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async placeStopOrder(params: StopOrderParams): Promise<OrderResult> {
-    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
+    const completedEffects: string[] = [];
+    const openingAmount = String(params.sizeBase);
+    const openingTrigger = String(params.triggerPrice);
+    const reduction = params.reduceOnly ? await this.prepareReduction(params, true) : null;
+    if (reduction && !reduction.ok) return this.constraintOrderResult(reduction.rejection);
+    if (!params.reduceOnly) {
+      const admission = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'stop_market', quantityBase: Number(openingAmount), trigger: Number(openingTrigger),
+      });
+      if (!admission.ok) return this.constraintOrderResult(admission);
+    }
+    const beforeEnrollmentEffect = params.reduceOnly ? undefined : async () => {
+      const admission = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'stop_market', quantityBase: Number(openingAmount), trigger: Number(openingTrigger),
+      });
+      if (!admission.ok) throw new ConstraintAdmissionError(admission);
+    };
+    let enrollment: { builderApproved: boolean; referralClaimed?: boolean };
+    try {
+      enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey,
+        { beforeEffect: beforeEnrollmentEffect, completedEffects });
+    } catch (error) {
+      if (error instanceof ConstraintAdmissionError)
+        return { ...this.constraintOrderResult(error.rejection), completedEffects: [...completedEffects] };
+      throw error;
+    }
+    completedEffects.push(`enrollment returned builderApproved=${enrollment.builderApproved}; referralClaimed=${enrollment.referralClaimed ?? false}`);
     const signer = new PacificaSigner(params.agentSecretKey);
     const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
 
@@ -1636,8 +1966,11 @@ export class PacificaAdapter implements ProtocolAdapter {
       side: mapToProtocolSide(params.side),
       reduce_only: params.reduceOnly ?? false,
       stop_order: {
-        amount: String(this.quantizeOrderSize(params.internalSymbol, params.sizeBase)),
-        stop_price: String(this.quantizePrice(params.internalSymbol, params.triggerPrice)),
+        amount: reduction && reduction.ok ? String(reduction.size) : openingAmount,
+        stop_price: reduction && reduction.ok && reduction.tick !== null
+          ? String(parseFloat((Math.round(params.triggerPrice / reduction.tick) * reduction.tick)
+            .toFixed(countDecimals(reduction.tick))))
+          : openingTrigger,
       },
     };
 
@@ -1652,6 +1985,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       operationData.builder_code = this.config.builderCode;
     }
 
+    if (!params.reduceOnly) {
+      const recheck = await this.preflightOpeningOrder(params.internalSymbol, {
+        kind: 'stop_market', quantityBase: Number(openingAmount), trigger: Number(openingTrigger),
+      });
+      if (!recheck.ok) return { ...this.constraintOrderResult(recheck), completedEffects: [...completedEffects] };
+    }
     const body = signer.buildRequestBody(
       OPERATION_TYPES.CREATE_STOP_ORDER,
       operationData,
@@ -1669,19 +2008,9 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async setTpSl(params: TpSlParams): Promise<OrderResult> {
-    let positionSide: 'bid' | 'ask' | null = null;
-    try {
-      const positions = await this.getPositions(params.agentPublicKey, params.subaccountId);
-      const matches = positions.filter(p => p.internalSymbol === params.internalSymbol);
-      if (matches.length === 1) {
-        const positionSize = matches[0].baseSize;
-        if (Number.isFinite(positionSize) && positionSize !== 0) {
-          positionSide = positionSize > 0 ? 'bid' : 'ask';
-        }
-      }
-    } catch {
-      console.warn(`[SetTpSl] position_side_unavailable for ${params.internalSymbol}: position read failed`);
-    }
+    const resolved = await this.resolveReductionPosition(params);
+    const positionSize = resolved.ok ? resolved.position?.baseSize : undefined;
+    const positionSide = positionSize && Number.isFinite(positionSize) ? (positionSize > 0 ? 'bid' : 'ask') : null;
 
     if (positionSide === null) {
       console.warn(`[SetTpSl] position_side_unavailable for ${params.internalSymbol}: no unique finite nonzero position`);
@@ -1689,10 +2018,24 @@ export class PacificaAdapter implements ProtocolAdapter {
         success: false,
         status: 'rejected',
         error: 'position_side_unavailable',
+        ...(!resolved.ok ? { constraintRejection: resolved.rejection } : {}),
         appliedTakeProfitPrice: null,
         appliedStopLossPrice: null,
       };
     }
+
+    const protectiveRequested = (params.takeProfitPrice !== undefined && params.takeProfitPrice > 0)
+      || (params.stopLossPrice !== undefined && params.stopLossPrice > 0);
+    const protectiveTick = protectiveRequested ? await this.getExitStep(params.internalSymbol, 'tick') : null;
+    if (protectiveRequested && protectiveTick === null) {
+      return this.constraintOrderResult({ ok: false, code: 'constraint_unavailable',
+        reason: `${params.internalSymbol}: protective tick unavailable after fresh /info and saved observation` });
+    }
+    const quantizeProtectivePrice = (price: number): number => {
+      if (protectiveTick === null) throw new Error('protective tick unavailable');
+      return parseFloat((Math.round(price / protectiveTick) * protectiveTick)
+        .toFixed(countDecimals(protectiveTick)));
+    };
 
     const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
     const signer = new PacificaSigner(params.agentSecretKey);
@@ -1801,18 +2144,18 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
 
     if (tpRequested && !tpInvalid) {
-      const tpStopQ = this.quantizePrice(params.internalSymbol, params.takeProfitPrice as number);
+      const tpStopQ = quantizeProtectivePrice(params.takeProfitPrice as number);
       const tpLimitRaw = isLong
         ? (params.takeProfitPrice as number) * (1 - TP_SLIPPAGE)
         : (params.takeProfitPrice as number) * (1 + TP_SLIPPAGE);
-      const tpLimitQ = this.quantizePrice(params.internalSymbol, tpLimitRaw);
+      const tpLimitQ = quantizeProtectivePrice(tpLimitRaw);
       operationData.take_profit = {
         stop_price: String(tpStopQ),
         limit_price: String(tpLimitQ),
       };
     }
     if (slRequested && !slInvalid) {
-      const slStopQ = this.quantizePrice(params.internalSymbol, params.stopLossPrice as number);
+      const slStopQ = quantizeProtectivePrice(params.stopLossPrice as number);
       operationData.stop_loss = {
         stop_price: String(slStopQ),
       };
@@ -2290,6 +2633,8 @@ export class PacificaAdapter implements ProtocolAdapter {
       return denied('live_breakeven_native_threshold_not_met_preclaim');
     }
     if (Date.now() > permit.binding.expiresAtMs) return denied('live_breakeven_permit_expired');
+    const breakevenTick = await this.getExitStep(params.internalSymbol, 'tick');
+    if (breakevenTick === null) return denied('live_breakeven_reduction_tick_unavailable');
     const claim = await params.claimAttempt();
     if (claim.status !== 'claimed') return denied(`live_breakeven_claim_${claim.status}`);
     const claimDetails = {
@@ -2316,7 +2661,8 @@ export class PacificaAdapter implements ProtocolAdapter {
         side: closingSide,
         take_profit: {
           stop_price: takeProfitPrice,
-          limit_price: String(this.quantizePrice(params.internalSymbol, tpLimitRaw.toNumber())),
+          limit_price: String(parseFloat((Math.round(tpLimitRaw.toNumber() / breakevenTick)
+            * breakevenTick).toFixed(countDecimals(breakevenTick)))),
           trigger_price_type: 'last_trade_price',
         },
         stop_loss: {
@@ -2921,6 +3267,7 @@ export class PacificaAdapter implements ProtocolAdapter {
           tx.feePayer = agentPubkey;
           tx.add(depositIx);
 
+          await params.beforeOpeningEffect?.();
           txSignature = await sendAndConfirmTransaction(connection, tx, [agentKeypair], {
             commitment: 'confirmed',
             maxRetries: 3,
@@ -3139,6 +3486,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     subSecretKey: Uint8Array;
     agentPublicKey: string;
     fundingAmount: number;
+    beforeOpeningEffect: () => Promise<void>;
   }): Promise<{
     subaccountId: string;
     wasNewAccount: boolean;
@@ -3164,10 +3512,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       const depositAmount = Math.max(rawGap, PACIFICA_MIN_TRANSFER_USDC);
       console.log(`[PacificaAdapter] provisionFundedSubaccount: depositing $${depositAmount} (gap=$${rawGap.toFixed(2)}, mainBalance=$${currentMainBalance.toFixed(2)}, fundingAmount=$${input.fundingAmount}, wasNewAccount=${wasNewAccount})`);
 
+      await input.beforeOpeningEffect();
       const depositResult = await this.executeDeposit({
         agentPublicKey: input.agentPublicKey,
         agentSecretKey: input.mainSecretKey,
         amount: depositAmount,
+        beforeOpeningEffect: input.beforeOpeningEffect,
       });
       if (!depositResult.success) {
         throw new Error(`provisionFundedSubaccount: deposit failed: ${depositResult.error}`);
@@ -3200,6 +3550,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     let lastCreateError: Error | null = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
+        await input.beforeOpeningEffect();
         subaccountInfo = await this.createSubaccount({
           mainSecretKey: input.mainSecretKey,
           subSecretKey: input.subSecretKey,
@@ -3226,6 +3577,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     // subaccount exists with $0 and funds remain in main. Caller saves the bot row
     // and surfaces the warning so user can recover via existing Add Funds flow.
     try {
+      await input.beforeOpeningEffect();
       const transferResult = await this.transferBetweenSubaccounts({
         agentSecretKey: input.mainSecretKey,
         mainWalletAddress: input.agentPublicKey,
@@ -3305,10 +3657,12 @@ export class PacificaAdapter implements ProtocolAdapter {
       const depositAmount = Math.max(rawGap, PACIFICA_MIN_TRANSFER_USDC);
       console.log(`[PacificaAdapter] reuseSubaccount: depositing $${depositAmount} (gap=$${rawGap.toFixed(2)}, mainBalance=$${currentMainBalance.toFixed(2)}, fundingAmount=$${input.fundingAmount}, subaccount=${input.subaccountId})`);
 
+      await input.beforeOpeningEffect();
       const depositResult = await this.executeDeposit({
         agentPublicKey: input.agentPublicKey,
         agentSecretKey: input.mainSecretKey,
         amount: depositAmount,
+        beforeOpeningEffect: input.beforeOpeningEffect,
       });
       if (!depositResult.success) {
         throw new Error(`reuseSubaccount: deposit failed: ${depositResult.error}`);
@@ -3337,6 +3691,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     // 4. Transfer fundingAmount from main → the existing subaccount. On failure the
     // subaccount stays empty and funds remain in main (recoverable) — never fatal.
     try {
+      await input.beforeOpeningEffect();
       const transferResult = await this.transferBetweenSubaccounts({
         agentSecretKey: input.mainSecretKey,
         mainWalletAddress: input.agentPublicKey,
@@ -3521,7 +3876,8 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   private async fetchMarkets(): Promise<ProtocolMarket[]> {
-    const response = await this.get('/info');
+    const response = await this.get('/info', undefined, { cachePolicy: 'fresh-required' });
+    const observedAt = Date.now();
 
     const rawMarkets: PacificaMarketInfo[] = Array.isArray(response)
       ? response
@@ -3539,6 +3895,10 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
 
     const allProtocolSymbols = rawMarkets.slice(0, MAX_MARKET_CACHE_SIZE).map(m => m.symbol);
+    if (allProtocolSymbols.some(symbol => typeof symbol !== 'string' || !symbol.trim())
+        || new Set(allProtocolSymbols.map(symbol => symbol.toUpperCase())).size !== allProtocolSymbols.length) {
+      throw new Error('PacificaAdapter: /info returned invalid or ambiguous market symbols');
+    }
     const allMappings = buildPacificaMappings(allProtocolSymbols);
     const protocolToInternal = new Map<string, string>();
     for (const mapping of allMappings) {
@@ -3559,9 +3919,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       // Signal Bot admission checks maxLeverageSource and never treats this
       // fallback as venue authority.
       const maxLev = typeof m.max_leverage === 'number' ? m.max_leverage : parsedMaxLev || 1;
-      const minOrderUsd = parseFloat(String(m.min_order_size)) || 10;
-      const tickSz = parseFloat(String(m.tick_size)) || 0.01;
-      const lotSz = parseFloat(String(m.lot_size)) || 0.01;
+      const constraintObservation = observePacificaConstraints(m, internalSymbol, observedAt);
       const fundRate = m.funding_rate !== undefined ? parseFloat(String(m.funding_rate)) : undefined;
 
       return {
@@ -3569,10 +3927,8 @@ export class PacificaAdapter implements ProtocolAdapter {
         protocolSymbol,
         maxLeverage: maxLev,
         maxLeverageSource,
-        minOrderSizeUsd: minOrderUsd,
-        minOrderSizeBase: lotSz,
-        tickSize: tickSz,
-        lotSize: lotSz,
+        ...marketConstraintView(constraintObservation, Date.now()),
+        constraintObservation,
         isActive: true,
         category: m.instrument_type ? [m.instrument_type] : [],
         fullName: DISPLAY_NAMES[m.base_asset || protocolSymbol] || m.base_asset || protocolSymbol,
@@ -4005,7 +4361,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         const errorBody = await this.readBodyBounded(
           response.text(), 10_000, `GET ${path} error-body`,
         ).catch(() => '');
-        throw new Error(
+        throw new PacificaHttpError(response.status,
           `PacificaAdapter GET ${path}: ${response.status} ${response.statusText} — ${errorBody}`,
         );
       }
@@ -4100,6 +4456,7 @@ export class PacificaAdapter implements ProtocolAdapter {
   private async ensurePacificaEnrollment(
     agentPublicKey: string,
     agentSecretKey: Uint8Array,
+    control?: { beforeEffect?: () => Promise<void>; completedEffects: string[] },
   ): Promise<{ builderApproved: boolean; referralClaimed: boolean }> {
     try {
       const { storage } = await import('../../storage.js');
@@ -4153,14 +4510,18 @@ export class PacificaAdapter implements ProtocolAdapter {
             agentPublicKey,
             agentSecretKey,
             accountKind: kind,
+            beforeEffect: control?.beforeEffect,
           });
+          control?.completedEffects.push(`builder approval returned ${builderApproved}`);
         }
         if (referralApplicable && !referralClaimed && this.config.referralAddress) {
           referralClaimed = await this.claimReferralCodeForUser({
             agentPublicKey,
             agentSecretKey,
             accountKind: kind,
+            beforeEffect: control?.beforeEffect,
           });
+          control?.completedEffects.push(`referral claim returned ${referralClaimed}`);
         }
         return { builderApproved, referralClaimed };
       })().finally(() => {
@@ -4170,6 +4531,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       this.enrollmentInFlight.set(agentPublicKey, work);
       return await work;
     } catch (err: any) {
+      if (err instanceof ConstraintAdmissionError) throw err;
       // Never let enrollment failures break a trade. Builder injection is
       // gated on the returned `builderApproved` flag (so fail-closed naturally
       // falls back to "place the order without our code"); referral is
@@ -4194,6 +4556,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     // Defaults to 'wallet' for backward-compat with the provision warm-up
     // call site in routes.ts which always operates on the main agent key.
     accountKind?: 'wallet' | 'bot';
+    beforeEffect?: () => Promise<void>;
   }): Promise<boolean> {
     const builderCode = this.config.builderCode;
     if (!builderCode) return false;
@@ -4218,6 +4581,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       ),
       '[PacificaBuilderApprove]',
       /already.*approv/i,
+      input.beforeEffect,
     );
 
     if (ok) {
@@ -4245,6 +4609,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     agentSecretKey: Uint8Array;
     // Task 149: see approveBuilderCodeForUser. Defaults to 'wallet'.
     accountKind?: 'wallet' | 'bot';
+    beforeEffect?: () => Promise<void>;
   }): Promise<boolean> {
     const refAddress = this.config.referralAddress;
     if (!refAddress) return false;
@@ -4281,6 +4646,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       },
       '[PacificaReferralClaim]',
       /already.*claim/i,
+      input.beforeEffect,
     );
 
     if (ok) {
@@ -4314,10 +4680,12 @@ export class PacificaAdapter implements ProtocolAdapter {
     buildBody: () => unknown,
     logTag: string,
     alreadyMatcher: RegExp,
+    beforeEffect?: () => Promise<void>,
   ): Promise<boolean> {
     const delays = [250, 600, 1100]; // ~1.95s cumulative cap
     let lastError = '';
     for (let attempt = 0; attempt < delays.length; attempt++) {
+      await beforeEffect?.();
       try {
         const body = buildBody();
         await this.post(path, body);

@@ -134,10 +134,13 @@ export async function verifyLiveProtectiveStop(input: {
     };
   } else {
     try {
-      const quantizedStopLossPrice = input.adapter.quantizePrice(
+      const quantizedStopLossPrice = await (input.adapter.quantizeReductionPrice?.(
         input.internalSymbol,
         input.expectedStopLossPrice,
-      );
+      ) ?? Promise.resolve(input.adapter.quantizePrice(
+        input.internalSymbol,
+        input.expectedStopLossPrice,
+      )));
       const snapshot = await input.adapter.getOpenProtectiveOrders(
         input.agentPublicKey,
         input.internalSymbol,

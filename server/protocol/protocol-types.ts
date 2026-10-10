@@ -1,17 +1,15 @@
 import { createHash } from 'node:crypto';
+import type { ConstraintAdmission, MarketConstraintObservation, PacificaConstraintAuthority } from './market-constraints';
 
 export type RiskTier = 'recommended' | 'caution' | 'high_risk';
 
-export interface ProtocolMarket {
+interface ProtocolMarketCommon {
   internalSymbol: string;
   protocolSymbol: string;
   maxLeverage: number;
   /** Whether maxLeverage is the parsed venue value or a compatibility fallback. */
   maxLeverageSource?: 'venue' | 'fallback';
-  minOrderSizeUsd: number;
-  minOrderSizeBase: number;
-  tickSize: number;
-  lotSize: number;
+  constraintObservation?: MarketConstraintObservation;
   isActive: boolean;
   category: string[];
   fullName: string;
@@ -23,7 +21,23 @@ export interface ProtocolMarket {
   estimatedSlippagePct: number;
 }
 
+export type PacificaMarketConstraints =
+  | { constraintAuthority: Extract<PacificaConstraintAuthority, { state: 'available' }>;
+      tickSize: number; lotSize: number; minOrderSizeBase: number; minOrderSizeUsd: number }
+  | { constraintAuthority: Extract<PacificaConstraintAuthority, { state: 'unavailable' }>;
+      tickSize?: never; lotSize?: never; minOrderSizeBase?: never; minOrderSizeUsd?: never };
+export type ProtocolMarket = ProtocolMarketCommon & (PacificaMarketConstraints |
+  { constraintAuthority?: never; tickSize: number; lotSize: number;
+    minOrderSizeBase: number; minOrderSizeUsd: number });
+
+/** Construction evidence only; the venue always enforces reduce_only. */
+export interface PacificaReductionContext {
+  venue: 'pacifica'; source: '/positions'; account: string; subaccountId?: string;
+  internalSymbol: string; observedAt: number; baseSize: number;
+}
+
 export interface ProtocolPosition {
+  reductionContext?: PacificaReductionContext;
   internalSymbol: string;
   baseSize: number;
   entryPrice: number;
@@ -45,6 +59,7 @@ export type BuilderAttachmentPolicy =
   | { mode: 'attach'; code: string };
 
 export interface MarketOrderParams {
+  reductionContext?: PacificaReductionContext;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
@@ -61,6 +76,7 @@ export interface MarketOrderParams {
 }
 
 export interface LimitOrderParams {
+  reductionContext?: PacificaReductionContext;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
@@ -88,7 +104,9 @@ export type OrderStatus =
 export type OrderLandingDisposition = 'terminal' | 'unconfirmed';
 
 export interface OrderResult {
+  completedEffects?: string[];
   success: boolean;
+  constraintRejection?: Extract<ConstraintAdmission, { ok: false }>;
   orderId?: string;
   clientOrderId?: string;
   status: OrderStatus;
@@ -135,6 +153,7 @@ export interface CancelResult {
 }
 
 export interface ClosePositionParams {
+  reductionContext?: PacificaReductionContext;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
@@ -163,6 +182,7 @@ export interface SetMarginModeParams {
 }
 
 export interface StopOrderParams {
+  reductionContext?: PacificaReductionContext;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
@@ -177,6 +197,7 @@ export interface StopOrderParams {
 }
 
 export interface TpSlParams {
+  reductionContext?: PacificaReductionContext;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
@@ -351,6 +372,8 @@ export interface AgentDepositParams {
   agentSecretKey: Uint8Array;
   amount: number;
   subaccountId?: string;
+  /** Opening flows recheck venue authority after RPC preflight, before each send. */
+  beforeOpeningEffect?: () => Promise<void>;
 }
 
 export interface AgentWithdrawParams {

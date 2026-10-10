@@ -1,3 +1,4 @@
+import { hasNumericMarketConstraints } from './protocol/market-constraints';
 import { getCachedMaxLeverage, getCachedMaxLeverageWithSource, isMarketNonTradable, getNonTradableMarkets, type MarketMaxLeverageReading } from "./leverage-cache-service";
 import { getMarketInfo as getAdapterMarketInfo, getAllMarkets as getAdapterAllMarkets } from "./market-registry";
 import type { MarketInfo as RegistryMarketInfo, MarketMaxLeverageSource } from "./market-registry";
@@ -201,22 +202,22 @@ export function getMarketIndex(symbol: string): number | null {
   return 0;
 }
 
-export function getMinOrderSize(symbol: string): number {
+export function getMinOrderSize(symbol: string): number | null {
   const normalizedSymbol = symbol.toUpperCase().includes('-PERP')
     ? symbol.toUpperCase()
     : `${symbol.toUpperCase()}-PERP`;
   const adapterInfo = getAdapterMarketInfo(normalizedSymbol);
-  if (adapterInfo) return adapterInfo.minOrderSizeBase;
-  return 0.01;
+  if (adapterInfo && hasNumericMarketConstraints(adapterInfo)) return adapterInfo.minOrderSizeBase;
+  return null;
 }
 
-export function getMinOrderSizeUsd(symbol: string): number {
+export function getMinOrderSizeUsd(symbol: string): number | null {
   const normalizedSymbol = symbol.toUpperCase().includes('-PERP')
     ? symbol.toUpperCase()
     : `${symbol.toUpperCase()}-PERP`;
   const adapterInfo = getAdapterMarketInfo(normalizedSymbol);
-  if (adapterInfo) return adapterInfo.minOrderSizeUsd;
-  return 10;
+  if (adapterInfo && hasNumericMarketConstraints(adapterInfo)) return adapterInfo.minOrderSizeUsd;
+  return null;
 }
 
 export function getMarketMaxLeverageWithSource(symbol: string): MarketMaxLeverageReading {

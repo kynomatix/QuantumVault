@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { refreshMarketConstraintView } from './protocol/market-constraints';
 import type { ProtocolMarket } from './protocol/protocol-types';
 
 function getModuleDir(): string {
@@ -143,24 +144,7 @@ export async function syncFromSdk(
 
 export type MarketMaxLeverageSource = 'venue' | 'fallback';
 
-export interface MarketInfo {
-  internalSymbol: string;
-  maxLeverage: number;
-  maxLeverageSource: MarketMaxLeverageSource;
-  maintenanceMarginWeight: number;
-  minOrderSizeUsd: number;
-  minOrderSizeBase: number;
-  tickSize: number;
-  lotSize: number;
-  isActive: boolean;
-  openInterestUsd?: number;
-  fullName: string;
-  category: string[];
-  warning?: string;
-  fundingRate?: number;
-  riskTier: 'recommended' | 'caution' | 'high_risk';
-  estimatedSlippagePct: number;
-}
+export type MarketInfo = ProtocolMarket & { maxLeverageSource: NonNullable<ProtocolMarket['maxLeverageSource']> };
 
 let marketCache: Map<string, MarketInfo> = new Map();
 let marketCacheUpdatedAt: Date | null = null;
@@ -169,24 +153,8 @@ const MARKET_CACHE_TTL_MS = 5 * 60 * 1000;
 export function updateMarketCache(markets: ProtocolMarket[]): void {
   const newCache = new Map<string, MarketInfo>();
   for (const m of markets) {
-    newCache.set(m.internalSymbol, {
-      internalSymbol: m.internalSymbol,
-      maxLeverage: m.maxLeverage,
-      maxLeverageSource: m.maxLeverageSource === 'venue' ? 'venue' : 'fallback',
-      maintenanceMarginWeight: m.maintenanceMarginWeight,
-      minOrderSizeUsd: m.minOrderSizeUsd,
-      minOrderSizeBase: m.minOrderSizeBase,
-      tickSize: m.tickSize,
-      lotSize: m.lotSize,
-      isActive: m.isActive,
-      openInterestUsd: m.openInterestUsd,
-      fullName: m.fullName,
-      category: m.category,
-      warning: m.warning,
-      fundingRate: m.fundingRate,
-      riskTier: m.riskTier,
-      estimatedSlippagePct: m.estimatedSlippagePct,
-    });
+    refreshMarketConstraintView(m, Date.now());
+    newCache.set(m.internalSymbol, { ...m, maxLeverageSource: m.maxLeverageSource ?? 'fallback' });
   }
   marketCache = newCache;
   marketCacheUpdatedAt = new Date();
@@ -194,15 +162,19 @@ export function updateMarketCache(markets: ProtocolMarket[]): void {
 }
 
 export function getMarketInfo(internalSymbol: string): MarketInfo | undefined {
-  return marketCache.get(internalSymbol);
+  const market = marketCache.get(internalSymbol);
+  if (market) refreshMarketConstraintView(market, Date.now());
+  return market;
 }
 
 export function getAllMarkets(): MarketInfo[] {
-  return Array.from(marketCache.values());
+  const markets = Array.from(marketCache.values());
+  for (const market of markets) refreshMarketConstraintView(market, Date.now());
+  return markets;
 }
 
 export function getActiveMarkets(): MarketInfo[] {
-  return Array.from(marketCache.values()).filter(m => m.isActive);
+  return getAllMarkets().filter(m => m.isActive);
 }
 
 export function isMarketCacheStale(): boolean {

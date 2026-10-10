@@ -8,6 +8,7 @@ import {
   isUnconfirmedLandingVerdict,
 } from '../../server/protocol/tx-verdicts.js';
 import type { MarketOrderParams } from '../../server/protocol/protocol-types.js';
+import { observePacificaConstraints } from '../../server/protocol/market-constraints.js';
 
 process.env.DATABASE_URL ??= 'postgresql://test:test@127.0.0.1:1/qv_test';
 process.env.AGENT_ENCRYPTION_KEY ??= '0'.repeat(64);
@@ -36,6 +37,16 @@ function adapter(): PacificaAdapter {
   subject.getRegistry = () => ({ internalToProtocol: () => 'BTC' });
   subject.quantizeOrderSize = (_symbol: string, size: number) => size;
   subject.quantizeOrderSizeCeil = (_symbol: string, size: number) => size;
+  subject.getMarkets = vi.fn(async () => {
+    const constraintObservation = observePacificaConstraints({
+      tick_size: '0.01', lot_size: '0.01', min_order_size: '1',
+    }, 'BTC-PERP', Date.now());
+    subject.marketDetailsMap.set('BTC-PERP', { constraintObservation });
+    return [{ internalSymbol: 'BTC-PERP', constraintObservation }];
+  });
+  subject.getMarkPrice = vi.fn(async () => ({ kind: 'available', venue: 'pacifica', internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC', source: '/info/prices', field: 'mark', exact: '101.5', observedAt: Date.now(), receivedAt: Date.now(), expiresAt: Date.now() + 5_000 }));
+  subject.getStrictPositionForMarket = vi.fn(async () => ({ baseSize: -0.01 }));
+  subject.getExitStep = vi.fn(async () => 0.01);
   return subject;
 }
 
@@ -318,4 +329,19 @@ describe('Pacifica entry transport soft/hard separation', () => {
       await vi.advanceTimersByTimeAsync(0);
     }
   });
+});
+
+
+// Install before module evaluation; restored spies return to a denying transport.
+const deniedHttp = vi.hoisted(() => {
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('Unmocked HTTP denied by test network boundary');
+  }) as typeof fetch;
+  return attempts;
+});
+afterEach(() => {
+  const unexpected = deniedHttp.splice(0);
+  expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
 });

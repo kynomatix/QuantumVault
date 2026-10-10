@@ -5,6 +5,7 @@ import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer';
 import { SymbolRegistry } from '../../server/protocol/symbol-registry';
 import type { MarketOrderParams, ProtocolPosition } from '../../server/protocol/protocol-types';
+import { observePacificaConstraints } from '../../server/protocol/market-constraints';
 
 const ACCOUNT = 'PacificaLeverageAccount111111111111111111111';
 const SECRET = new Uint8Array(64);
@@ -72,6 +73,14 @@ function makeAdapter(events: EventLog = []) {
     { internal: 'BTC-PERP', protocol: 'BTC', aliases: [] },
   ]);
   adapter.initialized = true;
+  const observed = () => observePacificaConstraints({
+    tick_size: '0.0001', lot_size: '0.01', min_order_size: '10',
+  }, 'LDO-PERP', Date.now());
+  adapter.getMarkets = vi.fn(async () => {
+    adapter.marketDetailsMap.set('LDO-PERP', { constraintObservation: observed() });
+    return [{ internalSymbol: 'LDO-PERP', constraintObservation: observed() }];
+  });
+  adapter.getMarkPrice = vi.fn(async () => ({ kind: 'available', venue: 'pacifica', internalSymbol: 'LDO-PERP', protocolSymbol: 'LDO', source: '/info/prices', field: 'mark', exact: '0.3764', observedAt: Date.now(), receivedAt: Date.now(), expiresAt: Date.now() + 5_000 }));
   adapter.ensurePacificaEnrollment = vi.fn(async () => ({
     builderApproved: false,
     referralClaimed: false,
@@ -382,6 +391,8 @@ describe('Pacifica leveraged market-order admission', () => {
   it('keeps reduce-only orders independent of settings and leverage', async () => {
     const events: EventLog = [];
     const { adapter } = makeAdapter(events);
+    vi.spyOn(adapter, 'getStrictPositionForMarket').mockResolvedValue({ baseSize: 77 } as ProtocolPosition);
+    (adapter as any).getExitStep = vi.fn(async () => 0.01);
     const fetchSpy = vi.spyOn(global, 'fetch');
 
     await adapter.placeMarketOrder(orderParams({ reduceOnly: true }));
@@ -389,4 +400,19 @@ describe('Pacifica leveraged market-order admission', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(events).toEqual(['POST /orders/create_market']);
   });
+});
+
+
+// Install before module evaluation; restored spies return to a denying transport.
+const deniedHttp = vi.hoisted(() => {
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('Unmocked HTTP denied by test network boundary');
+  }) as typeof fetch;
+  return attempts;
+});
+afterEach(() => {
+  const unexpected = deniedHttp.splice(0);
+  expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
 });

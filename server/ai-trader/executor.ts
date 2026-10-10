@@ -33,6 +33,7 @@ import {
   validateFeeRateQuote,
   type ProtocolAdapter,
 } from "../protocol/adapter";
+import { checkEntryConstraints, ConstraintAdmissionError, type ConstraintAdmission } from "../protocol/market-constraints";
 import { isUnconfirmedLandingResult } from "../protocol/tx-verdicts";
 import {
   applyGuardrails,
@@ -130,7 +131,7 @@ export type ExecuteFailureReason =
 
 export type ExecuteDecisionResult =
   | { ok: true; mode: "paper" | "live"; entryPrice: number }
-  | { ok: false; reason: ExecuteFailureReason; detail: string };
+  | { ok: false; reason: ExecuteFailureReason; detail: string; constraintRejection?: Extract<ConstraintAdmission, { ok: false }> };
 
 export interface ExecuteDecisionInput {
   bot: AiTraderBot;
@@ -394,6 +395,15 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   // later accounting, but missing fee context never blocks the atomic paper
   // entry. The close path records null fee/net-PnL when no truthful rate exists.
   if (bot.paperMode) {
+    if (bot.protocol === "pacifica") {
+      try {
+        await refreshEntryMarkets(input.adapter, bot.market);
+        input.adapter.quantizeOrderSize(bot.market, sizeBase as number);
+      } catch (error) {
+        if (!(error instanceof ConstraintAdmissionError)) throw error;
+        return unwindRejectedInternalDecision(input, constraintExecutionFailure(error));
+      }
+    }
     const result = await executePaperEntry(input, side);
     return result.ok ? result : unwindRejectedInternalDecision(input, result);
   }
@@ -479,10 +489,28 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   return result.ok ? result : unwindRejectedInternalDecision(input, result);
 }
 
+function constraintExecutionFailure(error: ConstraintAdmissionError): Extract<ExecuteDecisionResult, { ok: false }> {
+  return { ok: false, reason: "execution_revalidation_failed", detail: error.message,
+    constraintRejection: error.rejection };
+}
+
+async function refreshEntryMarkets(adapter: ProtocolAdapter, market: string): Promise<void> {
+  try {
+    const markets = await adapter.getMarkets();
+    const admission = checkEntryConstraints(markets.find(item => item.internalSymbol === market)?.constraintObservation, market, Date.now());
+    if (!admission.ok) throw new ConstraintAdmissionError(admission);
+  }
+  catch (error) {
+    if (error instanceof ConstraintAdmissionError) throw error;
+    throw new ConstraintAdmissionError({ ok: false, code: "constraint_unavailable",
+      reason: `fresh market constraints unavailable: ${error instanceof Error ? error.message : String(error)}` });
+  }
+}
+
 // --- Paper path -------------------------------------------------------------------
 
 /**
- * Paper entry: no adapter calls, no keys, no HMAC (G15 protects money paths —
+ * Paper entry: read-only constraint admission, no keys, no HMAC (G15 protects money paths —
  * a paper bot moves no funds, and paper bots have no execution authorization
  * to verify against). Entry fills at the decision-context mark price plus the
  * 0.05% adverse slippage penalty (plan §2e). The WO-6 monitor marks SL/TP
@@ -699,81 +727,87 @@ async function executeLiveEntry(
       };
     }
 
-    const accountDigest = n.contextDigest.account as Record<string, unknown> | null | undefined;
-    const positionState = accountDigest?.positionState === "open"
-      || accountDigest?.positionState === "flat"
-      || accountDigest?.positionState === "unknown"
-      ? accountDigest.positionState
-      : "unknown";
-    const revalidated = applyGuardrails(n.persistedRawDecision, {
-      entryPrice: revalidationPrice,
-      atr14: Number(n.contextDigest.indicators?.atr14?.value),
-      botMaxLeverage: bot.maxLeverage,
-      timeframe: bot.timeframe as GuardrailTimeframe,
-      takerFeeRate: NON_ADMISSION_TAKER_FEE_RATE,
-      maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
-      allocatedUsdc: Number(bot.allocatedUsdc),
-      positionState,
-      quantizeOrderSize: (value: number) => adapter.quantizeOrderSize(bot.market, value),
-      sizingMode: bot.sizingMode === "risk_based" ? "risk_based" : "discretionary",
-      riskMinPct: Number(bot.riskMinPct ?? "0.50"),
-      riskMaxPct: Number(bot.riskMaxPct ?? "1.50"),
-      currentEquity: balances.freeCollateral,
-      activeRange: n.contextDigest.activeRange ?? undefined,
-    });
-    if (!revalidated.ok || revalidated.clamped.action !== side) {
-      const codes = revalidated.violations.map((violation) => violation.code).join(",") || "action_changed";
-      console.warn(`[AiTrader] execution revalidation REJECTED bot=${bot.id.slice(0, 8)} market=${bot.market} violations=${codes}`);
-      return {
-        ok: false,
-        reason: "execution_revalidation_failed",
-        detail: `fresh venue-price guardrails rejected live entry (${codes})`,
-      };
-    }
-    const freshClamp = storedEntryClamp(revalidated.clamped, side);
-    if (!freshClamp) {
-      return {
-        ok: false,
-        reason: "execution_revalidation_failed",
-        detail: "fresh venue-price guardrails produced an unusable entry clamp",
-      };
-    }
+    try {
+      const accountDigest = n.contextDigest.account as Record<string, unknown> | null | undefined;
+      const positionState = accountDigest?.positionState === "open"
+        || accountDigest?.positionState === "flat"
+        || accountDigest?.positionState === "unknown"
+        ? accountDigest.positionState
+        : "unknown";
+      if (bot.protocol === "pacifica") await refreshEntryMarkets(adapter, bot.market);
+      const revalidated = applyGuardrails(n.persistedRawDecision, {
+        entryPrice: revalidationPrice,
+        atr14: Number(n.contextDigest.indicators?.atr14?.value),
+        botMaxLeverage: bot.maxLeverage,
+        timeframe: bot.timeframe as GuardrailTimeframe,
+        takerFeeRate: NON_ADMISSION_TAKER_FEE_RATE,
+        maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
+        allocatedUsdc: Number(bot.allocatedUsdc),
+        positionState,
+        quantizeOrderSize: (value: number) => adapter.quantizeOrderSize(bot.market, value),
+        sizingMode: bot.sizingMode === "risk_based" ? "risk_based" : "discretionary",
+        riskMinPct: Number(bot.riskMinPct ?? "0.50"),
+        riskMaxPct: Number(bot.riskMaxPct ?? "1.50"),
+        currentEquity: balances.freeCollateral,
+        activeRange: n.contextDigest.activeRange ?? undefined,
+      });
+      if (!revalidated.ok || revalidated.clamped.action !== side) {
+        const codes = revalidated.violations.map((violation) => violation.code).join(",") || "action_changed";
+        console.warn(`[AiTrader] execution revalidation REJECTED bot=${bot.id.slice(0, 8)} market=${bot.market} violations=${codes}`);
+        return {
+          ok: false,
+          reason: "execution_revalidation_failed",
+          detail: `fresh venue-price guardrails rejected live entry (${codes})`,
+        };
+      }
+      const freshClamp = storedEntryClamp(revalidated.clamped, side);
+      if (!freshClamp) {
+        return {
+          ok: false,
+          reason: "execution_revalidation_failed",
+          detail: "fresh venue-price guardrails produced an unusable entry clamp",
+        };
+      }
 
-    const maxLeverage = Math.min(n.persistedClampedDecision.leverage, freshClamp.leverage);
-    const maxMargin = Math.min(n.persistedClampedDecision.marginUsdc, freshClamp.marginUsdc);
-    const maxNotional = Math.min(n.persistedClampedDecision.notionalUsdc, freshClamp.notionalUsdc);
-    const rawSizeCap = Math.min(
-      n.persistedClampedDecision.sizeBase,
-      freshClamp.sizeBase,
-      maxNotional / revalidationPrice,
-      (maxMargin * maxLeverage) / revalidationPrice,
-    );
-    const boundedSize = adapter.quantizeOrderSize(bot.market, rawSizeCap);
-    const tolerance = Math.max(1, Math.abs(rawSizeCap)) * Number.EPSILON * 8;
-    if (!finitePositive(maxLeverage)
-        || !finitePositive(maxMargin)
-        || !finitePositive(maxNotional)
-        || !finitePositive(rawSizeCap)
-        || !finitePositive(boundedSize)
-        || boundedSize > rawSizeCap + tolerance) {
-      return {
-        ok: false,
-        reason: "execution_revalidation_failed",
-        detail: "fresh venue-price exposure bound or venue quantization was invalid",
-      };
+      const maxLeverage = Math.min(n.persistedClampedDecision.leverage, freshClamp.leverage);
+      const maxMargin = Math.min(n.persistedClampedDecision.marginUsdc, freshClamp.marginUsdc);
+      const maxNotional = Math.min(n.persistedClampedDecision.notionalUsdc, freshClamp.notionalUsdc);
+      const rawSizeCap = Math.min(
+        n.persistedClampedDecision.sizeBase,
+        freshClamp.sizeBase,
+        maxNotional / revalidationPrice,
+        (maxMargin * maxLeverage) / revalidationPrice,
+      );
+      const boundedSize = adapter.quantizeOrderSize(bot.market, rawSizeCap);
+      const tolerance = Math.max(1, Math.abs(rawSizeCap)) * Number.EPSILON * 8;
+      if (!finitePositive(maxLeverage)
+          || !finitePositive(maxMargin)
+          || !finitePositive(maxNotional)
+          || !finitePositive(rawSizeCap)
+          || !finitePositive(boundedSize)
+          || boundedSize > rawSizeCap + tolerance) {
+        return {
+          ok: false,
+          reason: "execution_revalidation_failed",
+          detail: "fresh venue-price exposure bound or venue quantization was invalid",
+        };
+      }
+      const boundedNotional = boundedSize * revalidationPrice;
+      const boundedMargin = boundedNotional / maxLeverage;
+      if (boundedNotional > maxNotional + tolerance || boundedMargin > maxMargin + tolerance) {
+        return {
+          ok: false,
+          reason: "execution_revalidation_failed",
+          detail: "fresh venue-price projection exceeded the reviewed exposure bound",
+        };
+      }
+      n.sizeBase = boundedSize;
+      n.marginUsdc = boundedMargin;
+      n.leverage = maxLeverage;
+    } catch (error) {
+      if (!(error instanceof ConstraintAdmissionError)) throw error;
+      return constraintExecutionFailure(error);
     }
-    const boundedNotional = boundedSize * revalidationPrice;
-    const boundedMargin = boundedNotional / maxLeverage;
-    if (boundedNotional > maxNotional + tolerance || boundedMargin > maxMargin + tolerance) {
-      return {
-        ok: false,
-        reason: "execution_revalidation_failed",
-        detail: "fresh venue-price projection exceeded the reviewed exposure bound",
-      };
-    }
-    n.sizeBase = boundedSize;
-    n.marginUsdc = boundedMargin;
-    n.leverage = maxLeverage;
 
     // G11 now evaluates the freshly bounded margin, never the stale decision-time amount.
     if (!Number.isFinite(balances.freeCollateral) || balances.freeCollateral < n.marginUsdc) {

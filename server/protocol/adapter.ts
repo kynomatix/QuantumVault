@@ -60,6 +60,8 @@ export interface ReuseSubaccountInput {
   /** The existing on-chain subaccount id being reused (a verified-empty spare). */
   subaccountId: string;
   fundingAmount: number;
+  /** Reacquire opening authority immediately before each funding effect. */
+  beforeOpeningEffect: () => Promise<void>;
 }
 
 /**
@@ -633,6 +635,8 @@ export interface ProtocolAdapter {
   getCapabilities(): AdapterCapabilities;
 
   getMarkets(): Promise<ProtocolMarket[]>;
+  /** Pacifica's fresh /info/prices mark, for opening admission. */
+  getMarkPrice?(internalSymbol: string): Promise<import('./market-constraints').MarkPriceAuthority>;
   getPrice(internalSymbol: string, opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null>;
   getAllPrices(): Promise<Record<string, number>>;
   /**
@@ -671,6 +675,8 @@ export interface ProtocolAdapter {
   getMaintenanceMarginWeight(internalSymbol: string): number;
   quantizeOrderSize(internalSymbol: string, size: number): number;
   quantizePrice(internalSymbol: string, price: number): number;
+  /** Protective/reduction price uses only a bounded venue tick source. */
+  quantizeReductionPrice?(internalSymbol: string, price: number): Promise<number>;
 
   getAccountInfo(agentPublicKey: string, subaccountId?: string): Promise<AccountInfo>;
   /**

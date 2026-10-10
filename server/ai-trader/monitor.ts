@@ -2760,14 +2760,20 @@ async function maybeFireLiveBreakeven(
   let expectedTakeProfitPrice: string;
   let expectedCurrentStopPrice: string;
   try {
-    quantizedCandidate = adapter.quantizePrice(bot.market, candidate.newSl);
+    quantizedCandidate = adapter.quantizeReductionPrice
+      ? await adapter.quantizeReductionPrice(bot.market, candidate.newSl)
+      : adapter.quantizePrice(bot.market, candidate.newSl);
     candidateStopPrice = new Decimal(quantizedCandidate).toFixed();
     expectedEntryPrice = new Decimal(view.entryPrice).toFixed();
     expectedTakeProfitPrice = new Decimal(
-      adapter.quantizePrice(bot.market, view.takeProfitPrice),
+      adapter.quantizeReductionPrice
+        ? await adapter.quantizeReductionPrice(bot.market, view.takeProfitPrice)
+        : adapter.quantizePrice(bot.market, view.takeProfitPrice),
     ).toFixed();
     expectedCurrentStopPrice = new Decimal(
-      adapter.quantizePrice(bot.market, view.stopLossPrice),
+      adapter.quantizeReductionPrice
+        ? await adapter.quantizeReductionPrice(bot.market, view.stopLossPrice)
+        : adapter.quantizePrice(bot.market, view.stopLossPrice),
     ).toFixed();
   } catch {
     rememberLiveBreakevenSuppression(view.decision.id, {

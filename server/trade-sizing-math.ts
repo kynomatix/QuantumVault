@@ -9,7 +9,7 @@
  *
  * evaluateNotionalFloor() mirrors that floor when deciding whether an order clears the
  * minimum, and when it doesn't, rounds the bumped size UP to a whole lot multiple (with a
- * small cushion for oracle<->mark drift) so the adapter's later Math.floor cannot drop it
+ * small cushion for price drift) so the adapter's later Math.floor cannot drop it
  * back under the minimum.
  */
 
@@ -54,6 +54,7 @@ export function ceilToLot(contracts: number, lotStep: number): number {
 }
 
 export interface NotionalFloorResult {
+  rejected?: false;
   /** True when the order, after lot-floor-quantization, would land below minOrderUsd. */
   needsBump: boolean;
   /** Size after mirroring the adapter's floor-quantization. */
@@ -66,12 +67,22 @@ export interface NotionalFloorResult {
   bumpedNotional: number;
 }
 
+export interface NotionalFloorRejection {
+  rejected: true;
+  reason: string;
+  needsBump?: undefined;
+  quantizedContracts?: undefined;
+  quantizedNotional?: undefined;
+  bumpedContracts?: undefined;
+  bumpedNotional?: undefined;
+}
+
 /**
  * Decide whether an order clears the venue minimum notional after lot-floor-quantization,
  * and if not, compute the smallest lot-aligned size whose notional clears it (UP, buffered).
  *
  * @param contracts    Desired order size in base contracts (pre-quantization).
- * @param price        Reference (oracle) price used for notional.
+ * @param price        Strictest applicable opening-minimum price used for notional.
  * @param minOrderUsd  Venue minimum order notional (USD).
  * @param lotStep      Venue lot step (== adapter minOrderSizeBase / lotSize).
  * @param buffer       Multiplier on the min notional when bumping (default 1% cushion).
@@ -82,11 +93,14 @@ export function evaluateNotionalFloor(
   minOrderUsd: number,
   lotStep: number,
   buffer = 1.01,
-): NotionalFloorResult {
+): NotionalFloorResult | NotionalFloorRejection {
+  if (![contracts, price, minOrderUsd, lotStep, buffer].every(v => Number.isFinite(v) && v > 0)) {
+    return { rejected: true, reason: 'Opening size, reference price, minimum or lot authority unavailable' };
+  }
   const quantizedContracts = floorToLot(contracts, lotStep);
   const quantizedNotional = quantizedContracts * price;
 
-  if (!(price > 0) || !(minOrderUsd > 0) || quantizedNotional >= minOrderUsd) {
+  if (quantizedNotional >= minOrderUsd) {
     return {
       needsBump: false,
       quantizedContracts,

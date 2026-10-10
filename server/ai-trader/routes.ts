@@ -44,6 +44,8 @@ import {
 import { resolveAgentKeypair } from "../agent-wallet";
 import { getAdapter, getDefaultAdapter } from "../protocol/adapter-registry";
 import { getMarketInfo } from "../market-registry";
+import { checkEntryConstraints, checkOpeningEffectAuthority } from "../protocol/market-constraints";
+import type { ProtocolMarket } from "../protocol/protocol-types";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
 import {
@@ -1937,6 +1939,8 @@ export function registerAiTraderRoutes(app: Express): void {
       if (adapter.protocolName !== "pacifica" || !caps.requiresExternalSubaccountKey) {
         return res.status(501).json({ error: `Live mode currently supports Pacifica only (this bot's protocol: ${bot.protocol}).` });
       }
+      const goLiveAuthority = await checkOpeningEffectAuthority(adapter, bot.market);
+      if (!goLiveAuthority.ok) return res.status(503).json({ error: goLiveAuthority.reason });
 
       const fundingAmount = Number(bot.allocatedUsdc);
       if (!(Number.isFinite(fundingAmount) && fundingAmount >= adapter.minTransferAmount)) {
@@ -2018,6 +2022,8 @@ export function registerAiTraderRoutes(app: Express): void {
         if (equity >= Math.max(adapter.minTransferAmount, fundingAmount / 2)) {
           fundingDetail = `already funded (equity $${equity.toFixed(2)})`;
         } else {
+          const authority = await checkOpeningEffectAuthority(adapter, bot.market);
+          if (!authority.ok) return res.status(503).json({ error: authority.reason });
           const tr = await adapter.transferBetweenSubaccounts({
             // Normalized 64-byte secret (resolveAgentKeypair) — the raw stored key
             // may be a 32-byte seed, which PacificaSigner would mis-handle.
@@ -2083,12 +2089,15 @@ export function registerAiTraderRoutes(app: Express): void {
 
         // Atomic provision + fund (throws on atomic failure → nothing stranded).
         // The helper consumes + zeroizes the mnemonic internally.
+        const authority = await checkOpeningEffectAuthority(adapter, bot.market);
+        if (!authority.ok) return res.status(503).json({ error: authority.reason });
         const provision = await provisionExternalKeyBotSubaccount({
           walletAddress: req.walletAddress!,
           agentKeypair,
           agentMnemonic: mnemonic,
           adapter,
           fundingAmount,
+          market: bot.market,
           umk: umkBuf,
         });
         mnemonic = null; // consumed (zeroized) by the helper

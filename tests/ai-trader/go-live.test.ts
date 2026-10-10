@@ -18,7 +18,7 @@
 //     never double-funds a funded subaccount,
 //   - UMK/agent-key handles are cleaned up on every exit.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach , afterEach} from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 
 const scannerCapabilitiesMock = vi.hoisted(() => ({
@@ -120,6 +120,7 @@ vi.mock("../../server/ai-trader/scanner", () => ({
 
 import { registerAiTraderRoutes } from "../../server/ai-trader/routes";
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
+import { observePacificaConstraints, unavailableMark } from "../../server/protocol/market-constraints";
 
 // --- Fake express harness ---------------------------------------------------------------
 
@@ -237,6 +238,18 @@ function makeAdapter(overrides: Record<string, unknown> = {}) {
     minTransferAmount: 10,
     subaccountCaps: { maxPerAgent: 10 },
     getCapabilities: () => ({ requiresExternalSubaccountKey: true, walletDerivation: "agent_hd" }),
+    getMarkets: vi.fn(async () => [{
+      internalSymbol: "SOL-PERP",
+      protocolSymbol: "SOL",
+      constraintObservation: observePacificaConstraints({
+        tick_size: "0.01", lot_size: "0.01", min_order_size: "10",
+      }, "SOL-PERP", Date.now()),
+    }]),
+    getMarkPrice: vi.fn(async () => { const now = Date.now(); return {
+      kind: 'available' as const, venue: 'pacifica' as const, internalSymbol: 'SOL-PERP', protocolSymbol: 'SOL',
+      source: '/info/prices' as const, field: 'mark' as const, exact: '100',
+      observedAt: now, receivedAt: now, expiresAt: now + 5_000,
+    }; }),
     getAccountInfo: vi.fn(),
     transferBetweenSubaccounts: vi.fn(),
     ...overrides,
@@ -701,6 +714,34 @@ describe("go-live idempotent retry (subaccount + key already persisted)", () => 
     expect(updateBotMock.mock.calls.at(-1)![1]).toMatchObject({ paperMode: false });
   });
 
+  it.each(['stale mark', 'failed price read', 'expired constraints'])(
+    'refuses existing-subaccount funding when %s lapses after admission', async (lapse) => {
+      getAiTraderBotMock.mockResolvedValue(provisionedBot());
+      const adapter = makeAdapter();
+      (adapter.getAccountInfo as any).mockResolvedValue({ equity: 12, balance: 12 });
+      if (lapse === 'expired constraints') {
+        const good = await adapter.getMarkets();
+        (adapter.getMarkets as any).mockResolvedValueOnce(good).mockResolvedValueOnce([{
+          ...good[0], constraintObservation: observePacificaConstraints({
+            tick_size: '0.01', lot_size: '0.01', min_order_size: '10',
+          }, 'SOL-PERP', Date.now() - 301_000),
+        }]);
+      } else {
+        const first = await adapter.getMarkPrice();
+        (adapter.getMarkPrice as any).mockResolvedValueOnce(first).mockResolvedValue(
+          lapse === 'failed price read' ? unavailableMark('SOL-PERP', 'SOL', 'transport_failed')
+            : { ...first, observedAt: first.observedAt - 5_001, expiresAt: first.expiresAt - 5_001 },
+        );
+      }
+      getAdapterMock.mockReturnValue(adapter);
+      armHappyCrypto();
+      const r = await invoke(routes, GO_LIVE, goLiveReq());
+      expect(r.statusCode).toBe(503);
+      expect(adapter.transferBetweenSubaccounts).not.toHaveBeenCalled();
+      expect(provisionMock).not.toHaveBeenCalled();
+    },
+  );
+
   it("fails closed on a malformed pre-funding balance instead of treating it as zero", async () => {
     getAiTraderBotMock.mockResolvedValue(provisionedBot());
     const adapter = makeAdapter();
@@ -873,4 +914,19 @@ describe("POST /api/admin/ai-trader/waive", () => {
     expect(r.statusCode).toBe(200);
     expect(r.body.bot.graduationState).toBe("waived");
   });
+});
+
+
+// Install before module evaluation; restored spies return to a denying transport.
+const deniedHttp = vi.hoisted(() => {
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('Unmocked HTTP denied by test network boundary');
+  }) as typeof fetch;
+  return attempts;
+});
+afterEach(() => {
+  const unexpected = deniedHttp.splice(0);
+  expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
 });
