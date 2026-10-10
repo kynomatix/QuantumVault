@@ -1,5 +1,10 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
+import { pacificaCache } from '../../server/protocol/pacifica/pacifica-cache.js';
+import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota.js';
+import { updateMarketCache, getMarketInfo } from '../../server/market-registry.js';
+import { getMinOrderSize, getMinOrderSizeUsd } from '../../server/market-liquidity-service.js';
+import { evaluateNotionalFloor } from '../../server/trade-sizing-math.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
 import {
   observePacificaConstraints, checkEntryConstraints, evaluateOpeningMinimum,
@@ -9,15 +14,71 @@ import {
 afterEach(() => vi.restoreAllMocks());
 
 describe('Pacifica market constraint authority', () => {
-  it.each([undefined, null, '', ' ', 'abc', '1junk', '0', '-1', 'NaN', 'Infinity', '1e999', 10])(
-    'rejects invalid opening minimum %s without a fabricated value', (raw) => {
-      const observation = observePacificaConstraints({
-        tick_size: '0.1', lot_size: '0.0001', min_order_size: raw,
-      }, 'ETH-PERP', 1_000);
-      expect(observation.openingMinimum).toBeNull();
-      expect(checkEntryConstraints(observation, 'ETH-PERP', 1_001).ok).toBe(false);
-    },
-  );
+  describe.each([
+    ['min_order_size', 'openingMinimum'], ['tick_size', 'tick'], ['lot_size', 'lot'],
+  ] as const)('invalid %s authority', (field, observedField) => {
+    it.each([
+      ['missing', undefined], ['null', null], ['empty', ''], ['whitespace', ' \t\n'],
+      ['malformed', 'abc'], ['prefix junk', '1junk'], ['zero', '0'], ['negative', '-1'],
+      ['string NaN', 'NaN'], ['string Infinity', 'Infinity'], ['string -Infinity', '-Infinity'],
+      ['overflow', '1e999'], ['numeric NaN', NaN], ['numeric Infinity', Infinity],
+      ['numeric -Infinity', -Infinity], ['numeric zero', 0], ['numeric negative', -1],
+      ['numeric positive', 10], ['boolean true', true], ['boolean false', false],
+      ['object', {}], ['array', ['10']],
+    ])('rejects %s through cache, registry, liquidity, sizing and submission', async (_label, raw) => {
+      const row: Record<string, unknown> = { symbol: 'SOL', tick_size: '0.1', lot_size: '0.01',
+        min_order_size: '10', max_leverage: 10 };
+      if (raw === undefined) delete row[field];
+      else row[field] = raw;
+      const adapter = new PacificaAdapter();
+      const get = vi.spyOn(adapter as any, 'get').mockResolvedValue([row]);
+      const enrollment = vi.spyOn(adapter as any, 'ensurePacificaEnrollment');
+      const post = vi.spyOn(adapter as any, 'post');
+      const sign = vi.spyOn(PacificaSigner.prototype, 'buildRequestBody');
+      try {
+        await adapter.initialize();
+        const markets = await adapter.getMarkets();
+        const observation = markets[0].constraintObservation!;
+        expect(observation[observedField]).toBeNull();
+        for (const validField of ['openingMinimum', 'tick', 'lot'] as const) {
+          if (validField !== observedField) expect(observation[validField]).not.toBeNull();
+        }
+        expect((adapter as any).marketDetailsMap.get('SOL-PERP').constraintObservation).toBe(observation);
+        updateMarketCache(markets);
+        const registered = getMarketInfo('SOL-PERP')!;
+        expect(registered.constraintObservation).toBe(observation);
+        expect(checkEntryConstraints(observation, 'SOL-PERP', Date.now()))
+          .toMatchObject({ ok: false, code: 'constraint_unavailable' });
+        for (const market of [markets[0], registered, (adapter as any).marketDetailsMap.get('SOL-PERP')]) {
+          for (const name of ['tickSize', 'lotSize', 'minOrderSizeBase', 'minOrderSizeUsd']) {
+            expect(market[name]).toBeUndefined();
+          }
+        }
+        const lot = getMinOrderSize('sol');
+        const minimum = getMinOrderSizeUsd('sol-perp');
+        expect(lot).toBeNull();
+        expect(minimum).toBeNull();
+        expect(evaluateNotionalFloor(1, 100, minimum as any, lot as any)).toMatchObject({ rejected: true });
+        expect(evaluateOpeningMinimum({ kind: 'market', quantityBase: 1, mark: 100 }, minimum as any))
+          .toMatchObject({ ok: false });
+        expect(() => adapter.quantizeOrderSize('SOL-PERP', 1)).toThrow(/constraints unavailable/);
+        const intent = { agentPublicKey: 'account', agentSecretKey: new Uint8Array(64),
+          mainWalletAddress: 'wallet', internalSymbol: 'SOL-PERP', side: 'long' as const, sizeBase: 1 };
+        const results = [await adapter.placeMarketOrder(intent),
+          await adapter.placeLimitOrder({ ...intent, price: 100, timeInForce: 'GTC' }),
+          await adapter.placeStopOrder({ ...intent, triggerPrice: 100 })];
+        for (const result of results) expect(result.constraintRejection)
+          .toMatchObject({ code: 'constraint_unavailable' });
+        expect(enrollment).not.toHaveBeenCalled();
+        expect(sign).not.toHaveBeenCalled();
+        expect(post).not.toHaveBeenCalled();
+        expect(get).toHaveBeenCalledTimes(1);
+      } finally {
+        updateMarketCache([]);
+        await adapter.shutdown();
+      }
+    });
+  });
 
   it('retains exact values and the original observation time', () => {
     const observation = observePacificaConstraints({
@@ -603,4 +664,192 @@ describe('constraint observation boundary regressions', () => {
       await expect(adapter.getMarkPrice('SOL-PERP')).resolves.toMatchObject({ kind: 'unavailable', reason: 'clock_regression' });
     } finally { await adapter.shutdown(); clock.mockRestore(); }
   });
+});
+
+describe('review corrections: independent exit authority', () => {
+  it.each(['minimum', 'tick', 'minimum and tick'])(
+    'submits a market close with missing %s and a valid lot', async missing => {
+      const adapter = new PacificaAdapter();
+      const row: Record<string, unknown> = { symbol: 'SOL', tick_size: '0.1', lot_size: '0.1',
+        min_order_size: '10', max_leverage: 10 };
+      if (missing.includes('minimum')) delete row.min_order_size;
+      if (missing.includes('tick')) delete row.tick_size;
+      const get = vi.spyOn(adapter as any, 'get').mockResolvedValue([row]);
+      vi.spyOn(adapter as any, 'getStrictPositionForMarket').mockResolvedValue({ baseSize: 0.3 });
+      vi.spyOn(adapter as any, 'ensurePacificaEnrollment').mockResolvedValue({ builderApproved: false });
+      const post = vi.spyOn(adapter as any, 'post').mockResolvedValue({ order_id: 'close', status: 'filled' });
+      vi.spyOn(adapter as any, 'mapOrderResponse').mockReturnValue({ success: true, status: 'filled', fillSize: 0.3 });
+      const sign = vi.spyOn(PacificaSigner.prototype, 'buildRequestBody').mockImplementation(
+        (_type: string, data: Record<string, unknown>) => ({ ...data, signature: 'EXAMPLE' }) as any);
+      const exitStep = vi.spyOn(adapter as any, 'getExitStep');
+      const mark = vi.spyOn(adapter, 'getMarkPrice');
+      try {
+        await adapter.initialize();
+        const observation = (await adapter.getMarkets())[0].constraintObservation!;
+        expect(observation.lot?.value).toBe(0.1);
+        if (missing.includes('minimum')) expect(observation.openingMinimum).toBeNull();
+        if (missing.includes('tick')) expect(observation.tick).toBeNull();
+        expect(checkEntryConstraints(observation, 'SOL-PERP', Date.now()).ok).toBe(false);
+        const result = await adapter.closePosition({ agentPublicKey: 'account',
+          agentSecretKey: new Uint8Array(64), mainWalletAddress: 'owner', internalSymbol: 'SOL-PERP' });
+        expect(result).toMatchObject({ success: true, status: 'filled', fillSize: 0.3 });
+        expect(sign).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+          amount: '0.3', reduce_only: true, side: 'ask',
+        }), 'account', null);
+        expect(post).toHaveBeenCalledOnce();
+        expect(post).toHaveBeenCalledWith('/orders/create_market', expect.objectContaining({
+          amount: '0.3', reduce_only: true,
+        }));
+        expect(exitStep.mock.calls).toEqual([['SOL-PERP', 'lot']]);
+        expect(mark).not.toHaveBeenCalled();
+        expect(get).toHaveBeenCalledTimes(1);
+      } finally { await adapter.shutdown(); }
+    });
+
+  it.each(['SOL-PERP', 'sol-perp', 'SoL-PeRp'])(
+    'normalizes %s exit lookups without revoking shared entry authority', async symbol => {
+      const adapter = new PacificaAdapter();
+      const get = vi.spyOn(adapter as any, 'get').mockResolvedValue([{ symbol: 'SOL',
+        tick_size: '0.1', lot_size: '0.1', min_order_size: '10', max_leverage: 10 }]);
+      try {
+        await adapter.initialize();
+        const shared = (await adapter.getMarkets())[0];
+        updateMarketCache([shared]);
+        const registered = getMarketInfo('SOL-PERP')!;
+        await expect(adapter.quantizeReductionPrice(symbol, 10.04)).resolves.toBe(10);
+        await expect(adapter.quantizeOrderSizeCeil(symbol, 0.21)).resolves.toBe(0.3);
+        expect(get).toHaveBeenCalledTimes(1);
+        expect(registered.constraintObservation).toBe(shared.constraintObservation);
+        expect(shared.constraintObservation?.refreshFailed).toBe(false);
+        expect(checkEntryConstraints(registered.constraintObservation, 'SOL-PERP', Date.now())).toEqual({ ok: true });
+        expect(adapter.quantizeOrderSize('SOL-PERP', 0.3)).toBe(0.3);
+      } finally {
+        updateMarketCache([]);
+        await adapter.shutdown();
+      }
+    });
+});
+
+describe('review corrections: fresh-required HTTP cache authority', () => {
+  const initialTime = 1_800_000_000_000;
+  const row = (minimum = '10') => ({ symbol: 'SOL', tick_size: '0.1', lot_size: '0.1',
+    min_order_size: minimum, max_leverage: 10 });
+  const prices = (mark = '100') => ({ success: true,
+    data: [{ symbol: 'SOL', mark, timestamp: Date.now() }] });
+  const ok = (data: unknown) => new Response(JSON.stringify(data), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  });
+  const rateLimited = () => new Response('rate limited', { status: 429 });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(initialTime);
+    pacificaCache.invalidateAll();
+    vi.spyOn(pacificaQuota, 'canAfford').mockReturnValue(true);
+    vi.spyOn(pacificaQuota, 'record').mockImplementation(() => {});
+    vi.spyOn(pacificaQuota, 'noteRejection').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    pacificaCache.invalidateAll();
+    vi.useRealTimers();
+  });
+
+  async function seed() {
+    const transport = vi.spyOn(globalThis, 'fetch').mockImplementation(async input => {
+      const path = new URL(String(input)).pathname;
+      if (path === '/info') return ok({ success: true, data: [row()] });
+      if (path === '/info/prices') return ok(prices());
+      throw new Error(`Unexpected HTTP path: ${path}`);
+    });
+    const adapter = new PacificaAdapter({ baseUrl: 'http://test-pacifica.invalid' });
+    await adapter.initialize();
+    const previous = (await adapter.getMarkets())[0];
+    expect(await adapter.getMarkPrice('SOL-PERP')).toMatchObject({ kind: 'available', exact: '100' });
+    vi.setSystemTime(initialTime + 300_001);
+    transport.mockClear();
+    // Both real REST cache entries remain present, but neither is trading authority.
+    expect(pacificaCache.getStale('/info')?.ageMs).toBe(300_001);
+    expect(pacificaCache.getStale('/info/prices:envelope')?.ageMs).toBe(300_001);
+    return { adapter, transport, previous };
+  }
+
+  it.each(['quota', '429'] as const)(
+    'does not serve stale constraints or marks under %s, although display fallback can', async failure => {
+      const { adapter, transport, previous } = await seed();
+      try {
+        if (failure === 'quota') vi.mocked(pacificaQuota.canAfford).mockReturnValue(false);
+        transport.mockImplementation(async () => rateLimited());
+        const markets = adapter.getMarkets().then(() => 'unexpected success', error => error);
+        const mark = adapter.getMarkPrice('SOL-PERP');
+        if (failure === 'quota') await vi.advanceTimersByTimeAsync(8_001);
+        expect(await markets).toBeInstanceOf(Error);
+        expect(await mark).toMatchObject({ kind: 'unavailable',
+          reason: failure === 'quota' ? 'quota_unavailable' : 'rate_limited' });
+        expect(previous.constraintObservation?.refreshFailed).toBe(true);
+        expect(previous.constraintObservation?.observedAt).toBe(initialTime);
+        expect(checkEntryConstraints(previous.constraintObservation, 'SOL-PERP', Date.now()).ok).toBe(false);
+        expect(() => adapter.quantizeOrderSize('SOL-PERP', 1)).toThrow();
+        expect(transport).toHaveBeenCalledTimes(failure === 'quota' ? 0 : 2);
+        // Positive control: the same cache really can supply the default policy's fallback.
+        expect(await (adapter as any).get('/info', undefined, { bypassCache: true })).toEqual([row()]);
+        expect(await (adapter as any).get('/info/prices', undefined,
+          { bypassCache: true, responseShape: 'envelope' })).toMatchObject({
+          data: [{ mark: '100', timestamp: initialTime }],
+        });
+      } finally { await adapter.shutdown(); }
+    });
+
+  it.each(['success', '429'] as const)(
+    'deduplicates concurrent refreshes with %s and never resolves callers with stale data', async outcome => {
+      const { adapter, transport, previous } = await seed();
+      const releases = new Map<string, (response: Response) => void>();
+      transport.mockImplementation(input => new Promise<Response>(resolve => {
+        const path = new URL(String(input)).pathname;
+        if (releases.has(path)) throw new Error(`Duplicate fetch storm: ${path}`);
+        releases.set(path, resolve);
+      }));
+      try {
+        let settled = 0;
+        const markets = Array.from({ length: 8 }, () => adapter.getMarkets().finally(() => { settled++; }));
+        const marks = Array.from({ length: 8 }, () => adapter.getMarkPrice('SOL-PERP').finally(() => { settled++; }));
+        const allMarkets = Promise.allSettled(markets);
+        const allMarks = Promise.all(marks);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(transport).toHaveBeenCalledTimes(2);
+        expect([...releases.keys()].sort()).toEqual(['/info', '/info/prices']);
+        expect(settled).toBe(0);
+        expect(checkEntryConstraints(previous.constraintObservation, 'SOL-PERP', Date.now()).ok).toBe(false);
+        releases.get('/info')!(outcome === '429' ? rateLimited()
+          : ok({ success: true, data: [row('20')] }));
+        releases.get('/info/prices')!(outcome === '429' ? rateLimited() : ok(prices('120')));
+        const marketResults = await allMarkets;
+        const markResults = await allMarks;
+        expect(settled).toBe(16);
+        for (const result of marketResults) {
+          if (outcome === '429') expect(result.status).toBe('rejected');
+          else {
+            expect(result.status).toBe('fulfilled');
+            if (result.status !== 'fulfilled') throw result.reason;
+            expect(result.value[0].constraintObservation).toMatchObject({
+              openingMinimum: { value: 20 }, observedAt: Date.now(), refreshFailed: false,
+            });
+            expect(checkEntryConstraints(result.value[0].constraintObservation, 'SOL-PERP', Date.now())).toEqual({ ok: true });
+          }
+        }
+        for (const result of markResults) expect(result).toMatchObject(outcome === '429'
+          ? { kind: 'unavailable', reason: 'rate_limited' }
+          : { kind: 'available', exact: '120', observedAt: Date.now() });
+        expect(previous.constraintObservation?.observedAt).toBe(initialTime);
+        expect(pacificaCache.snapshot().inflight).toBe(0);
+        expect(transport).toHaveBeenCalledTimes(2);
+        // A settled failed wave must release its slots so a later fresh read can recover.
+        if (outcome === '429') {
+          transport.mockImplementation(async input => new URL(String(input)).pathname === '/info'
+            ? ok({ success: true, data: [row('20')] }) : ok(prices('120')));
+          expect((await adapter.getMarkets())[0].minOrderSizeUsd).toBe(20);
+          expect(await adapter.getMarkPrice('SOL-PERP')).toMatchObject({ kind: 'available', exact: '120' });
+          expect(transport).toHaveBeenCalledTimes(4);
+        }
+      } finally { await adapter.shutdown(); }
+    });
 });

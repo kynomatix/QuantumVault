@@ -940,7 +940,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const key = internalSymbol.toUpperCase();
     const saved = this.marketDetailsMap.get(key)?.constraintObservation;
     const usable = (observation: typeof saved): number | null => {
-      if (!observation || observation.market !== internalSymbol || observation.source !== '/info'
+      if (!observation || observation.market.toUpperCase() !== key || observation.source !== '/info'
           || observation.venue !== 'pacifica' || !Number.isFinite(observation.observedAt)
           || observation.observedAt > Date.now()
           || Date.now() > observation.observedAt + 5 * 60 * 1000) return null;
