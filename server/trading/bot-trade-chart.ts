@@ -83,6 +83,9 @@ export function pairChartTradeHistory(rows: BotTrade[], timeframe: SignalChartTi
         else open.tainted = true;
         continue;
       }
+      // A smaller opposite-side fill while a position is open only trims it
+      // (e.g. a 0.0357 sell against a 1.76 long); the position keeps its side.
+      if (open && execution && execution.size < open.size) { open.members.push(execution); continue; }
       // A flip without a close leaves the previous position unpaired.
       positions.delete(key);
       if (execution) positions.set(key, { entry: execution, side, size: execution.size, notional: execution.size * execution.price, addCount: 0, tainted: false, members: [execution] });
