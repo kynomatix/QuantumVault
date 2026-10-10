@@ -15,15 +15,19 @@ import { Keypair } from "@solana/web3.js";
 // /api/auth/session report the SAME process-generation id.
 import { SERVER_BOOT_ID } from "./boot-id";
 import { appendTelemetry } from "./telemetry";
-import { storage, DatabaseStorage } from "./storage";
+import { storage, DatabaseStorage, notPhantomDupClose } from "./storage";
+import { toChartExecution, alignChartExecutions, chartPairingPlaceholders, chartScannedPage, assertSingleChartMarket, chartFirstTradeTime, chartOpenPosition, chartPriceSeries } from "./trading/bot-trade-chart";
+import { fetchOHLCV, CHART_CANDLE_POLICY } from "./lab/datafeed";
+import { marketToDatafeedTicker } from "./ai-trader/context-builder";
+import { isMultiplierMarketQuarantined } from "./ai-trader/multiplier-market-quarantine";
 import { resolveBotTradeNetPnl } from "./trading/bot-trade-pnl-convention";
 import { sumNetDepositedFromEvents, isVaultInternalEvent } from "./equity-events-util";
 import { recordCriticalError } from "./error-log";
 import { normalizeScannerIncidentHoldId } from "./ai-trader/scanner-incident-evidence";
-import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, type Wallet, webhookLogs, botTrades, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
+import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, type Wallet, webhookLogs, botTrades, botPositions, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
 import { db, isConnectionClassError } from "./db";
-import { desc, eq, sql, asc, and } from "drizzle-orm";
+import { desc, eq, sql, asc, and, or, lt, gte, lte, inArray } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
 import { normalizeMarket } from './protocol/symbol-registry';
@@ -18386,6 +18390,63 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       return res.status(500).json({ error: "Internal server error" });
     } finally {
       _confirmDeleteCleanup?.();
+    }
+  });
+
+  // Read-only, wallet-scoped Signal Bot chart. No order, position, or cache writes.
+  app.get("/api/trading-bots/:id/trade-chart", requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot) return res.status(404).json({ error: "Bot not found" });
+      if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
+      const tf = req.query.tf === "4h" ? "4h" : req.query.tf === undefined || req.query.tf === "1d" ? "1d" : null;
+      if (!tf) return res.status(400).json({ error: "Invalid timeframe" });
+      const to = req.query.to ? new Date(String(req.query.to)) : new Date();
+      const from = req.query.from ? new Date(String(req.query.from)) : new Date(to.getTime() - 90 * 86_400_000);
+      if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to || to.getTime() - from.getTime() > 120 * 86_400_000)
+        return res.status(400).json({ error: "Invalid or unbounded range" });
+      let cursor: { id: string; at: string; botId: string; market: string; from: string; to: string } | null = null;
+      if (req.query.cursor) {
+        try {
+          cursor = JSON.parse(Buffer.from(String(req.query.cursor), "base64url").toString("utf8"));
+          if (!cursor || cursor.botId !== bot.id || cursor.market !== bot.market || cursor.from !== from.toISOString() || cursor.to !== to.toISOString() || typeof cursor.id !== "string" || !cursor.id || typeof cursor.at !== "string" || !Number.isFinite(new Date(cursor.at).getTime()) || new Date(cursor.at) < from || new Date(cursor.at) >= to) throw Error();
+        } catch { return res.status(400).json({ error: "Invalid chart cursor" }); }
+      }
+      const markets = await db.selectDistinct({ market: botTrades.market }).from(botTrades).where(and(eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!)));
+      const ownPositions = await db.select().from(botPositions).where(and(eq(botPositions.tradingBotId, bot.id), eq(botPositions.walletAddress, req.walletAddress!)));
+      try { assertSingleChartMarket(bot.market, [...markets.map(x => x.market), ...ownPositions.map(x => x.market)]); }
+      catch { return res.status(409).json({ code: "MARKET_INVARIANT_VIOLATION", error: "Stored trade or position market differs from bot market" }); }
+      const first = await db.select({ first: sql<Date | string | null>`min(${botTrades.executedAt})` }).from(botTrades)
+        .where(and(eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!), eq(botTrades.market, bot.market), inArray(botTrades.status, ["executed", "liquidated", "recovered"]), notPhantomDupClose()));
+      const page = await db.select().from(botTrades).where(and(
+        eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!), eq(botTrades.market, bot.market),
+        inArray(botTrades.status, ["executed", "liquidated", "recovered"]), notPhantomDupClose(),
+        gte(botTrades.executedAt, from), lt(botTrades.executedAt, to),
+        cursor ? or(lt(botTrades.executedAt, new Date(cursor.at)), and(eq(botTrades.executedAt, new Date(cursor.at)), lt(botTrades.id, cursor.id))) : undefined,
+      )).orderBy(desc(botTrades.executedAt), desc(botTrades.id)).limit(251);
+      const { complete, scanned: kept, lastScanned: tail } = chartScannedPage(page);
+      const executions = kept.map(row => toChartExecution(row, tf, bot.activeProtocol)).filter((row): row is NonNullable<typeof row> => row !== null);
+      // Each cursor advances over scanned SQL rows, including invalid coordinates.
+      const nextCursor = !complete && tail ? Buffer.from(JSON.stringify({ id: tail.id, at: tail.executedAt.toISOString(), botId: bot.id, market: bot.market, from: from.toISOString(), to: to.toISOString() })).toString("base64url") : null;
+      let candles: Array<{ time: number; open: number; high: number; low: number; close: number }> = [];
+      let provenance: ReturnType<typeof chartPriceSeries>["provenance"] = null;
+      const multiplierQuarantined = isMultiplierMarketQuarantined(bot.market);
+      try {
+        if (multiplierQuarantined) throw new Error("multiplier_unqualified");
+        const fetched = await fetchOHLCV(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, cacheWritePolicy: "skip" });
+        ({ candles, provenance } = chartPriceSeries(fetched, tf));
+      } catch { /* trade detail remains available when price source fails */ }
+      const aligned = alignChartExecutions(executions, candles, tf === "1d" ? 86_400_000 : 14_400_000);
+      const paired = chartPairingPlaceholders(aligned);
+      const openPosition = chartOpenPosition(ownPositions.find(p => Number(p.baseSize) !== 0));
+      const totals = await storage.getCanonicalBotTradeStats(bot.id);
+      return res.json({ market: bot.market, timeframe: tf, range: { from: from.toISOString(), to: to.toISOString(), firstEligibleTradeAt: chartFirstTradeTime(first[0]?.first) }, complete, nextCursor,
+        price: { availability: candles.length ? "available" : "unavailable", reason: multiplierQuarantined ? "multiplier_unqualified" : candles.length ? null : "price_unavailable", source: provenance?.source ?? null, provenance,
+          basisLabel: provenance ? `Reference price — ${provenance.venue} (${provenance.source}), not ${bot.activeProtocol === "pacifica" ? "Pacifica" : bot.activeProtocol === "drift" ? "Drift" : "Flash"} execution price` : "Price unavailable", candles },
+        executions: paired.executions, bands: paired.bands, totals, openPosition });
+    } catch (error) {
+      console.error("Get bot trade chart error:", error);
+      return res.status(500).json({ error: "Internal server error" });
     }
   });
 

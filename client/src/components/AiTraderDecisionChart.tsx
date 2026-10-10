@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  createChart,
-  CrosshairMode,
   LineStyle,
   type IChartApi,
   type ISeriesApi,
@@ -20,6 +18,7 @@ import { Button } from '@/components/ui/button';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { deriveAiTraderChartPriceFormat } from '@/lib/ai-trader-position-display';
+import { createSharedTradePriceChart } from './SharedTradePriceChart';
 
 // Mirrors AiTraderDrawer.tsx's formatPrice — kept local since it isn't exported
 // there (same precedent that file already set for BotManagementDrawer), so
@@ -392,21 +391,7 @@ export function AiTraderDecisionChart({
   useEffect(() => {
     if (!open || loading || error || candles.length === 0 || !containerRef.current) return;
 
-    const chart = createChart(containerRef.current, {
-      width: containerRef.current.clientWidth,
-      height: containerRef.current.clientHeight || 360,
-      layout: {
-        background: { color: 'transparent' },
-        textColor: '#9ca3af',
-      },
-      grid: {
-        vertLines: { color: 'rgba(255,255,255,0.06)' },
-        horzLines: { color: 'rgba(255,255,255,0.06)' },
-      },
-      crosshair: { mode: CrosshairMode.Normal },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: 'rgba(255,255,255,0.12)' },
-      rightPriceScale: { borderColor: 'rgba(255,255,255,0.12)' },
-    });
+    const chart = createSharedTradePriceChart(containerRef.current);
     chartRef.current = chart;
 
     const times = candles.map((c) => c.time);

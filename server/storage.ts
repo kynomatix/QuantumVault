@@ -1324,7 +1324,7 @@ const PHANTOM_DUP_CLOSE_PREDICATE = `
 
 // Drizzle SQL chunk: TRUE when a bot_trades row is NOT a phantom duplicate.
 // Returns a fresh chunk per call so it can be embedded in multiple queries.
-function notPhantomDupClose() {
+export function notPhantomDupClose() {
   return sql.raw(`NOT (${PHANTOM_DUP_CLOSE_PREDICATE})`);
 }
 
