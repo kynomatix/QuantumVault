@@ -1,3 +1,4 @@
+import { botPolicyRecord, type BotPolicyInput } from './protocol/phoenix/policy';
 import nodeCrypto from 'crypto';
 import { escapeTelegramHtml } from './telegram-html';
 import {
@@ -1277,15 +1278,11 @@ setInterval(cleanupExpiredNonces, 5 * 60 * 1000);
 
 export function computeBotPolicyHmac(
   umk: Buffer,
-  botPolicy: { market: string; leverage: number; maxPositionSize: string | null }
+  botPolicy: BotPolicyInput
 ): string {
   const policyKey = deriveSubkey(umk, SUBKEY_PURPOSES.POLICY_HMAC);
   try {
-    const policyObj: Record<string, unknown> = {
-      market: botPolicy.market,
-      leverage: botPolicy.leverage,
-      maxPositionSize: botPolicy.maxPositionSize || '0',
-    };
+    const policyObj = botPolicyRecord(botPolicy);
     return computePolicyHmac(policyObj, policyKey);
   } finally {
     zeroizeBuffer(policyKey);
@@ -1294,17 +1291,16 @@ export function computeBotPolicyHmac(
 
 export function verifyBotPolicyHmac(
   umk: Buffer,
-  botPolicy: { market: string; leverage: number; maxPositionSize: string | null },
+  botPolicy: BotPolicyInput,
   expectedHmac: string
 ): boolean {
   const policyKey = deriveSubkey(umk, SUBKEY_PURPOSES.POLICY_HMAC);
   try {
-    const policyObj: Record<string, unknown> = {
-      market: botPolicy.market,
-      leverage: botPolicy.leverage,
-      maxPositionSize: botPolicy.maxPositionSize || '0',
-    };
+    const policyObj = botPolicyRecord(botPolicy);
+    if (!/^[0-9a-f]{64}$/.test(expectedHmac) || expectedHmac.length !== 64) return false;
     return verifyPolicyHmac(policyObj, policyKey, expectedHmac);
+  } catch {
+    return false;
   } finally {
     zeroizeBuffer(policyKey);
   }

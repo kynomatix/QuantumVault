@@ -246,6 +246,13 @@ export const tradingBots = pgTable("trading_bots", {
   // server/vault/jupiter-lend-borrow-executor.ts (repayPartialOnExistingBotPosition).
   autoRepayEnabled: boolean("auto_repay_enabled").default(false).notNull(),
 
+  // Phoenix public identity; NULL on every legacy row. Wallet authority is not the PDA.
+  phoenixAuthorityWallet: text("phoenix_authority_wallet"),
+  phoenixTraderAccount: text("phoenix_trader_account"),
+  phoenixNetwork: text("phoenix_network"),
+  phoenixProgramAddress: text("phoenix_program_address"),
+  phoenixPortfolioIndex: integer("phoenix_portfolio_index"),
+  phoenixSubaccountIndex: integer("phoenix_subaccount_index"),
   protocolSubaccountId: text("protocol_subaccount_id"),
   // Group D item 18 (April 17, 2026): which protocol adapter created/owns this bot.
   // Allowed values are constrained at the DB level by `trading_bots_active_protocol_check`
@@ -253,7 +260,7 @@ export const tradingBots = pgTable("trading_bots", {
   // server/db.ts ensureSchema() (which also backfills any pre-existing NULL rows to
   // 'drift' before applying NOT NULL). Drizzle's $type<...> here documents the union;
   // the SQL CHECK is the actual enforcement.
-  activeProtocol: text("active_protocol").$type<'pacifica' | 'drift' | 'flash'>().notNull(),
+  activeProtocol: text("active_protocol").$type<'pacifica' | 'drift' | 'flash' | 'phoenix'>().notNull(),
   botSubaccountKeyEncrypted: text("bot_subaccount_key_encrypted"),
   // Phase 4b: V3-encrypted bot subaccount key (subkey derived from owner UMK
   // with per-bot AAD). Legacy column remains during the Phase 5b/6 drop window.
@@ -283,6 +290,17 @@ export const tradingBots = pgTable("trading_bots", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ([
+  check("trading_bots_phoenix_identity_check", sql`(active_protocol <> 'phoenix' AND phoenix_authority_wallet IS NULL AND phoenix_trader_account IS NULL AND phoenix_network IS NULL AND phoenix_program_address IS NULL AND phoenix_portfolio_index IS NULL AND phoenix_subaccount_index IS NULL)
+          OR (active_protocol = 'phoenix' AND phoenix_authority_wallet IS NOT NULL AND phoenix_trader_account IS NOT NULL
+            AND phoenix_network IS NOT NULL AND phoenix_program_address IS NOT NULL AND phoenix_portfolio_index IS NOT NULL AND phoenix_subaccount_index IS NOT NULL
+            AND derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL AND protocol_subaccount_id IS NOT NULL
+            AND phoenix_authority_wallet <> phoenix_trader_account AND phoenix_network = 'solana-mainnet'
+            AND phoenix_program_address = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih'
+            AND phoenix_authority_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$' AND phoenix_trader_account ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+            AND phoenix_portfolio_index = 0 AND phoenix_subaccount_index = 0 AND derivation_index >= 1 AND derivation_path_version = 1
+            AND protocol_subaccount_id = phoenix_trader_account)`),
+  uniqueIndex("trading_bots_phoenix_authority_unique").on(table.phoenixNetwork, table.phoenixProgramAddress, table.phoenixAuthorityWallet),
+  uniqueIndex("trading_bots_phoenix_trader_unique").on(table.phoenixNetwork, table.phoenixProgramAddress, table.phoenixTraderAccount),
   index("idx_trading_bots_protocol_subaccount").on(table.activeProtocol, table.protocolSubaccountId),
   check(
     "trading_bots_subaccount_auth_mode_check",
@@ -294,7 +312,7 @@ export const tradingBots = pgTable("trading_bots", {
   ),
   check(
     "trading_bots_active_protocol_check",
-    sql`${table.activeProtocol} IN ('pacifica', 'drift', 'flash')`,
+    sql`${table.activeProtocol} IN ('pacifica', 'drift', 'flash', 'phoenix')`,
   ),
   // Phase 4b (Flash agent-HD wallets): fund-safety invariants. Postgres treats NULL
   // as distinct in UNIQUE, so legacy random bots (NULL index) never collide; two
@@ -2480,3 +2498,44 @@ export const labOptimizationConfigSchema = z.object({
   outOfSampleFraction: z.number().min(0).max(0.9).optional(),
   slippage: z.number().min(0).optional(),
 });
+
+// Phoenix U02: public durable intents and signed-attempt identities, never secret keys.
+export const phoenixOperations = pgTable("phoenix_operations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  botId: varchar("bot_id").notNull().references(() => tradingBots.id),
+  requestKey: text("request_key").notNull(),
+  kind: text("kind").$type<'register' | 'deposit' | 'withdraw' | 'transfer'>().notNull(),
+  intent: jsonb("intent").notNull(),
+  intentHash: text("intent_hash").notNull(),
+  state: text("state").$type<'prepared' | 'submission_pending' | 'queued' | 'unknown' | 'completed' | 'failed' | 'dropped'>().notNull().default('prepared'),
+  revision: integer("revision").notNull().default(0),
+  observation: jsonb("observation"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, table => [
+  unique("phoenix_operations_replay_unique").on(table.botId, table.requestKey),
+  uniqueIndex("phoenix_operations_active_unique").on(table.botId).where(sql`state NOT IN ('completed','failed','dropped')`),
+  uniqueIndex("phoenix_operations_registration_unique").on(table.botId).where(sql`kind = 'register'`),
+  check("phoenix_operations_kind_check", sql`kind IN ('register','deposit','withdraw','transfer')`),
+  check("phoenix_operations_state_check", sql`state IN ('prepared','submission_pending','queued','unknown','completed','failed','dropped')`),
+  check("phoenix_operations_values_check", sql`revision >= 0 AND length(request_key) BETWEEN 1 AND 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object'`),
+]);
+export const phoenixOperationAttempts = pgTable("phoenix_operation_attempts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  operationId: uuid("operation_id").notNull().references(() => phoenixOperations.id),
+  attemptNumber: integer("attempt_number").notNull(),
+  signature: text("signature").notNull(),
+  blockhash: text("blockhash").notNull(),
+  lastValidBlockHeight: decimal("last_valid_block_height", { precision: 20, scale: 0 }).notNull(),
+  transactionHash: text("transaction_hash").notNull(),
+  state: text("state").$type<'submission_pending' | 'confirmed' | 'failed' | 'expired'>().notNull().default('submission_pending'),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, table => [
+  unique("phoenix_attempt_number_unique").on(table.operationId, table.attemptNumber),
+  unique("phoenix_attempt_signature_unique").on(table.signature),
+  uniqueIndex("phoenix_attempt_pending_unique").on(table.operationId).where(sql`state = 'submission_pending'`),
+  check("phoenix_attempt_state_check", sql`state IN ('submission_pending','confirmed','failed','expired')`),
+  check("phoenix_attempt_values_check", sql`attempt_number BETWEEN 1 AND 5 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$'`),
+]);
+export type PhoenixOperation = typeof phoenixOperations.$inferSelect;
+export type PhoenixOperationAttempt = typeof phoenixOperationAttempts.$inferSelect;

@@ -818,9 +818,12 @@ const schemaMigrationSql = [
       // No data backfill needed — no 'flash' rows exist yet; the constraint is broadened,
       // not narrowed, so existing rows are unaffected.
       `DO $$ BEGIN
-         ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
-         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
-           CHECK (active_protocol IN ('pacifica', 'drift', 'flash'));
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass
+           AND conname = 'trading_bots_active_protocol_check' AND position('phoenix' in pg_get_constraintdef(oid)) > 0) THEN
+           ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
+             CHECK (active_protocol IN ('pacifica', 'drift', 'flash'));
+         END IF;
        END $$`,
 
       // --- bot_trades protocol label honesty. ---
@@ -1973,6 +1976,66 @@ const schemaMigrationSql = [
        CREATE UNIQUE INDEX IF NOT EXISTS solana_signed_submit_attempts_active_unique
          ON solana_signed_submit_attempts (operation_type, operation_id)
          WHERE status = 'confirmation_pending'`,
+      // Phoenix U02: no row backfill, no assets or encrypted metadata changed.
+      `DO $phoenix$ BEGIN
+         ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check CHECK (active_protocol IN ('pacifica','drift','flash','phoenix'));
+         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_authority_wallet text;
+         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_trader_account text;
+         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_network text;
+         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_program_address text;
+         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_portfolio_index integer;
+         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_subaccount_index integer;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass AND conname = 'trading_bots_phoenix_identity_check') THEN
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_phoenix_identity_check CHECK ((active_protocol <> 'phoenix' AND phoenix_authority_wallet IS NULL AND phoenix_trader_account IS NULL AND phoenix_network IS NULL AND phoenix_program_address IS NULL AND phoenix_portfolio_index IS NULL AND phoenix_subaccount_index IS NULL)
+          OR (active_protocol = 'phoenix' AND phoenix_authority_wallet IS NOT NULL AND phoenix_trader_account IS NOT NULL
+            AND phoenix_network IS NOT NULL AND phoenix_program_address IS NOT NULL AND phoenix_portfolio_index IS NOT NULL AND phoenix_subaccount_index IS NOT NULL
+            AND derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL AND protocol_subaccount_id IS NOT NULL
+            AND phoenix_authority_wallet <> phoenix_trader_account AND phoenix_network = 'solana-mainnet'
+            AND phoenix_program_address = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih'
+            AND phoenix_authority_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$' AND phoenix_trader_account ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+            AND phoenix_portfolio_index = 0 AND phoenix_subaccount_index = 0 AND derivation_index >= 1 AND derivation_path_version = 1
+            AND protocol_subaccount_id = phoenix_trader_account));
+         END IF;
+       END $phoenix$;
+       CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_authority_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_authority_wallet);
+       CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_trader_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_trader_account);
+       CREATE OR REPLACE FUNCTION qv_phoenix_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $phoenix$
+       BEGIN
+         IF (OLD.active_protocol = 'phoenix' OR NEW.active_protocol = 'phoenix') AND
+           ROW(OLD.active_protocol, OLD.wallet_address, OLD.protocol_subaccount_id, OLD.derivation_index, OLD.derivation_path_version,
+             OLD.phoenix_authority_wallet, OLD.phoenix_trader_account, OLD.phoenix_network, OLD.phoenix_program_address, OLD.phoenix_portfolio_index, OLD.phoenix_subaccount_index)
+           IS DISTINCT FROM
+           ROW(NEW.active_protocol, NEW.wallet_address, NEW.protocol_subaccount_id, NEW.derivation_index, NEW.derivation_path_version,
+             NEW.phoenix_authority_wallet, NEW.phoenix_trader_account, NEW.phoenix_network, NEW.phoenix_program_address, NEW.phoenix_portfolio_index, NEW.phoenix_subaccount_index)
+         THEN RAISE EXCEPTION 'Phoenix identity is immutable; new bots only'; END IF;
+         RETURN NEW;
+       END $phoenix$;
+       DROP TRIGGER IF EXISTS trading_bots_phoenix_identity_immutable ON trading_bots;
+       CREATE TRIGGER trading_bots_phoenix_identity_immutable BEFORE UPDATE ON trading_bots FOR EACH ROW EXECUTE FUNCTION qv_phoenix_identity_immutable();
+       CREATE TABLE IF NOT EXISTS phoenix_operations (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bot_id varchar NOT NULL REFERENCES trading_bots(id),
+         request_key text NOT NULL, kind text NOT NULL, intent jsonb NOT NULL, intent_hash text NOT NULL,
+         state text NOT NULL DEFAULT 'prepared', revision integer NOT NULL DEFAULT 0, observation jsonb,
+         created_at timestamp NOT NULL DEFAULT now(), updated_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT phoenix_operations_replay_unique UNIQUE (bot_id, request_key),
+         CONSTRAINT phoenix_operations_kind_check CHECK (kind IN ('register','deposit','withdraw','transfer')),
+         CONSTRAINT phoenix_operations_state_check CHECK (state IN ('prepared','submission_pending','queued','unknown','completed','failed','dropped')),
+         CONSTRAINT phoenix_operations_values_check CHECK (revision >= 0 AND length(request_key) BETWEEN 1 AND 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object')
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_operations_active_unique ON phoenix_operations (bot_id) WHERE state NOT IN ('completed','failed','dropped');
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_operations_registration_unique ON phoenix_operations (bot_id) WHERE kind = 'register';
+       CREATE TABLE IF NOT EXISTS phoenix_operation_attempts (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), operation_id uuid NOT NULL REFERENCES phoenix_operations(id),
+         attempt_number integer NOT NULL, signature text NOT NULL, blockhash text NOT NULL,
+         last_valid_block_height numeric(20,0) NOT NULL, transaction_hash text NOT NULL,
+         state text NOT NULL DEFAULT 'submission_pending', created_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT phoenix_attempt_number_unique UNIQUE (operation_id, attempt_number),
+         CONSTRAINT phoenix_attempt_signature_unique UNIQUE (signature),
+         CONSTRAINT phoenix_attempt_state_check CHECK (state IN ('submission_pending','confirmed','failed','expired')),
+         CONSTRAINT phoenix_attempt_values_check CHECK (attempt_number BETWEEN 1 AND 5 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$')
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_attempt_pending_unique ON phoenix_operation_attempts (operation_id) WHERE state = 'submission_pending' `,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -2428,7 +2491,7 @@ const schemaMigrationMetadata = [
         "table": "trading_bots",
         "constraint": "trading_bots_active_protocol_check",
         "definitionIncludes": [
-          "CHECK (active_protocol IN ('pacifica', 'drift'))"
+          "CHECK (active_protocol IN ('pacifica', 'drift', 'flash', 'phoenix'))"
         ]
       },
       {
@@ -3258,7 +3321,7 @@ const schemaMigrationMetadata = [
         "table": "trading_bots",
         "constraint": "trading_bots_active_protocol_check",
         "definitionIncludes": [
-          "CHECK (active_protocol IN ('pacifica', 'drift', 'flash'))"
+          "CHECK (active_protocol IN ('pacifica', 'drift', 'flash', 'phoenix'))"
         ]
       }
     ],
@@ -5377,7 +5440,165 @@ const schemaMigrationMetadata = [
       { "kind": "index", "table": "solana_signed_submit_attempts", "index": "solana_signed_submit_attempts_active_unique", "columns": ["operation_type", "operation_id"], "unique": true, "predicateIncludes": ["status = 'confirmation_pending'"] }
     ],
     "operation": "ddl"
-  }
+  },
+{
+  "id": "186-phoenix-identity-and-operations",
+  "capabilities": [
+    "phoenix"
+  ],
+  "requirements": [
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_authority_wallet"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_trader_account"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_network"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_program_address"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_portfolio_index"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_subaccount_index"
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_phoenix_identity_check",
+      "definitionIncludes": [
+        "(active_protocol <> 'phoenix' AND phoenix_authority_wallet IS NULL AND phoenix_trader_account IS NULL AND phoenix_network IS NULL AND phoenix_program_address IS NULL AND phoenix_portfolio_index IS NULL AND phoenix_subaccount_index IS NULL)\n          OR (active_protocol = 'phoenix' AND phoenix_authority_wallet IS NOT NULL AND phoenix_trader_account IS NOT NULL\n            AND phoenix_network IS NOT NULL AND phoenix_program_address IS NOT NULL AND phoenix_portfolio_index IS NOT NULL AND phoenix_subaccount_index IS NOT NULL\n            AND derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL AND protocol_subaccount_id IS NOT NULL\n            AND phoenix_authority_wallet <> phoenix_trader_account AND phoenix_network = 'solana-mainnet'\n            AND phoenix_program_address = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih'\n            AND phoenix_authority_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$' AND phoenix_trader_account ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'\n            AND phoenix_portfolio_index = 0 AND phoenix_subaccount_index = 0 AND derivation_index >= 1 AND derivation_path_version = 1\n            AND protocol_subaccount_id = phoenix_trader_account)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "trading_bots",
+      "index": "trading_bots_phoenix_authority_unique",
+      "columns": [
+        "phoenix_network",
+        "phoenix_program_address",
+        "phoenix_authority_wallet"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "trading_bots",
+      "index": "trading_bots_phoenix_trader_unique",
+      "columns": [
+        "phoenix_network",
+        "phoenix_program_address",
+        "phoenix_trader_account"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "table",
+      "table": "phoenix_operations",
+      "columns": [
+        "id",
+        "bot_id",
+        "request_key",
+        "kind",
+        "intent",
+        "intent_hash",
+        "state",
+        "revision",
+        "observation",
+        "created_at",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "UNIQUE (bot_id, request_key)",
+        "CHECK (kind IN ('register','deposit','withdraw','transfer'))",
+        "CHECK (state IN ('prepared','submission_pending','queued','unknown','completed','failed','dropped'))",
+        "CHECK (revision >= 0 AND length(request_key) >= 1 AND length(request_key) <= 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object')",
+        "FOREIGN KEY (bot_id) REFERENCES trading_bots(id)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "phoenix_operation_attempts",
+      "columns": [
+        "id",
+        "operation_id",
+        "attempt_number",
+        "signature",
+        "blockhash",
+        "last_valid_block_height",
+        "transaction_hash",
+        "state",
+        "created_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "UNIQUE (operation_id, attempt_number)",
+        "UNIQUE (signature)",
+        "CHECK (state IN ('submission_pending','confirmed','failed','expired'))",
+        "CHECK (attempt_number BETWEEN 1 AND 5 AND last_valid_block_height >= 0 AND length(signature) >= 64 AND length(signature) <= 88 AND length(blockhash) >= 32 AND length(blockhash) <= 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$')",
+        "FOREIGN KEY (operation_id) REFERENCES phoenix_operations(id)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_operations_active_unique",
+      "columns": [
+        "bot_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "state <> ALL (ARRAY['completed','failed','dropped'])"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_operations_registration_unique",
+      "columns": [
+        "bot_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "kind = 'register'"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operation_attempts",
+      "index": "phoenix_attempt_pending_unique",
+      "columns": [
+        "operation_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "state = 'submission_pending'"
+      ]
+    },
+    {
+      "kind": "data",
+      "identity": "phoenix-immutable-trigger",
+      "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'trading_bots'::regclass AND tgname = 'trading_bots_phoenix_identity_immutable' AND tgenabled = 'O' AND NOT tgisinternal) AS ok"
+    }
+  ],
+  "operation": "ddl"
+}
 ] as const;
 
 export const SCHEMA_MIGRATION_MANIFEST: readonly SchemaMigrationDefinition[] =

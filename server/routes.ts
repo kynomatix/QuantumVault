@@ -7025,7 +7025,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       const policyHmac = computeBotPolicyHmac(
         session.umk,
-        { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }
+        { ...bot, market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }
       );
 
       await storage.updateTradingBot(bot.id, { policyHmac } as any);
@@ -7056,7 +7056,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       for (const bot of bots) {
         const policyHmac = computeBotPolicyHmac(
           session.umk,
-          { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }
+          { ...bot, market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }
         );
         await storage.updateTradingBot(bot.id, { policyHmac } as any);
         updated++;
@@ -18941,11 +18941,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       // Security v3: Verify bot policy HMAC if one exists (detects tampering with critical settings)
-      if (bot.policyHmac) {
+      if (bot.policyHmac || bot.activeProtocol === 'phoenix') {
         const policyValid = verifyBotPolicyHmac(
           umkResult.umk,
-          { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },
-          bot.policyHmac
+          { ...bot, market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },
+          bot.policyHmac || ''
         );
         if (!policyValid) {
           umkResult.cleanup();
@@ -20423,11 +20423,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       // Security v3: Verify bot policy HMAC if one exists (detects tampering with critical settings)
-      if (bot.policyHmac) {
+      if (bot.policyHmac || bot.activeProtocol === 'phoenix') {
         const policyValid = verifyBotPolicyHmac(
           umkResult.umk,
-          { market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },
-          bot.policyHmac
+          { ...bot, market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },
+          bot.policyHmac || ''
         );
         if (!policyValid) {
           umkResult.cleanup();
