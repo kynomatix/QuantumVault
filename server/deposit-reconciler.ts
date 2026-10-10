@@ -1,6 +1,16 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { storage } from './storage';
 import { createSolanaRpcConnection } from './rpc-config';
+import type { PhoenixFundingService } from './protocol/phoenix/funding-service';
+import { phoenixFundingDetail } from './protocol/phoenix/funding-detail';
+
+/** Phoenix reconciles durable signatures, never a wallet-balance delta. Explicit
+ * dependency prevents this legacy scanner from installing a live funding runtime.
+ * Confirmed atomic wrap/deposit receives one receipt; queued funds are not cash.
+ */
+export async function reconcilePhoenixFunding(service: PhoenixFundingService, botId: string, ownerWallet: string) {
+  return phoenixFundingDetail(await service.recover(botId, ownerWallet));
+}
 
 const SOLANA_ENV = (process.env.DRIFT_ENV || process.env.SOLANA_ENV || 'mainnet-beta') as 'devnet' | 'mainnet-beta';
 const IS_MAINNET = SOLANA_ENV === 'mainnet-beta';

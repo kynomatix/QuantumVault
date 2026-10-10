@@ -6328,6 +6328,13 @@ export async function registerRoutes(
     next();
   };
 
+  const { registerPhoenixFundingRoutes } = await import('./protocol/phoenix/funding-routes');
+  registerPhoenixFundingRoutes(app, requireWallet, { history: async (botId, owner) => {
+    const { pool } = await import('./db');
+    const { PhoenixOperationStore } = await import('./protocol/phoenix/operation-store');
+    return new PhoenixOperationStore(pool).fundingHistory(botId, owner);
+  } });
+
   // Helper to generate a unique referral code
   const generateReferralCode = (): string => {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -8453,6 +8460,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "Valid amount required" });
       }
 
+      if (botId) {
+        const phoenixCandidate = await storage.getTradingBotById(botId);
+        if (phoenixCandidate?.activeProtocol === 'phoenix') {
+          if (phoenixCandidate.walletAddress !== req.walletAddress) return res.status(403).json({ error: 'Bot not found or not owned' });
+          const { PHOENIX_FUNDING_DISABLED } = await import('./protocol/phoenix/funding-routes');
+          return res.status(503).json(PHOENIX_FUNDING_DISABLED);
+        }
+      }
+
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
@@ -8743,6 +8759,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const ownedBot = botId ? await storage.getTradingBotById(botId) : null;
       if (botId && (!ownedBot || ownedBot.walletAddress !== req.walletAddress)) {
         return res.status(403).json({ error: "Bot not found or not owned" });
+      }
+      if (ownedBot?.activeProtocol === 'phoenix') {
+        const { PHOENIX_FUNDING_DISABLED } = await import('./protocol/phoenix/funding-routes');
+        return res.status(503).json(PHOENIX_FUNDING_DISABLED);
       }
       const isFlashWithdrawal = ownedBot?.activeProtocol === 'flash';
       if (!wallet.agentPublicKey || (!isFlashWithdrawal && !wallet.agentPrivateKeyEncryptedV3)) {

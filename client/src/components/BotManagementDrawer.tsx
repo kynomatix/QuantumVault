@@ -190,7 +190,7 @@ interface TradingBot {
   // pubkey for Pacifica, a derived sub address for Drift), not an "agent"
   // pubkey. The old name implied an off-chain wallet role.
   botSubaccountIdentifier?: string | null;
-  activeProtocol?: 'pacifica' | 'drift' | 'flash' | null;
+  activeProtocol?: 'pacifica' | 'drift' | 'flash' | 'phoenix' | null;
   sourcePublishedBotId?: string | null;
   profitReinvest?: boolean;
   autoWithdrawThreshold?: string | null;
@@ -836,6 +836,10 @@ export function BotManagementDrawer({
   const [addEquityStatus, setAddEquityStatus] = useState('');
 
   const handleAddEquity = async () => {
+    if (bot?.activeProtocol === 'phoenix') {
+      toast({ title: 'Phoenix funding is disabled', description: 'Live fee quotes and queue verification are not yet enabled.', variant: 'destructive' });
+      return;
+    }
     const amount = parseFloat(addEquityAmount);
     if (isNaN(amount) || amount <= 0) {
       toast({ title: 'Please enter a valid amount', variant: 'destructive' });
@@ -2323,7 +2327,7 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="equity" className="space-y-4 mt-4">
-            <PhoenixWithdrawalDetail activeProtocol={bot?.activeProtocol} visible={isOpen && activeTab === 'equity'} />
+            <PhoenixWithdrawalDetail botId={bot?.id} activeProtocol={bot?.activeProtocol} visible={isOpen && activeTab === 'equity'} />
             <div className="grid grid-cols-2 gap-3">
               <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
                 <div className="flex items-center justify-between">

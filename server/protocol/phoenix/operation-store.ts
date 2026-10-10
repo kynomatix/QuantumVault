@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { PhoenixTraderIdentity } from '../../../shared/phoenix-read-contract';
 import { phoenixIdentityFromBot, type PhoenixBotIdentityColumns } from './identity';
 import { PHOENIX_PUBLIC_ADDRESSES } from './sdk-boundary';
+import { validateFundingIntent, validateFundingReceipt, type FundingTerms, type FundingHistory, type FundingReceipt } from './funding-contract';
 
 export type PhoenixOperationKind = 'register' | 'deposit' | 'withdraw' | 'transfer';
 export type PhoenixOperationState = 'prepared' | 'submission_pending' | 'queued' | 'unknown' | 'completed' | 'failed' | 'dropped';
@@ -17,11 +18,13 @@ export interface PhoenixIntent {
   feeBaseUnits: string;
   destination: string;
   registration?: { maxPositions: number; maxCostLamports: string; name: string; market: string };
+  funding?: FundingTerms;
 }
 export interface StoredPhoenixOperation {
   id: string; bot_id: string; request_key: string; kind: PhoenixOperationKind;
   intent: PhoenixIntent; intent_hash: string; state: PhoenixOperationState; revision: number;
   observation: Record<string, unknown> | null;
+  created_at: Date;
 }
 export interface PhoenixAttemptInput {
   signature: string; blockhash: string; lastValidBlockHeight: string; transactionHash: string;
@@ -68,7 +71,7 @@ export class PhoenixOperationStore {
       const operation = await this.lockOperation(client, botId, ownerWallet, operationId);
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale preparation');
       const result = await client.query(`UPDATE phoenix_operations SET observation = $2, revision = revision + 1,
-        updated_at = now() WHERE id = $1 RETURNING *`, [operationId, structuredClone(observation)]);
+        updated_at = now() WHERE id = $1 RETURNING *`, [operationId, { ...structuredClone(observation), ...(operation.observation?.funding ? { funding: operation.observation.funding } : {}) }]);
       return result.rows[0] as StoredPhoenixOperation;
     });
   }
@@ -95,6 +98,7 @@ export class PhoenixOperationStore {
   async prepare(input: PhoenixIntent): Promise<{ operation: StoredPhoenixOperation; created: boolean }> {
     // Snapshot before awaiting: a caller cannot mutate the admitted identity while we wait for a lock.
     const intent = structuredClone(input);
+    if (intent.funding) validateFundingIntent(intent);
     if (!['register', 'deposit', 'withdraw', 'transfer'].includes(intent.kind)
       || typeof intent.requestKey !== 'string' || !/^[\x21-\x7e]{1,200}$/.test(intent.requestKey)
       || intent.requestKey.includes('\n') || intent.mint !== PHOENIX_PUBLIC_ADDRESSES.usdcMint
@@ -119,8 +123,25 @@ export class PhoenixOperationStore {
         }
         return { operation: replay.rows[0], created: false };
       }
-      const inserted = await client.query(`INSERT INTO phoenix_operations (bot_id, request_key, kind, intent, intent_hash)
-        VALUES ($1,$2,$3,$4,$5) RETURNING *`, [intent.botId, intent.requestKey, intent.kind, intent, intentHash]);
+      if (intent.funding) {
+        const registered = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id = $1 AND kind = 'register' AND state = 'completed'`, [intent.botId]);
+        if (!registered.rows.length) throw new Error('Phoenix registration not confirmed');
+        const parentId = intent.funding.parentOperationId;
+        if (parentId) {
+          const parent = await this.lockOperation(client, intent.botId, intent.ownerWallet, parentId);
+          const expectedParent = ({ deposit: 'wallet_funding', unwrap: 'withdraw', wallet_return: 'unwrap' } as Record<string, string>)[intent.funding.leg];
+          if (!expectedParent || parent.state !== 'completed' || parent.intent.funding?.leg !== expectedParent
+            || parent.intent.amountBaseUnits !== intent.funding.grossBaseUnits
+            || !parent.observation?.funding) throw new Error('Funding parent not settled');
+          const consumed = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id = $1 AND intent->'funding'->>'parentOperationId' = $2`, [intent.botId, parentId]);
+          if (consumed.rows.length) throw new Error('Funding parent already consumed');
+        }
+      }
+      // Use explicit epoch milliseconds: U02's timestamp-without-time-zone column
+      // cannot safely measure durations across database/client timezone settings.
+      const observation = intent.funding ? { funding: { requestedAt: Date.now() } } : null;
+      const inserted = await client.query(`INSERT INTO phoenix_operations (bot_id, request_key, kind, intent, intent_hash, observation)
+        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, [intent.botId, intent.requestKey, intent.kind, intent, intentHash, observation]);
       return { operation: inserted.rows[0], created: true };
     });
   }
@@ -175,7 +196,7 @@ export class PhoenixOperationStore {
    */
   async observe(botId: string, ownerWallet: string, operationId: string, revision: number,
     state: Exclude<PhoenixOperationState, 'submission_pending'>,
-    observation: { source: string; reference: string; attemptOutcome?: 'confirmed' | 'failed' | 'expired' }) {
+    observation: { source: string; reference: string; attemptOutcome?: 'confirmed' | 'failed' | 'expired'; fundingReceipt?: FundingReceipt }) {
     const evidence = structuredClone(observation);
     if (!evidence.source || !evidence.reference) throw new Error('Phoenix observation evidence required');
     return this.transaction(async client => {
@@ -192,13 +213,37 @@ export class PhoenixOperationStore {
         : state === 'prepared' ? !!pending.rows[0] && (outcome === 'failed' || outcome === 'expired')
         : state === 'queued' ? operation.kind === 'withdraw' && ((pending.rows[0] && outcome === 'confirmed') || (queueRecovery && !outcome))
         : state === 'completed' ? (pending.rows[0] && outcome === 'confirmed') || (queueRecovery && !outcome)
-        : state === 'dropped' ? queueRecovery && !outcome
+        : state === 'dropped' ? (queueRecovery && !outcome) || (operation.intent.funding && operation.kind === 'withdraw' && pending.rows[0] && outcome === 'confirmed')
         : state === 'failed' ? (pending.rows[0] && (outcome === 'failed' || outcome === 'expired')) || (operation.state === 'prepared' && !outcome)
         : false;
       if (!allowed) throw new Error('Phoenix invalid state transition');
+      let retained: Record<string, unknown> = evidence;
+      if (operation.intent.funding) {
+        const prior = operation.observation?.funding as FundingHistory | undefined;
+        if (!prior || !Number.isSafeInteger(prior.requestedAt)) throw new Error('Funding request timestamp missing');
+        const funding: FundingHistory = { ...prior };
+        const receipt = evidence.fundingReceipt;
+        if (['queued', 'completed', 'dropped'].includes(state) && !receipt) throw new Error('Funding receipt required');
+        if (receipt) {
+          const latest = await client.query(`SELECT signature FROM phoenix_operation_attempts WHERE operation_id = $1 ORDER BY attempt_number DESC LIMIT 1`, [operationId]);
+          validateFundingReceipt(operation, latest.rows[0]?.signature, receipt);
+          if (state !== (receipt.outcome === 'settled' ? 'completed' : receipt.outcome)) throw new Error('Funding receipt state mismatch');
+          if (receipt.intentHash !== operation.intent_hash || receipt.finalized !== true
+            || !Number.isSafeInteger(receipt.observedAt) || receipt.observedAt < funding.requestedAt
+            || receipt.observedAt > Date.now() || (funding.receipt && receipt.observedAt < funding.receipt.observedAt)
+            || (funding.queueRequestId && receipt.queueRequestId !== funding.queueRequestId)) throw new Error('Funding receipt binding mismatch');
+          if (state === 'queued') funding.queuedAt ??= receipt.observedAt;
+          if (state === 'completed') funding.completedAt = receipt.observedAt;
+          if (state === 'dropped') funding.droppedAt = receipt.observedAt;
+          funding.queueRequestId ??= receipt.queueRequestId;
+          funding.receipt = receipt;
+          funding.events = state === operation.state ? prior?.events : [...(prior?.events ?? []), { state, observedAt: receipt.observedAt, source: receipt.source, reference: receipt.reference, receipt }];
+        }
+        retained = { ...evidence, funding };
+      }
       if (outcome) await client.query('UPDATE phoenix_operation_attempts SET state = $2 WHERE id = $1', [pending.rows[0].id, outcome]);
       const result = await client.query(`UPDATE phoenix_operations SET state = $2, observation = $3,
-        revision = revision + 1, updated_at = now() WHERE id = $1 RETURNING *`, [operationId, state, evidence]);
+        revision = revision + 1, updated_at = now() WHERE id = $1 RETURNING *`, [operationId, state, retained]);
       return result.rows[0] as StoredPhoenixOperation;
     });
   }
@@ -209,6 +254,15 @@ export class PhoenixOperationStore {
       const result = await client.query(`SELECT * FROM phoenix_operations WHERE bot_id = $1
         AND state NOT IN ('completed','failed','dropped') ORDER BY created_at`, [botId]);
       return Promise.all(result.rows.map(row => this.lockOperation(client, botId, ownerWallet, row.id)));
+    });
+  }
+
+  /** Owned history remains available after restart, including settled legs awaiting a successor. */
+  async fundingHistory(botId: string, ownerWallet: string): Promise<StoredPhoenixOperation[]> {
+    return this.transaction(async client => {
+      await this.lockBot(client, botId, ownerWallet);
+      const rows = await client.query(`SELECT id FROM phoenix_operations WHERE bot_id = $1 AND intent ? 'funding' ORDER BY created_at`, [botId]);
+      return Promise.all(rows.rows.map(row => this.lockOperation(client, botId, ownerWallet, row.id)));
     });
   }
 }
