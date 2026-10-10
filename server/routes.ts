@@ -16,7 +16,8 @@ import { Keypair } from "@solana/web3.js";
 import { SERVER_BOOT_ID } from "./boot-id";
 import { appendTelemetry } from "./telemetry";
 import { storage, DatabaseStorage, notPhantomDupClose } from "./storage";
-import { pairChartTradeHistory, alignChartExecutions, chartPairingPlaceholders, chartScannedPage, assertSingleChartMarket, chartFirstTradeTime, chartOpenPosition, chartPriceSeries } from "./trading/bot-trade-chart";
+import { chartDefaultTimeframe, pairChartTradeHistory, alignChartExecutions, chartPairingPlaceholders, chartScannedPage, assertSingleChartMarket, chartFirstTradeTime, chartOpenPosition, chartPriceSeries } from "./trading/bot-trade-chart";
+import { SIGNAL_CHART_BAR_MS, isSignalChartTimeframe } from "@shared/signal-trade-chart";
 import { fetchOHLCV, CHART_CANDLE_POLICY } from "./lab/datafeed";
 import { marketToDatafeedTicker } from "./ai-trader/context-builder";
 import { isMultiplierMarketQuarantined } from "./ai-trader/multiplier-market-quarantine";
@@ -18399,38 +18400,49 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) return res.status(404).json({ error: "Bot not found" });
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
-      const tf = req.query.tf === "4h" ? "4h" : req.query.tf === undefined || req.query.tf === "1d" ? "1d" : null;
-      if (!tf) return res.status(400).json({ error: "Invalid timeframe" });
+      if (req.query.tf !== undefined && !isSignalChartTimeframe(req.query.tf)) return res.status(400).json({ error: "Invalid timeframe" });
       const to = req.query.to ? new Date(String(req.query.to)) : new Date();
-      const from = req.query.from ? new Date(String(req.query.from)) : new Date(to.getTime() - 90 * 86_400_000);
-      if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to || to.getTime() - from.getTime() > 120 * 86_400_000)
-        return res.status(400).json({ error: "Invalid or unbounded range" });
-      let cursor: { id: string; at: string; botId: string; market: string; from: string; to: string } | null = null;
-      if (req.query.cursor) {
-        try {
-          cursor = JSON.parse(Buffer.from(String(req.query.cursor), "base64url").toString("utf8"));
-          if (!cursor || cursor.botId !== bot.id || cursor.market !== bot.market || cursor.from !== from.toISOString() || cursor.to !== to.toISOString() || typeof cursor.id !== "string" || !cursor.id || typeof cursor.at !== "string" || !Number.isFinite(new Date(cursor.at).getTime()) || new Date(cursor.at) < from || new Date(cursor.at) >= to) throw Error();
-        } catch { return res.status(400).json({ error: "Invalid chart cursor" }); }
-      }
+      const requestedFrom = req.query.from ? new Date(String(req.query.from)) : null;
+      if (!Number.isFinite(to.getTime()) || (requestedFrom && (!Number.isFinite(requestedFrom.getTime()) || requestedFrom >= to)))
+        return res.status(400).json({ error: "Invalid range" });
+      const allTrades = req.query.allTrades === "1";
       const markets = await db.selectDistinct({ market: botTrades.market }).from(botTrades).where(and(eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!)));
       const ownPositions = await db.select().from(botPositions).where(and(eq(botPositions.tradingBotId, bot.id), eq(botPositions.walletAddress, req.walletAddress!)));
       try { assertSingleChartMarket(bot.market, [...markets.map(x => x.market), ...ownPositions.map(x => x.market)]); }
       catch { return res.status(409).json({ code: "MARKET_INVARIANT_VIOLATION", error: "Stored trade or position market differs from bot market" }); }
       const first = await db.select({ first: sql<Date | string | null>`min(${botTrades.executedAt})` }).from(botTrades)
         .where(and(eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!), eq(botTrades.market, bot.market), inArray(botTrades.status, ["executed", "liquidated", "recovered"]), notPhantomDupClose()));
-      const page = await db.select().from(botTrades).where(and(
-        eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!), eq(botTrades.market, bot.market),
-        inArray(botTrades.status, ["executed", "liquidated", "recovered"]), notPhantomDupClose(),
-        gte(botTrades.executedAt, from), lt(botTrades.executedAt, to),
-        cursor ? or(lt(botTrades.executedAt, new Date(cursor.at)), and(eq(botTrades.executedAt, new Date(cursor.at)), lt(botTrades.id, cursor.id))) : undefined,
-      )).orderBy(desc(botTrades.executedAt), desc(botTrades.id)).limit(251);
-      const { complete, scanned: kept, lastScanned: tail } = chartScannedPage(page);
       // Pair the entire retained history, including invalid rows as neutral barriers.
       // Never infer a new position merely because an entry fell off a page/window.
       const history = await db.select().from(botTrades).where(and(
         eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!), eq(botTrades.market, bot.market),
         inArray(botTrades.status, ["executed", "liquidated", "recovered"]), notPhantomDupClose(),
       ));
+      const tf = isSignalChartTimeframe(req.query.tf) ? req.query.tf : chartDefaultTimeframe(history);
+      const barMs = SIGNAL_CHART_BAR_MS[tf];
+      const firstEligibleTradeAt = chartFirstTradeTime(first[0]?.first);
+      // Include venue fills that predate their recorded execution timestamps.
+      const earliest = history.reduce((time, row) => {
+        const filled = row.filledAt ? new Date(row.filledAt).getTime() : NaN;
+        return Math.min(time, new Date(row.executedAt).getTime(), Number.isFinite(filled) ? filled : time);
+      }, firstEligibleTradeAt ? Date.parse(firstEligibleTradeAt) : to.getTime() - 100 * barMs);
+      const from = requestedFrom ?? new Date(Math.floor(earliest / barMs) * barMs - 2 * barMs);
+      let cursor: { id: string; at: string; botId: string; market: string; from: string; to: string } | null = null;
+      if (req.query.cursor) {
+        try {
+          cursor = JSON.parse(Buffer.from(String(req.query.cursor), "base64url").toString("utf8"));
+          if (allTrades || !cursor || cursor.botId !== bot.id || cursor.market !== bot.market || cursor.from !== from.toISOString() || cursor.to !== to.toISOString() || typeof cursor.id !== "string" || !cursor.id || typeof cursor.at !== "string" || !Number.isFinite(new Date(cursor.at).getTime()) || new Date(cursor.at) < from || new Date(cursor.at) >= to) throw Error();
+        } catch { return res.status(400).json({ error: "Invalid chart cursor" }); }
+      }
+      const page = allTrades ? history.filter(row => row.executedAt >= from && row.executedAt < to) : await db.select().from(botTrades).where(and(
+        eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!), eq(botTrades.market, bot.market),
+        inArray(botTrades.status, ["executed", "liquidated", "recovered"]), notPhantomDupClose(),
+        gte(botTrades.executedAt, from), lt(botTrades.executedAt, to),
+        cursor ? or(lt(botTrades.executedAt, new Date(cursor.at)), and(eq(botTrades.executedAt, new Date(cursor.at)), lt(botTrades.id, cursor.id))) : undefined,
+      )).orderBy(desc(botTrades.executedAt), desc(botTrades.id)).limit(251);
+      const { complete, scanned: kept, lastScanned: tail } = allTrades
+        ? { complete: true, scanned: page.sort((a, b) => +b.executedAt - +a.executedAt || b.id.localeCompare(a.id)), lastScanned: null }
+        : chartScannedPage(page);
       const sequential = pairChartTradeHistory(history, tf, bot.activeProtocol);
       const byId = new Map(sequential.executions.map(row => [row.id, row]));
       const executions = kept.flatMap(row => { const execution = byId.get(row.id); return execution ? [execution] : []; });
@@ -18442,10 +18454,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const multiplierQuarantined = isMultiplierMarketQuarantined(bot.market);
       try {
         if (multiplierQuarantined) throw new Error("multiplier_unqualified");
-        const fetched = await fetchOHLCV(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, cacheWritePolicy: "skip" });
+        // fetchOHLCV already pages native requests (OKX 300, Gate 2,000 bars)
+        // and bypasses Hyperliquid for ranges beyond its candle-count ceiling.
+        // Keep one provider series across the full history; bound fetch time too.
+        const fetched = await fetchOHLCV(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, cacheWritePolicy: "skip", deadlineMs: 60_000 });
         ({ candles, provenance } = chartPriceSeries(fetched, tf));
       } catch { /* trade detail remains available when price source fails */ }
-      const aligned = alignChartExecutions(executions, candles, tf === "1d" ? 86_400_000 : 14_400_000);
+      const aligned = alignChartExecutions(executions, candles, barMs);
       const paired = chartPairingPlaceholders(aligned);
       const openPosition = chartOpenPosition(ownPositions.find(p => Number(p.baseSize) !== 0));
       const totals = await storage.getCanonicalBotTradeStats(bot.id);

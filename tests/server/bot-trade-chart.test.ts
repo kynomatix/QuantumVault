@@ -3,11 +3,12 @@ import type { ProvenancedOHLCV } from "../../server/lab/datafeed";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { earlierChartWindow, mergeNeutralBands } from "../../client/src/components/signalTradeHistoryWindow";
+import { mergeNeutralBands } from "../../client/src/components/signalTradeHistoryWindow";
+import { SIGNAL_CHART_TIMEFRAMES, SIGNAL_CHART_BAR_MS, isSignalChartTimeframe, signalChartTimeframe } from "../../shared/signal-trade-chart";
 import type { BotTrade } from "@shared/schema";
 import { marketToDatafeedTicker } from "../../server/ai-trader/context-builder";
 import { isMultiplierMarketQuarantined } from "../../server/ai-trader/multiplier-market-quarantine";
-import { pairChartTradeHistory, chartFirstTradeTime, chartOpenPosition, chartPriceSeries, alignChartExecutions, assertSingleChartMarket, chartPairingPlaceholders, chartScannedPage, toChartExecution } from "../../server/trading/bot-trade-chart";
+import { chartDefaultTimeframe, pairChartTradeHistory, chartFirstTradeTime, chartOpenPosition, chartPriceSeries, alignChartExecutions, assertSingleChartMarket, chartPairingPlaceholders, chartScannedPage, toChartExecution } from "../../server/trading/bot-trade-chart";
 
 const row = (overrides: Record<string, unknown> = {}): BotTrade => ({
   id: "EXAMPLE_ENTRY", market: "SOL", side: "LONG", status: "executed",
@@ -244,13 +245,14 @@ describe("Signal Bot trade chart proof", () => {
     ]);
     expect(mergeNeutralBands(chartPairingPlaceholders([aa]).bands, chartPairingPlaceholders([bb]).bands)[0].rowIds).toEqual([a.id,b.id]);
   });
-  it("stops only at the first eligible time, including empty and 90-day gaps", () => {
-    expect(earlierChartWindow("2026-10-01T00:00:00.000Z", null)).toBeNull();
-    expect(earlierChartWindow("2026-10-01T00:00:00.000Z", "2026-04-01T00:00:00.000Z")).toEqual({from:"2026-07-03T00:00:00.000Z",to:"2026-10-01T00:00:00.000Z"});
-    expect(earlierChartWindow("2026-04-01T00:00:00.000Z", "2026-04-01T00:00:00.000Z")).toBeNull();
-    const route = readFileSync(resolve(process.cwd(), "server/routes.ts"), "utf8");
-    expect(route).toContain("eq(botTrades.market, bot.market), inArray(botTrades.status");
-    expect(route).toContain("firstEligibleTradeAt: chartFirstTradeTime(first[0]?.first)");
+  it("offers five timeframes and loads all chart trades without date-window controls", () => {
+    const source = readFileSync(resolve(process.cwd(), "client/src/components/SignalTradeHistoryChart.tsx"), "utf8");
+    expect(SIGNAL_CHART_TIMEFRAMES).toEqual(["1h", "2h", "4h", "12h", "1d"]);
+    expect(source).toContain("allTrades: '1'");
+    expect(source).toContain("setVisibleLogicalRange");
+    expect(source).toContain("SIGNAL_CHART_BAR_MS[data.timeframe] / 1000");
+    expect(source).not.toContain("Earlier 90 days");
+    expect(source).not.toContain("Recent 90 days");
   });
   it("uses a half-open executedAt window and cursors from the last scanned row even when invalid", () => {
     const from = new Date("2026-08-01T00:00:00Z"), boundary = new Date("2026-09-01T00:00:00Z");
@@ -316,6 +318,25 @@ const candle = (time = Date.parse("2026-08-04T00:00:00Z"), overrides: Record<str
 } as ProvenancedOHLCV);
 
 describe("chart boundary normalization", () => {
+  it.each(SIGNAL_CHART_TIMEFRAMES)("uses the %s bar length for admission and execution alignment", timeframe => {
+    const barMs = SIGNAL_CHART_BAR_MS[timeframe], start = candle().time;
+    const candles = [candle(start), candle(start + barMs)];
+    const prices = chartPriceSeries(candles, timeframe);
+    expect(prices.candles).toHaveLength(2);
+    const execution = toChartExecution(row({ executedAt: new Date(start + barMs + 1) }), timeframe)!;
+    expect(alignChartExecutions([execution], prices.candles, barMs)[0].displayBarTime).toBe(new Date(start + barMs).toISOString());
+    expect(chartPriceSeries([candles[0], candle(start + 2 * barMs)], timeframe).candles).toEqual([]);
+  });
+  it("uses the newest recorded signal interval, normalizes TradingView minutes and falls back to 4H", () => {
+    expect(chartDefaultTimeframe([row({ webhookPayload: { data: { interval: "120" } } })])).toBe("2h");
+    expect(chartDefaultTimeframe([row({ webhookPayload: JSON.stringify({ timeframe: "12H" }) })])).toBe("12h");
+    expect(chartDefaultTimeframe([row({ webhookPayload: { timeframe: "1h" } }), row({ id: "EXAMPLE_NEW", executedAt: new Date("2026-08-05"), webhookPayload: { interval: "15" } })])).toBe("4h");
+    expect(chartDefaultTimeframe([row()])).toBe("4h");
+    expect(chartDefaultTimeframe([])).toBe("4h");
+    expect(signalChartTimeframe("D")).toBe("1d");
+    expect(signalChartTimeframe(720)).toBe("12h");
+  });
+
   it("normalizes aggregate timestamps and rejects invalid position prices", () => {
     expect(chartFirstTradeTime("2026-08-04 00:00:00+00")).toBe("2026-08-04T00:00:00.000Z");
     expect(chartFirstTradeTime("invalid")).toBeNull();
@@ -332,7 +353,7 @@ describe("chart boundary normalization", () => {
     expect(chartPriceSeries([a, candle(a.time + 2 * 86_400_000)], "1d").candles).toEqual([]);
     expect(chartPriceSeries([candle(a.time, { high: 98 })], "1d").candles).toEqual([]);
     expect(chartPriceSeries([a, {...b, provenance: {...b.provenance, basis: "spot"}}], "1d").candles).toEqual([]);
-    expect(chartPriceSeries(Array.from({length:121}, (_, i) => candle(a.time + i * 86_400_000)), "1d").candles).toEqual([]);
+    expect(chartPriceSeries(Array.from({length:180}, (_, i) => candle(a.time + i * 86_400_000)), "1d").candles).toHaveLength(180);
   });
   it("survives non-string action payloads and retains marker row identity", async () => {
     expect(toChartExecution(row({ webhookPayload: { action: 123 } }), "1d")).not.toBeNull();
@@ -389,7 +410,7 @@ function routeHarness(trades: BotTrade[] = [fixture()], positions: TestRow[] = [
     botTrades:tradeTable,botPositions:positionTable,eq,lt,gte,and,or,desc:(key:string)=>key,
     inArray:(key:string,values:string[]):Predicate=>r=>values.includes(r[key]),sql:()=>"min",
     notPhantomDupClose:():Predicate=>r=>!r.phantom,fetchOHLCV,CHART_CANDLE_POLICY:"EXAMPLE_POLICY",
-    pairChartTradeHistory,chartFirstTradeTime,chartOpenPosition,chartPriceSeries,alignChartExecutions,assertSingleChartMarket,chartPairingPlaceholders,chartScannedPage,toChartExecution,
+    chartDefaultTimeframe,SIGNAL_CHART_BAR_MS,isSignalChartTimeframe,pairChartTradeHistory,chartFirstTradeTime,chartOpenPosition,chartPriceSeries,alignChartExecutions,assertSingleChartMarket,chartPairingPlaceholders,chartScannedPage,toChartExecution,
     marketToDatafeedTicker,isMultiplierMarketQuarantined,Buffer,console};
   new Function(...Object.keys(dependencies),handlerJs)(...Object.values(dependencies));
   async function request(query:Record<string,unknown>=windowQuery,walletAddress=bot.walletAddress) {
@@ -401,6 +422,24 @@ function routeHarness(trades: BotTrade[] = [fixture()], positions: TestRow[] = [
 }
 
 describe("registered chart route", () => {
+  it("loads from the first trade with padding and includes more than 250 trades on the chart", async () => {
+    const trades = Array.from({ length: 503 }, (_, i) => fixture({ id: `EXAMPLE_${i}`, executedAt: new Date(Date.parse("2026-04-01") + i * 7200000), webhookPayload: { interval: "120" } }));
+    const h = routeHarness(trades);
+    const { status, body } = await h.request({ allTrades: "1", to: "2026-10-01T00:00:00.000Z" });
+    expect(status).toBe(200);
+    expect(body.timeframe).toBe("2h");
+    expect(body.range.from).toBe("2026-03-31T20:00:00.000Z");
+    expect(body.executions).toHaveLength(503);
+    expect(body.complete).toBe(true);
+    expect(body.nextCursor).toBeNull();
+    expect(h.fetchOHLCV).toHaveBeenCalledWith("SOL/USDT", "2h", Date.parse(body.range.from), Date.parse(body.range.to), undefined, expect.objectContaining({ deadlineMs: 60_000, cacheWritePolicy: "skip" }));
+  });
+  it.each(SIGNAL_CHART_TIMEFRAMES)("accepts native %s history beyond 120 days", async tf => {
+    const h = routeHarness();
+    expect((await h.request({ ...windowQuery, tf, from: "2026-01-01" })).status).toBe(200);
+    expect(h.fetchOHLCV).toHaveBeenCalledWith("SOL/USDT", tf, expect.any(Number), expect.any(Number), undefined, expect.any(Object));
+  });
+
   it("pairs across the window boundary and includes spans with neither endpoint in view", async () => {
     const entry = fixture({ executedAt: new Date("2026-07-01") });
     const close = fixture({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-05"), pnl: "4", pnlConvention: "net_of_close_fee" });
@@ -449,10 +488,10 @@ describe("registered chart route", () => {
   });
   it("rejects bad ranges, unsupported timeframes and cursors bound to another bot", async () => {
     const h=routeHarness();
-    for(const query of [{...windowQuery,tf:"1h"},{...windowQuery,from:"2025-01-01"},{...windowQuery,from:windowQuery.to},{...windowQuery,cursor:Buffer.from(JSON.stringify({id:"EXAMPLE_ROW",at:windowQuery.from,botId:"EXAMPLE_OTHER",market:"SOL",from:windowQuery.from,to:windowQuery.to})).toString("base64url")}]) {
+    for(const query of [{...windowQuery,tf:"8h"},{...windowQuery,from:"invalid"},{...windowQuery,from:windowQuery.to},{...windowQuery,cursor:Buffer.from(JSON.stringify({id:"EXAMPLE_ROW",at:windowQuery.from,botId:"EXAMPLE_OTHER",market:"SOL",from:windowQuery.from,to:windowQuery.to})).toString("base64url")}]) {
       expect((await h.request(query)).status).toBe(400);
     }
-    expect(h.selects).toHaveLength(0);
+    expect(h.fetchOHLCV).not.toHaveBeenCalled();
   });
   it("rejects failed historical trades and zero-size positions on another market", async () => {
     const failed=routeHarness([fixture({status:"failed",market:"BTC"})]);
@@ -483,7 +522,7 @@ describe("registered chart route", () => {
   it("passes canonical totals through and requests only reference perpetual candles without cache writes", async () => {
     const h=routeHarness([fixture({market:"ZEC-PERP"})],[],"ZEC-PERP");const {body}=await h.request();
     expect(body.totals).toEqual(h.totals);expect(h.storage.getCanonicalBotTradeStats).toHaveBeenCalledWith(bot.id);
-    expect(h.fetchOHLCV).toHaveBeenCalledWith("ZEC/USDT","1d",Date.parse(windowQuery.from),Date.parse(windowQuery.to),undefined,{basisPolicy:"EXAMPLE_POLICY",skipSpotFallback:true,cacheWritePolicy:"skip"});
+    expect(h.fetchOHLCV).toHaveBeenCalledWith("ZEC/USDT","1d",Date.parse(windowQuery.from),Date.parse(windowQuery.to),undefined,{basisPolicy:"EXAMPLE_POLICY",skipSpotFallback:true,cacheWritePolicy:"skip",deadlineMs:60_000});
     expect(body.price.basisLabel).toContain("not Drift execution price");
   });
   it("retains exact trade details when price fetch fails or the market is quarantined", async () => {
