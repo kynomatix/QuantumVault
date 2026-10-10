@@ -14,7 +14,24 @@ export function attachTradeBoxes(chart: IChartApi, series: ISeriesApi<'Candlesti
   if (!candleTimes.length) return () => {};
   const first = candleTimes[0], end = candleTimes[candleTimes.length - 1] + barSeconds;
   const visible = pairs.filter(pair => Date.parse(pair.entryTime) / 1000 < end && Date.parse(pair.exitTime) / 1000 >= first);
-  const x = (time: number) => chart.timeScale().logicalToCoordinate(((Math.max(first, Math.min(end, time)) - first) / barSeconds) as Logical);
+  // lightweight-charts 4.2 returns 0 for fractional logicals, so interpolate by
+  // hand: whole bar index from the candle list, plus the fraction of a bar.
+  const logical = (time: number) => {
+    const t = Math.max(first, Math.min(end, time));
+    let lo = 0, hi = candleTimes.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (candleTimes[mid] <= t) lo = mid; else hi = mid - 1; }
+    return lo + Math.min(1, Math.max(0, (t - candleTimes[lo]) / barSeconds));
+  };
+  const x = (time: number) => {
+    const l = logical(time), index = Math.floor(l);
+    const base = chart.timeScale().logicalToCoordinate(index as Logical);
+    return base === null ? null : base + (l - index) * chart.timeScale().options().barSpacing;
+  };
+  const onScreen = () => {
+    const range = chart.timeScale().getVisibleLogicalRange();
+    if (!range) return visible;
+    return visible.filter(pair => logical(Date.parse(pair.exitTime) / 1000) >= range.from && logical(Date.parse(pair.entryTime) / 1000) <= range.to);
+  };
   const primitive: ISeriesPrimitive = {
     paneViews: () => [{
       zOrder: () => 'bottom',
@@ -39,10 +56,13 @@ export function attachTradeBoxes(chart: IChartApi, series: ISeriesApi<'Candlesti
         },
       }),
     }],
-    autoscaleInfo: () => visible.length ? { priceRange: {
-      minValue: visible.reduce((min, pair) => Math.min(min, pair.entryPrice, pair.exitPrice), Infinity),
-      maxValue: visible.reduce((max, pair) => Math.max(max, pair.entryPrice, pair.exitPrice), -Infinity),
-    } } : null,
+    autoscaleInfo: () => {
+      const shown = onScreen();
+      return shown.length ? { priceRange: {
+        minValue: shown.reduce((min, pair) => Math.min(min, pair.entryPrice, pair.exitPrice), Infinity),
+        maxValue: shown.reduce((max, pair) => Math.max(max, pair.entryPrice, pair.exitPrice), -Infinity),
+      } } : null;
+    },
   };
   series.attachPrimitive(primitive);
   return () => series.detachPrimitive(primitive);
