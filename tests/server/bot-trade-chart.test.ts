@@ -89,8 +89,8 @@ describe("Signal Bot trade chart proof", () => {
       row({ id: "EXAMPLE_LIQUIDATION", side: "CLOSE", status: "liquidated", executedAt: at(5), size: "3", price: "90", pnl: "-7", fee: "2", pnlConvention: "gross_before_close_fee" }),
     ], "4h");
     expect(result.pairs).toHaveLength(1);
-    expect(result.pairs[0]).toMatchObject({ entryId: "EXAMPLE_ENTRY", exitId: "EXAMPLE_LIQUIDATION", direction: side === "LONG" ? "Long" : "Short", entryTime: at(1).toISOString(), exitTime: at(5).toISOString(), entryPrice: 110, exitPrice: 90, size: 4, addCount: 2, liquidated: true, netPnl: -4, timeHeldMs: 4 * 3_600_000 });
-    expect(result.pairs[0].pnlPercent).toBeCloseTo(-4 / 440 * 100);
+    expect(result.pairs[0]).toMatchObject({ entryId: "EXAMPLE_ENTRY", exitId: "EXAMPLE_LIQUIDATION", direction: side === "LONG" ? "Long" : "Short", entryTime: at(1).toISOString(), exitTime: at(5).toISOString(), entryPrice: 110, exitPrice: 90, size: 4, addCount: 2, liquidated: true, netPnl: -9, timeHeldMs: 4 * 3_600_000 });
+    expect(result.pairs[0].pnlPercent).toBeCloseTo(-9 / 440 * 100);
     expect(result.executions.every(execution => execution.pair === result.pairs[0])).toBe(true);
   });
 
@@ -305,7 +305,7 @@ describe("Signal Bot trade chart proof", () => {
     expect(route).toContain("fetchOHLCV(marketToDatafeedTicker(bot.market), tf");
     expect(route).toContain("if (multiplierQuarantined) throw new Error");
     expect(route).toContain("reason: multiplierQuarantined ? \"multiplier_unqualified\"");
-    expect(route).not.toContain("bypassCache: true, cacheWritePolicy");
+    expect(route).toContain("bypassCache: true, cacheWritePolicy"); // one provider retry when the cached series has gaps
   });
   it("uses shared-series markers and an accessible row list", () => {
     const source=readFileSync(resolve(process.cwd(),"client/src/components/SignalTradeHistoryChart.tsx"),"utf8");
