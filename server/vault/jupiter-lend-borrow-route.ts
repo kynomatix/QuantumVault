@@ -24,7 +24,7 @@
  *   (÷10000), borrowLimitUtilization + oraclePrice* scaled ÷1e15.
  */
 
-import { PublicKey, Transaction } from "@solana/web3.js";
+import { PublicKey, Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import { getServerConnection } from "../agent-wallet";
 import { BORROW_PREVIEW_ASSUMPTIONS } from "./borrow-preview-assumptions";
 import {
@@ -46,6 +46,9 @@ const VAULTS_PROGRAM_ID = new PublicKey("jupr81YtYssSyPt8jbnGuiWon5f6x9TcDEFxYe3
 const LIQUIDITY_PROGRAM_ID = new PublicKey("jupeiUmn818Jg1ekPURTpr4mFo29p46vygyykFJ3wZC");
 /** Funded fee payer for read-only simulates (same fallback the SDK itself uses). */
 const SIMULATE_FEE_PAYER = new PublicKey("HEyJLdMfZhhQ7FHCtjD5DWDFNFQhaeAVAsHeWqoY6dSD");
+const ORACLE_PROGRAM_ID = new PublicKey("jupnw4B6Eqs7ft6rxpzYLJZYSnrpRgPcr589n5Kv4oc");
+const ORACLE_DISCRIMINATOR = Buffer.from([139, 194, 131, 179, 140, 179, 229, 244]);
+const oracleFallbackLogged = new Set<string>();
 
 /** Exchange prices move only with interest accrual — a short cache is safe and
  * saves one simulate per read. E only GROWS, so a cached (slightly older, thus
@@ -549,9 +552,70 @@ export class JupiterLendBorrowRoute {
         oracle: new PublicKey(config.oracleAddress),
       });
       const raw = reading?.oraclePriceLiquidate ?? reading?.oraclePriceOperate;
-      if (raw === undefined || raw === null) return null;
-      const price = decode1e15(String(raw));
-      return price > 0 ? price : null;
+      if (raw !== undefined && raw !== null) {
+        const price = decode1e15(String(raw));
+        return price > 0 ? price : null;
+      }
+    } catch {
+      // The SDK IDL may lag new source variants (e.g. InfPool).
+    }
+    return this.simulateOraclePrice(config.oracleAddress);
+  }
+
+  private async simulateOraclePrice(oracleAddress: string): Promise<number | null> {
+    try {
+      const connection = getServerConnection();
+      const oracle = new PublicKey(oracleAddress);
+      const account = await connection.getAccountInfo(oracle, "confirmed");
+      if (!account || account.executable || !account.owner.equals(ORACLE_PROGRAM_ID)) return null;
+      const data = account.data;
+      if (data.length < 15 || !data.subarray(0, 8).equals(ORACLE_DISCRIMINATOR)) return null;
+      // Borsh Oracle: discriminator, u16 nonce, Vec<Sources>, u8 bump.
+      // Sources: pubkey, bool, u128 multiplier, u128 divisor, fieldless enum.
+      // Parse the fixed layout without Anchor's outdated SourceType decoder.
+      const count = data.readUInt32LE(10);
+      const end = 14 + count * 66;
+      if (count === 0 || end + 1 > data.length || data.subarray(end + 1).some(byte => byte !== 0)) return null;
+      const keys = [{ pubkey: oracle, isSigner: false, isWritable: false }];
+      for (let offset = 14; offset < end; offset += 66) {
+        // Known variants through InfPool (11) are fieldless. A future layout
+        // needs review rather than treating possible enum payloads as pubkeys.
+        if (data[offset + 32] > 1 || data[offset + 65] > 11) return null;
+        keys.push({ pubkey: new PublicKey(data.subarray(offset, offset + 32)), isSigner: false, isWritable: false });
+      }
+      // Operate is the protocol's rate for position adjustments, appropriate
+      // for borrow/delever/relever sizing here; this is not a liquidation call.
+      const instruction = new TransactionInstruction({
+        programId: ORACLE_PROGRAM_ID,
+        keys,
+        data: Buffer.concat([Buffer.from([174, 166, 126, 10, 122, 153, 94, 203]), data.subarray(8, 10)]),
+      });
+      const message = new TransactionMessage({
+        payerKey: SIMULATE_FEE_PAYER,
+        recentBlockhash: PublicKey.default.toBase58(), // replaced by the RPC
+        instructions: [instruction],
+      }).compileToV0Message();
+      // Unsigned, read-only simulation: no wallet, signing, fee debit or send.
+      const simulation = await connection.simulateTransaction(new VersionedTransaction(message), {
+        sigVerify: false,
+        replaceRecentBlockhash: true,
+        commitment: "confirmed",
+      });
+      const returned = simulation.value.returnData;
+      if (simulation.value.err !== null || !returned || returned.programId !== ORACLE_PROGRAM_ID.toBase58()) return null;
+      if (returned.data[1] !== "base64") return null;
+      const bytes = Buffer.from(returned.data[0], "base64");
+      if (bytes.length !== 16 || bytes.toString("base64") !== returned.data[0]) return null;
+      const raw = bytes.readBigUInt64LE(0) + (bytes.readBigUInt64LE(8) << 64n);
+      // Keep the downstream 1e9-scaled sizing rate within JS's safe integers.
+      if (raw <= 0n || raw > BigInt(Number.MAX_SAFE_INTEGER) * 1_000_000n) return null;
+      const price = decode1e15(raw.toString());
+      if (!Number.isFinite(price) || price <= 0) return null;
+      if (!oracleFallbackLogged.has(oracleAddress)) {
+        oracleFallbackLogged.add(oracleAddress);
+        console.warn(`[JupiterLendBorrowRoute] oracle_simulate_fallback oracle=${oracleAddress}`);
+      }
+      return price;
     } catch {
       return null;
     }
