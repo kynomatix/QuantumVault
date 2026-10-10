@@ -16,7 +16,7 @@ export function chartDefaultTimeframe(rows: readonly BotTrade[]): SignalChartTim
 }
 
 export type ChartTradePair = { entryId: string; exitId: string; direction: "Long" | "Short"; entryTime: string; exitTime: string; entryPrice: number; exitPrice: number; size: number; addCount: number; liquidated: boolean; netPnl: number; pnlPercent: number; timeHeldMs: number; pairingStatus: "sequential" };
-export type ChartExecution = { id: string; market: string; side: string; status: string; protocol: string | null; protocolMismatch: boolean; kind: "entry" | "close" | "unknown"; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: "venue_fill" | "recorded_execution"; netPnl: number | null; accountingStatus: "resolved" | "accounting unavailable"; feeTruthStatus: string; pairingStatus: "unproven" | "sequential"; pair?: ChartTradePair };
+export type ChartExecution = { id: string; market: string; side: string; status: string; protocol: string | null; protocolMismatch: boolean; kind: "entry" | "close" | "trim" | "unknown"; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: "venue_fill" | "recorded_execution"; netPnl: number | null; accountingStatus: "resolved" | "accounting unavailable"; feeTruthStatus: string; pairingStatus: "unproven" | "sequential"; pair?: ChartTradePair };
 export type ChartBand = { barTime: string; rowIds: string[]; pairingStatus: "unproven" };
 const positive = (v: string | number | null | undefined) => v == null || !Number.isFinite(Number(v)) || Number(v) <= 0 ? null : Number(v);
 const validTime = (v: Date | string | null | undefined) => { const d = v ? new Date(v) : null; return d && Number.isFinite(d.getTime()) ? d : null; };
@@ -85,7 +85,7 @@ export function pairChartTradeHistory(rows: BotTrade[], timeframe: SignalChartTi
       }
       // A smaller opposite-side fill while a position is open only trims it
       // (e.g. a 0.0357 sell against a 1.76 long); the position keeps its side.
-      if (open && execution && execution.size < open.size) { open.members.push(execution); continue; }
+      if (open && execution && execution.size < open.size) { execution.kind = "trim"; open.members.push(execution); continue; }
       // A flip without a close leaves the previous position unpaired.
       positions.delete(key);
       if (execution) positions.set(key, { entry: execution, side, size: execution.size, notional: execution.size * execution.price, addCount: 0, tainted: false, members: [execution] });

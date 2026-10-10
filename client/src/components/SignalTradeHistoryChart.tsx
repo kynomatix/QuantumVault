@@ -36,6 +36,7 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
           <span style={{ color: '#059669' }}>● Close profit</span>
           <span style={{ color: '#dc2626' }}>● Close loss</span>
           <span style={{ color: '#64748b' }}>● Close: zero or P&L pending</span>
+          <span style={{ color: '#64748b' }}>● Trim</span>
           <span style={{ color: '#64748b' }}>■ Unclassified execution</span>
           <span className="inline-flex items-center gap-1"><i aria-hidden="true" className="inline-block h-3 w-5 border" style={{ backgroundColor: 'rgba(5,150,105,0.15)', borderColor: 'rgba(5,150,105,0.7)' }} />Trade profit</span>
           <span className="inline-flex items-center gap-1"><i aria-hidden="true" className="inline-block h-3 w-5 border" style={{ backgroundColor: 'rgba(220,38,38,0.15)', borderColor: 'rgba(220,38,38,0.7)' }} />Trade loss</span>
@@ -76,8 +77,8 @@ function TradeInfoCard({ execution, pinned, onDismiss }: { execution: Execution;
   const exitTime = pair?.exitTime ?? (exit ? execution.exactTime : null);
   return <div role={pinned ? 'region' : 'tooltip'} aria-label="Chart trade details" className={`absolute left-2 top-2 z-10 w-72 max-w-[calc(100%-1rem)] max-h-[calc(100%-1rem)] rounded-lg border border-border/70 bg-background/95 p-3 shadow-lg text-xs ${pinned ? 'overflow-y-auto' : 'pointer-events-none overflow-hidden'}`}>
     <div className="mb-2 flex items-center justify-between gap-2">
-      <strong className={direction === 'Long' ? 'text-sky-400' : direction === 'Short' ? 'text-violet-400' : 'text-foreground'}>
-        {pair ? `${direction} trade` : execution.status === 'liquidated' ? 'Liquidated' : direction ? `${direction} entry` : exit ? 'Exit' : 'Trade'}
+      <strong className={execution.kind === 'trim' ? 'text-foreground' : direction === 'Long' ? 'text-sky-400' : direction === 'Short' ? 'text-violet-400' : 'text-foreground'}>
+        {execution.kind === 'trim' ? 'Trim' : pair ? `${direction} trade` : execution.status === 'liquidated' ? 'Liquidated' : direction ? `${direction} entry` : exit ? 'Exit' : 'Trade'}
       </strong>
       {pinned && <button type="button" onClick={onDismiss} className="rounded px-2 py-1 text-muted-foreground hover:bg-muted focus-visible:outline focus-visible:outline-2" aria-label="Dismiss chart trade details">Close</button>}
     </div>
@@ -95,7 +96,7 @@ function TradeInfoCard({ execution, pinned, onDismiss }: { execution: Execution;
       <dt className="text-muted-foreground">Time held</dt><dd>{pair ? formatTimeHeld(pair.timeHeldMs) : 'Unavailable'}</dd>
       <dt className="text-muted-foreground">Status</dt><dd className="capitalize">{pair?.liquidated ? 'Liquidated' : pair ? 'Closed' : execution.status}</dd>
     </dl>
-    <p className="mt-2 text-[10px] text-muted-foreground">{pair ? 'Flat-to-flat trade; P&L sums all closes.' : 'Entry and exit are not linked for this execution.'} Times are local.{!pinned && ' Click the marker to keep details open.'}</p>
+    <p className="mt-2 text-[10px] text-muted-foreground">{pair ? 'Position ended by the next close; P&L comes from that close.' : 'Entry and exit are not linked for this execution.'} Times are local.{!pinned && ' Click the marker to keep details open.'}</p>
   </div>;
 }
 
@@ -201,13 +202,13 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
         <div ref={priceRef} className="absolute inset-0" aria-label={data.price.basisLabel} onMouseLeave={() => setHovered(null)} />
         {(hovered ?? pinned) && <TradeInfoCard execution={(hovered ?? pinned)!} pinned={!hovered || hovered.id === pinned?.id} onDismiss={() => { setPinned(null); setHovered(null); }} />}
       </div>}
-      <p className="text-muted-foreground">Hover or click a marker for trade details, or select a row below. Each box spans the first open to the final close, including adds, partial closes and liquidation. Adds use a size-weighted average entry. Open or unreconcilable positions stay on the grey strip.</p>
+      <p className="text-muted-foreground">Hover or click a marker for trade details, or select a row below. Each box spans the first entry to the next close or liquidation, including adds and trims. Adds use a size-weighted average entry. Open or unreconcilable positions stay on the grey strip.</p>
       {data.openPosition && <p className="rounded-md border bg-muted/20 px-3 py-2 text-xs tabular-nums">Open: {data.openPosition.size === null ? 'Size unavailable' : `${data.openPosition.size < 0 ? 'SHORT' : 'LONG'} ${formatSize(data.openPosition.size)}`} @ {data.openPosition.entryPrice === null ? 'Price unavailable' : formatPrice(data.openPosition.entryPrice)}</p>}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Arrows show direction · Circles show exit P&L</span></div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Arrows show direction · Circles show exits and trims</span></div>
       <div aria-label="Trade execution rows" className="max-h-48 overflow-y-auto rounded-lg border">
         <ul className="divide-y divide-border">{data.executions.slice(0, visibleRows).map(e => {
           const pnl = e.kind === 'close' && e.accountingStatus === 'resolved' ? e.netPnl : null;
-          const side = e.kind === 'close' ? 'CLOSE' : ['LONG', 'BUY'].includes(e.side.toUpperCase()) ? 'LONG' : ['SHORT', 'SELL'].includes(e.side.toUpperCase()) ? 'SHORT' : e.side.toUpperCase();
+          const side = e.kind === 'trim' ? 'TRIM' : e.kind === 'close' ? 'CLOSE' : ['LONG', 'BUY'].includes(e.side.toUpperCase()) ? 'LONG' : ['SHORT', 'SELL'].includes(e.side.toUpperCase()) ? 'SHORT' : e.side.toUpperCase();
           return <li key={e.id}><Button type="button" size="sm" variant="ghost" onClick={() => selectExecution(e)} className={`h-auto w-full justify-start flex-wrap whitespace-normal rounded-none px-3 py-2 text-left text-xs font-normal gap-x-3 gap-y-1 ${pnl !== null && pnl > 0 ? 'bg-emerald-500/5' : pnl !== null && pnl < 0 ? 'bg-red-500/5' : 'bg-muted/20'} ${selected?.id === e.id ? 'ring-1 ring-inset ring-primary' : ''}`} aria-label={`${e.status} ${e.side} at ${e.exactTime}`} aria-pressed={selected?.id === e.id}>
             <time dateTime={e.exactTime} title={e.exactTime} className="text-muted-foreground tabular-nums">{formatTradeTime(e.exactTime)}</time>
             <Badge variant="outline" className={`text-[10px] px-1.5 py-0 font-medium ${side === 'LONG' ? 'text-emerald-500 border-emerald-500/20' : side === 'SHORT' ? 'text-red-500 border-red-500/20' : 'text-amber-500 border-amber-500/20'}`}>{side}</Badge>

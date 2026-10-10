@@ -7,7 +7,6 @@ export type SequentialTradePair = {
 };
 
 /** Native pane primitive repaints with both price/time scales, without adding bars.
- * Interpolate exact execution times within each candle, including same-bar trades.
  * Clip cross-window positions to the available candle interval.
  */
 export function attachTradeBoxes(chart: IChartApi, series: ISeriesApi<'Candlestick'>, pairs: readonly SequentialTradePair[], candleTimes: readonly number[], barSeconds: number) {
@@ -87,11 +86,13 @@ export function tradeChartMarkers(rows: readonly MarkerRow[]) {
       id: row.id,
       time: (Date.parse(row.displayBarTime!) / 1000),
       position: (direction === 'Long' ? 'belowBar' : 'aboveBar') as 'belowBar' | 'aboveBar',
-      shape: (direction === 'Long' ? 'arrowUp' : direction === 'Short' ? 'arrowDown' : row.kind === 'close' ? 'circle' : 'square') as 'arrowUp' | 'arrowDown' | 'circle' | 'square',
+      shape: (direction === 'Long' ? 'arrowUp' : direction === 'Short' ? 'arrowDown' : row.kind === 'close' || row.kind === 'trim' ? 'circle' : 'square') as 'arrowUp' | 'arrowDown' | 'circle' | 'square',
+      size: row.kind === 'trim' ? 0.5 : 1,
       color: pnl !== null ? pnl > 0 ? '#059669' : pnl < 0 ? '#dc2626' : '#64748b'
         : direction === 'Long' ? '#38bdf8' : direction === 'Short' ? '#a78bfa' : '#64748b',
       text: row.status === 'liquidated' ? `Liquidated${pnl !== null ? ` ${formatTradePnl(pnl)}` : ''}`
         : row.kind === 'close' ? pnl !== null ? formatTradePnl(pnl) : 'Exit · P&L pending'
+        : row.kind === 'trim' ? 'Trim'
         : direction ?? (row.kind === 'entry' ? 'Entry' : 'Trade'),
     };
   }).sort((a,b) => a.time-b.time);

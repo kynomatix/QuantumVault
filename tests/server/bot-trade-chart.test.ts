@@ -60,35 +60,30 @@ describe("Signal Bot trade chart proof", () => {
     expect(() => assertSingleChartMarket("SOL", ["SOL", "BTC"])).toThrow("Stored market differs");
   });
 
-  it("includes partial closes and adds, then pairs the next flat-to-flat position", () => {
+  it("pairs an entry and adds to the next close, regardless of close size", () => {
     const at = (hour: number) => new Date(Date.UTC(2026, 7, 4, hour));
-    const close = (id: string, hour: number, size: string) => row({ id, side: "CLOSE", executedAt: at(hour), size, pnl: "1", pnlConvention: "net_of_close_fee" });
-    for (const middle of [
-      [close("EXAMPLE_PARTIAL", 2, "1"), close("EXAMPLE_REST", 3, "1")],
-      [row({ id: "EXAMPLE_ADD", executedAt: at(2), size: "1" }), close("EXAMPLE_ADDED_CLOSE", 3, "3")],
-    ]) {
-      const result = pairChartTradeHistory([row({ executedAt: at(1) }), ...middle, row({ id: "EXAMPLE_NEXT", executedAt: at(4) }), close("EXAMPLE_NEXT_CLOSE", 5, "2")], "4h");
-      expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_ENTRY", "EXAMPLE_NEXT"]);
-      expect(result.executions.every(execution => execution.pairingStatus === "sequential")).toBe(true);
-      expect(result.executions.slice(0, 3).every(execution => execution.pair === result.pairs[0])).toBe(true);
-    }
+    const result = pairChartTradeHistory([
+      row({ executedAt: at(1) }),
+      row({ id: "EXAMPLE_ADD", executedAt: at(2), size: "1", price: "130" }),
+      row({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: at(3), size: "1", pnl: "3", pnlConvention: "net_of_close_fee" }),
+      row({ id: "EXAMPLE_NEXT", executedAt: at(4) }),
+      row({ id: "EXAMPLE_NEXT_CLOSE", side: "CLOSE", executedAt: at(5), pnl: "2", pnlConvention: "net_of_close_fee" }),
+    ], "4h");
+    expect(result.pairs.map(pair => [pair.entryId, pair.exitId])).toEqual([["EXAMPLE_ENTRY", "EXAMPLE_CLOSE"], ["EXAMPLE_NEXT", "EXAMPLE_NEXT_CLOSE"]]);
+    expect(result.pairs[0]).toMatchObject({ size: 3, entryPrice: 110, addCount: 1, netPnl: 3 });
+    expect(result.executions.slice(0, 3).every(execution => execution.pair === result.pairs[0])).toBe(true);
   });
 
-  it.each([
-    { remainingSizeBase: "1" },
-    { size: "3" }, { pnlConvention: null }, { protocol: "EXAMPLE_OTHER_VENUE" },
-    { executedAt: new Date("2026-08-04T12:30:00Z") },
-  ])("withholds boxes for a close that cannot be paired: %j", overrides => {
+  it.each([{ pnlConvention: null }, { protocol: "EXAMPLE_OTHER_VENUE" }])("leaves an unpairable close neutral: %j", overrides => {
     const result = pairChartTradeHistory([row(), row({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-05"), pnl: "1", pnlConvention: "net_of_close_fee", ...overrides })], "1d");
     expect(result.pairs).toEqual([]);
     expect(result.executions.every(execution => execution.pairingStatus === "unproven")).toBe(true);
   });
 
-  it.each(["LONG", "SHORT"])("aggregates %s adds, partial closes and final liquidation", side => {
+  it.each(["LONG", "SHORT"])("pairs %s adds with the first reconciled liquidation", side => {
     const at = (hour: number) => new Date(Date.UTC(2026, 7, 4, hour));
     const result = pairChartTradeHistory([
       row({ side, executedAt: at(1) }),
-      row({ id: "EXAMPLE_PARTIAL", side: "CLOSE", executedAt: at(2), size: "1", pnl: "5", pnlConvention: "net_of_close_fee" }),
       row({ id: "EXAMPLE_ADD", side, executedAt: at(3), size: "1", price: "130" }),
       row({ id: "EXAMPLE_ADD_TWO", side, executedAt: at(4), size: "1", price: "110" }),
       row({ id: "EXAMPLE_LIQUIDATION", side: "CLOSE", status: "liquidated", executedAt: at(5), size: "3", price: "90", pnl: "-7", fee: "2", pnlConvention: "gross_before_close_fee" }),
@@ -123,7 +118,7 @@ describe("Signal Bot trade chart proof", () => {
     expect(result.executions[0].pairingStatus).toBe("unproven");
   });
 
-  it("withholds the whole trade if any partial close lacks reconciled P&L", () => {
+  it("ends a position at its first close even when P&L is unavailable", () => {
     const result = pairChartTradeHistory([
       row(),
       row({ id: "EXAMPLE_PARTIAL", side: "CLOSE", executedAt: new Date("2026-08-05"), size: "1" }),
@@ -132,39 +127,38 @@ describe("Signal Bot trade chart proof", () => {
       row({ id: "EXAMPLE_NEXT_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-08"), pnl: "2", pnlConvention: "net_of_close_fee" }),
     ], "1d");
     expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_NEXT"]);
+    expect(result.executions[0].pairingStatus).toBe("unproven");
+    expect(result.executions[1].pairingStatus).toBe("unproven");
   });
 
-  it.each([{ size: "0" }, { size: "NaN" }, { executionMethod: "on-chain-detected" }])("resets unknown quantity only at a reconciler-confirmed full close: %j", overrides => {
-    const trades = [
+  it.each([{ size: "0" }, { size: "NaN" }, { executionMethod: "on-chain-detected" }])("lets later trades pair after an invalid or unknown row: %j", overrides => {
+    const result = pairChartTradeHistory([
       row({ ...overrides }),
       row({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-05"), pnl: "1", pnlConvention: "net_of_close_fee" }),
       row({ id: "EXAMPLE_NEXT", executedAt: new Date("2026-08-06") }),
       row({ id: "EXAMPLE_NEXT_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-07"), pnl: "2", pnlConvention: "net_of_close_fee" }),
-    ];
-    expect(pairChartTradeHistory(trades, "1d").pairs).toEqual([]);
-    trades[1].webhookPayload = { reconciled: true, closeReason: "external_close" };
-    expect(pairChartTradeHistory(trades, "1d").pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_NEXT"]);
-    trades[1].webhookPayload = { reconciled: true, closeReason: "partial_close", partialCloseAccounting: { status: "complete", residualBaseSize: 1 } };
-    expect(pairChartTradeHistory(trades, "1d").pairs).toEqual([]);
+    ], "1d");
+    expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_NEXT"]);
   });
 
-  it("keeps a direction flip neutral and resumes after its residual closes", () => {
+  it("starts a new position after an equal-or-larger opposite fill flips direction", () => {
     const result = pairChartTradeHistory([
       row(), row({ id: "EXAMPLE_FLIP", side: "SHORT", size: "3", executedAt: new Date("2026-08-05") }),
       row({ id: "EXAMPLE_CLOSE", side: "CLOSE", size: "1", executedAt: new Date("2026-08-06"), pnl: "1", pnlConvention: "net_of_close_fee" }),
       row({ id: "EXAMPLE_NEXT", executedAt: new Date("2026-08-07") }),
       row({ id: "EXAMPLE_NEXT_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-08"), pnl: "1", pnlConvention: "net_of_close_fee" }),
     ], "1d");
-    expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_NEXT"]);
+    expect(result.pairs.map(pair => [pair.entryId, pair.direction])).toEqual([["EXAMPLE_FLIP", "Short"], ["EXAMPLE_NEXT", "Long"]]);
+    expect(result.executions[0].pairingStatus).toBe("unproven");
   });
 
-  it("resets simultaneous neutral executions at their net flat boundary", () => {
+  it("pairs simultaneous entries before closes, then pairs later trades", () => {
     const result = pairChartTradeHistory([
       row(), row({ id: "EXAMPLE_CLOSE", side: "CLOSE", pnl: "1", pnlConvention: "net_of_close_fee" }),
       row({ id: "EXAMPLE_NEXT", executedAt: new Date("2026-08-06") }),
       row({ id: "EXAMPLE_NEXT_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-07"), pnl: "1", pnlConvention: "net_of_close_fee" }),
     ], "1d");
-    expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_NEXT"]);
+    expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_ENTRY", "EXAMPLE_NEXT"]);
   });
 
   it("includes simultaneous same-direction adds because their weighted entry is unambiguous", () => {
@@ -176,22 +170,35 @@ describe("Signal Bot trade chart proof", () => {
     expect(result.executions.every(execution => execution.pair === result.pairs[0])).toBe(true);
   });
 
-  it("does not skip an invalid or unknown execution to fabricate a pair", () => {
-    for (const overrides of [{ price: "0" }, { executionMethod: "on-chain-detected" }]) {
-      const result = pairChartTradeHistory([
-        row(), row({ id: "EXAMPLE_BARRIER", executedAt: new Date("2026-08-04T13:00:00Z"), ...overrides }),
-        row({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-05"), pnl: "1", pnlConvention: "net_of_close_fee" }),
-      ], "1d");
-      expect(result.pairs).toEqual([]);
-    }
+  it("ignores an unclassified execution between an entry and close", () => {
+    const result = pairChartTradeHistory([
+      row(), row({ id: "EXAMPLE_UNKNOWN", executedAt: new Date("2026-08-04T13:00:00Z"), executionMethod: "on-chain-detected" }),
+      row({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-05"), pnl: "1", pnlConvention: "net_of_close_fee" }),
+    ], "1d");
+    expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_ENTRY"]);
+    expect(result.executions[1].pairingStatus).toBe("unproven");
   });
 
-  it("does not infer a flat boundary after an orphan close", () => {
+  it("keeps an orphan close neutral while later trades still pair", () => {
     const result = pairChartTradeHistory([
       row({ id: "EXAMPLE_ORPHAN", side: "CLOSE", executedAt: new Date("2026-08-03"), pnl: "1", pnlConvention: "net_of_close_fee" }),
       row(), row({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-05"), pnl: "1", pnlConvention: "net_of_close_fee" }),
     ], "1d");
-    expect(result.pairs).toEqual([]);
+    expect(result.pairs.map(pair => pair.entryId)).toEqual(["EXAMPLE_ENTRY"]);
+    expect(result.executions[0].pairingStatus).toBe("unproven");
+  });
+
+  it("marks a smaller opposite fill as a trim and keeps it in the paired execution list", async () => {
+    const { tradeChartMarkers } = await import("../../client/src/components/signalTradeChartMarkers");
+    const result = pairChartTradeHistory([
+      row(),
+      row({ id: "EXAMPLE_TRIM", side: "SHORT", size: "0.5", executedAt: new Date("2026-08-04T13:00:00Z") }),
+      row({ id: "EXAMPLE_CLOSE", side: "CLOSE", executedAt: new Date("2026-08-05"), pnl: "3", pnlConvention: "net_of_close_fee" }),
+    ], "4h");
+    expect(result.pairs).toHaveLength(1);
+    expect(result.executions[1]).toMatchObject({ id: "EXAMPLE_TRIM", kind: "trim", pairingStatus: "sequential", pair: result.pairs[0] });
+    const aligned = alignChartExecutions(result.executions, [{ time: Date.parse("2026-08-04T12:00:00Z") / 1000 }], 14_400_000);
+    expect(tradeChartMarkers(aligned)[1]).toMatchObject({ id: "EXAMPLE_TRIM", shape: "circle", size: 0.5, color: "#64748b", text: "Trim" });
   });
 
   it.each(["-4", "0", "4"])("uses canonical short P&L %s and exact same-bar duration", pnl => {
@@ -212,8 +219,6 @@ describe("Signal Bot trade chart proof", () => {
       expect(close).toMatchObject({ kind: "close", netPnl: item.expected, pairingStatus: "unproven" });
       expect(close).not.toHaveProperty("provenPairId");
     }
-    const source = readFileSync(resolve(process.cwd(), "client/src/components/signalTradeChartMarkers.ts"), "utf8");
-    expect(source).toContain("pnl > 0 ? '#059669' : pnl < 0 ? '#dc2626' : '#64748b'");
   });
 
   it("renders a neutral span with no estimate-style text", () => {
@@ -222,7 +227,6 @@ describe("Signal Bot trade chart proof", () => {
     expect(source).toContain("scaleMargins: { top: 0.975, bottom: 0.01 }");
     expect(source).toContain("const NEUTRAL_SPAN = 'rgba(100,116,139,0.25)'");
     expect(source).toContain("attachTradeBoxes(chart, series, data.pairs");
-    expect(source).toContain("Flat-to-flat trade; P&L sums all closes.");
     expect(source).toContain("'Entry (avg)'");
     expect(source).toContain("size-weighted average entry");
     expect(source).toContain("pair?.size ?? execution.size");
