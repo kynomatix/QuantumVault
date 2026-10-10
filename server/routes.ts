@@ -15594,6 +15594,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   app.post("/api/trading-bots", requireWallet, async (req, res) => {
+    if (String(req.body.activeProtocol).toLowerCase() === "phoenix") {
+      const { phoenixDisabledCreation } = await import("./protocol/phoenix/provisioner");
+      return res.status(503).json(phoenixDisabledCreation(req.body.requestId));
+    }
     if (String(req.body.activeProtocol).toLowerCase() === "flash") return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
     try {
       const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig } = req.body;

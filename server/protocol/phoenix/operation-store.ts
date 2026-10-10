@@ -16,6 +16,7 @@ export interface PhoenixIntent {
   amountBaseUnits: string;
   feeBaseUnits: string;
   destination: string;
+  registration?: { maxPositions: number; maxCostLamports: string; name: string; market: string };
 }
 export interface StoredPhoenixOperation {
   id: string; bot_id: string; request_key: string; kind: PhoenixOperationKind;
@@ -50,6 +51,27 @@ function rowBot(row: Record<string, any>): PhoenixBotIdentityColumns {
  */
 export class PhoenixOperationStore {
   constructor(private readonly pool: Pick<Pool, 'connect'>) {}
+
+  async read(botId: string, ownerWallet: string, operationId: string) {
+    return this.transaction(async client => {
+      const operation = await this.lockOperation(client, botId, ownerWallet, operationId);
+      const attempts = await client.query('SELECT * FROM phoenix_operation_attempts WHERE operation_id = $1 ORDER BY attempt_number DESC LIMIT 1', [operationId]);
+      const row = attempts.rows[0];
+      return { operation, attempt: row ? { signature: row.signature, blockhash: row.blockhash,
+        lastValidBlockHeight: row.last_valid_block_height, transactionHash: row.transaction_hash } as PhoenixAttemptInput : undefined };
+    });
+  }
+
+  /** Pre-send refusals remain prepared, preserving retry identity and public recovery details. */
+  async annotatePrepared(botId: string, ownerWallet: string, operationId: string, revision: number, observation: Record<string, unknown>) {
+    return this.transaction(async client => {
+      const operation = await this.lockOperation(client, botId, ownerWallet, operationId);
+      if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale preparation');
+      const result = await client.query(`UPDATE phoenix_operations SET observation = $2, revision = revision + 1,
+        updated_at = now() WHERE id = $1 RETURNING *`, [operationId, structuredClone(observation)]);
+      return result.rows[0] as StoredPhoenixOperation;
+    });
+  }
 
   private async transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
