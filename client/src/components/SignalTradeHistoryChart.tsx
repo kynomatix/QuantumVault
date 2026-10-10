@@ -5,10 +5,15 @@ import { createSharedTradePriceChart } from './SharedTradePriceChart';
 import { earlierChartWindow, mergeNeutralBands } from './signalTradeHistoryWindow';
 import { tradeChartMarkers } from './signalTradeChartMarkers';
 import type { UTCTimestamp } from 'lightweight-charts';
+import { BarChart3, Loader2 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
+import { deriveAiTraderChartPriceFormat } from '@/lib/ai-trader-position-display';
 
 type Execution = { id: string; status: string; side: string; protocol: string | null; protocolMismatch: boolean; kind: string; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: string; netPnl: number | null; accountingStatus: string; feeTruthStatus: string; pairingStatus: string };
 type Band = { barTime: string; rowIds: string[]; pairingStatus: 'unproven' };
-const NEUTRAL_SPAN = '#64748b'; // One token for light and dark themes.
+const NEUTRAL_SPAN = 'rgba(100,116,139,0.25)';
 type ChartResponse = {
   market: string; timeframe: string; range: { from: string; to: string; firstEligibleTradeAt: string | null };
   complete: boolean; nextCursor: string | null;
@@ -19,6 +24,39 @@ type ChartResponse = {
 };
 const DAY = 86_400_000;
 export function SignalTradeHistoryChart({ botId }: { botId: string }) {
+  return <Dialog>
+    <DialogTrigger asChild>
+      <Button type="button" size="sm" variant="outline"><BarChart3 className="w-4 h-4" />View chart</Button>
+    </DialogTrigger>
+    <DialogContent className="w-[95vw] sm:max-w-[min(1400px,95vw)] max-h-[90dvh] flex flex-col overflow-hidden font-sans" aria-describedby={undefined}>
+      <DialogHeader className="shrink-0">
+        <DialogTitle className="flex items-center gap-2 text-base"><BarChart3 className="w-4 h-4 text-primary" />Trade history chart</DialogTitle>
+      </DialogHeader>
+      <div className="min-h-0 overflow-y-auto">
+        <TradeHistoryChartContent botId={botId} />
+      </div>
+    </DialogContent>
+  </Dialog>;
+}
+
+function formatPrice(value: number) {
+  return value.toLocaleString(undefined, { maximumFractionDigits: deriveAiTraderChartPriceFormat(undefined, [value]).precision });
+}
+
+function formatSize(value: number) {
+  return Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function formatTradeTime(value: string) {
+  const date = new Date(value);
+  return `${date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+}
+
+function formatPnl(value: number) {
+  return `${value > 0 ? '+' : value < 0 ? '-' : ''}$${Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function TradeHistoryChartContent({ botId }: { botId: string }) {
   const initialTo = useRef(Date.now());
   const [range, setRange] = useState(() => ({ from: new Date(initialTo.current - 90 * DAY).toISOString(), to: new Date(initialTo.current).toISOString() }));
   const [tf, setTf] = useState<'1d' | '4h'>('1d');
@@ -53,7 +91,7 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
   useEffect(() => {
     if (!data || !priceRef.current || data.price.availability !== 'available') return;
     const chart = createSharedTradePriceChart(priceRef.current);
-    const series = chart.addCandlestickSeries({ upColor: '#38bdf8', downColor: '#7854d4', wickUpColor: '#38bdf8', wickDownColor: '#7854d4', borderVisible: false });
+    const series = chart.addCandlestickSeries({ upColor: '#38bdf8', downColor: '#7854d4', wickUpColor: '#38bdf8', wickDownColor: '#7854d4', borderVisible: false, priceFormat: deriveAiTraderChartPriceFormat(undefined, data.price.candles.flatMap(c => [c.open, c.high, c.low, c.close])) });
     series.setData(data.price.candles.map(c => ({ ...c, time: c.time as UTCTimestamp })));
     series.setMarkers(tradeChartMarkers(data.executions).map(marker => ({ ...marker, time: marker.time as UTCTimestamp })));
     chart.subscribeClick(param => {
@@ -62,12 +100,18 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
     });
     // A single histogram column occupies exactly one candle bar in the bottom trade lane.
     const bandSeries = chart.addHistogramSeries({ priceScaleId: 'trade-lane', base: 0, color: NEUTRAL_SPAN, priceLineVisible: false, lastValueVisible: false });
-    bandSeries.priceScale().applyOptions({ visible: false, scaleMargins: { top: 0.88, bottom: 0.02 } });
+    bandSeries.priceScale().applyOptions({ visible: false, scaleMargins: { top: 0.975, bottom: 0.01 } });
     bandSeries.setData(data.bands.map(b => ({ time: (Date.parse(b.barTime) / 1000) as UTCTimestamp, value: 1, color: NEUTRAL_SPAN })));
     chart.timeScale().fitContent();
-    const observer = new ResizeObserver(() => { if (priceRef.current) chart.applyOptions({ width: priceRef.current.clientWidth }); });
+    let resizeFrame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => {
+        if (priceRef.current) chart.applyOptions({ width: priceRef.current.clientWidth, height: priceRef.current.clientHeight });
+      });
+    });
     observer.observe(priceRef.current);
-    return () => { observer.disconnect(); chart.remove(); };
+    return () => { observer.disconnect(); cancelAnimationFrame(resizeFrame); chart.remove(); };
   }, [data?.price.candles, data?.bands, data?.executions]);
   async function loadMore() {
     if (!data?.nextCursor || pagingRequest.current === currentRequest.current.generation) return;
@@ -96,30 +140,58 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
     if (next) setRange(next);
   }
   const fromMs = new Date(range.from).getTime();
-  return <section aria-label="Signal Bot trade history chart" className="space-y-3">
-    <div className="flex gap-2 items-center"><strong>{data?.market ?? 'Trade chart'}</strong>
-      <button type="button" onClick={() => setTf('1d')} aria-pressed={tf === '1d'} className="px-2 border rounded">1d</button>
-      <button type="button" onClick={() => setTf('4h')} aria-pressed={tf === '4h'} className="px-2 border rounded">4h</button>
-      <button type="button" onClick={older} disabled={!data || !!data.nextCursor || !data.range.firstEligibleTradeAt || fromMs <= new Date(data.range.firstEligibleTradeAt).getTime()} className="px-2 border rounded">Earlier 90 days</button>
-      <button type="button" onClick={() => setRange({ from: new Date(initialTo.current - 90 * DAY).toISOString(), to: new Date(initialTo.current).toISOString() })} disabled={range.to === new Date(initialTo.current).toISOString()} className="px-2 border rounded">Recent 90 days</button>
-    </div>
-    <p className="text-xs" role="status">{data?.price.basisLabel ?? 'Loading price provenance'} · {data?.complete ? 'Range complete' : 'Partial history: load more rows'} · {range.from.slice(0,10)} to {range.to.slice(0,10)} UTC</p>
-    {loading && <p>Loading chart…</p>}{error && <p role="alert">{error}</p>}
-    {data && <>
-      <p className="text-xs">First eligible recorded trade: {data.range.firstEligibleTradeAt ?? 'none'}{data.range.firstEligibleTradeAt ? ' UTC' : ''}</p>
-      <p className="text-xs">All-history canonical closes: {data.totals.totalTrades} | Profitable: {data.totals.winningTrades} | Losing: {data.totals.losingTrades} | Accounting incomplete: {data.totals.accountingIncompleteTrades}</p>
-      {data.price.availability !== 'available' && <p role="status">Price unavailable. Trade details remain below.</p>}
-      {data.price.availability === 'available' && data.executions.some(e => e.displayBarTime === null) && <p role="status">Some executions have no containing price candle; their recorded details remain below.</p>}
-      <div ref={priceRef} className="h-72 w-full" aria-label={data.price.basisLabel} />
-      <div aria-label="Trade execution rows" className="max-h-40 overflow-auto rounded border">
-        <ul>{data.executions.map(e => <li key={e.id}><button type="button" onClick={() => selectExecution(e)} className={`w-full text-left px-2 py-1 focus:outline focus:outline-2 ${e.kind === 'close' && e.accountingStatus === 'resolved' && e.netPnl !== null && e.netPnl > 0 ? 'border-emerald-600 bg-emerald-600/30' : e.kind === 'close' && e.accountingStatus === 'resolved' && e.netPnl !== null && e.netPnl < 0 ? 'border-red-600 bg-red-600/30' : 'bg-background'}`} aria-label={`${e.status} ${e.side} at ${e.exactTime}`}>
-          {e.status === 'liquidated' ? 'L' : e.status === 'recovered' ? 'R' : e.kind === 'close' ? 'X' : e.kind === 'entry' ? 'E' : '?'} · {e.exactTime} · {e.side} · {e.price} × {e.size}
-        </button></li>)}</ul>
+  const priceVenue = data?.price.basisLabel.match(/^Reference price\s*[—–-]\s*([^\s(]+)/i)?.[1];
+  return <section aria-label="Signal Bot trade history chart" className="min-w-0 space-y-3 text-xs">
+    <div className="flex flex-wrap gap-2 items-center px-0.5"><strong className="text-sm font-medium mr-auto">{data?.market ?? 'Trade chart'}</strong>
+      <div className="flex gap-0.5 rounded-md border border-border/50 p-0.5">
+        {(['1d', '4h'] as const).map(timeframe => <Button key={timeframe} type="button" size="sm" variant="ghost" onClick={() => setTf(timeframe)} aria-pressed={tf === timeframe} className={`min-h-0 h-6 px-2 text-xs ${tf === timeframe ? 'bg-primary/15 text-primary' : 'text-muted-foreground'}`}>{timeframe}</Button>)}
       </div>
-      {data.range.firstEligibleTradeAt === null ? <p>No eligible executed trades.</p> : data.executions.length === 0 && <p>No eligible executed trades in this range.</p>}
-      {data.openPosition && <p>Open position: {data.openPosition.size ?? 'size unavailable'} at {data.openPosition.entryPrice ?? 'basis unavailable'}. {data.openPosition.attribution}; unrealized outcome unavailable.</p>}
-      {selected && <dl ref={detailRef} tabIndex={-1} aria-label="Recorded trade detail" className="grid grid-cols-2 gap-1 text-xs rounded border p-2"><dt>Row ID</dt><dd>{selected.id}</dd><dt>Exact UTC time</dt><dd>{selected.exactTime}</dd><dt>Price and size</dt><dd>{selected.price} × {selected.size} ({selected.coordinateBasis})</dd><dt>Side and status</dt><dd>{selected.side} · {selected.status}</dd><dt>Recorded protocol</dt><dd>{selected.protocol ?? "unknown"}{selected.protocolMismatch ? " (differs from active bot protocol)" : ""}</dd><dt>Net outcome</dt><dd>{selected.accountingStatus === 'resolved' ? selected.netPnl : selected.accountingStatus} · fee truth: {selected.feeTruthStatus}</dd></dl>}
-      {data.nextCursor && <button type="button" disabled={paging} onClick={loadMore} className="border rounded px-2">Load more trade rows</button>}
+      <Button type="button" size="sm" variant="outline" onClick={older} disabled={!data || !!data.nextCursor || !data.range.firstEligibleTradeAt || fromMs <= new Date(data.range.firstEligibleTradeAt).getTime()}>Earlier 90 days</Button>
+      <Button type="button" size="sm" variant="outline" onClick={() => setRange({ from: new Date(initialTo.current - 90 * DAY).toISOString(), to: new Date(initialTo.current).toISOString() })} disabled={range.to === new Date(initialTo.current).toISOString()}>Recent 90 days</Button>
+    </div>
+    <div className="flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-muted-foreground">
+      <p role="status">{priceVenue ? `Price: ${priceVenue.toUpperCase()} reference` : data ? 'Price unavailable' : 'Loading price…'}</p>
+      <p>{new Date(range.from).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} – {new Date(range.to).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })}</p>
+    </div>
+    {loading && <p role="status" className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><Loader2 className="w-4 h-4 animate-spin" />Loading chart…</p>}{error && <p role="alert" className="text-xs text-destructive">{error}</p>}
+    {data && <>
+      <div className="flex flex-wrap items-center gap-2" aria-label="All-time closed trade statistics">
+        <span className="text-muted-foreground">All time</span>
+        <Badge variant="secondary" className="text-xs font-medium">Trades {data.totals.totalTrades}</Badge>
+        <Badge variant="outline" className="text-xs font-medium text-emerald-500 border-emerald-500/20 bg-emerald-500/5">Wins {data.totals.winningTrades}</Badge>
+        <Badge variant="outline" className="text-xs font-medium text-red-500 border-red-500/20 bg-red-500/5">Losses {data.totals.losingTrades}</Badge>
+        {data.totals.accountingIncompleteTrades > 0 && <span className="text-muted-foreground">P&L pending: {data.totals.accountingIncompleteTrades}</span>}
+      </div>
+      {data.price.availability !== 'available' && <p role="status" className="text-muted-foreground">Price unavailable. Trade details remain below.</p>}
+      {data.price.availability === 'available' && data.executions.some(e => e.displayBarTime === null) && <p role="status" className="text-muted-foreground">Some trades fall outside the available candles. Their details are listed below.</p>}
+      {data.price.availability === 'available' && <div className="relative w-full overflow-hidden" style={{ height: 'min(62vh, 760px)' }}>
+        <div ref={priceRef} className="absolute inset-0" aria-label={data.price.basisLabel} />
+      </div>}
+      {data.openPosition && <p className="rounded-md border bg-muted/20 px-3 py-2 text-xs tabular-nums">Open: {data.openPosition.size === null ? 'Size unavailable' : `${data.openPosition.size < 0 ? 'SHORT' : 'LONG'} ${formatSize(data.openPosition.size)}`} @ {data.openPosition.entryPrice === null ? 'Price unavailable' : formatPrice(data.openPosition.entryPrice)}</p>}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Markers: E Entry · X Close · L Liquidation · R Recovered</span></div>
+      <div aria-label="Trade execution rows" className="max-h-48 overflow-y-auto rounded-lg border">
+        <ul className="divide-y divide-border">{data.executions.map(e => {
+          const pnl = e.kind === 'close' && e.accountingStatus === 'resolved' ? e.netPnl : null;
+          const side = e.kind === 'close' ? 'CLOSE' : ['LONG', 'BUY'].includes(e.side.toUpperCase()) ? 'LONG' : ['SHORT', 'SELL'].includes(e.side.toUpperCase()) ? 'SHORT' : e.side.toUpperCase();
+          return <li key={e.id}><Button type="button" size="sm" variant="ghost" onClick={() => selectExecution(e)} className={`h-auto w-full justify-start flex-wrap whitespace-normal rounded-none px-3 py-2 text-left text-xs font-normal gap-x-3 gap-y-1 ${pnl !== null && pnl > 0 ? 'bg-emerald-500/5' : pnl !== null && pnl < 0 ? 'bg-red-500/5' : 'bg-muted/20'} ${selected?.id === e.id ? 'ring-1 ring-inset ring-primary' : ''}`} aria-label={`${e.status} ${e.side} at ${e.exactTime}`} aria-pressed={selected?.id === e.id}>
+            <time dateTime={e.exactTime} title={e.exactTime} className="text-muted-foreground tabular-nums">{formatTradeTime(e.exactTime)}</time>
+            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 font-medium ${side === 'LONG' ? 'text-emerald-500 border-emerald-500/20' : side === 'SHORT' ? 'text-red-500 border-red-500/20' : 'text-amber-500 border-amber-500/20'}`}>{side}</Badge>
+            {['liquidated', 'recovered'].includes(e.status) && <span className="text-muted-foreground capitalize">{e.status}</span>}
+            <span className="tabular-nums">{formatSize(e.size)} @ {formatPrice(e.price)}</span>
+            {pnl !== null ? <span className={`ml-auto font-medium tabular-nums ${pnl > 0 ? 'text-emerald-500' : pnl < 0 ? 'text-red-500' : 'text-muted-foreground'}`}>{formatPnl(pnl)}</span> : e.kind === 'close' && <span className="ml-auto text-muted-foreground">P&L pending</span>}
+          </Button></li>;
+        })}</ul>
+      </div>
+      {data.range.firstEligibleTradeAt === null ? <p className="text-muted-foreground">No executed trades yet.</p> : data.executions.length === 0 && <p className="text-muted-foreground">No trades in this range.</p>}
+      {selected && <dl ref={detailRef} tabIndex={-1} aria-label="Recorded trade detail" className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-xs rounded-lg border bg-muted/20 p-3 break-words focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+        <dt className="text-muted-foreground">Trade ID</dt><dd>{selected.id}</dd>
+        <dt className="text-muted-foreground">Time (UTC)</dt><dd>{selected.exactTime}</dd>
+        <dt className="text-muted-foreground">Price · Size</dt><dd>{formatPrice(selected.price)} · {formatSize(selected.size)}</dd>
+        <dt className="text-muted-foreground">Side · Status</dt><dd>{selected.side} · {selected.status}</dd>
+        <dt className="text-muted-foreground">Venue</dt><dd>{selected.protocol ?? 'Unknown'}{selected.protocolMismatch ? ' (different from current bot venue)' : ''}</dd>
+        <dt className="text-muted-foreground">Net P&L</dt><dd>{selected.accountingStatus === 'resolved' && selected.netPnl !== null ? formatPnl(selected.netPnl) : selected.kind === 'close' ? 'Pending' : '—'}</dd>
+      </dl>}
+      {data.nextCursor && <div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="outline" disabled={paging} onClick={loadMore}>Load more trade rows</Button><span className="text-muted-foreground">More trades available in this range</span></div>}
     </>}
   </section>;
 }

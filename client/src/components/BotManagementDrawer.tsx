@@ -429,7 +429,6 @@ export function BotManagementDrawer({
   const [hasOpenPositions, setHasOpenPositions] = useState<boolean>(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [hasBalanceLoaded, setHasBalanceLoaded] = useState(false);
-  const [historyView, setHistoryView] = useState<'list' | 'chart'>('list');
   const [trades, setTrades] = useState<BotTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [equityEvents, setEquityEvents] = useState<EquityEvent[]>([]);
@@ -2685,15 +2684,14 @@ export function BotManagementDrawer({
           <TabsContent value="history" className="mt-4 flex flex-col h-[calc(100vh-280px)]">
             {/* Trades Section - 3/4 of available space */}
             <div className="flex-[3] flex flex-col min-h-0">
-              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                <TrendingUp className="w-4 h-4" />
-                Trade Executions
-              </h3>
-              <div className="flex gap-2 mb-2" role="group" aria-label="Trade history view">
-                <Button size="sm" variant={historyView === 'list' ? 'default' : 'outline'} onClick={() => setHistoryView('list')}>List</Button>
-                <Button size="sm" variant={historyView === 'chart' ? 'default' : 'outline'} onClick={() => setHistoryView('chart')}>Chart</Button>
+              <div className="flex shrink-0 items-center justify-between gap-2 mb-3">
+                <h3 className="text-sm font-semibold flex items-center gap-2">
+                  <TrendingUp className="w-4 h-4" />
+                  Trade Executions
+                </h3>
+                {bot && <SignalTradeHistoryChart key={bot.id} botId={bot.id} />}
               </div>
-              {historyView === 'chart' && bot ? <SignalTradeHistoryChart key={bot.id} botId={bot.id} /> : tradesLoading ? (
+              {tradesLoading ? (
                 <div className="flex items-center justify-center py-6">
                   <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                 </div>
