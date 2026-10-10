@@ -35,9 +35,14 @@ export function alignChartExecutions(executions: ChartExecution[], candles: read
     return { ...row, displayBarTime: open !== undefined && exact < open + barMs ? new Date(open).toISOString() : null };
   });
 }
-/** Display-only flat-to-flat sequencing over ALL retained rows, before paging.
- * Invalid coordinates/accounting taint only the current position. Keep counting
- * known quantities so a flat boundary can restore pairing for the next trade.
+/** Display-only position pairing over ALL retained rows, before paging (owner
+ * ruling 2026-10-10): a Signal Bot holds one position per market at a time, so a
+ * position is the first entry plus any later same-direction entries (adds, even
+ * accidental ones), ended by the next close or liquidation, whose reconciled net
+ * P&L is the trade's result. Recorded sizes are not compared: close rows often
+ * carry a different size basis. Orphan closes, direction flips without a close,
+ * missing coordinates and unreconciled P&L stay neutral and never block later trades;
+ * unclassified rows are ignored for pairing.
  */
 export function pairChartTradeHistory(rows: BotTrade[], timeframe: "1d" | "4h", activeProtocol?: string | null) {
   const history = rows.filter(row => ["executed", "liquidated", "recovered"].includes(row.status))
@@ -45,86 +50,45 @@ export function pairChartTradeHistory(rows: BotTrade[], timeframe: "1d" | "4h", 
   const executions = history.flatMap(item => item.execution ? [item.execution] : []);
   const pairs: ChartTradePair[] = [];
   const time = (item: typeof history[number]) => item.execution ? Date.parse(item.execution.exactTime) : validTime(item.row.executedAt)?.getTime();
-  if (history.some(item => time(item) === undefined)) return { executions, pairs };
-  // Ambiguous tied events remain neutral; count opens before closes to recover their net
-  // flat boundary without treating the arbitrary ID order as trade evidence.
-  history.sort((a, b) => time(a)! - time(b)! || Number(chartExecutionKind(b.row) === "entry") - Number(chartExecutionKind(a.row) === "entry") || a.row.id.localeCompare(b.row.id));
-  type Position = { entry: ChartExecution | null; balance: number | null; size: number; notional: number; netPnl: number; addCount: number; tainted: boolean; members: ChartExecution[] };
+  const timed = history.filter(item => time(item) !== undefined);
+  // Entries before closes at the same instant, then a stable id order.
+  timed.sort((a, b) => time(a)! - time(b)! || Number(chartExecutionKind(b.row) === "entry") - Number(chartExecutionKind(a.row) === "entry") || a.row.id.localeCompare(b.row.id));
+  type Position = { entry: ChartExecution; side: number; size: number; notional: number; addCount: number; tainted: boolean; members: ChartExecution[] };
   const positions = new Map<string, Position>();
   const streamKey = (row: BotTrade) => JSON.stringify([row.market, row.protocol ?? null]);
   const direction = (row: BotTrade) => ["LONG", "BUY"].includes(row.side.toUpperCase()) ? 1 : -1;
-  const tied = new Map<string, { count: number; entryDirection: number | null }>();
-  for (const item of history) {
-    const key = `${streamKey(item.row)}:${time(item)}`;
-    const entryDirection = chartExecutionKind(item.row) === "entry" ? direction(item.row) : null;
-    const group = tied.get(key);
-    if (!group) tied.set(key, { count: 1, entryDirection });
-    else { group.count++; if (entryDirection !== group.entryDirection) group.entryDirection = null; }
-  }
-  const sameSize = (a: number, b: number) => Math.abs(a - b) <= Number.EPSILON * 16 * Math.max(Math.abs(a), Math.abs(b));
-  for (let i = 0; i < history.length; i++) {
-    const { row, execution } = history[i];
+  for (const { row, execution } of timed) {
     const kind = chartExecutionKind(row);
     const key = streamKey(row);
-    const prior = positions.get(key);
-    const position: Position = prior ?? { entry: execution, balance: 0, size: 0, notional: 0, netPnl: 0, addCount: 0, tainted: false, members: [] };
-    positions.set(key, position);
-    const group = tied.get(`${key}:${time(history[i])}`)!;
-    // Same-direction simultaneous adds have the same weighted entry and time
-    // in either order. Mixed events or closes do not establish a final exit.
-    const simultaneous = group.count > 1 && group.entryDirection === null;
-    // Size remains useful even when a bad price prevents a drawable execution.
-    const size = execution?.size ?? positive(row.filledSizeBase ?? row.size);
-    if (execution) position.members.push(execution);
-    position.tainted ||= !execution || simultaneous;
-    // A partially filled order without usable fill coordinates does not tell us
-    // how much of its requested size actually changed the position.
-    if (positive(row.remainingSizeBase) !== null && execution?.coordinateBasis !== "venue_fill") {
-      position.tainted = true;
-      position.balance = null;
-    }
-    if (kind === "unknown" || size === null) {
-      position.tainted = true;
-      position.balance = null;
-    } else if (kind === "entry") {
-      const sign = direction(row);
-      if (prior) position.addCount++;
-      if (position.balance !== null) {
-        if (position.balance !== 0 && Math.sign(position.balance) !== sign) position.tainted = true;
-        const delta = sign * size;
-        position.balance = sameSize(-position.balance, delta) ? 0 : position.balance + delta;
+    const open = positions.get(key);
+    if (kind === "entry") {
+      const side = direction(row);
+      if (open && open.side === side) {
+        open.addCount++;
+        if (execution) { open.members.push(execution); open.size += execution.size; open.notional += execution.size * execution.price; }
+        else open.tainted = true;
+        continue;
       }
-      position.size += size;
-      position.notional += size * (execution?.price ?? NaN);
-    } else {
-      if (!prior) position.balance = null; // An orphan may be only a partial close.
-      if (position.balance !== null) {
-        const remaining = Math.abs(position.balance);
-        position.balance = sameSize(size, remaining) ? 0 : size < remaining ? Math.sign(position.balance) * (remaining - size) : null;
-      }
-      if (execution?.netPnl == null) position.tainted = true;
-      else position.netPnl += execution.netPnl;
+      // A flip without a close leaves the previous position unpaired.
+      positions.delete(key);
+      if (execution) positions.set(key, { entry: execution, side, size: execution.size, notional: execution.size * execution.price, addCount: 0, tainted: false, members: [execution] });
+      continue;
     }
-    if (position.balance !== null && !Number.isFinite(position.balance)) position.balance = null;
-    if (position.balance === null) position.tainted = true;
-    // These reconciler reasons are written only for a confirmed full close.
-    // remainingSizeBase is an ORDER remainder, never a position-flat signal.
-    const payload = row.webhookPayload as { reconciled?: boolean; closeReason?: string; partialCloseAccounting?: unknown } | null;
-    const reconciledFlat = kind === "close" && payload?.reconciled === true && !payload.partialCloseAccounting
-      && ["external_close", "tpsl", "liquidation"].includes(payload.closeReason ?? "");
-    if (position.balance !== 0 && !reconciledFlat) continue;
-    const { entry, notional, netPnl } = position;
-    const pnlPercent = netPnl / notional * 100;
-    if (position.balance === 0 && !position.tainted && entry && execution && kind === "close" && notional > 0 && Number.isFinite(notional) && Number.isFinite(pnlPercent)) {
-      const pair: ChartTradePair = {
-        entryId: entry.id, exitId: execution.id, direction: ["LONG", "BUY"].includes(entry.side.toUpperCase()) ? "Long" : "Short",
-        entryTime: entry.exactTime, exitTime: execution.exactTime, entryPrice: notional / position.size, exitPrice: execution.price,
-        size: position.size, addCount: position.addCount, liquidated: execution.status === "liquidated", netPnl, pnlPercent, timeHeldMs: Date.parse(execution.exactTime) - Date.parse(entry.exactTime), pairingStatus: "sequential",
-      };
-      for (const member of position.members) { member.pairingStatus = "sequential"; member.pair = pair; }
-      pairs.push(pair);
-    }
+    // Unclassified rows (e.g. on-chain detected fills) stay neutral markers only.
+    if (kind !== "close") continue;
     positions.delete(key);
+    if (!open || open.tainted || !execution || execution.netPnl == null || execution.accountingStatus !== "resolved") continue;
+    const { entry, size, notional } = open;
+    const pnlPercent = execution.netPnl / notional * 100;
+    if (!(notional > 0) || !(size > 0) || !Number.isFinite(pnlPercent)) continue;
+    const pair: ChartTradePair = {
+      entryId: entry.id, exitId: execution.id, direction: open.side > 0 ? "Long" : "Short",
+      entryTime: entry.exactTime, exitTime: execution.exactTime, entryPrice: notional / size, exitPrice: execution.price,
+      size, addCount: open.addCount, liquidated: execution.status === "liquidated", netPnl: execution.netPnl, pnlPercent,
+      timeHeldMs: Date.parse(execution.exactTime) - Date.parse(entry.exactTime), pairingStatus: "sequential",
+    };
+    for (const member of [...open.members, execution]) { member.pairingStatus = "sequential"; member.pair = pair; }
+    pairs.push(pair);
   }
   return { executions, pairs };
 }
