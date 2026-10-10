@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { SignalTradeHistoryChart } from './SignalTradeHistoryChart';
 import { resolveBotTradeDisplayPnl } from '@/lib/equity-display';
 import { useState, useEffect, useRef, type ReactNode, type ElementType } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
@@ -428,6 +429,7 @@ export function BotManagementDrawer({
   const [hasOpenPositions, setHasOpenPositions] = useState<boolean>(false);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [hasBalanceLoaded, setHasBalanceLoaded] = useState(false);
+  const [historyView, setHistoryView] = useState<'list' | 'chart'>('list');
   const [trades, setTrades] = useState<BotTrade[]>([]);
   const [tradesLoading, setTradesLoading] = useState(false);
   const [equityEvents, setEquityEvents] = useState<EquityEvent[]>([]);
@@ -2687,7 +2689,11 @@ export function BotManagementDrawer({
                 <TrendingUp className="w-4 h-4" />
                 Trade Executions
               </h3>
-              {tradesLoading ? (
+              <div className="flex gap-2 mb-2" role="group" aria-label="Trade history view">
+                <Button size="sm" variant={historyView === 'list' ? 'default' : 'outline'} onClick={() => setHistoryView('list')}>List</Button>
+                <Button size="sm" variant={historyView === 'chart' ? 'default' : 'outline'} onClick={() => setHistoryView('chart')}>Chart</Button>
+              </div>
+              {historyView === 'chart' && bot ? <SignalTradeHistoryChart key={bot.id} botId={bot.id} /> : tradesLoading ? (
                 <div className="flex items-center justify-center py-6">
                   <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
                 </div>
