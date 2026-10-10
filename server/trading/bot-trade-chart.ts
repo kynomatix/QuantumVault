@@ -1,7 +1,8 @@
 import type { BotTrade, BotPosition } from "@shared/schema";
 import type { ProvenancedOHLCV } from "../lab/datafeed";
 import { resolveBotTradeNetPnl } from "./bot-trade-pnl-convention";
-export type ChartExecution = { id: string; market: string; side: string; status: string; protocol: string | null; protocolMismatch: boolean; kind: "entry" | "close" | "unknown"; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: "venue_fill" | "recorded_execution"; netPnl: number | null; accountingStatus: "resolved" | "accounting unavailable"; feeTruthStatus: string; pairingStatus: "unproven" };
+export type ChartTradePair = { entryId: string; exitId: string; direction: "Long" | "Short"; entryTime: string; exitTime: string; entryPrice: number; exitPrice: number; size: number; netPnl: number; pnlPercent: number; timeHeldMs: number; pairingStatus: "sequential" };
+export type ChartExecution = { id: string; market: string; side: string; status: string; protocol: string | null; protocolMismatch: boolean; kind: "entry" | "close" | "unknown"; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: "venue_fill" | "recorded_execution"; netPnl: number | null; accountingStatus: "resolved" | "accounting unavailable"; feeTruthStatus: string; pairingStatus: "unproven" | "sequential"; pair?: ChartTradePair };
 export type ChartBand = { barTime: string; rowIds: string[]; pairingStatus: "unproven" };
 const positive = (v: string | number | null | undefined) => v == null || !Number.isFinite(Number(v)) || Number(v) <= 0 ? null : Number(v);
 const validTime = (v: Date | string | null | undefined) => { const d = v ? new Date(v) : null; return d && Number.isFinite(d.getTime()) ? d : null; };
@@ -31,11 +32,69 @@ export function alignChartExecutions(executions: ChartExecution[], candles: read
     return { ...row, displayBarTime: open !== undefined && exact < open + barMs ? new Date(open).toISOString() : null };
   });
 }
-/** One neutral histogram column per occupied candle bar; no holding duration is inferred. */
+/** Display-only sequencing over ALL retained rows, before windowing or paging.
+ * Adds and partial closes taint the whole position until its quantity reaches zero.
+ * An unknown quantity/order cannot establish flat again, so later rows stay neutral.
+ */
+export function pairChartTradeHistory(rows: BotTrade[], timeframe: "1d" | "4h", activeProtocol?: string | null) {
+  const history = rows.filter(row => ["executed", "liquidated", "recovered"].includes(row.status))
+    .map(row => ({ row, execution: toChartExecution(row, timeframe, activeProtocol) }));
+  const executions = history.flatMap(item => item.execution ? [item.execution] : []);
+  const pairs: ChartTradePair[] = [];
+  const time = (item: typeof history[number]) => item.execution ? Date.parse(item.execution.exactTime) : validTime(item.row.executedAt)?.getTime();
+  if (history.some(item => time(item) === undefined)) return { executions, pairs };
+  history.sort((a, b) => time(a)! - time(b)! || a.row.id.localeCompare(b.row.id));
+  let position: { entry: ChartExecution; remaining: number; tainted: boolean } | null = null;
+  let uncertain = false;
+  const sameSize = (a: number, b: number) => Math.abs(a - b) <= Number.EPSILON * 16 * Math.max(Math.abs(a), Math.abs(b));
+  for (let i = 0; i < history.length; i++) {
+    const execution = history[i].execution;
+    const incompleteFill = positive(history[i].row.remainingSizeBase) !== null;
+    // IDs cannot establish execution order for simultaneous events.
+    if ((i > 0 && time(history[i - 1]) === time(history[i])) || (i + 1 < history.length && time(history[i + 1]) === time(history[i]))) uncertain = true;
+    if (!execution || execution.kind === "unknown") { uncertain = true; continue; }
+    if (uncertain) continue;
+    if (execution.kind === "entry") {
+      if (position) {
+        const isLong = (side: string) => ["LONG", "BUY"].includes(side.toUpperCase());
+        if (isLong(position.entry.side) !== isLong(execution.side) || position.entry.protocol !== execution.protocol || position.entry.market !== execution.market) { uncertain = true; continue; }
+        position.remaining += execution.size;
+        if (!Number.isFinite(position.remaining)) uncertain = true;
+        position.tainted = true;
+      } else position = { entry: execution, remaining: execution.size, tainted: execution.status !== "executed" || incompleteFill };
+      continue;
+    }
+    // An orphan close may be partial; it cannot establish a flat boundary.
+    if (!position) { uncertain = true; continue; }
+    const { entry, remaining } = position;
+    if (entry.protocol !== execution.protocol || entry.market !== execution.market || (execution.size > remaining && !sameSize(execution.size, remaining))) { uncertain = true; continue; }
+    if (!sameSize(execution.size, remaining)) {
+      position.remaining -= execution.size;
+      position.tainted = true;
+      continue;
+    }
+    const notional = entry.price * entry.size;
+    const pnlPercent = execution.netPnl === null ? NaN : execution.netPnl / notional * 100;
+    if (!position.tainted && !incompleteFill && execution.status === "executed" && execution.netPnl !== null && Number.isFinite(notional) && Number.isFinite(pnlPercent)) {
+      const pair: ChartTradePair = {
+        entryId: entry.id, exitId: execution.id, direction: ["LONG", "BUY"].includes(entry.side.toUpperCase()) ? "Long" : "Short",
+        entryTime: entry.exactTime, exitTime: execution.exactTime, entryPrice: entry.price, exitPrice: execution.price,
+        size: entry.size, netPnl: execution.netPnl, pnlPercent, timeHeldMs: Date.parse(execution.exactTime) - Date.parse(entry.exactTime), pairingStatus: "sequential",
+      };
+      entry.pairingStatus = execution.pairingStatus = "sequential";
+      entry.pair = execution.pair = pair;
+      pairs.push(pair);
+    }
+    position = null;
+  }
+  return { executions, pairs };
+}
+
+/** One neutral histogram column per occupied candle bar for unpaired executions. */
 export function chartPairingPlaceholders(executions: ChartExecution[]): { executions: ChartExecution[]; bands: ChartBand[] } {
   const byBar = new Map<string, ChartBand>();
   for (const row of executions) {
-    if (row.displayBarTime === null) continue;
+    if (row.displayBarTime === null || row.pairingStatus === "sequential") continue;
     const band = byBar.get(row.displayBarTime);
     if (band) band.rowIds.push(row.id);
     else byBar.set(row.displayBarTime, { barTime: row.displayBarTime, rowIds: [row.id], pairingStatus: "unproven" });

@@ -3,7 +3,7 @@ import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { createSharedTradePriceChart } from './SharedTradePriceChart';
 import { earlierChartWindow, mergeNeutralBands } from './signalTradeHistoryWindow';
-import { formatTradePnl as formatPnl, tradeChartMarkers, tradeEntryDirection } from './signalTradeChartMarkers';
+import { attachTradeBoxes, formatTradePnl as formatPnl, tradeChartMarkers, tradeEntryDirection, type SequentialTradePair } from './signalTradeChartMarkers';
 import type { UTCTimestamp } from 'lightweight-charts';
 import { BarChart3, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -11,14 +11,14 @@ import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { deriveAiTraderChartPriceFormat } from '@/lib/ai-trader-position-display';
 
-type Execution = { id: string; status: string; side: string; protocol: string | null; protocolMismatch: boolean; kind: string; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: string; netPnl: number | null; accountingStatus: string; feeTruthStatus: string; pairingStatus: string };
+type Execution = { id: string; status: string; side: string; protocol: string | null; protocolMismatch: boolean; kind: string; exactTime: string; displayBarTime: string | null; price: number; size: number; coordinateBasis: string; netPnl: number | null; accountingStatus: string; feeTruthStatus: string; pairingStatus: string; pair?: SequentialTradePair };
 type Band = { barTime: string; rowIds: string[]; pairingStatus: 'unproven' };
 const NEUTRAL_SPAN = 'rgba(100,116,139,0.25)';
 type ChartResponse = {
   market: string; timeframe: string; range: { from: string; to: string; firstEligibleTradeAt: string | null };
   complete: boolean; nextCursor: string | null;
   price: { availability: string; reason: string | null; basisLabel: string; candles: Array<{ time: number; open: number; high: number; low: number; close: number }> };
-  executions: Execution[]; bands: Band[];
+  executions: Execution[]; bands: Band[]; pairs: SequentialTradePair[];
   totals: { totalTrades: number; winningTrades: number; losingTrades: number; accountingIncompleteTrades: number };
   openPosition: { size: number | null; entryPrice: number | null; attribution: string; unrealizedPnl: null } | null;
 };
@@ -37,8 +37,9 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
           <span className="text-emerald-500">● Exit win</span>
           <span className="text-red-500">● Exit loss</span>
           <span>● Grey exit: flat or P&L pending</span>
-          <span>□ Box: confirmed entry to exit only</span>
-          <span>Grey band: trade activity</span>
+          <span>□ Box: entry to exit paired in order</span>
+          <span>Green box: profit · Red box: loss · Grey box: flat</span>
+          <span>Grey strip: unpaired trade activity</span>
         </div>
       </DialogHeader>
       <div className="min-h-0 overflow-y-auto">
@@ -62,34 +63,44 @@ function formatTradeTime(value: string) {
 }
 
 function TradeInfoCard({ execution, pinned, onDismiss }: { execution: Execution; pinned: boolean; onDismiss: () => void }) {
-  const direction = tradeEntryDirection(execution);
+  const pair = execution.pairingStatus === 'sequential' ? execution.pair : undefined;
+  const direction = pair?.direction ?? tradeEntryDirection(execution);
   const entry = execution.kind === 'entry';
   const exit = execution.kind === 'close';
-  const pnl = exit && execution.accountingStatus === 'resolved' ? execution.netPnl : null;
-  // The endpoint currently supplies only unproven executions, never paired trades.
-  // A neighbouring row cannot establish entry notional, duration or position side.
+  const pnl = pair?.netPnl ?? (exit && execution.accountingStatus === 'resolved' ? execution.netPnl : null);
+  const entryPrice = pair?.entryPrice ?? (entry ? execution.price : null);
+  const exitPrice = pair?.exitPrice ?? (exit ? execution.price : null);
+  const entryTime = pair?.entryTime ?? (entry ? execution.exactTime : null);
+  const exitTime = pair?.exitTime ?? (exit ? execution.exactTime : null);
   return <div role={pinned ? 'region' : 'tooltip'} aria-label="Chart trade details" className={`absolute left-2 top-2 z-10 w-72 max-w-[calc(100%-1rem)] max-h-[calc(100%-1rem)] rounded-lg border border-border/70 bg-background/95 p-3 shadow-lg text-xs ${pinned ? 'overflow-y-auto' : 'pointer-events-none overflow-hidden'}`}>
     <div className="mb-2 flex items-center justify-between gap-2">
       <strong className={direction === 'Long' ? 'text-sky-400' : direction === 'Short' ? 'text-violet-400' : 'text-foreground'}>
-        {execution.status === 'liquidated' ? 'Liquidated' : direction ? `${direction} entry` : exit ? 'Exit' : 'Trade'}
+        {pair ? `${direction} trade` : execution.status === 'liquidated' ? 'Liquidated' : direction ? `${direction} entry` : exit ? 'Exit' : 'Trade'}
       </strong>
       {pinned && <button type="button" onClick={onDismiss} className="rounded px-2 py-1 text-muted-foreground hover:bg-muted focus-visible:outline focus-visible:outline-2" aria-label="Dismiss chart trade details">Close</button>}
     </div>
     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 tabular-nums">
       <dt className="text-muted-foreground">Direction</dt><dd>{direction ?? 'Unavailable'}</dd>
-      <dt className="text-muted-foreground">Entry</dt><dd>{entry ? `$${formatPrice(execution.price)}` : 'Not linked'}</dd>
-      {entry && <><dt className="text-muted-foreground">Entry time</dt><dd><time dateTime={execution.exactTime}>{new Date(execution.exactTime).toLocaleString()}</time></dd></>}
-      <dt className="text-muted-foreground">Exit</dt><dd>{exit ? `$${formatPrice(execution.price)}` : 'Not linked'}</dd>
-      {exit && <><dt className="text-muted-foreground">Exit time</dt><dd><time dateTime={execution.exactTime}>{new Date(execution.exactTime).toLocaleString()}</time></dd></>}
+      <dt className="text-muted-foreground">Entry</dt><dd>{entryPrice !== null ? `$${formatPrice(entryPrice)}` : 'Not linked'}</dd>
+      {entryTime && <><dt className="text-muted-foreground">Entry time</dt><dd><time dateTime={entryTime}>{new Date(entryTime).toLocaleString()}</time></dd></>}
+      <dt className="text-muted-foreground">Exit</dt><dd>{exitPrice !== null ? `$${formatPrice(exitPrice)}` : 'Not linked'}</dd>
+      {exitTime && <><dt className="text-muted-foreground">Exit time</dt><dd><time dateTime={exitTime}>{new Date(exitTime).toLocaleString()}</time></dd></>}
       {!entry && !exit && <><dt className="text-muted-foreground">Recorded price</dt><dd>${formatPrice(execution.price)}</dd><dt className="text-muted-foreground">Recorded time</dt><dd>{new Date(execution.exactTime).toLocaleString()}</dd></>}
       <dt className="text-muted-foreground">Size</dt><dd>{formatSize(execution.size)}</dd>
       <dt className="text-muted-foreground">Net P&L</dt><dd className={pnl !== null && pnl > 0 ? 'text-emerald-500' : pnl !== null && pnl < 0 ? 'text-red-500' : ''}>{pnl !== null ? formatPnl(pnl) : exit ? 'Pending' : 'Unavailable'}</dd>
-      <dt className="text-muted-foreground">P&L %</dt><dd>Unavailable</dd>
-      <dt className="text-muted-foreground">Time held</dt><dd>Unavailable</dd>
+      <dt className="text-muted-foreground">P&L %</dt><dd>{pair ? `${pair.pnlPercent > 0 ? '+' : ''}${pair.pnlPercent.toFixed(2)}% of entry notional` : 'Unavailable'}</dd>
+      <dt className="text-muted-foreground">Time held</dt><dd>{pair ? formatTimeHeld(pair.timeHeldMs) : 'Unavailable'}</dd>
       <dt className="text-muted-foreground">Status</dt><dd className="capitalize">{execution.status}</dd>
     </dl>
-    <p className="mt-2 text-[10px] text-muted-foreground">Entry and exit are not linked in this history. Times are local.{!pinned && ' Click the marker to keep details open.'}</p>
+    <p className="mt-2 text-[10px] text-muted-foreground">{pair ? 'Entry and exit paired in order.' : 'Entry and exit are not linked for this execution.'} Times are local.{!pinned && ' Click the marker to keep details open.'}</p>
   </div>;
+}
+
+function formatTimeHeld(ms: number) {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return `${Math.floor(ms / 1000)}s`;
+  const days = Math.floor(minutes / 1440), hours = Math.floor(minutes / 60) % 24;
+  return `${days ? `${days}d ` : ''}${hours || days ? `${hours}h ` : ''}${minutes % 60}m`;
 }
 
 function TradeHistoryChartContent({ botId }: { botId: string }) {
@@ -132,6 +143,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
     const series = chart.addCandlestickSeries({ upColor: '#38bdf8', downColor: '#7854d4', wickUpColor: '#38bdf8', wickDownColor: '#7854d4', borderVisible: false, priceFormat: deriveAiTraderChartPriceFormat(undefined, data.price.candles.flatMap(c => [c.open, c.high, c.low, c.close])) });
     series.setData(data.price.candles.map(c => ({ ...c, time: c.time as UTCTimestamp })));
     series.setMarkers(tradeChartMarkers(data.executions).map(marker => ({ ...marker, time: marker.time as UTCTimestamp })));
+    const detachBoxes = attachTradeBoxes(chart, series, data.pairs, data.price.candles.map(c => c.time), tf === '1d' ? 86_400 : 14_400);
     const byId = new Map(data.executions.map(row => [row.id, row]));
     chart.subscribeCrosshairMove(param => {
       setHovered(param.point && typeof param.hoveredObjectId === 'string' ? byId.get(param.hoveredObjectId) ?? null : null);
@@ -155,8 +167,8 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
       });
     });
     observer.observe(priceRef.current);
-    return () => { observer.disconnect(); cancelAnimationFrame(resizeFrame); chart.remove(); };
-  }, [data?.price.candles, data?.bands, data?.executions]);
+    return () => { observer.disconnect(); cancelAnimationFrame(resizeFrame); detachBoxes(); chart.remove(); };
+  }, [data?.price.candles, data?.bands, data?.executions, data?.pairs, tf]);
   async function loadMore() {
     if (!data?.nextCursor || pagingRequest.current === currentRequest.current.generation) return;
     const key = currentRequest.current.generation;
@@ -212,7 +224,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
         <div ref={priceRef} className="absolute inset-0" aria-label={data.price.basisLabel} onMouseLeave={() => setHovered(null)} />
         {(hovered ?? selected) && <TradeInfoCard execution={(hovered ?? selected)!} pinned={!hovered || hovered.id === selected?.id} onDismiss={() => { setSelected(null); setHovered(null); }} />}
       </div>}
-      <p className="text-muted-foreground">Hover or click a marker for trade details, or select a row below. Boxes need confirmed entry-to-exit links; this history does not supply them.</p>
+      <p className="text-muted-foreground">Hover or click a marker for trade details, or select a row below. Boxes pair entries and exits in order. Partial closes, adds and unreconciled positions stay on the grey strip.</p>
       {data.openPosition && <p className="rounded-md border bg-muted/20 px-3 py-2 text-xs tabular-nums">Open: {data.openPosition.size === null ? 'Size unavailable' : `${data.openPosition.size < 0 ? 'SHORT' : 'LONG'} ${formatSize(data.openPosition.size)}`} @ {data.openPosition.entryPrice === null ? 'Price unavailable' : formatPrice(data.openPosition.entryPrice)}</p>}
       <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Arrows show direction · Circles show exit P&L</span></div>
       <div aria-label="Trade execution rows" className="max-h-48 overflow-y-auto rounded-lg border">
@@ -235,7 +247,14 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
         <dt className="text-muted-foreground">Price · Size</dt><dd>{formatPrice(selected.price)} · {formatSize(selected.size)}</dd>
         <dt className="text-muted-foreground">Side · Status</dt><dd>{selected.side} · {selected.status}</dd>
         <dt className="text-muted-foreground">Venue</dt><dd>{selected.protocol ?? 'Unknown'}{selected.protocolMismatch ? ' (different from current bot venue)' : ''}</dd>
-        <dt className="text-muted-foreground">Net P&L</dt><dd>{selected.accountingStatus === 'resolved' && selected.netPnl !== null ? formatPnl(selected.netPnl) : selected.kind === 'close' ? 'Pending' : '—'}</dd>
+        <dt className="text-muted-foreground">Net P&L</dt><dd>{selected.pair ? formatPnl(selected.pair.netPnl) : selected.accountingStatus === 'resolved' && selected.netPnl !== null ? formatPnl(selected.netPnl) : selected.kind === 'close' ? 'Pending' : '—'}</dd>
+        {selected.pair && <>
+          <dt className="text-muted-foreground">Pairing</dt><dd>In order · {selected.pair.direction}</dd>
+          <dt className="text-muted-foreground">Entry</dt><dd>${formatPrice(selected.pair.entryPrice)} · {new Date(selected.pair.entryTime).toLocaleString()}</dd>
+          <dt className="text-muted-foreground">Exit</dt><dd>${formatPrice(selected.pair.exitPrice)} · {new Date(selected.pair.exitTime).toLocaleString()}</dd>
+          <dt className="text-muted-foreground">P&L %</dt><dd>{selected.pair.pnlPercent.toFixed(2)}% of entry notional</dd>
+          <dt className="text-muted-foreground">Time held</dt><dd>{formatTimeHeld(selected.pair.timeHeldMs)}</dd>
+        </>}
       </dl>}
       {data.nextCursor && <div className="flex flex-wrap items-center gap-2"><Button type="button" size="sm" variant="outline" disabled={paging} onClick={loadMore}>Load more trade rows</Button><span className="text-muted-foreground">More trades available in this range</span></div>}
     </>}

@@ -16,7 +16,7 @@ import { Keypair } from "@solana/web3.js";
 import { SERVER_BOOT_ID } from "./boot-id";
 import { appendTelemetry } from "./telemetry";
 import { storage, DatabaseStorage, notPhantomDupClose } from "./storage";
-import { toChartExecution, alignChartExecutions, chartPairingPlaceholders, chartScannedPage, assertSingleChartMarket, chartFirstTradeTime, chartOpenPosition, chartPriceSeries } from "./trading/bot-trade-chart";
+import { pairChartTradeHistory, alignChartExecutions, chartPairingPlaceholders, chartScannedPage, assertSingleChartMarket, chartFirstTradeTime, chartOpenPosition, chartPriceSeries } from "./trading/bot-trade-chart";
 import { fetchOHLCV, CHART_CANDLE_POLICY } from "./lab/datafeed";
 import { marketToDatafeedTicker } from "./ai-trader/context-builder";
 import { isMultiplierMarketQuarantined } from "./ai-trader/multiplier-market-quarantine";
@@ -18425,7 +18425,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         cursor ? or(lt(botTrades.executedAt, new Date(cursor.at)), and(eq(botTrades.executedAt, new Date(cursor.at)), lt(botTrades.id, cursor.id))) : undefined,
       )).orderBy(desc(botTrades.executedAt), desc(botTrades.id)).limit(251);
       const { complete, scanned: kept, lastScanned: tail } = chartScannedPage(page);
-      const executions = kept.map(row => toChartExecution(row, tf, bot.activeProtocol)).filter((row): row is NonNullable<typeof row> => row !== null);
+      // Pair the entire retained history, including invalid rows as neutral barriers.
+      // Never infer a new position merely because an entry fell off a page/window.
+      const history = await db.select().from(botTrades).where(and(
+        eq(botTrades.tradingBotId, bot.id), eq(botTrades.walletAddress, req.walletAddress!), eq(botTrades.market, bot.market),
+        inArray(botTrades.status, ["executed", "liquidated", "recovered"]), notPhantomDupClose(),
+      ));
+      const sequential = pairChartTradeHistory(history, tf, bot.activeProtocol);
+      const byId = new Map(sequential.executions.map(row => [row.id, row]));
+      const executions = kept.flatMap(row => { const execution = byId.get(row.id); return execution ? [execution] : []; });
+      const pairs = sequential.pairs.filter(pair => Date.parse(pair.entryTime) < to.getTime() && Date.parse(pair.exitTime) >= from.getTime());
       // Each cursor advances over scanned SQL rows, including invalid coordinates.
       const nextCursor = !complete && tail ? Buffer.from(JSON.stringify({ id: tail.id, at: tail.executedAt.toISOString(), botId: bot.id, market: bot.market, from: from.toISOString(), to: to.toISOString() })).toString("base64url") : null;
       let candles: Array<{ time: number; open: number; high: number; low: number; close: number }> = [];
@@ -18443,7 +18452,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       return res.json({ market: bot.market, timeframe: tf, range: { from: from.toISOString(), to: to.toISOString(), firstEligibleTradeAt: chartFirstTradeTime(first[0]?.first) }, complete, nextCursor,
         price: { availability: candles.length ? "available" : "unavailable", reason: multiplierQuarantined ? "multiplier_unqualified" : candles.length ? null : "price_unavailable", source: provenance?.source ?? null, provenance,
           basisLabel: provenance ? `Reference price — ${provenance.venue} (${provenance.source}), not ${bot.activeProtocol === "pacifica" ? "Pacifica" : bot.activeProtocol === "drift" ? "Drift" : "Flash"} execution price` : "Price unavailable", candles },
-        executions: paired.executions, bands: paired.bands, totals, openPosition });
+        executions: paired.executions, bands: paired.bands, pairs, totals, openPosition });
     } catch (error) {
       console.error("Get bot trade chart error:", error);
       return res.status(500).json({ error: "Internal server error" });

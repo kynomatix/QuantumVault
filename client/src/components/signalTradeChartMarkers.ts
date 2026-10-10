@@ -1,3 +1,53 @@
+import type { IChartApi, ISeriesApi, ISeriesPrimitive, Logical } from 'lightweight-charts';
+
+export type SequentialTradePair = {
+  entryId: string; exitId: string; direction: 'Long' | 'Short';
+  entryTime: string; exitTime: string; entryPrice: number; exitPrice: number;
+  size: number; netPnl: number; pnlPercent: number; timeHeldMs: number; pairingStatus: 'sequential';
+};
+
+/** Native pane primitive repaints with both price/time scales, without adding bars.
+ * Interpolate exact execution times within each candle, including same-bar trades.
+ * Clip cross-window positions to the available candle interval.
+ */
+export function attachTradeBoxes(chart: IChartApi, series: ISeriesApi<'Candlestick'>, pairs: readonly SequentialTradePair[], candleTimes: readonly number[], barSeconds: number) {
+  if (!candleTimes.length) return () => {};
+  const first = candleTimes[0], end = candleTimes[candleTimes.length - 1] + barSeconds;
+  const visible = pairs.filter(pair => Date.parse(pair.entryTime) / 1000 < end && Date.parse(pair.exitTime) / 1000 >= first);
+  const x = (time: number) => chart.timeScale().logicalToCoordinate(((Math.max(first, Math.min(end, time)) - first) / barSeconds) as Logical);
+  const primitive: ISeriesPrimitive = {
+    paneViews: () => [{
+      zOrder: () => 'bottom',
+      renderer: () => ({
+        draw(target) {
+          target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+            ctx.save();
+            ctx.beginPath(); ctx.rect(0, 0, mediaSize.width, mediaSize.height); ctx.clip();
+            for (const pair of visible) {
+              const left = x(Date.parse(pair.entryTime) / 1000), right = x(Date.parse(pair.exitTime) / 1000);
+              const entryY = series.priceToCoordinate(pair.entryPrice), exitY = series.priceToCoordinate(pair.exitPrice);
+              if (left === null || right === null || entryY === null || exitY === null) continue;
+              const rgb = pair.netPnl > 0 ? '5,150,105' : pair.netPnl < 0 ? '220,38,38' : '100,116,139';
+              const top = Math.min(entryY, exitY), width = Math.max(1, right - left), height = Math.max(1, Math.abs(exitY - entryY));
+              ctx.fillStyle = `rgba(${rgb},0.15)`;
+              ctx.strokeStyle = `rgba(${rgb},0.7)`;
+              ctx.lineWidth = 1;
+              ctx.fillRect(left, top, width, height); ctx.strokeRect(left, top, width, height);
+            }
+            ctx.restore();
+          });
+        },
+      }),
+    }],
+    autoscaleInfo: () => visible.length ? { priceRange: {
+      minValue: visible.reduce((min, pair) => Math.min(min, pair.entryPrice, pair.exitPrice), Infinity),
+      maxValue: visible.reduce((max, pair) => Math.max(max, pair.entryPrice, pair.exitPrice), -Infinity),
+    } } : null,
+  };
+  series.attachPrimitive(primitive);
+  return () => series.detachPrimitive(primitive);
+}
+
 export type MarkerRow = { id: string; kind: string; status: string; side: string; displayBarTime: string | null; netPnl: number | null; accountingStatus: string };
 
 export function tradeEntryDirection(row: Pick<MarkerRow, 'kind' | 'side'>): 'Long' | 'Short' | null {
