@@ -23,6 +23,7 @@ import {
 } from "../ai-assistant/router";
 import { estimateCallCostUsd } from "../ai-assistant/models-catalog";
 import { storage } from "../storage";
+import { checkEntryConstraints, ConstraintAdmissionError } from "../protocol/market-constraints";
 import type { ProtocolAdapter } from "../protocol/adapter";
 import type { AiTraderBot } from "@shared/schema";
 import {
@@ -419,27 +420,47 @@ async function finalizeDecision(args: {
         : accountDigest?.hasPosition === false
           ? "flat"
           : "unknown";
-  const guardrailResult = applyGuardrails(decision, {
-    entryPrice: finiteOrNaN(digest?.price),
-    atr14: finiteOrNaN(digest?.indicators?.atr14?.value),
-    botMaxLeverage: bot.maxLeverage,
-    timeframe: bot.timeframe as GuardrailTimeframe,
-    // A definitional sentinel, not an asserted venue rate: fee truth remains in
-    // contextDigest for accounting, but fees never participate in admission.
-    takerFeeRate: NON_ADMISSION_TAKER_FEE_RATE,
-    maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
-    allocatedUsdc: parseFloat(bot.allocatedUsdc),
-    positionState,
-    quantizeOrderSize: (sizeBase: number) => adapter.quantizeOrderSize(bot.market, sizeBase),
-    sizingMode,
-    // Decimal columns are strings; a malformed value parses to NaN and guardrails
-    // reject (risk_params_invalid) — fail closed, never a silent default.
-    riskMinPct: parseFloat(bot.riskMinPct ?? "0.50"),
-    riskMaxPct: parseFloat(bot.riskMaxPct ?? "1.50"),
-    currentEquity,
-    // SL-PLACE Phase B: pass active-range from context digest (null-safe).
-    activeRange: digest?.activeRange ?? undefined,
-  });
+  let guardrailResult: ReturnType<typeof applyGuardrails>;
+  try {
+    if (isEntry && bot.protocol === "pacifica") {
+      try {
+        const markets = await adapter.getMarkets();
+        const admission = checkEntryConstraints(markets.find(market => market.internalSymbol === bot.market)?.constraintObservation, bot.market, Date.now());
+        if (!admission.ok) throw new ConstraintAdmissionError(admission);
+      }
+      catch (error) {
+        if (error instanceof ConstraintAdmissionError) throw error;
+        throw new ConstraintAdmissionError({ ok: false, code: "constraint_unavailable",
+          reason: `fresh market constraints unavailable: ${error instanceof Error ? error.message : String(error)}` });
+      }
+    }
+    guardrailResult = applyGuardrails(decision, {
+      entryPrice: finiteOrNaN(digest?.price),
+      atr14: finiteOrNaN(digest?.indicators?.atr14?.value),
+      botMaxLeverage: bot.maxLeverage,
+      timeframe: bot.timeframe as GuardrailTimeframe,
+      // A definitional sentinel, not an asserted venue rate: fee truth remains in
+      // contextDigest for accounting, but fees never participate in admission.
+      takerFeeRate: NON_ADMISSION_TAKER_FEE_RATE,
+      maintenanceMarginWeight: adapter.getMaintenanceMarginWeight(bot.market),
+      allocatedUsdc: parseFloat(bot.allocatedUsdc),
+      positionState,
+      quantizeOrderSize: (sizeBase: number) => adapter.quantizeOrderSize(bot.market, sizeBase),
+      sizingMode,
+      // Decimal columns are strings; a malformed value parses to NaN and guardrails
+      // reject (risk_params_invalid) — fail closed, never a silent default.
+      riskMinPct: parseFloat(bot.riskMinPct ?? "0.50"),
+      riskMaxPct: parseFloat(bot.riskMaxPct ?? "1.50"),
+      currentEquity,
+      // SL-PLACE Phase B: pass active-range from context digest (null-safe).
+      activeRange: digest?.activeRange ?? undefined,
+    });
+
+  } catch (error) {
+    if (!(error instanceof ConstraintAdmissionError)) throw error;
+    guardrailResult = { ok: false, violations: [{ rule: "G5", code: "constraint_unavailable",
+      message: error.message, fatal: true }] };
+  }
 
   // Outcome: 'flat' is terminal immediately; a guardrail reject is terminal as
   // 'rejected_guardrails'; a passing long/short/close leaves outcome null — the

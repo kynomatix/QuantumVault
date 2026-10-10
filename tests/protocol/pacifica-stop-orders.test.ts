@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
 import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota.js';
+import { observePacificaConstraints } from '../../server/protocol/market-constraints.js';
 import {
   liveBreakevenFingerprint,
   type LiveBreakevenAuthorityPermit,
@@ -25,10 +26,16 @@ afterEach(() => {
 });
 
 function createAdapter(): PacificaAdapter {
-  return new PacificaAdapter({
-    baseUrl: 'https://api.pacifica.fi/api/v1',
-    wsUrl: 'wss://ws.pacifica.fi/ws',
+  const adapter = new PacificaAdapter({
+    baseUrl: 'http://test-pacifica.invalid',
+    wsUrl: 'ws://test-pacifica.invalid',
   });
+  (adapter as any).get = vi.fn(async (path: string) => {
+    if (path === '/info') return [{ symbol: 'SOL', tick_size: '0.01', lot_size: '0.01', min_order_size: '0.1', max_leverage: 50 }];
+    if (path === '/info/prices') return { success: true, data: [{ symbol: 'SOL', mark: '100', timestamp: Date.now() }] };
+    throw new Error(`Unmocked venue read: ${path}`);
+  });
+  return adapter;
 }
 
 const ACCT = 'SubAccountPubkey1111111111111111111111111111';
@@ -45,6 +52,19 @@ function stubRegistry(a: any) {
       return 'SOL-PERP';
     },
   });
+}
+
+function stubOrderConstraints(a: any) {
+  a.getMarkets = vi.fn(async () => {
+    const constraintObservation = observePacificaConstraints({
+      tick_size: '0.01', lot_size: '0.01', min_order_size: '0.1',
+    }, 'SOL-PERP', Date.now());
+    a.marketDetailsMap.set('SOL-PERP', { constraintObservation });
+    return [{ internalSymbol: 'SOL-PERP', constraintObservation }];
+  });
+  a.getMarkPrice = vi.fn(async () => ({ kind: 'available', venue: 'pacifica', internalSymbol: 'SOL-PERP', protocolSymbol: 'SOL', source: '/info/prices', field: 'mark', exact: '100', observedAt: Date.now(), receivedAt: Date.now(), expiresAt: Date.now() + 5_000 }));
+  a.getStrictPositionForMarket = vi.fn(async () => ({ baseSize: -0.01 }));
+  a.getExitStep = vi.fn(async (_symbol: string, field: string) => field === 'lot' ? 0.01 : 0.01);
 }
 
 describe('PacificaAdapter.getOpenStopOrders — symbol normalization', () => {
@@ -157,6 +177,7 @@ describe('PacificaAdapter.placeStopOrder — body layout (WO-5 live serde verifi
   it('sends symbol/side/reduce_only at top-level and amount/stop_price nested under stop_order', async () => {
     const a = createAdapter() as any;
     stubRegistry(a);
+    stubOrderConstraints(a);
     a.ensurePacificaEnrollment = vi.fn(async () => ({ builderApproved: false }));
     // Pass values through unchanged so the test assertions are deterministic
     a.quantizeOrderSize = vi.fn((_sym: string, size: number) => size);
@@ -211,6 +232,7 @@ describe('PacificaAdapter.placeStopOrder — body layout (WO-5 live serde verifi
   it('omits subaccount_id from the signed operationData and adds it to the outer body only when provided', async () => {
     const a = createAdapter() as any;
     stubRegistry(a);
+    stubOrderConstraints(a);
     a.ensurePacificaEnrollment = vi.fn(async () => ({ builderApproved: false }));
     a.quantizeOrderSize = vi.fn((_sym: string, size: number) => size);
     a.quantizePrice = vi.fn((_sym: string, price: number) => price);
@@ -253,6 +275,8 @@ describe('PacificaAdapter generic TP/SL trigger-basis isolation', () => {
     const a = createAdapter() as any;
     stubRegistry(a);
     a.getPositions = vi.fn(async () => [{ internalSymbol: 'SOL-PERP', baseSize: 2 }]);
+    a.getStrictPositionForMarket = vi.fn(async () => (await a.getPositions())[0]);
+    a.getExitStep = vi.fn(async () => 0.01);
     a.ensurePacificaEnrollment = vi.fn(async () => ({ builderApproved: false }));
     a.getPrice = vi.fn(async () => 100);
     a.quantizePrice = vi.fn((_sym: string, price: number) => price);
@@ -1100,4 +1124,19 @@ describe('PacificaAdapter live breakeven authority', () => {
     expect(claimAttempt).not.toHaveBeenCalled();
     expect(a.post).not.toHaveBeenCalled();
   });
+});
+
+
+// Install before module evaluation; restored spies return to a denying transport.
+const deniedHttp = vi.hoisted(() => {
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('Unmocked HTTP denied by test network boundary');
+  }) as typeof fetch;
+  return attempts;
+});
+afterEach(() => {
+  const unexpected = deniedHttp.splice(0);
+  expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
 });

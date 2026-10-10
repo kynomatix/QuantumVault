@@ -11,7 +11,7 @@ import {
   SIGNAL_BOT_LEVERAGE_INVALID,
 } from '../../server/signal-bot-leverage-admission';
 
-function market(overrides: Partial<ProtocolMarket> = {}): ProtocolMarket {
+function market(overrides: Partial<Extract<ProtocolMarket, { constraintAuthority?: never }>> = {}): ProtocolMarket {
   return {
     internalSymbol: 'ZEC-PERP',
     protocolSymbol: 'ZEC',

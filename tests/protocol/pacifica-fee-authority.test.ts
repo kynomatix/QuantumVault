@@ -508,6 +508,16 @@ describe('PacificaAdapter market-order builder policy precedence', () => {
     builderApproved: boolean;
   }): Promise<unknown> {
     const adapter = new PacificaAdapter({ builderCode: 'QuantumVault' }) as any;
+    adapter.get = vi.fn(async (path: string) => {
+      if (path === '/info') return [{
+        symbol: 'BTC', max_leverage: 50, tick_size: '0.1',
+        lot_size: '0.0001', min_order_size: '10',
+      }];
+      if (path === '/info/prices') return { success: true, data: [{
+        symbol: 'BTC', mark: '100000', timestamp: Date.now(),
+      }] };
+      throw new Error(`Unexpected fixture GET ${path}`);
+    });
     adapter.ensurePacificaEnrollment = vi.fn(async () => ({
       builderApproved: input.builderApproved,
       referralClaimed: false,
