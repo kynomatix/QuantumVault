@@ -18459,6 +18459,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // Keep one provider series across the full history; bound fetch time too.
         const fetched = await fetchOHLCV(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, cacheWritePolicy: "skip", deadlineMs: 60_000 });
         ({ candles, provenance } = chartPriceSeries(fetched, tf));
+        // The shared candle cache can hold a gappy single-venue series (it only
+        // needs ~70% coverage), which chartPriceSeries rightly refuses. Retry
+        // once straight from the provider before showing "Price unavailable".
+        if (!candles.length && fetched.length) {
+          const fresh = await fetchOHLCV(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true, cacheWritePolicy: "skip", deadlineMs: 45_000 });
+          ({ candles, provenance } = chartPriceSeries(fresh, tf));
+        }
       } catch { /* trade detail remains available when price source fails */ }
       const aligned = alignChartExecutions(executions, candles, barMs);
       const paired = chartPairingPlaceholders(aligned);
