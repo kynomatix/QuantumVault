@@ -3,7 +3,7 @@ import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import { createSharedTradePriceChart } from './SharedTradePriceChart';
 import { earlierChartWindow, mergeNeutralBands } from './signalTradeHistoryWindow';
-import { tradeChartMarkers } from './signalTradeChartMarkers';
+import { formatTradePnl as formatPnl, tradeChartMarkers, tradeEntryDirection } from './signalTradeChartMarkers';
 import type { UTCTimestamp } from 'lightweight-charts';
 import { BarChart3, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -31,6 +31,15 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
     <DialogContent className="w-[95vw] sm:max-w-[min(1400px,95vw)] max-h-[90dvh] flex flex-col overflow-hidden font-sans" aria-describedby={undefined}>
       <DialogHeader className="shrink-0">
         <DialogTitle className="flex items-center gap-2 text-base"><BarChart3 className="w-4 h-4 text-primary" />Trade history chart</DialogTitle>
+        <div aria-label="Chart legend" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground text-left">
+          <span className="text-sky-400">↑ Long entry</span>
+          <span className="text-violet-400">↓ Short entry</span>
+          <span className="text-emerald-500">● Exit win</span>
+          <span className="text-red-500">● Exit loss</span>
+          <span>● Grey exit: flat or P&L pending</span>
+          <span>□ Box: confirmed entry to exit only</span>
+          <span>Grey band: trade activity</span>
+        </div>
       </DialogHeader>
       <div className="min-h-0 overflow-y-auto">
         <TradeHistoryChartContent botId={botId} />
@@ -52,8 +61,35 @@ function formatTradeTime(value: string) {
   return `${date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })} ${date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false })}`;
 }
 
-function formatPnl(value: number) {
-  return `${value > 0 ? '+' : value < 0 ? '-' : ''}$${Math.abs(value).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+function TradeInfoCard({ execution, pinned, onDismiss }: { execution: Execution; pinned: boolean; onDismiss: () => void }) {
+  const direction = tradeEntryDirection(execution);
+  const entry = execution.kind === 'entry';
+  const exit = execution.kind === 'close';
+  const pnl = exit && execution.accountingStatus === 'resolved' ? execution.netPnl : null;
+  // The endpoint currently supplies only unproven executions, never paired trades.
+  // A neighbouring row cannot establish entry notional, duration or position side.
+  return <div role={pinned ? 'region' : 'tooltip'} aria-label="Chart trade details" className={`absolute left-2 top-2 z-10 w-72 max-w-[calc(100%-1rem)] max-h-[calc(100%-1rem)] rounded-lg border border-border/70 bg-background/95 p-3 shadow-lg text-xs ${pinned ? 'overflow-y-auto' : 'pointer-events-none overflow-hidden'}`}>
+    <div className="mb-2 flex items-center justify-between gap-2">
+      <strong className={direction === 'Long' ? 'text-sky-400' : direction === 'Short' ? 'text-violet-400' : 'text-foreground'}>
+        {execution.status === 'liquidated' ? 'Liquidated' : direction ? `${direction} entry` : exit ? 'Exit' : 'Trade'}
+      </strong>
+      {pinned && <button type="button" onClick={onDismiss} className="rounded px-2 py-1 text-muted-foreground hover:bg-muted focus-visible:outline focus-visible:outline-2" aria-label="Dismiss chart trade details">Close</button>}
+    </div>
+    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 tabular-nums">
+      <dt className="text-muted-foreground">Direction</dt><dd>{direction ?? 'Unavailable'}</dd>
+      <dt className="text-muted-foreground">Entry</dt><dd>{entry ? `$${formatPrice(execution.price)}` : 'Not linked'}</dd>
+      {entry && <><dt className="text-muted-foreground">Entry time</dt><dd><time dateTime={execution.exactTime}>{new Date(execution.exactTime).toLocaleString()}</time></dd></>}
+      <dt className="text-muted-foreground">Exit</dt><dd>{exit ? `$${formatPrice(execution.price)}` : 'Not linked'}</dd>
+      {exit && <><dt className="text-muted-foreground">Exit time</dt><dd><time dateTime={execution.exactTime}>{new Date(execution.exactTime).toLocaleString()}</time></dd></>}
+      {!entry && !exit && <><dt className="text-muted-foreground">Recorded price</dt><dd>${formatPrice(execution.price)}</dd><dt className="text-muted-foreground">Recorded time</dt><dd>{new Date(execution.exactTime).toLocaleString()}</dd></>}
+      <dt className="text-muted-foreground">Size</dt><dd>{formatSize(execution.size)}</dd>
+      <dt className="text-muted-foreground">Net P&L</dt><dd className={pnl !== null && pnl > 0 ? 'text-emerald-500' : pnl !== null && pnl < 0 ? 'text-red-500' : ''}>{pnl !== null ? formatPnl(pnl) : exit ? 'Pending' : 'Unavailable'}</dd>
+      <dt className="text-muted-foreground">P&L %</dt><dd>Unavailable</dd>
+      <dt className="text-muted-foreground">Time held</dt><dd>Unavailable</dd>
+      <dt className="text-muted-foreground">Status</dt><dd className="capitalize">{execution.status}</dd>
+    </dl>
+    <p className="mt-2 text-[10px] text-muted-foreground">Entry and exit are not linked in this history. Times are local.{!pinned && ' Click the marker to keep details open.'}</p>
+  </div>;
 }
 
 function TradeHistoryChartContent({ botId }: { botId: string }) {
@@ -62,6 +98,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
   const [tf, setTf] = useState<'1d' | '4h'>('1d');
   const [data, setData] = useState<ChartResponse | null>(null);
   const [selected, setSelected] = useState<Execution | null>(null);
+  const [hovered, setHovered] = useState<Execution | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [paging, setPaging] = useState(false);
@@ -79,7 +116,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
     let cancelled = false;
     const controller = new AbortController();
     pagingRequest.current = null; setPaging(false);
-    setLoading(true); setData(null); setError(''); setSelected(null);
+    setLoading(true); setData(null); setError(''); setSelected(null); setHovered(null);
     const query = new URLSearchParams({ tf, from: range.from, to: range.to });
     fetch(`/api/trading-bots/${encodeURIComponent(botId)}/trade-chart?${query}`, { credentials: 'include', headers: walletAuthHeaders(), signal: controller.signal })
       .then(async r => { const body = await safeResponseJson(r); if (!r.ok) throw Error(body?.code === 'MARKET_INVARIANT_VIOLATION' ? 'Market invariant violation: stored trades span another market' : body?.error || 'Chart unavailable'); return body as ChartResponse; })
@@ -91,12 +128,19 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
   useEffect(() => {
     if (!data || !priceRef.current || data.price.availability !== 'available') return;
     const chart = createSharedTradePriceChart(priceRef.current);
+    setHovered(null);
     const series = chart.addCandlestickSeries({ upColor: '#38bdf8', downColor: '#7854d4', wickUpColor: '#38bdf8', wickDownColor: '#7854d4', borderVisible: false, priceFormat: deriveAiTraderChartPriceFormat(undefined, data.price.candles.flatMap(c => [c.open, c.high, c.low, c.close])) });
     series.setData(data.price.candles.map(c => ({ ...c, time: c.time as UTCTimestamp })));
     series.setMarkers(tradeChartMarkers(data.executions).map(marker => ({ ...marker, time: marker.time as UTCTimestamp })));
+    const byId = new Map(data.executions.map(row => [row.id, row]));
+    chart.subscribeCrosshairMove(param => {
+      setHovered(param.point && typeof param.hoveredObjectId === 'string' ? byId.get(param.hoveredObjectId) ?? null : null);
+    });
     chart.subscribeClick(param => {
-      const execution = data.executions.find(row => row.id === param.hoveredObjectId);
-      if (execution) selectExecution(execution);
+      const execution = typeof param.hoveredObjectId === 'string' ? byId.get(param.hoveredObjectId) : undefined;
+      // Keep the card on the chart; focusing the list detail would scroll it away.
+      setSelected(execution ?? null);
+      setHovered(null);
     });
     // A single histogram column occupies exactly one candle bar in the bottom trade lane.
     const bandSeries = chart.addHistogramSeries({ priceScaleId: 'trade-lane', base: 0, color: NEUTRAL_SPAN, priceLineVisible: false, lastValueVisible: false });
@@ -165,10 +209,12 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
       {data.price.availability !== 'available' && <p role="status" className="text-muted-foreground">Price unavailable. Trade details remain below.</p>}
       {data.price.availability === 'available' && data.executions.some(e => e.displayBarTime === null) && <p role="status" className="text-muted-foreground">Some trades fall outside the available candles. Their details are listed below.</p>}
       {data.price.availability === 'available' && <div className="relative w-full overflow-hidden" style={{ height: 'min(62vh, 760px)' }}>
-        <div ref={priceRef} className="absolute inset-0" aria-label={data.price.basisLabel} />
+        <div ref={priceRef} className="absolute inset-0" aria-label={data.price.basisLabel} onMouseLeave={() => setHovered(null)} />
+        {(hovered ?? selected) && <TradeInfoCard execution={(hovered ?? selected)!} pinned={!hovered || hovered.id === selected?.id} onDismiss={() => { setSelected(null); setHovered(null); }} />}
       </div>}
+      <p className="text-muted-foreground">Hover or click a marker for trade details, or select a row below. Boxes need confirmed entry-to-exit links; this history does not supply them.</p>
       {data.openPosition && <p className="rounded-md border bg-muted/20 px-3 py-2 text-xs tabular-nums">Open: {data.openPosition.size === null ? 'Size unavailable' : `${data.openPosition.size < 0 ? 'SHORT' : 'LONG'} ${formatSize(data.openPosition.size)}`} @ {data.openPosition.entryPrice === null ? 'Price unavailable' : formatPrice(data.openPosition.entryPrice)}</p>}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Markers: E Entry · X Close · L Liquidation · R Recovered</span></div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Arrows show direction · Circles show exit P&L</span></div>
       <div aria-label="Trade execution rows" className="max-h-48 overflow-y-auto rounded-lg border">
         <ul className="divide-y divide-border">{data.executions.map(e => {
           const pnl = e.kind === 'close' && e.accountingStatus === 'resolved' ? e.netPnl : null;
