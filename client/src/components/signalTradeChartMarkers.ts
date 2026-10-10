@@ -3,7 +3,7 @@ import type { IChartApi, ISeriesApi, ISeriesPrimitive, Logical } from 'lightweig
 export type SequentialTradePair = {
   entryId: string; exitId: string; direction: 'Long' | 'Short';
   entryTime: string; exitTime: string; entryPrice: number; exitPrice: number;
-  size: number; netPnl: number; pnlPercent: number; timeHeldMs: number; pairingStatus: 'sequential';
+  size: number; addCount: number; liquidated: boolean; netPnl: number; pnlPercent: number; timeHeldMs: number; pairingStatus: 'sequential';
 };
 
 /** Native pane primitive repaints with both price/time scales, without adding bars.

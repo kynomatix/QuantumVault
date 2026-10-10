@@ -31,15 +31,18 @@ export function SignalTradeHistoryChart({ botId }: { botId: string }) {
     <DialogContent className="w-[95vw] sm:max-w-[min(1400px,95vw)] max-h-[90dvh] flex flex-col overflow-hidden font-sans" aria-describedby={undefined}>
       <DialogHeader className="shrink-0">
         <DialogTitle className="flex items-center gap-2 text-base"><BarChart3 className="w-4 h-4 text-primary" />Trade history chart</DialogTitle>
-        <div aria-label="Chart legend" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground text-left">
-          <span className="text-sky-400">↑ Long entry</span>
-          <span className="text-violet-400">↓ Short entry</span>
-          <span className="text-emerald-500">● Exit win</span>
-          <span className="text-red-500">● Exit loss</span>
-          <span>● Grey exit: flat or P&L pending</span>
-          <span>□ Box: entry to exit paired in order</span>
-          <span>Green box: profit · Red box: loss · Grey box: flat</span>
-          <span>Grey strip: unpaired trade activity</span>
+        <div role="group" aria-label="Chart legend" className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground text-left">
+          <span style={{ color: '#38bdf8' }}>↑ Long entry / add</span>
+          <span style={{ color: '#a78bfa' }}>↓ Short entry / add</span>
+          <span style={{ color: '#059669' }}>● Close profit</span>
+          <span style={{ color: '#dc2626' }}>● Close loss</span>
+          <span style={{ color: '#64748b' }}>● Close: zero or P&L pending</span>
+          <span style={{ color: '#64748b' }}>■ Unclassified execution</span>
+          <span className="inline-flex items-center gap-1"><i aria-hidden="true" className="inline-block h-3 w-5 border" style={{ backgroundColor: 'rgba(5,150,105,0.15)', borderColor: 'rgba(5,150,105,0.7)' }} />Trade profit</span>
+          <span className="inline-flex items-center gap-1"><i aria-hidden="true" className="inline-block h-3 w-5 border" style={{ backgroundColor: 'rgba(220,38,38,0.15)', borderColor: 'rgba(220,38,38,0.7)' }} />Trade loss</span>
+          <span className="inline-flex items-center gap-1"><i aria-hidden="true" className="inline-block h-3 w-5 border" style={{ backgroundColor: 'rgba(100,116,139,0.15)', borderColor: 'rgba(100,116,139,0.7)' }} />Trade zero P&L</span>
+          <span>Boxes: flat-to-flat positions</span>
+          <span className="inline-flex items-center gap-1"><i aria-hidden="true" className="inline-block h-1 w-5" style={{ backgroundColor: NEUTRAL_SPAN }} />Unpaired activity</span>
         </div>
       </DialogHeader>
       <div className="min-h-0 overflow-y-auto">
@@ -81,18 +84,19 @@ function TradeInfoCard({ execution, pinned, onDismiss }: { execution: Execution;
     </div>
     <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 tabular-nums">
       <dt className="text-muted-foreground">Direction</dt><dd>{direction ?? 'Unavailable'}</dd>
-      <dt className="text-muted-foreground">Entry</dt><dd>{entryPrice !== null ? `$${formatPrice(entryPrice)}` : 'Not linked'}</dd>
+      <dt className="text-muted-foreground">{pair?.addCount ? 'Entry (avg)' : 'Entry'}</dt><dd>{entryPrice !== null ? `$${formatPrice(entryPrice)}` : 'Not linked'}</dd>
       {entryTime && <><dt className="text-muted-foreground">Entry time</dt><dd><time dateTime={entryTime}>{new Date(entryTime).toLocaleString()}</time></dd></>}
+      {!!pair?.addCount && <><dt className="text-muted-foreground">Adds</dt><dd>{pair.addCount} · size-weighted average entry</dd></>}
       <dt className="text-muted-foreground">Exit</dt><dd>{exitPrice !== null ? `$${formatPrice(exitPrice)}` : 'Not linked'}</dd>
       {exitTime && <><dt className="text-muted-foreground">Exit time</dt><dd><time dateTime={exitTime}>{new Date(exitTime).toLocaleString()}</time></dd></>}
       {!entry && !exit && <><dt className="text-muted-foreground">Recorded price</dt><dd>${formatPrice(execution.price)}</dd><dt className="text-muted-foreground">Recorded time</dt><dd>{new Date(execution.exactTime).toLocaleString()}</dd></>}
-      <dt className="text-muted-foreground">Size</dt><dd>{formatSize(execution.size)}</dd>
+      <dt className="text-muted-foreground">Size</dt><dd>{formatSize(pair?.size ?? execution.size)}{pair?.addCount ? ' total opened' : ''}</dd>
       <dt className="text-muted-foreground">Net P&L</dt><dd className={pnl !== null && pnl > 0 ? 'text-emerald-500' : pnl !== null && pnl < 0 ? 'text-red-500' : ''}>{pnl !== null ? formatPnl(pnl) : exit ? 'Pending' : 'Unavailable'}</dd>
       <dt className="text-muted-foreground">P&L %</dt><dd>{pair ? `${pair.pnlPercent > 0 ? '+' : ''}${pair.pnlPercent.toFixed(2)}% of entry notional` : 'Unavailable'}</dd>
       <dt className="text-muted-foreground">Time held</dt><dd>{pair ? formatTimeHeld(pair.timeHeldMs) : 'Unavailable'}</dd>
-      <dt className="text-muted-foreground">Status</dt><dd className="capitalize">{execution.status}</dd>
+      <dt className="text-muted-foreground">Status</dt><dd className="capitalize">{pair?.liquidated ? 'Liquidated' : pair ? 'Closed' : execution.status}</dd>
     </dl>
-    <p className="mt-2 text-[10px] text-muted-foreground">{pair ? 'Entry and exit paired in order.' : 'Entry and exit are not linked for this execution.'} Times are local.{!pinned && ' Click the marker to keep details open.'}</p>
+    <p className="mt-2 text-[10px] text-muted-foreground">{pair ? 'Flat-to-flat trade; P&L sums all closes.' : 'Entry and exit are not linked for this execution.'} Times are local.{!pinned && ' Click the marker to keep details open.'}</p>
   </div>;
 }
 
@@ -109,6 +113,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
   const [tf, setTf] = useState<'1d' | '4h'>('1d');
   const [data, setData] = useState<ChartResponse | null>(null);
   const [selected, setSelected] = useState<Execution | null>(null);
+  const [pinned, setPinned] = useState<Execution | null>(null);
   const [hovered, setHovered] = useState<Execution | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -121,13 +126,14 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
   const pagingRequest = useRef<number | null>(null);
   function selectExecution(execution: Execution) {
     setSelected(execution);
+    setPinned(null); setHovered(null);
     requestAnimationFrame(() => detailRef.current?.focus());
   }
   useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
     pagingRequest.current = null; setPaging(false);
-    setLoading(true); setData(null); setError(''); setSelected(null); setHovered(null);
+    setLoading(true); setData(null); setError(''); setSelected(null); setPinned(null); setHovered(null);
     const query = new URLSearchParams({ tf, from: range.from, to: range.to });
     fetch(`/api/trading-bots/${encodeURIComponent(botId)}/trade-chart?${query}`, { credentials: 'include', headers: walletAuthHeaders(), signal: controller.signal })
       .then(async r => { const body = await safeResponseJson(r); if (!r.ok) throw Error(body?.code === 'MARKET_INVARIANT_VIOLATION' ? 'Market invariant violation: stored trades span another market' : body?.error || 'Chart unavailable'); return body as ChartResponse; })
@@ -152,6 +158,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
       const execution = typeof param.hoveredObjectId === 'string' ? byId.get(param.hoveredObjectId) : undefined;
       // Keep the card on the chart; focusing the list detail would scroll it away.
       setSelected(execution ?? null);
+      setPinned(execution ?? null);
       setHovered(null);
     });
     // A single histogram column occupies exactly one candle bar in the bottom trade lane.
@@ -222,9 +229,9 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
       {data.price.availability === 'available' && data.executions.some(e => e.displayBarTime === null) && <p role="status" className="text-muted-foreground">Some trades fall outside the available candles. Their details are listed below.</p>}
       {data.price.availability === 'available' && <div className="relative w-full overflow-hidden" style={{ height: 'min(62vh, 760px)' }}>
         <div ref={priceRef} className="absolute inset-0" aria-label={data.price.basisLabel} onMouseLeave={() => setHovered(null)} />
-        {(hovered ?? selected) && <TradeInfoCard execution={(hovered ?? selected)!} pinned={!hovered || hovered.id === selected?.id} onDismiss={() => { setSelected(null); setHovered(null); }} />}
+        {(hovered ?? pinned) && <TradeInfoCard execution={(hovered ?? pinned)!} pinned={!hovered || hovered.id === pinned?.id} onDismiss={() => { setPinned(null); setHovered(null); }} />}
       </div>}
-      <p className="text-muted-foreground">Hover or click a marker for trade details, or select a row below. Boxes pair entries and exits in order. Partial closes, adds and unreconciled positions stay on the grey strip.</p>
+      <p className="text-muted-foreground">Hover or click a marker for trade details, or select a row below. Each box spans the first open to the final close, including adds, partial closes and liquidation. Adds use a size-weighted average entry. Open or unreconcilable positions stay on the grey strip.</p>
       {data.openPosition && <p className="rounded-md border bg-muted/20 px-3 py-2 text-xs tabular-nums">Open: {data.openPosition.size === null ? 'Size unavailable' : `${data.openPosition.size < 0 ? 'SHORT' : 'LONG'} ${formatSize(data.openPosition.size)}`} @ {data.openPosition.entryPrice === null ? 'Price unavailable' : formatPrice(data.openPosition.entryPrice)}</p>}
       <div className="flex flex-wrap items-center justify-between gap-2 text-muted-foreground"><span>Trades in this range · Local time</span><span>Arrows show direction · Circles show exit P&L</span></div>
       <div aria-label="Trade execution rows" className="max-h-48 overflow-y-auto rounded-lg border">
@@ -249,8 +256,10 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
         <dt className="text-muted-foreground">Venue</dt><dd>{selected.protocol ?? 'Unknown'}{selected.protocolMismatch ? ' (different from current bot venue)' : ''}</dd>
         <dt className="text-muted-foreground">Net P&L</dt><dd>{selected.pair ? formatPnl(selected.pair.netPnl) : selected.accountingStatus === 'resolved' && selected.netPnl !== null ? formatPnl(selected.netPnl) : selected.kind === 'close' ? 'Pending' : '—'}</dd>
         {selected.pair && <>
-          <dt className="text-muted-foreground">Pairing</dt><dd>In order · {selected.pair.direction}</dd>
-          <dt className="text-muted-foreground">Entry</dt><dd>${formatPrice(selected.pair.entryPrice)} · {new Date(selected.pair.entryTime).toLocaleString()}</dd>
+          <dt className="text-muted-foreground">Pairing</dt><dd>Flat to flat · {selected.pair.direction}{selected.pair.liquidated ? ' · Liquidated' : ''}</dd>
+          <dt className="text-muted-foreground">{selected.pair.addCount ? 'Entry (avg)' : 'Entry'}</dt><dd>${formatPrice(selected.pair.entryPrice)} · {new Date(selected.pair.entryTime).toLocaleString()}</dd>
+          {!!selected.pair.addCount && <><dt className="text-muted-foreground">Adds</dt><dd>{selected.pair.addCount} · size-weighted average entry</dd></>}
+          <dt className="text-muted-foreground">Trade size</dt><dd>{formatSize(selected.pair.size)} total opened</dd>
           <dt className="text-muted-foreground">Exit</dt><dd>${formatPrice(selected.pair.exitPrice)} · {new Date(selected.pair.exitTime).toLocaleString()}</dd>
           <dt className="text-muted-foreground">P&L %</dt><dd>{selected.pair.pnlPercent.toFixed(2)}% of entry notional</dd>
           <dt className="text-muted-foreground">Time held</dt><dd>{formatTimeHeld(selected.pair.timeHeldMs)}</dd>
