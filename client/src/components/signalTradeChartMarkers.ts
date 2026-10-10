@@ -22,11 +22,9 @@ export function attachTradeBoxes(chart: IChartApi, series: ISeriesApi<'Candlesti
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (candleTimes[mid] <= t) lo = mid; else hi = mid - 1; }
     return lo + Math.min(1, Math.max(0, (t - candleTimes[lo]) / barSeconds));
   };
-  const x = (time: number) => {
-    const l = logical(time), index = Math.floor(l);
-    const base = chart.timeScale().logicalToCoordinate(index as Logical);
-    return base === null ? null : base + (l - index) * chart.timeScale().options().barSpacing;
-  };
+  // Snap box edges to the centre of the candle containing the execution, where
+  // its entry arrow and exit dot sit, like TradingView's position tool.
+  const x = (time: number) => chart.timeScale().logicalToCoordinate(Math.min(Math.floor(logical(time)), candleTimes.length - 1) as Logical);
   const onScreen = () => {
     const range = chart.timeScale().getVisibleLogicalRange();
     if (!range) return visible;
@@ -45,7 +43,7 @@ export function attachTradeBoxes(chart: IChartApi, series: ISeriesApi<'Candlesti
               const entryY = series.priceToCoordinate(pair.entryPrice), exitY = series.priceToCoordinate(pair.exitPrice);
               if (left === null || right === null || entryY === null || exitY === null) continue;
               const rgb = pair.netPnl > 0 ? '5,150,105' : pair.netPnl < 0 ? '220,38,38' : '100,116,139';
-              const top = Math.min(entryY, exitY), width = Math.max(1, right - left), height = Math.max(1, Math.abs(exitY - entryY));
+              const top = Math.min(entryY, exitY), width = Math.max(chart.timeScale().options().barSpacing * 0.5, right - left), height = Math.max(1, Math.abs(exitY - entryY));
               ctx.fillStyle = `rgba(${rgb},0.15)`;
               ctx.strokeStyle = `rgba(${rgb},0.7)`;
               ctx.lineWidth = 1;
