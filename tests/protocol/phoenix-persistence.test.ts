@@ -65,10 +65,55 @@ describe('Phoenix migration and allocation on isolated PostgreSQL', () => {
     await pool.query(`INSERT INTO trading_bots (id,wallet_address,active_protocol,bot_subaccount_key_encrypted)
       VALUES ('EXAMPLE-legacy',$1,'pacifica','EXAMPLE-encrypted')`, [owner]);
     const before = (await pool.query('SELECT * FROM trading_bots ORDER BY id')).rows;
+    const catalogIds = async () => (await pool.query(`SELECT
+      (SELECT oid FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass AND conname = 'trading_bots_active_protocol_check') AS protocol_constraint,
+      (SELECT oid FROM pg_trigger WHERE tgrelid = 'trading_bots'::regclass AND tgname = 'trading_bots_phoenix_identity_immutable') AS identity_trigger,
+      (SELECT oid FROM pg_proc WHERE oid = to_regprocedure('qv_phoenix_identity_immutable()')) AS identity_function,
+      'trading_bots_phoenix_authority_unique'::regclass::oid AS authority_index,
+      'trading_bots_phoenix_trader_unique'::regclass::oid AS trader_index`)).rows[0];
+    const objectsBefore = await catalogIds();
     await pool.query(manifest[76].sql);
     await pool.query(phoenix.sql);
     await pool.query(phoenix.sql);
+    expect(await catalogIds()).toEqual(objectsBefore);
     expect((await pool.query('SELECT * FROM trading_bots ORDER BY id')).rows).toEqual(before);
+  });
+
+  it('upgrades the previous unfiltered trigger once, then leaves it in place', async () => {
+    await pool.query(`DROP TRIGGER trading_bots_phoenix_identity_immutable ON trading_bots;
+      CREATE TRIGGER trading_bots_phoenix_identity_immutable BEFORE UPDATE ON trading_bots
+      FOR EACH ROW EXECUTE FUNCTION qv_phoenix_identity_immutable()`);
+    await pool.query(phoenix.sql);
+    const trigger = async () => (await pool.query(`SELECT oid, pg_get_triggerdef(oid) AS definition
+      FROM pg_trigger WHERE tgrelid = 'trading_bots'::regclass
+      AND tgname = 'trading_bots_phoenix_identity_immutable'`)).rows[0];
+    const upgraded = await trigger();
+    expect(upgraded.definition.toLowerCase()).toContain("old.active_protocol = 'phoenix'");
+    expect(upgraded.definition.toLowerCase()).toContain("new.active_protocol = 'phoenix'");
+    await pool.query(phoenix.sql);
+    expect(await trigger()).toEqual(upgraded);
+  });
+
+  it('attributes an unbroadened active protocol constraint to Phoenix', async () => {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM trading_bots WHERE id = $1', [botId]);
+      await client.query(`ALTER TABLE trading_bots DROP CONSTRAINT trading_bots_active_protocol_check;
+        ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
+        CHECK (active_protocol IN ('pacifica','drift','flash'))`);
+      const query = (sql: string, values?: readonly unknown[]) => client.query(
+        sql.replaceAll("'public'", `'${schemaName}'`),
+        values?.map(value => typeof value === 'string' ? value.replace(/^public\./, `${schemaName}.`) : value),
+      );
+      const snapshot = await probeSchemaMigrationManifest(query, [manifest[76], phoenix]);
+      expect(snapshot.unavailableCapabilities).toEqual(['phoenix']);
+      expect(snapshot.evidence).toContainEqual({ capability: 'phoenix', failureClass: 'postcondition_missing',
+        objectIdentity: 'constraint:trading_bots.trading_bots_active_protocol_check' });
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
   });
 
   it('proves every Phoenix readiness postcondition against the real catalog', async () => {

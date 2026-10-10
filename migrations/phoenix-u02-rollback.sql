@@ -11,10 +11,10 @@ DO $$ BEGIN
 END $$;
 DROP TABLE phoenix_operation_attempts;
 DROP TABLE phoenix_operations;
-DROP TRIGGER trading_bots_phoenix_identity_immutable ON trading_bots;
-DROP FUNCTION qv_phoenix_identity_immutable();
-DROP INDEX trading_bots_phoenix_authority_unique;
-DROP INDEX trading_bots_phoenix_trader_unique;
+DROP TRIGGER IF EXISTS trading_bots_phoenix_identity_immutable ON trading_bots;
+DROP FUNCTION IF EXISTS qv_phoenix_identity_immutable();
+DROP INDEX IF EXISTS trading_bots_phoenix_authority_unique;
+DROP INDEX IF EXISTS trading_bots_phoenix_trader_unique;
 ALTER TABLE trading_bots DROP CONSTRAINT trading_bots_phoenix_identity_check;
 ALTER TABLE trading_bots
   DROP COLUMN phoenix_authority_wallet,

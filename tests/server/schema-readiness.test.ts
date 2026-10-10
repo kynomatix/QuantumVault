@@ -223,6 +223,10 @@ describe("schema readiness", () => {
     });
     expect(sqlEntries[76]).toContain("position('phoenix' in pg_get_constraintdef(oid)) > 0");
     expect(sqlEntries[76]).toContain("CHECK (active_protocol IN ('pacifica', 'drift', 'flash'))");
+    expect(metadata[76].requirements[0]).toMatchObject({ definitionIncludes: ["'pacifica'", "'drift'", "'flash'"] });
+    expect(metadata[22].requirements[0]).toMatchObject({ definitionIncludes: ["'pacifica'", "'drift'"] });
+    expect(metadata[186].requirements[0]).toMatchObject({ kind: 'constraint',
+      constraint: 'trading_bots_active_protocol_check', definitionIncludes: ["'phoenix'"] });
 
     expect(sqlEntries[11]).toContain("total_volume numeric(30,6)");
     expect(sqlEntries[11]).toContain("total_trades integer");

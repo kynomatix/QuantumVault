@@ -1977,15 +1977,27 @@ const schemaMigrationSql = [
          ON solana_signed_submit_attempts (operation_type, operation_id)
          WHERE status = 'confirmation_pending'`,
       // Phoenix U02: no row backfill, no assets or encrypted metadata changed.
+      // The runner submits this entire SQL string as one query, so index creation
+      // cannot use CONCURRENTLY and a same-query NOT VALID/VALIDATE would retain
+      // the preceding DROP CONSTRAINT lock. Guard every trading_bots DDL on reboot.
       `DO $phoenix$ BEGIN
-         ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
-         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check CHECK (active_protocol IN ('pacifica','drift','flash','phoenix'));
-         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_authority_wallet text;
-         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_trader_account text;
-         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_network text;
-         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_program_address text;
-         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_portfolio_index integer;
-         ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_subaccount_index integer;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass
+           AND conname = 'trading_bots_active_protocol_check' AND convalidated
+           AND position('phoenix' in pg_get_constraintdef(oid)) > 0) THEN
+           ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check CHECK (active_protocol IN ('pacifica','drift','flash','phoenix'));
+         END IF;
+         IF (SELECT count(*) FROM pg_attribute WHERE attrelid = 'trading_bots'::regclass
+           AND attname = ANY (ARRAY['phoenix_authority_wallet','phoenix_trader_account','phoenix_network',
+             'phoenix_program_address','phoenix_portfolio_index','phoenix_subaccount_index'])
+           AND attnum > 0 AND NOT attisdropped) < 6 THEN
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_authority_wallet text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_trader_account text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_network text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_program_address text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_portfolio_index integer;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_subaccount_index integer;
+         END IF;
          IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass AND conname = 'trading_bots_phoenix_identity_check') THEN
            ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_phoenix_identity_check CHECK ((active_protocol <> 'phoenix' AND phoenix_authority_wallet IS NULL AND phoenix_trader_account IS NULL AND phoenix_network IS NULL AND phoenix_program_address IS NULL AND phoenix_portfolio_index IS NULL AND phoenix_subaccount_index IS NULL)
           OR (active_protocol = 'phoenix' AND phoenix_authority_wallet IS NOT NULL AND phoenix_trader_account IS NOT NULL
@@ -1998,9 +2010,17 @@ const schemaMigrationSql = [
             AND protocol_subaccount_id = phoenix_trader_account));
          END IF;
        END $phoenix$;
-       CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_authority_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_authority_wallet);
-       CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_trader_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_trader_account);
-       CREATE OR REPLACE FUNCTION qv_phoenix_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $phoenix$
+       DO $phoenix_indexes$ BEGIN
+         IF to_regclass('trading_bots_phoenix_authority_unique') IS NULL THEN
+           CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_authority_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_authority_wallet);
+         END IF;
+         IF to_regclass('trading_bots_phoenix_trader_unique') IS NULL THEN
+           CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_trader_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_trader_account);
+         END IF;
+       END $phoenix_indexes$;
+       DO $phoenix_function$ BEGIN
+         IF to_regprocedure('qv_phoenix_identity_immutable()') IS NULL THEN
+           EXECUTE $ddl$CREATE FUNCTION qv_phoenix_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $phoenix_body$
        BEGIN
          IF (OLD.active_protocol = 'phoenix' OR NEW.active_protocol = 'phoenix') AND
            ROW(OLD.active_protocol, OLD.wallet_address, OLD.protocol_subaccount_id, OLD.derivation_index, OLD.derivation_path_version,
@@ -2010,9 +2030,18 @@ const schemaMigrationSql = [
              NEW.phoenix_authority_wallet, NEW.phoenix_trader_account, NEW.phoenix_network, NEW.phoenix_program_address, NEW.phoenix_portfolio_index, NEW.phoenix_subaccount_index)
          THEN RAISE EXCEPTION 'Phoenix identity is immutable; new bots only'; END IF;
          RETURN NEW;
-       END $phoenix$;
-       DROP TRIGGER IF EXISTS trading_bots_phoenix_identity_immutable ON trading_bots;
-       CREATE TRIGGER trading_bots_phoenix_identity_immutable BEFORE UPDATE ON trading_bots FOR EACH ROW EXECUTE FUNCTION qv_phoenix_identity_immutable();
+       END $phoenix_body$ $ddl$;
+         END IF;
+       END $phoenix_function$;
+       DO $phoenix_trigger$ BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'trading_bots'::regclass
+           AND tgname = 'trading_bots_phoenix_identity_immutable' AND tgqual IS NOT NULL AND NOT tgisinternal) THEN
+           DROP TRIGGER IF EXISTS trading_bots_phoenix_identity_immutable ON trading_bots;
+           CREATE TRIGGER trading_bots_phoenix_identity_immutable BEFORE UPDATE ON trading_bots
+             FOR EACH ROW WHEN (OLD.active_protocol = 'phoenix' OR NEW.active_protocol = 'phoenix')
+             EXECUTE FUNCTION qv_phoenix_identity_immutable();
+         END IF;
+       END $phoenix_trigger$;
        CREATE TABLE IF NOT EXISTS phoenix_operations (
          id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bot_id varchar NOT NULL REFERENCES trading_bots(id),
          request_key text NOT NULL, kind text NOT NULL, intent jsonb NOT NULL, intent_hash text NOT NULL,
@@ -2491,7 +2520,8 @@ const schemaMigrationMetadata = [
         "table": "trading_bots",
         "constraint": "trading_bots_active_protocol_check",
         "definitionIncludes": [
-          "CHECK (active_protocol IN ('pacifica', 'drift', 'flash', 'phoenix'))"
+          "'pacifica'",
+          "'drift'"
         ]
       },
       {
@@ -3321,7 +3351,9 @@ const schemaMigrationMetadata = [
         "table": "trading_bots",
         "constraint": "trading_bots_active_protocol_check",
         "definitionIncludes": [
-          "CHECK (active_protocol IN ('pacifica', 'drift', 'flash', 'phoenix'))"
+          "'pacifica'",
+          "'drift'",
+          "'flash'"
         ]
       }
     ],
@@ -5447,6 +5479,12 @@ const schemaMigrationMetadata = [
     "phoenix"
   ],
   "requirements": [
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_active_protocol_check",
+      "definitionIncludes": ["'phoenix'"]
+    },
     {
       "kind": "column",
       "table": "trading_bots",
