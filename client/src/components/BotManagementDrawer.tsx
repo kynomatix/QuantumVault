@@ -1,5 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { SignalTradeHistoryChart } from './SignalTradeHistoryChart';
+import { PhoenixWithdrawalDetail } from './PhoenixWithdrawalDetail';
 import { resolveBotTradeDisplayPnl } from '@/lib/equity-display';
 import { useState, useEffect, useRef, type ReactNode, type ElementType } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
@@ -2322,6 +2323,7 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="equity" className="space-y-4 mt-4">
+            <PhoenixWithdrawalDetail activeProtocol={bot?.activeProtocol} visible={isOpen && activeTab === 'equity'} />
             <div className="grid grid-cols-2 gap-3">
               <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
                 <div className="flex items-center justify-between">

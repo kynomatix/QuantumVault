@@ -10,6 +10,9 @@ const adapterHealth = new Map<string, AdapterHealth>();
 let defaultAdapterId: string = 'pacifica';
 
 export function registerAdapter(adapter: ProtocolAdapter): void {
+  // U01 public-read enablement must never become execution enablement, even if a
+  // caller attempts an unsafe cast to the legacy adapter interface.
+  if (adapter.protocolName === 'phoenix') throw new Error('Phoenix execution is not implemented; use the public-read registry');
   assertProtocolRuntimeAvailable(adapter.protocolName);
   if (adapters.size >= MAX_ADAPTERS && !adapters.has(adapter.protocolName)) {
     throw new Error(

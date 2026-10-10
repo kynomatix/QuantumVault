@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+export type { PhoenixTraderIdentity, PhoenixReadCapabilities, PhoenixWithdrawalDetails } from '../../shared/phoenix-read-contract';
 
 export type RiskTier = 'recommended' | 'caution' | 'high_risk';
 

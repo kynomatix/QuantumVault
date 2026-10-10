@@ -6103,6 +6103,9 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
+  // Cached public data; importing/reading this boundary never initializes Phoenix.
+  const { registerPhoenixReadRoutes } = await import('./protocol/phoenix/routes');
+  registerPhoenixReadRoutes(app);
   const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim();
   console.log(`[Admin] ADMIN_PASSWORD configured: ${ADMIN_PASSWORD ? 'yes' : 'no'}`);
 

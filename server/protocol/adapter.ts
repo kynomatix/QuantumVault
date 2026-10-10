@@ -619,6 +619,15 @@ export interface SubaccountCaps {
   accountModel: 'subaccount' | 'independent_trader';
 }
 
+/** Separate display contract: implementing public reads does not authorize execution. */
+export interface PublicReadAdapter<TMarkets, TCapabilities> {
+  readonly protocolName: string;
+  refresh(): Promise<void>;
+  getMarkets(): TMarkets;
+  getCapabilities(): TCapabilities;
+  shutdown(): void;
+}
+
 export interface ProtocolAdapter {
   readonly protocolName: string;
   readonly protocolVersion: string;

@@ -153,6 +153,13 @@ async function initializeProtocolAdapter(): Promise<void> {
   }
 
   // Flash is retired; manual wallet withdrawals do not register a runtime adapter.
+  // Read-only Phoenix startup is detached and independently contained. It cannot
+  // delay Pacifica/routes or enter the execution-adapter registry.
+  if (process.env.PHOENIX_READS_ENABLED === 'true') {
+    void import('./protocol/phoenix/runtime')
+      .then(({ startPhoenixPublicReads }) => startPhoenixPublicReads())
+      .catch(() => console.warn('[Phoenix] Public read startup unavailable'));
+  }
 }
 import { createLabSupervisor, getLabAuthSecret } from "./lab/supervisor";
 import { createProxyMiddleware } from "http-proxy-middleware";
