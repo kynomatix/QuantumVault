@@ -80,7 +80,7 @@ export function PhoenixWithdrawalDetail({ activeProtocol, visible, botId, wallet
   );
   return <div className="rounded-xl border p-3 text-sm space-y-2" data-testid="phoenix-withdrawals">
     <p className="font-medium">Withdrawals and recovery</p>
-    <p className="text-muted-foreground">Measured withdrawal delay: {measured ?? 'Not yet measured.'}</p>
+    {measured && <p className="text-muted-foreground">{measured}</p>}
     {history?.measured && measured && <p className="text-xs text-muted-foreground">Historical request-to-observed-release time; last completion {localTime(history.measured.lastCompletedAt)}. This is not a forecast.</p>}
     {!measured && <p className="text-xs text-muted-foreground">{phoenixWithdrawalDelayText(capabilities?.withdrawals)}</p>}
     {typeof history?.droppedSamples === 'number' && history.droppedSamples > 0 && <p className="text-xs">{history.droppedSamples} dropped requests, excluded from successful delays.</p>}
