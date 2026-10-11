@@ -1,8 +1,9 @@
 /**
  * Pacifica credit budget manager.
  *
- * Pacifica enforces a 300-credit / 60-second rolling-window quota per master
- * account, shared across the main account and ALL its subaccounts. Heavy GETs
+ * Legacy callers retain this 300-credit local planning budget. It is NOT an
+ * observed venue allowance, account-domain proof, or Grid live-entry authority.
+ * Grid uses pacifica-observed-quota.ts instead. Heavy GETs
  * cost more credits than light ones. Exceeding the budget returns HTTP 429.
  *
  * This module implements a sliding-window credit tracker that:

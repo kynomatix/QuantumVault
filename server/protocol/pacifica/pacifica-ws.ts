@@ -1,6 +1,8 @@
 import type { FillEvent, OrderUpdate, ProtocolPosition } from '../protocol-types.js';
 import { mapPacificaSide } from './pacifica-types.js';
 import type { SymbolRegistry } from '../symbol-registry.js';
+import { WebSocket as NodeWebSocket } from 'ws';
+import { PacificaTransportAuthority, pacificaTransportAuthority } from './pacifica-transport.js';
 
 const MAX_RECONNECT_DELAY_MS = 60_000;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
@@ -41,7 +43,7 @@ export class PacificaWsManager {
   private healthCallbacks: Set<HealthCallback> = new Set();
   private subscribedChannels: Set<string> = new Set();
 
-  constructor(config: PacificaWsConfig, registry: SymbolRegistry) {
+  constructor(config: PacificaWsConfig, registry: SymbolRegistry, private readonly transport: PacificaTransportAuthority = pacificaTransportAuthority()) {
     this.config = config;
     this.registry = registry;
   }
@@ -116,9 +118,12 @@ export class PacificaWsManager {
     this.state = 'connecting';
 
     try {
-      this.ws = new WebSocket(this.config.wsUrl);
+      const options = this.transport.websocketOptions(this.config.wsUrl);
+      this.ws = this.transport.keyStatus === 'present'
+        ? new NodeWebSocket(this.config.wsUrl, options) as unknown as WebSocket
+        : new WebSocket(this.config.wsUrl);
     } catch (err) {
-      console.error('PacificaWsManager: WebSocket constructor failed:', err);
+      console.error('PacificaWsManager: WebSocket constructor failed:', this.transport.safeError(err));
       this.scheduleReconnect();
       return;
     }
@@ -133,7 +138,9 @@ export class PacificaWsManager {
       this.notifyHealth(true);
     };
 
+    const connection = this.ws;
     this.ws.onmessage = (event) => {
+      if (this.ws !== connection) return;
       this.lastHeartbeat = Date.now();
 
       if (this.messageCount >= MAX_QUEUED_MESSAGES) {
@@ -142,7 +149,8 @@ export class PacificaWsManager {
       this.messageCount++;
 
       try {
-        const data = JSON.parse(String(event.data));
+        const data = JSON.parse(this.transport.redact(String(event.data)));
+        this.transport.observeWsAction(data, this.ws === connection);
         this.handleMessage(data);
       } catch {
         // ignore unparseable

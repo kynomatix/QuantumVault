@@ -50,6 +50,11 @@ import type {
 } from '../protocol-types.js';
 import { liveBreakevenFingerprint } from '../protocol-types.js';
 import { SymbolRegistry, buildPacificaMappings } from '../symbol-registry.js';
+import { randomUUID } from 'node:crypto';
+import { PacificaTransportAuthority, pacificaTransportAuthority } from './pacifica-transport.js';
+import { createGridFeeQuote, type GridFeeIdentity, type GridFeeResult } from '../../grid-bot/fee-authority.js';
+import { parseGridVenueOrders, resolveGridOrder, isGridClientOrderId, type GridVenueOrder, type GridOrderLookup } from '../../grid-bot/order-identity.js';
+import { gridCapacitySnapshot, type CapacityInput, type RestingUse } from '../../grid-bot/capacity.js';
 import { PacificaSigner, OPERATION_TYPES, buildSigningMessage } from './pacifica-signer.js';
 import { PACIFICA_USDC_MINT, PACIFICA_MIN_TRANSFER_USDC, PACIFICA_RECYCLE_EMPTY_USDC } from './pacifica-constants.js';
 
@@ -455,8 +460,89 @@ export class PacificaAdapter implements ProtocolAdapter {
   // starting a replacement. Cleared in .finally() when the sweep settles.
   private _sweepOwner: Promise<Record<string, number>> | null = null;
 
-  constructor(config?: Partial<PacificaAdapterConfig>) {
+  constructor(config?: Partial<PacificaAdapterConfig>, private readonly transport: PacificaTransportAuthority = pacificaTransportAuthority()) {
     this.config = { ...DEFAULT_CONFIG, ...config };
+  }
+
+  /** Grid-only authority. Generic quotes/orders retain their existing commercial policy. */
+  getGridVenueAuthority() { return this.transport.status(); }
+
+  async getGridFeeQuote(input: GridFeeIdentity): Promise<GridFeeResult> {
+    if (this.transport.keyStatus !== 'present') return { availability: 'unavailable', reason: 'config_key_unavailable' };
+    const observedAt = Date.now();
+    try {
+      const params: Record<string, string> = { account: input.account };
+      if (input.subaccountId !== null) params.subaccount_id = input.subaccountId;
+      const account = (await this.readGridEnvelope('/account', params)).data;
+      let overview: unknown = null, approvals: unknown = null;
+      if (input.builderCode !== null) {
+        if (!this.config.referralAddress) return { availability: 'unavailable', reason: 'builder_owner_unconfigured' };
+        overview = (await this.readGridEnvelope('/builder/overview', { account: this.config.referralAddress })).data;
+        approvals = (await this.readGridEnvelope('/account/builder_codes/approvals', { account: input.account })).data;
+      }
+      if (!this.transport.status().liveEntryAllowed) return { availability: 'unavailable', reason: 'quota_authority_unavailable' };
+      return createGridFeeQuote(input, account, overview, approvals, observedAt);
+    } catch { return { availability: 'unavailable', reason: 'fee_read_unavailable' }; }
+  }
+
+  private async readGridEnvelope(path: string, params: Record<string, string>): Promise<Record<string, unknown>> {
+    let sent = false;
+    try {
+      const url = `${this.config.baseUrl}${path}?${new URLSearchParams(params)}`;
+      // Check target before charging a sent request. No secret is part of the durable identity.
+      this.transport.restInit(url, {});
+      sent = true;
+      const response = await this.fetchBounded(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } }, 15_000, 20_000, `Grid GET ${path}`);
+      if (!response.ok) throw new Error('Grid venue read failed');
+      const raw = await this.readBodyBounded(response.json(), 15_000, `Grid GET ${path}`);
+      if (!raw || typeof raw !== 'object' || raw.success !== true || !('data' in raw)) throw new Error('Grid venue read malformed');
+      return raw;
+    } finally {
+      if (sent) pacificaQuota.record(path);
+    }
+  }
+
+  async getGridOpenOrders(account: string, subaccountId: string | null = null): Promise<GridVenueOrder[]> {
+    if (!account || (subaccountId !== null && !subaccountId)) throw new Error('Invalid Grid account identity');
+    const params: Record<string, string> = { account };
+    if (subaccountId !== null) params.subaccount_id = subaccountId;
+    return parseGridVenueOrders((await this.readGridEnvelope('/orders', params)).data);
+  }
+
+  /** Ambiguous create/cancel resolution is read-only. Absence never authorizes a replay. */
+  async lookupGridOrder(input: { account: string; subaccountId: string | null; clientOrderId: string; protocolSymbol: string }): Promise<GridOrderLookup> {
+    const unknown = (reason: string): GridOrderLookup => ({ state: 'unknown', orderId: null, reason });
+    if (!input.account || !input.protocolSymbol || !isGridClientOrderId(input.clientOrderId)) return unknown('invalid_identity');
+    try {
+      const open = await this.getGridOpenOrders(input.account, input.subaccountId);
+      if (open.some(o => o.clientOrderId === input.clientOrderId)) return resolveGridOrder(input.clientOrderId, input.protocolSymbol, open, null);
+      const history: GridVenueOrder[] = [], cursors = new Set<string>();
+      let cursor: string | null = null;
+      for (let page = 0; page < 20; page++) {
+        const params: Record<string, string> = { account: input.account, limit: '100' };
+        if (input.subaccountId !== null) params.subaccount_id = input.subaccountId;
+        if (cursor) params.cursor = cursor;
+        const raw = await this.readGridEnvelope('/orders/history', params);
+        history.push(...parseGridVenueOrders(raw.data, true));
+        if (raw.has_more === false && (raw.next_cursor === null || raw.next_cursor === undefined)) return resolveGridOrder(input.clientOrderId, input.protocolSymbol, open, history);
+        if (raw.has_more !== true || typeof raw.next_cursor !== 'string' || !raw.next_cursor || cursors.has(raw.next_cursor)) return unknown('history_unavailable_or_incomplete');
+        cursor = raw.next_cursor; cursors.add(cursor);
+      }
+      return unknown('history_page_bound');
+    } catch { return unknown('venue_lookup_unavailable'); }
+  }
+
+  async getGridCapacitySnapshot(input: Omit<CapacityInput, 'orders' | 'observedAt' | 'expiresAt' | 'complete' | 'now'> & { ownership?: Record<string, RestingUse['category']> }) {
+    const observedAt = Date.now();
+    const compose = (snapshot: ReturnType<typeof gridCapacitySnapshot>) => ({ ...snapshot, venueAuthority: this.transport.status(),
+      liveEntryAllowed: this.transport.status().liveEntryAllowed && snapshot.policyWindow.admittedOrdinaryLimit > 0 });
+    try {
+      const orders = await this.getGridOpenOrders(input.account, input.subaccountId);
+      return compose(gridCapacitySnapshot({ ...input, orders: orders.map(o => ({ orderId: o.orderId, category: input.ownership?.[o.orderId] ?? 'unclassified' })),
+        observedAt, expiresAt: observedAt + 15_000, complete: true, now: Date.now() }));
+    } catch {
+      return compose(gridCapacitySnapshot({ ...input, orders: [], observedAt, expiresAt: observedAt, complete: false, now: Date.now() }));
+    }
   }
 
   async initialize(): Promise<void> {
@@ -4162,7 +4248,22 @@ export class PacificaAdapter implements ProtocolAdapter {
     // state because it runs entirely in the JS event loop.
     const controller = new AbortController();
     const softTimer = setTimeout(() => controller.abort(), softMs);
-    const fetchPromise = fetch(url, { ...init, signal: controller.signal });
+    let request: RequestInit;
+    try { request = this.transport.restInit(url, { ...init, signal: controller.signal }); }
+    catch (error) { clearTimeout(softTimer); throw this.transport.safeError(error); }
+    const reservationId = `transport:${randomUUID()}`;
+    const path = new URL(url).pathname;
+    const cost = /cancel/.test(path) ? 5 : /\/(account|orders|positions|trades)(\/|$)/.test(path) && (!init.method || init.method === 'GET') ? 120 : 10;
+    // Legacy and emergency traffic keeps its behavior; its in-flight spend is visible to Grid admission.
+    this.transport.quota.reserve(reservationId, cost, 'risk-reduction');
+    let disposition: 'sent' | 'uncertain' = 'uncertain';
+    let acceptingResponse = true;
+    const fetchPromise = Promise.resolve().then(() => fetch(url, request)).then(response => {
+      if (!acceptingResponse) return response;
+      disposition = 'sent';
+      return this.transport.response(response);
+    })
+      .catch(error => { throw this.transport.safeError(error); });
     // Suppress: once the hard cap has moved on, we do not want an unhandled
     // rejection if the late fetch eventually settles.
     fetchPromise.catch(() => {});
@@ -4173,6 +4274,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         fetchPromise,
         new Promise<never>((_, reject) => {
           hardTimer = setTimeout(() => {
+            acceptingResponse = false;
             // Belt-and-suspenders: the soft timer should already have called
             // abort(). If the socket is wedged and the soft abort did not
             // propagate, re-request abort here before rejecting.
@@ -4188,6 +4290,8 @@ export class PacificaAdapter implements ProtocolAdapter {
         }),
       ]);
     } finally {
+      acceptingResponse = false;
+      this.transport.quota.settle(reservationId, disposition);
       // Cancel both timers. Do NOT call controller.abort() here on the normal
       // success path — the caller still needs to read the response body;
       // aborting after headers arrive would corrupt the body stream.

@@ -1,3 +1,6 @@
+import type { GridFeeIdentity, GridFeeResult } from '../grid-bot/fee-authority.js';
+import type { GridVenueOrder, GridOrderLookup } from '../grid-bot/order-identity.js';
+import type { PacificaTransportAuthority } from './pacifica/pacifica-transport.js';
 import type {
   ProtocolMarket,
   ProtocolPosition,
@@ -694,6 +697,11 @@ export interface ProtocolAdapter {
    * configured fee constants through this capability.
    */
   getFeeRateQuote?(input: FeeRateQuoteRequest): Promise<FeeRateQuoteResult>;
+  /** Pacifica Grid authority is additive; generic callers keep their existing semantics. */
+  getGridFeeQuote?(input: GridFeeIdentity): Promise<GridFeeResult>;
+  getGridVenueAuthority?(): ReturnType<PacificaTransportAuthority['status']>;
+  getGridOpenOrders?(account: string, subaccountId?: string | null): Promise<GridVenueOrder[]>;
+  lookupGridOrder?(input: { account: string; subaccountId: string | null; clientOrderId: string; protocolSymbol: string }): Promise<GridOrderLookup>;
   /** Fresh, exact quote for adapters whose fee is a function of order inputs. */
   getOrderFeeRateQuote?(input: OrderFeeRateQuoteRequest): Promise<OrderFeeRateQuoteResult>;
   getPositions(agentPublicKey: string, subaccountId?: string): Promise<ProtocolPosition[]>;
