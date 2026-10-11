@@ -1,5 +1,6 @@
 import { planProtection, type ProtectionProgress } from '../../server/protocol/phoenix/protection-contract';
 import { signProtectionTransaction } from '../../server/protocol/phoenix/protection-builder';
+import { PhoenixProtectionService, type ProtectionIO } from '../../server/protocol/phoenix/protection-service';
 import { request, snapshot, leg } from '../helpers/phoenix-protection';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
@@ -118,10 +119,92 @@ describe('U06 durable protection and independent safety admission', () => {
     expect(await new PhoenixOperationStore(pool).protectionInFlight(first.bot_id, first.intent.ownerWallet, cancel.id)).toBe(true);
     expect((await funding.read(first.bot_id, first.intent.ownerWallet, first.id)).attempt!.signature).toBe(signed.signature);
   });
+  it.each([
+    ['pause', 'replace'], ['cancel', 'replace'], ['pause', 'breakeven'], ['cancel', 'breakeven'],
+  ] as const)('blocks %s timeout then %s slot reuse until the old cancel is reconciled', async (action, replacement) => {
+    const s = snapshot(); s.legs = [leg({ index: 1 })];
+    let sends = 0, cancelLanded = false;
+    const pending = new Map<string, { op: Awaited<ReturnType<PhoenixOperationStore['read']>>['operation']; signature: string }>();
+    const io: ProtectionIO = {
+      snapshot: async () => structuredClone(s), lifetime: async () => lifetime, blockHeight: async () => 100,
+      withSigner: async (_r, sign) => sign(key.secretKey),
+      submit: async () => {
+        sends++;
+        const { rows: [attempt] } = await pool.query("SELECT operation_id,signature FROM phoenix_operation_attempts WHERE state='submission_pending'");
+        const op = (await funding.read(intent().botId, intent().ownerWallet, attempt.operation_id)).operation;
+        pending.set(op.id, { op, signature: attempt.signature });
+        const p = op.observation!.protection as ProtectionProgress;
+        const command = op.intent.protection!.commands[p.step];
+        if (command.kind === 'place') {
+          s.legs.push(leg({ index: command.role === 'sl' ? 1 : 2, sequence: String(sends), direction: command.direction,
+            side: command.side, triggerTicks: command.triggerTicks, executionTicks: command.executionTicks, remainingLots: command.baseLots }));
+          s.slot = String(Number(s.slot) + 1);
+        }
+        return attempt.signature; // Cancel is submitted but deliberately has not landed.
+      },
+      receipt: async (op, attempt) => op.intent.protection!.request.action === action && !cancelLanded ? null : {
+        venue: 'phoenix', trader: s.trader, operationId: op.id, intentHash: op.intent_hash,
+        signature: attempt.signature, finalized: true, slot: s.slot, outcome: 'confirmed', source: 'EXAMPLE-chain', reference: 'EXAMPLE-receipt',
+      },
+    };
+    const service = () => new PhoenixProtectionService(new PhoenixOperationStore(pool), io, pin, () => now);
+    const cancelRequest = request({ action, requestKey: 'EXAMPLE-old-cancel' });
+    const cancel = await service().execute(cancelRequest);
+    expect(cancel.state).toBe('submission_pending'); expect(sends).toBe(1);
+    // The old order disappears independently; slot 1 is now reusable while the
+    // delayed cancellation transaction remains valid and its receipt unknown.
+    s.legs = []; s.slot = '101';
+    const replaceRequest = request({ action: replacement, requestKey: 'EXAMPLE-later-replace' });
+    const replace = await service().execute(replaceRequest);
+    expect(replace.state).toBe('prepared'); expect(sends).toBe(1); expect(s.legs).toEqual([]);
+    expect(await funding.protectionInFlight(cancel.bot_id, cancel.intent.ownerWallet, replace.id)).toBe(true);
+    expect((await funding.read(replace.bot_id, replace.intent.ownerWallet, replace.id)).attempt).toBeUndefined();
+    await service().execute(replaceRequest); expect(sends).toBe(1); // Restart cannot bypass the database guard.
+    expect((await funding.prepare(operation('EXAMPLE-withdraw', 'withdraw'))).created).toBe(true);
+    // Land the exact delayed index-only cancel; no replacement was allowed into its slot.
+    const old = pending.get(cancel.id)!.op;
+    const command = old.intent.protection!.commands[(old.observation!.protection as ProtectionProgress).step];
+    expect(command.kind).toBe('cancel-conditional');
+    if (command.kind === 'cancel-conditional') s.legs = s.legs.filter(l => l.index !== command.index);
+    s.slot = '102'; cancelLanded = true;
+    expect((await service().execute(cancelRequest)).state).toBe('prepared');
+    expect(await funding.protectionInFlight(cancel.bot_id, cancel.intent.ownerWallet, replace.id)).toBe(false);
+    const done = await service().execute(replaceRequest);
+    expect(done.id).toBe(replace.id); expect(done.state).toBe('completed'); expect(sends).toBe(3);
+    expect(s.legs.find(l => l.index === 1)).toMatchObject({ direction: 'less', triggerTicks: '14000' });
+    expect((done.observation!.protection as ProtectionProgress).protected).toBe(true);
+  });
   it('does not accept tampered commands or mismatched bot identity in protection terms', async () => {
     const i = protective(); i.protection!.commands = [];
     await expect(funding.prepare(i)).rejects.toThrow('terms');
     const j = protective(); j.protection!.request.botId = 'EXAMPLE-other';
     await expect(funding.prepare(j)).rejects.toThrow('terms');
+  });
+  it('keeps cancellations available and waits for every pending cancel, including unknown outcomes', async () => {
+    const cancellations = [];
+    for (const index of [1, 2]) {
+      const r = request({ action: 'cancel', requestKey: `EXAMPLE-cancel-${index}` });
+      const s = snapshot(); s.legs = [leg({ index })];
+      const i = protective(r); i.protection = planProtection(r, s, now);
+      const op = (await funding.prepare(i)).operation;
+      const signed = signProtectionTransaction(r, pin, i.protection.commands[0], lifetime, key.secretKey);
+      expect((await funding.recordAttempt(op.bot_id, op.intent.ownerWallet, op.id, op.revision, signed)).created).toBe(true);
+      const pending = (await funding.read(op.bot_id, op.intent.ownerWallet, op.id)).operation;
+      cancellations.push(await funding.observe(op.bot_id, op.intent.ownerWallet, op.id, pending.revision, 'unknown', {
+        source: 'EXAMPLE-chain', reference: 'EXAMPLE-timeout', protection: pending.observation!.protection as ProtectionProgress,
+      }));
+    }
+    const replacement = (await funding.prepare(protective())).operation;
+    const signed = signProtectionTransaction(request(), pin, replacement.intent.protection!.commands[0], lifetime, key.secretKey);
+    const claim = () => funding.recordAttempt(replacement.bot_id, replacement.intent.ownerWallet, replacement.id, replacement.revision, signed);
+    await expect(claim()).rejects.toThrow('unresolved');
+    for (const [index, op] of cancellations.entries()) {
+      await funding.observe(op.bot_id, op.intent.ownerWallet, op.id, op.revision, 'failed', {
+        source: 'EXAMPLE-chain', reference: 'EXAMPLE-authoritative-resolution', attemptOutcome: index === 0 ? 'expired' : 'failed',
+        protection: op.observation!.protection as ProtectionProgress,
+      });
+      if (index === 0) await expect(claim()).rejects.toThrow('unresolved');
+    }
+    expect((await claim()).created).toBe(true);
   });
 });

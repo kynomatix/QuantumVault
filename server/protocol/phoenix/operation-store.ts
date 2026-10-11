@@ -34,6 +34,10 @@ export interface PhoenixAttemptInput {
   signature: string; blockhash: string; lastValidBlockHeight: string; transactionHash: string;
 }
 
+export class PhoenixProtectionPendingError extends Error {
+  constructor() { super('Earlier protection attempt unresolved'); }
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
@@ -73,12 +77,15 @@ export class PhoenixOperationStore {
   async protectionInFlight(botId: string, ownerWallet: string, operationId: string): Promise<boolean> {
     return this.transaction(async client => {
       await this.lockBot(client, botId, ownerWallet);
-      const protection = await client.query(`SELECT 1 FROM phoenix_operations o JOIN phoenix_operation_attempts a ON a.operation_id=o.id
-        WHERE o.bot_id=$1 AND o.id<>$2 AND o.kind='protection' AND a.state='submission_pending'
-        AND o.intent->'protection'->'request'->>'action' IN ('replace','breakeven')`, [botId, operationId]);
+      const protection = await this.pendingProtection(client, botId, operationId);
       const orders = await client.query(`SELECT 1 FROM phoenix_order_intents WHERE bot_id=$1 AND state NOT IN ('settled','rejected')`, [botId]);
       return !!(protection.rows.length || orders.rows.length);
     });
+  }
+
+  private pendingProtection(client: PoolClient, botId: string, operationId: string) {
+    return client.query(`SELECT 1 FROM phoenix_operations o JOIN phoenix_operation_attempts a ON a.operation_id=o.id
+      WHERE o.bot_id=$1 AND o.id<>$2 AND o.kind='protection' AND a.state='submission_pending'`, [botId, operationId]);
   }
 
   async read(botId: string, ownerWallet: string, operationId: string) {
@@ -245,6 +252,10 @@ export class PhoenixOperationStore {
           AND intent->'protection'->'request'->>'action' IN ('pause','cancel') AND created_at >= $2 AND id <> $3`,
           [botId, operation.created_at, operation.id]);
         if (revoke.rows.length) throw new Error('Replacement revoked by safety action');
+        // Under the same bot lock as the write-ahead claim: a prior cancel can
+        // still hit a reused slot even when a fresh snapshot says it is empty.
+        // All protection actions count, regardless of asset or operation state.
+        if ((await this.pendingProtection(client, botId, operationId)).rows.length) throw new PhoenixProtectionPendingError();
       }
       const inserted = await client.query(`INSERT INTO phoenix_operation_attempts
         (operation_id, attempt_number, signature, blockhash, last_valid_block_height, transaction_hash)

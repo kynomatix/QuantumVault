@@ -61,6 +61,13 @@ Each transaction has a durable U02 write-ahead attempt and a bound finalized
 receipt. Progress, before/after snapshots and surviving legs persist in the
 operation record; a failed TP replacement explicitly retains the surviving SL.
 Unknown submission outcomes remain pending across restart, without blind resend.
+Every replacement/breakeven send claim also checks for pending protection attempts
+under the bot database lock, including earlier pause/cancel attempts on any asset.
+A snapshot showing an empty slot does not release this guard: only authoritative
+attempt reconciliation does. This prevents a delayed local cancel from hitting a
+replacement in a reused slot. Cancel, close and withdrawal admission stay available.
+RPC read failures before the durable claim leave the same request key retryable;
+errors after that claim retain the existing unknown-outcome recovery requirement.
 
 Pause cancels the book first and re-reads accounts before every subsequent step.
 A parent cancellation may remove its children; already absent legs are skipped

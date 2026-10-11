@@ -1,7 +1,7 @@
 import { PHOENIX_PUBLIC_ADDRESSES } from './sdk-boundary';
 import { units } from './funding-contract';
 import type { PhoenixOperationStore, StoredPhoenixOperation, PhoenixAttemptInput, PhoenixIntent } from './operation-store';
-import { phoenixIntentHash } from './operation-store';
+import { phoenixIntentHash, PhoenixProtectionPendingError } from './operation-store';
 import type { PhoenixOrderPin } from './order-builder';
 import { signProtectionTransaction } from './protection-builder';
 import { assertProtectionSnapshot, desiredProtection, matchingLeg, planProtection, protectionStatus,
@@ -59,8 +59,11 @@ export class PhoenixProtectionService {
             { protection: this.progress(op, before, progress.step + 1) });
           continue;
         }
-        const lifetime = await this.io.lifetime();
-        const latest = await this.io.snapshot(request, before.slot);
+        let lifetime: Awaited<ReturnType<ProtectionIO['lifetime']>>, latest: ProtectionSnapshot;
+        try {
+          lifetime = await this.io.lifetime();
+          latest = await this.io.snapshot(request, before.slot);
+        } catch { return op; } // No attempt claimed: retry these reads with the same requestKey.
         assertProtectionSnapshot(latest, request, this.now(), before.slot);
         before = latest;
         if (command.kind === 'place') this.assertPlacement(op, latest);
@@ -82,9 +85,10 @@ export class PhoenixProtectionService {
         const next = await this.reconcile(op);
         if (next.state !== 'prepared') return next;
         op = next;
-      } catch {
+      } catch (error) {
         const current = (await this.store.read(request.botId, request.ownerWallet, op.id)).operation;
         if (current.state !== 'prepared') return this.reconcile(current);
+        if (error instanceof PhoenixProtectionPendingError) return current;
         // Record exact surviving legs on replacement failure. Never clear them optimistically.
         return this.store.observe(request.botId, request.ownerWallet, op.id, current.revision, 'failed', {
           source: before.source, reference: before.reference,

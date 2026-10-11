@@ -106,6 +106,36 @@ describe('U06 durable replacement, cancellation and safety recovery', () => {
     expect((await f.service().execute(request())).state).toBe('submission_pending');
     expect(f.sends()).toBe(0); await f.service().execute(request()); expect(f.sends()).toBe(0);
   });
+  it.each(['lifetime', 'snapshot'] as const)('retries a transient pre-claim %s failure with the same requestKey', async source => {
+    const f = fixture();
+    const original = f.io[source]; let calls = 0;
+    if (source === 'lifetime') f.io.lifetime = async () => {
+      if (++calls === 1) throw new Error('EXAMPLE-RPC-unavailable');
+      return lifetime;
+    };
+    else f.io.snapshot = async (...args) => {
+      if (++calls === 3) throw new Error('EXAMPLE-RPC-unavailable');
+      return (original as ProtectionIO['snapshot'])(...args);
+    };
+    const first = await f.service().execute(request());
+    expect(first.state).toBe('prepared'); expect(f.store.attempt).toBeUndefined();
+    expect(f.signs()).toBe(0); expect(f.sends()).toBe(0);
+    const retried = await f.service().execute(request());
+    expect(retried.id).toBe(first.id); expect(retried.request_key).toBe(first.request_key);
+    expect(retried.state).toBe('completed'); expect(f.sends()).toBe(2);
+  });
+  it.each(['blockHeight', 'submit'] as const)('does not retry a transient %s failure after the durable claim', async source => {
+    const f = fixture(); f.timeout();
+    if (source === 'blockHeight') f.io.blockHeight = async () => { throw new Error('EXAMPLE-RPC-unavailable'); };
+    else {
+      const submit = f.io.submit;
+      f.io.submit = async transaction => { await submit(transaction); throw new Error('EXAMPLE-send-timeout'); };
+    }
+    const first = await f.service().execute(request());
+    expect(first.state).toBe('submission_pending'); expect(f.store.attempt).toBeDefined();
+    await f.service().execute(request());
+    expect(f.signs()).toBe(1); expect(f.sends()).toBe(source === 'submit' ? 1 : 0);
+  });
   it('requires post-transaction state at or beyond the finalized receipt slot', async () => {
     const f = fixture(); f.staleAfter();
     const op = await f.service().execute(request());
