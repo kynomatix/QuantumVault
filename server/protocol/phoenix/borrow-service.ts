@@ -75,7 +75,7 @@ export class PhoenixBorrowService {
         // U04's child journal owns submission/queue replay. Calling it again is
         // safe even when our process died after its durable create.
         const old = record.metadata.legs.deposit;
-        if (!old) {
+        if (!old || old.state === 'absent') {
           const s = await this.fresh(i); authorizeDebtDeployment(i,s,this.policy,this.now());
           await this.store.claim(i,'deposit',child);
         }
@@ -171,6 +171,12 @@ export class PhoenixBorrowService {
         await this.fresh(i);
         const claim = await this.store.claim(i,key,terms);
         if (!claim.execute) return restoreResult(claim.leg.result);
+        if (kind === 'executeBorrowClose' && p.recoverClosing) {
+          // Own the durable claim BEFORE releasing the stale closing CAS. A
+          // competing resume must never reopen this attempt's new closing CAS.
+          const absent = claim.previous?.state === 'absent' && claim.previous.proofReference ? claim.previous : null;
+          await p.recoverClosing(absent);
+        }
         const before = p.onBeforeBroadcast;
         p.onBeforeBroadcast = async (info: {signature:string;lastValidBlockHeight:number}) => {
           if (i.automation) await this.fresh(i);
