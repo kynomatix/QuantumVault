@@ -2135,7 +2135,7 @@ describe("post-close circuit breakers", () => {
 // --- Graduation ----------------------------------------------------------------------
 
 describe("graduation", () => {
-  it("graduates a paper bot after a close completes the §2e record and notifies", async () => {
+  it("graduates a paper bot after a close completes the Â§2e record and notifies", async () => {
     const { monitorBotOnce } = await importMonitor();
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     fetchOHLCVMock.mockResolvedValue([
@@ -5847,4 +5847,20 @@ describe("breakeven protect", () => {
       classifyLiveExit({ side: "long", avgExitPrice: 150.2, stopLossPrice: LIVE_FIXED_SL, takeProfitPrice: 160, originalStopLossPrice: 145 })
     ).toBe("sl");
   });
+});
+
+describe('U14 Phoenix monitor shared recovery', () => {
+ it('recovers and closes with AI live entry disabled, before any Pacifica wallet signing path', async () => {
+  const { installPhoenixAiTrader }=await import('../../server/ai-trader/phoenix-runtime');
+  const { aiBot }=await import('../helpers/phoenix-ai');
+  const { monitorBotOnce,userInitiatedClose }=await importMonitor();
+  delete process.env.PHOENIX_AI_LIVE_ENABLED;
+  const reconcile=vi.fn(async()=>true),close=vi.fn(async()=>({ok:true,closed:true}));
+  installPhoenixAiTrader({reconcile,close} as any);
+  try {
+   const b=aiBot({status:'open'});await monitorBotOnce(b);expect(reconcile).toHaveBeenCalledWith(b);
+   expect(await userInitiatedClose(b)).toMatchObject({ok:true,closed:true,exitPrice:null,realizedPnl:null});
+   expect(close).toHaveBeenCalledWith(b);
+  }finally{installPhoenixAiTrader(null);}
+ });
 });

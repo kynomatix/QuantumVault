@@ -2129,6 +2129,37 @@ const schemaMigrationSql = [
              WHERE intent->>'borrowAuthorizationId' IS NOT NULL;
          END IF;
        END $phoenix_parking$; `,
+      `DO $phoenix_ai$ BEGIN
+         IF (SELECT count(*) FROM pg_attribute WHERE attrelid='ai_trader_bots'::regclass
+             AND attname IN ('phoenix_execution_bot_id','phoenix_binding') AND NOT attisdropped) <> 2 THEN
+           ALTER TABLE ai_trader_bots
+             ADD COLUMN IF NOT EXISTS phoenix_execution_bot_id varchar REFERENCES trading_bots(id),
+             ADD COLUMN IF NOT EXISTS phoenix_binding jsonb;
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='ai_trader_bots'::regclass AND conname='ai_trader_phoenix_binding_check') THEN
+           ALTER TABLE ai_trader_bots ADD CONSTRAINT ai_trader_phoenix_binding_check CHECK ((
+             (phoenix_execution_bot_id IS NULL AND phoenix_binding IS NULL AND (protocol <> 'phoenix' OR paper_mode)) OR
+             (protocol='phoenix' AND phoenix_execution_bot_id IS NOT NULL AND phoenix_binding IS NOT NULL
+               AND jsonb_typeof(phoenix_binding)='object' AND phoenix_binding->>'version'='1'
+               AND phoenix_binding->>'aiBotId'=id AND phoenix_binding->>'executionBotId'=phoenix_execution_bot_id
+               AND phoenix_binding->'identity'->>'traderAccountAddress'=protocol_subaccount_id)) IS TRUE);
+         END IF;
+         IF to_regclass('ai_trader_phoenix_custody_unique') IS NULL THEN
+           CREATE UNIQUE INDEX ai_trader_phoenix_custody_unique ON ai_trader_bots(phoenix_execution_bot_id)
+             WHERE phoenix_execution_bot_id IS NOT NULL;
+         END IF;
+         IF to_regclass('phoenix_ai_executions') IS NULL THEN
+           CREATE TABLE phoenix_ai_executions (
+             bot_id varchar NOT NULL REFERENCES ai_trader_bots(id), decision_id varchar NOT NULL REFERENCES ai_trader_decisions(id),
+             execution_bot_id varchar NOT NULL REFERENCES trading_bots(id), intent jsonb NOT NULL, authority jsonb NOT NULL, policy_hash text NOT NULL,
+             state text NOT NULL DEFAULT 'prepared' CHECK(state IN ('prepared','open','closed','no_land','attention')),
+             PRIMARY KEY(bot_id,decision_id), CHECK(length(policy_hash)=64 AND policy_hash ~ '^[0-9a-f]{64}$'));
+         END IF;
+         IF to_regclass('phoenix_ai_execution_active_unique') IS NULL THEN
+           CREATE UNIQUE INDEX phoenix_ai_execution_active_unique ON phoenix_ai_executions(bot_id)
+             WHERE state IN ('prepared','open','attention');
+         END IF;
+       END $phoenix_ai$; `,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5836,6 +5867,22 @@ const schemaMigrationMetadata = [
       "predicateIncludes": ["state = ANY (ARRAY['active', 'attention'])"] },
     { "kind": "index", "table": "phoenix_parking_intents", "index": "phoenix_parking_borrow_unique", "columns": ["bot_id", "(intent ->> 'borrowAuthorizationId')"], "unique": true,
       "predicateIncludes": ["(intent ->> 'borrowAuthorizationId') IS NOT NULL"] }
+  ]
+}
+,
+{
+  "id": "191-phoenix-ai-trader",
+  "capabilities": ["phoenix"],
+  "operation": "ddl",
+  "requirements": [
+    { "kind": "table", "table": "ai_trader_bots", "columns": ["phoenix_execution_bot_id", "phoenix_binding"],
+      "constraintDefinitions": ["phoenix_execution_bot_id IS NULL", "phoenix_binding IS NULL"] },
+    { "kind": "table", "table": "phoenix_ai_executions", "columns": ["bot_id", "decision_id", "execution_bot_id", "intent", "authority", "policy_hash", "state"],
+      "constraintDefinitions": ["PRIMARY KEY (bot_id,decision_id)", "state = ANY", "'attention'"] },
+    { "kind": "index", "table": "ai_trader_bots", "index": "ai_trader_phoenix_custody_unique", "columns": ["phoenix_execution_bot_id"], "unique": true,
+      "predicateIncludes": ["phoenix_execution_bot_id IS NOT NULL"] },
+    { "kind": "index", "table": "phoenix_ai_executions", "index": "phoenix_ai_execution_active_unique", "columns": ["bot_id"], "unique": true,
+      "predicateIncludes": ["state = ANY (ARRAY['prepared', 'open', 'attention'])"] }
   ]
 }
 ] as const;

@@ -2159,6 +2159,8 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   walletAddress: text("wallet_address").notNull(),
   protocol: text("protocol").notNull(),
+  phoenixExecutionBotId: varchar("phoenix_execution_bot_id").references(() => tradingBots.id),
+  phoenixBinding: jsonb("phoenix_binding").$type<import('./phoenix-ai-contract').PhoenixAiBinding>(),
   protocolSubaccountId: text("protocol_subaccount_id"),
   // WO-7.1 go-live: the bot's OWN venue subaccount key (V3 ciphertext, AAD-bound
   // to walletAddress + this row's id — same encryptBotSubaccountKeyV3 envelope as
@@ -2393,6 +2395,8 @@ export const aiTraderExecutionEvents = pgTable("ai_trader_execution_events", {
 
 export const insertAiTraderBotSchema = createInsertSchema(aiTraderBots).omit({
   id: true,
+  phoenixExecutionBotId: true,
+  phoenixBinding: true,
   createdAt: true,
   updatedAt: true,
   trialStartedAt: true, // server-set at creation (§2e trial start)

@@ -65,6 +65,8 @@ vi.mock("../../server/ai-trader/context-builder", () => ({
   marketToDatafeedTicker: (market: string) => market.replace("-PERP", "/USDT"),
 }));
 
+const phoenixReaderMock = vi.hoisted(() => ({ getMarkets: vi.fn(), getCapabilities: vi.fn() }));
+vi.mock('../../server/protocol/phoenix/runtime', () => ({ getPhoenixReader: () => phoenixReaderMock }));
 function setLiveMarkets(markets: {internalSymbol:string}[]) { getAdapterMock.mockReturnValue({getMarkets:vi.fn(async()=>markets.map(m=>({...m,isActive:true}))) }); }
 const getFlashMarketSpecsMock = vi.fn<[], { internalSymbol: string }[]>();
 vi.mock("../../server/protocol/flash/flash-markets", () => ({
@@ -2595,13 +2597,14 @@ async function scannerWithSecondLiveProtocol(): Promise<typeof import("../../ser
   const { readFileSync } = await import("node:fs");
   const { transpileModule, ModuleKind, ScriptTarget } = await import("typescript");
   const source = readFileSync(new URL("../../server/ai-trader/scanner.ts", import.meta.url), "utf8");
-  const allowlist = 'const PROTOCOLS: readonly string[] = ["pacifica"];';
+  const allowlist = 'const PROTOCOLS: readonly string[] = ["pacifica", ...(phoenixAiFlags().scan ? ["phoenix"] : [])];';
   expect(source.split(allowlist)).toHaveLength(2);
   const code = transpileModule(source.replace(allowlist,
     'const PROTOCOLS: readonly string[] = ["test-only-live", "pacifica"];'), {
     compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 },
   }).outputText;
   const dependencies: Record<string, unknown> = {
+    "./phoenix-capabilities": await import("../../server/ai-trader/phoenix-capabilities"),
     "../lab/datafeed": await import("../../server/lab/datafeed"),
     "../error-log": await import("../../server/error-log"),
     "./context-builder": await import("../../server/ai-trader/context-builder"),
@@ -2631,3 +2634,17 @@ function setTwoLiveProtocols(testMarkets: string[], pacificaMarkets: string[]): 
     return { getMarkets: vi.fn(async () => markets.map((internalSymbol) => ({ internalSymbol, isActive: true }))) };
   });
 }
+
+describe('U14 scanner venue admission', () => {
+ it('has a separately gated Phoenix paper universe with exact venue labels', async () => {
+  process.env.PHOENIX_AI_SCANNER_ENABLED = 'true';
+  phoenixReaderMock.getCapabilities.mockReturnValue({ publicReads: 'ready' });
+  const market = (symbol: string) => ({ internalSymbol: symbol, isActive: true, marketStatus: 'active', isolatedOnly: false, tickSizeRaw: '100', baseLotsDecimals: 2 });
+  phoenixReaderMock.getMarkets.mockReturnValue({ state: 'fresh', value: [market('SOL-PERP'), market('BTC-PERP'), market('SOL'), market('EXAMPLE-PERP')] });
+  expect(await buildScannerUniverse('phoenix')).toEqual(['SOL-PERP', 'BTC-PERP']);
+  phoenixReaderMock.getMarkets.mockReturnValue({ state: 'stale', value: [market('SOL-PERP')] });
+  expect(await buildScannerUniverse('phoenix')).toEqual([]);
+  delete process.env.PHOENIX_AI_SCANNER_ENABLED;
+  expect(await buildScannerUniverse('phoenix')).toEqual([]);
+ });
+});

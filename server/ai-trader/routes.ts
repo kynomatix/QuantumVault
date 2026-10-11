@@ -43,6 +43,9 @@ import {
 } from "../session-v3";
 import { resolveAgentKeypair } from "../agent-wallet";
 import { getAdapter, getDefaultAdapter } from "../protocol/adapter-registry";
+import { getAiTraderAdapter } from "./phoenix-analysis";
+import { phoenixAiFlags, phoenixAiOptions, phoenixAiMarkets } from "./phoenix-capabilities";
+import { getPhoenixAiTrader, phoenixAiLiveAvailable } from "./phoenix-runtime";
 import { getMarketInfo } from "../market-registry";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
@@ -628,10 +631,10 @@ export function registerAiTraderRoutes(app: Express): void {
       }
 
       // Resolve market/timeframe: scanner bots use server-provided placeholders.
-      const market = isScanner ? SCANNER_PLACEHOLDER_MARKET : (body.market ?? "");
+      const market = isScanner ? (body.protocol === "phoenix" ? phoenixAiMarkets()[0] ?? "BTC-PERP" : SCANNER_PLACEHOLDER_MARKET) : (body.market ?? "");
       const timeframe = isScanner ? SCANNER_PLACEHOLDER_TIMEFRAME : (body.timeframe ?? "15m");
 
-      if (!getMarketInfo(market)) {
+      if (body.protocol !== "phoenix" && !getMarketInfo(market)) {
         return res.status(400).json({ error: `Unknown market '${market}'.` });
       }
       if (!isSelectableModel(body.model)) {
@@ -648,7 +651,12 @@ export function registerAiTraderRoutes(app: Express): void {
 
       if (String(body.protocol).toLowerCase() === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       let protocol: string;
-      if (body.protocol) {
+      if (body.protocol === "phoenix") {
+        if (!phoenixAiFlags().paper) return res.status(503).json({ error: "Phoenix AI paper gate disabled." });
+        if (!isAiTraderMarketAdmitted(market, "phoenix")) return res.status(400).json({ error: "Phoenix AI market unavailable." });
+        if (body.parkWhenIdle && !phoenixAiOptions().parking) return res.status(400).json({ error: "Phoenix AI parking unavailable." });
+        protocol = "phoenix";
+      } else if (body.protocol) {
         try {
           protocol = getAdapter(body.protocol).protocolName;
         } catch {
@@ -667,7 +675,8 @@ export function registerAiTraderRoutes(app: Express): void {
       // verifies against the actual traded market (not the placeholder).
       const policyHmac = computeBotPolicyHmac(
         umk,
-        aiTraderPolicyObject({ market, maxLeverage: body.maxLeverage, allocatedUsdc })
+        aiTraderPolicyObject({ market, maxLeverage: body.maxLeverage, allocatedUsdc, protocol, walletAddress: req.walletAddress,
+          paperMode: true, sizingMode: body.sizingMode, riskMinPct: String(body.riskMinPct), riskMaxPct: String(body.riskMaxPct) })
       );
 
       const bot = await storage.createAiTraderBot({
@@ -803,7 +812,7 @@ export function registerAiTraderRoutes(app: Express): void {
         await Promise.all(
           [...marketToBot.entries()].map(async ([key, bot]) => {
             try {
-              const p = await getAdapter(bot.protocol).getPrice(bot.market);
+              const p = await getAiTraderAdapter(bot).getPrice(bot.market);
               // Reject zero/negative prices — treat as unavailable.
               priceCache.set(key, p !== null && Number.isFinite(p) && p > 0 ? p : null);
             } catch {
@@ -946,7 +955,7 @@ export function registerAiTraderRoutes(app: Express): void {
       let markPrice: number | null = null;
       if (openPosition) {
         try {
-          const adapter = getAdapter(bot.protocol);
+          const adapter = getAiTraderAdapter(bot);
           const venueMarkStartedAt = Date.now();
           markPrice = await adapter.getPrice(bot.market);
           recordRequestSubspan("botVenueMarkMs", Date.now() - venueMarkStartedAt);
@@ -1138,6 +1147,12 @@ export function registerAiTraderRoutes(app: Express): void {
       if (body.riskMaxPct !== undefined) updates.riskMaxPct = String(body.riskMaxPct);
       if (body.marketSource !== undefined) updates.marketSource = body.marketSource;
 
+      if (bot.protocol === "phoenix" && (body.sizingMode !== undefined || body.riskMinPct !== undefined || body.riskMaxPct !== undefined)) {
+        const umk = await getInteractiveUmk(req.walletAddress, res);
+        if (!umk) return;
+        updates.policyHmac = computeBotPolicyHmac(umk, aiTraderPolicyObject({ ...bot, ...updates } as AiTraderBot));
+      }
+
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No mutable fields provided." });
       }
@@ -1265,7 +1280,7 @@ export function registerAiTraderRoutes(app: Express): void {
             detail: "Fresh scanner candidates use an unqualified multiplier market. No bot state was changed.",
           });
         }
-        const admitted = multiplierSafe.filter((entry) => isAiTraderMarketAdmitted(entry.market));
+        const admitted = multiplierSafe.filter((entry) => entry.protocol === bot!.protocol && isAiTraderMarketAdmitted(entry.market, bot!.protocol));
         if (admitted.length === 0) {
           console.warn(
             "[AiTrader] manual analyze: " + SCANNER_MARKET_UNADMITTED_REASON
@@ -1311,7 +1326,7 @@ export function registerAiTraderRoutes(app: Express): void {
 
         let adapter;
         try {
-          adapter = getAdapter(bot.protocol);
+          adapter = getAiTraderAdapter(bot);
         } catch {
           if (keyRes.usedFreeTrial) await storage.decrementAiTraderFreeCalls(req.walletAddress);
           return res.status(400).json({ error: `Unknown protocol '${bot.protocol}'.` });
@@ -1346,7 +1361,7 @@ export function registerAiTraderRoutes(app: Express): void {
             const newPolicyHmac = computeBotPolicyHmac(
               scannerPickUmk!,
               aiTraderPolicyObject({
-                market: candidate.market,
+                ...bot, market: candidate.market,
                 maxLeverage: bot.maxLeverage,
                 allocatedUsdc: bot.allocatedUsdc,
               }),
@@ -1571,7 +1586,7 @@ export function registerAiTraderRoutes(app: Express): void {
 
       let adapter;
       try {
-        adapter = getAdapter(bot.protocol);
+        adapter = getAiTraderAdapter(bot);
       } catch {
         return res.status(400).json({ error: `Unknown protocol '${bot.protocol}'.` });
       }
@@ -1932,7 +1947,13 @@ export function registerAiTraderRoutes(app: Express): void {
         return res.status(409).json({ error: "Close the open paper position (or wait for the in-flight cycle to finish) before going live." });
       }
 
-      const adapter = getAdapter(bot.protocol);
+      if (bot.protocol === "phoenix") {
+        const service = getPhoenixAiTrader();
+        if (!phoenixAiLiveAvailable() || !service) return res.status(503).json({ error: "Phoenix AI live capability unavailable." });
+        const live = await service.graduate(bot);
+        return live ? res.json(live) : res.status(202).json({ pending: true, detail: "Phoenix AI provisioning or funding is pending; retry this bot." });
+      }
+      const adapter = getAiTraderAdapter(bot);
       const caps = adapter.getCapabilities();
       if (adapter.protocolName !== "pacifica" || !caps.requiresExternalSubaccountKey) {
         return res.status(501).json({ error: `Live mode currently supports Pacifica only (this bot's protocol: ${bot.protocol}).` });

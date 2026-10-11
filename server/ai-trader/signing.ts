@@ -16,6 +16,11 @@
  */
 import { decryptBotSubaccountKey } from "../session-v3";
 import type { AiTraderBot } from "@shared/schema";
+import type { TradingBot } from '@shared/schema';
+import { aiTraderPolicyObject, assertPhoenixAiBinding, assertPhoenixAiCustody } from './phoenix-policy';
+import { withPhoenixBotSigner } from '../protocol/phoenix/custody';
+import { orderIntentHash } from '../protocol/phoenix/order-contract';
+import { phoenixAiFlags } from './phoenix-capabilities';
 
 /**
  * Decrypt the bot's own venue-subaccount key (V3 ciphertext, AAD bound to
@@ -28,6 +33,9 @@ export async function resolveAiTraderSubaccountSigner(
   bot: AiTraderBot,
   umk: Buffer
 ): Promise<{ secretKey: Uint8Array; cleanup: () => void } | null> {
+  // A Phoenix subaccount is a PDA, never the signer address or ciphertext AAD.
+  // Phoenix signs only through withPhoenixAiTraderSigner and linked U03 custody.
+  if (bot.protocol === 'phoenix') return null;
   if (!bot.protocolSubaccountId) return null;
   if (!bot.botSubaccountKeyEncryptedV3 && (bot.derivationIndex == null || bot.derivationPathVersion == null)) {
     console.error(
@@ -56,5 +64,27 @@ export async function resolveAiTraderSubaccountSigner(
  * always undefined on this model.
  */
 export function liveReadAccount(bot: AiTraderBot, agentPublicKey: string): string {
+  if (bot.protocol === 'phoenix') return assertPhoenixAiBinding(bot).identity.traderAccountAddress;
   return bot.protocolSubaccountId ?? agentPublicKey;
+}
+
+export async function withPhoenixAiTraderSigner<T>(bot: AiTraderBot, custody: TradingBot,
+  sign: (secret: Uint8Array) => T, mode: 'entry' | 'recovery' = 'entry'): Promise<T> {
+  assertPhoenixAiCustody(bot, custody);
+  if (mode === 'entry') {
+    const { storage } = await import('../storage');
+    const fresh = await storage.getAiTraderBot(bot.id);
+    if (!phoenixAiFlags().live || !fresh || fresh.paperMode || fresh.status !== 'executing'
+      || orderIntentHash(aiTraderPolicyObject(fresh)) !== orderIntentHash(aiTraderPolicyObject(bot))) throw new Error('Phoenix AI signing mandate changed');
+    bot = fresh;
+    assertPhoenixAiCustody(bot, custody);
+  }
+  const security = await import('../session-v3');
+  const held = await security.getUmkForWebhook(bot.walletAddress);
+  if (!held) throw new Error('Phoenix AI signing authorization unavailable');
+  try {
+    if (mode === 'entry' && !security.verifyBotPolicyHmac(held.umk, aiTraderPolicyObject(bot), bot.policyHmac)) throw new Error('Phoenix AI policy integrity failed');
+    return await withPhoenixBotSigner({ ...custody, market: custody.market, leverage: custody.leverage,
+      maxPositionSize: custody.maxPositionSize }, sign);
+  } finally { held.cleanup(); }
 }

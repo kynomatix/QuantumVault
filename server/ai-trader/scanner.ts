@@ -17,6 +17,7 @@
 //   getScannerStatus()             — full status blob for the telemetry endpoint.
 
 import type { OHLCV } from "../lab/engine";
+import { phoenixAiFlags, phoenixAiMarkets } from "./phoenix-capabilities";
 import {
   fetchOHLCV,
   prefetchCachedOHLCV,
@@ -126,7 +127,7 @@ const RING_BUFFER_MAX         = 200;          // max telemetry ring-buffer entri
 export const MAX_POST_BREAK_RETURN_AGE_BARS = 4;
 
 // Protocols scanned. Flash scanner bots are paper-only today (go-live is Pacifica-only).
-const PROTOCOLS: readonly string[] = ["pacifica"];
+const PROTOCOLS: readonly string[] = ["pacifica", ...(phoenixAiFlags().scan ? ["phoenix"] : [])];
 
 /**
  * Fairly allocate the remaining global fetch window to one protocol using the
@@ -1276,6 +1277,11 @@ export async function buildScannerUniverse(
   protocol: string,
   mayMutate: () => boolean = () => true,
 ): Promise<string[]> {
+  if (protocol === 'phoenix') {
+    // Public scanner admission is fresh each sweep, independent of live gates.
+    // Never reuse the generic one-hour cache as execution authority.
+    return phoenixAiFlags().scan ? phoenixAiMarkets().filter(m => !SCANNER_FEED_EXCLUDE.has(m) && !isMultiplierMarketQuarantined(m)) : [];
+  }
   if (protocol === 'flash') return []; // no cached or fresh Flash scanner work
   const cached = universeCache.get(protocol);
   if (cached && Date.now() < cached.expiresAt) return cached.data;

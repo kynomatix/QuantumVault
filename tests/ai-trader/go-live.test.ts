@@ -119,6 +119,7 @@ vi.mock("../../server/ai-trader/scanner", () => ({
 }));
 
 import { registerAiTraderRoutes } from "../../server/ai-trader/routes";
+import { installPhoenixAiTrader } from '../../server/ai-trader/phoenix-runtime';
 import { computeQualificationEraDigest } from "../../server/ai-trader/graduation";
 
 // --- Fake express harness ---------------------------------------------------------------
@@ -873,4 +874,22 @@ describe("POST /api/admin/ai-trader/waive", () => {
     expect(r.statusCode).toBe(200);
     expect(r.body.bot.graduationState).toBe("waived");
   });
+});
+
+describe('U14 Phoenix go-live route boundary', () => {
+ it('denies Phoenix live while its own gate is off without wallet or Pacifica funding', async () => {
+  delete process.env.PHOENIX_AI_LIVE_ENABLED; installPhoenixAiTrader(null);
+  getAiTraderBotMock.mockResolvedValue(makeBot({ protocol: 'phoenix' }));
+  const r = await invoke(routes, GO_LIVE, goLiveReq());
+  expect(r.statusCode).toBe(503); expect(getWalletMock).not.toHaveBeenCalled(); expect(provisionMock).not.toHaveBeenCalled();
+ });
+ it('delegates graduation to the shared Phoenix service and never provisions a Pacifica subaccount', async () => {
+  process.env.PHOENIX_AI_LIVE_ENABLED = 'true';
+  const bot = makeBot({ protocol: 'phoenix' }), graduate = vi.fn(async () => ({ ...bot, paperMode: false }));
+  installPhoenixAiTrader({ graduate } as any); getAiTraderBotMock.mockResolvedValue(bot);
+  try {
+   const r = await invoke(routes, GO_LIVE, goLiveReq()); expect(r.statusCode).toBe(200);
+   expect(graduate).toHaveBeenCalledTimes(1); expect(getWalletMock).not.toHaveBeenCalled(); expect(provisionMock).not.toHaveBeenCalled();
+  } finally { installPhoenixAiTrader(null); delete process.env.PHOENIX_AI_LIVE_ENABLED; }
+ });
 });

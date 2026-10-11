@@ -17,6 +17,7 @@ import type { OHLCV } from "../lab/engine";
 import { ema, rsi, macd, atr, adx, bollingerBands, supertrend, obv } from "../lab/indicators";
 import { resolveFeeRateQuote, type ProtocolAdapter } from "../protocol/adapter";
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
+import { assertPhoenixAiBinding } from "./phoenix-policy";
 import { getHlParticipationSnapshot, type HlParticipationSnapshot } from "./hl-context";
 import { getCotSnapshot, type CotSnapshot } from "./cot-service";
 import { getSessionContext } from "./session-context";
@@ -749,8 +750,8 @@ export async function buildMarketContext(
   // AI Trader admission input, so no fallback rate is needed or permitted.
   const feeRateIdentity = {
     protocol: bot.protocol,
-    account: input.agentPublicKey,
-    subaccountId: bot.protocolSubaccountId ?? null,
+    account: bot.protocol === "phoenix" && !bot.paperMode ? assertPhoenixAiBinding(bot).identity.traderAccountAddress : input.agentPublicKey,
+    subaccountId: bot.protocol === "phoenix" ? null : bot.protocolSubaccountId ?? null,
     liquidityRole: "taker" as const,
   };
   const feeRateQuote = await resolveFeeRateQuote(
@@ -794,6 +795,7 @@ export async function buildMarketContext(
       : "unknown";
   const microstateBlock = [
     `Mark price: ${fmtPrice(price)}${priceSource === 'hl_reference' ? ' (HL reference — venue price unavailable this cycle)' : priceSource === 'candle' ? ' (candle close — venue and HL price unavailable this cycle)' : ''}`,
+    bot.protocol === "phoenix" ? "Funding rate (Phoenix): unknown; reference funding cannot authorize a live trade." :
     `Funding rate (Pacifica — this is what your position actually pays): ${(fundingInfo.rate * 100).toFixed(
       4
     )}% (next funding at ${nextFundingLabel})`,
@@ -818,9 +820,9 @@ export async function buildMarketContext(
           .map((r) => fmtRatePct4(r))
           .join(", ")})`,
         `Mark/oracle premium: ${fmtRatePct4(hlSnapshot.premium)}`,
-        `HL-vs-Pacifica funding spread: ${fmtRatePct4(
+        ...(bot.protocol === "phoenix" ? [] : [`HL-vs-Pacifica funding spread: ${fmtRatePct4(
           hlSnapshot.fundingRate - fundingInfo.rate
-        )} (positive = HL funding richer than Pacifica)`,
+        )} (positive = HL funding richer than Pacifica)`]),
       ].join("\n")
     : "Participation data: unavailable this cycle";
 
@@ -866,7 +868,8 @@ export async function buildMarketContext(
   } else {
     // Live mode remains freshly venue-authoritative. Any thrown read prevents
     // the context, digest, and decision from being produced.
-    const positions = await adapter.getPositions(bot.protocolSubaccountId ?? input.agentPublicKey, undefined);
+    const positions = await adapter.getPositions(bot.protocol === "phoenix"
+      ? assertPhoenixAiBinding(bot).identity.traderAccountAddress : bot.protocolSubaccountId ?? input.agentPublicKey, undefined);
     const openPosition = positions.find((position) => position.internalSymbol.toUpperCase() === market.toUpperCase());
     accountBlock = openPosition
       ? [
@@ -974,6 +977,7 @@ export async function buildMarketContext(
     `## Market microstate`,
     microstateBlock,
     ...(sessionCtxBlock !== null ? [sessionCtxBlock] : []),
+    bot.protocol === "phoenix" ? `## Market participation — Hyperliquid (reference venue; execution on Phoenix)` :
     `## Market participation — Hyperliquid (reference venue; you trade on Pacifica)`,
     participationBlock,
     `## Account state`,
@@ -993,9 +997,11 @@ export async function buildMarketContext(
   if (scannerNote) {
     userSections.push(`## Scanner selection note`, scannerNote);
   }
+  if (bot.protocol === "phoenix") userSections.unshift("Execution venue: Phoenix. Candles and Hyperliquid data are reference analysis only; live price, size, margin and protection require fresh Phoenix authority.");
   const user = userSections.join("\n\n");
 
   const contextDigest = {
+    ...(bot.protocol === "phoenix" ? { executionVenue: "phoenix" } : {}),
     market,
     timeframe,
     generatedAt: new Date(now).toISOString(),

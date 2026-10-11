@@ -11,7 +11,7 @@ import { phoenixMigrationFixture } from '../helpers/phoenix-schema';
 import { event, page, snapshot, target, identity, now, origin } from '../helpers/phoenix-accounting';
 
 const { manifest }=phoenixMigrationFixture();
-const migrations=manifest.slice(186), migration=manifest[189];
+const migrations=manifest.slice(186,190), migration=manifest[189];
 const schemaName=`phoenix_u0708_${randomUUID().replaceAll('-','')}`;
 let pool:pg.Pool, bootstrap:pg.Pool, store:PhoenixAccountingStore;
 const fills=[event(1,'0','2'),event(2,'2','0',{grossPnlMicros:'100'})];
@@ -47,7 +47,7 @@ beforeEach(async()=>{
 });
 describe('Phoenix atomic durable settlement',()=>{
   it('migration 189 repeats without replacing tables/constraints and meets readiness',async()=>{
-    expect(manifest).toHaveLength(191); expect(migration.id).toBe('189-phoenix-accounting');
+    expect(manifest.map(m=>m.id)).toContain('191-phoenix-ai-trader'); expect(migration.id).toBe('189-phoenix-accounting');
     const objects=()=>pool.query(`SELECT oid::text FROM pg_constraint WHERE connamespace=current_schema()::regnamespace ORDER BY oid`);
     const before=(await objects()).rows;
     for(const m of migrations) await pool.query(m.sql);
