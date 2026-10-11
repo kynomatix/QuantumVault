@@ -51,6 +51,13 @@ export async function takePnlSnapshots(): Promise<void> {
       try {
         const sourceTradingBot = await storage.getTradingBotById(publishedBot.tradingBotId);
         if (!sourceTradingBot || sourceTradingBot.activeProtocol === 'flash') continue;
+        if (sourceTradingBot.activeProtocol === 'phoenix') {
+          // Phoenix persists exact equity/epoch snapshots atomically during
+          // reconciliation. This legacy percentage series lacks its cash basis.
+          const { reconcilePhoenixBotAccounting } = await import('./protocol/phoenix/accounting-runtime');
+          await reconcilePhoenixBotAccounting(sourceTradingBot);
+          continue;
+        }
         
         const wallet = await storage.getWallet(sourceTradingBot.walletAddress);
         if (!wallet) continue;

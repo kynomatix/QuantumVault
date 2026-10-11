@@ -2098,6 +2098,18 @@ const schemaMigrationSql = [
        CREATE UNIQUE INDEX IF NOT EXISTS phoenix_protection_replace_unique ON phoenix_operations(bot_id)
          WHERE kind='protection' AND state NOT IN ('completed','failed','dropped')
            AND intent->'protection'->'request'->>'action' IN ('replace','breakeven'); `,
+      `CREATE TABLE IF NOT EXISTS phoenix_accounting_state (
+         bot_id varchar PRIMARY KEY REFERENCES trading_bots(id), revision integer NOT NULL CHECK(revision >= 1),
+         status text NOT NULL CHECK(status IN ('complete','unknown')), origin jsonb NOT NULL, snapshot jsonb NOT NULL);
+       CREATE TABLE IF NOT EXISTS phoenix_accounting_events (
+         bot_id varchar NOT NULL REFERENCES trading_bots(id), event_id text NOT NULL, data jsonb NOT NULL,
+         PRIMARY KEY(bot_id,event_id));
+       CREATE TABLE IF NOT EXISTS phoenix_position_epochs (
+         bot_id varchar NOT NULL REFERENCES trading_bots(id), epoch_id text NOT NULL, opened_at bigint NOT NULL,
+         data jsonb NOT NULL, payout_provenance jsonb NOT NULL, PRIMARY KEY(bot_id,epoch_id));
+       CREATE TABLE IF NOT EXISTS phoenix_equity_snapshots (
+         bot_id varchar NOT NULL REFERENCES trading_bots(id), snapshot_hash text NOT NULL, data jsonb NOT NULL,
+         PRIMARY KEY(bot_id,snapshot_hash)); `,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5778,6 +5790,19 @@ const schemaMigrationMetadata = [
         "(((intent -> 'protection') -> 'request') ->> 'action') = ANY (ARRAY['replace', 'breakeven'])"
       ]
     }
+  ]
+}
+,
+{
+  "id": "189-phoenix-accounting",
+  "capabilities": ["phoenix"],
+  "operation": "ddl",
+  "requirements": [
+    { "kind": "table", "table": "phoenix_accounting_state", "columns": ["bot_id", "revision", "status", "origin", "snapshot"],
+      "constraintDefinitions": ["PRIMARY KEY (bot_id)", "CHECK (revision >= 1)", "CHECK (status IN ('complete','unknown'))"] },
+    { "kind": "table", "table": "phoenix_accounting_events", "columns": ["bot_id", "event_id", "data"], "constraintDefinitions": ["PRIMARY KEY (bot_id,event_id)"] },
+    { "kind": "table", "table": "phoenix_position_epochs", "columns": ["bot_id", "epoch_id", "opened_at", "data", "payout_provenance"], "constraintDefinitions": ["PRIMARY KEY (bot_id,epoch_id)"] },
+    { "kind": "table", "table": "phoenix_equity_snapshots", "columns": ["bot_id", "snapshot_hash", "data"], "constraintDefinitions": ["PRIMARY KEY (bot_id,snapshot_hash)"] }
   ]
 }
 ] as const;

@@ -133,6 +133,7 @@ export type SnapshotDeps = {
 
 /** Per-bot financial data from a wallet snapshot. */
 export type BotFinancialData = {
+  phoenixAccounting?: import('./protocol/phoenix/accounting-runtime').PhoenixAccountingDetail;
   /** Computed bot equity (live or DB-based). null only if both paths unavailable. */
   exchangeBalance: number | null;
   /** netPnl = exchangeBalance – netDeposited. null when exchangeBalance or deposit basis unknown. */
@@ -783,6 +784,27 @@ async function _refresh(
     for (const bot of bots) {
       const botId = bot.id;
 
+      if (bot.activeProtocol === 'phoenix') {
+        perBotFinancials.set(botId, { exchangeBalance: null, netPnl: null, netPnlPercent: null, borrowDebtUsdc: null,
+          parkedValueUsdc: 0, parkedValueIncluded: false, parkedValueUnavailable: true, liveDataAvailable: false, botFinancialStatus: 'unavailable' });
+        wrappers.push((async () => {
+          await _waitAndRun(pool, deadlineAt, async () => {
+            const { readPhoenixAccounting, displayMicros } = await import('./protocol/phoenix/accounting-runtime');
+            const detail = await readPhoenixAccounting(bot);
+            const equity = detail.equity;
+            perBotFinancials.set(botId, { phoenixAccounting: detail,
+              exchangeBalance: displayMicros(equity?.totalEquityMicros ?? null),
+              netPnl: null, netPnlPercent: null, // no deposit/yield/network-cost basis inferred from trading PnL
+              borrowDebtUsdc: displayMicros(equity?.externalDebtMicros ?? null),
+              parkedValueUsdc: displayMicros(equity?.parkedValueMicros ?? null) ?? 0,
+              parkedValueIncluded: equity?.totalEquityMicros !== null && equity !== null,
+              parkedValueUnavailable: equity?.parkedValueMicros == null,
+              liveDataAvailable: equity?.status === 'complete', botFinancialStatus: equity?.status === 'complete' ? 'live' : 'unavailable' });
+          });
+        })());
+        continue;
+      }
+
       // When enrichment failed, deposit basis and debt are unknown (null).
       const eq = enrichmentSucceeded ? enrichment.equityAgg.get(botId) : undefined;
       const netDeposited: number | null = enrichmentSucceeded ? (eq?.netDeposited ?? 0) : null;
@@ -1278,20 +1300,22 @@ export function mapBotToApiResponse(
     ...bot,
     // null when enrichment failed — zero when enrichment succeeded but bot has no rows.
     // (successful-empty parity: new bots have zero history, not unknown history)
-    actualTradeCount: ens ? (enrichment.tradeCounts.get(bot.id) ?? 0) : null,
-    realizedPnl: ens && accountingIncompleteCloseCount === 0
+    ...(bot.activeProtocol === 'phoenix' ? { phoenixAccounting: fin?.phoenixAccounting ?? null } : {}),
+    actualTradeCount: bot.activeProtocol === 'phoenix' ? (fin?.phoenixAccounting?.performance.closedPositions ?? null) : ens ? (enrichment.tradeCounts.get(bot.id) ?? 0) : null,
+    realizedPnl: bot.activeProtocol === 'phoenix' ? null : ens && accountingIncompleteCloseCount === 0
       ? ((position as any)?.realizedPnl ?? '0')
       : null,
-    totalFees: ens ? ((position as any)?.totalFees ?? '0') : null,
-    accountingIncompleteCloseCount,
-    realizedAccountingStatus: ens
+    totalFees: bot.activeProtocol === 'phoenix' ? null : ens ? ((position as any)?.totalFees ?? '0') : null,
+    accountingIncompleteCloseCount: bot.activeProtocol === 'phoenix'
+      ? (fin?.phoenixAccounting?.history.filter(e => e.accounting === 'incomplete').length ?? null) : accountingIncompleteCloseCount,
+    realizedAccountingStatus: bot.activeProtocol === 'phoenix' ? (fin?.phoenixAccounting?.performance.accounting ?? 'incomplete') : ens
       ? (accountingIncompleteCloseCount! > 0 ? 'incomplete' : 'complete')
       : 'unavailable',
     exchangeBalance: fin?.exchangeBalance ?? null,
     // null when enrichment failed (debt unknown, not zero).
     borrowDebtUsdc: fin?.borrowDebtUsdc ?? null,
     // null when enrichment failed (deposit basis unknown); zero for a new bot.
-    netDeposited: ens ? (eq?.netDeposited ?? 0) : null,
+    netDeposited: bot.activeProtocol === 'phoenix' ? null : ens ? (eq?.netDeposited ?? 0) : null,
     netPnl: fin?.netPnl ?? null,
     netPnlPercent: fin?.netPnlPercent ?? null,
     // null when enrichment failed (publication state unknown).

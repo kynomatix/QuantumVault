@@ -59,7 +59,7 @@ const protective = (patch: Parameters<typeof request>[0] = {}): PhoenixIntent =>
 
 describe('U06 durable protection and independent safety admission', () => {
   it('applies migration 188 twice without replacing healthy constraints/indexes and satisfies final readiness', async () => {
-    expect(manifest).toHaveLength(189); expect(migration).toBe(manifest[188]);
+    expect(manifest).toHaveLength(190); expect(migration).toBe(manifest[188]);
     const objects = () => pool.query(`SELECT oid::text FROM pg_constraint WHERE conrelid='phoenix_operations'::regclass
       UNION ALL SELECT oid::text FROM pg_class WHERE relname IN ('phoenix_operations_active_unique','phoenix_protection_replace_unique')
       AND relnamespace=current_schema()::regnamespace ORDER BY 1`);
