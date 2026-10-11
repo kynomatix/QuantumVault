@@ -21,6 +21,8 @@ export function getMaxLeverage(ticker: string): number {
   return getMaxLeverageFromTiers(ticker);
 }
 
+import { getExchangeUiCapabilities } from './exchange-capabilities';
+
 export type ProtocolId = 'pacifica' | 'flash';
 
 export interface ProtocolMeta {
@@ -37,7 +39,8 @@ export interface ProtocolMeta {
 // are the white monochrome marks in client/public/images/exchange/.
 export const SELECTABLE_PROTOCOLS: ProtocolMeta[] = [
   { id: 'pacifica', label: 'Pacifica', icon: '/images/exchange/Pacifica.webp', minDeposit: 10 },
-];
+].filter(protocol => getExchangeUiCapabilities(protocol.id).create) as ProtocolMeta[];
+// Phoenix stays absent: U04 public reads do not grant live rollout/account eligibility.
 
 // Minimum funding (USDC) required to create a bot on the given protocol.
 export function getProtocolMinDeposit(id: ProtocolId): number {

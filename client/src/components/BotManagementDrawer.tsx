@@ -1,6 +1,8 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { SignalTradeHistoryChart } from './SignalTradeHistoryChart';
-import { PhoenixWithdrawalDetail } from './PhoenixWithdrawalDetail';
+import { PhoenixEquityDetail } from './PhoenixEquityDetail';
+import { PhoenixUnavailableNotice } from './PhoenixUnavailableNotice';
+import { getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
 import { resolveBotTradeDisplayPnl } from '@/lib/equity-display';
 import { useState, useEffect, useRef, type ReactNode, type ElementType } from 'react';
 import { useWallet } from '@solana/wallet-adapter-react';
@@ -1541,6 +1543,7 @@ export function BotManagementDrawer({
   };
 
   const displayBot = localBot || bot;
+  const moneyControls = getExchangeUiCapabilities(displayBot?.activeProtocol).moneyControls;
   const webhookMessageTemplate = getMessageTemplate();
   const overviewEquity = deriveKnownBotEquity(exchangeBalance, parkedValueUsdc, borrowDebtUsdc);
   const overviewNetPnl = overviewEquity === null ? null : overviewEquity - netDeposited;
@@ -1580,7 +1583,7 @@ export function BotManagementDrawer({
               >
                 {(localBot?.isActive ?? displayBot?.isActive) ? 'Active' : 'Inactive'}
               </Badge>
-              <Button
+              {moneyControls && <Button
                 variant={(localBot?.isActive ?? displayBot?.isActive) ? 'outline' : 'default'}
                 size="icon"
                 onClick={handlePauseResume}
@@ -1603,8 +1606,8 @@ export function BotManagementDrawer({
                     </>
                   )}
                 </span>
-              </Button>
-              {!displayBot?.sourcePublishedBotId && (
+              </Button>}
+              {moneyControls && !displayBot?.sourcePublishedBotId && (
                 <Button 
                   variant="default" 
                   size="icon"
@@ -1647,6 +1650,7 @@ export function BotManagementDrawer({
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4 mt-4">
+            {moneyControls ? (<>
             {/* Pause reason warning banner */}
             {displayBot?.pauseReason && !displayBot?.isActive && (
               <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-start gap-3">
@@ -2324,10 +2328,12 @@ export function BotManagementDrawer({
                 </Button>
               </div>
             </div>
+
+            </>) : (<div className="space-y-3"><PhoenixUnavailableNotice /><Button variant="outline" onClick={() => setActiveTab('equity')}>View balances and withdrawals</Button></div>)}
           </TabsContent>
 
           <TabsContent value="equity" className="space-y-4 mt-4">
-            <PhoenixWithdrawalDetail botId={bot?.id} activeProtocol={bot?.activeProtocol} visible={isOpen && activeTab === 'equity'} />
+            {moneyControls ? (<>
             <div className="grid grid-cols-2 gap-3">
               <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border">
                 <div className="flex items-center justify-between">
@@ -2580,9 +2586,12 @@ export function BotManagementDrawer({
               )}
             </div>
 
+
+            </>) : (displayBot ? <PhoenixEquityDetail key={displayBot.id + ':' + walletAddress} botId={displayBot.id} walletAddress={walletAddress} visible={isOpen && activeTab === 'equity'} /> : null)}
           </TabsContent>
 
           <TabsContent value="webhook" className="space-y-4 mt-4">
+            {moneyControls ? (<>
             <div className="p-4 rounded-xl bg-gradient-to-br from-primary/10 to-accent/10 border border-primary/20">
               <h3 className="font-semibold mb-3 flex items-center gap-2">
                 <span className="w-6 h-6 rounded-full bg-primary text-white text-sm flex items-center justify-center">1</span>
@@ -2685,6 +2694,8 @@ export function BotManagementDrawer({
                 <li>• Webhook alerts require TradingView Essential plan or higher</li>
               </ul>
             </div>
+
+            </>) : (<PhoenixUnavailableNotice />)}
           </TabsContent>
 
           <TabsContent value="history" className="mt-4 flex flex-col h-[calc(100vh-280px)]">
@@ -2965,6 +2976,7 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="settings" className="space-y-3 mt-4">
+            {moneyControls ? (<>
             <DrawerSettingsPanel
               id="general"
               expandedPanel={expandedSettingsPanel}
@@ -3431,6 +3443,8 @@ export function BotManagementDrawer({
                 </Button>
               </div>
             )}
+
+            </>) : (<div className="space-y-3"><PhoenixUnavailableNotice /><div className="rounded-xl border p-3 space-y-1"><p className="text-sm font-medium">Phoenix trader account</p><p className="text-xs font-mono break-all">{displayBot?.botSubaccountIdentifier || 'Unknown'}</p><p className="text-xs text-muted-foreground">Keep this account and its records while withdrawals or debt remain outstanding.</p></div><Button variant="outline" onClick={() => setActiveTab('equity')}>View balances and withdrawals</Button></div>)}
           </TabsContent>
         </Tabs>
         </>
@@ -3439,7 +3453,7 @@ export function BotManagementDrawer({
 
       {displayBot && (
         <PublishBotModal
-          isOpen={publishModalOpen}
+          isOpen={moneyControls && publishModalOpen}
           onClose={() => setPublishModalOpen(false)}
           bot={{
             id: displayBot.id,

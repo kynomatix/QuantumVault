@@ -1,3 +1,5 @@
+import { getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
+import { PhoenixUnavailableNotice } from '@/components/PhoenixUnavailableNotice';
 import { useEffect, useMemo, useState } from 'react';
 import { useRoute, useLocation } from 'wouter';
 import { useWalletModal } from '@solana/wallet-adapter-react-ui';
@@ -386,7 +388,7 @@ export default function MarketplaceBotPage() {
             </div>
 
             <div className="rounded-2xl border border-border/60 bg-card p-5">
-              {sessionConnected ? (
+              {!getExchangeUiCapabilities(bot.activeProtocol).subscribe ? <PhoenixUnavailableNotice /> : sessionConnected ? (
                 <Button
                   className="w-full bg-gradient-to-r from-primary to-accent hover:opacity-90"
                   size="lg"

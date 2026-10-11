@@ -1,3 +1,4 @@
+import { getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { performanceCompleteness } from "@/lib/ai-trader-accounting-display";
 import { coreReadJson, CoreReadError, useServerDegraded, useSessionExpired, reportCoreAuthSuccess } from "@/lib/server-health";
@@ -150,7 +151,7 @@ interface TradingBot {
   totalInvestment: string;
   maxPositionSize: string | null;
   driftSubaccountId?: number | null;
-  activeProtocol?: 'pacifica' | 'drift' | 'flash';
+  activeProtocol?: 'pacifica' | 'drift' | 'flash' | 'phoenix';
   stats: {
     totalTrades: number;
     winningTrades: number;
@@ -4456,7 +4457,7 @@ export default function AppPage() {
                               <Eye className="w-4 h-4 mr-2" />
                               Details
                             </Button>
-                            {isSubscribed ? (
+                            {!getExchangeUiCapabilities(bot.activeProtocol).subscribe ? <p className="text-xs text-muted-foreground">Phoenix subscriptions are unavailable.</p> : isSubscribed ? (
                               <Button 
                                 variant="outline"
                                 className="flex-1 hover:bg-destructive/10 hover:text-destructive hover:border-destructive/50"
