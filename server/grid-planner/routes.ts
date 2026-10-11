@@ -14,7 +14,8 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   let metadataJob: Promise<ProtocolMarket[]> | undefined, lastAttempt = -Infinity;
   let previewStarts: number[] = [];
   let activeRequests = 0;
-  const dependencies = () => depsPromise ??= loadDeps();
+  // Forget a failed load so a transient import error does not disable the Planner until restart.
+  const dependencies = () => depsPromise ??= loadDeps().catch(error => { depsPromise = undefined; throw error; });
   const membership = (deps: PlannerDeps): Promise<ProtocolMarket[]> => {
     const now = deps.now();
     if (metadata && now >= metadata.observedAt && now - metadata.observedAt < 300_000) return Promise.resolve(metadata.rows);
