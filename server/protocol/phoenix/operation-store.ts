@@ -1,4 +1,5 @@
 import { assertPhoenixNewRisk } from './lifecycle';
+import { assertParkingFundingChild, excludePhoenixParking } from './parking-store';
 import type { PhoenixConsumerContext } from './consumer-contract';
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
@@ -24,6 +25,7 @@ export interface PhoenixIntent {
   funding?: FundingTerms;
   /** U05 funding child; bound to a durably claimed entry, never an independent park/withdraw. */
   executionOrderId?: string;
+  parkingIntentId?: string;
   protection?: ProtectionTerms;
 }
 export interface StoredPhoenixOperation {
@@ -168,6 +170,10 @@ export class PhoenixOperationStore {
         return { operation: replay.rows[0], created: false };
       }
       if (intent.kind === 'register' || intent.kind === 'deposit' || intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, intent.botId);
+      if (intent.kind !== 'protection') {
+        await excludePhoenixParking(client, intent.botId, false, intent.parkingIntentId);
+        if (intent.parkingIntentId) await assertParkingFundingChild(client, intent);
+      }
       {
         // The order table is absent only on a pre-U05 schema (including U04 fixtures).
         const orderSchema = await client.query("SELECT to_regclass('phoenix_order_intents') AS table_name");
@@ -248,6 +254,10 @@ export class PhoenixOperationStore {
       }
       if (operation.kind === 'register' || operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, botId);
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale send claim');
+      if (operation.kind !== 'protection') {
+        await excludePhoenixParking(client, botId, false, operation.intent.parkingIntentId);
+        if (operation.intent.parkingIntentId) await assertParkingFundingChild(client, operation.intent);
+      }
       const count = await client.query('SELECT count(*)::integer AS count FROM phoenix_operation_attempts WHERE operation_id = $1', [operationId]);
       const next = count.rows[0].count + 1;
       if (next > (operation.kind === 'protection' ? 256 : 5)) throw new Error('Phoenix retry budget exhausted');

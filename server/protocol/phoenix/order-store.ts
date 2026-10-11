@@ -1,4 +1,5 @@
 import { assertPhoenixNewRisk } from './lifecycle';
+import { excludePhoenixParking } from './parking-store';
 import type { Pool, PoolClient } from 'pg';
 import { phoenixIdentityFromBot } from './identity';
 import { orderIntentHash, validateOrderIntent, type PhoenixOrderIntent, type PhoenixAdmission } from './order-contract';
@@ -58,6 +59,7 @@ export class PhoenixOrderStore implements OrderRepository {
       const replay = (await c.query('SELECT * FROM phoenix_order_intents WHERE bot_id=$1 AND request_key=$2', [i.botId, i.requestKey])).rows[0];
       if (replay) return { record: this.verify(replay, i), created: false };
       if (i.action === 'entry') await assertPhoenixNewRisk(c, i.botId);
+      if (i.action === 'entry') await excludePhoenixParking(c, i.botId, true);
       const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')
         AND ($2 <> 'close' OR kind <> 'protection')`, [i.botId, i.action]);
       if (busy.rows.length) throw new Error('Phoenix funding/registration unresolved');
@@ -81,6 +83,7 @@ export class PhoenixOrderStore implements OrderRepository {
       };
       if (current.revision !== record.revision || !transitions[current.state].includes(state)) throw new Error('Stale Phoenix order transition');
       if (state === 'signing') {
+        if (record.intent.action === 'entry') await excludePhoenixParking(c, record.intent.botId);
         const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')
           AND ($2 <> 'close' OR kind <> 'protection')`, [record.intent.botId, record.intent.action]);
         if (busy.rows.length) throw new Error('Funding must settle before order signing');

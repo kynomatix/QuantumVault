@@ -181,9 +181,9 @@ describe("schema readiness", () => {
 
   it("retains all 190 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(190);
-    expect(metadata).toHaveLength(190);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(190);
+    expect(sqlEntries).toHaveLength(191);
+    expect(metadata).toHaveLength(191);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(191);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // Entries 028 and 076 preserve later superset constraints on every boot.
     // Pin the other pre-existing SQL bytes, including entry 185.

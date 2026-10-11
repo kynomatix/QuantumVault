@@ -47,7 +47,7 @@ beforeEach(async()=>{
 });
 describe('Phoenix atomic durable settlement',()=>{
   it('migration 189 repeats without replacing tables/constraints and meets readiness',async()=>{
-    expect(manifest).toHaveLength(190); expect(migration.id).toBe('189-phoenix-accounting');
+    expect(manifest).toHaveLength(191); expect(migration.id).toBe('189-phoenix-accounting');
     const objects=()=>pool.query(`SELECT oid::text FROM pg_constraint WHERE connamespace=current_schema()::regnamespace ORDER BY oid`);
     const before=(await objects()).rows;
     for(const m of migrations) await pool.query(m.sql);

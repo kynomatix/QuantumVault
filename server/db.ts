@@ -2110,6 +2110,25 @@ const schemaMigrationSql = [
        CREATE TABLE IF NOT EXISTS phoenix_equity_snapshots (
          bot_id varchar NOT NULL REFERENCES trading_bots(id), snapshot_hash text NOT NULL, data jsonb NOT NULL,
          PRIMARY KEY(bot_id,snapshot_hash)); `,
+      `DO $phoenix_parking$ BEGIN
+         IF to_regclass('phoenix_parking_intents') IS NULL THEN
+           CREATE TABLE phoenix_parking_intents (
+             id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bot_id varchar NOT NULL REFERENCES trading_bots(id),
+             request_key text NOT NULL, intent jsonb NOT NULL, intent_hash text NOT NULL,
+             state text NOT NULL DEFAULT 'active' CHECK(state IN ('active','completed','cancelled','attention')),
+             revision integer NOT NULL DEFAULT 0 CHECK(revision >= 0), legs jsonb NOT NULL DEFAULT '[]'::jsonb,
+             created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+             UNIQUE(bot_id,request_key), CHECK(length(intent_hash)=64 AND intent_hash ~ '^[0-9a-f]{64}$'),
+             CHECK(jsonb_typeof(intent)='object' AND jsonb_typeof(legs)='array'));
+         END IF;
+         IF to_regclass('phoenix_parking_active_unique') IS NULL THEN
+           CREATE UNIQUE INDEX phoenix_parking_active_unique ON phoenix_parking_intents(bot_id) WHERE state IN ('active','attention');
+         END IF;
+         IF to_regclass('phoenix_parking_borrow_unique') IS NULL THEN
+           CREATE UNIQUE INDEX phoenix_parking_borrow_unique ON phoenix_parking_intents(bot_id,(intent->>'borrowAuthorizationId'))
+             WHERE intent->>'borrowAuthorizationId' IS NOT NULL;
+         END IF;
+       END $phoenix_parking$; `,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5803,6 +5822,20 @@ const schemaMigrationMetadata = [
     { "kind": "table", "table": "phoenix_accounting_events", "columns": ["bot_id", "event_id", "data"], "constraintDefinitions": ["PRIMARY KEY (bot_id,event_id)"] },
     { "kind": "table", "table": "phoenix_position_epochs", "columns": ["bot_id", "epoch_id", "opened_at", "data", "payout_provenance"], "constraintDefinitions": ["PRIMARY KEY (bot_id,epoch_id)"] },
     { "kind": "table", "table": "phoenix_equity_snapshots", "columns": ["bot_id", "snapshot_hash", "data"], "constraintDefinitions": ["PRIMARY KEY (bot_id,snapshot_hash)"] }
+  ]
+}
+,
+{
+  "id": "190-phoenix-parking",
+  "capabilities": ["phoenix"],
+  "operation": "ddl",
+  "requirements": [
+    { "kind": "table", "table": "phoenix_parking_intents", "columns": ["id", "bot_id", "request_key", "intent", "intent_hash", "state", "revision", "legs"],
+      "constraintDefinitions": ["PRIMARY KEY (id)", "UNIQUE (bot_id,request_key)", "CHECK (revision >= 0)", "CHECK (state IN ('active','completed','cancelled','attention'))"] },
+    { "kind": "index", "table": "phoenix_parking_intents", "index": "phoenix_parking_active_unique", "columns": ["bot_id"], "unique": true,
+      "predicateIncludes": ["state = ANY (ARRAY['active', 'attention'])"] },
+    { "kind": "index", "table": "phoenix_parking_intents", "index": "phoenix_parking_borrow_unique", "columns": ["bot_id", "(intent ->> 'borrowAuthorizationId')"], "unique": true,
+      "predicateIncludes": ["(intent ->> 'borrowAuthorizationId') IS NOT NULL"] }
   ]
 }
 ] as const;

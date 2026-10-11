@@ -32,22 +32,30 @@ export class PhoenixOrderService {
   async execute(input: PhoenixOrderIntent): Promise<PhoenixOrderRecord> {
     const i = structuredClone(input); validateOrderIntent(i);
     const previous = await this.store.find(i);
-    if (previous) return this.reconcile(i, previous.id);
+    if (previous) return previous.state === 'funding' ? this.advance(previous) : this.reconcile(i, previous.id);
     if (i.action === 'entry' && !this.entryEnabled()) throw new Error('Phoenix entry disabled');
     const admission = admitPhoenixOrder(i, await this.io.snapshot(structuredClone(i)), this.now());
     validateOrderPin(i, admission, this.pin);
     const prepared = await this.store.prepare(i, admission);
     if (!prepared.created) return this.reconcile(i, prepared.record.id);
-    let record = prepared.record;
+    return this.advance(prepared.record);
+  }
+  private async advance(initial: PhoenixOrderRecord): Promise<PhoenixOrderRecord> {
+    let record = initial;
+    let fundingSettled = false;
+    const i = record.intent, admission = record.data.admission;
     try {
-      if (i.action === 'entry' && !this.entryEnabled()) return await this.store.change(record, 'rejected', { reason: 'Entry disabled before funding' });
+      if (i.action === 'entry' && !this.entryEnabled()) {
+        return record.state === 'admitted' ? await this.store.change(record, 'rejected', { reason: 'Entry disabled before funding' }) : record;
+      }
       // Refresh before the first money side effect as DB lock acquisition may have waited.
       const preFunding = admitPhoenixOrder(i, await this.io.snapshot(structuredClone(i)), this.now());
       validateOrderPin(i, preFunding, this.pin);
-      if (units(preFunding.fundingShortfallMicros) > 0n) {
-        record = await this.store.change(record, 'funding', { admission: preFunding });
+      if (record.state === 'funding' || units(preFunding.fundingShortfallMicros) > 0n) {
+        if (record.state !== 'funding') record = await this.store.change(record, 'funding', { admission: preFunding });
         if (!this.entryEnabled()) throw new Error('Entry disabled before funding');
         await this.io.fund(structuredClone(record));
+        fundingSettled = true;
       }
       const lifetime = await this.io.lifetime();
       const latest = admitPhoenixOrder(i, await this.io.snapshot(structuredClone(i)), this.now(), true);
@@ -71,6 +79,9 @@ export class PhoenixOrderService {
       record = await this.store.change(record, 'accepted');
     } catch {
       const current = await this.store.read(i, record.id);
+      // Funding owns durable settlement, including a queued U10 vault leg. Keep
+      // the original funding identity resumable; no order has been signed yet.
+      if (current.state === 'funding' && !fundingSettled) return current;
       if (['admitted', 'signing'].includes(current.state) && !current.data.attempt && record.state !== 'funding') {
         // Admission/signing rejection has no sent transaction. Funding may still need recovery.
         if (current.state === 'admitted') return this.store.change(current, 'rejected', { reason: 'Admission revoked before side effects' });

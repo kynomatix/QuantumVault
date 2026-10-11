@@ -2259,6 +2259,12 @@ async function parkBotIdleFundsAutonomously(
   bot: TradingBot,
   opts?: { authorizePostBorrow?: boolean; borrowedUsdc?: number },
 ): Promise<void> {
+  if (bot.activeProtocol === 'phoenix') {
+    const { dispatchPhoenixIdlePark } = await import('./protocol/phoenix/parking-runtime');
+    // Post-borrow requires its own immutable receipt-bound authorization (U11).
+    if (!opts?.authorizePostBorrow) await dispatchPhoenixIdlePark(bot);
+    return;
+  }
   // Keep the retired branch below for now without narrowing the retained code.
   if (['flash'].includes(bot.activeProtocol ?? '')) return;
   const postBorrow = opts?.authorizePostBorrow === true;
@@ -2523,6 +2529,8 @@ function dispatchPostBorrowIdlePark(tradingBotId: string, borrowedUsdc: number):
  * skipped repark won't retry until the bot's next full close.
  */
 async function runAutoReparkScan(): Promise<void> {
+  const { recoverPhoenixParking } = await import('./protocol/phoenix/parking-runtime');
+  await recoverPhoenixParking();
   let due: TradingBot[];
   try {
     due = await storage.claimDueAutoReparkBots();
@@ -10640,6 +10648,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const bot = await storage.getTradingBotById(botId);
       if (!bot || bot.walletAddress !== walletAddress) {
         return { ok: false, status: 404, error: "Bot not found" };
+      }
+      if (bot.activeProtocol === 'phoenix') {
+        // Never fall through to the account vault or sign with the trader PDA.
+        return { ok: false, status: 503, error: 'Phoenix bot vaults require the gated settlement orchestrator.' };
       }
       const adapter = getAdapterForBot(bot);
       if (adapter.subaccountCaps?.accountModel === 'independent_trader') {

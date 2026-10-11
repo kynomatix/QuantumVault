@@ -51,7 +51,7 @@ beforeEach(async () => {
 
 describe('Phoenix order durable authority in isolated PostgreSQL', () => {
   it('appends an idempotent migration with every readiness postcondition satisfied', async () => {
-    expect(manifest).toHaveLength(190); expect(migration).toBe(manifest[187]);
+    expect(manifest).toHaveLength(191); expect(migration).toBe(manifest[187]);
     const first = await orders.prepare(intent(), admission());
     await pool.query(migration.sql); await pool.query(migration.sql);
     expect(await orders.read(intent(), first.record.id)).toEqual(first.record);

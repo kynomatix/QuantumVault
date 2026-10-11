@@ -17,6 +17,7 @@
 
 import { storage } from "../storage";
 import type { TradingBot } from "@shared/schema";
+import { phoenixParkingEnabled } from '../protocol/phoenix/parking-runtime';
 
 /** Debounce window between a full close and the repark attempt. */
 export const AUTO_REPARK_DEBOUNCE_MS = 60_000;
@@ -29,7 +30,7 @@ export const AUTO_REPARK_DEBOUNCE_MS = 60_000;
 export function isAutoReparkEligibleVenue(
   bot: Pick<TradingBot, "activeProtocol">,
 ): boolean {
-  return bot.activeProtocol === "flash";
+  return bot.activeProtocol === "flash" || (bot.activeProtocol === 'phoenix' && phoenixParkingEnabled());
 }
 
 /**
@@ -49,6 +50,7 @@ export async function maybeScheduleAutoRepark(
   bot: Pick<TradingBot, "id" | "autoParkIdle" | "activeProtocol" | "parkDestinationAsset">,
 ): Promise<void> {
   if (!bot.autoParkIdle && !bot.parkDestinationAsset) return;
+  if (bot.activeProtocol === 'phoenix' && !bot.autoParkIdle) return;
   if (!isAutoReparkEligibleVenue(bot)) return;
   const dueAt = new Date(Date.now() + AUTO_REPARK_DEBOUNCE_MS);
   try {
