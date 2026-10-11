@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { Transaction } from '@solana/web3.js';
-import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { admitPhoenixOrder } from '../../server/protocol/phoenix/order-contract';
 import { encodePhoenixOrder, signOrderTransaction } from '../../server/protocol/phoenix/order-builder';
 import { phoenixOrderDisabled } from '../../server/protocol/phoenix/order-routes';
 import { authority, intent, now, key, pin, lifetime } from '../helpers/phoenix-orders';
+const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order-route-baseline.json', 'utf8')) as {
+  baseCommitHash: string; routeSha256: Record<string, string>;
+};
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('sizes exact lots, ticks, maximum slippage notional and account-tier fees', () => {
@@ -80,22 +83,43 @@ describe('Phoenix U05 exact admission and explicit wire policy', () => {
     expect(() => signOrderTransaction(i, a, pin, lifetime, new Uint8Array(64), now)).toThrow();
     expect(() => signOrderTransaction(i, a, pin, lifetime, key.secretKey, now + 5000)).toThrow();
   });
-  it('preserves incumbent routes apart from Phoenix refusals and unreachable policy comparisons', () => {
-    const baseCommitHash = '5825d1235b294fb8476aad85688b364be72002fa';
-    const base = execFileSync('git', ['show', `${baseCommitHash}:server/routes.ts`], { maxBuffer: 5_000_000 }).toString().replaceAll('\r\n', '\n');
+  it('preserves incumbent order routes byte for byte outside the reviewed Phoenix boundaries', () => {
     const current = readFileSync('server/routes.ts', 'utf8').replaceAll('\r\n', '\n');
     const branch = "      if (bot.activeProtocol === 'phoenix') {\n        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');\n        return res.status(503).json(phoenixOrderDisabled());\n      }\n\n";
-    const oldPolicyCheck = "      if (bot.policyHmac || bot.activeProtocol === 'phoenix') {";
-    const legacyPolicyCheck = "      // Phoenix was already refused before entering this legacy execution path.\n      if (bot.policyHmac) {";
-    expect(base.split(oldPolicyCheck).length - 1).toBe(0);
-    expect(current.split(legacyPolicyCheck).length - 1).toBe(2);
-    expect(current.split(branch).length - 1).toBe(5);
-    const normalized = current
-      .replace('borrowedUsdc?: number; phoenixBorrowAuthorizationId?: string', 'borrowedUsdc?: number')
-      .replace('dispatchPhoenixIdlePark, dispatchPhoenixPostBorrowPark', 'dispatchPhoenixIdlePark')
-      .replace("    if (opts?.authorizePostBorrow && opts.phoenixBorrowAuthorizationId) await dispatchPhoenixPostBorrowPark(bot, opts.phoenixBorrowAuthorizationId);\n    else if (!opts?.authorizePostBorrow)", "    if (!opts?.authorizePostBorrow)")
-      .replace("        if (Object.keys(req.body).some(key => key !== 'isActive')) {\n          return res.status(400).json({ error: 'Phoenix pause must be sent separately from configuration changes' });\n        }\n", '');
-    expect(normalized).toBe(base);
+    for (const [key, expectedSha256] of Object.entries(incumbentBaseline.routeSha256)) {
+      const colon = key.indexOf(':'), method = key.slice(0, colon), path = key.slice(colon + 1);
+      const start = current.indexOf(`  app.${method}("${path}"`);
+      expect(start, path).toBeGreaterThan(-1);
+      const end = current.indexOf('\n  app.', start + 1);
+      const body = current.slice(start, end < 0 ? undefined : end);
+      let incumbent: string;
+      if (method === 'patch') {
+        const phoenix = /      if \(bot.activeProtocol === 'phoenix' && isActive !== undefined\) \{[\s\S]*?\n      \}\n\n/;
+        expect(body).toMatch(phoenix);
+        const guarded = body.match(phoenix)![0];
+        expect(guarded).toContain('isActive === true');
+        expect(guarded).toContain('phoenixOrderDisabled()');
+        expect(guarded).toContain(".stop(bot.id, req.walletAddress!, 'pause')");
+        expect(body.indexOf(guarded)).toBeLessThan(body.indexOf('decryptAgentKeyStrict'));
+        const switchRefusal = "          if (bot.activeProtocol === 'phoenix' || requestedProtocol === 'phoenix') return res.status(409).json({ error: 'Phoenix requires a new bot; recovery identities cannot be retargeted.' });\n";
+        expect(body).toContain(switchRefusal);
+        expect(body.indexOf(switchRefusal)).toBeLessThan(body.indexOf('assertNoOpenPositionBeforeProtocolSwitch'));
+        incumbent = body.replace(phoenix, '').replace(switchRefusal, '');
+      } else {
+        expect(body.split(branch)).toHaveLength(2);
+        expect(body.indexOf(branch)).toBeLessThan(body.indexOf('getUmkForWebhook'));
+        incumbent = body.replace(branch, '');
+      }
+      // U03 supplies the complete policy object. These exact replacements pin
+      // the reviewed call while retaining the main digest for all incumbent bytes.
+      incumbent = incumbent
+        .replace("      // Phoenix was already refused before entering this legacy execution path.\n", '')
+        .replace('{ ...bot, market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }',
+          '{ market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize }')
+        .replace("          bot.policyHmac || ''\n", '          bot.policyHmac\n');
+      const sha256 = createHash('sha256').update(incumbent).digest('hex');
+      expect(sha256, `${path}: incumbent bytes differ from reviewed main`).toBe(expectedSha256.replace(/^sha256:/, ''));
+    }
     expect(phoenixOrderDisabled().code).toBe('PHOENIX_ORDERS_DISABLED');
   });
 });

@@ -21,7 +21,7 @@ import {
   type SchemaMigrationDefinition,
 } from "../../server/schema-readiness";
 
-const recordErrorMock = vi.hoisted(() => vi.fn(async () => undefined));
+const recordErrorMock = vi.hoisted(() => vi.fn(async (_input: { fingerprint: string }) => undefined));
 vi.mock("../../server/storage", () => ({
   storage: { recordError: recordErrorMock },
 }));
@@ -179,12 +179,14 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 190 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 192 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(191);
-    expect(metadata).toHaveLength(191);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(191);
+    expect(sqlEntries).toHaveLength(192);
+    expect(metadata).toHaveLength(192);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(192);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
+    expect(metadata[191]).toMatchObject({ id: '191-phoenix-ai-trader', capabilities: ['phoenix'], operation: 'ddl' });
+    expect(sqlEntries[191]).toContain('phoenix_ai_executions');
     // Entries 028 and 076 preserve later superset constraints on every boot.
     // Pin the other pre-existing SQL bytes, including entry 185.
     const preExistingUnchanged = sqlEntries.slice(0, 186).filter((_, index) => index !== 28 && index !== 76);

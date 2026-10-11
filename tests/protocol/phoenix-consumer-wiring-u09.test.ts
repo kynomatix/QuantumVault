@@ -41,9 +41,12 @@ describe('U09 HTTP and worker fail-closed wiring', () => {
   });
   it('retry ingress and processing refuse Phoenix using the stored venue before legacy execution', () => {
     const worker = readFileSync('server/trade-retry-service.ts','utf8');
-    const ingress = worker.slice(worker.indexOf('export async function queueTradeRetry('),worker.indexOf('export async function queueTradeRetry(')+800);
+    const ingress = worker.slice(worker.indexOf('export async function queueTradeRetry('),worker.indexOf('// Persist to database FIRST'));
     const processing = worker.slice(worker.indexOf('async function processRetryJob('),worker.indexOf('async function processRetryJob(')+900);
-    expect(ingress).toContain("ingressBot?.activeProtocol === 'phoenix'");
+    expect(ingress).toContain("if (job.protocol === 'phoenix') throw");
+    expect(ingress).toContain("phoenixBot = botRow?.activeProtocol === 'phoenix'");
+    expect(ingress).toContain("if (phoenixBot) throw");
+    expect(ingress.indexOf('if (phoenixBot) throw')).toBeGreaterThan(ingress.indexOf('catch (lookupErr)'));
     expect(processing).toContain("retirementBot?.activeProtocol === 'phoenix'");
     expect(processing).toContain('markTradeRetryJobFailed');
     expect(processing).toContain('retryQueue.delete(job.id)');

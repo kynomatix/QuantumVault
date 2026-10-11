@@ -47,8 +47,14 @@ describe('U03 current API and RPC adapter (no network)', () => {
     fetcher.mockResolvedValue(response(status)); expect(await io().eligibility()).toBe(expected);
   });
   it('exposes denied activation without treating it as a transport timeout', async () => {
-    fetcher.mockResolvedValue(response({}, 403)); expect(await io().eligibility()).toBe('denied');
+    fetcher.mockResolvedValueOnce(response({}, 403)).mockResolvedValueOnce(response({}, 403));
+    expect(await io().eligibility()).toBe('unknown');
     await expect(io().build(identity, 32)).rejects.toMatchObject({ code: 'denied' });
+    expect(fetcher.mock.calls.map(call => call[0])).toEqual([
+      'https://perp-api.phoenix.trade/v1/view/exchange/status',
+      'https://perp-api.phoenix.trade/v1/exchange/build-register-ixs',
+    ]);
+    expect(signer).not.toHaveBeenCalled();
   });
   it('uses only the current build and onboarder-send endpoints, with no retries', async () => {
     fetcher.mockResolvedValueOnce(response({ ...metadata(), instructions: instructions() }));

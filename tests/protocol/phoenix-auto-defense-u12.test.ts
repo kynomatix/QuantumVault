@@ -71,7 +71,8 @@ describe('U12 autonomous debt policy',()=>{
   });
   it('rechecks opt-out, reserve and health transitions at the execution boundary',async()=>{
     const f=defenseFacts(),i=proposal(f);
-    const source={enabled:()=>true,facts:async()=>f} as PhoenixDefenseSource;
+    const source: PhoenixDefenseSource={enabled:()=>true,facts:async()=>f,
+      pending:async()=>{throw new Error('Unexpected pending read');},attention:async()=>{throw new Error('Unexpected attention');}};
     const guard=automaticDefenseAuthorizer(source,()=>now);
     await expect(guard(i,f.snapshot)).resolves.toBeUndefined();
     f.snapshot.walletUsdcRaw='0';f.snapshot.queuedUsdcRaw='1000000000';await expect(guard(i,f.snapshot)).rejects.toThrow('reserve');

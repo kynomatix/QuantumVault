@@ -82,7 +82,8 @@ export function parkingAuthorized(i: ParkingIntent, s: ParkingSnapshot): boolean
   if (i.action === 'entry') return s.entryAuthorized;
   if (s.destination !== i.destination || !s.destinationEnabled) return false;
   if (i.action === 'idle') return s.autoPark;
-  return s.borrow?.authorizationId === i.borrowAuthorizationId && s.borrow.parkAuthorized === true
-    && units(s.borrow.creditedUsdc) >= units(i.maxUsdc);
+  const borrow = s.borrow;
+  return !!i.borrowAuthorizationId && !!borrow && borrow.authorizationId === i.borrowAuthorizationId && borrow.parkAuthorized === true
+    && units(borrow.creditedUsdc) >= units(i.maxUsdc);
 }
 export const minUnits = (a: bigint, b: bigint) => a < b ? a : b;

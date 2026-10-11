@@ -237,7 +237,7 @@ function tryClassifySwiftError(_error?: string): { category: string; shouldRetry
 }
 
 export interface RetryJob {
-  protocol?: string; // Historical queue venue; Phoenix jobs must use their own durable journal.
+  protocol?: string | null; // Historical DB rows may omit the venue; Phoenix jobs must use their own durable journal.
   id: string;
   botId: string;
   walletAddress: string;

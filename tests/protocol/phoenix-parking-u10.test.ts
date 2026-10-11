@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { PhoenixParkingService, PhoenixParkingUnsent, type ParkingRepository } from '../../server/protocol/phoenix/parking-service';
 import { verifyParkingReceipt } from '../../server/protocol/phoenix/parking-store';
 import { phoenixIntentHash } from '../../server/protocol/phoenix/operation-store';
-import { assertParkingSnapshot, type ParkingIntent, type ParkingLeg, type ParkingReceipt, type ParkingRecord, type ParkingSnapshot } from '../../server/protocol/phoenix/parking-contract';
+import { assertParkingSnapshot, parkingAuthorized, type ParkingIntent, type ParkingLeg, type ParkingReceipt, type ParkingRecord, type ParkingSnapshot } from '../../server/protocol/phoenix/parking-contract';
 import { phoenixParkingEnabled, createPhoenixParkingRuntime } from '../../server/protocol/phoenix/parking-runtime';
 import { authority, identity, now } from '../helpers/phoenix-orders';
 
@@ -52,6 +52,16 @@ function fixture(patch: Partial<ParkingIntent> = {}) {
 const entry = { action: 'entry' as const, executionOrderId: 'EXAMPLE-order', requiredMarginUsdc: '100', destination: null };
 
 describe('U10 pre-activation recovery', () => {
+  it('denies post-borrow parking when either authorization binding is missing', () => {
+    const i = intent({ action: 'post_borrow' }), s = snapshot();
+    expect(parkingAuthorized(i, s)).toBe(false);
+    i.borrowAuthorizationId = 'EXAMPLE-borrow';
+    expect(parkingAuthorized(i, s)).toBe(false);
+    s.borrow = { authorizationId: 'EXAMPLE-borrow', parkAuthorized: true, creditedUsdc: '100' };
+    expect(parkingAuthorized(i, s)).toBe(true);
+    i.borrowAuthorizationId = undefined;
+    expect(parkingAuthorized(i, s)).toBe(false);
+  });
   it('binds post-borrow parking to the completed authorization without idle opt-in',async()=>{
     const start=vi.fn(async()=>{}), i=intent({action:'post_borrow',borrowAuthorizationId:'EXAMPLE-borrow'});
     const runtime=createPhoenixParkingRuntime({start} as any,{idleIntent:async()=>null,postBorrowIntent:async()=>i,pending:async()=>[],report:()=>{}});

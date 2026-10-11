@@ -2,6 +2,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { PublicKey } from '@solana/web3.js';
 import { aiBot, custody, identity } from '../helpers/phoenix-ai';
 import { key } from '../helpers/phoenix-orders';
+import { grantPhoenixAiCanary } from '../helpers/phoenix-rollout';
 const security = vi.hoisted(() => ({ getUmkForWebhook: vi.fn(), verifyBotPolicyHmac: vi.fn(), decryptBotSubaccountKeyV3: vi.fn(),
  decryptMnemonic: vi.fn(), decryptBotSubaccountKey: vi.fn(), decryptAgentKey: vi.fn() }));
 const lookup = vi.hoisted(() => vi.fn());
@@ -11,11 +12,11 @@ import { liveReadAccount, resolveAiTraderSubaccountSigner, withPhoenixAiTraderSi
 let cached: Buffer, held: Buffer[], cleanups: ReturnType<typeof vi.fn>[];
 beforeEach(() => {
  vi.resetAllMocks(); cached = Buffer.from(key.secretKey); held = []; cleanups = [];
- process.env.PHOENIX_AI_LIVE_ENABLED = 'true'; lookup.mockResolvedValue(aiBot({ status: 'executing' }));
+ grantPhoenixAiCanary('EXAMPLE-owner', ['EXAMPLE-ai', 'EXAMPLE-bot']); lookup.mockResolvedValue(aiBot({ status: 'executing' }));
  security.getUmkForWebhook.mockImplementation(async () => { const umk = Buffer.alloc(32, 3), cleanup = vi.fn(() => umk.fill(0)); held.push(umk); cleanups.push(cleanup); return { umk, cleanup }; });
  security.verifyBotPolicyHmac.mockReturnValue(true); security.decryptBotSubaccountKeyV3.mockImplementation(() => cached);
 });
-afterEach(() => { delete process.env.PHOENIX_AI_LIVE_ENABLED; });
+afterEach(() => { vi.unstubAllEnvs(); });
 describe('U14 synthetic bot authority and PDA reads', () => {
  it('decrypts linked U03 custody using bot identity AAD, signs as authority and clears all owned keys', async () => {
   let seen: Uint8Array | undefined;

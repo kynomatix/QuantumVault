@@ -350,7 +350,7 @@ describe("AI Trader scanner route market admission", () => {
       statusCode: 409,
       body: { error: "scanner_no_candidates" },
     });
-    expect(isMarketAdmittedMock).toHaveBeenCalledWith("UNKNOWN-PERP");
+    expect(isMarketAdmittedMock).toHaveBeenCalledWith("UNKNOWN-PERP", "pacifica");
     expect(getSessionMock).not.toHaveBeenCalled();
     expect(restoreSecurityMock).not.toHaveBeenCalled();
     expect(updateBotMock).not.toHaveBeenCalled();

@@ -126,7 +126,7 @@ describe('U12 durable automatic money ownership',()=>{
   });
   it('refuses account subsidy and silent debt expansion even in an opted-in top-up executor',async()=>{
     const i=automatic({action:'topup',amountRaw:'0',collateralRaw:'20',consent:{accountCollateral:true,reserve:true,deployBorrowed:false},automation:{kind:'defender',targetFinalDebtRaw:null}});
-    let sends=0;const borrow=phoenixLendLeg('borrowMoreOnExistingBotPosition',async()=>{sends++;return {success:true};});
+    let sends=0;const borrow=phoenixLendLeg('borrowMoreOnExistingBotPosition',async(_p:{botPublicKey:string})=>{sends++;return {success:true};});
     const service=new PhoenixBorrowService(store,io({authorizeAutomatic:async()=>{}}),policy,()=>now,
       {runPerbotCollateralTopUp:async(p:any)=>borrow({botPublicKey:p.botPublicKey})} as any);
     await expect(service.run(i)).rejects.toThrow('cannot borrow');expect(sends).toBe(0);

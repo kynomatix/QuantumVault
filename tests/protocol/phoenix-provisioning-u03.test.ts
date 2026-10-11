@@ -133,14 +133,28 @@ describe('U03 durable allocation and recovery on isolated PostgreSQL', () => {
   });
   it('releases a conclusively expired absent submission for a fresh attempt', async () => {
     io.submit.mockRejectedValueOnce(new Error('EXAMPLE-submit-timeout'));
-    io.confirm.mockResolvedValueOnce('unknown');
     const pending = await provisioner().create(request());
+    expect(pending.code).toBe('submission_unknown');
+    expect(io.confirm).not.toHaveBeenCalled();
+    expect(io.submit).toHaveBeenCalledTimes(1);
     const op = (await operations.read(pending.botId!, request().ownerWallet, pending.operationId!)).operation;
     io.confirm.mockResolvedValueOnce('expired');
     expect((await provisioner().resume(op)).code).toBe('chain_expired');
     expect(io.confirm).toHaveBeenLastCalledWith(expect.any(String), op.intent.identity, String(lifetime.lastValidBlockHeight));
-    expect((await provisioner().create(request())).code).toBe('completed');
+    expect(io.submit).toHaveBeenCalledTimes(1);
+    // An expired signature remains claimed: a fresh attempt needs a fresh lifetime.
+    expect((await provisioner().create(request())).code).toBe('submission_unknown');
+    expect(io.submit).toHaveBeenCalledTimes(1);
+    const freshLifetime={blockhash:key(17).publicKey.toBase58(),lastValidBlockHeight:200};
+    io.lifetime.mockResolvedValueOnce(freshLifetime);
+    const completed=await provisioner().create(request());
+    expect(completed.code).toBe('completed');
+    expect(completed.botId).toBe(pending.botId);
     expect(io.submit).toHaveBeenCalledTimes(2);
+    expect(io.confirm).toHaveBeenLastCalledWith(expect.any(String),op.intent.identity,String(freshLifetime.lastValidBlockHeight));
+    const attempts=(await pool.query('SELECT signature,blockhash FROM phoenix_operation_attempts ORDER BY attempt_number')).rows;
+    expect(attempts.map(a=>a.blockhash)).toEqual([lifetime.blockhash,freshLifetime.blockhash]);
+    expect(new Set(attempts.map(a=>a.signature)).size).toBe(2);
   });
   it('reconciles an ambiguous submit after restart without re-signing or resending, even with new risk disabled', async () => {
     io.submit.mockRejectedValue(new Error('EXAMPLE-timeout-after-broadcast'));

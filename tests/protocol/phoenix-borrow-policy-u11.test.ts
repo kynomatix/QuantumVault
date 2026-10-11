@@ -6,7 +6,6 @@ import { assertBorrowSnapshot, authorizeDebtDeployment, borrowHash, cappedRepaym
 import { phoenixBorrowCapabilities, createPhoenixBorrowRuntime } from '../../server/protocol/phoenix/borrow-runtime';
 import { assessPhoenixEmpty, PHOENIX_RESIDUAL_DOMAINS } from '../../server/protocol/phoenix/lifecycle';
 import { phoenixLendLeg, withPhoenixLendContext } from '../../server/vault/phoenix-lend-context';
-import { createPhoenixBorrowRuntime } from '../../server/protocol/phoenix/borrow-runtime';
 
 const account = Keypair.fromSeed(new Uint8Array(32).fill(8)).publicKey.toBase58();
 describe('U11 receipt-bound post-borrow handoff',()=>{

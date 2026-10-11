@@ -25,7 +25,7 @@ function harness(killAt?: 'prepare'|'lifetime'|'signer'|'journal') {
     prepare:vi.fn(async(i,admission)=>{row={id:'EXAMPLE-order',intent:i,intent_hash:'EXAMPLE-intent-hash',state:'admitted',revision:0,data:{admission}};
       if(killAt==='prepare')kill();return {record:structuredClone(row),created:true};}),
     change:vi.fn(async(r,state,patch)=>{row={...r,state,revision:r.revision+1,data:{...r.data,...patch}};
-      if(killAt==='journal'&&state==='submission_pending')kill();return structuredClone(row);})};
+      if(killAt==='journal'&&state==='submission_pending')kill();return structuredClone(row!);})};
   const io:PhoenixOrderIO={snapshot:vi.fn(async()=>structuredClone(snapshot)),fund:vi.fn(),
     lifetime:vi.fn(async()=>{if(killAt==='lifetime')kill();return lifetime;}),blockHeight:vi.fn(async()=>400),
     withSigner:vi.fn(async(_i,fn)=>{if(killAt==='signer')kill();return fn(new Uint8Array());}),

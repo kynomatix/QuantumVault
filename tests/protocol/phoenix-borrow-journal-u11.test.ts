@@ -195,7 +195,13 @@ describe('U11 durable lender composition',()=>{
   });
   it('refuses queued repayment cash',async()=>{
     let sends=0;const base=io();const i=intent({action:'repay'});
-    const executors={repayPartialOnExistingBotPosition:async()=>{sends++;return {success:true};}} as LendExecutors;
+    const unexpectedExecutor=async()=>{throw new Error('Unexpected lender executor');};
+    const executors:LendExecutors={
+      runPerbotCarveOpen:unexpectedExecutor,runPerbotGrowLoan:unexpectedExecutor,
+      runPerbotCollateralTopUp:unexpectedExecutor,runPerbotRemoveCollateral:unexpectedExecutor,
+      runPerbotUnwindClose:unexpectedExecutor,
+      repayPartialOnExistingBotPosition:async()=>{sends++;return {success:true,signature:'EXAMPLE-signature'};},
+    };
     const source={...base,snapshot:async(i:PhoenixBorrowIntent)=>({...await base.snapshot(i),walletUsdcRaw:'0',queuedUsdcRaw:'1000'})};
     await expect(new PhoenixBorrowService(store,source,policy,()=>now,executors).run(i)).rejects.toThrow('Settled');expect(sends).toBe(0);
   });

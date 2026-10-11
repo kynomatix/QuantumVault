@@ -451,7 +451,7 @@ describe("go-live fresh accept path", () => {
       derivationIndex: 4,
       derivationPathVersion: 1,
       ambiguous: false,
-      reservationClaimToken: "reservation-token",
+      reservationClaimToken: "EXAMPLE",
       provisionMeta: { funded: true, fundedAmount: 100, wasNewAccount: false, depositTxSignature: "tx1" },
     });
     return pendingKey;
@@ -499,7 +499,7 @@ describe("go-live fresh accept path", () => {
       walletAddress: WALLET,
       protocol: "pacifica",
       protocolSubaccountId: "SUB_PUB",
-      claimToken: "reservation-token",
+      claimToken: "EXAMPLE",
     });
     expect(updateBotMock.mock.invocationCallOrder[0])
       .toBeLessThan(finalizeGoLiveReservationMock.mock.invocationCallOrder[0]);
@@ -524,7 +524,7 @@ describe("go-live fresh accept path", () => {
       derivationIndex: 4,
       derivationPathVersion: 1,
       ambiguous: false,
-      reservationClaimToken: "reservation-token",
+      reservationClaimToken: "EXAMPLE",
       provisionMeta: { funded: false, fundedAmount: 0, warning: "transfer failed" },
     });
     updateBotMock.mockImplementation(async (_id: string, updates: any) => ({ ...makeBot(), ...updates }));
@@ -595,7 +595,7 @@ describe("go-live fresh accept path", () => {
     expect(sweepMock.mock.calls[0][0].agentPublicKey).toBeNull();
     expect(markStuckMock).toHaveBeenCalledWith(expect.objectContaining({
       agentPublicKey: "AGENT_PUB",
-      claimToken: "reservation-token",
+      claimToken: "EXAMPLE",
     }));
   });
 
@@ -631,7 +631,7 @@ describe("go-live idempotent retry (subaccount + key already persisted)", () => 
 
   it.each([
     { status: "stuck_funds", claimToken: null, agentPublicKey: "AGENT_PUB" },
-    { status: "reserving", claimToken: "reservation-token", agentPublicKey: "OTHER_AGENT" },
+    { status: "reserving", claimToken: "EXAMPLE", agentPublicKey: "OTHER_AGENT" },
     { status: "reserving", claimToken: null, agentPublicKey: "AGENT_PUB" },
   ])("blocks retry when the protocol marker is not the exact resumable lease ($status)", async (marker) => {
     getAiTraderBotMock.mockResolvedValue(provisionedBot());
@@ -657,7 +657,7 @@ describe("go-live idempotent retry (subaccount + key already persisted)", () => 
       protocol: "pacifica",
       protocolSubaccountId: "SUB_PUB",
       status: "reserving",
-      claimToken: "reservation-token",
+      claimToken: "EXAMPLE",
       agentPublicKey: "AGENT_PUB",
     }]);
 
@@ -672,7 +672,7 @@ describe("go-live idempotent retry (subaccount + key already persisted)", () => 
       walletAddress: WALLET,
       protocol: "pacifica",
       protocolSubaccountId: "SUB_PUB",
-      claimToken: "reservation-token",
+      claimToken: "EXAMPLE",
     });
   });
 
@@ -925,13 +925,14 @@ describe('U14 Phoenix go-live route boundary', () => {
   expect(r.statusCode).toBe(503); expect(getWalletMock).not.toHaveBeenCalled(); expect(provisionMock).not.toHaveBeenCalled();
  });
  it('delegates graduation to the shared Phoenix service and never provisions a Pacifica subaccount', async () => {
-  process.env.PHOENIX_AI_LIVE_ENABLED = 'true';
   const bot = makeBot({ protocol: 'phoenix' }), graduate = vi.fn(async () => ({ ...bot, paperMode: false }));
+  const { grantPhoenixAiCanary } = await import('../helpers/phoenix-rollout');
+  grantPhoenixAiCanary(bot.walletAddress, [bot.id]);
   installPhoenixAiTrader({ graduate } as any); getAiTraderBotMock.mockResolvedValue(bot);
   try {
    const r = await invoke(routes, GO_LIVE, goLiveReq()); expect(r.statusCode).toBe(200);
    expect(graduate).toHaveBeenCalledTimes(1); expect(getWalletMock).not.toHaveBeenCalled(); expect(provisionMock).not.toHaveBeenCalled();
-  } finally { installPhoenixAiTrader(null); delete process.env.PHOENIX_AI_LIVE_ENABLED; }
+  } finally { installPhoenixAiTrader(null); vi.unstubAllEnvs(); }
  });
 });
 

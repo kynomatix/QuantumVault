@@ -17,7 +17,8 @@ vi.mock('../../server/error-log',()=>({recordCriticalError:vi.fn()}));
 vi.mock('../../server/signal-bot-leverage-admission',()=>({checkSignalBotLeverageAdmission:vi.fn()}));
 import { queueTradeRetry } from '../../server/trade-retry-service';
 const job={botId:'EXAMPLE-bot',walletAddress:'EXAMPLE-owner',market:'SOL',side:'long' as const,size:1,
-  priority:'normal' as const,protocol:'pacifica' as const,subAccountId:0};
+  priority:'normal' as const,protocol:'pacifica' as const,subAccountId:0,
+  agentPublicKey:'EXAMPLE-agent',slippageBps:50,reduceOnly:false};
 beforeEach(()=>{vi.clearAllMocks();mocks.getWallet.mockResolvedValue(null);mocks.createTradeRetryJob.mockResolvedValue({id:'EXAMPLE-retry'});});
 describe('U16 Pacifica retry ingress regression',()=>{
   it('queues Pacifica on a transient lookup failure with guarded defaults',async()=>{
