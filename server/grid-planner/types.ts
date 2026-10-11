@@ -1,0 +1,42 @@
+import type { GridGeometryInput, GridPlan, PairFee } from '../grid-bot/engine-types';
+import type { ProtocolMarket } from '../protocol/protocol-types';
+import type { ProvenancedOHLCV } from '../lab/datafeed';
+
+export type Fact<T> = { state: 'available'; value: T } | { state: 'unavailable'; reason: string };
+export interface PlannerMarket {
+  market: string; protocolSymbol: string; name: string;
+  constraints: Fact<{ tick: string; lot: string; minimumQuote: string; observedAt: number; expiresAt: number;
+    maxLeverage: Fact<string>; maximumQuote: Fact<string>; priceBounds: Fact<{ minimum: string; maximum: string }>;
+    restrictions: Fact<string>; source: '/info'; venue: 'pacifica' }>;
+  reference: Fact<{ price: string; observedAt: number; expiresAt: number; label: 'Cached Pacifica book reference price' }>;
+}
+export interface PlannerDeps {
+  getMarkets(): Promise<ProtocolMarket[]>;
+  cachedReference(market: string): { price: number; observedAt: number | null } | null;
+  candles(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<ProvenancedOHLCV[]>;
+  now(): number;
+}
+export interface PlannerQuery {
+  market: string; side: 'long' | 'short'; lower: string; upper: string; intervals: number;
+  entryScale: GridGeometryInput['entryScale']; profitScale: GridGeometryInput['profitScale']; seed: boolean;
+  leverage: string; investment: string; stop: string; fee: string | null;
+}
+export interface PlannerPreview {
+  state: 'diagnostic' | 'hypothetical_checks_passed' | 'rejected' | 'unavailable';
+  reasons: string[]; market: PlannerMarket; retrievedAt: number; validForMs: number;
+  requestedPlan: GridPlan | null; minimumPlan: GridPlan | null;
+  minimum: Fact<string>; assumedMinimum: Fact<string>; feeRows: PairFee[];
+  fee: { state: 'unknown' } | { state: 'assumption'; rate: string; label: 'Your assumption — not a venue quote' };
+  stop: { state: 'unavailable'; reason: string };
+  policy: typeof PLANNER_POLICY;
+}
+export const PLANNER_POLICY = {
+  source: 'Owner runtime policy 2026-09-09; H.5 capacity ruling 2026-09-28',
+  ordinaryWindow: 20, requiredAvailableSlots: 25, reserveSlots: 5, maximumIntervals: 100, transportBatch: 10,
+  liveAvailableSlots: { state: 'unavailable', reason: 'No account inventory is read by the Planner' },
+  venueRestingMaximum: { state: 'unavailable', reason: 'Not established by the transport batch limit' },
+  seedTakerFee: { state: 'unavailable', reason: 'No venue fee quote is read by the Planner' },
+} as const;
+export type PlannerChart = { state: 'available'; market: string; timeframe: string; requestedBars: number;
+  actualBars: number; partial: boolean; retrievedAt: number; cacheInsertedAt: number; validForMs: number;
+  candles: ProvenancedOHLCV[] } | { state: 'unavailable'; reason: string };

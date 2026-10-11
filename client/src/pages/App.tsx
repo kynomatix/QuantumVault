@@ -126,6 +126,7 @@ import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
 import { AiTraderDrawer } from '@/components/AiTraderDrawer';
+import { GridPlannerCard } from '@/components/grid-planner/GridPlannerCard';
 import { TradeHistoryModal, resolveTradePriceDisplay } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
@@ -3675,25 +3676,7 @@ export default function AppPage() {
                           </div>
                         </div>
 
-                        <div
-                          className="gradient-border p-5 noise flex flex-col gap-3 opacity-60 select-none cursor-not-allowed"
-                          aria-hidden="true"
-                          data-testid="card-grid-bot-coming-soon"
-                        >
-                          <div className="flex items-start justify-between">
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-muted/50 to-muted/30 flex items-center justify-center flex-shrink-0">
-                                <BarChart3 className="w-5 h-5 text-muted-foreground" />
-                              </div>
-                              <div>
-                                <h3 className="font-semibold">Grid Bot</h3>
-                                <p className="text-xs text-muted-foreground">Automated grid trading</p>
-                              </div>
-                            </div>
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Coming soon</span>
-                          </div>
-                          <p className="text-sm text-muted-foreground">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
-                        </div>
+                        <GridPlannerCard authenticated={sessionConnected} identity={publicKeyString} />
                       </div>
 
                       {/* Truthful state for the bot lists: if neither list has

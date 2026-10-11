@@ -1,0 +1,89 @@
+import type { Express, Request, Response, RequestHandler } from 'express';
+import type { ProtocolMarket } from '../protocol/protocol-types';
+import type { PlannerDeps, PlannerQuery } from './types';
+import { PlannerCharts } from './chart';
+import { marketSnapshot } from './market-snapshot';
+import { previewGrid, validatePreviewQuery } from './preview';
+
+export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHandler,
+  loadDeps: () => Promise<PlannerDeps> = async () => (await import('./default-deps')).defaultPlannerDeps,
+  enabled = process.env.GRID_PLANNER_ENABLED === 'true') {
+  if (!enabled) return;
+  let depsPromise: Promise<PlannerDeps> | undefined, charts: PlannerCharts | undefined;
+  let metadata: { rows: ProtocolMarket[]; observedAt: number } | undefined;
+  let metadataJob: Promise<ProtocolMarket[]> | undefined, lastAttempt = -Infinity;
+  let previewStarts: number[] = [];
+  let activeRequests = 0;
+  const dependencies = () => depsPromise ??= loadDeps();
+  const membership = (deps: PlannerDeps): Promise<ProtocolMarket[]> => {
+    const now = deps.now();
+    if (metadata && now >= metadata.observedAt && now - metadata.observedAt < 300_000) return Promise.resolve(metadata.rows);
+    if (metadataJob) return metadataJob;
+    if (now - lastAttempt < 300_000) return Promise.reject(new Error('Market metadata unavailable; refresh later'));
+    lastAttempt = now;
+    metadataJob = Promise.resolve().then(() => deps.getMarkets()).then(rows => {
+      metadata = { rows: rows.slice(0, 512), observedAt: deps.now() }; return metadata.rows;
+    }).catch(() => { metadata = undefined; throw new Error('Pacifica market metadata unavailable'); })
+      .finally(() => { metadataJob = undefined; });
+    return metadataJob;
+  };
+  const boundedMetadata = async (deps: PlannerDeps) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { return await Promise.race([membership(deps), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Market metadata deadline exceeded')), 15_000);
+    })]); } finally { clearTimeout(timer); }
+  };
+  const route = (keys: string[], handler: (req: Request, res: Response, deps: PlannerDeps) => Promise<void>) =>
+    async (req: Request, res: Response) => {
+      res.set('Cache-Control', 'no-store');
+      if (Object.keys(req.query).some(k => !keys.includes(k)) || Object.values(req.query).some(v => typeof v !== 'string' || v.length > 80)) {
+        res.status(400).json({ state: 'unavailable', reason: 'Invalid query fields' }); return;
+      }
+      // Bound callers before metadata work, including requests sharing one upstream job.
+      if (activeRequests >= 10) { res.status(503).json({ state: 'unavailable', reason: 'Planner is busy; refresh later' }); return; }
+      activeRequests++;
+      try { await handler(req, res, await dependencies()); }
+      catch (error) { if (!res.destroyed) res.status(503).json({ state: 'unavailable', reason: error instanceof Error ? error.message : 'Planner unavailable' }); }
+      finally { activeRequests--; }
+    };
+  app.get('/api/grid-planner/status', requireWallet, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (Object.keys(req.query).length) return res.status(400).json({ state: 'unavailable', reason: 'Status accepts no query fields' });
+    res.json({ enabled: true, name: 'Grid Planner', planningOnly: true });
+  });
+  app.get('/api/grid-planner/markets', requireWallet, route([], async (_req, res, deps) => {
+    const rows = await boundedMetadata(deps);
+    res.json({ state: 'available', markets: rows.map(row => marketSnapshot(row, deps)), retrievedAt: deps.now() });
+  }));
+  app.get('/api/grid-planner/chart', requireWallet, route(['market', 'timeframe', 'bars'], async (req, res, deps) => {
+    const { market, timeframe, bars } = req.query;
+    if (typeof market !== 'string' || !['15m', '1h', '4h'].includes(String(timeframe)) || !['100', '200'].includes(String(bars))) {
+      res.status(400).json({ state: 'unavailable', reason: 'Choose market, 15m/1h/4h and 100/200 bars' }); return;
+    }
+    const row = (await boundedMetadata(deps)).find(r => r.internalSymbol === market);
+    if (!row) { res.status(404).json({ state: 'unavailable', reason: 'Unknown Pacifica market' }); return; }
+    const controller = new AbortController(), onClose = () => controller.abort();
+    res.on('close', onClose);
+    try {
+      charts ??= new PlannerCharts(deps);
+      const result = await charts.read(market, String(timeframe), Number(bars), controller.signal);
+      if (!res.destroyed) res.status(result.state === 'available' ? 200 : 503).json(result);
+    } finally { res.off('close', onClose); }
+  }));
+  app.get('/api/grid-planner/preview', requireWallet, route(['market', 'side', 'lower', 'upper', 'intervals', 'entryScale', 'profitScale', 'seed', 'leverage', 'investment', 'stop', 'fee'], async (req, res, deps) => {
+    const raw = req.query;
+    if (!['true', 'false'].includes(String(raw.seed)) || !/^(?:[1-9]\d?|100)$/.test(String(raw.intervals)) || typeof raw.market !== 'string') {
+      res.status(400).json({ state: 'unavailable', reason: 'Invalid market, seed or interval count' }); return;
+    }
+    const q = { ...raw, intervals: Number(raw.intervals), seed: raw.seed === 'true', fee: raw.fee === undefined || raw.fee === '' ? null : raw.fee } as unknown as PlannerQuery;
+    const invalid = validatePreviewQuery(q);
+    if (invalid) { res.status(400).json({ state: 'unavailable', reason: invalid }); return; }
+    const now = deps.now(); previewStarts = previewStarts.filter(time => now - time < 60_000);
+    if (previewStarts.length >= 30) { res.status(503).json({ state: 'unavailable', reason: 'Preview is busy; refresh later' }); return; }
+    previewStarts.push(now);
+    const row = (await boundedMetadata(deps)).find(r => r.internalSymbol === q.market);
+    if (!row) { res.status(404).json({ state: 'unavailable', reason: 'Unknown Pacifica market' }); return; }
+    // Freshness is checked again after all asynchronous work, directly before serialization.
+    res.json(previewGrid(q, marketSnapshot(row, deps), deps.now()));
+  }));
+}

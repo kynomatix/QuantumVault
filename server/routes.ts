@@ -1705,6 +1705,7 @@ import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotific
 import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { registerAiTraderRoutes } from "./ai-trader/routes";
+import { registerGridPlannerRoutes } from "./grid-planner/routes";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptMnemonicForStorage, encryptAgentKeyV3, encryptBotSubaccountKeyV3, encryptPooledSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, isCollateralRetryError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
@@ -6476,7 +6477,7 @@ export async function registerRoutes(
   };
 
   const requireWallet = (req: any, res: any, next: any) => {
-    const headerWallet = req.query.wallet || req.body.walletAddress || req.headers['x-wallet-address'];
+    const headerWallet = req.query.wallet || req.body?.walletAddress || req.headers['x-wallet-address'];
     const sessionWallet = req.session?.walletAddress;
     
     // Debug logging for close-position requests
@@ -6497,6 +6498,8 @@ export async function registerRoutes(
     req.walletAddress = sessionWallet;
     next();
   };
+
+  registerGridPlannerRoutes(app, requireWallet);
 
   // Helper to generate a unique referral code
   const generateReferralCode = (): string => {
