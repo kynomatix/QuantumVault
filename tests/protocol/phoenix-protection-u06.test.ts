@@ -98,6 +98,11 @@ describe('U06 native protection authority and bounded packets', () => {
   it('encodes the SDK account order, explicit enums and bounded prices', () => {
     const c = desiredProtection(intent().protection!, 'long', '200', '15000')[1];
     const ix = protectionInstruction(request(), pin, c);
+    // Source-derived golden vector from @ellipsis-labs/rise 0.6.1:
+    // sourceCommitHash: 573b773a6a7b38f941aed3a6f0602bc648346114
+    // https://github.com/Ellipsis-Labs/rise-public/blob/573b773a6a7b38f941aed3a6f0602bc648346114/ts/src/primitives/ConditionalOrder/codec.ts
+    // asset=3, greater=None, less=Some(LessThan,Ask,IOC,14000,13860), lots=Some(200), percent=None.
+    expect([...ix.data]).toEqual([65,108,83,129,76,193,92,143,3,0,0,0,0,1,1,1,0,176,54,0,0,0,0,0,0,36,54,0,0,0,0,0,0,1,200,0,0,0,0,0,0,0,0]);
     expect(ix.data.subarray(0, 8)).toEqual(createHash('sha256').update('global:place_position_conditional_order').digest().subarray(0, 8));
     expect(ix.data.readUInt32LE(8)).toBe(3); expect([...ix.data.subarray(12, 17)]).toEqual([0, 1, 1, 1, 0]);
     expect(ix.data.readBigUInt64LE(17)).toBe(14000n); expect(ix.data.readBigUInt64LE(25)).toBe(13860n);

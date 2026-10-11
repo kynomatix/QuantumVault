@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
+import { Keypair } from '@solana/web3.js';
 import { PhoenixOrderStore } from '../../server/protocol/phoenix/order-store';
 import { PhoenixOperationStore, type PhoenixIntent } from '../../server/protocol/phoenix/operation-store';
 import { admitPhoenixOrder } from '../../server/protocol/phoenix/order-contract';
@@ -119,6 +120,20 @@ describe('Phoenix order durable authority in isolated PostgreSQL', () => {
     await expect(funding.prepare({ ...linked, requestKey: 'EXAMPLE-over-budget', amountBaseUnits: '151606050',
       funding: { ...linked.funding!, grossBaseUnits: '151606050' } })).rejects.toThrow('budget');
     expect((await orders.change(claim, 'signing')).state).toBe('signing');
+  });
+  it('combines unparented wallet and deposit budgets and releases failed legs', async () => {
+    const a=authority(); a.entry!.freeMarginMicros='0'; a.entry!.fundableMicros='200000000';
+    const first=await orders.prepare(intent(),admitPhoenixOrder(intent(),a,now));
+    const claim=await orders.change(first.record,'funding');
+    const cap=BigInt(claim.data.admission!.fundingShortfallMicros);
+    const linked: PhoenixIntent={...operation(),kind:'transfer',executionOrderId:claim.id,destination:identity.authorityWalletAddress,amountBaseUnits:cap.toString(),
+      funding:{leg:'wallet_funding',sourceWallet:Keypair.fromSeed(new Uint8Array(32).fill(50)).publicKey.toBase58(),grossBaseUnits:cap.toString(),minimumBaseUnits:'1',
+        maxGasLamports:'10000',quoteSource:'EXAMPLE-source',quoteReference:'EXAMPLE-quote',quoteExpiresAt:now+30000}};
+    const wallet=await funding.prepare(linked);
+    const deposit={...linked,kind:'deposit' as const,destination:identity.traderAccountAddress,requestKey:'EXAMPLE-deposit',amountBaseUnits:'1',funding:{...linked.funding!,leg:'deposit' as const,sourceWallet:identity.authorityWalletAddress,grossBaseUnits:'1'}};
+    await expect(funding.prepare(deposit)).rejects.toThrow('budget');
+    await pool.query("UPDATE phoenix_operations SET state='failed' WHERE id=$1",[wallet.operation.id]);
+    expect((await funding.prepare(deposit)).created).toBe(true);
   });
   it('persists immutable globally unique signatures before submission and survives repository restart', async () => {
     const first = await orders.prepare(intent(), admission());

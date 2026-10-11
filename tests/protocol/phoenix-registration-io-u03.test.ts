@@ -8,7 +8,7 @@ const metadata = () => ({ traderPda: identity.traderAccountAddress, traderOnboar
   txFeePayer: identity.authorityWalletAddress, maxPositions: 32, includeRegisterTrader: true });
 const fetcher = vi.fn();
 const rpc = { getLatestBlockhash: vi.fn(), getMinimumBalanceForRentExemption: vi.fn(), getFeeForMessage: vi.fn(),
-  getBalance: vi.fn(), getAccountInfo: vi.fn(), simulateTransaction: vi.fn(), getSignatureStatuses: vi.fn() };
+  getBalance: vi.fn(), getAccountInfo: vi.fn(), simulateTransaction: vi.fn(), getSignatureStatuses: vi.fn(), getBlockHeight: vi.fn() };
 const signer = vi.fn();
 const io = () => createPhoenixRegistrationIO(rpc as any, pin, signer, fetcher);
 const transaction = () => prepareRegistration(instructions(), identity, pin, 32, lifetime);
@@ -26,6 +26,19 @@ beforeEach(() => {
   rpc.simulateTransaction.mockResolvedValue(simulation());
 });
 describe('U03 current API and RPC adapter (no network)', () => {
+  it.each([401,403])('keeps public eligibility HTTP %s unknown', async status => {
+    fetcher.mockResolvedValue(response({}, status));
+    expect(await io().eligibility()).toBe('unknown');
+  });
+  it('expires only an absent signature beyond its last valid height', async () => {
+    rpc.getSignatureStatuses.mockResolvedValue({value:[null]});
+    rpc.getBlockHeight.mockResolvedValue(100);
+    expect(await io().confirm('EXAMPLE-signature',identity,'100')).toBe('unknown');
+    rpc.getBlockHeight.mockResolvedValue(101);
+    expect(await io().confirm('EXAMPLE-signature',identity,'100')).toBe('expired');
+    rpc.getSignatureStatuses.mockResolvedValueOnce({value:[null]}).mockResolvedValueOnce({value:[{confirmationStatus:'confirmed',err:null}]});
+    expect(await io().confirm('EXAMPLE-signature',identity,'100')).toBe('unknown');
+  });
   it.each([
     [{ gated: true, active: true, runningState: 'active' }, 'gated'],
     [{ gated: false, active: true, runningState: 'active' }, 'eligible'],

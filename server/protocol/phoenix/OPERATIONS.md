@@ -48,6 +48,10 @@ Run this drill with fake IO and the focused FRACTAL files first. A real-money dr
 
 ## Health and metrics
 
+Repay and unwind still require a readable, fresh, complete lender snapshot at
+broadcast. Disabling new risk does not bypass lender observations, authenticated
+custody, original consent, repayment limits or write-ahead recovery journals.
+
 The existing /health and /api/health HTTP 200/application readiness contract is preserved. The dependency-health-record projection adds dependencies.phoenix: adapter/SDK pin version, eligibility, RPC/API/WS timestamps/freshness, bounded queue count/oldest age/drops, unresolved journals, protection gaps and debt health. Application ready stays separate from venueReady/custodyReady. Request handlers only read cached bounded observations: no probes, DB calls, signatures, errors, wallets, bot IDs, endpoints or policy JSON.
 
 The public reader feeds validated API/WS observations; unknown/stale observations cannot become healthy zeroes. SDK verification is pin_only, not installed/chain attestation. The complete custody cohort sampler is deferred until the native account/queue/journal/protection/debt bindings exist. Its explicit trusted record interface accepts a complete fixed-field sample and refuses partial/invalid data. Until installed, RPC/custody/aggregate metrics remain unknown/null and venueReady remains false. These metrics are operational signals, never execution authorization.

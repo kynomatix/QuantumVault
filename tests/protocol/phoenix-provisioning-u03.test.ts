@@ -131,6 +131,17 @@ describe('U03 durable allocation and recovery on isolated PostgreSQL', () => {
     expect(row).toMatchObject({ subaccount_status: 'active', is_active: false, total_investment: '0' });
     expect((await provisioner().create(request())).code).toBe('completed'); expect(io.submit).toHaveBeenCalledTimes(1);
   });
+  it('releases a conclusively expired absent submission for a fresh attempt', async () => {
+    io.submit.mockRejectedValueOnce(new Error('EXAMPLE-submit-timeout'));
+    io.confirm.mockResolvedValueOnce('unknown');
+    const pending = await provisioner().create(request());
+    const op = (await operations.read(pending.botId!, request().ownerWallet, pending.operationId!)).operation;
+    io.confirm.mockResolvedValueOnce('expired');
+    expect((await provisioner().resume(op)).code).toBe('chain_expired');
+    expect(io.confirm).toHaveBeenLastCalledWith(expect.any(String), op.intent.identity, String(lifetime.lastValidBlockHeight));
+    expect((await provisioner().create(request())).code).toBe('completed');
+    expect(io.submit).toHaveBeenCalledTimes(2);
+  });
   it('reconciles an ambiguous submit after restart without re-signing or resending, even with new risk disabled', async () => {
     io.submit.mockRejectedValue(new Error('EXAMPLE-timeout-after-broadcast'));
     const pending = await provisioner().create(request()); expect(pending.code).toBe('submission_unknown');

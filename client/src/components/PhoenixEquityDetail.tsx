@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { PhoenixAccountingDetail } from '../../../server/protocol/phoenix/accounting-runtime';
+import type { PhoenixEquityDetailResponse } from '@shared/phoenix-accounting-detail';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { walletAuthHeaders } from '@/lib/queryClient';
@@ -21,7 +21,7 @@ function displayUsdc(micros?: string | null): string {
 export function PhoenixEquityDetail({ botId, walletAddress, visible }: {
   botId: string; walletAddress: string; visible: boolean;
 }) {
-  const [detail, setDetail] = useState<PhoenixAccountingDetail | null>(null);
+  const [detail, setDetail] = useState<PhoenixEquityDetailResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [snapshotKey, setSnapshotKey] = useState('');

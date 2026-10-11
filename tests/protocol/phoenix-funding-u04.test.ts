@@ -224,6 +224,18 @@ describe('U04 durable recovery on isolated PostgreSQL', () => {
     expect(fundingInstructions(i, pin)[1].data.readBigUInt64LE(8)).toBe(1000037n);
     io.quote.mockResolvedValueOnce({ ...quote, feeBaseUnits: '500000' }); await expect(service().create(i)).rejects.toThrow('changed');
     expect(io.withSigner).not.toHaveBeenCalled();
+    expect(await operations.fundingHistory(botId,owner)).toHaveLength(0);
+  });
+  it.each([0,100])('refuses boundary block height %s before signing', async height => {
+    io.blockHeight.mockResolvedValue(height);
+    await service().create(intent()).catch(()=>{});
+    expect(io.withSigner).not.toHaveBeenCalled(); expect(io.submit).not.toHaveBeenCalled();
+  });
+  it('rechecks block height after the durable claim before broadcast', async () => {
+    io.blockHeight.mockResolvedValueOnce(1).mockResolvedValueOnce(100);
+    await service().create(intent());
+    expect(io.submit).not.toHaveBeenCalled();
+    expect((await operations.fundingHistory(botId,owner))[0].state).toBe('submission_pending');
   });
   it.each(['gas', 'margin', 'expired', 'height', 'revoked'])('refuses %s before sending', async reason => {
     const i = intent(); const quote = await service().preview(i);

@@ -68,6 +68,8 @@ function rowBot(row: Record<string, any>): PhoenixBotIdentityColumns {
 /** U03/U04 persistence only. No signing, sending, RPC, registration or capability grant.
  * Uses a checked-out client for every transaction; no process-local locking.
  */
+export class PhoenixOwnershipError extends Error {}
+
 export class PhoenixOperationStore {
   constructor(private readonly pool: Pick<Pool, 'connect'>) {}
 
@@ -133,7 +135,7 @@ export class PhoenixOperationStore {
 
   private async lockBot(client: PoolClient, botId: string, ownerWallet: string) {
     const result = await client.query('SELECT * FROM trading_bots WHERE id = $1 AND wallet_address = $2 FOR UPDATE', [botId, ownerWallet]);
-    if (!result.rows[0]) throw new Error('Phoenix bot not owned');
+    if (!result.rows[0]) throw new PhoenixOwnershipError('Phoenix bot not owned');
     return phoenixIdentityFromBot(rowBot(result.rows[0]));
   }
 
@@ -188,9 +190,12 @@ export class PhoenixOperationStore {
             if (!active || active.id !== intent.executionOrderId || active.state !== 'funding' || active.intent.action !== 'entry'
               || !intent.funding || !['wallet_funding', 'deposit'].includes(intent.funding.leg)) throw new Error('Phoenix order excludes conflicting funding/park');
             const used = (await client.query(`SELECT COALESCE(sum((intent->'funding'->>'grossBaseUnits')::numeric),0)::text AS amount
-              FROM phoenix_operations WHERE bot_id=$1 AND intent->>'executionOrderId'=$2 AND intent->'funding'->>'leg'=$3`,
-              [intent.botId, active.id, intent.funding.leg])).rows[0].amount;
-            if (BigInt(used) + BigInt(intent.funding.grossBaseUnits) > BigInt(active.data.admission.fundingShortfallMicros)) throw new Error('Order funding budget exceeded');
+              FROM phoenix_operations WHERE bot_id=$1 AND intent->>'executionOrderId'=$2
+              AND state NOT IN ('failed','dropped') AND intent->'funding'->>'leg' IN ('wallet_funding','deposit')
+              AND intent->'funding'->>'parentOperationId' IS NULL`,
+              [intent.botId, active.id])).rows[0].amount;
+            const newSpend = intent.funding.parentOperationId ? 0n : BigInt(intent.funding.grossBaseUnits);
+            if (BigInt(used) + newSpend > BigInt(active.data.admission.fundingShortfallMicros)) throw new Error('Order funding budget exceeded');
           }
         } else if (intent.executionOrderId) throw new Error('Phoenix order schema unavailable');
       }
@@ -206,9 +211,10 @@ export class PhoenixOperationStore {
           const parent = await this.lockOperation(client, intent.botId, intent.ownerWallet, parentId);
           const expectedParent = ({ deposit: 'wallet_funding', unwrap: 'withdraw', wallet_return: 'unwrap' } as Record<string, string>)[intent.funding.leg];
           if (!expectedParent || parent.state !== 'completed' || parent.intent.funding?.leg !== expectedParent
+            || parent.intent.executionOrderId !== intent.executionOrderId
             || parent.intent.amountBaseUnits !== intent.funding.grossBaseUnits
             || !parent.observation?.funding) throw new Error('Funding parent not settled');
-          const consumed = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id = $1 AND intent->'funding'->>'parentOperationId' = $2`, [intent.botId, parentId]);
+          const consumed = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id = $1 AND intent->'funding'->>'parentOperationId' = $2 AND state NOT IN ('failed','dropped')`, [intent.botId, parentId]);
           if (consumed.rows.length) throw new Error('Funding parent already consumed');
         }
       }
@@ -341,6 +347,23 @@ export class PhoenixOperationStore {
       if (outcome) await client.query('UPDATE phoenix_operation_attempts SET state = $2 WHERE id = $1', [pending.rows[0].id, outcome]);
       const result = await client.query(`UPDATE phoenix_operations SET state = $2, observation = $3,
         revision = revision + 1, updated_at = now() WHERE id = $1 RETURNING *`, [operationId, state, retained]);
+      if (state === 'completed' && operation.intent.funding?.leg === 'deposit'
+        && operation.request_key === `consumer:deposit:${botId}`) {
+        // The subscription exists for recovery before funding; credit the public
+        // aggregate once, in the same transaction as the settled deposit.
+        await client.query(`WITH funded AS (
+          UPDATE bot_subscriptions s SET capital_invested=$3::numeric/1000000
+          FROM phoenix_operations registration
+          WHERE s.subscriber_bot_id=$1 AND s.subscriber_wallet_address=$2 AND s.capital_invested=0
+            AND registration.bot_id=$1 AND registration.kind='register' AND registration.state='completed'
+            AND registration.intent->'registration'->'consumer'->>'kind'='marketplace'
+            AND registration.intent->'registration'->'consumer'->>'sourcePublishedBotId'=s.published_bot_id
+            AND registration.intent->'registration'->'consumer'->>'initialFundingBaseUnits'=$3
+          RETURNING s.published_bot_id,s.capital_invested)
+          UPDATE published_bots p SET subscriber_count=p.subscriber_count+1,
+            total_capital_invested=p.total_capital_invested+funded.capital_invested
+          FROM funded WHERE p.id=funded.published_bot_id`, [botId, ownerWallet, operation.intent.amountBaseUnits]);
+      }
       return result.rows[0] as StoredPhoenixOperation;
     });
   }

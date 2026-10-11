@@ -17,7 +17,7 @@ import { parkingIntentForOrder } from '../../server/protocol/phoenix/parking-ord
 import { PHOENIX_PUBLIC_ADDRESSES } from '../../server/protocol/phoenix/sdk-boundary';
 import { authority, identity, intent, key, lifetime, now, pin } from '../helpers/phoenix-orders';
 
-function fixture(kind: 'park' | 'withdraw' = 'park') {
+function fixture(kind: 'park' | 'withdraw' | 'unpark' = 'park') {
   let r: ParkingRecord = { id: 'EXAMPLE-park-id', revision: 1, state: 'active', intent_hash: orderIntentHash('EXAMPLE-intent'),
     intent: { botId: intent().botId, ownerWallet: intent().ownerWallet, requestKey: 'EXAMPLE-park', identity,
       action: 'idle', maxUsdc: '100', destination: 'EXAMPLE-yield', mode: 'shortfall' },
@@ -51,6 +51,12 @@ function fixture(kind: 'park' | 'withdraw' = 'park') {
     setHistory: (value: StoredPhoenixOperation[]) => { history = value; }, disable: () => { enabled = false; } };
 }
 describe('U10 transfer boundary, mocked RPC/API only', () => {
+  it('classifies a snapshot failure before any durable send boundary as unsent', async () => {
+    const f=fixture(); f.snapshot.mockRejectedValueOnce(new Error('EXAMPLE-snapshot-outage'));
+    const {PhoenixParkingUnsent}=await import('../../server/protocol/phoenix/parking-service');
+    await expect(f.executor.submit(f.record(),f.leg())).rejects.toBeInstanceOf(PhoenixParkingUnsent);
+    expect(f.store.recordVaultAttempt).not.toHaveBeenCalled(); expect(f.vault.submit).not.toHaveBeenCalled();
+  });
   it('allows journaled vault unpark after the expansion gate is disabled', async () => {
     const f = fixture('unpark'); f.disable();
     await f.executor.submit(f.record(), f.leg());
@@ -64,6 +70,8 @@ describe('U10 transfer boundary, mocked RPC/API only', () => {
   });
   it('never broadcasts after losing attempt persistence acknowledgement', async () => {
     const f = fixture(); f.store.recordVaultAttempt.mockRejectedValue(new Error('EXAMPLE-lost-ack'));
+    const {PhoenixParkingUnsent}=await import('../../server/protocol/phoenix/parking-service');
+    await expect(f.executor.submit(f.record(),f.leg())).rejects.not.toBeInstanceOf(PhoenixParkingUnsent);
     await expect(f.executor.submit(f.record(), f.leg())).rejects.toThrow(); expect(f.vault.submit).not.toHaveBeenCalled();
   });
   it.each(['optout','gate'])('rechecks %s after preparing a transaction', async mode => {

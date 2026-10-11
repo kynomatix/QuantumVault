@@ -13,6 +13,17 @@ function proposal(f = defenseFacts()) {
   return d.intent;
 }
 describe('U12 autonomous debt policy',()=>{
+  it('considers opted-in repayment when top-up has no suggestion',()=>{
+    const f=defenseFacts(); f.suggestion=null;
+    expect(proposal(f).action).toBe('repay');
+  });
+  it('canonicalizes persisted attempt time before binding the request key',()=>{
+    const f=defenseFacts(); f.previousAttemptAt='2026-10-11T10:00:00+10:00';
+    const first=proposal(f).requestKey; f.previousAttemptAt='2026-10-11T00:00:00.000Z';
+    expect(proposal(f).requestKey).toBe(first);
+    f.previousAttemptAt='EXAMPLE-invalid-time';
+    expect(decidePhoenixDefense(f,now).action).toBe('needs_attention');
+  });
   it('keeps production disabled even with the environment switch and gates candidate actions independently',()=>{
     expect(phoenixDefenseCapabilities({PHOENIX_AUTO_DEFENSE_ENABLED:'true'})).toEqual({topup:false,repay:false});
     expect(autoDefenseProtocols({topup:false,repay:false})).toEqual(['flash']);

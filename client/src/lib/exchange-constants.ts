@@ -1,4 +1,5 @@
 import { tickerToMarket, getMaxLeverageFromTiers } from "@shared/leverage";
+import { getExchangeUiCapabilities } from './exchange-capabilities';
 
 // Re-export so existing consumers keep importing market normalization from here.
 export { tickerToMarket };
@@ -21,7 +22,6 @@ export function getMaxLeverage(ticker: string): number {
   return getMaxLeverageFromTiers(ticker);
 }
 
-import { getExchangeUiCapabilities } from './exchange-capabilities';
 
 export type ProtocolId = 'pacifica' | 'flash';
 

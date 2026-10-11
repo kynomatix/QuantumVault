@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 describe('U16 cached dependency health',()=>{
+  it('preserves stale public observations after a refresh failure',async()=>{
+    const h=await import('../../server/dependency-health-record');
+    h.recordPhoenixPublicHealth('api',1000,1000); h.recordPhoenixPublicHealth('ws',1000,1000);
+    h.recordPhoenixPublicHealth('api',null,1001); h.recordPhoenixPublicHealth('ws',1000,1001,'stale');
+    const s=h.phoenixDependencyHealth(1001);
+    expect(s.api.state).toBe('stale'); expect(s.ws.state).toBe('stale');
+    expect(s.api.observedAt).toBe(1000);
+    expect(s.adapterVersion).toBe('@ellipsis-labs/rise@0.6.1');
+  });
   beforeEach(()=>vi.resetModules());
   it('does not equate public API health or SDK pin with custody readiness',async()=>{
     const h = await import('../../server/dependency-health-record');

@@ -67,15 +67,36 @@ beforeEach(async () => {
 });
 
 describe('U09 durable consumer and lifecycle authority', () => {
+  it('credits marketplace totals once when the bound initial deposit is finalized', async () => {
+    const registration=await allocation.allocateAndDerive(baseRequest(),derive), botId=registration.bot_id;
+    await pool.query("UPDATE phoenix_operations SET state='completed' WHERE id=$1",[registration.id]);
+    const deposit:PhoenixIntent={botId,ownerWallet:baseRequest().ownerWallet,requestKey:`consumer:deposit:${botId}`,
+      kind:'deposit',identity:registration.intent.identity,mint:PHOENIX_PUBLIC_ADDRESSES.usdcMint,
+      destination:registration.intent.identity.traderAccountAddress,amountBaseUnits:'10000000',feeBaseUnits:'0',
+      funding:{leg:'deposit',sourceWallet:registration.intent.identity.authorityWalletAddress,grossBaseUnits:'10000000',
+        minimumBaseUnits:'1',maxGasLamports:'10000',quoteSource:'EXAMPLE-quote',quoteReference:'EXAMPLE-reference',quoteExpiresAt:Date.now()+30000}};
+    const prepared=await operations.prepare(deposit);
+    await operations.recordAttempt(botId,deposit.ownerWallet,prepared.operation.id,prepared.operation.revision,attempt());
+    const claimed=(await operations.read(botId,deposit.ownerWallet,prepared.operation.id)).operation;
+    const observation={source:'EXAMPLE-observer',reference:'EXAMPLE-finalized',attemptOutcome:'confirmed' as const,
+      fundingReceipt:{source:'EXAMPLE-observer',reference:'EXAMPLE-finalized',signature:attempt().signature,intentHash:claimed.intent_hash,
+        outcome:'settled' as const,finalized:true as const,slot:'100',observedAt:Date.now(),creditedBaseUnits:'10000000',
+        balances:{sourceWalletUsdc:'0',botWalletUsdc:'0',botWalletCollateral:'0',venueCollateral:'10000000',withdrawable:'10000000',queued:'0',destinationWalletUsdc:null}}};
+    await operations.observe(botId,deposit.ownerWallet,claimed.id,claimed.revision,'completed',observation);
+    await expect(operations.observe(botId,deposit.ownerWallet,claimed.id,claimed.revision,'completed',observation)).rejects.toThrow();
+    expect(Number((await pool.query('SELECT capital_invested FROM bot_subscriptions')).rows[0].capital_invested)).toBe(10);
+    const totals=(await pool.query('SELECT subscriber_count,total_capital_invested FROM published_bots')).rows[0];
+    expect(totals.subscriber_count).toBe(1); expect(Number(totals.total_capital_invested)).toBe(10);
+  });
   it('allocates one linked Phoenix subscriber across concurrent delivery and restart', async () => {
     const result = await Promise.all(Array.from({ length: 5 }, () => allocation.allocateAndDerive(baseRequest(), derive)));
     expect(new Set(result.map(r => r.id)).size).toBe(1);
     expect((await new PhoenixProvisioningStore(pool).allocateAndDerive(baseRequest(), derive)).id).toBe(result[0].id);
     const { rows: [subscription] } = await pool.query('SELECT * FROM bot_subscriptions');
-    expect(subscription).toMatchObject({ subscriber_bot_id: result[0].bot_id, status: 'paused', capital_invested: '10.0000000000000000' });
+    expect(subscription).toMatchObject({ subscriber_bot_id: result[0].bot_id, status: 'paused', capital_invested: '0' });
     const { rows: [bot] } = await pool.query('SELECT * FROM trading_bots WHERE id=$1', [result[0].bot_id]);
     expect(bot).toMatchObject({ active_protocol: 'phoenix', is_active: false, source_published_bot_id: 'EXAMPLE-published' });
-    expect((await pool.query('SELECT subscriber_count FROM published_bots')).rows[0].subscriber_count).toBe(1);
+    expect((await pool.query('SELECT subscriber_count FROM published_bots')).rows[0].subscriber_count).toBe(0);
   });
   it('binds consumer kind, budget and source immutably across JSONB replay', async () => {
     await allocation.allocateAndDerive(baseRequest(), derive);

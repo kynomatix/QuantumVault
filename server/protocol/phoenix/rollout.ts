@@ -29,12 +29,18 @@ export interface PhoenixRiskRequest {
 const integer = (v: unknown): v is string => typeof v === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(v) && !/[\r\n]/.test(v);
 const positive = (v: unknown): v is string => integer(v) && BigInt(v) > 0n;
 const label = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(v) && !/[\r\n]/.test(v);
+let cachedPolicyText: string | undefined;
+let cachedPolicy: PhoenixCanaryPolicy | null = null;
 export function readPhoenixCanaryPolicy(env: NodeJS.ProcessEnv = process.env, now = Date.now()): PhoenixCanaryPolicy | null {
+  const text = env.PHOENIX_CANARY_POLICY;
+  if (text === cachedPolicyText) return cachedPolicy && cachedPolicy.expiresAt > now
+    && cachedPolicy.expiresAt <= now + 86_400_000 ? cachedPolicy : null;
+  cachedPolicyText = text; cachedPolicy = null;
   try {
     if (!env.PHOENIX_CANARY_POLICY || env.PHOENIX_CANARY_POLICY.length > 8192) return null;
     const p = JSON.parse(env.PHOENIX_CANARY_POLICY) as PhoenixCanaryPolicy;
     if (p.version !== 1 || !label(p.authorizationId) || !label(p.ownerWallet)
-      || !Number.isSafeInteger(p.expiresAt) || p.expiresAt <= now || p.expiresAt > now + 86_400_000
+      || !Number.isSafeInteger(p.expiresAt)
       || !stages.includes(p.stage) || p.reviewedDeployment !== true || p.recoveryDrillPassed !== true
       || !Number.isInteger(p.maxBots) || p.maxBots < 1 || p.maxBots > 5
       || !Array.isArray(p.botIds) || !p.botIds.length || p.botIds.length > p.maxBots
@@ -43,7 +49,9 @@ export function readPhoenixCanaryPolicy(env: NodeJS.ProcessEnv = process.env, no
     const c = p.caps;
     if (!c || !label(c.collateralMint) || !positive(c.maxLeverage) || BigInt(c.maxLeverage) > 20n
       || ![c.maxRegistrationLamports,c.maxTransferUsdcMicros,c.maxExposureUsdcMicros,c.maxDebtUsdcMicros,c.maxParkUsdcMicros,c.maxCollateralRaw].every(positive)) return null;
-    return p;
+    Object.freeze(p.botIds); Object.freeze(p.acceptedUnits); Object.freeze(p.caps);
+    cachedPolicy = Object.freeze(p);
+    return p.expiresAt > now && p.expiresAt <= now + 86_400_000 ? p : null;
   } catch { return null; }
 }
 export function phoenixFeatureEnabled(action: PhoenixRiskAction, env: NodeJS.ProcessEnv = process.env, now = Date.now()): boolean {

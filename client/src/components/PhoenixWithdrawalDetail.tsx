@@ -87,6 +87,7 @@ export function PhoenixWithdrawalDetail({ activeProtocol, visible, botId, wallet
     {!history ? <p className="text-xs text-muted-foreground">Request history is unknown.</p> : operations.length === 0 ? <p className="text-xs text-muted-foreground">No funding requests reported.</p> : operations.slice(-5).reverse().map(operationRow)}
     {operations.length > 5 && <Button variant="outline" size="sm" onClick={() => setAllOpen(true)}>View all requests</Button>}
     <p className="text-xs text-muted-foreground">A queued or dropped request is not a successful withdrawal. Check its existing request before retrying. Recovery money actions are unavailable until the server enables them.</p>
+    <p className="text-xs text-muted-foreground">Queue release and fees require verified observations. A queued request does not establish when funds will reach your wallet.</p>
     <p className="text-xs text-muted-foreground">Released collateral must be unwrapped to USDC before it is wallet cash. Borrowing from an external lender is your choice, after reviewing measured delays and agreeing to keep a separate liquid repayment reserve. Queued withdrawals cannot repay a loan; repayment is not instant. Phoenix margin is not lender collateral.</p>
     <Dialog open={allOpen} onOpenChange={setAllOpen}>
       <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">

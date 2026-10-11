@@ -7,6 +7,7 @@ type Eligibility = 'eligible' | 'gated' | 'denied' | 'unknown';
 type DebtHealth = 'healthy' | 'attention' | 'unknown';
 const ttl = 120_000;
 let apiAt: number | null = null, wsAt: number | null = null;
+let apiFailed = false, wsFailed = false;
 export interface PhoenixCustodyHealthSample {
   complete: true; observedAt: number; rpcObservedAt: number | null; eligibility: Eligibility;
   executionBindingsReady: boolean; custodyVerified: boolean;
@@ -16,9 +17,10 @@ export interface PhoenixCustodyHealthSample {
 let custody: PhoenixCustodyHealthSample | null = null;
 const time = (v: unknown, now: number): v is number => Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= now;
 const count = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 1_000_000;
-export function recordPhoenixPublicHealth(kind: 'api' | 'ws', observedAt: number | null, now = Date.now()) {
+export function recordPhoenixPublicHealth(kind: 'api' | 'ws', observedAt: number | null, now = Date.now(), state: Freshness = observedAt === null ? 'stale' : 'fresh') {
   const value = time(observedAt,now) ? observedAt : null;
-  if (kind === 'api') apiAt = value; else wsAt = value;
+  if (kind === 'api') { apiAt = state === 'unknown' ? null : value ?? apiAt; apiFailed = state !== 'fresh'; }
+  else { wsAt = state === 'unknown' ? null : value ?? wsAt; wsFailed = state !== 'fresh'; }
 }
 /** Only a reviewed server-side complete cohort observer may supply this sample.
  * No client DTO or cached partial account observation is an aggregate source. */
@@ -43,10 +45,12 @@ export function phoenixDependencyHealth(now = Date.now()) {
   });
   const sample = observation(custody?.observedAt ?? null), fresh = sample.state === 'fresh';
   const api = observation(apiAt), ws = observation(wsAt), rpc = observation(custody?.rpcObservedAt ?? null);
+  if (apiFailed && api.state !== 'unknown') api.state = 'stale';
+  if (wsFailed && ws.state !== 'unknown') ws.state = 'stale';
   const custodyReady = fresh && rpc.state === 'fresh' && custody!.custodyVerified;
   const venueReady = custodyReady && custody!.executionBindingsReady && api.state === 'fresh' && custody!.eligibility === 'eligible'
     && custody!.protectionGaps === 0 && custody!.unresolvedJournals === 0 && custody!.queueDrops === 0 && custody!.debtHealth === 'healthy';
-  return { adapterVersion:'phoenix-u16/1', sdk:{package:PHOENIX_SDK_PIN.package,version:PHOENIX_SDK_PIN.version,
+  return { adapterVersion:`${PHOENIX_SDK_PIN.package}@${PHOENIX_SDK_PIN.version}`, sdk:{package:PHOENIX_SDK_PIN.package,version:PHOENIX_SDK_PIN.version,
     verification:'pin_only' as const}, venueReady, custodyReady,
     eligibility:fresh ? custody!.eligibility : 'unknown', rpc, api, ws, aggregate:sample,
     queue:{count:fresh ? custody!.queueCount : null,oldestAgeMs:fresh && custody!.queueOldestAt !== null ? now-custody!.queueOldestAt! : null,

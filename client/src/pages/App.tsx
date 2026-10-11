@@ -4457,7 +4457,7 @@ export default function AppPage() {
                               <Eye className="w-4 h-4 mr-2" />
                               Details
                             </Button>
-                            {!getExchangeUiCapabilities(bot.activeProtocol).subscribe ? <p className="text-xs text-muted-foreground">Phoenix subscriptions are unavailable.</p> : isSubscribed ? (
+                            {!getExchangeUiCapabilities(bot.activeProtocol).subscribe ? <p className="flex-1 text-xs text-muted-foreground">Phoenix subscriptions are unavailable.</p> : isSubscribed ? (
                               <Button 
                                 variant="outline"
                                 className="flex-1 hover:bg-destructive/10 hover:text-destructive hover:border-destructive/50"

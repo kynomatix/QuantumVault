@@ -27,7 +27,7 @@ export interface PhoenixAiRepository {
   graduate(expected: AiTraderBot, binding: PhoenixAiBinding, policyHmac: string): Promise<AiTraderBot | null>;
   open(bot: AiTraderBot, execution: PhoenixAiExecution, order: PhoenixOrderRecord): Promise<boolean>;
   noLand(bot: AiTraderBot, execution: PhoenixAiExecution): Promise<boolean>;
-  pause(bot: AiTraderBot, reason: string): Promise<void>;
+  recoverPrepared(bot: AiTraderBot, execution: PhoenixAiExecution): Promise<boolean>;
   unprotected(bot: AiTraderBot, execution: PhoenixAiExecution, order: PhoenixOrderRecord): Promise<void>;
   close(bot: AiTraderBot, execution: PhoenixAiExecution, result: Awaited<ReturnType<PhoenixSafetyService['close']>>): Promise<boolean>;
 }
@@ -181,6 +181,7 @@ export class PhoenixAiTraderService {
   async reconcile(bot: AiTraderBot): Promise<boolean> {
     const execution = await this.repository.execution(bot.id);
     if (!execution) return bot.status === 'idle';
+    if (bot.status === 'idle') return this.repository.recoverPrepared(bot, execution);
     const exit = await this.source.exit(bot, execution);
     if (exit && this.closed(execution, exit)) return this.repository.close(bot, execution, exit);
     // Recovery remains available with the AI entry gate disabled.

@@ -34,8 +34,9 @@ export function decidePhoenixDefense(f: PhoenixDefenseFacts, now: number): Phoen
     if (!Number.isFinite(f.snapshot.oracleObservedAt) || f.snapshot.oracleObservedAt > now
       || now - f.snapshot.oracleObservedAt > f.maxAgeMs || f.health.status !== 'available') return attention('Fresh lender health required');
     if (!f.reserveAuthorized) return attention('Liquid bot repayment route is not authorized');
+    const previousAttemptAt = f.previousAttemptAt === null ? null : new Date(f.previousAttemptAt).toISOString();
     const cash = raw(f.snapshot.walletUsdcRaw);
-    const base: PhoenixBorrowIntent = {...f.intent,requestKey:`auto:${borrowHash({loan:f.intent.botLoanId,previousAttemptAt:f.previousAttemptAt})}`,
+    const base: PhoenixBorrowIntent = {...f.intent,requestKey:`auto:${borrowHash({loan:f.intent.botLoanId,previousAttemptAt})}`,
       amountRaw:'0',collateralRaw:'0',measurementHash:null,
       consent:{accountCollateral:false,reserve:true,deployBorrowed:false}};
     if (f.autoCollateralTopUp && f.intent.consent.accountCollateral && cash >= raw(f.intent.reserveRaw)
@@ -45,7 +46,7 @@ export function decidePhoenixDefense(f: PhoenixDefenseFacts, now: number): Phoen
         collateralPriceUsd:f.collateralPriceUsd,collateralDecimals:f.collateralDecimals});
       if (topup.action === 'topup') return {action:'execute',intent:{...base,action:'topup',collateralRaw:topup.sourceAmountRaw.toString(),
         consent:{...base.consent,accountCollateral:true},automation:{kind:'defender',targetFinalDebtRaw:null}}};
-      if (topup.action === 'skip') return {action:'skip'};
+      if (topup.action === 'skip' && !f.autoRepayEnabled) return {action:'skip'};
     }
     if (f.autoRepayEnabled) {
       const cap = raw(f.maxRepayRaw);

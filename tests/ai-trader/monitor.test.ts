@@ -2135,7 +2135,7 @@ describe("post-close circuit breakers", () => {
 // --- Graduation ----------------------------------------------------------------------
 
 describe("graduation", () => {
-  it("graduates a paper bot after a close completes the Â§2e record and notifies", async () => {
+  it("graduates a paper bot after a close completes the section 2e record and notifies", async () => {
     const { monitorBotOnce } = await importMonitor();
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
     fetchOHLCVMock.mockResolvedValue([

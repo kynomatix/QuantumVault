@@ -29,7 +29,7 @@ export async function assertCarryRepaymentChild(c: PoolClient, i: PhoenixBorrowI
 
 export function verifyParkingReceipt(leg: ParkingLeg, r: ParkingReceipt) {
   if (!r || r.key !== leg.key || r.finalized !== true || !r.source || !r.reference
-    || !['pending','settled','dropped'].includes(r.state) || units(r.spent) > units(leg.amount)) throw new Error('Invalid parking receipt');
+    || !['pending','settled','dropped','unsent'].includes(r.state) || units(r.spent) > units(leg.amount)) throw new Error('Invalid parking receipt');
   units(r.slot); units(r.received);
   if (r.state !== 'settled' && (r.spent !== '0' || r.received !== '0')) throw new Error('Pending return is not cash');
   if (r.state === 'settled' && (!units(r.spent) || !units(r.received)
@@ -145,13 +145,13 @@ export class PhoenixParkingStore implements ParkingRepository {
     return this.locked(r.intent, async (c, b) => {
       const current = await this.current(c, r.intent);
       this.revision(current, r);
-      if (current.legs.some(l => !l.receipt || l.receipt.state !== 'settled') || !units(leg.amount)
+      if (current.legs.some(l => !l.receipt || !['settled','unsent'].includes(l.receipt.state)) || !units(leg.amount)
         || leg.key !== `${r.id}:${r.legs.length}`) throw new Error('Parking leg already claimed or invalid');
       const allowed = r.intent.action === 'carry' ? ['withdraw','unwrap','park','repay'] : r.intent.action === 'entry' ? ['unpark','deposit'] : r.intent.action === 'idle' ? ['withdraw','unwrap','park'] : ['park'];
       if (!allowed.includes(leg.kind) || (leg.kind !== 'unpark' && units(leg.amount) > units(r.intent.maxUsdc))
         || (['park','unpark'].includes(leg.kind) ? !leg.asset : leg.asset !== null)
         || (leg.kind === 'park' && leg.asset !== r.intent.destination)
-        || current.legs.some(l => l.leg.kind === leg.kind && (leg.kind !== 'unpark' || l.leg.asset === leg.asset))) throw new Error('Parking leg exceeds intent');
+        || current.legs.some(l => l.receipt?.state !== 'unsent' && l.leg.kind === leg.kind && (leg.kind !== 'unpark' || l.leg.asset === leg.asset))) throw new Error('Parking leg exceeds intent');
       const parent = current.legs.find(l => l.leg.key === leg.parentKey);
       if (leg.kind === 'unwrap' ? (!parent || parent.leg.kind !== 'withdraw' || parent.receipt?.received !== leg.amount) : !!leg.parentKey) throw new Error('Parking settlement parent mismatch');
       if (r.intent.carry) {
@@ -174,6 +174,10 @@ export class PhoenixParkingStore implements ParkingRepository {
       const last = current.legs.at(-1);
       if (!last || (last.receipt && last.receipt.state !== 'pending')) throw new Error('Parking receipt already terminal');
       verifyParkingReceipt(last.leg, receipt);
+      if (receipt.state === 'unsent') {
+        const child = await c.query('SELECT id FROM phoenix_operations WHERE bot_id=$1 AND request_key=$2 LIMIT 1', [r.intent.botId, last.leg.key]);
+        if (last.attempt || last.receipt || child.rows.length || receipt.source !== 'executor-pre-dispatch') throw new Error('Parking dispatch may have occurred');
+      }
       if (last.receipt && units(receipt.slot) < units(last.receipt.slot)) throw new Error('Parking receipt regressed');
       last.receipt = receipt;
       return this.write(c, r, 'active', current.legs);

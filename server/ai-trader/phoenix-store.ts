@@ -97,9 +97,19 @@ export class PhoenixAiStore implements PhoenixAiRepository {
     if (result.status === 'conflict') return false;
     await this.state(e, 'no_land'); return true;
   }
-  async pause(bot: AiTraderBot, reason: string) {
-    await this.pool.query(`UPDATE ai_trader_bots SET status='paused',pause_reason=$2,updated_at=now()
-      WHERE id=$1 AND protocol='phoenix' AND paper_mode=false AND status IN ('executing','open','paused')`, [bot.id, reason]);
+  async recoverPrepared(bot: AiTraderBot, e: PhoenixAiExecution) {
+    // The AI row lock serializes this with claimAiTraderExecution. A claim that
+    // has won changes status to executing before the order service can sign.
+    const { rows } = await this.pool.query(`WITH idle_bot AS MATERIALIZED (
+      SELECT id FROM ai_trader_bots WHERE id=$1 AND protocol='phoenix'
+        AND paper_mode=false AND status='idle' FOR UPDATE)
+      UPDATE phoenix_ai_executions e SET state='no_land'
+      FROM idle_bot b WHERE e.bot_id=b.id AND e.decision_id=$2 AND e.state='prepared'
+        AND e.execution_bot_id=$3 AND e.intent->>'requestKey'=$4
+        AND NOT EXISTS (SELECT 1 FROM phoenix_order_intents o WHERE o.bot_id=e.execution_bot_id
+          AND o.request_key=e.intent->>'requestKey') RETURNING e.bot_id`,
+    [bot.id, e.decisionId, e.intent.botId, e.intent.requestKey]);
+    return rows.length === 1;
   }
   async unprotected(bot: AiTraderBot, e: PhoenixAiExecution, order: PhoenixOrderRecord) {
     const f = phoenixAiFill(order);

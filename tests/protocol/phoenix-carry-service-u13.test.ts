@@ -24,6 +24,14 @@ function setup() {
   return {i,f,store,io,facts,service,cash,settle,disable:()=>{enabled=false;}};
 }
 describe('U13 restart-safe close settlement',()=>{
+  it('signals a claimed leg without settlement evidence and never resends it',async()=>{
+    const x=setup(), warning=vi.spyOn(console,'warn').mockImplementation(()=>{});
+    try {
+      x.cash('50000000'); await x.service().start(x.i); await x.service().resume(x.i);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining('operator reconciliation required'),expect.objectContaining({intentId:x.store.r.id}));
+      expect(x.io.submit).toHaveBeenCalledTimes(1); expect(x.store.r.state).toBe('active');
+    } finally { warning.mockRestore(); }
+  });
   it.each(['partial','protection','unknown_close','foreign_history','stale_debt'])(
     'refuses %s before creating a spend intent',async defect=>{
       const x=setup();

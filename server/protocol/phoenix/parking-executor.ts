@@ -5,7 +5,7 @@ import type { PhoenixOperationStore, StoredPhoenixOperation } from './operation-
 import type { FundingIntent, FundingHistory } from './funding-contract';
 import type { PhoenixParkingStore } from './parking-store';
 import { assertParkingSnapshot, parkingAuthorized, type ParkingLeg, type ParkingReceipt, type ParkingRecord, type ParkingSnapshot } from './parking-contract';
-import type { PhoenixParkingIO } from './parking-service';
+import { PhoenixParkingUnsent, type PhoenixParkingIO } from './parking-service';
 
 export interface ParkingVaultIO {
   /** Reviewed per-asset builder must bind bot authority (never PDA/account key),
@@ -40,10 +40,13 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
   }
   async submit(r: ParkingRecord, l: ParkingLeg) {
     if (l.kind === 'repay') throw new Error('Use the bounded carry repayment executor');
-    await this.authorized(r,l);
+    try { await this.authorized(r,l); } catch (error) { throw new PhoenixParkingUnsent(String(error)); }
     if (l.kind === 'park' || l.kind === 'unpark') {
-      const signed = await this.vault.prepare(structuredClone(r), structuredClone(l));
-      await this.authorized(r,l);
+      let signed: Awaited<ReturnType<ParkingVaultIO['prepare']>>;
+      try {
+        signed = await this.vault.prepare(structuredClone(r), structuredClone(l));
+        await this.authorized(r,l);
+      } catch (error) { throw new PhoenixParkingUnsent(String(error)); }
       const claimed = await this.store.recordVaultAttempt(r, { signature: signed.signature,
         lastValidBlockHeight: signed.lastValidBlockHeight,
         transactionHash: createHash('sha256').update(Buffer.from(signed.transaction, 'base64')).digest('hex') });
@@ -55,8 +58,9 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
     // Existing children are observed, never re-created or re-quoted on timeout.
     if (history.some(o => o.request_key === l.key)) return;
     const parent = l.parentKey ? history.find(o => o.request_key === l.parentKey) : undefined;
-    if (l.parentKey && (!parent || parent.state !== 'completed')) throw new Error('Parking withdrawal not settled');
-    const i = await this.buildFunding(r, l, parent);
+    if (l.parentKey && (!parent || parent.state !== 'completed')) throw new PhoenixParkingUnsent('Parking withdrawal not settled');
+    let i: FundingIntent;
+    try { i = await this.buildFunding(r, l, parent); } catch (error) { throw new PhoenixParkingUnsent(String(error)); }
     if (r.intent.carry) i.carryIntentId = r.id;
     const destination = l.kind === 'deposit' ? r.intent.identity.traderAccountAddress : r.intent.identity.authorityWalletAddress;
     if (i.botId !== r.intent.botId || i.ownerWallet !== r.intent.ownerWallet || i.requestKey !== l.key
@@ -64,9 +68,13 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
       || i.funding.leg !== l.kind || i.funding.grossBaseUnits !== l.amount || i.destination !== destination
       || i.funding.parentOperationId !== parent?.id
       || i.identity.authorityWalletAddress !== r.intent.identity.authorityWalletAddress
-      || i.identity.traderAccountAddress !== r.intent.identity.traderAccountAddress) throw new Error('Parking funding child mismatch');
-    await this.authorized(r,l);
-    await this.funding.create(i);
+      || i.identity.traderAccountAddress !== r.intent.identity.traderAccountAddress) throw new PhoenixParkingUnsent('Parking funding child mismatch');
+    try { await this.authorized(r,l); } catch (error) { throw new PhoenixParkingUnsent(String(error)); }
+    try { await this.funding.create(i); } catch (error) {
+      const after = await this.operations.fundingHistory(r.intent.botId, r.intent.ownerWallet);
+      if (!after.some(o => o.request_key === l.key)) throw new PhoenixParkingUnsent(String(error));
+      throw error;
+    }
   }
   async receipt(r: ParkingRecord, l: ParkingLeg): Promise<ParkingReceipt | null> {
     if (l.kind === 'repay') throw new Error('Use the bounded carry repayment observer');

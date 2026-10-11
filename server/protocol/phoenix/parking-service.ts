@@ -10,6 +10,9 @@ export interface ParkingRepository {
   observe(record: ParkingRecord, receipt: ParkingReceipt): Promise<ParkingRecord>;
   finish(record: ParkingRecord, state: 'completed' | 'cancelled' | 'attention'): Promise<ParkingRecord>;
 }
+/** Only the executor's pre-dispatch failure path may release a claim. Missing
+ * receipts and lost persistence acknowledgements never establish this proof. */
+export class PhoenixParkingUnsent extends Error {}
 export interface PhoenixParkingIO {
   snapshot(intent: ParkingIntent): Promise<ParkingSnapshot>;
   /** A claimed leg is submitted once. Funding uses U04; vault implementations MUST
@@ -56,7 +59,7 @@ export class PhoenixParkingService {
       if (receipt.state === 'dropped') return this.store.finish(r, 'attention');
       if (receipt.spent !== pending.leg.amount) return this.store.finish(r, 'attention');
     }
-    const lastSlot = r.legs.at(-1)?.receipt?.slot ?? '0';
+    const lastSlot = r.legs.filter(l => l.receipt && l.receipt.state !== 'unsent').at(-1)?.receipt?.slot ?? '0';
     const s = await this.io.snapshot(i); assertParkingSnapshot(s, i, this.now(), lastSlot);
     if (!parkingAuthorized(i, s)) return this.store.finish(r, 'cancelled');
     if (units(s.pendingReturnUsdc) > 0n) return r;
@@ -67,12 +70,21 @@ export class PhoenixParkingService {
     r = await this.store.claim(r, leg);
     // Claim checks current stored opt-in/lifecycle under the shared bot lock.
     // On any lost acknowledgement or send timeout the claim survives for observation.
-    try { if (this.allowed(i,leg)) await this.io.submit(r, leg); } catch { /* uncertain; observe only */ }
+    try {
+      if (!this.allowed(i,leg)) throw new PhoenixParkingUnsent('Parking authorization revoked before dispatch');
+      await this.io.submit(r, leg);
+    } catch (error) {
+      if (error instanceof PhoenixParkingUnsent) {
+        r = await this.store.observe(r, { key: leg.key, state: 'unsent', finalized: true,
+          source: 'executor-pre-dispatch', reference: leg.key, spent: '0', received: '0', slot: s.slot });
+      }
+      // All other failures preserve the claim for observation only.
+    }
     return r;
   }
   private next(r: ParkingRecord, s: ParkingSnapshot): ParkingLeg | 'attention' | null {
     const i = r.intent, cap = units(i.maxUsdc);
-    const made = (kind: ParkingLeg['kind']) => r.legs.find(l => l.leg.kind === kind);
+    const made = (kind: ParkingLeg['kind']) => r.legs.find(l => l.leg.kind === kind && l.receipt?.state !== 'unsent');
     const leg = (kind: ParkingLeg['kind'], amount: bigint, asset: string | null = null, parentKey?: string): ParkingLeg =>
       ({ key: `${r.id}:${r.legs.length}`, kind, amount: amount.toString(), asset, ...(parentKey ? { parentKey } : {}) });
     if (i.action !== 'entry') {
@@ -85,11 +97,11 @@ export class PhoenixParkingService {
       // An unwrap receipt proves the venue return reached THIS bot wallet. Queued
       // collateral never enters this budget; bounded post-borrow never withdraws.
       const amount = minUnits(cap, units(s.walletUsdc));
-      return amount > 0n ? leg('park', amount, i.destination) : 'attention';
+      return amount > 0n ? leg('park', amount, i.destination) : i.action === 'idle' ? null : 'attention';
     }
     const target = units(i.requiredMarginUsdc!);
     if (made('deposit')) return units(s.freeMarginUsdc) >= target ? null : 'attention';
-    const redeemed = new Set(r.legs.filter(l => l.leg.kind === 'unpark').map(l => l.leg.asset));
+    const redeemed = new Set(r.legs.filter(l => l.leg.kind === 'unpark' && l.receipt?.state !== 'unsent').map(l => l.leg.asset));
     const shortfall = target > units(s.freeMarginUsdc) ? target - units(s.freeMarginUsdc) : 0n;
     if (shortfall > cap) return 'attention';
     const need = shortfall > units(s.walletUsdc) ? shortfall - units(s.walletUsdc) : 0n;

@@ -14,7 +14,7 @@ export interface PhoenixRegistrationIO {
   estimate(transaction: Transaction, identity: PhoenixTraderIdentity): Promise<RegistrationQuote>;
   withSigner<T>(botId: string, sign: (secret: Uint8Array) => T): Promise<T>;
   submit(transaction: string, identity: PhoenixTraderIdentity, maxPositions: number): Promise<{ signature: string; traderPda: string }>;
-  confirm(signature: string, identity: PhoenixTraderIdentity): Promise<'confirmed' | 'failed' | 'unknown'>;
+  confirm(signature: string, identity: PhoenixTraderIdentity, lastValidBlockHeight?: string): Promise<'confirmed' | 'failed' | 'expired' | 'unknown'>;
 }
 export interface ProvisioningResult {
   status: 'refused' | 'pending' | 'completed'; code: string; message: string;
@@ -28,6 +28,7 @@ const messages: Record<string, string> = {
   cost_limit: 'Phoenix registration exceeds your approved SOL cost limit.', invalid_registration: 'Phoenix registration could not be safely prepared. Your recovery identity is retained.',
   submission_unknown: 'Registration may have been submitted. Confirmation is pending; no new payment will be sent.',
   chain_failed: 'Registration failed on chain. Retry the same request to prepare a new attempt.',
+  chain_expired: 'Registration expired without landing. Retry the same request to prepare a new attempt.',
   completed: 'Phoenix registration is confirmed. Trading and funding remain disabled.',
   recovery_required: 'Phoenix registration needs operator recovery. Your identity and recovery records are retained.',
   request_in_progress: 'This registration request has progressed elsewhere. Resume the same request to read its current state.',
@@ -79,8 +80,8 @@ export class PhoenixProvisioner {
     if (operation.state === 'failed' || operation.state === 'dropped') return result(requestId, 'recovery_required', operation);
     if (operation.state !== 'prepared') {
       if (!attempt) return result(requestId, 'submission_unknown', operation);
-      let outcome: 'confirmed' | 'failed' | 'unknown' = 'unknown';
-      try { outcome = await this.io.confirm(attempt.signature, operation.intent.identity); } catch { /* ambiguous stays recoverable */ }
+      let outcome: 'confirmed' | 'failed' | 'expired' | 'unknown' = 'unknown';
+      try { outcome = await this.io.confirm(attempt.signature, operation.intent.identity, attempt.lastValidBlockHeight); } catch { /* ambiguous stays recoverable */ }
       if (outcome === 'unknown') return result(requestId, operation.observation?.reference === 'activation-refused'
         ? 'activation_refused_pending' : 'submission_unknown', operation);
       try {
@@ -88,7 +89,7 @@ export class PhoenixProvisioner {
           outcome === 'confirmed' ? 'completed' : 'prepared', { source: 'phoenix-finalized-rpc', reference: attempt.signature, attemptOutcome: outcome });
       } catch { return result(requestId, 'request_in_progress', operation); }
       if (outcome === 'confirmed') await this.allocation.persistConfirmed(operation);
-      return result(requestId, outcome === 'confirmed' ? 'completed' : 'chain_failed', operation);
+      return result(requestId, outcome === 'confirmed' ? 'completed' : outcome === 'expired' ? 'chain_expired' : 'chain_failed', operation);
     }
     if (!this.allowed(operation.intent.ownerWallet,operation.bot_id,registration.maxCostLamports)) return result(requestId, 'disabled', operation);
     const refuse = async (code: string, estimate?: RegistrationQuote) => {
