@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import { phoenixIdentityFromBot } from './identity';
 import { assertPhoenixNewRisk } from './lifecycle';
 import { addsBorrowRisk, borrowHash, validateBorrowIntent, type PhoenixBorrowIntent } from './borrow-contract';
+import { AUTO_TOPUP_COOLDOWN_MS } from '../../vault/auto-topup';
 
 export interface BorrowLeg {
   termsHash: string; terms: Record<string, unknown>; state: 'claimed' | 'completed' | 'absent';
@@ -73,11 +74,17 @@ export class PhoenixBorrowStore implements BorrowRepository {
       || borrowHash(r.metadata.intent) !== borrowHash(i)) throw new Error('Borrow replay identity mismatch');
     return r;
   }
+  private async automaticOptIn(c: PoolClient, i: PhoenixBorrowIntent) {
+    if (!i.automation) return;
+    const {rows:[b]} = await c.query('SELECT auto_collateral_top_up,auto_repay_enabled FROM trading_bots WHERE id=$1',[i.botId]);
+    if (!(i.action === 'topup' ? b?.auto_collateral_top_up : b?.auto_repay_enabled)) throw new Error('Automatic defense opt-in revoked');
+  }
   async prepare(input: PhoenixBorrowIntent) {
     const i = structuredClone(input);
     return this.locked(i, async c => {
       const exists = await c.query('SELECT 1 FROM borrow_operations WHERE wallet_address=$1 AND client_request_id=$2', [i.ownerWallet,requestId(i)]);
       if (exists.rows.length) return this.current(c,i);
+      await this.automaticOptIn(c,i);
       if (addsBorrowRisk(i.action)) await assertPhoenixNewRisk(c,i.botId);
       for (const [loanId,venueId,botId] of [[i.accountLoanId,i.accountVenueId,null],[i.botLoanId,i.botVenueId,i.botId]] as const) {
         if (!loanId) continue;
@@ -93,25 +100,33 @@ export class PhoenixBorrowStore implements BorrowRepository {
         const found = await c.query('SELECT to_regclass($1) AS name',[table]);
         if (found.rows[0]?.name && (await c.query(`SELECT 1 FROM ${table} WHERE bot_id=$1 AND state NOT IN (${done}) LIMIT 1`,[i.botId])).rows.length) throw new Error('Phoenix settlement pending before lender operation');
       }
+      if (i.automation) {
+        const claimed = await c.query(`UPDATE borrow_positions SET last_auto_topup_attempt_at=now()
+          WHERE id=$1 AND trading_bot_id=$2 AND status='open' AND kind='borrow'
+          AND (last_auto_topup_attempt_at IS NULL OR last_auto_topup_attempt_at <= now() - ($3 * interval '1 millisecond')) RETURNING id`,
+          [i.botLoanId,i.botId,AUTO_TOPUP_COOLDOWN_MS]);
+        if (!claimed.rows.length) throw new Error('Automatic defense cooldown or loan unavailable');
+      }
       const { rows: [r] } = await c.query(`INSERT INTO borrow_operations (wallet_address,borrow_position_id,operation_type,client_request_id,status,step,metadata)
         VALUES ($1,$2,$3,$4,'pending','phoenix', $5) RETURNING *`, [i.ownerWallet,i.botLoanId,operationType,requestId(i), {intent:i,intentHash:borrowHash(i),legs:{}}]);
       return r as BorrowRecord;
     });
   }
   read(i: PhoenixBorrowIntent) { return this.locked(i,c => this.current(c,i)); }
-  private async update(i: PhoenixBorrowIntent, work: (r: BorrowRecord) => void) {
+  private async update(i: PhoenixBorrowIntent, work: (r: BorrowRecord, c: PoolClient) => void | Promise<void>) {
     return this.locked(i, async c => {
-      const r = await this.current(c,i); work(r);
+      const r = await this.current(c,i); await work(r,c);
       await c.query('UPDATE borrow_operations SET metadata=$2,status=$3,updated_at=now() WHERE id=$1',[r.id,r.metadata,r.status]);
     });
   }
   async claim(i: PhoenixBorrowIntent, key: string, terms: Record<string, unknown>) {
     let result!: {execute: boolean; leg: BorrowLeg};
-    await this.update(i,r => {
+    await this.update(i,async (r,c) => {
       const old = r.metadata.legs[key];
       if (old && old.termsHash !== borrowHash(terms)) throw new Error('Lender leg replay terms changed');
       if (old?.state === 'claimed') throw new Error('Lender leg outcome unknown; reconcile before resuming');
       if (old?.state === 'completed') { result = {execute:false,leg:old}; return; }
+      await this.automaticOptIn(c,i);
       if (r.status === 'completed') throw new Error('Completed borrowing journal is immutable');
       const leg: BorrowLeg = {termsHash:borrowHash(terms),terms:structuredClone(terms),state:'claimed'};
       r.metadata.legs[key] = leg; result = {execute:true,leg};
@@ -119,7 +134,8 @@ export class PhoenixBorrowStore implements BorrowRepository {
     return result;
   }
   signature(i: PhoenixBorrowIntent, key: string, signature: string, lastValidBlockHeight: number) {
-    return this.update(i,r => {
+    return this.update(i,async (r,c) => {
+      await this.automaticOptIn(c,i);
       const l = r.metadata.legs[key];
       if (l?.state !== 'claimed' || l.signature || !signature || !Number.isSafeInteger(lastValidBlockHeight)) throw new Error('Invalid lender write-ahead signature');
       l.signature = signature; l.lastValidBlockHeight = lastValidBlockHeight;

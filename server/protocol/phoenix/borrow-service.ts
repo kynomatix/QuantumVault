@@ -11,6 +11,9 @@ export interface PhoenixBorrowIO {
   /** Bound to owner/session and existing lender vault + wallet allowlists. */
   eligible(i: PhoenixBorrowIntent): Promise<boolean>;
   enabled(): boolean;
+  /** Reviewed U12 binding re-reads per-action opt-in, health, limits and reserve.
+   * Required at every primitive and broadcast for an autonomous intent. */
+  authorizeAutomatic?(i: PhoenixBorrowIntent, s: BorrowSnapshot): Promise<void>;
   snapshot(i: PhoenixBorrowIntent): Promise<BorrowSnapshot>;
   vault(i: PhoenixBorrowIntent): Promise<BorrowVaultConfig>;
   /** Uses U02 authenticated custody; callback receives disposable key copies. */
@@ -40,6 +43,10 @@ export class PhoenixBorrowService {
     if (addsBorrowRisk(i.action) && (!this.io.enabled() || !await this.io.eligible(i))) throw new Error('Phoenix new borrowing disabled or ineligible');
     const s = await this.io.snapshot(i);
     assertBorrowSnapshot(i,s,this.now(),this.policy.maxAgeMs);
+    if (i.automation) {
+      if (!this.io.authorizeAutomatic) throw new Error('Automatic defense binding unavailable');
+      await this.io.authorizeAutomatic(i,s);
+    }
     return s;
   }
   /** Wire into U04's authorizeBorrowDeployment using the persisted parent,
@@ -130,6 +137,14 @@ export class PhoenixBorrowService {
       leg: async <T>(kind: string, input: Record<string, any>, execute: (p: any) => Promise<T>): Promise<T> => {
         const p = {...input};
         const signer = p.agentPublicKey ?? p.botPublicKey;
+        if (i.automation) {
+          const allowed = i.action === 'repay' ? ['repay'] : ['transferTokenToWalletExact','supplyToExistingBotPosition'];
+          if (!allowed.includes(kind) || (kind !== 'transferTokenToWalletExact' && signer !== i.identity.authorityWalletAddress)
+            || (kind === 'transferTokenToWalletExact' && (signer !== i.accountAuthority || p.toWalletAddress !== i.identity.authorityWalletAddress))
+            || (kind === 'supplyToExistingBotPosition' && (typeof p.collateralRaw !== 'bigint' || p.collateralRaw > raw(i.collateralRaw)))) {
+            throw new Error('Automatic defense cannot borrow, carve, swap or subsidize repayment');
+          }
+        }
         if (![i.accountAuthority,i.identity.authorityWalletAddress].includes(signer)) throw new Error('Unbound lender signer');
         if (p.walletAddress && p.walletAddress !== i.ownerWallet || p.tradingBotId && p.tradingBotId !== i.botId) throw new Error('Lender account/bot isolation failure');
         if (p.borrowPositionId && ![i.botLoanId,i.accountLoanId].includes(p.borrowPositionId) && kind !== 'executeBorrowOpen') throw new Error('Lender loan identity mismatch');
@@ -158,6 +173,7 @@ export class PhoenixBorrowService {
         if (!claim.execute) return restoreResult(claim.leg.result);
         const before = p.onBeforeBroadcast;
         p.onBeforeBroadcast = async (info: {signature:string;lastValidBlockHeight:number}) => {
+          if (i.automation) await this.fresh(i);
           await this.store.signature(i,key,info.signature,info.lastValidBlockHeight);
           if (before) await before(info);
         };

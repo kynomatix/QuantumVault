@@ -1,6 +1,8 @@
 import { getTableColumns, eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
+import { autoDefenseProtocols, autoDefenseOptedIn } from './vault/auto-defense-capabilities';
+import { phoenixDefenseCapabilities } from './protocol/phoenix/auto-defense-runtime';
 import { db } from "./db";
 import { readPriceExcursion } from "@shared/ai-trader-excursion";
 import {
@@ -3617,13 +3619,14 @@ export class DatabaseStorage implements IStorage {
 
   async getAutoTopUpCandidatePositions(): Promise<{ position: BorrowPosition; bot: TradingBot }[]> {
     // Cheap prefilter for the autonomous "defend the loan" scanner: only OPEN,
-    // per-bot (Flash) positions whose owner bot OPTED IN to EITHER defense (auto
+    // per-bot positions with a proven defender whose owner OPTED IN to a defense (auto
     // collateral top-up OR auto repay), and whose LAST monitored band the
     // borrow-health monitor recorded as urgent-or-worse. The scanner does a FRESH
     // live read AND re-checks each per-action flag before spending anything — this
     // join just bounds the RPC to genuinely at-risk opted-in loans. (Depends on
     // the monitor having populated lastObservedHealthBand; a cold start yields no
     // candidates until it runs once.)
+    const phoenix = phoenixDefenseCapabilities();
     const rows = await db.select({ position: borrowPositions, bot: tradingBots })
       .from(borrowPositions)
       .innerJoin(tradingBots, eq(tradingBots.id, borrowPositions.tradingBotId))
@@ -3635,14 +3638,14 @@ export class DatabaseStorage implements IStorage {
           eq(tradingBots.autoCollateralTopUp, true),
           eq(tradingBots.autoRepayEnabled, true),
         ),
-        eq(tradingBots.activeProtocol, 'flash'),
+        inArray(tradingBots.activeProtocol, autoDefenseProtocols(phoenix)),
         inArray(borrowPositions.lastObservedHealthBand, ['urgent', 'liquidation']),
         // NEVER hand a SOL-loop row to the USDC "defend the loan" machinery —
         // it would try to defend WSOL debt with USDC. (Loops are account-scope
         // in P2 so the bot join already excludes them; this is the hard guard.)
         eq(borrowPositions.kind, 'borrow'),
       ));
-    return rows;
+    return rows.filter(({bot}) => autoDefenseOptedIn(bot,bot.activeProtocol === 'phoenix' ? phoenix : {topup:true,repay:true}));
   }
 
   async claimBorrowPositionAutoTopupAttempt(id: string, cooldownMs: number): Promise<BorrowPosition | null> {

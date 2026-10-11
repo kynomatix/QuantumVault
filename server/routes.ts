@@ -1,4 +1,5 @@
 import { phoenixConsumerDisabled } from './protocol/phoenix/consumer-service';
+import { dispatchPhoenixDefense } from './protocol/phoenix/auto-defense-runtime';
 import { PhoenixLifecycleStore } from './protocol/phoenix/lifecycle';
 import { FLASH_RETIRED_MESSAGE, assertProtocolRuntimeAvailable } from './protocol/flash-retirement.js';
 import { getManualFlashWithdrawalAdapter } from './protocol/flash/manual-withdrawal';
@@ -2881,6 +2882,10 @@ async function defendOneLoanAutonomously(
   bot: TradingBot,
   deps: ReturnType<typeof defaultRowHealthDeps>,
 ): Promise<void> {
+  if (bot.activeProtocol === 'phoenix') {
+    await dispatchPhoenixDefense(position,bot);
+    return;
+  }
   const logPrefix = `[AutoTopUp ${bot.id.slice(0, 8)}]`;
   const mint = position.collateralMint;
   const venueId = position.venuePositionId != null ? Number(position.venuePositionId) : NaN;

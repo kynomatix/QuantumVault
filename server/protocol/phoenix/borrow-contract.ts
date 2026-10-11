@@ -15,6 +15,8 @@ export interface PhoenixBorrowIntent {
   reserveRaw: string;
   /** The measurement shown to the user, bound to this immutable request. */
   measurementHash: string | null;
+  /** Server-created autonomous defense; the persisted floor survives retries. */
+  automation?: { kind: 'defender'; targetFinalDebtRaw: string | null };
 }
 export interface BorrowSnapshot {
   observedAt: number; oracleObservedAt: number; reference: string;
@@ -52,6 +54,14 @@ export function validateBorrowIntent(i: PhoenixBorrowIntent) {
     || !/^[A-Za-z0-9:_-]{1,120}$/.test(i.requestKey) || i.requestKey.includes('\n')
     || !Number.isFinite(i.targetLtv) || i.targetLtv <= 0 || i.targetLtv >= 1) throw new Error('Invalid Phoenix borrowing intent');
   [i.amountRaw, i.collateralRaw, i.reserveRaw].forEach(raw);
+  if (i.automation) {
+    if (i.automation.kind !== 'defender' || !['topup','repay'].includes(i.action)
+      || !i.consent.reserve || i.consent.deployBorrowed
+      || (i.action === 'repay' && (i.consent.accountCollateral || raw(i.collateralRaw) !== 0n))
+      || (i.action === 'topup' && raw(i.amountRaw) !== 0n)) throw new Error('Invalid automatic defense authority');
+    if (i.action === 'repay') raw(i.automation.targetFinalDebtRaw!);
+    else if (i.automation.targetFinalDebtRaw !== null) throw new Error('Invalid defense debt floor');
+  }
   if (!i.consent || Object.values(i.consent).length !== 3 || ['accountCollateral','reserve','deployBorrowed'].some(k => typeof (i.consent as any)[k] !== 'boolean')) throw new Error('Explicit boolean consent required');
   if (['open','grow','repay','deploy'].includes(i.action) && raw(i.amountRaw) === 0n || ['open','topup','release'].includes(i.action) && raw(i.collateralRaw) === 0n) throw new Error('Positive borrowing amount required');
   for (const [id, venue] of [[i.accountLoanId,i.accountVenueId],[i.botLoanId,i.botVenueId]] as const) {
@@ -93,7 +103,9 @@ export function authorizeDebtDeployment(i: PhoenixBorrowIntent, s: BorrowSnapsho
 export function cappedRepayment(i: PhoenixBorrowIntent, s: BorrowSnapshot): bigint {
   if (s.debtRaw === null) throw new Error('Unknown debt');
   const debt = raw(s.debtRaw), requested = raw(i.amountRaw), cash = raw(s.walletUsdcRaw);
-  const amount = requested < debt ? requested : debt;
+  const floor = i.automation?.targetFinalDebtRaw == null ? 0n : raw(i.automation.targetFinalDebtRaw);
+  const remaining = debt > floor ? debt - floor : 0n;
+  const amount = requested < remaining ? requested : remaining;
   if (amount === 0n || amount > cash) throw new Error('Settled bot USDC required; queued cash cannot repay');
   return amount;
 }
