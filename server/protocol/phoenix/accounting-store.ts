@@ -68,7 +68,7 @@ export class PhoenixAccountingStore implements AccountingRepository {
         creatorWallet: subscriber.creator_wallet_address, subscriptionId: subscriber.id } : null;
       for (const e of next.epochs) {
         const prior = (await c.query('SELECT payout_provenance FROM phoenix_position_epochs WHERE bot_id=$1 AND epoch_id=$2', [target.botId, e.id])).rows[0];
-        const provenance = phoenixPayoutProvenance(target, e, prior?.payout_provenance.subscription ?? binding);
+        const provenance = phoenixPayoutProvenance(target, e, prior?.payout_provenance?.subscription ?? binding);
         await c.query(`INSERT INTO phoenix_position_epochs(bot_id,epoch_id,opened_at,data,payout_provenance) VALUES($1,$2,$3,$4,$5)
           ON CONFLICT(bot_id,epoch_id) DO UPDATE SET data=EXCLUDED.data,payout_provenance=EXCLUDED.payout_provenance`,
         [target.botId, e.id, e.openedAt, e, provenance]);
