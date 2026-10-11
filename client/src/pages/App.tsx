@@ -127,6 +127,7 @@ import { CreateBotModal } from '@/components/CreateBotModal';
 import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
 import { AiTraderDrawer } from '@/components/AiTraderDrawer';
 import { GridPlannerCard } from '@/components/grid-planner/GridPlannerCard';
+import { GridDraftCard } from '@/components/grid-bot/GridDraftCard';
 import { TradeHistoryModal, resolveTradePriceDisplay } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
@@ -3677,6 +3678,7 @@ export default function AppPage() {
                         </div>
 
                         <GridPlannerCard authenticated={sessionConnected} identity={publicKeyString} />
+                        <GridDraftCard authenticated={sessionConnected} identity={publicKeyString} />
                       </div>
 
                       {/* Truthful state for the bot lists: if neither list has

@@ -11,6 +11,7 @@ export const SCHEMA_CAPABILITIES = [
   "sol_loop",
   "oracle",
   "ai_trader",
+  "grid_bot",
 ] as const;
 
 export type SchemaCapability = (typeof SCHEMA_CAPABILITIES)[number];

@@ -13,9 +13,11 @@ interface DepositDialogProps {
   usdcBalance: number | null;
   onComplete: () => void;
   initialTab?: 'usdc' | 'token';
+  initialAmount?: string;
+  showUnknownBalance?: boolean;
 }
 
-export function DepositDialog({ open, onOpenChange, usdcBalance, onComplete, initialTab = 'usdc' }: DepositDialogProps) {
+export function DepositDialog({ open, onOpenChange, usdcBalance, onComplete, initialTab = 'usdc', initialAmount, showUnknownBalance }: DepositDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md" data-testid="dialog-deposit">
@@ -30,6 +32,8 @@ export function DepositDialog({ open, onOpenChange, usdcBalance, onComplete, ini
           onComplete={onComplete}
           onClose={() => onOpenChange(false)}
           initialTab={initialTab}
+          initialAmount={initialAmount}
+          showUnknownBalance={showUnknownBalance}
         />
       </DialogContent>
     </Dialog>
