@@ -2332,6 +2332,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteTradingBot(id: string): Promise<void> {
+    if ((await this.getTradingBotById(id))?.activeProtocol === 'phoenix') throw new Error('Phoenix recovery identity must be archived and retained');
     const obligations = await db.select({ id: pendingProfitShares.id })
       .from(pendingProfitShares)
       .where(and(
@@ -5032,6 +5033,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deletePublishedBot(id: string): Promise<void> {
+    const published = await this.getPublishedBotById(id);
+    if (published && (await this.getTradingBotById(published.tradingBotId))?.activeProtocol === 'phoenix') {
+      throw new Error('Phoenix marketplace recovery links must be retained');
+    }
     await db.delete(publishedBots).where(eq(publishedBots.id, id));
   }
 

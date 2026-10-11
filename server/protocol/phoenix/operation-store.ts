@@ -1,3 +1,5 @@
+import { assertPhoenixNewRisk } from './lifecycle';
+import type { PhoenixConsumerContext } from './consumer-contract';
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { PhoenixTraderIdentity } from '../../../shared/phoenix-read-contract';
@@ -18,7 +20,7 @@ export interface PhoenixIntent {
   amountBaseUnits: string;
   feeBaseUnits: string;
   destination: string;
-  registration?: { maxPositions: number; maxCostLamports: string; name: string; market: string };
+  registration?: { maxPositions: number; maxCostLamports: string; name: string; market: string; consumer?: PhoenixConsumerContext };
   funding?: FundingTerms;
   /** U05 funding child; bound to a durably claimed entry, never an independent park/withdraw. */
   executionOrderId?: string;
@@ -102,6 +104,7 @@ export class PhoenixOperationStore {
   async annotatePrepared(botId: string, ownerWallet: string, operationId: string, revision: number, observation: Record<string, unknown>) {
     return this.transaction(async client => {
       const operation = await this.lockOperation(client, botId, ownerWallet, operationId);
+      if (operation.kind === 'register' || operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, botId);
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale preparation');
       const result = await client.query(`UPDATE phoenix_operations SET observation = $2, revision = revision + 1,
         updated_at = now() WHERE id = $1 RETURNING *`, [operationId, { ...structuredClone(observation), ...(operation.observation?.funding ? { funding: operation.observation.funding } : {}) }]);
@@ -164,6 +167,7 @@ export class PhoenixOperationStore {
         }
         return { operation: replay.rows[0], created: false };
       }
+      if (intent.kind === 'register' || intent.kind === 'deposit' || intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, intent.botId);
       {
         // The order table is absent only on a pre-U05 schema (including U04 fixtures).
         const orderSchema = await client.query("SELECT to_regclass('phoenix_order_intents') AS table_name");
@@ -242,6 +246,7 @@ export class PhoenixOperationStore {
         }
         return { attempt: prior, created: false };
       }
+      if (operation.kind === 'register' || operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, botId);
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale send claim');
       const count = await client.query('SELECT count(*)::integer AS count FROM phoenix_operation_attempts WHERE operation_id = $1', [operationId]);
       const next = count.rows[0].count + 1;

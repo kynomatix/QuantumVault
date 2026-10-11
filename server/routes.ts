@@ -1,3 +1,5 @@
+import { phoenixConsumerDisabled } from './protocol/phoenix/consumer-service';
+import { PhoenixLifecycleStore } from './protocol/phoenix/lifecycle';
 import { FLASH_RETIRED_MESSAGE, assertProtocolRuntimeAvailable } from './protocol/flash-retirement.js';
 import { getManualFlashWithdrawalAdapter } from './protocol/flash/manual-withdrawal';
 import type { Express } from "express";
@@ -27,7 +29,7 @@ import { recordCriticalError } from "./error-log";
 import { normalizeScannerIncidentHoldId } from "./ai-trader/scanner-incident-evidence";
 import { insertUserSchema, insertTradingBotSchema, type TradingBot, type BorrowPosition, type Wallet, webhookLogs, botTrades, botPositions, tradingBots, botSubscriptions, publishedBots, pendingProfitShares, wallets, referralLinks, referralRewardEvents, marketplaceEquitySnapshots, userApiTokens, labOptimizationRuns } from "@shared/schema";
 import type { Request as ExpressRequest, Response as ExpressResponse, NextFunction } from "express";
-import { db, isConnectionClassError } from "./db";
+import { db, pool, isConnectionClassError } from "./db";
 import { desc, eq, sql, asc, and, or, lt, gte, lte, inArray } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
@@ -5332,6 +5334,8 @@ export async function routeSignalToSubscribers(
       console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), isActive=${subBot.isActive}, market=${subBot.market}`);
 
       try {
+        const currentSubscriber = await storage.getTradingBotById(subBot.id);
+        if (currentSubscriber?.activeProtocol === 'phoenix' || subBot.activeProtocol === 'phoenix') return 'skippedInactive';
         const subscriberDbPosition = await storage.getBotPosition(subBot.id, subBot.market);
         const subscriberClassified = classifySignal(
           {
@@ -7383,6 +7387,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   app.post("/api/wallet/reset-account", requireWallet, async (req, res) => {
     try {
+      if ((await storage.getTradingBots(req.walletAddress!)).some(bot => bot.activeProtocol === 'phoenix')) {
+        return res.status(409).json({ code: 'PHOENIX_RECOVERY_RETAINED', error: 'Phoenix recovery identities must be retained. Resolve wallet, venue, transfer, vault, debt and payout residuals before reset.' });
+      }
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
@@ -7743,6 +7750,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // Reset Agent Wallet - Withdraw all funds to user wallet and generate a new agent wallet
   app.post("/api/wallet/reset-agent-wallet", requireWallet, async (req, res) => {
     try {
+      if ((await storage.getTradingBots(req.walletAddress!)).some(bot => bot.activeProtocol === 'phoenix')) {
+        return res.status(409).json({ code: 'PHOENIX_RECOVERY_RETAINED', error: 'Phoenix recovery identities must be retained. Resolve wallet, venue, transfer, vault, debt and payout residuals before reset.' });
+      }
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
@@ -15640,8 +15650,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   app.post("/api/trading-bots", requireWallet, async (req, res) => {
     if (String(req.body.activeProtocol).toLowerCase() === "phoenix") {
-      const { phoenixDisabledCreation } = await import("./protocol/phoenix/provisioner");
-      return res.status(503).json(phoenixDisabledCreation(req.body.requestId));
+      return res.status(503).json(phoenixConsumerDisabled(req.body.requestId));
     }
     if (String(req.body.activeProtocol).toLowerCase() === "flash") return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
     try {
@@ -16855,6 +16864,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (requestedProtocolRaw !== undefined && requestedProtocolRaw !== null) {
         const requestedProtocol = String(requestedProtocolRaw).toLowerCase();
         if (requestedProtocol !== (bot.activeProtocol ?? '').toLowerCase()) {
+          if (bot.activeProtocol === 'phoenix' || requestedProtocol === 'phoenix') return res.status(409).json({ error: 'Phoenix requires a new bot; recovery identities cannot be retargeted.' });
           const switchGuard = await assertNoOpenPositionBeforeProtocolSwitch(bot);
           if (!switchGuard.ok) {
             return res.status(409).json({
@@ -16904,8 +16914,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           return res.status(503).json(phoenixOrderDisabled());
         }
         if (isActive !== false) return res.status(400).json({ error: 'isActive must be a boolean' });
-        const paused = await storage.updateTradingBot(bot.id, { isActive: false });
-        return res.json({ ...paused, paused: true, safety: phoenixSafetyUnavailable('pause') });
+        const paused = await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'pause');
+        return res.json({ ...paused, safety: phoenixSafetyUnavailable('pause') });
       }
 
       // PAUSE BOT = CLOSE POSITION: If bot is being paused (isActive changing to false)
@@ -17176,6 +17186,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   });
 
+  app.post('/api/phoenix/bots/:id/archive', requireWallet, async (req, res) => {
+    try {
+      const bot = await storage.getTradingBotById(req.params.id);
+      if (!bot || bot.walletAddress !== req.walletAddress || bot.activeProtocol !== 'phoenix') return res.status(404).json({ error: 'Phoenix bot not found' });
+      return res.json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
+    } catch { return res.status(503).json({ error: 'Phoenix archive could not be confirmed; recovery identity retained' }); }
+  });
+
   app.delete("/api/trading-bots/:id", requireWallet, async (req, res) => {
     let _deleteAgentKeyCleanup: (() => void) | null = null;
     // Phase D: owner UMK, captured for eager key-rebind when pooling a spare. Valid
@@ -17189,6 +17207,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
+      }
+      if (bot.activeProtocol === 'phoenix') {
+        return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
       }
 
       // Get the wallet's agent public key - Drift accounts are under the AGENT wallet
@@ -17856,6 +17877,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      if (bot.activeProtocol === 'phoenix') {
+        return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
+      }
 
       const wallet = await storage.getWallet(req.walletAddress!);
       const agentAddress = wallet?.agentPublicKey;
@@ -18110,6 +18134,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
+      }
+      if (bot.activeProtocol === 'phoenix') {
+        return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
       }
 
       // Get the wallet's agent public key - Drift accounts are under the AGENT wallet
@@ -18387,6 +18414,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
+      }
+      if (bot.activeProtocol === 'phoenix') {
+        return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
       }
 
       const { txSignature } = req.body;
@@ -23181,6 +23211,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(403).json({ error: "Not your bot" });
       }
 
+      if (tradingBot.activeProtocol === 'phoenix') return res.status(503).json({ error: 'Phoenix marketplace publishing is not enabled; recovery records are retained.' });
+
       // Block re-publishing of subscribed/copied bots. A bot with
       // sourcePublishedBotId set is a copy of someone else's published bot
       // (created via the marketplace subscribe flow), so republishing it would
@@ -23395,7 +23427,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       //      its own min transfer), floored at the product minimum ($10). We derive
       //      it from the creator-protocol adapter and re-validate the amounts the
       //      caller passed (the early $10 checks above are just a cheap pre-filter).
-      const creatorProtocol = (originalBot.activeProtocol ?? getDefaultAdapter().protocolName);
+      const creatorProtocol = originalBot.activeProtocol;
+      if (!creatorProtocol) return res.status(409).json({ error: 'Creator venue is unknown; subscription refused.' });
+      if (creatorProtocol === 'phoenix') return res.status(503).json(phoenixConsumerDisabled(req.body.requestId));
       if (creatorProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
       if (creatorProtocol === 'drift') {
         return res.status(400).json({
@@ -23752,6 +23786,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(409).json({ code: 'FLASH_RETIRED', error: 'Flash subscriptions require owner-directed recovery. Contact support. Links and liabilities are preserved; no funds were moved.' });
       }
 
+      if (creatorBot?.activeProtocol === 'phoenix' && (!subscriberBotId || !(await storage.getTradingBotById(subscriberBotId)))) {
+        return res.status(409).json({ code: 'PHOENIX_RECOVERY_RETAINED', error: 'Copy identity unavailable; subscription and obligations retained.' });
+      }
+
       // No copy bot linked (legacy/partial row) — nothing to recover or tear down.
       const bot = subscriberBotId ? await storage.getTradingBotById(subscriberBotId) : null;
       if (!bot) {
@@ -23761,6 +23799,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Subscriber bot not owned by this wallet" });
+      }
+
+      if (bot.activeProtocol === 'phoenix') {
+        return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'unsubscribe'));
       }
 
       if (['flash'].includes(bot.activeProtocol ?? '')) {

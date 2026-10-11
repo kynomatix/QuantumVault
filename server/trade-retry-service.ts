@@ -237,6 +237,7 @@ function tryClassifySwiftError(_error?: string): { category: string; shouldRetry
 }
 
 export interface RetryJob {
+  protocol?: string; // Historical queue venue; Phoenix jobs must use their own durable journal.
   id: string;
   botId: string;
   walletAddress: string;
@@ -493,6 +494,8 @@ function calculateBackoff(attempts: number, priority: 'critical' | 'normal'): nu
 }
 
 export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAttempts' | 'nextRetryAt' | 'createdAt' | 'leverage'>): Promise<string> {
+  const ingressBot = await storage.getTradingBotById(job.botId);
+  if (ingressBot?.activeProtocol === 'phoenix' || job.protocol === 'phoenix') throw new Error('Phoenix retries require the durable Phoenix operation store');
   const maxAttempts = job.priority === 'critical' ? MAX_ATTEMPTS_CRITICAL : MAX_ATTEMPTS_NORMAL;
   const backoff = calculateBackoff(0, job.priority);
   const nextRetryAt = Date.now() + backoff;
@@ -668,6 +671,11 @@ async function rejectRetryAtLeverageAdmission(job: RetryJob, error: string): Pro
 async function processRetryJob(job: RetryJob): Promise<void> {
   // Includes close jobs: retire before keys, admission, RPC or another attempt.
   const retirementBot = await storage.getTradingBotById(job.botId);
+  if (retirementBot?.activeProtocol === 'phoenix' || job.protocol === 'phoenix') {
+    await storage.markTradeRetryJobFailed(job.id, 'Phoenix retries require durable Phoenix recovery');
+    retryQueue.delete(job.id);
+    return;
+  }
   if (retirementBot?.activeProtocol === 'flash') {
     await storage.markTradeRetryJobFailed(job.id, FLASH_RETIRED_MESSAGE);
     retryQueue.delete(job.id);
@@ -1476,6 +1484,7 @@ export async function startRetryWorker(): Promise<void> {
         const fullJob: RetryJob = {
           id: dbJob.id,
           botId: dbJob.botId,
+          protocol: dbJob.protocol,
           walletAddress: dbJob.walletAddress,
           agentPublicKey: bot.agentPublicKey || wallet.agentPublicKey || '',
           market: dbJob.market,

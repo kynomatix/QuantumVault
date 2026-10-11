@@ -1,3 +1,4 @@
+import { consumerFundingHandled } from '@shared/phoenix-consumer-contract';
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useCallback, useEffect, useRef, useMemo, Fragment, memo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
@@ -5276,7 +5277,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
       // Pacifica atomic-provision: backend deposited + transferred when bot.funded === true.
       // Otherwise (Drift, or atomic provision skipped) follow the legacy two-step deposit path.
       const totalDeposit = effectiveTradeSize + equityBuffer;
-      const backendHandledFunding = bot.funded === true || typeof bot.fundingWarning === 'string';
+      const backendHandledFunding = consumerFundingHandled(bot);
 
       let fundingFailed = false;
       if (!backendHandledFunding) {

@@ -1,3 +1,4 @@
+import { assertPhoenixNewRisk } from './lifecycle';
 import type { Pool, PoolClient } from 'pg';
 import { phoenixIdentityFromBot } from './identity';
 import { orderIntentHash, validateOrderIntent, type PhoenixOrderIntent, type PhoenixAdmission } from './order-contract';
@@ -56,6 +57,7 @@ export class PhoenixOrderStore implements OrderRepository {
     return this.locked(i, async c => {
       const replay = (await c.query('SELECT * FROM phoenix_order_intents WHERE bot_id=$1 AND request_key=$2', [i.botId, i.requestKey])).rows[0];
       if (replay) return { record: this.verify(replay, i), created: false };
+      if (i.action === 'entry') await assertPhoenixNewRisk(c, i.botId);
       const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')
         AND ($2 <> 'close' OR kind <> 'protection')`, [i.botId, i.action]);
       if (busy.rows.length) throw new Error('Phoenix funding/registration unresolved');
@@ -83,6 +85,7 @@ export class PhoenixOrderStore implements OrderRepository {
           AND ($2 <> 'close' OR kind <> 'protection')`, [record.intent.botId, record.intent.action]);
         if (busy.rows.length) throw new Error('Funding must settle before order signing');
       }
+      if (record.intent.action === 'entry' && ['funding', 'signing', 'submission_pending'].includes(state)) await assertPhoenixNewRisk(c, record.intent.botId);
       const next = { ...current.data, ...data };
       if (current.data.attempt && orderIntentHash(next.attempt) !== orderIntentHash(current.data.attempt)) throw new Error('Immutable order signature');
       if (state === 'submission_pending' && !next.attempt) throw new Error('Order signature required before submission');

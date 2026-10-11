@@ -1,3 +1,4 @@
+import { validatePhoenixConsumer, type PhoenixConsumerContext } from './consumer-contract';
 import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { derivePhoenixIdentity } from './identity';
@@ -6,9 +7,10 @@ import { PHOENIX_PUBLIC_ADDRESSES } from './sdk-boundary';
 
 export interface PhoenixCreationRequest {
   ownerWallet: string; requestId: string; name: string; market: string;
-  maxPositions: number; maxCostLamports: string;
+  maxPositions: number; maxCostLamports: string; consumer?: PhoenixConsumerContext;
 }
 export function validatePhoenixCreation(request: PhoenixCreationRequest) {
+  if (request.consumer) validatePhoenixConsumer(request.consumer);
   if (typeof request.requestId !== 'string' || !/^[\x21-\x7e]{1,200}$/.test(request.requestId) || request.requestId.includes('\n')
     || !request.ownerWallet || typeof request.name !== 'string' || !request.name.trim() || request.name.length > 100
     || typeof request.market !== 'string' || !request.market || request.market.length > 100
@@ -41,13 +43,21 @@ export class PhoenixProvisioningStore {
       const wallet = await client.query('SELECT address FROM wallets WHERE address = $1 FOR UPDATE', [request.ownerWallet]);
       if (!wallet.rows[0]) throw new Error('Phoenix owner missing');
       const replay = await client.query('SELECT * FROM phoenix_operations WHERE bot_id = $1 AND request_key = $2', [botId, request.requestId]);
-      const registration = { maxPositions: request.maxPositions, maxCostLamports: request.maxCostLamports, name: request.name, market: request.market };
+      const registration = { maxPositions: request.maxPositions, maxCostLamports: request.maxCostLamports, name: request.name, market: request.market, ...(request.consumer ? { consumer: request.consumer } : {}) };
       if (replay.rows[0]) {
         const op = replay.rows[0] as StoredPhoenixOperation;
         if (op.intent.ownerWallet !== request.ownerWallet || op.intent_hash !== phoenixIntentHash(op.intent)
-          || Object.entries(registration).some(([key, value]) => (op.intent.registration as any)?.[key] !== value)) throw new Error('Phoenix creation replay mismatch');
+          || phoenixIntentHash({ ...op.intent, registration }) !== op.intent_hash) throw new Error('Phoenix creation replay mismatch');
         await client.query('COMMIT');
         return op;
+      }
+      if (request.consumer?.kind === 'marketplace') {
+        const source = await client.query(`SELECT p.id FROM published_bots p JOIN trading_bots b ON b.id=p.trading_bot_id
+          WHERE p.id=$1 AND p.is_active=true AND b.active_protocol='phoenix' AND b.subaccount_status NOT IN ('phoenix_paused','phoenix_archived') FOR UPDATE OF p`, [request.consumer.sourcePublishedBotId]);
+        if (!source.rows[0]) throw new Error('Phoenix creator unavailable');
+        const subscribed = await client.query(`SELECT id FROM bot_subscriptions WHERE published_bot_id=$1 AND subscriber_wallet_address=$2`,
+          [request.consumer.sourcePublishedBotId, request.ownerWallet]);
+        if (subscribed.rows.length) throw new Error('Existing subscription retains recovery identity');
       }
       const allocated = await client.query(`UPDATE wallets SET next_bot_derivation_index = next_bot_derivation_index + 1
         WHERE address = $1 AND next_bot_derivation_index BETWEEN 1 AND 2147483646 RETURNING next_bot_derivation_index - 1 AS allocated`, [request.ownerWallet]);
@@ -63,6 +73,15 @@ export class PhoenixProvisioningStore {
         VALUES ($1,$2,$3,$4,$5,false,'0',1,'0','phoenix','external_key','provisioning',$6,1,$7,$8,$9,$10,0,0,$8,$11,$12)`,
       [botId, request.ownerWallet, request.name, request.market, `disabled-phoenix:${botId}`, index, identity.authorityWalletAddress,
         identity.traderAccountAddress, identity.network, identity.programAddress, material.encryptedKey, material.policyHmac]);
+      if (request.consumer?.kind === 'marketplace') {
+        await client.query('UPDATE trading_bots SET source_published_bot_id=$2 WHERE id=$1', [botId, request.consumer.sourcePublishedBotId]);
+        await client.query(`INSERT INTO bot_subscriptions(published_bot_id,subscriber_wallet_address,subscriber_bot_id,capital_invested,status)
+          VALUES ($1,$2,$3,$4::numeric/1000000,'paused')`,
+          [request.consumer.sourcePublishedBotId, request.ownerWallet, botId, request.consumer.initialFundingBaseUnits]);
+        await client.query(`UPDATE published_bots SET subscriber_count=subscriber_count+1,
+          total_capital_invested=total_capital_invested+$2::numeric/1000000 WHERE id=$1`,
+          [request.consumer.sourcePublishedBotId, request.consumer.initialFundingBaseUnits]);
+      }
       const intent: PhoenixIntent = { botId, ownerWallet: request.ownerWallet, requestKey: request.requestId, kind: 'register',
         identity, mint: PHOENIX_PUBLIC_ADDRESSES.usdcMint, amountBaseUnits: '0', feeBaseUnits: '0', destination: identity.traderAccountAddress, registration };
       const result = await client.query(`INSERT INTO phoenix_operations(bot_id,request_key,kind,intent,intent_hash)
@@ -77,7 +96,7 @@ export class PhoenixProvisioningStore {
     const client = await this.pool.connect();
     try {
       // One guarded statement: a crash between confirmation and this update simply resumes it.
-      const result = await client.query(`UPDATE trading_bots b SET subaccount_status = 'active', updated_at = now()
+      const result = await client.query(`UPDATE trading_bots b SET subaccount_status = CASE WHEN b.subaccount_status IN ('phoenix_paused','phoenix_archived') THEN b.subaccount_status ELSE 'active' END, updated_at = now()
         FROM phoenix_operations o WHERE b.id = $1 AND b.wallet_address = $2 AND b.active_protocol = 'phoenix'
         AND o.id = $3 AND o.bot_id = b.id AND o.kind = 'register' AND o.state = 'completed' AND o.intent_hash = $4 RETURNING b.id`,
       [operation.bot_id, operation.intent.ownerWallet, operation.id, phoenixIntentHash(operation.intent)]);
