@@ -18985,7 +18985,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       // Security v3: Verify bot policy HMAC if one exists (detects tampering with critical settings)
-      if (bot.policyHmac || bot.activeProtocol === 'phoenix') {
+      // Phoenix was already refused before entering this legacy execution path.
+      if (bot.policyHmac) {
         const policyValid = verifyBotPolicyHmac(
           umkResult.umk,
           { ...bot, market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },
@@ -20472,7 +20473,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       // Security v3: Verify bot policy HMAC if one exists (detects tampering with critical settings)
-      if (bot.policyHmac || bot.activeProtocol === 'phoenix') {
+      // Phoenix was already refused before entering this legacy execution path.
+      if (bot.policyHmac) {
         const policyValid = verifyBotPolicyHmac(
           umkResult.umk,
           { ...bot, market: bot.market, leverage: bot.leverage || 1, maxPositionSize: bot.maxPositionSize },

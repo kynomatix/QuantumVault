@@ -69,6 +69,16 @@ describe('Phoenix persisted identity and policy', () => {
     expect(getTableColumns(wallets)).not.toHaveProperty('phoenixAuthorityWallet');
     const routes = readFileSync(new URL('../../server/routes.ts', import.meta.url), 'utf8');
     expect(routes).toContain("requestedProtocol !== 'pacifica' && requestedProtocol !== 'flash'");
-    expect(routes.match(/bot.policyHmac \|\| bot.activeProtocol === 'phoenix'/g)).toHaveLength(2);
+    for (const endpoint of ['/api/webhook/tradingview/:botId', '/api/webhook/user/:walletAddress']) {
+      const start = routes.indexOf(`app.post("${endpoint}"`);
+      expect(start).toBeGreaterThan(-1);
+      const handler = routes.slice(start, routes.indexOf('\n  app.', start + 1));
+      const refusal = handler.indexOf("if (bot.activeProtocol === 'phoenix')");
+      const authorization = handler.indexOf('if (bot.policyHmac)');
+      expect(refusal).toBeGreaterThan(-1);
+      expect(authorization).toBeGreaterThan(refusal);
+      expect(handler.slice(refusal, authorization))
+        .toContain('return res.status(503).json(phoenixOrderDisabled());');
+    }
   });
 });

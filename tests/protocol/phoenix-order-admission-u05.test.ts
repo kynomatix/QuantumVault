@@ -80,12 +80,17 @@ describe('Phoenix U05 exact admission and explicit wire policy', () => {
     expect(() => signOrderTransaction(i, a, pin, lifetime, new Uint8Array(64), now)).toThrow();
     expect(() => signOrderTransaction(i, a, pin, lifetime, key.secretKey, now + 5000)).toThrow();
   });
-  it('leaves every incumbent route byte unchanged after removing only the five Phoenix branches', () => {
+  it('preserves incumbent routes apart from Phoenix refusals and unreachable policy comparisons', () => {
     const baseCommitHash = '81aaefea60e1eb0c816b85b545c75480023f6492';
     const base = execFileSync('git', ['show', `${baseCommitHash}:server/routes.ts`], { maxBuffer: 5_000_000 }).toString().replaceAll('\r\n', '\n');
     const current = readFileSync('server/routes.ts', 'utf8').replaceAll('\r\n', '\n');
     const branch = "      if (bot.activeProtocol === 'phoenix') {\n        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');\n        return res.status(503).json(phoenixOrderDisabled());\n      }\n\n";
-    expect(current.split(branch).length - 1).toBe(5); expect(current.replaceAll(branch, '')).toBe(base);
+    const oldPolicyCheck = "      if (bot.policyHmac || bot.activeProtocol === 'phoenix') {";
+    const legacyPolicyCheck = "      // Phoenix was already refused before entering this legacy execution path.\n      if (bot.policyHmac) {";
+    expect(base.split(oldPolicyCheck).length - 1).toBe(2);
+    expect(current.split(legacyPolicyCheck).length - 1).toBe(2);
+    expect(current.split(branch).length - 1).toBe(5);
+    expect(current.replaceAll(branch, '')).toBe(base.replaceAll(oldPolicyCheck, legacyPolicyCheck));
     expect(phoenixOrderDisabled().code).toBe('PHOENIX_ORDERS_DISABLED');
   });
 });
