@@ -20,6 +20,7 @@ export interface GridVenueOrder {
   price: string; amount: string; filledAmount: string; cancelledAmount: string | null;
   reduceOnly: boolean; orderType: string; createdAt: number; updatedAt: number;
   status: 'open' | 'partially_filled' | 'filled' | 'cancelled' | 'rejected';
+  reason?: string | null;
 }
 const exactAmount = (v: unknown): v is string => typeof v === 'string' && v.length <= 80 && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v);
 export function parseGridVenueOrders(raw: unknown, history = false): GridVenueOrder[] {
@@ -43,7 +44,7 @@ export function parseGridVenueOrders(raw: unknown, history = false): GridVenueOr
     return { orderId: id, clientOrderId: r.client_order_id as string | undefined ?? null, symbol: r.symbol, side: r.side === 'bid' ? 'long' : 'short',
       price, amount, filledAmount: r.filled_amount, cancelledAmount: history ? null : r.cancelled_amount as string,
       reduceOnly: r.reduce_only, orderType: r.order_type, createdAt: r.created_at as number, updatedAt: r.updated_at as number,
-      status: status as GridVenueOrder['status'] };
+      status: status as GridVenueOrder['status'], ...(history ? {reason:typeof r.reason==='string'?r.reason:null}: {}) };
   });
 }
 export interface GridOrderLookup { state: 'open' | 'filled' | 'cancelled' | 'unknown'; orderId: string | null; reason: string | null; order?: GridVenueOrder }

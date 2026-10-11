@@ -8,6 +8,7 @@ import { computeGridPolicyHmac, verifyGridPolicyHmac, canonicalGridPolicy, type 
 import { gridStopReachable } from './runtime-policy';
 import { type GridStorage, type DraftRecord } from './storage';
 import type { PlannerMarket } from '../grid-planner/types';
+import { projectGridStop } from './stop-clearance';
 
 const D = Decimal.clone({ precision:100, toExpNeg:-100, toExpPos:100 });
 export class GridDraftError extends Error { constructor(public code: 'authority_unavailable'|'preview_drift'|'idempotency_conflict'|'secret_unavailable'|'invalid_intent', public reasons: string[] = []) { super(code); } }
@@ -17,6 +18,7 @@ export interface GridDraftAuthority {
   autoRange: { lowerPrice:string; upperPrice:string; stopPrice:string; latestFinalizedTime:number } | null;
 }
 export interface GridDraftDeps {
+  projectedStop?: boolean;
   now():number; observe(wallet:string,intent:GridIntent):Promise<GridDraftAuthority>; umk(wallet:string):Promise<Buffer|null>;
   storage: Pick<GridStorage,'createDraftWithLevels'|'findByClientRequest'|'getBotSnapshot'>;
 }
@@ -85,7 +87,11 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
         if (!bounds.minimum || !bounds.maximum || plan.lines.some(l=>new D(l.price).lt(bounds.minimum!) || new D(l.price).gt(bounds.maximum!))) reject('Order is outside observed submitted-price bounds');
       }
       if (cv.restrictions.state==='available' && cv.restrictions.value!== 'unrestricted') reject('Observed market restrictions deny draft creation');
-      const s=authority.stop;
+      const s=deps.projectedStop && cv.maxLeverage.state==='available' && makerValid && seedValid
+        ? projectGridStop({plan,funding:intent.totalInvestment,stop:intent.stopPrice,tick:cv.tick,maxLeverage:cv.maxLeverage.value,
+          makerRate:makerRate!,takerRate:takerRate.toFixed(),observedAt:Math.max(cv.observedAt,r.observedAt),expiresAt,},now)
+        : authority.stop;
+      authority.stop=s;
       if (s.state!=='available') reject(s.reason);
       else {
         expiresAt=Math.min(expiresAt,s.expiresAt);

@@ -10,6 +10,8 @@ import { readGridRange } from './draft-default-deps';
 const uuid=z.string().uuid();
 const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),lookback:z.enum(['100','200'])}).strict();
 export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean}) {
+  // Unit 4 is buildable and reviewable, but no production money route is enabled.
+  app.post('/api/grid-bots/:id/start',requireWallet,(_req,res)=>{res.status(503).json({error:'Grid live launch is disabled until reconciliation and stop recovery are complete.'});});
   const enabled=provided?.enabled??(()=>process.env.GRID_BOT_ENABLED==='true');
   let initialized:Promise<{deps:GridDraftDeps;storage:GridStorage}>|null=null;
   const runtime=()=>provided?Promise.resolve(provided):initialized??(initialized=Promise.all([import('../db'),import('./storage'),import('./draft-default-deps')]).then(([{pool},{GridStorage},{defaultGridDraftDeps}])=>{const storage=new GridStorage(pool);return {storage,deps:defaultGridDraftDeps(storage)};}));

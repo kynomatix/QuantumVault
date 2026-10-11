@@ -25,7 +25,7 @@ export function defaultGridDraftDeps(storage:GridStorage):GridDraftDeps {
   // Retain original observations only until their expiry. A create reuses the same
   // evidence and recomputes geometry; refreshing economics changes the digest.
   const observations=new Map<string,{value:GridDraftAuthority;expiresAt:number}>();
-  return {now:Date.now,storage,
+  return {now:Date.now,storage,projectedStop:true,
     async umk(wallet) {
       const security=await import('../session-v3');
       let session=security.getSessionByWalletAddress(wallet);

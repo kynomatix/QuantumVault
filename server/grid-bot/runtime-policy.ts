@@ -5,8 +5,9 @@ const D = Decimal.clone({ precision: 100 });
 /** Owner policy 1.0.0, 2026-09-09; H.5 settles only the resting-capacity proof. No feature flag is enabled here. */
 export const GRID_RUNTIME_POLICY = Object.freeze({
   version: '1.0.0', approvedOn: '2026-09-09', capacityRuling: 'H.5/2026-09-28', caps: GRID_CAPS,
-  quota: Object.freeze({ observedSameDeploymentRequired: true, planningCredits: 100, windowSeconds: 60,
-    routineReserveFraction: '0.30', minimumReserveCredits: 30, sharedNonGridDemandRequired: true }), // 1–2
+  quota: Object.freeze({ observedSameDeploymentRequired: false, planningCredits: 300, windowSeconds: 60,
+    fixedShare: '0.5', ledgerScope: 'pacifica_master_postgresql', uncertainClaimsRetained: true,
+    durable429Backoff: true, sharedNonGridDemandRequired: false }), // Owner ruling 2026-10-12; Signal/AI unchanged.
   monitor: Object.freeze({ intervalMs: 15_000, conditionalOnMeasuredWorkload: true, globalStartSpacingMs: 1000,
     globalConcurrency: 1, perBotExclusion: true, catchUp: false, optionalHeavyMovementFraction: '0.001',
     skipPriceMaxAgeMs: 5000, mandatoryReconciliationNeverSkipped: true, riskEveryMs: 15_000,

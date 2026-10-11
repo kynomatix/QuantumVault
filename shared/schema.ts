@@ -2599,6 +2599,8 @@ export const gridOperations = pgTable("grid_operations", {
   parentOperationId: uuid("parent_operation_id"),
   idempotencyKey: text("idempotency_key").notNull(),
   requestIdentity: text("request_identity").notNull(),
+  exactRequest: jsonb("exact_request"),
+  exactRequestDigest: text("exact_request_digest"),
   type: text("type").notNull(),
   state: text("state").notNull().default('prepared'),
   attempt: integer("attempt").notNull().default(1),
@@ -2620,6 +2622,7 @@ export const gridOperations = pgTable("grid_operations", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   check("grid_operations_identity_check", sql`length(btrim(${t.idempotencyKey})) > 0 AND length(btrim(${t.requestIdentity})) > 0 AND ${t.attempt} > 0`),
+  check("grid_exact_request_pair", sql`(${t.exactRequest} IS NULL AND ${t.exactRequestDigest} IS NULL) OR (${t.exactRequest} IS NOT NULL AND ${t.exactRequestDigest} IS NOT NULL AND jsonb_typeof(${t.exactRequest})='object' AND ${t.exactRequestDigest} ~ '^[0-9a-f]{64}$')`),
   check("grid_operations_type_check", sql`${t.type} IN ('provision_subaccount','set_leverage','fund_subaccount','seed_position','place_level_order','cancel_level_order','cancel_all_orders','pause','resume','sync','stop_trigger','close_position','sweep_subaccount','release_subaccount','send_notification')`),
   check("grid_operations_state_check", sql`${t.state} IN ('prepared','submitted','unconfirmed','confirmed','failed')`),
   check("grid_operations_failure_check", sql`(${t.failureClassification} IS NULL OR ${t.failureClassification} IN ('expected_rejection','transport','authentication','quota','margin','policy','invariant','venue_rejection','unknown')) AND (${t.state} NOT IN ('unconfirmed','failed') OR ${t.failureClassification} IS NOT NULL) AND (${t.state} <> 'confirmed' OR ${t.failureClassification} IS NULL)`),
