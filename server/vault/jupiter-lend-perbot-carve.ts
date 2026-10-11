@@ -66,6 +66,7 @@ import {
   borrowMoreOnExistingBotPosition as legacy_borrowMoreOnExistingBotPosition,
   withdrawFromExistingBotPosition as legacy_withdrawFromExistingBotPosition,
   withBorrowLock,
+  REPAY_BUFFER_BPS,
 } from "./jupiter-lend-borrow-executor";
 import { JupiterLendBorrowRoute, type BorrowVaultConfig } from "./jupiter-lend-borrow-route";
 import { readBorrowOracleContext } from "./borrow-oracle-freshness";
@@ -187,6 +188,19 @@ async function reconcileSignature(
     }
   }
   return "in_flight";
+}
+
+/** Phoenix recovery needs terminal proof; processed errors and RPC failures
+ * are uncertain. Read expiry BEFORE status so a landing during expiry cannot
+ * be mistaken for an absent transaction. Legacy reconciliation is unchanged. */
+async function phoenixCloseCannotLand(signature: string, lastValidBlockHeight?: number): Promise<boolean> {
+  try {
+    const connection = getServerConnection();
+    const height = await connection.getBlockHeight("finalized");
+    const { value: [status] } = await connection.getSignatureStatuses([signature], { searchTransactionHistory: true });
+    if (status) return status.confirmationStatus === "finalized" && Boolean(status.err);
+    return Number.isSafeInteger(lastValidBlockHeight) && lastValidBlockHeight! >= 0 && height > lastValidBlockHeight!;
+  } catch { return false; }
 }
 
 /** Idempotent op resolution. Returns the existing op for this (wallet,
@@ -1049,7 +1063,8 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
         // below covers the interest); else fall back to the bot's live USDC.
         const base = principalRaw > 0n ? principalRaw : botUsdcBefore;
         const headroom = bmax((base * TOPUP_HEADROOM_BPS) / 10_000n, TOPUP_MIN_HEADROOM_RAW);
-        const target = phoenixLendContext() ? await phoenixLendContext()!.freshDebt() : base + headroom;
+        const phoenixDebt = phoenixLendContext() ? await phoenixLendContext()!.freshDebt() : null;
+        const target = phoenixDebt === null ? base + headroom : phoenixDebt + phoenixDebt * BigInt(REPAY_BUFFER_BPS) / 10_000n;
         const needRaw = target > botUsdcBefore ? target - botUsdcBefore : 0n;
         // Anomaly ceiling: a top-up bigger than ~1.5x the base means a misread
         // somewhere -> refuse rather than move a large amount of account USDC.
@@ -1104,12 +1119,14 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
     let returnedRaw = BigInt(readMeta(op).returnedRaw || "0");
     const cStep = op.step ?? "";
     if (cStep === "topped_up" || cStep === "closing" || cStep === "close_failed") {
+      let recoverClosing: ((absent: { signature?: string; lastValidBlockHeight?: number } | null) => Promise<void>) | undefined;
       const dbPos = await storage.getBorrowPosition(params.walletAddress, params.botBorrowPositionId);
       if (phoenixLendContext() && !dbPos) return failClosed(op, "close_failed", "Unknown Phoenix loan remains recoverable; missing row is not proof of repayment.", true);
       let closeLanded = phoenixLendContext() ? false : !dbPos || dbPos.status === "closed";
 
-      // RESUME-SAFE close detection. executeBorrowClose has NO write-ahead
-      // signature and REJECTS any non-"open" DB status. A crash AFTER it claims
+      // RESUME-SAFE close detection. Legacy close has no write-ahead signature;
+      // Phoenix records it through its durable leg. Close rejects non-open status.
+      // A crash AFTER it claims
       // "closing" (CAS open->closing) and broadcasts, but BEFORE the DB finalize,
       // leaves DB="closing" while the close tx already landed on-chain. A blind
       // retry would (a) be rejected for status!="open" -> stall forever, OR (b)
@@ -1133,11 +1150,28 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
             { status: "closed", debtAmountRaw: BigInt(liveBot.debtRaw).toString(), collateralAmountRaw: BigInt(liveBot.collateralRaw).toString() },
             dbPos.status,
           );
-        } else if (dbPos.status === "closing" && !phoenixLendContext()) {
-          // Claimed "closing" but the close did NOT land (crash before/at
-          // broadcast) — chain still shows the debt, so nothing was repaid/
-          // withdrawn. Reset to "open" so executeBorrowClose can re-attempt.
-          await storage.updateBorrowPosition(dbPos.id, { status: "open" }, "closing");
+        } else if (dbPos.status === "closing") {
+          if (phoenixLendContext()) {
+            recoverClosing = async absent => {
+              // Live debt alone cannot disprove a pending close. Require the
+              // authoritative journal reconciliation, then recheck any recorded
+              // signature at finalized commitment. A signature-less attempt needs
+              // the reconciler's proof of non-submission, never a timeout inference.
+              const live = await route.readLivePositionHealth(collateralMint, botVenueId);
+              const signature = absent?.signature ?? readMeta(op).closeSig;
+              const expiry = absent?.lastValidBlockHeight ?? readMeta(op).closeLvbh;
+              if (!live || BigInt(live.debtRaw) <= 0n || !absent
+                || (signature && !await phoenixCloseCannotLand(signature, expiry))) {
+                throw new Error("Phoenix close absence is unproven; reconcile before retrying.");
+              }
+              if (!await storage.updateBorrowPosition(dbPos.id, { status: "open" }, "closing")) {
+                throw new Error("Phoenix close state changed during recovery.");
+              }
+            };
+          } else {
+            // Legacy recovery retains its existing live-debt rule.
+            await storage.updateBorrowPosition(dbPos.id, { status: "open" }, "closing");
+          }
         }
       }
 
@@ -1150,6 +1184,9 @@ export async function runPerbotUnwindClose(params: PerbotUnwindCloseParams): Pro
           borrowPositionId: params.botBorrowPositionId,
           funderPublicKey: params.accountPublicKey,
           funderSecretKey: params.accountSecretKey,
+          ...(phoenixLendContext() ? { recoverClosing, onBeforeBroadcast: async ({ signature, lastValidBlockHeight }: { signature: string; lastValidBlockHeight: number }) => {
+            await storage.updateBorrowOperation(op.id, { mergeMetadata: { closeSig: signature, closeLvbh: lastValidBlockHeight } });
+          } } : {}),
         });
         if (!close.success || !close.finalized) {
           return failClosed(op, "close_failed", `${close.error || "Close did not finalise"}. The bot position may still be OPEN — reconcile before retrying.`, true);

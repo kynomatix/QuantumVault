@@ -60,6 +60,58 @@ beforeEach(async()=>{
 });
 
 describe('U11 durable lender composition',()=>{
+  it('owns the close re-claim before exposing the exact reconciled absence to CAS recovery',async()=>{
+    const i=intent({action:'unwind'});let recoveries=0,fail=true;
+    const close=phoenixLendLeg('executeBorrowClose',async(p:any)=>{
+      await p.onBeforeBroadcast({signature:'EXAMPLE-close',lastValidBlockHeight:100});
+      if(fail)throw Error('EXAMPLE-crash');return {success:true,finalized:true};
+    });
+    const executors={runPerbotUnwindClose:async(p:any)=>close({agentPublicKey:p.botPublicKey,borrowPositionId:p.botBorrowPositionId,
+      ...(fail?{}:{recoverClosing:async(proof:any)=>{
+        expect(proof).toMatchObject({state:'absent',signature:'EXAMPLE-close',lastValidBlockHeight:100,proofReference:'EXAMPLE-proof'});
+        expect((await store.read(i)).metadata.legs['executeBorrowClose:bot'].state).toBe('claimed');recoveries++;
+      }})})} as unknown as LendExecutors;
+    const service=new PhoenixBorrowService(store,io(),policy,()=>now,executors);
+    await expect(service.run(i)).rejects.toThrow('crash');
+    await store.reconcile(i,'executeBorrowClose:bot',async l=>({termsHash:l.termsHash,reference:'EXAMPLE-proof',finalized:true,outcome:'absent'}));
+    fail=false;
+    const results=await Promise.allSettled([service.run(i),service.run(i)]);
+    expect(results.some(r=>r.status==='fulfilled')).toBe(true);expect(recoveries).toBe(1);
+    expect((await store.read(i)).metadata.legs['executeBorrowClose:bot'].state).toBe('completed');
+  });
+  it('reclaims an absent deployment before authorizing its U04 child and completes exactly once',async()=>{
+    const measured={samples:1,maxSeconds:60,observedAt:now,reference:'EXAMPLE-measured'};
+    const i=intent({action:'deploy',measurementHash:borrowHash(measured)}),base=io();
+    const r=await store.prepare(i),child={borrowIntentId:r.id,requestKey:`${i.requestKey}:deposit`,amountRaw:i.amountRaw};
+    await store.claim(i,'deposit',child);
+    await store.reconcile(i,'deposit',async l=>({termsHash:l.termsHash,reference:'EXAMPLE-never-submitted',finalized:true,outcome:'absent'}));
+    let deposits=0;
+    const source=io({snapshot:async i=>({...await base.snapshot(i),measured,expectedQueueSeconds:60,queueCostRaw:'1'}),
+      deposit:async()=>{
+        await service.authorizeFunding(i,{...child,botId:i.botId,ownerWallet:i.ownerWallet,identity:i.identity,
+          amountBaseUnits:i.amountRaw,borrowReserveRaw:i.reserveRaw,kind:'deposit',funding:{leg:'deposit'}} as any);
+        const c=await pool.connect();try{
+          await excludePhoenixBorrow(c,i.botId,{...child,amountBaseUnits:i.amountRaw,borrowReserveRaw:i.reserveRaw,feeBaseUnits:'0',kind:'deposit'});
+        }finally{c.release();}
+        deposits++;return {success:true,finalized:true,operationId:'EXAMPLE-child'};
+      }});
+    const service=new PhoenixBorrowService(new PhoenixBorrowStore(pool),source,policy,()=>now);
+    expect((await service.run(i)).status).toBe('completed');
+    expect((await store.read(i)).metadata.legs.deposit.state).toBe('completed');
+    await service.run(i);expect(deposits).toBe(1);
+    await expect(store.claim(i,'deposit',{...child,amountRaw:'101'})).rejects.toThrow('terms');
+  });
+  it('allows exactly one re-claim of an absent leg across concurrent repositories',async()=>{
+    const i=intent({action:'deploy',measurementHash:'EXAMPLE-measurement'}),r=await store.prepare(i);
+    const child={borrowIntentId:r.id,requestKey:`${i.requestKey}:deposit`,amountRaw:i.amountRaw};
+    await store.claim(i,'deposit',child);
+    await store.reconcile(i,'deposit',async l=>({termsHash:l.termsHash,reference:'EXAMPLE-absence',finalized:true,outcome:'absent'}));
+    const claims=await Promise.allSettled(Array.from({length:6},()=>new PhoenixBorrowStore(pool).claim(i,'deposit',child)));
+    expect(claims.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+    expect(claims.filter(r=>r.status==='rejected')).toHaveLength(5);
+    await store.complete(i,'deposit',{success:true,finalized:true});
+    expect((await store.claim(i,'deposit',child)).execute).toBe(false);
+  });
   it('observes a queued deposit child after new borrowing is disabled',async()=>{
     const measured={samples:1,maxSeconds:60,observedAt:now,reference:'EXAMPLE-measured-withdrawal'};
     const i=intent({action:'deploy',measurementHash:borrowHash(measured)}),base=io();let enabled=true,calls=0;

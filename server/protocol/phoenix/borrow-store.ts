@@ -14,7 +14,7 @@ export interface BorrowRecord {
 export interface BorrowRepository {
   prepare(i: PhoenixBorrowIntent): Promise<BorrowRecord>;
   read(i: PhoenixBorrowIntent): Promise<BorrowRecord>;
-  claim(i: PhoenixBorrowIntent, key: string, terms: Record<string, unknown>): Promise<{ execute: boolean; leg: BorrowLeg }>;
+  claim(i: PhoenixBorrowIntent, key: string, terms: Record<string, unknown>): Promise<{ execute: boolean; leg: BorrowLeg; previous?: BorrowLeg }>;
   signature(i: PhoenixBorrowIntent, key: string, signature: string, lastValidBlockHeight: number): Promise<void>;
   complete(i: PhoenixBorrowIntent, key: string, result: unknown): Promise<void>;
   finish(i: PhoenixBorrowIntent, success: boolean): Promise<void>;
@@ -106,7 +106,7 @@ export class PhoenixBorrowStore implements BorrowRepository {
     });
   }
   async claim(i: PhoenixBorrowIntent, key: string, terms: Record<string, unknown>) {
-    let result!: {execute: boolean; leg: BorrowLeg};
+    let result!: {execute: boolean; leg: BorrowLeg; previous?: BorrowLeg};
     await this.update(i,r => {
       const old = r.metadata.legs[key];
       if (old && old.termsHash !== borrowHash(terms)) throw new Error('Lender leg replay terms changed');
@@ -114,7 +114,7 @@ export class PhoenixBorrowStore implements BorrowRepository {
       if (old?.state === 'completed') { result = {execute:false,leg:old}; return; }
       if (r.status === 'completed') throw new Error('Completed borrowing journal is immutable');
       const leg: BorrowLeg = {termsHash:borrowHash(terms),terms:structuredClone(terms),state:'claimed'};
-      r.metadata.legs[key] = leg; result = {execute:true,leg};
+      r.metadata.legs[key] = leg; result = {execute:true,leg,previous:old};
     });
     return result;
   }
