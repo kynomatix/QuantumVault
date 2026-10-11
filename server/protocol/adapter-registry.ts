@@ -1,5 +1,6 @@
 import { assertProtocolRuntimeAvailable } from './flash-retirement.js';
 import type { ProtocolAdapter } from './adapter.js';
+import type { TradingBot } from '@shared/schema';
 
 export type AdapterHealth = 'initializing' | 'ready' | 'degraded' | 'unavailable';
 
@@ -42,12 +43,18 @@ export function getDefaultAdapter(): ProtocolAdapter {
   return adapter;
 }
 
-export function getAdapterForBot(bot: { id?: number | string; activeProtocol: 'pacifica' | 'drift' | 'flash' }): ProtocolAdapter {
+export function getAdapterForBot(bot: { id?: number | string; activeProtocol: TradingBot['activeProtocol'] }): ProtocolAdapter {
+  // Phoenix bots are valid stored rows, but cannot use legacy execution adapters.
+  // Refuse before lookup so they can never fall through to the Pacifica default.
+  if (bot.activeProtocol === 'phoenix') {
+    throw new Error('Phoenix execution is disabled; Phoenix bots cannot use legacy protocol adapters');
+  }
   assertProtocolRuntimeAvailable(bot.activeProtocol);
   // Group D item 18 (April 17, 2026) made trading_bots.active_protocol NOT NULL with
   // a CHECK constraint locking it to ('pacifica','drift'), and the four routes.ts
   // insert sites that previously emitted NULL were fixed in the same atomic diff.
-  // The schema-level $type union narrows the parameter so callers cannot pass null.
+  // Phoenix expanded that constraint; the guard above excludes it from this path.
+  // The schema-level $type union keeps callers from passing null.
   // The read-side null fallback that used to live here (warn + default-adapter) is
   // therefore structurally unreachable and was removed alongside item 18 closeout.
   const adapter = adapters.get(bot.activeProtocol);
