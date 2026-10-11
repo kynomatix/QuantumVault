@@ -431,6 +431,21 @@ export function runSerializedBootWork(
 }
 
 export const db = drizzle(pool, { schema });
+// Drizzle 0.39.3 issues BEGIN before its pooled-session release finally.
+// Own the lease here; a client-bound session neither acquires nor releases it.
+const runPooledTransaction: typeof db.transaction = async (transaction, config) => {
+  const client = await pool.connect();
+  let discardClient = false;
+  try {
+    return await drizzle(client, { schema }).transaction(transaction, config);
+  } catch (error) {
+    discardClient = true;
+    throw error;
+  } finally {
+    client.release(discardClient);
+  }
+};
+db.transaction = runPooledTransaction;
 /** @internal — exported for standalone analysis scripts only; do not import from production code paths. */
 export { pool };
 
