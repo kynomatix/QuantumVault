@@ -506,6 +506,11 @@ function _fallbackFinancials(
   parkedBotIds: Set<string>,
   status: 'db-only' | 'unavailable',
 ): BotFinancialData {
+  if (bot.activeProtocol === 'phoenix') return {
+    exchangeBalance: null, netPnl: null, netPnlPercent: null, borrowDebtUsdc: null,
+    parkedValueUsdc: 0, parkedValueIncluded: false, parkedValueUnavailable: true,
+    liveDataAvailable: false, botFinancialStatus: 'unavailable',
+  };
   if (!enrichmentSucceeded) {
     return {
       exchangeBalance: null,
@@ -1308,7 +1313,7 @@ export function mapBotToApiResponse(
     totalFees: bot.activeProtocol === 'phoenix' ? null : ens ? ((position as any)?.totalFees ?? '0') : null,
     accountingIncompleteCloseCount: bot.activeProtocol === 'phoenix'
       ? (fin?.phoenixAccounting?.history.filter(e => e.accounting === 'incomplete').length ?? null) : accountingIncompleteCloseCount,
-    realizedAccountingStatus: bot.activeProtocol === 'phoenix' ? (fin?.phoenixAccounting?.performance.accounting ?? 'incomplete') : ens
+    realizedAccountingStatus: bot.activeProtocol === 'phoenix' ? (fin?.phoenixAccounting?.performance.accounting ?? 'unavailable') : ens
       ? (accountingIncompleteCloseCount! > 0 ? 'incomplete' : 'complete')
       : 'unavailable',
     exchangeBalance: fin?.exchangeBalance ?? null,

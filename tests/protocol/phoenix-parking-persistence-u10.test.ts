@@ -50,6 +50,17 @@ beforeEach(async () => {
   await pool.query("UPDATE phoenix_operations SET state='completed' WHERE id=$1", [registered.operation.id]);
 });
 describe('U10 durable serialization and guarded migration', () => {
+  it('releases only a proven pre-dispatch claim and retains each retry key',async()=>{
+    const r=await store.claim(await store.prepare(parking()),leg(await store.read(parking())));
+    const receipt={key:r.legs[0].leg.key,state:'unsent' as const,spent:'0',received:'0',slot:'100',finalized:true as const,
+      source:'executor-pre-dispatch',reference:'EXAMPLE-pre-dispatch'};
+    const released=await store.observe(r,receipt);
+    const retried=await store.claim(released,leg(released));
+    expect(retried.legs).toHaveLength(2);
+    await store.recordVaultAttempt(retried,{signature:bs58.encode(new Uint8Array(64).fill(8)),lastValidBlockHeight:'200',
+      transactionHash:createHash('sha256').update('EXAMPLE-transaction').digest('hex')});
+    await expect(store.observe(await store.read(parking()),{...receipt,key:retried.legs[1].leg.key})).rejects.toThrow('dispatch');
+  });
   it('boots repeatedly and probes its actual schema including partial indexes', async () => {
     const r = await store.prepare(parking());
     await pool.query(migration.sql); await pool.query(migration.sql);

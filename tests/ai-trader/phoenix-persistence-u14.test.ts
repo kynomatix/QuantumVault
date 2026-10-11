@@ -19,19 +19,33 @@ beforeAll(async () => {
  bootstrap=new pg.Pool({connectionString:url});await bootstrap.query(`CREATE SCHEMA ${schema}`);
  pool=new pg.Pool({connectionString:url,options:`-c search_path=${schema}`,max:10});
  await pool.query(`CREATE TABLE trading_bots(id varchar PRIMARY KEY);
- CREATE TABLE ai_trader_bots(id varchar PRIMARY KEY,wallet_address text,protocol text NOT NULL,paper_mode boolean NOT NULL,protocol_subaccount_id text);
+ CREATE TABLE ai_trader_bots(id varchar PRIMARY KEY,wallet_address text,protocol text NOT NULL,paper_mode boolean NOT NULL,protocol_subaccount_id text,status text DEFAULT 'idle');
+ CREATE TABLE phoenix_order_intents(bot_id varchar,request_key text);
  CREATE TABLE ai_trader_decisions(id varchar PRIMARY KEY,bot_id varchar REFERENCES ai_trader_bots(id));`);
  await pool.query(migration.sql);
 },30000);
 afterAll(async()=>{await pool?.end();if(bootstrap){await bootstrap.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);await bootstrap.end();}});
 beforeEach(async()=>{
- await pool.query('TRUNCATE phoenix_ai_executions,ai_trader_decisions,ai_trader_bots,trading_bots');
+ await pool.query('TRUNCATE phoenix_ai_executions,ai_trader_decisions,ai_trader_bots,trading_bots,phoenix_order_intents');
  const b=aiBot();await pool.query("INSERT INTO trading_bots VALUES('EXAMPLE-bot')");
  await pool.query(`INSERT INTO ai_trader_bots(id,wallet_address,protocol,paper_mode,protocol_subaccount_id,phoenix_execution_bot_id,phoenix_binding)
  VALUES($1,$2,$3,$4,$5,$6,$7)`,[b.id,b.walletAddress,b.protocol,b.paperMode,b.protocolSubaccountId,b.phoenixExecutionBotId,b.phoenixBinding]);
  await pool.query("INSERT INTO ai_trader_decisions VALUES('EXAMPLE-decision','EXAMPLE-ai'),('EXAMPLE-next','EXAMPLE-ai')");
 });
 describe('U14 durable bindings and repeat-boot migration',()=>{
+ it('releases only an idle prepared execution with no durable order child',async()=>{
+  const b=aiBot(), a=aiAuthority(), i=buildPhoenixAiEntry(b,'EXAMPLE-decision',clamped(),a,'1',now);
+  const store=new PhoenixAiStore(pool);
+  const e=await store.prepare(b,'EXAMPLE-decision',i,a);
+  await pool.query("UPDATE ai_trader_bots SET status='executing'");
+  expect(await store.recoverPrepared(b,e)).toBe(false);
+  await pool.query("UPDATE ai_trader_bots SET status='idle'");
+  await pool.query('INSERT INTO phoenix_order_intents VALUES($1,$2)',[i.botId,i.requestKey]);
+  expect(await store.recoverPrepared(b,e)).toBe(false);
+  await pool.query('DELETE FROM phoenix_order_intents');
+  expect(await store.recoverPrepared(b,e)).toBe(true);
+  expect(await store.execution(b.id)).toBeNull();
+ });
  it('repeat boot performs catalog checks without requiring an AI table DDL lock',async()=>{
   const c=await pool.connect();try{
    await c.query('BEGIN');await c.query('LOCK TABLE ai_trader_bots IN ACCESS SHARE MODE');

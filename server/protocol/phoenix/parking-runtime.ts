@@ -15,6 +15,7 @@ export function phoenixParkingEnabled(env: NodeJS.ProcessEnv = process.env): boo
 }
 export interface PhoenixParkingRuntime {
   idle(bot: TradingBot): Promise<void>;
+  postBorrow(bot: TradingBot, authorizationId: string): Promise<void>;
   recover(): Promise<void>;
 }
 /** Composition for a reviewed installation. idleIntent uses the persisted due
@@ -22,10 +23,19 @@ export interface PhoenixParkingRuntime {
  * Recovery enumerates all active intents, including opt-out and archive. */
 export function createPhoenixParkingRuntime(service: PhoenixParkingService, source: {
   idleIntent(bot: TradingBot): Promise<ParkingIntent | null>;
+  postBorrowIntent?(bot: TradingBot, authorizationId: string): Promise<ParkingIntent | null>;
   pending(): Promise<ParkingIntent[]>;
   report(intent: ParkingIntent, error: unknown): void;
 }): PhoenixParkingRuntime {
   return {
+    async postBorrow(bot, authorizationId) {
+      if (bot.activeProtocol !== 'phoenix' || !source.postBorrowIntent) return;
+      const intent = await source.postBorrowIntent(bot, authorizationId);
+      if (!intent) return;
+      if (intent.botId !== bot.id || intent.ownerWallet !== bot.walletAddress || intent.action !== 'post_borrow'
+        || intent.borrowAuthorizationId !== authorizationId) throw new Error('Post-borrow parking binding mismatch');
+      await service.start(intent);
+    },
     async idle(bot) {
       if (bot.activeProtocol !== 'phoenix' || !bot.autoParkIdle) return;
       const intent = await source.idleIntent(bot);
@@ -47,6 +57,10 @@ const runtime: PhoenixParkingRuntime | null = null;
 export async function dispatchPhoenixIdlePark(bot: TradingBot) {
   if (bot.activeProtocol !== 'phoenix' || !bot.autoParkIdle || !phoenixParkingEnabled()) return;
   await (runtime as PhoenixParkingRuntime | null)?.idle(bot);
+}
+export async function dispatchPhoenixPostBorrowPark(bot: TradingBot, authorizationId: string) {
+  if (bot.activeProtocol !== 'phoenix' || !authorizationId || !phoenixParkingEnabled()) return;
+  await (runtime as PhoenixParkingRuntime | null)?.postBorrow(bot, authorizationId);
 }
 export async function recoverPhoenixParking() {
   const { recoverPhoenixCarry } = await import('./carry-runtime');

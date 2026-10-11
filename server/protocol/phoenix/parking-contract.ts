@@ -19,7 +19,7 @@ export interface ParkingLeg {
   targetFinalDebtRaw?: string;
 }
 export interface ParkingReceipt {
-  key: string; state: 'pending' | 'settled' | 'dropped';
+  key: string; state: 'pending' | 'settled' | 'dropped' | 'unsent';
   source: string; reference: string; finalized: true;
   signature?: string; // Vault observations bind to the persisted signed attempt.
   // Measured input/output, NOT a quote or total wallet balance.

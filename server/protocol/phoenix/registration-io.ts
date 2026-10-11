@@ -15,7 +15,7 @@ export class PhoenixActivationRefusal extends Error {
   constructor(readonly code: 'denied' | 'gated') { super(`Phoenix activation ${code}`); }
 }
 type RegistrationRpc = Pick<Connection, 'getLatestBlockhash' | 'getMinimumBalanceForRentExemption'
-  | 'getFeeForMessage' | 'getBalance' | 'getAccountInfo' | 'simulateTransaction' | 'getSignatureStatuses'>;
+  | 'getFeeForMessage' | 'getBalance' | 'getAccountInfo' | 'simulateTransaction' | 'getSignatureStatuses' | 'getBlockHeight'>;
 const origin = 'https://perp-api.phoenix.trade';
 const traderDiscriminator = createHash('sha256').update('account:trader').digest().subarray(0, 8);
 
@@ -42,7 +42,7 @@ export function createPhoenixRegistrationIO(rpc: RegistrationRpc, deployment: Ph
     const response = await fetcher(`${origin}${path}`, { method: body ? 'POST' : 'GET', redirect: 'error',
       signal: AbortSignal.timeout(15000), headers: { 'Content-Type': 'application/json' },
       ...(body ? { body: JSON.stringify(body) } : {}) });
-    if (response.status === 401 || response.status === 403) throw new PhoenixActivationRefusal('denied');
+    if (body && (response.status === 401 || response.status === 403)) throw new PhoenixActivationRefusal('denied');
     if (!response.ok) throw new Error('Phoenix registration API unavailable');
     const text = await response.text();
     if (text.length > 65536) throw new Error('Phoenix registration response too large');
@@ -105,10 +105,17 @@ export function createPhoenixRegistrationIO(rpc: RegistrationRpc, deployment: Ph
       if (typeof response.signature !== 'string') throw new Error('Phoenix signature missing');
       return { signature: response.signature, traderPda: response.traderPda };
     },
-    async confirm(signature, identity) {
+    async confirm(signature, identity, lastValidBlockHeight) {
       assertPhoenixIdentity(identity);
       const status = (await rpc.getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0];
-      if (!status || status.confirmationStatus !== 'finalized') return 'unknown';
+      if (!status) {
+        const height = await rpc.getBlockHeight('finalized');
+        if (lastValidBlockHeight && /^[1-9][0-9]*$/.test(lastValidBlockHeight)
+          && Number.isSafeInteger(height) && BigInt(height) > BigInt(lastValidBlockHeight)
+          && !(await rpc.getSignatureStatuses([signature], { searchTransactionHistory: true })).value[0]) return 'expired';
+        return 'unknown';
+      }
+      if (status.confirmationStatus !== 'finalized') return 'unknown';
       if (status.err) return 'failed';
       const account = await rpc.getAccountInfo(new PublicKey(identity.traderAccountAddress), 'finalized');
       if (!account || account.owner.toBase58() !== identity.programAddress || account.executable) return 'unknown';

@@ -1,5 +1,3 @@
-import type { PhoenixReadCapabilities } from '@shared/phoenix-read-contract';
-
 const LABELS: Record<string, string> = {
   pacifica: 'Pacifica', flash: 'Flash', drift: 'Drift', phoenix: 'Phoenix',
 };
@@ -21,9 +19,4 @@ export function getExchangeUiCapabilities(protocol?: string | null) {
     borrow: !phoenix,
     vault: !phoenix,
   };
-}
-
-export function phoenixPublicReadsReady(capabilities?: PhoenixReadCapabilities | null): boolean {
-  return capabilities?.venue === 'phoenix' && capabilities.enabled
-    && capabilities.mode === 'read-only' && capabilities.publicReads === 'ready';
 }

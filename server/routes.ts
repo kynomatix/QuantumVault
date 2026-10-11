@@ -2258,12 +2258,13 @@ const AUTO_REPARK_MIN_USDC = 5;
  */
 async function parkBotIdleFundsAutonomously(
   bot: TradingBot,
-  opts?: { authorizePostBorrow?: boolean; borrowedUsdc?: number },
+  opts?: { authorizePostBorrow?: boolean; borrowedUsdc?: number; phoenixBorrowAuthorizationId?: string },
 ): Promise<void> {
   if (bot.activeProtocol === 'phoenix') {
-    const { dispatchPhoenixIdlePark } = await import('./protocol/phoenix/parking-runtime');
+    const { dispatchPhoenixIdlePark, dispatchPhoenixPostBorrowPark } = await import('./protocol/phoenix/parking-runtime');
     // Post-borrow requires its own immutable receipt-bound authorization (U11).
-    if (!opts?.authorizePostBorrow) await dispatchPhoenixIdlePark(bot);
+    if (opts?.authorizePostBorrow && opts.phoenixBorrowAuthorizationId) await dispatchPhoenixPostBorrowPark(bot, opts.phoenixBorrowAuthorizationId);
+    else if (!opts?.authorizePostBorrow) await dispatchPhoenixIdlePark(bot);
     return;
   }
   // Keep the retired branch below for now without narrowing the retained code.
@@ -16931,6 +16932,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           return res.status(503).json(phoenixOrderDisabled());
         }
         if (isActive !== false) return res.status(400).json({ error: 'isActive must be a boolean' });
+        if (Object.keys(req.body).some(key => key !== 'isActive')) {
+          return res.status(400).json({ error: 'Phoenix pause must be sent separately from configuration changes' });
+        }
         const paused = await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'pause');
         return res.json({ ...paused, safety: phoenixSafetyUnavailable('pause') });
       }

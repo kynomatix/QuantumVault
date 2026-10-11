@@ -11,11 +11,19 @@ export interface PhoenixBorrowRuntime {
  * can install a runtime, supply a receipt or replace a liquidity policy. */
 export function createPhoenixBorrowRuntime(service: PhoenixBorrowService, source: {
   intent(owner: string, botId: string, action: BorrowAction | 'resume', body: unknown): Promise<PhoenixBorrowIntent>;
+  /** Resolve a persisted completed borrow receipt to its bounded U10 authorization.
+   * The consumer must reuse that authorization on recovery, never a body amount. */
+  postBorrow?(intent: PhoenixBorrowIntent, authorizationId: string): Promise<void>;
 }): PhoenixBorrowRuntime {
   return { async request(owner,botId,action,body) {
     const intent = await source.intent(owner,botId,action,body);
     if (intent.ownerWallet !== owner || intent.botId !== botId || action !== 'resume' && intent.action !== action) throw new Error('Phoenix borrowing request binding mismatch');
-    return service.run(intent);
+    const result = await service.run(intent);
+    if (result.status === 'completed' && ['open','grow'].includes(intent.action) && source.postBorrow) {
+      try { await source.postBorrow(intent, result.id); }
+      catch (error) { console.warn('[Phoenix borrow] receipt-bound parking needs reconciliation', { botId, error: String(error) }); }
+    }
+    return result;
   } };
 }
 // As with U04/U10, live queue evidence and reviewed production bindings have not

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Keypair } from '@solana/web3.js';
 import { identity, now } from '../helpers/phoenix-orders';
 import { assertBorrowSnapshot, authorizeDebtDeployment, borrowHash, cappedRepayment, validateBorrowIntent,
@@ -6,8 +6,21 @@ import { assertBorrowSnapshot, authorizeDebtDeployment, borrowHash, cappedRepaym
 import { phoenixBorrowCapabilities, createPhoenixBorrowRuntime } from '../../server/protocol/phoenix/borrow-runtime';
 import { assessPhoenixEmpty, PHOENIX_RESIDUAL_DOMAINS } from '../../server/protocol/phoenix/lifecycle';
 import { phoenixLendLeg, withPhoenixLendContext } from '../../server/vault/phoenix-lend-context';
+import { createPhoenixBorrowRuntime } from '../../server/protocol/phoenix/borrow-runtime';
 
 const account = Keypair.fromSeed(new Uint8Array(32).fill(8)).publicKey.toBase58();
+describe('U11 receipt-bound post-borrow handoff',()=>{
+  it('dispatches only completed open/grow outcomes, including recovery',async()=>{
+    const intent=makeIntent({action:'open'}), postBorrow=vi.fn(async()=>{});
+    const run=vi.fn(async()=>({status:'completed',id:'EXAMPLE-completed-borrow'}));
+    const runtime=createPhoenixBorrowRuntime({run} as any,{intent:async()=>intent,postBorrow});
+    await runtime.request(intent.ownerWallet,intent.botId,'resume',{});
+    expect(postBorrow).toHaveBeenCalledWith(intent,'EXAMPLE-completed-borrow');
+    run.mockResolvedValueOnce({status:'active',id:'EXAMPLE-completed-borrow'});
+    await runtime.request(intent.ownerWallet,intent.botId,'resume',{});
+    expect(postBorrow).toHaveBeenCalledTimes(1);
+  });
+});
 const measurement = {samples:3,maxSeconds:60,observedAt:now,reference:'EXAMPLE-receipts'};
 const makeIntent = (patch: Partial<PhoenixBorrowIntent> = {}): PhoenixBorrowIntent => ({version:1,botId:'EXAMPLE-bot',ownerWallet:'EXAMPLE-owner',requestKey:'EXAMPLE-request',identity,
   accountAuthority:account,action:'deploy',collateralMint:'EXAMPLE-collateral',accountLoanId:'EXAMPLE-account-loan',accountVenueId:1,

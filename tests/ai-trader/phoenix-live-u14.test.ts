@@ -24,7 +24,8 @@ function fixture() {
   graduate: vi.fn(async (_b, binding, hmac) => bot = { ...bot, paperMode: false, phoenixExecutionBotId: binding.executionBotId,
    phoenixBinding: binding, protocolSubaccountId: binding.identity.traderAccountAddress, policyHmac: hmac }),
   open: vi.fn(async () => { bot = { ...bot, status: 'open' }; d = { ...d, outcome: 'executed' }; return true; }),
-  noLand: vi.fn(async () => { bot = { ...bot, status: 'idle' }; return true; }), pause: vi.fn(),
+  noLand: vi.fn(async () => { bot = { ...bot, status: 'idle' }; return true; }),
+  recoverPrepared: vi.fn(async () => { execution=null; return true; }),
   unprotected: vi.fn(async () => { bot = { ...bot, status: 'paused', pauseReason: 'bracket_failed' }; }), close: vi.fn(async () => true),
  };
  const source = {
@@ -64,6 +65,13 @@ function fixture() {
   setRecord: (v: typeof record) => { record = v; }, disable: () => { enabled = false; }, debt: (v: string) => { debtRaw = v; } };
 }
 describe('U14 shared-core AI live service', () => {
+ it('routes idle prepared recovery through the durable repository before observing money',async()=>{
+  const f=fixture(); await f.service.entry(f.input());
+  const b={...f.bot(),status:'idle' as const}; f.setBot(b);
+  expect(await f.service.reconcile(b)).toBe(true);
+  expect(f.repo.recoverPrepared).toHaveBeenCalledWith(b,expect.any(Object));
+  expect(f.source.exit).not.toHaveBeenCalled();
+ });
  it('claims before money, uses fresh lots, proves bracket before recording open', async () => {
   const f = fixture(); expect(await f.service.entry(f.input())).toMatchObject({ ok: true, mode: 'live', entryPrice: 150 });
   expect(f.orders.execute.mock.calls[0][0].baseUnits).toBe('0.66');

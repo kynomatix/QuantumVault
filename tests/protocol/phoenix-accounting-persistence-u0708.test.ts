@@ -46,6 +46,15 @@ beforeEach(async()=>{
     VALUES($1,1,$2,$3,100,$4,'confirmed')`,[op.id,origin.registrationSignature,'EXAMPLE-blockhash'.padEnd(32,'X'),orderIntentHash('EXAMPLE-transaction')]);
 });
 describe('Phoenix atomic durable settlement',()=>{
+  it('reads without waiting for a trading-bot writer',async()=>{
+    const c=await pool.connect();
+    try {
+      await c.query('BEGIN'); await c.query('SELECT id FROM trading_bots WHERE id=$1 FOR UPDATE',[target.botId]);
+      const reader=new pg.Pool({connectionString:process.env.DATABASE_URL,options:`-c search_path=${schemaName} -c statement_timeout=1000`,max:1});
+      try { expect((await new PhoenixAccountingStore(reader).read(target)).events).toEqual([]); }
+      finally { await reader.end(); }
+    } finally { await c.query('ROLLBACK'); c.release(); }
+  });
   it('migration 189 repeats without replacing tables/constraints and meets readiness',async()=>{
     expect(manifest.map(m=>m.id)).toContain('191-phoenix-ai-trader'); expect(migration.id).toBe('189-phoenix-accounting');
     const objects=()=>pool.query(`SELECT oid::text FROM pg_constraint WHERE connamespace=current_schema()::regnamespace ORDER BY oid`);
@@ -77,6 +86,7 @@ describe('Phoenix atomic durable settlement',()=>{
     expect((await store.read(target)).events).toHaveLength(0); expect((await pool.query('SELECT * FROM phoenix_equity_snapshots')).rows).toHaveLength(0);
   });
   it('binds creator provenance to the subscriber bot and payer and retains original binding',async()=>{
+    expect((await service().reconcile(target)).synced).toBe(true);
     await pool.query("INSERT INTO published_bots VALUES('EXAMPLE-published','EXAMPLE-creator')");
     await pool.query("INSERT INTO bot_subscriptions VALUES('EXAMPLE-subscription','EXAMPLE-published',$1,$2)",[target.botId,target.ownerWallet]);
     expect((await service().reconcile(target)).synced).toBe(true);

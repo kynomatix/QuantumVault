@@ -4,11 +4,11 @@ vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
   phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true, phoenixFeatureEnabled: () => true,
 }));
 import { describe, expect, it, vi } from 'vitest';
-import { PhoenixParkingService, type ParkingRepository } from '../../server/protocol/phoenix/parking-service';
+import { PhoenixParkingService, PhoenixParkingUnsent, type ParkingRepository } from '../../server/protocol/phoenix/parking-service';
 import { verifyParkingReceipt } from '../../server/protocol/phoenix/parking-store';
 import { phoenixIntentHash } from '../../server/protocol/phoenix/operation-store';
 import { assertParkingSnapshot, type ParkingIntent, type ParkingLeg, type ParkingReceipt, type ParkingRecord, type ParkingSnapshot } from '../../server/protocol/phoenix/parking-contract';
-import { phoenixParkingEnabled } from '../../server/protocol/phoenix/parking-runtime';
+import { phoenixParkingEnabled, createPhoenixParkingRuntime } from '../../server/protocol/phoenix/parking-runtime';
 import { authority, identity, now } from '../helpers/phoenix-orders';
 
 function intent(patch: Partial<ParkingIntent> = {}): ParkingIntent {
@@ -50,6 +50,35 @@ function fixture(patch: Partial<ParkingIntent> = {}) {
   return { i, s, store, io, service, settle, disable: () => { enabled = false; } };
 }
 const entry = { action: 'entry' as const, executionOrderId: 'EXAMPLE-order', requiredMarginUsdc: '100', destination: null };
+
+describe('U10 pre-activation recovery', () => {
+  it('binds post-borrow parking to the completed authorization without idle opt-in',async()=>{
+    const start=vi.fn(async()=>{}), i=intent({action:'post_borrow',borrowAuthorizationId:'EXAMPLE-borrow'});
+    const runtime=createPhoenixParkingRuntime({start} as any,{idleIntent:async()=>null,postBorrowIntent:async()=>i,pending:async()=>[],report:()=>{}});
+    const bot={id:i.botId,walletAddress:i.ownerWallet,activeProtocol:'phoenix',autoParkIdle:false} as any;
+    await runtime.postBorrow(bot,'EXAMPLE-borrow'); expect(start).toHaveBeenCalledWith(i);
+    await expect(runtime.postBorrow(bot,'EXAMPLE-other')).rejects.toThrow('binding');
+  });
+  it('completes empty idle work without blocking entry', async () => {
+    const f=fixture(); f.s.withdrawableUsdc='0';
+    expect((await f.service().start(f.i)).state).toBe('completed');
+    expect(f.io.submit).not.toHaveBeenCalled();
+  });
+  it('retries a proven unsent leg under a fresh key', async () => {
+    const f=fixture(); f.io.submit.mockRejectedValueOnce(new PhoenixParkingUnsent('EXAMPLE-pre-dispatch'));
+    await f.service().start(f.i);
+    expect(f.store.r.legs[0].receipt?.state).toBe('unsent');
+    await f.service().resume(f.i);
+    expect(f.io.submit).toHaveBeenCalledTimes(2);
+    expect(f.store.r.legs.map(l=>l.leg.key)).toEqual(['EXAMPLE-id:0','EXAMPLE-id:1']);
+  });
+  it('holds an ambiguous failure with no receipt', async () => {
+    const f=fixture(); f.io.submit.mockRejectedValueOnce(new Error('EXAMPLE-lost-ack'));
+    await f.service().start(f.i); await f.service().resume(f.i);
+    expect(f.io.submit).toHaveBeenCalledTimes(1);
+    expect(f.store.r.state).toBe('active');
+  });
+});
 
 describe('U10 settlement-aware bot parking', () => {
   it('continues journaled redemption after rollback but never starts the following entry deposit', async () => {
@@ -130,6 +159,17 @@ describe('U10 settlement-aware bot parking', () => {
     const f = fixture(); f.s.walletUsdc = '100'; await f.store.prepare(f.i);
     await Promise.allSettled([f.service().resume(f.i), f.service().resume(f.i)]);
     expect(f.io.submit).toHaveBeenCalledTimes(1);
+  });
+  it('keeps the settled slot floor when retrying an unsent leg', async () => {
+    const f = fixture(); await f.service().start(f.i); f.settle();
+    f.io.submit.mockRejectedValueOnce(new PhoenixParkingUnsent('EXAMPLE-pre-dispatch'));
+    await f.service().resume(f.i);
+    expect(f.store.r.legs.at(-1)!.receipt?.state).toBe('unsent');
+    f.s.slot = '99';
+    await expect(f.service().resume(f.i)).rejects.toThrow();
+    expect(f.io.submit).toHaveBeenCalledTimes(2);
+    f.s.slot = '100'; await f.service().resume(f.i);
+    expect(f.io.submit).toHaveBeenCalledTimes(3);
   });
   it('keeps a partial swap for attention and never deposits quoted proceeds', async () => {
     const f = fixture(entry); f.s.holdings = [{ asset: 'EXAMPLE-disabled', tokenUnits: '100', valueUsdc: '100', redeemable: true }];

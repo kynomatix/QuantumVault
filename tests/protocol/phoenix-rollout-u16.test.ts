@@ -16,6 +16,14 @@ const r = {ownerWallet:'EXAMPLE-owner',botId:'EXAMPLE-bot',registrationLamports:
   notionalMicros:'500',leverage:'2',debtUsdcMicros:'500',parkUsdcMicros:'100',collateralRaw:'200',collateralMint:'EXAMPLE-mint'};
 afterEach(()=>vi.unstubAllEnvs());
 describe('U16 owner canary admission',()=>{
+  it('reuses an immutable parse while checking expiry on every call',()=>{
+    const env=environment(), first=readPhoenixCanaryPolicy(env,now);
+    expect(readPhoenixCanaryPolicy(env,now+1)).toBe(first);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(readPhoenixCanaryPolicy(env,now+60_000)).toBeNull();
+    const changed=environment({...policy(),authorizationId:'EXAMPLE-new-grant'});
+    expect(readPhoenixCanaryPolicy(changed,now)?.authorizationId).toBe('EXAMPLE-new-grant');
+  });
   it.each(Object.keys(PHOENIX_RISK_FLAGS) as (keyof typeof PHOENIX_RISK_FLAGS)[])('%s fails closed without a launch policy and admits exact capped owner',action=>{
     expect(phoenixCanaryAllows(action,r,{},now)).toBe(false);
     expect(phoenixCanaryAllows(action,r,environment(),now)).toBe(true);

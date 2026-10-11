@@ -65,6 +65,11 @@ export class PhoenixFundingService {
   async create(input: FundingIntent) {
     const intent = structuredClone(input); validateFundingIntent(intent);
     if (!this.allowed(intent)) throw new Error('Phoenix funding disabled');
+    const existing = (await this.operations.fundingHistory(intent.botId, intent.ownerWallet)).some(row => row.request_key === intent.requestKey);
+    if (!existing) {
+      const transaction = prepareFundingTransaction(intent, this.pin, await this.io.lifetime());
+      this.checkQuote(intent, await this.io.quote(structuredClone(intent), transaction));
+    }
     const { operation } = await this.operations.prepare(intent);
     return this.resume(operation.bot_id, operation.intent.ownerWallet, operation.id);
   }
@@ -110,12 +115,14 @@ export class PhoenixFundingService {
       if (!this.io.authorizeBorrowDeployment) throw new Error('Debt deployment authorization unavailable');
       await this.io.authorizeBorrowDeployment(structuredClone(intent));
     }
+    const height = await this.io.blockHeight();
+    if (!Number.isSafeInteger(height) || height <= 0 || height >= transaction.lastValidBlockHeight!
+      || !this.allowed(intent) || Date.now() >= quote.expiresAt) return operation;
     const signed = await this.io.withSigner(structuredClone(intent), secret => {
       if (!this.allowed(intent)) throw new Error('Funding revoked at signer');
       return signFundingTransaction(transaction, intent, this.pin, secret);
     });
-    const height = await this.io.blockHeight();
-    if (!Number.isSafeInteger(height) || height < 0 || !this.allowed(intent) || Date.now() >= quote.expiresAt || height > Number(signed.lastValidBlockHeight)) return operation;
+    if (!this.allowed(intent) || Date.now() >= quote.expiresAt) return operation;
     if (intent.borrowIntentId) await this.io.authorizeBorrowDeployment!(structuredClone(intent));
     if (intent.carryIntentId) await this.io.authorizeCarrySettlement!(structuredClone(intent));
     if (!this.allowed(intent) || Date.now() >= quote.expiresAt) return operation;
@@ -127,7 +134,12 @@ export class PhoenixFundingService {
     if (!this.allowed(intent)) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
     if (intent.carryIntentId) await this.io.authorizeCarrySettlement!(structuredClone(intent));
     if (!this.allowed(intent)) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
-    try { if (await this.io.submit(signed.transaction) !== signed.signature) throw new Error('Signature mismatch'); }
+    try {
+      const sendHeight = await this.io.blockHeight();
+      if (!Number.isSafeInteger(sendHeight) || sendHeight <= 0 || sendHeight >= Number(signed.lastValidBlockHeight)
+        || !this.allowed(intent) || Date.now() >= quote.expiresAt) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
+      if (await this.io.submit(signed.transaction) !== signed.signature) throw new Error('Signature mismatch');
+    }
     catch { return (await this.operations.read(botId, ownerWallet, operationId)).operation; }
     return this.resume(botId, ownerWallet, operationId);
   }

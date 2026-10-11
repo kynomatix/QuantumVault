@@ -6,6 +6,11 @@ import { phoenixCarryCapabilities } from '../../server/protocol/phoenix/carry-ru
 import { decideCarryTrade } from '../../server/vault/carry-trade-advisor';
 
 describe('U13 measured carry advice',()=>{
+  it('does not advise repayment with zero debt in a sub-healthy band',()=>{
+    const e=carryFixture().f.economics; e.debtUsd=0;
+    expect(recommendPhoenixCarry(e,now).action).toBe('hold');
+    expect(recommendPhoenixCarry(e,now).message).toContain('No debt');
+  });
   it('is unavailable for live use even with the environment gate alone',()=>{
     expect(phoenixCarryCapabilities({PHOENIX_CARRY_ENABLED:'true'})).toMatchObject({enabled:false,automaticBorrowing:false,recovery:false});
   });

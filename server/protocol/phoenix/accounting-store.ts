@@ -8,11 +8,11 @@ import { enrichEvent, reducePhoenixHistory } from './accounting-reducer';
 
 export class PhoenixAccountingStore implements AccountingRepository {
   constructor(private readonly pool: Pick<Pool, 'connect'>, private readonly now = Date.now) {}
-  private async locked<T>(target: AccountingTarget, fn: (c: PoolClient) => Promise<T>): Promise<T> {
+  private async locked<T>(target: AccountingTarget, fn: (c: PoolClient) => Promise<T>, readOnly = false): Promise<T> {
     assertTarget(target); const c = await this.pool.connect();
     try {
-      await c.query('BEGIN');
-      const row = (await c.query('SELECT * FROM trading_bots WHERE id=$1 FOR UPDATE', [target.botId])).rows[0];
+      await c.query(readOnly ? 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY' : 'BEGIN');
+      const row = (await c.query(`SELECT * FROM trading_bots WHERE id=$1${readOnly ? '' : ' FOR UPDATE'}`, [target.botId])).rows[0];
       if (!row || row.wallet_address !== target.ownerWallet) throw new Error('Accounting bot owner mismatch');
       const bot = Object.fromEntries(Object.entries(row).map(([k, v]) => [k.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase()), v]));
       if (orderIntentHash(phoenixIdentityFromBot(bot)) !== orderIntentHash(target.identity)) throw new Error('Accounting trader mismatch');
@@ -26,7 +26,7 @@ export class PhoenixAccountingStore implements AccountingRepository {
       const epochs = (await c.query('SELECT data FROM phoenix_position_epochs WHERE bot_id=$1 ORDER BY opened_at,epoch_id', [target.botId])).rows.map(r => r.data);
       return { revision: row?.revision ?? 0, status: row?.status ?? 'unknown', origin: row?.origin ?? null,
         snapshot: row?.snapshot ?? null, events, epochs };
-    });
+    }, true);
   }
   async commit(target: AccountingTarget, expectedRevision: number, next: AccountingState) {
     await this.locked(target, async c => {
@@ -68,7 +68,7 @@ export class PhoenixAccountingStore implements AccountingRepository {
         creatorWallet: subscriber.creator_wallet_address, subscriptionId: subscriber.id } : null;
       for (const e of next.epochs) {
         const prior = (await c.query('SELECT payout_provenance FROM phoenix_position_epochs WHERE bot_id=$1 AND epoch_id=$2', [target.botId, e.id])).rows[0];
-        const provenance = phoenixPayoutProvenance(target, e, prior ? prior.payout_provenance.subscription : binding);
+        const provenance = phoenixPayoutProvenance(target, e, prior?.payout_provenance.subscription ?? binding);
         await c.query(`INSERT INTO phoenix_position_epochs(bot_id,epoch_id,opened_at,data,payout_provenance) VALUES($1,$2,$3,$4,$5)
           ON CONFLICT(bot_id,epoch_id) DO UPDATE SET data=EXCLUDED.data,payout_provenance=EXCLUDED.payout_provenance`,
         [target.botId, e.id, e.openedAt, e, provenance]);

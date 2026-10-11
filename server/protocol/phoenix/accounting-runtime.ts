@@ -1,4 +1,5 @@
 import type { TradingBot } from '../../../shared/schema';
+import type { PhoenixEquityDetailResponse } from '../../../shared/phoenix-accounting-detail';
 import { phoenixIdentityFromBot } from './identity';
 import { phoenixEquity } from './accounting-equity';
 import { signed } from './accounting-contract';
@@ -22,7 +23,7 @@ export async function readPhoenixAccounting(bot: TradingBot, repository?: Accoun
     repository = new PhoenixAccountingStore(pool);
   }
   const target = phoenixAccountingTarget(bot), state = await repository.read(target);
-  let equity: ReturnType<typeof phoenixEquity> | null = null;
+  let equity: (ReturnType<typeof phoenixEquity> & NonNullable<PhoenixEquityDetailResponse['equity']>) | null = null;
   try { if (state.status === 'complete' && state.snapshot) equity = phoenixEquity(target, state.snapshot, now); } catch { /* stale is unknown */ }
   const closed = state.epochs.filter(e => e.status === 'closed');
   const complete = equity !== null && closed.every(e => e.accounting === 'complete');

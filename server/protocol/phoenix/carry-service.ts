@@ -42,8 +42,14 @@ export class PhoenixCarryService {
       // Observation survives opt-out, expiry, kill switches and restarts. Never
       // infer unsent from a timeout, missing signature or unchanged balance.
       let receipt;
-      try { receipt = await this.io.receipt(r,pending.leg); } catch { return r; }
-      if (!receipt) return r;
+      try { receipt = await this.io.receipt(r,pending.leg); } catch {
+        console.warn('[Phoenix carry] Claimed leg observation failed; operator reconciliation required', { intentId: r.id, legKey: pending.leg.key });
+        return r;
+      }
+      if (!receipt) {
+        console.warn('[Phoenix carry] Claimed leg has no settlement evidence; operator reconciliation required', { intentId: r.id, legKey: pending.leg.key });
+        return r;
+      }
       r = await this.store.observe(r,receipt);
       if (receipt.state === 'pending') return r;
       if (receipt.state === 'dropped' || (pending.leg.kind !== 'repay' && receipt.spent !== pending.leg.amount)) return this.store.finish(r,'attention');

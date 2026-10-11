@@ -28,7 +28,7 @@ export function startPhoenixPublicReads(
     const target = createReader();
     reader = target;
     const stream = createStream(target);
-    const refresh = () => { void target.refresh().then(() => { const s = target.getCapabilities().exchangeStatus; recordPhoenixPublicHealth('api',s.state === 'fresh' ? s.observedAt : null); }).catch(() => { recordPhoenixPublicHealth('api',null); }); };
+    const refresh = () => { void target.refresh().then(() => { const s = target.getCapabilities().exchangeStatus; recordPhoenixPublicHealth('api',s.observedAt,Date.now(),s.state); }).catch(() => { recordPhoenixPublicHealth('api',null); }); };
     const interval = setInterval(refresh, phoenixReadRefreshMs(env));
     interval.unref?.();
     stop = () => { clearInterval(interval); stream.shutdown(); target.shutdown(); };
@@ -41,4 +41,4 @@ export function startPhoenixPublicReads(
   }
 }
 
-export function stopPhoenixPublicReads(): void { stop?.(); stop = null; reader = null; recordPhoenixPublicHealth('api',null); recordPhoenixPublicHealth('ws',null); }
+export function stopPhoenixPublicReads(): void { stop?.(); stop = null; reader = null; recordPhoenixPublicHealth('api',null,Date.now(),'unknown'); recordPhoenixPublicHealth('ws',null,Date.now(),'unknown'); }

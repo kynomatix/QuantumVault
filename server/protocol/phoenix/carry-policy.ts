@@ -40,12 +40,12 @@ export function recommendPhoenixCarry(f: CarryEconomics, now: number): PhoenixCa
   const base: PhoenixCarryRecommendation = {action:'unavailable',reason:'economics_unavailable',destination:f.destination,
     parkedAsset:f.parkedAsset,estimatedNetUsd:null,roundTripUsd:null,observedDelaySeconds:null,queueCostUsd:null,
     message:'Carry economics are unavailable.'};
+  if (!finite(f.debtUsd) || f.debtUsd < 0) return base;
+  if (f.debtUsd === 0) return {...base,action:'hold',reason:'no_debt',message:'No debt to carry. No new borrowing is authorized.'};
   const health = decideCarryTrade({rankedYields:[],borrowApr:f.borrowApr,healthSummary:f.healthSummary,debtUsd:f.debtUsd});
   if (health.action === 'unavailable' && health.blockedBy === 'health') return {...base,reason:'health_unavailable'};
   if (health.action === 'repay') return {...base,action:'repay',reason:health.reason,
     message:'Loan health calls for repayment from available authorized bot cash.'};
-  if (!finite(f.debtUsd) || f.debtUsd < 0) return base;
-  if (f.debtUsd === 0) return {...base,action:'hold',reason:'no_debt',message:'No debt to carry. No new borrowing is authorized.'};
   const ranked = rankMeasuredYieldDestinations(f.yieldTable,f.assets.filter(a => a.enabled && a.mint)).ranked;
   const asset = ranked.find(a => a.assetKey === (f.parkedAsset ?? f.destination));
   const m = phoenixFundingDetail(f.history).measured;

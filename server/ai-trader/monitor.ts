@@ -41,7 +41,6 @@ import { storage } from "../storage";
 import { appendTelemetry } from "../telemetry";
 import { SERVER_BOOT_ID } from "../boot-id";
 import { ExcursionObservations } from "./excursion-observation";
-import { getAdapter } from "../protocol/adapter-registry";
 import { getAiTraderAdapter } from "./phoenix-analysis";
 import { getPhoenixAiTrader, phoenixAiLiveAvailable } from "./phoenix-runtime";
 import {
@@ -3016,9 +3015,18 @@ async function maybeFireLiveBreakeven(
   return true;
 }
 
+async function reconcilePhoenixAiBot(bot: AiTraderBot): Promise<boolean> {
+  const service = getPhoenixAiTrader();
+  if (!service) {
+    console.warn(`[AiTraderMonitor] Phoenix live bot ${bot.id}: shared recovery service unavailable; reconciliation pending`);
+    return false;
+  }
+  return service.reconcile(bot);
+}
+
 /** One monitoring pass for an OPEN live bot. */
 async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise<void> {
-  if (bot.protocol === "phoenix") { await getPhoenixAiTrader()?.reconcile(bot); return; }
+  if (bot.protocol === "phoenix") { await reconcilePhoenixAiBot(bot); return; }
   const adapter = getAiTraderAdapter(bot);
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey) {
@@ -4065,7 +4073,7 @@ async function commitCrashedRecovery(
  * false ⇒ venue read failed (caller may queue a reconciliation retry).
  */
 async function reconcileUnconfirmedLandingImplementation(bot: AiTraderBot): Promise<boolean> {
-  if (bot.protocol === "phoenix" && !bot.paperMode) return await getPhoenixAiTrader()?.reconcile(bot) ?? false;
+  if (bot.protocol === "phoenix" && !bot.paperMode) return await reconcilePhoenixAiBot(bot) ?? false;
   // Unreachable for paper bots (the executor's unconfirmed branch is
   // live-only), but fail safe rather than loop on venue reads forever.
   if (bot.paperMode) {
@@ -4310,7 +4318,7 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
  * resolved (false ⇒ venue read failed; caller keeps it pending for retry).
  */
 async function reconcileBotOnStartupImplementation(bot: AiTraderBot): Promise<boolean> {
-  if (bot.protocol === "phoenix" && !bot.paperMode) return await getPhoenixAiTrader()?.reconcile(bot) ?? false;
+  if (bot.protocol === "phoenix" && !bot.paperMode) return await reconcilePhoenixAiBot(bot) ?? false;
   // A quarantined unconfirmed-landing entry survives restarts via its
   // persisted state (paused/position_unconfirmed + 'unconfirmed_landing'
   // decision row) — route it to its dedicated reconciler.
@@ -4670,8 +4678,8 @@ export async function reconcileOnStartup(): Promise<void> {
 /** One monitoring pass for a single bot (exported for tests). */
 export async function monitorBotOnce(bot: AiTraderBot): Promise<void> {
   if (bot.protocol === "flash") return;
-  if (bot.protocol === "phoenix" && !bot.paperMode && ["open", "executing", "paused"].includes(bot.status)) {
-    await getPhoenixAiTrader()?.reconcile(bot); return;
+  if (bot.protocol === "phoenix" && !bot.paperMode && ["idle", "open", "executing", "paused"].includes(bot.status)) {
+    await reconcilePhoenixAiBot(bot); return;
   }
   // Quarantined unconfirmed-landing entries are actively reconciled every
   // tick — the pause is a quarantine from NEW entries, not from monitoring.

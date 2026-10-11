@@ -76,11 +76,8 @@ export class PhoenixProvisioningStore {
       if (request.consumer?.kind === 'marketplace') {
         await client.query('UPDATE trading_bots SET source_published_bot_id=$2 WHERE id=$1', [botId, request.consumer.sourcePublishedBotId]);
         await client.query(`INSERT INTO bot_subscriptions(published_bot_id,subscriber_wallet_address,subscriber_bot_id,capital_invested,status)
-          VALUES ($1,$2,$3,$4::numeric/1000000,'paused')`,
-          [request.consumer.sourcePublishedBotId, request.ownerWallet, botId, request.consumer.initialFundingBaseUnits]);
-        await client.query(`UPDATE published_bots SET subscriber_count=subscriber_count+1,
-          total_capital_invested=total_capital_invested+$2::numeric/1000000 WHERE id=$1`,
-          [request.consumer.sourcePublishedBotId, request.consumer.initialFundingBaseUnits]);
+          VALUES ($1,$2,$3,0,'paused')`,
+          [request.consumer.sourcePublishedBotId, request.ownerWallet, botId]);
       }
       const intent: PhoenixIntent = { botId, ownerWallet: request.ownerWallet, requestKey: request.requestId, kind: 'register',
         identity, mint: PHOENIX_PUBLIC_ADDRESSES.usdcMint, amountBaseUnits: '0', feeBaseUnits: '0', destination: identity.traderAccountAddress, registration };
