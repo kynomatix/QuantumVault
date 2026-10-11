@@ -15,6 +15,9 @@ function approvedTarget(raw: string, ws: boolean): boolean {
         && !/%|\\/.test(u.pathname));
   } catch { return false; }
 }
+export class PacificaCredentialTargetError extends Error {
+  constructor() { super('Pacifica credential target refused'); this.name = 'PacificaCredentialTargetError'; }
+}
 /** Credentials stay in private memory, never in config/status/quotes or durable request material. */
 export class PacificaTransportAuthority {
   #key: string | null;
@@ -36,13 +39,13 @@ export class PacificaTransportAuthority {
     const headers = new Headers(init.headers);
     headers.delete('PF-API-KEY');
     if (this.#key) {
-      if (!approvedTarget(url, false)) throw new Error('Pacifica credential target refused');
+      if (!approvedTarget(url, false)) throw new PacificaCredentialTargetError();
       headers.set('PF-API-KEY', this.#key);
     }
     return { ...init, headers, redirect: 'error' };
   }
   websocketOptions(url: string): { headers: Record<string, string>; followRedirects: false } {
-    if (this.#key && !approvedTarget(url, true)) throw new Error('Pacifica credential target refused');
+    if (this.#key && !approvedTarget(url, true)) throw new PacificaCredentialTargetError();
     return { headers: this.#key ? { 'PF-API-KEY': this.#key } : {}, followRedirects: false };
   }
   /** Called at response headers, before any potentially hanging body read. */

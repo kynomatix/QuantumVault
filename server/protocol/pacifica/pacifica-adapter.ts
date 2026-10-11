@@ -460,15 +460,19 @@ export class PacificaAdapter implements ProtocolAdapter {
   // starting a replacement. Cleared in .finally() when the sweep settles.
   private _sweepOwner: Promise<Record<string, number>> | null = null;
 
-  constructor(config?: Partial<PacificaAdapterConfig>, private readonly transport: PacificaTransportAuthority = pacificaTransportAuthority()) {
+  constructor(config?: Partial<PacificaAdapterConfig>, private readonly gridTransportOverride?: PacificaTransportAuthority) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
+  private get gridTransport(): PacificaTransportAuthority {
+    return this.gridTransportOverride ?? pacificaTransportAuthority();
+  }
+
   /** Grid-only authority. Generic quotes/orders retain their existing commercial policy. */
-  getGridVenueAuthority() { return this.transport.status(); }
+  getGridVenueAuthority() { return this.gridTransport.status(); }
 
   async getGridFeeQuote(input: GridFeeIdentity): Promise<GridFeeResult> {
-    if (this.transport.keyStatus !== 'present') return { availability: 'unavailable', reason: 'config_key_unavailable' };
+    if (this.gridTransport.keyStatus !== 'present') return { availability: 'unavailable', reason: 'config_key_unavailable' };
     const observedAt = Date.now();
     try {
       const params: Record<string, string> = { account: input.account };
@@ -480,7 +484,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         overview = (await this.readGridEnvelope('/builder/overview', { account: this.config.referralAddress })).data;
         approvals = (await this.readGridEnvelope('/account/builder_codes/approvals', { account: input.account })).data;
       }
-      if (!this.transport.status().liveEntryAllowed) return { availability: 'unavailable', reason: 'quota_authority_unavailable' };
+      if (!this.gridTransport.status().liveEntryAllowed) return { availability: 'unavailable', reason: 'quota_authority_unavailable' };
       return createGridFeeQuote(input, account, overview, approvals, observedAt);
     } catch { return { availability: 'unavailable', reason: 'fee_read_unavailable' }; }
   }
@@ -490,9 +494,9 @@ export class PacificaAdapter implements ProtocolAdapter {
     try {
       const url = `${this.config.baseUrl}${path}?${new URLSearchParams(params)}`;
       // Check target before charging a sent request. No secret is part of the durable identity.
-      this.transport.restInit(url, {});
+      this.gridTransport.restInit(url, {});
       sent = true;
-      const response = await this.fetchBounded(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } }, 15_000, 20_000, `Grid GET ${path}`);
+      const response = await this.fetchGridBounded(url, { method: 'GET', headers: { 'Content-Type': 'application/json' } }, 15_000, 20_000, `Grid GET ${path}`);
       if (!response.ok) throw new Error('Grid venue read failed');
       const raw = await this.readBodyBounded(response.json(), 15_000, `Grid GET ${path}`);
       if (!raw || typeof raw !== 'object' || raw.success !== true || !('data' in raw)) throw new Error('Grid venue read malformed');
@@ -534,8 +538,8 @@ export class PacificaAdapter implements ProtocolAdapter {
 
   async getGridCapacitySnapshot(input: Omit<CapacityInput, 'orders' | 'observedAt' | 'expiresAt' | 'complete' | 'now'> & { ownership?: Record<string, RestingUse['category']> }) {
     const observedAt = Date.now();
-    const compose = (snapshot: ReturnType<typeof gridCapacitySnapshot>) => ({ ...snapshot, venueAuthority: this.transport.status(),
-      liveEntryAllowed: this.transport.status().liveEntryAllowed && snapshot.policyWindow.admittedOrdinaryLimit > 0 });
+    const compose = (snapshot: ReturnType<typeof gridCapacitySnapshot>) => ({ ...snapshot, venueAuthority: this.gridTransport.status(),
+      liveEntryAllowed: this.gridTransport.status().liveEntryAllowed && snapshot.policyWindow.admittedOrdinaryLimit > 0 });
     try {
       const orders = await this.getGridOpenOrders(input.account, input.subaccountId);
       return compose(gridCapacitySnapshot({ ...input, orders: orders.map(o => ({ orderId: o.orderId, category: input.ownership?.[o.orderId] ?? 'unclassified' })),
@@ -4234,6 +4238,30 @@ export class PacificaAdapter implements ProtocolAdapter {
    * discarded) and rejects, so callers — and the dedup layer above them —
    * are guaranteed to settle.
    */
+  /** Only Grid-owned reads opt into credentials, observed quota and sanitized errors. */
+  private async fetchGridBounded(
+    url: string, init: RequestInit, softMs: number, hardMs: number, label: string,
+  ): Promise<Response> {
+    const transport = this.gridTransport;
+    // Validate before reservation/dispatch; target refusals remain visible to callers.
+    const request = transport.restInit(url, init);
+    const reservationId = `grid-transport:${randomUUID()}`;
+    const path = new URL(url).pathname;
+    const cost = /cancel/.test(path) ? 5 : /\/(account|orders|positions|trades)(\/|$)/.test(path) && (!init.method || init.method === 'GET') ? 120 : 10;
+    transport.quota.reserve(reservationId, cost, 'risk-reduction');
+    let disposition: 'sent' | 'uncertain' = 'uncertain';
+    try {
+      // The legacy deadline owns the raw promise. A late response never reaches observation.
+      const response = await this.fetchBounded(url, request, softMs, hardMs, label);
+      disposition = 'sent';
+      return transport.response(response);
+    } catch (error) {
+      throw transport.safeError(error);
+    } finally {
+      transport.quota.settle(reservationId, disposition);
+    }
+  }
+
   private async fetchBounded(
     url: string,
     init: RequestInit,
@@ -4248,22 +4276,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     // state because it runs entirely in the JS event loop.
     const controller = new AbortController();
     const softTimer = setTimeout(() => controller.abort(), softMs);
-    let request: RequestInit;
-    try { request = this.transport.restInit(url, { ...init, signal: controller.signal }); }
-    catch (error) { clearTimeout(softTimer); throw this.transport.safeError(error); }
-    const reservationId = `transport:${randomUUID()}`;
-    const path = new URL(url).pathname;
-    const cost = /cancel/.test(path) ? 5 : /\/(account|orders|positions|trades)(\/|$)/.test(path) && (!init.method || init.method === 'GET') ? 120 : 10;
-    // Legacy and emergency traffic keeps its behavior; its in-flight spend is visible to Grid admission.
-    this.transport.quota.reserve(reservationId, cost, 'risk-reduction');
-    let disposition: 'sent' | 'uncertain' = 'uncertain';
-    let acceptingResponse = true;
-    const fetchPromise = Promise.resolve().then(() => fetch(url, request)).then(response => {
-      if (!acceptingResponse) return response;
-      disposition = 'sent';
-      return this.transport.response(response);
-    })
-      .catch(error => { throw this.transport.safeError(error); });
+    const fetchPromise = fetch(url, { ...init, signal: controller.signal });
     // Suppress: once the hard cap has moved on, we do not want an unhandled
     // rejection if the late fetch eventually settles.
     fetchPromise.catch(() => {});
@@ -4274,7 +4287,6 @@ export class PacificaAdapter implements ProtocolAdapter {
         fetchPromise,
         new Promise<never>((_, reject) => {
           hardTimer = setTimeout(() => {
-            acceptingResponse = false;
             // Belt-and-suspenders: the soft timer should already have called
             // abort(). If the socket is wedged and the soft abort did not
             // propagate, re-request abort here before rejecting.
@@ -4290,8 +4302,6 @@ export class PacificaAdapter implements ProtocolAdapter {
         }),
       ]);
     } finally {
-      acceptingResponse = false;
-      this.transport.quota.settle(reservationId, disposition);
       // Cancel both timers. Do NOT call controller.abort() here on the normal
       // success path — the caller still needs to read the response body;
       // aborting after headers arrive would corrupt the body stream.

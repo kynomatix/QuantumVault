@@ -1,10 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PacificaTransportAuthority, validPacificaConfigKey } from '../../server/protocol/pacifica/pacifica-transport.js';
-import * as transportModule from '../../server/protocol/pacifica/pacifica-transport.js';
 import { ObservedPacificaQuota, parseRestQuota, parseWsQuota } from '../../server/protocol/pacifica/pacifica-observed-quota.js';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
-import { PacificaWsManager } from '../../server/protocol/pacifica/pacifica-ws.js';
-import { PacificaPricesWsManager } from '../../server/live-data-spine/pacifica-prices-ws.js';
+import { GridPacificaWsManager } from '../../server/grid-bot/pacifica-ws.js';
 const mocks = vi.hoisted(() => {
   const sockets: any[] = [];
   class Socket {
@@ -64,7 +62,7 @@ describe('Config Key custody and target binding', () => {
     const t = new PacificaTransportAuthority(EXAMPLE_KEY);
     t.response(response({}, true, code)); expect(t.status().liveEntryAllowed).toBe(false);
   });
-  it('covers every adapter REST path through the common boundary', async () => {
+  it('only Grid REST opts into the credential and observed-quota boundary', async () => {
     const t = new PacificaTransportAuthority(EXAMPLE_KEY);
     const adapter = new PacificaAdapter(undefined, t);
     const fetch = vi.fn(async (_url, init) => {
@@ -72,17 +70,33 @@ describe('Config Key custody and target binding', () => {
       expect(init.redirect).toBe('error'); return response({ success: true, data: [] });
     }); vi.stubGlobal('fetch', fetch);
     await adapter.getGridOpenOrders('EXAMPLE_ACCOUNT');
-    await (adapter as any).post('/orders/cancel', { account: 'EXAMPLE_ACCOUNT' });
-    await (adapter as any).fetchBounded(URL, { method: 'GET' }, 500, 1000, 'EXAMPLE');
-    expect(fetch).toHaveBeenCalledTimes(3);
-    expect(t.status().quota.outstandingDeciCredits).toBe(245);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(t.status().quota.outstandingDeciCredits).toBe(120);
+    expect(t.status().liveEntryAllowed).toBe(true);
+  });
+  it('refuses a Grid REST target visibly before dispatch or quota reservation', async () => {
+    const t = new PacificaTransportAuthority(EXAMPLE_KEY);
+    const adapter = new PacificaAdapter({ baseUrl: 'https://evil.example/api/v1' }, t);
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await expect(adapter.getGridOpenOrders('EXAMPLE_ACCOUNT')).rejects.toThrow('credential target refused');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(t.status().quota.outstandingDeciCredits).toBe(0);
+  });
+  it('only Grid transport errors are flattened and Grid body echoes are redacted', async () => {
+    const adapter = new PacificaAdapter(undefined, new PacificaTransportAuthority(EXAMPLE_KEY));
+    const fetch = vi.fn().mockRejectedValueOnce(new TypeError(EXAMPLE_KEY))
+      .mockResolvedValueOnce(response({ echo: EXAMPLE_KEY }));
+    vi.stubGlobal('fetch', fetch);
+    await expect((adapter as any).fetchGridBounded(URL, {}, 500, 1000, 'EXAMPLE')).rejects.toThrow('Pacifica transport failed');
+    const result = await (adapter as any).fetchGridBounded(URL, {}, 500, 1000, 'EXAMPLE');
+    expect(await result.json()).toEqual({ echo: 'REDACTED' });
   });
   it('never restores quota from a response after the hard timeout', async () => {
     vi.useFakeTimers(); vi.spyOn(console, 'error').mockImplementation(() => {});
     const t = new PacificaTransportAuthority(EXAMPLE_KEY), adapter = new PacificaAdapter(undefined, t);
     let deliver!: (response: Response) => void;
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { deliver = resolve; })));
-    const result = expect((adapter as any).fetchBounded(URL, { method: 'GET' }, 10, 20, 'EXAMPLE')).rejects.toThrow('HARD-TIMEOUT');
+    const result = expect((adapter as any).fetchGridBounded(URL, { method: 'GET' }, 10, 20, 'EXAMPLE')).rejects.toThrow('Pacifica transport failed');
     await vi.advanceTimersByTimeAsync(20); await result;
     deliver(response()); await vi.advanceTimersByTimeAsync(0);
     expect(t.status().liveEntryAllowed).toBe(false);
@@ -91,7 +105,7 @@ describe('Config Key custody and target binding', () => {
   it('private WS attaches the key on reconnect and ignores replaced-connection quota', () => {
     vi.useFakeTimers(); vi.stubGlobal('WebSocket', mocks.Socket);
     const t = new PacificaTransportAuthority(EXAMPLE_KEY);
-    const ws = new PacificaWsManager({ wsUrl: 'wss://ws.pacifica.fi/ws', account: 'EXAMPLE_ACCOUNT' }, {} as any, t);
+    const ws = new GridPacificaWsManager({ wsUrl: 'wss://ws.pacifica.fi/ws', account: 'EXAMPLE_ACCOUNT' }, {} as any, t);
     ws.connect(); const first = mocks.sockets[0];
     expect(first.options).toEqual({ headers: { 'PF-API-KEY': EXAMPLE_KEY }, followRedirects: false });
     (ws as any).doConnect(); const second = mocks.sockets[1];
@@ -100,14 +114,15 @@ describe('Config Key custody and target binding', () => {
     second.onmessage({ data }); expect(t.status().liveEntryAllowed).toBe(true);
     expect(second.options).toEqual(first.options); ws.disconnect();
   });
-  it('public prices WS attaches credentials on every new connection but never proves action quota', () => {
+  it('a refused Grid WS target throws visibly without scheduling reconnects', async () => {
     vi.useFakeTimers(); const t = new PacificaTransportAuthority(EXAMPLE_KEY);
-    vi.spyOn(transportModule, 'pacificaTransportAuthority').mockReturnValue(t);
-    const ws = new PacificaPricesWsManager({ onTick: () => {} });
-    ws.connect(); (ws as any).doConnect();
-    expect(mocks.sockets).toHaveLength(2);
-    for (const socket of mocks.sockets) expect(socket.options).toMatchObject({ headers: { 'PF-API-KEY': EXAMPLE_KEY }, followRedirects: false });
-    expect(t.status().liveEntryAllowed).toBe(false); ws.disconnect();
+    const ws = new GridPacificaWsManager({ wsUrl: 'wss://evil.example/ws', account: 'EXAMPLE_ACCOUNT' }, {} as any, t);
+    expect(() => ws.connect()).toThrow('credential target refused');
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(mocks.sockets).toHaveLength(0);
+    expect(ws.isConnected()).toBe(false);
+    ws.disconnect();
   });
 });
 describe('observed quota and shared reservations', () => {

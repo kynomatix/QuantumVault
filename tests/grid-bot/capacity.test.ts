@@ -35,8 +35,9 @@ describe('shared capacity observation versus product window', () => {
     i.orders = []; i.reservations.push({ id: 'EXAMPLE_RESERVATION', slots: 0 }); expect(gridCapacitySnapshot(i).policyWindow.admittedOrdinaryLimit).toBe(0);
     i.reservations = [{ id: 'EXAMPLE_BAD', slots: NaN }]; expect(gridCapacitySnapshot(i).policyWindow.admittedOrdinaryLimit).toBe(0);
   });
-  it('two-bot pilot has no third window and never recounts shared reserve per bot', () => {
-    expect(gridCapacitySnapshot({ ...input(), activeBots: 2 })).toMatchObject({ reason: 'pilot_bot_limit', policyWindow: { admittedOrdinaryLimit: 0, sharedReserved: 5 } });
+  it('pilot admission and refusal use the same configured cap', () => {
+    expect(gridCapacitySnapshot({ ...input(), activeBots: GRID_CAPS.pilotBotsPerQuotaDomain - 1 }).reason).toBeNull();
+    expect(gridCapacitySnapshot({ ...input(), activeBots: GRID_CAPS.pilotBotsPerQuotaDomain })).toMatchObject({ reason: 'pilot_bot_limit', policyWindow: { admittedOrdinaryLimit: 0, sharedReserved: 5 } });
   });
   it('live reader reports all observed use; missing key still denies live entry', async () => {
     const raw = { order_id: '1', client_order_id: null, symbol: 'BTC', side: 'bid', price: '100', initial_amount: '1', filled_amount: '0',

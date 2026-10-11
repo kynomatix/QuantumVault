@@ -17,7 +17,6 @@
  */
 
 import { WebSocket as NodeWebSocket } from 'ws';
-import { pacificaTransportAuthority } from '../protocol/pacifica/pacifica-transport.js';
 import type { PriceTick } from './types.js';
 
 export const PACIFICA_PRICES_WS_URL = 'wss://ws.pacifica.fi/ws';
@@ -162,7 +161,7 @@ export class PacificaPricesWsManager {
     this.onParseError = opts.onParseError;
     this.wsFactory =
       opts.webSocketFactory ??
-      ((url) => new NodeWebSocket(url, { ...pacificaTransportAuthority().websocketOptions(url), maxPayload: MAX_WS_PAYLOAD }) as unknown as WebSocket);
+      ((url) => new NodeWebSocket(url, { maxPayload: MAX_WS_PAYLOAD }) as unknown as WebSocket);
   }
 
   connect(): void {
@@ -211,7 +210,7 @@ export class PacificaPricesWsManager {
     try {
       this.ws = this.wsFactory(this.wsUrl);
     } catch (err) {
-      console.error('[Spine][Pacifica] WebSocket constructor failed:', pacificaTransportAuthority().safeError(err));
+      console.error('[Spine][Pacifica] WebSocket constructor failed:', err);
       this.scheduleReconnect();
       return;
     }
@@ -229,7 +228,7 @@ export class PacificaPricesWsManager {
       this.lastMessageAt = Date.now();
       let data: any;
       try {
-        data = JSON.parse(pacificaTransportAuthority().redact(String((event as any).data)));
+        data = JSON.parse(String((event as any).data));
       } catch {
         this.onParseError?.(1);
         return;

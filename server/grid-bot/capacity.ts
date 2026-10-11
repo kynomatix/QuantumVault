@@ -33,5 +33,5 @@ export function gridCapacitySnapshot(input: CapacityInput) {
     policyWindow: { ordinaryLimit: GRID_CAPS.ordinaryRestingPerBot, sharedReserved: GRID_CAPS.sharedProtectionReserve,
       requiredAvailable: GRID_CAPS.requiredAvailableSlots, admittedOrdinaryLimit: canAdmitWindow ? GRID_CAPS.ordinaryRestingPerBot : 0 },
     batchActionLimit: GRID_CAPS.transportBatchActions,
-    reason: !valid ? 'inventory_unknown_or_stale' : input.activeBots >= 2 ? 'pilot_bot_limit' : !canAdmitWindow ? 'insufficient_shared_slots' : null };
+    reason: !valid ? 'inventory_unknown_or_stale' : input.activeBots >= GRID_CAPS.pilotBotsPerQuotaDomain ? 'pilot_bot_limit' : !canAdmitWindow ? 'insufficient_shared_slots' : null };
 }
