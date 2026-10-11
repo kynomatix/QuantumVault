@@ -30,6 +30,10 @@ export function validateFundingIntent(intent: PhoenixIntent): asserts intent is 
   for (const address of [terms.sourceWallet, intent.destination]) {
     if (new PublicKey(address).toBase58() !== address) throw new Error('Invalid funding address');
   }
+  if (intent.borrowIntentId || intent.borrowReserveRaw !== undefined) {
+    if (!intent.borrowIntentId || intent.borrowReserveRaw === undefined || units(intent.borrowReserveRaw) === 0n
+      || terms.leg !== 'deposit' || intent.parkingIntentId || intent.executionOrderId) throw new Error('Invalid debt reserve binding');
+  }
   const net = units(intent.amountBaseUnits), fee = units(intent.feeBaseUnits), gross = units(terms.grossBaseUnits);
   if (net === 0n || gross !== net + fee || gross < units(terms.minimumBaseUnits)) throw new Error('Funding minimum or net mismatch');
   units(terms.maxGasLamports);

@@ -9,6 +9,9 @@ export interface FundingQuote {
   source: string; reference: string; expiresAt: number;
 }
 export interface PhoenixFundingIO {
+  /** U11 must re-read measured delay, lender debt, consent and liquid coverage
+   * at signing. Missing authorization is a hard denial for debt-backed deposits. */
+  authorizeBorrowDeployment?(intent: FundingIntent): Promise<void>;
   // Must verify program/account owners, mint, queue fee semantics and exact source authority.
   quote(intent: FundingIntent, transaction: Transaction): Promise<FundingQuote>;
   lifetime(): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
@@ -41,6 +44,7 @@ export class PhoenixFundingService {
   }
   private checkQuote(intent: FundingIntent, quote: FundingQuote) {
     for (const name of ['minimumBaseUnits', 'feeBaseUnits', 'grossBaseUnits', 'netBaseUnits', 'gasLamports', 'rentLamports', 'availableLamports', 'availableBaseUnits'] as const) units(quote[name]);
+    if (intent.borrowReserveRaw !== undefined && units(quote.availableBaseUnits) < units(intent.funding.grossBaseUnits) + units(intent.borrowReserveRaw)) throw new Error('Liquid repayment reserve would be spent');
     const t = intent.funding;
     if (!quote.source || quote.source !== t.quoteSource || quote.reference !== t.quoteReference
       || quote.expiresAt !== t.quoteExpiresAt || !Number.isSafeInteger(quote.expiresAt) || Date.now() >= quote.expiresAt
@@ -90,9 +94,15 @@ export class PhoenixFundingService {
     const quote = await this.io.quote(structuredClone(intent), transaction); this.checkQuote(intent, quote);
     if (!this.enabled()) return operation;
     operation = await this.operations.annotatePrepared(botId, ownerWallet, operationId, operation.revision, { quote });
+    if (intent.borrowIntentId) {
+      if (!this.io.authorizeBorrowDeployment) throw new Error('Debt deployment authorization unavailable');
+      await this.io.authorizeBorrowDeployment(structuredClone(intent));
+    }
     const signed = await this.io.withSigner(structuredClone(intent), secret => signFundingTransaction(transaction, intent, this.pin, secret));
     const height = await this.io.blockHeight();
     if (!Number.isSafeInteger(height) || height < 0 || !this.enabled() || Date.now() >= quote.expiresAt || height > Number(signed.lastValidBlockHeight)) return operation;
+    if (intent.borrowIntentId) await this.io.authorizeBorrowDeployment!(structuredClone(intent));
+    if (!this.enabled() || Date.now() >= quote.expiresAt) return operation;
     // Persist signature BEFORE sending; only the CAS winner gets one send.
     try {
       const claim = await this.operations.recordAttempt(botId, ownerWallet, operationId, operation.revision, signed);

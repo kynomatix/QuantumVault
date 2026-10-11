@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { phoenixIntentHash, type PhoenixIntent } from './operation-store';
 import { phoenixIdentityFromBot } from './identity';
+import { excludePhoenixBorrow } from './borrow-store';
 import { assertPhoenixNewRisk } from './lifecycle';
 import { units } from './funding-contract';
 import { validateParkingIntent, type ParkingIntent, type ParkingLeg, type ParkingReceipt, type ParkingRecord } from './parking-contract';
@@ -82,6 +83,7 @@ export class PhoenixParkingStore implements ParkingRepository {
     await assertPhoenixNewRisk(c, i.botId);
     if (i.action === 'idle' && b.auto_park_idle !== true) throw new Error('Parking opt-out');
     if (i.action !== 'entry' && b.park_destination_asset && b.park_destination_asset !== i.destination) throw new Error('Parking destination changed');
+    await excludePhoenixBorrow(c, i.botId);
     await excludePhoenixParking(c, i.botId, false, id);
     const orders = (await c.query("SELECT * FROM phoenix_order_intents WHERE bot_id=$1 AND state NOT IN ('settled','rejected')", [i.botId])).rows;
     if (i.action === 'entry') {

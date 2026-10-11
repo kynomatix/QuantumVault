@@ -1,3 +1,4 @@
+import { phoenixBorrowCapabilities } from './borrow-runtime';
 import type { StoredPhoenixOperation } from './operation-store';
 import type { FundingHistory } from './funding-contract';
 import type { PhoenixFundingDetail } from '../../../shared/phoenix-funding-contract';
@@ -19,7 +20,7 @@ export function phoenixFundingDetail(history: StoredPhoenixOperation[]): Phoenix
   const latest = history.filter(op => (op.observation?.funding as FundingHistory | undefined)?.receipt)
     .sort((a, b) => (b.observation!.funding as FundingHistory).receipt!.observedAt - (a.observation!.funding as FundingHistory).receipt!.observedAt)[0];
   const receipt = latest ? (latest.observation!.funding as FundingHistory).receipt! : null;
-  return { enabled: false, autoReturn: false, parking: false, debt: false, operations,
+  return { enabled: false, borrowing: phoenixBorrowCapabilities(), autoReturn: false, parking: false, debt: phoenixBorrowCapabilities().newBorrowing, operations,
     lastSnapshot: receipt ? { observedAt: receipt.observedAt, slot: receipt.slot, sourceWallet: latest.intent.funding!.sourceWallet,
       destinationWallet: ['wallet_funding', 'wallet_return'].includes(latest.intent.funding!.leg) ? latest.intent.destination : null,
       authorityWallet: latest.intent.identity.authorityWalletAddress, traderAccount: latest.intent.identity.traderAccountAddress,

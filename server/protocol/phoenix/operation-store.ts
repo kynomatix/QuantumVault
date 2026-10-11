@@ -1,3 +1,4 @@
+import { excludePhoenixBorrow } from './borrow-store';
 import { assertPhoenixNewRisk } from './lifecycle';
 import { assertParkingFundingChild, excludePhoenixParking } from './parking-store';
 import type { PhoenixConsumerContext } from './consumer-contract';
@@ -26,6 +27,8 @@ export interface PhoenixIntent {
   /** U05 funding child; bound to a durably claimed entry, never an independent park/withdraw. */
   executionOrderId?: string;
   parkingIntentId?: string;
+  borrowIntentId?: string;
+  borrowReserveRaw?: string;
   protection?: ProtectionTerms;
 }
 export interface StoredPhoenixOperation {
@@ -171,6 +174,7 @@ export class PhoenixOperationStore {
       }
       if (intent.kind === 'register' || intent.kind === 'deposit' || intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, intent.botId);
       if (intent.kind !== 'protection') {
+        if (intent.kind === 'deposit' || intent.funding?.leg === 'wallet_return') await excludePhoenixBorrow(client, intent.botId, intent);
         await excludePhoenixParking(client, intent.botId, false, intent.parkingIntentId);
         if (intent.parkingIntentId) await assertParkingFundingChild(client, intent);
       }
@@ -255,6 +259,7 @@ export class PhoenixOperationStore {
       if (operation.kind === 'register' || operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, botId);
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale send claim');
       if (operation.kind !== 'protection') {
+        if (operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_return') await excludePhoenixBorrow(client, botId, operation.intent);
         await excludePhoenixParking(client, botId, false, operation.intent.parkingIntentId);
         if (operation.intent.parkingIntentId) await assertParkingFundingChild(client, operation.intent);
       }

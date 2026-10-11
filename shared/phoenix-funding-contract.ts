@@ -2,7 +2,9 @@ export interface PhoenixFundingDetail {
   enabled: false;
   autoReturn: false;
   parking: false;
-  debt: false;
+  debt: boolean;
+  borrowing?: { externalLender: 'jupiter-lend'; phoenixMarginIsCollateral: false; newBorrowing: boolean; manualRecovery: boolean;
+    requiresMeasuredDelay: true; requiresDeploymentConsent: true; requiresSeparateLiquidReserve: true };
   measured: null | { samples: number; meanSeconds: number; minSeconds: number; maxSeconds: number; lastCompletedAt: number };
   droppedSamples: number;
   lastSnapshot: null | { observedAt: number; slot: string; sourceWallet: string; destinationWallet: string | null; authorityWallet: string; traderAccount: string;

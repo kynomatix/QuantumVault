@@ -47,7 +47,7 @@ export interface PhoenixReadCapabilities {
     queuedReturnUsdc: PhoenixObservation<string>;
   };
   recycling: { supported: false; permanent: 'unknown'; maxPerAuthority: null };
-  supportsPerBotExternalDebt: false;
+  supportsPerBotExternalDebt: boolean;
   supportsCarryOnClose: false;
   exchangeStatus: PhoenixObservation<{ active: boolean; gated: boolean; runningState: string }>;
   withdrawals: PhoenixWithdrawalDetails;

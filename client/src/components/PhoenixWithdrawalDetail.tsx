@@ -45,6 +45,6 @@ export function PhoenixWithdrawalDetail({ activeProtocol, visible, botId }: { ac
     {funding?.measured && <p className="text-xs text-muted-foreground">Historical request-to-observed-release time; last completion {new Date(funding.measured.lastCompletedAt).toLocaleString()}. This is not a forecast.</p>}
     {!!funding?.droppedSamples && <p>{funding.droppedSamples} dropped requests (excluded from successful delays).</p>}
     {funding?.operations.filter(op => op.leg === 'withdraw' && op.state !== 'completed').slice(-5).map(op => <p key={op.id}>Withdrawal: {op.state === 'dropped' ? 'Dropped — not completed' : op.state.replaceAll('_', ' ')}{op.queuedAt ? `; queued ${new Date(op.queuedAt).toLocaleString()}` : ''}</p>)}
-    <p className="text-xs text-muted-foreground mt-1">Released collateral must be unwrapped to USDC before it is wallet cash. Borrowing against queued funds is your decision. Automatic return, parking and debt actions are disabled.</p>
+    <p className="text-xs text-muted-foreground mt-1">Released collateral must be unwrapped to USDC before it is wallet cash. Deploying borrowed capital requires your explicit choice after reviewing measured withdrawal delays, plus consent to keep a separate liquid repayment reserve. Queued withdrawals cannot repay a loan. Phoenix margin is not lender collateral. External borrowing {funding?.borrowing?.newBorrowing ? 'requires the displayed consent and coverage checks.' : 'is currently disabled.'}</p>
   </div>;
 }
