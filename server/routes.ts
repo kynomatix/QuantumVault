@@ -9289,6 +9289,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(403).json({ error: "Forbidden" });
       }
 
+      if (bot.activeProtocol === 'phoenix') {
+        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
+        return res.status(503).json(phoenixOrderDisabled());
+      }
+
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
@@ -9945,6 +9950,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(403).json({ error: "Forbidden" });
       }
 
+      if (bot.activeProtocol === 'phoenix') {
+        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
+        return res.status(503).json(phoenixOrderDisabled());
+      }
+
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
@@ -10052,6 +10062,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (!bot.isActive) {
         return res.status(400).json({ error: "Bot is paused. Activate it first." });
+      }
+
+      if (bot.activeProtocol === 'phoenix') {
+        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
+        return res.status(503).json(phoenixOrderDisabled());
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
@@ -18848,6 +18863,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(401).json({ error: "Invalid secret" });
       }
 
+      if (bot.activeProtocol === 'phoenix') {
+        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
+        return res.status(503).json(phoenixOrderDisabled());
+      }
+
       try {
         log = await storage.createWebhookLog({
           tradingBotId: botId,
@@ -20393,6 +20413,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       if (!secureTokenMatches(suppliedSecret, wallet.userWebhookSecret)) {
         return res.status(401).json({ error: "Invalid secret" });
+      }
+
+      if (bot.activeProtocol === 'phoenix') {
+        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
+        return res.status(503).json(phoenixOrderDisabled());
       }
 
       try {

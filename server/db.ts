@@ -2065,6 +2065,18 @@ const schemaMigrationSql = [
          CONSTRAINT phoenix_attempt_values_check CHECK (attempt_number BETWEEN 1 AND 5 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$')
        );
        CREATE UNIQUE INDEX IF NOT EXISTS phoenix_attempt_pending_unique ON phoenix_operation_attempts (operation_id) WHERE state = 'submission_pending' `,
+      `       CREATE TABLE IF NOT EXISTS phoenix_order_intents (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bot_id varchar NOT NULL REFERENCES trading_bots(id),
+         request_key text NOT NULL, sequence numeric(20,0) NOT NULL, intent jsonb NOT NULL, intent_hash text NOT NULL,
+         state text NOT NULL DEFAULT 'admitted', revision integer NOT NULL DEFAULT 0, data jsonb NOT NULL,
+         created_at timestamp NOT NULL DEFAULT now(), updated_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT phoenix_order_replay_unique UNIQUE(bot_id,request_key),
+         CONSTRAINT phoenix_order_sequence_unique UNIQUE(bot_id,sequence),
+         CONSTRAINT phoenix_order_state_check CHECK(state IN ('admitted','funding','signing','submission_pending','accepted','landed','unknown','settled','rejected')),
+         CONSTRAINT phoenix_order_values_check CHECK(sequence > 0 AND revision >= 0 AND length(request_key) BETWEEN 1 AND 200 AND length(intent_hash)=64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent)='object' AND jsonb_typeof(data)='object')
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_order_active_unique ON phoenix_order_intents(bot_id) WHERE state NOT IN ('settled','rejected');
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_order_signature_unique ON phoenix_order_intents((data->'attempt'->>'signature')) WHERE data->'attempt'->>'signature' IS NOT NULL; `,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5636,6 +5648,60 @@ const schemaMigrationMetadata = [
     }
   ],
   "operation": "ddl"
+},
+{
+  "id": "187-phoenix-order-intents",
+  "capabilities": [
+    "phoenix"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "phoenix_order_intents",
+      "columns": [
+        "id",
+        "bot_id",
+        "request_key",
+        "sequence",
+        "intent",
+        "intent_hash",
+        "state",
+        "revision",
+        "data",
+        "created_at",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "UNIQUE (bot_id, request_key)",
+        "UNIQUE (bot_id, sequence)",
+        "CHECK (state IN ('admitted','funding','signing','submission_pending','accepted','landed','unknown','settled','rejected'))",
+        "CHECK (sequence > 0 AND revision >= 0 AND length(request_key) >= 1 AND length(request_key) <= 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object' AND jsonb_typeof(data) = 'object')",
+        "FOREIGN KEY (bot_id) REFERENCES trading_bots(id)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_order_intents",
+      "index": "phoenix_order_active_unique",
+      "columns": [
+        "bot_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "state <> ALL (ARRAY['settled','rejected'])"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_order_intents",
+      "index": "phoenix_order_signature_unique",
+      "unique": true,
+      "columns": ["((data -> 'attempt') ->> 'signature')"],
+      "predicateIncludes": ["((data -> 'attempt') ->> 'signature') IS NOT NULL"]
+    }
+  ]
 }
 ] as const;
 

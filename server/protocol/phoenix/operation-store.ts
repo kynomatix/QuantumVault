@@ -19,6 +19,8 @@ export interface PhoenixIntent {
   destination: string;
   registration?: { maxPositions: number; maxCostLamports: string; name: string; market: string };
   funding?: FundingTerms;
+  /** U05 funding child; bound to a durably claimed entry, never an independent park/withdraw. */
+  executionOrderId?: string;
 }
 export interface StoredPhoenixOperation {
   id: string; bot_id: string; request_key: string; kind: PhoenixOperationKind;
@@ -122,6 +124,21 @@ export class PhoenixOperationStore {
           throw new Error('Phoenix replay payload mismatch');
         }
         return { operation: replay.rows[0], created: false };
+      }
+      {
+        // The order table is absent only on a pre-U05 schema (including U04 fixtures).
+        const orderSchema = await client.query("SELECT to_regclass('phoenix_order_intents') AS table_name");
+        if (orderSchema.rows[0]?.table_name) {
+          const active = (await client.query(`SELECT id,state,intent,data FROM phoenix_order_intents WHERE bot_id=$1 AND state NOT IN ('settled','rejected')`, [intent.botId])).rows[0];
+          if (active || intent.executionOrderId) {
+            if (!active || active.id !== intent.executionOrderId || active.state !== 'funding' || active.intent.action !== 'entry'
+              || !intent.funding || !['wallet_funding', 'deposit'].includes(intent.funding.leg)) throw new Error('Phoenix order excludes conflicting funding/park');
+            const used = (await client.query(`SELECT COALESCE(sum((intent->'funding'->>'grossBaseUnits')::numeric),0)::text AS amount
+              FROM phoenix_operations WHERE bot_id=$1 AND intent->>'executionOrderId'=$2 AND intent->'funding'->>'leg'=$3`,
+              [intent.botId, active.id, intent.funding.leg])).rows[0].amount;
+            if (BigInt(used) + BigInt(intent.funding.grossBaseUnits) > BigInt(active.data.admission.fundingShortfallMicros)) throw new Error('Order funding budget exceeded');
+          }
+        } else if (intent.executionOrderId) throw new Error('Phoenix order schema unavailable');
       }
       if (intent.funding) {
         const registered = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id = $1 AND kind = 'register' AND state = 'completed'`, [intent.botId]);
