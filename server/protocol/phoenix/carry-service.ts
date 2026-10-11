@@ -1,3 +1,4 @@
+import { phoenixCanaryAllows } from './rollout';
 import { assertCarryFacts, type CarryFacts } from './carry-contract';
 import { recommendPhoenixCarry } from './carry-policy';
 import { assertParkingSnapshot, minUnits, validateParkingIntent, type ParkingIntent, type ParkingLeg, type ParkingRecord } from './parking-contract';
@@ -15,6 +16,10 @@ export interface PhoenixCarrySource {
 export class PhoenixCarryService {
   constructor(private readonly store: ParkingRepository, private readonly io: PhoenixParkingIO,
     private readonly source: PhoenixCarrySource, private readonly enabled = () => false, private readonly now = Date.now) {}
+  private allowed(i: ParkingIntent, l?: ParkingLeg) {
+    if (l && ['repay','withdraw','unwrap'].includes(l.kind)) return true;
+    return this.enabled() && phoenixCanaryAllows('carry', {ownerWallet:i.ownerWallet,botId:i.botId,parkUsdcMicros:i.maxUsdc});
+  }
   private async fresh(i: ParkingIntent, slot = '0') {
     const f = await this.source.facts(i);
     assertParkingSnapshot(f.parking,i,this.now(),slot); assertCarryFacts(i,f,this.now());
@@ -22,7 +27,7 @@ export class PhoenixCarryService {
   }
   async start(input: ParkingIntent) {
     const i = structuredClone(input); validateParkingIntent(i);
-    if (!i.carry || !this.enabled()) throw new Error('Phoenix carry disabled');
+    if (!i.carry || !this.allowed(i)) throw new Error('Phoenix carry disabled');
     await this.fresh(i);
     await this.store.prepare(i);
     return this.resume(i);
@@ -54,7 +59,7 @@ export class PhoenixCarryService {
     const leg = this.next(r,f);
     if (leg === 'attention') return this.store.finish(r,'attention');
     if (!leg) return this.store.finish(r,'completed');
-    if (leg.kind !== 'repay' && !this.enabled()) return r;
+    if (!this.allowed(i,leg)) return r;
     r = await this.store.claim(r,leg);
     try { await this.authorize(r); await this.io.submit(r,leg); } catch { /* durable claim: observe only */ }
     return r;
@@ -73,7 +78,7 @@ export class PhoenixCarryService {
     if (last.leg.kind === 'repay') {
       if (!c.allowRepay || !f.autoRepayEnabled || raw(last.leg.amount) > raw(c.maxRepayRaw)
         || raw(last.leg.amount) > raw(f.parking.walletUsdc)) throw new Error('Authorized repayment cash unavailable');
-    } else if (!this.enabled() || (c.choice === 'carry' ? !f.parking.autoPark : !f.autoRepayEnabled || !c.allowRepay)) throw new Error('Carry opt-in revoked');
+    } else if (!this.allowed(latest.intent,last.leg) || (c.choice === 'carry' ? !f.parking.autoPark : !f.autoRepayEnabled || !c.allowRepay)) throw new Error('Carry opt-in revoked');
     // Re-run selection against the PRE-leg record; compare the exact leg terms.
     const before = {...latest,legs:latest.legs.slice(0,-1)};
     const selected = this.next(before,f);

@@ -71,7 +71,9 @@ describe("runtime deployment identity", () => {
       unavailableCapabilities: ["lab_scanner"],
     });
 
-    expect(starting).toEqual({
+    const { dependencies, ...application } = starting;
+    expect(dependencies.phoenix).toMatchObject({venueReady:false,custodyReady:false,eligibility:'unknown'});
+    expect(application).toEqual({
       status: "ok",
       ready: false,
       timestamp: 100,

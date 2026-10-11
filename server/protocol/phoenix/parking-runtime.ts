@@ -1,3 +1,4 @@
+import { phoenixFeatureEnabled } from './rollout';
 import type { TradingBot } from '../../../shared/schema';
 import type { ParkingIntent } from './parking-contract';
 import type { PhoenixParkingService } from './parking-service';
@@ -10,7 +11,7 @@ export const PHOENIX_PARKING_DISABLED = {
 // Separate gate from Phoenix reads, funding and orders. An environment switch
 // alone cannot supply the missing reviewed queue/vault production bindings.
 export function phoenixParkingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.PHOENIX_PARKING_ENABLED === 'true' && runtime !== null;
+  return phoenixFeatureEnabled('park',env) && runtime !== null;
 }
 export interface PhoenixParkingRuntime {
   idle(bot: TradingBot): Promise<void>;

@@ -1,3 +1,4 @@
+import { phoenixCanaryAllows } from './rollout';
 import type { Transaction } from '@solana/web3.js';
 import { PhoenixOperationStore, type PhoenixAttemptInput, type StoredPhoenixOperation } from './operation-store';
 import { units, validateFundingIntent, validateFundingReceipt, type FundingIntent, type FundingReceipt, type FundingHistory } from './funding-contract';
@@ -37,6 +38,11 @@ export class PhoenixFundingService {
   constructor(private readonly operations: Pick<PhoenixOperationStore, 'prepare' | 'read' | 'annotatePrepared' | 'recordAttempt' | 'observe' | 'fundingHistory'>,
     private readonly io: PhoenixFundingIO, pin: PhoenixFundingPin, private readonly enabled = () => false) { this.pin = structuredClone(pin); }
 
+  private allowed(i: FundingIntent) {
+    if (['withdraw','unwrap','wallet_return'].includes(i.funding.leg)) return true;
+    return this.enabled() && phoenixCanaryAllows('fund', {ownerWallet:i.ownerWallet,botId:i.botId,transferUsdcMicros:i.funding.grossBaseUnits});
+  }
+
   async preview(input: FundingIntent) {
     const intent = structuredClone(input); validateFundingIntent(intent);
     const transaction = prepareFundingTransaction(intent, this.pin, await this.io.lifetime());
@@ -58,7 +64,7 @@ export class PhoenixFundingService {
   }
   async create(input: FundingIntent) {
     const intent = structuredClone(input); validateFundingIntent(intent);
-    if (!this.enabled()) throw new Error('Phoenix funding disabled');
+    if (!this.allowed(intent)) throw new Error('Phoenix funding disabled');
     const { operation } = await this.operations.prepare(intent);
     return this.resume(operation.bot_id, operation.intent.ownerWallet, operation.id);
   }
@@ -90,11 +96,11 @@ export class PhoenixFundingService {
             ...(!queued ? { attemptOutcome: 'confirmed' as const } : {}) });
       } catch { return unknown(); }
     }
-    if (!this.enabled()) return operation;
     const intent = operation.intent;
+    if (!this.allowed(intent)) return operation;
     const transaction = prepareFundingTransaction(intent, this.pin, await this.io.lifetime());
     const quote = await this.io.quote(structuredClone(intent), transaction); this.checkQuote(intent, quote);
-    if (!this.enabled()) return operation;
+    if (!this.allowed(intent)) return operation;
     operation = await this.operations.annotatePrepared(botId, ownerWallet, operationId, operation.revision, { quote });
     if (intent.carryIntentId) {
       if (!this.io.authorizeCarrySettlement) throw new Error('Carry settlement authorization unavailable');
@@ -104,19 +110,23 @@ export class PhoenixFundingService {
       if (!this.io.authorizeBorrowDeployment) throw new Error('Debt deployment authorization unavailable');
       await this.io.authorizeBorrowDeployment(structuredClone(intent));
     }
-    const signed = await this.io.withSigner(structuredClone(intent), secret => signFundingTransaction(transaction, intent, this.pin, secret));
+    const signed = await this.io.withSigner(structuredClone(intent), secret => {
+      if (!this.allowed(intent)) throw new Error('Funding revoked at signer');
+      return signFundingTransaction(transaction, intent, this.pin, secret);
+    });
     const height = await this.io.blockHeight();
-    if (!Number.isSafeInteger(height) || height < 0 || !this.enabled() || Date.now() >= quote.expiresAt || height > Number(signed.lastValidBlockHeight)) return operation;
+    if (!Number.isSafeInteger(height) || height < 0 || !this.allowed(intent) || Date.now() >= quote.expiresAt || height > Number(signed.lastValidBlockHeight)) return operation;
     if (intent.borrowIntentId) await this.io.authorizeBorrowDeployment!(structuredClone(intent));
     if (intent.carryIntentId) await this.io.authorizeCarrySettlement!(structuredClone(intent));
-    if (!this.enabled() || Date.now() >= quote.expiresAt) return operation;
+    if (!this.allowed(intent) || Date.now() >= quote.expiresAt) return operation;
     // Persist signature BEFORE sending; only the CAS winner gets one send.
     try {
       const claim = await this.operations.recordAttempt(botId, ownerWallet, operationId, operation.revision, signed);
       if (!claim.created) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
     } catch { return (await this.operations.read(botId, ownerWallet, operationId)).operation; }
-    if (!this.enabled()) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
+    if (!this.allowed(intent)) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
     if (intent.carryIntentId) await this.io.authorizeCarrySettlement!(structuredClone(intent));
+    if (!this.allowed(intent)) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
     try { if (await this.io.submit(signed.transaction) !== signed.signature) throw new Error('Signature mismatch'); }
     catch { return (await this.operations.read(botId, ownerWallet, operationId)).operation; }
     return this.resume(botId, ownerWallet, operationId);

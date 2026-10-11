@@ -1,7 +1,8 @@
+import { phoenixCanaryAllows, phoenixFeatureEnabled } from './rollout';
 import type { Transaction } from '@solana/web3.js';
 import type { PhoenixTraderIdentity } from '../../../shared/phoenix-read-contract';
 import { PhoenixOperationStore, type StoredPhoenixOperation } from './operation-store';
-import { PhoenixProvisioningStore, validatePhoenixCreation, type DerivePhoenixMaterial, type PhoenixCreationRequest } from './provisioning-store';
+import { PhoenixProvisioningStore, phoenixCreationId, validatePhoenixCreation, type DerivePhoenixMaterial, type PhoenixCreationRequest } from './provisioning-store';
 import { prepareRegistration, signRegistration, type PhoenixRegistrationPin } from './registration';
 import { PhoenixActivationRefusal } from './registration-io';
 
@@ -37,7 +38,7 @@ function result(requestId: string, code: string, operation?: StoredPhoenixOperat
     message: messages[code], requestId, ...(operation ? { botId: operation.bot_id, operationId: operation.id, identity: operation.intent.identity } : {}),
     ...(estimate ? { estimate } : {}) };
 }
-export function phoenixProvisioningEnabled(env: NodeJS.ProcessEnv = process.env) { return env.PHOENIX_PROVISIONING_ENABLED === 'true'; }
+export function phoenixProvisioningEnabled(env: NodeJS.ProcessEnv = process.env) { return phoenixFeatureEnabled('create', env); }
 export function phoenixDisabledCreation(requestId: unknown): ProvisioningResult { return result(typeof requestId === 'string' ? requestId : '', 'disabled'); }
 
 /** No production instance is installed until a reviewed canary pin/eligibility grant exists.
@@ -53,10 +54,14 @@ export class PhoenixProvisioner {
     this.pin = structuredClone(pin);
   }
 
+  private allowed(ownerWallet: string, botId: string, registrationLamports: string) {
+    return this.enabled() && phoenixCanaryAllows('create', {ownerWallet,botId,registrationLamports});
+  }
+
   async create(input: PhoenixCreationRequest): Promise<ProvisioningResult> {
     const request = structuredClone(input);
     validatePhoenixCreation(request);
-    if (!this.enabled()) return result(request.requestId, 'disabled');
+    if (!this.allowed(request.ownerWallet, phoenixCreationId(request.ownerWallet,request.requestId),request.maxCostLamports)) return result(request.requestId, 'disabled');
     const operation = await this.allocation.allocateAndDerive(request, this.derive);
     return this.resume(operation);
   }
@@ -85,7 +90,7 @@ export class PhoenixProvisioner {
       if (outcome === 'confirmed') await this.allocation.persistConfirmed(operation);
       return result(requestId, outcome === 'confirmed' ? 'completed' : 'chain_failed', operation);
     }
-    if (!this.enabled()) return result(requestId, 'disabled', operation);
+    if (!this.allowed(operation.intent.ownerWallet,operation.bot_id,registration.maxCostLamports)) return result(requestId, 'disabled', operation);
     const refuse = async (code: string, estimate?: RegistrationQuote) => {
       try {
         await this.operations.annotatePrepared(operation.bot_id, operation.intent.ownerWallet, operation.id, operation.revision,
@@ -112,23 +117,27 @@ export class PhoenixProvisioner {
       if (total > BigInt(registration.maxCostLamports)) return refuse('cost_limit', quote);
       if (total > BigInt(quote.balanceLamports)) return refuse('insufficient_gas', quote);
       // Recheck after all external preparation and immediately before opening the key window.
-      if (!this.enabled()) return result(requestId, 'disabled', operation);
+      if (!this.allowed(operation.intent.ownerWallet,operation.bot_id,registration.maxCostLamports)) return result(requestId, 'disabled', operation);
       const freshEligibility = await this.io.eligibility();
       if (freshEligibility !== 'eligible') return refuse(freshEligibility, quote);
       operation = await this.operations.annotatePrepared(operation.bot_id, operation.intent.ownerWallet, operation.id, operation.revision,
         { stage: 'estimated', estimate: quote });
-      signed = await this.io.withSigner(operation.bot_id, secret => signRegistration(transaction, identity, this.pin, registration.maxPositions, secret));
+      signed = await this.io.withSigner(operation.bot_id, secret => {
+        if (!this.allowed(operation.intent.ownerWallet,operation.bot_id,registration.maxCostLamports)) throw new Error('Creation revoked at signer');
+        return signRegistration(transaction, identity, this.pin, registration.maxPositions, secret);
+      });
     } catch (error) {
       const code = error instanceof PhoenixActivationRefusal ? error.code : 'invalid_registration';
       return refuse(code);
     }
-    if (!this.enabled()) return result(requestId, 'disabled', operation, quote);
+    if (!this.allowed(operation.intent.ownerWallet,operation.bot_id,registration.maxCostLamports)) return result(requestId, 'disabled', operation, quote);
     // CAS admits one sender across processes, even when two preparations race.
     let claim: Awaited<ReturnType<PhoenixOperationStore['recordAttempt']>>;
     try { claim = await this.operations.recordAttempt(operation.bot_id, operation.intent.ownerWallet, operation.id, operation.revision, signed); }
     catch { return result(requestId, 'submission_unknown', operation, quote); }
     if (!claim.created) return result(requestId, 'submission_unknown', operation, quote);
     try {
+      if (!this.allowed(operation.intent.ownerWallet,operation.bot_id,registration.maxCostLamports)) return result(requestId, 'submission_unknown', operation, quote);
       // The endpoint co-signs AND sends. No separate RPC send and no automatic retry.
       const receipt = await this.io.submit(signed.transaction, operation.intent.identity, registration.maxPositions);
       if (receipt.signature !== signed.signature || receipt.traderPda !== operation.intent.identity.traderAccountAddress) throw new Error('Phoenix receipt mismatch');

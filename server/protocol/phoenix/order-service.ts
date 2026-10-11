@@ -1,3 +1,4 @@
+import { phoenixCanaryAllows, phoenixExposureAllows } from './rollout';
 import { admitPhoenixOrder, orderIntentHash, validateOrderIntent, type PhoenixOrderIntent, type PhoenixOrderAuthority } from './order-contract';
 import { signOrderTransaction, validateOrderPin, type PhoenixOrderPin } from './order-builder';
 import type { OrderRepository, PhoenixOrderRecord, PhoenixFill } from './order-store';
@@ -29,13 +30,18 @@ export class PhoenixOrderService {
     pin: PhoenixOrderPin, private readonly entryEnabled = () => false, private readonly now = Date.now) {
     this.pin = structuredClone(pin);
   }
+  private allowed(i: PhoenixOrderIntent, a?: PhoenixOrderAuthority) {
+    return this.entryEnabled() && phoenixCanaryAllows('entry', {ownerWallet:i.ownerWallet,botId:i.botId,notionalMicros:i.maxNotionalMicros,leverage:i.leverage})
+      && (!a || phoenixExposureAllows(a.canaryExposureMicros,i.maxNotionalMicros));
+  }
   async execute(input: PhoenixOrderIntent): Promise<PhoenixOrderRecord> {
     const i = structuredClone(input); validateOrderIntent(i);
     const previous = await this.store.find(i);
     if (previous) return previous.state === 'funding' ? this.advance(previous) : this.reconcile(i, previous.id);
-    if (i.action === 'entry' && !this.entryEnabled()) throw new Error('Phoenix entry disabled');
+    if (i.action === 'entry' && !this.allowed(i)) throw new Error('Phoenix entry disabled');
     const admission = admitPhoenixOrder(i, await this.io.snapshot(structuredClone(i)), this.now());
     validateOrderPin(i, admission, this.pin);
+    if (i.action === 'entry' && !this.allowed(i,admission.authority)) throw new Error('Canary exposure unavailable or exceeded');
     const prepared = await this.store.prepare(i, admission);
     if (!prepared.created) return this.reconcile(i, prepared.record.id);
     return this.advance(prepared.record);
@@ -45,15 +51,16 @@ export class PhoenixOrderService {
     let fundingSettled = false;
     const i = record.intent, admission = record.data.admission;
     try {
-      if (i.action === 'entry' && !this.entryEnabled()) {
+      if (i.action === 'entry' && !this.allowed(i)) {
         return record.state === 'admitted' ? await this.store.change(record, 'rejected', { reason: 'Entry disabled before funding' }) : record;
       }
       // Refresh before the first money side effect as DB lock acquisition may have waited.
       const preFunding = admitPhoenixOrder(i, await this.io.snapshot(structuredClone(i)), this.now());
       validateOrderPin(i, preFunding, this.pin);
+      if (i.action === 'entry' && !this.allowed(i,preFunding.authority)) throw new Error('Canary exposure revoked');
       if (record.state === 'funding' || units(preFunding.fundingShortfallMicros) > 0n) {
         if (record.state !== 'funding') record = await this.store.change(record, 'funding', { admission: preFunding });
-        if (!this.entryEnabled()) throw new Error('Entry disabled before funding');
+        if (!this.allowed(i)) throw new Error('Entry disabled before funding');
         await this.io.fund(structuredClone(record));
         fundingSettled = true;
       }
@@ -62,10 +69,10 @@ export class PhoenixOrderService {
       if (latest.authority.assetId !== admission.authority.assetId || latest.authority.tickSize !== admission.authority.tickSize
         || latest.authority.baseLotsDecimals !== admission.authority.baseLotsDecimals
         || latest.authority.position.epoch !== admission.authority.position.epoch) throw new Error('Phoenix execution identity changed');
-      if (i.action === 'entry' && !this.entryEnabled()) throw new Error('Phoenix entry disabled before signing');
+      if (i.action === 'entry' && !this.allowed(i,latest.authority)) throw new Error('Phoenix entry disabled before signing');
       record = await this.store.change(record, 'signing', { admission: latest });
       const signed = await this.io.withSigner(structuredClone(i), secret => {
-        if (i.action === 'entry' && !this.entryEnabled()) throw new Error('Phoenix entry disabled at signer');
+        if (i.action === 'entry' && !this.allowed(i,latest.authority)) throw new Error('Phoenix entry disabled at signer');
         return signOrderTransaction(i, latest, this.pin, lifetime, secret, this.now());
       });
       const { transaction, ...attempt } = signed;
@@ -74,7 +81,7 @@ export class PhoenixOrderService {
       const height = await this.io.blockHeight();
       admitPhoenixOrder(i, latest.authority, this.now(), true);
       if (!Number.isSafeInteger(height) || height < 0 || height > lifetime.lastValidBlockHeight
-        || (i.action === 'entry' && !this.entryEnabled())) throw new Error('Order lifetime/entry revoked');
+        || (i.action === 'entry' && !this.allowed(i,latest.authority))) throw new Error('Order lifetime/entry revoked');
       if (await this.io.submit(transaction) !== signed.signature) throw new Error('Unexpected order signature');
       record = await this.store.change(record, 'accepted');
     } catch {

@@ -1,3 +1,8 @@
+// Primitive tests use an explicit trusted rollout fixture; U16 tests exercise the real owner gate.
+vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
+  ...await importOriginal<typeof import('../../server/protocol/phoenix/rollout')>(),
+  phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true,
+}));
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -51,7 +56,7 @@ beforeEach(async () => {
   io.build.mockReset().mockImplementation(async (identity, max) => expectedRegistration(identity, pin, max));
   io.lifetime.mockReset().mockResolvedValue(lifetime);
   io.estimate.mockReset().mockResolvedValue({ rentLamports: '1000', feeLamports: '10000', balanceLamports: '100000' });
-  io.withSigner.mockReset().mockImplementation(async (_id, sign) => { const secret = authority.secretKey; try { return sign(secret); } finally { secret.fill(0); } });
+  io.withSigner.mockReset().mockImplementation(async (_id, sign) => { const exampleSigningBytes = authority.secretKey; try { return sign(exampleSigningBytes); } finally { exampleSigningBytes.fill(0); } });
   io.submit.mockReset().mockImplementation(async (wire, identity) => ({ signature: bs58.encode(Transaction.from(Buffer.from(wire, 'base64')).signature!), traderPda: identity.traderAccountAddress }));
   io.confirm.mockReset().mockResolvedValue('confirmed');
 });
@@ -108,8 +113,8 @@ describe('U03 durable allocation and recovery on isolated PostgreSQL', () => {
     io.withSigner.mockRejectedValueOnce(new Error('EXAMPLE-missing-signer'));
     expect((await provisioner().create(request())).code).toBe('invalid_registration');
     io.withSigner.mockImplementationOnce(async (_id, sign) => {
-      const secret = authority.secretKey;
-      try { const signed = sign(secret); enabled = false; return signed; } finally { secret.fill(0); }
+      const exampleSigningBytes = authority.secretKey;
+      try { const signed = sign(exampleSigningBytes); enabled = false; return signed; } finally { exampleSigningBytes.fill(0); }
     });
     expect((await provisioner().create(request())).code).toBe('disabled');
     expect(io.submit).not.toHaveBeenCalled();
@@ -172,7 +177,7 @@ describe('U03 durable allocation and recovery on isolated PostgreSQL', () => {
     expect((await provisioner().create(request())).code).toBe('disabled'); expect(derive).not.toHaveBeenCalled();
     const routes = readFileSync(new URL('../../server/routes.ts', import.meta.url), 'utf8');
     const start = routes.indexOf('app.post("/api/trading-bots"');
-    const phoenix = routes.indexOf('phoenixDisabledCreation', start);
+    const phoenix = routes.indexOf('return res.status(503).json(phoenixConsumerDisabled', start);
     expect(phoenix).toBeGreaterThan(start);
     expect(phoenix).toBeLessThan(routes.indexOf('storage.getOrCreateWallet', start));
   });

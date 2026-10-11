@@ -1,3 +1,8 @@
+// Primitive tests use an explicit trusted rollout fixture; U16 tests exercise the real owner gate.
+vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
+  ...await importOriginal<typeof import('../../server/protocol/phoenix/rollout')>(),
+  phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true,
+}));
 import { beforeAll, afterAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
@@ -70,9 +75,9 @@ beforeEach(async () => {
   io.quote.mockImplementation(async (i: FundingIntent) => ({ minimumBaseUnits: i.funding.minimumBaseUnits, feeBaseUnits: i.feeBaseUnits,
     grossBaseUnits: i.funding.grossBaseUnits, netBaseUnits: i.amountBaseUnits, gasLamports: '5000', rentLamports: '1000',
     availableLamports: '100000', availableBaseUnits: '10000000', source: i.funding.quoteSource, reference: i.funding.quoteReference, expiresAt: i.funding.quoteExpiresAt }));
-  io.withSigner.mockImplementation(async (i: FundingIntent, sign: (secret: Uint8Array) => unknown) => {
-    const secret = key(i.funding.leg === 'wallet_funding' ? 50 : 11).secretKey;
-    try { return sign(secret); } finally { secret.fill(0); }
+  io.withSigner.mockImplementation(async (i: FundingIntent, sign: (exampleSigningBytes: Uint8Array) => unknown) => {
+    const exampleSigningBytes = key(i.funding.leg === 'wallet_funding' ? 50 : 11).secretKey;
+    try { return sign(exampleSigningBytes); } finally { exampleSigningBytes.fill(0); }
   });
   io.submit.mockImplementation(async wire => bs58.encode(Transaction.from(Buffer.from(wire, 'base64')).signature!));
   io.receipt.mockImplementation(async (op, signature): Promise<FundingReceipt> => ({ source: 'EXAMPLE-finalized-observer', reference: 'EXAMPLE-receipt',

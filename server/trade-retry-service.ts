@@ -494,8 +494,7 @@ function calculateBackoff(attempts: number, priority: 'critical' | 'normal'): nu
 }
 
 export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'maxAttempts' | 'nextRetryAt' | 'createdAt' | 'leverage'>): Promise<string> {
-  const ingressBot = await storage.getTradingBotById(job.botId);
-  if (ingressBot?.activeProtocol === 'phoenix' || job.protocol === 'phoenix') throw new Error('Phoenix retries require the durable Phoenix operation store');
+  if (job.protocol === 'phoenix') throw new Error('Phoenix retries require the durable Phoenix operation store');
   const maxAttempts = job.priority === 'critical' ? MAX_ATTEMPTS_CRITICAL : MAX_ATTEMPTS_NORMAL;
   const backoff = calculateBackoff(0, job.priority);
   const nextRetryAt = Date.now() + backoff;
@@ -509,8 +508,10 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
   // Resolve the bot's configured leverage so Flash OPEN retries post collateral =
   // notional/leverage (not full notional). Reuse this lookup for protocolSubaccountId too.
   let resolvedLeverage = 1;
+  let phoenixBot = false;
   try {
     const botRow = await storage.getTradingBotById(job.botId);
+    phoenixBot = botRow?.activeProtocol === 'phoenix';
     if (botRow?.leverage) {
       resolvedLeverage = botRow.leverage || 1;
     }
@@ -520,6 +521,9 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
   } catch (lookupErr) {
     console.warn(`[TradeRetry] Failed to look up bot ${job.botId} for leverage/protocolSubaccountId:`, lookupErr);
   }
+  // Keep the Phoenix refusal outside the catch: a known Phoenix bot cannot
+  // enter the legacy queue; a transient lookup failure preserves Pacifica queueing.
+  if (phoenixBot) throw new Error('Phoenix retries require the durable Phoenix operation store');
   // Hydrate the in-memory job copy too so retry execution has the same value.
   if (resolvedProtocolSubaccountId && !job.protocolSubaccountId) {
     (job as RetryJob).protocolSubaccountId = resolvedProtocolSubaccountId;

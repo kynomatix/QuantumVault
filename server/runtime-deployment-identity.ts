@@ -1,3 +1,4 @@
+import { phoenixDependencyHealth } from './dependency-health-record';
 import type { RequestHandler } from "express";
 import { getDatabaseReadiness } from "./database-readiness";
 import { SERVER_BOOT_ID, SERVER_BOOT_STARTED_AT } from "./boot-id";
@@ -87,6 +88,7 @@ export function createRuntimeHealthPayload(
     bootId: identity.bootId,
     bootStartedAt: identity.bootStartedAt,
     identityVerified: identity.identityVerified,
+    dependencies: { phoenix: phoenixDependencyHealth(timestamp) },
     schemaReadiness: {
       evaluated: schemaReadiness.evaluated,
       unavailableCapabilities: [...schemaReadiness.unavailableCapabilities],

@@ -1,3 +1,4 @@
+import { phoenixFeatureEnabled } from './rollout';
 import type { BorrowPosition, TradingBot } from '../../../shared/schema';
 import type { AutoDefenseCapabilities } from '../../vault/auto-defense-capabilities';
 import { assertBorrowSnapshot, borrowHash, raw, type BorrowSnapshot, type PhoenixBorrowIntent } from './borrow-contract';
@@ -76,7 +77,8 @@ export function createPhoenixDefenseRuntime(service: Pick<PhoenixBorrowService,'
 const runtime: PhoenixDefenseRuntime | null = null;
 export function phoenixDefenseCapabilities(env: NodeJS.ProcessEnv = process.env): AutoDefenseCapabilities {
   const installed = runtime as PhoenixDefenseRuntime | null;
-  return env.PHOENIX_AUTO_DEFENSE_ENABLED === 'true' && installed ? installed.capabilities() : {topup:false,repay:false};
+  const caps = installed?.capabilities();
+  return {topup:!!caps?.topup && phoenixFeatureEnabled('defense',env),repay:!!caps?.repay};
 }
 export async function dispatchPhoenixDefense(position: BorrowPosition, bot: TradingBot) {
   await (runtime as PhoenixDefenseRuntime | null)?.defend(position,bot);

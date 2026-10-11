@@ -60,6 +60,12 @@ export class PhoenixOrderStore implements OrderRepository {
       const replay = (await c.query('SELECT * FROM phoenix_order_intents WHERE bot_id=$1 AND request_key=$2', [i.botId, i.requestKey])).rows[0];
       if (replay) return { record: this.verify(replay, i), created: false };
       if (i.action === 'entry') await assertPhoenixNewRisk(c, i.botId);
+      if (i.action === 'entry') {
+        // Serialize outstanding entry exposure across markets under the bot lock.
+        // A missing receipt is unresolved risk, never unused canary capacity.
+        const outstanding = await c.query("SELECT 1 FROM phoenix_order_intents WHERE bot_id=$1 AND state NOT IN ('settled','rejected')", [i.botId]);
+        if (outstanding.rows.length) throw new Error('Phoenix order exposure unresolved');
+      }
       if (i.action === 'entry') { await excludePhoenixBorrow(c, i.botId, undefined, false); await excludePhoenixParking(c, i.botId, true); }
       const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')
         AND ($2 <> 'close' OR kind <> 'protection')`, [i.botId, i.action]);

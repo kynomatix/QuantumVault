@@ -1,3 +1,8 @@
+// Primitive tests use an explicit trusted rollout fixture; U16 tests exercise the real owner gate.
+vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
+  ...await importOriginal<typeof import('../../server/protocol/phoenix/rollout')>(),
+  phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true, phoenixFeatureEnabled: () => true,
+}));
 import { describe, expect, it, vi } from 'vitest';
 import bs58 from 'bs58';
 import { Transaction } from '@solana/web3.js';
@@ -46,6 +51,12 @@ function fixture(kind: 'park' | 'withdraw' = 'park') {
     setHistory: (value: StoredPhoenixOperation[]) => { history = value; }, disable: () => { enabled = false; } };
 }
 describe('U10 transfer boundary, mocked RPC/API only', () => {
+  it('allows journaled vault unpark after the expansion gate is disabled', async () => {
+    const f = fixture('unpark'); f.disable();
+    await f.executor.submit(f.record(), f.leg());
+    expect(f.store.recordVaultAttempt).toHaveBeenCalledTimes(1);
+    expect(f.vault.submit).toHaveBeenCalledTimes(1);
+  });
   it('persists the signed vault attempt before any broadcast', async () => {
     const f = fixture(); await f.executor.submit(f.record(), f.leg());
     expect(f.store.recordVaultAttempt).toHaveBeenCalledTimes(1); expect(f.vault.submit).toHaveBeenCalledTimes(1);

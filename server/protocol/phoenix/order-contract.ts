@@ -26,6 +26,8 @@ export interface PhoenixOrderAuthority {
   entry: null | { observedAt: number; minimumNotionalMicros: string; maxNotionalMicros: string;
     maxLeverage: string; takerFeePpm: string; feeReference: string; feeObservedAt: number;
     freeMarginMicros: string; fundableMicros: string; marginObservedAt: number };
+  /** Trusted complete current exposure across every market, in USDC micros; absent denies canary entries. */
+  canaryExposureMicros?: string;
   position: { observedAt: number; side: 'long' | 'short' | 'flat'; baseLots: string; epoch: string };
   protection?: ProtectionSnapshot;
 }

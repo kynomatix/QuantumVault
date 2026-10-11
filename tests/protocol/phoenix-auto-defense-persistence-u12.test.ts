@@ -1,4 +1,9 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+// Primitive tests use an explicit trusted rollout fixture; U16 tests exercise the real owner gate.
+vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
+  ...await importOriginal<typeof import('../../server/protocol/phoenix/rollout')>(),
+  phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true,
+}));
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { Keypair } from '@solana/web3.js';
 import pg from 'pg';

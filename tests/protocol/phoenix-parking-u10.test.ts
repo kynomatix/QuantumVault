@@ -1,3 +1,8 @@
+// Primitive tests use an explicit trusted rollout fixture; U16 tests exercise the real owner gate.
+vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
+  ...await importOriginal<typeof import('../../server/protocol/phoenix/rollout')>(),
+  phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true, phoenixFeatureEnabled: () => true,
+}));
 import { describe, expect, it, vi } from 'vitest';
 import { PhoenixParkingService, type ParkingRepository } from '../../server/protocol/phoenix/parking-service';
 import { verifyParkingReceipt } from '../../server/protocol/phoenix/parking-store';
@@ -47,6 +52,16 @@ function fixture(patch: Partial<ParkingIntent> = {}) {
 const entry = { action: 'entry' as const, executionOrderId: 'EXAMPLE-order', requiredMarginUsdc: '100', destination: null };
 
 describe('U10 settlement-aware bot parking', () => {
+  it('continues journaled redemption after rollback but never starts the following entry deposit', async () => {
+    const f = fixture({...entry,maxUsdc:'60'}); f.s.freeMarginUsdc='40';
+    f.s.holdings=[{asset:'EXAMPLE-disabled',tokenUnits:'100',valueUsdc:'100',redeemable:true}];
+    await f.store.prepare(f.i); f.disable();
+    await f.service().resume(f.i);
+    expect(f.store.r.legs[0].leg.kind).toBe('unpark'); expect(f.io.submit).toHaveBeenCalledTimes(1);
+    f.settle('settled','61'); f.s.walletUsdc='61'; await f.service().resume(f.i);
+    expect(f.store.r.legs).toHaveLength(1); expect(f.io.submit).toHaveBeenCalledTimes(1);
+    expect(f.store.r.state).toBe('active');
+  });
   it('is off by default even if an environment switch is set without reviewed bindings', async () => {
     expect(phoenixParkingEnabled({})).toBe(false);
     expect(phoenixParkingEnabled({ PHOENIX_PARKING_ENABLED: 'true' })).toBe(false);
@@ -104,9 +119,12 @@ describe('U10 settlement-aware bot parking', () => {
     const f = fixture(); await f.service().start(f.i); f.settle('dropped'); await f.service().resume(f.i);
     expect(f.store.r.state).toBe('attention'); expect(f.io.submit).toHaveBeenCalledTimes(1);
   });
-  it('continues observation with the feature gate off', async () => {
+  it('continues the confirmed return and unwrap with the feature gate off, then stops new parking', async () => {
     const f = fixture(); await f.service().start(f.i); f.disable(); f.settle(); await f.service().resume(f.i);
-    expect(f.store.r.legs[0].receipt?.state).toBe('settled'); expect(f.io.submit).toHaveBeenCalledTimes(1);
+    expect(f.store.r.legs[0].receipt?.state).toBe('settled');
+    expect(f.store.r.legs.at(-1)!.leg.kind).toBe('unwrap'); expect(f.io.submit).toHaveBeenCalledTimes(2);
+    f.settle(); f.s.walletUsdc='100'; await f.service().resume(f.i);
+    expect(f.io.submit).toHaveBeenCalledTimes(2); expect(f.store.r.state).toBe('active');
   });
   it('serializes concurrent resumes so only one vault leg is submitted', async () => {
     const f = fixture(); f.s.walletUsdc = '100'; await f.store.prepare(f.i);

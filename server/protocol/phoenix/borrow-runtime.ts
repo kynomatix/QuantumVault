@@ -1,3 +1,4 @@
+import { phoenixFeatureEnabled } from './rollout';
 import type { Express, RequestHandler } from 'express';
 import type { PhoenixBorrowService } from './borrow-service';
 import type { BorrowAction, PhoenixBorrowIntent } from './borrow-contract';
@@ -22,7 +23,7 @@ export function createPhoenixBorrowRuntime(service: PhoenixBorrowService, source
 const runtime: PhoenixBorrowRuntime | null = null;
 export function phoenixBorrowCapabilities(env: NodeJS.ProcessEnv = process.env) {
   return { externalLender: 'jupiter-lend' as const, phoenixMarginIsCollateral: false as const,
-    newBorrowing: runtime !== null && env.PHOENIX_BORROW_ENABLED === 'true',
+    newBorrowing: runtime !== null && phoenixFeatureEnabled('borrow',env),
     manualRecovery: runtime !== null, requiresMeasuredDelay: true as const,
     requiresDeploymentConsent: true as const, requiresSeparateLiquidReserve: true as const };
 }

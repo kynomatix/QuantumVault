@@ -1,3 +1,4 @@
+import { phoenixCanaryAllows, phoenixFeatureEnabled } from './rollout';
 import { createHash } from 'node:crypto';
 import type { PhoenixFundingService } from './funding-service';
 import type { PhoenixOperationStore, StoredPhoenixOperation } from './operation-store';
@@ -25,8 +26,11 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
     private readonly buildFunding: (r: ParkingRecord, l: ParkingLeg, parent?: StoredPhoenixOperation) => Promise<FundingIntent>,
     private readonly vault: ParkingVaultIO, private readonly enabled = () => false, private readonly now = Date.now,
     private readonly authorizeCarry?: (r: ParkingRecord) => Promise<void>) {}
-  private async authorized(r: ParkingRecord) {
-    if (!this.enabled()) throw new Error('Phoenix parking disabled');
+  private async authorized(r: ParkingRecord, l: ParkingLeg) {
+    const request = {ownerWallet:r.intent.ownerWallet,botId:r.intent.botId,parkUsdcMicros:r.intent.maxUsdc,transferUsdcMicros:r.intent.maxUsdc};
+    if (!['withdraw','unwrap','unpark'].includes(l.kind) && (!this.enabled()
+      || !phoenixCanaryAllows(r.intent.carry ? 'carry' : 'park',request)
+      || (r.intent.action === 'entry' && (!phoenixFeatureEnabled('entry') || !phoenixCanaryAllows('fund',request))))) throw new Error('Phoenix parking disabled');
     const s = await this.snapshot(r.intent); assertParkingSnapshot(s, r.intent, this.now());
     if (!parkingAuthorized(r.intent, s)) throw new Error('Parking consent revoked');
     if (r.intent.carry) {
@@ -36,14 +40,14 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
   }
   async submit(r: ParkingRecord, l: ParkingLeg) {
     if (l.kind === 'repay') throw new Error('Use the bounded carry repayment executor');
-    await this.authorized(r);
+    await this.authorized(r,l);
     if (l.kind === 'park' || l.kind === 'unpark') {
       const signed = await this.vault.prepare(structuredClone(r), structuredClone(l));
-      await this.authorized(r);
+      await this.authorized(r,l);
       const claimed = await this.store.recordVaultAttempt(r, { signature: signed.signature,
         lastValidBlockHeight: signed.lastValidBlockHeight,
         transactionHash: createHash('sha256').update(Buffer.from(signed.transaction, 'base64')).digest('hex') });
-      await this.authorized(claimed);
+      await this.authorized(claimed,l);
       if (await this.vault.submit(signed.transaction) !== signed.signature) throw new Error('Vault signature mismatch');
       return;
     }
@@ -61,7 +65,7 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
       || i.funding.parentOperationId !== parent?.id
       || i.identity.authorityWalletAddress !== r.intent.identity.authorityWalletAddress
       || i.identity.traderAccountAddress !== r.intent.identity.traderAccountAddress) throw new Error('Parking funding child mismatch');
-    await this.authorized(r);
+    await this.authorized(r,l);
     await this.funding.create(i);
   }
   async receipt(r: ParkingRecord, l: ParkingLeg): Promise<ParkingReceipt | null> {

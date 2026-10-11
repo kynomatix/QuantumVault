@@ -1,3 +1,8 @@
+// Primitive tests use an explicit trusted rollout fixture; U16 tests exercise the real owner gate.
+vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
+  ...await importOriginal<typeof import('../../server/protocol/phoenix/rollout')>(),
+  phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true,
+}));
 import { describe, expect, it, vi } from 'vitest';
 import { PhoenixCarryService } from '../../server/protocol/phoenix/carry-service';
 import { carryRepayIntent } from '../../server/protocol/phoenix/carry-contract';

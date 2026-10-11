@@ -1,3 +1,4 @@
+import { phoenixCanaryAllows } from './rollout';
 import { phoenixDisabledCreation, type PhoenixProvisioner, type ProvisioningResult } from './provisioner';
 import { phoenixCreationId, type PhoenixCreationRequest } from './provisioning-store';
 import type { PhoenixFundingService } from './funding-service';
@@ -24,7 +25,7 @@ export class PhoenixConsumerService {
   async create(input: PhoenixCreationRequest & { consumer: PhoenixConsumerContext }) {
     const request = structuredClone(input);
     validatePhoenixConsumer(request.consumer);
-    if (!this.enabled()) return phoenixConsumerDisabled(request.requestId);
+    if (!this.enabled() || !phoenixCanaryAllows('create', {ownerWallet:request.ownerWallet,botId:phoenixCreationId(request.ownerWallet,request.requestId),registrationLamports:request.maxCostLamports})) return phoenixConsumerDisabled(request.requestId);
     const registration = await this.provisioning.create(request);
     const handoff = { ...registration, id: registration.botId, activeProtocol: 'phoenix' as const,
       fundingManagedBy: 'phoenix' as const, funded: false };

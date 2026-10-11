@@ -50,6 +50,13 @@ beforeEach(async () => {
 });
 
 describe('Phoenix order durable authority in isolated PostgreSQL', () => {
+  it('reserves unresolved entry capacity across markets until the journal settles', async () => {
+    const first = await orders.prepare(intent(), admission());
+    const next = intent({requestKey:'EXAMPLE-next-market',sequence:'2',market:'ETH'});
+    await expect(orders.prepare(next, admission())).rejects.toThrow('exposure unresolved');
+    await pool.query("UPDATE phoenix_order_intents SET state='settled' WHERE id=$1",[first.record.id]);
+    expect((await orders.prepare(next, admission())).created).toBe(true);
+  });
   it('appends an idempotent migration with every readiness postcondition satisfied', async () => {
     expect(manifest.map(m=>m.id)).toContain('191-phoenix-ai-trader'); expect(migration).toBe(manifest[187]);
     const first = await orders.prepare(intent(), admission());

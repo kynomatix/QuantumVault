@@ -1,3 +1,4 @@
+import { phoenixFeatureEnabled } from './rollout';
 import type { Express, RequestHandler } from 'express';
 import type { PhoenixCarryService } from './carry-service';
 import { recommendPhoenixCarry, type CarryEconomics } from './carry-policy';
@@ -32,7 +33,7 @@ type PhoenixCarryRuntime = ReturnType<typeof createPhoenixCarryRuntime>;
 // must be reviewed first. An environment switch alone cannot enable automation.
 const runtime: PhoenixCarryRuntime | null = null;
 export function phoenixCarryCapabilities(env: NodeJS.ProcessEnv = process.env) {
-  return { enabled: runtime !== null && env.PHOENIX_CARRY_ENABLED === 'true',
+  return { enabled: runtime !== null && phoenixFeatureEnabled('carry',env),
     recovery: runtime !== null, automaticBorrowing: false as const, preservesParkedAssets: true as const };
 }
 export async function recoverPhoenixCarry() { await (runtime as PhoenixCarryRuntime | null)?.recover(); }

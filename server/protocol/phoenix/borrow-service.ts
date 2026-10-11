@@ -1,3 +1,4 @@
+import { phoenixCanaryAllows } from './rollout';
 import { Keypair } from '@solana/web3.js';
 import type { BorrowVaultConfig } from '../../vault/jupiter-lend-borrow-route';
 import { lendLegTerms, withPhoenixLendContext, type PhoenixLendContext } from '../../vault/phoenix-lend-context';
@@ -43,6 +44,11 @@ export class PhoenixBorrowService {
     if (addsBorrowRisk(i.action) && (!this.io.enabled() || !await this.io.eligible(i))) throw new Error('Phoenix new borrowing disabled or ineligible');
     const s = await this.io.snapshot(i);
     assertBorrowSnapshot(i,s,this.now(),this.policy.maxAgeMs);
+    if (addsBorrowRisk(i.action)) {
+      const action = i.action === 'topup' ? (i.automation ? 'defense' : 'topup') : 'borrow';
+      const debtUsdcMicros = s.debtRaw === null ? undefined : (raw(s.debtRaw) + (['open','grow'].includes(i.action) ? raw(i.amountRaw) : 0n)).toString();
+      if (!phoenixCanaryAllows(action, {ownerWallet:i.ownerWallet,botId:i.botId,debtUsdcMicros,collateralRaw:s.collateralRaw === null ? undefined : (raw(s.collateralRaw) + (i.action === 'release' ? 0n : raw(i.collateralRaw))).toString(),collateralMint:i.collateralMint})) throw new Error('Phoenix canary debt/collateral gate refused');
+    }
     if (i.automation) {
       if (!this.io.authorizeAutomatic) throw new Error('Automatic defense binding unavailable');
       await this.io.authorizeAutomatic(i,s);
@@ -179,9 +185,11 @@ export class PhoenixBorrowService {
         }
         const before = p.onBeforeBroadcast;
         p.onBeforeBroadcast = async (info: {signature:string;lastValidBlockHeight:number}) => {
-          if (i.automation) await this.fresh(i);
+          await this.fresh(i);
           await this.store.signature(i,key,info.signature,info.lastValidBlockHeight);
           if (before) await before(info);
+          // Re-read after journal persistence and the upstream callback, immediately before send.
+          await this.fresh(i);
         };
         const result: any = await execute(p);
         // An error/timeout without a signature is STILL ambiguous. Only an

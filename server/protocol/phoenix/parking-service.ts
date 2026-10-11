@@ -1,3 +1,4 @@
+import { phoenixCanaryAllows, phoenixFeatureEnabled } from './rollout';
 import { units } from './funding-contract';
 import { assertParkingSnapshot, minUnits, parkingAuthorized, validateParkingIntent,
   type ParkingIntent, type ParkingLeg, type ParkingReceipt, type ParkingRecord, type ParkingSnapshot } from './parking-contract';
@@ -24,10 +25,16 @@ export interface PhoenixParkingIO {
 export class PhoenixParkingService {
   constructor(private readonly store: ParkingRepository, private readonly io: PhoenixParkingIO,
     private readonly enabled = () => false, private readonly now = Date.now) {}
+  private allowed(i: ParkingIntent, leg?: ParkingLeg) {
+    if (leg && ['withdraw','unwrap','unpark'].includes(leg.kind)) return true;
+    const request = {ownerWallet:i.ownerWallet,botId:i.botId,parkUsdcMicros:i.maxUsdc,transferUsdcMicros:i.maxUsdc};
+    return this.enabled() && phoenixCanaryAllows('park',request)
+      && (i.action !== 'entry' || (phoenixFeatureEnabled('entry') && phoenixCanaryAllows('fund',request)));
+  }
   async start(input: ParkingIntent) {
     const i = structuredClone(input); validateParkingIntent(i);
     if (i.action === 'carry') throw new Error('Use the durable carry service');
-    if (!this.enabled()) throw new Error('Phoenix parking disabled');
+    if (!this.allowed(i)) throw new Error('Phoenix parking disabled');
     const s = await this.io.snapshot(i); assertParkingSnapshot(s, i, this.now());
     if (!parkingAuthorized(i, s)) throw new Error('Phoenix parking not authorized');
     await this.store.prepare(i);
@@ -49,7 +56,6 @@ export class PhoenixParkingService {
       if (receipt.state === 'dropped') return this.store.finish(r, 'attention');
       if (receipt.spent !== pending.leg.amount) return this.store.finish(r, 'attention');
     }
-    if (!this.enabled()) return r;
     const lastSlot = r.legs.at(-1)?.receipt?.slot ?? '0';
     const s = await this.io.snapshot(i); assertParkingSnapshot(s, i, this.now(), lastSlot);
     if (!parkingAuthorized(i, s)) return this.store.finish(r, 'cancelled');
@@ -57,11 +63,11 @@ export class PhoenixParkingService {
     const leg = this.next(r, s);
     if (leg === 'attention') return this.store.finish(r, 'attention');
     if (!leg) return this.store.finish(r, 'completed');
-    if (!this.enabled()) return r;
+    if (!this.allowed(i,leg)) return r;
     r = await this.store.claim(r, leg);
     // Claim checks current stored opt-in/lifecycle under the shared bot lock.
     // On any lost acknowledgement or send timeout the claim survives for observation.
-    try { if (this.enabled()) await this.io.submit(r, leg); } catch { /* uncertain; observe only */ }
+    try { if (this.allowed(i,leg)) await this.io.submit(r, leg); } catch { /* uncertain; observe only */ }
     return r;
   }
   private next(r: ParkingRecord, s: ParkingSnapshot): ParkingLeg | 'attention' | null {

@@ -1,3 +1,4 @@
+import { stopPhoenixNewRisk } from './protocol/phoenix/rollout';
 export const SHUTDOWN_DRAIN_TIMEOUT_MS = 120_000;
 export const STORAGE_CLOSE_TIMEOUT_MS = 60_000;
 export const BIND_RETRY_MS = 1_000;
@@ -29,6 +30,8 @@ export function createGracefulHttpShutdown(
   let activeShutdown: Promise<GracefulHttpShutdownOutcome> | undefined;
 
   return () => {
+    // Revoke Phoenix risk before async HTTP/storage drain; recovery state is retained.
+    stopPhoenixNewRisk();
     if (!activeShutdown) activeShutdown = runShutdown(dependencies);
     return activeShutdown;
   };
