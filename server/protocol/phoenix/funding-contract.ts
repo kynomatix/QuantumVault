@@ -24,6 +24,7 @@ export function units(value: string): bigint {
 export function validateFundingIntent(intent: PhoenixIntent): asserts intent is FundingIntent {
   assertPhoenixIdentity(intent.identity);
   const terms = intent.funding;
+  if (intent.carryIntentId && (intent.carryIntentId !== intent.parkingIntentId || !['withdraw','unwrap'].includes(terms?.leg ?? ''))) throw new Error('Invalid carry funding binding');
   if (!terms || !['wallet_funding', 'deposit', 'withdraw', 'unwrap', 'wallet_return'].includes(terms.leg)
     || intent.mint !== PHOENIX_PUBLIC_ADDRESSES.usdcMint || !terms.quoteSource || !terms.quoteReference
     || !Number.isSafeInteger(terms.quoteExpiresAt) || terms.quoteExpiresAt <= 0) throw new Error('Invalid Phoenix funding terms');

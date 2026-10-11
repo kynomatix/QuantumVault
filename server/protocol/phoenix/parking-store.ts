@@ -7,6 +7,25 @@ import { units } from './funding-contract';
 import { validateParkingIntent, type ParkingIntent, type ParkingLeg, type ParkingReceipt, type ParkingRecord } from './parking-contract';
 import type { ParkingRepository } from './parking-service';
 import { vaultLockKey } from '../../vault/scope';
+import { borrowHash, type PhoenixBorrowIntent } from './borrow-contract';
+import { carryRepayIntent } from './carry-contract';
+
+/** Under the shared bot lock. Consent is independent for park and repayment. */
+async function carryOptIn(c: PoolClient, i: ParkingIntent, kind?: ParkingLeg['kind']) {
+  if (!i.carry) return;
+  const {rows:[b]} = await c.query('SELECT auto_park_idle,auto_repay_enabled,park_destination_asset FROM trading_bots WHERE id=$1',[i.botId]);
+  if (Date.now() >= i.carry.expiresAt || b?.park_destination_asset !== i.destination
+    || (kind === 'repay' ? !i.carry.allowRepay || !b.auto_repay_enabled
+      : i.carry.choice === 'carry' ? !b.auto_park_idle : !i.carry.allowRepay || !b.auto_repay_enabled)) throw new Error('Carry consent revoked or expired');
+}
+
+export async function assertCarryRepaymentChild(c: PoolClient, i: PhoenixBorrowIntent) {
+  const {rows:[r]} = await c.query('SELECT * FROM phoenix_parking_intents WHERE id=$1 AND bot_id=$2', [i.automation?.parkingIntentId,i.botId]);
+  const last = (r?.legs as ParkingRecord['legs'] | undefined)?.at(-1);
+  if (!r || r.state !== 'active' || !r.intent.carry || !last || last.receipt
+    || r.intent_hash !== phoenixIntentHash(r.intent) || borrowHash(carryRepayIntent(r,last.leg)) !== borrowHash(i)) throw new Error('Carry repayment binding mismatch');
+  await carryOptIn(c,r.intent,'repay');
+}
 
 export function verifyParkingReceipt(leg: ParkingLeg, r: ParkingReceipt) {
   if (!r || r.key !== leg.key || r.finalized !== true || !r.source || !r.reference
@@ -40,8 +59,10 @@ export async function assertParkingFundingChild(c: PoolClient, i: PhoenixIntent)
     || phoenixIntentHash(r.intent.identity) !== phoenixIntentHash(i.identity as any)
     || last.leg.key !== i.requestKey || last.leg.kind !== i.funding?.leg
     || last.leg.amount !== i.funding.grossBaseUnits || r.intent.executionOrderId !== i.executionOrderId
+    || (r.intent.carry ? i.carryIntentId !== r.id : i.carryIntentId !== undefined)
     || !['withdraw','unwrap','deposit'].includes(last.leg.kind)) throw new Error('Parking funding binding mismatch');
   await assertPhoenixNewRisk(c, i.botId);
+  await carryOptIn(c,r.intent,last.leg.kind);
   const { rows: [b] } = await c.query('SELECT auto_park_idle,park_destination_asset FROM trading_bots WHERE id=$1', [i.botId]);
   if (r.intent.action === 'idle' && b.auto_park_idle !== true) throw new Error('Parking opt-out before funding');
   if (r.intent.action !== 'entry' && b.park_destination_asset && b.park_destination_asset !== r.intent.destination) throw new Error('Parking destination changed');
@@ -79,11 +100,12 @@ export class PhoenixParkingStore implements ParkingRepository {
   private async current(c: PoolClient, i: ParkingIntent) {
     return this.verify((await c.query('SELECT * FROM phoenix_parking_intents WHERE bot_id=$1 AND request_key=$2 FOR UPDATE', [i.botId, i.requestKey])).rows[0], i);
   }
-  private async authorize(c: PoolClient, b: any, i: ParkingIntent, id?: string) {
+  private async authorize(c: PoolClient, b: any, i: ParkingIntent, id?: string, kind?: ParkingLeg['kind']) {
     await assertPhoenixNewRisk(c, i.botId);
     if (i.action === 'idle' && b.auto_park_idle !== true) throw new Error('Parking opt-out');
     if (i.action !== 'entry' && b.park_destination_asset && b.park_destination_asset !== i.destination) throw new Error('Parking destination changed');
-    await excludePhoenixBorrow(c, i.botId);
+    await carryOptIn(c,i,kind);
+    await excludePhoenixBorrow(c, i.botId, undefined, !i.carry);
     await excludePhoenixParking(c, i.botId, false, id);
     const orders = (await c.query("SELECT * FROM phoenix_order_intents WHERE bot_id=$1 AND state NOT IN ('settled','rejected')", [i.botId])).rows;
     if (i.action === 'entry') {
@@ -91,6 +113,14 @@ export class PhoenixParkingStore implements ParkingRepository {
         || orders[0].intent.action !== 'entry' || units(i.maxUsdc) > units(orders[0].data.admission.fundingShortfallMicros)
         || i.requiredMarginUsdc !== orders[0].data.admission.requiredMarginMicros) throw new Error('Parking entry authority unavailable');
     } else if (orders.length) throw new Error('Parking conflicts with pending order');
+    if (i.carry) {
+      const {rows:[close]} = await c.query('SELECT * FROM phoenix_order_intents WHERE id=$1 AND bot_id=$2',[i.carry.closeOrderId,i.botId]);
+      if (!close || close.state !== 'settled' || close.intent.action !== 'close'
+        || close.data.remainingPositionLots !== '0' || close.data.positionEpoch !== i.carry.positionEpoch
+        || !close.data.outcomeSource || !close.data.outcomeReference) throw new Error('Authoritative full close required');
+      const newer = await c.query("SELECT 1 FROM phoenix_order_intents WHERE bot_id=$1 AND (intent->>'sequence')::numeric > $2::numeric LIMIT 1",[i.botId,close.intent.sequence]);
+      if (newer.rows.length) throw new Error('Carry close superseded');
+    }
     const pending = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')
       AND ($2::text IS NULL OR intent->>'parkingIntentId' IS DISTINCT FROM $2)`, [i.botId, id ?? null]);
     if (pending.rows.length) throw new Error('Phoenix transfer/protection unresolved');
@@ -101,6 +131,7 @@ export class PhoenixParkingStore implements ParkingRepository {
       const { rows: [old] } = await c.query('SELECT * FROM phoenix_parking_intents WHERE bot_id=$1 AND request_key=$2', [i.botId, i.requestKey]);
       if (old) return this.verify(old, i);
       await this.authorize(c, b, i);
+      if (i.carry && (await c.query("SELECT 1 FROM phoenix_parking_intents WHERE bot_id=$1 AND intent->'carry'->>'closeOrderId'=$2",[i.botId,i.carry.closeOrderId])).rows.length) throw new Error('Carry close already consumed');
       // One explicit borrow authorization can never be consumed by another request.
       if (i.borrowAuthorizationId && (await c.query("SELECT 1 FROM phoenix_parking_intents WHERE bot_id=$1 AND intent->>'borrowAuthorizationId'=$2", [i.botId, i.borrowAuthorizationId])).rows.length) throw new Error('Borrow park authorization consumed');
       const { rows: [r] } = await c.query(`INSERT INTO phoenix_parking_intents(bot_id,request_key,intent,intent_hash)
@@ -116,14 +147,21 @@ export class PhoenixParkingStore implements ParkingRepository {
       this.revision(current, r);
       if (current.legs.some(l => !l.receipt || l.receipt.state !== 'settled') || !units(leg.amount)
         || leg.key !== `${r.id}:${r.legs.length}`) throw new Error('Parking leg already claimed or invalid');
-      const allowed = r.intent.action === 'entry' ? ['unpark','deposit'] : r.intent.action === 'idle' ? ['withdraw','unwrap','park'] : ['park'];
+      const allowed = r.intent.action === 'carry' ? ['withdraw','unwrap','park','repay'] : r.intent.action === 'entry' ? ['unpark','deposit'] : r.intent.action === 'idle' ? ['withdraw','unwrap','park'] : ['park'];
       if (!allowed.includes(leg.kind) || (leg.kind !== 'unpark' && units(leg.amount) > units(r.intent.maxUsdc))
         || (['park','unpark'].includes(leg.kind) ? !leg.asset : leg.asset !== null)
         || (leg.kind === 'park' && leg.asset !== r.intent.destination)
         || current.legs.some(l => l.leg.kind === leg.kind && (leg.kind !== 'unpark' || l.leg.asset === leg.asset))) throw new Error('Parking leg exceeds intent');
       const parent = current.legs.find(l => l.leg.key === leg.parentKey);
       if (leg.kind === 'unwrap' ? (!parent || parent.leg.kind !== 'withdraw' || parent.receipt?.received !== leg.amount) : !!leg.parentKey) throw new Error('Parking settlement parent mismatch');
-      await this.authorize(c, b, r.intent, r.id);
+      if (r.intent.carry) {
+        if (current.legs.some(l => ['park','repay'].includes(l.leg.kind))
+          || (leg.kind === 'repay' && (!leg.targetFinalDebtRaw || units(leg.amount) > units(r.intent.carry.maxRepayRaw)))
+          || (leg.kind !== 'repay' && leg.targetFinalDebtRaw !== undefined)
+          || (leg.kind === 'park' && r.intent.carry.choice !== 'carry')) throw new Error('Carry spend exceeds consent');
+        if (leg.kind === 'repay') units(leg.targetFinalDebtRaw!);
+      } else if (leg.kind === 'repay' || leg.targetFinalDebtRaw !== undefined) throw new Error('Unexpected repayment');
+      await this.authorize(c, b, r.intent, r.id,leg.kind);
       // Same scope/asset lock namespace as vault cost basis, plus durable whole-bot ownership.
       await c.query('SELECT pg_advisory_xact_lock($1)', [vaultLockKey(r.intent.ownerWallet, r.intent.botId, leg.asset ?? 'USDC')]);
       return this.write(c, r, 'active', [...current.legs, { leg }]);
@@ -148,7 +186,7 @@ export class PhoenixParkingStore implements ParkingRepository {
     units(a.lastValidBlockHeight);
     return this.locked(r.intent, async (c, b) => {
       const current = await this.current(c, r.intent); this.revision(current, r);
-      await this.authorize(c, b, r.intent, r.id);
+      await this.authorize(c, b, r.intent, r.id,current.legs.at(-1)?.leg.kind);
       const last = current.legs.at(-1);
       if (!last || !['park','unpark'].includes(last.leg.kind) || last.attempt || last.receipt) throw new Error('Vault attempt already claimed');
       last.attempt = a;

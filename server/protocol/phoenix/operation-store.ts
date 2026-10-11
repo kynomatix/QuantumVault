@@ -27,6 +27,7 @@ export interface PhoenixIntent {
   /** U05 funding child; bound to a durably claimed entry, never an independent park/withdraw. */
   executionOrderId?: string;
   parkingIntentId?: string;
+  carryIntentId?: string;
   borrowIntentId?: string;
   borrowReserveRaw?: string;
   protection?: ProtectionTerms;

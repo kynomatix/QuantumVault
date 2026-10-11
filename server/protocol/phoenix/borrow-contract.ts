@@ -16,7 +16,7 @@ export interface PhoenixBorrowIntent {
   /** The measurement shown to the user, bound to this immutable request. */
   measurementHash: string | null;
   /** Server-created autonomous defense; the persisted floor survives retries. */
-  automation?: { kind: 'defender'; targetFinalDebtRaw: string | null };
+  automation?: { kind: 'defender' | 'carry'; targetFinalDebtRaw: string | null; parkingIntentId?: string };
 }
 export interface BorrowSnapshot {
   observedAt: number; oracleObservedAt: number; reference: string;
@@ -55,10 +55,11 @@ export function validateBorrowIntent(i: PhoenixBorrowIntent) {
     || !Number.isFinite(i.targetLtv) || i.targetLtv <= 0 || i.targetLtv >= 1) throw new Error('Invalid Phoenix borrowing intent');
   [i.amountRaw, i.collateralRaw, i.reserveRaw].forEach(raw);
   if (i.automation) {
-    if (i.automation.kind !== 'defender' || !['topup','repay'].includes(i.action)
+    if (!['defender','carry'].includes(i.automation.kind) || !['topup','repay'].includes(i.action)
       || !i.consent.reserve || i.consent.deployBorrowed
       || (i.action === 'repay' && (i.consent.accountCollateral || raw(i.collateralRaw) !== 0n))
       || (i.action === 'topup' && raw(i.amountRaw) !== 0n)) throw new Error('Invalid automatic defense authority');
+    if (i.automation.kind === 'carry' ? i.action !== 'repay' || !i.automation.parkingIntentId : !!i.automation.parkingIntentId) throw new Error('Invalid carry repayment parent');
     if (i.action === 'repay') raw(i.automation.targetFinalDebtRaw!);
     else if (i.automation.targetFinalDebtRaw !== null) throw new Error('Invalid defense debt floor');
   }

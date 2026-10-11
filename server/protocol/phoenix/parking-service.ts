@@ -26,6 +26,7 @@ export class PhoenixParkingService {
     private readonly enabled = () => false, private readonly now = Date.now) {}
   async start(input: ParkingIntent) {
     const i = structuredClone(input); validateParkingIntent(i);
+    if (i.action === 'carry') throw new Error('Use the durable carry service');
     if (!this.enabled()) throw new Error('Phoenix parking disabled');
     const s = await this.io.snapshot(i); assertParkingSnapshot(s, i, this.now());
     if (!parkingAuthorized(i, s)) throw new Error('Phoenix parking not authorized');
@@ -34,6 +35,7 @@ export class PhoenixParkingService {
   }
   async resume(input: ParkingIntent): Promise<ParkingRecord> {
     const i = structuredClone(input); validateParkingIntent(i);
+    if (i.action === 'carry') throw new Error('Use the durable carry service');
     let r = await this.store.read(i);
     if (r.state !== 'active') return r;
     const pending = r.legs.find(l => !l.receipt || l.receipt.state === 'pending');

@@ -35,6 +35,7 @@ export function createPhoenixParkingRuntime(service: PhoenixParkingService, sour
     },
     async recover() {
       for (const intent of await source.pending()) {
+        if (intent.action === 'carry') continue; // U13 owns the whole settlement flow.
         try { await service.resume(intent); } catch (error) { source.report(intent, error); }
       }
     },
@@ -47,5 +48,7 @@ export async function dispatchPhoenixIdlePark(bot: TradingBot) {
   await (runtime as PhoenixParkingRuntime | null)?.idle(bot);
 }
 export async function recoverPhoenixParking() {
+  const { recoverPhoenixCarry } = await import('./carry-runtime');
+  await recoverPhoenixCarry();
   await (runtime as PhoenixParkingRuntime | null)?.recover();
 }

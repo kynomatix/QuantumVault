@@ -9,6 +9,8 @@ export interface FundingQuote {
   source: string; reference: string; expiresAt: number;
 }
 export interface PhoenixFundingIO {
+  /** U13 requires fresh parent consent/economics at both signing and sending. */
+  authorizeCarrySettlement?(intent: FundingIntent): Promise<void>;
   /** U11 must re-read measured delay, lender debt, consent and liquid coverage
    * at signing. Missing authorization is a hard denial for debt-backed deposits. */
   authorizeBorrowDeployment?(intent: FundingIntent): Promise<void>;
@@ -94,6 +96,10 @@ export class PhoenixFundingService {
     const quote = await this.io.quote(structuredClone(intent), transaction); this.checkQuote(intent, quote);
     if (!this.enabled()) return operation;
     operation = await this.operations.annotatePrepared(botId, ownerWallet, operationId, operation.revision, { quote });
+    if (intent.carryIntentId) {
+      if (!this.io.authorizeCarrySettlement) throw new Error('Carry settlement authorization unavailable');
+      await this.io.authorizeCarrySettlement(structuredClone(intent));
+    }
     if (intent.borrowIntentId) {
       if (!this.io.authorizeBorrowDeployment) throw new Error('Debt deployment authorization unavailable');
       await this.io.authorizeBorrowDeployment(structuredClone(intent));
@@ -102,6 +108,7 @@ export class PhoenixFundingService {
     const height = await this.io.blockHeight();
     if (!Number.isSafeInteger(height) || height < 0 || !this.enabled() || Date.now() >= quote.expiresAt || height > Number(signed.lastValidBlockHeight)) return operation;
     if (intent.borrowIntentId) await this.io.authorizeBorrowDeployment!(structuredClone(intent));
+    if (intent.carryIntentId) await this.io.authorizeCarrySettlement!(structuredClone(intent));
     if (!this.enabled() || Date.now() >= quote.expiresAt) return operation;
     // Persist signature BEFORE sending; only the CAS winner gets one send.
     try {
@@ -109,6 +116,7 @@ export class PhoenixFundingService {
       if (!claim.created) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
     } catch { return (await this.operations.read(botId, ownerWallet, operationId)).operation; }
     if (!this.enabled()) return (await this.operations.read(botId, ownerWallet, operationId)).operation;
+    if (intent.carryIntentId) await this.io.authorizeCarrySettlement!(structuredClone(intent));
     try { if (await this.io.submit(signed.transaction) !== signed.signature) throw new Error('Signature mismatch'); }
     catch { return (await this.operations.read(botId, ownerWallet, operationId)).operation; }
     return this.resume(botId, ownerWallet, operationId);

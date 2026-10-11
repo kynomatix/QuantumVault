@@ -1,4 +1,5 @@
 import { registerPhoenixBorrowRoutes } from './borrow-runtime';
+import { registerPhoenixCarryRoutes } from './carry-runtime';
 import type { Express, RequestHandler } from 'express';
 import { phoenixFundingDetail } from './funding-detail';
 import type { PhoenixOperationStore } from './operation-store';
@@ -9,6 +10,7 @@ export const PHOENIX_FUNDING_DISABLED = Object.freeze({ code: 'PHOENIX_FUNDING_D
 export function registerPhoenixFundingRoutes(app: Express, requireWallet: RequestHandler,
   dependencies: { history(botId: string, owner: string): ReturnType<PhoenixOperationStore['fundingHistory']> }) {
   registerPhoenixBorrowRoutes(app, requireWallet);
+  registerPhoenixCarryRoutes(app, requireWallet);
   app.get('/api/phoenix/performance/:publishedBotId', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {

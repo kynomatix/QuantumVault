@@ -3,6 +3,7 @@ import { phoenixIdentityFromBot } from './identity';
 import { assertPhoenixNewRisk } from './lifecycle';
 import { addsBorrowRisk, borrowHash, validateBorrowIntent, type PhoenixBorrowIntent } from './borrow-contract';
 import { AUTO_TOPUP_COOLDOWN_MS } from '../../vault/auto-topup';
+import { assertCarryRepaymentChild } from './parking-store';
 
 export interface BorrowLeg {
   termsHash: string; terms: Record<string, unknown>; state: 'claimed' | 'completed' | 'absent';
@@ -76,6 +77,7 @@ export class PhoenixBorrowStore implements BorrowRepository {
   }
   private async automaticOptIn(c: PoolClient, i: PhoenixBorrowIntent) {
     if (!i.automation) return;
+    if (i.automation.kind === 'carry') await assertCarryRepaymentChild(c,i);
     const {rows:[b]} = await c.query('SELECT auto_collateral_top_up,auto_repay_enabled FROM trading_bots WHERE id=$1',[i.botId]);
     if (!(i.action === 'topup' ? b?.auto_collateral_top_up : b?.auto_repay_enabled)) throw new Error('Automatic defense opt-in revoked');
   }
@@ -98,7 +100,8 @@ export class PhoenixBorrowStore implements BorrowRepository {
       if (busy.rows.length) throw new Error('Account collateral or bot already reserved by an unresolved journal');
       for (const [table, done] of [['phoenix_operations',"'completed','failed','dropped'"],['phoenix_order_intents',"'settled','rejected'"],['phoenix_parking_intents',"'completed','cancelled'"]]) {
         const found = await c.query('SELECT to_regclass($1) AS name',[table]);
-        if (found.rows[0]?.name && (await c.query(`SELECT 1 FROM ${table} WHERE bot_id=$1 AND state NOT IN (${done}) LIMIT 1`,[i.botId])).rows.length) throw new Error('Phoenix settlement pending before lender operation');
+        const parentId = table === 'phoenix_parking_intents' && i.automation?.kind === 'carry' ? i.automation.parkingIntentId : null;
+        if (found.rows[0]?.name && (await c.query(`SELECT 1 FROM ${table} WHERE bot_id=$1 AND state NOT IN (${done}) AND ($2::text IS NULL OR id::text <> $2) LIMIT 1`,[i.botId,parentId])).rows.length) throw new Error('Phoenix settlement pending before lender operation');
       }
       if (i.automation) {
         const claimed = await c.query(`UPDATE borrow_positions SET last_auto_topup_attempt_at=now()

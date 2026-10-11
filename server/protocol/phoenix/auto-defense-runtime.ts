@@ -18,7 +18,7 @@ export interface PhoenixDefenseSource {
  * before broadcast, so a queue/health/opt-in change after selection cannot spend. */
 export function automaticDefenseAuthorizer(source: PhoenixDefenseSource, now = Date.now) {
   return async (i: PhoenixBorrowIntent, s: BorrowSnapshot) => {
-    if (!i.automation || !i.botLoanId) throw new Error('Automatic intent required');
+    if (i.automation?.kind !== 'defender' || !i.botLoanId) throw new Error('Automatic defense intent required');
     const f = await source.facts(i.botId,i.botLoanId);
     assertBorrowSnapshot(i,s,now(),f.maxAgeMs);
     assertBorrowSnapshot(i,f.snapshot,now(),f.maxAgeMs);
@@ -56,7 +56,7 @@ export function createPhoenixDefenseRuntime(service: Pick<PhoenixBorrowService,'
       try {
         const pending = await source.pending(bot.id,position.id);
         if (pending) {
-          if (!pending.automation || pending.botId !== bot.id || pending.ownerWallet !== bot.walletAddress || pending.botLoanId !== position.id) throw new Error('Unresolved lender operation requires manual recovery');
+          if (pending.automation?.kind !== 'defender' || pending.botId !== bot.id || pending.ownerWallet !== bot.walletAddress || pending.botLoanId !== position.id) throw new Error('Unresolved lender operation requires manual recovery');
           await service.run(pending); return;
         }
         if (!source.enabled()) return;

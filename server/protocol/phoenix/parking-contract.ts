@@ -2,18 +2,21 @@ import type { PhoenixTraderIdentity } from '../../../shared/phoenix-read-contrac
 import { assertPhoenixIdentity } from './identity';
 import { units } from './funding-contract';
 import { assertProtectionSnapshot, type ProtectionSnapshot } from './protection-contract';
+import { validateCarryConsent, type CarryConsent } from './carry-contract';
 
 export interface ParkingIntent {
   botId: string; ownerWallet: string; requestKey: string; identity: PhoenixTraderIdentity;
-  action: 'idle' | 'post_borrow' | 'entry'; maxUsdc: string;
+  action: 'idle' | 'post_borrow' | 'entry' | 'carry'; maxUsdc: string;
+  carry?: CarryConsent;
   destination: string | null; mode: 'shortfall' | 'all';
   executionOrderId?: string; borrowAuthorizationId?: string;
   requiredMarginUsdc?: string;
 }
-export type ParkingLegKind = 'withdraw' | 'unwrap' | 'park' | 'unpark' | 'deposit';
+export type ParkingLegKind = 'withdraw' | 'unwrap' | 'park' | 'unpark' | 'deposit' | 'repay';
 export interface ParkingLeg {
   key: string; kind: ParkingLegKind; amount: string; asset: string | null;
   parentKey?: string;
+  targetFinalDebtRaw?: string;
 }
 export interface ParkingReceipt {
   key: string; state: 'pending' | 'settled' | 'dropped';
@@ -43,11 +46,13 @@ export interface ParkingSnapshot {
 export function validateParkingIntent(i: ParkingIntent) {
   assertPhoenixIdentity(i.identity);
   if (!i.botId || !i.ownerWallet || !/^[\x21-\x7e]{1,120}$/.test(i.requestKey) || i.requestKey.includes('\n')
-    || !['idle','post_borrow','entry'].includes(i.action) || !['shortfall','all'].includes(i.mode)
+    || !['idle','post_borrow','entry','carry'].includes(i.action) || !['shortfall','all'].includes(i.mode)
     || units(i.maxUsdc) === 0n || (i.action === 'entry') !== !!i.executionOrderId
     || (i.action === 'post_borrow') !== !!i.borrowAuthorizationId
     || (i.action !== 'entry' && !i.destination)) throw new Error('Invalid Phoenix parking intent');
   if (i.action === 'entry' && (!i.requiredMarginUsdc || units(i.requiredMarginUsdc) < units(i.maxUsdc))) throw new Error('Invalid entry margin target');
+  if (i.action === 'carry') validateCarryConsent(i);
+  else if (i.carry) throw new Error('Unexpected carry consent');
 }
 export function assertParkingSnapshot(s: ParkingSnapshot, i: ParkingIntent, now: number, minimumSlot = '0') {
   if (!s || s.botId !== i.botId || s.authority !== i.identity.authorityWalletAddress || s.trader !== i.identity.traderAccountAddress
@@ -73,6 +78,7 @@ export function assertParkingSnapshot(s: ParkingSnapshot, i: ParkingIntent, now:
 }
 export function parkingAuthorized(i: ParkingIntent, s: ParkingSnapshot): boolean {
   if (!s.lifecycleActive) return false;
+  if (i.action === 'carry') return s.destination === i.destination;
   if (i.action === 'entry') return s.entryAuthorized;
   if (s.destination !== i.destination || !s.destinationEnabled) return false;
   if (i.action === 'idle') return s.autoPark;

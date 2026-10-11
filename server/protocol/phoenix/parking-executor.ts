@@ -23,13 +23,19 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
     private readonly funding: Pick<PhoenixFundingService, 'create' | 'resume'>,
     private readonly operations: Pick<PhoenixOperationStore, 'fundingHistory'>,
     private readonly buildFunding: (r: ParkingRecord, l: ParkingLeg, parent?: StoredPhoenixOperation) => Promise<FundingIntent>,
-    private readonly vault: ParkingVaultIO, private readonly enabled = () => false, private readonly now = Date.now) {}
+    private readonly vault: ParkingVaultIO, private readonly enabled = () => false, private readonly now = Date.now,
+    private readonly authorizeCarry?: (r: ParkingRecord) => Promise<void>) {}
   private async authorized(r: ParkingRecord) {
     if (!this.enabled()) throw new Error('Phoenix parking disabled');
     const s = await this.snapshot(r.intent); assertParkingSnapshot(s, r.intent, this.now());
     if (!parkingAuthorized(r.intent, s)) throw new Error('Parking consent revoked');
+    if (r.intent.carry) {
+      if (!this.authorizeCarry) throw new Error('Carry spending authorization unavailable');
+      await this.authorizeCarry(r);
+    }
   }
   async submit(r: ParkingRecord, l: ParkingLeg) {
+    if (l.kind === 'repay') throw new Error('Use the bounded carry repayment executor');
     await this.authorized(r);
     if (l.kind === 'park' || l.kind === 'unpark') {
       const signed = await this.vault.prepare(structuredClone(r), structuredClone(l));
@@ -47,6 +53,7 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
     const parent = l.parentKey ? history.find(o => o.request_key === l.parentKey) : undefined;
     if (l.parentKey && (!parent || parent.state !== 'completed')) throw new Error('Parking withdrawal not settled');
     const i = await this.buildFunding(r, l, parent);
+    if (r.intent.carry) i.carryIntentId = r.id;
     const destination = l.kind === 'deposit' ? r.intent.identity.traderAccountAddress : r.intent.identity.authorityWalletAddress;
     if (i.botId !== r.intent.botId || i.ownerWallet !== r.intent.ownerWallet || i.requestKey !== l.key
       || i.parkingIntentId !== r.id || i.executionOrderId !== r.intent.executionOrderId
@@ -58,6 +65,7 @@ export class PhoenixParkingExecutor implements PhoenixParkingIO {
     await this.funding.create(i);
   }
   async receipt(r: ParkingRecord, l: ParkingLeg): Promise<ParkingReceipt | null> {
+    if (l.kind === 'repay') throw new Error('Use the bounded carry repayment observer');
     if (l.kind === 'park' || l.kind === 'unpark') {
       const attempt = r.legs.find(item => item.leg.key === l.key)?.attempt;
       if (!attempt) return null;
