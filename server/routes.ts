@@ -9290,8 +9290,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
-        return res.status(503).json(phoenixOrderDisabled());
+        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
+        return res.status(503).json(phoenixSafetyUnavailable('close'));
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
@@ -9730,6 +9730,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!bot) return res.status(404).json({ error: "Bot not found" });
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
+      if (bot.activeProtocol === 'phoenix') {
+        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
+        return res.status(503).json(phoenixSafetyUnavailable('replace'));
+      }
+
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
@@ -9853,6 +9858,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!bot) return res.status(404).json({ error: "Bot not found" });
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
+      if (bot.activeProtocol === 'phoenix') {
+        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
+        return res.status(503).json(phoenixSafetyUnavailable('cancel'));
+      }
+
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
         return res.status(400).json({ error: "Agent wallet not configured" });
@@ -9951,8 +9961,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
-        return res.status(503).json(phoenixOrderDisabled());
+        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
+        return res.status(503).json(phoenixSafetyUnavailable('close'));
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
@@ -16887,6 +16897,17 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
       
+      if (bot.activeProtocol === 'phoenix' && isActive !== undefined) {
+        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
+        if (isActive === true) {
+          const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
+          return res.status(503).json(phoenixOrderDisabled());
+        }
+        if (isActive !== false) return res.status(400).json({ error: 'isActive must be a boolean' });
+        const paused = await storage.updateTradingBot(bot.id, { isActive: false });
+        return res.json({ ...paused, paused: true, safety: phoenixSafetyUnavailable('pause') });
+      }
+
       // PAUSE BOT = CLOSE POSITION: If bot is being paused (isActive changing to false)
       // close any open position on Drift first
       let positionClosed = false;

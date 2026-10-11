@@ -5,6 +5,8 @@ import bs58 from 'bs58';
 import { PHOENIX_PUBLIC_ADDRESSES } from './sdk-boundary';
 import { units } from './funding-contract';
 import { admitPhoenixOrder, type PhoenixAdmission, type PhoenixOrderIntent, type PhoenixOrderPacket } from './order-contract';
+import { desiredProtection } from './protection-contract';
+import { protectionInstruction } from './protection-builder';
 
 /** Reviewed deployment pins. Never accepted from a webhook; no production pin installed. */
 export interface PhoenixOrderPin {
@@ -37,8 +39,16 @@ export function prepareOrderTransaction(i: PhoenixOrderIntent, a: PhoenixAdmissi
   if (!Number.isSafeInteger(lifetime.lastValidBlockHeight) || lifetime.lastValidBlockHeight < 1
     || pk(lifetime.blockhash).toBase58() !== lifetime.blockhash) throw new Error('Invalid order lifetime');
   const keys = list.map((s, n) => ({ pubkey: pk(s), isWritable: n === 2 || n >= 4, isSigner: n === 3 }));
-  return new Transaction({ feePayer: pk(i.identity.authorityWalletAddress), ...lifetime }).add(new TransactionInstruction({
+  const tx = new Transaction({ feePayer: pk(i.identity.authorityWalletAddress), ...lifetime }).add(new TransactionInstruction({
     programId: pk(PHOENIX_PUBLIC_ADDRESSES.program), keys, data: encodePhoenixOrder(a.packet) }));
+  if (i.action === 'entry') {
+    if (!a.authority.protection || !i.protection) throw new Error('Atomic entry protection required');
+    const legs = desiredProtection(i.protection, i.side === 'buy' ? 'long' : 'short', a.packet.numBaseLots, a.authority.protection.markTicks);
+    // Same transaction: IOC partial fills receive 100% of the resulting position; zero-fill
+    // cannot leave a naked entry. No independently submitted follow-up bracket.
+    for (const leg of [legs[1], legs[0]]) tx.add(protectionInstruction({ identity: i.identity, market: i.market, assetId: a.authority.assetId }, pin, leg, true));
+  }
+  return tx;
 }
 export function signOrderTransaction(i: PhoenixOrderIntent, a: PhoenixAdmission, pin: PhoenixOrderPin,
   lifetime: { blockhash: string; lastValidBlockHeight: number }, secret: Uint8Array, now: number) {

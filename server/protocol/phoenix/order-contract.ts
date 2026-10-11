@@ -3,6 +3,7 @@ import type { PhoenixTraderIdentity } from '../../../shared/phoenix-read-contrac
 import { assertPhoenixIdentity } from './identity';
 import { units } from './funding-contract';
 import { PHOENIX_PUBLIC_ADDRESSES, phoenixBaseUnitsToLots, phoenixPriceUsdToTicks } from './sdk-boundary';
+import { assertProtectionSnapshot, desiredProtection, type ProtectionPrices, type ProtectionSnapshot } from './protection-contract';
 
 export interface PhoenixOrderIntent {
   botId: string; ownerWallet: string; requestKey: string;
@@ -12,6 +13,7 @@ export interface PhoenixOrderIntent {
   baseUnits: string; leverage: string; maxNotionalMicros: string;
   fillPolicy: 'IOC' | 'FOK'; minFillLots: string; slippageBps: number;
   expiresAt: number; lastValidSlot: string;
+  protection?: ProtectionPrices;
 }
 export interface PhoenixOrderAuthority {
   venue: 'phoenix'; trader: string; market: string; assetId: number; collateralMint: string;
@@ -25,6 +27,7 @@ export interface PhoenixOrderAuthority {
     maxLeverage: string; takerFeePpm: string; feeReference: string; feeObservedAt: number;
     freeMarginMicros: string; fundableMicros: string; marginObservedAt: number };
   position: { observedAt: number; side: 'long' | 'short' | 'flat'; baseLots: string; epoch: string };
+  protection?: ProtectionSnapshot;
 }
 export interface PhoenixOrderPacket {
   side: 'buy' | 'sell'; priceInTicks: string; numBaseLots: string; minBaseLotsToFill: string;
@@ -38,7 +41,9 @@ export interface PhoenixAdmission {
 export function orderIntentHash(value: unknown): string {
   function canonical(v: any): string {
     if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
-    if (v && typeof v === 'object') return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`;
+    // PostgreSQL JSON drops undefined optional object fields. Hash the same shape
+    // so a close with omitted protection retains its identity after restart.
+    if (v && typeof v === 'object') return `{${Object.keys(v).filter(k => v[k] !== undefined).sort().map(k => `${JSON.stringify(k)}:${canonical(v[k])}`).join(',')}}`;
     return JSON.stringify(v);
   }
   return createHash('sha256').update(canonical(value)).digest('hex');
@@ -74,6 +79,15 @@ export function admitPhoenixOrder(input: PhoenixOrderIntent, snapshot: PhoenixOr
   if (a.price.source !== 'phoenix-execution' || !a.price.reference || !a.position.epoch) throw new Error('Phoenix price/position unknown');
   const lots = phoenixBaseUnitsToLots(i.baseUnits, a.baseLotsDecimals);
   if (lots === 0n || lots > 18446744073709551615n) throw new Error('Rounded dust or quantity overflow');
+  if (i.action === 'entry') {
+    const protection = a.protection;
+    if (!protection || !i.protection) throw new Error('Phoenix entry protection unknown');
+    assertProtectionSnapshot(protection, { identity: i.identity, market: i.market, assetId: a.assetId }, now, a.slot);
+    if (protection.slot !== a.slot || !protection.conditionalExists || protection.position.side !== 'flat'
+      || protection.position.epoch !== a.position.epoch || protection.orderbookOrderIds.length
+      || protection.legs.some(l => l.assetId === a.assetId)) throw new Error('Phoenix entry protection unresolved');
+    desiredProtection(i.protection, i.side === 'buy' ? 'long' : 'short', lots.toString(), protection.markTicks);
+  }
   // Price conversion is exact rational arithmetic; round buy DOWN / sell UP to stay inside slippage.
   const parts = a.price.usd.split('.');
   if (!/^\d+(\.\d+)?$/.test(a.price.usd) || a.price.usd.length > 60) throw new Error('Invalid execution price');

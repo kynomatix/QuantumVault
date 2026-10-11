@@ -2077,6 +2077,27 @@ const schemaMigrationSql = [
        );
        CREATE UNIQUE INDEX IF NOT EXISTS phoenix_order_active_unique ON phoenix_order_intents(bot_id) WHERE state NOT IN ('settled','rejected');
        CREATE UNIQUE INDEX IF NOT EXISTS phoenix_order_signature_unique ON phoenix_order_intents((data->'attempt'->>'signature')) WHERE data->'attempt'->>'signature' IS NOT NULL; `,
+      `       DO $phoenix_protection$ BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='phoenix_operations'::regclass
+           AND conname='phoenix_operations_kind_check' AND pg_get_constraintdef(oid) LIKE '%protection%') THEN
+           ALTER TABLE phoenix_operations DROP CONSTRAINT IF EXISTS phoenix_operations_kind_check;
+           ALTER TABLE phoenix_operations ADD CONSTRAINT phoenix_operations_kind_check CHECK (kind IN ('register','deposit','withdraw','transfer','protection'));
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='phoenix_operation_attempts'::regclass
+           AND conname='phoenix_attempt_values_check' AND pg_get_constraintdef(oid) LIKE '%256%') THEN
+           ALTER TABLE phoenix_operation_attempts DROP CONSTRAINT IF EXISTS phoenix_attempt_values_check;
+           ALTER TABLE phoenix_operation_attempts ADD CONSTRAINT phoenix_attempt_values_check CHECK (attempt_number BETWEEN 1 AND 256 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$');
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('phoenix_operations_active_unique')
+           AND pg_get_expr(indpred,indrelid) LIKE '%protection%') THEN
+           DROP INDEX IF EXISTS phoenix_operations_active_unique;
+           CREATE UNIQUE INDEX phoenix_operations_active_unique ON phoenix_operations(bot_id)
+             WHERE state NOT IN ('completed','failed','dropped') AND kind <> 'protection';
+         END IF;
+       END $phoenix_protection$;
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_protection_replace_unique ON phoenix_operations(bot_id)
+         WHERE kind='protection' AND state NOT IN ('completed','failed','dropped')
+           AND intent->'protection'->'request'->>'action' IN ('replace','breakeven'); `,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -5576,7 +5597,6 @@ const schemaMigrationMetadata = [
       "constraintDefinitions": [
         "PRIMARY KEY (id)",
         "UNIQUE (bot_id, request_key)",
-        "CHECK (kind IN ('register','deposit','withdraw','transfer'))",
         "CHECK (state IN ('prepared','submission_pending','queued','unknown','completed','failed','dropped'))",
         "CHECK (revision >= 0 AND length(request_key) >= 1 AND length(request_key) <= 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object')",
         "FOREIGN KEY (bot_id) REFERENCES trading_bots(id)"
@@ -5601,7 +5621,6 @@ const schemaMigrationMetadata = [
         "UNIQUE (operation_id, attempt_number)",
         "UNIQUE (signature)",
         "CHECK (state IN ('submission_pending','confirmed','failed','expired'))",
-        "CHECK (attempt_number BETWEEN 1 AND 5 AND last_valid_block_height >= 0 AND length(signature) >= 64 AND length(signature) <= 88 AND length(blockhash) >= 32 AND length(blockhash) <= 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$')",
         "FOREIGN KEY (operation_id) REFERENCES phoenix_operations(id)"
       ]
     },
@@ -5700,6 +5719,64 @@ const schemaMigrationMetadata = [
       "unique": true,
       "columns": ["((data -> 'attempt') ->> 'signature')"],
       "predicateIncludes": ["((data -> 'attempt') ->> 'signature') IS NOT NULL"]
+    }
+  ]
+},
+{
+  "id": "188-phoenix-protection-safety",
+  "capabilities": [
+    "phoenix"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "phoenix_operations",
+      "columns": [
+        "kind",
+        "intent",
+        "observation"
+      ],
+      "constraintDefinitions": [
+        "CHECK (kind IN ('register','deposit','withdraw','transfer','protection'))"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "phoenix_operation_attempts",
+      "columns": [
+        "attempt_number"
+      ],
+      "constraintDefinitions": [
+        "CHECK (attempt_number >= 1 AND attempt_number <= 256 AND last_valid_block_height >= 0 AND length(signature) >= 64 AND length(signature) <= 88 AND length(blockhash) >= 32 AND length(blockhash) <= 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$')"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_operations_active_unique",
+      "unique": true,
+      "columns": [
+        "bot_id"
+      ],
+      "predicateIncludes": [
+        "state <> ALL (ARRAY['completed', 'failed', 'dropped'])",
+        "kind <> 'protection'"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_protection_replace_unique",
+      "unique": true,
+      "columns": [
+        "bot_id"
+      ],
+      "predicateIncludes": [
+        "kind = 'protection'",
+        "state <> ALL (ARRAY['completed', 'failed', 'dropped'])",
+        "(((intent -> 'protection') -> 'request') ->> 'action') = ANY (ARRAY['replace', 'breakeven'])"
+      ]
     }
   ]
 }

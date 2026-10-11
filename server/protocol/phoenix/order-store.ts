@@ -56,7 +56,8 @@ export class PhoenixOrderStore implements OrderRepository {
     return this.locked(i, async c => {
       const replay = (await c.query('SELECT * FROM phoenix_order_intents WHERE bot_id=$1 AND request_key=$2', [i.botId, i.requestKey])).rows[0];
       if (replay) return { record: this.verify(replay, i), created: false };
-      const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')`, [i.botId]);
+      const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')
+        AND ($2 <> 'close' OR kind <> 'protection')`, [i.botId, i.action]);
       if (busy.rows.length) throw new Error('Phoenix funding/registration unresolved');
       const registered = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND kind='register' AND state='completed'`, [i.botId]);
       if (!registered.rows.length) throw new Error('Phoenix registration not confirmed');
@@ -78,7 +79,8 @@ export class PhoenixOrderStore implements OrderRepository {
       };
       if (current.revision !== record.revision || !transitions[current.state].includes(state)) throw new Error('Stale Phoenix order transition');
       if (state === 'signing') {
-        const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')`, [record.intent.botId]);
+        const busy = await c.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND state NOT IN ('completed','failed','dropped')
+          AND ($2 <> 'close' OR kind <> 'protection')`, [record.intent.botId, record.intent.action]);
         if (busy.rows.length) throw new Error('Funding must settle before order signing');
       }
       const next = { ...current.data, ...data };

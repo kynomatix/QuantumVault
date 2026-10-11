@@ -4,8 +4,9 @@ import type { PhoenixTraderIdentity } from '../../../shared/phoenix-read-contrac
 import { phoenixIdentityFromBot, type PhoenixBotIdentityColumns } from './identity';
 import { PHOENIX_PUBLIC_ADDRESSES } from './sdk-boundary';
 import { validateFundingIntent, validateFundingReceipt, type FundingTerms, type FundingHistory, type FundingReceipt } from './funding-contract';
+import { planProtection, type ProtectionTerms, type ProtectionProgress, type ProtectionRequest } from './protection-contract';
 
-export type PhoenixOperationKind = 'register' | 'deposit' | 'withdraw' | 'transfer';
+export type PhoenixOperationKind = 'register' | 'deposit' | 'withdraw' | 'transfer' | 'protection';
 export type PhoenixOperationState = 'prepared' | 'submission_pending' | 'queued' | 'unknown' | 'completed' | 'failed' | 'dropped';
 export interface PhoenixIntent {
   botId: string;
@@ -21,6 +22,7 @@ export interface PhoenixIntent {
   funding?: FundingTerms;
   /** U05 funding child; bound to a durably claimed entry, never an independent park/withdraw. */
   executionOrderId?: string;
+  protection?: ProtectionTerms;
 }
 export interface StoredPhoenixOperation {
   id: string; bot_id: string; request_key: string; kind: PhoenixOperationKind;
@@ -34,7 +36,7 @@ export interface PhoenixAttemptInput {
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
+  if (value && typeof value === 'object') return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
     .map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`;
   return JSON.stringify(value);
 }
@@ -56,6 +58,28 @@ function rowBot(row: Record<string, any>): PhoenixBotIdentityColumns {
  */
 export class PhoenixOperationStore {
   constructor(private readonly pool: Pick<Pool, 'connect'>) {}
+
+  async findProtection(request: ProtectionRequest): Promise<StoredPhoenixOperation | null> {
+    return this.transaction(async client => {
+      await this.lockBot(client, request.botId, request.ownerWallet);
+      const { rows: [row] } = await client.query('SELECT id FROM phoenix_operations WHERE bot_id=$1 AND request_key=$2', [request.botId, request.requestKey]);
+      if (!row) return null;
+      const operation = await this.lockOperation(client, request.botId, request.ownerWallet, row.id);
+      if (canonical(operation.intent.protection?.request) !== canonical(request)) throw new Error('Protection replay payload mismatch');
+      return operation;
+    });
+  }
+
+  async protectionInFlight(botId: string, ownerWallet: string, operationId: string): Promise<boolean> {
+    return this.transaction(async client => {
+      await this.lockBot(client, botId, ownerWallet);
+      const protection = await client.query(`SELECT 1 FROM phoenix_operations o JOIN phoenix_operation_attempts a ON a.operation_id=o.id
+        WHERE o.bot_id=$1 AND o.id<>$2 AND o.kind='protection' AND a.state='submission_pending'
+        AND o.intent->'protection'->'request'->>'action' IN ('replace','breakeven')`, [botId, operationId]);
+      const orders = await client.query(`SELECT 1 FROM phoenix_order_intents WHERE bot_id=$1 AND state NOT IN ('settled','rejected')`, [botId]);
+      return !!(protection.rows.length || orders.rows.length);
+    });
+  }
 
   async read(botId: string, ownerWallet: string, operationId: string) {
     return this.transaction(async client => {
@@ -101,7 +125,7 @@ export class PhoenixOperationStore {
     // Snapshot before awaiting: a caller cannot mutate the admitted identity while we wait for a lock.
     const intent = structuredClone(input);
     if (intent.funding) validateFundingIntent(intent);
-    if (!['register', 'deposit', 'withdraw', 'transfer'].includes(intent.kind)
+    if (!['register', 'deposit', 'withdraw', 'transfer', 'protection'].includes(intent.kind)
       || typeof intent.requestKey !== 'string' || !/^[\x21-\x7e]{1,200}$/.test(intent.requestKey)
       || intent.requestKey.includes('\n') || intent.mint !== PHOENIX_PUBLIC_ADDRESSES.usdcMint
       || typeof intent.destination !== 'string' || !intent.destination || intent.destination.length > 200) {
@@ -111,8 +135,16 @@ export class PhoenixOperationStore {
       if (typeof amount !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(amount) || amount.includes('\n')
         || BigInt(amount) > 18446744073709551615n) throw new Error('Invalid Phoenix base units');
     }
-    if (intent.kind === 'register' ? intent.amountBaseUnits !== '0' : intent.amountBaseUnits === '0') {
+    if (['register', 'protection'].includes(intent.kind) ? intent.amountBaseUnits !== '0' : intent.amountBaseUnits === '0') {
       throw new Error('Invalid Phoenix operation amount');
+    }
+    if ((intent.kind === 'protection') !== !!intent.protection) throw new Error('Protection terms required');
+    if (intent.protection) {
+      const p = intent.protection, r = p.request;
+      if (intent.funding || intent.executionOrderId || intent.feeBaseUnits !== '0' || intent.destination !== intent.identity.traderAccountAddress
+        || r.botId !== intent.botId || r.ownerWallet !== intent.ownerWallet || r.requestKey !== intent.requestKey
+        || canonical(r.identity) !== canonical(intent.identity)
+        || canonical(planProtection(r, p.before, p.before.observedAt)) !== canonical(p)) throw new Error('Invalid protection terms');
     }
     return this.transaction(async client => {
       const identity = await this.lockBot(client, intent.botId, intent.ownerWallet);
@@ -130,7 +162,7 @@ export class PhoenixOperationStore {
         const orderSchema = await client.query("SELECT to_regclass('phoenix_order_intents') AS table_name");
         if (orderSchema.rows[0]?.table_name) {
           const active = (await client.query(`SELECT id,state,intent,data FROM phoenix_order_intents WHERE bot_id=$1 AND state NOT IN ('settled','rejected')`, [intent.botId])).rows[0];
-          if (active || intent.executionOrderId) {
+          if ((active || intent.executionOrderId) && intent.kind !== 'protection') {
             if (!active || active.id !== intent.executionOrderId || active.state !== 'funding' || active.intent.action !== 'entry'
               || !intent.funding || !['wallet_funding', 'deposit'].includes(intent.funding.leg)) throw new Error('Phoenix order excludes conflicting funding/park');
             const used = (await client.query(`SELECT COALESCE(sum((intent->'funding'->>'grossBaseUnits')::numeric),0)::text AS amount
@@ -139,6 +171,10 @@ export class PhoenixOperationStore {
             if (BigInt(used) + BigInt(intent.funding.grossBaseUnits) > BigInt(active.data.admission.fundingShortfallMicros)) throw new Error('Order funding budget exceeded');
           }
         } else if (intent.executionOrderId) throw new Error('Phoenix order schema unavailable');
+      }
+      if (intent.kind !== 'protection' && !['withdraw', 'transfer'].includes(intent.kind)) {
+        const protection = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND kind='protection' AND state NOT IN ('completed','failed','dropped')`, [intent.botId]);
+        if (protection.rows.length) throw new Error('Protection unresolved; new funding unavailable');
       }
       if (intent.funding) {
         const registered = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id = $1 AND kind = 'register' AND state = 'completed'`, [intent.botId]);
@@ -156,7 +192,10 @@ export class PhoenixOperationStore {
       }
       // Use explicit epoch milliseconds: U02's timestamp-without-time-zone column
       // cannot safely measure durations across database/client timezone settings.
-      const observation = intent.funding ? { funding: { requestedAt: Date.now() } } : null;
+      const observation = intent.funding ? { funding: { requestedAt: Date.now() } } : intent.protection ? { protection: {
+        step: 0, before: intent.protection.before, after: intent.protection.before,
+        remainingLegs: intent.protection.before.legs, allOrdersCancelled: false, protected: false,
+      } } : null;
       const inserted = await client.query(`INSERT INTO phoenix_operations (bot_id, request_key, kind, intent, intent_hash, observation)
         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, [intent.botId, intent.requestKey, intent.kind, intent, intentHash, observation]);
       return { operation: inserted.rows[0], created: true };
@@ -199,7 +238,14 @@ export class PhoenixOperationStore {
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale send claim');
       const count = await client.query('SELECT count(*)::integer AS count FROM phoenix_operation_attempts WHERE operation_id = $1', [operationId]);
       const next = count.rows[0].count + 1;
-      if (next > 5) throw new Error('Phoenix retry budget exhausted');
+      if (next > (operation.kind === 'protection' ? 256 : 5)) throw new Error('Phoenix retry budget exhausted');
+      if (operation.intent.protection && ['replace', 'breakeven'].includes(operation.intent.protection.request.action)) {
+        // A pause/cancel claim permanently revokes older replacements, including after restart.
+        const revoke = await client.query(`SELECT 1 FROM phoenix_operations WHERE bot_id=$1 AND kind='protection'
+          AND intent->'protection'->'request'->>'action' IN ('pause','cancel') AND created_at >= $2 AND id <> $3`,
+          [botId, operation.created_at, operation.id]);
+        if (revoke.rows.length) throw new Error('Replacement revoked by safety action');
+      }
       const inserted = await client.query(`INSERT INTO phoenix_operation_attempts
         (operation_id, attempt_number, signature, blockhash, last_valid_block_height, transaction_hash)
         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, [operationId, next, attempt.signature, attempt.blockhash, attempt.lastValidBlockHeight, attempt.transactionHash]);
@@ -213,7 +259,7 @@ export class PhoenixOperationStore {
    */
   async observe(botId: string, ownerWallet: string, operationId: string, revision: number,
     state: Exclude<PhoenixOperationState, 'submission_pending'>,
-    observation: { source: string; reference: string; attemptOutcome?: 'confirmed' | 'failed' | 'expired'; fundingReceipt?: FundingReceipt }) {
+    observation: { source: string; reference: string; attemptOutcome?: 'confirmed' | 'failed' | 'expired'; fundingReceipt?: FundingReceipt; protection?: ProtectionProgress }) {
     const evidence = structuredClone(observation);
     if (!evidence.source || !evidence.reference) throw new Error('Phoenix observation evidence required');
     return this.transaction(async client => {
@@ -227,13 +273,15 @@ export class PhoenixOperationStore {
         && ['queued', 'unknown'].includes(operation.state) && !pending.rows.length;
       const outcome = evidence.attemptOutcome;
       const allowed = state === 'unknown' ? !outcome && operation.state !== 'prepared'
-        : state === 'prepared' ? !!pending.rows[0] && (outcome === 'failed' || outcome === 'expired')
+        : state === 'prepared' ? !!pending.rows[0] && (outcome === 'failed' || outcome === 'expired' || (operation.kind === 'protection' && outcome === 'confirmed'))
         : state === 'queued' ? operation.kind === 'withdraw' && ((pending.rows[0] && outcome === 'confirmed') || (queueRecovery && !outcome))
         : state === 'completed' ? (pending.rows[0] && outcome === 'confirmed') || (queueRecovery && !outcome)
+          || (operation.kind === 'protection' && operation.state === 'prepared' && !outcome && !!evidence.protection)
         : state === 'dropped' ? (queueRecovery && !outcome) || (operation.intent.funding && operation.kind === 'withdraw' && pending.rows[0] && outcome === 'confirmed')
-        : state === 'failed' ? (pending.rows[0] && (outcome === 'failed' || outcome === 'expired')) || (operation.state === 'prepared' && !outcome)
+        : state === 'failed' ? (pending.rows[0] && (outcome === 'failed' || outcome === 'expired' || (operation.kind === 'protection' && outcome === 'confirmed'))) || (operation.state === 'prepared' && !outcome)
         : false;
       if (!allowed) throw new Error('Phoenix invalid state transition');
+      if (operation.kind === 'protection' && !evidence.protection) throw new Error('Protection before/after evidence required');
       let retained: Record<string, unknown> = evidence;
       if (operation.intent.funding) {
         const prior = operation.observation?.funding as FundingHistory | undefined;
