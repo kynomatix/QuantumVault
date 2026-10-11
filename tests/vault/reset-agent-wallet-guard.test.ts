@@ -1,3 +1,4 @@
+import { observePacificaConstraints } from "../../server/protocol/market-constraints.js";
 /**
  * tests/vault/reset-agent-wallet-guard.test.ts — WO2B1
  *
@@ -855,6 +856,17 @@ describe("WO-R1-C1 external-key provisioning write-ahead", () => {
   function adapter(overrides: Record<string, unknown> = {}) {
     return {
       protocolName: "pacifica",
+      getMarkets: vi.fn(async () => [{
+        internalSymbol: "SOL-PERP", protocolSymbol: "SOL",
+        constraintObservation: observePacificaConstraints({
+          tick_size: "0.01", lot_size: "0.01", min_order_size: "10",
+        }, "SOL-PERP", Date.now()),
+      }]),
+      getMarkPrice: vi.fn(async () => ({
+        kind: "available", venue: "pacifica", internalSymbol: "SOL-PERP", protocolSymbol: "SOL",
+        source: "/info/prices", field: "mark", exact: "100",
+        observedAt: Date.now(), receivedAt: Date.now(), expiresAt: Date.now() + 5_000,
+      })),
       getCapabilities: () => ({ requiresExternalSubaccountKey: true, walletDerivation: "random" }),
       provisionFundedSubaccount: vi.fn(async (p: any) => ({
         subaccountId: Keypair.fromSecretKey(p.subSecretKey).publicKey.toString(),
@@ -877,6 +889,7 @@ describe("WO-R1-C1 external-key provisioning write-ahead", () => {
       agentKeypair: Keypair.generate(),
       agentMnemonic: null,
       adapter: venue,
+      market: "SOL-PERP",
       fundingAmount: 10,
       umk: Buffer.alloc(32, 9),
     });
@@ -907,6 +920,7 @@ describe("WO-R1-C1 external-key provisioning write-ahead", () => {
       agentKeypair: Keypair.generate(),
       agentMnemonic: null,
       adapter: venue,
+      market: "SOL-PERP",
       fundingAmount: 10,
       umk: Buffer.alloc(32, 9),
     })).rejects.toThrow();
@@ -929,6 +943,7 @@ describe("WO-R1-C1 external-key provisioning write-ahead", () => {
       agentKeypair: Keypair.generate(),
       agentMnemonic: null,
       adapter: venue,
+      market: "SOL-PERP",
       fundingAmount: 10,
       umk: Buffer.alloc(32, 9),
     })).rejects.toThrow(/process-boundary/);

@@ -33,7 +33,7 @@ const position = {
 describe('PacificaAdapter terminal close truth', () => {
   it('returns an uncertain result for one flat read and sends no close order', async () => {
     const subject = adapter() as any;
-    subject.getPositions = vi.fn(async () => []);
+    subject.getStrictPositionForMarket = vi.fn(async () => null);
     subject.placeMarketOrder = vi.fn();
 
     const result = await subject.closePosition(request());
@@ -59,7 +59,7 @@ describe('PacificaAdapter terminal close truth', () => {
     ['filled', true, true],
   ] as const)('preserves %s while allowing close success only for a full fill', async (status, transportSuccess, terminalSuccess) => {
     const subject = adapter() as any;
-    subject.getPositions = vi.fn(async () => [position]);
+    subject.getStrictPositionForMarket = vi.fn(async () => position);
     subject.placeMarketOrder = vi.fn(async () => ({
       success: transportSuccess,
       status,
@@ -82,7 +82,7 @@ describe('PacificaAdapter terminal close truth', () => {
 
   it.each([0, 0.123456])('preserves a terminal venue fee of %s on the close result', async fee => {
     const subject = adapter() as any;
-    subject.getPositions = vi.fn(async () => [position]);
+    subject.getStrictPositionForMarket = vi.fn(async () => position);
     subject.placeMarketOrder = vi.fn(async () => ({
       success: true,
       status: 'filled',

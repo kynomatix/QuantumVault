@@ -1102,6 +1102,7 @@ async function executeAgentDeposit(
   amountUsdc: number,
   subAccountId: number = 0,
   adapter = getDefaultAdapter(),
+  beforeOpeningEffect?: () => Promise<void>,
 ): Promise<{ success: boolean; signature?: string; error?: string }> {
   try {
     const result = await adapter.executeDeposit({
@@ -1109,6 +1110,7 @@ async function executeAgentDeposit(
       agentSecretKey,
       amount: amountUsdc,
       subaccountId: _subIdStr(subAccountId),
+      beforeOpeningEffect,
     });
     return { success: result.success, signature: result.txSignature, error: result.error };
   } catch (error: any) {
@@ -1698,6 +1700,9 @@ const MAX_SWAP_SLIPPAGE_BPS = 500;
 const DEFAULT_SWAP_SLIPPAGE_BPS = 100;
 import { getAllPerpMarkets, getAllPerpMarketsForExchange, getMarketBySymbol, getRiskTierInfo, isValidMarket, refreshMarketData, getCacheStatus, getMinOrderSize, getMinOrderSizeUsd, getMarketMaxLeverageWithSource } from "./market-liquidity-service";
 import { evaluateNotionalFloor } from "./trade-sizing-math";
+import { checkEntryConstraints, minimumOpeningPriceForSizing, acquireMarkPrice, checkMarkPrice, checkOpeningEffectAuthority,
+  evaluateOpeningMinimum, isValidMultiple, hasNumericMarketConstraints,
+  type MarkPriceAuthority, type ConstraintAdmission } from "./protocol/market-constraints";
 import { getAllCachedLeverageLimits, getAllCachedLeverageSources, getLeverageCacheStatus, isMarketNonTradable } from "./leverage-cache-service";
 import { sendTradeNotification, getCloseReasonLabel, schedulePartialCloseNotification, type TradeNotification, buildDefaultInlineKeyboard, sendAutoTopUpNotification } from "./notification-service";
 import { classifySignal } from "./trading/signal-classifier";
@@ -1917,7 +1922,7 @@ function parseDriftError(error: string | undefined): string {
 
 // Shared trade sizing and capital management helper
 // Used by all trade execution paths for consistent behavior
-interface TradeSizingParams {
+interface TradeSizingCommon {
   agentPublicKey: string;
   // V3 Phase 3b: accept either legacy encrypted blob (string) or an
   // already-decrypted secret key (Uint8Array) from decryptAgentKeyStrict.
@@ -1934,6 +1939,7 @@ interface TradeSizingParams {
   profitReinvestEnabled: boolean;
   signalPercent: number;
   oraclePrice: number;
+  slippageBps?: number;
   logPrefix: string;
   botCtx?: BotSubaccountContext | null;
   adapter?: ReturnType<typeof getDefaultAdapter>;
@@ -1944,7 +1950,15 @@ interface TradeSizingParams {
   vaultAllOut?: boolean;
 }
 
+type TradeSizingParams = TradeSizingCommon & (
+  | { sizingProtocol: 'pacifica'; markPrice: MarkPriceAuthority; adapter: ProtocolAdapter }
+  | { sizingProtocol: 'legacy'; markPrice?: never }
+);
+
 interface TradeSizingResult {
+  attemptedEffects?: string[];
+  constraintRejection?: Extract<ConstraintAdmission, { ok: false }>;
+  completedEffects?: string[];
   success: boolean;
   tradeAmountUsd: number;
   finalContractSize: number;
@@ -2020,6 +2034,7 @@ async function autoUnparkAccountVaultForUsdc(args: {
    * cover `neededUsdc` (the live-trade water top-up behavior).
    */
   all?: boolean;
+  beforeOpeningEffect?: () => Promise<void>;
 }): Promise<number> {
   const { walletAddress, agentPublicKey, agentSecretKey, neededUsdc, logPrefix, all } = args;
   if (!(neededUsdc > 0)) return 0;
@@ -2051,6 +2066,7 @@ async function autoUnparkAccountVaultForUsdc(args: {
       if (all) {
         // Sell the FULL on-chain balance of this asset (all-out). unparkToUsdc reads
         // the live on-chain balance itself, so this can never sell more than is held.
+        await args.beforeOpeningEffect?.();
         res = await unparkToUsdc({
           walletAddress,
           tradingBotId: null, // account scope: agent is its own gas funder
@@ -2065,6 +2081,7 @@ async function autoUnparkAccountVaultForUsdc(args: {
         let tokenAmount = (remaining * BUFFER) / pricePerToken;
         if (!(tokenAmount > 0)) continue;
         if (tokenAmount > v.onChainAmount) tokenAmount = v.onChainAmount; // cap to held
+        await args.beforeOpeningEffect?.();
         res = await unparkToUsdc({
           walletAddress,
           tradingBotId: null, // account scope: agent is its own gas funder
@@ -3184,11 +3201,6 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
     };
   }
 
-  // Per-bot (independent_trader, e.g. Flash) vaults park into the bot's OWN
-  // wallet and need the bot's signing key + a separate gas funder, so the
-  // account-scope auto-unpark below is skipped for them (handled elsewhere).
-  const isIndependentTrader = adapter.subaccountCaps?.accountModel === 'independent_trader';
-
   // Calculate effective leverage (capped by an authoritative default-adapter venue maximum).
   const botLeverage = Math.max(1, leverage || 1);
   const marketMaxLeverage = leverageAuthority.venueMaxLeverage;
@@ -3197,16 +3209,6 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
   if (botLeverage > marketMaxLeverage) {
     console.log(`${logPrefix} Leverage capped: ${botLeverage}x → ${marketMaxLeverage}x (${market} max)`);
   }
-
-  // Minimum equity to place a viable on-chain order (base-unit AND notional USD
-  // minimums). Hoisted here so the per-bot auto-unpark below can floor its restore
-  // target at it; the underfunded guard further down reuses these same values.
-  const minOrderSize = getMinOrderSize(market);
-  const minOrderUsd = getMinOrderSizeUsd(market);
-  const minEquityFromBase = (minOrderSize * oraclePrice / effectiveLeverage) * 1.2;
-  const minEquityFromUsd = (minOrderUsd / effectiveLeverage) * 1.15;
-  const minEquityNeeded = Math.max(minEquityFromBase, minEquityFromUsd);
-  const minEquityThreshold = Math.max(0.50, minEquityNeeded);
 
   // Validate base capital for non-profit-reinvest mode
   if (baseCapital <= 0 && !profitReinvestEnabled) {
@@ -3220,6 +3222,91 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
       error: 'Bot has no capital configured. Set Max Position Size on the bot.',
     };
   }
+
+  let minimumPriceForSizing = oraclePrice;
+  let pacificaMarketConstraints: Awaited<ReturnType<typeof adapter.getMarkets>>[number] | undefined;
+  let markPrice = params.sizingProtocol === 'pacifica' ? params.markPrice : undefined;
+  const completedEffects: string[] = [];
+  const attemptedEffects: string[] = [];
+  let refreshSizingMinimums: (() => void) | undefined;
+  const unavailableSizing = (rejection: Extract<ConstraintAdmission, { ok: false }>): TradeSizingResult => ({
+    success: false, tradeAmountUsd: 0, finalContractSize: 0, freeCollateral: 0,
+    maxTradeableValue: 0, effectiveLeverage: 0, error: rejection.reason,
+    constraintRejection: rejection, completedEffects: [...completedEffects], attemptedEffects: [...attemptedEffects],
+  });
+  const recheckSizingAuthority = async (quantity?: number): Promise<TradeSizingResult | null> => {
+    if (adapter.protocolName !== 'pacifica') return null;
+    try {
+      pacificaMarketConstraints = (await adapter.getMarkets()).find(m => m.internalSymbol === market);
+      const authority = checkEntryConstraints(pacificaMarketConstraints?.constraintObservation, market, Date.now());
+      if (!authority.ok) return unavailableSizing(authority);
+      if (!pacificaMarketConstraints || !hasNumericMarketConstraints(pacificaMarketConstraints))
+        return unavailableSizing({ ok: false, code: 'constraint_unavailable', reason: `${market}: numeric authority unavailable` });
+      if (!markPrice) return unavailableSizing({ ok: false, code: 'mark_price_unavailable', candidate: 'mark', reason: 'capability_missing' });
+      const checked = checkMarkPrice(markPrice, market, Date.now());
+      if (checked.kind === 'unavailable' && checked.reason === 'stale') markPrice = await acquireMarkPrice(adapter, market);
+      else markPrice = checked;
+      if (markPrice.kind === 'unavailable') return unavailableSizing({ ok: false, ...markPrice });
+      if (markPrice.protocolSymbol !== pacificaMarketConstraints.protocolSymbol)
+        return unavailableSizing({ ok: false, code: 'mark_price_unavailable', candidate: 'mark', reason: 'symbol_missing' });
+      const afterRead = checkEntryConstraints(pacificaMarketConstraints.constraintObservation, market, Date.now());
+      if (!afterRead.ok) return unavailableSizing(afterRead);
+      minimumPriceForSizing = Number(markPrice.exact);
+      refreshSizingMinimums?.();
+      if (quantity !== undefined) {
+        if (!isValidMultiple(quantity, pacificaMarketConstraints.lotSize))
+          return unavailableSizing({ ok: false, code: 'invalid_intended_order', reason: `${market}: prepared size is off lot` });
+        const minimum = evaluateOpeningMinimum({ kind: 'market', quantityBase: quantity, mark: markPrice.exact }, pacificaMarketConstraints.minOrderSizeUsd);
+        if (!minimum.ok) return unavailableSizing(minimum);
+      }
+      return null;
+    } catch {
+      return unavailableSizing({ ok: false, code: 'constraint_unavailable', reason: `${market}: opening authority read failed` });
+    }
+  };
+  const beforeOpeningEffect = async () => {
+    const authority = await checkOpeningEffectAuthority(adapter, market);
+    if (!authority.ok) throw new Error(authority.reason);
+  };
+  const recheckFundingEffect = async (): Promise<TradeSizingResult | null> => {
+    const authority = await checkOpeningEffectAuthority(adapter, market);
+    return authority.ok ? null : unavailableSizing(authority);
+  };
+  const initialAuthorityFailure = await recheckSizingAuthority();
+  if (initialAuthorityFailure) return initialAuthorityFailure;
+
+  // Per-bot (independent_trader, e.g. Flash) vaults park into the bot's OWN
+  // wallet and need the bot's signing key + a separate gas funder, so the
+  // account-scope auto-unpark below is skipped for them (handled elsewhere).
+  const isIndependentTrader = adapter.subaccountCaps?.accountModel === 'independent_trader';
+
+  // Minimum equity to place a viable on-chain order (base-unit AND notional USD
+  // minimums). Hoisted here so the per-bot auto-unpark below can floor its restore
+  // target at it; the underfunded guard further down reuses these same values.
+  let minOrderSize = adapter.protocolName === 'pacifica'
+    ? (pacificaMarketConstraints?.lotSize ?? null) : getMinOrderSize(market);
+  let minOrderUsd = adapter.protocolName === 'pacifica'
+    ? (pacificaMarketConstraints?.minOrderSizeUsd ?? null) : getMinOrderSizeUsd(market);
+  if (minOrderSize === null || minOrderUsd === null
+      || !Number.isFinite(minOrderSize) || minOrderSize <= 0
+      || !Number.isFinite(minOrderUsd) || minOrderUsd <= 0) {
+    return { success: false, tradeAmountUsd: 0, finalContractSize: 0, freeCollateral: 0,
+      maxTradeableValue: 0, effectiveLeverage: 0,
+      error: `${market}: authoritative lot or opening minimum unavailable` };
+  }
+  let minEquityFromBase = (minOrderSize * minimumPriceForSizing / effectiveLeverage) * 1.2;
+  let minEquityFromUsd = (minOrderUsd / effectiveLeverage) * 1.15;
+  let minEquityNeeded = Math.max(minEquityFromBase, minEquityFromUsd);
+  let minEquityThreshold = Math.max(0.50, minEquityNeeded);
+  refreshSizingMinimums = () => {
+    if (adapter.protocolName !== 'pacifica' || !pacificaMarketConstraints || !hasNumericMarketConstraints(pacificaMarketConstraints)) return;
+    minOrderSize = pacificaMarketConstraints.lotSize;
+    minOrderUsd = pacificaMarketConstraints.minOrderSizeUsd;
+    minEquityFromBase = (minOrderSize * minimumPriceForSizing / effectiveLeverage) * 1.2;
+    minEquityFromUsd = (minOrderUsd / effectiveLeverage) * 1.15;
+    minEquityNeeded = Math.max(minEquityFromBase, minEquityFromUsd);
+    minEquityThreshold = Math.max(0.50, minEquityNeeded);
+  };
 
   let tradeAmountUsd = 0;
   let maxTradeableValue = 0;
@@ -3241,6 +3328,11 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
         error: 'Cannot execute trade: profit reinvest enabled but collateral check failed',
       };
     }
+    if (adapter.protocolName === 'pacifica') return {
+      success: false, tradeAmountUsd: 0, finalContractSize: 0, freeCollateral: 0,
+      maxTradeableValue: 0, effectiveLeverage, completedEffects, attemptedEffects,
+      error: 'Cannot prepare Pacifica intent without a collateral read',
+    };
     // Fallback for normal mode — but NOT for a safe-default all-out Flash bot.
     // Returning a buffer-blind trade size here would skip the per-bot auto-unpark
     // and full-buffer verification below, opening a position without restoring the
@@ -3319,6 +3411,8 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
         freeCollateral = Math.max(freeCollateral, strictUsdc);
         if (unparkAll || strictUsdc < targetNeed) {
           const agentKeypair = resolveAgentKeypair(agentPrivateKeyEncrypted);
+          { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+          attemptedEffects.push('autoUnparkPerBotVaultForUsdc attempted');
           const realized = await autoUnparkPerBotVaultForUsdc({
             walletAddress,
             botCtx,
@@ -3328,6 +3422,7 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
             all: unparkAll,
             logPrefix,
           });
+              completedEffects.push('autoUnparkPerBotVaultForUsdc returned: ' + JSON.stringify(realized));
           if (realized > 0) {
             // Re-read from chain — NEVER size a trade off the unpark estimate.
             const reread = await readStrictWalletUsdc();
@@ -3408,13 +3503,17 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
             const shortfallToExchange = depositAmount - agentFreeCollateral;
             let walletUsdc = await getAgentUsdcBalance(agentPublicKey);
             if (walletUsdc < shortfallToExchange) {
+              { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+              attemptedEffects.push('autoUnparkAccountVaultForUsdc attempted');
               const realized = await autoUnparkAccountVaultForUsdc({
                 walletAddress,
                 agentPublicKey,
                 agentSecretKey: agentKeypair.secretKey,
                 neededUsdc: shortfallToExchange - walletUsdc,
                 logPrefix,
+                beforeOpeningEffect,
               });
+              completedEffects.push('autoUnparkAccountVaultForUsdc returned: ' + JSON.stringify(realized));
               if (realized > 0) walletUsdc = await getAgentUsdcBalance(agentPublicKey);
             }
             // Only refill when we can FULLY cover the shortfall — a partial deposit
@@ -3424,7 +3523,11 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
             // gracefully; the next signal retries.
             const depositToExchange = Math.ceil(shortfallToExchange * 100) / 100;
             if (walletUsdc >= depositToExchange) {
-              const dep = await executeAgentDeposit(agentPublicKey, agentKeypair.secretKey, depositToExchange, 0, adapter);
+              { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+              { const failure = await recheckFundingEffect(); if (failure) return failure; }
+              attemptedEffects.push('executeAgentDeposit attempted');
+              const dep = await executeAgentDeposit(agentPublicKey, agentKeypair.secretKey, depositToExchange, 0, adapter, beforeOpeningEffect);
+              completedEffects.push('executeAgentDeposit returned: ' + String(dep.success));
               if (dep.success) {
                 console.log(`${logPrefix} Refilled agent exchange with $${depositToExchange.toFixed(2)} from wallet USDC (incl. any Vault sweep)`);
                 agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
@@ -3437,6 +3540,9 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
 
           if (agentFreeCollateral >= depositAmount) {
             console.log(`${logPrefix} Transferring $${depositAmount} from agent to bot subaccount ${botCtx.botPublicKey}`);
+            { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+            { const failure = await recheckFundingEffect(); if (failure) return failure; }
+            attemptedEffects.push('adapter.transferBetweenSubaccounts attempted');
             const transferResult = await adapter.transferBetweenSubaccounts({
               agentSecretKey: agentKeypair.secretKey,
               mainWalletAddress: agentKeypair.publicKey.toString(),
@@ -3444,6 +3550,7 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
               toSubaccountId: botCtx.botPublicKey,
               amount: depositAmount,
             });
+              completedEffects.push('adapter.transferBetweenSubaccounts returned: ' + String(transferResult.success));
             if (transferResult.success) {
               console.log(`${logPrefix} Auto top-up transfer successful: $${depositAmount.toFixed(2)}`);
               freeCollateral += depositAmount;
@@ -3468,13 +3575,17 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
           // Auto-unpark just enough from the account Vault when plain wallet USDC
           // can't cover the top-up. Skipped for per-bot (independent_trader) vaults.
           if (agentUsdcBalance < topUpNeeded && !isIndependentTrader) {
+            { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+            attemptedEffects.push('autoUnparkAccountVaultForUsdc attempted');
             const realized = await autoUnparkAccountVaultForUsdc({
               walletAddress,
               agentPublicKey,
               agentSecretKey: agentPrivateKeyEncrypted,
               neededUsdc: topUpNeeded - agentUsdcBalance,
               logPrefix,
+              beforeOpeningEffect,
             });
+              completedEffects.push('autoUnparkAccountVaultForUsdc returned: ' + JSON.stringify(realized));
             if (realized > 0) {
               agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
               console.log(`${logPrefix} Agent wallet USDC after Vault sweep: $${agentUsdcBalance.toFixed(2)}`);
@@ -3483,13 +3594,18 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
 
           if (agentUsdcBalance >= topUpNeeded) {
             const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+            { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+            { const failure = await recheckFundingEffect(); if (failure) return failure; }
+            attemptedEffects.push('executeAgentDeposit attempted');
             const depositResult = await executeAgentDeposit(
               agentPublicKey,
               agentPrivateKeyEncrypted,
               depositAmount,
               subAccountId,
               adapter,
+              beforeOpeningEffect,
             );
+              completedEffects.push('executeAgentDeposit returned: ' + String(depositResult.success));
 
             if (depositResult.success) {
               console.log(`${logPrefix} Auto top-up successful: deposited $${depositAmount.toFixed(2)} (equity $${currentEquity.toFixed(2)} → $${(currentEquity + depositAmount).toFixed(2)}), tx: ${depositResult.signature}`);
@@ -3621,13 +3737,17 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
               const shortfallToExchange = depositAmount - agentAccountInfo.freeCollateral;
               let walletUsdc = await getAgentUsdcBalance(agentPublicKey);
               if (walletUsdc < shortfallToExchange) {
+                { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+                attemptedEffects.push('autoUnparkAccountVaultForUsdc attempted');
                 const realized = await autoUnparkAccountVaultForUsdc({
                   walletAddress,
                   agentPublicKey,
                   agentSecretKey: agentKeypair.secretKey,
                   neededUsdc: shortfallToExchange - walletUsdc,
                   logPrefix,
+                  beforeOpeningEffect,
                 });
+              completedEffects.push('autoUnparkAccountVaultForUsdc returned: ' + JSON.stringify(realized));
                 if (realized > 0) walletUsdc = await getAgentUsdcBalance(agentPublicKey);
               }
               // Full-coverage-only refill (see primary path): a partial deposit would
@@ -3635,7 +3755,11 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
               // unparked USDC in the agent wallet (counted) and let the trade pause.
               const depositToExchange = Math.ceil(shortfallToExchange * 100) / 100;
               if (walletUsdc >= depositToExchange) {
-                const dep = await executeAgentDeposit(agentPublicKey, agentKeypair.secretKey, depositToExchange, 0, adapter);
+                { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+                { const failure = await recheckFundingEffect(); if (failure) return failure; }
+                attemptedEffects.push('executeAgentDeposit attempted');
+                const dep = await executeAgentDeposit(agentPublicKey, agentKeypair.secretKey, depositToExchange, 0, adapter, beforeOpeningEffect);
+              completedEffects.push('executeAgentDeposit returned: ' + String(dep.success));
                 if (dep.success) {
                   console.log(`${logPrefix} Secondary: refilled agent exchange with $${depositToExchange.toFixed(2)} from wallet USDC (incl. any Vault sweep)`);
                   agentAccountInfo = await getExchangeAccountInfo(agentPublicKey, 0, adapter);
@@ -3646,6 +3770,9 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
             }
 
             if (agentAccountInfo.freeCollateral >= depositAmount) {
+              { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+              { const failure = await recheckFundingEffect(); if (failure) return failure; }
+              attemptedEffects.push('adapter.transferBetweenSubaccounts attempted');
               const transferResult = await adapter.transferBetweenSubaccounts({
                 agentSecretKey: agentKeypair.secretKey,
                 mainWalletAddress: agentKeypair.publicKey.toString(),
@@ -3653,6 +3780,7 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
                 toSubaccountId: botCtx.botPublicKey,
                 amount: depositAmount,
               });
+              completedEffects.push('adapter.transferBetweenSubaccounts returned: ' + String(transferResult.success));
               if (transferResult.success) {
                 console.log(`${logPrefix} Secondary top-up transfer successful: $${depositAmount.toFixed(2)}`);
                 freeCollateral += depositAmount;
@@ -3680,13 +3808,17 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
           // Auto-unpark just enough from the account Vault when plain wallet USDC
           // can't cover the shortfall. Skipped for per-bot (independent_trader) vaults.
           if (agentUsdcBalance < shortfall && !isIndependentTrader) {
+            { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+            attemptedEffects.push('autoUnparkAccountVaultForUsdc attempted');
             const realized = await autoUnparkAccountVaultForUsdc({
               walletAddress,
               agentPublicKey,
               agentSecretKey: agentPrivateKeyEncrypted,
               neededUsdc: shortfall - agentUsdcBalance,
               logPrefix,
+              beforeOpeningEffect,
             });
+              completedEffects.push('autoUnparkAccountVaultForUsdc returned: ' + JSON.stringify(realized));
             if (realized > 0) {
               agentUsdcBalance = await getAgentUsdcBalance(agentPublicKey);
               console.log(`${logPrefix} Agent wallet USDC after Vault sweep: $${agentUsdcBalance.toFixed(2)}`);
@@ -3695,13 +3827,18 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
 
           if (agentUsdcBalance >= shortfall) {
             const depositAmount = Math.ceil(shortfall * 100) / 100;
+            { const failure = await recheckSizingAuthority(); if (failure) return failure; }
+            { const failure = await recheckFundingEffect(); if (failure) return failure; }
+            attemptedEffects.push('executeAgentDeposit attempted');
             const depositResult = await executeAgentDeposit(
               agentPublicKey,
               agentPrivateKeyEncrypted,
               depositAmount,
               subAccountId,
               adapter,
+              beforeOpeningEffect,
             );
+              completedEffects.push('executeAgentDeposit returned: ' + String(depositResult.success));
 
             if (depositResult.success) {
               console.log(`${logPrefix} Auto top-up successful: deposited $${depositAmount.toFixed(2)}, tx: ${depositResult.signature}`);
@@ -3785,20 +3922,25 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
   // to the exact `minOrderUsd / price` contracts gets its sub-lot remainder truncated away and
   // the order lands BELOW the floor (Pacifica 422 "Order amount too low: 8.14 < 10"). The shared
   // evaluateNotionalFloor() mirrors that floor and, when bumping, rounds UP to a whole lot
-  // multiple (+ a 1% cushion for oracle↔mark drift) so the adapter's floor can't drop us back
+  // multiple (+ the existing 1% cushion for price drift) so the adapter's floor can't drop us back
   // under the minimum. See server/trade-sizing-math.ts.
+  { const failure = await recheckSizingAuthority(); if (failure) return failure; }
   const notionalFloor = evaluateNotionalFloor(
     finalContractSize,
-    oraclePrice,
+    minimumPriceForSizing,
     minOrderUsd,
-    minOrderSize > 0 ? minOrderSize : 0,
+    minOrderSize,
   );
+  if (notionalFloor.rejected) {
+    return { success: false, tradeAmountUsd, finalContractSize, freeCollateral,
+      maxTradeableValue, effectiveLeverage, error: notionalFloor.reason };
+  }
   if (notionalFloor.needsBump) {
-    const requiredCollateralForMin = (notionalFloor.bumpedNotional / effectiveLeverage) * 1.05;
+    const requiredCollateralForMin = (notionalFloor.bumpedContracts * oraclePrice / effectiveLeverage) * 1.05;
     if (freeCollateral >= requiredCollateralForMin) {
       console.log(`${logPrefix} NOTIONAL FLOOR: quantized $${notionalFloor.quantizedNotional.toFixed(2)} < $${minOrderUsd} minimum. Bumping ${finalContractSize.toFixed(6)} → ${notionalFloor.bumpedContracts.toFixed(6)} contracts (lot-aligned, $${notionalFloor.bumpedNotional.toFixed(2)} notional; need $${requiredCollateralForMin.toFixed(2)} collateral, have $${freeCollateral.toFixed(2)})`);
       finalContractSize = notionalFloor.bumpedContracts;
-      tradeAmountUsd = notionalFloor.bumpedNotional;
+      tradeAmountUsd = finalContractSize * oraclePrice;
     } else {
       const pauseReason = `Order notional $${notionalFloor.quantizedNotional.toFixed(2)} below Pacifica minimum of $${minOrderUsd}. Need $${requiredCollateralForMin.toFixed(2)} equity at ${effectiveLeverage}x leverage, but only $${freeCollateral.toFixed(2)} available. Deposit more funds to trade.`;
       console.log(`${logPrefix} ${pauseReason}`);
@@ -3816,7 +3958,16 @@ export async function computeTradeSizingAndTopUp(params: TradeSizingParams): Pro
     }
   }
 
+  // Signal intent is formed when this sizing result is returned. Keep the
+  // no-bump proposal on the venue lot before that point as well.
+  if (adapter.protocolName === 'pacifica' && !notionalFloor.needsBump) {
+    finalContractSize = notionalFloor.quantizedContracts;
+    tradeAmountUsd = finalContractSize * oraclePrice;
+  }
+
+  { const failure = await recheckSizingAuthority(finalContractSize); if (failure) return failure; }
   return {
+    completedEffects, attemptedEffects,
     success: true,
     tradeAmountUsd,
     finalContractSize,
@@ -3849,6 +4000,7 @@ export async function provisionExternalKeyBotSubaccount(params: {
   agentMnemonic: Buffer | null;
   adapter: ProtocolAdapter;
   fundingAmount: number;
+  market?: string;
   umk?: Buffer;
 }): Promise<{
   botSubaccountPublicKey: string;
@@ -3871,6 +4023,16 @@ export async function provisionExternalKeyBotSubaccount(params: {
   if (!(Number.isFinite(fundingAmount) && fundingAmount > 0)) {
     throw new Error(`Funding amount must be > 0 to provision a ${adapter.protocolName} subaccount`);
   }
+  if (adapter.protocolName === 'pacifica') {
+    if (!params.market) throw new Error('Pacifica market unavailable before provisioning');
+    const authority = await checkOpeningEffectAuthority(adapter, params.market);
+    if (!authority.ok) throw new Error(authority.reason);
+  }
+  const beforeOpeningEffect = async () => {
+    if (adapter.protocolName !== 'pacifica') return;
+    const authority = await checkOpeningEffectAuthority(adapter, params.market!);
+    if (!authority.ok) throw new Error(authority.reason);
+  };
 
   const { Keypair } = await import('@solana/web3.js');
 
@@ -3957,11 +4119,13 @@ export async function provisionExternalKeyBotSubaccount(params: {
   try {
   if (adapter.protocolName === 'pacifica') {
     const pacificaAdapter = adapter as unknown as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+    await beforeOpeningEffect();
     const result = await pacificaAdapter.provisionFundedSubaccount({
       mainSecretKey: agentKeypair.secretKey,
       subSecretKey: botSecretKey,
       agentPublicKey: agentKeypair.publicKey.toString(),
       fundingAmount,
+      beforeOpeningEffect,
     });
     botSubaccountPublicKey = result.subaccountId;
     if (botSubaccountPublicKey !== botSubaccountPublicKeyPrepared) {
@@ -5845,6 +6009,10 @@ export async function routeSignalToSubscribers(
 
           // Use shared trade sizing helper
           const subBotCtx = subCloseCtx;
+          const sizingAdapter = getAdapterForBot(subBot);
+          const sizingAuthority = sizingAdapter.protocolName === 'pacifica'
+            ? { sizingProtocol: 'pacifica' as const, markPrice: await acquireMarkPrice(sizingAdapter, subBot.market) }
+            : { sizingProtocol: 'legacy' as const };
           const sizingResult = await computeTradeSizingAndTopUp({
             agentPublicKey: subWallet.agentPublicKey!,
             agentPrivateKeyEncrypted: subAgentSecretKey,
@@ -5859,8 +6027,10 @@ export async function routeSignalToSubscribers(
             signalPercent,
             oraclePrice,
             logPrefix: `[Subscriber Routing] Bot ${subBot.id}`,
+            slippageBps: subWallet.slippageBps ?? 50,
             botCtx: subBotCtx,
-            adapter: getAdapterForBot(subBot),
+            adapter: sizingAdapter,
+            ...sizingAuthority,
             vaultAllOut: subBot.vaultAllOut ?? true,
           });
 
@@ -10138,6 +10308,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(500).json({ error: "Could not get market price" });
       }
 
+      const sizingAdapter = getAdapterForBot(bot);
+      const sizingAuthority = sizingAdapter.protocolName === 'pacifica'
+        ? { sizingProtocol: 'pacifica' as const, markPrice: await acquireMarkPrice(sizingAdapter, bot.market) }
+        : { sizingProtocol: 'legacy' as const };
       const sizingResult = await computeTradeSizingAndTopUp({
         agentPublicKey: wallet.agentPublicKey,
         agentPrivateKeyEncrypted: agentSecret,
@@ -10152,8 +10326,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         signalPercent: 0,
         oraclePrice,
         logPrefix: "[ManualTrade]",
+        slippageBps: wallet.slippageBps ?? 50,
         botCtx: manualBotCtx,
-        adapter: getAdapterForBot(bot),
+        adapter: sizingAdapter,
+        ...sizingAuthority,
         vaultAllOut: bot.vaultAllOut ?? true,
       });
 
@@ -15822,6 +15998,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const agentKeypair = resolveAgentKeypair(_botCreateAgentKey.secretKey);
         const adapter = createAdapter;
         const caps = createCaps;
+        const beforeOpeningEffect = async () => {
+          if (adapter.protocolName !== 'pacifica') return;
+          const authority = await checkOpeningEffectAuthority(adapter, market);
+          if (!authority.ok) throw new Error(authority.reason);
+        };
 
         let botKeypair: import('@solana/web3.js').Keypair | null = null;
         if (caps.requiresExternalSubaccountKey) {
@@ -16016,6 +16197,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               console.log(`[Bot Creation] Skipping Vault auto-unpark: agent SOL ${agentSolForCreate.toFixed(4)} < required ${requiredSolForCreate.toFixed(4)} for ${adapter.protocolName} create (provisioning would fail anyway; leaving Vault untouched)`);
             } else {
               const shortfall = fundingAmountNum - walletUsdcBeforeUnpark;
+              await beforeOpeningEffect();
               const realized = await autoUnparkAccountVaultForUsdc({
                 walletAddress: req.walletAddress!,
                 agentPublicKey: agentPubForUnpark,
@@ -16023,6 +16205,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 neededUsdc: shortfall,
                 all: true,
                 logPrefix: '[Bot Creation]',
+                beforeOpeningEffect,
               });
               if (realized > 0) {
                 console.log(`[Bot Creation] Vault auto-unpark (all-out) realized $${realized.toFixed(2)} toward $${shortfall.toFixed(2)} shortfall before provisioning ${adapter.protocolName} bot`);
@@ -16068,11 +16251,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               } else {
                 await storage.markSubaccountVerifiedEmpty(adapter.protocolName, subId);
                 const pacificaAdapter = adapter as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+                await beforeOpeningEffect();
                 const reuseResult = await pacificaAdapter.reuseSubaccount!({
                   mainSecretKey: agentKeypair.secretKey,
                   agentPublicKey: agentPub,
                   subaccountId: subId,
                   fundingAmount: fundingAmountNum,
+                  beforeOpeningEffect,
                 });
                 botSubaccountPublicKey = subId;
                 // Stay 'pending' until the post-insert rebind writes the bot-row key,
@@ -16157,11 +16342,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         try {
           if (usePacificaAtomicProvision && !reuseHandled) {
             const pacificaAdapter = adapter as import('./protocol/pacifica/pacifica-adapter').PacificaAdapter;
+            await beforeOpeningEffect();
             const result = await pacificaAdapter.provisionFundedSubaccount({
               mainSecretKey: agentKeypair.secretKey,
               subSecretKey: botKeypair!.secretKey,
               agentPublicKey: agentKeypair.publicKey.toString(),
               fundingAmount: fundingAmountNum,
+              beforeOpeningEffect,
             });
 
             botSubaccountPublicKey = result.subaccountId;
@@ -20170,6 +20357,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       const baseCapital = parseFloat(bot.maxPositionSize || "0");
 
+      const sizingAdapter = getAdapterForBot(bot);
+      const sizingAuthority = sizingAdapter.protocolName === 'pacifica'
+        ? { sizingProtocol: 'pacifica' as const, markPrice: await acquireMarkPrice(sizingAdapter, bot.market) }
+        : { sizingProtocol: 'legacy' as const };
       const sizingResult = await computeTradeSizingAndTopUp({
         agentPublicKey: wallet.agentPublicKey!,
         agentPrivateKeyEncrypted: agentKeyResult.secretKey,
@@ -20184,8 +20375,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         signalPercent,
         oraclePrice,
         logPrefix: "[Webhook]",
+        slippageBps: wallet.slippageBps ?? 50,
         botCtx: webhookBotCtx,
-        adapter: getAdapterForBot(bot),
+        adapter: sizingAdapter,
+        ...sizingAuthority,
         vaultAllOut: bot.vaultAllOut ?? true,
       });
 
@@ -21604,6 +21797,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // Use shared trade sizing helper
       const uwOpenSubAccountId = userWebhookBotCtx ? 0 : subAccountId;
+      const sizingAdapter = getAdapterForBot(bot);
+      const sizingAuthority = sizingAdapter.protocolName === 'pacifica'
+        ? { sizingProtocol: 'pacifica' as const, markPrice: await acquireMarkPrice(sizingAdapter, bot.market) }
+        : { sizingProtocol: 'legacy' as const };
       const sizingResult = await computeTradeSizingAndTopUp({
         agentPublicKey: userWallet.agentPublicKey!,
         agentPrivateKeyEncrypted: agentKeyResult.secretKey,
@@ -21618,8 +21815,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         signalPercent,
         oraclePrice,
         logPrefix: "[User Webhook]",
+        slippageBps: userWallet.slippageBps ?? 50,
         botCtx: userWebhookBotCtx,
-        adapter: getAdapterForBot(bot),
+        adapter: sizingAdapter,
+        ...sizingAuthority,
         vaultAllOut: bot.vaultAllOut ?? true,
       });
 
@@ -23577,6 +23776,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             agentMnemonic: copyBotMnemonic,
             adapter: subAdapter,
             fundingAmount: capitalInvested,
+            market: originalBot.market,
           });
           copyBotMnemonic = null; // ownership transferred into the helper, which zeroizes it
         } catch (provErr: any) {
@@ -24762,6 +24962,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!leverageAuthority.allowed) {
         return res.status(503).json({ error: leverageAuthority.error });
       }
+      if (retryAdapter.protocolName === 'pacifica') {
+        const retryAuthority = await checkOpeningEffectAuthority(retryAdapter, market);
+        if (!retryAuthority.ok) return res.status(503).json({ error: retryAuthority.reason });
+      }
       const baseCapital = parseFloat(bot.maxPositionSize?.toString() || '0'); // This is leveraged position size
       const effectiveLeverage = computeRetryEffectiveLeverage(Number(bot.leverage), leverageAuthority.venueMaxLeverage);
       const targetEquity = baseCapital / effectiveLeverage; // The investment amount user wants
@@ -24785,6 +24989,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               } else {
               const agentMainInfo = await getExchangeAccountInfo(wallet.agentPublicKey!, 0, adapter);
               if (agentMainInfo.freeCollateral >= depositAmount) {
+                const authority = await checkOpeningEffectAuthority(adapter, market);
+                if (!authority.ok) return res.status(503).json({ error: authority.reason });
                 const transferResult = await adapter.transferBetweenSubaccounts({
                   agentSecretKey: agentKeypairForTopUp.secretKey,
                   mainWalletAddress: agentKeypairForTopUp.publicKey.toString(),
@@ -24815,12 +25021,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             
             if (agentUsdcBalance >= topUpNeeded) {
               const depositAmount = Math.ceil(topUpNeeded * 100) / 100;
+              const authority = await checkOpeningEffectAuthority(retryAdapter, market);
+              if (!authority.ok) return res.status(503).json({ error: authority.reason });
               const depositResult = await executeAgentDeposit(
                 wallet.agentPublicKey!,
                 retryAgentSecret,
                 depositAmount,
                 subAccountId,
                 getAdapterForBot(bot),
+                async () => {
+                  const authority = await checkOpeningEffectAuthority(retryAdapter, market);
+                  if (!authority.ok) throw new Error(authority.reason);
+                },
               );
               
               if (depositResult.success) {
@@ -26387,6 +26599,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
           try {
             const debugSubBotCtx = getBotSubaccountContext(subBot);
+            const sizingAdapter = getAdapterForBot(subBot);
+            const sizingAuthority = sizingAdapter.protocolName === 'pacifica'
+              ? { sizingProtocol: 'pacifica' as const, markPrice: await acquireMarkPrice(sizingAdapter, subBot.market) }
+              : { sizingProtocol: 'legacy' as const };
             const sizingResult = await computeTradeSizingAndTopUp({
               agentPublicKey: subWallet.agentPublicKey!,
               agentPrivateKeyEncrypted: debugAgentKey.secretKey,
@@ -26401,8 +26617,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               signalPercent,
               oraclePrice,
               logPrefix: `[Debug Routing] Bot ${subBot.id}`,
+              slippageBps: subWallet.slippageBps ?? 50,
               botCtx: debugSubBotCtx,
-              adapter: getAdapterForBot(subBot),
+              adapter: sizingAdapter,
+              ...sizingAuthority,
               vaultAllOut: subBot.vaultAllOut ?? true,
             });
             

@@ -1,3 +1,4 @@
+import { observePacificaConstraints } from "../../server/protocol/market-constraints";
 // WO-4 acceptance: unit tests for server/ai-trader/decide.ts — the decision cycle.
 // The WO-1 gateway is partially mocked (real LlmGatewayError class kept so
 // `instanceof` in decide.ts matches), storage and models-catalog pricing are
@@ -101,8 +102,15 @@ function makeBot(overrides: Partial<AiTraderBot> = {}): AiTraderBot {
   } as unknown as AiTraderBot;
 }
 
+function entryMarkets() {
+  return [{ internalSymbol: "SOL-PERP", constraintObservation: observePacificaConstraints({
+    tick_size: "0.01", lot_size: "0.01", min_order_size: "10",
+  }, "SOL-PERP", Date.now()) }];
+}
+
 function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   return {
+    getMarkets: vi.fn(async () => entryMarkets()),
     getMaintenanceMarginWeight: vi.fn().mockReturnValue(0.02),
     quantizeOrderSize: vi.fn((_m: string, s: number) => Math.floor(s * 100) / 100),
     getBalances: vi.fn().mockResolvedValue({ freeCollateral: 1000 }),
@@ -842,5 +850,69 @@ describe("risk_based sizing — decide.ts equity wiring", () => {
     expect(result.rejected).toBe(false);
     expect((adapter.getBalances as any)).not.toHaveBeenCalled();
     expect(pnlMapMock).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("H.53 constraint admission audit", () => {
+  it.each([false, true])("records stale constraints without losing cost or throwing (paper=%s)", async (paperMode) => {
+    const { ConstraintAdmissionError } = await import("../../server/protocol/market-constraints");
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+    const adapter = makeAdapter({ quantizeOrderSize: vi.fn(() => {
+      throw new ConstraintAdmissionError({ ok: false, code: "constraint_expired", reason: "stale observation; no replacement" });
+    }) });
+    const result = await runDecision({ bot: makeBot({ protocol: "pacifica", paperMode }),
+      apiKey: "EXAMPLE", context: makeContext(), adapter });
+    expect(result).toMatchObject({ ok: true, rejected: true,
+      violations: [expect.objectContaining({ code: "constraint_unavailable", fatal: true })] });
+    expect(adapter.getMarkets).toHaveBeenCalledOnce();
+    expect(insertMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "rejected_guardrails",
+      llmCostUsd: expect.stringMatching(/0\.012345/), clampedDecision: null,
+      guardrailViolations: [expect.objectContaining({ code: "constraint_unavailable" })] }));
+  });
+  it("audits a failed market refresh before any sizing callback", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+    const adapter = makeAdapter({ getMarkets: vi.fn().mockRejectedValue(new Error("offline")) });
+    await expect(runDecision({ bot: makeBot({ protocol: "pacifica" }), apiKey: "EXAMPLE",
+      context: makeContext(), adapter })).resolves.toMatchObject({ ok: true, rejected: true });
+    expect(adapter.quantizeOrderSize).not.toHaveBeenCalled();
+    expect(insertMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "rejected_guardrails" }));
+  });
+  it("awaits refreshed constraints before invoking guardrail sizing", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+    let refreshed = false;
+    const adapter = makeAdapter({ getMarkets: vi.fn(async () => { await Promise.resolve(); refreshed = true; return entryMarkets(); }),
+      quantizeOrderSize: vi.fn((_market: string, size: number) => { expect(refreshed).toBe(true); return size; }) });
+    await expect(runDecision({ bot: makeBot({ protocol: "pacifica" }), apiKey: "EXAMPLE",
+      context: makeContext(), adapter })).resolves.toMatchObject({ ok: true, rejected: false });
+    expect(adapter.quantizeOrderSize).toHaveBeenCalled();
+  });
+});
+
+
+// Successful refreshes may remove a previously initialized market.
+describe("r2j absent market audit", () => {
+  it.each([false, true])("audits a successful refresh without the target market (paper=%s)", async (paperMode) => {
+    const { runDecision } = await importDecide();
+    callMock.mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
+    const adapter = makeAdapter({
+      getMarkets: vi.fn().mockResolvedValue([{ internalSymbol: "BTC-PERP" }]),
+      getMaintenanceMarginWeight: vi.fn(() => { throw new Error("Market SOL-PERP not found"); }),
+      quantizeOrderSize: vi.fn(() => { throw new Error("Market SOL-PERP not found"); }),
+    });
+    await expect(runDecision({ bot: makeBot({ protocol: "pacifica", paperMode }), apiKey: "EXAMPLE",
+      context: makeContext(), adapter })).resolves.toMatchObject({ ok: true, rejected: true,
+      violations: [expect.objectContaining({ code: "constraint_unavailable", fatal: true })] });
+    expect(adapter.getMarkets).toHaveBeenCalledOnce();
+    expect(adapter.getMaintenanceMarginWeight).not.toHaveBeenCalled();
+    expect(adapter.quantizeOrderSize).not.toHaveBeenCalled();
+    expect(insertMock).toHaveBeenCalledOnce();
+    expect(insertMock).toHaveBeenCalledWith(expect.objectContaining({ outcome: "rejected_guardrails",
+      llmCostUsd: expect.stringMatching(/0\.012345/), clampedDecision: null,
+      rawDecision: expect.objectContaining({ action: "long" }),
+      guardrailViolations: [expect.objectContaining({ code: "constraint_unavailable" })] }));
   });
 });

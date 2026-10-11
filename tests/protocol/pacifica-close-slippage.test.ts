@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi , afterEach} from 'vitest';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
 import type { ClosePositionParams, MarketOrderParams } from '../../server/protocol/protocol-types.js';
@@ -32,7 +32,9 @@ function request(): ClosePositionParams {
 }
 
 function createAdapter(): PacificaAdapter {
-  return new PacificaAdapter({ baseUrl: 'http://test-pacifica.invalid' });
+  const adapter = new PacificaAdapter({ baseUrl: 'http://test-pacifica.invalid' });
+  vi.spyOn(adapter, 'getStrictPositionForMarket').mockImplementation(async () => (await adapter.getPositions(ACCOUNT))[0] ?? null);
+  return adapter;
 }
 
 describe('PacificaAdapter.closePosition slippage propagation', () => {
@@ -76,6 +78,8 @@ describe('PacificaAdapter.closePosition slippage propagation', () => {
     adapter.getRegistry = () => ({ internalToProtocol: () => 'SOL' });
     adapter.ensurePacificaEnrollment = vi.fn(async () => ({ builderApproved: false }));
     adapter.quantizeOrderSizeCeil = vi.fn((_symbol: string, size: number) => size);
+    adapter.getStrictPositionForMarket = vi.fn(async () => position(2.25));
+    adapter.getExitStep = vi.fn(async () => 0.01);
     adapter.post = vi.fn(async () => ({ order_id: 'close-1', status: 'filled' }));
     adapter.mapOrderResponse = vi.fn(() => ({ success: true, status: 'filled' }));
     let operationData: Record<string, unknown> | undefined;
@@ -102,4 +106,19 @@ describe('PacificaAdapter.closePosition slippage propagation', () => {
       build.mockRestore();
     }
   });
+});
+
+
+// Install before module evaluation; restored spies return to a denying transport.
+const deniedHttp = vi.hoisted(() => {
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('Unmocked HTTP denied by test network boundary');
+  }) as typeof fetch;
+  return attempts;
+});
+afterEach(() => {
+  const unexpected = deniedHttp.splice(0);
+  expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
 });

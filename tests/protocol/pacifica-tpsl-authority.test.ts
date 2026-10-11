@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi , afterEach} from 'vitest';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
 import type { TpSlParams } from '../../server/protocol/protocol-types.js';
@@ -21,14 +21,25 @@ function position(baseSize: number, internalSymbol = 'SOL-PERP') {
 
 function createAdapter(): any {
   const adapter = new PacificaAdapter({
-    baseUrl: 'https://api.pacifica.fi/api/v1',
-    wsUrl: 'wss://ws.pacifica.fi/ws',
+    baseUrl: 'http://test-pacifica.invalid',
+    wsUrl: 'ws://test-pacifica.invalid',
   }) as any;
   adapter.getRegistry = () => ({
     internalToProtocol: (symbol: string) => {
       if (symbol !== 'SOL-PERP') throw new Error(`unexpected symbol ${symbol}`);
       return 'SOL';
     },
+    protocolToInternal: (symbol: string) => symbol === 'SOL' ? 'SOL-PERP' : symbol,
+  });
+  adapter.get = vi.fn(async (path: string) => {
+    if (path === '/info') return [{ symbol: 'SOL', tick_size: '0.01', lot_size: '0.01', min_order_size: '10', max_leverage: 10 }];
+    if (path === '/info/prices') return { success: true, data: [{ symbol: 'SOL', mark: '100', timestamp: Date.now() }] };
+    if (path === '/positions') {
+      const positions = await adapter.getPositions();
+      return positions.map((p: any) => ({ symbol: p.internalSymbol === 'SOL-PERP' ? 'SOL' : p.internalSymbol,
+        side: p.baseSize > 0 ? 'bid' : 'ask', amount: String(Math.abs(p.baseSize)), entry_price: String(p.entryPrice) }));
+    }
+    throw new Error(`Unmocked venue read ${path}`);
   });
   adapter.ensurePacificaEnrollment = vi.fn(async () => ({ builderApproved: false }));
   adapter.getPrice = vi.fn(async () => 100);
@@ -186,4 +197,19 @@ describe('PacificaAdapter.setTpSl builder policy precedence', () => {
   it('absent policy preserves legacy enrollment behavior', async () => {
     await expect(captureBuilderCode({ builderApproved: true })).resolves.toBe('QuantumVault');
   });
+});
+
+
+// Install before module evaluation; restored spies return to a denying transport.
+const deniedHttp = vi.hoisted(() => {
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('Unmocked HTTP denied by test network boundary');
+  }) as typeof fetch;
+  return attempts;
+});
+afterEach(() => {
+  const unexpected = deniedHttp.splice(0);
+  expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
 });

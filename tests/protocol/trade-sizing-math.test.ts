@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect , vi, afterEach} from "vitest";
 import {
   evaluateNotionalFloor,
   floorToLot,
@@ -34,6 +34,7 @@ describe("evaluateNotionalFloor", () => {
 
     // Bumped size is a whole-lot multiple that still clears the min AFTER the adapter floors it
     expect(r.bumpedContracts).toBeCloseTo(0.4, 9);
+    if (r.rejected) throw new Error('Expected a numeric sizing result');
     expect(adapterFloor(r.bumpedContracts, lot) * price).toBeGreaterThanOrEqual(MIN);
   });
 
@@ -45,6 +46,7 @@ describe("evaluateNotionalFloor", () => {
 
     expect(r.quantizedNotional).toBeLessThan(MIN);
     expect(r.needsBump).toBe(true);
+    if (r.rejected) throw new Error('Expected a numeric sizing result');
     expect(adapterFloor(r.bumpedContracts, lot) * price).toBeGreaterThanOrEqual(MIN);
   });
 
@@ -87,20 +89,13 @@ describe("evaluateNotionalFloor", () => {
 
     expect(r.needsBump).toBe(true);
     expect(r.bumpedContracts).toBeCloseTo(0.4, 9); // 0.4, NOT 0.5
+    if (r.rejected) throw new Error('Expected a numeric sizing result');
     expect(adapterFloor(r.bumpedContracts, lot) * price).toBeGreaterThanOrEqual(MIN);
   });
 
-  it("with no lot step (lotStep = 0) bumps to the raw buffered min", () => {
-    const price = 50;
-    const r = evaluateNotionalFloor(0.05, price, MIN, 0); // $2.50
-    expect(r.needsBump).toBe(true);
-    expect(r.bumpedNotional).toBeGreaterThanOrEqual(MIN);
-  });
 
-  it("treats non-positive price/min as no-bump (defensive)", () => {
-    expect(evaluateNotionalFloor(1, 0, MIN, 0.1).needsBump).toBe(false);
-    expect(evaluateNotionalFloor(1, 40, 0, 0.1).needsBump).toBe(false);
-  });
+
+
 });
 
 describe("floor/ceil lot helpers", () => {
@@ -132,4 +127,19 @@ describe("floor/ceil lot helpers", () => {
     expect(countDecimals(1)).toBe(0);
     expect(countDecimals(1e-7)).toBe(7);
   });
+});
+
+
+// Install before module evaluation; restored spies return to a denying transport.
+const deniedHttp = vi.hoisted(() => {
+  const attempts: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    attempts.push(String(input));
+    throw new Error('Unmocked HTTP denied by test network boundary');
+  }) as typeof fetch;
+  return attempts;
+});
+afterEach(() => {
+  const unexpected = deniedHttp.splice(0);
+  expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
 });

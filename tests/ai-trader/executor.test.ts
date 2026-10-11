@@ -1,3 +1,4 @@
+import { observePacificaConstraints } from "../../server/protocol/market-constraints";
 // WO-5 acceptance: unit tests for server/ai-trader/executor.ts — the execution
 // layer. Storage, session-v3 crypto and notifications are mocked (decide.test.ts
 // pattern); paper-math runs for real (pure). Covers: entry-shape refusals, G6
@@ -202,8 +203,15 @@ function protectiveSnapshot(orderId = "st-1", triggerPrice = "145") {
   };
 }
 
+function entryMarkets() {
+  return [{ internalSymbol: "SOL-PERP", constraintObservation: observePacificaConstraints({
+    tick_size: "0.01", lot_size: "0.01", min_order_size: "10",
+  }, "SOL-PERP", Date.now()) }];
+}
+
 function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
   return {
+    getMarkets: vi.fn(async () => entryMarkets()),
     getBalances: vi.fn(async () => {
       callOrder.push("getBalances");
       return { totalEquity: 1000, freeCollateral: 900, totalMarginUsed: 0, unrealizedPnl: 0 };
@@ -1983,5 +1991,58 @@ describe("risk-based sizing — slippage constant sync pin", () => {
     const { ENTRY_MAX_SLIPPAGE_PCT } = await importExecutor();
     const { MAX_ENTRY_SLIPPAGE_FRAC } = await import("../../server/ai-trader/guardrails");
     expect(MAX_ENTRY_SLIPPAGE_FRAC).toBe(ENTRY_MAX_SLIPPAGE_PCT / 100);
+  });
+});
+
+
+describe("H.53 typed constraint revalidation", () => {
+  it.each([false, true])("refuses expired constraints before execution (paper=%s)", async (paperMode) => {
+    if (!paperMode) armLiveAuth();
+    const { executeDecision } = await importExecutor();
+    const { ConstraintAdmissionError } = await import("../../server/protocol/market-constraints");
+    const adapter = makeAdapter({ quantizeOrderSize: vi.fn(() => {
+      throw new ConstraintAdmissionError({ ok: false, code: "constraint_expired", reason: "stale observation" });
+    }) });
+    const result = await executeDecision({ authoritySource: "internal_cycle",
+      bot: makeBot({ protocol: "pacifica", paperMode }), decisionId: "d-1", clamped: makeClamped(), adapter, markPrice: 150 });
+    expect(result).toMatchObject({ ok: false, reason: "execution_revalidation_failed",
+      constraintRejection: { ok: false, code: "constraint_expired" } });
+    expect(adapter.getMarkets).toHaveBeenCalledOnce();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(commitPaperEntryMock).not.toHaveBeenCalled();
+  });
+  it("returns a typed paper failure when the refresh itself fails", async () => {
+    const { executeDecision } = await importExecutor();
+    const adapter = makeAdapter({ getMarkets: vi.fn().mockRejectedValue(new Error("offline")) });
+    const result = await executeDecision({ authoritySource: "internal_cycle",
+      bot: makeBot({ protocol: "pacifica", paperMode: true }), decisionId: "d-1", clamped: makeClamped(), adapter, markPrice: 150 });
+    expect(result).toMatchObject({ ok: false, reason: "execution_revalidation_failed",
+      constraintRejection: { code: "constraint_unavailable" } });
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("r2j absent market execution", () => {
+  it.each([false, true])("types a successful refresh without the target market (paper=%s)", async (paperMode) => {
+    if (!paperMode) armLiveAuth();
+    const { executeDecision } = await importExecutor();
+    const adapter = makeAdapter({
+      getMarkets: vi.fn().mockResolvedValue([{ internalSymbol: "BTC-PERP" }]),
+      getMaintenanceMarginWeight: vi.fn(() => { throw new Error("Market SOL-PERP not found"); }),
+      quantizeOrderSize: vi.fn(() => { throw new Error("Market SOL-PERP not found"); }),
+    });
+    const result = await executeDecision({ authoritySource: "internal_cycle",
+      bot: makeBot({ protocol: "pacifica", paperMode }), decisionId: "d-1", clamped: makeClamped(), adapter, markPrice: 150 });
+    expect(result).toMatchObject({ ok: false, reason: "execution_revalidation_failed",
+      constraintRejection: { ok: false, code: "constraint_unavailable" } });
+    expect(adapter.getMarkets).toHaveBeenCalledOnce();
+    expect(adapter.getMaintenanceMarginWeight).not.toHaveBeenCalled();
+    expect(adapter.quantizeOrderSize).not.toHaveBeenCalled();
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
+    expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(commitPaperEntryMock).not.toHaveBeenCalled();
   });
 });
