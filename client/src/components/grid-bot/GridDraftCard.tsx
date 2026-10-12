@@ -1,4 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';
+import {BarChart3} from 'lucide-react';
 import {Button} from '@/components/ui/button';
 import {Card,CardContent,CardHeader,CardTitle} from '@/components/ui/card';
 import {walletAuthHeaders} from '@/lib/queryClient';
@@ -25,6 +26,8 @@ function GridCollection({authenticated,identity}:{authenticated:boolean;identity
     }).catch(()=>{if(!controller.signal.aborted&&order.current.accepts(seq))setError('Grid bots unavailable. Retry to load current state.');});
     return()=>{controller.abort();order.current.next();};
   },[authenticated,identity,refresh]);
+  // Until Grid is enabled, or the owner already has Grid bots, keep the original coming-soon card.
+  if(!enabled&&!bots.length)return <GridComingSoon/>;
   return <Card data-testid="card-grid-bot"><CardHeader><CardTitle className="text-amber-500">Pacifica Grid Bots</CardTitle></CardHeader><CardContent className="space-y-3">
     <p className="text-sm text-muted-foreground">Live start and worker are disabled. PnL excludes funding.</p>
     {!authenticated?<p className="text-sm">Connect your wallet to view your Grid bots.</p>:<>
@@ -37,4 +40,16 @@ function GridCollection({authenticated,identity}:{authenticated:boolean;identity
     {selected&&identity?<GridBotDrawer key={identity+selected} id={selected} createEnabled={enabled} onClose={()=>{setSelected(null);setRefresh(v=>v+1);}} onAdjust={intent=>{setSelected(null);setCreate({key:Date.now(),intent});}}/>:null}
     {create?<GridCreateSheet key={(identity??'anonymous')+create.key} open onOpenChange={open=>{if(!open)setCreate(null);}} initialIntent={create.intent} onSaved={()=>{setCreate(null);setRefresh(v=>v+1);}}/>:null}
   </CardContent></Card>;
+}
+function GridComingSoon(){
+  return <div className="gradient-border p-5 noise flex flex-col gap-3 opacity-60 select-none cursor-not-allowed" aria-hidden="true" data-testid="card-grid-bot-coming-soon">
+    <div className="flex items-start justify-between">
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-muted/50 to-muted/30 flex items-center justify-center flex-shrink-0"><BarChart3 className="w-5 h-5 text-muted-foreground"/></div>
+        <div><h3 className="font-semibold">Grid Bot</h3><p className="text-xs text-muted-foreground">Automated grid trading</p></div>
+      </div>
+      <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border/60 shrink-0">Coming soon</span>
+    </div>
+    <p className="text-sm text-muted-foreground">Buys and sells automatically within a price range, capturing volatility without predicting direction.</p>
+  </div>;
 }

@@ -56,7 +56,8 @@ describe('Planner client authority boundaries', () => {
     for (const props of [{ authenticated: false, identity: null }, { authenticated: true, identity: 'EXAMPLE' }]) {
       const html = renderToStaticMarkup(createElement(GridPlannerCard, props));
       expect(html).toBe('');
-      const live=renderToStaticMarkup(createElement(GridDraftCard,props));expect(live).toContain('card-grid-bot');expect(live).toContain('Live start and worker are disabled');expect(live).toContain('PnL excludes funding');expect(live).not.toContain('Coming soon');expect(live).not.toContain('Start bot');
+      // Before Grid is enabled (and with no Grid bots) the original coming-soon card stays.
+      const live=renderToStaticMarkup(createElement(GridDraftCard,props));expect(live).toContain('card-grid-bot-coming-soon');expect(live).toContain('Coming soon');expect(live).not.toContain('Start bot');
     }
     expect(readableDecimal('123456.000001')).toBe('123,456.000001');
   });
