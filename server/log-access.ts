@@ -27,7 +27,7 @@
  *  - /api/logs/telemetry  — tail of logs/telemetry.log(+.1) (plain text)
  */
 
-import fs from "node:fs";
+import fs from "node:fs/promises";
 import path from "path";
 import crypto from "crypto";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -179,13 +179,13 @@ export function parseCurrentBootMonitor(
   }
 }
 
-function readTelemetryTailSnapshot(lines: number, grep?: string): TelemetryTailSnapshot {
+async function readTelemetryTailSnapshot(lines: number, grep?: string): Promise<TelemetryTailSnapshot> {
   let raw = "";
   let readable = true;
   let activeRead = false;
   for (const file of [TELEMETRY_ROTATED, TELEMETRY_FILE]) {
     try {
-      raw += fs.readFileSync(file, "utf8");
+      raw += await fs.readFile(file, "utf8");
       if (file === TELEMETRY_FILE) activeRead = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") readable = false;
@@ -206,8 +206,8 @@ function readTelemetryTailSnapshot(lines: number, grep?: string): TelemetryTailS
   return { text: snapshotText, readable, activeRead };
 }
 
-function readTelemetryTail(lines: number, grep?: string): string {
-  return readTelemetryTailSnapshot(lines, grep).text;
+async function readTelemetryTail(lines: number, grep?: string): Promise<string> {
+  return (await readTelemetryTailSnapshot(lines, grep)).text;
 }
 
 function errorRowToText(e: {
@@ -260,8 +260,8 @@ export function registerLogAccessRoutes(app: Express): void {
         currentBootMonitor: CurrentBootMonitor | null;
       } = { present: false, bytes: 0, lastLineAt: null, writer, currentBootMonitor: null };
       try {
-        const { size } = fs.statSync(TELEMETRY_FILE);
-        const snapshot = readTelemetryTailSnapshot(MAX_TELEMETRY_LINES);
+        const { size } = await fs.stat(TELEMETRY_FILE);
+        const snapshot = await readTelemetryTailSnapshot(MAX_TELEMETRY_LINES);
         if (!snapshot.readable || !snapshot.activeRead) throw new Error("telemetry snapshot unavailable");
         const lastLine = snapshot.text.split("\n").filter(Boolean).at(-1) ?? "";
         const tsMatch = lastLine.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/);
@@ -343,14 +343,14 @@ export function registerLogAccessRoutes(app: Express): void {
   // Tail of the local telemetry file(s) — the same lines the console emits,
   // surviving deployment-log rollover. Plain text (LLM/CLI friendly).
   // ?lines=300 (max 2000) &grep=substring (case-insensitive)
-  app.get("/api/logs/telemetry", requireLogReadAuth, (req, res) => {
+  app.get("/api/logs/telemetry", requireLogReadAuth, async (req, res) => {
     try {
       const lines = Math.min(
         Math.max(parseInt(req.query.lines as string) || DEFAULT_TELEMETRY_LINES, 1),
         MAX_TELEMETRY_LINES,
       );
       const grep = typeof req.query.grep === "string" && req.query.grep.length > 0 ? req.query.grep : undefined;
-      const text = redactSensitive(readTelemetryTail(lines, grep));
+      const text = redactSensitive(await readTelemetryTail(lines, grep));
       res.type("text/plain").send(text.length ? text + "\n" : "(telemetry log empty)\n");
     } catch (error) {
       console.error("[LogAccess] telemetry failed:", error);
