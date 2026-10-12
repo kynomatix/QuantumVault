@@ -2,6 +2,7 @@ import type { Express, Request, Response, RequestHandler } from 'express';
 import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { PlannerDeps, PlannerQuery } from './types';
 import { PlannerCharts } from './chart';
+import { PlannerDirection } from './direction';
 import { marketSnapshot } from './market-snapshot';
 import { previewGrid, validatePreviewQuery } from './preview';
 
@@ -10,6 +11,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   enabled = process.env.GRID_PLANNER_ENABLED === 'true') {
   if (!enabled) return;
   let depsPromise: Promise<PlannerDeps> | undefined, charts: PlannerCharts | undefined;
+  let direction: PlannerDirection | undefined;
   let metadata: { rows: ProtocolMarket[]; observedAt: number } | undefined;
   let metadataJob: Promise<ProtocolMarket[]> | undefined, lastAttempt = -Infinity;
   let previewStarts: number[] = [];
@@ -64,6 +66,11 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
       finally { res.off('close', onClose); }
     }
     if (!res.destroyed) res.json({ state: 'available', markets: rows.map(row => marketSnapshot(row, deps)), retrievedAt: deps.now() });
+  }));
+  app.get('/api/grid-planner/direction', requireWallet, route([], async (_req, res, deps) => {
+    direction ??= new PlannerDirection(deps);
+    const result = await direction.read();
+    if (!res.destroyed) res.json(result);
   }));
   app.get('/api/grid-planner/chart', requireWallet, route(['market', 'timeframe', 'bars'], async (req, res, deps) => {
     const { market, timeframe, bars } = req.query;

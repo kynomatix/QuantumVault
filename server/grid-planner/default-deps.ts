@@ -1,5 +1,6 @@
 import { getAdapter } from '../protocol/adapter-registry';
 import { fetchOHLCV, CHART_CANDLE_POLICY } from '../lab/datafeed';
+import { BTC_TREND_WEEK_MS } from '../../shared/grid-direction';
 import type { PlannerDeps } from './types';
 import { pacificaPlannerCandles } from './pacifica-candles';
 import { PlannerReferences } from './pacifica-reference';
@@ -9,6 +10,14 @@ const references = new PlannerReferences();
 
 export const defaultPlannerDeps: PlannerDeps = {
   now: Date.now,
+  btcWeeklyCandles: signal => {
+    const end = Date.now();
+    return fetchOHLCV('BTC/USDT', '1w', end - 56 * BTC_TREND_WEEK_MS, end, undefined, {
+      basisPolicy: { ...CHART_CANDLE_POLICY, acceptedFinality: ['finalized'] },
+      skipSpotFallback: true, bypassCache: true, cacheWritePolicy: 'skip', deadlineMs: 10_000,
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    });
+  },
   getMarkets: () => getAdapter('pacifica').getMarkets(),
   refreshReference: (market, symbol, signal) => references.refresh(market, symbol, signal),
   cachedReference: market => {

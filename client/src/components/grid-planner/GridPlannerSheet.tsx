@@ -16,6 +16,7 @@ import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGene
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
 import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
+import { GridDirectionBadge } from './GridDirectionBadge';
 import { PlannerPriceRefresh, watchPlannerPrice } from '@/lib/planner-price-refresh';
 
 const INITIAL = { market: '', side: 'long', lower: '', upper: '', intervals: '10', entryScale: 'flat', profitScale: 'flat',
@@ -218,6 +219,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
 
         <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5"><Label id="grid-side-label">Direction</Label>
+            <GridDirectionBadge active={open} identity={identity}/>
             <div role="group" aria-labelledby="grid-side-label" className="flex gap-2 rounded-lg border border-border/60 bg-card/40 p-1">
               {['long', 'short'].map(side => <Button key={side} type="button" className="flex-1" variant={form.side === side ? 'default' : 'ghost'}
                 aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}

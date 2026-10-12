@@ -8,6 +8,7 @@ import { Slider } from '@/components/ui/slider';
 import { Checkbox } from '@/components/ui/checkbox';
 import { DepositDialog } from '@/components/DepositDialog';
 import { GridPlannerChart } from '@/components/grid-planner/GridPlannerChart';
+import { GridDirectionBadge } from '@/components/grid-planner/GridDirectionBadge';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { gridIntentSchema,type GridIntent,GRID_CREATE_POLICY } from '../../../../shared/grid-draft';
 import { GRID_PREVIEW_DEBOUNCE_MS,GridDraftSession,submitGridDraftRequest,gridDraftRevision,gridFunds,gridWidth,gridWidthAtMidpoint,readableGridNumber,readableGridPercent,type GridDraftPreview } from '@/lib/grid-draft-view';
@@ -54,7 +55,7 @@ export function GridCreateSheet({open,onOpenChange,onSaved,initialIntent}:{open:
     <SheetHeader className="border-b px-6 py-4"><SheetTitle>Create a Pacifica Grid draft</SheetTitle><SheetDescription>Review the range, costs and stop. Saving a draft does not start trading.</SheetDescription></SheetHeader>
     <div className="flex-1 overflow-y-auto px-6 py-4"><div className="grid gap-6 lg:grid-cols-2"><div className="space-y-4">
       <div><Label htmlFor="grid-market">Pacifica market</Label><Select value={intent.market} disabled={busy} onValueChange={market=>update({market,rangeSource:'manual'})}><SelectTrigger id="grid-market"><SelectValue placeholder="Choose a market"/></SelectTrigger><SelectContent>{markets.map(m=><SelectItem key={m.market} value={m.market}>{m.market}</SelectItem>)}</SelectContent></Select></div>
-      <div className="grid grid-cols-2 gap-3">{selected('direction','Direction',['long','short'])}{selected('timeframe','Candle timeframe',GRID_CREATE_POLICY.timeframes)}</div>
+      <div className="grid grid-cols-2 gap-3"><div className="space-y-1.5">{selected('direction','Direction',['long','short'])}<GridDirectionBadge active={open}/></div>{selected('timeframe','Candle timeframe',GRID_CREATE_POLICY.timeframes)}</div>
       <div><Label htmlFor="grid-lookback">Finalized history</Label><Select value={String(intent.lookback)} disabled={busy} onValueChange={value=>update({lookback:Number(value) as 100|200})}><SelectTrigger id="grid-lookback"><SelectValue/></SelectTrigger><SelectContent><SelectItem value="100">100 candles</SelectItem><SelectItem value="200">200 candles</SelectItem></SelectContent></Select></div>
       <div className="flex flex-wrap gap-2"><Button variant="outline" disabled={busy||autoBusy||!intent.market} onClick={()=>void autoRange()}>{autoBusy?'Finding range…':'Suggest auto range'}</Button><Button variant="outline" disabled={busy} onClick={()=>update({rangeSource:'manual',...manual.current})}>Use manual range</Button></div>
       <div className="grid grid-cols-2 gap-3">{field('lowerPrice','Lower price')}{field('upperPrice','Upper price')}</div>
