@@ -61,7 +61,8 @@ describe('write ahead and exact identity execution',()=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),master=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(8));
     const r={...request(),account:bs58.encode(sub.publicKey),masterAccount:bs58.encode(master.publicKey)};
     const fetcher=vi.fn(async()=>new Response(null,{status:429})),key='EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch);expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true});
+    // This test exercises signing/transport only; concrete book authority has its own boundary tests.
+    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true});
     const [url,init]=fetcher.mock.calls[0] as unknown as [string,RequestInit];expect(url).toBe('https://api.pacifica.fi/api/v1/orders/create');expect(init.redirect).toBe('error');expect(new Headers(init.headers).get('PF-API-KEY')).toBe(key);
     expect(JSON.parse(String(init.body))).toMatchObject({account:r.account,timestamp:1000,expiry_window:5000,tif:'ALO'});
     await expect(sender.send({...r,path:'/EXAMPLE'},Buffer.from(sub.secretKey))).rejects.toThrow();expect(fetcher).toHaveBeenCalledOnce();

@@ -13,6 +13,7 @@ import {validGridHistory,type GridObservation} from './reconciliation';
 import {durableGridUmk} from './service';
 import {pacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
 import Decimal from 'decimal.js';
+import {GridFirstPlacementAuthority} from './first-placement';
 
 /** Full-account facts, never a single balance interpreted as transfer or settlement evidence. */
 export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObservation,start:number,recycler:GridSettlementFact['recycler'],now:number):GridSettlementFact|null{
@@ -28,7 +29,7 @@ export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObserv
     observedAt:d.updated_at as number,settlementComplete:true,source:'pacifica:/account+retained-operation-ledger+'+o.history.source,recycler};
 }
 export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonitorReads,json:GridLaunchReads,authorities:Partial<Pick<GridLifecycleDeps,'resume'|'settlement'|'sol'>>={}){
-  const custody=new GridCustody(storage.launch),sender=new GridPacificaSender(pacificaTransportAuthority()),lifecycle=new GridLifecycleStorage(storage);
+  const custody=new GridCustody(storage.launch),sender=new GridPacificaSender(pacificaTransportAuthority(),fetch,new GridFirstPlacementAuthority(storage.launch,json)),lifecycle=new GridLifecycleStorage(storage);
   const observe=async(claim:GridMonitorClaim,signal:AbortSignal)=>{
     const {bot}=await storage.snapshot(claim),symbol=bot.market.replace(/-PERP$/,''),from=new Date(bot.created_at).getTime();
     try{return await reads.observe({...claim,symbol,from,through:Date.now()},signal);}catch{

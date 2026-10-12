@@ -5,6 +5,8 @@ import type {Pool,PoolClient} from 'pg';
 import {requireSchemaCapabilityReady} from '../schema-readiness';
 import {gridEntrySafety,freshGridFact,gridUnresolvedEntryCancel} from './lifecycle-policy';
 import {gridRecyclerGate} from './runtime-policy';
+import {canonicalGridPolicy,type GridPolicy} from './policy-hmac';
+import type {GridFirstPlacementContext} from './first-placement';
 export const canonicalRequest=(x:unknown):string=>JSON.stringify(x,(_,v)=>v && typeof v==='object' && !Array.isArray(v)
   ? Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
 export const requestDigest=(x:unknown)=>createHash('sha256').update(canonicalRequest(x)).digest('hex');
@@ -46,6 +48,38 @@ export class GridLaunchStorage {
   }
   async read(botId:string,key:string):Promise<DurableGridOperation|null>{
     await this.ready();return (await this.pool.query('SELECT * FROM grid_operations WHERE bot_id=$1 AND idempotency_key=$2',[botId,key])).rows[0]??null;
+  }
+  /** Existing persisted owner confirmation and exact terminal funding; no balance inference or new schema. */
+  async firstPlacementContext(r:ExactGridRequest):Promise<GridFirstPlacementContext|null>{
+    return this.transaction(async c=>{
+      const b=(await c.query(`SELECT b.*,a.account,a.master_account,a.released_at FROM grid_bots b
+        JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1`,[r.botId])).rows[0];
+      if(!b||b.released_at||!b.created_at||b.account!==r.account||b.master_account!==r.masterAccount||!b.client_request_id||!b.server_intent_digest
+        ||!b.policy_hmac||b.policy_hmac!==r.authority.policyHmac||!['provisioning','canary','active'].includes(b.status))return null;
+      const levels=(await c.query('SELECT ordinal,price,size,side,reduce_only FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[r.botId])).rows;
+      const policy:GridPolicy={id:b.id,protocol:b.protocol,market:b.market,direction:b.direction,upperPrice:b.upper_price,lowerPrice:b.lower_price,
+        startPrice:b.start_price,gridCount:b.grid_count,totalInvestment:b.total_investment,leverage:b.leverage,entryScaleType:b.entry_scale_type,
+        profitScaleType:b.profit_scale_type,policyVersion:b.policy_version,feePolicyVersion:b.fee_policy_version,runtimePolicyVersion:b.runtime_policy_version,
+        stopLossPercent:b.stop_loss_percent,stopLossPrice:b.stop_loss_price,seedAtCreation:b.seed_at_creation,
+        levels:levels.map(l=>({ordinal:l.ordinal,price:l.price,size:l.size,side:l.side,reduceOnly:l.reduce_only}))};
+      if(!canonicalGridPolicy(policy)||canonicalGridPolicy(policy)!==canonicalGridPolicy(r.authority.policy as GridPolicy))return null;
+      const ops=(await c.query('SELECT state,exact_request,exact_request_digest,terminal_at,idempotency_key FROM grid_operations WHERE bot_id=$1',[r.botId])).rows;
+      const fund=ops.find(o=>o.idempotency_key===`grid:${r.botId}:launch:fund`),f=fund?.exact_request as ExactGridRequest|undefined;
+      if(!fund||fund.state!=='confirmed'||!fund.terminal_at||!f||requestDigest(f)!==fund.exact_request_digest||f.kind!=='fund'
+        ||f.account!==r.account||f.masterAccount!==r.masterAccount||f.data.to_account!==r.account||f.data.amount!==policy.totalInvestment
+        ||f.authority.policyHmac!==b.policy_hmac||f.path!=='/account/subaccount/transfer'||f.operationType!=='transfer_funds')return null;
+      let alreadyPlaced=false;
+      for(const op of ops){
+        const q=op.exact_request as ExactGridRequest;
+        if(!q||requestDigest(q)!==op.exact_request_digest)return null;
+        if(['prepared','submitted','unconfirmed'].includes(op.state)&&op.exact_request_digest!==requestDigest(r))return null;
+        // Seed and first resting entry each consume their own post-funding price proof.
+        if(op.state==='confirmed'&&q.kind===r.kind&&q.account===r.account&&q.masterAccount===r.masterAccount
+          &&q.data.symbol===r.data.symbol&&q.data.reduce_only===false)alreadyPlaced=true;
+      }
+      const confirmedAt=new Date(b.created_at).getTime(),fundedAt=new Date(fund.terminal_at).getTime();
+      return Number.isSafeInteger(confirmedAt)&&Number.isSafeInteger(fundedAt)?{policy,confirmedAt,fundedAt,alreadyPlaced}:null;
+    });
   }
   /** Read traffic shares the same master's serialized budget. Failed reads still consume their credit. */
   async claimRead(masterAccount:string,credits='1',observedCredits='300',share='0.5'){

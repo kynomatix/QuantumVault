@@ -10,6 +10,7 @@ import {validGridEmptyProof,type GridCustody,type GridAccount,type GridEmptyProo
 import type {GridExecution} from './execution';
 import type {ExactGridRequest,GridClaim,DurableGridOperation} from './launch-storage';
 import {GridLaunchTransientError} from './launch-storage';
+import {executeGridWindow} from './placement';
 
 // Grid levels occupy 1..101. Funding and seed must each have their own reserved identity.
 export const GRID_FUND_IDENTITY_LEVEL = 102;
@@ -76,6 +77,7 @@ export interface GridProvisionDeps {
   execution:Pick<GridExecution,'run'>;
   existing(key:string,botId:string):Promise<DurableGridOperation|null>;
   markCanary(account:GridAccount):Promise<void>;
+  prepareFirstEntry?(input:{account:GridAccount;policy:GridPolicy;policyHmac:string;admission:Extract<LaunchAdmission,{ok:true}>;facts:LaunchFacts;now:number}):Promise<{request:ExactGridRequest;claim:GridClaim}>;
 }
 /** Unit 5 will supervise retries. Each invocation advances only from authoritative confirmed steps. */
 export class GridProvision {
@@ -86,7 +88,7 @@ export class GridProvision {
     try {
       if(!verifyGridPolicyHmac(input.policy,security.umk,input.policyHmac).ok)return {state:'denied',reason:'Grid policy signature changed.'};
       // Recovery precedes new market/fee reads. A disappeared response cannot grant a new send.
-      for(const kind of ['create','fund','leverage','seed']){
+      for(const kind of ['create','fund','leverage','seed','entry']){
         const key=`grid:${input.policy.id}:launch:${kind}`,old=await this.deps.existing(key,input.policy.id);
         if(old && ['submitted','unconfirmed'].includes(old.state)){
           if(!input.account)return {state:'pending',reason:'Recover the retained Grid custody identity before resuming.'};
@@ -98,6 +100,7 @@ export class GridProvision {
       const facts=await this.deps.observe(input.policy,input.account??null),now=this.deps.now();
       const admission=preflightGridLaunch(input.policy,input.policyHmac,security.umk,facts,now,funding?.state==='confirmed');
       if(!admission.ok)return {state:admission.transient?'pending':'denied',reason:admission.reason,account:retainedAccount};
+      if(!this.deps.prepareFirstEntry)return {state:'pending',reason:'First resting entry preparation authority is unavailable.',account:retainedAccount};
       const account=input.account??await this.deps.custody.reserve({botId:input.policy.id,wallet:input.wallet,masterAccount:facts.masterAccount,
         policyHmac:input.policyHmac,canaryLimit:admission.canaryLimit,share:this.deps.quotaShare},security.umk);
       retainedAccount=account;
@@ -140,6 +143,26 @@ export class GridProvision {
         const result=await this.deps.execution.run(key,request,claim,account.leaseToken);
         if(result!=='confirmed')return {state:'pending',reason:result==='failed'?'A launch operation was rejected; reconcile before recovery.':undefined,account};
         if(step.kind==='create')await this.deps.custody.confirmCreated(account);
+      }
+      const entryKey=`grid:${input.policy.id}:launch:entry`,oldEntry=await this.deps.existing(entryKey,input.policy.id);
+      if(oldEntry?.state!=='confirmed'){
+        const current=await this.deps.observe(input.policy,account),timestamp=this.deps.now();
+        const latest=preflightGridLaunch(input.policy,input.policyHmac,security.umk,current,timestamp,true);
+        if(!latest.ok)return {state:latest.transient?'pending':'denied',reason:latest.reason,account};
+        if(current.account!==account.account||current.masterAccount!==account.masterAccount)return {state:'denied',reason:'First entry account authority changed.',account};
+        const prepared=await this.deps.prepareFirstEntry({account,policy:input.policy,policyHmac:input.policyHmac,admission:latest,facts:current,now:timestamp});
+        const request=oldEntry?.exact_request??prepared.request,claim=prepared.claim;
+        const line=input.policy.levels.find(l=>l.ordinal===latest.firstEntryOrdinal);
+        if(!line||line.reduceOnly||request.kind!=='limit'||request.botId!==input.policy.id||request.account!==account.account
+          ||request.masterAccount!==account.masterAccount||request.data.symbol!==symbol||request.data.reduce_only!==false
+          ||request.data.tif!=='ALO'||request.data.price!==line.price||request.data.amount!==line.size
+          ||request.data.side!==(line.side==='buy'?'bid':'ask')||request.authority.policyHmac!==input.policyHmac
+          ||request.data.client_order_id!==gridClientOrderId({botId:input.policy.id,level:line.ordinal,attempt:0,leg:'entry'})
+          ||typeof request.authority.levelId!=='string'||request.authority.levelAttempt!==0||claim.slots!==1
+          ||!new Decimal(claim.canaryIncrement).eq(new Decimal(line.price).mul(line.size)))return {state:'pending',reason:'First entry would change the confirmed geometry or identity; recover or confirm a new preview.',account};
+        const result=await executeGridWindow([[{kind:'place',level:{...line,id:request.authority.levelId,attempt:0}}]],this.deps.execution,
+          async()=>({key:entryKey,request,claim,leaseToken:account.leaseToken}));
+        if(result.state!=='confirmed')return {state:'pending',reason:'First resting entry remains attributable to its retained operation.',account};
       }
       await this.deps.markCanary(account);return {state:'canary',account};
     }catch(error){

@@ -71,13 +71,18 @@ export function gridStopReachable(input: { side: 'long' | 'short'; entry: string
   return input.side === 'long' ? stop.lt(entry) && adverse.lte(stop) && adverse.minus(liquidation).gte(clearance)
     : input.side === 'short' && stop.gt(entry) && adverse.gte(stop) && liquidation.minus(adverse).gte(clearance);
 }
-export function gridFirstPlacementGate(input: { confirmedPrice: string; bookPrice: string; smallestSpacingFraction: string;
+export function gridFirstPlacementGate(input: { confirmedPrice: string; bookPrice: string; smallestSpacingFraction?: string; smallestSpacingPrice?: string;
   observedAt: number; source: string; identityValid: boolean; sideFlip: boolean; rangeValid: boolean }, now: number): boolean {
-  const a = decimal(input.confirmedPrice), b = decimal(input.bookPrice), s = decimal(input.smallestSpacingFraction);
-  return !!a && !!b && !!s && a.gt(0) && b.gt(0) && s.gt(0) && input.source === '/book' && input.identityValid
+  const a = decimal(input.confirmedPrice), b = decimal(input.bookPrice);
+  if (!a || !b || !a.gt(0) || !b.gt(0)) return false;
+  const s = decimal(input.smallestSpacingPrice ?? input.smallestSpacingFraction ?? '');
+  // Quantized price distances keep half-spacing equality exact even when distance/start is a repeating decimal.
+  const withinCap = !!s && s.gt(0) && (input.smallestSpacingPrice !== undefined
+    ? b.minus(a).abs().lte(D.min(a.mul('.001'), s.mul('.5')))
+    : b.minus(a).abs().div(a).lte(D.min('.001', s.mul('.5'))));
+  return withinCap && input.source === '/book' && input.identityValid
     && !input.sideFlip && input.rangeValid && Number.isSafeInteger(now) && Number.isSafeInteger(input.observedAt)
-    && now >= input.observedAt && now - input.observedAt <= 5000
-    && b.minus(a).abs().div(a).lte(D.min('.001', s.mul('.5')));
+    && now >= input.observedAt && now - input.observedAt <= 5000;
 }
 export function gridAdxLabel(value: number | null): 'ranging' | 'transitional' | 'trending' | 'UNKNOWN' {
   return value === null || !Number.isFinite(value) || value < 0 || value > 100 ? 'UNKNOWN' : value < 20 ? 'ranging' : value <= 25 ? 'transitional' : 'trending';
