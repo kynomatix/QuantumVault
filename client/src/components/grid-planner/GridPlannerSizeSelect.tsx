@@ -13,6 +13,6 @@ export function GridPlannerSizeSelect({ id, label, value, side, startingPosition
       <SelectTrigger id={id} aria-describedby={`${id}-hint`}><SelectValue /></SelectTrigger>
       <SelectContent>{ORDER_SIZES.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
     </Select>
-    <p id={`${id}-hint`} className="text-xs text-muted-foreground">{hint}</p>
+    <p id={`${id}-hint`} className="text-xs text-muted-foreground">Entry price = the price when your bot starts. {hint}</p>
   </div>;
 }

@@ -8,20 +8,24 @@ export const clientObservationDeadline = (expiresAt: number, serverNow: number, 
 
 const D = Decimal.clone({ precision: 80 });
 const plainPrice = (value: string) => value.length <= 37 && /^(0|[1-9]\d{0,17})(\.\d{1,18})?$/.test(value) && new D(value).gt(0);
-export const RANGE_PRESETS = [{ label: 'Tight', percent: 5 }, { label: 'Balanced', percent: 10 }, { label: 'Wide', percent: 20 }] as const;
+export const RANGE_PRESETS = [{ label: 'Tight ±5%', percent: 5 }, { label: 'Balanced ±10%', percent: 10 }, { label: 'Wide ±20%', percent: 20 }] as const;
 export const ORDER_SIZES = [
-  { value: 'flat', label: 'Equal quote allocation' },
-  { value: 'ascending', label: 'Larger further from current price' },
-  { value: 'descending', label: 'Larger near current price' },
+  { value: 'flat', label: 'Equal' },
+  { value: 'ascending', label: 'Larger further from entry price' },
+  { value: 'descending', label: 'Larger near entry price' },
 ] as const;
+export function plannerShortcutReason(market: string, hasFreshPrice: boolean, error: string, loading: boolean) {
+  return !market ? 'Choose a market to use the presets and width slider.'
+    : !hasFreshPrice && error && !loading ? `Fresh price unavailable: ${error}. Refresh price to retry.` : '';
+}
 export function plannerSizeHint(side: string, scale: string, startingPosition = false): string {
   const action = startingPosition ? side === 'long' ? 'sold to close the starting long' : 'bought back to close the starting short'
     : side === 'long' ? 'bought' : 'sold short';
   const move = startingPosition ? side === 'long' ? 'rises' : 'falls' : side === 'long' ? 'falls' : 'rises';
   const near = startingPosition ? side === 'long' ? 'above' : 'below' : side === 'long' ? 'below' : 'above';
   return scale === 'flat' ? `Equal quote value is ${action} at each level; base quantities vary with price and lot rounding.`
-    : scale === 'ascending' ? `More quote value is ${action} as price ${move} further from the current price; base quantities depend on price and lot rounding.`
-      : `More quote value is ${action} at levels just ${near} the current price; base quantities depend on price and lot rounding.`;
+    : scale === 'ascending' ? `More quote value is ${action} as price ${move} further from the entry price; base quantities depend on price and lot rounding.`
+      : `More quote value is ${action} at levels just ${near} the entry price; base quantities depend on price and lot rounding.`;
 }
 
 /** A shortcut uses only an unexpired, observed Pacifica price; never chart closes. */

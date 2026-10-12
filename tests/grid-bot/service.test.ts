@@ -43,6 +43,26 @@ describe('bounded read-only Planner HTTP surface', () => {
     for (const query of ['markets?account=EXAMPLE', 'chart?market=BTC-PERP&market=BTC-PERP', `chart?market=${'X'.repeat(81)}`, 'chart?market=BTC-PERP&timeframe=1m&bars=999']) expect((await s.get(query)).status).toBe(400);
     expect(d.getMarkets).not.toHaveBeenCalled(); expect(d.candles).not.toHaveBeenCalled();
   });
+  it('refreshes only an authenticated, validated selected market and preserves its real observation time', async () => {
+    const d = makeDeps();
+    d.refreshReference = vi.fn(async () => { d.cachedReference = vi.fn(() => ({ price: 200, observedAt: clock - 5_000 })); });
+    const s = await serve(true, d);
+    expect((await s.get('markets?market=BTC-PERP', null)).status).toBe(401);
+    for (const query of ['markets?market=BTC-PERP&market=BTC-PERP', `markets?market=${'X'.repeat(81)}`]) expect((await s.get(query)).status).toBe(400);
+    expect(d.refreshReference).not.toHaveBeenCalled();
+    expect((await s.get('markets?market=ETH-PERP')).status).toBe(404); expect(d.refreshReference).not.toHaveBeenCalled();
+    const response = await s.get('markets?market=BTC-PERP'), value = await response.json();
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(value).toMatchObject({ state: 'available', retrievedAt: clock, markets: [{ reference: { state: 'available', value: { price: '200', observedAt: clock - 5_000, expiresAt: clock + 55_000 } } }] });
+    expect(d.refreshReference).toHaveBeenCalledWith('BTC-PERP', 'BTC', expect.any(AbortSignal));
+    await s.get('markets'); expect(d.refreshReference).toHaveBeenCalledTimes(1); expect(d.candles).not.toHaveBeenCalled();
+  });
+  it('returns unavailable when a fresh price read fails rather than treating cached data as refreshed', async () => {
+    const d = makeDeps(); d.refreshReference = vi.fn(async () => { throw Error('EXAMPLE: fresh price unavailable'); });
+    const s = await serve(true, d), response = await s.get('markets?market=BTC-PERP');
+    expect(response.status).toBe(503); expect(await response.json()).toMatchObject({ state: 'unavailable', reason: 'EXAMPLE: fresh price unavailable' });
+    expect(d.cachedReference).not.toHaveBeenCalled(); expect(d.candles).not.toHaveBeenCalled();
+  });
   it('serves the selected market only, preserves candles/provenance and does no price refresh', async () => {
     const d = makeDeps(), s = await serve(true, d);
     expect((await s.get('chart?market=ETH-PERP&timeframe=1h&bars=100')).status).toBe(404);

@@ -52,9 +52,18 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     if (Object.keys(req.query).length) return res.status(400).json({ state: 'unavailable', reason: 'Status accepts no query fields' });
     res.json({ enabled: true, name: 'Grid Planner', planningOnly: true });
   });
-  app.get('/api/grid-planner/markets', requireWallet, route([], async (_req, res, deps) => {
+  app.get('/api/grid-planner/markets', requireWallet, route(['market'], async (req, res, deps) => {
     const rows = await boundedMetadata(deps);
-    res.json({ state: 'available', markets: rows.map(row => marketSnapshot(row, deps)), retrievedAt: deps.now() });
+    if (req.query.market !== undefined) {
+      const row = rows.find(r => r.internalSymbol === req.query.market);
+      if (!row) { res.status(404).json({ state: 'unavailable', reason: 'Unknown Pacifica market' }); return; }
+      if (!deps.refreshReference) throw Error('Fresh price refresh unavailable');
+      const controller = new AbortController(), onClose = () => controller.abort();
+      res.on('close', onClose);
+      try { await deps.refreshReference(row.internalSymbol, row.protocolSymbol, controller.signal); }
+      finally { res.off('close', onClose); }
+    }
+    if (!res.destroyed) res.json({ state: 'available', markets: rows.map(row => marketSnapshot(row, deps)), retrievedAt: deps.now() });
   }));
   app.get('/api/grid-planner/chart', requireWallet, route(['market', 'timeframe', 'bars'], async (req, res, deps) => {
     const { market, timeframe, bars } = req.query;

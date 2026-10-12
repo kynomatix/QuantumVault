@@ -11,11 +11,12 @@ import { Switch } from '@/components/ui/switch';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart,
-  isPlannerMarket, isPlannerPreview, plannerOverlays, readableDecimal, readableTime, clientObservationDeadline,
-  RANGE_PRESETS, ORDER_SIZES, plannerRangeAround, proposedPlannerStop, plannerChartRange,
+  isPlannerPreview, plannerOverlays, readableDecimal, readableTime, clientObservationDeadline,
+  RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
 import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
+import { PlannerPriceRefresh, watchPlannerPrice } from '@/lib/planner-price-refresh';
 
 const INITIAL = { market: '', side: 'long', lower: '', upper: '', intervals: '10', entryScale: 'flat', profitScale: 'flat',
   seed: true, leverage: '1', investment: '', stop: '', feePercent: '', timeframe: '1h', bars: '100' };
@@ -37,6 +38,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
   const [advancedOpen, setAdvancedOpen] = useState(false), [marketLoading, setMarketLoading] = useState(false);
   const [width, setWidth] = useState(10), [rangeShortcut, setRangeShortcut] = useState<number | null>(null);
   const generation = useRef({ markets: new PlannerRequestGeneration(), chart: new PlannerRequestGeneration(), preview: new PlannerRequestGeneration() });
+  const priceRefresh = useRef<PlannerPriceRefresh | null>(null);
   const selected = markets.find(m => m.market === form.market);
   const referenceExpiry = selected?.reference.state === 'available' ? clientObservationDeadline(selected.reference.value.expiresAt, marketClock.serverNow, marketClock.startedAt) : 0;
   const constraintExpiry = selected?.constraints.state === 'available' ? clientObservationDeadline(selected.constraints.value.expiresAt, marketClock.serverNow, marketClock.startedAt) : 0;
@@ -47,12 +49,14 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
   const effectiveStop = form.stop || suggestedStop || '';
   const invalidate = useCallback(() => { generation.current.preview.invalidate(); setPreview(null); setError(''); }, []);
   const edit = (key: keyof typeof INITIAL, value: string | boolean) => {
+    priceRefresh.current?.cancelShortcut();
     invalidate();
     if (['market', 'timeframe', 'bars'].includes(key)) { generation.current.chart.invalidate(); setChart(null); setChartError(''); }
     if (['market', 'lower', 'upper'].includes(key)) setRangeShortcut(null);
     setForm(previous => ({ ...previous, [key]: value }));
   };
   const refreshObservations = () => {
+    priceRefresh.current?.dispose();
     Object.values(generation.current).forEach(g => g.invalidate());
     setPreview(null); setChart(null); setMarkets([]); setError(''); setChartError(''); setNow(Date.now());
     setRefresh(r => r + 1);
@@ -69,20 +73,15 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
   }, [form, effectiveStop]);
   useEffect(() => {
     if (!open) return;
-    const request = generation.current.markets.start(), startedAt = Date.now(); setMarketError(''); setMarkets([]); setMarketLoading(true);
-    readPlanner('markets', request.signal).then(value => {
-      if (!request.current()) return;
-      if (!value || typeof value !== 'object') throw new Error('Invalid market response');
-      const response = value as Record<string, any>;
-      if (response.state !== 'available' || !Array.isArray(response.markets)) throw new Error('Invalid market response');
-      if (response.markets.length > 512) throw new Error('Invalid market response');
-      if (!response.markets.every(isPlannerMarket)) throw new Error('Invalid market response');
-      if (!Number.isSafeInteger(response.retrievedAt)) throw new Error('Invalid market response');
-      setMarketClock({ serverNow: response.retrievedAt, startedAt }); setMarkets(response.markets); setNow(Date.now());
-    }).catch(e => { if (request.current()) { setMarkets([]); setMarketError(e.message); } })
-      .finally(() => { if (request.current()) setMarketLoading(false); });
-    return () => generation.current.markets.invalidate();
-  }, [open, identity, refresh]);
+    const controller = new PlannerPriceRefresh(form.market,
+      signal => readPlanner(form.market ? `markets?${new URLSearchParams({ market: form.market })}` : 'markets', signal),
+      observation => { setMarketClock(observation); setMarkets(observation.markets); setNow(Date.now()); },
+      (busy, reason) => { setMarketLoading(busy); setMarketError(reason); setNow(Date.now()); });
+    priceRefresh.current = controller;
+    const stop = watchPlannerPrice(controller);
+    return () => { stop(); if (priceRefresh.current === controller) priceRefresh.current = null; };
+  }, [open, identity, form.market, refresh]);
+  useEffect(() => { setMarkets([]); setMarketError(''); setNow(Date.now()); }, [open, identity]);
   useEffect(() => {
     if (!open || !form.market) return;
     const request = generation.current.chart.start(); setChart(null); setChartError('');
@@ -125,11 +124,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
   }, [open, now, previewExpiry, chartExpiry, referenceExpiry, constraintExpiry]);
   useEffect(() => () => Object.values(generation.current).forEach(g => g.invalidate()), []);
   const preset = (percent: number) => {
-    // Check at click time too: a suspended tab may not have rendered its expiry yet.
-    const range = plannerRangeAround(selected, referenceExpiry, Date.now(), percent);
-    if (!range) { setNow(Date.now()); return; }
-    invalidate(); setWidth(percent); setRangeShortcut(percent); setForm(previous => ({ ...previous, ...range }));
+    void priceRefresh.current?.apply(percent, range => {
+      invalidate(); setWidth(percent); setRangeShortcut(percent); setForm(previous => ({ ...previous, ...range }));
+    });
   };
+  const shortcutReason = plannerShortcutReason(form.market, !!reference, marketError, marketLoading);
   const lines = useMemo(() => plannerOverlays(preview, previewExpiry, now), [preview, previewExpiry, now]);
   const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
   const stale = preview !== null && now >= previewExpiry;
@@ -151,7 +150,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
     </Select>
   </div>;
   return <Sheet open={open} onOpenChange={value => {
-    if (!value) Object.values(generation.current).forEach(g => g.invalidate()); onOpenChange(value);
+    if (!value) { priceRefresh.current?.dispose(); Object.values(generation.current).forEach(g => g.invalidate()); } onOpenChange(value);
   }}>
     <SheetContent className="w-full sm:max-w-[760px] p-0" data-testid="sheet-grid-planner">
       <div className="h-full overflow-y-auto p-5 sm:p-6 space-y-6">
@@ -200,10 +199,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
           <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} hasMarket={!!form.market}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
           <div className="grid grid-cols-3 gap-2" aria-label="Range presets">
-            {RANGE_PRESETS.map(p => <Button key={p.percent} type="button" variant="outline" disabled={!reference}
+            {RANGE_PRESETS.map(p => <Button key={p.percent} type="button" variant="outline" disabled={!!shortcutReason} aria-describedby="grid-shortcut-hint"
               aria-pressed={rangeShortcut === p.percent} onClick={() => preset(p.percent)}
               className={`h-auto min-h-14 flex-col py-2 ${rangeShortcut === p.percent ? 'border-primary/50 bg-primary/10' : ''}`}>
-              <span className="font-medium">{p.label}</span><span className="text-xs text-muted-foreground">±{p.percent}%</span>
+              <span className="font-medium">{p.label}</span>
             </Button>)}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{numberField('lower', 'Lower price')}{numberField('upper', 'Upper price')}</div>
@@ -211,8 +210,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
             <div className="flex items-center justify-between gap-2"><Label htmlFor="grid-width">Range width around price now</Label>
               <span className="text-xs text-muted-foreground">{rangeShortcut === null ? 'Manual range' : `±${width}%`}</span></div>
             <Slider id="grid-width" aria-label="Range half-width percent" min={1} max={40} step={1} value={[width]}
-              disabled={!reference} onValueChange={([value]) => preset(value)} />
-            <p className="text-xs text-muted-foreground">Use a shortcut or enter both prices yourself.{!reference && ' Refresh price to use the presets and width slider. A fresh price may still be unavailable.'}</p>
+              disabled={!!shortcutReason} aria-describedby="grid-shortcut-hint" onValueChange={([value]) => preset(value)} />
+            <p id="grid-shortcut-hint" className="text-xs text-muted-foreground">{shortcutReason || (marketLoading && !reference ? 'Fetching a fresh price before applying your range…' : 'Use a shortcut or enter both prices yourself. An expired price is refreshed before applying a shortcut.')}</p>
           </div>
         </section>
 

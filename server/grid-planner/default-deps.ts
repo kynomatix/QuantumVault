@@ -2,15 +2,25 @@ import { getAdapter } from '../protocol/adapter-registry';
 import { fetchOHLCV, CHART_CANDLE_POLICY } from '../lab/datafeed';
 import type { PlannerDeps } from './types';
 import { pacificaPlannerCandles } from './pacifica-candles';
+import { PlannerReferences } from './pacifica-reference';
+
+const references = new PlannerReferences();
 
 export const defaultPlannerDeps: PlannerDeps = {
   now: Date.now,
   getMarkets: () => getAdapter('pacifica').getMarkets(),
+  refreshReference: (market, symbol, signal) => references.refresh(market, symbol, signal),
   cachedReference: market => {
+    const refreshed = references.cached(market);
     const adapter = getAdapter('pacifica');
     const price = adapter.getCachedPrices?.([market])[market];
     const observedAt = adapter.getCachedPriceMeta?.([market]).oldestFetchedAt ?? null;
-    return price === undefined ? null : { price, observedAt };
+    const cached = price === undefined ? null : { price, observedAt };
+    if (!refreshed) return cached;
+    // Neither cache may renew the other: choose the newer valid real observation.
+    return cached && Number.isFinite(cached.price) && cached.price > 0 && cached.observedAt !== null
+      && Number.isSafeInteger(cached.observedAt) && cached.observedAt <= Date.now() && cached.observedAt > refreshed.observedAt
+      ? cached : refreshed;
   },
   candles: async (market, timeframe, bars, signal) => {
     const end = Date.now(), duration = timeframe === '15m' ? 900_000 : timeframe === '1h' ? 3_600_000 : 14_400_000;

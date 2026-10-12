@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GridPlannerCard } from '../../client/src/components/grid-planner/GridPlannerCard';
@@ -7,7 +7,8 @@ import { GridPlannerChart } from '../../client/src/components/grid-planner/GridP
 import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, isPlannerMarket, isPlannerChart, isPlannerPreview,
   PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline, plannerRangeAround,
-  proposedPlannerStop, plannerChartRange, plannerSizeHint, ORDER_SIZES, type PlannerChart } from '../../client/src/lib/grid-planner-view';
+  proposedPlannerStop, plannerChartRange, plannerSizeHint, plannerShortcutReason, ORDER_SIZES, RANGE_PRESETS, type PlannerChart } from '../../client/src/lib/grid-planner-view';
+import { PlannerPriceRefresh, watchPlannerPrice } from '../../client/src/lib/planner-price-refresh';
 import { previewGrid } from '../../server/grid-planner/preview';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
@@ -18,16 +19,106 @@ const market = marketSnapshot({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC
   { now: () => now, cachedReference: () => ({ price: 100, observedAt: now }), getMarkets: async () => [], candles: async () => [] });
 const preview = previewGrid({ market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat', seed: true,
   leverage: '1', investment: '1000', stop: '70', fee: '0' }, market, now);
+afterEach(() => vi.useRealTimers());
+const priceResponse = (price: string, observedAt = now, retrievedAt = observedAt) => ({ state: 'available', retrievedAt,
+  markets: [{ ...market, reference: { state: 'available', value: { price, observedAt, expiresAt: observedAt + 60_000, label: 'Cached Pacifica book reference price' } } }] });
+describe('Planner fresh-price shortcuts and visibility', () => {
+  it('labels all preset distances and leaves expiry alone recoverable by clicking', () => {
+    expect(RANGE_PRESETS.map(p => p.label)).toEqual(['Tight ±5%', 'Balanced ±10%', 'Wide ±20%']);
+    expect(plannerShortcutReason('BTC-PERP', false, '', false)).toBe('');
+    expect(plannerShortcutReason('BTC-PERP', false, 'EXAMPLE quota exhausted', false)).toContain('EXAMPLE quota exhausted');
+    expect(plannerShortcutReason('BTC-PERP', false, 'EXAMPLE', true)).toBe('');
+    expect(plannerShortcutReason('BTC-PERP', true, 'EXAMPLE', false)).toBe('');
+    expect(plannerShortcutReason('', false, '', false)).toContain('Choose a market');
+  });
+  it('uses a fresh observation immediately and fetches before applying an expired preset', async () => {
+    let time = now;
+    const read = vi.fn(async () => priceResponse(time === now ? '100' : '200', time));
+    const changed = vi.fn(), status = vi.fn();
+    const controller = new PlannerPriceRefresh('BTC-PERP', read, vi.fn(), status, () => time);
+    await controller.refresh();
+    expect(await controller.apply(5, changed)).toBe(true); expect(changed).toHaveBeenLastCalledWith({ lower: '95', upper: '105' });
+    expect(read).toHaveBeenCalledTimes(1);
+    time += 60_001;
+    expect(await controller.apply(20, changed)).toBe(true); expect(changed).toHaveBeenLastCalledWith({ lower: '160', upper: '240' });
+    expect(read).toHaveBeenCalledTimes(2); expect(status).toHaveBeenLastCalledWith(false, '');
+    controller.dispose();
+  });
+  it('coalesces an expired slider drag and applies only its latest requested width', async () => {
+    let resolve!: (value: unknown) => void;
+    const read = vi.fn(() => new Promise<unknown>(r => { resolve = r; })), changed = vi.fn();
+    const controller = new PlannerPriceRefresh('BTC-PERP', read, vi.fn(), vi.fn(), () => now);
+    const first = controller.apply(5, changed), last = controller.apply(20, changed);
+    await Promise.resolve(); resolve(priceResponse('200'));
+    expect(await first).toBe(false); expect(await last).toBe(true);
+    expect(read).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledExactlyOnceWith({ lower: '160', upper: '240' });
+    controller.dispose();
+  });
+  it.each(['cancelShortcut', 'pause', 'dispose'] as const)('a late price cannot apply a shortcut after %s', async action => {
+    let resolve!: (value: unknown) => void;
+    const changed = vi.fn(), observed = vi.fn();
+    const controller = new PlannerPriceRefresh('BTC-PERP', () => new Promise<unknown>(r => { resolve = r; }), observed, vi.fn(), () => now);
+    const pending = controller.apply(10, changed);
+    await Promise.resolve(); controller[action](); resolve(priceResponse('200'));
+    expect(await pending).toBe(false); expect(changed).not.toHaveBeenCalled();
+    if (action !== 'cancelShortcut') expect(observed).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+  it('failed refresh keeps the original expiry and input range untouched, then recovers', async () => {
+    let time = now;
+    const read = vi.fn(async () => priceResponse('100', time)), observed = vi.fn(), status = vi.fn(), changed = vi.fn();
+    const controller = new PlannerPriceRefresh('BTC-PERP', read, observed, status, () => time);
+    await controller.refresh(); time += 60_001;
+    read.mockRejectedValueOnce(Error('EXAMPLE venue unavailable'));
+    expect(await controller.apply(10, changed)).toBe(false);
+    expect(changed).not.toHaveBeenCalled(); expect(observed).toHaveBeenCalledTimes(1);
+    expect(status).toHaveBeenLastCalledWith(false, 'EXAMPLE venue unavailable');
+    expect(await controller.apply(10, changed)).toBe(true); controller.dispose();
+  });
+  it.each([priceResponse('100', now - 60_000, now), priceResponse('100', now + 1, now),
+    { state: 'available', retrievedAt: now, markets: [] },
+    { state: 'available', retrievedAt: now, markets: [{ ...market, reference: { state: 'unavailable', reason: 'EXAMPLE no observation' } }] },
+    { state: 'available', retrievedAt: now, markets: [{ ...market, reference: { state: 'available', value: { price: '100', observedAt: now, expiresAt: now + 120_000 } } }] },
+  ])('never applies an unavailable, expired, future or fabricated price', async response => {
+    const changed = vi.fn(), status = vi.fn();
+    const controller = new PlannerPriceRefresh('BTC-PERP', async () => response, vi.fn(), status, () => now);
+    expect(await controller.apply(10, changed)).toBe(false); expect(changed).not.toHaveBeenCalled();
+    expect(status.mock.calls.at(-1)?.[1]).toBeTruthy(); controller.dispose();
+  });
+  it('subtracts transit time even with client/server clock skew', async () => {
+    let time = now, resolve!: (value: unknown) => void;
+    const changed = vi.fn();
+    const controller = new PlannerPriceRefresh('BTC-PERP', () => new Promise<unknown>(r => { resolve = r; }), vi.fn(), vi.fn(), () => time);
+    const pending = controller.apply(10, changed);
+    await Promise.resolve(); time += 60_000; resolve(priceResponse('100', now + 100_000));
+    expect(await pending).toBe(false); expect(changed).not.toHaveBeenCalled(); controller.dispose();
+  });
+  it('refreshes every 20 seconds while visible, pauses hidden reads, wakes immediately and stops on close', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const visibility = Object.assign(new EventTarget(), { hidden: false });
+    const read = vi.fn(async () => priceResponse('100', Date.now()));
+    const controller = new PlannerPriceRefresh('BTC-PERP', read, vi.fn(), vi.fn());
+    const stop = watchPlannerPrice(controller, visibility);
+    await vi.advanceTimersByTimeAsync(0); expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(40_000); expect(read).toHaveBeenCalledTimes(3);
+    visibility.hidden = true; visibility.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(120_000); expect(read).toHaveBeenCalledTimes(3);
+    visibility.hidden = false; visibility.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(0); expect(read).toHaveBeenCalledTimes(4);
+    stop(); await vi.advanceTimersByTimeAsync(60_000); expect(read).toHaveBeenCalledTimes(4);
+    visibility.dispatchEvent(new Event('visibilitychange')); await vi.advanceTimersByTimeAsync(0); expect(read).toHaveBeenCalledTimes(4);
+  });
+});
 describe('Planner client authority boundaries', () => {
   it('size labels describe distance and quote allocation for both sides and both order roles', () => {
     expect(ORDER_SIZES).toEqual([
-      { value: 'flat', label: 'Equal quote allocation' }, { value: 'ascending', label: 'Larger further from current price' }, { value: 'descending', label: 'Larger near current price' },
+      { value: 'flat', label: 'Equal' }, { value: 'ascending', label: 'Larger further from entry price' }, { value: 'descending', label: 'Larger near entry price' },
     ]);
     for (const side of ['long', 'short']) for (const seed of [false, true]) {
       const move = side === 'long' ? (seed ? 'rises' : 'falls') : (seed ? 'falls' : 'rises');
       const near = side === 'long' ? (seed ? 'above' : 'below') : (seed ? 'below' : 'above');
       expect(plannerSizeHint(side, 'ascending', seed)).toContain(`price ${move} further`);
-      expect(plannerSizeHint(side, 'descending', seed)).toContain(`just ${near} the current price`);
+      expect(plannerSizeHint(side, 'descending', seed)).toContain(`just ${near} the entry price`);
       expect(plannerSizeHint(side, 'flat', seed)).toContain('Equal quote value');
       expect(plannerSizeHint(side, 'flat', seed)).toContain('base quantities vary');
     }
@@ -42,8 +133,10 @@ describe('Planner client authority boundaries', () => {
     expect(disabled).toContain('How the starting position is taken profit on');
     expect(disabled).toContain('disabled=""'); expect(disabled).toContain('to choose how that position is closed in pieces.');
     expect(disabled).toContain('aria-describedby="grid-profitScale-hint"');
+    expect(disabled).toContain('Entry price = the price when your bot starts');
     const enabled = renderToStaticMarkup(createElement(GridPlannerSizeSelect, { ...props, enabled: true }));
     expect(enabled).not.toContain('disabled=""'); expect(enabled).toContain('bought back to close the starting short'); expect(enabled).toContain('price falls further');
+    expect(enabled).toContain('Entry price = the price when your bot starts');
   });
   it('blank, explicit zero and decimal percentages preserve meaning without floats', () => {
     expect(feePercentToRate('')).toBeNull(); expect(feePercentToRate('0')).toBe('0'); expect(feePercentToRate('0.05')).toBe('0.0005');

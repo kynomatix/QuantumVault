@@ -14,6 +14,7 @@ vi.mock('../../server/protocol/adapter-registry', () => ({ getAdapter: () => sen
 vi.mock('../../server/protocol/pacifica/pacifica-quota', () => ({ pacificaQuota: { tryClaimImmediate: sentinels.quota } }));
 import { defaultPlannerDeps } from '../../server/grid-planner/default-deps';
 import { pacificaPlannerCandles } from '../../server/grid-planner/pacifica-candles';
+import { PlannerReferences } from '../../server/grid-planner/pacifica-reference';
 import { __testResetOkxSourceBreaker } from '../../server/lab/datafeed';
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.clearAllMocks(); sentinels.quota.mockReturnValue(true); __testResetOkxSourceBreaker(); });
 const json = (payload: unknown) => new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -23,6 +24,58 @@ const assertReadOnly = () => {
   expect(sentinels.cacheRead).not.toHaveBeenCalled(); expect(sentinels.cacheWrite).not.toHaveBeenCalled();
   expect(sentinels.adapter.getPrice).not.toHaveBeenCalled(); expect(sentinels.adapter.getAccount).not.toHaveBeenCalled(); expect(sentinels.adapter.placeOrder).not.toHaveBeenCalled();
 };
+
+describe('Planner fresh Pacifica price observations', () => {
+  const clock = 1_800_000_000_000;
+  const book = (t = clock, bid = '99', ask = '101') => ({ success: true, data: { s: 'BTC', t, l: [[{ p: bid }], [{ p: ask }]] } });
+  it('reads the native book with background quota and preserves venue age and transit time', async () => {
+    let now = clock;
+    const refs = new PlannerReferences(() => now), transport = vi.fn(async () => { now += 5_000; return json(book(clock - 10_000)); });
+    vi.stubGlobal('fetch', transport);
+    await refs.refresh('BTC-PERP', 'BTC', new AbortController().signal);
+    expect(refs.cached('BTC-PERP')).toEqual({ price: 100, observedAt: clock - 10_000 });
+    expect(sentinels.quota).toHaveBeenCalledWith('/book', 'background');
+    expect(transport).toHaveBeenCalledWith('https://api.pacifica.fi/api/v1/book?symbol=BTC', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    now += 20_000;
+    await refs.refresh('BTC-PERP', 'BTC', new AbortController().signal);
+    expect(refs.cached('BTC-PERP')?.observedAt).toBe(clock - 10_000); assertReadOnly();
+  });
+  it.each([
+    ['expired', book(clock - 60_000)], ['future', book(clock + 1)], ['wrong market', { ...book(), data: { ...book().data, s: 'ETH' } }],
+    ['missing bids', { ...book(), data: { ...book().data, l: [[], [{ p: '101' }]] } }],
+    ['crossed', book(clock, '102', '101')], ['zero', book(clock, '0')], ['invalid number', book(clock, 'NaN')],
+    ['unsuccessful', { ...book(), success: false }],
+  ])('fails closed for %s without renewing the previous observation', async (_name, payload) => {
+    const refs = new PlannerReferences(() => clock), transport = vi.fn().mockResolvedValueOnce(json(book())).mockResolvedValueOnce(json(payload));
+    vi.stubGlobal('fetch', transport);
+    await refs.refresh('BTC-PERP', 'BTC', new AbortController().signal);
+    await expect(refs.refresh('BTC-PERP', 'BTC', new AbortController().signal)).rejects.toThrow();
+    expect(refs.cached('BTC-PERP')).toEqual({ price: 100, observedAt: clock }); assertReadOnly();
+  });
+  it('coalesces callers and prevents an aborted caller from publishing a response', async () => {
+    let finish!: (value: Response) => void;
+    const refs = new PlannerReferences(() => clock), transport = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));
+    vi.stubGlobal('fetch', transport);
+    const canceled = new AbortController(), rejected = expect(refs.refresh('BTC-PERP', 'BTC', canceled.signal)).rejects.toThrow();
+    const active = refs.refresh('BTC-PERP', 'BTC', new AbortController().signal);
+    canceled.abort(); finish(json(book()));
+    await rejected; await active;
+    expect(transport).toHaveBeenCalledTimes(1); expect(sentinels.quota).toHaveBeenCalledTimes(1);
+    expect(refs.cached('BTC-PERP')).toEqual({ price: 100, observedAt: clock }); assertReadOnly();
+  });
+  it('refuses unavailable quota, canceled callers and unbounded starts without upstream work', async () => {
+    const refs = new PlannerReferences(() => clock), transport = vi.fn(async () => json(book())); vi.stubGlobal('fetch', transport);
+    const canceled = new AbortController(); canceled.abort();
+    await expect(refs.refresh('BTC-PERP', 'BTC', canceled.signal)).rejects.toThrow();
+    sentinels.quota.mockReturnValue(false);
+    await expect(refs.refresh('BTC-PERP', 'BTC', new AbortController().signal)).rejects.toThrow(/quota/);
+    expect(transport).not.toHaveBeenCalled();
+    sentinels.quota.mockReturnValue(true);
+    for (let i = 0; i < 30; i++) await refs.refresh('BTC-PERP', 'BTC', new AbortController().signal);
+    await expect(refs.refresh('BTC-PERP', 'BTC', new AbortController().signal)).rejects.toThrow(/busy/);
+    expect(transport).toHaveBeenCalledTimes(30); assertReadOnly();
+  });
+});
 describe('Planner real chart dependency path', () => {
   it.each([['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000]] as const)('uses native Pacifica %s trade candles before OKX with exact provenance and finality', async (timeframe, step) => {
     const now = Date.now(), opening = Math.floor(now / step) * step;
@@ -87,5 +140,19 @@ describe('Planner real chart dependency path', () => {
     const transport = vi.fn(); vi.stubGlobal('fetch', transport); const controller = new AbortController(); controller.abort();
     await expect(defaultPlannerDeps.candles('BTC-PERP', '1h', 100, controller.signal)).rejects.toThrow();
     expect(transport).not.toHaveBeenCalled(); assertReadOnly();
+  });
+  it('keeps the newer valid real observation across the Planner and adapter caches', async () => {
+    const observedAt = Date.now() - 5_000;
+    const prices = vi.spyOn(sentinels.adapter, 'getCachedPrices').mockReturnValue({ 'BTC-PERP': 250 });
+    const metadata = vi.spyOn(sentinels.adapter, 'getCachedPriceMeta').mockReturnValue({ oldestFetchedAt: observedAt - 1_000 });
+    vi.stubGlobal('fetch', vi.fn(async () => json({ success: true, data: { s: 'BTC', t: observedAt, l: [[{ p: '99' }], [{ p: '101' }]] } })));
+    await defaultPlannerDeps.refreshReference!('BTC-PERP', 'BTC', new AbortController().signal);
+    expect(defaultPlannerDeps.cachedReference('BTC-PERP')).toEqual({ price: 100, observedAt });
+    metadata.mockReturnValue({ oldestFetchedAt: observedAt + 1_000 });
+    expect(defaultPlannerDeps.cachedReference('BTC-PERP')).toEqual({ price: 250, observedAt: observedAt + 1_000 });
+    prices.mockReturnValue({ 'BTC-PERP': NaN });
+    expect(defaultPlannerDeps.cachedReference('BTC-PERP')).toEqual({ price: 100, observedAt });
+    prices.mockReturnValue({ 'BTC-PERP': 250 }); metadata.mockReturnValue({ oldestFetchedAt: Date.now() + 60_000 });
+    expect(defaultPlannerDeps.cachedReference('BTC-PERP')).toEqual({ price: 100, observedAt }); assertReadOnly();
   });
 });

@@ -17,6 +17,7 @@ export interface PlannerMarket {
 }
 export interface PlannerDeps {
   getMarkets(): Promise<ProtocolMarket[]>;
+  refreshReference?(market: string, symbol: string, signal: AbortSignal): Promise<void>;
   cachedReference(market: string): { price: number; observedAt: number | null } | null;
   candles(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<PlannerCandle[]>;
   now(): number;
