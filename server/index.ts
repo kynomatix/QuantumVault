@@ -702,8 +702,12 @@ registerRequestTrace(app);
   const runGracefulShutdown = createGracefulHttpShutdown({
     server: httpServer,
     beforeStorageClose: async () => {
-      const { stopGridBotMonitor } = await import('./grid-bot/monitor-runtime');
-      await stopGridBotMonitor();
+      try {
+        const { stopGridBotMonitor } = await import('./grid-bot/monitor-runtime');
+        await stopGridBotMonitor();
+      } catch (err) {
+        console.error('[Shutdown] Grid monitor stop failed:', err);
+      }
       // Stop order-producing background work after HTTP admission has stopped.
       try {
         const { stopAiTraderMonitor } = await import("./ai-trader/monitor");
