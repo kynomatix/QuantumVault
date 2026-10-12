@@ -17,6 +17,11 @@ export function parseGridTrades(rows:Record<string,unknown>[]):GridTrade[]{retur
 });}
 export class GridMonitorReads {
   constructor(private reads:Pick<GridLaunchReads,'json'>,private safeWindow:(input:{account:string;from:number;through:number;observedAt:number})=>Promise<GridHistoryWindow|null>=async()=>null){}
+  async mark(master:string,symbol:string,signal:AbortSignal):Promise<GridObservation['mark']>{
+    try{const prices=envelope(await this.reads.json(master,'/info/prices',{},signal)).data.filter(p=>p.symbol===symbol);
+      if(prices.length===1){const p=prices[0],now=Date.now();if(Number.isSafeInteger(p.timestamp)&&(p.timestamp as number)<=now&&now-(p.timestamp as number)<=5000)return {price:exact(p.mark,true),observedAt:p.timestamp as number};}
+    }catch{signal.throwIfAborted();}return null;
+  }
   private async pages(master:string,path:string,params:Record<string,string>,signal:AbortSignal){
     const rows:Record<string,unknown>[]=[],cursors=new Set<string>();let cursor:string|undefined;
     for(let page=0;page<100;page++){
@@ -30,18 +35,25 @@ export class GridMonitorReads {
     if(!Number.isSafeInteger(from)||!Number.isSafeInteger(through)||from<0||through<from)throw Error('Invalid history interval');
     const params={account,symbol,start_time:String(from),end_time:String(through)};
     const trades=parseGridTrades(await this.pages(master,'/trades/history',params,signal));
-    const history=parseGridVenueOrders(await this.pages(master,'/orders/history',params,signal),true);
+    const history=parseGridVenueOrders(await this.pages(master,'/orders/history',{account},signal),true);
     const open=envelope(await this.reads.json(master,'/orders',{account},signal));
     if(open.has_more===true)throw Error('Incomplete open orders');
     const live=parseGridVenueOrders(open.data),positions=envelope(await this.reads.json(master,'/positions',{account},signal));
     if(positions.has_more===true)throw Error('Incomplete positions');
     const matches=positions.data.filter(p=>p.symbol===symbol);if(matches.length>1)throw Error('Ambiguous position');
     const p=matches[0];let position:GridObservation['position']=null;
-    // An omitted row is unavailable. It is never converted into a flat position.
+    // Absence alone is not flatness. A fresh explicit full-account zero count can prove it.
     if(p){if(!['bid','ask'].includes(p.side as string))throw Error('Unknown position direction');position={direction:p.side==='bid'?'long':'short',size:exact(p.amount)};}
+    else if(positions.data.length===0){try{
+      const r=await this.reads.json(master,'/account',{account},signal) as {success?:boolean;data?:{positions_count?:number;updated_at?:number}};
+      const at=r?.data?.updated_at,now=Date.now();
+      if(r?.success===true&&r.data?.positions_count===0&&Number.isSafeInteger(at)&&at!<=now&&now-at!<=5000)position={direction:'long',size:'0'};
+    }catch{signal.throwIfAborted();}}
     const observedAt=Date.now(),safe=await this.safeWindow({account,from,through,observedAt});
     if(safe&&(safe.from!==from||safe.through>through))throw Error('History authority window mismatch');
     const liveIds=new Set(live.map(o=>o.orderId));
-    return {account,symbol,observedAt,trades,orders:[...history.filter(o=>!liveIds.has(o.orderId)),...live],position,inventoryComplete:true,history:safe,mark:null};
+    // Mark failure must not discard authoritative order recovery. History paging is NOT a safeWindow authority.
+    const mark=await this.mark(master,symbol,signal);
+    return {account,symbol,observedAt,trades,orders:[...history.filter(o=>!liveIds.has(o.orderId)),...live],position,inventoryComplete:true,history:safe,mark};
   }
 }

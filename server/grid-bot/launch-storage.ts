@@ -3,11 +3,13 @@ import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
 import type {Pool,PoolClient} from 'pg';
 import {requireSchemaCapabilityReady} from '../schema-readiness';
+import {gridEntrySafety,freshGridFact} from './lifecycle-policy';
+import {gridRecyclerGate} from './runtime-policy';
 export const canonicalRequest=(x:unknown):string=>JSON.stringify(x,(_,v)=>v && typeof v==='object' && !Array.isArray(v)
   ? Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
 export const requestDigest=(x:unknown)=>createHash('sha256').update(canonicalRequest(x)).digest('hex');
 export interface ExactGridRequest {
-  kind:'create'|'fund'|'leverage'|'seed'|'limit'|'cancel'; botId:string; account:string; masterAccount:string;
+  kind:'create'|'fund'|'leverage'|'seed'|'limit'|'cancel'|'close'|'sweep'; botId:string; account:string; masterAccount:string;
   path:string; operationType:string; timestamp:number; expiryMs:number; data:Record<string,unknown>;
   authority:Record<string,unknown>;
 }
@@ -16,7 +18,23 @@ export interface GridClaim {
   observedAt:number; expiresAt:number;
 }
 export interface DurableGridOperation {id:string;state:string;exact_request:ExactGridRequest;exact_request_digest:string;failure_classification:string|null}
-const typeFor={create:'provision_subaccount',fund:'fund_subaccount',leverage:'set_leverage',seed:'seed_position',limit:'place_level_order',cancel:'cancel_level_order'};
+const typeFor={create:'provision_subaccount',fund:'fund_subaccount',leverage:'set_leverage',seed:'seed_position',limit:'place_level_order',cancel:'cancel_level_order',close:'close_position',sweep:'sweep_subaccount'};
+const reduction=(r:ExactGridRequest)=>['cancel','close','sweep'].includes(r.kind)||r.kind==='limit'&&r.data.reduce_only===true;
+const liveStates=['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping'];
+function reductionAuthority(r:ExactGridRequest,monitor:any,now:number){
+  if(r.kind==='limit'&&r.data.reduce_only===true&&monitor)return monitor.fresh&&freshGridFact(monitor.observation?.observedAt,now)
+    &&String(monitor.generation)===String(r.authority.monitorGeneration)&&monitor.observation.account===r.account;
+  if(!['close','sweep'].includes(r.kind))return true;
+  const o=monitor?.observation,p=o?.position;
+  if(!monitor?.fresh||!o.inventoryComplete||!freshGridFact(o.observedAt,now)||o.account!==r.account||!p)return false;
+  if(r.kind==='close')return o.symbol===r.data.symbol&&new Decimal(p.size).gt(0)&&new Decimal(String(r.data.amount)).gt(0)
+    &&new Decimal(String(r.data.amount)).lte(p.size)&&r.data.reduce_only===true&&r.data.side===(p.direction==='long'?'ask':'bid');
+  const proof=r.authority.settlement as any;
+  return !monitor.blocked_reasons.length&&new Decimal(p.size).isZero()&&!o.orders.some((x:{status:string})=>['open','partially_filled'].includes(x.status))
+    &&r.data.to_account===r.masterAccount&&proof?.account===r.account&&proof.masterAccount===r.masterAccount&&proof.settlementComplete===true
+    &&!!proof.source&&freshGridFact(proof.observedAt,now)&&gridRecyclerGate(proof.recycler,now)
+    &&new Decimal(proof.balance).gt(0)&&new Decimal(proof.balance).eq(proof.withdrawable)&&new Decimal(proof.balance).eq(String(r.data.amount));
+}
 export class GridLaunchTransientError extends Error {}
 /** Lock order is always master, then bot. No deployment identity partitions a master's quota. */
 export class GridLaunchStorage {
@@ -86,14 +104,26 @@ export class GridLaunchStorage {
       if(!master)throw Error('Master quota unavailable');const now=new Date(master.clock).getTime();
       const bot=(await c.query('SELECT b.*,a.account,a.master_account,a.canary_limit,a.canary_committed,a.released_at FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 FOR UPDATE OF b,a',[request.botId])).rows[0];
       if(!bot || bot.released_at || bot.account!==request.account || bot.master_account!==request.masterAccount || bot.lease_token!==leaseToken
-        || new Date(bot.lease_expires_at).getTime()<=now || !['provisioning','canary','active'].includes(bot.status))throw Error('Lost Grid ownership');
+        || new Date(bot.lease_expires_at).getTime()<=now || !(reduction(request)?liveStates:['provisioning','canary','active']).includes(bot.status))throw Error('Lost Grid ownership');
+      const lifecycle=(await c.query('SELECT * FROM grid_lifecycle WHERE bot_id=$1',[request.botId])).rows[0];
+      if(lifecycle&&String(lifecycle.epoch)!==String(request.authority.lifecycleEpoch))throw Error('Grid lifecycle changed');
+      if(['close','sweep'].includes(request.kind)&&bot.status!=='stopping')throw Error('Stop intent required');
       const old=(await c.query('SELECT * FROM grid_operations WHERE idempotency_key=$1',[key])).rows[0];
       if(old){if(old.bot_id!==request.botId || old.exact_request_digest!==digest || canonicalRequest(old.exact_request)!==canonicalRequest(exact))throw Error('Exact request conflict');return old;}
       const monitor=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[request.botId])).rows[0];
-      if(monitor&&['limit','seed'].includes(request.kind)){
+      if(monitor&&['limit','seed'].includes(request.kind)&&!reduction(request)){
         if(!monitor.fresh||monitor.boot_id!==request.authority.monitorBootId||String(monitor.generation)!==String(request.authority.monitorGeneration)
           ||!monitor.boot_id||monitor.blocked_reasons.length)throw Error('Grid restart or reconciliation barrier');
+        if(!gridEntrySafety({sol:bot.sol_balance,solObservedAt:bot.sol_balance_observed_at?new Date(bot.sol_balance_observed_at).getTime():null,failures:bot.consecutive_failures,mark:monitor.observation?.mark??null},now).allowed)throw Error('Grid entry risk gate');
       }
+      if(request.kind==='close'){
+        const p=monitor?.observation?.position;
+        if(!monitor?.fresh||!p||monitor.observation.account!==request.account||monitor.observation.symbol!==request.data.symbol||!new Decimal(p.size).gt(0)
+          ||new Decimal(String(request.data.amount)).gt(p.size)||request.data.reduce_only!==true||request.data.side!==(p.direction==='long'?'ask':'bid'))throw Error('Close position authority unavailable');
+      }
+      if(request.kind==='sweep'&&(!monitor?.fresh||monitor.blocked_reasons.length||monitor.observation?.position?.size==null
+        ||!new Decimal(monitor.observation.position.size).isZero()||request.data.to_account!==request.masterAccount||request.authority.settlementComplete!==true))throw Error('Sweep settlement authority unavailable');
+      if(!reductionAuthority(request,monitor,now))throw Error('Grid reduction authority unavailable');
       if((await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[request.botId])).rowCount)throw Error('Unresolved operation barrier');
       if(!Number.isSafeInteger(claim.observedAt) || !Number.isSafeInteger(claim.expiresAt) || claim.observedAt>now || claim.expiresAt<=now
         || claim.expiresAt-claim.observedAt>5000 || request.timestamp>now || request.timestamp+request.expiryMs<=now)throw Error('Stale admission');
@@ -110,6 +140,11 @@ export class GridLaunchStorage {
       if(bot.status!=='active' && new Decimal(bot.canary_committed).plus(claim.canaryIncrement).gt(bot.canary_limit))throw Error('Canary commitment exceeded');
       const id=randomUUID();
       const levelId=request.authority.levelId??null;
+      if(request.kind==='cancel'){
+        const original=request.authority.originalRequest as ExactGridRequest|undefined;
+        if(!original||original.kind!=='limit'||original.botId!==request.botId||original.account!==request.account||original.data.symbol!==request.data.symbol
+          ||!(await c.query('SELECT id FROM grid_operations WHERE bot_id=$1 AND exact_request_digest=$2 AND venue_order_id=$3 AND level_id=$4',[request.botId,requestDigest(original),String(request.data.order_id),levelId])).rowCount)throw Error('Cancel ownership unavailable');
+      }
       if(request.kind==='limit'||request.kind==='cancel'){
         const level=(await c.query('SELECT * FROM grid_levels WHERE id=$1 AND bot_id=$2 FOR UPDATE',[levelId,request.botId])).rows[0];
         if(!level)throw Error('Grid level ownership unavailable');
@@ -156,35 +191,48 @@ export class GridLaunchStorage {
     return this.transaction(async c=>{
       const q=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount])).rows[0];
       if(!q||q.blocked)return false;
+      const bot=(await c.query('SELECT *,clock_timestamp() AS now FROM grid_bots WHERE id=$1 FOR UPDATE',[op.exact_request.botId])).rows[0];
+      if(!bot)return false;
       const monitor=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[op.exact_request.botId])).rows[0];
-      if(monitor&&['limit','seed'].includes(op.exact_request.kind)&&(!monitor.fresh||!monitor.boot_id||monitor.blocked_reasons.length
+      if(monitor&&['limit','seed'].includes(op.exact_request.kind)&&!reduction(op.exact_request)&&(!monitor.fresh||!monitor.boot_id||monitor.blocked_reasons.length
         ||monitor.boot_id!==op.exact_request.authority.monitorBootId||String(monitor.generation)!==String(op.exact_request.authority.monitorGeneration)))return false;
+      const lifecycle=(await c.query('SELECT * FROM grid_lifecycle WHERE bot_id=$1',[op.exact_request.botId])).rows[0];
+      if(lifecycle&&String(lifecycle.epoch)!==String(op.exact_request.authority.lifecycleEpoch))return false;
+      if(!reduction(op.exact_request)&&!['provisioning','canary','active'].includes(bot.status))return false;
+      if(['close','sweep'].includes(op.exact_request.kind)&&bot.status!=='stopping')return false;
+      if(!reductionAuthority(op.exact_request,monitor,new Date(bot.now).getTime()))return false;
+      if(monitor&&!reduction(op.exact_request)&&['limit','seed'].includes(op.exact_request.kind)
+        &&!gridEntrySafety({sol:bot.sol_balance,solObservedAt:bot.sol_balance_observed_at?new Date(bot.sol_balance_observed_at).getTime():null,failures:bot.consecutive_failures,mark:monitor.observation?.mark??null},new Date(bot.now).getTime()).allowed)return false;
       // The CAS makes a crash before POST uncertain. A new worker never adopts permission to resend.
       const r=await c.query(`UPDATE grid_operations o SET state='submitted',submitted_at=clock_timestamp(),updated_at=clock_timestamp()
         FROM grid_bots b WHERE o.id=$1 AND o.bot_id=b.id AND o.state='prepared' AND o.exact_request_digest=$2
-        AND b.lease_token=$3 AND b.lease_expires_at>clock_timestamp() AND b.status IN ('provisioning','canary','active')
+        AND b.lease_token=$3 AND b.lease_expires_at>clock_timestamp() AND b.status IN ('provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping')
         AND ($4::bigint+$5::bigint)>extract(epoch from clock_timestamp())*1000 RETURNING o.id`,
       [op.id,op.exact_request_digest,leaseToken,op.exact_request.timestamp,op.exact_request.expiryMs]);return !!r.rowCount;
     });
   }
-  async settle(op:DurableGridOperation,outcome:{state:'confirmed'|'failed'|'unconfirmed';reason:string|null;releaseSlot:boolean;rateLimited?:boolean;orderId?:string},leaseToken?:string){
+  async settle(op:DurableGridOperation,outcome:{state:'confirmed'|'failed'|'unconfirmed';reason:string|null;releaseSlot:boolean;rateLimited?:boolean;orderId?:string;orderStatus?:string},leaseToken?:string){
     return this.transaction(async c=>{
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount]);
       if(leaseToken&&!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE',[op.exact_request.botId,leaseToken])).rowCount)throw Error('Grid recovery ownership lost');
       const r=await c.query(`UPDATE grid_operations SET state=$2,failure_classification=$3,terminal_at=CASE WHEN $2='unconfirmed' THEN NULL ELSE clock_timestamp() END,
         updated_at=clock_timestamp() WHERE id=$1 AND state IN ('submitted','unconfirmed') AND exact_request_digest=$4 RETURNING id`,[op.id,outcome.state,outcome.reason,op.exact_request_digest]);
       if(!r.rowCount)throw Error('Settlement CAS conflict');
+      // Only terminal venue results alter the breaker; an uncertain HTTP send is not counted repeatedly.
+      if(outcome.state==='failed'&&['authentication','quota','margin','transport'].includes(outcome.reason??''))await c.query("UPDATE grid_bots SET consecutive_failures=consecutive_failures+1,status=CASE WHEN consecutive_failures+1>=5 AND status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=CASE WHEN consecutive_failures+1>=5 THEN 'circuit_breaker' ELSE pause_reason END WHERE id=$1",[op.exact_request.botId]);
+      if(outcome.state==='failed'&&['venue_rejection','policy','invariant'].includes(outcome.reason??''))await c.query("UPDATE grid_bots SET status=CASE WHEN status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=$2 WHERE id=$1",[op.exact_request.botId,outcome.reason]);
+      if(outcome.state==='confirmed'&&outcome.releaseSlot)await c.query('UPDATE grid_bots SET consecutive_failures=0 WHERE id=$1',[op.exact_request.botId]);
       if(outcome.state==='failed'&&outcome.reason==='expected_rejection')await c.query('UPDATE grid_profit_allocations SET released_at=clock_timestamp(),released_size=size WHERE operation_id=$1 AND released_at IS NULL',[op.id]);
       if(outcome.state!=='unconfirmed')await c.query('UPDATE grid_execution_claims SET settled_at=clock_timestamp(),slot_released=$2 WHERE operation_id=$1',[op.id,outcome.releaseSlot]);
       if(outcome.orderId)await c.query('UPDATE grid_operations SET venue_order_id=$2 WHERE id=$1',[op.id,outcome.orderId]);
       if(outcome.state==='confirmed'&&['seed','limit'].includes(op.exact_request.kind))await c.query('UPDATE grid_bots SET canary_started_at=COALESCE(canary_started_at,clock_timestamp()) WHERE id=$1',[op.exact_request.botId]);
       if(op.exact_request.kind==='limit'&&outcome.state!=='unconfirmed'){
-        const status=outcome.reason==='expected_rejection'?'pending':outcome.state==='failed'?'failed':outcome.releaseSlot?'filled':'active';
+        const status=outcome.reason==='expected_rejection'?'pending':outcome.state==='failed'?'failed':outcome.orderStatus==='cancelled'?'cancelled':outcome.releaseSlot?'filled':'active';
         await c.query('UPDATE grid_levels SET status=$2,venue_order_id=$3,placement_attempt=placement_attempt+CASE WHEN $4 THEN 1 ELSE 0 END,updated_at=clock_timestamp() WHERE id=$1 AND bot_id=$5',
-          [op.exact_request.authority.levelId,status,outcome.orderId??null,outcome.reason==='expected_rejection',op.exact_request.botId]);
+          [op.exact_request.authority.levelId,status,outcome.orderId??null,outcome.reason==='expected_rejection'||outcome.orderStatus==='cancelled',op.exact_request.botId]);
       }
       if(op.exact_request.kind==='cancel'&&outcome.state==='confirmed'){
-        await c.query("UPDATE grid_levels SET status='cancelled',placement_attempt=placement_attempt+1,updated_at=clock_timestamp() WHERE id=$1 AND bot_id=$2",[op.exact_request.authority.levelId,op.exact_request.botId]);
+        await c.query("UPDATE grid_levels SET status=$4,placement_attempt=placement_attempt+1,updated_at=clock_timestamp() WHERE id=$1 AND bot_id=$2 AND venue_order_id=$3 AND status IN ('active','partially_filled','cancelling')",[op.exact_request.authority.levelId,op.exact_request.botId,String(op.exact_request.data.order_id),outcome.orderStatus==='filled'?'filled':'cancelled']);
         await c.query(`UPDATE grid_execution_claims c SET slot_released=true FROM grid_operations o WHERE c.operation_id=o.id AND o.bot_id=$1 AND o.venue_order_id=$2`,[op.exact_request.botId,String(op.exact_request.data.order_id)]);
       }
       if(outcome.rateLimited)await c.query("UPDATE grid_master_quota SET backoff_until=GREATEST(backoff_until,clock_timestamp()+interval '60 seconds') WHERE master_account=$1",[op.exact_request.masterAccount]);

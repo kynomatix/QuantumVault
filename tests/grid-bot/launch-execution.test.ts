@@ -53,7 +53,8 @@ describe('write ahead and exact identity execution',()=>{
   });
   it('only exact documented zero-fill post-only history is an expected crossing',()=>{const r=request();const rows=parseGridVenueOrders([{order_id:'1',client_order_id:r.data.client_order_id,symbol:'BTC',side:'bid',initial_price:'90',amount:'1',filled_amount:'0',reduce_only:false,order_type:'limit',created_at:1000,updated_at:1001,order_status:'rejected',reason:'post_only_rejected'}],true);
     expect(reconcileGridLimit(r,rows).state).toBe('expected_alo_cross');
-    for(const patch of [{reason:'EXAMPLE_error_text'},{filledAmount:'0.1'},{price:'91'},{amount:'2'},{reduceOnly:true},{createdAt:999},{clientOrderId:randomUUID()}])expect(reconcileGridLimit(r,[{...rows[0],...patch} as GridVenueOrder]).state).toBe('unknown');
+    expect(reconcileGridLimit(r,[{...rows[0],reason:'EXAMPLE_error_text'}]).state).toBe('rejected');
+    for(const patch of [{filledAmount:'0.1'},{price:'91'},{amount:'2'},{reduceOnly:true},{createdAt:999},{clientOrderId:randomUUID()}])expect(reconcileGridLimit(r,[{...rows[0],...patch} as GridVenueOrder]).state).toBe('unknown');
     expect(reconcileGridLimit(r,[...rows,...rows]).state).toBe('unknown');expect(reconcileGridLimit(r,[]).state).toBe('unknown');
   });
   it('signs only synthetic identities through the Grid transport with the retained timestamp and no redirects',async()=>{
@@ -74,4 +75,14 @@ describe('bounded rolling placement',()=>{
   it('entry denial retains backed exits; protection reserve remains free',()=>{const f=facts();f.levels[0].reduceOnly=true;expect(gridWindow({...f,positionSize:'1',entriesAllowed:false,freeSlots:6}).flat()).toHaveLength(1);expect(gridWindow({...facts(),freeSlots:5})).toEqual([]);});
   it('refuses unknown inventory and does not shrink orders to fit canary',()=>{expect(()=>gridWindow({...facts(),inventoryComplete:false})).toThrow();expect(gridWindow({...facts(),canaryRemaining:'79'})).toEqual([]);});
   it('an uncertain exit blocks every subsequent entry and chunk',async()=>{const f=facts();f.levels[19].reduceOnly=true;const chunks=gridWindow({...f,positionSize:'1'}),run=vi.fn(async()=> 'pending' as const),prepare=vi.fn(async()=>({key:'EXAMPLE',request:request(),claim,leaseToken:'EXAMPLE'}));expect(await executeGridWindow(chunks,{run},prepare)).toEqual({confirmed:0,state:'pending'});expect(run).toHaveBeenCalledOnce();});
+});
+
+describe('Grid terminal sweep sender',()=>{
+  it.each([true,false])('requires the full nested terminal envelope: %s',async terminal=>{
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));const r:ExactGridRequest={...request(),kind:'sweep',account:bs58.encode(sub.publicKey),path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:'EXAMPLE_MASTER',amount:'1'},authority:{settlementComplete:true}};
+    const body=terminal?{success:true,error:null,data:{success:true,error:null}}:{success:true};const fetcher=vi.fn(async()=>new Response(JSON.stringify(body),{status:200}));
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch);
+    expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual(terminal?{rateLimited:false,terminalTransferDigest:requestDigest(r)}:{rateLimited:false});
+    expect(JSON.parse(String((fetcher.mock.calls[0] as unknown as [string,RequestInit])[1].body))).toMatchObject({account:r.account,to_account:r.masterAccount,amount:'1'});
+  });
 });

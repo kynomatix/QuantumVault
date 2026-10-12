@@ -46,7 +46,7 @@ export class GridMonitorStorage {
       start:new Date(bot.created_at).getTime(),now,operations,prior,observation});
     // All downstream decisions use exact operation progress, not scale-eight compatibility columns.
     for(const order of observation.orders){const op=operations.find(op=>op.venue_order_id===order.orderId||op.exact_request?.data.client_order_id===order.clientOrderId&&order.clientOrderId!==null);
-      if(!op||!['seed','limit'].includes(op.exact_request?.kind))continue;
+      if(!op||!['seed','limit','close'].includes(op.exact_request?.kind))continue;
       const actual=result.fills.filter(f=>f.operationId===op.id).reduce((q,f)=>q.plus(f.size),new D(0));
       if(!actual.eq(order.filledAmount))continue;
       const remaining=new D(order.amount).minus(order.filledAmount);
@@ -57,11 +57,12 @@ export class GridMonitorStorage {
         ON CONFLICT(operation_id) DO UPDATE SET status=EXCLUDED.status,filled=EXCLUDED.filled,remaining=EXCLUDED.remaining,observed_at=EXCLUDED.observed_at`,[op.id,order.orderId,order.status,actual.toFixed(),remaining.toFixed(),observation.observedAt]);
       if(['filled','cancelled','rejected'].includes(order.status)){
         if(order.status==='filled'&&!actual.eq(order.amount))throw Error('False terminal fill');
+        if(result.entriesAllowed&&['filled','cancelled'].includes(order.status)&&(!old||!['filled','cancelled','rejected'].includes(old.status)))await c.query('UPDATE grid_bots SET consecutive_failures=0 WHERE id=$1',[claim.id]);
         await c.query('UPDATE grid_execution_claims SET slot_released=true WHERE operation_id=$1',[op.id]);
         if(op.level_id)await c.query(`UPDATE grid_levels SET status=$3,placement_attempt=placement_attempt+1,updated_at=clock_timestamp()
           WHERE id=$1 AND bot_id=$2 AND venue_order_id=$4 AND status IN ('active','partially_filled','cancelling')`,[op.level_id,claim.id,order.status==='filled'?'filled':'cancelled',order.orderId]);
         // A proved terminal cancellation frees only the never-filled part of its allocations.
-        if(result.entriesAllowed&&observation.history!.through>=order.updatedAt&&op.exact_request.data.reduce_only===true){
+        if(result.entriesAllowed&&observation.history!.through>=order.updatedAt&&op.exact_request.kind==='limit'&&op.exact_request.data.reduce_only===true){
           const allocations=(await c.query(`SELECT a.*,f.venue_time FROM grid_profit_allocations a JOIN grid_exact_fills f ON f.account=a.account AND f.trade_id=a.trade_id
             WHERE a.operation_id=$1 ORDER BY f.venue_time,a.trade_id FOR UPDATE OF a`,[op.id])).rows;
           let consumed=actual;
@@ -110,7 +111,8 @@ export class GridMonitorStorage {
     const levels=(await c.query(`SELECT l.*,CASE WHEN l.status='cancelled' AND p.status='cancelled' THEN p.remaining::text ELSE l.size::text END AS exact_size
       FROM grid_levels l LEFT JOIN LATERAL (SELECT p.* FROM grid_monitor_orders p JOIN grid_operations o ON o.id=p.operation_id
         WHERE o.level_id=l.id AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1) p ON true WHERE l.bot_id=$1 ORDER BY l.ordinal`,[claim.id])).rows;
-    return {fills,reserved,levels,authority:{monitorBootId:bootId,monitorGeneration:String(state.generation)},observation:state.observation as GridObservation};
+    const life=(await c.query('SELECT epoch FROM grid_lifecycle WHERE bot_id=$1',[claim.id])).rows[0];
+    return {fills,reserved,levels,authority:{monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
   });}
   async pnl(wallet:string,id:string){return this.launch.transaction(async c=>{
     if(!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rowCount)return null;

@@ -21,7 +21,7 @@ describe('Grid migration and transactional storage on an isolated FRACTAL qvtest
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30_000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query("INSERT INTO wallets VALUES ('EXAMPLE'),('REDACTED')");});
   const draft=(wallet='EXAMPLE')=>{const p=policy(),h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;const bot:DraftRecord={...snapshot,walletAddress:wallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:gridDraftRevision(intent),createIntent:intent,authoritySnapshot:{state:'EXAMPLE'},policyHmac:h.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};return{bot,levels};};
-  it('retains byte-identical Unit 3 runtime SQL, four tables, eleven indexes and nine RESTRICT references',async()=>{const sql=runtimeSql();expect(sql).toHaveLength(188);expect(sql[186]).toBe(migration);
+  it('retains byte-identical Unit 3 runtime SQL, four tables, eleven indexes and nine RESTRICT references',async()=>{const sql=runtimeSql();expect(sql).toHaveLength(190);expect(sql[186]).toBe(migration);
     const tables=await pool.query("SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename LIKE 'grid_%'");expect(tables.rowCount).toBe(4);
     const indexes=await pool.query("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename LIKE 'grid_%' AND indexname NOT LIKE '%_pkey'");expect(indexes.rowCount).toBe(11);
     const refs=await pool.query("SELECT confdeltype FROM pg_constraint WHERE connamespace=current_schema()::regnamespace AND contype='f'");expect(refs.rows).toHaveLength(9);expect(refs.rows.every(r=>r.confdeltype==='r')).toBe(true);});
@@ -49,11 +49,11 @@ describe('Grid migration and transactional storage on an isolated FRACTAL qvtest
     await storage.recordFillAndLevelState(fill,String(seed.id));expect((await pool.query('SELECT state FROM grid_operations WHERE id=$1',[seed.id])).rows[0].state).toBe('prepared');
     await expect(storage.transitionOperation(String(seed.id),'prepared','confirmed',null,{requestIdentity:'EXAMPLE:seed',type:'seed_position',source:'EXAMPLE',observedAt:new Date(),venueOrderId:null,clientOrderUuid,transactionSignature:null,confirmedAmountUsdc:null,expectedSize:'1',filledSize:'0.5'})).rejects.toMatchObject({code:'invariant'});
   });
-  it.each([null,'0','0.00000001'])('atomically binds terminal stop and exact residual (%s)',async(amount)=>{
+  it.each([null,'0','0.00000001'])('legacy trigger confirmation cannot terminalize stop or release custody (%s)',async(amount)=>{
     const {bot,levels}=draft();await storage.createDraftWithLevels(bot,levels);const token=randomUUID(),subaccount=(await pool.query('INSERT INTO protocol_subaccounts DEFAULT VALUES RETURNING id')).rows[0].id;await pool.query("UPDATE grid_bots SET status='stopping',protocol_subaccount_id=$3,lease_token=$2,lease_expires_at=clock_timestamp()+interval '30 seconds' WHERE id=$1",[bot.id,token,subaccount]);
     const stop=await storage.prepareOperation({botId:bot.id,type:'stop_trigger',idempotencyKey:'EXAMPLE:stop',requestIdentity:'EXAMPLE:stop',triggerPrice:'80',triggerPnl:'-1',triggerObservedAt:new Date()});
     await expect(storage.finalizeTerminalStop(bot.id,token,String(stop.id),amount,amount===null?null:new Date())).rejects.toMatchObject({code:'invariant'});
     await storage.transitionOperation(String(stop.id),'prepared','confirmed',null,{requestIdentity:'EXAMPLE:stop',type:'stop_trigger',source:'EXAMPLE',observedAt:new Date(),venueOrderId:null,clientOrderUuid:null,transactionSignature:null,confirmedAmountUsdc:null});
-    const stopped=await storage.finalizeTerminalStop(bot.id,token,String(stop.id),amount,amount===null?null:new Date());expect(stopped.status).toBe('stopped');expect(stopped).toMatchObject({terminalStopOperationId:stop.id});expect(stopped.residualUsdc).toBe(amount===null?null:new Decimal(amount).toFixed(8));
+    await expect(storage.finalizeTerminalStop(bot.id,token,String(stop.id),amount,amount===null?null:new Date())).rejects.toMatchObject({code:'invariant'});
   });
 });

@@ -5,6 +5,9 @@ import Decimal from 'decimal.js';
 import {deriveSubkey,encryptToBase64,decryptFromBase64,buildPooledSubaccountAAD,zeroizeBuffer} from '../crypto-v3';
 import {GridLaunchStorage} from './launch-storage';
 import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../storage';
+import type {GridSettlementFact} from './lifecycle-service';
+import {gridRecyclerGate} from './runtime-policy';
+import {freshGridFact} from './lifecycle-policy';
 
 // Leave recovery time beyond the durable 60-second rate-limit backoff.
 export const GRID_LAUNCH_LEASE_MS = 120_000;
@@ -120,6 +123,41 @@ export class GridCustody {
         AND b.id=a.bot_id AND b.lease_token=$4 AND b.lease_expires_at>clock_timestamp() AND p.status IN ('grid_reserved','grid_owned')
         AND EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.type='provision_subaccount' AND o.state='confirmed') RETURNING p.id`,
       [identity.botId,identity.account,identity.masterAccount,identity.leaseToken]);if(!r.rowCount)throw Error('Grid create confirmation unavailable');
+    });
+  }
+  /** Terminal ownership release and stop completion are atomic, after a fresh full-account zero proof. */
+  async recycleStopped(identity:GridAccount,umk:Buffer,requestId:string,proof:GridSettlementFact){
+    if(proof.account!==identity.account||proof.masterAccount!==identity.masterAccount||!proof.settlementComplete||!proof.source
+      ||!new Decimal(proof.balance).isZero()||!new Decimal(proof.withdrawable).isZero()||!freshGridFact(proof.observedAt,Date.now())||!gridRecyclerGate(proof.recycler,Date.now()))throw Error('Grid terminal proof unavailable');
+    await this.withSecret(identity,umk,async secret=>{
+      const key=deriveSubkey(umk,'bot_subaccount_privkey');
+      try{const pooled=encryptToBase64(secret,key,buildPooledSubaccountAAD('pacifica',identity.wallet,identity.account));
+        await this.storage.transaction(async c=>{
+          await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,identity.wallet]);
+          const owner=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1 FOR UPDATE',[identity.wallet])).rows[0];
+          if(owner?.agent_public_key!==identity.masterAccount)throw Error('Grid wallet generation changed');
+          await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[identity.masterAccount]);
+          const row=(await c.query(`SELECT a.protocol_subaccount_id,l.active_request,m.observation,m.blocked_reasons,m.reconciled_at,clock_timestamp() AS now
+            FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id JOIN grid_lifecycle l ON l.bot_id=b.id JOIN grid_monitor_state m ON m.bot_id=b.id
+            WHERE b.id=$1 AND b.wallet_address=$2 AND b.status='stopping' AND b.lease_token=$3 AND b.lease_expires_at>clock_timestamp()
+            AND a.account=$4 AND a.master_account=$5 AND a.released_at IS NULL
+            AND EXISTS(SELECT 1 FROM wallets w WHERE w.address=b.wallet_address AND w.agent_public_key=a.master_account)
+            FOR UPDATE OF b,a,l`,[identity.botId,identity.wallet,identity.leaseToken,identity.account,identity.masterAccount])).rows[0];
+          if(!row||row.active_request!==requestId||row.blocked_reasons.length||!freshGridFact(new Date(row.reconciled_at).getTime(),new Date(row.now).getTime())
+            ||!freshGridFact(proof.observedAt,new Date(row.now).getTime())||!row.observation?.position||!new Decimal(row.observation.position.size).isZero()
+            ||row.observation.orders.some((o:{status:string})=>['open','partially_filled'].includes(o.status)))throw Error('Grid terminal venue truth unavailable');
+          if((await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[identity.botId])).rowCount)throw Error('Grid terminal operation unresolved');
+          const control=await c.query("UPDATE grid_control_requests SET state='complete',completed_at=clock_timestamp() WHERE id=$1 AND bot_id=$2 AND action='stop' AND state='pending' RETURNING id",[requestId,identity.botId]);
+          if(!control.rowCount)throw Error('Grid terminal control changed');
+          const released=await c.query(`UPDATE protocol_subaccounts SET status='spare',subaccount_key_encrypted_v3=$2,last_verified_empty_at=clock_timestamp(),released_at=clock_timestamp()
+            WHERE id=$1 AND bot_id IS NULL AND status IN ('grid_owned','grid_reserved') AND protocol='pacifica' AND protocol_subaccount_id=$3 AND agent_public_key=$4 RETURNING id`,[row.protocol_subaccount_id,pooled,identity.account,identity.masterAccount]);
+          if(!released.rowCount)throw Error('Grid recycler ownership changed');
+          await c.query('UPDATE grid_lifecycle SET terminal_proof=$2,blocker=NULL WHERE bot_id=$1',[identity.botId,proof]);
+          await c.query('UPDATE grid_launch_accounts SET released_at=clock_timestamp() WHERE bot_id=$1',[identity.botId]);
+          await c.query('UPDATE grid_execution_claims SET slot_released=true WHERE bot_id=$1',[identity.botId]);
+          await c.query("UPDATE grid_bots SET status='stopped',residual_usdc=0,residual_observed_at=$2,updated_at=clock_timestamp() WHERE id=$1",[identity.botId,new Date(proof.observedAt)]);
+        });
+      }finally{zeroizeBuffer(key);}
     });
   }
 }

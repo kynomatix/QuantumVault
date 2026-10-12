@@ -7,6 +7,7 @@ import {reconcileGridLaunch} from './launch-reconciliation';
 import {requestDigest} from './launch-storage';
 import {gridWindow,type WindowLevel} from './window';
 import {planGridRebalance} from './rebalance';
+import {reconcileGridReduction} from './lifecycle-policy';
 /** Each process gets a new startup authority; persisted timestamps cannot satisfy it. */
 export class GridMonitorService {
   readonly bootId=randomUUID();
@@ -29,11 +30,12 @@ export class GridMonitorService {
       if(!op.exact_request||requestDigest(op.exact_request)!==op.exact_request_digest)throw Error('Unrecoverable operation identity');
       let result:GridReconciliation={state:'unknown'};
       if(op.exact_request.kind==='limit')result=reconcileGridLimit(op.exact_request,observation.orders);
+      else if(['cancel','close'].includes(op.exact_request.kind))result=reconcileGridReduction(op.exact_request,observation.orders);
       else if(op.exact_request.kind==='seed')result=reconcileGridLaunch(op.exact_request,{kind:'seed',account:claim.account,complete:observation.inventoryComplete,orders:observation.orders,observedAt:observation.observedAt},Date.now());
       else if(this.deps.recover)result=await this.deps.recover(op,observation,signal);
       signal.throwIfAborted();
       if(result.state!=='unknown'&&result.requestDigest===op.exact_request_digest){
-        await this.deps.storage.launch.settle(op,{state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':'venue_rejection',releaseSlot:op.exact_request.kind==='limit'&&result.state==='confirmed'?false:result.releaseSlot,orderId:result.orderId},claim.leaseToken);
+        await this.deps.storage.launch.settle(op,{state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':'venue_rejection',releaseSlot:op.exact_request.kind==='limit'&&result.state==='confirmed'?false:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus},claim.leaseToken);
       }
     }
     signal.throwIfAborted();const result=await this.deps.storage.reconcile(claim,this.bootId,observation);

@@ -185,15 +185,9 @@ export class GridStorage {
     });
   }
   async finalizeTerminalStop(id:string,token:string,operationId:string,amount:string|null,observedAt:Date|null) {
-    if(!decimal(amount,true) || (amount===null)!==(observedAt===null) || observedAt && (!Number.isFinite(observedAt.getTime()) || observedAt.getTime()>Date.now()))throw new GridStorageError('invariant');
-    return this.transaction(async c=>{
-      const b=await c.query("SELECT id FROM grid_bots WHERE id=$1 AND status='stopping' AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE",[id,token]);
-      if(!b.rowCount)throw new GridStorageError('lost_lease');
-      const op=await c.query("SELECT id FROM grid_operations WHERE id=$1 AND bot_id=$2 AND type='stop_trigger' AND state='confirmed' FOR UPDATE",[operationId,id]);
-      if(!op.rowCount || (await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[id])).rowCount)throw new GridStorageError('invariant');
-      const result=await c.query("UPDATE grid_bots SET status='stopped',terminal_stop_operation_id=$2,residual_usdc=$3,residual_observed_at=$4,updated_at=clock_timestamp() WHERE id=$1 AND status='stopping' AND lease_token=$5 AND lease_expires_at>clock_timestamp() RETURNING *",[id,operationId,amount,observedAt,token]);
-      if(!result.rowCount)throw new GridStorageError('lost_lease');return botRow(result.rows[0]);
-    });
+    // A trigger confirmation cannot prove a flat venue account or release its custody.
+    // Terminalization belongs exclusively to GridCustody.recycleStopped's atomic proof check.
+    throw new GridStorageError('invariant');
   }
   async setResidual(id: string, operationId: string, amount: string | null, observedAt: Date | null) {
     if (!decimal(amount,true) || (amount===null)!==(observedAt===null)) throw new GridStorageError('invariant');

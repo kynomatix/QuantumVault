@@ -21,7 +21,7 @@ import {
   type SchemaMigrationDefinition,
 } from "../../server/schema-readiness";
 
-const recordErrorMock = vi.hoisted(() => vi.fn(async () => undefined));
+const recordErrorMock = vi.hoisted(() => vi.fn(async (_input: { fingerprint: string }) => undefined));
 vi.mock("../../server/storage", () => ({
   storage: { recordError: recordErrorMock },
 }));
@@ -179,11 +179,11 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 189 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 190 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(189);
-    expect(metadata).toHaveLength(189);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(189);
+    expect(sqlEntries).toHaveLength(190);
+    expect(metadata).toHaveLength(190);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(190);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // Entry 028 is intentionally guarded so a later superset constraint survives
     // every boot. Preserve every other pre-existing SQL byte exactly.

@@ -21,7 +21,7 @@ export function reconcileGridObservation(input:{account:string;symbol:string;dir
   const {observation:o,operations}=input;
   if(o.account!==input.account||o.symbol!==input.symbol||o.observedAt>input.now||input.now-o.observedAt>5000||!o.inventoryComplete)throw Error('Grid inventory authority unavailable');
   const owner=(orderId:string,cloid:string|null)=>{
-    const matches=operations.filter(op=>['limit','seed'].includes(op.exact_request?.kind)&&op.exact_request.account===input.account
+    const matches=operations.filter(op=>['limit','seed','close'].includes(op.exact_request?.kind)&&op.exact_request.account===input.account
       &&(op.venue_order_id===orderId||(cloid!==null&&op.exact_request.data.client_order_id===cloid)));
     if(matches.length!==1)return null;const op=matches[0];
     if(op.venue_order_id!==null&&op.venue_order_id!==orderId)throw Error('Conflicting order identity');return op;
@@ -48,7 +48,7 @@ export function reconcileGridObservation(input:{account:string;symbol:string;dir
     if(filled.gt(order.amount))throw Error('Order overfill');
     if(order.status==='open'||order.status==='partially_filled')owned.push({operationId:op.id,levelId:op.level_id,order,remaining:new D(order.amount).minus(order.filledAmount).minus(order.cancelledAmount??'0').toFixed()});
   }
-  for(const op of operations.filter(op=>['limit','seed'].includes(op.exact_request?.kind)&&op.state==='confirmed')){
+  for(const op of operations.filter(op=>['limit','seed','close'].includes(op.exact_request?.kind)&&op.state==='confirmed')){
     if(![...orders.values()].some(o=>owner(o.orderId,o.clientOrderId)?.id===op.id))reasons.push('vanished_order_unresolved');
     const sum=ledger.filter(f=>f.operationId===op.id).reduce((q,f)=>q.plus(f.size),new D(0));
     if(sum.gt(String(op.exact_request.data.amount)))throw Error('Cumulative operation overfill');

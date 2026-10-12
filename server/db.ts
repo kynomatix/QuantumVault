@@ -2225,6 +2225,41 @@ END $$;`
     observed_at bigint NOT NULL, CONSTRAINT grid_monitor_order_values CHECK (filled>=0 AND remaining>=0 AND observed_at>=0)
   );
 END $$;
+`,
+`DO $$ BEGIN
+  -- Repeat boot uses catalog reads only, without locking live trading tables for DDL.
+  IF to_regclass('grid_lifecycle') IS NOT NULL AND to_regclass('grid_control_requests') IS NOT NULL
+    AND to_regclass('grid_risk_events') IS NOT NULL AND to_regclass('grid_control_keys') IS NOT NULL AND to_regclass('grid_wallet_safety') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_control_requests') AND conname='grid_control_action')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_lifecycle') AND conname='grid_lifecycle_epoch') THEN RETURN; END IF;
+  CREATE TABLE IF NOT EXISTS grid_control_requests (
+    id uuid PRIMARY KEY, bot_id uuid NOT NULL REFERENCES grid_bots(id), request_key text NOT NULL,
+    action text NOT NULL, source text NOT NULL, state text NOT NULL DEFAULT 'pending',
+    previous_status text NOT NULL, evidence jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz, UNIQUE(bot_id,request_key),
+    CONSTRAINT grid_control_action CHECK(action IN ('pause','resume','resync','stop','band') AND source IN ('owner','risk') AND state IN ('pending','complete','superseded'))
+  );
+  CREATE TABLE IF NOT EXISTS grid_lifecycle (
+    bot_id uuid PRIMARY KEY REFERENCES grid_bots(id), epoch bigint NOT NULL DEFAULT 0,
+    active_request uuid REFERENCES grid_control_requests(id), blocker text, terminal_proof jsonb,
+    CONSTRAINT grid_lifecycle_epoch CHECK(epoch>=0)
+  );
+  CREATE TABLE IF NOT EXISTS grid_control_keys (
+    bot_id uuid NOT NULL REFERENCES grid_bots(id), request_key text NOT NULL,
+    control_id uuid NOT NULL REFERENCES grid_control_requests(id), evidence jsonb NOT NULL,
+    PRIMARY KEY(bot_id,request_key)
+  );
+  -- Durable incident outbox. Unique identity prevents a second notification on retry/restart.
+  CREATE TABLE IF NOT EXISTS grid_wallet_safety (
+    execution_wallet text PRIMARY KEY, balance_lamports numeric(30,0), observed_at timestamptz,
+    guard_state text NOT NULL, incident_id uuid, policy_version text NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS grid_risk_events (
+    bot_id uuid NOT NULL REFERENCES grid_bots(id), event_key text NOT NULL, kind text NOT NULL,
+    evidence jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), delivered_at timestamptz,
+    PRIMARY KEY(bot_id,event_key)
+  );
+END $$;
 `
 ] as const;
 
@@ -6299,7 +6334,8 @@ const schemaMigrationMetadata = [
 {"kind":"constraint","table":"grid_exact_fills","constraint":"grid_exact_fill_values","definitionIncludes":["size >","price >","fee >=","venue_time >="]},
 {"kind":"constraint","table":"grid_profit_allocations","constraint":"grid_allocation_values","definitionIncludes":["size >","released_size >=","released_size <="]},
 {"kind":"index","table":"grid_exact_fills","index":"grid_exact_fills_time_idx","columns":["bot_id","venue_time","trade_id"],"unique":false}
-]}
+]},
+{"id":"189-grid-lifecycle-controls","capabilities":["grid_bot"],"operation":"ddl","requirements":[{"kind":"table","table":"grid_control_keys","columns":["bot_id","request_key","control_id","evidence"],"constraintDefinitions":["PRIMARY KEY (bot_id, request_key)"]},{"kind":"table","table":"grid_control_requests","columns":["id","bot_id","request_key","action","source","state","previous_status","evidence","created_at","completed_at"],"constraintDefinitions":["PRIMARY KEY (id)","UNIQUE (bot_id, request_key)"]},{"kind":"table","table":"grid_lifecycle","columns":["bot_id","epoch","active_request","blocker","terminal_proof"],"constraintDefinitions":["PRIMARY KEY (bot_id)"]},{"kind":"table","table":"grid_risk_events","columns":["bot_id","event_key","kind","evidence","created_at","delivered_at"],"constraintDefinitions":["PRIMARY KEY (bot_id, event_key)"]},{"kind":"constraint","table":"grid_control_requests","constraint":"grid_control_action","definitionIncludes":["pause","resume","resync","stop","band","owner","risk","pending","complete","superseded"]},{"kind":"constraint","table":"grid_lifecycle","constraint":"grid_lifecycle_epoch","definitionIncludes":["epoch >="]},{"kind":"table","table":"grid_wallet_safety","columns":["execution_wallet","balance_lamports","observed_at","guard_state","incident_id","policy_version"],"constraintDefinitions":["PRIMARY KEY (execution_wallet)"]}]}
 ] as const;
 
 export const SCHEMA_MIGRATION_MANIFEST: readonly SchemaMigrationDefinition[] =

@@ -6,12 +6,13 @@ import { GridStorageError, type GridStorage } from './storage';
 import { PlannerCharts } from '../grid-planner/chart';
 import { defaultPlannerDeps } from '../grid-planner/default-deps';
 import { readGridRange } from './draft-default-deps';
+import type {GridLifecycleStorage} from './lifecycle-storage';
 
 const uuid=z.string().uuid();
 const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),lookback:z.enum(['100','200'])}).strict();
-export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean}) {
+export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean;lifecycle?:Pick<GridLifecycleStorage,'request'>}) {
   // Unit 4 is buildable and reviewable, but no production money route is enabled.
-  app.post('/api/grid-bots/:id/start',requireWallet,(_req,res)=>{res.status(503).json({error:'Grid live launch is disabled until reconciliation and stop recovery are complete.'});});
+  app.post('/api/grid-bots/:id/start',requireWallet,(_req,res)=>{res.status(503).json({error:'Grid live launch requires the owner’s separate launch authorization.'});});
   const enabled=provided?.enabled??(()=>process.env.GRID_BOT_ENABLED==='true');
   let initialized:Promise<{deps:GridDraftDeps;storage:GridStorage}>|null=null;
   const runtime=()=>provided?Promise.resolve(provided):initialized??(initialized=Promise.all([import('../db'),import('./storage'),import('./draft-default-deps')]).then(([{pool},{GridStorage},{defaultGridDraftDeps}])=>{const storage=new GridStorage(pool);return {storage,deps:defaultGridDraftDeps(storage)};}));
@@ -29,6 +30,15 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
       else res.status(503).json({error:'Grid authority or storage unavailable'});
     } finally {if(bounded)inFlight--;}
   };
+  // Safety controls remain available under draft/entry denial. Owner identity comes only from auth middleware.
+  for(const action of ['pause','resume','resync','stop'] as const)app.post('/api/grid-bots/:id/'+action,requireWallet,work(async(req,res)=>{
+    const body=z.object({requestId:uuid}).strict().safeParse(req.body),id=uuid.safeParse(req.params.id);
+    if(!body.success||!id.success){res.status(400).json({error:'Invalid control request'});return;}
+    let lifecycle=provided?.lifecycle;
+    if(!lifecycle){const [{pool},{GridLaunchStorage},{GridMonitorStorage},{GridLifecycleStorage}]=await Promise.all([import('../db'),import('./launch-storage'),import('./monitor-storage'),import('./lifecycle-storage')]);
+      lifecycle=new GridLifecycleStorage(new GridMonitorStorage(new GridLaunchStorage(pool)));}
+    const result=await lifecycle.request(wallet(req),id.data,body.data.requestId,action,{requestedBy:'owner'});res.status(result.state==='complete'?200:202).json({request:result});
+  }));
   app.get('/api/grid-bots/status',requireWallet,(_req,res)=>{res.json({enabled:enabled(),draftOnly:true});});
   app.get('/api/grid-bots/create-policy',requireWallet,gate,(_req,res)=>{res.json(GRID_CREATE_POLICY);});
   app.get('/api/grid-bots/markets',requireWallet,gate,work(async(_req,res)=>{
