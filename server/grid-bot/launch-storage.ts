@@ -1,5 +1,6 @@
 import {createHash,randomUUID} from 'node:crypto';
-import Decimal from 'decimal.js';
+import DecimalBase from 'decimal.js';
+const Decimal=DecimalBase.clone({precision:200});
 import type {Pool,PoolClient} from 'pg';
 import {requireSchemaCapabilityReady} from '../schema-readiness';
 export const canonicalRequest=(x:unknown):string=>JSON.stringify(x,(_,v)=>v && typeof v==='object' && !Array.isArray(v)
@@ -55,10 +56,18 @@ export class GridLaunchStorage {
     return this.transaction(async c=>{
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount]);
       const r=await c.query(`UPDATE grid_operations o SET state='failed',failure_classification='policy',terminal_at=clock_timestamp(),updated_at=clock_timestamp()
-        FROM grid_bots b WHERE o.id=$1 AND o.bot_id=b.id AND o.state='prepared' AND o.exact_request_digest=$2 AND b.lease_token=$3
+        FROM grid_bots b WHERE o.id=$1 AND o.bot_id=b.id AND o.state='prepared' AND o.submitted_at IS NULL AND o.exact_request_digest=$2 AND b.lease_token=$3
         AND b.lease_expires_at>clock_timestamp() AND ($4::bigint+$5::bigint)<=extract(epoch from clock_timestamp())*1000 RETURNING o.id`,
         [op.id,op.exact_request_digest,leaseToken,op.exact_request.timestamp,op.exact_request.expiryMs]);
-      if(r.rowCount)await c.query('UPDATE grid_execution_claims SET settled_at=clock_timestamp(),slot_released=true WHERE operation_id=$1',[op.id]);
+      if(r.rowCount){
+        const claim=(await c.query('UPDATE grid_execution_claims SET settled_at=clock_timestamp(),slot_released=true WHERE operation_id=$1 RETURNING canary_increment',[op.id])).rows[0];
+        if(claim)await c.query('UPDATE grid_launch_accounts SET canary_committed=GREATEST(0,canary_committed-$2) WHERE bot_id=$1',[op.exact_request.botId,claim.canary_increment]);
+        if(op.exact_request.kind==='limit')await c.query(`UPDATE grid_levels SET status='pending',client_order_uuid=NULL,venue_order_id=NULL,placement_attempt=placement_attempt+1
+          WHERE id=$1 AND bot_id=$2 AND status='submitting' AND client_order_uuid=$3`,[op.exact_request.authority.levelId,op.exact_request.botId,op.exact_request.data.client_order_id]);
+        if(op.exact_request.kind==='cancel')await c.query(`UPDATE grid_levels SET status=CASE WHEN cumulative_filled_size>0 THEN 'partially_filled' ELSE 'active' END
+          WHERE id=$1 AND bot_id=$2 AND status='cancelling'`,[op.exact_request.authority.levelId,op.exact_request.botId]);
+        await c.query('UPDATE grid_profit_allocations SET released_at=clock_timestamp(),released_size=size WHERE operation_id=$1 AND released_at IS NULL',[op.id]);
+      }
       return !!r.rowCount;
     });
   }
@@ -80,6 +89,11 @@ export class GridLaunchStorage {
         || new Date(bot.lease_expires_at).getTime()<=now || !['provisioning','canary','active'].includes(bot.status))throw Error('Lost Grid ownership');
       const old=(await c.query('SELECT * FROM grid_operations WHERE idempotency_key=$1',[key])).rows[0];
       if(old){if(old.bot_id!==request.botId || old.exact_request_digest!==digest || canonicalRequest(old.exact_request)!==canonicalRequest(exact))throw Error('Exact request conflict');return old;}
+      const monitor=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[request.botId])).rows[0];
+      if(monitor&&['limit','seed'].includes(request.kind)){
+        if(!monitor.fresh||monitor.boot_id!==request.authority.monitorBootId||String(monitor.generation)!==String(request.authority.monitorGeneration)
+          ||!monitor.boot_id||monitor.blocked_reasons.length)throw Error('Grid restart or reconciliation barrier');
+      }
       if((await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[request.botId])).rowCount)throw Error('Unresolved operation barrier');
       if(!Number.isSafeInteger(claim.observedAt) || !Number.isSafeInteger(claim.expiresAt) || claim.observedAt>now || claim.expiresAt<=now
         || claim.expiresAt-claim.observedAt>5000 || request.timestamp>now || request.timestamp+request.expiryMs<=now)throw Error('Stale admission');
@@ -99,14 +113,39 @@ export class GridLaunchStorage {
       if(request.kind==='limit'||request.kind==='cancel'){
         const level=(await c.query('SELECT * FROM grid_levels WHERE id=$1 AND bot_id=$2 FOR UPDATE',[levelId,request.botId])).rows[0];
         if(!level)throw Error('Grid level ownership unavailable');
-        if(request.kind==='limit'&&(!['pending','cancelled'].includes(level.status)||level.placement_attempt!==request.authority.levelAttempt
-          || !new Decimal(level.price).eq(String(request.data.price))||!new Decimal(level.size).eq(String(request.data.amount))||level.reduce_only!==request.data.reduce_only
-          || (level.side==='buy'?'bid':'ask')!==request.data.side))throw Error('Grid signed level changed');
+        const profit=!!monitor&&request.data.reduce_only===true;
+        const previous=(await c.query(`SELECT p.remaining,p.status FROM grid_monitor_orders p JOIN grid_operations o ON o.id=p.operation_id
+          WHERE o.bot_id=$1 AND o.level_id=$2 AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1`,[request.botId,levelId])).rows[0];
+        const entrySize=monitor&&level.status==='cancelled'&&previous?.status==='cancelled'?previous.remaining:level.size;
+        if(request.kind==='limit'&&(!(profit?['pending','cancelled','filled']:['pending','cancelled']).includes(level.status)||level.placement_attempt!==request.authority.levelAttempt
+          || !new Decimal(level.price).eq(String(request.data.price))||!(profit?new Decimal(request.data.amount as string).gt(0):new Decimal(entrySize).eq(String(request.data.amount)))
+          ||(!profit&&(level.reduce_only!==request.data.reduce_only||(level.side==='buy'?'bid':'ask')!==request.data.side))
+          ||(profit&&request.data.side!==(bot.direction==='long'?'ask':'bid'))))throw Error('Grid signed level changed');
         if(request.kind==='cancel'&&(!['active','partially_filled'].includes(level.status)||level.venue_order_id!==String(request.data.order_id)))throw Error('Grid cancel identity changed');
         await c.query('UPDATE grid_levels SET status=$2,client_order_uuid=COALESCE($3,client_order_uuid),updated_at=clock_timestamp() WHERE id=$1',[levelId,request.kind==='limit'?'submitting':'cancelling',request.data.client_order_id??null]);
       }
       const result=await c.query(`INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type,client_order_uuid,exact_request,exact_request_digest,level_id)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[id,request.botId,key,digest,typeFor[request.kind],request.data.client_order_id??null,exact,digest,levelId]);
+      if(monitor&&request.kind==='limit'&&request.data.reduce_only===true){
+        const allocations=request.authority.fillAllocations as {tradeId:string;size:string}[];
+        if(!Array.isArray(allocations)||!allocations.length||new Set(allocations.map(a=>a.tradeId)).size!==allocations.length)throw Error('Missing actual fill backing');
+        let total=new Decimal(0);
+        for(const a of allocations){if(typeof a.size!=='string'||!new Decimal(a.size).gt(0))throw Error('Invalid fill allocation');
+          const fill=(await c.query(`SELECT f.size,f.level_id,l.ordinal,COALESCE((SELECT sum(a.size-a.released_size) FROM grid_profit_allocations a WHERE a.account=f.account AND a.trade_id=f.trade_id AND a.released_at IS NULL),0) AS reserved
+            FROM grid_exact_fills f LEFT JOIN grid_levels l ON l.id=f.level_id WHERE f.account=$1 AND f.trade_id=$2 AND f.bot_id=$3 AND f.leg='entry' FOR UPDATE OF f`,[request.account,a.tradeId,request.botId])).rows[0];
+          if(!fill||new Decimal(fill.reserved).plus(a.size).gt(fill.size))throw Error('Fill backing already reserved');total=total.plus(a.size);
+          const target=(await c.query('SELECT ordinal,reduce_only FROM grid_levels WHERE id=$1 AND bot_id=$2',[levelId,request.botId])).rows[0];
+          if(!target||(fill.level_id?target.ordinal!==fill.ordinal+(bot.direction==='long'?1:-1):!target.reduce_only))throw Error('Profit must pair with its adjacent entry or seed');
+          await c.query('INSERT INTO grid_profit_allocations(operation_id,account,trade_id,size) VALUES($1,$2,$3,$4)',[id,request.account,a.tradeId,a.size]);
+        }
+        if(!total.eq(String(request.data.amount)))throw Error('Allocation size mismatch');
+        const backing=monitor.observation?.position?.size;
+        const outstanding=(await c.query(`SELECT COALESCE(sum(GREATEST(0,(o.exact_request->'data'->>'amount')::numeric-
+          COALESCE((SELECT sum(f.size) FROM grid_exact_fills f WHERE f.operation_id=o.id),0))),0) AS reserved FROM grid_operations o
+          LEFT JOIN grid_monitor_orders p ON p.operation_id=o.id WHERE o.bot_id=$1 AND o.exact_request->'data'->>'reduce_only'='true'
+          AND o.state IN ('prepared','submitted','unconfirmed','confirmed') AND (p.status IS NULL OR p.status IN ('open','partially_filled'))`,[request.botId])).rows[0].reserved;
+        if(backing==null||new Decimal(outstanding).gt(backing))throw Error('Exit position backing unavailable');
+      }
       await c.query('INSERT INTO grid_execution_claims(operation_id,bot_id,master_account,account,credits,slots,canary_increment) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,request.botId,request.masterAccount,request.account,claim.credits,claim.slots,claim.canaryIncrement]);
       if(bot.status!=='active')await c.query('UPDATE grid_launch_accounts SET canary_committed=canary_committed+$2 WHERE bot_id=$1',[request.botId,claim.canaryIncrement]);
       return result.rows[0];
@@ -117,6 +156,9 @@ export class GridLaunchStorage {
     return this.transaction(async c=>{
       const q=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount])).rows[0];
       if(!q||q.blocked)return false;
+      const monitor=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[op.exact_request.botId])).rows[0];
+      if(monitor&&['limit','seed'].includes(op.exact_request.kind)&&(!monitor.fresh||!monitor.boot_id||monitor.blocked_reasons.length
+        ||monitor.boot_id!==op.exact_request.authority.monitorBootId||String(monitor.generation)!==String(op.exact_request.authority.monitorGeneration)))return false;
       // The CAS makes a crash before POST uncertain. A new worker never adopts permission to resend.
       const r=await c.query(`UPDATE grid_operations o SET state='submitted',submitted_at=clock_timestamp(),updated_at=clock_timestamp()
         FROM grid_bots b WHERE o.id=$1 AND o.bot_id=b.id AND o.state='prepared' AND o.exact_request_digest=$2
@@ -125,12 +167,14 @@ export class GridLaunchStorage {
       [op.id,op.exact_request_digest,leaseToken,op.exact_request.timestamp,op.exact_request.expiryMs]);return !!r.rowCount;
     });
   }
-  async settle(op:DurableGridOperation,outcome:{state:'confirmed'|'failed'|'unconfirmed';reason:string|null;releaseSlot:boolean;rateLimited?:boolean;orderId?:string}){
+  async settle(op:DurableGridOperation,outcome:{state:'confirmed'|'failed'|'unconfirmed';reason:string|null;releaseSlot:boolean;rateLimited?:boolean;orderId?:string},leaseToken?:string){
     return this.transaction(async c=>{
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount]);
+      if(leaseToken&&!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE',[op.exact_request.botId,leaseToken])).rowCount)throw Error('Grid recovery ownership lost');
       const r=await c.query(`UPDATE grid_operations SET state=$2,failure_classification=$3,terminal_at=CASE WHEN $2='unconfirmed' THEN NULL ELSE clock_timestamp() END,
         updated_at=clock_timestamp() WHERE id=$1 AND state IN ('submitted','unconfirmed') AND exact_request_digest=$4 RETURNING id`,[op.id,outcome.state,outcome.reason,op.exact_request_digest]);
       if(!r.rowCount)throw Error('Settlement CAS conflict');
+      if(outcome.state==='failed'&&outcome.reason==='expected_rejection')await c.query('UPDATE grid_profit_allocations SET released_at=clock_timestamp(),released_size=size WHERE operation_id=$1 AND released_at IS NULL',[op.id]);
       if(outcome.state!=='unconfirmed')await c.query('UPDATE grid_execution_claims SET settled_at=clock_timestamp(),slot_released=$2 WHERE operation_id=$1',[op.id,outcome.releaseSlot]);
       if(outcome.orderId)await c.query('UPDATE grid_operations SET venue_order_id=$2 WHERE id=$1',[op.id,outcome.orderId]);
       if(outcome.state==='confirmed'&&['seed','limit'].includes(op.exact_request.kind))await c.query('UPDATE grid_bots SET canary_started_at=COALESCE(canary_started_at,clock_timestamp()) WHERE id=$1',[op.exact_request.botId]);

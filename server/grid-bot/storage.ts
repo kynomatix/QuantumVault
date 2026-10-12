@@ -161,7 +161,8 @@ export class GridStorage {
   async claimLease(states: string[], token: string, durationMs: number) {
     if (!states.length || !Number.isSafeInteger(durationMs) || durationMs < 1 || durationMs > 300_000) throw new GridStorageError('invariant');
     return this.transaction(async c => {
-      const r = await c.query("WITH candidate AS (SELECT id FROM grid_bots WHERE status=ANY($1::text[]) AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp()) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE grid_bots SET lease_token=$2,lease_expires_at=clock_timestamp()+$3*interval '1 millisecond' FROM candidate WHERE grid_bots.id=candidate.id RETURNING grid_bots.*",[states,token,durationMs]);
+      // An expired token is an uncertain old worker, not permission to take over money work.
+      const r = await c.query("WITH candidate AS (SELECT id FROM grid_bots WHERE status=ANY($1::text[]) AND lease_token IS NULL ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) UPDATE grid_bots SET lease_token=$2,lease_expires_at=clock_timestamp()+$3*interval '1 millisecond' FROM candidate WHERE grid_bots.id=candidate.id RETURNING grid_bots.*",[states,token,durationMs]);
       return r.rows[0] ? botRow(r.rows[0]) : null;
     });
   }

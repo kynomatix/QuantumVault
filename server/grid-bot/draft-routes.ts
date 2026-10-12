@@ -76,6 +76,13 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
     if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}
     const {storage}=await runtime(),snapshot=await storage.getBotSnapshot(wallet(req),req.params.id);res.json({levels:snapshot.levels});
   }));
+  app.get('/api/grid-bots/:id/pnl',requireWallet,gate,work(async(req,res)=>{
+    if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}
+    const {storage}=await runtime();await storage.getBotSnapshot(wallet(req),req.params.id);
+    const [{pool},{GridLaunchStorage},{GridMonitorStorage}]=await Promise.all([import('../db'),import('./launch-storage'),import('./monitor-storage')]);
+    const result=await new GridMonitorStorage(new GridLaunchStorage(pool)).pnl(wallet(req),req.params.id);
+    if(!result){res.status(404).json({error:'not_found'});return;}res.json(result);
+  }));
   app.get('/api/grid-bots/:id',requireWallet,gate,work(async(req,res)=>{
     if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}
     const {storage}=await runtime(),snapshot=await storage.getBotSnapshot(wallet(req),req.params.id);res.json({bot:snapshot.bot,operations:snapshot.operations,pnlLabel:'Excludes funding'});

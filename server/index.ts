@@ -702,6 +702,8 @@ registerRequestTrace(app);
   const runGracefulShutdown = createGracefulHttpShutdown({
     server: httpServer,
     beforeStorageClose: async () => {
+      const { stopGridBotMonitor } = await import('./grid-bot/monitor-runtime');
+      await stopGridBotMonitor();
       // Stop order-producing background work after HTTP admission has stopped.
       try {
         const { stopAiTraderMonitor } = await import("./ai-trader/monitor");
@@ -999,6 +1001,13 @@ registerRequestTrace(app);
         log('[Background ownership] AI Trader monitor and scanner suppressed: REPLIT_DEPLOYMENT is not exactly 1');
       } else {
       // ~77s: AI Trader monitor (WO-6): startup reconciliation + 15s
+      // Grid remains hard disabled until Unit 6 completes the stop path.
+      const { GRID_WORKER_ENABLED } = await import('./grid-bot/service');
+      if (GRID_WORKER_ENABLED && isSchemaCapabilityReady('grid_bot')) {
+        await startObservedBackgroundComponent({component:'grid-bot-monitor',
+          announce:()=>log('[Grid] Starting supervised monitor'),
+          loadAndStart:async()=>{const {startGridBotMonitor}=await import('./grid-bot/monitor-runtime');await startGridBotMonitor();}});
+      }
       // close-detection tick + graduation sweep. Dynamic import keeps the
       // ai-trader module graph off the boot critical path. Kept early (it
       // reconciles live positions — trading-relevant) but headroom-gated.

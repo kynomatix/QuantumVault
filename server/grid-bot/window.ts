@@ -1,4 +1,5 @@
-import Decimal from 'decimal.js';
+import DecimalBase from 'decimal.js';
+const Decimal=DecimalBase.clone({precision:200});
 import {GRID_CAPS} from './grid-caps';
 export interface WindowLevel {id:string;ordinal:number;price:string;size:string;reduceOnly:boolean;side:'buy'|'sell';attempt:number}
 export interface WindowOrder {levelId:string;orderId:string;clientOrderId:string;remaining:string;reduceOnly:boolean}
