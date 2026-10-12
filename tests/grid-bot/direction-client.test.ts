@@ -6,8 +6,8 @@ import { GridDirectionBadge, GridDirectionHint } from '../../client/src/componen
 import { gridDirectionText, isGridDirectionSuggestion } from '../../client/src/lib/grid-direction-view';
 import { BTC_TREND_PUBLICATION_GRACE_MS as GRACE, BTC_TREND_WEEK_MS as WEEK, type GridDirectionSuggestion } from '../../shared/grid-direction';
 
-const DAY = WEEK / 7, now = Date.UTC(2026, 9, 13), asOf = now - DAY, expiresAt = asOf + WEEK + GRACE;
-const above: GridDirectionSuggestion = { regime: 'above', sourceVenue: 'okx', movingAverage: 100, lastClose: 102,
+const DAY = WEEK / 7, now = Date.UTC(2026, 9, 13), asOf = now - DAY, expiresAt = asOf + WEEK;
+const above: GridDirectionSuggestion = { regime: 'above', source: 'okx-index', sourceVenue: 'okx', sourceBasis: 'index', sourceAggregation: 'native', movingAverage: 100, lastClose: 102,
   asOf, retrievedAt: now, serverNow: now, expiresAt };
 const below: GridDirectionSuggestion = { ...above, regime: 'below', lastClose: 98 };
 
@@ -36,30 +36,26 @@ describe('display-only direction badge', () => {
       { ...above, retrievedAt: now + 1 }, { ...above, expiresAt: expiresAt + 1 },
       { ...above, expiresAt: now + DAY }]) expect(isGridDirectionSuggestion(value)).toBe(false);
   });
-  it('accepts the held previous close throughout Monday grace and rejects it at weekly expiry', () => {
-    for (const serverNow of [now + DAY, asOf + WEEK, expiresAt - 1]) {
-      expect(isGridDirectionSuggestion({ ...above, serverNow })).toBe(true);
-    }
+  it('accepts only the current completed UTC Monday week and expires before publication grace', () => {
+    expect(isGridDirectionSuggestion({ ...above, serverNow: expiresAt - 1 })).toBe(true);
     expect(isGridDirectionSuggestion({ ...above, serverNow: expiresAt })).toBe(false);
-    expect(isGridDirectionSuggestion({ ...above, asOf: asOf + WEEK, retrievedAt: expiresAt,
-      serverNow: expiresAt, expiresAt: expiresAt + WEEK })).toBe(true);
+    expect(isGridDirectionSuggestion({ ...above, asOf: asOf - 8 * 3600000 })).toBe(false);
+    expect(isGridDirectionSuggestion({ ...above, expiresAt: expiresAt + GRACE })).toBe(false);
   });
-  it('validates native Sunday-close results against the UTC Monday expiry through publication grace', () => {
-    const native = { ...above, asOf: asOf - 8 * 60 * 60 * 1000 };
-    for (const serverNow of [asOf + WEEK - 1, asOf + WEEK, expiresAt - 1]) {
-      expect(isGridDirectionSuggestion({ ...native, serverNow })).toBe(true);
-    }
-    expect(isGridDirectionSuggestion({ ...native, serverNow: expiresAt })).toBe(false);
-    expect(isGridDirectionSuggestion({ ...native, expiresAt: expiresAt - 8 * 60 * 60 * 1000 })).toBe(false);
-  });
-  it('labels native Pacifica weeks separately from weekly closes aggregated from daily', () => {
-    const native: GridDirectionSuggestion = { ...above, sourceVenue: 'pacifica' };
-    const daily: GridDirectionSuggestion = { ...native, sourceAggregation: 'weekly-from-daily' };
-    expect(isGridDirectionSuggestion(native)).toBe(true); expect(isGridDirectionSuggestion(daily)).toBe(true);
-    expect(gridDirectionText(native).basis).toContain('PACIFICA perpetual candles');
-    expect(gridDirectionText(daily).basis).toContain('Pacifica perp, weekly from daily');
-    expect(isGridDirectionSuggestion({ ...above, sourceAggregation: 'weekly-from-daily' })).toBe(false);
-    expect(isGridDirectionSuggestion({ ...native, sourceAggregation: 'spot' })).toBe(false);
+  it('labels index, spot, mark, daily-derived and mixed windows honestly', () => {
+    expect(gridDirectionText(above).basis).toContain('BTC weekly close (OKX index)');
+    const spot: GridDirectionSuggestion = { ...above, source: 'gate-spot', sourceVenue: 'gate', sourceBasis: 'spot' };
+    const mark: GridDirectionSuggestion = { ...above, source: 'pacifica-mark', sourceVenue: 'pacifica', sourceBasis: 'perp' };
+    const daily: GridDirectionSuggestion = { ...above, source: 'hyperliquid-perp', sourceVenue: 'hyperliquid', sourceBasis: 'perp', sourceAggregation: 'weekly-from-daily' };
+    const mixed: GridDirectionSuggestion = { ...above, source: 'mixed', sourceVenue: 'mixed', sourceBasis: 'mixed', sourceAggregation: 'mixed' };
+    for(const value of [spot,mark,daily,mixed]) expect(isGridDirectionSuggestion(value)).toBe(true);
+    expect(gridDirectionText(spot).basis).toContain('Gate.io spot');
+    expect(gridDirectionText(mark).basis).toContain('Pacifica mark');
+    expect(gridDirectionText(daily).basis).toContain('aggregated from daily');
+    expect(gridDirectionText(mixed).basis).toContain('mixed sources');
+    expect(isGridDirectionSuggestion({ ...above, sourceBasis: 'perp' })).toBe(false);
+    expect(isGridDirectionSuggestion({ ...above, source: 'REDACTED' })).toBe(false);
+    expect(isGridDirectionSuggestion({ ...daily, sourceAggregation: 'spot' })).toBe(false);
   });
   it.each(['long', 'short'] as const)('leaves the selected %s control unchanged across opposing and unavailable suggestions', direction => {
     for (const suggestion of [above, below, null]) {

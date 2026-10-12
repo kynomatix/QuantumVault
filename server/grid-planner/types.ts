@@ -1,6 +1,8 @@
 import type { GridGeometryInput, GridPlan, PairFee } from '../grid-bot/engine-types';
 import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { ProvenancedOHLCV } from '../lab/datafeed';
+import type { BtcStoredWeek } from '../../shared/grid-direction';
+import type { BtcWeeklyStore } from './weekly-store';
 
 // Pacifica candles are Planner-only; shared datafeed consumers keep their existing sources.
 export type PlannerCandle = ProvenancedOHLCV | (Omit<ProvenancedOHLCV, 'provenance'> & {
@@ -22,7 +24,8 @@ export interface PlannerDeps {
   refreshReference?(market: string, symbol: string, signal: AbortSignal): Promise<void>;
   cachedReference(market: string): { price: number; observedAt: number | null } | null;
   candles(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<PlannerCandle[]>;
-  btcWeeklyCandles?(signal: AbortSignal): Promise<PlannerCandle[]>;
+  btcWeeklyCandles?(signal: AbortSignal, start: number, end: number): Promise<BtcStoredWeek[]>;
+  btcWeeklyStore?: BtcWeeklyStore;
   now(): number;
 }
 export interface PlannerQuery {

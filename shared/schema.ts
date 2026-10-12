@@ -1696,6 +1696,30 @@ export const labCandleCacheV2 = pgTable("lab_candle_cache_v2", {
   check("lab_candle_cache_v2_time_semantic_check", sql`${table.timeSemantic} IN ('open_time', 'unknown')`),
 ]);
 
+export const plannerBtcWeeklyCloses = pgTable("planner_btc_weekly_closes", {
+  market: text("market").notNull(),
+  weekStart: timestamp("week_start", { withTimezone: true }).notNull(),
+  close: text("close").notNull(),
+  source: text("source").notNull(),
+  basis: text("basis").notNull(),
+  aggregation: text("aggregation").notNull(),
+  finalized: boolean("finalized").notNull(),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  unique("planner_btc_weekly_identity_unique").on(table.market, table.weekStart),
+  check("planner_btc_weekly_market_check", sql`${table.market} = 'BTC'`),
+  check("planner_btc_weekly_utc_check", sql`${table.weekStart} >= '1970-01-05 00:00:00+00'::timestamptz AND extract(isodow FROM ${table.weekStart} AT TIME ZONE 'UTC') = 1 AND (${table.weekStart} AT TIME ZONE 'UTC')::time = '00:00:00'::time`),
+  check("planner_btc_weekly_close_check", sql`CASE WHEN ${table.close} ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' THEN ${table.close}::numeric > 0 ELSE false END`),
+  check("planner_btc_weekly_source_check", sql`(${table.source} = 'okx-index' AND ${table.basis} = 'index') OR (${table.source} IN ('gate-spot','kraken-spot','coinbase-spot') AND ${table.basis} = 'spot') OR (${table.source} IN ('pacifica-mark','hyperliquid-perp','pacifica-perp','okx-perp') AND ${table.basis} = 'perp')`),
+  check("planner_btc_weekly_aggregation_check", sql`${table.aggregation} IN ('native','daily')`),
+  check("planner_btc_weekly_finalized_check", sql`${table.finalized} AND ${table.fetchedAt} >= ${table.weekStart} + interval '168 hours'`),
+]);
+
+export const plannerBtcWeeklyRefresh = pgTable("planner_btc_weekly_refresh", {
+  market: text("market").primaryKey(),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }).notNull(),
+}, (table) => [check("planner_btc_weekly_refresh_market_check", sql`${table.market} = 'BTC'`)]);
+
 export const labOptimizationResults = pgTable("lab_optimization_results", {
   id: serial("id").primaryKey(),
   runId: integer("run_id").notNull(),

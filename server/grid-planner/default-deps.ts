@@ -1,6 +1,8 @@
 import { getAdapter } from '../protocol/adapter-registry';
 import { fetchOHLCV, CHART_CANDLE_POLICY } from '../lab/datafeed';
 import { plannerBtcWeeklyCandles } from './btc-candles';
+import { pool } from '../db';
+import { PostgresBtcWeeklyStore } from './weekly-store';
 import type { PlannerDeps } from './types';
 import { pacificaPlannerCandles } from './pacifica-candles';
 import { PlannerReferences } from './pacifica-reference';
@@ -11,6 +13,7 @@ const references = new PlannerReferences();
 export const defaultPlannerDeps: PlannerDeps = {
   now: Date.now,
   btcWeeklyCandles: plannerBtcWeeklyCandles,
+  btcWeeklyStore: new PostgresBtcWeeklyStore(pool),
   getMarkets: () => getAdapter('pacifica').getMarkets(),
   refreshReference: (market, symbol, signal) => references.refresh(market, symbol, signal),
   cachedReference: market => {

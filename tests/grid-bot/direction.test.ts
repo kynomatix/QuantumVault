@@ -1,310 +1,253 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Express, Request, Response, RequestHandler } from 'express';
-import { BTC_TREND_PUBLICATION_GRACE_MS as GRACE, BTC_TREND_NEGATIVE_CACHE_MS as NEGATIVE_TTL, BTC_TREND_WEEK_MS as WEEK } from '../../shared/grid-direction';
+import { BTC_TREND_PUBLICATION_GRACE_MS as GRACE, BTC_TREND_NEGATIVE_CACHE_MS as RETRY,
+  BTC_TREND_WEEK_MS as WEEK, BTC_WEEKLY_SOURCES, type BtcStoredWeek, type BtcWeeklySource } from '../../shared/grid-direction';
 import { computeBtcDirection, PlannerDirection } from '../../server/grid-planner/direction';
-import { aggregatePacificaDailyWeeks, pacificaBtcWeeklyCandles, plannerBtcWeeklyCandles } from '../../server/grid-planner/btc-candles';
+import { aggregateBtcDailyWeeks, readBtcWeeklySource, plannerBtcWeeklyCandles, BTC_WEEKLY_SOURCE_ORDER } from '../../server/grid-planner/btc-candles';
+import { PostgresBtcWeeklyStore, type WeeklyPool } from '../../server/grid-planner/weekly-store';
 import { registerGridPlannerRoutes } from '../../server/grid-planner/routes';
-import type { PlannerCandle, PlannerDeps } from '../../server/grid-planner/types';
-import type { ProvenancedOHLCV } from '../../server/lab/datafeed';
+import type { PlannerDeps } from '../../server/grid-planner/types';
 
-const feed = vi.hoisted(() => ({ read: vi.fn(), claim: vi.fn(() => true) }));
-vi.mock('../../server/lab/datafeed', () => ({ fetchOHLCV: feed.read,
-  CHART_CANDLE_POLICY: { consumer: 'chart', acceptedBasis: ['perp'], acceptedProxy: ['direct'], acceptedFinality: ['finalized', 'forming'] } }));
-vi.mock('../../server/protocol/pacifica/pacifica-quota', () => ({ pacificaQuota: { tryClaimImmediate: feed.claim } }));
-
-const DAY = WEEK / 7, now = Date.UTC(2026, 9, 13), asOf = now - DAY;
-function history(count = 55, lastClose = 200, source: 'okx' | 'gate' = 'okx', completedAt = asOf): ProvenancedOHLCV[] {
-  return Array.from({ length: count }, (_, i) => ({ time: completedAt - (count - i) * WEEK,
-    open: 100, high: 200, low: 50, close: i === count - 1 ? lastClose : 100, volume: 10,
-    provenance: { source, venue: source, basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } }));
+const quota = vi.hoisted(() => vi.fn(() => true));
+vi.mock('../../server/protocol/pacifica/pacifica-quota', () => ({ pacificaQuota: { tryClaimImmediate: quota } }));
+const DAY = WEEK / 7, now = Date.UTC(2026, 9, 13), end = now - DAY, start = end - 55 * WEEK;
+function history(count = 55, lastClose = '200', source: BtcWeeklySource = 'okx-index', until = end): BtcStoredWeek[] {
+  return Array.from({ length: count }, (_, i) => ({ market: 'BTC', weekStart: until - (count - i) * WEEK,
+    close: i === count - 1 ? lastClose : '100', source, basis: BTC_WEEKLY_SOURCES[source].basis,
+    aggregation: 'native', finalized: true, fetchedAt: until + DAY }));
 }
-afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); feed.read.mockReset(); feed.claim.mockReset().mockReturnValue(true); });
+const dbRow = (w: BtcStoredWeek) => ({ market: w.market, week_start: new Date(w.weekStart).toISOString(), close: w.close,
+  source: w.source, basis: w.basis, aggregation: w.aggregation, finalized: w.finalized, fetched_at: new Date(w.fetchedAt).toISOString() });
+// Shared database double: each store uses independent clients against the same durable rows and session lock.
+class Database {
+  weeks = new Map<number, ReturnType<typeof dbRow>>();
+  attempt: number | null = null;
+  lock: object | null = null;
+  failInsert = false;
+  releases: (Error | undefined)[] = [];
+  statements: string[] = [];
+  constructor(rows: BtcStoredWeek[] = []) { rows.forEach(w => this.weeks.set(w.weekStart, dbRow(w))); }
+  private latest(cutoff: number) { return [...this.weeks.values()].filter(w => w.finalized && Date.parse(w.week_start) < cutoff)
+    .sort((a, b) => Date.parse(b.week_start) - Date.parse(a.week_start)).slice(0, 50); }
+  pool: WeeklyPool = {
+    query: async (sql, args) => { this.statements.push(sql); return { rows: [{ weeks: this.latest(Number(args![0])).reverse(),
+      last_attempt_at: this.attempt === null ? null : new Date(this.attempt).toISOString() }] }; },
+    connect: async () => {
+      const session = {};
+      return { release: error => { this.releases.push(error); if (this.lock === session) this.lock = null; },
+        query: async (sql, args) => {
+          this.statements.push(sql);
+          if (sql.includes('pg_try_advisory_lock')) {
+            if (this.lock) return { rows: [{ locked: false }] };
+            this.lock = session; return { rows: [{ locked: true }] };
+          }
+          if (sql.includes('pg_advisory_unlock')) { this.lock = null; return { rows: [] }; }
+          if (sql.includes('SELECT week_start')) return { rows: this.latest(Number(args![0])) };
+          if (sql.includes('INSERT INTO planner_btc_weekly_refresh')) {
+            if (this.attempt !== null && this.attempt > Number(args![1])) return { rows: [] };
+            this.attempt = Number(args![0]); return { rows: [{ market: 'BTC' }] };
+          }
+          if (sql.includes('INSERT INTO planner_btc_weekly_closes')) {
+            if (this.failInsert) throw Error('EXAMPLE failed insert');
+            expect(sql).toContain('ON CONFLICT (market, week_start) DO NOTHING');
+            for (const w of JSON.parse(String(args![0]))) if (!this.weeks.has(Date.parse(w.week_start))) {
+              this.weeks.set(Date.parse(w.week_start), { ...w, market: 'BTC', finalized: true });
+            }
+            return { rows: [] };
+          }
+          throw Error('EXAMPLE unexpected SQL');
+        } };
+    },
+  };
+}
+function service(db: Database, clock: () => number = () => now, load = vi.fn(async () => history())) {
+  return { load, direction: new PlannerDirection({ now: clock, btcWeeklyCandles: load, btcWeeklyStore: new PostgresBtcWeeklyStore(db.pool) }) };
+}
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); quota.mockReset().mockReturnValue(true); });
 
-describe('BTC finalized 50-week direction suggestion', () => {
-  it.each(['okx', 'gate'] as const)('uses the latest 50 of 55 %s weeks and ignores a forming candle', source => {
-    const bars = history(55, 200, source);
-    bars[0].close = 50;
-    bars.push({ ...bars[54], time: asOf, close: 1, provenance: { ...bars[54].provenance, finality: 'forming' } });
-    const value = computeBtcDirection(bars, now);
-    expect(value).toMatchObject({ regime: 'above', sourceVenue: source, asOf, lastClose: 200, retrievedAt: now, serverNow: now });
-    expect(value.movingAverage).toBeCloseTo(102);
+ describe('stored BTC 50-week regime', () => {
+  it.each(Object.keys(BTC_WEEKLY_SOURCES) as BtcWeeklySource[])('uses only the last 50 finalized stored %s closes', source => {
+    const rows = history(55, '200', source); rows[0].close = '1';
+    expect(computeBtcDirection(rows, now)).toMatchObject({ regime: 'above', movingAverage: 102, lastClose: 200,
+      source, sourceBasis: BTC_WEEKLY_SOURCES[source].basis, sourceAggregation: 'native', asOf: end, expiresAt: end + WEEK });
   });
-  it('suggests short below the average and gives no suggestion at equality', () => {
-    expect(computeBtcDirection(history(55, 50), now)).toMatchObject({ regime: 'below', movingAverage: 99, lastClose: 50 });
-    expect(computeBtcDirection(history(55, 100), now).regime).toBe('unavailable');
+  it('returns below and unavailable at exact equality, including decimal closes', () => {
+    expect(computeBtcDirection(history(50, '50'), now).regime).toBe('below');
+    expect(computeBtcDirection(history(50, '100'), now).regime).toBe('unavailable');
+    const equal = history(50).map(w => ({ ...w, close: '0.123456789012345678' }));
+    expect(computeBtcDirection(equal, now).regime).toBe('unavailable');
   });
-  it('uses completed closes regardless of wicks and expires at next Monday plus publication grace', () => {
-    const bars = history();
-    bars.forEach(c => { c.high = 10_000; c.low = 1; });
-    for (const clock of [asOf, now, asOf + WEEK - 1]) {
-      expect(computeBtcDirection(bars, clock)).toMatchObject({ regime: 'above', movingAverage: 102,
-        lastClose: 200, expiresAt: asOf + WEEK + GRACE });
-    }
+  it.each(['short', 'gap', 'duplicate', 'utc', 'finality', 'basis', 'price', 'future fetch', 'stale'] as const)('rejects %s history', defect => {
+    const rows = history(50);
+    if (defect === 'short') rows.pop();
+    if (defect === 'gap') rows[10].weekStart -= WEEK;
+    if (defect === 'duplicate') rows[10] = { ...rows[9] };
+    if (defect === 'utc') rows[10].weekStart -= 8 * 3600000;
+    if (defect === 'finality') (rows[10] as any).finalized = false;
+    if (defect === 'basis') rows[10].basis = 'perp';
+    if (defect === 'price') rows[10].close = 'NaN';
+    if (defect === 'future fetch') rows[10].fetchedAt = now + 1;
+    if (defect === 'stale') rows.forEach(w => { w.weekStart -= WEEK; });
+    expect(computeBtcDirection(rows, now).regime).toBe('unavailable');
   });
-  it('sorts history without modifying the input', () => {
-    const bars = history().reverse(), times = bars.map(c => c.time);
-    expect(computeBtcDirection(bars, now).regime).toBe('above');
-    expect(bars.map(c => c.time)).toEqual(times);
+  it('honestly marks mixed sources and aggregation', () => {
+    const rows = history(50); rows[0] = { ...rows[0], source: 'gate-spot', basis: 'spot', aggregation: 'daily' };
+    expect(computeBtcDirection(rows, now)).toMatchObject({ regime: 'above', source: 'mixed', sourceVenue: 'mixed', sourceBasis: 'mixed', sourceAggregation: 'mixed' });
   });
-  it('returns truthful null facts for missing, stale and future-finalized history', () => {
-    for (const [bars, clock] of [[[], now], [history(49), now], [history(), asOf + WEEK], [history(), asOf - 1]] as const) {
-      expect(computeBtcDirection(bars as PlannerCandle[], clock)).toMatchObject({ regime: 'unavailable', sourceVenue: null,
-        asOf: null, movingAverage: null, lastClose: null });
-    }
-  });
-  it.each(['gap', 'duplicate', 'mixed', 'proxy', 'unknown finality', 'bad price'] as const)('refuses %s in the averaging window', defect => {
-    const bars = history(50);
-    if (defect === 'gap') bars[25].time += WEEK / 2;
-    if (defect === 'duplicate') bars[25].time = bars[24].time;
-    if (defect === 'mixed') bars[25].provenance = { ...bars[25].provenance, source: 'gate', venue: 'gate' };
-    if (defect === 'proxy') bars[25].provenance.proxy = 'proxy';
-    if (defect === 'unknown finality') bars[25].provenance.finality = 'unknown';
-    if (defect === 'bad price') bars[25].close = NaN;
-    expect(computeBtcDirection(bars, now).regime).toBe('unavailable');
+  it('expires old data exactly on UTC Monday even during publication grace', () => {
+    expect(computeBtcDirection(history(), end + WEEK - 1).regime).toBe('above');
+    expect(computeBtcDirection(history(), end + WEEK).regime).toBe('unavailable');
   });
 });
 
-describe('one process-wide Planner BTC read', () => {
-  it('shares concurrent work and never refetches mid-week or during Monday publication grace', async () => {
-    let clock = now, resolve!: (bars: PlannerCandle[]) => void;
-    const load = vi.fn(() => new Promise<PlannerCandle[]>(done => { resolve = done; }));
-    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
-    const a = service.read(), b = service.read();
-    expect(load).toHaveBeenCalledTimes(1);
-    resolve(history());
-    expect(await a).toEqual(await b);
-    for (const time of [now + DAY, now + 3 * DAY, asOf + WEEK - 1, asOf + WEEK, asOf + WEEK + GRACE - 1]) {
-      clock = time;
-      expect(await service.read()).toMatchObject({ regime: 'above', serverNow: clock, retrievedAt: now,
-        expiresAt: asOf + WEEK + GRACE });
-      expect(load).toHaveBeenCalledTimes(1);
-    }
-    clock = asOf + WEEK + GRACE;
-    const next = service.read(), concurrent = service.read();
-    expect(load).toHaveBeenCalledTimes(2);
-    resolve(history(55, 50, 'okx', asOf + WEEK));
-    expect(await next).toEqual(await concurrent);
-    expect(await next).toMatchObject({ regime: 'below', retrievedAt: clock, expiresAt: asOf + 2 * WEEK + GRACE });
-    expect(load).toHaveBeenCalledTimes(2);
+ describe('database reads, append and platform-wide coordination', () => {
+  it('reads 50 completed stored weeks on every request, without an upstream or result cache', async () => {
+    const db = new Database(history()), { direction, load } = service(db);
+    expect((await direction.read()).lastClose).toBe(200);
+    db.weeks.get(end - WEEK)!.close = '50';
+    expect((await direction.read()).regime).toBe('below');
+    expect(load).not.toHaveBeenCalled();
+    expect(db.statements.filter(s => s.includes('jsonb_agg'))).toHaveLength(2);
   });
-  it('expires a late-week fetch at Monday plus grace rather than a duration from retrieval', async () => {
-    let clock = asOf + WEEK - DAY / 2;
-    const load = vi.fn(async () => history());
-    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
-    expect(await service.read()).toMatchObject({ regime: 'above', expiresAt: asOf + WEEK + GRACE });
-    clock = asOf + WEEK + GRACE - 1;
-    expect((await service.read()).regime).toBe('above');
-    expect(load).toHaveBeenCalledTimes(1);
-    clock++;
-    expect((await service.read()).regime).toBe('unavailable');
-    expect(load).toHaveBeenCalledTimes(2);
-  });
-  it('holds a native OKX Sunday 16:00 UTC close until Monday 00:15 UTC rather than expiring eight hours early', async () => {
-    let clock = now;
-    const nativeClose = asOf - 8 * 60 * 60 * 1000;
-    const load = vi.fn(async () => history(55, 200, 'okx', nativeClose));
-    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
-    expect(await service.read()).toMatchObject({ regime: 'above', asOf: nativeClose, expiresAt: asOf + WEEK + GRACE });
-    for (const time of [nativeClose + WEEK, asOf + WEEK, asOf + WEEK + GRACE - 1]) {
-      clock = time;
-      expect(await service.read()).toMatchObject({ regime: 'above', asOf: nativeClose });
-      expect(load).toHaveBeenCalledTimes(1);
-    }
-    clock++;
-    load.mockResolvedValue(history(55, 50, 'okx', nativeClose + WEEK));
-    expect(await service.read()).toMatchObject({ regime: 'below', asOf: nativeClose + WEEK,
-      expiresAt: asOf + 2 * WEEK + GRACE });
-    expect(load).toHaveBeenCalledTimes(2);
-  });
-  it('caches failure for only 30 minutes without serving an expired success', async () => {
-    let clock = now;
-    const load = vi.fn(async () => history());
-    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
-    expect((await service.read()).regime).toBe('above');
-    load.mockRejectedValue(new Error('EXAMPLE upstream unavailable'));
-    clock = asOf + WEEK + GRACE;
-    expect(await service.read()).toMatchObject({ regime: 'unavailable', movingAverage: null });
-    expect((await service.read()).expiresAt).toBe(clock + NEGATIVE_TTL);
-    clock += NEGATIVE_TTL - 1; await service.read();
-    expect(load).toHaveBeenCalledTimes(2);
-    clock++; load.mockResolvedValue(history(55, 200, 'okx', asOf + WEEK));
-    const recoveredAt = clock;
-    expect(await service.read()).toMatchObject({ regime: 'above', retrievedAt: recoveredAt, expiresAt: asOf + 2 * WEEK + GRACE });
-    clock += 2 * DAY;
-    expect(await service.read()).toMatchObject({ regime: 'above', retrievedAt: recoveredAt });
-    expect(load).toHaveBeenCalledTimes(3);
-  });
-  it('retries an unpublished latest completed week every 30 minutes then holds the new close all week', async () => {
-    let clock = asOf + WEEK + GRACE;
-    const load = vi.fn(async () => history());
-    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      expect(await service.read()).toMatchObject({ regime: 'unavailable', asOf: null, expiresAt: clock + NEGATIVE_TTL });
-      clock += NEGATIVE_TTL - 1;
-      expect((await service.read()).regime).toBe('unavailable');
-      expect(load).toHaveBeenCalledTimes(attempt);
-      clock++;
-    }
-    load.mockResolvedValue(history(55, 50, 'okx', asOf + WEEK));
-    const recoveredAt = clock;
-    expect(await service.read()).toMatchObject({ regime: 'below', asOf: asOf + WEEK,
-      retrievedAt: recoveredAt, expiresAt: asOf + 2 * WEEK + GRACE });
-    clock = asOf + 2 * WEEK + GRACE - 1;
-    expect(await service.read()).toMatchObject({ regime: 'below', retrievedAt: recoveredAt });
-    expect(load).toHaveBeenCalledTimes(3);
-  });
-  it('retries incomplete history after the same 30-minute negative TTL', async () => {
-    let clock = now;
-    const load = vi.fn(async () => history(49));
-    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
-    expect(await service.read()).toMatchObject({ regime: 'unavailable', expiresAt: now + NEGATIVE_TTL });
-    clock += NEGATIVE_TTL - 1; await service.read(); expect(load).toHaveBeenCalledTimes(1);
-    clock++; load.mockResolvedValue(history());
-    expect((await service.read()).regime).toBe('above'); expect(load).toHaveBeenCalledTimes(2);
-  });
-  it('bounds an unresponsive feed and releases the single flight', async () => {
-    vi.useFakeTimers();
-    const load = vi.fn((_signal: AbortSignal) => new Promise<PlannerCandle[]>(() => {}));
-    const service = new PlannerDirection({ now: () => now, btcWeeklyCandles: load });
-    const pending = service.read();
-    await vi.advanceTimersByTimeAsync(15_000);
-    expect((await pending).regime).toBe('unavailable');
-    expect(load.mock.calls[0][0].aborted).toBe(true);
-    await service.read(); expect(load).toHaveBeenCalledTimes(1);
-  });
-  it('is a GET behind the Planner flag and existing auth without market/account work', async () => {
-    const registrations = new Map<string, RequestHandler[]>();
-    const get = vi.fn((path: string, ...handlers: RequestHandler[]) => { registrations.set(path, handlers); });
-    const app = { get } as unknown as Express, auth: RequestHandler = (_req, _res, next) => next();
-    const deps: PlannerDeps = { now: () => now, getMarkets: vi.fn(async () => []),
-      cachedReference: vi.fn(() => null), candles: vi.fn(async () => []), btcWeeklyCandles: vi.fn(async () => history()) };
-    const load = vi.fn(async () => deps);
-    registerGridPlannerRoutes(app, auth, load, false);
-    expect(get).not.toHaveBeenCalled(); expect(load).not.toHaveBeenCalled();
-    registerGridPlannerRoutes(app, auth, load, true);
-    const handlers = registrations.get('/api/grid-planner/direction')!;
-    expect(handlers[0]).toBe(auth);
-    const json = vi.fn(), status = vi.fn();
-    const res = { set: vi.fn(), json, status, destroyed: false } as unknown as Response;
-    status.mockReturnValue(res);
-    await handlers[1]({ query: {} } as Request, res, vi.fn());
-    expect(json).toHaveBeenCalledWith(expect.objectContaining({ regime: 'above' }));
-    expect(deps.getMarkets).not.toHaveBeenCalled(); expect(deps.cachedReference).not.toHaveBeenCalled();
-    await handlers[1]({ query: { side: 'short' } } as unknown as Request, res, vi.fn());
-    expect(status).toHaveBeenCalledWith(400);
-    expect(deps.btcWeeklyCandles).toHaveBeenCalledTimes(1);
-  });
-});
-
-function pacificaDays(count = 55 * 7): PlannerCandle[] {
-  return Array.from({ length: count }, (_, i) => ({ time: asOf - 55 * WEEK + i * DAY,
-    open: 100, high: 200, low: 50, close: i === 55 * 7 - 1 ? 200 : 100, volume: 10,
-    provenance: { source: 'pacifica', venue: 'pacifica', basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } }));
-}
-function pacificaRows(interval: '1w' | '1d') {
-  const bars = interval === '1d' ? pacificaDays() : history();
-  return bars.map(c => ({ s: 'BTC', i: interval, t: c.time, T: c.time + (interval === '1d' ? DAY : WEEK),
-    o: String(c.open), h: String(c.high), l: String(c.low), c: String(c.close), v: String(c.volume) }));
-}
-const response = (data: unknown[]) => ({ ok: true, json: async () => ({ success: true, data }) });
-
-describe('Planner direct-perpetual weekly source fallback', () => {
-  it('uses OKX first without requesting Pacifica or permitting spot', async () => {
+  it('backfills 55 weeks, then appends only missing weeks without replacing old provenance', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(now);
-    feed.read.mockResolvedValue(history());
-    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
-    const candles = await plannerBtcWeeklyCandles(new AbortController().signal);
-    expect(computeBtcDirection(candles, now)).toMatchObject({ regime: 'above', sourceVenue: 'okx' });
-    expect(fetcher).not.toHaveBeenCalled();
-    expect(feed.read).toHaveBeenCalledWith('BTC/USDT', '1w', expect.any(Number), now, undefined,
-      expect.objectContaining({ skipSpotFallback: true, bypassCache: true, cacheWritePolicy: 'skip',
-        basisPolicy: expect.objectContaining({ consumer: 'chart', acceptedBasis: ['perp'], acceptedFinality: ['finalized'] }) }));
+    const db = new Database(), first = service(db);
+    expect((await first.direction.read()).regime).toBe('above');
+    expect(db.weeks.size).toBe(55);
+    expect(first.load).toHaveBeenCalledWith(expect.any(AbortSignal), start, end);
+    vi.spyOn(Date, 'now').mockReturnValue(now + WEEK);
+    const next = service(db, () => now + WEEK, vi.fn(async () => history(55, '200', 'gate-spot', end + WEEK)));
+    const value = await next.direction.read();
+    expect(db.weeks.size).toBe(56); expect(db.weeks.get(end - WEEK)!.source).toBe('okx-index');
+    expect(value).toMatchObject({ source: 'mixed', regime: 'above' });
+    await next.direction.read(); expect(db.weeks.size).toBe(56); expect(next.load).toHaveBeenCalledTimes(1);
   });
-  it.each(['exception', 'empty', 'stale', 'spot', 'incomplete'] as const)('tries Pacifica native weekly after OKX %s', failure => {
-    return (async () => {
-      vi.spyOn(Date, 'now').mockReturnValue(now);
-      const raw = history();
-      if (failure === 'exception') feed.read.mockRejectedValue(Error('EXAMPLE transport failure'));
-      else {
-        if (failure === 'stale') raw.forEach(c => { c.time -= WEEK; });
-        if (failure === 'spot') raw.forEach(c => { c.provenance.basis = 'spot'; });
-        feed.read.mockResolvedValue(failure === 'empty' ? [] : failure === 'incomplete' ? history(49) : raw);
-      }
-      const fetcher = vi.fn(async (_url: string) => response(pacificaRows('1w'))); vi.stubGlobal('fetch', fetcher);
-      const candles = await plannerBtcWeeklyCandles(new AbortController().signal);
-      expect(computeBtcDirection(candles, now)).toMatchObject({ regime: 'above', sourceVenue: 'pacifica' });
-      expect(fetcher).toHaveBeenCalledTimes(1);
-      expect(new URL(fetcher.mock.calls[0][0]).searchParams.get('interval')).toBe('1w');
-      expect(feed.claim).toHaveBeenCalledWith('/kline', 'background');
-    })();
+  it('does not fetch until Monday 00:15 UTC and never uses stale data through grace', async () => {
+    const db = new Database(history(55, '200', 'okx-index', end - WEEK));
+    const early = service(db, () => end + GRACE - 1);
+    expect(await early.direction.read()).toMatchObject({ regime: 'unavailable', expiresAt: end + GRACE });
+    expect(early.load).not.toHaveBeenCalled();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const ready = service(db, () => end + GRACE, vi.fn(async () => history().map(w => ({ ...w, fetchedAt: end + GRACE }))));
+    expect((await ready.direction.read()).regime).toBe('above'); expect(ready.load).toHaveBeenCalledTimes(1);
   });
-  it('falls back to complete daily weeks when native weekly is unsupported', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(now); feed.read.mockResolvedValue([]);
-    const fetcher = vi.fn(async (url: string) => new URL(url).searchParams.get('interval') === '1w'
-      ? { ok: false, json: async () => ({ success: false }) } : response(pacificaRows('1d')));
-    vi.stubGlobal('fetch', fetcher);
-    const candles = await plannerBtcWeeklyCandles(new AbortController().signal);
-    expect(fetcher.mock.calls.map(([url]) => new URL(url).searchParams.get('interval'))).toEqual(['1w', '1d']);
-    expect(computeBtcDirection(candles, now)).toMatchObject({ regime: 'above', sourceVenue: 'pacifica', sourceAggregation: 'weekly-from-daily' });
+  it('single-flights across separate service instances and releases the session lock', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const db = new Database(); let finish!: (rows: BtcStoredWeek[]) => void, started!: () => void;
+    const began = new Promise<void>(resolve => { started = resolve; });
+    const load = vi.fn(() => { started(); return new Promise<BtcStoredWeek[]>(resolve => { finish = resolve; }); });
+    const first = service(db, () => now, load), second = service(db, () => now, load);
+    const pending = first.direction.read(); await began;
+    expect((await second.direction.read()).regime).toBe('unavailable'); expect(load).toHaveBeenCalledTimes(1);
+    finish(history()); expect((await pending).regime).toBe('above');
+    expect((await second.direction.read()).regime).toBe('above'); expect(load).toHaveBeenCalledTimes(1); expect(db.lock).toBeNull();
   });
-  it('returns unavailable when both sources fail and preserves quota headroom', async () => {
-    vi.spyOn(Date, 'now').mockReturnValue(now); feed.read.mockResolvedValue([]);
-    feed.claim.mockReturnValue(false);
-    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
-    expect(await plannerBtcWeeklyCandles(new AbortController().signal)).toEqual([]);
-    expect(fetcher).not.toHaveBeenCalled();
+  it.each(['empty', 'throw', 'invalid', 'duplicate', 'insert failure'] as const)('persists the retry cadence across restart after %s results', async defect => {
+    let clock = now; vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const db = new Database(); db.failInsert = defect === 'insert failure';
+    const load = vi.fn(async () => {
+      if (defect === 'throw') throw Error('EXAMPLE unavailable');
+      if (defect === 'empty') return [];
+      const rows = history().map(w => ({ ...w, fetchedAt: clock }));
+      if (defect === 'invalid') rows[0].weekStart++;
+      if (defect === 'duplicate') rows[1] = rows[0];
+      return rows;
+    });
+    expect(await service(db, () => clock, load).direction.read()).toMatchObject({ regime: 'unavailable', expiresAt: now + RETRY });
+    expect(db.attempt).toBe(now); expect(db.weeks.size).toBe(0); expect(db.lock).toBeNull();
+    clock += RETRY - 1; await service(db, () => clock, load).direction.read(); expect(load).toHaveBeenCalledTimes(1);
+    clock++; await service(db, () => clock, load).direction.read(); expect(load).toHaveBeenCalledTimes(2);
   });
-  it('does not start fallback after caller cancellation or the total deadline', async () => {
-    const fetcher = vi.fn(); vi.stubGlobal('fetch', fetcher);
-    const controller = new AbortController(); controller.abort();
-    await expect(plannerBtcWeeklyCandles(controller.signal)).rejects.toThrow();
-    expect(feed.read).not.toHaveBeenCalled();
-    vi.spyOn(Date, 'now').mockReturnValueOnce(now).mockReturnValue(now + 15_000);
-    feed.read.mockResolvedValue([]);
-    expect(await plannerBtcWeeklyCandles(new AbortController().signal)).toEqual([]);
-    expect(fetcher).not.toHaveBeenCalled();
+  it('repairs a missing older week even when the newest week is already stored', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const db = new Database(history()); db.weeks.delete(end - 20 * WEEK);
+    const { direction, load } = service(db);
+    expect((await direction.read()).regime).toBe('above'); expect(load).toHaveBeenCalledTimes(1);
   });
-  it.each(['symbol', 'interval', 'boundary', 'end time', 'duplicate', 'price'] as const)('rejects malformed Pacifica %s', defect => {
-    return (async () => {
-      const rows = pacificaRows('1w');
-      if (defect === 'symbol') rows[0].s = 'ETH';
-      if (defect === 'interval') rows[0].i = '1d';
-      if (defect === 'boundary') { rows[0].t++; rows[0].T++; }
-      if (defect === 'end time') rows[0].T -= 2;
-      if (defect === 'duplicate') rows[1] = { ...rows[0] };
-      if (defect === 'price') rows[0].c = '0';
-      vi.stubGlobal('fetch', vi.fn(async () => response(rows)));
-      expect(await pacificaBtcWeeklyCandles(now, new AbortController().signal)).toEqual([]);
-    })();
+  it('returns unavailable when storage is absent or failed, even if an upstream returns valid closes', async () => {
+    const load = vi.fn(async () => history());
+    expect((await new PlannerDirection({ now: () => now, btcWeeklyCandles: load }).read()).regime).toBe('unavailable');
+    const db = new Database(); db.pool.query = async () => { throw Error('EXAMPLE DB unavailable'); };
+    expect((await service(db, () => now, load).direction.read()).regime).toBe('unavailable'); expect(load).not.toHaveBeenCalled();
   });
 });
 
-describe('complete UTC Monday Pacifica daily aggregation', () => {
-  it('preserves weekly OHLC, Sunday close, volume and honest provenance without mutating input', () => {
-    const raw = pacificaDays().reverse(), before = raw.map(c => c.time);
-    const weeks = aggregatePacificaDailyWeeks(raw, now);
-    expect(weeks).toHaveLength(55);
-    expect(weeks.at(-1)).toMatchObject({ time: asOf - WEEK, open: 100, high: 200, low: 50, close: 200, volume: 70,
-      provenance: { source: 'pacifica', basis: 'perp', aggregation: 'weekly-from-daily', finality: 'finalized' } });
-    expect(raw.map(c => c.time)).toEqual(before);
-    expect(computeBtcDirection(weeks, now)).toMatchObject({ regime: 'above', sourceVenue: 'pacifica', sourceAggregation: 'weekly-from-daily', movingAverage: 102 });
+function dailyBars() { return Array.from({ length: 385 }, (_, i) => ({ time: start + i * DAY,
+  close: i === 384 ? '200' : '100', finalized: true })); }
+function payload(source: BtcWeeklySource) {
+  const weeks = history(), days = dailyBars();
+  if (source.startsWith('okx')) return { code: '0', data: weeks.map(w => source === 'okx-index'
+    ? [String(w.weekStart), '100', '200', '50', w.close, '1'] : [String(w.weekStart), '100', '200', '50', w.close, '10', '1', '1', '1']) };
+  if (source === 'gate-spot') return weeks.map(w => [String(w.weekStart / 1000), '10', w.close, '200', '50', '100', '1', 'true']);
+  if (source === 'kraken-spot') return { error: [], result: { XXBTZUSD: [...days, { time: end, close: '1', finalized: false }].map(w => [w.time / 1000, '100', '200', '50', w.close]), last: end / 1000 } };
+  if (source === 'coinbase-spot') return days.map(w => [w.time / 1000, 50, 200, 100, Number(w.close), 10]);
+  if (source === 'hyperliquid-perp') return days.map(w => ({ t: w.time, T: w.time + DAY - 1, s: 'BTC', i: '1d', c: w.close }));
+  return { success: true, data: weeks.map(w => ({ t: w.weekStart, T: w.weekStart + WEEK, s: 'BTC', i: '1w', c: w.close })) };
+}
+const response = (data: unknown) => ({ ok: true, json: async () => data });
+ describe('finalized UTC source adapters and source selection', () => {
+  it.each(BTC_WEEKLY_SOURCE_ORDER)('parses a complete %s window and retains honest provenance', async source => {
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const fetcher = vi.fn(async (url: string, _init?: RequestInit) => {
+      let data = payload(source);
+      if (source === 'coinbase-spot') { const q = new URL(url).searchParams; const lo = Date.parse(q.get('start')!), hi = Date.parse(q.get('end')!);
+        data = (data as number[][]).filter(r => r[0] * 1000 >= lo && r[0] * 1000 <= hi); }
+      return response(data);
+    }); vi.stubGlobal('fetch', fetcher);
+    const rows = await readBtcWeeklySource(source, new AbortController().signal, start, end);
+    expect(rows).toHaveLength(55); expect(rows.at(-1)).toMatchObject({ weekStart: end - WEEK, close: '200', source,
+      basis: BTC_WEEKLY_SOURCES[source].basis, aggregation: ['kraken-spot','coinbase-spot','hyperliquid-perp'].includes(source) ? 'daily' : 'native' });
+    if (source === 'hyperliquid-perp') expect(JSON.parse(fetcher.mock.calls[0][1]!.body as string)).toMatchObject({ req: { interval: '1d' } });
+    if (source === 'coinbase-spot') expect(fetcher).toHaveBeenCalledTimes(2);
   });
-  it.each(['missing', 'duplicate', 'forming', 'partial current week'] as const)('never fills a %s with an invented close', defect => {
-    const raw = pacificaDays();
-    if (defect === 'missing') raw.splice(raw.length - 2, 1);
-    if (defect === 'duplicate') raw[raw.length - 2] = raw[raw.length - 3];
-    if (defect === 'forming') raw[raw.length - 1].provenance.finality = 'forming';
-    if (defect === 'partial current week') raw.push({ ...raw[0], time: asOf, low: 1, close: 1 });
-    const weeks = aggregatePacificaDailyWeeks(raw, now);
-    expect(weeks.at(-1)?.time).toBe(defect === 'partial current week' ? asOf - WEEK : asOf - 2 * WEEK);
-    expect(computeBtcDirection(weeks, now).regime).toBe(defect === 'partial current week' ? 'above' : 'unavailable');
+  it('prefers a single OKX index window, then Gate spot on refusal, without consulting chart caches', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const fetcher = vi.fn(async (url: string) => url.includes('okx') ? { ok: false } : response(payload('gate-spot'))); vi.stubGlobal('fetch', fetcher);
+    const rows = await plannerBtcWeeklyCandles(new AbortController().signal, start, end);
+    expect(new Set(rows.map(w => w.source))).toEqual(new Set(['gate-spot'])); expect(fetcher).toHaveBeenCalledTimes(2);
+    fetcher.mockImplementation(async () => response(payload('okx-index')));
+    expect((await plannerBtcWeeklyCandles(new AbortController().signal, start, end))[0].source).toBe('okx-index');
   });
-  it('rejects foreign provenance and mixed native/aggregated weekly windows', () => {
-    const raw = pacificaDays(); raw[0].provenance.basis = 'spot';
-    expect(aggregatePacificaDailyWeeks(raw, now)).toEqual([]);
-    const weeks = aggregatePacificaDailyWeeks(pacificaDays(), now);
-    const last = weeks[weeks.length - 1];
-    last.provenance = { source: 'pacifica', venue: 'pacifica', basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' };
-    expect(computeBtcDirection(weeks, now).regime).toBe('unavailable');
+  it.each(['duplicate','offset','forming','missing','price'] as const)('rejects an unusable Gate weekly %s window', async defect => {
+    vi.spyOn(Date, 'now').mockReturnValue(now); const rows = payload('gate-spot') as string[][];
+    if (defect === 'duplicate') rows[1] = rows[0];
+    if (defect === 'offset') rows.forEach(row => { row[0] = String(Number(row[0]) - 28800); });
+    if (defect === 'forming') rows[54][7] = 'false';
+    if (defect === 'missing') rows.splice(20, 1);
+    if (defect === 'price') rows[0][2] = '0';
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes('gateio') ? response(rows) : { ok: false }));
+    expect(await plannerBtcWeeklyCandles(new AbortController().signal, start, end)).toEqual([]);
+  });
+  it.each(['missing','duplicate','forming','offset'] as const)('never synthesizes a daily week with a %s day', defect => {
+    const days = dailyBars();
+    if (defect === 'missing') days.pop();
+    if (defect === 'duplicate') days[384] = { ...days[383] };
+    if (defect === 'forming') days[384].finalized = false;
+    if (defect === 'offset') days[384].time++;
+    const weeks = aggregateBtcDailyWeeks(days, 'hyperliquid-perp', start, end, now);
+    expect(weeks.find(w => w.weekStart === end - WEEK)).toBeUndefined();
+  });
+  it('honours cancellation and Pacifica quota without using an invented oracle candle', async () => {
+    const signal = AbortSignal.abort(); vi.stubGlobal('fetch', vi.fn());
+    await expect(plannerBtcWeeklyCandles(signal, start, end)).rejects.toThrow(); expect(fetch).not.toHaveBeenCalled();
+    quota.mockReturnValue(false);
+    expect(await readBtcWeeklySource('pacifica-mark', new AbortController().signal, start, end)).toEqual([]); expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+ describe('display-only endpoint', () => {
+  it('requires wallet auth, rejects direction inputs and reads stored BTC data without market/reference queries', async () => {
+    const registrations = new Map<string, any[]>(), auth = vi.fn();
+    const app = { get: vi.fn((path, ...handlers) => registrations.set(path, handlers)) };
+    const db = new Database(history());
+    const deps: PlannerDeps = { now: () => now, getMarkets: vi.fn(async () => []), cachedReference: vi.fn(() => null),
+      candles: vi.fn(async () => []), btcWeeklyCandles: vi.fn(async () => history()), btcWeeklyStore: new PostgresBtcWeeklyStore(db.pool) };
+    const load = vi.fn(async () => deps);
+    registerGridPlannerRoutes(app as any, auth, load, false); expect(app.get).not.toHaveBeenCalled(); expect(load).not.toHaveBeenCalled();
+    registerGridPlannerRoutes(app as any, auth, load, true);
+    const handlers = registrations.get('/api/grid-planner/direction')!; expect(handlers[0]).toBe(auth);
+    const res = { set: vi.fn(), json: vi.fn(), status: vi.fn(), destroyed: false }; res.status.mockReturnValue(res);
+    await handlers[1]({ query: {} }, res); expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ regime: 'above', source: 'okx-index' }));
+    await handlers[1]({ query: { side: 'short' } }, res); expect(res.status).toHaveBeenCalledWith(400);
+    expect(deps.getMarkets).not.toHaveBeenCalled(); expect(deps.cachedReference).not.toHaveBeenCalled(); expect(deps.btcWeeklyCandles).not.toHaveBeenCalled();
   });
 });
