@@ -3,6 +3,7 @@ import {PacificaSigner,buildSigningMessage} from '../protocol/pacifica/pacifica-
 import {PacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
 import {GridLaunchStorage,GridLaunchTransientError,requestDigest,type ExactGridRequest,type GridClaim,type DurableGridOperation} from './launch-storage';
 import type {GridVenueOrder} from './order-identity';
+import {gridNeedsBook,type GridFirstPlacementBoundary} from './first-placement';
 
 const endpoints={create:['/account/subaccount/create','subaccount_confirm'],fund:['/account/subaccount/transfer','transfer_funds'],
   leverage:['/account/leverage','update_leverage'],seed:['/orders/create_market','create_market_order'],
@@ -22,11 +23,14 @@ export function validExactRequest(r:ExactGridRequest):boolean{
 }
 /** Only this Grid-specific boundary signs and posts. No enrollment, leverage or legacy adapter side effects. */
 export class GridPacificaSender {
-  constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch){}
+  constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary){}
   async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer):Promise<{rateLimited:boolean;terminalTransferDigest?:string}>{
     if(!validExactRequest(r) || this.transport.keyStatus!=='present')throw Error('Grid transport authority unavailable');
     const sub=new PacificaSigner(subaccountSecret);
     if(sub.getPublicKey()!==r.account)throw Error('Grid signing account mismatch');
+    const needsBook=gridNeedsBook(r);
+    const proof=needsBook?await this.firstPlacement?.observe(r):null;
+    if(needsBook&&!proof)throw Error('Grid first placement needs a fresh confirmed preview and post-funding book.');
     let body:Record<string,unknown>;
     if(r.kind==='create' || r.kind==='fund'){
       if(!masterSecret)throw Error('Grid master authority unavailable');const master=new PacificaSigner(masterSecret);
@@ -38,8 +42,10 @@ export class GridPacificaSender {
       }else body={...r.data,account:r.masterAccount,agent_wallet:null,signature:master.signMessage(buildSigningMessage(r.operationType,r.data,r.timestamp,r.expiryMs)),timestamp:r.timestamp,expiry_window:r.expiryMs};
     }else body={...r.data,account:r.account,agent_wallet:null,signature:sub.signMessage(buildSigningMessage(r.operationType,r.data,r.timestamp,r.expiryMs)),timestamp:r.timestamp,expiry_window:r.expiryMs};
     const url='https://api.pacifica.fi/api/v1'+r.path;
+    const init=this.transport.restInit(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(5000)});
+    if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired during preparation; recover or confirm a fresh preview.');
     // One bounded request only. Header/HTTP success alone never settles money or an order.
-    const response=this.transport.response(await this.fetcher(url,this.transport.restInit(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(5000)})));
+    const response=this.transport.response(await this.fetcher(url,init));
     if((r.kind==='fund'||r.kind==='sweep')&&response.status===200){
       const result=await response.json() as {success?:unknown;error?:unknown;data?:{success?:unknown;error?:unknown}};
       // Pacifica documents this exact nested envelope as "Transfer completed successfully".
