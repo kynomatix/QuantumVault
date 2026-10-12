@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Grid Bot Setup Mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root { --bg:#07070c; --panel:#0d0d16; --card:#13131f; --line:#23233a; --text:#ecebf5; --muted:#a5a3bd; --faint:#8f8da8; --accent:#8b5cf6; --accent-soft:#1f1a3a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: 'DM Sans', sans-serif; padding: 24px 16px; }
+  .note { max-width: 760px; margin: 0 auto 16px; font-size: 13px; color: var(--faint); text-align: center; }
+  .sheet { max-width: 760px; margin: 0 auto; background: var(--panel); border: 1px solid var(--line); border-radius: 20px; padding: 28px; display: flex; flex-direction: column; gap: 24px; }
+  h1 { margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 28px; letter-spacing: -0.01em; }
+  .sub { margin: 4px 0 0; color: var(--muted); font-size: 15px; }
+  .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .pill { font-size: 13px; padding: 6px 12px; border-radius: 999px; background: #1b1830; color: #c4b5fd; border: 1px solid #3a3260; white-space: nowrap; }
+  .market { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 16px 18px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+  .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+  .big { font-family: 'Space Grotesk', sans-serif; font-size: 22px; font-weight: 600; }
+  select.big { background: transparent; color: var(--text); border: 0; padding: 0; outline: none; }
+  .row { display: flex; justify-content: space-between; align-items: center; }
+  .title { font-size: 15px; font-weight: 600; }
+  .hint { font-size: 13px; color: var(--faint); margin: 0; }
+  .chart { position: relative; width: 100%; height: 280px; background: #0a0a12; border: 1px solid #1f1f33; border-radius: 14px; overflow: hidden; }
+  .chart svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .tag { position: absolute; right: 10px; font-size: 12px; padding: 2px 8px; border-radius: 6px; }
+  .choices { display: flex; gap: 10px; flex-wrap: wrap; }
+  .choice { flex: 1 1 0; min-height: 52px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; font: inherit; }
+  .choice b { font-size: 15px; } .choice span { font-size: 12px; color: var(--muted); }
+  .choice[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .seg { display: flex; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 4px; }
+  .seg button { flex: 1 1 0; min-height: 44px; border: 0; border-radius: 9px; background: transparent; color: var(--text); font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .seg button.long[aria-pressed="true"] { background: #166534; } .seg button.short[aria-pressed="true"] { background: #9a3412; }
+  .amount { display: flex; align-items: center; gap: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 0 14px; min-height: 52px; }
+  .amount input { flex: 1; min-width: 0; background: transparent; border: 0; color: var(--text); font-family: 'Space Grotesk', sans-serif; font-size: 18px; font-weight: 600; outline: none; }
+  .lev { display: flex; gap: 8px; } .lev button { flex: 1; min-height: 44px; border-radius: 10px; border: 1px solid var(--line); background: var(--card); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+  .lev button[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .plan { display: flex; flex-direction: column; gap: 14px; padding: 20px; background: var(--card); border: 1px solid #2c2650; border-radius: 16px; }
+  .plan .grid2 { gap: 14px 24px; } .plan dt { font-size: 13px; color: var(--muted); } .plan dd { margin: 2px 0 0; font-size: 16px; font-weight: 600; }
+  .adv-toggle { display: flex; justify-content: space-between; align-items: center; min-height: 48px; background: transparent; border: 0; border-top: 1px solid var(--line); color: #c9c7dd; font: inherit; font-size: 15px; cursor: pointer; padding: 0 4px; }
+  .adv label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+  .adv input, .adv select { min-height: 44px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; color: var(--text); padding: 0 12px; font: inherit; font-size: 15px; }
+  .adv .check { flex-direction: row; align-items: center; grid-column: span 2; color: var(--text); font-size: 14px; }
+  .adv .check input { width: 20px; height: 20px; min-height: 0; accent-color: var(--accent); }
+  .cta { min-height: 56px; border: 0; border-radius: 14px; background: var(--accent); color: #fff; font: inherit; font-size: 17px; font-weight: 700; cursor: pointer; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } .adv .check { grid-column: auto; } .sheet { padding: 20px; } }
+</style>
+</head>
+<body>
+<p class="note">Design mockup only — not connected to anything. Click the buttons to see it react.</p>
+<main class="sheet">
+  <div class="head">
+    <div><h1>New Grid Bot</h1><p class="sub">Buys low and sells high inside a price range you choose.</p></div>
+    <span class="pill">Preview · no orders placed</span>
+  </div>
+
+  <div class="market">
+    <label><div class="label">Market</div>
+      <select class="big"><option>PUMP</option><option>SOL</option><option>BTC</option><option>ETH</option></select></label>
+    <div style="text-align:right"><div class="label">Price now</div><div class="big">0.005862</div></div>
+  </div>
+
+  <section style="display:flex;flex-direction:column;gap:12px">
+    <div class="row"><span class="title">Your range</span><span class="hint">4h candles · last 3 weeks</span></div>
+    <div class="chart" id="chart"><svg id="svg" viewBox="0 0 696 280" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <span class="tag" id="tagUpper" style="color:#ddd6fe;background:#1b1830"></span>
+      <span class="tag" id="tagLower" style="color:#ddd6fe;background:#1b1830"></span>
+      <span class="tag" id="tagStop" style="color:#fdba74;background:#1c120a"></span>
+    </div>
+    <div class="choices" id="presets">
+      <button class="choice" data-w="0.05"><b>Tight</b><span>±5%</span></button>
+      <button class="choice" data-w="0.10" aria-pressed="true"><b>Balanced</b><span>±10%</span></button>
+      <button class="choice" data-w="0.20"><b>Wide</b><span>±20%</span></button>
+    </div>
+    <p class="hint">In the real thing you can also drag the purple edges on the chart.</p>
+  </section>
+
+  <div class="grid2">
+    <div style="display:flex;flex-direction:column;gap:8px"><span class="title">Direction</span>
+      <div class="seg"><button class="long" aria-pressed="true" id="long">Long</button><button class="short" aria-pressed="false" id="short">Short</button></div></div>
+    <label style="display:flex;flex-direction:column;gap:8px"><span class="title">Amount</span>
+      <div class="amount"><span style="color:var(--muted)">$</span><input id="amount" value="100" inputmode="decimal"><span class="hint">USDC</span></div></label>
+  </div>
+
+  <div style="display:flex;flex-direction:column;gap:8px">
+    <div class="row"><span class="title">Leverage</span><span class="big" style="font-size:16px" id="levLabel">2x</span></div>
+    <div class="lev" id="lev"><button data-l="1">1x</button><button data-l="2" aria-pressed="true">2x</button><button data-l="3">3x</button><button data-l="5">5x</button><button data-l="10">10x</button></div>
+  </div>
+
+  <section class="plan">
+    <span class="label" style="color:#c4b5fd">Your plan</span>
+    <dl class="grid2" style="margin:0">
+      <div><dt>Grid</dt><dd id="pGrid"></dd></div>
+      <div><dt>Each order</dt><dd id="pOrder"></dd></div>
+      <div><dt>Range</dt><dd id="pRange"></dd></div>
+      <div><dt>Safety stop</dt><dd id="pStop"></dd></div>
+    </dl>
+    <p class="hint">Profit depends on how often price crosses your levels, so we don't guess it. Profit shown later excludes funding.</p>
+  </section>
+
+  <section style="display:flex;flex-direction:column;gap:12px">
+    <button class="adv-toggle" id="advBtn" aria-expanded="false"><span>Advanced settings</span><span id="chev">▾</span></button>
+    <div class="adv grid2" id="adv" hidden>
+      <label>Number of levels<input id="levels" value="10" inputmode="numeric"></label>
+      <label>Order sizes<select><option>Equal</option><option>Bigger at better prices</option><option>Bigger near the start</option></select></label>
+      <label>Custom stop price<input id="customStop" placeholder=""></label>
+      <label>Chart timeframe<select><option>4h</option><option>1h</option><option>15m</option></select></label>
+      <label class="check"><input type="checkbox" checked> Start with a position at the current price (recommended)</label>
+    </div>
+  </section>
+
+  <button class="cta" type="button">Save plan</button>
+  <p class="hint" style="text-align:center;margin-top:-12px">Starting live grid bots opens soon.</p>
+</main>
+<script>
+(function () {
+  var ref = 0.005862, H = 280, W = 696, top = 0.0068, bot = 0.0046;
+  var state = { w: 0.10, long: true, lev: 2 };
+  var y = function (p) { return Math.max(0, Math.min(H, (top - p) / (top - bot) * H)); };
+  var candles = [], p = 0.0054;
+  for (var i = 0; i < 56; i++) {
+    var d = Math.sin(i / 6) * 0.00009 + Math.cos(i / 2.3) * 0.00006 + (i < 20 ? 0.00002 : 0);
+    var o = p, c = p + d; if (i > 50) c += (ref - c) * 0.35;
+    candles.push({ o: o, c: c, h: Math.max(o, c) + 0.00006 + (i % 3) * 0.00002, l: Math.min(o, c) - 0.00005 - (i % 4) * 0.00002 });
+    p = c;
+  }
+  var f = function (n) { return n.toFixed(6); };
+  var $ = function (id) { return document.getElementById(id); };
+  function render() {
+    var levels = Math.max(2, Math.min(100, parseInt($('levels').value, 10) || 10));
+    var amount = parseFloat($('amount').value) || 0;
+    var lower = ref * (1 - state.w), upper = ref * (1 + state.w);
+    var stop = parseFloat($('customStop').value) || (state.long ? lower * 0.97 : upper * 1.03);
+    var s = '<rect x="0" y="' + y(upper) + '" width="' + W + '" height="' + (y(lower) - y(upper)) + '" fill="rgba(139,92,246,0.10)"/>';
+    s += '<line x1="0" x2="' + W + '" y1="' + y(upper) + '" y2="' + y(upper) + '" stroke="#8b5cf6" stroke-width="2"/>';
+    s += '<line x1="0" x2="' + W + '" y1="' + y(lower) + '" y2="' + y(lower) + '" stroke="#8b5cf6" stroke-width="2"/>';
+    for (var k = 1; k < levels; k++) { var gy = y(lower + (upper - lower) * k / levels); s += '<line x1="0" x2="' + W + '" y1="' + gy + '" y2="' + gy + '" stroke="rgba(167,139,250,0.35)" stroke-dasharray="4 4"/>'; }
+    candles.forEach(function (c, i) {
+      var x = 8 + i * 12, col = c.c >= c.o ? '#22c55e' : '#ef4444', bt = y(Math.max(c.o, c.c)), bb = y(Math.min(c.o, c.c));
+      s += '<line x1="' + (x + 3.5) + '" x2="' + (x + 3.5) + '" y1="' + y(c.h) + '" y2="' + y(c.l) + '" stroke="' + col + '"/>';
+      s += '<rect x="' + x + '" y="' + bt + '" width="7" height="' + Math.max(2, bb - bt) + '" fill="' + col + '" rx="1"/>';
+    });
+    s += '<line x1="0" x2="' + W + '" y1="' + y(stop) + '" y2="' + y(stop) + '" stroke="#f97316" stroke-width="2"/>';
+    $('svg').innerHTML = s;
+    $('tagUpper').style.top = Math.max(4, y(upper) - 26) + 'px'; $('tagUpper').textContent = f(upper);
+    $('tagLower').style.top = Math.min(H - 26, y(lower) + 4) + 'px'; $('tagLower').textContent = f(lower);
+    $('tagStop').style.top = Math.min(H - 26, y(stop) + 4) + 'px'; $('tagStop').textContent = 'Stop ' + f(stop);
+    $('pGrid').textContent = levels + ' levels · every ' + (state.w * 2 / levels * 100).toFixed(1) + '%';
+    $('pOrder').textContent = 'about $' + (amount * state.lev / levels).toFixed(2);
+    $('pRange').textContent = f(lower) + ' – ' + f(upper);
+    $('pStop').textContent = f(stop) + ($('customStop').value ? '' : ' · set for you');
+    $('customStop').placeholder = f(state.long ? lower * 0.97 : upper * 1.03);
+    $('levLabel').textContent = state.lev + 'x';
+  }
+  document.querySelectorAll('#presets .choice').forEach(function (b) { b.addEventListener('click', function () {
+    document.querySelectorAll('#presets .choice').forEach(function (x) { x.setAttribute('aria-pressed', 'false'); });
+    b.setAttribute('aria-pressed', 'true'); state.w = parseFloat(b.dataset.w); render(); }); });
+  document.querySelectorAll('#lev button').forEach(function (b) { b.addEventListener('click', function () {
+    document.querySelectorAll('#lev button').forEach(function (x) { x.setAttribute('aria-pressed', 'false'); });
+    b.setAttribute('aria-pressed', 'true'); state.lev = parseInt(b.dataset.l, 10); render(); }); });
+  $('long').addEventListener('click', function () { state.long = true; $('long').setAttribute('aria-pressed', 'true'); $('short').setAttribute('aria-pressed', 'false'); render(); });
+  $('short').addEventListener('click', function () { state.long = false; $('short').setAttribute('aria-pressed', 'true'); $('long').setAttribute('aria-pressed', 'false'); render(); });
+  $('advBtn').addEventListener('click', function () { var open = $('adv').hidden; $('adv').hidden = !open; $('advBtn').setAttribute('aria-expanded', String(open)); $('chev').textContent = open ? '▴' : '▾'; });
+  ['amount', 'levels', 'customStop'].forEach(function (id) { $(id).addEventListener('input', render); });
+  render();
+})();
+</script>
+</body>
+</html>
