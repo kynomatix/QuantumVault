@@ -82,7 +82,7 @@ describe('Planner client authority boundaries', () => {
   it('chart captions preserve provenance, partial coverage, expiry and unavailable explanations', () => {
     const chart: PlannerChart = { state: 'available', market: 'BTC-PERP', timeframe: '15m', requestedBars: 100, actualBars: 1,
       partial: true, retrievedAt: now, cacheInsertedAt: now, validForMs: 60_000,
-      candles: [{ time: now - 900_000, open: 100, high: 101, low: 99, close: 100,
+      candles: [{ time: now - 900_000, open: 100, high: 101, low: 99, close: 100, volume: 1,
         provenance: { source: 'okx', venue: 'okx', basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'forming' } }] };
     expect(isPlannerChart(chart)).toBe(true);
     const html = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: false }));
