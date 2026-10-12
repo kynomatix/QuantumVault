@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Express, Request, Response, RequestHandler } from 'express';
-import { BTC_TREND_CACHE_MS as DAY, BTC_TREND_NEGATIVE_CACHE_MS as NEGATIVE_TTL, BTC_TREND_WEEK_MS as WEEK } from '../../shared/grid-direction';
+import { BTC_TREND_PUBLICATION_GRACE_MS as GRACE, BTC_TREND_NEGATIVE_CACHE_MS as NEGATIVE_TTL, BTC_TREND_WEEK_MS as WEEK } from '../../shared/grid-direction';
 import { computeBtcDirection, PlannerDirection } from '../../server/grid-planner/direction';
 import { aggregatePacificaDailyWeeks, pacificaBtcWeeklyCandles, plannerBtcWeeklyCandles } from '../../server/grid-planner/btc-candles';
 import { registerGridPlannerRoutes } from '../../server/grid-planner/routes';
@@ -12,9 +12,9 @@ vi.mock('../../server/lab/datafeed', () => ({ fetchOHLCV: feed.read,
   CHART_CANDLE_POLICY: { consumer: 'chart', acceptedBasis: ['perp'], acceptedProxy: ['direct'], acceptedFinality: ['finalized', 'forming'] } }));
 vi.mock('../../server/protocol/pacifica/pacifica-quota', () => ({ pacificaQuota: { tryClaimImmediate: feed.claim } }));
 
-const now = Date.UTC(2026, 9, 13), asOf = now - DAY;
-function history(count = 55, lastClose = 200, source: 'okx' | 'gate' = 'okx'): ProvenancedOHLCV[] {
-  return Array.from({ length: count }, (_, i) => ({ time: asOf - (count - i) * WEEK,
+const DAY = WEEK / 7, now = Date.UTC(2026, 9, 13), asOf = now - DAY;
+function history(count = 55, lastClose = 200, source: 'okx' | 'gate' = 'okx', completedAt = asOf): ProvenancedOHLCV[] {
+  return Array.from({ length: count }, (_, i) => ({ time: completedAt - (count - i) * WEEK,
     open: 100, high: 200, low: 50, close: i === count - 1 ? lastClose : 100, volume: 10,
     provenance: { source, venue: source, basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } }));
 }
@@ -32,6 +32,14 @@ describe('BTC finalized 50-week direction suggestion', () => {
   it('suggests short below the average and gives no suggestion at equality', () => {
     expect(computeBtcDirection(history(55, 50), now)).toMatchObject({ regime: 'below', movingAverage: 99, lastClose: 50 });
     expect(computeBtcDirection(history(55, 100), now).regime).toBe('unavailable');
+  });
+  it('uses completed closes regardless of wicks and expires at next Monday plus publication grace', () => {
+    const bars = history();
+    bars.forEach(c => { c.high = 10_000; c.low = 1; });
+    for (const clock of [asOf, now, asOf + WEEK - 1]) {
+      expect(computeBtcDirection(bars, clock)).toMatchObject({ regime: 'above', movingAverage: 102,
+        lastClose: 200, expiresAt: asOf + WEEK + GRACE });
+    }
   });
   it('sorts history without modifying the input', () => {
     const bars = history().reverse(), times = bars.map(c => c.time);
@@ -57,7 +65,7 @@ describe('BTC finalized 50-week direction suggestion', () => {
 });
 
 describe('one process-wide Planner BTC read', () => {
-  it('shares concurrent work and caches for 24 hours before refreshing', async () => {
+  it('shares concurrent work and never refetches mid-week or during Monday publication grace', async () => {
     let clock = now, resolve!: (bars: PlannerCandle[]) => void;
     const load = vi.fn(() => new Promise<PlannerCandle[]>(done => { resolve = done; }));
     const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
@@ -65,21 +73,47 @@ describe('one process-wide Planner BTC read', () => {
     expect(load).toHaveBeenCalledTimes(1);
     resolve(history());
     expect(await a).toEqual(await b);
-    clock += DAY - 1;
-    expect(await service.read()).toMatchObject({ regime: 'above', serverNow: clock, retrievedAt: now });
-    expect(load).toHaveBeenCalledTimes(1);
-    clock++;
-    const next = service.read(); resolve(history(55, 50));
-    expect(await next).toMatchObject({ regime: 'below', retrievedAt: clock });
+    for (const time of [now + DAY, now + 3 * DAY, asOf + WEEK - 1, asOf + WEEK, asOf + WEEK + GRACE - 1]) {
+      clock = time;
+      expect(await service.read()).toMatchObject({ regime: 'above', serverNow: clock, retrievedAt: now,
+        expiresAt: asOf + WEEK + GRACE });
+      expect(load).toHaveBeenCalledTimes(1);
+    }
+    clock = asOf + WEEK + GRACE;
+    const next = service.read(), concurrent = service.read();
+    expect(load).toHaveBeenCalledTimes(2);
+    resolve(history(55, 50, 'okx', asOf + WEEK));
+    expect(await next).toEqual(await concurrent);
+    expect(await next).toMatchObject({ regime: 'below', retrievedAt: clock, expiresAt: asOf + 2 * WEEK + GRACE });
     expect(load).toHaveBeenCalledTimes(2);
   });
-  it('refreshes at the one-week freshness cap before the 24-hour cache expires', async () => {
+  it('expires a late-week fetch at Monday plus grace rather than a duration from retrieval', async () => {
     let clock = asOf + WEEK - DAY / 2;
     const load = vi.fn(async () => history());
     const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
+    expect(await service.read()).toMatchObject({ regime: 'above', expiresAt: asOf + WEEK + GRACE });
+    clock = asOf + WEEK + GRACE - 1;
     expect((await service.read()).regime).toBe('above');
-    clock = asOf + WEEK;
+    expect(load).toHaveBeenCalledTimes(1);
+    clock++;
     expect((await service.read()).regime).toBe('unavailable');
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+  it('holds a native OKX Sunday 16:00 UTC close until Monday 00:15 UTC rather than expiring eight hours early', async () => {
+    let clock = now;
+    const nativeClose = asOf - 8 * 60 * 60 * 1000;
+    const load = vi.fn(async () => history(55, 200, 'okx', nativeClose));
+    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
+    expect(await service.read()).toMatchObject({ regime: 'above', asOf: nativeClose, expiresAt: asOf + WEEK + GRACE });
+    for (const time of [nativeClose + WEEK, asOf + WEEK, asOf + WEEK + GRACE - 1]) {
+      clock = time;
+      expect(await service.read()).toMatchObject({ regime: 'above', asOf: nativeClose });
+      expect(load).toHaveBeenCalledTimes(1);
+    }
+    clock++;
+    load.mockResolvedValue(history(55, 50, 'okx', nativeClose + WEEK));
+    expect(await service.read()).toMatchObject({ regime: 'below', asOf: nativeClose + WEEK,
+      expiresAt: asOf + 2 * WEEK + GRACE });
     expect(load).toHaveBeenCalledTimes(2);
   });
   it('caches failure for only 30 minutes without serving an expired success', async () => {
@@ -88,13 +122,35 @@ describe('one process-wide Planner BTC read', () => {
     const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
     expect((await service.read()).regime).toBe('above');
     load.mockRejectedValue(new Error('EXAMPLE upstream unavailable'));
-    clock += DAY;
+    clock = asOf + WEEK + GRACE;
     expect(await service.read()).toMatchObject({ regime: 'unavailable', movingAverage: null });
     expect((await service.read()).expiresAt).toBe(clock + NEGATIVE_TTL);
     clock += NEGATIVE_TTL - 1; await service.read();
     expect(load).toHaveBeenCalledTimes(2);
-    clock++; load.mockResolvedValue(history());
-    expect((await service.read()).regime).toBe('above');
+    clock++; load.mockResolvedValue(history(55, 200, 'okx', asOf + WEEK));
+    const recoveredAt = clock;
+    expect(await service.read()).toMatchObject({ regime: 'above', retrievedAt: recoveredAt, expiresAt: asOf + 2 * WEEK + GRACE });
+    clock += 2 * DAY;
+    expect(await service.read()).toMatchObject({ regime: 'above', retrievedAt: recoveredAt });
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+  it('retries an unpublished latest completed week every 30 minutes then holds the new close all week', async () => {
+    let clock = asOf + WEEK + GRACE;
+    const load = vi.fn(async () => history());
+    const service = new PlannerDirection({ now: () => clock, btcWeeklyCandles: load });
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      expect(await service.read()).toMatchObject({ regime: 'unavailable', asOf: null, expiresAt: clock + NEGATIVE_TTL });
+      clock += NEGATIVE_TTL - 1;
+      expect((await service.read()).regime).toBe('unavailable');
+      expect(load).toHaveBeenCalledTimes(attempt);
+      clock++;
+    }
+    load.mockResolvedValue(history(55, 50, 'okx', asOf + WEEK));
+    const recoveredAt = clock;
+    expect(await service.read()).toMatchObject({ regime: 'below', asOf: asOf + WEEK,
+      retrievedAt: recoveredAt, expiresAt: asOf + 2 * WEEK + GRACE });
+    clock = asOf + 2 * WEEK + GRACE - 1;
+    expect(await service.read()).toMatchObject({ regime: 'below', retrievedAt: recoveredAt });
     expect(load).toHaveBeenCalledTimes(3);
   });
   it('retries incomplete history after the same 30-minute negative TTL', async () => {

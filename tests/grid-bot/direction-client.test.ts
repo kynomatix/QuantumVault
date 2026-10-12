@@ -4,11 +4,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { GridDirectionBadge, GridDirectionHint } from '../../client/src/components/grid-planner/GridDirectionBadge';
 import { gridDirectionText, isGridDirectionSuggestion } from '../../client/src/lib/grid-direction-view';
-import { BTC_TREND_CACHE_MS as DAY, BTC_TREND_WEEK_MS as WEEK, type GridDirectionSuggestion } from '../../shared/grid-direction';
+import { BTC_TREND_PUBLICATION_GRACE_MS as GRACE, BTC_TREND_WEEK_MS as WEEK, type GridDirectionSuggestion } from '../../shared/grid-direction';
 
-const now = Date.UTC(2026, 9, 13);
+const DAY = WEEK / 7, now = Date.UTC(2026, 9, 13), asOf = now - DAY, expiresAt = asOf + WEEK + GRACE;
 const above: GridDirectionSuggestion = { regime: 'above', sourceVenue: 'okx', movingAverage: 100, lastClose: 102,
-  asOf: now - DAY, retrievedAt: now, serverNow: now, expiresAt: now + DAY };
+  asOf, retrievedAt: now, serverNow: now, expiresAt };
 const below: GridDirectionSuggestion = { ...above, regime: 'below', lastClose: 98 };
 
 // Exercise the real badge effect without adding a DOM runtime or renderer dependency.
@@ -25,15 +25,32 @@ describe('display-only direction badge', () => {
     expect(gridDirectionText(above).label).toBe('Trend: BTC above its 50-week average — long grids favoured');
     expect(gridDirectionText(below).label).toContain('short grids favoured');
     const html = renderToStaticMarkup(createElement(GridDirectionHint, { suggestion: above }));
-    for (const text of ['BTC weekly candles', '50-week simple moving average', 'OKX', 'As of', 'UTC', 'choose either direction']) expect(html).toContain(text);
+    for (const text of ["Based on last week&#x27;s close", 'BTC weekly candles', '50-week simple moving average', 'OKX', 'As of', 'UTC', 'choose either direction']) expect(html).toContain(text);
     expect(html).toContain('<details'); expect(html).toContain('<summary');
   });
   it('shows unavailable for absent data and rejects malformed, expired and stale server values', () => {
     expect(gridDirectionText(null).label).toBe('Trend suggestion unavailable');
     expect(isGridDirectionSuggestion(above)).toBe(true);
-    for (const value of [null, {}, { ...above, expiresAt: now }, { ...above, asOf: now - WEEK },
+    for (const value of [null, {}, { ...above, expiresAt: now }, { ...above, asOf: now - WEEK - GRACE },
       { ...above, lastClose: 99 }, { ...above, sourceVenue: 'unknown' }, { ...above, movingAverage: '100' },
-      { ...above, retrievedAt: now + 1 }, { ...above, expiresAt: now + 2 * DAY }]) expect(isGridDirectionSuggestion(value)).toBe(false);
+      { ...above, retrievedAt: now + 1 }, { ...above, expiresAt: expiresAt + 1 },
+      { ...above, expiresAt: now + DAY }]) expect(isGridDirectionSuggestion(value)).toBe(false);
+  });
+  it('accepts the held previous close throughout Monday grace and rejects it at weekly expiry', () => {
+    for (const serverNow of [now + DAY, asOf + WEEK, expiresAt - 1]) {
+      expect(isGridDirectionSuggestion({ ...above, serverNow })).toBe(true);
+    }
+    expect(isGridDirectionSuggestion({ ...above, serverNow: expiresAt })).toBe(false);
+    expect(isGridDirectionSuggestion({ ...above, asOf: asOf + WEEK, retrievedAt: expiresAt,
+      serverNow: expiresAt, expiresAt: expiresAt + WEEK })).toBe(true);
+  });
+  it('validates native Sunday-close results against the UTC Monday expiry through publication grace', () => {
+    const native = { ...above, asOf: asOf - 8 * 60 * 60 * 1000 };
+    for (const serverNow of [asOf + WEEK - 1, asOf + WEEK, expiresAt - 1]) {
+      expect(isGridDirectionSuggestion({ ...native, serverNow })).toBe(true);
+    }
+    expect(isGridDirectionSuggestion({ ...native, serverNow: expiresAt })).toBe(false);
+    expect(isGridDirectionSuggestion({ ...native, expiresAt: expiresAt - 8 * 60 * 60 * 1000 })).toBe(false);
   });
   it('labels native Pacifica weeks separately from weekly closes aggregated from daily', () => {
     const native: GridDirectionSuggestion = { ...above, sourceVenue: 'pacifica' };
@@ -99,7 +116,13 @@ describe('display-only direction badge', () => {
       expect(hooks.writes).toEqual([null, response]);
       expect(intent.direction).toBe(direction);
       await vi.advanceTimersByTimeAsync(DAY);
+      expect(hooks.value).toEqual(response); expect(fetcher).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(expiresAt - now - DAY - 1);
+      expect(hooks.value).toEqual(response); expect(fetcher).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
       expect(hooks.value).toBeNull(); expect(intent.direction).toBe(direction);
+      await vi.advanceTimersByTimeAsync(WEEK);
+      expect(fetcher).toHaveBeenCalledTimes(1);
     } finally { if (typeof cleanup === 'function') cleanup(); }
   });
   it('ignores a late response after closing and shows unavailable for failed reads', async () => {

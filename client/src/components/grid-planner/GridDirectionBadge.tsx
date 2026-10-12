@@ -30,6 +30,7 @@ export function GridDirectionBadge({ active, identity }: { active: boolean; iden
         const remaining = value.expiresAt - value.serverNow - (Date.now() - startedAt);
         if (remaining <= 0) return;
         setSuggestion(value);
+        // Expiry only clears the display; it never starts another fetch.
         expiry = setTimeout(() => setSuggestion(null), remaining);
       }).catch(() => { if (!controller.signal.aborted) setSuggestion(null); });
     return () => { controller.abort(); clearTimeout(expiry); };

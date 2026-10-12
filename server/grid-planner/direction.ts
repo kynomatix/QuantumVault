@@ -1,4 +1,4 @@
-import { BTC_TREND_CACHE_MS, BTC_TREND_NEGATIVE_CACHE_MS, BTC_TREND_PERIODS, BTC_TREND_WEEK_MS, type GridDirectionSuggestion } from '../../shared/grid-direction';
+import { btcTrendExpiresAt, BTC_TREND_NEGATIVE_CACHE_MS, BTC_TREND_PERIODS, BTC_TREND_WEEK_MS, type GridDirectionSuggestion } from '../../shared/grid-direction';
 import type { PlannerCandle, PlannerDeps } from './types';
 
 const unavailable = (now: number, reason: string): GridDirectionSuggestion => ({ regime: 'unavailable',
@@ -33,7 +33,8 @@ export function computeBtcDirection(raw: PlannerCandle[], now: number): GridDire
   return { regime: last.close > movingAverage ? 'above' : 'below', sourceVenue: venue as 'okx' | 'gate' | 'hyperliquid' | 'pacifica',
     ...(sourceAggregation ? { sourceAggregation } : {}),
     asOf, movingAverage, lastClose: last.close, retrievedAt: now, serverNow: now,
-    expiresAt: Math.min(now + BTC_TREND_CACHE_MS, asOf + BTC_TREND_WEEK_MS) };
+    // Hold this completed week's result through the next Monday's publication grace.
+    expiresAt: btcTrendExpiresAt(asOf) };
 }
 
 // One instance belongs to the Planner route registration: one BTC cache and one shared upstream job.
