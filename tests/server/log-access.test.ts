@@ -15,7 +15,7 @@ const storageTarget = vi.hoisted(() => ({
   getErrorStats: vi.fn(async () => []),
   listErrors: vi.fn(async () => []),
 }));
-const fsTarget = vi.hoisted(() => ({ readFileSync: vi.fn(), statSync: vi.fn() }));
+const fsTarget = vi.hoisted(() => ({ readFile: vi.fn(), stat: vi.fn() }));
 const telemetrySnapshotMock = vi.hoisted(() => vi.fn(() => ({
   queueLength: 3,
   queueBytes: 144,
@@ -24,7 +24,7 @@ const telemetrySnapshotMock = vi.hoisted(() => vi.fn(() => ({
   consecutiveFailures: 2,
 })));
 
-vi.mock("node:fs", () => ({ default: fsTarget }));
+vi.mock("node:fs/promises", () => ({ default: fsTarget }));
 vi.mock("../../server/boot-id", () => ({ SERVER_BOOT_ID: "abcdef12-3456-4789-abcd-ef1234567890", SERVER_BOOT_STARTED_AT: "2026-08-28T00:00:00.000Z" }));
 vi.mock("../../server/storage", () => ({ storage: storageTarget }));
 vi.mock("../../server/telemetry", () => ({
@@ -36,8 +36,8 @@ import { parseCurrentBootMonitor, redactSensitive, registerLogAccessRoutes } fro
 let currentServer: Server | undefined;
 
 beforeEach(() => {
-  fsTarget.statSync.mockReset().mockReturnValue({ size: 321 });
-  fsTarget.readFileSync.mockReset().mockReturnValue("");
+  fsTarget.stat.mockReset().mockReturnValue({ size: 321 });
+  fsTarget.readFile.mockReset().mockReturnValue("");
 });
 
 afterEach(async () => {
@@ -131,6 +131,24 @@ describe("redactSensitive", () => {
 });
 
 describe("GET /api/logs/summary telemetry writer health", () => {
+  it("waits asynchronously for telemetry reads and preserves rotated-to-active ordering", async () => {
+    let release!: (text: string) => void;
+    const pending = new Promise<string>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => {
+      fsTarget.readFile.mockImplementationOnce(() => { resolve(); return pending; });
+    });
+    fsTarget.readFile.mockReturnValueOnce("2026-08-28T00:04:00.000Z active-line\n");
+    const exampleToken = "EXAMPLE".repeat(3);
+    const base = await startServer(exampleToken);
+    const responsePromise = fetch(`${base}/api/logs/telemetry`, { headers: { authorization: `Bearer ${exampleToken}` } });
+    await started;
+    expect(fsTarget.readFile).toHaveBeenCalledTimes(1);
+    release("2026-08-28T00:03:00.000Z rotated-line\n");
+    const response = await responsePromise;
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("2026-08-28T00:03:00.000Z rotated-line\n2026-08-28T00:04:00.000Z active-line\n");
+  });
+
   const token = "read-only-token-123456";
 
   it("retains dedicated bearer authentication", async () => {
@@ -221,7 +239,7 @@ describe("GET /api/logs/summary telemetry writer health", () => {
   });
 
   it("reports a readable prior-boot-only snapshot as current-boot warming", async () => {
-    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+    fsTarget.readFile.mockImplementation((file: unknown) => String(file).endsWith(".1")
       ? ""
       : "2026-08-28T00:04:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=deadbeef\n");
     const base = await startServer(token);
@@ -235,7 +253,7 @@ describe("GET /api/logs/summary telemetry writer health", () => {
   });
 
   it("returns currentBootMonitor null when the active-file stat is unavailable", async () => {
-    fsTarget.statSync.mockImplementationOnce(() => {
+    fsTarget.stat.mockImplementationOnce(() => {
       throw Object.assign(new Error("missing"), { code: "ENOENT" });
     });
     const base = await startServer(token);
@@ -245,18 +263,18 @@ describe("GET /api/logs/summary telemetry writer health", () => {
   });
 
   it("uses one active-plus-rotated snapshot for both summary consumers", async () => {
-    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+    fsTarget.readFile.mockImplementation((file: unknown) => String(file).endsWith(".1")
       ? "2026-08-28T00:01:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=abcdef12\n"
       : "2026-08-28T00:04:00.000Z [AiTraderMonitor] heartbeat tick_degraded pid=41 boot=abcdef12\n");
     const base = await startServer(token);
     const response = await getSummary(base, token);
     expect(response.body.telemetry.lastLineAt).toBe("2026-08-28T00:04:00.000Z");
     expect(response.body.telemetry.currentBootMonitor).toMatchObject({ state: "observed", lastHeartbeatAt: "2026-08-28T00:04:00.000Z" });
-    expect(fsTarget.readFileSync).toHaveBeenCalledTimes(2);
+    expect(fsTarget.readFile).toHaveBeenCalledTimes(2);
   });
 
   it("keeps an absent not-yet-rotated file transparent to a readable active file", async () => {
-    fsTarget.readFileSync.mockImplementation((file: unknown) => {
+    fsTarget.readFile.mockImplementation((file: unknown) => {
       if (String(file).endsWith(".1")) {
         throw Object.assign(new Error("not rotated yet"), { code: "ENOENT" });
       }
@@ -275,7 +293,7 @@ describe("GET /api/logs/summary telemetry writer health", () => {
     const filler = Array.from({ length: 1100 }, (_, index) =>
       `2026-08-28T00:00:00.000Z filler=${index} ${"x".repeat(1000)}`,
     ).join("\n");
-    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+    fsTarget.readFile.mockImplementation((file: unknown) => String(file).endsWith(".1")
       ? ""
       : `${filler}\n2026-08-28T00:05:00.000Z [AiTraderMonitor] heartbeat tick_degraded pid=41 boot=abcdef12\n`);
     const base = await startServer(token);
@@ -291,7 +309,7 @@ describe("GET /api/logs/summary telemetry writer health", () => {
     const unrelated = Array.from({ length: 2000 }, (_, index) =>
       `2026-08-28T00:01:00.000Z unrelated=${index}`,
     ).join("\n");
-    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+    fsTarget.readFile.mockImplementation((file: unknown) => String(file).endsWith(".1")
       ? "2026-08-28T00:00:00.000Z [AiTraderMonitor] heartbeat tick_completed pid=41 boot=abcdef12\n"
       : `${unrelated}\n`);
     const base = await startServer(token);
@@ -303,7 +321,7 @@ describe("GET /api/logs/summary telemetry writer health", () => {
   });
 
   it("returns currentBootMonitor null on a non-missing read failure", async () => {
-    fsTarget.readFileSync.mockImplementation(() => { throw Object.assign(new Error("denied"), { code: "EACCES" }); });
+    fsTarget.readFile.mockImplementation(() => { throw Object.assign(new Error("denied"), { code: "EACCES" }); });
     const base = await startServer(token);
     const response = await getSummary(base, token);
     expect(response.status).toBe(200);
@@ -311,7 +329,7 @@ describe("GET /api/logs/summary telemetry writer health", () => {
   });
 
   it("preserves raw-route grep-before-tail ordering", async () => {
-    fsTarget.readFileSync.mockImplementation((file: unknown) => String(file).endsWith(".1")
+    fsTarget.readFile.mockImplementation((file: unknown) => String(file).endsWith(".1")
       ? [
           "2026-08-28T00:01:00.000Z needle first",
           "2026-08-28T00:02:00.000Z unrelated",
