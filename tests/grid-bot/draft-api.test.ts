@@ -1,0 +1,63 @@
+import { describe,it,expect,vi,afterEach } from 'vitest';
+import express from 'express';
+import Decimal from 'decimal.js';
+import type { Server } from 'node:http';
+import { randomUUID } from 'node:crypto';
+import { authoritativeGridPreview,createGridDraft } from '../../server/grid-bot/draft-service';
+import { GridStorageError,type GridStorage,type StoredBot,type StoredLevel,type DraftRecord } from '../../server/grid-bot/storage';
+import { gridIntentSchema,gridCreateRequestSchema } from '../../shared/grid-draft';
+import { gridDraftRevision } from '../../client/src/lib/grid-draft-view';
+import { intent,authority,clock,umk } from './draft-fixtures';
+import type { GridDraftDeps } from '../../server/grid-bot/draft-service';
+vi.mock('../../server/grid-planner/default-deps',()=>({defaultPlannerDeps:{now:()=>1_800_000_000_000,getMarkets:async()=>[],candles:async()=>[],cachedReference:()=>null}}));
+vi.mock('../../server/grid-bot/draft-default-deps',()=>({readGridRange:async()=>({state:'unavailable',manualAvailable:true}),defaultGridDraftDeps:()=>{throw Error('Unexpected default dependencies');}}));
+import { registerGridBotRoutes } from '../../server/grid-bot/draft-routes';
+function memory() {
+  const bots=new Map<string,StoredBot>(),levels=new Map<string,StoredLevel[]>();
+  return {bots,levels,createDraftWithLevels:vi.fn(async(bot:DraftRecord,l:StoredLevel[])=>{
+    const previous=[...bots.values()].find(b=>b.walletAddress===bot.walletAddress&&b.clientRequestId===bot.clientRequestId);if(previous)return {bot:previous,result:'existing_request' as const};
+    const stored={...bot,status:'draft',totalFees:'0.00000000',residualUsdc:null,createdAt:new Date(clock),updatedAt:new Date(clock)};bots.set(bot.id,stored);levels.set(bot.id,l);return{bot:stored,result:'created' as const};
+  }),findByClientRequest:async(wallet:string,request:string)=>[...bots.values()].find(b=>b.walletAddress===wallet&&b.clientRequestId===request)??null,
+    getBotSnapshot:async(wallet:string,id:string)=>{const bot=bots.get(id);if(!bot || bot.walletAddress!==wallet)throw new GridStorageError('not_found');return{bot,levels:levels.get(id)!,operations:[]};},
+    listBots:async(wallet:string)=>[...bots.values()].filter(b=>b.walletAddress===wallet),listFills:async(wallet:string,id:string)=>{if(bots.get(id)?.walletAddress!==wallet)throw new GridStorageError('not_found');return{fills:[],next:null};}};
+}
+const setup=()=>{const storage=memory(),a=authority(),deps:GridDraftDeps={storage:storage as never,observe:async()=>a,now:()=>clock,umk:async()=>umk()};return{storage,a,deps};};
+const request=async(deps:GridDraftDeps)=>{const draftRevision=gridDraftRevision(intent),preview=await authoritativeGridPreview('EXAMPLE',intent,draftRevision,deps);expect(preview.state).toBe('ready');return{schemaVersion:1 as const,clientRequestId:randomUUID(),draftRevision,intent,serverIntentDigest:preview.serverIntentDigest!};};
+describe('server authoritative Grid drafts',()=>{
+  it('saves one draft on exact retries, signs all levels, and isolates wallets',async()=>{const {storage,deps}=setup(),r=await request(deps);const first=await createGridDraft('EXAMPLE',r,deps),retry=await createGridDraft('EXAMPLE',r,deps);expect(first.bot.id).toBe(retry.bot.id);expect(retry.result).toBe('existing_request');expect(storage.bots.size).toBe(1);expect(storage.levels.get(first.bot.id)).toHaveLength(intent.gridCount+1);expect(first.bot.policyHmac).toMatch(/^[0-9a-f]{64}$/);await createGridDraft('REDACTED',r,deps);expect(storage.bots.size).toBe(2);});
+  it.each([true,false])('keeps required capital within the submitted budget and distinguishes seed capital (%s)',async(seedAtCreation)=>{
+    const {deps}=setup(),i={...intent,seedAtCreation},p=await authoritativeGridPreview('EXAMPLE',i,gridDraftRevision(i),deps);
+    expect(p.state).toBe('ready');expect(p.geometrySummary?.minimumSpacing).toBe('5');expect(p.geometrySummary?.maximumSpacing).toBe('5');
+    expect(p.geometrySummary?.feeClearance).toBe('clears');expect(new Decimal(p.geometrySummary!.totalRequiredCapital!).lte(i.totalInvestment)).toBe(true);
+    expect(new Decimal(p.geometrySummary!.restingEntryMargin).gt(0)).toBe(true);expect(new Decimal(p.geometrySummary!.seedNotional).gt(0)).toBe(seedAtCreation);
+    if(!seedAtCreation){expect(p.seedTakerCost).toBe('0');expect(p.geometrySummary!.seedNotional).toBe('0');}
+  });
+  it('recomputes instead of accepting changed geometry, a seed change or fees',async()=>{const {storage,deps,a}=setup(),r=await request(deps);await expect(createGridDraft('EXAMPLE',{...r,intent:{...intent,upperPrice:'120'}},deps)).rejects.toMatchObject({code:'preview_drift'});
+    await expect(createGridDraft('EXAMPLE',{...r,intent:{...intent,seedAtCreation:false}},deps)).rejects.toMatchObject({code:'preview_drift'});a.entryFee={...a.entryFee!,effectiveRate:'0'};await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'authority_unavailable'});expect(storage.bots.size).toBe(0);});
+  it('rejects authority expiry and stop clearance, while unknown capacity is not a gate',async()=>{const {deps,a}=setup();const r=await request(deps);expect((await authoritativeGridPreview('EXAMPLE',intent,r.draftRevision,deps)).capacity.state).toBe('unavailable');a.stop={state:'unavailable',reason:'EXAMPLE unknown liquidation'};await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'authority_unavailable'});});
+  it('rejects changed intent on the same request and never mutates the winner',async()=>{const {storage,deps}=setup(),r=await request(deps);const first=await createGridDraft('EXAMPLE',r,deps);const changed={...intent,totalInvestment:'200'},revision=gridDraftRevision(changed),p=await authoritativeGridPreview('EXAMPLE',changed,revision,deps);await expect(createGridDraft('EXAMPLE',{...r,intent:changed,draftRevision:revision,serverIntentDigest:p.serverIntentDigest!},deps)).rejects.toMatchObject({code:'idempotency_conflict'});expect(storage.bots.get(first.bot.id)?.totalInvestment).toBe('100.00');});
+  it('denies tampered durable levels or HMAC on replay',async()=>{const {deps,storage}=setup(),r=await request(deps),saved=await createGridDraft('EXAMPLE',r,deps);storage.levels.get(saved.bot.id)![0].size='999.00000000';await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'idempotency_conflict'});});
+  it('a missing UMK cannot commit a draft',async()=>{const {deps,storage}=setup(),r=await request(deps);deps.umk=async()=>null;await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'secret_unavailable'});expect(storage.bots.size).toBe(0);});
+  it('rejects auto unavailable without breaking manual previews',async()=>{const {deps}=setup();expect((await authoritativeGridPreview('EXAMPLE',{...intent,rangeSource:'auto'},'EXAMPLE',deps)).state).toBe('unavailable');expect((await authoritativeGridPreview('EXAMPLE',intent,'EXAMPLE',deps)).state).toBe('ready');});
+  it.each(['walletAddress','levels','startPrice','feeRate','policyHmac','serverIntentDigest'])('strictly rejects client authority %s',field=>{expect(gridIntentSchema.safeParse({...intent,[field]:'EXAMPLE'}).success).toBe(false);});
+  it('rejects floating leverage, exponent/negative prices and invalid request UUID',()=>{expect(gridIntentSchema.safeParse({...intent,leverage:'1.5'}).success).toBe(false);expect(gridIntentSchema.safeParse({...intent,lowerPrice:'1e2'}).success).toBe(false);expect(gridCreateRequestSchema.safeParse({schemaVersion:1,clientRequestId:'EXAMPLE',draftRevision:'EXAMPLE',intent,serverIntentDigest:'EXAMPLE'}).success).toBe(false);});
+});
+const servers:Server[]=[];afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>new Promise<void>(resolve=>{s.close(()=>resolve());s.closeAllConnections();})));});
+async function api(enabled=true) {const {storage,deps}=setup(),app=express();app.use(express.json());registerGridBotRoutes(app,(req,res,next)=>{const wallet=req.headers['x-wallet'];if(!wallet){res.sendStatus(401);return;}(req as typeof req & {walletAddress:string}).walletAddress=String(wallet);next();},{deps,storage:storage as unknown as GridStorage,enabled:()=>enabled});const server=await new Promise<Server>(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});servers.push(server);const address=server.address();if(!address||typeof address==='string')throw Error();return{...{storage,deps},url:'http://127.0.0.1:'+address.port};}
+describe('Grid owner-only routes',()=>{
+  it('requires authentication, keeps owner reads available and blocks draft creation with the flag off',async()=>{
+    const {url,storage}=await api(false),headers={'x-wallet':'EXAMPLE','Content-Type':'application/json'};
+    expect((await fetch(url+'/api/grid-bots')).status).toBe(401);
+    const list=await fetch(url+'/api/grid-bots',{headers});expect(list.status).toBe(200);expect(await list.json()).toMatchObject({bots:[]});
+    for(const path of ['/api/grid-bots/preview','/api/grid-bots'])expect((await fetch(url+path,{method:'POST',headers,body:'{}'})).status).toBe(404);
+    expect((await fetch(url+'/api/grid-bots/'+randomUUID()+'/start',{method:'POST',headers})).status).toBe(503);
+    expect(storage.createDraftWithLevels).not.toHaveBeenCalled();expect(storage.bots.size).toBe(0);
+  });
+  it('echoes only valid correlations, creates a draft, and returns the same foreign/missing result',async()=>{const {url,deps}=await api(),r=await request(deps),headers={'x-wallet':'EXAMPLE','Content-Type':'application/json'};
+    const invalid=await fetch(url+'/api/grid-bots/preview',{method:'POST',headers,body:JSON.stringify({requestId:'EXAMPLE'})});expect(invalid.status).toBe(400);expect((await invalid.json()).requestId).toBeUndefined();
+    const p=await fetch(url+'/api/grid-bots/preview',{method:'POST',headers,body:JSON.stringify({schemaVersion:1,requestId:1,draftRevision:r.draftRevision,intent})});expect(await p.json()).toMatchObject({requestId:1,draftRevision:r.draftRevision,state:'ready'});
+    const saved=await fetch(url+'/api/grid-bots',{method:'POST',headers,body:JSON.stringify(r)});expect(saved.status).toBe(201);const body=await saved.json();
+    const foreign=await fetch(url+'/api/grid-bots/'+body.bot.id,{headers:{'x-wallet':'REDACTED'}}),missing=await fetch(url+'/api/grid-bots/'+randomUUID(),{headers});expect(foreign.status).toBe(404);expect(await foreign.json()).toEqual(await missing.json());
+    expect((await fetch(url+'/api/grid-bots/by-client-request/'+r.clientRequestId,{headers})).status).toBe(200);expect((await fetch(url+'/api/grid-bots/'+body.bot.id+'/levels',{headers})).status).toBe(200);});
+  it('keeps start disabled and exposes no funding, provisioning or deposit route',async()=>{const {url,storage}=await api();for(const action of ['provision','deposit','fund'])expect((await fetch(url+'/api/grid-bots/'+randomUUID()+'/'+action,{method:'POST',headers:{'x-wallet':'EXAMPLE'}})).status).toBe(404);expect((await fetch(url+'/api/grid-bots/'+randomUUID()+'/start',{method:'POST',headers:{'x-wallet':'EXAMPLE'}})).status).toBe(503);expect(storage.bots.size).toBe(0);});
+});

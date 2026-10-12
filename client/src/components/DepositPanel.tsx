@@ -51,6 +51,8 @@ interface DepositPanelProps {
   /** Optional: notifies the parent whether a deposit/swap is in flight (to block closing). */
   onProcessingChange?: (processing: boolean) => void;
   initialTab?: 'usdc' | 'token';
+  initialAmount?: string;
+  showUnknownBalance?: boolean;
 }
 
 /** Converts a decimal UI amount string into a raw integer base-unit string. */
@@ -75,6 +77,8 @@ export function DepositPanel({
   onClose,
   onProcessingChange,
   initialTab = 'usdc',
+  initialAmount,
+  showUnknownBalance = false,
 }: DepositPanelProps) {
   const solanaWallet = useSolanaWallet();
   const { connection } = useConnection();
@@ -105,6 +109,7 @@ export function DepositPanel({
   useEffect(() => {
     if (active) {
       setTab(initialTab);
+      if (initialAmount && /^(?:0|[1-9]\d*)\.\d{2}$/.test(initialAmount)) setUsdcAmount(initialAmount);
     } else {
       // Reset transient state when hidden.
       setUsdcAmount('');
@@ -115,7 +120,7 @@ export function DepositPanel({
       setStatusText('');
       setPendingSwap(null);
     }
-  }, [active, initialTab]);
+  }, [active, initialTab, initialAmount]);
 
   useEffect(() => {
     onProcessingChange?.(isDepositingUsdc || isProcessing);
@@ -387,7 +392,7 @@ export function DepositPanel({
         <div>
           <div className="flex items-center justify-between mb-2">
             <label className="text-sm font-medium">Amount (USDC)</label>
-            <span className="text-xs text-muted-foreground">Available: ${(usdcBalance ?? 0).toFixed(2)}</span>
+            <span className="text-xs text-muted-foreground">Available: {showUnknownBalance && usdcBalance === null ? 'Unknown' : '$' + (usdcBalance ?? 0).toFixed(2)}</span>
           </div>
           <div className="flex gap-2">
             <Input

@@ -1,7 +1,7 @@
 import { recordCriticalError } from "./error-log";
 import { appendTelemetry } from "./telemetry";
 
-type BackgroundComponent = "ai-trader-monitor" | "scanner";
+type BackgroundComponent = "ai-trader-monitor" | "scanner" | "grid-bot-monitor";
 
 type StartupFailureClass =
   | "module_not_found"
@@ -69,7 +69,7 @@ function reportStartFailure(component: BackgroundComponent, error: unknown): voi
 
   try {
     recordCriticalError({
-      category: component === "ai-trader-monitor" ? "crash" : "scanner",
+      category: component === "scanner" ? "scanner" : "crash",
       severity: "error",
       source: `${component}-startup`,
       message: `${component} failed to start`,

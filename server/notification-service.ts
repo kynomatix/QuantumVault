@@ -76,6 +76,7 @@ async function sendTelegramMessage(
   chatId: string,
   text: string,
   replyMarkup?: Record<string, any>,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
   
@@ -97,6 +98,7 @@ async function sendTelegramMessage(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
+      signal,
     });
 
     if (!response.ok) {
@@ -110,6 +112,15 @@ async function sendTelegramMessage(
     console.error('[Telegram] Error sending message:', error);
     return false;
   }
+}
+
+/** Grid safety events use the existing channel and global owner preference. No execution callbacks. */
+export async function sendGridOwnerNotification(walletAddress:string,title:string,body:string):Promise<'sent'|'skipped'|'uncertain'> {
+  // Recipient lookup happens before the outbound request; callers retain a durable attempt claim.
+  const [wallet]=await db.select().from(wallets).where(eq(wallets.address,walletAddress)).limit(1);
+  if(!wallet?.notificationsEnabled||!wallet.telegramChatId)return 'skipped';
+  const sent=await sendTelegramMessage(wallet.telegramChatId,`<b>${escapeTelegramHtml(title)}</b>\n${escapeTelegramHtml(body)}`,buildDefaultInlineKeyboard(),AbortSignal.timeout(15000));
+  return sent?'sent':'uncertain';
 }
 
 export async function sendTradeNotification(

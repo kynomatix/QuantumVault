@@ -1,0 +1,124 @@
+import {randomUUID} from 'node:crypto';
+import type {PoolClient} from 'pg';
+import {GridLaunchStorage,canonicalRequest} from './launch-storage';
+import {reconcileGridObservation,type GridObservation,type ReconciliationOperation} from './reconciliation';
+import type {GridEconomicFill} from './pnl';
+import Decimal from 'decimal.js';
+const D=Decimal.clone({precision:200});
+const states=['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping'];
+export interface GridMonitorClaim {id:string;leaseToken:string;account:string;masterAccount:string}
+const fillsFromRows=(rows:Record<string,any>[]):GridEconomicFill[]=>rows.map(r=>({tradeId:r.trade_id,operationId:r.operation_id,orderId:r.order_id,levelId:r.level_id,time:Number(r.venue_time),leg:r.leg,size:r.size,price:r.price,fee:r.fee}));
+export class GridMonitorStorage {
+  constructor(readonly launch:GridLaunchStorage){}
+  /** Expiry alone never proves the old worker is dead. Only unowned rows are claimable. */
+  async claim(exclude:string[]=[]):Promise<GridMonitorClaim|null>{return this.launch.transaction(async c=>{
+    const row=(await c.query(`SELECT b.id,a.account,a.master_account FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
+      WHERE b.status=ANY($1::text[]) AND b.lease_token IS NULL AND a.released_at IS NULL AND NOT(b.id=ANY($2::uuid[]))
+      AND (b.last_tick_at IS NULL OR b.last_tick_at<=clock_timestamp()-interval '15 seconds')
+      ORDER BY b.last_tick_at NULLS FIRST,b.id FOR UPDATE OF b SKIP LOCKED LIMIT 1`,[states,exclude])).rows[0];
+    if(!row)return null;
+    const token=randomUUID();
+    await c.query("UPDATE grid_bots SET lease_token=$2,lease_expires_at=clock_timestamp()+interval '120 seconds' WHERE id=$1",[row.id,token]);
+    return {id:row.id,leaseToken:token,account:row.account,masterAccount:row.master_account};
+  });}
+  async assertLease(c:PoolClient,claim:GridMonitorClaim){const bot=(await c.query(`SELECT b.*,a.account,a.master_account,clock_timestamp() AS db_now
+    FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 AND b.lease_token=$2
+    AND b.lease_expires_at>clock_timestamp() AND a.released_at IS NULL AND b.status=ANY($3::text[]) FOR UPDATE OF b`,[claim.id,claim.leaseToken,states])).rows[0];
+    if(!bot||bot.account!==claim.account||bot.master_account!==claim.masterAccount)throw Error('Grid ownership uncertain');return bot;
+  }
+  async release(claim:GridMonitorClaim){await this.launch.transaction(async c=>{await c.query(`UPDATE grid_bots SET lease_token=NULL,lease_expires_at=NULL,last_tick_at=clock_timestamp()
+    WHERE id=$1 AND lease_token=$2`,[claim.id,claim.leaseToken]);});}
+  async snapshot(claim:GridMonitorClaim){return this.launch.transaction(async c=>{const bot=await this.assertLease(c,claim);
+    const operations=(await c.query('SELECT * FROM grid_operations WHERE bot_id=$1 ORDER BY created_at,id',[claim.id])).rows as ReconciliationOperation[];
+    return {bot,operations,levels:(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[claim.id])).rows};
+  });}
+  async block(claim:GridMonitorClaim,reason:string){await this.launch.transaction(async c=>{await this.assertLease(c,claim);
+    await c.query(`INSERT INTO grid_monitor_state(bot_id,blocked_reasons) VALUES($1,$2) ON CONFLICT(bot_id)
+      DO UPDATE SET boot_id=NULL,pnl=NULL,blocked_reasons=EXCLUDED.blocked_reasons,generation=grid_monitor_state.generation+1`,[claim.id,JSON.stringify([reason])]);
+  });}
+  /** Cursor, immutable fills, balances and startup generation commit together, or not at all. */
+  async reconcile(claim:GridMonitorClaim,bootId:string,observation:GridObservation){return this.launch.transaction(async c=>{
+    await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[claim.masterAccount]);
+    const bot=await this.assertLease(c,claim),now=new Date(bot.db_now).getTime();
+    const operations=(await c.query('SELECT * FROM grid_operations WHERE bot_id=$1 ORDER BY created_at,id FOR UPDATE',[claim.id])).rows as ReconciliationOperation[];
+    const prior=fillsFromRows((await c.query('SELECT * FROM grid_exact_fills WHERE bot_id=$1',[claim.id])).rows);
+    const result=reconcileGridObservation({account:claim.account,symbol:bot.market.replace(/-PERP$/,''),direction:bot.direction,
+      start:new Date(bot.created_at).getTime(),now,operations,prior,observation});
+    // All downstream decisions use exact operation progress, not scale-eight compatibility columns.
+    for(const order of observation.orders){const op=operations.find(op=>op.venue_order_id===order.orderId||op.exact_request?.data.client_order_id===order.clientOrderId&&order.clientOrderId!==null);
+      if(!op||!['seed','limit','close'].includes(op.exact_request?.kind))continue;
+      const actual=result.fills.filter(f=>f.operationId===op.id).reduce((q,f)=>q.plus(f.size),new D(0));
+      if(!actual.eq(order.filledAmount))continue;
+      const remaining=new D(order.amount).minus(order.filledAmount);
+      const old=(await c.query('SELECT * FROM grid_monitor_orders WHERE operation_id=$1 FOR UPDATE',[op.id])).rows[0];
+      if(old&&(old.order_id!==order.orderId||new D(old.filled).gt(actual)||Number(old.observed_at)>observation.observedAt
+        ||(['filled','cancelled','rejected'].includes(old.status)&&!['filled','cancelled','rejected'].includes(order.status))))throw Error('Regressing order observation');
+      await c.query(`INSERT INTO grid_monitor_orders(operation_id,order_id,status,filled,remaining,observed_at) VALUES($1,$2,$3,$4,$5,$6)
+        ON CONFLICT(operation_id) DO UPDATE SET status=EXCLUDED.status,filled=EXCLUDED.filled,remaining=EXCLUDED.remaining,observed_at=EXCLUDED.observed_at`,[op.id,order.orderId,order.status,actual.toFixed(),remaining.toFixed(),observation.observedAt]);
+      if(['filled','cancelled','rejected'].includes(order.status)){
+        if(order.status==='filled'&&!actual.eq(order.amount))throw Error('False terminal fill');
+        if(result.entriesAllowed&&['filled','cancelled'].includes(order.status)&&(!old||!['filled','cancelled','rejected'].includes(old.status)))await c.query('UPDATE grid_bots SET consecutive_failures=0 WHERE id=$1',[claim.id]);
+        await c.query('UPDATE grid_execution_claims SET slot_released=true WHERE operation_id=$1',[op.id]);
+        if(op.level_id)await c.query(`UPDATE grid_levels SET status=$3,placement_attempt=placement_attempt+1,updated_at=clock_timestamp()
+          WHERE id=$1 AND bot_id=$2 AND venue_order_id=$4 AND status IN ('active','partially_filled','cancelling')`,[op.level_id,claim.id,order.status==='filled'?'filled':'cancelled',order.orderId]);
+        // A proved terminal cancellation frees only the never-filled part of its allocations.
+        if(result.entriesAllowed&&observation.history!.through>=order.updatedAt&&op.exact_request.kind==='limit'&&op.exact_request.data.reduce_only===true){
+          const allocations=(await c.query(`SELECT a.*,f.venue_time FROM grid_profit_allocations a JOIN grid_exact_fills f ON f.account=a.account AND f.trade_id=a.trade_id
+            WHERE a.operation_id=$1 ORDER BY f.venue_time,a.trade_id FOR UPDATE OF a`,[op.id])).rows;
+          let consumed=actual;
+          for(const a of allocations){const used=D.min(consumed,a.size),released=new D(a.size).minus(used);consumed=consumed.minus(used);
+            if(released.lt(a.released_size))throw Error('Terminal allocation settlement regressed');
+            await c.query('UPDATE grid_profit_allocations SET released_size=$4,settled_at=clock_timestamp(),released_at=CASE WHEN $4::numeric=size THEN clock_timestamp() ELSE NULL END WHERE operation_id=$1 AND account=$2 AND trade_id=$3',[op.id,a.account,a.trade_id,released.toFixed()]);
+          }
+          if(!consumed.isZero())throw Error('Profit fill lacks actual entry allocation');
+        }
+      }
+    }
+    for(const f of result.fills){
+      const inserted=await c.query(`INSERT INTO grid_exact_fills(account,trade_id,bot_id,operation_id,level_id,order_id,venue_time,leg,size,price,fee)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING RETURNING trade_id`,[claim.account,f.tradeId,claim.id,f.operationId,f.levelId,f.orderId,f.time,f.leg,f.size,f.price,f.fee]);
+      if(!inserted.rowCount){const row=(await c.query('SELECT * FROM grid_exact_fills WHERE account=$1 AND trade_id=$2',[claim.account,f.tradeId])).rows[0];
+        if(row.bot_id!==claim.id||canonicalRequest(fillsFromRows([row])[0])!==canonicalRequest(f))throw Error('Conflicting stored trade');}
+    }
+    // Re-arm an entry only after its full operation is filled and every source lot has a settled exit.
+    if(result.entriesAllowed)for(const op of operations.filter(o=>o.exact_request?.kind==='limit'&&o.exact_request.data.reduce_only===false&&o.level_id)){
+      const progress=(await c.query('SELECT status,remaining FROM grid_monitor_orders WHERE operation_id=$1',[op.id])).rows[0];
+      if(progress?.status!=='filled')continue;
+      const unclosed=(await c.query(`SELECT f.trade_id FROM grid_exact_fills f WHERE f.operation_id=$1 AND f.size>
+        COALESCE((SELECT sum(a.size-a.released_size) FROM grid_profit_allocations a JOIN grid_monitor_orders p ON p.operation_id=a.operation_id
+          WHERE a.account=f.account AND a.trade_id=f.trade_id AND a.settled_at IS NOT NULL AND p.status IN ('filled','cancelled','rejected')),0) LIMIT 1`,[op.id])).rowCount;
+      if(!unclosed)await c.query(`UPDATE grid_levels SET status='pending',venue_order_id=NULL,client_order_uuid=NULL WHERE id=$1 AND bot_id=$2 AND status='filled' AND venue_order_id=$3`,[op.level_id,claim.id,op.venue_order_id]);
+    }
+    // Observe actual residuals; never convert the 98% threshold into a synthetic fill.
+    for(const owned of result.owned){if(owned.levelId)await c.query(`UPDATE grid_levels SET status=CASE WHEN $3::numeric>0 THEN 'partially_filled' ELSE 'active' END
+      WHERE id=$1 AND bot_id=$2 AND venue_order_id=$4 AND status IN ('active','partially_filled')`,[owned.levelId,claim.id,owned.order.filledAmount,owned.order.orderId]);}
+    const safe=result.entriesAllowed?observation.history!.through:null;
+    const economicUnknown=result.reasons.some(r=>['unowned_trade','history_safe_through_unavailable','order_trade_mismatch','vanished_order_unresolved','position_mismatch_or_unavailable'].includes(r));
+    await c.query(`INSERT INTO grid_monitor_state(bot_id,boot_id,generation,safe_through,observation,pnl,blocked_reasons,reconciled_at)
+      VALUES($1,$2,1,$3,$4,$5,$6,clock_timestamp()) ON CONFLICT(bot_id) DO UPDATE SET boot_id=EXCLUDED.boot_id,
+      generation=grid_monitor_state.generation+1,safe_through=CASE WHEN EXCLUDED.safe_through IS NULL THEN grid_monitor_state.safe_through ELSE GREATEST(grid_monitor_state.safe_through,EXCLUDED.safe_through) END,
+      observation=EXCLUDED.observation,pnl=EXCLUDED.pnl,blocked_reasons=EXCLUDED.blocked_reasons,reconciled_at=EXCLUDED.reconciled_at`,
+      [claim.id,result.entriesAllowed?bootId:null,safe,JSON.stringify(observation),economicUnknown?null:JSON.stringify(result.pnl),JSON.stringify(result.reasons)]);
+    await c.query(`UPDATE grid_bots SET last_reconciliation_at=clock_timestamp(),startup_reconciled_at=CASE WHEN $2 THEN clock_timestamp() ELSE NULL END WHERE id=$1`,[claim.id,result.entriesAllowed]);
+    return result;
+  });}
+  async planningState(claim:GridMonitorClaim,bootId:string){return this.launch.transaction(async c=>{
+    await this.assertLease(c,claim);const state=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0];
+    if(!state?.fresh||state.boot_id!==bootId||state.blocked_reasons.length)throw Error('Startup reconciliation unavailable');
+    const fills=fillsFromRows((await c.query('SELECT * FROM grid_exact_fills WHERE bot_id=$1',[claim.id])).rows);
+    const reserved=(await c.query(`SELECT a.trade_id AS "tradeId",(a.size-a.released_size)::text AS size FROM grid_profit_allocations a JOIN grid_operations o ON o.id=a.operation_id
+      WHERE o.bot_id=$1 AND a.released_at IS NULL`,[claim.id])).rows;
+    const levels=(await c.query(`SELECT l.*,CASE WHEN l.status='cancelled' AND p.status='cancelled' THEN p.remaining::text ELSE l.size::text END AS exact_size
+      FROM grid_levels l LEFT JOIN LATERAL (SELECT p.* FROM grid_monitor_orders p JOIN grid_operations o ON o.id=p.operation_id
+        WHERE o.level_id=l.id AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1) p ON true WHERE l.bot_id=$1 ORDER BY l.ordinal`,[claim.id])).rows;
+    const life=(await c.query('SELECT epoch FROM grid_lifecycle WHERE bot_id=$1',[claim.id])).rows[0];
+    return {fills,reserved,levels,authority:{monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
+  });}
+  async pnl(wallet:string,id:string){return this.launch.transaction(async c=>{
+    if(!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rowCount)return null;
+    const row=(await c.query('SELECT pnl,reconciled_at,blocked_reasons FROM grid_monitor_state WHERE bot_id=$1',[id])).rows[0];
+    if(!row?.pnl)return {available:false,label:'PnL excludes funding',reason:'reconciliation_unavailable'};
+    const fresh=Date.now()-new Date(row.reconciled_at).getTime()<=15000;
+    return {available:true,...row.pnl,...(!fresh?{unrealised:null,total:null,markObservedAt:null}:{}),reconciledAt:row.reconciled_at,blockedReasons:row.blocked_reasons};
+  });}
+}

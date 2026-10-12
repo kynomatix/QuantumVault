@@ -51,10 +51,15 @@ export interface ActiveRange {
 export function detectActiveRange(
   bars: OHLCV[],
   price: number,
-  k = ACTIVE_RANGE_K,
+  k: number | { finalizedOnly: true; intrabarAtr: number; driftAtr: number; maximumBars: number } = ACTIVE_RANGE_K,
   capBars = 400,
 ): ActiveRange | null {
-  const closed = bars.slice(0, -1); // strip forming bar
+  const typed = typeof k === 'object';
+  const drift = typed ? k.driftAtr : DRIFT_ESCAPE_MULT;
+  capBars = typed ? k.maximumBars : capBars;
+  const multiplier = typed ? k.intrabarAtr : k;
+  if (![multiplier, drift, capBars, price].every(Number.isFinite) || multiplier <= 0 || drift <= 0 || capBars < 1) return null;
+  const closed = typed ? bars : bars.slice(0, -1); // typed caller supplies only finalized bars
   const len = closed.length;
 
   if (len < 14) return null; // need ≥ 14 bars for ATR(14) to be defined
@@ -67,7 +72,7 @@ export function detectActiveRange(
 
   if (!Number.isFinite(atr14) || atr14 <= 0) return null;
 
-  const threshold = k * atr14;
+  const threshold = multiplier * atr14;
 
   // Seed the envelope from the newest closed bar (ageOf* = 0).
   const newest = closed[len - 1];
@@ -93,7 +98,7 @@ export function detectActiveRange(
     // never produces a single wide bar (each bar individually passes the intrabar
     // check) but whose close is already in a different price regime. Stop WITHOUT
     // including this bar.
-    if (Math.abs(bar.close - newest.close) > DRIFT_ESCAPE_MULT * atr14) break;
+    if (Math.abs(bar.close - newest.close) > drift * atr14) break;
 
     if (bar.high > envHigh) {
       envHigh   = bar.high;
@@ -112,4 +117,12 @@ export function detectActiveRange(
   const pctInRange = Math.min(1, Math.max(0, (price - envLow) / rangeWidth));
 
   return { high: envHigh, low: envLow, bars: walkCount, ageOfHigh, ageOfLow, pctInRange };
+}
+
+export function deriveStructuralSafeZones(high: number, low: number, atrValue: number, multiplier: number) {
+  if (![high,low,atrValue,multiplier].every(Number.isFinite) || high <= low || low <= 0 || atrValue <= 0 || multiplier <= 0)
+    return { state: 'unavailable' as const, reason: 'Structural range or ATR unavailable' };
+  const buffer = atrValue * multiplier, longStop = low - buffer, shortStop = high + buffer;
+  return longStop > 0 && Number.isFinite(shortStop) ? { state:'available' as const, buffer, longStop, shortStop }
+    : { state:'unavailable' as const, reason:'Structural stop is not a positive price' };
 }

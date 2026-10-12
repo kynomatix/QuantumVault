@@ -179,14 +179,25 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 192 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 196 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(192);
-    expect(metadata).toHaveLength(192);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(192);
+    expect(sqlEntries).toHaveLength(196);
+    expect(metadata).toHaveLength(196);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(196);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     expect(metadata[191]).toMatchObject({ id: '191-phoenix-ai-trader', capabilities: ['phoenix'], operation: 'ddl' });
     expect(sqlEntries[191]).toContain('phoenix_ai_executions');
+    const gridMigrations = [
+      ['192-grid-bot-drafts', '0004_grid_bot_drafts.sql'],
+      ['193-grid-launch-ledger', '0005_grid_launch.sql'],
+      ['194-grid-monitor-ledger', '0006_grid_monitor.sql'],
+      ['195-grid-lifecycle-controls', '0007_grid_lifecycle.sql'],
+    ];
+    for (const [offset, [id, file]] of gridMigrations.entries()) {
+      expect(metadata[192 + offset]).toMatchObject({ id, capabilities: ['grid_bot'], operation: 'ddl' });
+      const fileSql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
+      expect(sqlEntries[192 + offset].trim()).toBe(fileSql.replaceAll('\r\n', '\n').trim());
+    }
     // Entries 028 and 076 preserve later superset constraints on every boot.
     // Pin the other pre-existing SQL bytes, including entry 185.
     const preExistingUnchanged = sqlEntries.slice(0, 186).filter((_, index) => index !== 28 && index !== 76);

@@ -55,7 +55,8 @@ export type CandleReadCallerClass =
   | "paper_monitor"
   | "live_monitor"
   | "context"
-  | "lab";
+  | "lab"
+  | "grid-bot";
 
 export type CandleReadOutcome =
   | "hit"
