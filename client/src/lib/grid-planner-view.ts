@@ -10,10 +10,19 @@ const D = Decimal.clone({ precision: 80 });
 const plainPrice = (value: string) => value.length <= 37 && /^(0|[1-9]\d{0,17})(\.\d{1,18})?$/.test(value) && new D(value).gt(0);
 export const RANGE_PRESETS = [{ label: 'Tight', percent: 5 }, { label: 'Balanced', percent: 10 }, { label: 'Wide', percent: 20 }] as const;
 export const ORDER_SIZES = [
-  { value: 'flat', label: 'Equal allocation' },
-  { value: 'ascending', label: 'Bigger at better prices' },
-  { value: 'descending', label: 'Bigger near the start' },
+  { value: 'flat', label: 'Equal quote allocation' },
+  { value: 'ascending', label: 'Larger further from current price' },
+  { value: 'descending', label: 'Larger near current price' },
 ] as const;
+export function plannerSizeHint(side: string, scale: string, startingPosition = false): string {
+  const action = startingPosition ? side === 'long' ? 'sold to close the starting long' : 'bought back to close the starting short'
+    : side === 'long' ? 'bought' : 'sold short';
+  const move = startingPosition ? side === 'long' ? 'rises' : 'falls' : side === 'long' ? 'falls' : 'rises';
+  const near = startingPosition ? side === 'long' ? 'above' : 'below' : side === 'long' ? 'below' : 'above';
+  return scale === 'flat' ? `Equal quote value is ${action} at each level; base quantities vary with price and lot rounding.`
+    : scale === 'ascending' ? `More quote value is ${action} as price ${move} further from the current price; base quantities depend on price and lot rounding.`
+      : `More quote value is ${action} at levels just ${near} the current price; base quantities depend on price and lot rounding.`;
+}
 
 /** A shortcut uses only an unexpired, observed Pacifica price; never chart closes. */
 export function plannerRangeAround(market: PlannerMarket | undefined, deadline: number, now: number, percent: number) {
@@ -87,7 +96,8 @@ export function isPlannerChart(v: unknown): v is PlannerChart {
     && v.candles.every((c: any, i: number) => record(c) && clock(c.time) && c.time <= v.retrievedAt
       && (!i || c.time > v.candles[i - 1].time) && [c.open, c.high, c.low, c.close].every(n => typeof n === 'number' && Number.isFinite(n) && n > 0)
       && c.low <= Math.min(c.open, c.close) && c.high >= Math.max(c.open, c.close)
-      && record(c.provenance) && c.provenance.source === 'okx' && c.provenance.venue === 'okx' && c.provenance.basis === 'perp'
+      && record(c.provenance) && ['okx', 'pacifica'].includes(c.provenance.source) && c.provenance.venue === c.provenance.source
+      && c.provenance.source === v.candles[0].provenance.source && c.provenance.basis === 'perp'
       && c.provenance.proxy === 'direct' && c.provenance.timeSemantic === 'open_time' && ['finalized', 'forming'].includes(c.provenance.finality));
 }
 function isPlan(p: any): boolean {

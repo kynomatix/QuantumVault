@@ -60,6 +60,15 @@ describe('bounded read-only Planner HTTP surface', () => {
   });
 });
 describe('chart work/cache bounds and provenance', () => {
+  it('accepts native Pacifica candles but rejects mixed or mismatched venue provenance', async () => {
+    const native = { ...candle, provenance: { ...candle.provenance, source: 'pacifica' as const, venue: 'pacifica' as const } };
+    expect(validateCandles([native], clock)).toBe(true);
+    expect(validateCandles([{ ...native, provenance: { ...native.provenance, venue: 'okx' } } as any], clock)).toBe(false);
+    expect(validateCandles([candle, { ...native, time: candle.time + 1 }], clock)).toBe(false);
+    const d = makeDeps(); d.candles = vi.fn(async () => [native]);
+    const s = await serve(true, d);
+    expect(await (await s.get('chart?market=BTC-PERP&timeframe=1h&bars=100')).json()).toMatchObject({ state: 'available', candles: [native] });
+  });
   it('rejects spot/proxy/unknown provenance, invalid OHLC and unordered bars', () => {
     for (const provenance of [{ ...candle.provenance, basis: 'spot' }, { ...candle.provenance, proxy: 'proxy' }, { ...candle.provenance, finality: 'unknown' }])
       expect(validateCandles([{ ...candle, provenance } as any], clock)).toBe(false);

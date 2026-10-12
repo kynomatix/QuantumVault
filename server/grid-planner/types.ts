@@ -2,6 +2,11 @@ import type { GridGeometryInput, GridPlan, PairFee } from '../grid-bot/engine-ty
 import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { ProvenancedOHLCV } from '../lab/datafeed';
 
+// Pacifica candles are Planner-only; shared datafeed consumers keep their existing sources.
+export type PlannerCandle = ProvenancedOHLCV | (Omit<ProvenancedOHLCV, 'provenance'> & {
+  provenance: Omit<ProvenancedOHLCV['provenance'], 'source' | 'venue'> & { source: 'pacifica'; venue: 'pacifica' };
+});
+
 export type Fact<T> = { state: 'available'; value: T } | { state: 'unavailable'; reason: string };
 export interface PlannerMarket {
   market: string; protocolSymbol: string; name: string;
@@ -13,7 +18,7 @@ export interface PlannerMarket {
 export interface PlannerDeps {
   getMarkets(): Promise<ProtocolMarket[]>;
   cachedReference(market: string): { price: number; observedAt: number | null } | null;
-  candles(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<ProvenancedOHLCV[]>;
+  candles(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<PlannerCandle[]>;
   now(): number;
 }
 export interface PlannerQuery {
@@ -39,4 +44,4 @@ export const PLANNER_POLICY = {
 } as const;
 export type PlannerChart = { state: 'available'; market: string; timeframe: string; requestedBars: number;
   actualBars: number; partial: boolean; retrievedAt: number; cacheInsertedAt: number; validForMs: number;
-  candles: ProvenancedOHLCV[] } | { state: 'unavailable'; reason: string };
+  candles: PlannerCandle[] } | { state: 'unavailable'; reason: string };

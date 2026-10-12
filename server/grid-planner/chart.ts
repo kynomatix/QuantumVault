@@ -6,7 +6,8 @@ export function validateCandles(candles: Awaited<ReturnType<PlannerDeps['candles
     && (i === 0 || c.time > candles[i - 1].time)
     && [c.open, c.high, c.low, c.close].every(n => Number.isFinite(n) && n > 0)
     && c.low <= Math.min(c.open, c.close) && c.high >= Math.max(c.open, c.close) && c.high >= c.low
-    && c.provenance?.source === 'okx' && c.provenance.venue === 'okx' && c.provenance.basis === 'perp'
+    && ['okx', 'pacifica'].includes(c.provenance?.source) && c.provenance.venue === c.provenance.source
+    && c.provenance.source === candles[0].provenance.source && c.provenance.basis === 'perp'
     && c.provenance.proxy === 'direct' && c.provenance.timeSemantic === 'open_time'
     && ['finalized', 'forming'].includes(c.provenance.finality));
 }
@@ -37,14 +38,14 @@ export class PlannerCharts {
       created.promise = Promise.resolve().then(() => this.deps.candles(market, timeframe, bars, controller.signal)).then(raw => {
         const retrievedAt = this.deps.now(), candles = raw.slice(-bars);
         if (controller.signal.aborted) return { state: 'unavailable' as const, reason: 'Chart deadline or cancellation' };
-        if (!validateCandles(candles, retrievedAt)) return { state: 'unavailable' as const, reason: 'Direct perpetual candles or provenance unavailable' };
+        if (!validateCandles(candles, retrievedAt)) return { state: 'unavailable' as const, reason: 'The price sources did not return usable candles with verified perpetual provenance.' };
         const response: Extract<PlannerChart, { state: 'available' }> = { state: 'available', market, timeframe, requestedBars: bars,
           actualBars: candles.length, partial: candles.length < bars, retrievedAt, cacheInsertedAt: retrievedAt,
           validForMs: TTL[timeframe], candles };
         this.cache.delete(key); this.cache.set(key, response);
         if (this.cache.size > 64) this.cache.delete(this.cache.keys().next().value!);
         return response;
-      }).catch(() => ({ state: 'unavailable' as const, reason: 'Chart source unavailable' }))
+      }).catch(() => ({ state: 'unavailable' as const, reason: 'The perpetual candle sources are temporarily unavailable.' }))
         .finally(() => { clearTimeout(timer); this.jobs.delete(key); });
       job = created;
     }

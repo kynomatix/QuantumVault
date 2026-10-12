@@ -15,6 +15,27 @@ export const deps = (): PlannerDeps => ({ now: () => now, getMarkets: vi.fn(asyn
 const query: PlannerQuery = { market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat',
   seed: true, investment: '1000', leverage: '1', stop: '70', fee: null };
 describe('Pacifica authority and honest planner verdicts', () => {
+  it.each(['long', 'short'] as const)('engine quote weighting matches distance labels for %s entries and starting-position exits', side => {
+    const m = marketSnapshot(row(), deps());
+    for (const scale of ['flat', 'ascending', 'descending'] as const) {
+      const result = previewGrid({ ...query, side, entryScale: scale, profitScale: scale, stop: side === 'long' ? '70' : '130', fee: '0' }, m, now);
+      expect(result.state).toBe('diagnostic');
+      const plan = result.requestedPlan!; expect(plan).not.toBeNull();
+      for (const role of ['entry', 'seed_exit'] as const) {
+        const lines = plan.lines.filter(l => l.role === role).sort((a, b) => Math.abs(Number(b.price) - 100) - Math.abs(Number(a.price) - 100));
+        expect(lines).toHaveLength(2);
+        const far = Number(lines[0].notional), near = Number(lines[1].notional);
+        if (scale === 'ascending') expect(far).toBeGreaterThan(near);
+        else if (scale === 'descending') expect(far).toBeLessThan(near);
+        else expect(Math.abs(far - near)).toBeLessThan(1.2);
+        expect(lines.every(l => role === 'entry' ? (side === 'long' ? Number(l.price) < 100 : Number(l.price) > 100)
+          : (side === 'long' ? Number(l.price) > 100 : Number(l.price) < 100))).toBe(true);
+      }
+      expect(Number(plan.seedQuantity)).toBeCloseTo(plan.lines.filter(l => l.role === 'seed_exit').reduce((sum, l) => sum + Number(l.quantity), 0), 8);
+    }
+    const withoutSeed = previewGrid({ ...query, side, seed: false, stop: side === 'long' ? '70' : '130', fee: '0' }, m, now).requestedPlan!;
+    expect(withoutSeed.seedQuantity).toBe('0'); expect(withoutSeed.lines.some(l => l.role === 'seed_exit')).toBe(false);
+  });
   it('uses original observation clocks and refuses to fabricate missing maxima', () => {
     const m = marketSnapshot(row(), deps());
     expect(m.constraints).toMatchObject({ state: 'available', value: { tick: '0.1', lot: '0.01', minimumQuote: '10', observedAt: now,

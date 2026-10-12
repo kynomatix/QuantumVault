@@ -15,6 +15,7 @@ import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGene
   RANGE_PRESETS, ORDER_SIZES, plannerRangeAround, proposedPlannerStop, plannerChartRange,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
+import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
 
 const INITIAL = { market: '', side: 'long', lower: '', upper: '', intervals: '10', entryScale: 'flat', profitScale: 'flat',
   seed: true, leverage: '1', investment: '', stop: '', feePercent: '', timeframe: '1h', bars: '100' };
@@ -30,6 +31,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
   const [preview, setPreview] = useState<PlannerPreview | null>(null), [chart, setChart] = useState<PlannerChart | null>(null);
   const [error, setError] = useState(''), [marketError, setMarketError] = useState(''), [chartError, setChartError] = useState('');
   const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [now, setNow] = useState(Date.now());
+  const [chartRefresh, setChartRefresh] = useState(0);
   const [previewExpiry, setPreviewExpiry] = useState(0), [chartExpiry, setChartExpiry] = useState(0);
   const [marketClock, setMarketClock] = useState({ serverNow: 0, startedAt: 0 });
   const [advancedOpen, setAdvancedOpen] = useState(false), [marketLoading, setMarketLoading] = useState(false);
@@ -96,7 +98,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
       setChart(value); setChartExpiry(value.state === 'available' ? startedAt + value.validForMs : 0); setNow(Date.now());
     }).catch(e => { if (request.current()) setChartError(e.message); });
     return () => generation.current.chart.invalidate();
-  }, [open, identity, form.market, form.timeframe, form.bars, refresh]);
+  }, [open, identity, form.market, form.timeframe, form.bars, refresh, chartRefresh]);
   useEffect(() => {
     generation.current.preview.invalidate(); setPreview(null); setLoading(false);
     if (!open || !form.market || query.error) return;
@@ -137,6 +139,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
     <Input id={`grid-${key}`} inputMode={key === 'intervals' ? 'numeric' : 'decimal'} value={String(form[key])}
       placeholder={placeholder} onChange={e => edit(key, e.target.value)} />
   </div>;
+  const retryChart = () => {
+    generation.current.chart.invalidate(); setChart(null); setChartError(''); setChartExpiry(0);
+    setChartRefresh(previous => previous + 1);
+  };
   const choice = (key: keyof typeof INITIAL, label: string, options: readonly { value: string; label: string }[]) => <div className="space-y-1.5">
     <Label htmlFor={`grid-${key}`}>{label}</Label>
     <Select value={String(form[key])} onValueChange={v => edit(key, v)}>
@@ -191,8 +197,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
               <Button type="button" size="sm" variant="ghost" disabled={marketLoading} onClick={refreshObservations}>Refresh observations</Button>
             </div>
           </div>
-          {chartError && <p role="alert" className="text-sm text-destructive">{chartError}</p>}
-          <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} loading={!!form.market && !chart && !chartError} />
+          <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} hasMarket={!!form.market}
+            error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
           <div className="grid grid-cols-3 gap-2" aria-label="Range presets">
             {RANGE_PRESETS.map(p => <Button key={p.percent} type="button" variant="outline" disabled={!reference}
               aria-pressed={rangeShortcut === p.percent} onClick={() => preset(p.percent)}
@@ -281,21 +287,22 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
             Advanced settings<ChevronDown className={`h-4 w-4 transition-transform ${advancedOpen ? 'rotate-180' : ''}`} />
           </Button></CollapsibleTrigger>
           <CollapsibleContent className="mt-3 space-y-4 rounded-lg border border-border/60 bg-card/40 p-4">
+            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
+              <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position at the current price</Label>
+                <p className="text-xs text-muted-foreground">Model a position opened at the current price, then closed in pieces at higher levels for a long or lower levels for a short; its taker fee is unavailable. This does not place an order.</p></div>
+              <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               {numberField('intervals', 'Number of levels (1–100)')}
-              {choice('entryScale', 'Order sizes', ORDER_SIZES)}
-              {choice('profitScale', 'Starting-position exit sizes', ORDER_SIZES)}
+              <GridPlannerSizeSelect id="grid-entryScale" label="Order sizes" value={form.entryScale} side={form.side} onChange={value => edit('entryScale', value)} />
+              <GridPlannerSizeSelect id="grid-profitScale" label="How the starting position is taken profit on" value={form.profitScale} side={form.side}
+                startingPosition enabled={form.seed} onChange={value => edit('profitScale', value)} />
               {numberField('stop', 'Custom stop price', suggestedStop ?? 'Enter a proposed stop')}
               {choice('bars', 'History bars', [{ value: '100', label: '100 bars' }, { value: '200', label: '200 bars' }])}
               {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
             </div>
-            <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines. Flat divides investment equally; ascending allocates more at better prices; descending does the reverse. Base quantities also depend on price and lot rounding. Starting-position exit sizes use the seed exit scale.</p>
+            <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines. Technical scales: flat = equal quote allocation; ascending = larger allocation further from current price; descending = larger allocation near current price. These apply separately to entries and starting-position exits. Base quantities also depend on price and lot rounding.</p>
             <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption. A blank custom stop uses the suggested price.</p>
-            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
-              <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position at the current price</Label>
-                <p className="text-xs text-muted-foreground">Model an initial seed position; its taker fee is unavailable. This does not place an order.</p></div>
-              <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
-            </div>
             <div className="space-y-2 border-t border-border/60 pt-4 text-xs text-muted-foreground">
               <h4 className="font-medium text-foreground">Observation and sizing details</h4>
               {selected ? <>

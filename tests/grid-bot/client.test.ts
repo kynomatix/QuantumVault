@@ -4,9 +4,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { GridPlannerCard } from '../../client/src/components/grid-planner/GridPlannerCard';
 import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
+import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, isPlannerMarket, isPlannerChart, isPlannerPreview,
   PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline, plannerRangeAround,
-  proposedPlannerStop, plannerChartRange, type PlannerChart } from '../../client/src/lib/grid-planner-view';
+  proposedPlannerStop, plannerChartRange, plannerSizeHint, ORDER_SIZES, type PlannerChart } from '../../client/src/lib/grid-planner-view';
 import { previewGrid } from '../../server/grid-planner/preview';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
@@ -18,6 +19,32 @@ const market = marketSnapshot({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC
 const preview = previewGrid({ market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat', seed: true,
   leverage: '1', investment: '1000', stop: '70', fee: '0' }, market, now);
 describe('Planner client authority boundaries', () => {
+  it('size labels describe distance and quote allocation for both sides and both order roles', () => {
+    expect(ORDER_SIZES).toEqual([
+      { value: 'flat', label: 'Equal quote allocation' }, { value: 'ascending', label: 'Larger further from current price' }, { value: 'descending', label: 'Larger near current price' },
+    ]);
+    for (const side of ['long', 'short']) for (const seed of [false, true]) {
+      const move = side === 'long' ? (seed ? 'rises' : 'falls') : (seed ? 'falls' : 'rises');
+      const near = side === 'long' ? (seed ? 'above' : 'below') : (seed ? 'below' : 'above');
+      expect(plannerSizeHint(side, 'ascending', seed)).toContain(`price ${move} further`);
+      expect(plannerSizeHint(side, 'descending', seed)).toContain(`just ${near} the current price`);
+      expect(plannerSizeHint(side, 'flat', seed)).toContain('Equal quote value');
+      expect(plannerSizeHint(side, 'flat', seed)).toContain('base quantities vary');
+    }
+    expect(plannerSizeHint('long', 'ascending')).toContain('bought');
+    expect(plannerSizeHint('short', 'ascending')).toContain('sold short');
+    expect(plannerSizeHint('long', 'ascending', true)).toContain('sold to close the starting long');
+    expect(plannerSizeHint('short', 'ascending', true)).toContain('bought back to close the starting short');
+  });
+  it('starting-position sizing is disabled with a reason until enabled, then explains the selected direction', () => {
+    const props = { id: 'grid-profitScale', label: 'How the starting position is taken profit on', value: 'ascending', side: 'short', startingPosition: true, onChange: () => {} };
+    const disabled = renderToStaticMarkup(createElement(GridPlannerSizeSelect, { ...props, enabled: false }));
+    expect(disabled).toContain('How the starting position is taken profit on');
+    expect(disabled).toContain('disabled=""'); expect(disabled).toContain('to choose how that position is closed in pieces.');
+    expect(disabled).toContain('aria-describedby="grid-profitScale-hint"');
+    const enabled = renderToStaticMarkup(createElement(GridPlannerSizeSelect, { ...props, enabled: true }));
+    expect(enabled).not.toContain('disabled=""'); expect(enabled).toContain('bought back to close the starting short'); expect(enabled).toContain('price falls further');
+  });
   it('blank, explicit zero and decimal percentages preserve meaning without floats', () => {
     expect(feePercentToRate('')).toBeNull(); expect(feePercentToRate('0')).toBe('0'); expect(feePercentToRate('0.05')).toBe('0.0005');
     expect(feePercentToRate('1.2345678901234567')).toBe('0.012345678901234567');
@@ -85,12 +112,26 @@ describe('Planner client authority boundaries', () => {
       candles: [{ time: now - 900_000, open: 100, high: 101, low: 99, close: 100, volume: 1,
         provenance: { source: 'okx', venue: 'okx', basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'forming' } }] };
     expect(isPlannerChart(chart)).toBe(true);
+    const pacifica = { ...chart, candles: chart.candles.map(c => ({ ...c, provenance: { ...c.provenance, source: 'pacifica', venue: 'pacifica' } })) };
+    expect(isPlannerChart(pacifica)).toBe(true);
+    for (const change of [{ venue: 'okx' }, { basis: 'spot' }, { proxy: 'proxy' }])
+      expect(isPlannerChart({ ...pacifica, candles: pacifica.candles.map(c => ({ ...c, provenance: { ...c.provenance, ...change } })) })).toBe(false);
+    expect(isPlannerChart({ ...chart, candles: [...chart.candles, { ...pacifica.candles[0], time: now }] })).toBe(false);
+    const nativeHtml = renderToStaticMarkup(createElement(GridPlannerChart, { chart: pacifica as PlannerChart, lines: [], range: null, stale: false }));
+    expect(nativeHtml).toContain('PACIFICA direct perpetual candles');
+    expect(nativeHtml).toContain('PACIFICA trade candle prices');
     const html = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: false }));
     for (const text of ['OKX direct perpetual candles', '15m', '1/100 bars', 'partial coverage', 'opening times', 'forming candles', 'separate from the Pacifica', 'Expand Planner chart']) expect(html).toContain(text);
     const expired = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: true }));
     expect(expired).toContain('Chart cache expired');
-    const unavailable = renderToStaticMarkup(createElement(GridPlannerChart, { chart: { state: 'unavailable', reason: 'EXAMPLE' }, lines: [], range: null, stale: false }));
-    expect(unavailable).toContain('Chart unavailable: EXAMPLE');
+    const unavailable = renderToStaticMarkup(createElement(GridPlannerChart, { chart: { state: 'unavailable', reason: 'EXAMPLE' }, hasMarket: true, onRetry: () => {}, lines: [], range: null, stale: false }));
+    expect(unavailable).toContain('Candles are temporarily unavailable from the price source. Try again shortly.');
+    expect(unavailable).toContain('role="alert"'); expect(unavailable).toContain('EXAMPLE'); expect(unavailable).toContain('Retry chart');
+    expect(unavailable).not.toContain('Choose a market');
+    const failure = renderToStaticMarkup(createElement(GridPlannerChart, { chart: null, hasMarket: true, error: 'EXAMPLE source failure', onRetry: () => {}, lines: [], range: null, stale: false }));
+    expect(failure).toContain('EXAMPLE source failure'); expect(failure).toContain('Retry chart'); expect(failure).not.toContain('Choose a market');
+    const unselected = renderToStaticMarkup(createElement(GridPlannerChart, { chart: null, hasMarket: false, lines: [], range: null, stale: false }));
+    expect(unselected).toContain('Choose a market to load candles.'); expect(unselected).not.toContain('Retry chart');
   });
   it('planner flags coexist with a truthful Grid surface and never offer a live start', () => {
     for (const props of [{ authenticated: false, identity: null }, { authenticated: true, identity: 'EXAMPLE' }]) {

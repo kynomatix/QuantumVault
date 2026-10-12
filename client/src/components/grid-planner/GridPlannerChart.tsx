@@ -66,16 +66,22 @@ function PriceCanvas({ chart, lines, range }: { chart: Extract<PlannerChart, { s
   }, [chart, lines, range]);
   return <div ref={container} className="h-full min-h-[280px] w-full" aria-label="Direct perpetual candle chart with proposed range band, stop and hypothetical grid levels" />;
 }
-export function GridPlannerChart({ chart, lines, range = null, stale, loading = false }: {
+export function GridPlannerChart({ chart, lines, range = null, stale, loading = false, hasMarket = false, error = '', onRetry }: {
   chart: PlannerChart | null; lines: GridLine[]; range?: PlannerRange | null; stale: boolean; loading?: boolean;
+  hasMarket?: boolean; error?: string; onRetry?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  if (!chart || chart.state === 'unavailable') return <div className="flex min-h-[280px] items-center justify-center rounded-xl border border-border bg-card/40 p-5">
-    <p role="status" className="text-sm text-muted-foreground">{loading ? 'Loading candles…' : `Chart unavailable: ${chart?.reason ?? 'choose a market to load candles'}`}</p>
+  if (!chart || chart.state === 'unavailable') return <div className="flex min-h-[280px] flex-col items-center justify-center gap-3 rounded-xl border border-border bg-card/40 p-5 text-center">
+    <p role="status" className="text-sm text-muted-foreground">{loading ? 'Loading candles…' : hasMarket
+      ? 'Candles are temporarily unavailable from the price source. Try again shortly.' : 'Choose a market to load candles.'}</p>
+    {!loading && hasMarket && <>
+      <p role="alert" className="text-sm text-destructive">{error || chart?.reason || 'The price source did not return usable perpetual candles.'}</p>
+      {onRetry && <Button type="button" size="sm" variant="outline" onClick={onRetry}>Retry chart</Button>}
+    </>}
   </div>;
   const provenance = chart.candles[0].provenance;
   const label = `${provenance.venue.toUpperCase()} direct perpetual candles · ${chart.timeframe} · ${chart.actualBars}/${chart.requestedBars} bars${chart.partial ? ' · partial coverage' : ''}`;
-  const note = `Retrieved ${readableTime(chart.retrievedAt)}. Candle times are opening times; forming candles are unfinished. ${stale ? 'Chart cache expired; refresh for a new observation.' : 'These are OKX chart prices, separate from the Pacifica book reference.'}`;
+  const note = `Retrieved ${readableTime(chart.retrievedAt)}. Candle times are opening times; forming candles are unfinished. ${stale ? 'Chart cache expired; refresh for a new observation.' : `These are ${provenance.venue.toUpperCase()} trade candle prices, separate from the Pacifica book reference.`}`;
   return <div className="space-y-2">
     <div className="flex items-center justify-between gap-2"><p className="text-xs text-muted-foreground">{label}</p><Button type="button" size="sm" variant="outline" onClick={() => setExpanded(true)} aria-label="Expand Planner chart"><Maximize2 className="h-4 w-4" /></Button></div>
     <div className="h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><PriceCanvas chart={chart} lines={stale ? [] : lines} range={stale ? null : range} /></div>
