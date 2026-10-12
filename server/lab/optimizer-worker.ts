@@ -4,6 +4,9 @@ import type { LabPineInput, LabBacktestResult, LabJobProgress, LabCheckpoint, Gu
 import { makeRng, hashStringToSeed, deriveComboSeed, deriveConfigSeed, deriveStageSeed, type SeededRng } from "./rng";
 import { sharpeFromTrades, robustScore, oosBoundaryMs, computeWindowMetrics, robustnessRank } from "./metrics";
 import { runPineParityTest } from "./pine/index";
+import { lowerLabPriority } from "./resource-policy";
+
+lowerLabPriority("optimizer worker");
 
 // Module-level seeded RNG. Reseeded per (job, combo) inside run() so that
 // optimizer behavior is fully reproducible from (jobSeed, combo) regardless

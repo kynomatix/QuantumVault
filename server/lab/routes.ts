@@ -10,6 +10,7 @@ import { resolve, dirname } from "path";
 import type { OHLCV } from "./engine";
 import { DEFAULT_LAB_SLIPPAGE } from "./friction";
 import { WorkerPool, recommendedPoolSize } from "./worker-pool";
+import { LAB_PRIORITY } from "./resource-policy";
 import { hashStringToSeed } from "./rng";
 import { db } from "../db";
 import { eq, or, and, inArray, desc, sql } from "drizzle-orm";
@@ -887,7 +888,8 @@ export function registerLabRoutes(app: Express): void {
         candlesByCombo,
         resumeCheckpoint,
       });
-      console.log(`[QuantumLab] Spawned worker pool size=${worker.poolSize} for job ${job.id}`);
+      const policy = worker.resourcePolicy;
+      console.log(`[QuantumLab] Spawned worker pool size=${worker.poolSize} for job ${job.id} quotaSource=${policy.quotaSource} quotaCpus=${policy.quotaCpus ?? "unknown"} availableCpus=${policy.availableCpus} LAB_MAX_WORKERS=${policy.maxWorkers ?? "default"} priorityRequested=${LAB_PRIORITY}`);
 
       activeWorker = worker;
       workerStarting = false;
