@@ -858,6 +858,11 @@ export async function syncPositionFromOnChain(
     if (!botRowForAdapter) {
       throw new Error(`Reconciliation: bot ${botId} not found — cannot resolve protocol adapter (fail-closed)`);
     }
+    if (botRowForAdapter.activeProtocol === 'phoenix') {
+      const { reconcilePhoenixBotAccounting } = await import('./protocol/phoenix/accounting-runtime');
+      const result = await reconcilePhoenixBotAccounting(botRowForAdapter);
+      return { success: result.synced, ...(result.synced ? {} : { error: 'Phoenix accounting evidence unavailable' }) };
+    }
     const adapter = getAdapterForBot(botRowForAdapter);
     const fetchOnce = async () => {
       if (botSubaccountPublicKey) {
@@ -1451,6 +1456,10 @@ export async function reconcileBotPosition(
     const botRowForAdapter = await storage.getTradingBotById(botId);
     if (!botRowForAdapter) {
       throw new Error(`Reconciliation: bot ${botId} not found — cannot resolve protocol adapter (fail-closed)`);
+    }
+    if (botRowForAdapter.activeProtocol === 'phoenix') {
+      const { reconcilePhoenixBotAccounting } = await import('./protocol/phoenix/accounting-runtime');
+      return reconcilePhoenixBotAccounting(botRowForAdapter);
     }
     const adapter = getAdapterForBot(botRowForAdapter);
     let fetchResult;

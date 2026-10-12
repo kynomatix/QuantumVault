@@ -1,3 +1,4 @@
+import { getExchangeLabel } from '@/lib/exchange-capabilities';
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
@@ -278,7 +279,7 @@ export function CreateAiTraderModal({
     return null;
   })();
 
-  const exchangeLabel = form.protocol === 'flash' ? 'Flash' : 'Pacifica';
+  const exchangeLabel = getExchangeLabel(form.protocol);
   const scannerCoverageUnknown = scannerStatus?.currentGeneration?.verdict === 'diagnostic_only';
 
   const handleClose = () => {

@@ -1,3 +1,4 @@
+import { recordPhoenixPublicHealth } from '../../dependency-health-record';
 import { PhoenixReadAdapter } from './phoenix-read-adapter';
 import { PhoenixRestTransport } from './transport';
 import { PhoenixPublicStream } from './public-stream';
@@ -20,14 +21,14 @@ export function getPhoenixReader(): PhoenixReadAdapter | null { return reader; }
 export function startPhoenixPublicReads(
   env: NodeJS.ProcessEnv = process.env,
   createReader = () => new PhoenixReadAdapter(new PhoenixRestTransport(), Date.now, 120_000, phoenixReadRefreshMs(env)),
-  createStream = (target: PhoenixReadAdapter) => new PhoenixPublicStream(event => target.onPublicStreamInvalidation(event), undefined, mids => target.onPublicMids(mids)),
+  createStream = (target: PhoenixReadAdapter) => new PhoenixPublicStream(event => { target.onPublicStreamInvalidation(event); if (event !== 'update') recordPhoenixPublicHealth('ws',null); }, undefined, mids => { target.onPublicMids(mids); recordPhoenixPublicHealth('ws',Date.now()); }),
 ): void {
   if (!phoenixReadsEnabled(env) || reader) return;
   try {
     const target = createReader();
     reader = target;
     const stream = createStream(target);
-    const refresh = () => { void target.refresh().catch(() => { /* retained as stale/unknown */ }); };
+    const refresh = () => { void target.refresh().then(() => { const s = target.getCapabilities().exchangeStatus; recordPhoenixPublicHealth('api',s.observedAt,Date.now(),s.state); }).catch(() => { recordPhoenixPublicHealth('api',null); }); };
     const interval = setInterval(refresh, phoenixReadRefreshMs(env));
     interval.unref?.();
     stop = () => { clearInterval(interval); stream.shutdown(); target.shutdown(); };
@@ -40,4 +41,4 @@ export function startPhoenixPublicReads(
   }
 }
 
-export function stopPhoenixPublicReads(): void { stop?.(); stop = null; reader = null; }
+export function stopPhoenixPublicReads(): void { stop?.(); stop = null; reader = null; recordPhoenixPublicHealth('api',null,Date.now(),'unknown'); recordPhoenixPublicHealth('ws',null,Date.now(),'unknown'); }

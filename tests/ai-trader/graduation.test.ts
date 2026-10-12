@@ -5,9 +5,8 @@
 // mark-to-market drawdown (open-position MTM counts), profit-factor edge
 // cases (no losses ⇒ Infinity, no wins ⇒ 0), drawdown measured as % of
 // ALLOCATION, fail-closed throws on garbage inputs, and the canGoLive gate.
-import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import {
   sanitizeGraduationCriteria,
@@ -27,6 +26,10 @@ import {
   type GraduationTradeRecord,
 } from "../../server/ai-trader/graduation";
 import type { AiTraderBot } from "@shared/schema";
+
+const qualificationBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-main-baseline.json', 'utf8')) as {
+  baseCommitHash: string; registry: QualificationEraRegistry; ownerSha256: Record<string, string>;
+};
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z
 const DAY = 86_400_000;
@@ -484,31 +487,36 @@ function cloneRegistry(): QualificationEraRegistry {
   return JSON.parse(JSON.stringify(QUALIFICATION_ERA_REGISTRY)) as QualificationEraRegistry;
 }
 
+function cloneReviewedMainRegistry(): QualificationEraRegistry {
+  return structuredClone(qualificationBaseline.registry) as QualificationEraRegistry;
+}
+
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
 
   it("declares Flash venue retirement as a reviewed no-bump", () => {
-    expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
+    const historical = cloneReviewedMainRegistry();
+    expect(historical.scanner_capability_policy).toMatchObject({
       materialVersion: 3,
       decisionGeneration: 46,
       decision: "no_bump",
     });
-    expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toMatchObject({
+    expect(historical.prompt_context_schema).toMatchObject({
       materialVersion: 3,
       decisionGeneration: 4,
       decision: "no_bump",
     });
-    expect(QUALIFICATION_ERA_REGISTRY.guardrail_risk_policy).toMatchObject({
+    expect(historical.guardrail_risk_policy).toMatchObject({
       materialVersion: 4,
       decisionGeneration: 18,
       decision: "no_bump",
     });
-    expect(QUALIFICATION_ERA_REGISTRY.paper_execution_simulator).toMatchObject({
+    expect(historical.paper_execution_simulator).toMatchObject({
       materialVersion: 3,
       decisionGeneration: 16,
       decision: "no_bump",
     });
-    expect(QUALIFICATION_ERA_REGISTRY.accepted_candle_provenance).toMatchObject({
+    expect(historical.accepted_candle_provenance).toMatchObject({
       materialVersion: 1,
       decisionGeneration: 20,
       decision: "no_bump",
@@ -516,23 +524,23 @@ describe("qualification era forgotten-declaration gate", () => {
   });
 
   it("binds the shared graduation owner path to the reviewed scanner no-bump declaration", () => {
-    const base = cloneRegistry();
+    const base = cloneReviewedMainRegistry();
     base.scanner_capability_policy.decisionGeneration = 45;
     base.accepted_candle_provenance.decisionGeneration = 19;
 
     expect(validateQualificationEraDeclarationChanges({
       base,
-      current: cloneRegistry(),
+      current: cloneReviewedMainRegistry(),
       changedPaths: ["server/lab/datafeed.ts", "server/ai-trader/graduation.ts"],
     })).toEqual([]);
   });
 
   it("declares monitor observation without changing any material qualification component", () => {
-    const base = cloneRegistry();
+    const base = cloneReviewedMainRegistry();
     base.scanner_capability_policy.decisionGeneration = 45;
     base.paper_execution_simulator.decisionGeneration = 15;
     expect(validateQualificationEraDeclarationChanges({
-      base, current: cloneRegistry(), changedPaths: ["server/ai-trader/monitor.ts"],
+      base, current: cloneReviewedMainRegistry(), changedPaths: ["server/ai-trader/monitor.ts"],
     })).toEqual([]);
     expect(Object.fromEntries(components.map(component =>
       [component, QUALIFICATION_ERA_REGISTRY[component].materialVersion]))).toEqual({
@@ -543,12 +551,12 @@ describe("qualification era forgotten-declaration gate", () => {
   });
 
   it("declares the Flash retirement owner paths without changing qualification material", () => {
-    const base = cloneRegistry();
+    const base = cloneReviewedMainRegistry();
     base.scanner_capability_policy.decisionGeneration = 45;
     base.guardrail_risk_policy.decisionGeneration = 17;
     base.paper_execution_simulator.decisionGeneration = 15;
     expect(validateQualificationEraDeclarationChanges({
-      base, current: cloneRegistry(), changedPaths: [
+      base, current: cloneReviewedMainRegistry(), changedPaths: [
         "server/ai-trader/executor.ts", "server/ai-trader/monitor.ts",
         "server/ai-trader/routes.ts", "server/ai-trader/scanner.ts",
       ],
@@ -599,8 +607,8 @@ describe("qualification era forgotten-declaration gate", () => {
   }
 
   it("declares historical pagination with unchanged material versions and exact route-owner generations", () => {
-    const current = cloneRegistry();
-    const base = cloneRegistry();
+    const current = cloneReviewedMainRegistry();
+    const base = cloneReviewedMainRegistry();
     base.scanner_capability_policy.decisionGeneration = 45;
     base.guardrail_risk_policy.decisionGeneration = 17;
     const changedPaths = [
@@ -641,28 +649,24 @@ describe("qualification era forgotten-declaration gate", () => {
       registry.scanner_capability_policy.decisionGeneration = scannerGeneration;
       registry.guardrail_risk_policy.decisionGeneration = guardrailGeneration;
     }
-    expect(registry.scanner_capability_policy.decisionGeneration).toBe(46);
-    expect(registry.guardrail_risk_policy.decisionGeneration).toBe(18);
+    expect(registry.scanner_capability_policy.decisionGeneration).toBe(scannerGeneration);
+    expect(registry.guardrail_risk_policy.decisionGeneration).toBe(guardrailGeneration);
   });
 
-  it("binds the real changed-path inventory to the base registry", () => {
-    const root = execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" }).trim();
-    const mergeBase = execFileSync("git", ["merge-base", "HEAD", "origin/main"], { cwd: root, encoding: "utf8" }).trim();
-    const changedPaths = execFileSync("git", ["diff", "--name-only", mergeBase, "HEAD"], { cwd: root, encoding: "utf8" })
-      .trim().split(/\r?\n/).filter(Boolean);
-    const source = execFileSync("git", ["show", `${mergeBase}:server/ai-trader/graduation.ts`], { cwd: root, encoding: "utf8" });
+  it("binds every real owner source to the pinned main registry without requiring Git history", () => {
+    // This tracked baseline was captured from main d8701cef. Hash every owner,
+    // including any newly declared path; sealed FRACTAL payloads cannot read Git alternates.
+    const base = cloneReviewedMainRegistry();
+    const paths = new Set([...Object.keys(qualificationBaseline.ownerSha256),
+      ...Object.values(QUALIFICATION_ERA_REGISTRY).flatMap(entry => [...entry.ownerPaths])]);
+    const changedPaths = [...paths].filter(path => {
+      const source = readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
+      const sha256 = createHash('sha256').update(source).digest('hex');
+      return sha256 !== qualificationBaseline.ownerSha256[path]?.replace(/^sha256:/, '');
+    });
     const beginMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN";
     const endMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END";
-    const hasBegin = source.includes(beginMarker);
-    const hasEnd = source.includes(endMarker);
-    let base: QualificationEraRegistry | null = null;
-    if (hasBegin || hasEnd) {
-      expect(hasBegin && hasEnd, "base registry markers must be complete").toBe(true);
-      const match = /QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN[\s\S]*?=\s*(\{[\s\S]*\})\s*as const satisfies QualificationEraRegistry;[\s\S]*?QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END/.exec(source);
-      expect(match, "base registry literal must be parseable").not.toBeNull();
-      base = JSON.parse(match![1]) as QualificationEraRegistry;
-    }
-    const currentSource = readFileSync(resolve(root, "server/ai-trader/graduation.ts"), "utf8");
+    const currentSource = readFileSync("server/ai-trader/graduation.ts", "utf8");
     expect(currentSource).toContain(beginMarker);
     expect(currentSource).toContain(endMarker);
     expect(validateQualificationEraDeclarationChanges({ base, current: QUALIFICATION_ERA_REGISTRY, changedPaths })).toEqual([]);

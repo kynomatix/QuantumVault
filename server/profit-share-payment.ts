@@ -186,6 +186,7 @@ export async function payGrossCreatorObligation(params: {
   subscriberAgentPublicKey: string;
   subscriberEncryptedPrivateKey: Uint8Array;
 }): Promise<{ outcome: SignedSubmitOutcome; signature?: string; error?: string }> {
+  if (params.obligation.protocol === 'phoenix') return { outcome: 'rejected_before_broadcast', error: 'Phoenix creator payouts disabled: incumbent settlement prerequisites unresolved' };
   try {
     await requireSchemaCapabilityReady('referrals');
   } catch (error: any) {
@@ -304,6 +305,7 @@ export async function payCreatorAndReferrals(params: {
   referralSummary?: string;
   error?: string;
 }> {
+  if (params.obligation.protocol === 'phoenix') return { success: false, outcome: 'rejected_before_broadcast', error: 'Phoenix creator payouts disabled: incumbent settlement prerequisites unresolved' };
   const allowed = params.allowedSourceStatuses ?? ['pending'];
   const pendingInput: InsertPendingProfitShare = { ...params.obligation };
   let claim: Awaited<ReturnType<typeof storage.createOrClaimPendingProfitShare>>;

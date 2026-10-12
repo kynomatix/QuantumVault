@@ -1,5 +1,6 @@
 export const SCHEMA_CAPABILITIES = [
   "platform",
+  "phoenix",
   "lab",
   "lab_scanner",
   "signal_bot",

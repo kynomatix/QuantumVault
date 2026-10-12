@@ -1,3 +1,6 @@
+import { ExchangeBadge } from './ExchangeBadge';
+import { getExchangeLabel, getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
+import { PhoenixUnavailableNotice } from './PhoenixUnavailableNotice';
 import { useState, useEffect, useCallback } from 'react';
 import { accountingNumber, performanceCompleteness } from '@/lib/ai-trader-accounting-display';
 import { AiTraderExcursion } from './AiTraderExcursion';
@@ -1322,8 +1325,9 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
     }
   };
 
-  const canAnalyze = bot && ['idle', 'paused', 'proposed'].includes(bot.status);
-  const canPauseResume = bot && !['executing', 'analyzing', 'open'].includes(bot.status);
+  const moneyControls = getExchangeUiCapabilities(bot?.protocol).moneyControls;
+  const canAnalyze = moneyControls && bot && ['idle', 'paused', 'proposed'].includes(bot.status);
+  const canPauseResume = moneyControls && bot && !['executing', 'analyzing', 'open'].includes(bot.status);
   const isPaused = bot?.status === 'paused';
 
   return (
@@ -1350,6 +1354,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   <div>
                     <SheetTitle className="text-base flex items-center gap-2" data-testid="text-ai-bot-name">
                       AI Trader
+                      {bot.protocol === 'phoenix' && <ExchangeBadge protocol={bot.protocol} />}
                       {bot.paperMode && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded border border-amber-500/50 text-amber-400 font-medium" data-testid="badge-paper-header">PAPER</span>
                       )}
@@ -1404,7 +1409,8 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               </div>
             </SheetHeader>
 
-            {bot.paperMode && (
+            {!moneyControls && <PhoenixUnavailableNotice />}
+            {moneyControls && bot.paperMode && (
               <TrialStrip
                 bot={bot}
                 qualificationProgress={detail?.qualificationProgress ?? {
@@ -1449,6 +1455,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                     <AiTraderDecisionCard
                       botId={bot.id}
                       decision={latestProposal}
+                      actionsEnabled={moneyControls}
                       paperMode={!!bot.paperMode}
                       onExecute={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}
                       onSkip={() => { fetchDetail(); fetchHistory(); onBotUpdated(); }}
@@ -1536,11 +1543,11 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       </span>
                     </div>
                     <div className="flex justify-end gap-1.5">
-                      <ManualClosePositionControl
+                      {moneyControls && <ManualClosePositionControl
                         paperMode={!!bot.paperMode}
                         loading={closePositionLoading}
                         onConfirm={handleClosePosition}
-                      />
+                      />}
                       <Button
                         type="button"
                         variant="ghost"
@@ -1591,12 +1598,12 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       </div>
                     </div>
                     <div className="flex justify-end">
-                      <ManualClosePositionControl
+                      {moneyControls && <ManualClosePositionControl
                         paperMode={!!bot.paperMode}
                         loading={closePositionLoading}
                         degraded
                         onConfirm={handleClosePosition}
-                      />
+                      />}
                     </div>
                   </div>
                 )}
@@ -1820,7 +1827,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                           </div>
                           <div className="flex justify-between gap-4">
                             <span>Open unrealized</span>
-                            <span>{formatPerformancePnl(trackRecordOpenPnl ?? 0)}</span>
+                            <span>{!moneyControls && trackRecordOpenPnl === null ? 'Unknown' : formatPerformancePnl(trackRecordOpenPnl ?? 0)}</span>
                           </div>
                           {performance.omittedUnattributedTrades > 0 && (
                             <p>{performance.omittedUnattributedTrades} closed {performance.omittedUnattributedTrades === 1 ? 'trade' : 'trades'} omitted: paper/live attribution unavailable.</p>
@@ -1956,6 +1963,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               </TabsContent>
 
               <TabsContent value="settings" className="space-y-4 mt-3">
+                {moneyControls ? (<>
                 {/* Editable: Mode */}
                 <div className="space-y-1.5">
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Mode</p>
@@ -2186,7 +2194,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 <div className="rounded-xl border border-border bg-card/40 divide-y divide-border/50" data-testid="settings-policy">
                   {([
                     { label: 'Market', value: bot.market, locked: true },
-                    { label: 'Exchange', value: bot.protocol, locked: false },
+                    { label: 'Exchange', value: bot.protocol === 'phoenix' ? getExchangeLabel(bot.protocol) : bot.protocol, locked: false },
                     { label: 'Timeframe', value: bot.timeframe, locked: false },
                     { label: 'Max leverage', value: `${bot.maxLeverage}×`, locked: true },
                   ] as { label: string; value: string; locked: boolean }[]).map((row) => (
@@ -2232,6 +2240,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                   );
                 })()}
 
+                </>) : (<PhoenixUnavailableNotice />)}
                 {bot.pauseReason && (
                   <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-start gap-2">
                     <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
@@ -2260,7 +2269,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       <Button
                         variant="destructive"
                         className="w-full"
-                        disabled={bot.status === 'open' || bot.status === 'executing'}
+                        disabled={!moneyControls || bot.status === 'open' || bot.status === 'executing'}
                         data-testid="button-ai-trader-delete"
                       >
                         <Trash2 className="w-4 h-4 mr-2" />
@@ -2379,6 +2388,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               open={chartTarget != null}
               onOpenChange={(o) => { if (!o) setChartTarget(null); }}
               botId={bot.id}
+              protocol={bot.protocol}
               market={chartTarget?.market ?? bot.market}
               timeframe={chartTarget?.timeframe ?? bot.timeframe}
               decisionId={chartTarget?.decisionId ?? ''}

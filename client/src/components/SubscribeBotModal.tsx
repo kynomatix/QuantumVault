@@ -1,3 +1,5 @@
+import { getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
+import { PhoenixUnavailableNotice } from './PhoenixUnavailableNotice';
 import { safeResponseJson } from "@/lib/safe-fetch";
 import {
   normalizeAgentBalance,
@@ -88,6 +90,7 @@ function DrawdownTag({ value }: { value: number }) {
 export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: SubscribeBotModalProps) {
   const { toast } = useToast();
   const subscribe = useSubscribeToPublishedBot();
+  const canSubscribe = getExchangeUiCapabilities(bot.activeProtocol).subscribe;
   const wallet = useWallet();
   const { connection } = useConnection();
   const { getMaxLeverage } = useLeverageLimits();
@@ -110,7 +113,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
   const maxLeverage = getMaxLeverage(bot.market);
   
   useEffect(() => {
-    if (isOpen) {
+    if (isOpen && canSubscribe) {
       setBalanceLoading(true);
       Promise.all([
         // One-shot affordability read — bounded to 8 s to match the core-read budget.
@@ -131,7 +134,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
         })
         .finally(() => setBalanceLoading(false));
     }
-  }, [isOpen]);
+  }, [isOpen, canSubscribe]);
 
   const handleRiskToggle = async () => {
     if (riskOpen) {
@@ -560,6 +563,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
           </DialogDescription>
         </DialogHeader>
 
+        {canSubscribe ? (<>
         {/* SOL Balance Warning */}
         {solRequirement && !solRequirement.canCreate && (
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-lg p-3 mt-2" data-testid="warning-sol-insufficient-subscribe">
@@ -1083,6 +1087,7 @@ export function SubscribeBotModal({ isOpen, onClose, bot, onSubscribed }: Subscr
             </Button>
           )}
         </DialogFooter>
+        </>) : (<><PhoenixUnavailableNotice /><DialogFooter><Button variant="outline" onClick={handleClose}>Close</Button></DialogFooter></>)}
       </DialogContent>
     </Dialog>
   );

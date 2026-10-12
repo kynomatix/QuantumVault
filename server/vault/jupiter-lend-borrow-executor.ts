@@ -30,6 +30,7 @@
  */
 
 import Decimal from "decimal.js";
+import { phoenixLendContext } from './phoenix-lend-context';
 import {
   executeAgentInstructions,
   executeAgentInstructionsConfirmOnly,
@@ -588,6 +589,7 @@ export async function executeBorrowOpen(params: BorrowOpenParams): Promise<Borro
 // --- FULL CLOSE -------------------------------------------------------------
 
 export interface BorrowCloseParams {
+  onBeforeBroadcast?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => void | Promise<void>;
   walletAddress: string;
   /** The SIGNING wallet that repays the debt + receives the returned collateral. */
   agentPublicKey: string;
@@ -715,12 +717,14 @@ export async function executeBorrowClose(params: BorrowCloseParams): Promise<Bor
       verifyOutputMint: position.collateralMint,
       addressLookupTables: operate.addressLookupTableAccounts,
       label: "Borrow close",
+      ...(phoenixLendContext() ? { onBeforeBroadcast: params.onBeforeBroadcast } : {}),
     });
 
     if (!exec.success || !exec.outputReceivedRaw) {
       // Operate is atomic -> nothing moved. Revert to open (CAS on still-closing).
       await storage.updateBorrowOperation(op.id, { status: "failed", step: "exec_failed", error: exec.error || "borrow close failed", ...(exec.signature ? { appendTxSignature: exec.signature } : {}) });
-      await storage.updateBorrowPosition(position.id, { status: "open" }, "closing");
+      // Phoenix keeps an uncertain send fenced until authoritative reconciliation.
+      if (!phoenixLendContext()) await storage.updateBorrowPosition(position.id, { status: "open" }, "closing");
       return { success: false, finalized: false, signature: exec.signature, error: exec.error || "Repay/withdraw failed." };
     }
 

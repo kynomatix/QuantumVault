@@ -1,3 +1,4 @@
+import { getExchangeLabel } from '@/lib/exchange-capabilities';
 import { useEffect, useRef, useState } from 'react';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
@@ -224,7 +225,7 @@ function TradeHistoryChartContent({ botId }: { botId: string }) {
         <dt className="text-muted-foreground">Time (UTC)</dt><dd>{selected.exactTime}</dd>
         <dt className="text-muted-foreground">Price · Size</dt><dd>{formatPrice(selected.price)} · {formatSize(selected.size)}</dd>
         <dt className="text-muted-foreground">Side · Status</dt><dd>{selected.side} · {selected.status}</dd>
-        <dt className="text-muted-foreground">Venue</dt><dd>{selected.protocol ?? 'Unknown'}{selected.protocolMismatch ? ' (different from current bot venue)' : ''}</dd>
+        <dt className="text-muted-foreground">Venue</dt><dd>{selected.protocol === 'phoenix' ? getExchangeLabel(selected.protocol) : selected.protocol ?? 'Unknown'}{selected.protocolMismatch ? ' (different from current bot venue)' : ''}</dd>
         <dt className="text-muted-foreground">Net P&L</dt><dd>{selected.pair ? formatPnl(selected.pair.netPnl) : selected.accountingStatus === 'resolved' && selected.netPnl !== null ? formatPnl(selected.netPnl) : selected.kind === 'close' ? 'Pending' : '—'}</dd>
         {selected.pair && <>
           <dt className="text-muted-foreground">Pairing</dt><dd>Flat to flat · {selected.pair.direction}{selected.pair.liquidated ? ' · Liquidated' : ''}</dd>

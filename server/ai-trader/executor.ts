@@ -24,6 +24,9 @@ import { FLASH_RETIRED_MESSAGE } from '../protocol/flash-retirement.js';
 // exitReason='bracket_failed' — the entry DID execute; the exit reason says why
 // it was immediately closed.
 import { storage } from "../storage";
+import { getPhoenixAiService, phoenixAiLiveAvailable } from './phoenix-runtime';
+import { aiTraderPolicyObject } from './phoenix-policy';
+export { aiTraderPolicyObject } from './phoenix-policy';
 import { getUmkForWebhook, decryptAgentKeyStrict, verifyBotPolicyHmac, healExecutionUmkFromStorage } from "../session-v3";
 import { resolveAiTraderSubaccountSigner } from "./signing";
 import { sendTradeNotification } from "../notification-service";
@@ -100,13 +103,6 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * can never drift: market + max leverage + allocated collateral are the fields
  * a DB-tamperer would edit to make a bot trade bigger than the user authorized.
  */
-export function aiTraderPolicyObject(bot: Pick<AiTraderBot, "market" | "maxLeverage" | "allocatedUsdc">): {
-  market: string;
-  leverage: number;
-  maxPositionSize: string | null;
-} {
-  return { market: bot.market, leverage: bot.maxLeverage, maxPositionSize: bot.allocatedUsdc };
-}
 
 export type ExecuteFailureReason =
   | "venue_retired"
@@ -354,7 +350,7 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   }
   if (
     (bot.marketSource === "scanner" || freshBot.marketSource === "scanner")
-    && !isAiTraderMarketAdmitted(bot.market)
+    && !(bot.protocol === "phoenix" ? isAiTraderMarketAdmitted(bot.market, "phoenix") : isAiTraderMarketAdmitted(bot.market))
   ) {
     return unwindRejectedInternalDecision(input, {
       ok: false,
@@ -377,6 +373,15 @@ export async function executeDecision(input: ExecuteDecisionInput): Promise<Exec
   const recentClosed = await storage.getRecentClosedDecisions(bot.id, 30);
   const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
   if (!g6.ok) return unwindRejectedInternalDecision(input, { ok: false, reason: g6.reason, detail: g6.detail });
+
+  if (bot.protocol === 'phoenix' && !bot.paperMode) {
+    const live = getPhoenixAiService();
+    if (!phoenixAiLiveAvailable() || !live) return unwindRejectedInternalDecision(input, {
+      ok: false, reason: 'capability_missing', detail: 'Phoenix AI live gate and reviewed shared-core IO are required',
+    });
+    const result = await live.entry(input);
+    return result.ok ? result : unwindRejectedInternalDecision(input, result);
+  }
 
   // Preserve the existing live bracket-capability refusal ahead of any wallet
   // or retained fee-context read. It is a structural property of the adapter.

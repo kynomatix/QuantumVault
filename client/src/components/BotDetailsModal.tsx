@@ -1,3 +1,5 @@
+import { getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
+import { PhoenixUnavailableNotice } from './PhoenixUnavailableNotice';
 import { useState } from 'react';
 import { useBotPerformance, type PublishedBot } from '@/hooks/useApi';
 import { Button } from '@/components/ui/button';
@@ -260,6 +262,7 @@ export function BotDetailsModal({ isOpen, onClose, bot, isSubscribed, onSubscrib
               )}
             </div>
 
+            {!getExchangeUiCapabilities(bot.activeProtocol).subscribe && <PhoenixUnavailableNotice />}
             <div className="flex gap-3 pt-2">
               <Button 
                 variant="outline" 
@@ -268,7 +271,7 @@ export function BotDetailsModal({ isOpen, onClose, bot, isSubscribed, onSubscrib
               >
                 Close
               </Button>
-              {!isSubscribed && (
+              {getExchangeUiCapabilities(bot.activeProtocol).subscribe && !isSubscribed && (
                 <Button 
                   className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90"
                   onClick={handleSubscribe}

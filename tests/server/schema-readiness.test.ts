@@ -21,7 +21,7 @@ import {
   type SchemaMigrationDefinition,
 } from "../../server/schema-readiness";
 
-const recordErrorMock = vi.hoisted(() => vi.fn(async () => undefined));
+const recordErrorMock = vi.hoisted(() => vi.fn(async (_input: { fingerprint: string }) => undefined));
 vi.mock("../../server/storage", () => ({
   storage: { recordError: recordErrorMock },
 }));
@@ -179,17 +179,19 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 186 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 192 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(186);
-    expect(metadata).toHaveLength(186);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(186);
+    expect(sqlEntries).toHaveLength(192);
+    expect(metadata).toHaveLength(192);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(192);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
-    // Entry 028 is intentionally guarded so a later superset constraint survives
-    // every boot. Preserve every other pre-existing SQL byte exactly.
-    const preExistingUnchanged = sqlEntries.slice(0, 185).filter((_, index) => index !== 28);
+    expect(metadata[191]).toMatchObject({ id: '191-phoenix-ai-trader', capabilities: ['phoenix'], operation: 'ddl' });
+    expect(sqlEntries[191]).toContain('phoenix_ai_executions');
+    // Entries 028 and 076 preserve later superset constraints on every boot.
+    // Pin the other pre-existing SQL bytes, including entry 185.
+    const preExistingUnchanged = sqlEntries.slice(0, 186).filter((_, index) => index !== 28 && index !== 76);
     const sqlDigest = createHash("sha256").update(preExistingUnchanged.join("\u0000"), "utf8").digest("hex").toUpperCase();
-    expect(sqlDigest).toBe("5161C4D9D2A3DDB9B1AE9302A5C438B919A32EEB2898C9B919754A081E1C42C4");
+    expect(sqlDigest).toBe("6F74C8CBC20E676AE95DD17408CB93EFF468FF5479519FDEFE0CEFEF4702AD3D");
     const normalizedMigration028 = sqlEntries[28].split("\n").map((line) => line.trim()).join("\n");
     expect(normalizedMigration028).toBe([
       "DO $$",
@@ -221,6 +223,12 @@ describe("schema readiness", () => {
       }],
       operation: "ddl",
     });
+    expect(sqlEntries[76]).toContain("position('phoenix' in pg_get_constraintdef(oid)) > 0");
+    expect(sqlEntries[76]).toContain("CHECK (active_protocol IN ('pacifica', 'drift', 'flash'))");
+    expect(metadata[76].requirements[0]).toMatchObject({ definitionIncludes: ["'pacifica'", "'drift'", "'flash'"] });
+    expect(metadata[22].requirements[0]).toMatchObject({ definitionIncludes: ["'pacifica'", "'drift'"] });
+    expect(metadata[186].requirements[0]).toMatchObject({ kind: 'constraint',
+      constraint: 'trading_bots_active_protocol_check', definitionIncludes: ["'phoenix'"] });
 
     expect(sqlEntries[11]).toContain("total_volume numeric(30,6)");
     expect(sqlEntries[11]).toContain("total_trades integer");

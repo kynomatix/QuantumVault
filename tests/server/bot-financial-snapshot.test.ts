@@ -652,6 +652,21 @@ describe('snapshot field shapes', () => {
 // ---------------------------------------------------------------------------
 
 describe('DB fallback', () => {
+  it('keeps Phoenix deadline fallbacks unknown even when legacy enrichment is populated', async () => {
+    vi.useFakeTimers();
+    let resolveEnrichment!: (e: any) => void;
+    (storage.getTradingBotListEnrichment as any).mockReturnValueOnce(new Promise(r => { resolveEnrichment = r; }));
+    (storage.getTradingBots as any).mockResolvedValueOnce(makeBots(1, { activeProtocol: 'phoenix' }));
+    initSnapshotModule(makeDeps());
+    const pending = getWalletFinancialSnapshot(W);
+    await vi.advanceTimersByTimeAsync(10_100);
+    await pending;
+    resolveEnrichment(makeEnrichment(['bot-1'], { equityAgg: new Map([['bot-1', { netDeposited: 500, totalDeposits: 500 }]]) }));
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    const snap = await getWalletFinancialSnapshot(W), fin = snap.perBotFinancials.get('bot-1')!;
+    expect(fin).toMatchObject({ exchangeBalance: null, netPnl: null, borrowDebtUsdc: null, botFinancialStatus: 'unavailable', parkedValueUnavailable: true });
+    expect(mapBotToApiResponse(snap.bots[0], fin, snap.enrichment, true, 'partial', snap.observedAt).realizedAccountingStatus).toBe('unavailable');
+  });
   it('uses DB-based calculation when botCtx is null (no live context)', async () => {
     const bots = makeBots(1); // protocolSubaccountId: null, no external key
     (storage.getTradingBots as any).mockResolvedValue(bots);

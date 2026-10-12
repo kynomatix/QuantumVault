@@ -47,6 +47,7 @@ interface AiTraderDecisionCardProps {
   onSkip?: () => void;
   onAskAgain?: () => void;
   analyzeLoading?: boolean;
+  actionsEnabled?: boolean;
 }
 
 /**
@@ -101,6 +102,7 @@ export function AiTraderDecisionCard({
   onSkip,
   onAskAgain,
   analyzeLoading,
+  actionsEnabled = true,
 }: AiTraderDecisionCardProps) {
   const { toast } = useToast();
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
@@ -268,7 +270,7 @@ export function AiTraderDecisionCard({
         </p>
       )}
 
-      {isProposed && !isFlat && !isExpired && (
+      {actionsEnabled && isProposed && !isFlat && !isExpired && (
         <div className="flex items-center gap-2 pt-1" data-testid="decision-actions">
           <Button
             size="sm"
@@ -303,7 +305,7 @@ export function AiTraderDecisionCard({
         </div>
       )}
 
-      {isProposed && !isFlat && isExpired && (
+      {actionsEnabled && isProposed && !isFlat && isExpired && (
         <div className="pt-1">
           <Button
             size="sm"
@@ -319,7 +321,7 @@ export function AiTraderDecisionCard({
         </div>
       )}
 
-      {isProposed && isFlat && (
+      {actionsEnabled && isProposed && isFlat && (
         <div className="pt-1">
           <Button
             size="sm"

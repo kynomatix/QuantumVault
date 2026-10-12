@@ -105,6 +105,14 @@ describe('Phase 4 per-bot adapter routing', () => {
     expect(getAdapterForBot(bot)).toBe(getDefaultAdapter());
   });
 
+  it('refuses Phoenix bots before resolving any legacy adapter', () => {
+    expect(() => getAdapterForBot({ id: 'phoenix', activeProtocol: 'phoenix' }))
+      .toThrow('Phoenix execution is disabled; Phoenix bots cannot use legacy protocol adapters');
+    expect(pacifica.__calls).toEqual([]);
+    expect(drift.__calls).toEqual([]);
+    expect(getDefaultAdapter()).toBe(pacifica);
+  });
+
   it('fails closed when a bot is on a protocol with no registered adapter', () => {
     unregisterAdapter('drift');
     const bot = { id: '3', activeProtocol: 'drift' as const };

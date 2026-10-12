@@ -146,6 +146,30 @@ QuantumVault routes each bot to a perpetual exchange on Solana. You choose the e
 
 **Flash has closed:** New bots and trading are disabled. Existing bot records remain available. You can manually withdraw USDC held in a Flash bot wallet to your agent wallet; its wallet balance is checked at withdrawal. This does not close venue positions or recover venue-held funds.
 
+### Phoenix availability and account balances
+
+Phoenix perpetuals use USDC margin. Phoenix is unavailable by default. Public market reads do not enable trading: new bots, subscriptions, Lab deployments, AI trading, deposits, borrowing and yield controls need separately accepted and enabled server capabilities for the account. The current server exposes read-only Phoenix capabilities and disables money routes, so Phoenix is absent from creation selectors. Existing Pacifica and legacy withdrawal screens are retained.
+
+For an existing Phoenix bot, open **Equity** to review balances and **Withdrawals and recovery**. Amounts come from server account reports. Missing, stale or failed reads show **Unknown**, never a zero balance. The bot wallet and Phoenix trader account are separate:
+
+- **Wallet cash:** USDC confirmed in the bot wallet.
+- **Wallet lending collateral:** collateral held outside Phoenix, separate from cash.
+- **Venue collateral and P&L:** the Phoenix trader balance, including venue profit or loss. Free margin and queued withdrawals are parts of that balance, not extra cash.
+- **Pending returns:** released funds moving back to the wallet. Release alone does not confirm spendable USDC.
+- **External yield balance:** value parked with an external provider. Phoenix does not supply native lending or yield.
+- **External debt:** money owed to an external lender. The total equity figure is reported by the server; the UI does not add balances or calculate trade sizes.
+
+Phoenix fees and minimum deposits are **unknown until a server preview is available**. Do not apply Pacifica or legacy fee tables to Phoenix. A market price, wallet balance or public readiness result is not a transfer preview or permission to trade.
+
+### Phoenix withdrawals, borrowing and recovery
+
+The Equity tab shows the measured withdrawal delay, sample count and last completed release in your local time. Measurements describe historical request-to-observed-release time, not a forecast. A published delay is labelled separately; it is not a measured delay. Dropped requests are excluded from successful delay measurements.
+
+A queued withdrawal is still venue-held collateral. A completed release may still need unwrapping into USDC before wallet cash is confirmed. Review each request, queue reference, time and cash-confirmation status. An unknown or dropped request is not a successful withdrawal: check that same request before attempting recovery or retrying. Refresh and the full request-history popup are read-only. Money recovery actions remain unavailable while the server disables them; keep the trader account and history while returns or debt are outstanding.
+
+Borrowing is your informed choice. Any borrowing is through an external lender, not Phoenix native lending; Phoenix margin is not lender collateral. Deploying borrowed money requires measured withdrawal-delay evidence, your explicit consent and a separate liquid repayment reserve. Queued collateral cannot repay a loan. Repayment is not instant and must wait for confirmed liquid funds. External yield also needs its own enabled server capability; it is never implied by Phoenix support.
+
+Phoenix records and chart popups identify the venue and USDC margin. Reference candles are chart context; an execution record identifies where a trade actually happened. Paper results do not enable live AI trading. Turning off Phoenix prevents new money actions while existing records remain visible for review.
 ---
 
 ## Creating Trading Bots

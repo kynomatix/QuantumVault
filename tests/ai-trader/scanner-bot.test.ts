@@ -637,7 +637,7 @@ describe("scanner bot: happy path — market pick", () => {
     const { runAutoCycle } = await importMonitor();
     await runAutoCycle("bot-scanner-2222");
 
-    expect(isMarketAdmittedMock).toHaveBeenCalledWith("UNKNOWN-PERP");
+    expect(isMarketAdmittedMock).toHaveBeenCalledWith("UNKNOWN-PERP", "pacifica");
     expect(updateBotMock).not.toHaveBeenCalled();
     expect(buildContextMock).not.toHaveBeenCalled();
     expect(runDecisionMock).not.toHaveBeenCalled();
@@ -838,7 +838,7 @@ describe("routes: scanner bot creation and PATCH contract", () => {
     // The actual routes.ts handler code path: check the exact error token and status code.
     // We verify via the implemented condition logic.
     const activeStatuses = ["open", "executing", "analyzing", "proposed"];
-    const errorToken = "cannot_switch_market_source_with_position";
+    const errorCode = "cannot_switch_market_source_with_position";
 
     for (const status of activeStatuses) {
       const wouldReject = activeStatuses.includes(status);
@@ -849,7 +849,7 @@ describe("routes: scanner bot creation and PATCH contract", () => {
     expect(activeStatuses.includes("idle")).toBe(false);
 
     // The error token used in the handler matches the spec.
-    expect(errorToken).toBe("cannot_switch_market_source_with_position");
+    expect(errorCode).toBe("cannot_switch_market_source_with_position");
   });
 
   it("PATCH marketSource switch while status='idle' is allowed (no active position)", () => {

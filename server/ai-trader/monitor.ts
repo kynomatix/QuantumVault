@@ -41,7 +41,8 @@ import { storage } from "../storage";
 import { appendTelemetry } from "../telemetry";
 import { SERVER_BOOT_ID } from "../boot-id";
 import { ExcursionObservations } from "./excursion-observation";
-import { getAdapter } from "../protocol/adapter-registry";
+import { getAiTraderAdapter } from "./phoenix-analysis";
+import { getPhoenixAiTrader, phoenixAiLiveAvailable } from "./phoenix-runtime";
 import {
   getUmkForWebhook,
   decryptAgentKeyStrict,
@@ -929,6 +930,7 @@ async function withSigningContext<T>(
   bot: AiTraderBot,
   fn: (keyTrio: KeyTrio) => Promise<T>
 ): Promise<{ ok: true; value: T } | { ok: false; detail: string }> {
+  if (bot.protocol === "phoenix") return { ok: false, detail: "Phoenix AI uses shared bot custody signing only" };
   const walletAddress = bot.walletAddress;
   const wallet = await storage.getWallet(walletAddress);
   if (!wallet?.agentPublicKey || !wallet?.agentPrivateKeyEncryptedV3) {
@@ -2317,6 +2319,14 @@ export async function userInitiatedClose(
     return { ok: false, detail: "a close is already in progress for this bot" };
   }
   try {
+    if (bot.protocol === "phoenix" && !bot.paperMode) {
+      const service = getPhoenixAiTrader();
+      if (!service) return { ok: false, detail: "Phoenix AI shared close capability unavailable" };
+      const result = await service.close(bot);
+      if (!result.ok) return { ok: false, detail: result.detail };
+      if (!result.closed) return { ok: true, closed: false };
+      return { ok: true, closed: true, exitPrice: null, realizedPnl: null };
+    }
     const decisions = await storage.getAiTraderDecisions(bot.id, 20);
     let view = parseOpenDecision(decisions);
     if (!view) {
@@ -2330,7 +2340,7 @@ export async function userInitiatedClose(
     view = fresh.view;
     const attributedCloseAttemptId = newMutationAttemptId("close", view.decision.id);
     const cancelAttemptId = newMutationAttemptId("cancel", view.decision.id);
-    const adapter = getAdapter(bot.protocol);
+    const adapter = getAiTraderAdapter(bot);
 
     if (bot.paperMode) {
       let markPrice: number | null;
@@ -3011,9 +3021,19 @@ async function maybeFireLiveBreakeven(
   return true;
 }
 
+async function reconcilePhoenixAiBot(bot: AiTraderBot): Promise<boolean> {
+  const service = getPhoenixAiTrader();
+  if (!service) {
+    console.warn(`[AiTraderMonitor] Phoenix live bot ${bot.id}: shared recovery service unavailable; reconciliation pending`);
+    return false;
+  }
+  return service.reconcile(bot);
+}
+
 /** One monitoring pass for an OPEN live bot. */
 async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise<void> {
-  const adapter = getAdapter(bot.protocol);
+  if (bot.protocol === "phoenix") { await reconcilePhoenixAiBot(bot); return; }
+  const adapter = getAiTraderAdapter(bot);
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey) {
     console.error(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: wallet has no agentPublicKey — cannot monitor live position`);
@@ -3352,7 +3372,7 @@ export async function runGraduationSweep(): Promise<void> {
         const decisions = await storage.getAiTraderDecisions(bot.id, 10);
         const view = parseOpenDecision(decisions);
         if (view && view.entryPrice !== null) {
-          const adapter = getAdapter(bot.protocol);
+          const adapter = getAiTraderAdapter(bot);
           const price = await adapter.getPrice(bot.market);
           if (price !== null && Number.isFinite(price)) {
             const direction = view.side === "long" ? 1 : -1;
@@ -3510,6 +3530,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   let bot = await storage.getAiTraderBot(botId);
   if (bot?.protocol === "flash") return; // old queued cycle: no reschedule or venue work
   if (!bot) return; // exitReason stays "status_gate" (default)
+  if (bot.protocol === "phoenix" && !bot.paperMode && !phoenixAiLiveAvailable()) return;
   if (bot.status !== "idle" || bot.mode !== "auto" || !bot.autoNext) return;
 
   if (bot.marketSource === "scanner" && !SCANNER_CAPABILITIES.consumersEnabled) {
@@ -3528,7 +3549,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
   let adapter: ProtocolAdapter;
   try {
-    adapter = getAdapter(bot.protocol);
+    adapter = getAiTraderAdapter(bot);
   } catch (err) {
     if (_obs) _obs.exitReason = "adapter_missing";
     console.error(`[AiTraderMonitor] auto cycle: no adapter for '${bot.protocol}' — skipping`);
@@ -3671,7 +3692,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           );
           return false;
         }
-        if (!isAiTraderMarketAdmitted(c.market)) {
+        if (c.protocol !== bot!.protocol || !isAiTraderMarketAdmitted(c.market, bot!.protocol)) {
           console.warn(
             "[AiTraderMonitor] scanner: " + SCANNER_MARKET_UNADMITTED_REASON
               + " market=" + c.market + " — skipped before bot mutation"
@@ -3710,7 +3731,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
         // Persist pick + recomputed policyHmac BEFORE building context.
         const newPolicyHmac = computeBotPolicyHmac(
           umk,
-          aiTraderPolicyObject({ market: candidate.market, maxLeverage: bot.maxLeverage, allocatedUsdc: bot.allocatedUsdc })
+          aiTraderPolicyObject({ ...bot, market: candidate.market })
         );
         const pickUpdates: InternalAnalysisClaimUpdates = {
           market: candidate.market,
@@ -4058,6 +4079,7 @@ async function commitCrashedRecovery(
  * false ⇒ venue read failed (caller may queue a reconciliation retry).
  */
 async function reconcileUnconfirmedLandingImplementation(bot: AiTraderBot): Promise<boolean> {
+  if (bot.protocol === "phoenix" && !bot.paperMode) return await reconcilePhoenixAiBot(bot) ?? false;
   // Unreachable for paper bots (the executor's unconfirmed branch is
   // live-only), but fail safe rather than loop on venue reads forever.
   if (bot.paperMode) {
@@ -4066,7 +4088,7 @@ async function reconcileUnconfirmedLandingImplementation(bot: AiTraderBot): Prom
 
   let adapter: ProtocolAdapter;
   try {
-    adapter = getAdapter(bot.protocol);
+    adapter = getAiTraderAdapter(bot);
   } catch (err) {
     console.error(`[AiTraderMonitor] unconfirmed-landing: no adapter for '${bot.protocol}' (bot ${bot.id.slice(0, 8)}): ${err instanceof Error ? err.message : err}`);
     return false;
@@ -4302,6 +4324,7 @@ export async function reconcileUnconfirmedLanding(bot: AiTraderBot): Promise<boo
  * resolved (false ⇒ venue read failed; caller keeps it pending for retry).
  */
 async function reconcileBotOnStartupImplementation(bot: AiTraderBot): Promise<boolean> {
+  if (bot.protocol === "phoenix" && !bot.paperMode) return await reconcilePhoenixAiBot(bot) ?? false;
   // A quarantined unconfirmed-landing entry survives restarts via its
   // persisted state (paused/position_unconfirmed + 'unconfirmed_landing'
   // decision row) — route it to its dedicated reconciler.
@@ -4357,7 +4380,7 @@ async function reconcileBotOnStartupImplementation(bot: AiTraderBot): Promise<bo
     }
   }
 
-  const adapter = getAdapter(bot.protocol);
+  const adapter = getAiTraderAdapter(bot);
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey) {
     console.error(`[AiTraderMonitor] reconcile: bot ${bot.id.slice(0, 8)} wallet has no agentPublicKey`);
@@ -4661,6 +4684,9 @@ export async function reconcileOnStartup(): Promise<void> {
 /** One monitoring pass for a single bot (exported for tests). */
 export async function monitorBotOnce(bot: AiTraderBot): Promise<void> {
   if (bot.protocol === "flash") return;
+  if (bot.protocol === "phoenix" && !bot.paperMode && ["idle", "open", "executing", "paused"].includes(bot.status)) {
+    await reconcilePhoenixAiBot(bot); return;
+  }
   // Quarantined unconfirmed-landing entries are actively reconciled every
   // tick — the pause is a quarantine from NEW entries, not from monitoring.
   if (bot.status === "paused" && bot.pauseReason === "position_unconfirmed") {

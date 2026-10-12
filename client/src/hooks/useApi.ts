@@ -317,7 +317,7 @@ export interface PublishedBot {
   profitSharePercent: string;
   publishedAt: string;
   creatorEarnings?: string; // Profit share earnings from subscribers
-  activeProtocol?: "pacifica" | "drift" | "flash" | null;
+  activeProtocol?: "pacifica" | "drift" | "flash" | "phoenix" | null;
   creator: {
     displayName: string | null;
     xUsername: string | null;

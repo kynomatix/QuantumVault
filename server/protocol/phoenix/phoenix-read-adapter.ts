@@ -1,3 +1,4 @@
+import { phoenixBorrowCapabilities } from './borrow-runtime';
 import type { PhoenixObservation, PhoenixReadCapabilities, PhoenixMoneyOperation } from '../../../shared/phoenix-read-contract';
 import { unknownPhoenixObservation } from '../../../shared/phoenix-read-contract';
 import { PHOENIX_PUBLIC_ADDRESSES, PHOENIX_PUBLIC_API, phoenixLotSize, phoenixTickSizeUsd } from './sdk-boundary';
@@ -223,7 +224,7 @@ export class PhoenixReadAdapter implements PublicReadAdapter<PhoenixObservation<
         queuedReturnUsdc: unknownPhoenixObservation('account_reads_unsupported'),
       },
       recycling: { supported: false, permanent: 'unknown', maxPerAuthority: null },
-      supportsPerBotExternalDebt: false, supportsCarryOnClose: false, exchangeStatus: status,
+      supportsPerBotExternalDebt: phoenixBorrowCapabilities().newBorrowing, supportsCarryOnClose: false, exchangeStatus: status,
       withdrawals: {
         availability: this.read(this.availability), queueAccount: this.read(this.queue),
         queueLength: unknownPhoenixObservation(), settlementEndpoint: unknownPhoenixObservation(),

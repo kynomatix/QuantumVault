@@ -43,7 +43,7 @@ const PHASE_BY_EVENT: Readonly<Record<JournalEventType, 0 | 10 | 20 | 90 | null>
 });
 
 const ACTIONS = new Set<JournalAction>(["entry", "close", "cancel", "protective"]);
-const PROTOCOLS = new Set(["pacifica", "flash", "drift"]);
+const PROTOCOLS = new Set(["pacifica", "flash", "drift", "phoenix"]);
 const CAUSES = new Set<JournalCause>([
   "decision", "paper", "emergency_unwind", "protective", "user_requested",
   "venue_detected", "unconfirmed_orphan", "startup_orphan",

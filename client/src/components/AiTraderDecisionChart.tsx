@@ -1,3 +1,4 @@
+import { getExchangeLabel } from '@/lib/exchange-capabilities';
 import { useEffect, useRef, useState } from 'react';
 import {
   LineStyle,
@@ -121,6 +122,7 @@ export interface WMFormationData {
 }
 
 interface AiTraderDecisionChartProps {
+  protocol?: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   botId: string;
@@ -228,6 +230,7 @@ function computeBB(
 }
 
 export function AiTraderDecisionChart({
+  protocol,
   open,
   onOpenChange,
   botId,
@@ -1037,7 +1040,7 @@ export function AiTraderDecisionChart({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base">
             <BarChart3 className="w-4 h-4 text-primary" />
-            Chart
+            Chart{protocol === 'phoenix' ? ` \u00b7 ${getExchangeLabel(protocol)} \u00b7 USDC margin` : ''}
           </DialogTitle>
         </DialogHeader>
 

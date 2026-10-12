@@ -1,3 +1,5 @@
+import { getExchangeLabel } from '@/lib/exchange-capabilities';
+
 // Monochrome exchange marks (white webp on transparent) — same set used in the
 // bot-creation flow. We use icons (not colored text pills) so the exchange never
 // competes with the platform's color budget (green/red PnL, status dots). Phoenix
@@ -8,17 +10,10 @@ const EXCHANGE_ICONS: Record<string, string> = {
   phoenix: '/images/exchange/Phoenix.webp',
 };
 
-const EXCHANGE_LABELS: Record<string, string> = {
-  flash: 'Flash',
-  pacifica: 'Pacifica',
-  phoenix: 'Phoenix',
-  drift: 'Drift',
-};
-
 export function ExchangeBadge({ protocol, className = '' }: { protocol?: string | null; className?: string }) {
   if (!protocol) return null;
   const key = protocol.toLowerCase();
-  const label = EXCHANGE_LABELS[key];
+  const label = ['flash', 'pacifica', 'phoenix', 'drift'].includes(key) ? getExchangeLabel(key) : null;
   if (!label) return null;
   const icon = EXCHANGE_ICONS[key];
   if (icon) {
