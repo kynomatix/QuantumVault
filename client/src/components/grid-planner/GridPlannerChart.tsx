@@ -66,8 +66,8 @@ function PriceCanvas({ chart, lines, range }: { chart: Extract<PlannerChart, { s
   }, [chart, lines, range]);
   return <div ref={container} className="h-full min-h-[280px] w-full" aria-label="Direct perpetual candle chart with proposed range band, stop and hypothetical grid levels" />;
 }
-export function GridPlannerChart({ chart, lines, range, stale, loading = false }: {
-  chart: PlannerChart | null; lines: GridLine[]; range: PlannerRange | null; stale: boolean; loading?: boolean;
+export function GridPlannerChart({ chart, lines, range = null, stale, loading = false }: {
+  chart: PlannerChart | null; lines: GridLine[]; range?: PlannerRange | null; stale: boolean; loading?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   if (!chart || chart.state === 'unavailable') return <div className="flex min-h-[280px] items-center justify-center rounded-xl border border-border bg-card/40 p-5">
