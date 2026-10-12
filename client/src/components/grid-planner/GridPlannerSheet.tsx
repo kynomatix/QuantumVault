@@ -1,19 +1,23 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import Decimal from 'decimal.js';
+import { BarChart3, ChevronDown, RefreshCw } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart,
   isPlannerMarket, isPlannerPreview, plannerOverlays, readableDecimal, readableTime, clientObservationDeadline,
+  RANGE_PRESETS, ORDER_SIZES, plannerRangeAround, proposedPlannerStop, plannerChartRange,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
 
-const D = Decimal.clone({ precision: 80 });
 const INITIAL = { market: '', side: 'long', lower: '', upper: '', intervals: '10', entryScale: 'flat', profitScale: 'flat',
   seed: true, leverage: '1', investment: '', stop: '', feePercent: '', timeframe: '1h', bars: '100' };
-const selectClass = 'flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm';
 async function readPlanner(path: string, signal: AbortSignal): Promise<unknown> {
   const res = await fetch(`/api/grid-planner/${path}`, { method: 'GET', credentials: 'include', headers: walletAuthHeaders(), signal });
   const value = await res.json();
@@ -28,67 +32,89 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
   const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [now, setNow] = useState(Date.now());
   const [previewExpiry, setPreviewExpiry] = useState(0), [chartExpiry, setChartExpiry] = useState(0);
   const [marketClock, setMarketClock] = useState({ serverNow: 0, startedAt: 0 });
+  const [advancedOpen, setAdvancedOpen] = useState(false), [marketLoading, setMarketLoading] = useState(false);
+  const [width, setWidth] = useState(10), [rangeShortcut, setRangeShortcut] = useState<number | null>(null);
   const generation = useRef({ markets: new PlannerRequestGeneration(), chart: new PlannerRequestGeneration(), preview: new PlannerRequestGeneration() });
   const selected = markets.find(m => m.market === form.market);
   const referenceExpiry = selected?.reference.state === 'available' ? clientObservationDeadline(selected.reference.value.expiresAt, marketClock.serverNow, marketClock.startedAt) : 0;
   const constraintExpiry = selected?.constraints.state === 'available' ? clientObservationDeadline(selected.constraints.value.expiresAt, marketClock.serverNow, marketClock.startedAt) : 0;
   const reference = selected?.reference.state === 'available' && now < referenceExpiry ? selected.reference.value : null;
+  // Editable input proposal only; server checks still decide whether the tick/stop is valid.
+  const suggestedStop = selected?.constraints.state === 'available'
+    ? proposedPlannerStop(form.lower, form.upper, form.side, selected.constraints.value.tick) : null;
+  const effectiveStop = form.stop || suggestedStop || '';
   const invalidate = useCallback(() => { generation.current.preview.invalidate(); setPreview(null); setError(''); }, []);
   const edit = (key: keyof typeof INITIAL, value: string | boolean) => {
     invalidate();
-    if (['market', 'timeframe', 'bars'].includes(key)) { generation.current.chart.invalidate(); setChart(null); }
+    if (['market', 'timeframe', 'bars'].includes(key)) { generation.current.chart.invalidate(); setChart(null); setChartError(''); }
+    if (['market', 'lower', 'upper'].includes(key)) setRangeShortcut(null);
     setForm(previous => ({ ...previous, [key]: value }));
+  };
+  const refreshObservations = () => {
+    Object.values(generation.current).forEach(g => g.invalidate());
+    setPreview(null); setChart(null); setMarkets([]); setError(''); setChartError(''); setNow(Date.now());
+    setRefresh(r => r + 1);
   };
   const query = useMemo(() => {
     try {
       const fee = feePercentToRate(form.feePercent);
       const q = new URLSearchParams({ market: form.market, side: form.side, lower: form.lower, upper: form.upper,
         intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
-        leverage: form.leverage, investment: form.investment, stop: form.stop });
+        leverage: form.leverage, investment: form.investment, stop: effectiveStop });
       if (fee !== null) q.set('fee', fee);
       return { value: q.toString(), error: '' };
     } catch (e) { return { value: '', error: (e as Error).message }; }
-  }, [form]);
+  }, [form, effectiveStop]);
   useEffect(() => {
     if (!open) return;
-    const token = generation.current.markets.start(), startedAt = Date.now(); setMarketError(''); setMarkets([]);
-    readPlanner('markets', token.signal).then(value => {
-      if (!token.current()) return;
-      if (!value || typeof value !== 'object' || (value as any).state !== 'available' || !Array.isArray((value as any).markets)
-        || (value as any).markets.length > 512 || !(value as any).markets.every(isPlannerMarket)
-        || !Number.isSafeInteger((value as any).retrievedAt)) throw new Error('Invalid market response');
-      setMarketClock({ serverNow: (value as any).retrievedAt, startedAt }); setMarkets((value as any).markets); setNow(Date.now());
-    }).catch(e => { if (token.current()) { setMarkets([]); setMarketError(e.message); } });
+    const request = generation.current.markets.start(), startedAt = Date.now(); setMarketError(''); setMarkets([]); setMarketLoading(true);
+    readPlanner('markets', request.signal).then(value => {
+      if (!request.current()) return;
+      if (!value || typeof value !== 'object') throw new Error('Invalid market response');
+      const response = value as Record<string, any>;
+      if (response.state !== 'available' || !Array.isArray(response.markets)) throw new Error('Invalid market response');
+      if (response.markets.length > 512) throw new Error('Invalid market response');
+      if (!response.markets.every(isPlannerMarket)) throw new Error('Invalid market response');
+      if (!Number.isSafeInteger(response.retrievedAt)) throw new Error('Invalid market response');
+      setMarketClock({ serverNow: response.retrievedAt, startedAt }); setMarkets(response.markets); setNow(Date.now());
+    }).catch(e => { if (request.current()) { setMarkets([]); setMarketError(e.message); } })
+      .finally(() => { if (request.current()) setMarketLoading(false); });
     return () => generation.current.markets.invalidate();
   }, [open, identity, refresh]);
   useEffect(() => {
     if (!open || !form.market) return;
-    const token = generation.current.chart.start(); setChart(null); setChartError('');
+    const request = generation.current.chart.start(); setChart(null); setChartError('');
     const startedAt = Date.now();
-    readPlanner(`chart?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, bars: form.bars })}`, token.signal).then(value => {
-      if (!token.current()) return;
-      if (!isPlannerChart(value) || value.state === 'available' && (value.market !== form.market || value.timeframe !== form.timeframe || value.requestedBars !== Number(form.bars))) throw new Error('Invalid chart response');
+    readPlanner(`chart?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, bars: form.bars })}`, request.signal).then(value => {
+      if (!request.current()) return;
+      if (!isPlannerChart(value)) throw new Error('Invalid chart response');
+      if (value.state === 'available') {
+        if (value.market !== form.market) throw new Error('Invalid chart response');
+        if (value.timeframe !== form.timeframe) throw new Error('Invalid chart response');
+        if (value.requestedBars !== Number(form.bars)) throw new Error('Invalid chart response');
+      }
       setChart(value); setChartExpiry(value.state === 'available' ? startedAt + value.validForMs : 0); setNow(Date.now());
-    }).catch(e => { if (token.current()) setChartError(e.message); });
+    }).catch(e => { if (request.current()) setChartError(e.message); });
     return () => generation.current.chart.invalidate();
   }, [open, identity, form.market, form.timeframe, form.bars, refresh]);
   useEffect(() => {
     generation.current.preview.invalidate(); setPreview(null); setLoading(false);
-    if (!open || !form.market || !form.lower || !form.upper || !form.investment || !form.stop || query.error) return;
-    const token = generation.current.preview.start(); setLoading(true); setError('');
+    if (!open || !form.market || query.error) return;
+    if (!form.lower || !form.upper || !form.investment || !effectiveStop) return;
+    const request = generation.current.preview.start(); setLoading(true); setError('');
     const timer = setTimeout(() => {
       const startedAt = Date.now();
-      readPlanner(`preview?${query.value}`, token.signal).then(value => {
-        if (!token.current()) return;
+      readPlanner(`preview?${query.value}`, request.signal).then(value => {
+        if (!request.current()) return;
         if (!isPlannerPreview(value) || value.market.market !== form.market) throw new Error('Invalid preview response');
         // Subtract the whole transit time; client/server wall-clock skew cannot renew authority.
         setPreviewExpiry(startedAt + value.validForMs); setPreview(value); setNow(Date.now());
-      }).catch(e => { if (token.current()) setError(e.message); }).finally(() => { if (token.current()) setLoading(false); });
+      }).catch(e => { if (request.current()) setError(e.message); }).finally(() => { if (request.current()) setLoading(false); });
     }, 250);
     return () => { clearTimeout(timer); generation.current.preview.invalidate(); };
   }, [open, identity, query.value, query.error, refresh]);
   useEffect(() => {
-    if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); return; }
+    if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setAdvancedOpen(false); return; }
     const deadlines = [previewExpiry, chartExpiry, referenceExpiry, constraintExpiry].filter(t => t > Date.now());
     const timer = deadlines.length ? setTimeout(() => setNow(Date.now()), Math.max(1, Math.min(...deadlines) - Date.now() + 1)) : undefined;
     const wake = () => setNow(Date.now());
@@ -97,53 +123,193 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
   }, [open, now, previewExpiry, chartExpiry, referenceExpiry, constraintExpiry]);
   useEffect(() => () => Object.values(generation.current).forEach(g => g.invalidate()), []);
   const preset = (percent: number) => {
-    if (!reference) return;
-    const price = new D(reference.price), fraction = new D(percent).div(100);
-    invalidate(); setForm(previous => ({ ...previous, lower: price.times(new D(1).minus(fraction)).toFixed(18).replace(/\.?0+$/, ''),
-      upper: price.times(new D(1).plus(fraction)).toFixed(18).replace(/\.?0+$/, '') }));
+    // Check at click time too: a suspended tab may not have rendered its expiry yet.
+    const range = plannerRangeAround(selected, referenceExpiry, Date.now(), percent);
+    if (!range) { setNow(Date.now()); return; }
+    invalidate(); setWidth(percent); setRangeShortcut(percent); setForm(previous => ({ ...previous, ...range }));
   };
   const lines = useMemo(() => plannerOverlays(preview, previewExpiry, now), [preview, previewExpiry, now]);
   const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
   const stale = preview !== null && now >= previewExpiry;
-  const numberField = (key: keyof typeof INITIAL, label: string) => <div key={key} className="space-y-1"><Label htmlFor={`grid-${key}`}>{label}</Label><Input id={`grid-${key}`} inputMode="decimal" value={String(form[key])} onChange={e => edit(key, e.target.value)} /></div>;
-  const choice = (key: keyof typeof INITIAL, label: string, options: string[]) => <div className="space-y-1"><Label htmlFor={`grid-${key}`}>{label}</Label><select id={`grid-${key}`} className={selectClass} value={String(form[key])} onChange={e => edit(key, e.target.value)}>{options.map(o => <option key={o} value={o}>{o[0].toUpperCase() + o.slice(1)}</option>)}</select></div>;
-  return <Sheet open={open} onOpenChange={value => { if (!value) Object.values(generation.current).forEach(g => g.invalidate()); onOpenChange(value); }}>
-    <SheetContent className="w-full sm:max-w-[1000px] p-0"><div className="h-full overflow-y-auto p-5 sm:p-6 space-y-5">
-      <SheetHeader><SheetTitle>Grid Planner</SheetTitle><SheetDescription>Explore a hypothetical Pacifica grid before any live bot is available.</SheetDescription></SheetHeader>
-      <p className="rounded-md border border-primary/30 bg-primary/10 p-3 text-sm font-medium">{PLANNING_BANNER}</p>
-      <div className="flex items-center justify-between"><p className="text-xs text-muted-foreground">No live capacity, balances or positions are read.</p><Button variant="outline" size="sm" disabled={loading} onClick={() => { invalidate(); generation.current.chart.invalidate(); setChart(null); setRefresh(r => r + 1); }}>Refresh observations</Button></div>
-      {marketError && <p role="alert" className="text-sm text-destructive">{marketError}</p>}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <div className="space-y-1"><Label htmlFor="grid-market">Pacifica market</Label><select id="grid-market" className={selectClass} value={form.market} onChange={e => edit('market', e.target.value)}><option value="">Choose a market</option>{markets.map(m => <option key={m.market} value={m.market}>{m.market}{m.constraints.state === 'unavailable' ? ' — sizing unavailable' : ''}</option>)}</select></div>
-        {choice('timeframe', 'Candle timeframe', ['15m', '1h', '4h'])}{choice('bars', 'History bars', ['100', '200'])}
+  const range = useMemo(() => plannerChartRange(form.lower, form.upper, effectiveStop), [form.lower, form.upper, effectiveStop]);
+  const numberField = (key: keyof typeof INITIAL, label: string, placeholder?: string) => <div className="space-y-1.5">
+    <Label htmlFor={`grid-${key}`}>{label}</Label>
+    <Input id={`grid-${key}`} inputMode={key === 'intervals' ? 'numeric' : 'decimal'} value={String(form[key])}
+      placeholder={placeholder} onChange={e => edit(key, e.target.value)} />
+  </div>;
+  const choice = (key: keyof typeof INITIAL, label: string, options: readonly { value: string; label: string }[]) => <div className="space-y-1.5">
+    <Label htmlFor={`grid-${key}`}>{label}</Label>
+    <Select value={String(form[key])} onValueChange={v => edit(key, v)}>
+      <SelectTrigger id={`grid-${key}`}><SelectValue /></SelectTrigger>
+      <SelectContent>{options.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
+    </Select>
+  </div>;
+  return <Sheet open={open} onOpenChange={value => {
+    if (!value) Object.values(generation.current).forEach(g => g.invalidate()); onOpenChange(value);
+  }}>
+    <SheetContent className="w-full sm:max-w-[760px] p-0" data-testid="sheet-grid-planner">
+      <div className="h-full overflow-y-auto p-5 sm:p-6 space-y-6">
+        <SheetHeader className="text-left pr-6">
+          <SheetTitle className="flex items-center gap-2 text-xl"><BarChart3 className="h-5 w-5 text-primary" />Grid Planner</SheetTitle>
+          <SheetDescription>Choose a price range and explore your grid before starting a bot.</SheetDescription>
+          <Badge variant="secondary" className="w-fit mt-2">{PLANNING_BANNER}</Badge>
+        </SheetHeader>
+
+        <section aria-label="Market and price" className="rounded-xl border border-border bg-card/40 p-4 flex flex-col sm:flex-row gap-4 sm:items-start sm:justify-between">
+          <div className="space-y-1.5 sm:w-64">
+            <Label htmlFor="grid-market">Pacifica market</Label>
+            <Select value={form.market} onValueChange={v => edit('market', v === '__clear__' ? '' : v)} disabled={marketLoading}>
+              <SelectTrigger id="grid-market"><SelectValue placeholder="Choose a market" /></SelectTrigger>
+              <SelectContent><SelectItem value="__clear__">Choose a market</SelectItem>{markets.map(m => <SelectItem key={m.market} value={m.market}>
+                {m.market}{m.constraints.state === 'unavailable' ? ' — sizing unavailable' : ''}
+              </SelectItem>)}</SelectContent>
+            </Select>
+            {marketLoading && <p role="status" className="text-xs text-muted-foreground">Refreshing market observations…</p>}
+            {marketError && <p role="alert" className="text-sm text-destructive">{marketError}</p>}
+          </div>
+          <div className="space-y-1 sm:text-right sm:max-w-[50%]">
+            <p className="text-xs text-muted-foreground">Price now</p>
+            <p className="font-semibold text-xl tabular-nums">{reference ? readableDecimal(reference.price) : 'Unavailable'}</p>
+            <p className="text-xs text-muted-foreground">{reference ? 'Cached Pacifica book reference'
+              : selected ? `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`
+              : marketLoading ? 'Refreshing price…' : form.market ? 'Market observation unavailable' : 'Choose a market to see its observed price.'}</p>
+            <Button type="button" size="sm" variant="outline" disabled={marketLoading} onClick={refreshObservations}>
+              <RefreshCw className="h-3.5 w-3.5 mr-2" />Refresh price
+            </Button>
+          </div>
+        </section>
+
+        <section aria-labelledby="grid-range-heading" className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h3 id="grid-range-heading" className="text-sm font-semibold">Your range</h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <span id="grid-timeframe-label" className="text-xs text-muted-foreground">Candle timeframe</span>
+              <div role="group" aria-labelledby="grid-timeframe-label" className="flex gap-1">
+                {['15m', '1h', '4h'].map(t => <Button key={t} type="button" size="sm" variant={form.timeframe === t ? 'default' : 'outline'}
+                  aria-pressed={form.timeframe === t} onClick={() => edit('timeframe', t)}>{t}</Button>)}
+              </div>
+              <Button type="button" size="sm" variant="ghost" disabled={marketLoading} onClick={refreshObservations}>Refresh observations</Button>
+            </div>
+          </div>
+          {chartError && <p role="alert" className="text-sm text-destructive">{chartError}</p>}
+          <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} loading={!!form.market && !chart && !chartError} />
+          <div className="grid grid-cols-3 gap-2" aria-label="Range presets">
+            {RANGE_PRESETS.map(p => <Button key={p.percent} type="button" variant="outline" disabled={!reference}
+              aria-pressed={rangeShortcut === p.percent} onClick={() => preset(p.percent)}
+              className={`h-auto min-h-14 flex-col py-2 ${rangeShortcut === p.percent ? 'border-primary/50 bg-primary/10' : ''}`}>
+              <span className="font-medium">{p.label}</span><span className="text-xs text-muted-foreground">±{p.percent}%</span>
+            </Button>)}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{numberField('lower', 'Lower price')}{numberField('upper', 'Upper price')}</div>
+          <div className="rounded-lg border border-border/60 px-3 py-3 space-y-3">
+            <div className="flex items-center justify-between gap-2"><Label htmlFor="grid-width">Range width around price now</Label>
+              <span className="text-xs text-muted-foreground">{rangeShortcut === null ? 'Manual range' : `±${width}%`}</span></div>
+            <Slider id="grid-width" aria-label="Range half-width percent" min={1} max={40} step={1} value={[width]}
+              disabled={!reference} onValueChange={([value]) => preset(value)} />
+            <p className="text-xs text-muted-foreground">Use a shortcut or enter both prices yourself.{!reference && ' Refresh price to use the presets and width slider. A fresh price may still be unavailable.'}</p>
+          </div>
+        </section>
+
+        <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5"><Label id="grid-side-label">Direction</Label>
+            <div role="group" aria-labelledby="grid-side-label" className="flex gap-2 rounded-lg border border-border/60 bg-card/40 p-1">
+              {['long', 'short'].map(side => <Button key={side} type="button" className="flex-1" variant={form.side === side ? 'default' : 'ghost'}
+                aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}
+            </div>
+          </div>
+          <div className="space-y-1.5">{numberField('investment', 'Investment (USDC)', '100.00')}
+            <p className="text-xs text-muted-foreground">Use 0.01 USDC increments.</p></div>
+        </section>
+        <section aria-label="Leverage" className="space-y-2">
+          <div className="flex items-end justify-between gap-3"><Label htmlFor="grid-leverage">Leverage</Label>
+            <div className="flex items-center gap-2"><Input id="grid-leverage" className="w-24" inputMode="decimal" value={form.leverage}
+              onChange={e => edit('leverage', e.target.value)} /><span className="text-sm text-muted-foreground">×</span></div></div>
+          <div className="grid grid-cols-5 gap-2">{['1', '2', '3', '5', '10'].map(value => <Button key={value} type="button" variant="outline"
+            aria-pressed={form.leverage === value} className={form.leverage === value ? 'border-primary/50 bg-primary/10' : ''}
+            onClick={() => edit('leverage', value)}>{value}×</Button>)}</div>
+        </section>
+
+        <section aria-labelledby="grid-plan-heading" className="rounded-xl border border-primary/20 bg-card/40 p-4 sm:p-5 space-y-4">
+          <h3 id="grid-plan-heading" className="text-sm font-semibold">Your plan</h3>
+          {(query.error || error) && <p role="alert" className="text-sm text-destructive">{query.error || error}</p>}
+          {loading ? <p role="status" className="text-sm">Calculating hypothetical geometry…</p>
+            : preview ? <p role="status" className="text-sm font-medium">{stale ? 'Observation expired — refresh before using this preview'
+              : preview.state === 'rejected' ? 'Requested plan rejected' : preview.state === 'unavailable' ? 'Preview unavailable'
+              : preview.state === 'diagnostic' ? 'Diagnostic geometry — some checks unavailable' : 'Hypothetical checks passed'}</p>
+            : <p className="text-sm text-muted-foreground">Choose a market, range and investment to see your plan.{!effectiveStop && ' A proposed stop needs observed sizing, or enter one in Advanced settings.'}</p>}
+          <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+            <div><dt className="text-xs text-muted-foreground">Price levels</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length} price lines` : 'Awaiting preview'}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Range you chose</dt><dd className="font-medium mt-1 break-words">{range ? `${readableDecimal(range.lower)} – ${readableDecimal(range.upper)}` : 'Enter lower and upper prices'}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Proposed stop</dt><dd className="font-medium mt-1 break-words">{effectiveStop ? `${readableDecimal(effectiveStop)}${form.stop ? ' · custom' : ' · suggested'}` : 'Unavailable'}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Order sizes</dt><dd className="font-medium mt-1">{ORDER_SIZES.find(o => o.value === form.entryScale)?.label}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Minimum capital for this geometry</dt><dd className="font-medium mt-1">{preview ? preview.minimum.state === 'available' ? `${readableDecimal(preview.minimum.value)} USDC` : `Unavailable — ${preview.minimum.reason}` : 'Awaiting preview'}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Minimum with your fee assumption</dt><dd className="font-medium mt-1">{preview ? preview.assumedMinimum.state === 'available' ? `${readableDecimal(preview.assumedMinimum.value)} USDC` : `Unavailable — ${preview.assumedMinimum.reason}` : form.feePercent === '' ? 'Unknown — no fee assumed' : 'Awaiting preview'}</dd></div>
+          </dl>
+          <p className="text-xs text-muted-foreground">{form.stop ? 'Your custom stop must align to the venue tick and lie beyond the loss side of the range.'
+            : 'The suggested stop is 3% beyond the loss side of your range, rounded outwards to the observed tick. Change it in Advanced settings.'} Liquidation reachability is unknown.</p>
+          {preview?.reasons.map((reason, i) => <p key={i} className="text-xs text-muted-foreground">{reason}</p>)}
+          <p className="text-xs text-muted-foreground">{preview?.fee.state === 'unknown' || form.feePercent === '' ? 'Fee unknown — fee gate was not evaluated.' : ASSUMPTION_LABEL} Taker fees for a starting position, slippage, venue fee rounding and funding are unavailable. {preview?.stop.reason}</p>
+          <p className="text-xs text-muted-foreground">No profit or fill forecasts. Minimum capital uses a 0.01 USDC display quantum and no modeled transfer floor; it does not establish funding, liquidation safety, live capacity or executable partial fills. No live capacity, balances or positions are read.</p>
+
+          {displayPlan && <details className="border-t border-border/60 pt-3">
+            <summary className="cursor-pointer text-sm font-medium">View all quantized levels and quantities</summary>
+            <p className="text-xs text-muted-foreground mt-3">{stale && 'Expired observation. '}{preview?.minimumPlan ? 'Diagnostic quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Starting position quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p>
+            <div className="overflow-x-auto max-h-72 mt-2"><table className="w-full text-xs text-left">
+              <caption className="text-left py-2">Hypothetical levels ({displayPlan.lines.length} price lines)</caption>
+              <thead><tr><th className="p-2">Level</th><th className="p-2">Price</th><th className="p-2">Base quantity</th><th className="p-2">Role</th></tr></thead>
+              <tbody>{displayPlan.lines.map(line => <tr key={line.ordinal} className="border-t border-border/60">
+                <td className="p-2">{line.ordinal + 1}</td><td className="p-2 tabular-nums">{readableDecimal(line.price)}</td><td className="p-2 tabular-nums">{readableDecimal(line.quantity)}</td>
+                <td className="p-2">{line.role === 'entry' ? 'Entry' : line.role === 'seed_exit' ? 'Starting-position exit' : 'Virtual line'}</td>
+              </tr>)}</tbody>
+            </table></div>
+          </details>}
+          {!!preview?.feeRows.length && <details className="border-t border-border/60 pt-3">
+            <summary className="cursor-pointer text-sm font-medium">View fee assumption checks</summary>
+            <div className="overflow-x-auto mt-2"><table className="w-full text-xs text-left">
+              <caption className="text-left py-2">Assumed fees on equal-quantity pairs — {ASSUMPTION_LABEL}</caption>
+              <thead><tr><th className="p-2">Entry → exit</th><th className="p-2">Spread</th><th className="p-2">Required spread</th><th className="p-2">Assumed round-trip fee (USDC)</th><th className="p-2">Check</th></tr></thead>
+              <tbody>{preview.feeRows.map(row => <tr key={row.ordinal} className="border-t border-border/60">
+                <td className="p-2">{readableDecimal(row.entryPrice)} → {readableDecimal(row.exitPrice)}</td><td className="p-2">{readableDecimal(row.spread)}</td>
+                <td className="p-2">{readableDecimal(row.requiredSpread)}</td><td className="p-2">{readableDecimal(row.assumedRoundTripFee)}</td><td className="p-2">{row.clears ? 'Clears assumption' : 'Fails assumption'}</td>
+              </tr>)}</tbody>
+            </table></div>
+          </details>}
+        </section>
+
+        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="border-t border-border/60 pt-4">
+          <CollapsibleTrigger asChild><Button type="button" variant="ghost" className="w-full justify-between px-0" data-testid="grid-advanced-toggle">
+            Advanced settings<ChevronDown className={`h-4 w-4 transition-transform ${advancedOpen ? 'rotate-180' : ''}`} />
+          </Button></CollapsibleTrigger>
+          <CollapsibleContent className="mt-3 space-y-4 rounded-lg border border-border/60 bg-card/40 p-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {numberField('intervals', 'Number of levels (1–100)')}
+              {choice('entryScale', 'Order sizes', ORDER_SIZES)}
+              {choice('profitScale', 'Starting-position exit sizes', ORDER_SIZES)}
+              {numberField('stop', 'Custom stop price', suggestedStop ?? 'Enter a proposed stop')}
+              {choice('bars', 'History bars', [{ value: '100', label: '100 bars' }, { value: '200', label: '200 bars' }])}
+              {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
+            </div>
+            <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines. Flat divides investment equally; ascending allocates more at better prices; descending does the reverse. Base quantities also depend on price and lot rounding. Starting-position exit sizes use the seed exit scale.</p>
+            <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption. A blank custom stop uses the suggested price.</p>
+            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
+              <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position at the current price</Label>
+                <p className="text-xs text-muted-foreground">Model an initial seed position; its taker fee is unavailable. This does not place an order.</p></div>
+              <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
+            </div>
+            <div className="space-y-2 border-t border-border/60 pt-4 text-xs text-muted-foreground">
+              <h4 className="font-medium text-foreground">Observation and sizing details</h4>
+              {selected ? <>
+                <p>{reference ? `Cached Pacifica book reference price: ${readableDecimal(reference.price)} · observed ${readableTime(reference.observedAt)}`
+                  : `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`}</p>
+                {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
+                  : <p>Sizing unavailable: {selected.constraints.reason}</p>}
+              </> : <p>Choose a market and refresh observations to see tick and lot details.</p>}
+              {preview && <p>Policy model: {preview.policy.ordinaryWindow} ordinary window orders, {preview.policy.requiredAvailableSlots} required available slots including {preview.policy.reserveSlots} reserved, up to 100 intervals / 101 lines; transport batches up to 10. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
+            </div>
+          </CollapsibleContent>
+        </Collapsible>
+        <p className="text-center text-xs text-muted-foreground pb-2">Planning only — no orders are placed. Live Grid bots are coming soon.</p>
       </div>
-      {selected && <div className="text-xs space-y-1 text-muted-foreground">
-        <p>{reference ? `Cached Pacifica book reference price: ${readableDecimal(reference.price)} · observed ${readableTime(reference.observedAt)}` : `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`}</p>
-        {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p> : <p>Sizing unavailable: {selected.constraints.reason}</p>}
-      </div>}
-      {chartError && <p role="alert" className="text-sm text-destructive">{chartError}</p>}
-      <GridPlannerChart chart={chart} lines={lines} stale={now >= chartExpiry} />
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-        {choice('side', 'Direction', ['long', 'short'])}{numberField('lower', 'Lower price')}{numberField('upper', 'Upper price')}
-        {numberField('intervals', 'Grid intervals (1–100)')}{choice('entryScale', 'Entry size scale', ['flat', 'ascending', 'descending'])}{choice('profitScale', 'Seed exit size scale', ['flat', 'ascending', 'descending'])}
-        {numberField('investment', 'Investment (USDC, 0.01 increments)')}{numberField('leverage', 'Leverage')}{numberField('stop', 'Proposed stop price')}
-      </div>
-      <p className="text-xs text-muted-foreground">Ascending allocates more at better prices; descending does the reverse. Stops must lie beyond the loss side of the range. Liquidation reachability remains unknown.</p>
-      <div className="flex gap-2 items-center flex-wrap"><span className="text-xs">Range around reference:</span>{[5, 10, 20].map(p => <Button key={p} type="button" size="sm" variant="outline" disabled={!reference} onClick={() => preset(p)}>±{p}%</Button>)}<Label htmlFor="grid-width">Width</Label><input id="grid-width" aria-label="Range half-width percent" type="range" min="1" max="40" defaultValue="10" disabled={!reference} onChange={e => preset(Number(e.target.value))} /></div>
-      <Label className="flex gap-2 items-center"><input type="checkbox" checked={form.seed} onChange={e => edit('seed', e.target.checked)} />Model an initial seed position (taker fee unavailable)</Label>
-      <div className="space-y-1 max-w-sm">{numberField('feePercent', 'Assumed maker + builder fee per side (%)')}<p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption.</p></div>
-      {(query.error || error) && <p role="alert" className="text-sm text-destructive">{query.error || error}</p>}
-      {loading && <p role="status" className="text-sm">Calculating hypothetical geometry…</p>}
-      {preview && <div className="space-y-3 border-t pt-4">
-        <p role="status" className="font-medium">{stale ? 'Observation expired — refresh before using this preview' : preview.state === 'rejected' ? 'Requested plan rejected' : preview.state === 'unavailable' ? 'Preview unavailable' : preview.state === 'diagnostic' ? 'Diagnostic geometry — some checks unavailable' : 'Hypothetical checks passed'}</p>
-        {preview.reasons.map((reason, i) => <p key={i} className="text-xs text-muted-foreground">{reason}</p>)}
-        <p className="text-sm">Hypothetical geometry minimum: {preview.minimum.state === 'available' ? `${readableDecimal(preview.minimum.value)} USDC` : `unavailable — ${preview.minimum.reason}`}. Uses a 0.01 USDC display quantum and no modeled transfer floor; does not establish funding, liquidation safety, live capacity or executable partial fills.</p>
-        <p className="text-sm">Minimum with your fee assumption: {preview.assumedMinimum.state === 'available' ? `${readableDecimal(preview.assumedMinimum.value)} USDC` : `unavailable — ${preview.assumedMinimum.reason}`}</p>
-        <p className="text-xs text-muted-foreground">{preview.fee.state === 'unknown' ? 'Fee unknown — fee gate was not evaluated.' : ASSUMPTION_LABEL}. Seed taker fees, slippage, venue fee rounding and funding are unavailable. {preview.stop.reason}</p>
-        {displayPlan && <><p className="text-xs">{preview.minimumPlan ? 'Diagnostic quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Seed quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p><div className="overflow-x-auto max-h-72"><table className="w-full text-xs text-left"><caption className="text-left py-2">Hypothetical levels ({displayPlan.lines.length} lines)</caption><thead><tr><th className="p-2">Line</th><th className="p-2">Price</th><th className="p-2">Base quantity</th><th className="p-2">Role</th></tr></thead><tbody>{displayPlan.lines.map(line => <tr key={line.ordinal} className="border-t"><td className="p-2">{line.ordinal + 1}</td><td className="p-2 tabular-nums">{readableDecimal(line.price)}</td><td className="p-2 tabular-nums">{readableDecimal(line.quantity)}</td><td className="p-2">{line.role === 'entry' ? 'Entry' : line.role === 'seed_exit' ? 'Seed-backed exit' : 'Virtual line'}</td></tr>)}</tbody></table></div></>}
-        {preview.feeRows.length > 0 && <div className="overflow-x-auto"><table className="w-full text-xs text-left"><caption className="text-left py-2">Assumed fees on equal-quantity pairs — {ASSUMPTION_LABEL}</caption><thead><tr><th className="p-2">Entry → exit</th><th className="p-2">Spread</th><th className="p-2">Required spread</th><th className="p-2">Assumed round-trip fee (USDC)</th><th className="p-2">Check</th></tr></thead><tbody>{preview.feeRows.map(row => <tr key={row.ordinal} className="border-t"><td className="p-2">{readableDecimal(row.entryPrice)} → {readableDecimal(row.exitPrice)}</td><td className="p-2">{readableDecimal(row.spread)}</td><td className="p-2">{readableDecimal(row.requiredSpread)}</td><td className="p-2">{readableDecimal(row.assumedRoundTripFee)}</td><td className="p-2">{row.clears ? 'Clears assumption' : 'Fails assumption'}</td></tr>)}</tbody></table></div>}
-        <p className="text-xs text-muted-foreground">Policy model: {preview.policy.ordinaryWindow} ordinary window orders, {preview.policy.requiredAvailableSlots} required available slots including {preview.policy.reserveSlots} reserved, up to 100 intervals / 101 lines; transport batches up to 10. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>
-      </div>}
-    </div></SheetContent>
+    </SheetContent>
   </Sheet>;
 }

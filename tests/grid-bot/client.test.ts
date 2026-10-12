@@ -3,8 +3,10 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GridPlannerCard } from '../../client/src/components/grid-planner/GridPlannerCard';
 import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
+import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, isPlannerMarket, isPlannerChart, isPlannerPreview,
-  PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline } from '../../client/src/lib/grid-planner-view';
+  PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline, plannerRangeAround,
+  proposedPlannerStop, plannerChartRange, type PlannerChart } from '../../client/src/lib/grid-planner-view';
 import { previewGrid } from '../../server/grid-planner/preview';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
@@ -51,6 +53,44 @@ describe('Planner client authority boundaries', () => {
   it('observation deadlines subtract transit and do not depend on client/server wall-clock agreement', () => {
     expect(clientObservationDeadline(now + 60_000, now, 1000)).toBe(61_000);
     expect(clientObservationDeadline(now - 1, now, 1000)).toBe(1000);
+  });
+  it('range shortcuts use an observed price and recheck expiry at click time', () => {
+    const deadline = now + 60_000;
+    expect(plannerRangeAround(market, deadline, now, 5)).toEqual({ lower: '95', upper: '105' });
+    expect(plannerRangeAround(market, deadline, now, 10)).toEqual({ lower: '90', upper: '110' });
+    expect(plannerRangeAround(market, deadline, now, 20)).toEqual({ lower: '80', upper: '120' });
+    expect(plannerRangeAround(market, deadline, deadline, 10)).toBeNull();
+    expect(plannerRangeAround(undefined, deadline, now, 10)).toBeNull();
+    expect(plannerRangeAround({ ...market, reference: { state: 'unavailable', reason: 'EXAMPLE' } }, deadline, now, 10)).toBeNull();
+    for (const width of [0, 41, NaN, Infinity]) expect(plannerRangeAround(market, deadline, now, width)).toBeNull();
+    const small = { ...market, reference: { ...market.reference, state: 'available' as const,
+      value: { price: '0.00000123', observedAt: now, expiresAt: deadline, label: 'Cached Pacifica book reference price' as const } } };
+    expect(plannerRangeAround(small, deadline, now, 5)).toEqual({ lower: '0.0000011685', upper: '0.0000012915' });
+  });
+  it('proposed stops round outwards to the tick; manual invalid inputs never become chart prices', () => {
+    expect(proposedPlannerStop('95', '105', 'long', '0.1')).toBe('92.1');
+    expect(proposedPlannerStop('95', '105', 'short', '0.1')).toBe('108.2');
+    expect(proposedPlannerStop('0.000001', '0.000002', 'long', '0.00000001')).toBe('0.00000097');
+    expect(proposedPlannerStop('0.01', '0.02', 'long', '1')).toBeNull();
+    for (const lower of ['', '0', '-1', '1e-3', 'EXAMPLE', '105']) {
+      expect(proposedPlannerStop(lower, '105', 'long', '0.1')).toBeNull();
+      expect(plannerChartRange(lower, '105', '90')).toBeNull();
+    }
+    expect(plannerChartRange('95', '105', 'EXAMPLE')).toEqual({ lower: '95', upper: '105', stop: null });
+    expect(plannerChartRange('95', '105', '92.1')).toEqual({ lower: '95', upper: '105', stop: '92.1' });
+  });
+  it('chart captions preserve provenance, partial coverage, expiry and unavailable explanations', () => {
+    const chart: PlannerChart = { state: 'available', market: 'BTC-PERP', timeframe: '15m', requestedBars: 100, actualBars: 1,
+      partial: true, retrievedAt: now, cacheInsertedAt: now, validForMs: 60_000,
+      candles: [{ time: now - 900_000, open: 100, high: 101, low: 99, close: 100, volume: 1,
+        provenance: { source: 'okx', venue: 'okx', basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'forming' } }] };
+    expect(isPlannerChart(chart)).toBe(true);
+    const html = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: false }));
+    for (const text of ['OKX direct perpetual candles', '15m', '1/100 bars', 'partial coverage', 'opening times', 'forming candles', 'separate from the Pacifica', 'Expand Planner chart']) expect(html).toContain(text);
+    const expired = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: true }));
+    expect(expired).toContain('Chart cache expired');
+    const unavailable = renderToStaticMarkup(createElement(GridPlannerChart, { chart: { state: 'unavailable', reason: 'EXAMPLE' }, lines: [], range: null, stale: false }));
+    expect(unavailable).toContain('Chart unavailable: EXAMPLE');
   });
   it('planner flags coexist with a truthful Grid surface and never offer a live start', () => {
     for (const props of [{ authenticated: false, identity: null }, { authenticated: true, identity: 'EXAMPLE' }]) {

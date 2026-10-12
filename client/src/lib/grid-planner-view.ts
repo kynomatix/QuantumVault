@@ -1,9 +1,43 @@
+import Decimal from 'decimal.js';
 import type { PlannerChart, PlannerMarket, PlannerPreview } from '../../../server/grid-planner/types';
 export type { PlannerChart, PlannerMarket, PlannerPreview };
 export const PLANNING_BANNER = 'Planning only — no orders are placed';
 export const ASSUMPTION_LABEL = 'Your assumption — not a venue quote';
 export const clientObservationDeadline = (expiresAt: number, serverNow: number, requestStartedAt: number) =>
   requestStartedAt + Math.max(0, expiresAt - serverNow);
+
+const D = Decimal.clone({ precision: 80 });
+const plainPrice = (value: string) => value.length <= 37 && /^(0|[1-9]\d{0,17})(\.\d{1,18})?$/.test(value) && new D(value).gt(0);
+export const RANGE_PRESETS = [{ label: 'Tight', percent: 5 }, { label: 'Balanced', percent: 10 }, { label: 'Wide', percent: 20 }] as const;
+export const ORDER_SIZES = [
+  { value: 'flat', label: 'Equal allocation' },
+  { value: 'ascending', label: 'Bigger at better prices' },
+  { value: 'descending', label: 'Bigger near the start' },
+] as const;
+
+/** A shortcut uses only an unexpired, observed Pacifica price; never chart closes. */
+export function plannerRangeAround(market: PlannerMarket | undefined, deadline: number, now: number, percent: number) {
+  if (market?.reference.state !== 'available' || now >= deadline || !Number.isFinite(percent) || percent < 1 || percent > 40) return null;
+  const price = new D(market.reference.value.price), fraction = new D(percent).div(100);
+  const lower = price.times(new D(1).minus(fraction)).toFixed(18).replace(/\.?0+$/, '');
+  const upper = price.times(new D(1).plus(fraction)).toFixed(18).replace(/\.?0+$/, '');
+  return plainPrice(lower) && plainPrice(upper) && new D(lower).lt(upper) ? { lower, upper } : null;
+}
+
+/** Proposed input only: 3% beyond the loss-side edge, rounded outwards to the tick. */
+export function proposedPlannerStop(lower: string, upper: string, side: string, tick: string): string | null {
+  if (![lower, upper, tick].every(plainPrice) || !['long', 'short'].includes(side) || !new D(lower).lt(upper)) return null;
+  const long = side === 'long', edge = new D(long ? lower : upper);
+  const stop = edge.times(long ? '0.97' : '1.03').div(tick).toDecimalPlaces(0, long ? Decimal.ROUND_FLOOR : Decimal.ROUND_CEIL).times(tick).toFixed();
+  return plainPrice(stop) ? stop : null;
+}
+
+export type PlannerRange = { lower: string; upper: string; stop: string | null };
+/** User inputs are labelled proposed; quantized levels still need a current preview. */
+export function plannerChartRange(lower: string, upper: string, stop: string): PlannerRange | null {
+  if (![lower, upper].every(plainPrice) || !new D(lower).lt(upper)) return null;
+  return { lower, upper, stop: plainPrice(stop) ? stop : null };
+}
 
 /** UI percent conversion is decimal string manipulation, never binary floating point. */
 export function feePercentToRate(percent: string): string | null {

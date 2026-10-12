@@ -4,6 +4,7 @@ import type { ProtocolMarket } from '../../server/protocol/protocol-types';
 import type { PlannerDeps, PlannerQuery } from '../../server/grid-planner/types';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { previewGrid } from '../../server/grid-planner/preview';
+import { proposedPlannerStop, plannerRangeAround } from '../../client/src/lib/grid-planner-view';
 const now = 1_800_000_000_000;
 export const row = (): ProtocolMarket => ({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC', fullName: 'Bitcoin', maxLeverage: 50, maxLeverageSource: 'venue',
   constraintObservation: observePacificaConstraints({ tick_size: '0.1', lot_size: '0.01', min_order_size: '10' }, 'BTC-PERP', now),
@@ -64,5 +65,16 @@ describe('Pacifica authority and honest planner verdicts', () => {
     expect(previewGrid({ ...query, stop: '70.01' }, m, now).state).toBe('rejected');
     expect(previewGrid({ ...query, leverage: '51' }, m, now).state).toBe('rejected');
     expect(previewGrid(query, m, now + 60_001)).toMatchObject({ state: 'unavailable', requestedPlan: null, validForMs: 0 });
+  });
+  it('primary range and suggested-stop shortcuts remain proposals checked by the server', () => {
+    const m = marketSnapshot(row(), deps());
+    const range = plannerRangeAround(m, now + 60_000, now, 10)!;
+    for (const side of ['long', 'short'] as const) {
+      const stop = proposedPlannerStop(range.lower, range.upper, side, '0.1')!;
+      const result = previewGrid({ ...query, ...range, side, stop, fee: '0' }, m, now);
+      expect(result.state).toBe('diagnostic'); expect(result.requestedPlan).not.toBeNull();
+      expect(result.stop.state).toBe('unavailable');
+      expect(previewGrid({ ...query, ...range, side, stop }, m, now + 60_001).state).toBe('unavailable');
+    }
   });
 });
