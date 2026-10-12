@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import ts from "typescript";
+import { readDbSchemaMigrationManifest } from "../helpers/schema-migration-manifest";
 import {
   SCHEMA_CAPABILITIES,
   SCHEMA_FAILURE_CLASSES,
@@ -103,42 +103,49 @@ function makeCatalog(options: {
   }) as CatalogQuery & ReturnType<typeof vi.fn>;
 }
 
-function readDbSchemaMigrationManifest(): {
-  sqlEntries: string[];
-  metadata: Array<Omit<SchemaMigrationDefinition, "sql">>;
-  manifest: SchemaMigrationDefinition[];
-} {
-  const sourcePath = new URL("../../server/db.ts", import.meta.url);
-  const sourceText = readFileSync(sourcePath, "utf8");
-  const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
-  let sqlArray: ts.ArrayLiteralExpression | undefined;
-  let metadataArray: ts.ArrayLiteralExpression | undefined;
-  const visit = (node: ts.Node): void => {
-    if (ts.isVariableDeclaration(node)) {
-      const name = node.name.getText(source);
-      const expression = node.initializer && ts.isAsExpression(node.initializer)
-        ? node.initializer.expression
-        : node.initializer;
-      if (expression && ts.isArrayLiteralExpression(expression)) {
-        if (name === "schemaMigrationSql") sqlArray = expression;
-        if (name === "schemaMigrationMetadata") metadataArray = expression;
+// PostgreSQL catalog output includes casts, ANY ARRAY forms, and canonical intervals.
+const plannerWeeklyCatalog: Record<string, { columns: string[]; constraints: Record<string, string> }> = {
+  planner_btc_weekly_closes: {
+    columns: ["market", "week_start", "close", "source", "basis", "aggregation", "finalized", "fetched_at"],
+    constraints: {
+      planner_btc_weekly_identity_unique: "UNIQUE (market, week_start)",
+      planner_btc_weekly_market_check: "CHECK (market = 'BTC'::text)",
+      planner_btc_weekly_utc_check: "CHECK (week_start >= '1970-01-05 00:00:00+00'::timestamp with time zone AND EXTRACT(isodow FROM (week_start AT TIME ZONE 'UTC'::text)) = 1::numeric AND (week_start AT TIME ZONE 'UTC'::text)::time without time zone = '00:00:00'::time without time zone)",
+      planner_btc_weekly_close_check: "CHECK (CASE WHEN close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text THEN close::numeric > 0::numeric ELSE false END)",
+      planner_btc_weekly_source_check: "CHECK (source = 'okx-index'::text AND basis = 'index'::text OR (source = ANY (ARRAY['gate-spot'::text, 'kraken-spot'::text, 'coinbase-spot'::text])) AND basis = 'spot'::text OR (source = ANY (ARRAY['pacifica-mark'::text, 'hyperliquid-perp'::text, 'pacifica-perp'::text, 'okx-perp'::text])) AND basis = 'perp'::text)",
+      planner_btc_weekly_aggregation_check: "CHECK (aggregation = ANY (ARRAY['native'::text, 'daily'::text]))",
+      planner_btc_weekly_finalized_check: "CHECK (finalized AND fetched_at >= (week_start + '168:00:00'::interval))",
+    },
+  },
+  planner_btc_weekly_refresh: {
+    columns: ["market", "last_attempt_at"],
+    constraints: {
+      planner_btc_weekly_refresh_pkey: "PRIMARY KEY (market)",
+      planner_btc_weekly_refresh_market_check: "CHECK (market = 'BTC'::text)",
+    },
+  },
+};
+
+function plannerWeeklyCatalogQuery(closeDefinition?: string): CatalogQuery {
+  return async (text, values) => {
+    const table = String(values?.[0] ?? "").replace(/^public\./, "");
+    const catalog = plannerWeeklyCatalog[table];
+    if (!catalog) throw new Error(`unexpected weekly catalog table: ${table}`);
+    if (text.includes("to_regclass")) return { rows: [{ relation: table }] };
+    if (text.includes("information_schema.columns")) {
+      return { rows: catalog.columns.map(column_name => ({ column_name })) };
+    }
+    if (text.includes("pg_get_constraintdef")) {
+      const constraints = { ...catalog.constraints };
+      if (table === "planner_btc_weekly_closes" && closeDefinition !== undefined) {
+        constraints.planner_btc_weekly_close_check = closeDefinition;
       }
+      const definitions = text.includes("c.conname=$2")
+        ? [constraints[String(values?.[1])]].filter(definition => definition !== undefined)
+        : Object.values(constraints);
+      return { rows: definitions.map(definition => ({ definition })) };
     }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  if (!sqlArray || !metadataArray) throw new Error("schema migration arrays missing from server/db.ts");
-  const sqlEntries = sqlArray.elements.map((element) => {
-    if (!ts.isNoSubstitutionTemplateLiteral(element) && !ts.isStringLiteral(element)) {
-      throw new Error("schemaMigrationSql contains a non-literal entry");
-    }
-    return element.text;
-  });
-  const metadata = JSON.parse(metadataArray.getText(source)) as Array<Omit<SchemaMigrationDefinition, "sql">>;
-  return {
-    sqlEntries,
-    metadata,
-    manifest: metadata.map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
+    throw new Error(`unexpected weekly catalog SQL: ${text}`);
   };
 }
 
@@ -651,6 +658,42 @@ describe("schema readiness", () => {
     const snapshot = await applySchemaMigrationManifest(query, manifest);
     expect(snapshot.unavailableCapabilities).toEqual([]);
     expect(snapshot.evidence).toEqual([]);
+  });
+
+  it("matches all migration 196 postconditions against PostgreSQL catalog renderings", async () => {
+    const { manifest } = readDbSchemaMigrationManifest();
+    const migration = manifest.find(entry => entry.id === "196-planner-btc-weekly")!;
+    expect(migration.requirements).toHaveLength(9); // Two table identities plus seven named CHECKs; no index requirements.
+    const snapshot = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(), [migration]);
+    expect(snapshot.unavailableCapabilities).toEqual([]);
+    expect(snapshot.evidence).toEqual([]);
+
+    // The original tokens cannot match, even though PostgreSQL emits ::numeric twice.
+    const closeRequirement = migration.requirements.find(requirement =>
+      requirement.kind === "constraint" && requirement.constraint === "planner_btc_weekly_close_check",
+    );
+    if (!closeRequirement || closeRequirement.kind !== "constraint") throw new Error("close postcondition missing");
+    const original = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(), [{
+      ...migration, requirements: [{ ...closeRequirement, definitionIncludes: ["numeric", "0"] }],
+    }]);
+    expect(original.evidence).toEqual([{
+      capability: "grid_bot", failureClass: "postcondition_missing",
+      objectIdentity: "constraint:planner_btc_weekly_closes.planner_btc_weekly_close_check",
+    }]);
+  });
+
+  it.each([
+    ["decimal grammar", "CHECK (CASE WHEN true THEN close::numeric > 0::numeric ELSE false END)"],
+    ["positive close", "CHECK (CASE WHEN close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text THEN true ELSE false END)"],
+    ["invalid-close rejection", "CHECK (CASE WHEN close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text THEN close::numeric > 0::numeric ELSE true END)"],
+  ])("rejects migration 196 when the close CHECK loses %s", async (_missing, definition) => {
+    const migration = readDbSchemaMigrationManifest().manifest.find(entry => entry.id === "196-planner-btc-weekly")!;
+    const snapshot = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(definition), [migration]);
+    expect(snapshot.unavailableCapabilities).toEqual(["grid_bot"]);
+    expect(snapshot.evidence).toEqual([{
+      capability: "grid_bot", failureClass: "postcondition_missing",
+      objectIdentity: "constraint:planner_btc_weekly_closes.planner_btc_weekly_close_check",
+    }]);
   });
 
   it("matches the complete migration 184 cause vocabulary against PostgreSQL ANY ARRAY rendering", async () => {
