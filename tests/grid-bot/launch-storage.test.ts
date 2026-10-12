@@ -5,8 +5,9 @@ import {readFileSync} from 'node:fs';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import {GridStorage,type DraftRecord} from '../../server/grid-bot/storage';
-import {GridLaunchStorage,type ExactGridRequest,type GridClaim} from '../../server/grid-bot/launch-storage';
-import {GridCustody} from '../../server/grid-bot/custody';
+import {GridLaunchStorage,GridLaunchTransientError,type ExactGridRequest,type GridClaim} from '../../server/grid-bot/launch-storage';
+import {GridCustody,GRID_LAUNCH_LEASE_MS} from '../../server/grid-bot/custody';
+import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../../server/storage';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 import {policy,umk,intent} from './draft-fixtures';
 import {gridDraftRevision} from '../../client/src/lib/grid-draft-view';
@@ -34,6 +35,32 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     try{await pool.query("SET lock_timeout='500ms'");await pool.query(migration);}finally{await c.query('ROLLBACK');c.release();}
     const {account}=await reserve(),v=input(account),op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);
     await expect(pool.query('UPDATE grid_operations SET exact_request_digest=NULL WHERE id=$1',[op.id])).rejects.toThrow();
+  });
+  it('keeps the launch lease beyond durable backoff and exposes quota denials as transient',async()=>{
+    const {account}=await reserve();expect(GRID_LAUNCH_LEASE_MS).toBeGreaterThan(60000);
+    await storage.recordRateLimit(account.masterAccount);
+    const row=(await pool.query('SELECT b.lease_expires_at>q.backoff_until AS survives FROM grid_bots b CROSS JOIN grid_master_quota q WHERE b.id=$1 AND q.master_account=$2',[account.botId,account.masterAccount])).rows[0];
+    expect(row.survives).toBe(true);const v=input(account);
+    await expect(storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).rejects.toBeInstanceOf(GridLaunchTransientError);
+    await expect(storage.claimRead(account.masterAccount)).rejects.toBeInstanceOf(GridLaunchTransientError);
+    expect((await pool.query('SELECT id FROM grid_operations')).rowCount).toBe(0);
+    await pool.query("UPDATE grid_master_quota SET backoff_until=clock_timestamp()-interval '1 second'");
+    await storage.claimRead(account.masterAccount,'150');
+    await expect(storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).rejects.toBeInstanceOf(GridLaunchTransientError);
+  });
+  it('uses the same advisory lock namespace as wallet reset',async()=>{
+    const bot=await draft();await pool.query('UPDATE wallets SET agent_public_key=$1 WHERE address=$2',['EXAMPLE_MASTER',wallet]);
+    const c=await pool.connect();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,wallet]);
+    const boundedPool=new Pool({connectionString:process.env.DATABASE_URL,max:1,options:'-c search_path='+schema+' -c lock_timeout=100ms'});
+    try{await expect(new GridCustody(new GridLaunchStorage(boundedPool,async()=>{})).reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:bot.policyHmac,canaryLimit:'250'},umk())).rejects.toThrow('lock timeout');}
+    finally{await c.query('ROLLBACK');c.release();await boundedPool.end();}
+    expect((await pool.query('SELECT bot_id FROM grid_launch_accounts')).rowCount).toBe(0);
+  });
+  it('still checks stale request timestamps against the advancing database clock',async()=>{
+    const {account}=await reserve(),v=input(account);v.request.timestamp-=6000;
+    await expect(storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).rejects.toThrow('Stale admission');
+    expect((await pool.query('SELECT id FROM grid_operations')).rowCount).toBe(0);
+    v.request.timestamp=Date.now();expect((await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).state).toBe('prepared');
   });
   it('stores independent Grid ownership and decrypts only the matching owner/account/UMK',async()=>{const {account}=await reserve();const p=(await pool.query('SELECT bot_id,status FROM protocol_subaccounts')).rows[0];expect(p).toEqual({bot_id:null,status:'grid_reserved'});
     let captured:Buffer|undefined;await custody.withSecret(account,umk(),async secret=>{captured=secret;expect(bs58.encode(secret.subarray(32))).toBe(account.account);});expect(captured!.every(x=>x===0)).toBe(true);

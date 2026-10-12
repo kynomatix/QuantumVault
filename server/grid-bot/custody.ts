@@ -4,6 +4,10 @@ import bs58 from 'bs58';
 import Decimal from 'decimal.js';
 import {deriveSubkey,encryptToBase64,decryptFromBase64,buildPooledSubaccountAAD,zeroizeBuffer} from '../crypto-v3';
 import {GridLaunchStorage} from './launch-storage';
+import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../storage';
+
+// Leave recovery time beyond the durable 60-second rate-limit backoff.
+export const GRID_LAUNCH_LEASE_MS = 120_000;
 
 const purpose='grid_subaccount_privkey';
 export interface GridAccount {botId:string;wallet:string;masterAccount:string;account:string;leaseToken:string;reused:boolean}
@@ -23,7 +27,7 @@ export class GridCustody {
       return await this.storage.transaction(async c=>{
         await c.query("SELECT pg_advisory_xact_lock(hashtext('grid:pilot:admission'))");
         // Same wallet-generation lock namespace as storage.ts's legacy pool/reset path.
-        await c.query('SELECT pg_advisory_xact_lock(927412,hashtext($1))',[input.wallet]);
+        await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,input.wallet]);
         const owner=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1 FOR UPDATE',[input.wallet])).rows[0];
         if(owner?.agent_public_key!==input.masterAccount)throw Error('Grid master generation changed');
         await c.query('INSERT INTO grid_master_quota(master_account,share) VALUES($1,$2) ON CONFLICT DO NOTHING',[input.masterAccount,share.toFixed()]);
@@ -50,7 +54,7 @@ export class GridCustody {
         const row=spare?(await c.query(`UPDATE protocol_subaccounts SET status='grid_reserved',claim_token=$2,claimed_at=clock_timestamp(),subaccount_key_encrypted_v3=$3 WHERE id=$1 RETURNING id`,[spare.id,leaseToken,chosenEncrypted])).rows[0]:(await c.query(`INSERT INTO protocol_subaccounts(wallet_address,protocol,protocol_subaccount_id,status,agent_public_key,subaccount_key_encrypted_v3,aad_version,claim_token,claimed_at)
           VALUES($1,'pacifica',$2,'grid_reserved',$3,$4,1,$5,clock_timestamp()) RETURNING id`,[input.wallet,account,input.masterAccount,encrypted,leaseToken])).rows[0];
         await c.query('INSERT INTO grid_launch_accounts(bot_id,protocol_subaccount_id,master_account,account,canary_limit,reused) VALUES($1,$2,$3,$4,$5,$6)',[input.botId,row.id,input.masterAccount,chosenAccount,input.canaryLimit,!!spare]);
-        await c.query("UPDATE grid_bots SET protocol_subaccount_id=$2,status='provisioning',lease_token=$3,lease_expires_at=clock_timestamp()+interval '30 seconds',updated_at=clock_timestamp() WHERE id=$1",[input.botId,row.id,leaseToken]);
+        await c.query("UPDATE grid_bots SET protocol_subaccount_id=$2,status='provisioning',lease_token=$3,lease_expires_at=clock_timestamp()+$4*interval '1 millisecond',updated_at=clock_timestamp() WHERE id=$1",[input.botId,row.id,leaseToken,GRID_LAUNCH_LEASE_MS]);
         return {botId:input.botId,wallet:input.wallet,masterAccount:input.masterAccount,account:chosenAccount,leaseToken,reused:!!spare};
       });
     } finally {zeroizeBuffer(secret);keypair.secretKey.fill(0);zeroizeBuffer(subkey);}

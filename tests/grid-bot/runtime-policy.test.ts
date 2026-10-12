@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { GRID_RUNTIME_POLICY as P, gridWalletEntryGate, gridCanaryBudget, gridCanaryAdmission, gridRecyclerGate, gridStopReachable, gridFirstPlacementGate, gridAdxLabel } from '../../server/grid-bot/runtime-policy.js';
+import { GRID_RUNTIME_POLICY as P, GRID_RECYCLER_MAX_AGE_MS, gridWalletEntryGate, gridCanaryBudget, gridCanaryAdmission, gridRecyclerGate, gridStopReachable, gridFirstPlacementGate, gridAdxLabel } from '../../server/grid-bot/runtime-policy.js';
 describe('approved policy boundaries', () => {
   it('pins versioned pilot, mandatory stops, geometry, cadence and final-bar range rules', () => {
     expect(P.version).toBe('1.0.0'); expect(P.caps).toMatchObject({ ordinaryRestingPerBot: 20, sharedProtectionReserve: 5, intervals: 100, lines: 101, pilotBotsPerQuotaDomain: 2 });
@@ -30,7 +30,15 @@ describe('approved policy boundaries', () => {
   it('recycler proof must be current, true, and deployment-bound for each create', () => {
     const r = { reuse: 'true', recycle: true, deployment: 'EXAMPLE_DEPLOYMENT', expectedDeployment: 'EXAMPLE_DEPLOYMENT', checkedAt: 1000 };
     expect(gridRecyclerGate(r, 1000)).toBe(true);
-    expect(gridRecyclerGate({ ...r, checkedAt: 999 }, 1000)).toBe(false);
+    expect(GRID_RECYCLER_MAX_AGE_MS).toBe(5000);
+    expect(gridRecyclerGate({ ...r, checkedAt: 999 }, 1000)).toBe(true);
+    expect(gridRecyclerGate(r, 6000)).toBe(true);
+    expect(gridRecyclerGate(r, 6001)).toBe(false);
+    expect(gridRecyclerGate({ ...r, checkedAt: 1001 }, 1000)).toBe(false);
+    for(const invalid of [NaN,Infinity,1000.5]){
+      expect(gridRecyclerGate({ ...r, checkedAt: invalid }, 1000)).toBe(false);
+      expect(gridRecyclerGate(r, invalid)).toBe(false);
+    }
     expect(gridRecyclerGate({ ...r, reuse: 'false' }, 1000)).toBe(false);
     expect(gridRecyclerGate({ ...r, expectedDeployment: 'EXAMPLE_OTHER' }, 1000)).toBe(false);
   });

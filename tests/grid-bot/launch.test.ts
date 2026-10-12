@@ -4,7 +4,10 @@ import {calculateGrid} from '../../server/grid-bot/engine';
 import {computeGridPolicyHmac,type GridPolicy} from '../../server/grid-bot/policy-hmac';
 import {createGridFeeQuote} from '../../server/grid-bot/fee-authority';
 import {projectGridStop,GRID_STOP_EXECUTION_CUSHION} from '../../server/grid-bot/stop-clearance';
-import {preflightGridLaunch,GridProvision,type LaunchFacts} from '../../server/grid-bot/provision';
+import {preflightGridLaunch,GridProvision,GRID_FUND_IDENTITY_LEVEL,GRID_SEED_IDENTITY_LEVEL,type LaunchFacts} from '../../server/grid-bot/provision';
+import {gridClientOrderId} from '../../server/grid-bot/order-identity';
+import {GridExecution} from '../../server/grid-bot/execution';
+import {GridLaunchTransientError,requestDigest,type DurableGridOperation,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import {GRID_START_ROUTE_ENABLED,GRID_WORKER_ENABLED} from '../../server/grid-bot/service';
 import {policy as basePolicy,umk,clock} from './draft-fixtures';
 
@@ -40,6 +43,60 @@ describe('projected new-subaccount stop clearance',()=>{
   it.each([{maxLeverage:''},{funding:'NaN'},{tick:'0'},{stop:'96.001'},{expiresAt:clock},{observedAt:clock+1},{makerRate:'unknown'}])('denies unknown, stale or non-tick input %j',patch=>expect(projectGridStop({...input,...patch},clock).state).toBe('unavailable'));
 });
 describe('Grid launch preflight and hard production gates',()=>{
+  it.each(['long','short'] as const)('keeps seed and funding identities disjoint from every %s gridCount boundary',side=>{
+    const botId=basePolicy().id;
+    expect(GRID_SEED_IDENTITY_LEVEL).toBeGreaterThan(101);expect(GRID_SEED_IDENTITY_LEVEL).not.toBe(GRID_FUND_IDENTITY_LEVEL);
+    const seed=gridClientOrderId({botId,level:GRID_SEED_IDENTITY_LEVEL,attempt:0,leg:'entry'});
+    const fund=gridClientOrderId({botId,level:GRID_FUND_IDENTITY_LEVEL,attempt:0,leg:'profit'});
+    expect(seed).not.toBe(fund);
+    for(let intervals=1;intervals<=100;intervals++){
+      const result=calculateGrid({side,lower:'90',upper:'110',start:'100',intervals,entryScale:'flat',profitScale:'flat',seed:true,leverage:'2',tick:'0.01',lot:'0.001',minimumQuote:'1',investmentStep:'0.01',transferFloor:'1',effectiveMakerCostRate:'0',investment:'10000'});
+      expect(result.ok).toBe(true);if(!result.ok)throw Error('EXAMPLE geometry failed');
+      expect(result.plan.lines).toHaveLength(intervals+1);
+      for(const line of result.plan.lines)for(const leg of ['entry','profit'] as const){
+        const id=gridClientOrderId({botId,level:line.ordinal+1,attempt:0,leg});expect(id).not.toBe(seed);expect(id).not.toBe(fund);
+      }
+      if(side==='short'&&intervals===100)expect(result.plan.lines[100]).toMatchObject({ordinal:100,role:'entry'});
+    }
+  });
+  it.each(['stale','future'] as const)('makes zero custody or execution mutations with %s recycler evidence',async mode=>{
+    const f=launchFixture();f.facts.recycler.checkedAt=mode==='stale'?clock-5001:clock+1;
+    const reserve=vi.fn(),run=vi.fn();
+    const p=new GridProvision({now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup:vi.fn()}),observe:async()=>f.facts,custody:{reserve,confirmCreated:vi.fn(),confirmReused:vi.fn()},verifyEmpty:vi.fn(),execution:{run},existing:vi.fn(),markCanary:vi.fn()});
+    expect((await p.start({wallet:'EXAMPLE',policy:f.policy,policyHmac:f.policyHash})).state).toBe('denied');expect(reserve).not.toHaveBeenCalled();expect(run).not.toHaveBeenCalled();
+  });
+  it.each(['quota','read backoff'] as const)('returns pending without mutations for transient %s',async mode=>{
+    const f=launchFixture();f.facts.availableGridCredits='0';const cleanup=vi.fn(),reserve=vi.fn(),run=vi.fn();
+    const p=new GridProvision({now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup}),observe:async()=>{if(mode==='read backoff')throw new GridLaunchTransientError('backoff');return f.facts;},custody:{reserve,confirmCreated:vi.fn(),confirmReused:vi.fn()},verifyEmpty:vi.fn(),execution:{run},existing:vi.fn(),markCanary:vi.fn()});
+    expect((await p.start({wallet:'EXAMPLE',policy:f.policy,policyHmac:f.policyHash})).state).toBe('pending');expect(reserve).not.toHaveBeenCalled();expect(run).not.toHaveBeenCalled();expect(cleanup).toHaveBeenCalledOnce();
+  });
+  it('completes create/fund/leverage/seed with a real advancing clock beyond one request expiry',async()=>{
+    vi.useRealTimers();const f=launchFixture(true,'109');
+    const account={botId:f.policy.id,wallet:'EXAMPLE',masterAccount:'EXAMPLE_MASTER',account:'EXAMPLE_SUB',leaseToken:'EXAMPLE',reused:false};
+    const done=new Map<string,DurableGridOperation>(),requests:ExactGridRequest[]=[];
+    const execution=new GridExecution({now:Date.now,storage:{
+      read:async(_bot,key)=>done.get(key)??null,
+      prepare:async(key,r,claim)=>{const now=Date.now();expect(r.timestamp).toBeLessThanOrEqual(now);expect(r.timestamp+r.expiryMs).toBeGreaterThan(now);expect(claim.expiresAt).toBeGreaterThan(now);
+        const op={id:key,state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null};done.set(key,op);return op;},
+      submit:async op=>{op.state='submitted';return true;},settle:async(op,outcome)=>{done.get(op.id)!.state=outcome.state;}
+    },preflight:async r=>preflightGridLaunch(f.policy,f.policyHash,umk(),r.authority.facts as LaunchFacts,Date.now(),done.get(`grid:${f.policy.id}:launch:fund`)?.state==='confirmed').ok,
+      send:async r=>{requests.push(r);await new Promise(resolve=>setTimeout(resolve,1700));return {rateLimited:false};},
+      reconcile:async op=>({state:'confirmed',requestDigest:op.exact_request_digest,releaseSlot:true})});
+    const p=new GridProvision({now:Date.now,durableUmk:async()=>({umk:umk(),cleanup:vi.fn()}),
+      observe:async(_policy,a)=>{const now=Date.now(),facts=structuredClone(f.facts);facts.observedAt=now;facts.expiresAt=now+5000;facts.recycler.checkedAt=now;facts.account=a?.account??null;
+        for(const k of ['maker','profit','taker'] as const){const old=facts[k]!,owner=a?.account??facts.masterAccount;
+          const q=createGridFeeQuote({account:owner,subaccountId:null,market:old.market,liquidityRole:old.liquidityRole,builderCode:old.builderCode,intent:old.intent},{account:owner,maker_fee:'0',taker_fee:'0'},[{builder_code:'CARRY',fee_rate:'0'}],[{builder_code:'CARRY',max_fee_rate:'0'}],now);
+          if(q.availability!=='available')throw Error(q.reason);facts[k]=q.quote;}
+        await new Promise(resolve=>setTimeout(resolve,10));return facts;},
+      custody:{reserve:async()=>account,confirmCreated:vi.fn(),confirmReused:vi.fn()},verifyEmpty:async()=>{const now=Date.now();return {account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000};},
+      execution,existing:async key=>done.get(key)??null,markCanary:vi.fn()});
+    expect(await p.start({wallet:'EXAMPLE',policy:f.policy,policyHmac:f.policyHash})).toMatchObject({state:'canary'});
+    expect(requests.map(r=>r.kind)).toEqual(['create','fund','leverage','seed']);
+    expect(requests[3].timestamp-requests[0].timestamp).toBeGreaterThan(5000);
+    for(const r of requests)expect(r.timestamp).toBeGreaterThan((r.authority.facts as LaunchFacts).recycler.checkedAt);
+    expect(requests[3].data.client_order_id).toBe(gridClientOrderId({botId:f.policy.id,level:103,attempt:0,leg:'entry'}));
+    expect(requests[3].data.client_order_id).not.toBe(requests[1].data.idempotency_key);
+  },15000);
   it('admits unchanged seed-off geometry with a funded stop and valid canary entry',()=>{const f=launchFixture();expect(preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock)).toMatchObject({ok:true});});
   it.each(['policy','fees','price','constraints','quota','recycler','slots','stop','canary','sol','transport','balance','durable security'])('failed %s preflight reserves and sends nothing',async defect=>{
     const f=launchFixture(defect==='canary');

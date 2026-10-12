@@ -16,6 +16,7 @@ export interface GridClaim {
 }
 export interface DurableGridOperation {id:string;state:string;exact_request:ExactGridRequest;exact_request_digest:string;failure_classification:string|null}
 const typeFor={create:'provision_subaccount',fund:'fund_subaccount',leverage:'set_leverage',seed:'seed_position',limit:'place_level_order',cancel:'cancel_level_order'};
+export class GridLaunchTransientError extends Error {}
 /** Lock order is always master, then bot. No deployment identity partitions a master's quota. */
 export class GridLaunchStorage {
   constructor(private pool:Pool,private ready=()=>requireSchemaCapabilityReady('grid_bot',async(q,v)=>pool.query(q,v?[...v]:undefined))){}
@@ -33,10 +34,11 @@ export class GridLaunchStorage {
     return this.transaction(async c=>{
       await c.query('INSERT INTO grid_master_quota(master_account,share) VALUES($1,$2) ON CONFLICT DO NOTHING',[masterAccount,share]);
       const q=(await c.query('SELECT share,backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[masterAccount])).rows[0];
-      if(q.blocked||!new Decimal(q.share).eq(share))throw Error('Grid master read authority unavailable');
+      if(!new Decimal(q.share).eq(share))throw Error('Grid master read authority unavailable');
+      if(q.blocked)throw new GridLaunchTransientError('Grid master read authority unavailable during backoff');
       const used=(await c.query(`SELECT (SELECT COALESCE(sum(credits),0) FROM grid_read_claims WHERE master_account=$1 AND claimed_at>clock_timestamp()-interval '60 seconds')
         +(SELECT COALESCE(sum(credits),0) FROM grid_execution_claims WHERE master_account=$1 AND (settled_at IS NULL OR settled_at>clock_timestamp()-interval '60 seconds')) AS used`,[masterAccount])).rows[0].used;
-      if(new Decimal(used).plus(credits).gt(Decimal.min(300,observedCredits).mul(q.share).floor()))throw Error('Grid fixed quota share exhausted');
+      if(new Decimal(used).plus(credits).gt(Decimal.min(300,observedCredits).mul(q.share).floor()))throw new GridLaunchTransientError('Grid fixed quota share exhausted');
       const id=randomUUID();await c.query('INSERT INTO grid_read_claims(id,master_account,credits) VALUES($1,$2,$3)',[id,masterAccount,credits]);return id;
     });
   }
@@ -81,13 +83,13 @@ export class GridLaunchStorage {
       if((await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[request.botId])).rowCount)throw Error('Unresolved operation barrier');
       if(!Number.isSafeInteger(claim.observedAt) || !Number.isSafeInteger(claim.expiresAt) || claim.observedAt>now || claim.expiresAt<=now
         || claim.expiresAt-claim.observedAt>5000 || request.timestamp>now || request.timestamp+request.expiryMs<=now)throw Error('Stale admission');
-      if(new Date(master.backoff_until).getTime()>now)throw Error('Durable Grid rate-limit backoff');
+      if(new Date(master.backoff_until).getTime()>now)throw new GridLaunchTransientError('Durable Grid rate-limit backoff');
       const quota=(await c.query(`SELECT (SELECT COALESCE(sum(credits),0) FROM grid_execution_claims
         WHERE master_account=$1 AND (settled_at IS NULL OR settled_at>clock_timestamp()-interval '60 seconds'))
         +(SELECT COALESCE(sum(credits),0) FROM grid_read_claims WHERE master_account=$1 AND claimed_at>clock_timestamp()-interval '60 seconds') AS used`,[request.masterAccount])).rows[0];
       // Unknown observed tier uses the owner-assumed 300; observations may only reduce that conservative floor.
       const ceiling=Decimal.min(300,claim.observedCredits).mul(master.share).floor();
-      if(!ceiling.gt(0) || new Decimal(quota.used).plus(claim.credits).gt(ceiling))throw Error('Grid fixed quota share exhausted');
+      if(!ceiling.gt(0) || new Decimal(quota.used).plus(claim.credits).gt(ceiling))throw new GridLaunchTransientError('Grid fixed quota share exhausted');
       const slots=(await c.query('SELECT COALESCE(sum(slots),0) AS used FROM grid_execution_claims WHERE account=$1 AND NOT slot_released',[request.account])).rows[0];
       // Conservatively count all retained claims against observed free inventory. Never double-spend a snapshot.
       if(claim.slots && (new Decimal(slots.used).plus(claim.slots).gt(20) || claim.availableSlots-Number(slots.used)-claim.slots<5))throw Error('Grid subaccount slots unavailable');

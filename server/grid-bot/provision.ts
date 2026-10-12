@@ -9,6 +9,11 @@ import {gridClientOrderId} from './order-identity';
 import {validGridEmptyProof,type GridCustody,type GridAccount,type GridEmptyProof} from './custody';
 import type {GridExecution} from './execution';
 import type {ExactGridRequest,GridClaim,DurableGridOperation} from './launch-storage';
+import {GridLaunchTransientError} from './launch-storage';
+
+// Grid levels occupy 1..101. Funding and seed must each have their own reserved identity.
+export const GRID_FUND_IDENTITY_LEVEL = 102;
+export const GRID_SEED_IDENTITY_LEVEL = 103;
 
 export interface LaunchFacts {
   observedAt:number;expiresAt:number;masterAccount:string;account:string|null;bookPrice:string;bookSource:string;
@@ -17,7 +22,7 @@ export interface LaunchFacts {
   masterWithdrawable:string;sol:string|null;availableSlots:number;subaccountCount:number;observedCredits:string;availableGridCredits:string;reusableAccountAvailable?:boolean;
   transportReady:boolean;inventoryComplete:boolean;recycler:{reuse:unknown;recycle:unknown;deployment:string;expectedDeployment:string;checkedAt:number};
 }
-export type LaunchAdmission={ok:false;reason:string}|{ok:true;plan:GridPlan;canaryLimit:string;seedNotional:string;firstEntryOrdinal:number;stop:ReturnType<typeof projectGridStop>};
+export type LaunchAdmission={ok:false;reason:string;transient?:boolean}|{ok:true;plan:GridPlan;canaryLimit:string;seedNotional:string;firstEntryOrdinal:number;stop:ReturnType<typeof projectGridStop>};
 /** Every pre-reservation check is read-only. No custody, funding, enrollment or leverage mutation occurs here. */
 export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buffer,f:LaunchFacts,now:number,alreadyFunded=false):LaunchAdmission{
   const deny=(reason:string):LaunchAdmission=>({ok:false,reason});
@@ -29,7 +34,8 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
     if(!gridWalletEntryGate(f.sol).entryAllowed)return deny('Wallet SOL reserve is below the entry minimum or unknown.');
     if(!Number.isSafeInteger(f.availableSlots)||f.availableSlots<25||!Number.isSafeInteger(f.subaccountCount)||f.subaccountCount<0||f.subaccountCount>(f.account||f.reusableAccountAvailable===true?10:9))return deny('Subaccount or order slot capacity is unavailable.');
     if(f.restrictions!=='unrestricted'||!new Decimal(f.maxLeverage).gte(policy.leverage)||!alreadyFunded&&!new Decimal(f.masterWithdrawable).gte(policy.totalInvestment)
-      || !new Decimal(f.observedCredits).gt(0)||!new Decimal(f.availableGridCredits).gte(alreadyFunded?10:policy.seedAtCreation?50:40))return deny('Funding, leverage, quota or market restrictions deny launch.');
+      || !new Decimal(f.observedCredits).gt(0))return deny('Funding, leverage, quota or market restrictions deny launch.');
+    if(!new Decimal(f.availableGridCredits).gte(alreadyFunded?10:policy.seedAtCreation?50:40))return {ok:false,transient:true,reason:'Grid quota is temporarily unavailable.'};
     const account=f.account??f.masterAccount;
     const fee=(quote:GridFeeQuote|null,role:'maker'|'taker',intent:'entry'|'profit')=>quote&&validateGridFeeQuote(quote,{account,subaccountId:null,market:policy.market,liquidityRole:role,builderCode:'CARRY',intent},now);
     if(!fee(f.maker,'maker','entry')||!fee(f.profit,'maker','profit')||policy.seedAtCreation&&!fee(f.taker,'taker','entry'))return deny('Current account fees and builder approval are unavailable.');
@@ -76,6 +82,7 @@ export class GridProvision {
   constructor(private deps:GridProvisionDeps){}
   async start(input:{wallet:string;policy:GridPolicy;policyHmac:string;account?:GridAccount}):Promise<{state:'denied'|'pending'|'canary';reason?:string;account?:GridAccount}>{
     const security=await this.deps.durableUmk(input.wallet);if(!security)return {state:'denied',reason:'Durable execution security is unavailable.'};
+    let retainedAccount=input.account;
     try {
       if(!verifyGridPolicyHmac(input.policy,security.umk,input.policyHmac).ok)return {state:'denied',reason:'Grid policy signature changed.'};
       // Recovery precedes new market/fee reads. A disappeared response cannot grant a new send.
@@ -90,9 +97,10 @@ export class GridProvision {
       const funding=await this.deps.existing(`grid:${input.policy.id}:launch:fund`,input.policy.id);
       const facts=await this.deps.observe(input.policy,input.account??null),now=this.deps.now();
       const admission=preflightGridLaunch(input.policy,input.policyHmac,security.umk,facts,now,funding?.state==='confirmed');
-      if(!admission.ok)return {state:'denied',reason:admission.reason};
+      if(!admission.ok)return {state:admission.transient?'pending':'denied',reason:admission.reason,account:retainedAccount};
       const account=input.account??await this.deps.custody.reserve({botId:input.policy.id,wallet:input.wallet,masterAccount:facts.masterAccount,
         policyHmac:input.policyHmac,canaryLimit:admission.canaryLimit,share:this.deps.quotaShare},security.umk);
+      retainedAccount=account;
       if(account.wallet!==input.wallet||account.botId!==input.policy.id||account.masterAccount!==facts.masterAccount)throw Error('Grid provision identity conflict');
       if(funding?.state!=='confirmed'){
         const empty=await this.deps.verifyEmpty(account);
@@ -103,18 +111,18 @@ export class GridProvision {
       const steps:Array<{kind:ExactGridRequest['kind'];path:string;operationType:string;data:Record<string,unknown>}>=[];
       if(!account.reused)steps.push({kind:'create',path:'/account/subaccount/create',operationType:'subaccount_confirm',data:{}});
       steps.push({kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:account.account,amount:input.policy.totalInvestment,
-        idempotency_key:gridClientOrderId({botId:input.policy.id,level:102,attempt:0,leg:'profit'})}},
+        idempotency_key:gridClientOrderId({botId:input.policy.id,level:GRID_FUND_IDENTITY_LEVEL,attempt:0,leg:'profit'})}},
         {kind:'leverage',path:'/account/leverage',operationType:'update_leverage',data:{symbol,leverage:input.policy.leverage}});
       if(input.policy.seedAtCreation&&new Decimal(admission.plan.seedQuantity).gt(0))steps.push({kind:'seed',path:'/orders/create_market',operationType:'create_market_order',
         data:{symbol,amount:admission.plan.seedQuantity,side:input.policy.direction==='long'?'bid':'ask',reduce_only:false,slippage_percent:GRID_SEED_MAX_SLIPPAGE_PERCENT,
-          client_order_id:gridClientOrderId({botId:input.policy.id,level:101,attempt:0,leg:'entry'}),...(facts.taker?.builder?{builder_code:facts.taker.builder.code}:{})}});
+          client_order_id:gridClientOrderId({botId:input.policy.id,level:GRID_SEED_IDENTITY_LEVEL,attempt:0,leg:'entry'}),...(facts.taker?.builder?{builder_code:facts.taker.builder.code}:{})}});
       for(const step of steps){
         const key=`grid:${input.policy.id}:launch:${step.kind}`,old=await this.deps.existing(key,input.policy.id);
         if(old?.state==='confirmed'){if(step.kind==='create')await this.deps.custody.confirmCreated(account);continue;}
         const current=await this.deps.observe(input.policy,step.kind==='create'?null:account),timestamp=this.deps.now();
         const funded=await this.deps.existing(`grid:${input.policy.id}:launch:fund`,input.policy.id);
         const latest=preflightGridLaunch(input.policy,input.policyHmac,security.umk,current,timestamp,funded?.state==='confirmed');
-        if(!latest.ok)return {state:'denied',reason:latest.reason,account};
+        if(!latest.ok)return {state:latest.transient?'pending':'denied',reason:latest.reason,account};
         if((step.kind!=='create'&&current.account!==account.account)||current.masterAccount!==account.masterAccount)return {state:'denied',reason:'Reserved account authority changed.',account};
         if(step.kind==='fund'){
           const empty=await this.deps.verifyEmpty(account);
@@ -134,6 +142,9 @@ export class GridProvision {
         if(step.kind==='create')await this.deps.custody.confirmCreated(account);
       }
       await this.deps.markCanary(account);return {state:'canary',account};
+    }catch(error){
+      if(error instanceof GridLaunchTransientError)return {state:'pending',reason:error.message,account:retainedAccount};
+      throw error;
     }finally{security.cleanup();}
   }
 }

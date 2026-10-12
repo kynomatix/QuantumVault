@@ -1,7 +1,7 @@
 import Decimal from 'decimal.js';
 import {PacificaSigner,buildSigningMessage} from '../protocol/pacifica/pacifica-signer';
 import {PacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
-import {GridLaunchStorage,requestDigest,type ExactGridRequest,type GridClaim,type DurableGridOperation} from './launch-storage';
+import {GridLaunchStorage,GridLaunchTransientError,requestDigest,type ExactGridRequest,type GridClaim,type DurableGridOperation} from './launch-storage';
 import type {GridVenueOrder} from './order-identity';
 
 const endpoints={create:['/account/subaccount/create','subaccount_confirm'],fund:['/account/subaccount/transfer','transfer_funds'],
@@ -71,7 +71,8 @@ export class GridExecution {
       }
     }
     if(!validExactRequest(request) || !await this.deps.preflight(request))return 'not_sent';
-    op??=await this.deps.storage.prepare(key,request,claim,leaseToken);
+    try{op??=await this.deps.storage.prepare(key,request,claim,leaseToken);}
+    catch(error){if(error instanceof GridLaunchTransientError)return 'pending';throw error;}
     if(op.state!=='prepared')return this.reconcile(op);
     // Re-read current authority after the transaction and immediately before acquiring send permission.
     if(!await this.deps.preflight(op.exact_request))return 'not_sent';

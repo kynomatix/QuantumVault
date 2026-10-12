@@ -54,9 +54,12 @@ export function gridCanaryAdmission(target: string, seedOpenAndCommitments: stri
   return budget !== null && !!used && !!min && min.gt(0) && min.lte(budget) && orders.every(o => !!o && o.gt(0))
     && orders.reduce<Decimal>((sum, o) => sum.plus(o!), used).lte(budget);
 }
+export const GRID_RECYCLER_MAX_AGE_MS = 5000;
 export function gridRecyclerGate(input: { reuse: unknown; recycle: unknown; deployment: string; expectedDeployment: string; checkedAt: number }, now: number): boolean {
   const yes = (v: unknown) => v === true || v === 'true';
-  return yes(input.reuse) && yes(input.recycle) && !!input.deployment && input.deployment === input.expectedDeployment && input.checkedAt === now;
+  return yes(input.reuse) && yes(input.recycle) && !!input.deployment && input.deployment === input.expectedDeployment
+    && Number.isSafeInteger(now) && Number.isSafeInteger(input.checkedAt)
+    && input.checkedAt <= now && now - input.checkedAt <= GRID_RECYCLER_MAX_AGE_MS;
 }
 /** adverseExitUsd and clearance are validated execution inputs, not a guessed percent buffer. */
 export function gridStopReachable(input: { side: 'long' | 'short'; entry: string; stop: string; liquidation: string; tick: string;

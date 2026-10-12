@@ -3,7 +3,8 @@ import {randomUUID} from 'node:crypto';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import {GridExecution,GridPacificaSender,reconcileGridLimit,type GridExecutionDeps} from '../../server/grid-bot/execution';
-import {requestDigest,type ExactGridRequest,type DurableGridOperation,type GridClaim} from '../../server/grid-bot/launch-storage';
+import {GridLaunchTransientError,requestDigest,type ExactGridRequest,type DurableGridOperation,type GridClaim} from '../../server/grid-bot/launch-storage';
+import {GridLaunchReads} from '../../server/grid-bot/launch-reads';
 import {PacificaTransportAuthority} from '../../server/protocol/pacifica/pacifica-transport';
 import {parseGridVenueOrders,type GridVenueOrder} from '../../server/grid-bot/order-identity';
 import {gridWindow,type WindowLevel} from '../../server/grid-bot/window';
@@ -14,6 +15,26 @@ const claim:GridClaim={credits:'10',slots:1,canaryIncrement:'90',observedCredits
 function harness(){const r=request();let row:DurableGridOperation|null=null;
   const deps:GridExecutionDeps={storage:{read:vi.fn(async()=>row),prepare:vi.fn(async()=>row={id:randomUUID(),state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null}),submit:vi.fn(async()=>{row!.state='submitted';return true;}),settle:vi.fn(async(_op,outcome)=>{row!.state=outcome.state;row!.failure_classification=outcome.reason;})},preflight:vi.fn(async()=>true),send:vi.fn(async()=>({rateLimited:false})),reconcile:vi.fn(async()=>({state:'unknown' as const}))};return {r,deps,execution:new GridExecution(deps),get row(){return row;}};}
 describe('write ahead and exact identity execution',()=>{
+  it.each(['Grid fixed quota share exhausted','Durable Grid rate-limit backoff'])('returns pending without submitting or sending for %s',async reason=>{
+    const h=harness();vi.mocked(h.deps.storage.prepare).mockRejectedValue(new GridLaunchTransientError(reason));
+    expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');
+    expect(h.deps.storage.submit).not.toHaveBeenCalled();expect(h.deps.send).not.toHaveBeenCalled();
+  });
+  it('does not disguise an ownership failure as a transient quota denial',async()=>{
+    const h=harness();vi.mocked(h.deps.storage.prepare).mockRejectedValue(Error('Lost Grid ownership'));
+    await expect(h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).rejects.toThrow('Lost Grid ownership');expect(h.deps.send).not.toHaveBeenCalled();
+  });
+  it('uses the configured share on all reads and retains 429 as a transient denial',async()=>{
+    const ledger={claimRead:vi.fn(async()=>randomUUID()),recordRateLimit:vi.fn(async()=>{})};
+    const fetcher=vi.fn(async()=>new Response('{}',{status:200}));
+    const reads=new GridLaunchReads(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),ledger,'0.25',fetcher as typeof fetch);
+    await reads.json('EXAMPLE_MASTER','/account',{});expect(ledger.claimRead).toHaveBeenLastCalledWith('EXAMPLE_MASTER','1','300','0.25');
+    fetcher.mockImplementationOnce(async()=>new Response(null,{status:429}));
+    await expect(reads.json('EXAMPLE_MASTER','/account',{})).rejects.toBeInstanceOf(GridLaunchTransientError);
+    expect(ledger.recordRateLimit).toHaveBeenCalledWith('EXAMPLE_MASTER');
+    ledger.claimRead.mockRejectedValueOnce(new GridLaunchTransientError('backoff'));
+    await expect(reads.json('EXAMPLE_MASTER','/account',{})).rejects.toBeInstanceOf(GridLaunchTransientError);expect(fetcher).toHaveBeenCalledTimes(2);
+  });
   it('zero signing or preparation after failed authority',async()=>{const h=harness();vi.mocked(h.deps.preflight).mockResolvedValue(false);expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('not_sent');expect(h.deps.storage.prepare).not.toHaveBeenCalled();expect(h.deps.send).not.toHaveBeenCalled();});
   it('rechecks after durable preparation and never signs with lost authority',async()=>{const h=harness();vi.mocked(h.deps.preflight).mockResolvedValueOnce(true).mockResolvedValueOnce(false);expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('not_sent');expect(h.deps.storage.prepare).toHaveBeenCalledOnce();expect(h.deps.send).not.toHaveBeenCalled();});
   it.each(['timeout','http-success','429'])('%s stays unresolved across restart without a second send',async(mode)=>{const h=harness();if(mode==='timeout')vi.mocked(h.deps.send).mockRejectedValue(Error('EXAMPLE'));if(mode==='429')vi.mocked(h.deps.send).mockResolvedValue({rateLimited:true});
