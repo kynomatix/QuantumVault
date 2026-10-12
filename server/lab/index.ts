@@ -1,6 +1,9 @@
 import express from "express";
 import { createServer } from "http";
 import { registerLabRoutes, getLabCleanup } from "./routes";
+import { lowerLabPriority } from "./resource-policy";
+
+lowerLabPriority("child");
 
 const LAB_PORT = parseInt(process.env.LAB_PORT || "5050", 10);
 

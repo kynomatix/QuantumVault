@@ -1,6 +1,6 @@
 import { Worker } from "worker_threads";
 import { EventEmitter } from "events";
-import { availableParallelism } from "os";
+import { getLabResourcePolicy, type LabResourcePolicy } from "./resource-policy";
 import type { LabBacktestResult } from "@shared/schema";
 import { robustnessRank } from "./metrics";
 
@@ -29,13 +29,8 @@ import { robustnessRank } from "./metrics";
 // union of top-K results is byte-stable for the same jobSeed across N=1
 // and N=4 (proved by test-determinism.ts).
 
-const MAX_POOL_SIZE = 6;
-
 export function recommendedPoolSize(numCombos: number): number {
-  const cores = (() => {
-    try { return availableParallelism(); } catch { return 4; }
-  })();
-  const target = Math.max(1, Math.min(MAX_POOL_SIZE, cores - 1));
+  const target = getLabResourcePolicy().workers;
   // Don't artificially cap by combo count anymore — per-slot partitioning
   // makes single-combo jobs parallelize. Still need ≥1 combo.
   return Math.max(1, numCombos > 0 ? target : 1);
@@ -53,6 +48,7 @@ export interface PoolSpawnArgs {
 
 export class WorkerPool extends EventEmitter {
   public readonly poolSize: number;
+  public readonly resourcePolicy: LabResourcePolicy;
   public readonly perSlot: boolean;
   private workers: Worker[] = [];
   private states: WorkerState[];
@@ -78,6 +74,7 @@ export class WorkerPool extends EventEmitter {
     sizeOverride?: number,
   ) {
     super();
+    this.resourcePolicy = getLabResourcePolicy();
 
     const tickers: string[] = args.config.tickers || [];
     const timeframes: string[] = args.config.timeframes || [];
@@ -86,7 +83,7 @@ export class WorkerPool extends EventEmitter {
 
     const requestedN = typeof sizeOverride === "number"
       ? Math.max(1, sizeOverride)
-      : recommendedPoolSize(combos.length);
+      : (combos.length > 0 ? this.resourcePolicy.workers : 1);
     // We can't have more workers than there is work for either mode:
     // per-combo caps at combos.length; per-slot caps at randomSamples.
     const randomSamples: number = args.config.randomSamples ?? 0;
