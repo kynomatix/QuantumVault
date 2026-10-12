@@ -4,8 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   appendTelemetry: vi.fn(),
   spawn: vi.fn(),
-  setPriority: vi.fn(),
-  getPriority: vi.fn(() => 19),
   existsSync: vi.fn(() => false),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
@@ -23,12 +21,6 @@ vi.mock("../../server/boot-id", () => ({
 
 vi.mock("node:child_process", () => ({
   spawn: mocks.spawn,
-}));
-
-vi.mock("node:os", () => ({
-  setPriority: mocks.setPriority,
-  getPriority: mocks.getPriority,
-  availableParallelism: vi.fn(() => 4),
 }));
 
 vi.mock("node:fs", () => ({
@@ -105,8 +97,6 @@ describe("LabSupervisor durable terminal-health telemetry", () => {
     vi.stubEnv("SESSION_SECRET", "lab-supervisor-test-secret");
     children.length = 0;
     mocks.appendTelemetry.mockReset();
-    mocks.setPriority.mockReset();
-    mocks.getPriority.mockReset().mockReturnValue(19);
     mocks.existsSync.mockReset().mockReturnValue(false);
     mocks.readFileSync.mockReset();
     mocks.writeFileSync.mockReset();
@@ -124,33 +114,6 @@ describe("LabSupervisor durable terminal-health telemetry", () => {
       return child;
     });
     supervisor = await makeSupervisor();
-  });
-
-  it("lowers only the newly spawned child's priority before writing its PID file", async () => {
-    const { promise, child } = await beginStart();
-    expect(mocks.setPriority).toHaveBeenCalledWith(child.pid, 19);
-    expect(mocks.getPriority).toHaveBeenCalledWith(child.pid);
-    expect(mocks.setPriority.mock.invocationCallOrder[0]).toBeLessThan(mocks.writeFileSync.mock.invocationCallOrder[0]);
-    child.emit("message", { type: "ready", port: 5050 });
-    await promise;
-  });
-
-  it("still becomes ready if the parent cannot lower child priority", async () => {
-    mocks.setPriority.mockImplementationOnce(() => { throw new Error("not supported"); });
-    const { promise, child } = await beginStart();
-    child.emit("message", { type: "ready", port: 5050 });
-    await promise;
-    expect(supervisor?.getStatus().isReady).toBe(true);
-  });
-
-  it("launches the prebuilt bundle in production without runtime tsx", async () => {
-    vi.stubGlobal("__ESBUILD_CJS_BUNDLE__", true);
-    const { promise, child } = await beginStart();
-    const args = mocks.spawn.mock.calls[0][1] as string[];
-    expect(args).toHaveLength(1);
-    expect(args[0]).toMatch(/lab-server\.cjs$/);
-    child.emit("message", { type: "ready", port: 5050 });
-    await promise;
   });
 
   afterEach(async () => {

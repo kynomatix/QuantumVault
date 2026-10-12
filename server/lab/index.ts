@@ -2,16 +2,13 @@ import express from "express";
 import { createServer } from "http";
 import { registerLabRoutes, getLabCleanup } from "./routes";
 import { lowerLabPriority } from "./resource-policy";
-import { startLabCpuStats } from "./cpu-stats";
 
 lowerLabPriority("child");
-const stopCpuStats = startLabCpuStats();
 
 const LAB_PORT = parseInt(process.env.LAB_PORT || "5050", 10);
 
 const app = express();
 const httpServer = createServer(app);
-httpServer.once("close", stopCpuStats);
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", timestamp: Date.now() });

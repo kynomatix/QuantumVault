@@ -1,10 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { createHash } from "node:crypto";
-import { getPriority, setPriority } from "node:os";
-import { performance } from "node:perf_hooks";
-import { LAB_PRIORITY } from "./resource-policy";
-import { isLabProductionBundle } from "./runtime-mode";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { appendTelemetry } from "../telemetry";
 import { SERVER_BOOT_ID } from "../boot-id";
@@ -239,7 +235,7 @@ export function createLabSupervisor(): LabSupervisor {
     spawnInFlight = true;
 
     return new Promise((resolveReady, rejectReady) => {
-      const isProd = isLabProductionBundle();
+      const isProd = typeof (globalThis as any).__ESBUILD_CJS_BUNDLE__ !== "undefined";
       const entryPath = isProd
         ? resolve(dirname(process.argv[1] || __filename), "lab-server.cjs")
         : resolve(process.cwd(), "server", "lab", "index.ts");
@@ -255,7 +251,6 @@ export function createLabSupervisor(): LabSupervisor {
 
       const args = isProd ? [entryPath] : ["--import", "tsx", entryPath];
 
-      const spawnedAt = performance.now();
       const spawnedChild = spawn("node", args, {
         env,
         stdio: ["ignore", "inherit", "inherit", "ipc"],
@@ -266,16 +261,8 @@ export function createLabSupervisor(): LabSupervisor {
       ownsChild = true;
 
       if (spawnedChild.pid) {
-        // Lower priority immediately after spawn to cover module loading too.
-        // The child may run briefly before this call; its own call is a fallback.
-        try {
-          setPriority(spawnedChild.pid, LAB_PRIORITY);
-          console.log(`[LabSupervisor] priority pid=${spawnedChild.pid} requested=${LAB_PRIORITY} effective=${getPriority(spawnedChild.pid)} phase=spawn`);
-        } catch {
-          console.log(`[LabSupervisor] priority pid=${spawnedChild.pid} requested=${LAB_PRIORITY} phase=spawn failed`);
-        }
         writePidFile(spawnedChild.pid);
-        console.log(`[LabSupervisor] Spawned lab process (pid: ${spawnedChild.pid}) mode=${isProd ? "bundle" : "tsx"}`);
+        console.log(`[LabSupervisor] Spawned lab process (pid: ${spawnedChild.pid})`);
       }
 
       const readyTimeout = setTimeout(async () => {
@@ -325,7 +312,7 @@ export function createLabSupervisor(): LabSupervisor {
           restartCount = 0;
           spawnInFlight = false;
           recordSuccess();
-          console.log(`[LabSupervisor] Lab process ready on port ${labPort} (pid: ${spawnedChild.pid}) after=${Math.round(performance.now() - spawnedAt)}ms`);
+          console.log(`[LabSupervisor] Lab process ready on port ${labPort} (pid: ${spawnedChild.pid})`);
           spawnedChild.unref();
           try { spawnedChild.disconnect?.(); } catch {}
           resolveReady();

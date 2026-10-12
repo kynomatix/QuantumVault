@@ -25,7 +25,6 @@ import { AsyncLocalStorage } from "async_hooks";
 import { monitorEventLoopDelay, performance, PerformanceObserver } from "perf_hooks";
 import { getHeapStatistics } from "v8";
 import { takeJobTimingStats } from "./job-timing";
-import { createCpuAccountingProbe } from "./cpu-accounting";
 import { appendTelemetry } from "./telemetry";
 import { SERVER_BOOT_ID } from "./boot-id";
 
@@ -217,9 +216,6 @@ export function registerRequestTrace(app: Express): void {
  * hold the process alive (zombie-shutdown gotcha).
  */
 export function startSelfStats(httpServer: Server): void {
-  const cpuAccounting = createCpuAccountingProbe();
-  void cpuAccounting.sample(); // Baseline before the first minute's deltas.
-  let stopped = false;
   const eld = monitorEventLoopDelay({ resolution: 20 });
   eld.enable();
   let previousTime = performance.now();
@@ -269,19 +265,15 @@ export function startSelfStats(httpServer: Server): void {
         gcCount = 0;
         gcTotalMs = 0;
         gcMaxMs = 0;
-        void cpuAccounting.sample().then((accounting) => {
-          if (stopped) return;
-          const enriched = `${line} ${accounting}`;
-          console.log(enriched);
-          appendTelemetry(enriched);
-        }).catch(() => {});
+        console.log(line);
+        appendTelemetry(line);
       });
     } catch {
       // vitals must never affect the app
     }
   }, 60_000);
   timer.unref();
-  httpServer.once("close", () => { stopped = true; clearInterval(timer); eld.disable(); gc.disconnect(); });
+  httpServer.once("close", () => { clearInterval(timer); eld.disable(); gc.disconnect(); });
 }
 
 /** Test-only: reset the per-minute counters. */
