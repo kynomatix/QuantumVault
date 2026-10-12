@@ -156,6 +156,7 @@ export class GridCustody {
           await c.query('UPDATE grid_launch_accounts SET released_at=clock_timestamp() WHERE bot_id=$1',[identity.botId]);
           await c.query('UPDATE grid_execution_claims SET slot_released=true WHERE bot_id=$1',[identity.botId]);
           await c.query("UPDATE grid_bots SET status='stopped',residual_usdc=0,residual_observed_at=$2,updated_at=clock_timestamp() WHERE id=$1",[identity.botId,new Date(proof.observedAt)]);
+          await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[identity.botId,requestId+':complete','stopped',{controlRequestId:requestId}]);
         });
       }finally{zeroizeBuffer(key);}
     });

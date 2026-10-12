@@ -8,6 +8,14 @@ const D=Decimal.clone({precision:200});
 export type GridControlAction='pause'|'resume'|'resync'|'stop'|'band';
 export const freshGridFact=(at:number,now:number)=>Number.isSafeInteger(at)&&at<=now&&now-at<=5000;
 const positive=(value:unknown)=>typeof value==='string'&&/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)&&new D(value).gt(0);
+/** Only an identity-bound entry cancel may coexist with a Stop close. Never replay it. */
+export function gridUnresolvedEntryCancel(op:{state:string;exact_request:ExactGridRequest;exact_request_digest:string},identity:{botId:string;account:string;masterAccount:string}){
+  const r=op.exact_request,original=r?.authority?.originalRequest as ExactGridRequest|undefined;
+  return ['submitted','unconfirmed'].includes(op.state)&&r?.kind==='cancel'&&requestDigest(r)===op.exact_request_digest
+    &&r.botId===identity.botId&&r.account===identity.account&&r.masterAccount===identity.masterAccount
+    &&original?.kind==='limit'&&original.data.reduce_only===false&&original.botId===r.botId
+    &&original.account===r.account&&original.masterAccount===r.masterAccount&&original.data.symbol===r.data.symbol;
+}
 export function gridEntrySafety(input:{sol:string|null;solObservedAt:number|null;failures:number;mark:GridObservation['mark']},now:number){
   const sol=input.solObservedAt!==null&&freshGridFact(input.solObservedAt,now)?input.sol:null;
   const wallet=gridWalletEntryGate(sol),reasons:string[]=[];

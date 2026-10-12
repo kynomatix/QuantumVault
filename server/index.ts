@@ -1005,11 +1005,10 @@ registerRequestTrace(app);
         log('[Background ownership] AI Trader monitor and scanner suppressed: REPLIT_DEPLOYMENT is not exactly 1');
       } else {
       // ~77s: AI Trader monitor (WO-6): startup reconciliation + 15s
-      // Grid remains hard disabled until Unit 6 completes the stop path.
-      const { GRID_WORKER_ENABLED } = await import('./grid-bot/service');
-      if (GRID_WORKER_ENABLED && isSchemaCapabilityReady('grid_bot')) {
+      // Owner notifications run independently; the runtime keeps the money worker hard disabled.
+      if (isSchemaCapabilityReady('grid_bot')) {
         await startObservedBackgroundComponent({component:'grid-bot-monitor',
-          announce:()=>log('[Grid] Starting supervised monitor'),
+          announce:()=>log('[Grid] Starting owner notification outbox (money worker remains gated)'),
           loadAndStart:async()=>{const {startGridBotMonitor}=await import('./grid-bot/monitor-runtime');await startGridBotMonitor();}});
       }
       // close-detection tick + graduation sweep. Dynamic import keeps the

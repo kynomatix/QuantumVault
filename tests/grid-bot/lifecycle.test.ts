@@ -25,7 +25,7 @@ function fixture(action:string|null='stop'){
   const monitor={launch,snapshot:vi.fn(async()=>({bot,operations})),reconcile:vi.fn(async()=>({entriesAllowed:true}))};
   const storage={monitor,state:vi.fn(async()=>({bot,life})),request:vi.fn(async(_wallet:string,_id:string,_key:string,act:string,evidence:any)=>{life={action:act,epoch:'2',active_request:randomUUID(),state:'pending',evidence};bot.status=act==='stop'?'stopping':'pausing';return life;}),blocked:vi.fn(async()=>{}),sol:vi.fn(async()=>{}),safetyObservation:vi.fn(async()=>{}),complete:vi.fn(async()=>{})};
   const proof:GridSettlementFact={account:claim.account,masterAccount:claim.masterAccount,observedAt:now,balance:'0',withdrawable:'0',settlementComplete:true,source:'EXAMPLE_REVIEWED',recycler:recycler()};
-  const deps={storage,observe:vi.fn(async()=>observation),send:vi.fn(async()=>({rateLimited:false})),recover:vi.fn(async()=>({state:'unknown' as const})),sol:vi.fn(async()=>({balance:'0.1',observedAt:now})),resume:vi.fn(async()=>null),settlement:vi.fn(async()=>proof),recycle:vi.fn(async()=>{})};
+  const deps={storage,observe:vi.fn(async()=>observation),send:vi.fn(async(_claim:unknown,_request:ExactGridRequest)=>({rateLimited:false})),recover:vi.fn(async(_claim:unknown,_op:any)=>({state:'unknown' as const})),sol:vi.fn(async()=>({balance:'0.1',observedAt:now})),resume:vi.fn(async()=>null),settlement:vi.fn(async()=>proof),recycle:vi.fn(async()=>{})};
   const service=new GridLifecycleService(deps as unknown as GridLifecycleDeps);
   const own=(reduceOnly=false)=>{request.data.reduce_only=reduceOnly;request.data.side=reduceOnly?'ask':'bid';order.reduceOnly=reduceOnly;order.side=reduceOnly?'short':'long';observation.orders=[order];operations.push({id:randomUUID(),state:'confirmed',exact_request:request,exact_request_digest:requestDigest(request),venue_order_id:order.orderId,level_id:request.authority.levelId});};
   return {claim,request,order,bot,observation,operations,launch,monitor,storage,deps,service,proof,own,get life(){return life;}};
@@ -50,6 +50,25 @@ describe('Grid lifecycle boundary and failure drills',()=>{
   it('orphan orders block cancellation and all sweep work',async()=>{const f=fixture();f.observation.orders=[f.order];expect(gridOwnedLive([],f.observation)[0].operation).toBeNull();expect(await f.service.tick(f.claim,signal())).toBe('unrelated_order_requires_review');expect(f.deps.send).not.toHaveBeenCalled();expect(f.deps.settlement).not.toHaveBeenCalled();});
   it('risk-denied stop keeps exits and sends only the exact reduce-only residual',async()=>{const f=fixture();f.own(true);f.bot.consecutive_failures=9;f.bot.sol_balance='0';f.observation.position!.size='0.02';f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});await f.service.tick(f.claim,signal());expect(f.deps.send).toHaveBeenCalledWith(f.claim,expect.objectContaining({kind:'close',data:expect.objectContaining({amount:'0.02',side:'ask',reduce_only:true,slippage_percent:'0.5'})}));});
   it('close uncertainty blocks another close after restart',async()=>{const f=fixture();await f.service.tick(f.claim,signal());expect(await new GridLifecycleService(f.deps as unknown as GridLifecycleDeps).tick(f.claim,signal())).toBe('venue_operation_unresolved');expect(f.deps.send).toHaveBeenCalledOnce();expect(f.deps.recycle).not.toHaveBeenCalled();});
+  it.each(['long','short'] as const)('%s unresolved entry cancel cannot wedge a stop close or hide a later fill',async direction=>{
+    const f=fixture();f.bot.direction=direction;f.observation.position!.direction=direction;f.own();
+    if(direction==='short'){f.request.data.side='ask';f.order.side='short';f.operations[0].exact_request_digest=requestDigest(f.request);}
+    await f.service.tick(f.claim,signal()); // The cancel send does not land.
+    const cancel=f.operations.find(op=>op.exact_request.kind==='cancel');
+    expect(cancel.state).toBe('unconfirmed');
+    await f.service.tick(f.claim,signal());
+    expect(f.deps.send).toHaveBeenLastCalledWith(f.claim,expect.objectContaining({kind:'close',data:expect.objectContaining({reduce_only:true,side:direction==='long'?'ask':'bid',amount:'1'})}));
+    const close=f.operations.find(op=>op.exact_request.kind==='close');
+    // An uncertain close is not replayed even though the cancel is also unresolved.
+    expect(await f.service.tick(f.claim,signal())).toBe('venue_operation_unresolved');expect(f.deps.send).toHaveBeenCalledTimes(2);
+    f.deps.recover.mockImplementation(async(_claim:any,op:any)=>op.id===close.id?{state:'confirmed',requestDigest:op.exact_request_digest,releaseSlot:true} as never:{state:'unknown'});
+    f.observation.position!.size='0';await f.service.tick(f.claim,signal());
+    expect(await f.service.tick(f.claim,signal())).toBe('venue_operation_unresolved');expect(f.deps.recycle).not.toHaveBeenCalled();expect(f.deps.settlement).not.toHaveBeenCalled();
+    // The same pending stop reconciles and closes a later fill of the still-resting entry.
+    f.observation.position!.size='0.25';await f.service.tick(f.claim,signal());
+    expect(f.monitor.reconcile).toHaveBeenCalled();expect(f.deps.send).toHaveBeenLastCalledWith(f.claim,expect.objectContaining({kind:'close',data:expect.objectContaining({amount:'0.25',reduce_only:true})}));
+    expect(f.deps.send.mock.calls.filter(c=>c[1].kind==='cancel')).toHaveLength(1);expect(cancel.state).toBe('unconfirmed');expect(f.deps.recycle).not.toHaveBeenCalled();
+  });
   it('resume reconciles and denies missing current authority',async()=>{const f=fixture('resume');expect(await f.service.tick(f.claim,signal())).toBe('resume_authority_unavailable');expect(f.monitor.reconcile).toHaveBeenCalledOnce();expect(f.storage.complete).not.toHaveBeenCalled();expect(f.deps.send).not.toHaveBeenCalled();});
   it('resume cannot bypass unresolved inventory',async()=>{const f=fixture('resume');f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});expect(await f.service.tick(f.claim,signal())).toBe('reconciliation_required');expect(f.deps.resume).not.toHaveBeenCalled();});
   it('re-sync reconciles without silently resuming entries',async()=>{const f=fixture('resync');expect(await f.service.tick(f.claim,signal())).toBe('paused');expect(f.storage.complete).toHaveBeenCalledWith(f.claim,f.life.active_request,'paused');});

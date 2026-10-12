@@ -7,6 +7,13 @@ vi.mock('../../server/grid-bot/draft-default-deps',()=>({}));
 import {registerGridBotRoutes} from '../../server/grid-bot/draft-routes';
 import {GridStorageError} from '../../server/grid-bot/storage';
 describe('Grid owner controls while entry gates are disabled',()=>{
+  it('keeps owner-scoped live reads available with the draft flag off',async()=>{
+    const id=randomUUID(),getBotSnapshot=vi.fn(async(wallet:string,bot:string,surface?:boolean)=>{if(wallet!=='EXAMPLE_OWNER'||bot!==id)throw new GridStorageError('not_found');return {surface:{bot:{id},startEnabled:false,workerEnabled:false}};}),listBots=vi.fn(async()=>[]);
+    const app=express();registerGridBotRoutes(app,(req,res,next)=>{if(!req.headers['x-wallet']){res.status(401).end();return;}(req as any).walletAddress=req.headers['x-wallet'];next();},{deps:{} as never,storage:{getBotSnapshot,listBots} as never,enabled:()=>false});
+    const server=app.listen(0);await new Promise<void>(r=>server.once('listening',r));const url='http://127.0.0.1:'+(server.address() as AddressInfo).port+'/api/grid-bots',headers={'x-wallet':'EXAMPLE_OWNER'};
+    try{expect((await fetch(url,{headers})).status).toBe(200);const r=await fetch(url+'/'+id+'/surface',{headers});expect(r.status).toBe(200);expect(await r.json()).toMatchObject({startEnabled:false,workerEnabled:false});expect(getBotSnapshot).toHaveBeenCalledWith('EXAMPLE_OWNER',id,true);expect((await fetch(url+'/'+id+'/surface')).status).toBe(401);expect((await fetch(url+'/'+id+'/surface',{headers:{'x-wallet':'EXAMPLE_OTHER'}})).status).toBe(404);expect((await fetch(url+'/bad/surface',{headers})).status).toBe(400);expect((await fetch(url+'/'+id+'/chart?timeframe=bad',{headers})).status).toBe(400);expect((await fetch(url+'/status',{headers})).status).toBe(200);}
+    finally{await new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve()));}
+  });
   it('authenticates, validates strict identity, scopes owner, and accepts all four controls with no venue action',async()=>{
     const request=vi.fn(async(wallet:string,_bot:string,_key:string,_action:string)=>{if(wallet!=='EXAMPLE_OWNER')throw new GridStorageError('not_found');return {state:'pending',id:randomUUID()};});
     const app=express();app.use(express.json());registerGridBotRoutes(app,(req,res,next)=>{const wallet=req.headers['x-wallet'];if(!wallet){res.status(401).end();return;}(req as any).walletAddress=wallet;next();},{deps:{} as never,storage:{} as never,enabled:()=>false,lifecycle:{request} as never});

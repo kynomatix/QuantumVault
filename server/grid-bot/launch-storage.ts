@@ -3,7 +3,7 @@ import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
 import type {Pool,PoolClient} from 'pg';
 import {requireSchemaCapabilityReady} from '../schema-readiness';
-import {gridEntrySafety,freshGridFact} from './lifecycle-policy';
+import {gridEntrySafety,freshGridFact,gridUnresolvedEntryCancel} from './lifecycle-policy';
 import {gridRecyclerGate} from './runtime-policy';
 export const canonicalRequest=(x:unknown):string=>JSON.stringify(x,(_,v)=>v && typeof v==='object' && !Array.isArray(v)
   ? Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
@@ -124,7 +124,11 @@ export class GridLaunchStorage {
       if(request.kind==='sweep'&&(!monitor?.fresh||monitor.blocked_reasons.length||monitor.observation?.position?.size==null
         ||!new Decimal(monitor.observation.position.size).isZero()||request.data.to_account!==request.masterAccount||request.authority.settlementComplete!==true))throw Error('Sweep settlement authority unavailable');
       if(!reductionAuthority(request,monitor,now))throw Error('Grid reduction authority unavailable');
-      if((await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[request.botId])).rowCount)throw Error('Unresolved operation barrier');
+      const unresolved=(await c.query("SELECT * FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[request.botId])).rows;
+      if(unresolved.length&&!(request.kind==='close'&&request.data.reduce_only===true&&bot.status==='stopping'
+        &&lifecycle?.active_request===request.authority.controlRequestId
+        &&(await c.query("SELECT id FROM grid_control_requests WHERE id=$1 AND bot_id=$2 AND action='stop' AND state='pending'",[lifecycle.active_request,request.botId])).rowCount
+        &&unresolved.every(op=>gridUnresolvedEntryCancel(op,request))))throw Error('Unresolved operation barrier');
       if(!Number.isSafeInteger(claim.observedAt) || !Number.isSafeInteger(claim.expiresAt) || claim.observedAt>now || claim.expiresAt<=now
         || claim.expiresAt-claim.observedAt>5000 || request.timestamp>now || request.timestamp+request.expiryMs<=now)throw Error('Stale admission');
       if(new Date(master.backoff_until).getTime()>now)throw new GridLaunchTransientError('Durable Grid rate-limit backoff');

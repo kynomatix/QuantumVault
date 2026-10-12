@@ -5,7 +5,7 @@ import {GridLifecycleStorage} from './lifecycle-storage';
 import {GridExecution,type GridReconciliation} from './execution';
 import {requestDigest,type ExactGridRequest,type DurableGridOperation} from './launch-storage';
 import type {GridObservation} from './reconciliation';
-import {gridOwnedLive,gridRiskTrigger,freshGridFact,gridEntrySafety} from './lifecycle-policy';
+import {gridOwnedLive,gridRiskTrigger,freshGridFact,gridEntrySafety,gridUnresolvedEntryCancel} from './lifecycle-policy';
 import {preflightGridLaunch,type LaunchFacts} from './provision';
 import type {GridPolicy} from './policy-hmac';
 import {gridRecyclerGate} from './runtime-policy';
@@ -58,11 +58,18 @@ export class GridLifecycleService {
     await s.sol(claim,sol);({bot,life}=await s.state(claim));
     const snapshot=await monitor.snapshot(claim);
     // Recover uncertain requests first. Acknowledgments and disappearance are never terminal facts.
+    let unresolvedEntryCancel=false;
     for(const op of snapshot.operations.filter(op=>['prepared','submitted','unconfirmed'].includes(op.state))){
       if(!op.exact_request||requestDigest(op.exact_request)!==op.exact_request_digest)return block('operation_identity_unavailable');
       if(op.state==='prepared'){await launch.expirePrepared(op,claim.leaseToken);return block('prepared_operation_pending');}
       const result=await this.deps.recover(claim,op,signal);signal.throwIfAborted();
-      if(result.state==='unknown'||result.requestDigest!==op.exact_request_digest)return block('venue_operation_unresolved');
+      if(result.state==='unknown'||result.requestDigest!==op.exact_request_digest){
+        if(life?.state==='pending'&&life.action==='stop'&&bot.status==='stopping'
+          &&gridUnresolvedEntryCancel(op,{botId:claim.id,account:claim.account,masterAccount:claim.masterAccount})){
+          unresolvedEntryCancel=true;continue;
+        }
+        return block('venue_operation_unresolved');
+      }
       await launch.settle(op,{state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':'venue_rejection',releaseSlot:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus},claim.leaseToken);
       return block('recovered_reobserve_required');
     }
@@ -81,7 +88,7 @@ export class GridLifecycleService {
       return execution.run('control:'+life.active_request+':'+randomUUID(),r,{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},claim.leaseToken);
     };
     const cancel=async(target:NonNullable<typeof entry>)=>act('cancel',{symbol:target.order.symbol,order_id:target.order.orderId},{levelId:target.operation!.level_id,originalRequest:target.operation!.exact_request});
-    if(entry)return cancel(entry);
+    if(entry&&!unresolvedEntryCancel)return cancel(entry);
     // Preserve all backed reduce-only exits while pausing. Orphans require owner investigation.
     if(orphan)return block('unrelated_order_requires_review');
     if(life.action==='pause'||life.action==='band'){
@@ -117,6 +124,8 @@ export class GridLifecycleService {
       // Existing protective exits remain in place until a confirmed reduce-only close leaves zero.
       return act('close',{symbol:observation.symbol,side:bot.direction==='long'?'ask':'bid',amount:observation.position.size,reduce_only:true,slippage_percent:'0.5',client_order_id:randomUUID()},{});
     }
+    // Flat now is not terminal: the retained entry may still fill on a later tick.
+    if(unresolvedEntryCancel)return block('venue_operation_unresolved');
     const exit=owned.find(x=>x.operation);if(exit)return cancel(exit);
     if(!reconciled.entriesAllowed)return block('terminal_history_unavailable');
     const settlement=await this.deps.settlement(claim,signal);

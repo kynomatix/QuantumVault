@@ -35,7 +35,7 @@ export class GridLifecycleStorage {
         DO UPDATE SET epoch=grid_lifecycle.epoch+1,active_request=EXCLUDED.active_request,blocker=NULL,terminal_proof=NULL`,[botId,id]);
       await c.query('UPDATE grid_bots SET status=$2,pause_reason=$3,updated_at=clock_timestamp() WHERE id=$1',[botId,status,action==='band'?'range_exhausted':action]);
       await c.query('UPDATE grid_monitor_state SET boot_id=NULL,generation=generation+1 WHERE bot_id=$1',[botId]);
-      if(source==='risk')await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[botId,id,action,evidence]);
+      await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[botId,id,action,evidence]);
       return bind(row);
     });
   }
@@ -76,6 +76,7 @@ export class GridLifecycleStorage {
       if((await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[claim.id])).rowCount)throw new GridStorageError('conflict');
       await c.query("UPDATE grid_control_requests SET state='complete',completed_at=clock_timestamp() WHERE id=$1 AND state='pending'",[requestId]);
       await c.query('UPDATE grid_bots SET status=$2,updated_at=clock_timestamp() WHERE id=$1',[claim.id,status]);
+      await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[claim.id,requestId+':complete',status,{controlRequestId:requestId}]);
       await c.query('UPDATE grid_lifecycle SET blocker=NULL WHERE bot_id=$1',[claim.id]);
     });
   }

@@ -3,6 +3,8 @@ import Decimal from 'decimal.js';
 import type { Pool, PoolClient } from 'pg';
 import { requireSchemaCapabilityReady } from '../schema-readiness';
 import type { GridPolicy, SignedGridLevel } from './policy-hmac';
+import {gridSurface} from './surface';
+import type {GridBotSurface} from '../../shared/grid-surface';
 
 /** Trusted reconciliation must supply operation-specific terminal facts; a fill alone is never terminal proof. */
 export interface GridOperationConfirmation {
@@ -68,7 +70,7 @@ export class GridStorage {
     await this.readiness(); const r = await this.pool.query("SELECT * FROM grid_bots WHERE wallet_address=$1 AND ($2 OR status <> 'stopped') ORDER BY created_at DESC,id", [wallet,includeStopped]);
     return r.rows.map(botRow);
   }
-  async getBotSnapshot(wallet: string, id: string): Promise<{ bot: StoredBot; levels: StoredLevel[]; operations: Record<string,unknown>[] }> {
+  async getBotSnapshot(wallet: string, id: string, withSurface=false): Promise<{ bot: StoredBot; levels: StoredLevel[]; operations: Record<string,unknown>[]; surface?:GridBotSurface }> {
     return this.transaction(async c => {
       // One MVCC snapshot for the bot, geometry and unresolved operations.
       await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
@@ -78,7 +80,14 @@ export class GridStorage {
       const o = await c.query("SELECT * FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed') ORDER BY prepared_at,id",[id]);
       const bot = botRow(b.rows[0]);
       if (l.rows.length !== bot.gridCount + 1 || !l.rows.every((v, i) => v.ordinal === i + 1 && decimal(v.price) && decimal(v.size) && decimal(v.cumulative_filled_size))) throw new GridStorageError('invariant');
-      return { bot, levels: l.rows.map(v => row<StoredLevel>(v)), operations: o.rows.map(v => row<Record<string,unknown>>(v)) };
+      const snapshot={ bot, levels: l.rows.map(v => row<StoredLevel>(v)), operations: o.rows.map(v => row<Record<string,unknown>>(v)) };
+      if(!withSurface)return snapshot;
+      const monitor=(await c.query('SELECT * FROM grid_monitor_state WHERE bot_id=$1',[id])).rows[0];
+      const life=(await c.query('SELECT l.blocker,r.action,r.state FROM grid_lifecycle l LEFT JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[id])).rows[0];
+      const events=(await c.query(`SELECT count(*) FILTER (WHERE delivered_at IS NULL AND evidence->'notificationDelivery' IS NULL)::int AS pending,
+        count(*) FILTER (WHERE delivered_at IS NULL AND evidence->'notificationDelivery' IS NOT NULL)::int AS uncertain FROM grid_risk_events WHERE bot_id=$1`,[id])).rows[0];
+      const fills=(await c.query('SELECT trade_id,venue_time,leg,size::text,price::text FROM grid_exact_fills WHERE bot_id=$1 ORDER BY venue_time DESC,trade_id DESC LIMIT 100',[id])).rows;
+      return {...snapshot,surface:gridSurface({...snapshot,fills},monitor,life,events)};
     });
   }
   async listFills(wallet: string, id: string, limit: number, cursor: { time: string; trade: string } | null) {

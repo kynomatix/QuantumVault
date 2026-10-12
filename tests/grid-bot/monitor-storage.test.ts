@@ -1,4 +1,5 @@
 import {GridLifecycleStorage} from '../../server/grid-bot/lifecycle-storage';
+import {GridNotifications} from '../../server/grid-bot/notifications';
 import {beforeAll,afterAll,beforeEach,describe,it,expect} from 'vitest';
 import {Pool} from 'pg';
 import {randomUUID} from 'node:crypto';
@@ -42,6 +43,32 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   }
   async function landed(){const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false,orderId:'10'});return f;}
   it('keeps production start and worker gates disabled',()=>{expect(GRID_START_ROUTE_ENABLED).toBe(false);expect(GRID_WORKER_ENABLED).toBe(false);});
+  it('admits only an authoritative stop close past an uncertain owned entry cancel',async()=>{
+    const f=await landed(),control=new GridLifecycleStorage(storage),stop=await control.request(wallet,f.bot.id,randomUUID(),'stop');
+    await control.safetyObservation(f.claim,f.observe());const life=(await control.state(f.claim)).life,now=Date.now();
+    const admission={credits:'10',slots:0 as const,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000};
+    const cancel:ExactGridRequest={...f.request,kind:'cancel',path:'/orders/cancel',operationType:'cancel_order',timestamp:now,data:{symbol:'BTC',order_id:'10'},authority:{lifecycleEpoch:life.epoch,controlRequestId:stop.id,levelId:f.level.id,originalRequest:f.request}};
+    const cancelOp=await launch.prepare('EXAMPLE_CANCEL',cancel,admission,f.claim.leaseToken);expect(await launch.submit(cancelOp,f.claim.leaseToken)).toBe(true);await launch.settle(cancelOp,{state:'unconfirmed',reason:'unknown',releaseSlot:false},f.claim.leaseToken);
+    const close:ExactGridRequest={...cancel,kind:'close',path:'/orders/create_market',operationType:'create_market_order',data:{symbol:'BTC',side:'ask',amount:'0.98',reduce_only:true,slippage_percent:'0.5',client_order_id:randomUUID()},authority:{lifecycleEpoch:life.epoch,controlRequestId:stop.id}};
+    await expect(launch.prepare('EXAMPLE_WRONG_STOP',{...close,authority:{...close.authority,controlRequestId:randomUUID()}},admission,f.claim.leaseToken)).rejects.toThrow('Unresolved');
+    await expect(launch.prepare('EXAMPLE_NOT_REDUCING',{...close,data:{...close.data,reduce_only:false}},admission,f.claim.leaseToken)).rejects.toThrow();
+    const op=await launch.prepare('EXAMPLE_CLOSE',close,admission,f.claim.leaseToken);expect(await launch.submit(op,f.claim.leaseToken)).toBe(true);await launch.settle(op,{state:'unconfirmed',reason:'unknown',releaseSlot:false},f.claim.leaseToken);
+    await expect(launch.prepare('EXAMPLE_CLOSE_REPLAY',{...close,data:{...close.data,client_order_id:randomUUID()}},admission,f.claim.leaseToken)).rejects.toThrow('Unresolved');
+    expect((await pool.query('SELECT state FROM grid_operations WHERE id=$1',[cancelOp.id])).rows[0].state).toBe('unconfirmed');
+  });
+  it('claims owner notification events once across concurrent workers and uncertain delivery restart',async()=>{
+    const f=await landed(),control=new GridLifecycleStorage(storage),requestId=randomUUID();
+    await control.request(wallet,f.bot.id,requestId,'pause');await control.request(wallet,f.bot.id,requestId,'pause');let calls=0;
+    const send=async(recipient:string)=>{expect(recipient).toBe(wallet);calls++;throw Error('EXAMPLE_ACK_LOST');};
+    await Promise.all([new GridNotifications(pool,send).deliverNext(),new GridNotifications(pool,send).deliverNext()]);expect(calls).toBe(1);
+    expect(await new GridNotifications(pool,send).deliverNext()).toBe(false);expect(calls).toBe(1);
+    const snapshot=await new GridStorage(pool,async()=>{}).getBotSnapshot(wallet,f.bot.id,true);expect(snapshot.surface?.notifications).toEqual({pending:0,uncertain:1});expect(snapshot.surface?.bot.status).toBe('pausing');
+    await expect(new GridStorage(pool,async()=>{}).getBotSnapshot('EXAMPLE_OTHER',f.bot.id,true)).rejects.toThrow('not_found');
+    await control.complete(f.claim,(await control.state(f.claim)).life.active_request,'paused');
+    expect(await new GridNotifications(pool,async()=>{calls++;return 'sent';}).deliverNext()).toBe(true);expect(calls).toBe(2);
+    expect((await pool.query('SELECT count(*) AS n FROM grid_risk_events WHERE delivered_at IS NOT NULL')).rows[0].n).toBe('1');
+    expect((await storage.snapshot(f.claim)).operations).toHaveLength(1);
+  });
   it('repeat boot avoids DDL locks and preserves exact columns',async()=>{const c=await pool.connect();await c.query('BEGIN');await c.query('LOCK TABLE grid_exact_fills IN ACCESS SHARE MODE');try{await pool.query("SET lock_timeout='500ms'");await pool.query(migrations[2]);}finally{await c.query('ROLLBACK');c.release();}
     const source=readFileSync(new URL('../../server/db.ts',import.meta.url),'utf8');expect(source.replaceAll('\r\n','\n')).toContain(migrations[2].trim().replaceAll('\r\n','\n'));expect(source).toContain('188-grid-monitor-ledger');
   });
@@ -148,7 +175,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     const stop=await control.request(wallet,f.bot.id,randomUUID(),'stop',{price:'80'},'risk',f.claim);
     expect((await control.state(f.claim)).life).toMatchObject({epoch:'2',active_request:stop.id});
     expect((await pool.query('SELECT state FROM grid_control_requests WHERE id=$1',[pause.id])).rows[0].state).toBe('superseded');
-    expect((await pool.query('SELECT evidence FROM grid_risk_events')).rows[0].evidence).toEqual({price:'80'});
+    expect((await pool.query('SELECT evidence FROM grid_risk_events WHERE event_key=$1',[stop.id])).rows[0].evidence).toEqual({price:'80'});
     await expect(control.request(wallet,f.bot.id,randomUUID(),'resume')).rejects.toThrow('conflict');
     await expect(control.complete(f.claim,pause.id,'paused')).rejects.toThrow('conflict');
   });

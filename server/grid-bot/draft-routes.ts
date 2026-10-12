@@ -39,7 +39,7 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
       lifecycle=new GridLifecycleStorage(new GridMonitorStorage(new GridLaunchStorage(pool)));}
     const result=await lifecycle.request(wallet(req),id.data,body.data.requestId,action,{requestedBy:'owner'});res.status(result.state==='complete'?200:202).json({request:result});
   }));
-  app.get('/api/grid-bots/status',requireWallet,(_req,res)=>{res.json({enabled:enabled(),draftOnly:true});});
+  app.get('/api/grid-bots/status',requireWallet,(_req,res)=>{res.json({enabled:enabled(),draftOnly:true,startEnabled:false,workerEnabled:false});});
   app.get('/api/grid-bots/create-policy',requireWallet,gate,(_req,res)=>{res.json(GRID_CREATE_POLICY);});
   app.get('/api/grid-bots/markets',requireWallet,gate,work(async(_req,res)=>{
     const markets=await defaultPlannerDeps.getMarkets();res.json({markets:markets.map(m=>({market:m.internalSymbol,name:m.fullName}))});
@@ -69,10 +69,22 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
     const id=uuid.safeParse(req.params.clientRequestId);if(!id.success){res.status(400).json({error:'Invalid request identity'});return;}
     const {storage}=await runtime(),bot=await storage.findByClientRequest(wallet(req),id.data);if(!bot){res.status(404).json({error:'not_found'});return;}res.json({bot,pnlLabel:'Excludes funding'});
   }));
-  app.get('/api/grid-bots',requireWallet,gate,work(async(req,res)=>{
+  app.get('/api/grid-bots',requireWallet,work(async(req,res)=>{
     const q=z.object({includeStopped:z.enum(['true','false']).optional()}).strict().safeParse(req.query);if(!q.success){res.status(400).json({error:'Invalid list filters'});return;}
     const {storage}=await runtime();res.json({bots:await storage.listBots(wallet(req),q.data.includeStopped==='true'),pnlLabel:'Excludes funding'});
   }));
+  app.get('/api/grid-bots/:id/surface',requireWallet,work(async(req,res)=>{
+    if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}
+    const {storage}=await runtime(),snapshot=await storage.getBotSnapshot(wallet(req),req.params.id,true);res.json(snapshot.surface);
+  }));
+  app.get('/api/grid-bots/:id/chart',requireWallet,work(async(req,res)=>{
+    if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}
+    const q=z.object({timeframe:z.enum(['15m','1h','4h'])}).strict().safeParse(req.query);
+    if(!q.success){res.status(400).json({error:'Invalid chart timeframe'});return;}
+    const {storage}=await runtime(),snapshot=await storage.getBotSnapshot(wallet(req),req.params.id);
+    const controller=new AbortController();res.once('close',()=>controller.abort());
+    res.json(await charts.read(snapshot.bot.market,q.data.timeframe,100,controller.signal));
+  },true));
   app.get('/api/grid-bots/:id/fills',requireWallet,gate,work(async(req,res)=>{
     const q=z.object({limit:z.string().regex(/^\d+$/).optional(),cursor:z.string().max(512).optional()}).strict().safeParse(req.query);
     if(!q.success || !uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid fill request'});return;}

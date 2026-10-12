@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GridPlannerCard } from '../../client/src/components/grid-planner/GridPlannerCard';
+import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, isPlannerMarket, isPlannerChart, isPlannerPreview,
   PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline } from '../../client/src/lib/grid-planner-view';
 import { previewGrid } from '../../server/grid-planner/preview';
@@ -51,10 +52,11 @@ describe('Planner client authority boundaries', () => {
     expect(clientObservationDeadline(now + 60_000, now, 1000)).toBe(61_000);
     expect(clientObservationDeadline(now - 1, now, 1000)).toBe(1000);
   });
-  it('unauthenticated and unconfirmed feature states render the original coming-soon card', () => {
+  it('planner flags coexist with a truthful Grid surface and never offer a live start', () => {
     for (const props of [{ authenticated: false, identity: null }, { authenticated: true, identity: 'EXAMPLE' }]) {
       const html = renderToStaticMarkup(createElement(GridPlannerCard, props));
-      expect(html).toContain('card-grid-bot-coming-soon'); expect(html).toContain('Coming soon'); expect(html).not.toContain('Open Planner');
+      expect(html).toBe('');
+      const live=renderToStaticMarkup(createElement(GridDraftCard,props));expect(live).toContain('card-grid-bot');expect(live).toContain('Live start and worker are disabled');expect(live).toContain('PnL excludes funding');expect(live).not.toContain('Coming soon');expect(live).not.toContain('Start bot');
     }
     expect(readableDecimal('123456.000001')).toBe('123,456.000001');
   });

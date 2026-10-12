@@ -1,19 +1,40 @@
 import React,{useEffect,useRef,useState} from 'react';
-import { Button } from '@/components/ui/button';
-import { Card,CardContent,CardHeader,CardTitle } from '@/components/ui/card';
-import { walletAuthHeaders } from '@/lib/queryClient';
-import { readableGridNumber } from '@/lib/grid-draft-view';
-import { GridCreateSheet } from './GridCreateSheet';
-export function GridDraftCard({authenticated,identity}:{authenticated:boolean;identity:string|null}) {
-  const [enabled,setEnabled]=useState(false),[open,setOpen]=useState(false),[bots,setBots]=useState<Record<string,unknown>[]>([]),[detail,setDetail]=useState<Record<string,unknown>|null>(null);
-  const epoch=useRef(0);
-  const refresh=async()=>{const current=epoch.current;try{const r=await fetch('/api/grid-bots',{credentials:'include',headers:walletAuthHeaders()});if(!r.ok)return;const data=await r.json();if(current===epoch.current)setBots(data.bots);}catch{}};
-  const inspect=async(id:string)=>{const current=epoch.current;try{const r=await fetch('/api/grid-bots/'+id,{credentials:'include',headers:walletAuthHeaders()});if(!r.ok)return;const data=await r.json();if(current===epoch.current)setDetail(data.bot);}catch{}};
-  useEffect(()=>{epoch.current++;setEnabled(false);setOpen(false);setBots([]);setDetail(null);if(!authenticated)return;const c=new AbortController();fetch('/api/grid-bots/status',{credentials:'include',headers:walletAuthHeaders(),signal:c.signal}).then(async r=>{if(!r.ok)return;const d=await r.json();if(c.signal.aborted)return;setEnabled(d.enabled===true);if(d.enabled===true)void refresh();}).catch(()=>{});return()=>{c.abort();epoch.current++;};},[authenticated,identity]);
-  if(!enabled)return null;
-  return <Card><CardHeader><CardTitle>Pacifica Grid drafts</CardTitle></CardHeader><CardContent className="space-y-3"><p className="text-sm text-muted-foreground">Save a range and review its costs. Drafts do not trade.</p><Button onClick={()=>setOpen(true)}>Create Grid draft</Button>
-    {bots.map(bot=><Button className="block" variant="outline" key={String(bot.id)} onClick={()=>void inspect(String(bot.id))}>{String(bot.market)} · {String(bot.status)}</Button>)}
-    {detail?<dl className="grid grid-cols-2 gap-2 text-sm"><dt>Range</dt><dd>{readableGridNumber(String(detail.lowerPrice))}–{readableGridNumber(String(detail.upperPrice))}</dd><dt>Investment</dt><dd>${readableGridNumber(String(detail.totalInvestment),2)}</dd><dt>Stop</dt><dd>{readableGridNumber(typeof detail.stopLossPrice==='string'?detail.stopLossPrice:null)}</dd><dt>Direction / intervals</dt><dd>{String(detail.direction)} / {String(detail.gridCount)}</dd><dt>Status</dt><dd>{String(detail.status)}</dd></dl>:null}
-    <GridCreateSheet key={identity??'anonymous'} open={open} onOpenChange={setOpen} onSaved={()=>void refresh()}/>
+import {Button} from '@/components/ui/button';
+import {Card,CardContent,CardHeader,CardTitle} from '@/components/ui/card';
+import {walletAuthHeaders} from '@/lib/queryClient';
+import {GridReadOrder} from '@/lib/grid-live-view';
+import type {GridBotSummary} from '../../../../shared/grid-surface';
+import type {GridIntent} from '../../../../shared/grid-draft';
+import {GridCreateSheet} from './GridCreateSheet';
+import {GridBotDrawer} from './GridBotDrawer';
+export const gridJson=async(path:string,options:RequestInit={})=>{
+  const r=await fetch('/api/grid-bots'+path,{...options,credentials:'include',headers:{...walletAuthHeaders(),'Content-Type':'application/json',...options.headers}});
+  const body=await r.json();if(!r.ok)throw Error(body.error??'Grid request unavailable');return body;
+};
+export function GridDraftCard({authenticated,identity}:{authenticated:boolean;identity:string|null}){
+  return <GridCollection key={String(authenticated)+identity} authenticated={authenticated} identity={identity}/>;
+}
+function GridCollection({authenticated,identity}:{authenticated:boolean;identity:string|null}){
+  const [enabled,setEnabled]=useState(false),[bots,setBots]=useState<GridBotSummary[]>([]),[selected,setSelected]=useState<string|null>(null),[error,setError]=useState('');
+  const [create,setCreate]=useState<{key:number;intent?:GridIntent}|null>(null),[refresh,setRefresh]=useState(0);
+  const order=useRef(new GridReadOrder());
+  useEffect(()=>{setBots([]);setEnabled(false);setSelected(null);setCreate(null);setError('');if(!authenticated||!identity)return;
+    const controller=new AbortController();const seq=order.current.next();
+    Promise.all([gridJson('/status',{signal:controller.signal}),gridJson('?includeStopped=true',{signal:controller.signal})]).then(([status,list])=>{
+      if(!controller.signal.aborted&&order.current.accepts(seq)){setEnabled(status.enabled===true);setBots(list.bots);}
+    }).catch(()=>{if(!controller.signal.aborted&&order.current.accepts(seq))setError('Grid bots unavailable. Retry to load current state.');});
+    return()=>{controller.abort();order.current.next();};
+  },[authenticated,identity,refresh]);
+  return <Card data-testid="card-grid-bot"><CardHeader><CardTitle className="text-amber-500">Pacifica Grid Bots</CardTitle></CardHeader><CardContent className="space-y-3">
+    <p className="text-sm text-muted-foreground">Live start and worker are disabled. PnL excludes funding.</p>
+    {!authenticated?<p className="text-sm">Connect your wallet to view your Grid bots.</p>:<>
+      <div className="flex flex-wrap gap-2">{enabled?<Button onClick={()=>setCreate({key:Date.now()})}>Create Grid draft</Button>:<span className="text-sm">Draft creation unavailable</span>}<Button variant="outline" onClick={()=>setRefresh(v=>v+1)}>Refresh bots</Button></div>
+      <p role="status" className="text-sm">{error||(!bots.length?'No Grid bots loaded.':'')}</p>
+      <div className="grid gap-3 sm:grid-cols-2">{bots.map(bot=><button key={bot.id} onClick={()=>setSelected(bot.id)} className="rounded-xl border p-4 text-left hover:bg-muted/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+        <span className="block font-medium">{bot.market} · {bot.direction}</span><span className="block text-sm capitalize">{bot.status.replaceAll('_',' ')}</span><span className="block text-xs text-muted-foreground">{bot.lowerPrice} – {bot.upperPrice} · {bot.gridCount} intervals</span><span className="block text-xs">Realised / unrealised PnL: UNKNOWN until details refresh · excludes funding</span>
+      </button>)}</div>
+    </>}
+    {selected&&identity?<GridBotDrawer key={identity+selected} id={selected} createEnabled={enabled} onClose={()=>{setSelected(null);setRefresh(v=>v+1);}} onAdjust={intent=>{setSelected(null);setCreate({key:Date.now(),intent});}}/>:null}
+    {create?<GridCreateSheet key={(identity??'anonymous')+create.key} open onOpenChange={open=>{if(!open)setCreate(null);}} initialIntent={create.intent} onSaved={()=>{setCreate(null);setRefresh(v=>v+1);}}/>:null}
   </CardContent></Card>;
 }
