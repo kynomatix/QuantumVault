@@ -5,7 +5,7 @@ import { GridPlannerCard } from '../../client/src/components/grid-planner/GridPl
 import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
-import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, isPlannerMarket, isPlannerChart, isPlannerPreview,
+import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, plannerLevelMessage, isPlannerMarket, isPlannerChart, isPlannerPreview,
   PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline, plannerRangeAround,
   proposedPlannerStop, plannerChartRange, plannerSizeHint, plannerShortcutReason, ORDER_SIZES, RANGE_PRESETS, type PlannerChart } from '../../client/src/lib/grid-planner-view';
 import { PlannerPriceRefresh, watchPlannerPrice } from '../../client/src/lib/planner-price-refresh';
@@ -163,12 +163,30 @@ describe('Planner client authority boundaries', () => {
     expect(isPlannerMarket({ ...market, reference: { state: 'available', value: { price: '0', observedAt: now, expiresAt: now + 60000 } } })).toBe(false);
     expect(isPlannerChart({ state: 'available', candles: [] })).toBe(false);
   });
-  it('only current, accepted requested geometry draws overlays; rejected and expired geometry clears', () => {
+  it('draws current server-calculated geometry, including diagnostic plans, and clears expired or absent geometry', () => {
     expect(plannerOverlays(preview, now + 60000, now)).toHaveLength(5);
     expect(plannerOverlays(preview, now + 60000, now + 60000)).toEqual([]);
-    expect(plannerOverlays({ ...preview, state: 'rejected' }, now + 60000, now)).toEqual([]);
-    expect(plannerOverlays({ ...preview, requestedPlan: null, minimumPlan: preview.requestedPlan }, now + 60000, now)).toEqual([]);
+    expect(plannerOverlays({ ...preview, state: 'rejected' }, now + 60000, now)).toHaveLength(5);
+    expect(plannerOverlays({ ...preview, requestedPlan: null, minimumPlan: preview.requestedPlan }, now + 60000, now)).toHaveLength(5);
+    expect(plannerOverlays({ ...preview, state: 'rejected', requestedPlan: null, minimumPlan: null }, now + 60000, now)).toEqual([]);
+    expect(plannerOverlays({ ...preview, state: 'unavailable' }, now + 60000, now)).toEqual([]);
     expect(plannerOverlays(null, now + 60000, now)).toEqual([]);
+  });
+  it('explains missing inputs, request errors, loading, expired observations and diagnostic level authority', () => {
+    const inputs = { market: 'BTC-PERP', lower: '80', upper: '120', investment: '1000', stop: '70' };
+    const message = (p: typeof preview | null, overrides = {}, loading = false, error = '') =>
+      plannerLevelMessage(p, now + 60000, now, { ...inputs, ...overrides }, loading, error);
+    expect(message(null, { market: '' })).toContain('Choose a market');
+    expect(message(null, { lower: '', upper: '', investment: '', stop: '' })).toContain('a lower price, an upper price, an investment amount, a stop price');
+    expect(message(null, {}, true)).toContain('Calculating grid levels');
+    expect(message(null, {}, false, 'Enter a valid fee percentage')).toContain('Enter a valid fee percentage');
+    expect(message(null)).toContain('Waiting for a grid preview');
+    expect(message({ ...preview, state: 'unavailable', validForMs: 0, requestedPlan: null, reasons: ['A fresh price is unavailable'] })).toContain('A fresh price is unavailable');
+    expect(plannerLevelMessage(preview, now, now, inputs, false, '')).toContain('Grid levels have expired');
+    expect(message(preview)).toContain('at your investment');
+    expect(message(preview)).toContain('Some checks are unavailable');
+    expect(message({ ...preview, state: 'rejected', requestedPlan: null, minimumPlan: preview.requestedPlan, reasons: ['Investment is too low'] })).toContain('at the minimum investment, not your entered investment');
+    expect(message({ ...preview, state: 'rejected', reasons: ['Assumed fee check failed'] })).toContain('Checks did not pass: Assumed fee check failed');
   });
   it('observation deadlines subtract transit and do not depend on client/server wall-clock agreement', () => {
     expect(clientObservationDeadline(now + 60_000, now, 1000)).toBe(61_000);

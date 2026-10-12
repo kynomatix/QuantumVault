@@ -34,6 +34,9 @@ function PriceCanvas({ chart, lines, range }: { chart: Extract<PlannerChart, { s
     series.applyOptions({ priceFormat: { type: 'price', precision, minMove: 10 ** -precision } });
     for (const line of lines) series.createPriceLine({ price: Number(line.price), color: line.role === 'entry' ? color('primary', 0.5) : color('chart-2', 0.5),
       lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `Level ${line.ordinal + 1}` });
+    if (lines.length) series.attachPrimitive({
+      autoscaleInfo: () => ({ priceRange: { minValue: Number(lines[0].price), maxValue: Number(lines[lines.length - 1].price) } }),
+    });
     if (range) {
       const lower = Number(range.lower), upper = Number(range.upper), stop = range.stop === null ? null : Number(range.stop);
       // A native pane primitive follows both axes and resize, with no fabricated candles.
@@ -66,9 +69,9 @@ function PriceCanvas({ chart, lines, range }: { chart: Extract<PlannerChart, { s
   }, [chart, lines, range]);
   return <div ref={container} className="h-full min-h-[280px] w-full" aria-label="Direct perpetual candle chart with proposed range band, stop and hypothetical grid levels" />;
 }
-export function GridPlannerChart({ chart, lines, range = null, stale, loading = false, hasMarket = false, error = '', onRetry }: {
+export function GridPlannerChart({ chart, lines, range = null, stale, loading = false, hasMarket = false, error = '', onRetry, levelMessage }: {
   chart: PlannerChart | null; lines: GridLine[]; range?: PlannerRange | null; stale: boolean; loading?: boolean;
-  hasMarket?: boolean; error?: string; onRetry?: () => void;
+  hasMarket?: boolean; error?: string; onRetry?: () => void; levelMessage?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   if (!chart || chart.state === 'unavailable') return <div className="flex min-h-[280px] flex-col items-center justify-center gap-3 rounded-xl border border-border bg-card/40 p-5 text-center">
@@ -78,15 +81,17 @@ export function GridPlannerChart({ chart, lines, range = null, stale, loading = 
       <p role="alert" className="text-sm text-destructive">{error || chart?.reason || 'The price source did not return usable perpetual candles.'}</p>
       {onRetry && <Button type="button" size="sm" variant="outline" onClick={onRetry}>Retry chart</Button>}
     </>}
+    {levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}
   </div>;
   const provenance = chart.candles[0].provenance;
   const label = `${provenance.venue.toUpperCase()} direct perpetual candles · ${chart.timeframe} · ${chart.actualBars}/${chart.requestedBars} bars${chart.partial ? ' · partial coverage' : ''}`;
   const note = `Retrieved ${readableTime(chart.retrievedAt)}. Candle times are opening times; forming candles are unfinished. ${stale ? 'Chart cache expired; refresh for a new observation.' : `These are ${provenance.venue.toUpperCase()} trade candle prices, separate from the Pacifica book reference.`}`;
   return <div className="space-y-2">
     <div className="flex items-center justify-between gap-2"><p className="text-xs text-muted-foreground">{label}</p><Button type="button" size="sm" variant="outline" onClick={() => setExpanded(true)} aria-label="Expand Planner chart"><Maximize2 className="h-4 w-4" /></Button></div>
-    <div className="h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><PriceCanvas chart={chart} lines={stale ? [] : lines} range={stale ? null : range} /></div>
+    <div className="h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} /></div>
+    {levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}
     <p className="text-xs text-muted-foreground">{note}</p>
     <p className="text-xs text-muted-foreground">Shaded band and solid edges: your proposed range. Dashed lines: current hypothetical quantized levels. Red line: proposed stop, not certified liquidation protection.</p>
-    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>{label}</DialogDescription></DialogHeader><div className="h-[65vh]"><PriceCanvas chart={chart} lines={stale ? [] : lines} range={stale ? null : range} /></div><p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
+    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>{label}</DialogDescription></DialogHeader><div className="h-[65vh]"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
   </div>;
 }

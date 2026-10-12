@@ -4,7 +4,7 @@ import type { ProtocolMarket } from '../../server/protocol/protocol-types';
 import type { PlannerDeps, PlannerQuery } from '../../server/grid-planner/types';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { previewGrid } from '../../server/grid-planner/preview';
-import { proposedPlannerStop, plannerRangeAround } from '../../client/src/lib/grid-planner-view';
+import { proposedPlannerStop, plannerRangeAround, plannerOverlays, plannerLevelMessage } from '../../client/src/lib/grid-planner-view';
 const now = 1_800_000_000_000;
 export const row = (): ProtocolMarket => ({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC', fullName: 'Bitcoin', maxLeverage: 50, maxLeverageSource: 'venue',
   constraintObservation: observePacificaConstraints({ tick_size: '0.1', lot_size: '0.01', min_order_size: '10' }, 'BTC-PERP', now),
@@ -15,6 +15,23 @@ export const deps = (): PlannerDeps => ({ now: () => now, getMarkets: vi.fn(asyn
 const query: PlannerQuery = { market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat',
   seed: true, investment: '1000', leverage: '1', stop: '70', fee: null };
 describe('Pacifica authority and honest planner verdicts', () => {
+  it('shows actual quantized minimum-capital lines when entered investment fails, with an honest chart explanation', () => {
+    const underfunded = previewGrid({ ...query, investment: '0.01' }, marketSnapshot(row(), deps()), now);
+    expect(underfunded.state).toBe('rejected'); expect(underfunded.requestedPlan).toBeNull();
+    expect(underfunded.minimumPlan).not.toBeNull();
+    expect(plannerOverlays(underfunded, now + underfunded.validForMs, now)).toEqual(underfunded.minimumPlan!.lines);
+    expect(plannerLevelMessage(underfunded, now + underfunded.validForMs, now, query, false, '')).toContain('minimum investment, not your entered investment');
+    expect(plannerOverlays(underfunded, now + underfunded.validForMs, now + underfunded.validForMs)).toEqual([]);
+  });
+  it('shows server geometry after a failed fee assumption without saying checks passed, and never invents lines for invalid stops', () => {
+    const m = marketSnapshot(row(), deps()), costly = previewGrid({ ...query, fee: '1' }, m, now);
+    expect(costly.state).toBe('rejected'); expect(costly.requestedPlan).not.toBeNull();
+    expect(plannerOverlays(costly, now + costly.validForMs, now)).toEqual(costly.requestedPlan!.lines);
+    expect(plannerLevelMessage(costly, now + costly.validForMs, now, query, false, '')).toContain('Checks did not pass');
+    const invalidStop = previewGrid({ ...query, stop: '100' }, m, now);
+    expect(plannerOverlays(invalidStop, now + invalidStop.validForMs, now)).toEqual([]);
+    expect(plannerLevelMessage(invalidStop, now + invalidStop.validForMs, now, query, false, '')).toContain('Stop must align');
+  });
   it.each(['long', 'short'] as const)('engine quote weighting matches distance labels for %s entries and starting-position exits', side => {
     const m = marketSnapshot(row(), deps());
     for (const scale of ['flat', 'ascending', 'descending'] as const) {

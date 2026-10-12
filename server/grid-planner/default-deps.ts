@@ -3,6 +3,7 @@ import { fetchOHLCV, CHART_CANDLE_POLICY } from '../lab/datafeed';
 import type { PlannerDeps } from './types';
 import { pacificaPlannerCandles } from './pacifica-candles';
 import { PlannerReferences } from './pacifica-reference';
+import { validateCandles } from './chart';
 
 const references = new PlannerReferences();
 
@@ -26,16 +27,20 @@ export const defaultPlannerDeps: PlannerDeps = {
     const end = Date.now(), duration = timeframe === '15m' ? 900_000 : timeframe === '1h' ? 3_600_000 : 14_400_000;
     signal.throwIfAborted();
     try {
-      const candles = await pacificaPlannerCandles(market.replace(/-PERP$/, ''), timeframe, bars, end,
-        AbortSignal.any([signal, AbortSignal.timeout(5_000)]));
-      if (candles.length) { signal.throwIfAborted(); return candles; }
+      const candles = await fetchOHLCV(market.replace(/-PERP$/, ''), timeframe, end - bars * duration, end, undefined, {
+        basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true,
+        cacheWritePolicy: 'skip', deadlineMs: 10_000,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      });
+      signal.throwIfAborted();
+      if (validateCandles(candles, Date.now())) return candles;
     } catch { signal.throwIfAborted(); }
     signal.throwIfAborted();
     const remaining = 15_000 - (Date.now() - end);
     if (remaining <= 0) return [];
-    return fetchOHLCV(market.replace(/-PERP$/, ''), timeframe, end - bars * duration, end, undefined, {
-      basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true,
-      cacheWritePolicy: 'skip', deadlineMs: remaining, signal,
-    });
+    try {
+      return await pacificaPlannerCandles(market.replace(/-PERP$/, ''), timeframe, bars, Date.now(),
+        AbortSignal.any([signal, AbortSignal.timeout(Math.min(5_000, remaining))]));
+    } catch { signal.throwIfAborted(); return []; }
   },
 };

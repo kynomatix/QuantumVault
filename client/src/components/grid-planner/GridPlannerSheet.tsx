@@ -11,7 +11,7 @@ import { Switch } from '@/components/ui/switch';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart,
-  isPlannerPreview, plannerOverlays, readableDecimal, readableTime, clientObservationDeadline,
+  isPlannerPreview, plannerOverlays, plannerLevelMessage, readableDecimal, readableTime, clientObservationDeadline,
   RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
@@ -113,7 +113,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
       }).catch(e => { if (request.current()) setError(e.message); }).finally(() => { if (request.current()) setLoading(false); });
     }, 250);
     return () => { clearTimeout(timer); generation.current.preview.invalidate(); };
-  }, [open, identity, query.value, query.error, refresh]);
+  }, [open, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry]);
   useEffect(() => {
     if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setAdvancedOpen(false); return; }
     const deadlines = [previewExpiry, chartExpiry, referenceExpiry, constraintExpiry].filter(t => t > Date.now());
@@ -197,6 +197,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity }: { open: boole
             </div>
           </div>
           <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} hasMarket={!!form.market}
+            levelMessage={plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
           <div className="grid grid-cols-3 gap-2" aria-label="Range presets">
             {RANGE_PRESETS.map(p => <Button key={p.percent} type="button" variant="outline" disabled={!!shortcutReason} aria-describedby="grid-shortcut-hint"

@@ -16,6 +16,7 @@ import { defaultPlannerDeps } from '../../server/grid-planner/default-deps';
 import { pacificaPlannerCandles } from '../../server/grid-planner/pacifica-candles';
 import { PlannerReferences } from '../../server/grid-planner/pacifica-reference';
 import { __testResetOkxSourceBreaker } from '../../server/lab/datafeed';
+import * as datafeed from '../../server/lab/datafeed';
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.clearAllMocks(); sentinels.quota.mockReturnValue(true); __testResetOkxSourceBreaker(); });
 const json = (payload: unknown) => new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
 const nativeRow = (time: number, interval = '1h', duration = 3_600_000) =>
@@ -77,8 +78,9 @@ describe('Planner fresh Pacifica price observations', () => {
   });
 });
 describe('Planner real chart dependency path', () => {
-  it.each([['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000]] as const)('uses native Pacifica %s trade candles before OKX with exact provenance and finality', async (timeframe, step) => {
+  it.each([['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000]] as const)('falls back to native Pacifica %s trade candles when OKX has no usable candles', async (timeframe, step) => {
     const now = Date.now(), opening = Math.floor(now / step) * step;
+    const primary = vi.spyOn(datafeed, 'fetchOHLCV').mockResolvedValue([]);
     const transport = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => json({ success: true,
       data: [nativeRow(opening, timeframe, step), nativeRow(opening - step, timeframe, step)] }));
     vi.stubGlobal('fetch', transport);
@@ -86,11 +88,23 @@ describe('Planner real chart dependency path', () => {
     expect(bars).toHaveLength(2);
     expect(bars[0]).toMatchObject({ time: opening - step, provenance: { source: 'pacifica', venue: 'pacifica', basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'finalized' } });
     expect(bars[1].provenance.finality).toBe('forming'); expect(transport).toHaveBeenCalledTimes(1);
+    expect(primary.mock.invocationCallOrder[0]).toBeLessThan(transport.mock.invocationCallOrder[0]);
     const url = new URL(String(transport.mock.calls[0][0]));
     expect(url.origin + url.pathname).toBe('https://api.pacifica.fi/api/v1/kline');
     expect(url.searchParams.get('symbol')).toBe('BTC'); expect(url.searchParams.get('interval')).toBe(timeframe);
     expect(url.searchParams.get('limit')).toBe('100'); expect(Number(url.searchParams.get('start_time'))).toBe(opening - 99 * step);
     expect(sentinels.quota).toHaveBeenCalledWith('/kline', 'background'); assertReadOnly();
+  });
+  it.each(['failure', 'invalid geometry', 'spot provenance'])('uses verified Pacifica fallback after OKX %s', async failure => {
+    const now = Date.now(), opening = Math.floor(now / 3_600_000) * 3_600_000;
+    const primary = vi.spyOn(datafeed, 'fetchOHLCV');
+    if (failure === 'failure') primary.mockRejectedValue(new Error('EXAMPLE provider unavailable'));
+    else primary.mockResolvedValue([{ time: opening, open: 100, high: failure === 'invalid geometry' ? 99 : 110, low: 90, close: 101, volume: 2,
+      provenance: { source: 'okx', venue: 'okx', basis: failure === 'spot provenance' ? 'spot' : 'perp', proxy: 'direct', finality: 'forming', timeSemantic: 'open_time' } }]);
+    const transport = vi.fn(async () => json({ success: true, data: [nativeRow(opening)] })); vi.stubGlobal('fetch', transport);
+    const candles = await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal);
+    expect(candles).toHaveLength(1); expect(candles[0].provenance.source).toBe('pacifica');
+    expect(transport).toHaveBeenCalledTimes(1); assertReadOnly();
   });
   it('refuses corrupt Pacifica identity, timing, numbers, ordering duplicates and oversized responses', async () => {
     const now = Date.now(), opening = Math.floor(now / 3_600_000) * 3_600_000, row = nativeRow(opening);
@@ -114,7 +128,8 @@ describe('Planner real chart dependency path', () => {
     vi.stubGlobal('fetch', transport);
     const bars = await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal);
     expect(bars).toHaveLength(1); expect(bars[0]).toMatchObject({ open: 100, close: 101, provenance: { source: 'okx', basis: 'perp', proxy: 'direct', finality: 'forming' } });
-    expect(transport).toHaveBeenCalledTimes(2); expect(String(transport.mock.calls[1][0])).toContain('instId=BTC-USDT-SWAP'); assertReadOnly();
+    expect(transport).toHaveBeenCalledTimes(1); expect(String(transport.mock.calls[0][0])).toContain('instId=BTC-USDT-SWAP');
+    expect(sentinels.quota).not.toHaveBeenCalled(); assertReadOnly();
   });
   it('permanent missing instrument has no spot fallback and no persistence', async () => {
     const transport = vi.fn(async () => new Response(JSON.stringify({ code: '51001', msg: "Instrument doesn't exist", data: [] }), { status: 200 }));
@@ -122,13 +137,13 @@ describe('Planner real chart dependency path', () => {
     const bars = await defaultPlannerDeps.candles('EXAMPLE-PERP', '1h', 100, new AbortController().signal).catch(() => []);
     expect(bars).toEqual([]); expect(transport).toHaveBeenCalledTimes(2); assertReadOnly();
   });
-  it('quota exhaustion skips optional Pacifica work and retains the OKX-only fallback', async () => {
+  it('quota exhaustion skips Pacifica after the OKX primary fails', async () => {
     sentinels.quota.mockReturnValue(false);
     const transport = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => json({ code: '51001', data: [] })); vi.stubGlobal('fetch', transport);
     await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal).catch(() => []);
     expect(transport).toHaveBeenCalledTimes(1); expect(String(transport.mock.calls[0][0])).toContain('okx.com'); assertReadOnly();
   });
-  it('an in-flight caller abort stops Pacifica without starting OKX fallback', async () => {
+  it('an in-flight caller abort stops OKX without starting Pacifica fallback', async () => {
     const transport = vi.fn((_url: string | URL | Request, options?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       options!.signal!.addEventListener('abort', () => reject(options!.signal!.reason), { once: true });
     }));

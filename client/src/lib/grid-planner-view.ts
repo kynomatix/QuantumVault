@@ -127,8 +127,25 @@ export function isPlannerPreview(v: unknown): v is PlannerPreview {
     && v.policy.maximumIntervals === 100 && v.policy.transportBatch === 10 && typeof v.policy.source === 'string';
 }
 export function plannerOverlays(preview: PlannerPreview | null, expiresAt: number, now: number) {
-  if (!preview || now >= expiresAt || !['diagnostic', 'hypothetical_checks_passed'].includes(preview.state)) return [];
-  return preview.requestedPlan?.lines ?? [];
+  if (!preview || now >= expiresAt || preview.state === 'unavailable') return [];
+  // Rejected funding/fee checks can retain valid server-calculated diagnostic geometry.
+  return (preview.requestedPlan ?? preview.minimumPlan)?.lines ?? [];
+}
+export function plannerLevelMessage(preview: PlannerPreview | null, expiresAt: number, now: number,
+  inputs: { market: string; lower: string; upper: string; investment: string; stop: string }, loading: boolean, error: string) {
+  if (!inputs.market) return 'Choose a market to calculate grid levels.';
+  const missing = [!inputs.lower && 'a lower price', !inputs.upper && 'an upper price',
+    !inputs.investment && 'an investment amount', !inputs.stop && 'a stop price (or fresh market details for a suggested stop)'].filter(Boolean);
+  if (missing.length) return `To show grid levels, enter ${missing.join(', ')}.`;
+  if (error) return `Grid levels are unavailable: ${error}`;
+  if (loading) return 'Calculating grid levels from your inputs…';
+  if (!preview) return 'Waiting for a grid preview. Refresh observations if it does not appear.';
+  if (now >= expiresAt && preview.validForMs > 0) return 'Grid levels have expired. Refresh observations to get a fresh price and market details.';
+  if (!plannerOverlays(preview, expiresAt, now).length) return `Grid levels are unavailable: ${preview.reasons.join('; ') || 'a fresh price and usable market details are required.'}`;
+  const basis = preview.requestedPlan ? 'your investment' : 'the minimum investment, not your entered investment';
+  const warning = preview.state === 'rejected' ? ` Checks did not pass: ${preview.reasons.join('; ')}`
+    : preview.state === 'diagnostic' ? ' Some checks are unavailable.' : '';
+  return `Dashed grid levels are hypothetical geometry at ${basis}.${warning} No orders are placed.`;
 }
 export function readableDecimal(value: string): string {
   const [whole, fraction] = value.split('.');
