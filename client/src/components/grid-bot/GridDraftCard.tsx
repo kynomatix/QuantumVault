@@ -38,7 +38,7 @@ function GridCollection({authenticated,identity}:{authenticated:boolean;identity
       </button>)}</div>
     </>}
     {selected&&identity?<GridBotDrawer key={identity+selected} id={selected} createEnabled={enabled} onClose={()=>{setSelected(null);setRefresh(v=>v+1);}} onAdjust={intent=>{setSelected(null);setCreate({key:Date.now(),intent});}}/>:null}
-    {create?<GridCreateSheet key={(identity??'anonymous')+create.key} open onOpenChange={open=>{if(!open)setCreate(null);}} initialIntent={create.intent} onSaved={()=>{setCreate(null);setRefresh(v=>v+1);}}/>:null}
+    {create?<GridCreateSheet key={(identity??'anonymous')+create.key} identity={identity??undefined} open onOpenChange={open=>{if(!open)setCreate(null);}} initialIntent={create.intent} onSaved={()=>{setCreate(null);setRefresh(v=>v+1);}}/>:null}
   </CardContent></Card>;
 }
 function GridComingSoon(){

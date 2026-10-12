@@ -4,7 +4,9 @@ import type { ProvenancedOHLCV } from '../lab/datafeed';
 
 // Pacifica candles are Planner-only; shared datafeed consumers keep their existing sources.
 export type PlannerCandle = ProvenancedOHLCV | (Omit<ProvenancedOHLCV, 'provenance'> & {
-  provenance: Omit<ProvenancedOHLCV['provenance'], 'source' | 'venue'> & { source: 'pacifica'; venue: 'pacifica' };
+  provenance: Omit<ProvenancedOHLCV['provenance'], 'source' | 'venue'> & {
+    source: 'pacifica'; venue: 'pacifica'; aggregation?: 'weekly-from-daily';
+  };
 });
 
 export type Fact<T> = { state: 'available'; value: T } | { state: 'unavailable'; reason: string };

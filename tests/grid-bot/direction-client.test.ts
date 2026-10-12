@@ -12,10 +12,10 @@ const above: GridDirectionSuggestion = { regime: 'above', sourceVenue: 'okx', mo
 const below: GridDirectionSuggestion = { ...above, regime: 'below', lastClose: 98 };
 
 // Exercise the real badge effect without adding a DOM runtime or renderer dependency.
-const hooks = vi.hoisted(() => ({ value: null as unknown, writes: [] as unknown[], effect: undefined as (() => void | (() => void)) | undefined }));
+const hooks = vi.hoisted(() => ({ value: null as unknown, writes: [] as unknown[], effect: undefined as (() => void | (() => void)) | undefined, dependencies: [] as unknown[] }));
 vi.mock('react', async importOriginal => ({ ...await importOriginal<typeof import('react')>(),
   useState: () => [hooks.value, (value: unknown) => { hooks.value = value; hooks.writes.push(value); }],
-  useEffect: (effect: () => void | (() => void)) => { hooks.effect = effect; },
+  useEffect: (effect: () => void | (() => void), dependencies: unknown[]) => { hooks.effect = effect; hooks.dependencies = dependencies; },
 }));
 vi.mock('../../client/src/lib/queryClient', () => ({ walletAuthHeaders: () => ({ 'x-wallet-address': 'EXAMPLE' }) }));
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); hooks.value = null; hooks.writes = []; hooks.effect = undefined; });
@@ -34,6 +34,15 @@ describe('display-only direction badge', () => {
     for (const value of [null, {}, { ...above, expiresAt: now }, { ...above, asOf: now - WEEK },
       { ...above, lastClose: 99 }, { ...above, sourceVenue: 'unknown' }, { ...above, movingAverage: '100' },
       { ...above, retrievedAt: now + 1 }, { ...above, expiresAt: now + 2 * DAY }]) expect(isGridDirectionSuggestion(value)).toBe(false);
+  });
+  it('labels native Pacifica weeks separately from weekly closes aggregated from daily', () => {
+    const native: GridDirectionSuggestion = { ...above, sourceVenue: 'pacifica' };
+    const daily: GridDirectionSuggestion = { ...native, sourceAggregation: 'weekly-from-daily' };
+    expect(isGridDirectionSuggestion(native)).toBe(true); expect(isGridDirectionSuggestion(daily)).toBe(true);
+    expect(gridDirectionText(native).basis).toContain('PACIFICA perpetual candles');
+    expect(gridDirectionText(daily).basis).toContain('Pacifica perp, weekly from daily');
+    expect(isGridDirectionSuggestion({ ...above, sourceAggregation: 'weekly-from-daily' })).toBe(false);
+    expect(isGridDirectionSuggestion({ ...native, sourceAggregation: 'spot' })).toBe(false);
   });
   it.each(['long', 'short'] as const)('leaves the selected %s control unchanged across opposing and unavailable suggestions', direction => {
     for (const suggestion of [above, below, null]) {
@@ -54,11 +63,27 @@ describe('display-only direction badge', () => {
     const create = readFileSync('client/src/components/grid-bot/GridCreateSheet.tsx', 'utf8');
     expect(planner).toContain('<GridDirectionBadge active={open} identity={identity}/>');
     expect(planner).toContain("onClick={() => edit('side', side)}");
-    expect(create).toContain('<GridDirectionBadge active={open}/>');
+    expect(create).toContain('<GridDirectionBadge active={open} identity={identity}/>');
+    const parent = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
+    expect(parent).toContain('identity={identity??undefined}');
     expect(create).toContain("selected('direction','Direction',['long','short'])");
     for (const source of [planner, create]) {
       expect(source.match(/<GridDirectionBadge\b/g)).toHaveLength(1);
     }
+  });
+  it('binds the effect to wallet identity and aborts the old wallet read before refetching', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+    GridDirectionBadge({ active: true, identity: 'EXAMPLE_A' });
+    expect(hooks.dependencies).toEqual([true, 'EXAMPLE_A']);
+    const firstCleanup = hooks.effect?.();
+    const firstSignal = vi.mocked(fetch).mock.calls[0][1]?.signal;
+    if (typeof firstCleanup === 'function') firstCleanup();
+    expect(firstSignal?.aborted).toBe(true);
+    GridDirectionBadge({ active: true, identity: 'EXAMPLE_B' });
+    expect(hooks.dependencies).toEqual([true, 'EXAMPLE_B']);
+    const secondCleanup = hooks.effect?.();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    if (typeof secondCleanup === 'function') secondCleanup();
   });
   it.each(['long', 'short'] as const)('fetches an opposing suggestion without any %s direction state write and expires the display', async direction => {
     vi.useFakeTimers(); vi.setSystemTime(now);
