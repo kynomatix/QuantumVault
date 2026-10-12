@@ -621,37 +621,69 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
 
   it("bounds each wire result to ten symbols, yields between chunks, and aggregates under one batch", async () => {
     const symbols = Array.from({ length: 21 }, (_, index) => `M${index}-PERP`);
+    const admitted = new Set<string>();
     const release = vi.fn();
     const query = vi.fn(async (config: { text: string; values?: unknown[] }) => {
       if (!config.text.includes("FROM lab_candle_cache_v2")) return { rows: [] };
       const chunk = config.values?.[0] as string[];
-      return { rows: chunk.map((symbol, index) => row(symbol, "finalized", index + 1)) };
+      // Later SELECTs must see the preceding chunk already admitted, rather
+      // than merely grouped after the whole batch has accumulated.
+      const preceding = symbols.slice(0, symbols.indexOf(chunk[0]));
+      expect([...admitted]).toEqual(preceding);
+      return { rows: chunk.map((symbol, index) => ({
+        ...row(symbol, "finalized", index + 1),
+        get open() { admitted.add(symbol); return index; },
+      })) };
     });
     const immediateSpy = vi.spyOn(globalThis, "setImmediate");
+    // This test measures chunk ownership and yields, not acquisition latency.
+    // Keep the aggregate-clock assertion independent of runner scheduling.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now());
     fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
     let phases: CandleBatchReadPhases | undefined;
 
-    const result = await getCachedCandlesBatch(
-      symbols, "1h", RANGE.start, RANGE.end,
-      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
-    );
+    try {
+      const result = await getCachedCandlesBatch(
+        symbols, "1h", RANGE.start, RANGE.end,
+        { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner", onPhases: (value) => (phases = value) },
+      );
 
-    const dataStatements = query.mock.calls.filter(([value]) => value.text.includes("FROM lab_candle_cache_v2"));
-    expect(SCANNER_BATCH_SYMBOL_CHUNK_SIZE).toBe(10);
-    expect(dataStatements.map(([value]) => (value.values?.[0] as string[]).length)).toEqual([10, 10, 1]);
-    expect(immediateSpy).toHaveBeenCalledTimes(2);
-    expect(result.size).toBe(21);
-    expect(phases).toMatchObject({
-      requestedSymbols: 21,
-      plannedChunks: 3,
-      chunks: 3,
-      batchBudgetMs: 15_000,
-      hits: 21,
-      misses: 0,
-      termination: "success",
+      const dataStatements = query.mock.calls.filter(([value]) => value.text.includes("FROM lab_candle_cache_v2"));
+      expect(SCANNER_BATCH_SYMBOL_CHUNK_SIZE).toBe(10);
+      expect(dataStatements.map(([value]) => (value.values?.[0] as string[]).length)).toEqual([10, 10, 1]);
+      expect(immediateSpy.mock.calls.length).toBeGreaterThanOrEqual(20);
+      expect(admitted.size).toBe(21);
+      expect(result.size).toBe(21);
+      expect(phases).toMatchObject({
+        requestedSymbols: 21,
+        plannedChunks: 3,
+        chunks: 3,
+        batchBudgetMs: 15_000,
+        hits: 21,
+        misses: 0,
+        termination: "success",
+        maxChunkRows: 10,
+      });
+      expect(release).toHaveBeenCalledWith();
+    } finally {
+      nowSpy.mockRestore();
+      immediateSpy.mockRestore();
+    }
+  });
+
+  it("fails the whole batch when admission throws, without publishing a partial SQL prefix", async () => {
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string }) => {
+      if (!config.text.includes("FROM lab_candle_cache_v2")) return { rows: [] };
+      return { rows: [{ ...row("M0-PERP"), get open() { throw new Error("EXAMPLE admission failure"); } }] };
     });
-    expect(release).toHaveBeenCalledWith();
-    immediateSpy.mockRestore();
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    await expect(getCachedCandlesBatch(
+      Array.from({ length: 11 }, (_, index) => `M${index}-PERP`), "1h", RANGE.start, RANGE.end,
+      { basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, callerClass: "scanner" },
+    )).rejects.toMatchObject({ code: "candle_batch_read_failed" });
+    expect(query.mock.calls.filter(([config]) => config.text.includes("FROM lab_candle_cache_v2"))).toHaveLength(1);
+    expect(release).toHaveBeenCalledWith(expect.any(Error));
   });
 
   it("gives each chunk at most five seconds while retaining one finite aggregate deadline", async () => {

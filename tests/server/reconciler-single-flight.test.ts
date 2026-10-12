@@ -85,7 +85,7 @@ describe('periodic reconciler single-flight', () => {
     await vi.advanceTimersByTimeAsync(TICK_MS);
     expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(1);
     expect(console.warn).toHaveBeenCalledWith(
-      '[Reconcile] Skipping tick - previous cycle still running',
+      '[Reconcile] Skipping tick - previous cycle still running age=60000ms',
     );
 
     firstCycle.resolve([]);

@@ -1,3 +1,5 @@
+import { performance } from "perf_hooks";
+import { startJobTiming } from "../job-timing";
 import { labCandleCacheV2 } from "@shared/schema";
 import { db, pool, scannerCandlePool } from "../db";
 import { eq, and, gte, lte, sql, inArray, ne } from "drizzle-orm";
@@ -247,6 +249,9 @@ export type CandleBatchReadPhases = {
   poolAcquireMs: number;
   queryMs: number;
   resultProcessingMs: number;
+  groupingMs: number;
+  maxChunkRows: number;
+  maxWorkSpanMs: number;
   totalMs: number;
   rows: number;
   pool: { total: number; idle: number; waiting: number };
@@ -545,6 +550,9 @@ export async function getCachedCandlesBatch(
     poolAcquireMs: -1,
     queryMs: 0,
     resultProcessingMs: 0,
+    groupingMs: 0,
+    maxChunkRows: 0,
+    maxWorkSpanMs: 0,
     totalMs: 0,
     rows: 0,
     pool: poolSnapshot(scannerCandlePool),
@@ -564,7 +572,7 @@ export async function getCachedCandlesBatch(
       `resolved_symbols=${phases.resolvedSymbols} unresolved_symbols=${phases.unresolvedSymbols} ` +
       `batch_budget=${phases.batchBudgetMs}ms hits=${phases.hits} misses=${phases.misses} ` +
       `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
-      `query=${phases.queryMs}ms process=${phases.resultProcessingMs}ms total=${phases.totalMs}ms ` +
+      `query=${phases.queryMs}ms group=${phases.groupingMs}ms process=${phases.resultProcessingMs}ms max_chunk_rows=${phases.maxChunkRows} max_work_span=${phases.maxWorkSpanMs}ms total=${phases.totalMs}ms ` +
       `termination=${phases.termination} sqlstate=${phases.sqlstate ?? "none"} ` +
       `pool=${phases.pool.total}/${phases.pool.idle}i/${phases.pool.waiting}w`;
     console.log(line);
@@ -597,6 +605,7 @@ export async function getCachedCandlesBatch(
   phases.semaphoreWaitMs = Date.now() - semaphoreStartedAt;
 
   activeCandleReads++;
+  const endBatchTiming = startJobTiming("candle.batch");
   try {
     const policy = opts.basisPolicy;
     const requireDirectOkxIdentity = policy.consumer !== "lab"
@@ -620,7 +629,8 @@ export async function getCachedCandlesBatch(
     phases.batchBudgetMs = Math.max(0, batchDeadlineAt - Date.now());
     let selectStartedAt: number | null = null;
     let selectCompleted = true;
-    const rows: CandleCacheBatchRow[] = [];
+    const admittedBySymbol = new Map<string, ProvenancedOHLCV[] | null>();
+    let chunkProcessingFailed = false;
     const completedSymbols = new Set<string>();
     let partialFailure: {
       error: unknown;
@@ -666,7 +676,63 @@ export async function getCachedCandlesBatch(
         selectCompleted = true;
         phases.chunks++;
         for (const symbol of symbolChunk) completedSymbols.add(symbol);
-        rows.push(...result.rows as CandleCacheBatchRow[]);
+        // Each symbol belongs to one SQL chunk. Keep all of its rows together
+        // for unchanged source/finality selection, then release the raw chunk.
+        // A processing failure must fail the whole read, never become a trusted
+        // partial SQL prefix.
+        try {
+          const chunkRows = result.rows as CandleCacheBatchRow[];
+          phases.rows += chunkRows.length;
+          phases.maxChunkRows = Math.max(phases.maxChunkRows, chunkRows.length);
+          const grouped = new Map(symbolChunk.map((symbol) => [symbol, [] as CandleCacheRow[]]));
+          const endGrouping = startJobTiming("candle.group");
+          let spanStartedAt = performance.now();
+          try {
+            for (let index = 0; index < chunkRows.length; index++) {
+              const row = chunkRows[index];
+              grouped.get(row.symbol)?.push(row);
+              if ((index & 255) === 255 && performance.now() - spanStartedAt >= 8) {
+                const spanMs = performance.now() - spanStartedAt;
+                phases.groupingMs += spanMs;
+                phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
+                await new Promise<void>((resolve) => setImmediate(resolve));
+                if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+                spanStartedAt = performance.now();
+              }
+            }
+          } finally {
+            const spanMs = performance.now() - spanStartedAt;
+            phases.groupingMs += spanMs;
+            phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
+            endGrouping();
+          }
+          const endAdmission = startJobTiming("candle.admit");
+          try {
+            for (let index = 0; index < symbolChunk.length; index++) {
+              if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+              const symbol = symbolChunk[index];
+              const localPhases: CandleReadPhases = {
+                callerClass: phases.callerClass, symbol, timeframe, outcome: "miss",
+                semaphoreWaitMs: phases.semaphoreWaitMs, poolAcquireMs: phases.poolAcquireMs,
+                queryMs: phases.queryMs, resultProcessingMs: 0, totalMs: 0, rows: 0, pool: phases.pool,
+              };
+              const admissionStartedAt = performance.now();
+              const admitted = await processCandleRows(symbol, timeframe, startMs, endMs,
+                grouped.get(symbol) ?? [], localPhases, opts.admission === "scanner_prefix");
+              const spanMs = performance.now() - admissionStartedAt;
+              phases.resultProcessingMs += spanMs;
+              // Admission may await a misalignment purge; this is an upper
+              // bound on uninterrupted work, not exclusive CPU attribution.
+              phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
+              admittedBySymbol.set(symbol, admitted);
+              grouped.delete(symbol);
+              if (admitted !== null) phases.hits++;
+              if (index + 1 < symbolChunk.length) {
+                await new Promise<void>((resolve) => setImmediate(resolve));
+              }
+            }
+          } finally { endAdmission(); }
+        } catch (error) { chunkProcessingFailed = true; throw error; }
         if (offset + SCANNER_BATCH_SYMBOL_CHUNK_SIZE < uniqueSymbols.length) {
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
@@ -680,6 +746,10 @@ export async function getCachedCandlesBatch(
     } catch (error) {
       if (selectStartedAt !== null && !selectCompleted) {
         phases.queryMs += Date.now() - selectStartedAt;
+      }
+      if (chunkProcessingFailed) {
+        client.release(error instanceof Error ? error : new Error(String(error)));
+        throw error;
       }
       const classified = classifyBatchTermination(error);
       phases.termination = classified.termination;
@@ -720,44 +790,9 @@ export async function getCachedCandlesBatch(
     }
     if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
 
-    phases.rows = rows.length;
-    const symbolsToProcess = partialFailure ? [...completedSymbols] : uniqueSymbols;
-    phases.resolvedSymbols = symbolsToProcess.length;
+    phases.resolvedSymbols = completedSymbols.size;
     phases.unresolvedSymbols = phases.requestedSymbols - phases.resolvedSymbols;
-    const grouped = new Map(symbolsToProcess.map((symbol) => [symbol, [] as CandleCacheRow[]]));
-    for (const row of rows) grouped.get(row.symbol)?.push(row);
-
-    const processStartedAt = Date.now();
-    const admittedBySymbol = new Map<string, ProvenancedOHLCV[] | null>();
-    for (const symbol of symbolsToProcess) {
-      if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
-      const localPhases: CandleReadPhases = {
-        callerClass: phases.callerClass,
-        symbol,
-        timeframe,
-        outcome: "miss",
-        semaphoreWaitMs: phases.semaphoreWaitMs,
-        poolAcquireMs: phases.poolAcquireMs,
-        queryMs: phases.queryMs,
-        resultProcessingMs: 0,
-        totalMs: 0,
-        rows: 0,
-        pool: phases.pool,
-      };
-      const admitted = await processCandleRows(
-        symbol,
-        timeframe,
-        startMs,
-        endMs,
-        grouped.get(symbol) ?? [],
-        localPhases,
-        opts.admission === "scanner_prefix",
-      );
-      admittedBySymbol.set(symbol, admitted);
-      if (admitted !== null) phases.hits++;
-    }
     phases.misses = phases.resolvedSymbols - phases.hits;
-    phases.resultProcessingMs = Date.now() - processStartedAt;
     if (partialFailure) {
       const unresolvedSymbols = new Set(uniqueSymbols.filter((symbol) => !completedSymbols.has(symbol)));
       finish(phases.hits > 0 ? "hit" : "miss");
@@ -792,6 +827,7 @@ export async function getCachedCandlesBatch(
     );
   } finally {
     activeCandleReads--;
+    endBatchTiming();
   }
 }
 

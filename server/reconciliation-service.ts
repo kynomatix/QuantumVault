@@ -1,3 +1,4 @@
+import { startJobTiming } from "./job-timing";
 import { storage, DatabaseStorage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
 import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
@@ -2161,6 +2162,7 @@ export async function reconcileIfStale(
 }
 
 let consecutiveDbTimeouts = 0;
+let reconciliationStartedAt = 0;
 
 function isDbTimeout(error: any): boolean {
   const msg = error?.message || "";
@@ -2174,11 +2176,13 @@ export function startPeriodicReconciliation(): void {
   
   reconcileInterval = setInterval(async () => {
     if (periodicReconciliationCycleInFlight) {
-      console.warn("[Reconcile] Skipping tick - previous cycle still running");
+      console.warn(`[Reconcile] Skipping tick - previous cycle still running age=${Date.now() - reconciliationStartedAt}ms`);
       return;
     }
 
     periodicReconciliationCycleInFlight = true;
+    reconciliationStartedAt = Date.now();
+    const end = startJobTiming("reconcile.tick");
     try {
       if (consecutiveDbTimeouts > 0) {
         consecutiveDbTimeouts--;
@@ -2231,6 +2235,7 @@ export function startPeriodicReconciliation(): void {
       }
     } finally {
       periodicReconciliationCycleInFlight = false;
+      end();
     }
   }, RECONCILE_INTERVAL_MS);
 }

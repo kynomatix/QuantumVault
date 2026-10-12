@@ -536,25 +536,14 @@ export function log(message: string, source = "express") {
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
-
-  const originalResJson = res.json;
-  res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
-  };
 
   res.on("finish", () => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        const jsonStr = JSON.stringify(capturedJsonResponse);
-        if (jsonStr.length > 500) {
-          logLine += ` :: [${jsonStr.length} bytes]`;
-        } else {
-          logLine += ` :: ${jsonStr}`;
-        }
+      const contentLength = res.getHeader("content-length");
+      if (typeof contentLength === "number" || (typeof contentLength === "string" && /^\d{1,20}$/.test(contentLength))) {
+        logLine += ` bytes=${contentLength}`;
       }
 
       log(logLine);

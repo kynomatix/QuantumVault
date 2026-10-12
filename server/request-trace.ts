@@ -22,7 +22,9 @@ import type { Express } from "express";
 import type { Server } from "http";
 import crypto from "crypto";
 import { AsyncLocalStorage } from "async_hooks";
-import { monitorEventLoopDelay } from "perf_hooks";
+import { monitorEventLoopDelay, performance, PerformanceObserver } from "perf_hooks";
+import { getHeapStatistics } from "v8";
+import { takeJobTimingStats } from "./job-timing";
 import { appendTelemetry } from "./telemetry";
 import { SERVER_BOOT_ID } from "./boot-id";
 
@@ -216,6 +218,20 @@ export function registerRequestTrace(app: Express): void {
 export function startSelfStats(httpServer: Server): void {
   const eld = monitorEventLoopDelay({ resolution: 20 });
   eld.enable();
+  let previousTime = performance.now();
+  let previousCpu = process.cpuUsage();
+  let previousElu = performance.eventLoopUtilization();
+  let gcCount = 0;
+  let gcTotalMs = 0;
+  let gcMaxMs = 0;
+  const gc = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      gcCount++;
+      gcTotalMs += entry.duration;
+      gcMaxMs = Math.max(gcMaxMs, entry.duration);
+    }
+  });
+  gc.observe({ entryTypes: ["gc"] });
   const timer = setInterval(() => {
     try {
       httpServer.getConnections((err, conns) => {
@@ -233,8 +249,22 @@ export function startSelfStats(httpServer: Server): void {
         const p50 = Math.round(eld.percentile(50) / 1e6);
         const max = Math.round(eld.max / 1e6);
         eld.reset();
-        const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
-        const line = `[SelfStats] elp50=${p50}ms elmax=${max}ms conns=${err ? -1 : conns} handles=${handles} rss=${rssMb}MB inflight=${inFlight} boot=${SERVER_BOOT_ID.slice(0, 8)}`;
+        const now = performance.now();
+        const intervalMs = now - previousTime;
+        previousTime = now;
+        const cpu = process.cpuUsage();
+        const cpuUserMs = (cpu.user - previousCpu.user) / 1000;
+        const cpuSystemMs = (cpu.system - previousCpu.system) / 1000;
+        previousCpu = cpu;
+        const elu = performance.eventLoopUtilization();
+        const utilization = performance.eventLoopUtilization(elu, previousElu).utilization;
+        previousElu = elu;
+        const memory = process.memoryUsage();
+        const mb = (bytes: number) => Math.round(bytes / (1024 * 1024));
+        const line = `[SelfStats] pid=${process.pid} interval=${Math.round(intervalMs)}ms elp50=${p50}ms elmax=${max}ms conns=${err ? -1 : conns} handles=${handles} rss=${mb(memory.rss)}MB heap=${mb(memory.heapUsed)}/${mb(getHeapStatistics().heap_size_limit)}MB external=${mb(memory.external)}MB arraybuffers=${mb(memory.arrayBuffers)}MB cpu_user=${Math.round(cpuUserMs)}ms cpu_system=${Math.round(cpuSystemMs)}ms cpu=${((cpuUserMs + cpuSystemMs) / Math.max(intervalMs, 1) * 100).toFixed(1)}% elu=${(utilization * 100).toFixed(1)}% gc_count=${gcCount} gc_total=${Math.round(gcTotalMs)}ms gc_max=${Math.round(gcMaxMs)}ms inflight=${inFlight} boot=${SERVER_BOOT_ID.slice(0, 8)} ${takeJobTimingStats()}`;
+        gcCount = 0;
+        gcTotalMs = 0;
+        gcMaxMs = 0;
         console.log(line);
         appendTelemetry(line);
       });
@@ -243,6 +273,7 @@ export function startSelfStats(httpServer: Server): void {
     }
   }, 60_000);
   timer.unref();
+  httpServer.once("close", () => { clearInterval(timer); eld.disable(); gc.disconnect(); });
 }
 
 /** Test-only: reset the per-minute counters. */

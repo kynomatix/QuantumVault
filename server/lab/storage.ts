@@ -10,12 +10,16 @@ import {
   type LabAgentMessage, type AgentSuggestedAction,
 } from "@shared/schema";
 import { db } from "../db";
-import { eq, desc, inArray, isNull, and, or, asc, sql } from "drizzle-orm";
+import { eq, desc, inArray, isNull, and, or, asc, sql, gt, lte } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import { sharpeFromTrades } from "./metrics";
 import { countJobsAhead, type QueueCensusRun, type QueueClaimRun } from "./queue-order";
 
+import { startJobTiming, timeJob, type JobName } from "../job-timing";
+import { cleanupProjection, resetCheckpointAttempts, completedCheckpointNeedsTrim, slimCompletedCheckpoint } from "./cleanup-checkpoint";
+
 const MAX_CONCURRENT_JOBS = 1;
+const CLEANUP_PAGE_SIZE = 100;
 
 // Delegates to the shared single-source-of-truth helper so the persistence
 // fallback Sharpe is identical to the engine + optimizer ones.
@@ -169,7 +173,7 @@ export class LabDatabaseStorage implements ILabStorage {
 
   constructor() {
     this.jobs = new Map();
-    this.initPromise = this.backfillOwnership().then(() => this.cleanupStaleRuns());
+    this.initPromise = timeJob("lab.backfill", () => this.backfillOwnership()).then(() => this.cleanupStaleRuns());
   }
 
   private async backfillOwnership(): Promise<void> {
@@ -193,113 +197,78 @@ export class LabDatabaseStorage implements ILabStorage {
   }
 
   private async cleanupStaleRuns(): Promise<void> {
+    const interrupted = new Set(this.interruptedRunIds);
+    const remember = (id: number) => {
+      if (!interrupted.has(id)) { interrupted.add(id); this.interruptedRunIds.push(id); }
+    };
+    // Keyset pages keep only recovery metadata in Node. Fence each phase so
+    // concurrent inserts cannot turn startup maintenance into an endless scan.
+    const recover = async (status: "running" | "failed" | "paused", name: JobName) => {
+      const end = startJobTiming(name);
+      let selected = 0, changed = 0, storedBytes = 0, maxStoredBytes = 0;
+      try {
+        const [last] = await db.select({ id: labOptimizationRuns.id }).from(labOptimizationRuns)
+          .where(eq(labOptimizationRuns.status, status)).orderBy(desc(labOptimizationRuns.id)).limit(1);
+        let cursor = 0;
+        while (last && cursor < last.id) {
+          const page = await db.select(cleanupProjection).from(labOptimizationRuns)
+            .where(and(eq(labOptimizationRuns.status, status), gt(labOptimizationRuns.id, cursor), lte(labOptimizationRuns.id, last.id)))
+            .orderBy(asc(labOptimizationRuns.id)).limit(CLEANUP_PAGE_SIZE);
+          if (page.length === 0) break;
+          for (const run of page) {
+            cursor = run.id;
+            selected++;
+            const bytes = Number(run.checkpointStoredBytes);
+            storedBytes += bytes; maxStoredBytes = Math.max(maxStoredBytes, bytes);
+            if (status === "paused" && (interrupted.has(run.id) || run.userCancelled || run.resourceError)) continue;
+            if (status === "failed" && run.userCancelled) continue;
+            const hasCheckpoint = run.comboLength > 0 || (run.currentCombo && run.currentIteration != null
+              && (status !== "running" || run.currentIteration >= 0));
+            if (status === "paused") {
+              if (hasCheckpoint || run.configSnapshot) { remember(run.id); changed++; }
+              continue;
+            }
+            const savedResults = await db.select({ id: labOptimizationResults.id }).from(labOptimizationResults)
+              .where(eq(labOptimizationResults.runId, run.id)).limit(1);
+            const canResume = hasCheckpoint || savedResults.length > 0 || run.configSnapshot;
+            if (status === "failed" && !canResume) continue;
+            await db.update(labOptimizationRuns).set({
+              status: canResume ? "paused" : "failed",
+              ...(status === "failed" ? { completedAt: null } : !canResume ? { completedAt: new Date() } : {}),
+              ...(canResume && run.checkpointObject ? { checkpoint: resetCheckpointAttempts } : {}),
+            }).where(eq(labOptimizationRuns.id, run.id));
+            if (canResume) remember(run.id);
+            changed++;
+          }
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } finally {
+        console.log(`[QuantumLab] Cleanup status=${status} selected=${selected} changed=${changed} checkpoint_stored_bytes=${storedBytes} max_checkpoint_stored_bytes=${maxStoredBytes}`);
+        end();
+      }
+    };
     try {
-      const staleRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "running"));
-      for (const run of staleRuns) {
-        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
-        const hasComboCheckpoint = cp?.completedCombos?.length > 0;
-        const hasMidComboCheckpoint = cp?.currentCombo && cp?.currentIteration != null && cp.currentIteration >= 0;
-        const hasAnyCheckpoint = hasComboCheckpoint || hasMidComboCheckpoint;
-
-        const savedResults = await db.select({ id: labOptimizationResults.id })
-          .from(labOptimizationResults)
-          .where(eq(labOptimizationResults.runId, run.id))
-          .limit(1);
-        const hasPersistedResults = savedResults.length > 0;
-
-        const hasConfigSnapshot = !!cp?.configSnapshot;
-        const canResume = hasAnyCheckpoint || hasPersistedResults || hasConfigSnapshot;
-        const newStatus = canResume ? "paused" : "failed";
-        if (canResume && cp) cp.autoResumeAttempts = 0;
-        await db.update(labOptimizationRuns).set({
-          status: newStatus,
-          ...(!canResume ? { completedAt: new Date() } : {}),
-          ...(canResume && cp ? { checkpoint: cp } : {}),
-        }).where(eq(labOptimizationRuns.id, run.id));
-
-        const detail = hasComboCheckpoint
-          ? `${cp.completedCombos.length} combos checkpointed`
-          : hasMidComboCheckpoint
-            ? `mid-combo ${cp.currentCombo} at ${cp.currentStage} iter ${cp.currentIteration}`
-            : hasPersistedResults
-              ? `has persisted results in DB`
-              : hasConfigSnapshot
-                ? `config snapshot only (no progress)`
-                : "";
-        console.log(`[QuantumLab] Stale run ${run.id} → ${newStatus}${detail ? ` (${detail})` : ""}`);
-        if (canResume) {
-          this.interruptedRunIds.push(run.id);
+      await recover("running", "lab.running");
+      await recover("failed", "lab.failed");
+      await recover("paused", "lab.paused");
+      await timeJob("lab.complete", async () => {
+        const [last] = await db.select({ id: labOptimizationRuns.id }).from(labOptimizationRuns)
+          .where(eq(labOptimizationRuns.status, "complete")).orderBy(desc(labOptimizationRuns.id)).limit(1);
+        let cursor = 0, trimmed = 0;
+        while (last && cursor < last.id) {
+          const page = await db.select({ id: labOptimizationRuns.id }).from(labOptimizationRuns)
+            .where(and(eq(labOptimizationRuns.status, "complete"), gt(labOptimizationRuns.id, cursor), lte(labOptimizationRuns.id, last.id), completedCheckpointNeedsTrim))
+            .orderBy(asc(labOptimizationRuns.id)).limit(CLEANUP_PAGE_SIZE);
+          if (page.length === 0) break;
+          cursor = page[page.length - 1].id;
+          // Compute the slim value in PostgreSQL; never download large blobs.
+          await db.update(labOptimizationRuns).set({ checkpoint: slimCompletedCheckpoint })
+            .where(inArray(labOptimizationRuns.id, page.map((run) => run.id)));
+          trimmed += page.length;
+          await new Promise<void>((resolve) => setImmediate(resolve));
         }
-      }
-      if (staleRuns.length > 0) {
-        console.log(`[QuantumLab] Processed ${staleRuns.length} stale run(s) from previous session`);
-      }
-
-      const failedRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "failed"));
-      let recovered = 0;
-      for (const run of failedRuns) {
-        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
-        if (cp?.userCancelled) continue;
-        const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
-        const hasConfigSnapshot = !!cp?.configSnapshot;
-        const savedResults = await db.select({ id: labOptimizationResults.id })
-          .from(labOptimizationResults)
-          .where(eq(labOptimizationResults.runId, run.id))
-          .limit(1);
-        if (hasCheckpoint || savedResults.length > 0 || hasConfigSnapshot) {
-          if (cp) cp.autoResumeAttempts = 0;
-          await db.update(labOptimizationRuns).set({
-            status: "paused",
-            completedAt: null,
-            ...(cp ? { checkpoint: cp } : {}),
-          }).where(eq(labOptimizationRuns.id, run.id));
-          const reason = hasCheckpoint ? "checkpoint" : savedResults.length > 0 ? "results" : "config snapshot";
-          const oldAttempts = (run.checkpoint as any)?.autoResumeAttempts ?? 0;
-          console.log(`[QuantumLab] Recovered failed run ${run.id} → paused (has ${reason}, reset attempts ${oldAttempts}→0)`);
-          this.interruptedRunIds.push(run.id);
-          recovered++;
-        }
-      }
-      if (recovered > 0) {
-        console.log(`[QuantumLab] Recovered ${recovered} failed run(s) with salvageable data`);
-      }
-
-      const pausedRuns = await db.select().from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "paused"));
-      let pausedRecovered = 0;
-      for (const run of pausedRuns) {
-        if (this.interruptedRunIds.includes(run.id)) continue;
-        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
-        if (cp?.userCancelled || cp?.resourceError) continue;
-        const hasCheckpoint = cp?.completedCombos?.length > 0 || (cp?.currentCombo && cp?.currentIteration != null);
-        const hasConfigSnapshot = !!cp?.configSnapshot;
-        if (hasCheckpoint || hasConfigSnapshot) {
-          this.interruptedRunIds.push(run.id);
-          pausedRecovered++;
-          console.log(`[QuantumLab] Paused run ${run.id} queued for lazy recovery`);
-        }
-      }
-      if (pausedRecovered > 0) {
-        console.log(`[QuantumLab] Found ${pausedRecovered} paused run(s) eligible for auto-resume`);
-      }
-
-      const completedRuns = await db.select({
-        id: labOptimizationRuns.id,
-        checkpoint: labOptimizationRuns.checkpoint,
-        configSnapshot: labOptimizationRuns.configSnapshot,
-      }).from(labOptimizationRuns).where(eq(labOptimizationRuns.status, "complete"));
-      let trimmed = 0;
-      for (const run of completedRuns) {
-        const cp = run.checkpoint && typeof run.checkpoint === "object" ? run.checkpoint as any : null;
-        if (cp && (cp.completedCombos || cp.currentCombo || cp.currentIteration != null)) {
-          const csType = cp?.configSnapshot?.type || (run.configSnapshot as any)?.type || null;
-          const slimCp = csType ? { configSnapshot: { type: csType } } : null;
-          await db.update(labOptimizationRuns).set({ checkpoint: slimCp as any }).where(eq(labOptimizationRuns.id, run.id));
-          trimmed++;
-        }
-      }
-      if (trimmed > 0) {
         console.log(`[QuantumLab] Trimmed checkpoint bloat from ${trimmed} completed run(s)`);
-      }
+      });
     } catch (err: any) {
       console.log(`[QuantumLab] Stale run cleanup error: ${err.message}`);
     }

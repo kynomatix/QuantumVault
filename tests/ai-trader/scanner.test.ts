@@ -2077,6 +2077,8 @@ describe("scanner batch cache prefetch", () => {
       await vi.advanceTimersByTimeAsync(10_000);
       await sweep;
 
+      const { takeJobTimingStats } = await import("../../server/job-timing");
+      expect(takeJobTimingStats().split(" recent=")[0]).not.toContain("scanner.");
       expect(testMarkets).toHaveLength(52);
       expect(pacificaMarkets).toHaveLength(42);
       expect(testMarkets.filter((market) => pacificaMarkets.includes(market))).toHaveLength(17);
@@ -2604,6 +2606,7 @@ async function scannerWithSecondLiveProtocol(): Promise<typeof import("../../ser
     compilerOptions: { module: ModuleKind.CommonJS, target: ScriptTarget.ES2022 },
   }).outputText;
   const dependencies: Record<string, unknown> = {
+    "../job-timing": await import("../../server/job-timing"),
     "./phoenix-capabilities": await import("../../server/ai-trader/phoenix-capabilities"),
     "../lab/datafeed": await import("../../server/lab/datafeed"),
     "../error-log": await import("../../server/error-log"),

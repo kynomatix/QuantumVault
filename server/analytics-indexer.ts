@@ -1,3 +1,4 @@
+import { startJobTiming } from "./job-timing";
 import { storage } from './storage';
 import type { PlatformMetricType } from '@shared/schema';
 
@@ -24,6 +25,7 @@ let cachedMetrics: PlatformMetricsSnapshot | null = null;
 let indexerInterval: NodeJS.Timeout | null = null;
 
 async function seedCumulativeLedger(): Promise<void> {
+  const end = startJobTiming("analytics.seed");
   try {
     const [volumeData, statsData, prevMetrics] = await Promise.all([
       storage.calculatePlatformVolume(),
@@ -42,10 +44,11 @@ async function seedCumulativeLedger(): Promise<void> {
     console.log(`[Analytics] Cumulative ledger seeded: volume=$${bestVolume.toFixed(2)}, trades=${bestTrades}`);
   } catch (err) {
     console.error('[Analytics] Failed to seed cumulative ledger:', err);
-  }
+  } finally { end(); }
 }
 
 export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapshot> {
+  const end = startJobTiming("analytics.metrics");
   try {
     console.log('[Analytics] Calculating platform metrics...');
     const startTime = Date.now();
@@ -142,7 +145,7 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
   } catch (error) {
     console.error('[Analytics] Error calculating metrics:', error);
     throw error;
-  }
+  } finally { end(); }
 }
 
 export function getCachedMetrics(): PlatformMetricsSnapshot | null {

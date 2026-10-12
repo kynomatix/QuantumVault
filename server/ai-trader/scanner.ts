@@ -1,3 +1,4 @@
+import { startJobTiming, timeJob } from "../job-timing";
 // server/ai-trader/scanner.ts
 //
 // WO-A: Scanner core (shadow mode — no trading, no schema changes, no UI).
@@ -1366,6 +1367,8 @@ async function runSweep(): Promise<void> {
   activeSweepOwner = owner;
   sweepStartedAt = Date.now();
   const sweepBeganAt = sweepStartedAt;
+  const endSweepTiming = startJobTiming("scanner.sweep");
+  let endPhaseTiming = () => {};
   // Sweep-global fetch deadline: bounds the WHOLE sweep's network time so a
   // degraded-feed sweep finishes comfortably inside SWEEP_WEDGE_MS and two
   // sweeps can never run concurrently in practice. Each dispatch passes the
@@ -1425,6 +1428,7 @@ async function runSweep(): Promise<void> {
     // Resolve both protocol universes once, then collapse their shared
     // datafeed identities before touching the persistent cache. The finite
     // union is the reviewed symbol-set bound; no arbitrary cap is added.
+    endPhaseTiming = startJobTiming("scanner.universe");
     const universesByProtocol = new Map<string, string[]>();
     for (const protocol of PROTOCOLS) {
       requireScannerSweepOwner(owner);
@@ -1435,6 +1439,7 @@ async function runSweep(): Promise<void> {
       requireScannerSweepOwner(owner);
       universesByProtocol.set(protocol, universe);
     }
+    endPhaseTiming();
     const sweepTickers = [...new Set(
       [...universesByProtocol.values()].flat().map(marketToDatafeedTicker),
     )];
@@ -1514,7 +1519,7 @@ async function runSweep(): Promise<void> {
     const batchPrefetchTasks = new Map<string, Promise<void>>();
     let batchPrefetchChain = Promise.resolve();
     for (const tf of batchTimeframes) {
-      const task = batchPrefetchChain.then(() => prefetchBatchTimeframe(tf));
+      const task = batchPrefetchChain.then(() => timeJob("scanner.prefetch", () => prefetchBatchTimeframe(tf)));
       // A revoked sweep can stop before a later task is awaited. Observe the
       // rejection without changing the original promise seen by its consumer.
       task.catch(() => {});
@@ -1530,6 +1535,7 @@ async function runSweep(): Promise<void> {
     const universeSizes = PROTOCOLS.map((protocol) =>
       universesByProtocol.get(protocol)?.length ?? 0,
     );
+    endPhaseTiming = startJobTiming("scanner.evaluate");
     for (let protocolIndex = 0; protocolIndex < PROTOCOLS.length; protocolIndex++) {
       const protocol = PROTOCOLS[protocolIndex];
       requireScannerSweepOwner(owner);
@@ -2119,6 +2125,8 @@ async function runSweep(): Promise<void> {
       } // end TF loop
     } // end protocol loop
 
+    endPhaseTiming();
+    endPhaseTiming = startJobTiming("scanner.publish");
     // Rank locally, then publish candidates and their final governing verdict
     // through one atomic replacement before any diagnostic sink is invoked.
     const rankedCandidatesByProtocol = new Map<string, readonly ScannerCandidate[]>();
@@ -2309,6 +2317,8 @@ async function runSweep(): Promise<void> {
       },
     });
   } finally {
+    endPhaseTiming();
+    endSweepTiming();
     for (const child of owner.children) {
       if (!child.signal.aborted) child.abort("sweep finished");
     }
