@@ -10,7 +10,7 @@ import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, plannerLevelMessage, isPlannerMarket, isPlannerChart, isPlannerPreview,
   PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline, plannerRangeAround,
   proposedPlannerStop, plannerChartRange, plannerSizeHint, plannerShortcutReason, ORDER_SIZES, RANGE_PRESETS, type PlannerChart } from '../../client/src/lib/grid-planner-view';
-import { PlannerPriceRefresh, watchPlannerPrice } from '../../client/src/lib/planner-price-refresh';
+import { PlannerPriceRefresh, watchPlannerPrice, PRICE_BUSY_MESSAGE } from '../../client/src/lib/planner-price-refresh';
 import { previewGrid } from '../../server/grid-planner/preview';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
@@ -76,6 +76,29 @@ describe('Planner fresh-price shortcuts and visibility', () => {
     expect(changed).not.toHaveBeenCalled(); expect(observed).toHaveBeenCalledTimes(1);
     expect(status).toHaveBeenLastCalledWith(false, 'EXAMPLE venue unavailable');
     expect(await controller.apply(10, changed)).toBe(true); controller.dispose();
+  });
+  it('backs off quota refusals without reusing an expired price, then automatically recovers', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const visibility = Object.assign(new EventTarget(), { hidden: false });
+    const read = vi.fn(async () => priceResponse('100', Date.now())), observed = vi.fn(), status = vi.fn(), changed = vi.fn();
+    const controller = new PlannerPriceRefresh('BTC-PERP', read, observed, status);
+    const stop = watchPlannerPrice(controller, visibility);
+    await vi.advanceTimersByTimeAsync(0);
+    read.mockRejectedValue(Error(PRICE_BUSY_MESSAGE));
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(status).toHaveBeenLastCalledWith(false, PRICE_BUSY_MESSAGE);
+    expect(controller.retryDelay()).toBe(5_000);
+    await controller.refresh(); expect(read).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5_000); expect(controller.retryDelay()).toBe(10_000);
+    await vi.advanceTimersByTimeAsync(10_000); expect(controller.retryDelay()).toBe(20_000);
+    await vi.advanceTimersByTimeAsync(20_000); expect(controller.retryDelay()).toBe(40_000);
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(await controller.apply(10, changed)).toBe(false); expect(changed).not.toHaveBeenCalled();
+    expect(observed).toHaveBeenCalledTimes(1);
+    read.mockImplementation(async () => priceResponse('200', Date.now()));
+    await vi.advanceTimersByTimeAsync(34_999);
+    expect(observed).toHaveBeenCalledTimes(2); expect(status).toHaveBeenLastCalledWith(false, '');
+    expect(await controller.apply(10, changed)).toBe(true); stop();
   });
   it.each([priceResponse('100', now - 60_000, now), priceResponse('100', now + 1, now),
     { state: 'available', retrievedAt: now, markets: [] },

@@ -1,5 +1,7 @@
 import { plannerRegime } from '../../server/grid-planner/regime';
 import { PlannerRangeFacts } from '../../server/grid-planner/range-facts';
+import { PlannerCharts } from '../../server/grid-planner/chart';
+import type { PlannerCandle } from '../../server/grid-planner/types';
 import type { ProvenancedOHLCV } from '../../server/lab/datafeed';
 import { describe, it, expect, vi } from 'vitest';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
@@ -144,5 +146,17 @@ describe('Persistent finalized timeframe ADX and independent auto-range', () => 
     const value=await reader.read(row(),'1h',100,d,new AbortController().signal);
     expect(value.regime.state).toBe('available');expect(value.range.state).toBe('unavailable');expect(value.validForMs).toBeGreaterThan(0);
     const controller=new AbortController();controller.abort();await expect(reader.read(row(),'1h',100,d,controller.signal)).rejects.toThrow();
+  });
+  it.each(['okx','gate','hyperliquid','pacifica'] as const)('chart and ADX share the exact cached %s history without an independent source read',async venue=>{
+    const candles: PlannerCandle[] = history().map(c => venue === 'pacifica'
+      ? { ...c, provenance: { ...c.provenance, source: 'pacifica', venue: 'pacifica' } }
+      : { ...c, provenance: { ...c.provenance, source: venue, venue } });
+    const d = { ...deps(), candles: vi.fn(async () => candles), rangeCandles: vi.fn(async () => []) };
+    const charts = new PlannerCharts(d), signal = new AbortController().signal;
+    const [chart, rangeChart] = await Promise.all([charts.read('BTC-PERP','1h',100,signal), charts.read('BTC-PERP','1h',100,signal)]);
+    const result = await new PlannerRangeFacts().read(row(),'1h',100,d,signal,rangeChart);
+    expect(chart.state).toBe('available');
+    expect(result.regime).toMatchObject({ state:'available', venue, bars:100, latestFinalizedTime:candles.at(-1)!.time });
+    expect(d.candles).toHaveBeenCalledTimes(1); expect(d.rangeCandles).not.toHaveBeenCalled();
   });
 });
