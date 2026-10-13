@@ -1,7 +1,9 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { GridPlannerCard } from '../../client/src/components/grid-planner/GridPlannerCard';
+import { readFileSync } from 'node:fs';
+import { GridRegimeHint } from '../../client/src/components/grid-planner/GridRegimeHint';
+import { gridSetupAccess, gridSetupForm, gridSetupIntent, isGridRegime } from '../../client/src/lib/grid-setup-view';
 import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
@@ -244,13 +246,38 @@ describe('Planner client authority boundaries', () => {
     const unselected = renderToStaticMarkup(createElement(GridPlannerChart, { chart: null, hasMarket: false, lines: [], range: null, stale: false }));
     expect(unselected).toContain('Choose a market to load candles.'); expect(unselected).not.toContain('Retry chart');
   });
-  it('planner flags coexist with a truthful Grid surface and never offer a live start', () => {
-    for (const props of [{ authenticated: false, identity: null }, { authenticated: true, identity: 'EXAMPLE' }]) {
-      const html = renderToStaticMarkup(createElement(GridPlannerCard, props));
-      expect(html).toBe('');
-      // Before Grid is enabled (and with no Grid bots) the original coming-soon card stays.
-      const live=renderToStaticMarkup(createElement(GridDraftCard,props));expect(live).toContain('card-grid-bot-coming-soon');expect(live).toContain('Coming soon');expect(live).not.toContain('Start bot');
+  it('uses one setup across independent planning, draft and live gates', () => {
+    for (const planner of [false, true]) for (const drafts of [false, true]) for (const start of [false, true]) for (const worker of [false, true]) {
+      expect(gridSetupAccess(planner, drafts, start, worker)).toEqual({ setup: planner || drafts, drafts, live: drafts && start && worker });
     }
+    const app = readFileSync('client/src/pages/App.tsx', 'utf8');
+    expect(app.match(/<GridDraftCard\b/g)).toHaveLength(1); expect(app).not.toContain('GridPlannerCard');
+    const card = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
+    expect(card.match(/<GridPlannerSheet\b/g)).toHaveLength(1); expect(card).not.toContain('GridCreateSheet');
+    expect(readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8')).toContain('rangeBusy={autoApplying}');
+    expect(card).toContain('initialIntent={create.intent}'); expect(card).toContain('createEnabled={enabled}');
+    const live = renderToStaticMarkup(createElement(GridDraftCard, { authenticated: false, identity: null }));
+    expect(live).toContain('card-grid-bot-coming-soon'); expect(live).not.toContain('Start bot');
     expect(readableDecimal('123456.000001')).toBe('123,456.000001');
+  });
+  it('retains every Adjust Range intent field through the unified form, including inactive profit sizing', () => {
+    const form = { ...gridSetupForm(), market: 'ETH-PERP', side: 'short', lower: '90', upper: '110', stop: '115', intervals: '17',
+      timeframe: '4h', bars: '200', investment: '234.56', leverage: '3', seed: false, entryScale: 'ascending', profitScale: 'descending' };
+    const intent = gridSetupIntent(form, form.stop, 'auto');
+    expect(gridSetupForm(intent)).toEqual(form); expect(intent.rangeSource).toBe('auto');
+    expect(intent.seedAtCreation).toBe(false); expect(intent.profitScaleType).toBe('descending');
+    expect(gridSetupIntent(form, '120', 'manual').stopPrice).toBe('120');
+  });
+  it('keeps an explicit timeframe ADX advisory and trending caution separate from direction inputs', () => {
+    const regime = { state: 'available' as const, market: 'BTC-PERP', timeframe: '1h', adx: 30, label: 'trending' as const,
+      venue: 'okx' as const, bars: 100, latestFinalizedTime: now };
+    expect(isGridRegime(regime, 'BTC-PERP', '1h')).toBe(true);
+    for (const bad of [{ ...regime, label: 'ranging' }, { ...regime, bars: 27 }, { ...regime, adx: NaN }, { ...regime, timeframe: '4h' }])
+      expect(isGridRegime(bad, 'BTC-PERP', '1h')).toBe(false);
+    const html = renderToStaticMarkup(createElement(GridRegimeHint, { timeframe: '1h', regime }));
+    expect(html).toContain('ADX(14)'); expect(html).toContain('1h'); expect(html.toLowerCase()).toContain('trending');
+    expect(html).toContain('Caution'); expect(html).not.toMatch(/<input|<select|disabled/);
+    const unknown = renderToStaticMarkup(createElement(GridRegimeHint, { timeframe: '4h', regime: { state: 'unavailable', reason: 'EXAMPLE' } }));
+    expect(unknown).toContain('UNKNOWN'); expect(unknown).toContain('EXAMPLE'); expect(unknown).toContain('4h');
   });
 });

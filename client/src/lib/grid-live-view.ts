@@ -1,4 +1,5 @@
 import type {GridBotSurface,GridOwnerAction} from '../../../shared/grid-surface';
+import Decimal from 'decimal.js';
 /** Invalidate reads on selection, identity, action submission and newer reads. */
 export class GridReadOrder {
   private version=0;
@@ -13,3 +14,22 @@ export class GridActionKeys {
 }
 export function gridAdjustReady(surface:GridBotSurface){return surface.bot.status==='stopped'&&surface.lifecycle.state==='complete'&&surface.sweep==='Confirmed terminal';}
 export function gridFactsFresh(surface:GridBotSurface,now:number){const at=Date.parse(surface.observedAt??'');return at<=now&&now-at<=15000;}
+const positive = (value: string | null) => {
+  if (typeof value !== 'string' || value.length > 100 || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
+  const number = new Decimal(value); return number.gt(0) ? number : null;
+};
+export function gridRangeState(surface: GridBotSurface, now: number) {
+  const mark = positive(surface.mark), lower = positive(surface.bot.lowerPrice), upper = positive(surface.bot.upperPrice);
+  if (!gridFactsFresh(surface, now) || !mark || !lower || !upper || !lower.lt(upper)) return 'UNKNOWN';
+  return mark.gt(upper) ? 'Out Above' : mark.lt(lower) ? 'Out Below' : 'In Range';
+}
+/** Position-only display; existing ledger accounting remains the authority. */
+export function gridBreakevenView(surface: GridBotSurface, now: number) {
+  const price = positive(surface.pnl.breakeven), size = positive(surface.position?.size ?? null);
+  const direction = surface.position?.direction;
+  if (!gridFactsFresh(surface, now) || !price || !size || !['long', 'short'].includes(direction ?? '')) return null;
+  const mark = positive(surface.mark);
+  const percent = mark ? mark.minus(price).div(price).mul(direction === 'long' ? 100 : -100) : null;
+  return { price: price.toFixed(), percent: percent?.toDecimalPlaces(2).toFixed(2) ?? null,
+    tone: percent === null || percent.isZero() ? 'neutral' : percent.gt(0) ? 'profit' : 'loss' };
+}

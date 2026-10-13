@@ -1,3 +1,6 @@
+import { plannerRegime } from '../../server/grid-planner/regime';
+import { PlannerRangeFacts } from '../../server/grid-planner/range-facts';
+import type { ProvenancedOHLCV } from '../../server/lab/datafeed';
 import { describe, it, expect, vi } from 'vitest';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
 import type { ProtocolMarket } from '../../server/protocol/protocol-types';
@@ -114,5 +117,32 @@ describe('Pacifica authority and honest planner verdicts', () => {
       expect(result.stop.state).toBe('unavailable');
       expect(previewGrid({ ...query, ...range, side, stop }, m, now + 60_001).state).toBe('unavailable');
     }
+  });
+});
+
+
+describe('Persistent finalized timeframe ADX and independent auto-range', () => {
+  const history = (count = 100): ProvenancedOHLCV[] => {
+    const duration = 3_600_000, end = Math.floor(now / duration) * duration;
+    return Array.from({length:count},(_,i)=>({time:end-(count-i)*duration,open:100,high:102,low:98,close:100,volume:1,
+      provenance:{source:'okx',venue:'okx',basis:'perp',proxy:'direct',finality:'finalized',timeSemantic:'open_time'}}));
+  };
+  it('computes a valid 28-candle advisory and preserves selected market and timeframe provenance',()=>{
+    expect(plannerRegime('BTC-PERP','1h',history(28),now)).toMatchObject({state:'available',adx:0,label:'ranging',market:'BTC-PERP',timeframe:'1h',venue:'okx',bars:28});
+    expect(plannerRegime('BTC-PERP','1h',history(27),now).state).toBe('unavailable');
+    expect(plannerRegime('BTC-PERP','4h',history(),now).state).toBe('unavailable');
+    const bars=history();bars.forEach((b,i)=>{b.open=100+i;b.close=101+i;b.high=102+i;b.low=99+i;});
+    expect(plannerRegime('BTC-PERP','1h',bars,now)).toMatchObject({state:'available',label:'trending'});
+  });
+  it.each(['forming','spot','proxy','mixed','gap','nan','volume','stale'])('reports UNKNOWN for %s observations',kind=>{
+    const bars=history();if(kind==='forming')bars[99].provenance.finality='forming';if(kind==='spot')bars[0].provenance.basis='spot';if(kind==='proxy')bars[0].provenance.proxy='proxy';
+    if(kind==='mixed')bars[0].provenance.venue='gate';if(kind==='gap')bars[3].time+=1;if(kind==='nan')bars[1].high=NaN;if(kind==='volume')bars[1].volume=-1;if(kind==='stale')bars.forEach(b=>b.time-=3_600_000);
+    expect(plannerRegime('BTC-PERP','1h',bars,now).state).toBe('unavailable');
+  });
+  it('retains ADX when structural range detection has insufficient bars and respects cancellation',async()=>{
+    const d={...deps(),rangeCandles:vi.fn(async()=>history(28))},reader=new PlannerRangeFacts();
+    const value=await reader.read(row(),'1h',100,d,new AbortController().signal);
+    expect(value.regime.state).toBe('available');expect(value.range.state).toBe('unavailable');expect(value.validForMs).toBeGreaterThan(0);
+    const controller=new AbortController();controller.abort();await expect(reader.read(row(),'1h',100,d,controller.signal)).rejects.toThrow();
   });
 });

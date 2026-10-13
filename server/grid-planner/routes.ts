@@ -3,6 +3,7 @@ import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { PlannerDeps, PlannerQuery } from './types';
 import { PlannerCharts } from './chart';
 import { PlannerDirection } from './direction';
+import { PlannerRangeFacts } from './range-facts';
 import { marketSnapshot } from './market-snapshot';
 import { previewGrid, validatePreviewQuery } from './preview';
 
@@ -12,6 +13,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   if (!enabled) return;
   let depsPromise: Promise<PlannerDeps> | undefined, charts: PlannerCharts | undefined;
   let direction: PlannerDirection | undefined;
+  const ranges = new PlannerRangeFacts();
   let metadata: { rows: ProtocolMarket[]; observedAt: number } | undefined;
   let metadataJob: Promise<ProtocolMarket[]> | undefined, lastAttempt = -Infinity;
   let previewStarts: number[] = [];
@@ -71,6 +73,20 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     direction ??= new PlannerDirection(deps);
     const result = await direction.read();
     if (!res.destroyed) res.json(result);
+  }));
+  app.get('/api/grid-planner/range', requireWallet, route(['market', 'timeframe', 'bars'], async (req, res, deps) => {
+    const { market, timeframe, bars } = req.query;
+    if (typeof market !== 'string' || !['15m', '1h', '4h'].includes(String(timeframe)) || !['100', '200'].includes(String(bars))) {
+      res.status(400).json({ state: 'unavailable', reason: 'Choose market, 15m/1h/4h and 100/200 bars' }); return;
+    }
+    const row = (await boundedMetadata(deps)).find(r => r.internalSymbol === market);
+    if (!row) { res.status(404).json({ state: 'unavailable', reason: 'Unknown Pacifica market' }); return; }
+    const controller = new AbortController(), onClose = () => controller.abort();
+    const timer = setTimeout(onClose, 15_000); res.on('close', onClose);
+    try {
+      const result = await ranges.read(row, String(timeframe) as '15m' | '1h' | '4h', Number(bars) as 100 | 200, deps, controller.signal);
+      if (!res.destroyed) res.json(result);
+    } finally { clearTimeout(timer); res.off('close', onClose); }
   }));
   app.get('/api/grid-planner/chart', requireWallet, route(['market', 'timeframe', 'bars'], async (req, res, deps) => {
     const { market, timeframe, bars } = req.query;

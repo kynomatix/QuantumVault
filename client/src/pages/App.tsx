@@ -127,7 +127,6 @@ import { ExchangeBadge } from '@/components/ExchangeBadge';
 import { CreateBotModal } from '@/components/CreateBotModal';
 import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
 import { AiTraderDrawer } from '@/components/AiTraderDrawer';
-import { GridPlannerCard } from '@/components/grid-planner/GridPlannerCard';
 import { GridDraftCard } from '@/components/grid-bot/GridDraftCard';
 import { TradeHistoryModal, resolveTradePriceDisplay } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
@@ -1799,8 +1798,8 @@ export default function AppPage() {
         throw new Error(errData.error || 'Failed to reveal recovery phrase');
       }
       
-      const { mnemonic: revealedMnemonic, expiresAt } = await safeResponseJson(revealRes);
-      setMnemonic(revealedMnemonic);
+      const { mnemonic: phrase, expiresAt } = await safeResponseJson(revealRes);
+      setMnemonic(phrase);
       setMnemonicExpiresAt(new Date(expiresAt));
       toast({ title: 'Recovery phrase revealed', description: 'Write it down and store securely. It will auto-hide in 60 seconds.' });
     } catch (err: unknown) {
@@ -3678,7 +3677,6 @@ export default function AppPage() {
                           </div>
                         </div>
 
-                        <GridPlannerCard authenticated={sessionConnected} identity={publicKeyString} />
                         <GridDraftCard authenticated={sessionConnected} identity={publicKeyString} />
                       </div>
 

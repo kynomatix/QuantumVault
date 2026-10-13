@@ -9,8 +9,10 @@ import { gridIntentSchema,gridCreateRequestSchema } from '../../shared/grid-draf
 import { gridDraftRevision } from '../../client/src/lib/grid-draft-view';
 import { intent,authority,clock,umk } from './draft-fixtures';
 import type { GridDraftDeps } from '../../server/grid-bot/draft-service';
-vi.mock('../../server/grid-planner/default-deps',()=>({defaultPlannerDeps:{now:()=>1_800_000_000_000,getMarkets:async()=>[],candles:async()=>[],cachedReference:()=>null}}));
+vi.mock('../../server/grid-planner/default-deps',()=>({defaultPlannerDeps:{now:()=>1_800_000_000_000,getMarkets:async()=>[],candles:async()=>[],cachedReference:()=>null,refreshReference:vi.fn(async()=>{})}}));
 vi.mock('../../server/grid-bot/draft-default-deps',()=>({readGridRange:async()=>({state:'unavailable',manualAvailable:true}),defaultGridDraftDeps:()=>{throw Error('Unexpected default dependencies');}}));
+import type { ProtocolMarket } from '../../server/protocol/protocol-types';
+import { defaultPlannerDeps } from '../../server/grid-planner/default-deps';
 import { registerGridBotRoutes } from '../../server/grid-bot/draft-routes';
 function memory() {
   const bots=new Map<string,StoredBot>(),levels=new Map<string,StoredLevel[]>();
@@ -45,6 +47,25 @@ describe('server authoritative Grid drafts',()=>{
 const servers:Server[]=[];afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>new Promise<void>(resolve=>{s.close(()=>resolve());s.closeAllConnections();})));});
 async function api(enabled=true) {const {storage,deps}=setup(),app=express();app.use(express.json());registerGridBotRoutes(app,(req,res,next)=>{const wallet=req.headers['x-wallet'];if(!wallet){res.sendStatus(401);return;}(req as typeof req & {walletAddress:string}).walletAddress=String(wallet);next();},{deps,storage:storage as unknown as GridStorage,enabled:()=>enabled});const server=await new Promise<Server>(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});servers.push(server);const address=server.address();if(!address||typeof address==='string')throw Error();return{...{storage,deps},url:'http://127.0.0.1:'+address.port};}
 describe('Grid owner-only routes',()=>{
+  it('refreshes the selected Pacifica price in draft-only setup while preserving auth and the draft flag',async()=>{
+    const markets=vi.spyOn(defaultPlannerDeps,'getMarkets').mockResolvedValue([{internalSymbol:'BTC-PERP',protocolSymbol:'BTC',fullName:'Bitcoin'} as ProtocolMarket]);
+    const cached=vi.spyOn(defaultPlannerDeps,'cachedReference').mockReturnValue({price:100,observedAt:defaultPlannerDeps.now()});
+    const refresh=vi.mocked(defaultPlannerDeps.refreshReference!);refresh.mockClear();
+    try{
+      const {url,storage}=await api(),headers={'x-wallet':'EXAMPLE'};
+      expect((await fetch(url+'/api/grid-bots/setup-markets?market=BTC-PERP')).status).toBe(401);
+      expect((await fetch(url+'/api/grid-bots/setup-markets?market=BTC-PERP&extra=1',{headers})).status).toBe(400);
+      expect((await fetch(url+'/api/grid-bots/setup-markets?market=ETH-PERP',{headers})).status).toBe(404);
+      expect(refresh).not.toHaveBeenCalled();
+      const response=await fetch(url+'/api/grid-bots/setup-markets?market=BTC-PERP',{headers});
+      expect(response.status).toBe(200);expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toMatchObject({state:'available',markets:[{market:'BTC-PERP',reference:{state:'available',value:{price:'100'}}}]});
+      expect(refresh).toHaveBeenCalledOnce();expect(refresh).toHaveBeenCalledWith('BTC-PERP','BTC',expect.any(AbortSignal));
+      const off=await api(false);expect((await fetch(off.url+'/api/grid-bots/setup-markets?market=BTC-PERP',{headers})).status).toBe(404);
+      expect(refresh).toHaveBeenCalledOnce();expect(storage.createDraftWithLevels).not.toHaveBeenCalled();
+    }finally{markets.mockRestore();cached.mockRestore();refresh.mockClear();}
+  });
+
   it('requires authentication, keeps owner reads available and blocks draft creation with the flag off',async()=>{
     const {url,storage}=await api(false),headers={'x-wallet':'EXAMPLE','Content-Type':'application/json'};
     expect((await fetch(url+'/api/grid-bots')).status).toBe(401);

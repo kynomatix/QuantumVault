@@ -6,6 +6,8 @@ import { GridStorageError, type GridStorage } from './storage';
 import { PlannerCharts } from '../grid-planner/chart';
 import { defaultPlannerDeps } from '../grid-planner/default-deps';
 import { readGridRange } from './draft-default-deps';
+import { PlannerRangeFacts } from '../grid-planner/range-facts';
+import { marketSnapshot } from '../grid-planner/market-snapshot';
 import type {GridLifecycleStorage} from './lifecycle-storage';
 
 const uuid=z.string().uuid();
@@ -18,6 +20,7 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
   const runtime=()=>provided?Promise.resolve(provided):initialized??(initialized=Promise.all([import('../db'),import('./storage'),import('./draft-default-deps')]).then(([{pool},{GridStorage},{defaultGridDraftDeps}])=>{const storage=new GridStorage(pool);return {storage,deps:defaultGridDraftDeps(storage)};}));
   const wallet=(req:Request)=>(req as Request & {walletAddress:string}).walletAddress;
   const charts=new PlannerCharts(defaultPlannerDeps);
+  const rangeFacts=new PlannerRangeFacts();
   let inFlight=0;const starts=new Map<string,number[]>();
   const gate:RequestHandler=(req,res,next)=>{if (!enabled()) {res.status(404).json({error:'Grid drafts are disabled'});return;}next();};
   const work=(handler:(req:Request,res:Response)=>Promise<void>,bounded=false):RequestHandler=>async(req,res)=>{
@@ -45,6 +48,29 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
     const markets=await defaultPlannerDeps.getMarkets();res.json({markets:markets.map(m=>({market:m.internalSymbol,name:m.fullName}))});
   }));
   app.get('/api/grid-bots/capacity',requireWallet,gate,(_req,res)=>{res.json({policy:GRID_CREATE_POLICY,...GRID_CAPACITY_UNKNOWN});});
+  // Preserve the draft-only setup when the independent hypothetical Planner flag is off.
+  app.get('/api/grid-bots/setup-markets',requireWallet,gate,work(async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    const parsed=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/).optional()}).strict().safeParse(req.query);
+    if(!parsed.success){res.status(400).json({error:'Invalid market refresh request'});return;}
+    const rows=await defaultPlannerDeps.getMarkets();
+    if(parsed.data.market){
+      const row=rows.find(m=>m.internalSymbol===parsed.data.market);
+      if(!row){res.status(404).json({error:'Unknown Pacifica market'});return;}
+      if(!defaultPlannerDeps.refreshReference)throw Error('Fresh price refresh unavailable');
+      const controller=new AbortController(),onClose=()=>controller.abort(),timer=setTimeout(onClose,15_000);res.on('close',onClose);
+      try{await defaultPlannerDeps.refreshReference(row.internalSymbol,row.protocolSymbol,controller.signal);}
+      finally{clearTimeout(timer);res.off('close',onClose);}
+    }
+    if(!res.destroyed)res.json({state:'available',retrievedAt:defaultPlannerDeps.now(),markets:rows.map(row=>marketSnapshot(row,defaultPlannerDeps))});
+  },true));
+  app.get('/api/grid-bots/range',requireWallet,gate,work(async(req,res)=>{
+    const parsed=rangeQuery.safeParse(req.query);if(!parsed.success){res.status(400).json({error:'Invalid advisory request'});return;}
+    const rows=await defaultPlannerDeps.getMarkets(),row=rows.find(m=>m.internalSymbol===parsed.data.market);
+    if(!row){res.status(400).json({error:'Unknown Pacifica market'});return;}
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15_000);res.once('close',()=>controller.abort());
+    try{const value=await rangeFacts.read(row,parsed.data.timeframe,Number(parsed.data.lookback) as 100|200,defaultPlannerDeps,controller.signal);if(!res.destroyed)res.json(value);}finally{clearTimeout(timer);}
+  },true));
   app.get('/api/grid-bots/suggest-range',requireWallet,gate,work(async(req,res)=>{
     const parsed=rangeQuery.safeParse(req.query);if(!parsed.success){res.status(400).json({error:'Invalid range request'});return;}
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15_000);res.once('close',()=>controller.abort());

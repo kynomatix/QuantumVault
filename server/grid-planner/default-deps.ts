@@ -1,5 +1,5 @@
 import { getAdapter } from '../protocol/adapter-registry';
-import { fetchOHLCV, CHART_CANDLE_POLICY } from '../lab/datafeed';
+import { fetchOHLCV, CHART_CANDLE_POLICY, MONEY_CANDLE_POLICY } from '../lab/datafeed';
 import { plannerBtcWeeklyCandles } from './btc-candles';
 import { pool } from '../db';
 import { PostgresBtcWeeklyStore } from './weekly-store';
@@ -15,6 +15,12 @@ export const defaultPlannerDeps: PlannerDeps = {
   btcWeeklyCandles: plannerBtcWeeklyCandles,
   btcWeeklyStore: new PostgresBtcWeeklyStore(pool),
   getMarkets: () => getAdapter('pacifica').getMarkets(),
+  rangeCandles: async (market, timeframe, bars, signal) => {
+    const duration = timeframe === '15m' ? 900_000 : timeframe === '1h' ? 3_600_000 : 14_400_000;
+    const end = Math.floor(Date.now() / duration) * duration;
+    return fetchOHLCV(market.replace(/-PERP$/, ''), timeframe, end - bars * duration, end, undefined,
+      { basisPolicy: MONEY_CANDLE_POLICY, skipSpotFallback: true, deadlineMs: 15_000, signal, callerClass: 'grid-bot' });
+  },
   refreshReference: (market, symbol, signal) => references.refresh(market, symbol, signal),
   cachedReference: market => {
     const refreshed = references.cached(market);

@@ -71,18 +71,17 @@ describe('display-only direction badge', () => {
       expect(hint).not.toMatch(/<input|<select|<button|disabled|aria-pressed/);
     }
   });
-  it('keeps both real integrations independent of all direction editing and admission', () => {
+  it('keeps the unified integration independent of direction editing and draft admission', () => {
     const planner = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
-    const create = readFileSync('client/src/components/grid-bot/GridCreateSheet.tsx', 'utf8');
+    const create = readFileSync('client/src/components/grid-bot/GridDraftActions.tsx', 'utf8');
     expect(planner).toContain('<GridDirectionBadge active={open} identity={identity}/>');
     expect(planner).toContain("onClick={() => edit('side', side)}");
-    expect(create).toContain('<GridDirectionBadge active={open} identity={identity}/>');
+    expect(create).not.toContain('GridDirectionBadge');
     const parent = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
-    expect(parent).toContain('identity={identity??undefined}');
-    expect(create).toContain("selected('direction','Direction',['long','short'])");
-    for (const source of [planner, create]) {
-      expect(source.match(/<GridDirectionBadge\b/g)).toHaveLength(1);
-    }
+    expect(parent).toContain('identity={identity}');
+    expect(create).toContain('submitGridDraftRequest');
+    expect(planner.match(/<GridDirectionBadge\b/g)).toHaveLength(1);
+    expect(create).not.toMatch(/direction\s*[:=]\s*['"](?:long|short)['"]/);
   });
   it('binds the effect to wallet identity and aborts the old wallet read before refetching', async () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
