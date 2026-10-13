@@ -1,5 +1,5 @@
 import type { BotTrade, BotPosition } from "@shared/schema";
-import type { ProvenancedOHLCV } from "../lab/datafeed";
+import type { PlannerCandle } from "../grid-planner/types";
 import { resolveBotTradeNetPnl } from "./bot-trade-pnl-convention";
 import { SIGNAL_CHART_BAR_MS, signalChartTimeframe, type SignalChartTimeframe } from "@shared/signal-trade-chart";
 
@@ -149,12 +149,12 @@ export function chartOpenPosition(position: Pick<BotPosition, "baseSize" | "avgE
 }
 
 /** Admit one known direct perpetual series; never bridge an internal candle gap. */
-export function chartPriceSeries(fetched: readonly ProvenancedOHLCV[], timeframe: SignalChartTimeframe) {
+export function chartPriceSeries(fetched: readonly PlannerCandle[], timeframe: SignalChartTimeframe) {
   const barMs = SIGNAL_CHART_BAR_MS[timeframe];
   const empty = { candles: [] as Array<{ time: number; open: number; high: number; low: number; close: number }>, provenance: null };
   if (!fetched.length) return empty;
   const first = fetched[0].provenance;
-  if (!first || !["okx", "gate", "hyperliquid"].includes(first.source) || !["okx", "gate", "hyperliquid"].includes(first.venue) || first.basis !== "perp" || first.proxy !== "direct" || first.timeSemantic !== "open_time") return empty;
+  if (!first || !["okx", "gate", "hyperliquid", "pacifica"].includes(first.source) || first.venue !== first.source || first.basis !== "perp" || first.proxy !== "direct" || first.timeSemantic !== "open_time") return empty;
   const usable = fetched.every((c, i) => {
     const p = c.provenance;
     return p && p.source === first.source && p.venue === first.venue && p.basis === first.basis && p.proxy === first.proxy && p.timeSemantic === "open_time" && ["finalized", "forming"].includes(p.finality)

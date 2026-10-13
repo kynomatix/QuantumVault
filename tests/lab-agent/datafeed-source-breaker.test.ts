@@ -52,7 +52,7 @@ function gateCandles(startMs: number, count: number): string[][] {
   return rows;
 }
 
-type OkxMode = "network-down" | "not-found" | "ok";
+type OkxMode = "network-down" | "not-found" | "rate-limited" | "ok";
 
 /**
  * Fetch stub with a switchable OKX behaviour. Gate always serves candles;
@@ -74,6 +74,9 @@ function makeFetch(getOkxMode: () => OkxMode, rangeStartMs: number) {
           text: async () => "",
         };
       }
+      if (mode === 'rate-limited') return {
+        ok: true, status: 200, json: async () => ({ code: '50011', msg: 'Rate limit reached', data: [] }), text: async () => '',
+      };
       // "ok": one page of OKX history candles including confirm at index 8.
       const data: string[][] = [];
       for (let i = 99; i >= 0; i--) {
@@ -139,6 +142,19 @@ describe("fetchOHLCV — OKX source-level circuit breaker", () => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it('API rate limits do not open the legacy OKX source breaker', async () => {
+    const rangeStart = Date.now() - 100 * TF_MS;
+    let mode: OkxMode = 'rate-limited';
+    const fetchSpy = makeFetch(() => mode, rangeStart);
+    vi.stubGlobal('fetch', fetchSpy);
+    for (const symbol of ['EXAMPLE_RATE_A/USDT', 'EXAMPLE_RATE_B/USDT', 'EXAMPLE_RATE_C/USDT']) await runFetch(symbol);
+    const before = callsTo(fetchSpy, 'okx.com'); mode = 'ok';
+    const result = await runFetch('BTC/USDT');
+    expect(result.length).toBeGreaterThan(0);
+    expect(result.every(c => c.provenance.source === 'okx')).toBe(true);
+    expect(callsTo(fetchSpy, 'okx.com')).toBeGreaterThan(before);
   });
 
   it("A: trips after 3 consecutive network-failed symbols — 4th symbol makes ZERO OKX calls", async () => {

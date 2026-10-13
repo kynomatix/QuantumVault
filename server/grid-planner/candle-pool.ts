@@ -1,10 +1,46 @@
-import { readPlannerPerpSource } from '../lab/datafeed';
-import { pacificaPlannerCandles } from './pacifica-candles';
+import { readPlannerPerpSource, readChartPerpSource } from '../lab/datafeed';
+import { pacificaPlannerCandles, pacificaPerpWindow, PERP_CHART_INTERVAL_MS } from './pacifica-candles';
 import { validateCandles } from './chart';
 import type { PlannerCandle } from './types';
 
 /** Every entry reads native perpetual trades; no spot, index or relabelled proxy history. */
 export const PLANNER_CANDLE_SOURCES = ['okx', 'gate', 'hyperliquid', 'pacifica'] as const;
+export type PerpChartSource = typeof PLANNER_CANDLE_SOURCES[number];
+
+export function validPerpChartSeries(candles: readonly PlannerCandle[], timeframe: string, now = Date.now()): boolean {
+  const duration = PERP_CHART_INTERVAL_MS[timeframe];
+  return !!duration && validateCandles([...candles], now) && candles.every((c, i) =>
+    Number.isFinite(c.volume) && c.volume >= 0 && (!i || c.time === candles[i - 1].time + duration));
+}
+
+/** Shared ordered pool, with native chart intervals and forming candles admitted. */
+export async function chartPoolCandles(symbol: string, timeframe: string, start: number, end: number,
+  signal: AbortSignal, onlySource?: PerpChartSource): Promise<PlannerCandle[]> {
+  symbol = symbol.replace(/\/USDT$/, '');
+  const duration = PERP_CHART_INTERVAL_MS[timeframe];
+  if (!duration || !/^[A-Za-z0-9-]+$/.test(symbol) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= end) return [];
+  for (const source of PLANNER_CANDLE_SOURCES) {
+    signal.throwIfAborted();
+    if (onlySource && source !== onlySource) continue;
+    // Gate futures has no native 2h/12h interval. Never substitute another interval or spot.
+    if (source === 'gate' && ['2h', '12h'].includes(timeframe)) continue;
+    try {
+      const entrySignal = AbortSignal.any([signal, AbortSignal.timeout(12_000)]);
+      const raw = source === 'pacifica'
+        ? await pacificaPerpWindow(symbol, timeframe, start, end, entrySignal)
+        : await readChartPerpSource(source, symbol, timeframe, start, end, entrySignal);
+      signal.throwIfAborted();
+      const candles = raw.filter(c => c.time >= start && c.time < end);
+      if (validPerpChartSeries(candles, timeframe) && candles.every(c => c.provenance.source === source)
+        && candles.at(-1)!.time + duration >= end - duration) return candles;
+      console.info(`[TradeChartCandles] source=${source} market=${symbol} reason=validation bars=${candles.length}`);
+    } catch (error) {
+      signal.throwIfAborted();
+      console.info(`[TradeChartCandles] source=${source} market=${symbol} reason=${error instanceof Error ? error.name : 'unavailable'}`);
+    }
+  }
+  return [];
+}
 
 export async function plannerPoolCandles(market: string, timeframe: string, bars: number,
   signal: AbortSignal): Promise<PlannerCandle[]> {

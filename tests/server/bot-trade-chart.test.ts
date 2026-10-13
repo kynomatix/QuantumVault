@@ -302,7 +302,7 @@ describe("Signal Bot trade chart proof", () => {
     const route=readFileSync(resolve(process.cwd(),"server/routes.ts"),"utf8");
     expect(marketToDatafeedTicker("ZEC-PERP")).toBe("ZEC/USDT");
     expect(isMultiplierMarketQuarantined("1KZEC-PERP")).toBe(true);
-    expect(route).toContain("fetchOHLCV(marketToDatafeedTicker(bot.market), tf");
+    expect(route).toContain("fetchChartCandles(marketToDatafeedTicker(bot.market), tf");
     expect(route).toContain("if (multiplierQuarantined) throw new Error");
     expect(route).toContain("reason: multiplierQuarantined ? \"multiplier_unqualified\"");
     expect(route).toContain("bypassCache: true, cacheWritePolicy"); // one provider retry when the cached series has gaps
@@ -413,7 +413,7 @@ function routeHarness(trades: BotTrade[] = [fixture()], positions: TestRow[] = [
     db:{select:(shape?:Record<string,unknown>)=>select(shape),selectDistinct:(shape:Record<string,unknown>)=>select(shape,true)},
     botTrades:tradeTable,botPositions:positionTable,eq,lt,gte,and,or,desc:(key:string)=>key,
     inArray:(key:string,values:string[]):Predicate=>r=>values.includes(r[key]),sql:()=>"min",
-    notPhantomDupClose:():Predicate=>r=>!r.phantom,fetchOHLCV,CHART_CANDLE_POLICY:"EXAMPLE_POLICY",
+    notPhantomDupClose:():Predicate=>r=>!r.phantom,fetchChartCandles:fetchOHLCV,
     chartDefaultTimeframe,SIGNAL_CHART_BAR_MS,isSignalChartTimeframe,pairChartTradeHistory,chartFirstTradeTime,chartOpenPosition,chartPriceSeries,alignChartExecutions,assertSingleChartMarket,chartPairingPlaceholders,chartScannedPage,toChartExecution,
     marketToDatafeedTicker,isMultiplierMarketQuarantined,Buffer,console};
   new Function(...Object.keys(dependencies),handlerJs)(...Object.values(dependencies));
@@ -426,6 +426,15 @@ function routeHarness(trades: BotTrade[] = [fixture()], positions: TestRow[] = [
 }
 
 describe("registered chart route", () => {
+  it.each(['gate', 'pacifica'])('shows honest %s perpetual provenance without changing execution prices', async source => {
+    const h = routeHarness();
+    const native = candle();
+    h.fetchOHLCV.mockResolvedValue([{ ...native, provenance: { ...native.provenance, source, venue: source } }] as any);
+    const { status, body } = await h.request();
+    expect(status).toBe(200);
+    expect(body.price.provenance).toMatchObject({ source, venue: source, basis: 'perp', proxy: 'direct' });
+    expect(body.price.candles).toHaveLength(1);
+  });
   it("loads from the first trade with padding and includes more than 250 trades on the chart", async () => {
     const trades = Array.from({ length: 503 }, (_, i) => fixture({ id: `EXAMPLE_${i}`, executedAt: new Date(Date.parse("2026-04-01") + i * 7200000), webhookPayload: { interval: "120" } }));
     const h = routeHarness(trades);
@@ -526,7 +535,7 @@ describe("registered chart route", () => {
   it("passes canonical totals through and requests only reference perpetual candles without cache writes", async () => {
     const h=routeHarness([fixture({market:"ZEC-PERP"})],[],"ZEC-PERP");const {body}=await h.request();
     expect(body.totals).toEqual(h.totals);expect(h.storage.getCanonicalBotTradeStats).toHaveBeenCalledWith(bot.id);
-    expect(h.fetchOHLCV).toHaveBeenCalledWith("ZEC/USDT","1d",Date.parse(windowQuery.from),Date.parse(windowQuery.to),undefined,{basisPolicy:"EXAMPLE_POLICY",skipSpotFallback:true,cacheWritePolicy:"skip",deadlineMs:60_000});
+    expect(h.fetchOHLCV).toHaveBeenCalledWith("ZEC/USDT","1d",Date.parse(windowQuery.from),Date.parse(windowQuery.to),undefined,{cacheWritePolicy:"skip",deadlineMs:60_000});
     expect(body.price.basisLabel).toContain("not Drift execution price");
   });
   it("retains exact trade details when price fetch fails or the market is quarantined", async () => {

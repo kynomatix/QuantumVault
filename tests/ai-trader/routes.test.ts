@@ -89,6 +89,9 @@ vi.mock("../../server/ai-trader/context-builder", () => ({
   marketToDatafeedTicker: vi.fn(),
 }));
 const fetchOHLCVMock = vi.hoisted(() => vi.fn());
+vi.mock("../../server/trading/chart-candles", () => ({
+  fetchChartCandles: (...args: unknown[]) => fetchOHLCVMock(...args),
+}));
 vi.mock("../../server/lab/datafeed", () => ({
   fetchOHLCV: (...args: unknown[]) => fetchOHLCVMock(...args),
   CHART_CANDLE_POLICY: {
@@ -741,10 +744,6 @@ describe("AI Trader chart unavailable response", () => {
 
       expect(result.statusCode).toBe(200);
       const options = fetchOHLCVMock.mock.calls[0][5];
-      expect(options).toMatchObject({
-        basisPolicy: expect.objectContaining({ consumer: "chart" }),
-        skipSpotFallback: true,
-      });
       expect(options).not.toHaveProperty("bypassCache");
     },
   );
@@ -764,8 +763,6 @@ describe("AI Trader chart unavailable response", () => {
 
     expect(result.statusCode).toBe(200);
     expect(fetchOHLCVMock.mock.calls[0][5]).toMatchObject({
-      basisPolicy: expect.objectContaining({ consumer: "chart" }),
-      skipSpotFallback: true,
       bypassCache: true,
     });
   });

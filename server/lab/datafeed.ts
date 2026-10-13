@@ -580,6 +580,11 @@ class OkxInstrumentNotFoundError extends Error {
   }
 }
 
+/** Rate limiting proves the source answered; it is not an egress outage. */
+class OkxRateLimitedError extends Error {
+  constructor() { super('OKX rate limited'); this.name = 'OkxRateLimitedError'; }
+}
+
 /** Verbose per-fetch source tracing (set DATAFEED_VERBOSE=1). */
 const DATAFEED_VERBOSE =
   process.env.DATAFEED_VERBOSE === "1" || process.env.DATAFEED_VERBOSE === "true";
@@ -1866,6 +1871,11 @@ async function fetchOkxCandles(
           throw new Error(`OKX API error ${res.status}: ${text}`);
         }
         const json = await bounded.json();
+        if (json.code === '50011') {
+          bounded.release();
+          await abortableSleep(RETRY_DELAY_MS * (attempt + 1) * 2, signal);
+          continue;
+        }
         if (json.code !== "0") {
           // 51001 = "Instrument ID ... doesn't exist" — permanent, non-retryable.
           if (json.code === "51001" || (typeof json.msg === "string" && json.msg.includes("doesn't exist"))) {
@@ -1949,7 +1959,7 @@ async function fetchOkxCandlesFromEndpoint(
   try {
     if (bounded.response.status === 429) {
       bounded.release();
-      throw new Error("OKX rate limited");
+      throw new OkxRateLimitedError();
     }
     if (!bounded.response.ok) {
       const text = await bounded.text();
@@ -1957,6 +1967,7 @@ async function fetchOkxCandlesFromEndpoint(
     }
     const json = await bounded.json<any>();
     if (json?.code !== "0") {
+      if (json?.code === "50011") throw new OkxRateLimitedError();
       if (json?.code === "51001" || (typeof json?.msg === "string" && json.msg.includes("doesn't exist"))) {
         throw new OkxInstrumentNotFoundError(instId, json?.msg || json?.code);
       }
@@ -2097,6 +2108,7 @@ async function tryHyperliquidCandles(
   deadlineAt: number,
   callerClass: CandleReadCallerClass,
   signal?: AbortSignal,
+  chartRead = false,
 ): Promise<HyperliquidCandleAttempt> {
   const coin = symbol.split("/")[0].toUpperCase();
   const timeframeMs = getTimeframeSeconds(timeframe) * 1000;
@@ -2110,7 +2122,7 @@ async function tryHyperliquidCandles(
     sawMalformedProvenance: false,
     trace,
   });
-  if (!["15m", "1h", "4h", "1d"].includes(timeframe) || expectedRows > HYPERLIQUID_MAX_CANDLES) {
+  if (!(chartRead ? ["15m", "1h", "2h", "4h", "12h", "1d"] : ["15m", "1h", "4h", "1d"]).includes(timeframe) || expectedRows > HYPERLIQUID_MAX_CANDLES) {
     return unavailable("hyperliquid:catalog-miss");
   }
 
@@ -2235,6 +2247,7 @@ async function fetchDirectPerpCandles(
   callerClass: CandleReadCallerClass,
   signal?: AbortSignal,
   onlyProvider?: DirectPerpProvider,
+  chartRead = false,
 ): Promise<DirectPerpFetchResult> {
   const instId = symbolToOkxInstId(symbol);
   const contract = symbolToGateFuturesContract(symbol);
@@ -2302,6 +2315,7 @@ async function fetchDirectPerpCandles(
         deadlineAt,
         callerClass,
         signal,
+        chartRead,
       );
       trace.push(hyperliquid.trace);
       sawMalformedProvenance ||= hyperliquid.sawMalformedProvenance;
@@ -2311,7 +2325,7 @@ async function fetchDirectPerpCandles(
       if (hyperliquid.circuitBlocked) providerCircuitBlocked.add("hyperliquid");
       if (hyperliquid.candles.length > 0) lastPureProviderCandles = hyperliquid.candles;
       const hyperliquidEligible = hyperliquid.candles.filter((candle) =>
-        candle.provenance.finality === "finalized" && candle.provenance.proxy === "direct",
+        (chartRead || candle.provenance.finality === "finalized") && candle.provenance.proxy === "direct",
       );
       if (hyperliquidEligible.length > 0) {
         return {
@@ -2479,7 +2493,7 @@ async function fetchDirectPerpCandles(
       }
 
       const eligible = providerCandles.filter((candle) =>
-        candle.provenance.finality === "finalized" && candle.provenance.proxy === "direct",
+        (chartRead || candle.provenance.finality === "finalized") && candle.provenance.proxy === "direct",
       );
       if (providerCandles.length > 0) lastPureProviderCandles = providerCandles;
       trace.push(`${endpoint.provider}:${endpoint.id}=${eligible.length}c/${Date.now() - startedAt}ms`);
@@ -2505,6 +2519,12 @@ async function fetchDirectPerpCandles(
         settleProviderSuccess("okx");
         negCache(okxFailedInstruments, instId);
         trace.push(`okx:${endpoint.id}=notfound`);
+        continue;
+      }
+      if (error instanceof OkxRateLimitedError) {
+        providerReachable.add("okx");
+        settleProviderSuccess("okx");
+        trace.push(`okx:${endpoint.id}=rate-limited`);
         continue;
       }
       if (error instanceof GateFuturesContractNotFoundError) {
@@ -2552,6 +2572,19 @@ export async function readPlannerPerpSource(provider: "okx" | "gate" | "hyperliq
   return deduplicateCandles(result.candles.filter(c => c.provenance.source === provider
     && c.provenance.venue === provider && c.provenance.basis === 'perp'
     && c.provenance.proxy === 'direct' && c.provenance.finality === 'finalized'));
+}
+
+/** Display-only pool transport. Planner/scanner finality and interval rules stay unchanged. */
+export async function readChartPerpSource(provider: DirectPerpProvider, symbol: string,
+  timeframe: string, startMs: number, endMs: number, signal: AbortSignal): Promise<ProvenancedOHLCV[]> {
+  throwIfAborted(signal);
+  // Gate has no native 2h/12h futures bars. Never send an unsupported interval or relabel 1h bars.
+  if (provider === 'gate' && !['15m', '1h', '4h', '1d'].includes(timeframe)) return [];
+  const result = await fetchDirectPerpCandles(symbol, timeframe, startMs, endMs,
+    Date.now() + 12_000, 'grid-bot', signal, provider, true);
+  throwIfAborted(signal);
+  return deduplicateCandles(result.candles.filter(c => c.provenance.source === provider
+    && c.provenance.venue === provider && c.provenance.basis === 'perp' && c.provenance.proxy === 'direct'));
 }
 
 const TIMEFRAME_MS: Record<string, number> = {

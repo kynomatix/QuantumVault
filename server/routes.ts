@@ -21,7 +21,7 @@ import { appendTelemetry } from "./telemetry";
 import { storage, DatabaseStorage, notPhantomDupClose } from "./storage";
 import { chartDefaultTimeframe, pairChartTradeHistory, alignChartExecutions, chartPairingPlaceholders, chartScannedPage, assertSingleChartMarket, chartFirstTradeTime, chartOpenPosition, chartPriceSeries } from "./trading/bot-trade-chart";
 import { SIGNAL_CHART_BAR_MS, isSignalChartTimeframe } from "@shared/signal-trade-chart";
-import { fetchOHLCV, CHART_CANDLE_POLICY } from "./lab/datafeed";
+import { fetchChartCandles } from "./trading/chart-candles";
 import { marketToDatafeedTicker } from "./ai-trader/context-builder";
 import { isMultiplierMarketQuarantined } from "./ai-trader/multiplier-market-quarantine";
 import { resolveBotTradeNetPnl } from "./trading/bot-trade-pnl-convention";
@@ -18759,16 +18759,16 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const multiplierQuarantined = isMultiplierMarketQuarantined(bot.market);
       try {
         if (multiplierQuarantined) throw new Error("multiplier_unqualified");
-        // fetchOHLCV already pages native requests (OKX 300, Gate 2,000 bars)
+        // The shared perpetual pool pages native requests (OKX 300, Gate 2,000 bars)
         // and bypasses Hyperliquid for ranges beyond its candle-count ceiling.
         // Keep one provider series across the full history; bound fetch time too.
-        const fetched = await fetchOHLCV(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, cacheWritePolicy: "skip", deadlineMs: 60_000 });
+        const fetched = await fetchChartCandles(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { cacheWritePolicy: "skip", deadlineMs: 60_000 });
         ({ candles, provenance } = chartPriceSeries(fetched, tf));
         // The shared candle cache can hold a gappy single-venue series (it only
         // needs ~70% coverage), which chartPriceSeries rightly refuses. Retry
         // once straight from the provider before showing "Price unavailable".
         if (!candles.length && fetched.length) {
-          const fresh = await fetchOHLCV(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true, cacheWritePolicy: "skip", deadlineMs: 45_000 });
+          const fresh = await fetchChartCandles(marketToDatafeedTicker(bot.market), tf, from.getTime(), to.getTime(), undefined, { bypassCache: true, cacheWritePolicy: "skip", deadlineMs: 45_000 });
           ({ candles, provenance } = chartPriceSeries(fresh, tf));
         }
       } catch { /* trade detail remains available when price source fails */ }

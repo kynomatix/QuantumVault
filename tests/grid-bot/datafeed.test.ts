@@ -17,6 +17,43 @@ import { pacificaPlannerCandles } from '../../server/grid-planner/pacifica-candl
 import { PlannerReferences } from '../../server/grid-planner/pacifica-reference';
 import { __testResetOkxSourceBreaker } from '../../server/lab/datafeed';
 import * as datafeed from '../../server/lab/datafeed';
+describe('direct-perpetual OKX source health', () => {
+  const hour = 3_600_000;
+  const window = () => { const end = Math.floor(Date.now() / hour) * hour; return { start: end - 3 * hour, end }; };
+  const okxRows = (start: number) => Array.from({ length: 3 }, (_, i) => [String(start + i * hour), '100', '110', '90', '101', '2', '0', '0', '1']);
+  it.each(['http429', 'api50011'])('does not open the whole-source breaker after repeated %s responses', async mode => {
+    const { start, end } = window(); let limited = true;
+    const transport = vi.fn(async () => limited
+      ? mode === 'http429' ? new Response('', { status: 429 }) : json({ code: '50011', msg: 'Rate limit reached', data: [] })
+      : json({ code: '0', data: okxRows(start) }));
+    vi.stubGlobal('fetch', transport);
+    for (const symbol of ['SOL', 'ETH', 'BTC']) expect(await datafeed.readChartPerpSource('okx', symbol, '1h', start, end, new AbortController().signal)).toEqual([]);
+    const before = transport.mock.calls.length; limited = false;
+    expect(await datafeed.readChartPerpSource('okx', 'DOGE', '1h', start, end, new AbortController().signal)).toHaveLength(3);
+    expect(transport.mock.calls.length).toBeGreaterThan(before); assertReadOnly();
+  });
+  it('negative-caches missing instruments without tripping source health for a different symbol', async () => {
+    const { start, end } = window(); let missing = true;
+    const transport = vi.fn(async () => json(missing ? { code: '51001', data: [] } : { code: '0', data: okxRows(start) }));
+    vi.stubGlobal('fetch', transport);
+    for (const symbol of ['PAXG', 'EXAMPLE_A', 'EXAMPLE_B']) await datafeed.readChartPerpSource('okx', symbol, '1h', start, end, new AbortController().signal);
+    const before = transport.mock.calls.length;
+    await datafeed.readChartPerpSource('okx', 'PAXG', '1h', start, end, new AbortController().signal);
+    expect(transport.mock.calls.length).toBe(before);
+    missing = false;
+    expect(await datafeed.readChartPerpSource('okx', 'BTC', '1h', start, end, new AbortController().signal)).toHaveLength(3);
+    assertReadOnly();
+  });
+  it.each(['transport', 'http403'])('still opens source health after three %s failures', async mode => {
+    const { start, end } = window();
+    const transport = vi.fn(async () => { if (mode === 'transport') throw new Error('EXAMPLE network failure'); return new Response('', { status: 403 }); });
+    vi.stubGlobal('fetch', transport);
+    for (const symbol of ['SOL', 'ETH', 'BTC']) await datafeed.readChartPerpSource('okx', symbol, '1h', start, end, new AbortController().signal);
+    const before = transport.mock.calls.length;
+    expect(await datafeed.readChartPerpSource('okx', 'DOGE', '1h', start, end, new AbortController().signal)).toEqual([]);
+    expect(transport.mock.calls.length).toBe(before); assertReadOnly();
+  });
+});
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.clearAllMocks(); sentinels.quota.mockReturnValue(true); __testResetOkxSourceBreaker(); });
 const json = (payload: unknown) => new Response(JSON.stringify(payload), { status: 200, headers: { 'Content-Type': 'application/json' } });
 const nativeRow = (time: number, interval = '1h', duration = 3_600_000) =>

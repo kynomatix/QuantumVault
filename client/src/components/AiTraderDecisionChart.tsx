@@ -67,8 +67,8 @@ function parseCandleBasisLabel(value: unknown): CandleBasisLabel | null {
   if (!value || typeof value !== 'object') return null;
   const v = value as Record<string, unknown>;
   const accepted = {
-    source: ['okx', 'gate', 'pyth', 'hyperliquid'],
-    venue: ['okx', 'gate', 'hyperliquid', 'none'],
+    source: ['okx', 'gate', 'pyth', 'hyperliquid', 'pacifica'],
+    venue: ['okx', 'gate', 'hyperliquid', 'none', 'pacifica'],
     basis: ['perp', 'spot', 'index'],
     proxy: ['direct', 'proxy'],
     timeSemantic: ['open_time'],
@@ -378,6 +378,7 @@ export function AiTraderDecisionChart({
         if (cancelled || deep.candles.length <= fastCount) return;
         preserveViewRef.current =
           (chartRef.current?.timeScale().getVisibleRange() as { from: UTCTimestamp; to: UTCTimestamp } | null) ?? null;
+        liveBarsRef.current.clear();
         setCandles(deep.candles);
         setCandleBasisLabel(deep.label);
       } catch {
@@ -974,22 +975,25 @@ export function AiTraderDecisionChart({
           return;
         }
         if (cancelled || !seriesRef.current || bars.length === 0) return;
-        setCandleBasisLabel((current) => {
-          if (!current) return tailLabel;
-          const sameIdentity = current.source === tailLabel!.source
-            && current.venue === tailLabel!.venue
-            && current.basis === tailLabel!.basis
-            && current.proxy === tailLabel!.proxy
-            && current.timeSemantic === tailLabel!.timeSemantic;
-          if (!sameIdentity) {
-            setError('Chart candle provenance changed unexpectedly');
-            return current;
-          }
-          return {
-            ...current,
-            finality: [...new Set([...current.finality, ...tailLabel!.finality])].sort(),
-          };
-        });
+        const sameIdentity = candleBasisLabel && candleBasisLabel.source === tailLabel!.source
+          && candleBasisLabel.venue === tailLabel!.venue && candleBasisLabel.basis === tailLabel!.basis
+          && candleBasisLabel.proxy === tailLabel!.proxy && candleBasisLabel.timeSemantic === tailLabel!.timeSemantic;
+        if (!sameIdentity) {
+          // Refetch the complete window before admitting a different venue's tail.
+          const fullRes = await fetch(
+            `/api/ai-trader/${botId}/chart?decisionId=${encodeURIComponent(decisionId)}&tf=${encodeURIComponent(tf)}&span=deep`,
+            { credentials: 'include', headers: walletAuthHeaders() }
+          );
+          if (!fullRes.ok) return;
+          const full = await safeResponseJson(fullRes);
+          const fullLabel = parseCandleBasisLabel(full?.candleBasisLabel);
+          if (cancelled || !fullLabel || !Array.isArray(full?.candles) || !full.candles.length) return;
+          liveBarsRef.current.clear();
+          setCandles(full.candles);
+          setCandleBasisLabel(fullLabel);
+          return;
+        }
+        setCandleBasisLabel({ ...candleBasisLabel!, finality: [...new Set([...candleBasisLabel!.finality, ...tailLabel!.finality])].sort() });
         // Only bars at/after the newest bar already on the chart — the series
         // API rejects out-of-order updates, and older bars are already drawn.
         const lastLive = Math.max(0, ...liveBarsRef.current.keys());
@@ -1011,7 +1015,7 @@ export function AiTraderDecisionChart({
       cancelled = true;
       clearInterval(id);
     };
-  }, [open, botId, decisionId, tf, closedAt, loading, error, hasCandles, candles]);
+  }, [open, botId, decisionId, tf, closedAt, loading, error, hasCandles, candles, candleBasisLabel]);
 
   const isOpenPosition = closedAt === null;
   const pnlValue = isOpenPosition ? (unrealizedPnl ?? null) : realizedPnl;

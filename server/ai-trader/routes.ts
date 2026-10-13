@@ -51,12 +51,9 @@ import { checkEntryConstraints, checkOpeningEffectAuthority } from "../protocol/
 import type { ProtocolMarket } from "../protocol/protocol-types";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
-import {
-  fetchOHLCV,
-  CHART_CANDLE_POLICY,
-  isCandleBasisUnavailableError,
-  type CandleProvenance,
-} from "../lab/datafeed";
+import { isCandleBasisUnavailableError } from "../lab/datafeed";
+import { fetchChartCandles } from "../trading/chart-candles";
+import type { PlannerCandle } from "../grid-planner/types";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
 import { userInitiatedClose, scheduleAutoNext, nextCycleTimeframe, SCANNER_CANDIDATE_MAX_AGE_MS } from "./monitor";
@@ -343,20 +340,20 @@ const CHART_TRADE_SPAN_MIN = 200;
 const CHART_TAIL_SPAN_CANDLES = 3;
 
 export function summarizeCandleProvenance(
-  candles: Array<{ provenance?: CandleProvenance }>,
+  candles: Array<{ provenance?: PlannerCandle['provenance'] }>,
 ): {
-  source: CandleProvenance["source"];
-  venue: CandleProvenance["venue"];
-  basis: CandleProvenance["basis"];
-  proxy: CandleProvenance["proxy"];
-  timeSemantic: CandleProvenance["timeSemantic"];
-  finality: CandleProvenance["finality"][];
+  source: PlannerCandle['provenance']["source"];
+  venue: PlannerCandle['provenance']["venue"];
+  basis: PlannerCandle['provenance']["basis"];
+  proxy: PlannerCandle['provenance']["proxy"];
+  timeSemantic: PlannerCandle['provenance']["timeSemantic"];
+  finality: PlannerCandle['provenance']["finality"][];
 } {
   if (candles.length === 0 || !candles[0].provenance) {
     throw new Error("Chart candles are missing provenance");
   }
   const first = candles[0].provenance;
-  const finality = new Set<CandleProvenance["finality"]>();
+  const finality = new Set<PlannerCandle['provenance']["finality"]>();
   for (const candle of candles) {
     const p = candle.provenance;
     if (!p || Object.values(p).some((v) => v === "unknown")) {
@@ -2560,13 +2557,13 @@ export function registerAiTraderRoutes(app: Express): void {
 
       if (spanRaw === "tail") {
         const tailStartMs = now - CHART_TAIL_SPAN_CANDLES * tfMs;
-        const rawTail = await fetchOHLCV(
+        const rawTail = await fetchChartCandles(
           marketToDatafeedTicker(chartMarket),
           chartTf,
           new Date(tailStartMs).toISOString(),
           new Date(now).toISOString(),
           undefined,
-          { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true, bypassCache: true }
+          { bypassCache: true }
         );
         if (rawTail.length === 0) {
           return chartCandlesUnavailable(res, {
@@ -2612,13 +2609,13 @@ export function registerAiTraderRoutes(app: Express): void {
       // AI Trader only trades perpetual-swap markets; Gate.io spot candles
       // misrepresent the market (lower volume, different price action) and must
       // never substitute for OKX SWAP candles on this chart.
-      const rawCandles = await fetchOHLCV(
+      const rawCandles = await fetchChartCandles(
         datafeedTicker,
         chartTf,
         new Date(startMs).toISOString(),
         new Date(endMs).toISOString(),
         undefined,
-        { basisPolicy: CHART_CANDLE_POLICY, skipSpotFallback: true }
+        {}
       );
       if (rawCandles.length === 0) {
         return chartCandlesUnavailable(res, {
