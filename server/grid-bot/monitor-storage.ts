@@ -4,6 +4,8 @@ import {GridLaunchStorage,canonicalRequest} from './launch-storage';
 import {reconcileGridObservation,type GridObservation,type ReconciliationOperation} from './reconciliation';
 import type {GridEconomicFill} from './pnl';
 import Decimal from 'decimal.js';
+import {advanceGridCanary,gridCanaryPolicyCurrent,type GridCanaryClock} from './canary-clock';
+import {GRID_HISTORY_PUBLICATION_LAG_MS} from './history-safety';
 const D=Decimal.clone({precision:200});
 const states=['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping'];
 export interface GridMonitorClaim {id:string;leaseToken:string;account:string;masterAccount:string}
@@ -35,6 +37,10 @@ export class GridMonitorStorage {
   async block(claim:GridMonitorClaim,reason:string){await this.launch.transaction(async c=>{await this.assertLease(c,claim);
     await c.query(`INSERT INTO grid_monitor_state(bot_id,blocked_reasons) VALUES($1,$2) ON CONFLICT(bot_id)
       DO UPDATE SET boot_id=NULL,pnl=NULL,blocked_reasons=EXCLUDED.blocked_reasons,generation=grid_monitor_state.generation+1`,[claim.id,JSON.stringify([reason])]);
+    if(reason!=='startup_or_reconciliation_in_progress'){
+      await c.query('UPDATE grid_bots SET canary_clean_since=NULL,canary_clean_ticks=0 WHERE id=$1',[claim.id]);
+      await c.query("UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{clock}', 'null'::jsonb) WHERE bot_id=$1 AND event_key='canary-clock'",[claim.id]);
+    }
   });}
   /** Cursor, immutable fills, balances and startup generation commit together, or not at all. */
   async reconcile(claim:GridMonitorClaim,bootId:string,observation:GridObservation){return this.launch.transaction(async c=>{
@@ -42,6 +48,11 @@ export class GridMonitorStorage {
     const bot=await this.assertLease(c,claim),now=new Date(bot.db_now).getTime();
     const operations=(await c.query('SELECT * FROM grid_operations WHERE bot_id=$1 ORDER BY created_at,id FOR UPDATE',[claim.id])).rows as ReconciliationOperation[];
     const prior=fillsFromRows((await c.query('SELECT * FROM grid_exact_fills WHERE bot_id=$1',[claim.id])).rows);
+    const checkpoint=(await c.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='canary-clock' FOR UPDATE",[claim.id])).rows[0]?.evidence;
+    const previousFull=checkpoint?.full;
+    try{for(const stream of ['orders','positions'] as const)if(observation.history?.lastIds&&previousFull?.lastIds
+      &&BigInt(observation.history.lastIds[stream])<BigInt(previousFull.lastIds[stream]))observation={...observation,history:null};}catch{observation={...observation,history:null};}
+    if(observation.history?.lastId&&previousFull?.lastId&&BigInt(observation.history.lastId)<BigInt(previousFull.lastId))observation={...observation,history:null};
     const result=reconcileGridObservation({account:claim.account,symbol:bot.market.replace(/-PERP$/,''),direction:bot.direction,
       start:new Date(bot.created_at).getTime(),now,operations,prior,observation});
     // All downstream decisions use exact operation progress, not scale-eight compatibility columns.
@@ -100,6 +111,25 @@ export class GridMonitorStorage {
       observation=EXCLUDED.observation,pnl=EXCLUDED.pnl,blocked_reasons=EXCLUDED.blocked_reasons,reconciled_at=EXCLUDED.reconciled_at`,
       [claim.id,result.entriesAllowed?bootId:null,safe,JSON.stringify(observation),economicUnknown?null:JSON.stringify(result.pnl),JSON.stringify(result.reasons)]);
     await c.query(`UPDATE grid_bots SET last_reconciliation_at=clock_timestamp(),startup_reconciled_at=CASE WHEN $2 THEN clock_timestamp() ELSE NULL END WHERE id=$1`,[claim.id,result.entriesAllowed]);
+    // Every eligible monitor tick performs a full replay; this exceeds the 30-minute
+    // cadence without creating another scheduler. Completion and safe-through are
+    // committed with fills and the durable canary checkpoint in this transaction.
+    const generation=String((await c.query('SELECT generation FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0].generation);
+    const full=result.entriesAllowed?{generation,safeThrough:safe,completedAt:now,lastId:observation.history?.lastId??null,lastIds:observation.history?.lastIds??null}:previousFull??null;
+    const q=observation.qualification;
+    const quota=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1',[claim.masterAccount])).rows[0];
+    const levels=(await c.query('SELECT price,size::text AS exact_size,reduce_only FROM grid_levels WHERE bot_id=$1 ORDER BY price,ordinal',[claim.id])).rows;
+    const currentPolicy=gridCanaryPolicyCurrent(q,levels,bot.leverage,now,bot.direction);
+    const qualifying=bot.status==='canary'&&result.entriesAllowed&&bot.consecutive_failures===0&&quota&&!quota.blocked&&currentPolicy
+      &&observation.history?.publicationLagMs===GRID_HISTORY_PUBLICATION_LAG_MS&&!!observation.history.lastId;
+    const first=bot.canary_started_at?new Date(bot.canary_started_at).getTime():null;
+    const clock=first===null?null:advanceGridCanary(checkpoint?.clock as GridCanaryClock|null??null,{bootId,tickId:claim.leaseToken,observedAt:observation.observedAt,firstConfirmedAt:first,
+      qualifying,generation,safeThrough:result.entriesAllowed?safe:null});
+    await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at) VALUES($1,'canary-clock','internal_canary_clock',$2,clock_timestamp())
+      ON CONFLICT(bot_id,event_key) DO UPDATE SET evidence=EXCLUDED.evidence,delivered_at=EXCLUDED.delivered_at`,[claim.id,{clock,full}]);
+    if(bot.status==='canary')await c.query(`UPDATE grid_bots SET canary_clean_since=$2,canary_clean_ticks=$3,
+      status=CASE WHEN $4 THEN 'active' ELSE status END,canary_promoted_at=CASE WHEN $4 THEN clock_timestamp() ELSE canary_promoted_at END WHERE id=$1`,
+      [claim.id,clock?.cleanSince===null||!clock?null:new Date(clock.cleanSince),clock?.cleanTicks??0,clock?.promoted??false]);
     return result;
   });}
   async planningState(claim:GridMonitorClaim,bootId:string){return this.launch.transaction(async c=>{

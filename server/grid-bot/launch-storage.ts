@@ -7,6 +7,7 @@ import {gridEntrySafety,freshGridFact,gridUnresolvedEntryCancel} from './lifecyc
 import {gridRecyclerGate} from './runtime-policy';
 import {canonicalGridPolicy,type GridPolicy} from './policy-hmac';
 import type {GridFirstPlacementContext} from './first-placement';
+import {gridAddsExposure,gridMarginAllowed,gridRequiredMargin,readGridMargin,GridMarginDenied,type GridMarginReading} from './margin';
 export const canonicalRequest=(x:unknown):string=>JSON.stringify(x,(_,v)=>v && typeof v==='object' && !Array.isArray(v)
   ? Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
 export const requestDigest=(x:unknown)=>createHash('sha256').update(canonicalRequest(x)).digest('hex');
@@ -40,7 +41,60 @@ function reductionAuthority(r:ExactGridRequest,monitor:any,now:number){
 export class GridLaunchTransientError extends Error {}
 /** Lock order is always master, then bot. No deployment identity partitions a master's quota. */
 export class GridLaunchStorage {
-  constructor(private pool:Pool,private ready=()=>requireSchemaCapabilityReady('grid_bot',async(q,v)=>pool.query(q,v?[...v]:undefined))){}
+  constructor(private pool:Pool,private ready=()=>requireSchemaCapabilityReady('grid_bot',async(q,v)=>pool.query(q,v?[...v]:undefined)),
+    private marginRead?:(r:ExactGridRequest)=>Promise<GridMarginReading|null>){}
+  private async freshMargin(r:ExactGridRequest){
+    if(!gridAddsExposure(r))return null;
+    if(this.marginRead){try{return await this.marginRead(r);}catch{return null;}}
+    const [{GridLaunchReads},{pacificaTransportAuthority}]=await Promise.all([import('./launch-reads'),import('../protocol/pacifica/pacifica-transport')]);
+    return readGridMargin(new GridLaunchReads(pacificaTransportAuthority(),this,'0.5'),r);
+  }
+  /** Caller holds master then bot locks. Pause, cancellation intent and outbox are one commit. */
+  private async marginPause(c:PoolClient,bot:any,r:ExactGridRequest,reason:string){
+    if(bot.pause_reason==='margin'&&['pausing','paused'].includes(bot.status))return;
+    const life=(await c.query('SELECT l.*,r.action,r.state FROM grid_lifecycle l LEFT JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[r.botId])).rows[0];
+    const key='margin:'+(life?.epoch??0),evidence={classification:'margin',reason,account:r.account,requestDigest:requestDigest(r)};
+    await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[r.botId,key,'margin_pause',evidence]);
+    if(bot.status==='stopping'||life?.action==='stop'&&life.state==='pending')return;
+    if(life?.state==='pending'&&life.action!=='pause')await c.query("UPDATE grid_control_requests SET state='superseded',completed_at=clock_timestamp() WHERE id=$1",[life.active_request]);
+    if(!(life?.state==='pending'&&life.action==='pause')){
+      const id=randomUUID();
+      await c.query("INSERT INTO grid_control_requests(id,bot_id,request_key,action,source,previous_status,evidence) VALUES($1,$2,$3,'pause','risk',$4,$5)",[id,r.botId,key,bot.status,evidence]);
+      await c.query(`INSERT INTO grid_lifecycle(bot_id,epoch,active_request) VALUES($1,1,$2) ON CONFLICT(bot_id)
+        DO UPDATE SET epoch=grid_lifecycle.epoch+1,active_request=EXCLUDED.active_request,blocker=NULL,terminal_proof=NULL`,[r.botId,id]);
+      await c.query('INSERT INTO grid_control_keys(bot_id,request_key,control_id,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[r.botId,key,id,evidence]);
+    }
+    await c.query("UPDATE grid_bots SET status=CASE WHEN status='paused' THEN status ELSE 'pausing' END,pause_reason='margin',canary_clean_since=NULL,canary_clean_ticks=0,updated_at=clock_timestamp() WHERE id=$1",[r.botId]);
+    await c.query('UPDATE grid_monitor_state SET boot_id=NULL,generation=generation+1 WHERE bot_id=$1',[r.botId]);
+  }
+  private async marginGate(c:PoolClient,bot:any,r:ExactGridRequest,reading:GridMarginReading|null,now:number,exclude?:string){
+    if(!gridAddsExposure(r))return true;
+    let committed='0';
+    try{const outstanding=(await c.query("SELECT id,exact_request FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed') AND ($2::uuid IS NULL OR id<>$2)",[r.botId,exclude??null])).rows;
+      for(const op of outstanding)if(gridAddsExposure(op.exact_request)){
+        if(!reading||op.exact_request.account!==r.account||op.exact_request.data.symbol!==r.data.symbol)throw Error('Unknown commitment');
+        committed=new Decimal(committed).plus(gridRequiredMargin(op.exact_request,reading)).toFixed();
+      }
+      if(gridMarginAllowed(r,reading,committed,now,bot.leverage))return true;
+    }catch{/* Unknown committed risk cannot be reused. */}
+    await this.marginPause(c,bot,r,reading?'insufficient_or_stale_margin':'margin_unavailable');return false;
+  }
+  /** Final transport boundary, after book observation and before POST. No optional entry bypass. */
+  async finalMargin(r:ExactGridRequest,leaseToken:string):Promise<void>{
+    if(!gridAddsExposure(r))return;
+    const reading=await this.freshMargin(r);
+    const allowed=await this.transaction(async c=>{
+      await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[r.masterAccount]);
+      const bot=(await c.query('SELECT b.*,a.account,a.master_account,clock_timestamp() AS now FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 AND a.released_at IS NULL FOR UPDATE OF b,a',[r.botId])).rows[0];
+      const op=(await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND exact_request_digest=$2 AND state='submitted'",[r.botId,requestDigest(r)])).rows[0];
+      if(!bot||bot.account!==r.account||bot.master_account!==r.masterAccount||!op)return null;
+      const now=new Date(bot.now).getTime();
+      if(!leaseToken||bot.lease_token!==leaseToken||new Date(bot.lease_expires_at).getTime()<=now||!['provisioning','canary','active'].includes(bot.status)||r.timestamp+ r.expiryMs<=now)return null;
+      return this.marginGate(c,bot,r,reading,now,op.id);
+    });
+    if(allowed===null)throw new GridLaunchTransientError('Final Grid submit ownership unavailable');
+    if(!allowed)throw new GridMarginDenied('Final Grid margin authority denied exposure');
+  }
   async transaction<T>(work:(c:PoolClient)=>Promise<T>):Promise<T>{
     await this.ready();const c=await this.pool.connect();
     try{await c.query('BEGIN');const r=await work(c);await c.query('COMMIT');return r;}
@@ -124,6 +178,7 @@ export class GridLaunchStorage {
     });
   }
   async prepare(key:string,request:ExactGridRequest,claim:GridClaim,leaseToken:string):Promise<DurableGridOperation>{
+    const margin=await this.freshMargin(request);
     const exact=JSON.parse(canonicalRequest(request)) as ExactGridRequest,digest=requestDigest(exact);
     if(!request.botId || !request.account || !request.masterAccount || !Number.isSafeInteger(request.timestamp)
       || !Number.isSafeInteger(request.expiryMs) || request.expiryMs<1 || request.expiryMs>15000
@@ -133,7 +188,7 @@ export class GridLaunchStorage {
     const minimumRisk=request.kind==='limit'&&request.data.reduce_only===false?new Decimal(String(request.data.price)).mul(String(request.data.amount))
       :request.kind==='seed'?new Decimal(String(request.authority.seedWorstPrice)).mul(String(request.data.amount)):new Decimal(0);
     if(new Decimal(claim.canaryIncrement).lt(minimumRisk))throw Error('Understated canary commitment');
-    return this.transaction(async c=>{
+    const prepared=await this.transaction(async c=>{
       const master=(await c.query('SELECT *,clock_timestamp() AS clock FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[request.masterAccount])).rows[0];
       if(!master)throw Error('Master quota unavailable');const now=new Date(master.clock).getTime();
       const bot=(await c.query('SELECT b.*,a.account,a.master_account,a.canary_limit,a.canary_committed,a.released_at FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 FOR UPDATE OF b,a',[request.botId])).rows[0];
@@ -144,6 +199,7 @@ export class GridLaunchStorage {
       if(['close','sweep'].includes(request.kind)&&bot.status!=='stopping')throw Error('Stop intent required');
       const old=(await c.query('SELECT * FROM grid_operations WHERE idempotency_key=$1',[key])).rows[0];
       if(old){if(old.bot_id!==request.botId || old.exact_request_digest!==digest || canonicalRequest(old.exact_request)!==canonicalRequest(exact))throw Error('Exact request conflict');return old;}
+      if(!await this.marginGate(c,bot,request,margin,now))return null;
       const monitor=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[request.botId])).rows[0];
       if(monitor&&['limit','seed'].includes(request.kind)&&!reduction(request)){
         if(!monitor.fresh||monitor.boot_id!==request.authority.monitorBootId||String(monitor.generation)!==String(request.authority.monitorGeneration)
@@ -223,14 +279,19 @@ export class GridLaunchStorage {
       if(bot.status!=='active')await c.query('UPDATE grid_launch_accounts SET canary_committed=canary_committed+$2 WHERE bot_id=$1',[request.botId,claim.canaryIncrement]);
       return result.rows[0];
     });
+    if(!prepared)throw new GridLaunchTransientError('Durable Grid margin pause');return prepared;
   }
   async submit(op:DurableGridOperation,leaseToken:string):Promise<boolean>{
     if(requestDigest(op.exact_request)!==op.exact_request_digest)return false;
+    const margin=await this.freshMargin(op.exact_request);
     return this.transaction(async c=>{
       const q=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount])).rows[0];
       if(!q||q.blocked)return false;
       const bot=(await c.query('SELECT *,clock_timestamp() AS now FROM grid_bots WHERE id=$1 FOR UPDATE',[op.exact_request.botId])).rows[0];
       if(!bot)return false;
+      const account=(await c.query('SELECT account,master_account FROM grid_launch_accounts WHERE bot_id=$1 AND released_at IS NULL',[op.exact_request.botId])).rows[0];
+      if(!account||account.account!==op.exact_request.account||account.master_account!==op.exact_request.masterAccount)return false;
+      if(!await this.marginGate(c,bot,op.exact_request,margin,new Date(bot.now).getTime(),op.id))return false;
       const monitor=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[op.exact_request.botId])).rows[0];
       if(monitor&&['limit','seed'].includes(op.exact_request.kind)&&!reduction(op.exact_request)&&(!monitor.fresh||!monitor.boot_id||monitor.blocked_reasons.length
         ||monitor.boot_id!==op.exact_request.authority.monitorBootId||String(monitor.generation)!==String(op.exact_request.authority.monitorGeneration)))return false;
@@ -256,14 +317,18 @@ export class GridLaunchStorage {
       const r=await c.query(`UPDATE grid_operations SET state=$2,failure_classification=$3,terminal_at=CASE WHEN $2='unconfirmed' THEN NULL ELSE clock_timestamp() END,
         updated_at=clock_timestamp() WHERE id=$1 AND state IN ('submitted','unconfirmed') AND exact_request_digest=$4 RETURNING id`,[op.id,outcome.state,outcome.reason,op.exact_request_digest]);
       if(!r.rowCount)throw Error('Settlement CAS conflict');
+      if(outcome.state==='failed'&&outcome.reason==='margin'){
+        const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 FOR UPDATE',[op.exact_request.botId])).rows[0];
+        await this.marginPause(c,bot,op.exact_request,'venue_insufficient_margin');
+      }
       // Only terminal venue results alter the breaker; an uncertain HTTP send is not counted repeatedly.
-      if(outcome.state==='failed'&&['authentication','quota','margin','transport'].includes(outcome.reason??''))await c.query("UPDATE grid_bots SET consecutive_failures=consecutive_failures+1,status=CASE WHEN consecutive_failures+1>=5 AND status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=CASE WHEN consecutive_failures+1>=5 THEN 'circuit_breaker' ELSE pause_reason END WHERE id=$1",[op.exact_request.botId]);
+      if(outcome.state==='failed'&&['authentication','quota','transport'].includes(outcome.reason??''))await c.query("UPDATE grid_bots SET consecutive_failures=consecutive_failures+1,status=CASE WHEN consecutive_failures+1>=5 AND status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=CASE WHEN consecutive_failures+1>=5 THEN 'circuit_breaker' ELSE pause_reason END WHERE id=$1",[op.exact_request.botId]);
       if(outcome.state==='failed'&&['venue_rejection','policy','invariant'].includes(outcome.reason??''))await c.query("UPDATE grid_bots SET status=CASE WHEN status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=$2 WHERE id=$1",[op.exact_request.botId,outcome.reason]);
       if(outcome.state==='confirmed'&&outcome.releaseSlot)await c.query('UPDATE grid_bots SET consecutive_failures=0 WHERE id=$1',[op.exact_request.botId]);
       if(outcome.state==='failed'&&outcome.reason==='expected_rejection')await c.query('UPDATE grid_profit_allocations SET released_at=clock_timestamp(),released_size=size WHERE operation_id=$1 AND released_at IS NULL',[op.id]);
       if(outcome.state!=='unconfirmed')await c.query('UPDATE grid_execution_claims SET settled_at=clock_timestamp(),slot_released=$2 WHERE operation_id=$1',[op.id,outcome.releaseSlot]);
       if(outcome.orderId)await c.query('UPDATE grid_operations SET venue_order_id=$2 WHERE id=$1',[op.id,outcome.orderId]);
-      if(outcome.state==='confirmed'&&['seed','limit'].includes(op.exact_request.kind))await c.query('UPDATE grid_bots SET canary_started_at=COALESCE(canary_started_at,clock_timestamp()) WHERE id=$1',[op.exact_request.botId]);
+      if(outcome.state==='confirmed'&&gridAddsExposure(op.exact_request))await c.query('UPDATE grid_bots SET canary_started_at=COALESCE(canary_started_at,clock_timestamp()) WHERE id=$1',[op.exact_request.botId]);
       if(op.exact_request.kind==='limit'&&outcome.state!=='unconfirmed'){
         const status=outcome.reason==='expected_rejection'?'pending':outcome.state==='failed'?'failed':outcome.orderStatus==='cancelled'?'cancelled':outcome.releaseSlot?'filled':'active';
         await c.query('UPDATE grid_levels SET status=$2,venue_order_id=$3,placement_attempt=placement_attempt+CASE WHEN $4 THEN 1 ELSE 0 END,updated_at=clock_timestamp() WHERE id=$1 AND bot_id=$5',
