@@ -104,7 +104,7 @@ function simulateTradingBotsEnrichment(
 // Fixture data
 // ---------------------------------------------------------------------------
 
-const STALE_AGE_MS = 5 * 60 * 1000; // 5 minutes — well past the 60 s TTL
+const OBSERVATION_AGE_MS = 5_000; // A usable observation within the existing 60-second limit.
 const PRICE_CACHE_TTL_MS = 60 * 1000;
 
 const BOT_POSITIONS = [
@@ -135,14 +135,22 @@ describe('DASH-PRICE-FAILFAST-01: PacificaAdapter.getCachedPrices', () => {
   });
 
   // 1 — Every Pacifica market stale → getCachedPrices still returns cached values
-  it('[T01] returns stale cached prices when all markets are past TTL', () => {
-    seedPrice(adapter, 'SOL-PERP', 142.5, STALE_AGE_MS);
-    seedPrice(adapter, 'BTC-PERP', 61000, STALE_AGE_MS);
+  it('[T01] excludes expired cached prices when all markets are past TTL', () => {
+    seedPrice(adapter, 'SOL-PERP', 142.5, 60_000);
+    seedPrice(adapter, 'BTC-PERP', 61000, 60_000);
 
     const result = adapter.getCachedPrices(['SOL-PERP', 'BTC-PERP']);
 
-    expect(result['SOL-PERP']).toBe(142.5);
-    expect(result['BTC-PERP']).toBe(61000);
+    expect(result).toEqual({});
+
+  });
+
+  it('expired display observations remain unavailable without network work', () => {
+    seedPrice(adapter, 'SOL-PERP', 155, 60_000);
+    const refresh = vi.spyOn(adapter, 'getAllPrices');
+    expect(adapter.getCachedPrices(['SOL-PERP'])).toEqual({});
+    expect(adapter.getCachedPriceMeta(['SOL-PERP'])).toEqual({ oldestFetchedAt: null });
+    expect(refresh).not.toHaveBeenCalled();
   });
 
   // 2 — Scanner disabled → cached values still returned (no refresh timer needed)
@@ -151,7 +159,7 @@ describe('DASH-PRICE-FAILFAST-01: PacificaAdapter.getCachedPrices', () => {
     const internal = adapter as unknown as { telemetryInterval: NodeJS.Timeout | null };
     expect(internal.telemetryInterval).toBeNull();
 
-    seedPrice(adapter, 'SOL-PERP', 145.0, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 145.0, OBSERVATION_AGE_MS);
 
     const result = adapter.getCachedPrices(['SOL-PERP']);
     expect(result['SOL-PERP']).toBe(145.0);
@@ -159,7 +167,7 @@ describe('DASH-PRICE-FAILFAST-01: PacificaAdapter.getCachedPrices', () => {
 
   // 3 — Upstream price requests never settle → getCachedPrices returns immediately
   it('[T03] getCachedPrices returns synchronously — it is not a Promise', () => {
-    seedPrice(adapter, 'SOL-PERP', 150.0, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 150.0, OBSERVATION_AGE_MS);
 
     // If getCachedPrices were async it would return a Promise (thenable).
     const result = adapter.getCachedPrices(['SOL-PERP']);
@@ -179,7 +187,7 @@ describe('DASH-PRICE-FAILFAST-01: PacificaAdapter.getCachedPrices', () => {
       adapter as unknown as { get: (...args: unknown[]) => unknown },
       'get',
     );
-    seedPrice(adapter, 'ETH-PERP', 3500, STALE_AGE_MS);
+    seedPrice(adapter, 'ETH-PERP', 3500, OBSERVATION_AGE_MS);
 
     adapter.getCachedPrices(['ETH-PERP']);
 
@@ -199,9 +207,9 @@ describe('DASH-PRICE-FAILFAST-01: PacificaAdapter.getCachedPrices', () => {
   });
 
   // 6 — /api/positions returns stored positions with stale cached prices
-  it('[T06] positions enrichment uses stale cached prices for mark-price display', () => {
-    seedPrice(adapter, 'SOL-PERP', 155.0, STALE_AGE_MS);
-    seedPrice(adapter, 'BTC-PERP', 62000, STALE_AGE_MS);
+  it('[T06] positions enrichment uses fresh cached prices for mark-price display', () => {
+    seedPrice(adapter, 'SOL-PERP', 155.0, OBSERVATION_AGE_MS);
+    seedPrice(adapter, 'BTC-PERP', 62000, OBSERVATION_AGE_MS);
 
     const result = simulatePositionsEnrichment(BOT_POSITIONS, adapter);
 
@@ -311,8 +319,8 @@ describe('DASH-PRICE-FAILFAST-01: PacificaAdapter.getCachedPrices', () => {
 
   // 13 — Cached-snapshot reads do not alter freshness/timestamps
   it('[T13] getCachedPrices does not mutate fetchedAt or any cache entry', () => {
-    const staleFetchedAt = Date.now() - STALE_AGE_MS;
-    seedPrice(adapter, 'SOL-PERP', 146.0, STALE_AGE_MS);
+    const staleFetchedAt = Date.now() - OBSERVATION_AGE_MS;
+    seedPrice(adapter, 'SOL-PERP', 146.0, OBSERVATION_AGE_MS);
 
     const before = readRawEntry(adapter, 'SOL-PERP');
     expect(before?.fetchedAt).toBe(staleFetchedAt);

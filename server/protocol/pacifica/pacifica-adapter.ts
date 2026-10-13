@@ -95,6 +95,7 @@ import type {
 } from './pacifica-types.js';
 import { mapToProtocolSide } from './pacifica-types.js';
 import { pacificaQuota, QuotaExhaustedError, type RequestPriority } from './pacifica-quota.js';
+import { freshPacificaPrice, parsePacificaPrices } from './pacifica-prices.js';
 import { pacificaCache } from './pacifica-cache.js';
 import { appendTelemetry } from '../../telemetry.js';
 import { UNCONFIRMED_LANDING_VERDICT_TOKEN } from '../tx-verdicts.js';
@@ -589,6 +590,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const top = q.topEndpoints
       .map((e) => `${e.path}=${e.credits}c/${e.calls}x`)
       .join(' ');
+    const callers = q.topCallers.map((e) => `${e.caller}=${e.credits}c/${e.calls}x`).join(' ');
     const builderSuppressed = BUILDER_SUPPRESSION_REASONS.reduce(
       (sum, reason) => sum + (this.builderSuppressionCounts.get(reason) ?? 0),
       0,
@@ -601,7 +603,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         `served=${q.requestsServed} rejected=${q.requestsRejected} | ` +
         `cache: ${c.entries} entries, ${c.hitRatePct}% hit, ${c.dedupedJoins} deduped | ` +
         `builder_suppressed=${builderSuppressed} reasons=${builderReasons} | ` +
-        `top: ${top || '(none)'}`,
+        `top: ${top || '(none)'} | callers: ${callers || '(none)'}`,
     );
     this.builderSuppressionCounts.clear();
     pacificaQuota.resetCounters();
@@ -689,59 +691,35 @@ export class PacificaAdapter implements ProtocolAdapter {
     return markets;
   }
 
-  async getPrice(internalSymbol: string, opts?: { priority?: RequestPriority }): Promise<number | null> {
+  async getPrice(internalSymbol: string, opts?: { priority?: RequestPriority; caller?: string }): Promise<number | null> {
     const priority = opts?.priority ?? 'background';
 
     const cached = this.priceCache.get(internalSymbol.toUpperCase());
-    if (cached && Date.now() - cached.fetchedAt < PRICE_CACHE_TTL_MS) {
+    if (cached && this.isFreshPrice(cached)) {
       return cached.data;
     }
 
-    // PRICE-STARVE fix: 'normal' / 'critical' callers (e.g. the analyze cycle)
-    // fetch this one symbol's /book directly at the requested priority so they
-    // are never starved by the background bulk sweep (getAllPrices) that the
-    // dashboard uses and that is capped at 162 credits/min.
-    if (priority !== 'background') {
-      const market = (this.marketCache?.data ?? []).find(
-        (m) => m.internalSymbol.toUpperCase() === internalSymbol.toUpperCase(),
-      );
-      if (!market) return null;
-      try {
-        const book = await this.get('/book', { symbol: market.protocolSymbol, depth: '1' }, { priority });
-        const bids = book?.l?.[0];
-        const asks = book?.l?.[1];
-        const bestBid = bids?.[0]?.p ? parseFloat(bids[0].p) : NaN;
-        const bestAsk = asks?.[0]?.p ? parseFloat(asks[0].p) : NaN;
-        let mid: number;
-        if (!isNaN(bestBid) && !isNaN(bestAsk)) {
-          mid = (bestBid + bestAsk) / 2;
-        } else if (!isNaN(bestBid)) {
-          mid = bestBid;
-        } else if (!isNaN(bestAsk)) {
-          mid = bestAsk;
-        } else {
-          return null;
-        }
-        if (this.priceCache.size >= MAX_PRICE_CACHE_SIZE) {
-          this.evictStalePrices();
-        }
-        this.priceCache.set(internalSymbol.toUpperCase(), { data: mid, fetchedAt: Date.now() });
-        return mid;
-      } catch {
-        return null;
-      }
-    }
+    const market = (this.marketCache?.data ?? []).find(
+      m => m.internalSymbol.toUpperCase() === internalSymbol.toUpperCase(),
+    );
+    if (!market) return null;
+    // Normal/critical readers retain their priority and do not join a background
+    // quota wait. All readers still receive the same venue midpoint as before.
+    if (priority === 'background') await this.getAllPrices({ caller: opts?.caller ?? 'adapter.price.background' });
+    else await this._runAllPrices(priority, opts?.caller ?? `adapter.price.${priority}`);
+    const refreshed = this.priceCache.get(internalSymbol.toUpperCase());
+    return refreshed && this.isFreshPrice(refreshed) ? refreshed.data : null;
+  }
 
-    const prices = await this.getAllPrices();
-    return prices[internalSymbol] ?? null;
+  private isFreshPrice(entry: CacheEntry<number>): boolean {
+    return freshPacificaPrice({ price: entry.data, observedAt: entry.fetchedAt }, Date.now(), PRICE_CACHE_TTL_MS);
   }
 
   /**
    * DASH-PRICE-FAILFAST-01 — synchronous cached-price snapshot.
    *
    * Reads from the in-memory priceCache without any network access, quota
-   * consumption, or cache mutation. Stale entries are returned as-is — they
-   * are display-only and MUST NOT be used for trading decisions. NaN,
+   * consumption, or cache mutation. Expired observations are unavailable. NaN,
    * Infinity, and non-positive values are excluded. Safe on the request path.
    */
   getCachedPrices(internalSymbols: string[]): Record<string, number> {
@@ -752,8 +730,8 @@ export class PacificaAdapter implements ProtocolAdapter {
       if (seen.has(key)) continue;
       seen.add(key);
       const entry = this.priceCache.get(key);
-      // Stale entries permitted — display-only. Exclude NaN, Infinity, ≤ 0.
-      if (entry !== undefined && Number.isFinite(entry.data) && entry.data > 0) {
+      // Preserve the venue expiry even on display/fallback reads.
+      if (entry !== undefined && this.isFreshPrice(entry)) {
         // Return with the original-case symbol to match database market strings.
         result[sym] = entry.data;
       }
@@ -771,7 +749,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     let oldest: number | null = null;
     for (const sym of internalSymbols) {
       const entry = this.priceCache.get(sym.toUpperCase());
-      if (entry !== undefined && Number.isFinite(entry.data) && entry.data > 0) {
+      if (entry !== undefined && this.isFreshPrice(entry)) {
         if (oldest === null || entry.fetchedAt < oldest) {
           oldest = entry.fetchedAt;
         }
@@ -791,7 +769,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     return markets.map((m) => m.internalSymbol);
   }
 
-  getAllPrices(): Promise<Record<string, number>> {
+  getAllPrices(opts?: { caller?: string }): Promise<Record<string, number>> {
     // NOT async: must return the stored Promise instance directly so all
     // concurrent callers get the SAME object reference (async functions always
     // allocate a new Promise wrapper, breaking the identity guarantee).
@@ -803,71 +781,56 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (this._sweepOwner !== null) {
       return this._sweepOwner;
     }
-    const sweep = this._runAllPrices().finally(() => {
+    const sweep = this._runAllPrices('background', opts?.caller ?? 'adapter.all-prices').finally(() => {
       this._sweepOwner = null;
     });
     this._sweepOwner = sweep;
     return sweep;
   }
 
-  private async _runAllPrices(): Promise<Record<string, number>> {
+  private async _runAllPrices(priority: RequestPriority = 'background', caller = 'adapter.all-prices'): Promise<Record<string, number>> {
     const result: Record<string, number> = {};
 
     const markets = this.marketCache?.data || [];
     if (markets.length === 0) return result;
 
     const staleSymbols: { internal: string; protocol: string }[] = [];
-    const now = Date.now();
-
     for (const m of markets) {
       const cached = this.priceCache.get(m.internalSymbol.toUpperCase());
-      if (cached && now - cached.fetchedAt < PRICE_CACHE_TTL_MS) {
+      if (cached && this.isFreshPrice(cached)) {
         result[m.internalSymbol] = cached.data;
       } else {
         staleSymbols.push({ internal: m.internalSymbol, protocol: m.protocolSymbol });
       }
     }
 
-    const BATCH_SIZE = 5;
-    for (let i = 0; i < staleSymbols.length; i += BATCH_SIZE) {
-      const batch = staleSymbols.slice(i, i + BATCH_SIZE);
-      const settled = await Promise.allSettled(
-        batch.map(async ({ internal, protocol }) => {
-          // Bulk price refresh is non-critical: trading reads fresh quotes
-          // separately. Mark as background so it never starves /account or
-          // /positions calls that the user dashboard depends on.
-          const book = await this.get('/book', { symbol: protocol, depth: '1' }, { priority: 'background' });
-          const bids = book?.l?.[0];
-          const asks = book?.l?.[1];
-          const bestBid = bids?.[0]?.p ? parseFloat(bids[0].p) : NaN;
-          const bestAsk = asks?.[0]?.p ? parseFloat(asks[0].p) : NaN;
-          let mid: number;
-          if (!isNaN(bestBid) && !isNaN(bestAsk)) {
-            mid = (bestBid + bestAsk) / 2;
-          } else if (!isNaN(bestBid)) {
-            mid = bestBid;
-          } else if (!isNaN(bestAsk)) {
-            mid = bestAsk;
-          } else {
-            return;
-          }
-          return { internal, mid };
-        }),
-      );
-      for (const s of settled) {
-        if (s.status === 'fulfilled' && s.value) {
-          result[s.value.internal] = s.value.mid;
-          if (this.priceCache.size >= MAX_PRICE_CACHE_SIZE) {
-            this.evictStalePrices();
-          }
-          this.priceCache.set(s.value.internal.toUpperCase(), {
-            data: s.value.mid,
-            fetchedAt: now,
-          });
+    if (staleSymbols.length > 0) {
+      try {
+        // The envelope is validated by the parser. A stale transport cache can
+        // never renew a price: force a physical read and retain each venue time.
+        const payload: unknown = await this.get('/info/prices', undefined, {
+          priority, caller, cachePolicy: 'fresh-required', responseShape: 'envelope',
+        });
+        const observations = parsePacificaPrices(payload, Date.now(), PRICE_CACHE_TTL_MS);
+        for (const market of markets) {
+          const observation = observations.get(market.protocolSymbol);
+          if (!observation) continue;
+          const key = market.internalSymbol.toUpperCase();
+          const previous = this.priceCache.get(key);
+          // Priority-separated reads can overlap; a late older response cannot
+          // replace a newer observation. Invalid/missing rows never renew it.
+          if (previous && previous.fetchedAt > observation.observedAt) continue;
+          if (!previous && this.priceCache.size >= MAX_PRICE_CACHE_SIZE) this.evictStalePrices();
+          this.priceCache.set(key, { data: observation.price, fetchedAt: observation.observedAt });
         }
-      }
+      } catch { /* Fresh entries remain usable only until their original expiry. */ }
     }
-
+    // Recheck after the read: prices can expire while transport/quota is pending.
+    for (const market of markets) {
+      const entry = this.priceCache.get(market.internalSymbol.toUpperCase());
+      if (entry && this.isFreshPrice(entry)) result[market.internalSymbol] = entry.data;
+      else delete result[market.internalSymbol];
+    }
     return result;
   }
 
@@ -876,7 +839,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const params: Record<string, string> = { symbol: protocolSymbol };
     if (depth !== undefined) params.depth = String(depth);
 
-    const response = await this.get('/book', params);
+    const response = await this.get('/book', params, { caller: 'adapter.orderbook' });
 
     const bidsRaw = response.l?.[0] || response.bids || [];
     const asksRaw = response.l?.[1] || response.asks || [];
@@ -1138,7 +1101,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const startedAt = Date.now();
     try {
       envelope = await this.get('/info/prices', undefined, {
-        priority: 'normal', cachePolicy: 'fresh-required', responseShape: 'envelope',
+        priority: 'normal', cachePolicy: 'fresh-required', responseShape: 'envelope', caller: 'adapter.mark-price',
       });
     } catch (error) {
       if (error instanceof QuotaExhaustedError) return fail('quota_unavailable');
@@ -1373,8 +1336,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!Array.isArray(response)) return [];
     let prices: Record<string, number> = {};
     try {
-      prices = await this.getAllPrices();
-    } catch { /* prices unavailable, will use entry price fallback */ }
+      prices = await this.getAllPrices({ caller: 'adapter.positions.prices' });
+    } catch { /* Position identity remains usable for closes; missing marks are UNKNOWN. */ }
     return response.map((p) => this.mapPosition(p, prices));
   }
 
@@ -1488,10 +1451,6 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!Number.isFinite(mapped.baseSize) || !Number.isFinite(mapped.entryPrice)) {
       throw new Error(`PacificaAdapter: strict ${internalSymbol} position mapping is invalid`);
     }
-    if (!Number.isFinite(mapped.markPrice) || mapped.markPrice <= 0) {
-      mapped.markPrice = mapped.entryPrice;
-    }
-    if (!Number.isFinite(mapped.unrealizedPnl)) mapped.unrealizedPnl = 0;
     mapped.reductionContext = { venue: 'pacifica', source: '/positions', account: agentPublicKey,
       internalSymbol, subaccountId, observedAt: Date.now(), baseSize: mapped.baseSize };
     this.reductionObservations.set(this.reductionKey(agentPublicKey, internalSymbol, subaccountId), mapped.reductionContext);
@@ -4030,23 +3989,21 @@ export class PacificaAdapter implements ProtocolAdapter {
     });
   }
 
-  private mapPosition(p: PacificaPositionResponse, oraclePrices: Record<string, number> = {}): ProtocolPosition {
+  private mapPosition(p: PacificaPositionResponse, midPrices: Record<string, number> = {}): ProtocolPosition {
     const rawAmount = parseFloat(p.amount || p.size || '0');
     const size = p.side === 'ask' ? -rawAmount : rawAmount;
     const entryPrice = parseFloat(p.entry_price);
     const internalSymbol = this.safeProtocolToInternal(p.symbol);
 
-    let markPrice = p.mark_price ? parseFloat(p.mark_price) : 0;
-    if (!markPrice || markPrice === 0) {
-      markPrice = oraclePrices[internalSymbol] || entryPrice;
-    }
-
-    let unrealizedPnl = p.unrealized_pnl ? parseFloat(p.unrealized_pnl) : 0;
-    if (unrealizedPnl === 0 && Math.abs(size) > 0.0001 && markPrice > 0 && entryPrice > 0 && markPrice !== entryPrice) {
-      unrealizedPnl = size > 0
-        ? (markPrice - entryPrice) * Math.abs(size)
-        : (entryPrice - markPrice) * Math.abs(size);
-    }
+    const venueMark = Number(p.mark_price);
+    const mid = midPrices[internalSymbol];
+    const markPrice = Number.isFinite(venueMark) && venueMark > 0 ? venueMark
+      : Number.isFinite(mid) && mid > 0 ? mid : null;
+    const venuePnl = p.unrealized_pnl == null || String(p.unrealized_pnl).trim() === ''
+      ? NaN : Number(p.unrealized_pnl);
+    const unrealizedPnl = Number.isFinite(venuePnl) ? venuePnl
+      : markPrice !== null && Number.isFinite(entryPrice) && entryPrice > 0
+        ? (markPrice - entryPrice) * size : null;
 
     return {
       internalSymbol,
@@ -4368,15 +4325,17 @@ export class PacificaAdapter implements ProtocolAdapter {
       bypassCache?: boolean;
       cachePolicy?: 'default' | 'fresh-required';
       responseShape?: 'data' | 'envelope';
+      caller?: string;
     },
   ): Promise<any> {
     const priority = options?.priority ?? 'normal';
     const freshRequired = options?.cachePolicy === 'fresh-required';
     const bypassCache = options?.bypassCache === true || freshRequired;
     const responseShape = options?.responseShape ?? 'data';
+    const caller = options?.caller ?? `adapter.get:${path}`;
     const cacheKey = pacificaCache.buildKey(path, params)
       + (responseShape === 'envelope' ? ':envelope' : '');
-    const dedupKey = freshRequired ? `fresh-required:${cacheKey}` : cacheKey;
+    const dedupKey = freshRequired ? `fresh-required:${cacheKey}${path === '/info/prices' ? `:${priority}` : ''}` : cacheKey;
 
     if (!bypassCache) {
       const fresh = pacificaCache.getFresh(cacheKey);
@@ -4455,7 +4414,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       } finally {
         // Pacifica meters the request whether it succeeds or fails (including
         // 4xx/5xx), so always record the spend.
-        pacificaQuota.record(path);
+        pacificaQuota.record(path, undefined, caller);
       }
 
       if (!response.ok) {

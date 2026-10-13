@@ -10,7 +10,7 @@
  *   4. Two+ route polls timing out while only one upstream refresh exists
  *   5. Callers joining the same owned refresh (single-flight identity)
  *   6. Late completion without stale-generation overwrite
- *   7. Stale last-known-good fallback (non-empty cache, deadline exceeded)
+ *   7. Fresh last-known-good fallback (deadline exceeded)
  *   8. Cold-cache unavailable behavior (empty cache, deadline exceeded → 503)
  *   9. No fallback network work after the route deadline
  *  10. Timer/ownership cleanup (timers cancelled, _sweepOwner null after settle)
@@ -71,8 +71,8 @@ function sweepOwner(adapter: PacificaAdapter): Promise<any> | null {
 describe('getAllPrices — normal fast path', () => {
   it('returns fresh cached prices without fetching', async () => {
     const adapter = makeAdapter([
-      { internalSymbol: 'SOL', protocolSymbol: 'SOL-PERP' },
-      { internalSymbol: 'BTC', protocolSymbol: 'BTC-PERP' },
+      { internalSymbol: 'SOL', protocolSymbol: 'SOL' },
+      { internalSymbol: 'BTC', protocolSymbol: 'BTC' },
     ]);
     seedPrice(adapter, 'SOL', 130.5);
     seedPrice(adapter, 'BTC', 95_000);
@@ -96,7 +96,7 @@ describe('getAllPrices — single-flight ownership', () => {
   let adapter: PacificaAdapter;
 
   beforeEach(() => {
-    adapter = makeAdapter([{ internalSymbol: 'SOL', protocolSymbol: 'SOL-PERP' }]);
+    adapter = makeAdapter([{ internalSymbol: 'SOL', protocolSymbol: 'SOL' }]);
     // No price in cache → sweep will attempt a fetch.
   });
 
@@ -130,10 +130,10 @@ describe('getAllPrices — single-flight ownership', () => {
     const p2 = adapter.getAllPrices();
     expect(p1).toBe(p2);
 
-    // Settle the fetch with a well-formed book response.
+    // Settle the fetch with a well-formed bulk price response.
     resolveFetch(
       new Response(
-        JSON.stringify({ success: true, data: { l: [[{ p: '130' }], [{ p: '131' }]] } }),
+        JSON.stringify({ success: true, data: [{ symbol: 'SOL', mid: '130.5', timestamp: Date.now() }] }),
         { status: 200 },
       ),
     );
@@ -148,7 +148,7 @@ describe('getAllPrices — single-flight ownership', () => {
 
     vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(
-        JSON.stringify({ success: true, data: { l: [[{ p: '100' }], [{ p: '101' }]] } }),
+        JSON.stringify({ success: true, data: [{ symbol: 'SOL', mid: '100.5', timestamp: Date.now() }] }),
         { status: 200 },
       ),
     );
@@ -164,7 +164,7 @@ describe('getAllPrices — single-flight ownership', () => {
   it('a new sweep starts after the previous one settles', async () => {
     vi.spyOn(global, 'fetch').mockResolvedValue(
       new Response(
-        JSON.stringify({ success: true, data: { l: [[{ p: '50' }], [{ p: '51' }]] } }),
+        JSON.stringify({ success: true, data: [{ symbol: 'SOL', mid: '50.5', timestamp: Date.now() }] }),
         { status: 200 },
       ),
     );
@@ -219,14 +219,14 @@ describe('getAllPrices — single-flight ownership', () => {
 // ---------------------------------------------------------------------------
 describe('getAllPrices — late completion does not corrupt cache from a newer sweep', () => {
   it('second sweep starts only after first settles; no generation race possible', async () => {
-    const adapter = makeAdapter([{ internalSymbol: 'ETH', protocolSymbol: 'ETH-PERP' }]);
+    const adapter = makeAdapter([{ internalSymbol: 'ETH', protocolSymbol: 'ETH' }]);
 
     let callCount = 0;
     vi.spyOn(global, 'fetch').mockImplementation(() => {
       callCount++;
       return Promise.resolve(
         new Response(
-          JSON.stringify({ success: true, data: { l: [[{ p: '3000' }], [{ p: '3001' }]] } }),
+          JSON.stringify({ success: true, data: [{ symbol: 'ETH', mid: '3000.5', timestamp: Date.now() }] }),
           { status: 200 },
         ),
       );
@@ -354,23 +354,23 @@ describe('getCachedMarketSymbols', () => {
 
   it('returns internalSymbol list from the warm market cache', () => {
     const adapter = makeAdapter([
-      { internalSymbol: 'SOL', protocolSymbol: 'SOL-PERP' },
-      { internalSymbol: 'BTC', protocolSymbol: 'BTC-PERP' },
+      { internalSymbol: 'SOL', protocolSymbol: 'SOL' },
+      { internalSymbol: 'BTC', protocolSymbol: 'BTC' },
     ]);
     expect(adapter.getCachedMarketSymbols()).toEqual(['SOL', 'BTC']);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 7. Stale last-known-good fallback — non-empty cache served after deadline
+// 7. Expired last-known-good is unavailable — expired cache rejected after deadline
 // ---------------------------------------------------------------------------
-describe('/api/prices fallback — stale cache served when deadline exceeded', () => {
-  it('returns stale prices (non-empty cache) when getAllPrices() hangs past deadline', async () => {
+describe('/api/prices fallback — expired cache unavailable when deadline exceeded', () => {
+  it('returns no expired prices when getAllPrices() hangs past deadline', async () => {
     // We test the component behaviour directly: build an adapter with warm price
     // cache and verify that getCachedMarketSymbols + getCachedPrices returns the
-    // stale snapshot that the route handler would serve.
+    // snapshot that the route handler must refuse.
     const adapter = makeAdapter([
-      { internalSymbol: 'SOL', protocolSymbol: 'SOL-PERP' },
+      { internalSymbol: 'SOL', protocolSymbol: 'SOL' },
     ]);
     const OLD_AGE_MS = 90_000; // 90 s — beyond PRICE_CACHE_TTL_MS (60 s)
     seedPrice(adapter, 'SOL', 128, OLD_AGE_MS);
@@ -379,7 +379,7 @@ describe('/api/prices fallback — stale cache served when deadline exceeded', (
     expect(symbols).toEqual(['SOL']);
 
     const prices = adapter.getCachedPrices!(symbols);
-    expect(prices.SOL).toBe(128);
+    expect(prices).toEqual({});
   });
 });
 
@@ -389,7 +389,7 @@ describe('/api/prices fallback — stale cache served when deadline exceeded', (
 describe('/api/prices fallback — cold cache (no prices)', () => {
   it('getCachedPrices returns {} when price cache is empty', () => {
     const adapter = makeAdapter([
-      { internalSymbol: 'SOL', protocolSymbol: 'SOL-PERP' },
+      { internalSymbol: 'SOL', protocolSymbol: 'SOL' },
     ]);
     // No prices seeded — cache is cold.
     const symbols = adapter.getCachedMarketSymbols();
@@ -413,7 +413,7 @@ describe('/api/prices fallback — no upstream work after deadline', () => {
 
   it('getCachedMarketSymbols does not invoke fetch', async () => {
     const adapter = makeAdapter([
-      { internalSymbol: 'SOL', protocolSymbol: 'SOL-PERP' },
+      { internalSymbol: 'SOL', protocolSymbol: 'SOL' },
     ]);
     const fetchSpy = vi.spyOn(global, 'fetch').mockRejectedValue(new Error('network'));
     adapter.getCachedMarketSymbols();
@@ -422,7 +422,7 @@ describe('/api/prices fallback — no upstream work after deadline', () => {
   });
 
   it('getCachedPrices does not invoke fetch', () => {
-    const adapter = makeAdapter([{ internalSymbol: 'BTC', protocolSymbol: 'BTC-PERP' }]);
+    const adapter = makeAdapter([{ internalSymbol: 'BTC', protocolSymbol: 'BTC' }]);
     seedPrice(adapter, 'BTC', 95_000, 10_000);
     const fetchSpy = vi.spyOn(global, 'fetch').mockRejectedValue(new Error('network'));
     const result = adapter.getCachedPrices!(['BTC']);
@@ -476,7 +476,7 @@ describe('getAllPrices — ownership cleared even on sweep rejection', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('_sweepOwner is null after the sweep rejects', async () => {
-    const adapter = makeAdapter([{ internalSymbol: 'SOL', protocolSymbol: 'SOL-PERP' }]);
+    const adapter = makeAdapter([{ internalSymbol: 'SOL', protocolSymbol: 'SOL' }]);
 
     // Force get() to throw by making fetchBounded reject quickly.
     vi.spyOn(global, 'fetch').mockRejectedValue(new Error('connection refused'));

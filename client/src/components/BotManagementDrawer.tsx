@@ -1976,18 +1976,18 @@ export function BotManagementDrawer({
                     <div className="p-2 rounded-lg bg-primary/10 border border-primary/20">
                       <p className="text-xs text-muted-foreground">Position Value</p>
                       <p className="font-mono font-bold text-lg" data-testid="text-position-value">
-                        ${((botPosition.size ?? 0) * (botPosition.currentPrice ?? 0)).toFixed(2)}
+                        {botPosition.currentPrice == null ? 'UNKNOWN' : `$${((botPosition.size ?? 0) * botPosition.currentPrice).toFixed(2)}`}
                       </p>
                     </div>
                     <div className="p-2 rounded-lg bg-background/50">
                       <p className="text-xs text-muted-foreground">Unrealized P&L</p>
                       <p 
                         className={`font-mono font-bold text-lg ${
-                          (botPosition.unrealizedPnl ?? 0) >= 0 ? 'text-emerald-500' : 'text-red-500'
+                          botPosition.unrealizedPnl == null ? 'text-muted-foreground' : botPosition.unrealizedPnl >= 0 ? 'text-emerald-500' : 'text-red-500'
                         }`}
                         data-testid="text-unrealized-pnl"
                       >
-                        {(botPosition.unrealizedPnl ?? 0) >= 0 ? '+' : ''}${botPosition.unrealizedPnl?.toFixed(2)}
+                        {botPosition.unrealizedPnl == null ? 'UNKNOWN' : `${botPosition.unrealizedPnl >= 0 ? '+' : ''}$${botPosition.unrealizedPnl.toFixed(2)}`}
                       </p>
                     </div>
                   </div>

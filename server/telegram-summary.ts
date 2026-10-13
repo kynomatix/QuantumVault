@@ -11,7 +11,7 @@ export interface SummaryOpenPosition {
   side: 'LONG' | 'SHORT';
   size: number;
   entryPrice: number;
-  unrealizedPnl: number;
+  unrealizedPnl: number | null;
 }
 
 export interface WalletSummaryStats {
@@ -50,7 +50,8 @@ function fmtUsdOrDash(n: number | null): string {
   return fmtUsd(n);
 }
 
-function fmtPnl(n: number): string {
+function fmtPnl(n: number | null): string {
+  if (n === null) return 'UNKNOWN';
   return n >= 0 ? `+${fmtUsd(n)}` : fmtUsd(n);
 }
 
@@ -139,8 +140,8 @@ export async function buildWalletSummaryStats(
     if (!bot) continue;
     const side: 'LONG' | 'SHORT' = baseSize > 0 ? 'LONG' : 'SHORT';
     const entryPrice = parseFloat(pos.avgEntryPrice);
-    const markPrice = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : entryPrice;
-    const unrealizedPnl = side === 'LONG'
+    const markPrice = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : null;
+    const unrealizedPnl = markPrice === null ? null : side === 'LONG'
       ? (markPrice - entryPrice) * Math.abs(baseSize)
       : (entryPrice - markPrice) * Math.abs(baseSize);
     openPositions.push({
@@ -183,7 +184,7 @@ export async function buildTodayStats(walletAddress: string): Promise<TodayStats
  */
 export async function getMarkPricesSafely(): Promise<Record<string, number>> {
   try {
-    return await getDefaultAdapter().getAllPrices();
+    return await getDefaultAdapter().getAllPrices({ caller: 'telegram.summary' });
   } catch {
     return {};
   }
@@ -283,8 +284,8 @@ export interface PositionJson {
   side: 'LONG' | 'SHORT';
   size: number;
   entryPrice: number;
-  markPrice: number;
-  unrealizedPnl: number;
+  markPrice: number | null;
+  unrealizedPnl: number | null;
 }
 
 export interface BotCardJson {
@@ -384,7 +385,7 @@ export async function buildPositionsJsonForChat(walletAddresses: string[]): Prom
     try {
       const s = await buildWalletSummaryStats(addr, prices);
       const positions: PositionJson[] = s.openPositions.map(p => {
-        const mark = prices[p.market] && prices[p.market] > 0 ? prices[p.market] : p.entryPrice;
+        const mark = prices[p.market] && prices[p.market] > 0 ? prices[p.market] : null;
         return {
           botName: p.botName,
           market: p.market,
@@ -497,8 +498,8 @@ export async function buildBotsJsonForChat(walletAddresses: string[]): Promise<{
       const baseSize = parseFloat(pos.baseSize);
       const side: 'LONG' | 'SHORT' = baseSize > 0 ? 'LONG' : 'SHORT';
       const entry = parseFloat(pos.avgEntryPrice);
-      const mark = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : entry;
-      const uPnl = side === 'LONG'
+      const mark = prices[pos.market] && prices[pos.market] > 0 ? prices[pos.market] : null;
+      const uPnl = mark === null ? null : side === 'LONG'
         ? (mark - entry) * Math.abs(baseSize)
         : (entry - mark) * Math.abs(baseSize);
       openPosition = {

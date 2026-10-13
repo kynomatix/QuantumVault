@@ -11,7 +11,7 @@ export async function plannerPoolCandles(market: string, timeframe: string, bars
   signal.throwIfAborted();
   const duration = timeframe === '15m' ? 900_000 : timeframe === '1h' ? 3_600_000 : timeframe === '4h' ? 14_400_000 : 0;
   const symbol = market.replace(/-PERP$/, '');
-  if (!duration || ![100, 200].includes(bars) || !/^[A-Z0-9]+$/.test(symbol)) return [];
+  if (!duration || ![100, 200].includes(bars) || !/^[A-Za-z0-9-]+$/.test(symbol)) return [];
   const now = Date.now(), end = Math.floor(now / duration) * duration;
   let partial: PlannerCandle[] = [];
   for (const source of PLANNER_CANDLE_SOURCES) {

@@ -2874,8 +2874,8 @@ export default function AppPage() {
                                     </div>
                                     <div className="text-right border-l border-border/30 pl-2 sm:pl-4">
                                       <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">PnL</p>
-                                      <p className={`font-mono font-semibold ${Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                        {Number(pos.unrealizedPnl) >= 0 ? '+' : ''}${Number(pos.unrealizedPnl).toFixed(2)}
+                                      <p className={`font-mono font-semibold ${pos.unrealizedPnl == null ? 'text-muted-foreground' : Number(pos.unrealizedPnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                        {pos.unrealizedPnl == null ? 'UNKNOWN' : `${Number(pos.unrealizedPnl) >= 0 ? '+' : ''}$${Number(pos.unrealizedPnl).toFixed(2)}`}
                                       </p>
                                     </div>
                                     <ChevronDown className={`w-5 h-5 text-muted-foreground transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
@@ -3363,7 +3363,7 @@ export default function AppPage() {
                   const renderBotCard = (bot: TradingBot) => {
                     const position = positionsData?.find((p: any) => p.botId === bot.id);
                     const hasPosition = position && Math.abs(position.baseAssetAmount) > 0.0001;
-                    const unrealizedPnl = position?.unrealizedPnl ?? 0;
+                    const unrealizedPnl = position?.unrealizedPnl ?? null;
                     // Null-safe display helpers — must not coerce null to 0 or false.
                     // Defect 5: use financialDataStatus (freshness verdict), not botFinancialStatus.
                     const _fds = (bot as any).financialDataStatus;
@@ -3421,9 +3421,9 @@ export default function AppPage() {
                               </span>
                             </div>
                             <span className={`text-sm font-semibold ${
-                              unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
+                              unrealizedPnl === null ? 'text-muted-foreground' : unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400'
                             }`}>
-                              {unrealizedPnl >= 0 ? '+' : ''}{unrealizedPnl.toFixed(2)}
+                              {unrealizedPnl === null ? 'UNKNOWN' : `${unrealizedPnl >= 0 ? '+' : ''}${unrealizedPnl.toFixed(2)}`}
                             </span>
                           </div>
                         )}

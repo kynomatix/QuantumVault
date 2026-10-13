@@ -104,7 +104,8 @@ function formatPnl(
   return fmtUsd(usd, opts);
 }
 
-function pnlClass(n: number): string {
+function pnlClass(n: number | null): string {
+  if (n === null) return 'text-[color:var(--tg-hint)]';
   if (n > 0.0001) return "text-emerald-400";
   if (n < -0.0001) return "text-rose-400";
   return "text-[color:var(--tg-hint)]";
@@ -149,8 +150,8 @@ interface PositionsResponse {
       side: "LONG" | "SHORT";
       size: number;
       entryPrice: number;
-      markPrice: number;
-      unrealizedPnl: number;
+      markPrice: number | null;
+      unrealizedPnl: number | null;
     }>;
   }>;
 }
@@ -315,7 +316,7 @@ function PositionsTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUni
       {all.map((p, i) => {
         // Position % = unrealizedPnl / notional (size * entryPrice). Falls back to — when denom missing/zero.
         const notional = p.size * p.entryPrice;
-        const pct = notional > 0 ? (p.unrealizedPnl / notional) * 100 : null;
+        const pct = notional > 0 && p.unrealizedPnl !== null ? (p.unrealizedPnl / notional) * 100 : null;
         return (
         <Card key={`${p.walletAddress}-${i}`} testid={`card-position-${p.market}-${i}`}>
           <div className="flex items-start justify-between">
@@ -337,7 +338,7 @@ function PositionsTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUni
               <div className="text-[color:var(--tg-hint)]">Size</div>
               <div data-testid={`text-position-size-${i}`}>{fmtNum(p.size)}</div>
               <div className="text-[color:var(--tg-hint)]" data-testid={`text-position-notional-${i}`}>
-                {fmtUsd(p.size * p.markPrice)}
+                {fmtUsd(p.markPrice === null ? null : p.size * p.markPrice)}
               </div>
             </div>
             <div>
@@ -416,7 +417,7 @@ function BotsTab({ initData, pnlUnit }: { initData: string; pnlUnit: PnlUnit }) 
             {b.openPosition && (() => {
               const op = b.openPosition;
               const notional = op.size * op.entryPrice;
-              const opPct = notional > 0 ? (op.unrealizedPnl / notional) * 100 : null;
+              const opPct = notional > 0 && op.unrealizedPnl !== null ? (op.unrealizedPnl / notional) * 100 : null;
               return (
                 <div className="mt-3 rounded-lg border border-white/10 bg-white/5 p-2 text-xs">
                   <div className="flex justify-between">

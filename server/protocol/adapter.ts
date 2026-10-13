@@ -649,14 +649,14 @@ export interface ProtocolAdapter {
   getMarkets(): Promise<ProtocolMarket[]>;
   /** Pacifica's fresh /info/prices mark, for opening admission. */
   getMarkPrice?(internalSymbol: string): Promise<import('./market-constraints').MarkPriceAuthority>;
-  getPrice(internalSymbol: string, opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null>;
-  getAllPrices(): Promise<Record<string, number>>;
+  getPrice(internalSymbol: string, opts?: { priority?: 'critical' | 'normal' | 'background'; caller?: string }): Promise<number | null>;
+  getAllPrices(opts?: { caller?: string }): Promise<Record<string, number>>;
   /**
    * DASH-PRICE-FAILFAST-01 — Synchronous cached-price snapshot for display-only
    * enrichment on the dashboard request path.
    *
    * Contract (callers must rely on these):
-   *   - Returns only finite positive values; stale values are permitted.
+   *   - Returns only finite positive values within the adapter's freshness limit.
    *   - MUST NOT initiate any async work, network request, or quota operation.
    *   - MUST NOT mutate cache entries, timestamps, or expiry state.
    *   - Returns an ordinary Record, never a Promise.

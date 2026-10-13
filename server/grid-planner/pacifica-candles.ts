@@ -8,7 +8,7 @@ export async function pacificaPlannerCandles(symbol: string, timeframe: string, 
   signal.throwIfAborted();
   const durations: Record<string, number> = { '15m': 900_000, '1h': 3_600_000, '4h': 14_400_000 };
   const duration = durations[timeframe];
-  if (!duration || ![100, 200].includes(bars) || !/^[A-Z0-9]+$/.test(symbol)) return [];
+  if (!duration || ![100, 200].includes(bars) || !/^[A-Za-z0-9-]+$/.test(symbol)) return [];
   // Optional chart work preserves the adapter's critical-request headroom. No quota waiting/retries.
   const refuse = (reason: string) => { console.info(`[GridPlannerCandles] source=pacifica market=${symbol}-PERP reason=${reason}`); return []; };
   if (!pacificaQuota.tryClaimImmediate('/kline', 'background')) return refuse('quota');

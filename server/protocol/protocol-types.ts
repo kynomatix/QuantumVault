@@ -42,8 +42,10 @@ export interface ProtocolPosition {
   internalSymbol: string;
   baseSize: number;
   entryPrice: number;
-  markPrice: number;
-  unrealizedPnl: number;
+  /** null means UNKNOWN; entry price is never a mark or new-exposure authority. */
+  markPrice: number | null;
+  /** null when neither venue P&L nor a usable mark can establish it. */
+  unrealizedPnl: number | null;
   leverage: number;
   liquidationPrice: number | null;
   marginMode: 'cross' | 'isolated';

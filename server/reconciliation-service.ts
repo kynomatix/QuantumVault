@@ -314,9 +314,9 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number, 
       entryPrice: p.entryPrice,
       markPrice: p.markPrice,
       unrealizedPnl: p.unrealizedPnl,
-      unrealizedPnlPercent: p.entryPrice > 0
+      unrealizedPnlPercent: p.markPrice !== null && p.entryPrice > 0
         ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
-        : 0,
+        : null,
     })), fetchFailed: false };
   } catch (err) {
     console.log(`[fetchPerpPositions] Failed to fetch positions: ${err instanceof Error ? err.message : err}`);
@@ -326,7 +326,7 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number, 
 
 async function fetchMarketPrice(market: string, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<number | null> {
   try {
-    return await adapter.getPrice(market);
+    return await adapter.getPrice(market, { caller: 'reconciliation.price' });
   } catch {
     return null;
   }
@@ -877,9 +877,9 @@ export async function syncPositionFromOnChain(
             entryPrice: p.entryPrice,
             markPrice: p.markPrice,
             unrealizedPnl: p.unrealizedPnl,
-            unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
+            unrealizedPnlPercent: p.unrealizedPnl !== null && p.entryPrice > 0 && p.baseSize !== 0
               ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
-              : 0,
+              : null,
           })), fetchFailed: false };
         } catch (err) {
           console.log(`[Sync] Bot subaccount position fetch failed: ${err instanceof Error ? err.message : err}`);
@@ -1475,9 +1475,9 @@ export async function reconcileBotPosition(
           entryPrice: p.entryPrice,
           markPrice: p.markPrice,
           unrealizedPnl: p.unrealizedPnl,
-          unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
+          unrealizedPnlPercent: p.unrealizedPnl !== null && p.entryPrice > 0 && p.baseSize !== 0
             ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
-            : 0,
+            : null,
         })), fetchFailed: false };
       } catch (err) {
         console.log(`[Reconcile] Bot subaccount position fetch failed for ${botId}: ${err instanceof Error ? err.message : err}`);

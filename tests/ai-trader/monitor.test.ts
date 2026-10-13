@@ -1159,12 +1159,12 @@ describe("live close-result consumption", () => {
     appliedTakeProfitPrice: p.takeProfitPrice ?? null,
   }));
 
-  it("user close succeeds while every journal append fails", async () => {
+  it.each([150, null])("user close succeeds with mark %s while every journal append fails", async (markPrice) => {
     const { userInitiatedClose } = await importMonitor();
     armLiveAuth();
     safeJournalMock.mockImplementation(() => undefined);
     const adapter = makeAdapter({
-      getPositions: vi.fn(async () => [openPosition]),
+      getPositions: vi.fn(async () => [{ ...openPosition, markPrice, unrealizedPnl: markPrice === null ? null : 0 }]),
       closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 151 })),
     });
     getAdapterMock.mockReturnValue(adapter);
@@ -1860,12 +1860,12 @@ describe("live close detection", () => {
 describe("G10 bracket re-verification", () => {
   const openPosition = { internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150, markPrice: 150, unrealizedPnl: 0, leverage: 2, liquidationPrice: null, marginMode: "cross" as const };
 
-  it("protective close reaches closePosition while every journal append fails", async () => {
+  it.each([150, null])("protective close reaches closePosition with mark %s while every journal append fails", async (markPrice) => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
     safeJournalMock.mockImplementation(() => undefined);
     const adapter = makeAdapter({
-      getPositions: vi.fn(async () => [openPosition]),
+      getPositions: vi.fn(async () => [{ ...openPosition, markPrice, unrealizedPnl: markPrice === null ? null : 0 }]),
       getOpenStopOrders: vi.fn(async () => []),
     });
     getAdapterMock.mockReturnValue(adapter);
@@ -2030,15 +2030,17 @@ describe("G10 bracket re-verification", () => {
     expect(botUpdates().some((u) => u.status === "paused" && u.pauseReason === "daily_loss_breaker")).toBe(true);
   });
 
-  it("a degraded periodic stop read still permits the G7 daily-loss exit", async () => {
+  it.each([150, null])("a degraded stop read permits the G7 daily-loss exit with mark %s", async (markPrice) => {
     const { monitorBotOnce } = await importMonitor();
     armLiveAuth();
     const adapter = makeAdapter({
-      getPositions: vi.fn(async () => [{ ...openPosition, unrealizedPnl: -200 }]),
+      getPositions: vi.fn(async () => [{ ...openPosition, markPrice, unrealizedPnl: markPrice === null ? null : -200 }]),
       getOpenStopOrders: vi.fn(async () => { throw new Error("protective read unavailable"); }),
     });
     getAdapterMock.mockReturnValue(adapter);
     getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+
+    if (markPrice === null) getRecentClosedMock.mockResolvedValue([{ closedAt: new Date(NOW - 60_000), realizedPnl: '-200' }]);
 
     await monitorBotOnce(makeBot({ paperMode: false }));
 
