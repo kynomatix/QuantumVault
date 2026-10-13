@@ -1709,7 +1709,7 @@ export const plannerBtcWeeklyCloses = pgTable("planner_btc_weekly_closes", {
   unique("planner_btc_weekly_identity_unique").on(table.market, table.weekStart),
   check("planner_btc_weekly_market_check", sql`${table.market} = 'BTC'`),
   check("planner_btc_weekly_utc_check", sql`${table.weekStart} >= '1970-01-05 00:00:00+00'::timestamptz AND extract(isodow FROM ${table.weekStart} AT TIME ZONE 'UTC') = 1 AND (${table.weekStart} AT TIME ZONE 'UTC')::time = '00:00:00'::time`),
-  check("planner_btc_weekly_close_check", sql`CASE WHEN ${table.close} ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' THEN ${table.close}::numeric > 0 ELSE false END`),
+  check("planner_btc_weekly_close_check", sql`${table.close} ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' AND ${table.close} !~ '^0{1,12}(\\.0{1,18})?$'`),
   check("planner_btc_weekly_source_check", sql`(${table.source} = 'okx-index' AND ${table.basis} = 'index') OR (${table.source} IN ('gate-spot','kraken-spot','coinbase-spot') AND ${table.basis} = 'spot') OR (${table.source} IN ('pacifica-mark','hyperliquid-perp','pacifica-perp','okx-perp') AND ${table.basis} = 'perp')`),
   check("planner_btc_weekly_aggregation_check", sql`${table.aggregation} IN ('native','daily')`),
   check("planner_btc_weekly_finalized_check", sql`${table.finalized} AND ${table.fetchedAt} >= ${table.weekStart} + interval '168 hours'`),

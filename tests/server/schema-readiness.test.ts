@@ -186,12 +186,17 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 197 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 198 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(197);
-    expect(metadata).toHaveLength(197);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(197);
+    expect(sqlEntries).toHaveLength(198);
+    expect(metadata).toHaveLength(198);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(198);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
+    // Append-only repair: preserve every SQL statement and metadata entry from 000 through 196.
+    const preservedManifestDigest = createHash("sha256").update(JSON.stringify(
+      metadata.slice(0, 197).map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
+    )).digest("hex").toUpperCase();
+    expect(preservedManifestDigest).toBe("7EE1954C5F2561D78B66441826CEA222B065242C36478055EE16A760F7AD2E5A");
     expect(metadata[191]).toMatchObject({ id: '191-phoenix-ai-trader', capabilities: ['phoenix'], operation: 'ddl' });
     expect(sqlEntries[191]).toContain('phoenix_ai_executions');
     const gridMigrations = [
@@ -200,6 +205,7 @@ describe("schema readiness", () => {
       ['194-grid-monitor-ledger', '0006_grid_monitor.sql'],
       ['195-grid-lifecycle-controls', '0007_grid_lifecycle.sql'],
       ['196-planner-btc-weekly', '0008_planner_btc_weekly.sql'],
+      ['197-planner-btc-weekly-close-check', '0009_planner_btc_weekly_close_check.sql'],
     ];
     for (const [offset, [id, file]] of gridMigrations.entries()) {
       expect(metadata[192 + offset]).toMatchObject({ id, capabilities: ['grid_bot'], operation: 'ddl' });
@@ -677,6 +683,33 @@ describe("schema readiness", () => {
       ...migration, requirements: [{ ...closeRequirement, definitionIncludes: ["numeric", "0"] }],
     }]);
     expect(original.evidence).toEqual([{
+      capability: "grid_bot", failureClass: "postcondition_missing",
+      objectIdentity: "constraint:planner_btc_weekly_closes.planner_btc_weekly_close_check",
+    }]);
+  });
+
+  it("matches migration 197's cast-stripped catalog rendering and supersedes only the 196 close postcondition", async () => {
+    const migrations = readDbSchemaMigrationManifest().manifest.slice(196);
+    const definition = "CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text AND close !~ '^0{1,12}(\\.0{1,18})?$'::text)";
+    const snapshot = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(definition), migrations);
+    expect(snapshot.unavailableCapabilities).toEqual([]);
+    expect(snapshot.evidence).toEqual([]);
+    const obsolete = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(), migrations);
+    expect(obsolete.evidence).toEqual([{
+      capability: "grid_bot", failureClass: "postcondition_missing",
+      objectIdentity: "constraint:planner_btc_weekly_closes.planner_btc_weekly_close_check",
+    }]);
+  });
+
+  it.each([
+    ["decimal grammar", "CHECK (close !~ '^0{1,12}(\\.0{1,18})?$'::text)"],
+    ["zero rejection", "CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text)"],
+    ["conjunction", "CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text OR close !~ '^0{1,12}(\\.0{1,18})?$'::text)"],
+  ])("rejects migration 197 when the close CHECK loses %s", async (_missing, definition) => {
+    const migrations = readDbSchemaMigrationManifest().manifest.slice(196);
+    const snapshot = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(definition), migrations);
+    expect(snapshot.unavailableCapabilities).toEqual(["grid_bot"]);
+    expect(snapshot.evidence).toEqual([{
       capability: "grid_bot", failureClass: "postcondition_missing",
       objectIdentity: "constraint:planner_btc_weekly_closes.planner_btc_weekly_close_check",
     }]);

@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 import { PostgresBtcWeeklyStore } from '../../server/grid-planner/weekly-store';
@@ -9,14 +8,15 @@ import { readDbSchemaMigrationManifest } from '../helpers/schema-migration-manif
 
 // The desktop runner owns the database URL. Everything rolls back in a private schema.
 describe.skipIf(!process.env.DATABASE_URL)('BTC weekly migration on PostgreSQL', () => {
-  it('boots twice, enforces finalized UTC weeks and decimal/provenance constraints, and deduplicates weeks', async () => {
+  it('upgrades 196, boots twice without replacing the corrected CHECK, renders every planner CHECK single-line, and enforces weekly storage', async () => {
     const client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000,
       query_timeout: 5000, statement_timeout: 5000 });
     const schema = 'weekly_test_' + randomUUID().replaceAll('-', '');
-    const sql = readFileSync(new URL('../../migrations/0008_planner_btc_weekly.sql', import.meta.url), 'utf8')
-      .replaceAll('public.planner_btc_weekly_', schema + '.planner_btc_weekly_');
-    const migration = readDbSchemaMigrationManifest().manifest.find(entry => entry.id === '196-planner-btc-weekly');
-    if (!migration) throw new Error('weekly migration missing from the runtime manifest');
+    const migrations = readDbSchemaMigrationManifest().manifest.filter(entry =>
+      entry.id === '196-planner-btc-weekly' || entry.id === '197-planner-btc-weekly-close-check');
+    if (migrations.length !== 2) throw new Error('weekly migrations missing from the runtime manifest');
+    const sql = migrations.map(migration => migration.sql
+      .replaceAll('public.planner_btc_weekly_', schema + '.planner_btc_weekly_'));
     await client.connect();
     try {
       await client.query('BEGIN');
@@ -28,11 +28,36 @@ describe.skipIf(!process.env.DATABASE_URL)('BTC weekly migration on PostgreSQL',
         text.replaceAll("'public'", `'${schema}'`),
         values?.map(value => typeof value === 'string' ? value.replace(/^public\./, schema + '.') : value),
       );
+      let correctedOid: number | undefined;
       for (let boot = 0; boot < 2; boot++) {
-        await client.query(sql);
-        const readiness = await probeSchemaMigrationManifest(catalogQuery, [migration]);
+        await client.query(sql[0]);
+        if (boot === 0) {
+          const old = await client.query(`SELECT pg_get_constraintdef(oid, true) AS definition
+            FROM pg_constraint WHERE conrelid=$1::regclass AND conname='planner_btc_weekly_close_check'`,
+          [schema + '.planner_btc_weekly_closes']);
+          expect(old.rows[0].definition).toMatch(/[\r\n]/);
+          expect((await probeSchemaMigrationManifest(catalogQuery, migrations)).unavailableCapabilities).toEqual(['grid_bot']);
+        }
+        await client.query(sql[1]);
+        const readiness = await probeSchemaMigrationManifest(catalogQuery, migrations);
         expect(readiness.unavailableCapabilities).toEqual([]);
         expect(readiness.evidence).toEqual([]);
+        const checks = await client.query(`SELECT c.oid, c.conname,
+          pg_get_constraintdef(c.oid) AS definition, pg_get_constraintdef(c.oid, true) AS pretty_definition
+          FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid
+          JOIN pg_namespace n ON n.oid=t.relnamespace
+          WHERE n.nspname=$1 AND t.relname IN ('planner_btc_weekly_closes', 'planner_btc_weekly_refresh')
+            AND c.contype='c' ORDER BY c.conname`, [schema]);
+        expect(checks.rows).toHaveLength(7);
+        for (const check of checks.rows) {
+          expect(check.definition, check.conname).not.toMatch(/[\r\n]/);
+          expect(check.pretty_definition, check.conname).not.toMatch(/[\r\n]/);
+        }
+        const close = checks.rows.find(check => check.conname === 'planner_btc_weekly_close_check')!;
+        const canonical = migrations[1].sql.match(/\$constraint\$(.*?)\$constraint\$/)?.[1];
+        expect(close.pretty_definition).toBe(canonical);
+        if (correctedOid !== undefined) expect(close.oid).toBe(correctedOid);
+        correctedOid = close.oid;
       }
       const catalog = await client.query(`SELECT t.relname AS table_name, c.conname,
         pg_get_constraintdef(c.oid, true) AS definition FROM pg_constraint c
@@ -40,7 +65,7 @@ describe.skipIf(!process.env.DATABASE_URL)('BTC weekly migration on PostgreSQL',
         WHERE n.nspname=$1 AND c.contype IN ('c', 'u', 'p')
         ORDER BY t.relname, c.conname`, [schema]);
       expect(catalog.rows).toHaveLength(9);
-      console.info('PLANNER_196_CATALOG', JSON.stringify(catalog.rows));
+      console.info('PLANNER_197_SINGLE_LINE', JSON.stringify({ checks: 7, renderings: 14, multiline: 0, boots: 2 }));
       const insert = `INSERT INTO planner_btc_weekly_closes
         (market, week_start, close, source, basis, aggregation, finalized, fetched_at)
         VALUES ('BTC', $1, $2, $3, $4, 'native', $5, $6) ON CONFLICT (market, week_start) DO NOTHING`;
@@ -74,6 +99,60 @@ describe.skipIf(!process.env.DATABASE_URL)('BTC weekly migration on PostgreSQL',
       expect(snapshot.weeks.at(-1)).toMatchObject({ market: 'BTC', close: '200.000000000000000001', finalized: true,
         source: 'okx-index', basis: 'index', weekStart: cutoff - WEEK });
       expect(snapshot.lastAttemptAt).toBe(now);
+      // Repair a differing definition and a missing CHECK, then prove the fast no-op again.
+      for (const replacement of ['ADD CONSTRAINT planner_btc_weekly_close_check CHECK (true)', '']) {
+        await client.query('ALTER TABLE planner_btc_weekly_closes DROP CONSTRAINT planner_btc_weekly_close_check');
+        if (replacement) await client.query('ALTER TABLE planner_btc_weekly_closes ' + replacement);
+        await client.query(sql[1]);
+        expect((await probeSchemaMigrationManifest(catalogQuery, migrations)).evidence).toEqual([]);
+        const before = await client.query(`SELECT oid FROM pg_constraint
+          WHERE conrelid=$1::regclass AND conname='planner_btc_weekly_close_check'`, [schema + '.planner_btc_weekly_closes']);
+        await client.query(sql[1]);
+        const after = await client.query(`SELECT oid FROM pg_constraint
+          WHERE conrelid=$1::regclass AND conname='planner_btc_weekly_close_check'`, [schema + '.planner_btc_weekly_closes']);
+        expect(after.rows).toEqual(before.rows);
+      }
     } finally { await client.query('ROLLBACK').catch(() => {}); await client.end(); }
+  }, 30_000);
+
+  it('proves regex-only positivity is equivalent to the original CASE/numeric CHECK in PostgreSQL', async () => {
+    const { manifest } = readDbSchemaMigrationManifest();
+    const original = manifest[196].sql.match(/CONSTRAINT planner_btc_weekly_close_check CHECK\((.*?)\),/)?.[1];
+    const repaired = manifest[197].sql.match(/ADD CONSTRAINT planner_btc_weekly_close_check\s+CHECK \((.*?)\);/)?.[1];
+    if (!original || !repaired) throw new Error('close predicates missing from runtime migrations');
+    const cases = new Map<string, boolean>();
+    // Every allowed zero width, every integer digit position and every fractional digit position.
+    for (let integerWidth = 1; integerWidth <= 12; integerWidth++) {
+      const zero = '0'.repeat(integerWidth);
+      cases.set(zero, false);
+      for (let position = 0; position < integerWidth; position++) {
+        for (let digit = 1; digit <= 9; digit++) {
+          cases.set(zero.slice(0, position) + digit + zero.slice(position + 1), true);
+        }
+      }
+      for (let fractionWidth = 1; fractionWidth <= 18; fractionWidth++) {
+        const fraction = '0'.repeat(fractionWidth);
+        cases.set(zero + '.' + fraction, false);
+        cases.set('9'.repeat(integerWidth) + '.' + '9'.repeat(fractionWidth), true);
+        for (let position = 0; position < fractionWidth; position++) {
+          cases.set(zero + '.' + fraction.slice(0, position) + '1' + fraction.slice(position + 1), true);
+        }
+      }
+    }
+    for (const value of ['', '0.', '.1', '-1', '+1', '1e1', 'NaN', 'Infinity', ' 1', '1 ', '1\n', '\n1',
+      '1\r', '1\t', '1.2.3', '1,000', '0x1', '١', '１', '1000000000000', '0.0000000000000000001']) {
+      cases.set(value, false);
+    }
+    const client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000,
+      query_timeout: 5000, statement_timeout: 5000 });
+    await client.connect();
+    try {
+      const result = await client.query(`SELECT close, expected, (${original}) AS old_accepts, (${repaired}) AS new_accepts
+        FROM unnest($1::text[], $2::boolean[]) AS samples(close, expected)
+        WHERE (${original}) IS DISTINCT FROM (${repaired}) OR (${repaired}) IS DISTINCT FROM expected`,
+      [[...cases.keys()], [...cases.values()]]);
+      expect(result.rows).toEqual([]);
+      console.info('PLANNER_197_EQUIVALENCE', JSON.stringify({ cases: cases.size, mismatches: result.rowCount }));
+    } finally { await client.end(); }
   }, 30_000);
 });
