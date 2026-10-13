@@ -7218,8 +7218,10 @@ const schemaMigrationMetadata = [
       "table": "planner_btc_weekly_closes",
       "constraint": "planner_btc_weekly_close_check",
       "definitionIncludes": [
-        "numeric",
-        "0"
+        "case when close ~",
+        "^[0-9]{1,12}(\\.[0-9]{1,18})?$",
+        "then close > 0",
+        "else false end"
       ]
     },
     {
