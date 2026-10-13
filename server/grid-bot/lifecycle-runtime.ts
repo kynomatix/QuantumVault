@@ -29,7 +29,7 @@ export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObserv
     observedAt:d.updated_at as number,settlementComplete:true,source:'pacifica:/account+retained-operation-ledger+'+o.history.source,recycler};
 }
 export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonitorReads,json:GridLaunchReads,authorities:Partial<Pick<GridLifecycleDeps,'resume'|'settlement'|'sol'>>={}){
-  const custody=new GridCustody(storage.launch),sender=new GridPacificaSender(pacificaTransportAuthority(),fetch,new GridFirstPlacementAuthority(storage.launch,json)),lifecycle=new GridLifecycleStorage(storage);
+  const custody=new GridCustody(storage.launch),sender=new GridPacificaSender(pacificaTransportAuthority(),fetch,new GridFirstPlacementAuthority(storage.launch,json),storage.launch),lifecycle=new GridLifecycleStorage(storage);
   const observe=async(claim:GridMonitorClaim,signal:AbortSignal)=>{
     const {bot}=await storage.snapshot(claim),symbol=bot.market.replace(/-PERP$/,''),from=new Date(bot.created_at).getTime();
     try{return await reads.observe({...claim,symbol,from,through:Date.now()},signal);}catch{
@@ -44,7 +44,7 @@ export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonito
     sol:authorities.sol??((claim,signal)=>sharedGridSol(claim.masterAccount,signal)),
     // Unit 4 has no production LaunchFacts provider. Do not manufacture current fees/margin/HMAC authority.
     resume:authorities.resume??(async()=>null),
-    send:(claim,r)=>withKey(claim,(identity,umk)=>custody.withSecret(identity,umk,secret=>sender.send(r,secret))),
+    send:(claim,r)=>withKey(claim,(identity,umk)=>custody.withSecret(identity,umk,secret=>sender.send(r,secret,undefined,claim.leaseToken))),
     recover:async(claim,op,signal)=>{const o=await observe(claim,signal);if(!o.inventoryComplete)return {state:'unknown'};
       const r=op.exact_request;if(r.kind==='limit')return reconcileGridLimit(r,o.orders);
       if(r.kind==='cancel'||r.kind==='close')return reconcileGridReduction(r,o.orders);

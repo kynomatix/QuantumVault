@@ -66,7 +66,7 @@ describe('first-placement signing boundary',()=>{
   it.each([5000,5001])('rechecks after synchronous signing/preparation at %s ms',async delay=>{
     const h=harness(),r={...request(),account:bs58.encode(sub.publicKey)},transport=new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9)));
     const original=transport.restInit.bind(transport);vi.spyOn(transport,'restInit').mockImplementation((...args)=>{const init=original(...args);h.setNow(1000+delay);return init;});
-    const post=vi.fn(async()=>new Response(null,{status:200})),sender=new GridPacificaSender(transport,post as typeof fetch,h.authority);
+    const post=vi.fn(async()=>new Response(null,{status:200})),sender=new GridPacificaSender(transport,post as typeof fetch,h.authority,{finalMargin:async()=>{}});
     if(delay===5000){await sender.send(r,Buffer.from(sub.secretKey));expect(post).toHaveBeenCalledOnce();}
     else {await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('expired');expect(post).not.toHaveBeenCalled();}
   });
