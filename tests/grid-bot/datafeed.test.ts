@@ -89,6 +89,19 @@ describe('Planner fresh Pacifica price observations', () => {
   });
 });
 describe('Planner real chart dependency path', () => {
+  it.each([
+    ['timeout', new DOMException('EXAMPLE timeout', 'TimeoutError')],
+    ['timeout', { name: 'TimeoutError', message: 'EXAMPLE timeout' }],
+    ['transport', new Error('EXAMPLE transport')],
+  ])('classifies source failures as %s and continues the perpetual pool', async (reason, failure) => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const primary = vi.spyOn(datafeed, 'readPlannerPerpSource').mockRejectedValue(failure);
+    vi.stubGlobal('fetch', vi.fn(async () => json({ success: true, data: [] })));
+    expect(await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal)).toEqual([]);
+    expect(primary.mock.calls.map(call => call[0])).toEqual(['okx', 'gate', 'hyperliquid']);
+    expect(log.mock.calls.filter(call => String(call[0]).includes('source=okx'))[0]?.[0]).toContain(`reason=${reason} detail=EXAMPLE`);
+    assertReadOnly();
+  });
   it.each(['okx', 'gate', 'hyperliquid'] as const)('selects verified %s candles in pool order and stops before later entries', async venue => {
     const step = 3_600_000, end = Math.floor(Date.now() / step) * step;
     const candles = Array.from({ length: 100 }, (_, i) => ({ time: end - (100 - i) * step,

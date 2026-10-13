@@ -131,7 +131,7 @@ describe('Persistent finalized timeframe ADX and independent auto-range', () => 
   };
   it('computes a valid 28-candle advisory and preserves selected market and timeframe provenance',()=>{
     expect(plannerRegime('BTC-PERP','1h',history(28),now)).toMatchObject({state:'available',adx:0,label:'ranging',market:'BTC-PERP',timeframe:'1h',venue:'okx',bars:28});
-    expect(plannerRegime('BTC-PERP','1h',history(27),now).state).toBe('unavailable');
+    expect(plannerRegime('BTC-PERP','1h',history(27),now)).toEqual({state:'unavailable',reason:'ADX needs 28 bars'});
     expect(plannerRegime('BTC-PERP','4h',history(),now).state).toBe('unavailable');
     const bars=history();bars.forEach((b,i)=>{b.open=100+i;b.close=101+i;b.high=102+i;b.low=99+i;});
     expect(plannerRegime('BTC-PERP','1h',bars,now)).toMatchObject({state:'available',label:'trending'});

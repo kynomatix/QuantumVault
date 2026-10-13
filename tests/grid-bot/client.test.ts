@@ -303,6 +303,11 @@ describe('Planner client authority boundaries', () => {
     expect(html).toContain('ADX(14)'); expect(html).toContain('1h'); expect(html.toLowerCase()).toContain('trending');
     expect(html).toContain('Caution'); expect(html).not.toMatch(/<input|<select|disabled/);
     const unknown = renderToStaticMarkup(createElement(GridRegimeHint, { timeframe: '4h', regime: { state: 'unavailable', reason: 'EXAMPLE' } }));
-    expect(unknown).toContain('UNKNOWN'); expect(unknown).toContain('EXAMPLE'); expect(unknown).toContain('4h');
+    expect(unknown).toContain('UNKNOWN'); expect(unknown).toContain('>EXAMPLE</p>'); expect(unknown).toContain('role="status"'); expect(unknown).toContain('4h');
+  });
+  it('shows the short-history ADX reason as visible text on touch screens', () => {
+    const html = renderToStaticMarkup(createElement(GridRegimeHint, { timeframe: '1h', regime: { state: 'unavailable', reason: 'ADX needs 28 bars' } }));
+    expect(html).toContain('UNKNOWN'); expect(html).toContain('>ADX needs 28 bars</p>');
+    expect(html).not.toMatch(/<input|<select|disabled/);
   });
 });

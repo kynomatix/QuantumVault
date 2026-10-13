@@ -4,7 +4,8 @@ export function GridRegimeHint({ regime, timeframe }: { regime: GridRegime | nul
     <p className="font-medium" title={regime?.state === 'available'
       ? `${regime.venue.toUpperCase()} direct perpetual · ${regime.bars} finalized candles · latest ${new Date(regime.latestFinalizedTime).toUTCString()}`
       : regime?.reason ?? 'Choose a market to read finalized perpetual history.'}>
-      ADX(14) · {timeframe}: {regime?.state === 'available' ? `${regime.adx.toFixed(1)} · ${regime.label}` : 'UNKNOWN'}</p>
+       ADX(14) · {timeframe}: {regime?.state === 'available' ? `${regime.adx.toFixed(1)} · ${regime.label}` : 'UNKNOWN'}</p>
+    {regime?.state !== 'available' && <p className="text-xs text-muted-foreground" role="status">{regime?.reason ?? 'Choose a market to read finalized perpetual history.'}</p>}
     {regime?.state === 'available' && regime.label === 'trending' && <p className="text-amber-500">Caution: this market looks trending. Price may move out of your grid range.</p>}
     <p className="text-xs text-muted-foreground">Advisory only. Choose either direction; this does not block your plan.</p>
   </section>;

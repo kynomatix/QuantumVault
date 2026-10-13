@@ -1,5 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';
-import {LineStyle,type CandlestickData,type UTCTimestamp} from 'lightweight-charts';
+import {LineStyle,type CandlestickData,type UTCTimestamp,type ISeriesApi,type IPriceLine} from 'lightweight-charts';
 import {Dialog,DialogContent,DialogHeader,DialogTitle,DialogDescription} from '@/components/ui/dialog';
 import {Button} from '@/components/ui/button';
 import {createSharedTradePriceChart} from '../SharedTradePriceChart';
@@ -9,6 +9,7 @@ import {gridFactsFresh,gridBreakevenView} from '@/lib/grid-live-view';
 import {gridJson} from './GridDraftCard';
 function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'available'}>;surface:GridBotSurface;fresh:boolean;now:number}){
   const container=useRef<HTMLDivElement>(null);
+  const liveLines=useRef<{series:ISeriesApi<'Candlestick'>;mark:IPriceLine|null;breakeven:IPriceLine|null}|null>(null);
   useEffect(()=>{if(!container.current)return;const canvas=createSharedTradePriceChart(container.current);
     const series=canvas.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
     const candles=chart.candles.map(c=>({time:Math.floor(c.time/1000) as UTCTimestamp,open:c.open,high:c.high,low:c.low,close:c.close}));
@@ -18,12 +19,22 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
     const line=(price:string|null,title:string,color:string)=>{if(price!==null&&Number.isFinite(Number(price))&&Number(price)>0)series.createPriceLine({price:Number(price),title,color,lineWidth:1,lineStyle:LineStyle.Dashed,axisLabelVisible:true});};
     for(const l of surface.levels)line(l.price,`${l.ordinal} ${l.side} ${l.size} · ${l.status}`,l.reduceOnly?'#a78bfa':'#f59e0b');
     line(surface.bot.lowerPrice,'Lower range','#94a3b8');line(surface.bot.upperPrice,'Upper range','#94a3b8');line(surface.bot.stopLossPrice,'Stop','#ef4444');
-    if(fresh){line(surface.mark,'Pacifica mark','#38bdf8');const b=gridBreakevenView(surface,now);if(b)line(b.price,`Breakeven${b.percent===null?'':` · ${b.percent}%`}`,b.tone==='profit'?'#10b981':b.tone==='loss'?'#ef4444':'#94a3b8');}
+    liveLines.current={series,mark:null,breakeven:null};
     const period=chart.timeframe==='15m'?900:chart.timeframe==='4h'?14400:3600;
     const markers=surface.fills.map(f=>({time:(Math.floor(f.time/1000/period)*period) as UTCTimestamp,position:f.leg==='entry'?'belowBar' as const:'aboveBar' as const,color:f.leg==='entry'?'#f59e0b':'#a78bfa',shape:f.leg==='entry'?'arrowUp' as const:'arrowDown' as const,text:f.leg+' '+f.size+' @ '+f.price})).filter(m=>candles.length&&m.time>=candles[0].time&&m.time<=candles[candles.length-1].time);
     series.setMarkers(markers);
     canvas.timeScale().fitContent();let frame=0;const observer=new ResizeObserver(()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{if(container.current)canvas.applyOptions({width:container.current.clientWidth,height:container.current.clientHeight});});});observer.observe(container.current);
-    return()=>{observer.disconnect();cancelAnimationFrame(frame);canvas.remove();};
+    return()=>{liveLines.current=null;observer.disconnect();cancelAnimationFrame(frame);canvas.remove();};
+  },[chart,surface]);
+  useEffect(()=>{const live=liveLines.current;if(!live)return;
+    const update=(key:'mark'|'breakeven',price:string|null,title:string,color:string)=>{
+      if(price===null||!Number.isFinite(Number(price))||Number(price)<=0){if(live[key])live.series.removePriceLine(live[key]);live[key]=null;return;}
+      const options={price:Number(price),title,color,lineWidth:1 as const,lineStyle:LineStyle.Dashed,axisLabelVisible:true};
+      if(live[key])live[key].applyOptions(options);else live[key]=live.series.createPriceLine(options);
+    };
+    update('mark',fresh?surface.mark:null,'Pacifica mark','#38bdf8');
+    const b=fresh?gridBreakevenView(surface,now):null;
+    update('breakeven',b?.price??null,`Breakeven${b?.percent==null?'':` · ${b.percent}%`}`,b?.tone==='profit'?'#10b981':b?.tone==='loss'?'#ef4444':'#94a3b8');
   },[chart,surface,fresh,now]);
   return <div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with persisted Grid levels, range and stop"/>;
 }

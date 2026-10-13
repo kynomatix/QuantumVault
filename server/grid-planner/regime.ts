@@ -9,7 +9,7 @@ export function plannerRegime(market: string, timeframe: string, candles: Planne
   const unknown = (reason: string): GridRegime => ({ state: 'unavailable', reason });
   const duration = gridTimeframeMs(timeframe), first = candles[0]?.provenance;
   if (!duration || !Number.isSafeInteger(now) || candles.length < 28 || candles.length > 200)
-    return unknown('At least 28 finalized candles are needed');
+    return unknown('ADX needs 28 bars');
   if (!first || !['okx', 'gate', 'hyperliquid', 'pacifica'].includes(first.source) || first.source !== first.venue)
     return unknown('Direct perpetual provenance unavailable');
   if (!candles.every((c, i) => Number.isSafeInteger(c.time) && c.time > 0 && c.time % duration === 0 && c.time + duration <= now

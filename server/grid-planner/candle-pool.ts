@@ -31,7 +31,10 @@ export async function plannerPoolCandles(market: string, timeframe: string, bars
       console.info(`[GridPlannerCandles] source=${source} market=${market} reason=${valid ? 'partial' : 'validation'} bars=${candles.length}`);
     } catch (error) {
       signal.throwIfAborted();
-      console.info(`[GridPlannerCandles] source=${source} market=${market} reason=transport detail=${error instanceof Error ? error.message : 'unavailable'}`);
+      const timeout = error !== null && typeof error === 'object' && 'name' in error && error.name === 'TimeoutError';
+      const detail = error !== null && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
+        ? error.message : 'unavailable';
+      console.info(`[GridPlannerCandles] source=${source} market=${market} reason=${timeout ? 'timeout' : 'transport'} detail=${detail}`);
     }
   }
   return partial;
