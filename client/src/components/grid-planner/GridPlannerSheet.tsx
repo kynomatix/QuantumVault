@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BarChart3, ChevronDown, RefreshCw } from 'lucide-react';
+import { BarChart3, RefreshCw, SlidersHorizontal, ArrowUpDown, Shield, Layers, Receipt } from 'lucide-react';
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { DrawerSettingsPanel } from '@/components/ui/settings-panel';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart,
   isPlannerPreview, plannerOverlays, plannerLevelMessage, readableDecimal, readableTime, clientObservationDeadline,
@@ -59,7 +59,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [chartRefresh, setChartRefresh] = useState(0);
   const [previewExpiry, setPreviewExpiry] = useState(0), [chartExpiry, setChartExpiry] = useState(0);
   const [marketClock, setMarketClock] = useState({ serverNow: 0, startedAt: 0 });
-  const [advancedOpen, setAdvancedOpen] = useState(false), [marketLoading, setMarketLoading] = useState(false);
+  const [expandedSettingsPanel, setExpandedSettingsPanel] = useState<string | null>('range'), [marketLoading, setMarketLoading] = useState(false);
   const [width, setWidth] = useState(10), [rangeShortcut, setRangeShortcut] = useState<number | null>(null);
   const [rangeSource, setRangeSource] = useState<'manual' | 'auto'>(initialIntent?.rangeSource ?? 'manual');
   const manual = useRef({ lower: form.lower, upper: form.upper, stop: form.stop });
@@ -163,7 +163,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     return () => { clearTimeout(timer); generation.current.preview.invalidate(); };
   }, [open, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry, plannerEnabled]);
   useEffect(() => {
-    if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setAdvancedOpen(false); return; }
+    if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setExpandedSettingsPanel('range'); return; }
     const deadlines = [previewExpiry, chartExpiry, referenceExpiry, constraintExpiry, rangeExpiry].filter(t => t > Date.now());
     const timer = deadlines.length ? setTimeout(() => setNow(Date.now()), Math.max(1, Math.min(...deadlines) - Date.now() + 1)) : undefined;
     const wake = () => setNow(Date.now());
@@ -258,6 +258,28 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       <SelectContent>{options.map(o => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}</SelectContent>
     </Select>
   </div>;
+  const feesPanel = (draftDetails?: React.ReactNode) => <fieldset disabled={draftBusy}>
+    <DrawerSettingsPanel id="fees" title="Fees & data" icon={Receipt} keepMounted
+      expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-advanced-toggle">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {choice('bars', 'History bars', [{ value: '100', label: '100 bars' }, { value: '200', label: '200 bars' }])}
+              {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
+      </div>
+            <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines. Technical scales: flat = equal quote allocation; ascending = larger allocation further from current price; descending = larger allocation near current price. These apply separately to entries and starting-position exits. Base quantities also depend on price and lot rounding.</p>
+            <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption. A blank custom stop uses the suggested price.</p>
+            <div className="space-y-2 border-t border-border/60 pt-4 text-xs text-muted-foreground">
+              <h4 className="font-medium text-foreground">Observation and sizing details</h4>
+              {selected ? <>
+                <p>{reference ? `Cached Pacifica book reference price: ${readableDecimal(reference.price)} · observed ${readableTime(reference.observedAt)}`
+                  : `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`}</p>
+                {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
+                  : <p>Sizing unavailable: {selected.constraints.reason}</p>}
+              </> : <p>Choose a market and refresh observations to see tick and lot details.</p>}
+              {preview && <p>Policy model: {preview.policy.ordinaryWindow} ordinary window orders, {preview.policy.requiredAvailableSlots} required available slots including {preview.policy.reserveSlots} reserved, up to 100 intervals / 101 lines; transport batches up to 10. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
+            </div>
+      {draftDetails}
+    </DrawerSettingsPanel>
+  </fieldset>;
   return <Sheet open={open} onOpenChange={value => {
     if (draftBusy) return;
     if (!value) { priceRefresh.current?.dispose(); Object.values(generation.current).forEach(g => g.invalidate()); } onOpenChange(value);
@@ -297,7 +319,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           </div>
         </section>
 
-        <section aria-labelledby="grid-range-heading" className="space-y-3">
+        <section aria-label="Range chart and timeframe" className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 id="grid-range-heading" className="text-sm font-semibold">Your range</h3>
             <div className="flex flex-wrap items-center gap-2">
@@ -309,13 +331,17 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
               <Button type="button" size="sm" variant="ghost" disabled={marketLoading} onClick={refreshObservations}>Refresh observations</Button>
             </div>
           </div>
-          <GridRegimeHint timeframe={form.timeframe} regime={regime} />
-          {rangeFacts?.range.state === 'available' && now < rangeExpiry && regime.state === 'unavailable' &&
-            <p className="text-xs text-muted-foreground">Auto range uses {rangeFacts.range.includedBars} finalized bars.</p>}
           <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} hasMarket={!!form.market}
             levelMessage={createEnabled ? lines.length ? 'Authoritative draft preview levels used when saving.' : 'Authoritative draft levels require a fresh validated draft preview.'
               : `Hypothetical planner preview. ${plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}`}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
+        </section>
+
+        <DrawerSettingsPanel id="range" title="Range" icon={SlidersHorizontal} keepMounted
+          expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-range-toggle">
+          <GridRegimeHint timeframe={form.timeframe} regime={regime} />
+          {rangeFacts?.range.state === 'available' && now < rangeExpiry && regime.state === 'unavailable' &&
+            <p className="text-xs text-muted-foreground">Auto range uses {rangeFacts.range.includedBars} finalized bars.</p>}
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" disabled={!form.market || rangeBusy} onClick={autoRange}>Suggest auto-range</Button>
             {rangeSource === 'auto' && <Button type="button" variant="ghost" onClick={restoreManual}>Restore entered range</Button>}
@@ -325,7 +351,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           <div className="grid grid-cols-3 gap-2" aria-label="Range presets">
             {RANGE_PRESETS.map(p => <Button key={p.percent} type="button" variant="outline" disabled={!!shortcutReason} aria-describedby="grid-shortcut-hint"
               aria-pressed={rangeShortcut === p.percent} onClick={() => preset(p.percent)}
-              className={`h-auto min-h-14 flex-col py-2 ${rangeShortcut === p.percent ? 'border-primary/50 bg-primary/10' : ''}`}>
+              className={`h-auto min-h-14 flex-col whitespace-normal px-1 py-2 ${rangeShortcut === p.percent ? 'border-primary/50 bg-primary/10' : ''}`}>
               <span className="font-medium">{p.label}</span>
             </Button>)}
           </div>
@@ -340,8 +366,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
               ? 'Around your entered range midpoint. Presets use the current price.'
               : shortcutReason || 'Around the current price. Enter both prices to resize around their midpoint.'}</p>
           </div>
-        </section>
+        </DrawerSettingsPanel>
 
+        <DrawerSettingsPanel id="direction-size" title="Direction & size" icon={ArrowUpDown} keepMounted
+          expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-direction-size-toggle">
         <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5"><Label id="grid-side-label">Direction</Label>
             <GridDirectionBadge active={open} identity={identity}/>
@@ -358,9 +386,34 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             <div className="flex items-center gap-2"><Input id="grid-leverage" className="w-24" inputMode="decimal" value={form.leverage}
               onChange={e => edit('leverage', e.target.value)} /><span className="text-sm text-muted-foreground">×</span></div></div>
           <div className="grid grid-cols-5 gap-2">{['1', '2', '3', '5', '10'].map(value => <Button key={value} type="button" variant="outline"
-            aria-pressed={form.leverage === value} className={form.leverage === value ? 'border-primary/50 bg-primary/10' : ''}
+            aria-pressed={form.leverage === value} className={`px-1 ${form.leverage === value ? 'border-primary/50 bg-primary/10' : ''}`}
             onClick={() => edit('leverage', value)}>{value}×</Button>)}</div>
         </section>
+
+          {numberField('intervals', 'Number of grids (1–100)')}
+        </DrawerSettingsPanel>
+
+        <DrawerSettingsPanel id="stop" title="Stop loss" icon={Shield} keepMounted
+          expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-stop-toggle">
+          {numberField('stop', 'Custom stop price', suggestedStop ?? 'Enter a proposed stop')}
+          <p className="text-xs text-muted-foreground">{form.stop ? 'Your custom stop must align to the venue tick and lie beyond the loss side of the range.'
+            : suggestedStop ? `Suggested stop: ${readableDecimal(suggestedStop)}. It is 3% beyond the loss side of your range, rounded outwards to the observed tick.`
+            : 'A proposed stop needs observed sizing, or enter a custom stop price.'} A blank custom stop uses the suggested price. Liquidation reachability is unknown.</p>
+        </DrawerSettingsPanel>
+
+        <DrawerSettingsPanel id="orders" title="Order sizes" icon={Layers} keepMounted
+          expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-orders-toggle">
+            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
+              <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position at the current price</Label>
+                <p className="text-xs text-muted-foreground">Model a position opened at the current price, then closed in pieces at higher levels for a long or lower levels for a short; its taker fee is unavailable. This does not place an order.</p></div>
+              <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
+            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <GridPlannerSizeSelect id="grid-entryScale" label="Order sizes" value={form.entryScale} side={form.side} onChange={value => edit('entryScale', value)} />
+              <GridPlannerSizeSelect id="grid-profitScale" label="How the starting position is taken profit on" value={form.profitScale} side={form.side}
+                startingPosition enabled={form.seed} onChange={value => edit('profitScale', value)} />
+          </div>
+        </DrawerSettingsPanel>
 
         {plannerEnabled && <section aria-labelledby="grid-plan-heading" className="rounded-xl border border-primary/20 bg-card/40 p-4 sm:p-5 space-y-4">
           <h3 id="grid-plan-heading" className="text-sm font-semibold">Your plan</h3>
@@ -369,7 +422,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             : preview ? <p role="status" className="text-sm font-medium">{stale ? 'Observation expired — refresh before using this preview'
               : preview.state === 'rejected' ? 'Requested plan rejected' : preview.state === 'unavailable' ? 'Preview unavailable'
               : preview.state === 'diagnostic' ? 'Diagnostic geometry — some checks unavailable' : 'Hypothetical checks passed'}</p>
-            : <p className="text-sm text-muted-foreground">Choose a market, range and investment to see your plan.{!effectiveStop && ' A proposed stop needs observed sizing, or enter one in Advanced settings.'}</p>}
+            : <p className="text-sm text-muted-foreground">Choose a market, range and investment to see your plan.{!effectiveStop && ' A proposed stop needs observed sizing, or enter one in Stop loss settings.'}</p>}
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <div><dt className="text-xs text-muted-foreground">Price levels</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length} price lines` : 'Awaiting preview'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Range you chose</dt><dd className="font-medium mt-1 break-words">{range ? `${readableDecimal(range.lower)} – ${readableDecimal(range.upper)}` : 'Enter lower and upper prices'}</dd></div>
@@ -379,7 +432,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             <div><dt className="text-xs text-muted-foreground">Minimum with your fee assumption</dt><dd className="font-medium mt-1">{preview ? preview.assumedMinimum.state === 'available' ? `${readableDecimal(preview.assumedMinimum.value)} USDC` : `Unavailable — ${preview.assumedMinimum.reason}` : form.feePercent === '' ? 'Unknown — no fee assumed' : 'Awaiting preview'}</dd></div>
           </dl>
           <p className="text-xs text-muted-foreground">{form.stop ? 'Your custom stop must align to the venue tick and lie beyond the loss side of the range.'
-            : 'The suggested stop is 3% beyond the loss side of your range, rounded outwards to the observed tick. Change it in Advanced settings.'} Liquidation reachability is unknown.</p>
+            : 'The suggested stop is 3% beyond the loss side of your range, rounded outwards to the observed tick. Change it in Stop loss settings.'} Liquidation reachability is unknown.</p>
           {preview?.reasons.map((reason, i) => <p key={i} className="text-xs text-muted-foreground">{reason}</p>)}
           <p className="text-xs text-muted-foreground">{preview?.fee.state === 'unknown' || form.feePercent === '' ? 'Fee unknown — fee gate was not evaluated.' : ASSUMPTION_LABEL} Taker fees for a starting position, slippage, venue fee rounding and funding are unavailable. {preview?.stop.reason}</p>
           <p className="text-xs text-muted-foreground">No profit or fill forecasts. Minimum capital uses a 0.01 USDC display quantum and no modeled transfer floor; it does not establish funding, liquidation safety, live capacity or executable partial fills. This hypothetical plan does not establish live capacity or balances; draft funds are checked separately below.</p>
@@ -409,42 +462,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           </details>}
         </section>}
 
-        <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="border-t border-border/60 pt-4">
-          <CollapsibleTrigger asChild><Button type="button" variant="ghost" className="w-full justify-between px-0" data-testid="grid-advanced-toggle">
-            Advanced settings<ChevronDown className={`h-4 w-4 transition-transform ${advancedOpen ? 'rotate-180' : ''}`} />
-          </Button></CollapsibleTrigger>
-          <CollapsibleContent className="mt-3 space-y-4 rounded-lg border border-border/60 bg-card/40 p-4">
-            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
-              <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position at the current price</Label>
-                <p className="text-xs text-muted-foreground">Model a position opened at the current price, then closed in pieces at higher levels for a long or lower levels for a short; its taker fee is unavailable. This does not place an order.</p></div>
-              <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {numberField('intervals', 'Number of levels (1–100)')}
-              <GridPlannerSizeSelect id="grid-entryScale" label="Order sizes" value={form.entryScale} side={form.side} onChange={value => edit('entryScale', value)} />
-              <GridPlannerSizeSelect id="grid-profitScale" label="How the starting position is taken profit on" value={form.profitScale} side={form.side}
-                startingPosition enabled={form.seed} onChange={value => edit('profitScale', value)} />
-              {numberField('stop', 'Custom stop price', suggestedStop ?? 'Enter a proposed stop')}
-              {choice('bars', 'History bars', [{ value: '100', label: '100 bars' }, { value: '200', label: '200 bars' }])}
-              {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
-            </div>
-            <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines. Technical scales: flat = equal quote allocation; ascending = larger allocation further from current price; descending = larger allocation near current price. These apply separately to entries and starting-position exits. Base quantities also depend on price and lot rounding.</p>
-            <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption. A blank custom stop uses the suggested price.</p>
-            <div className="space-y-2 border-t border-border/60 pt-4 text-xs text-muted-foreground">
-              <h4 className="font-medium text-foreground">Observation and sizing details</h4>
-              {selected ? <>
-                <p>{reference ? `Cached Pacifica book reference price: ${readableDecimal(reference.price)} · observed ${readableTime(reference.observedAt)}`
-                  : `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`}</p>
-                {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
-                  : <p>Sizing unavailable: {selected.constraints.reason}</p>}
-              </> : <p>Choose a market and refresh observations to see tick and lot details.</p>}
-              {preview && <p>Policy model: {preview.policy.ordinaryWindow} ordinary window orders, {preview.policy.requiredAvailableSlots} required available slots including {preview.policy.reserveSlots} reserved, up to 100 intervals / 101 lines; transport batches up to 10. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
-            </div>
-          </CollapsibleContent>
-        </Collapsible>
         </fieldset>
         {createEnabled && <GridDraftActions open={open} intent={draftIntent} onSaved={onSaved} onBusyChange={setDraftBusy}
-          onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} />}
+          onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} renderDetails={feesPanel} />}
+        {!createEnabled && feesPanel()}
         <p className="text-center text-xs text-muted-foreground pb-2">{liveEnabled ? 'Creating a bot saves this reviewed setup through the existing draft path.' : PLANNING_BANNER}</p>
       </div>
     </SheetContent>

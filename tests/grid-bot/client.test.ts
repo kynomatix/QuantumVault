@@ -310,4 +310,50 @@ describe('Planner client authority boundaries', () => {
     expect(html).toContain('UNKNOWN'); expect(html).toContain('>ADX needs 28 bars</p>');
     expect(html).not.toMatch(/<input|<select|disabled/);
   });
+  it('groups all normal and detailed settings without hiding the chart, plan or actions', () => {
+    const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
+    const body = sheet.slice(sheet.indexOf('  return <Sheet'));
+    expect(sheet).toContain("useState<string | null>('range')");
+    expect(sheet).toContain("setExpandedSettingsPanel('range')");
+    for (const title of ['Range', 'Direction & size', 'Stop loss', 'Order sizes', 'Fees & data'])
+      expect(sheet).toContain(`title="${title}"`);
+    expect(sheet.match(/<DrawerSettingsPanel\b/g)).toHaveLength(5);
+    expect(sheet.match(/icon=\{\w+\} keepMounted/g)).toHaveLength(5);
+    expect(sheet).not.toContain('<Collapsible'); expect(sheet).not.toContain('Advanced settings');
+    expect(body.indexOf('<GridPlannerChart')).toBeLessThan(body.indexOf('<DrawerSettingsPanel'));
+    expect(body).toContain('aria-labelledby="grid-plan-heading"');
+    expect(body.slice(body.indexOf('        </fieldset>'))).toContain('<GridDraftActions');
+    expect(body).toContain('!createEnabled && feesPanel()');
+    expect(sheet).toContain('const feesPanel = (draftDetails?: React.ReactNode) => <fieldset disabled={draftBusy}>');
+  });
+  it('puts grid count with direction, investment and leverage and keeps every editable field', () => {
+    const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
+    const panel = (id: string) => sheet.slice(sheet.indexOf(`<DrawerSettingsPanel id="${id}"`)).split('</DrawerSettingsPanel>')[0];
+    const direction = panel('direction-size');
+    for (const control of ['<GridDirectionBadge', "edit('side'", "numberField('investment'", 'id="grid-leverage"', "numberField('intervals', 'Number of grids (1–100)'"])
+      expect(direction).toContain(control);
+    for (const field of ['lower', 'upper', 'investment', 'intervals', 'stop', 'feePercent'])
+      expect(sheet.match(new RegExp(`numberField\\('${field}'`, 'g'))).toHaveLength(1);
+    expect(panel('range')).toContain('<GridRegimeHint'); expect(panel('range')).toContain('id="grid-width"');
+    expect(panel('stop')).toContain("numberField('stop'"); expect(panel('stop')).toContain('Suggested stop:');
+    for (const control of ['id="grid-seed"', 'id="grid-entryScale"', 'id="grid-profitScale"', 'startingPosition enabled={form.seed}'])
+      expect(panel('orders')).toContain(control);
+    expect(panel('fees')).toContain("choice('bars'"); expect(panel('fees')).toContain('Observation and sizing details');
+    expect(panel('fees')).toContain('testId="grid-advanced-toggle"');
+    expect(sheet).toContain('grid grid-cols-1 sm:grid-cols-2');
+  });
+  it('folds draft funding and capacity details without changing the action owner or save guards', () => {
+    const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
+    const actions = readFileSync('client/src/components/grid-bot/GridDraftActions.tsx', 'utf8');
+    expect(sheet).toContain('rangeBusy={autoApplying} renderDetails={feesPanel}');
+    const details = actions.slice(actions.indexOf('  const details = <>'), actions.indexOf('  return <section'));
+    for (const text of ['Draft sizing, observed fees and funds', 'Capacity before trading', 'Unknown capacity does not prevent saving a draft.'])
+      expect(details).toContain(text);
+    expect(details).not.toContain('<Button'); expect(details).not.toContain('role="status"');
+    const visible = actions.slice(actions.indexOf('  return <section'));
+    expect(visible).toContain('{renderDetails ? renderDetails(details) : details}');
+    expect(visible).toContain('role="status"'); expect(visible).toContain('<DepositDialog');
+    expect(actions).toContain("cash.shortfall!=='0.00'");
+    expect(actions).toContain('session.current.beginCreate');
+  });
 });
