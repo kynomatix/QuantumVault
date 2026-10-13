@@ -20,7 +20,7 @@ import { GridDirectionBadge } from './GridDirectionBadge';
 import { PlannerPriceRefresh, watchPlannerPrice } from '@/lib/planner-price-refresh';
 
 import { GRID_SETUP_INITIAL as INITIAL, gridSetupForm, gridSetupIntent, isGridRegime } from '@/lib/grid-setup-view';
-import { gridWidth, type GridDraftPreview } from '@/lib/grid-draft-view';
+import { gridDraftRevision, gridWidth, type GridDraftPreview } from '@/lib/grid-draft-view';
 import { GridDraftActions } from '../grid-bot/GridDraftActions';
 import { GridRegimeHint } from './GridRegimeHint';
 import type { GridIntent } from '../../../../shared/grid-draft';
@@ -76,6 +76,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     setAutoApplying(false);
     priceRefresh.current?.cancelShortcut();
     invalidate();
+    if (key === 'market') setRangeSource('manual');
     if (['lower', 'upper', 'stop'].includes(key)) {
       setRangeSource('manual'); manual.current = { lower: form.lower, upper: form.upper, stop: form.stop, [key]: value } as typeof manual.current;
     }
@@ -198,7 +199,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     const r = rangeFacts.range;
     if (rangeSource === 'manual') manual.current = { lower: form.lower, upper: form.upper, stop: form.stop };
     priceRefresh.current?.cancelShortcut(); invalidate(); setRangeShortcut(null); setRangeSource('auto');
-    setForm(previous => ({ ...previous, lower: r.lowerPrice, upper: r.upperPrice, stop: form.side === 'long' ? r.longStop : r.shortStop }));
+    setForm(previous => ({ ...previous, lower: r.lowerPrice, upper: r.upperPrice, stop: previous.side === 'long' ? r.longStop : r.shortStop }));
   };
   const restoreManual = () => {
     if (draftBusy) return;
@@ -219,9 +220,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     });
   };
   const shortcutReason = plannerShortcutReason(form.market, !!reference, marketError, marketLoading);
-  const lines = useMemo(() => plannerEnabled ? plannerOverlays(preview, previewExpiry, now)
-    : draftPreview?.state === 'ready' && now < draftPreview.expiresAt ? draftPreview.plan?.lines ?? [] : [], [plannerEnabled, preview, previewExpiry, now, draftPreview]);
   const draftIntent = useMemo(() => gridSetupIntent(form, effectiveStop, rangeSource), [form, effectiveStop, rangeSource]);
+  const lines = useMemo(() => createEnabled
+    ? draftPreview?.state === 'ready' && now < draftPreview.expiresAt && draftPreview.draftRevision === gridDraftRevision(draftIntent)
+      ? draftPreview.plan?.lines ?? [] : []
+    : plannerEnabled ? plannerOverlays(preview, previewExpiry, now) : [], [createEnabled, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
   const regime = rangeFacts && now < rangeExpiry ? rangeFacts.regime : { state: 'unavailable' as const,
     reason: rangeError || (rangeBusy ? 'Loading finalized candles' : !form.market ? 'Choose a market' : 'Observation expired or unavailable; refresh observations') };
   const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
@@ -293,8 +296,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             </div>
           </div>
           <GridRegimeHint timeframe={form.timeframe} regime={regime} />
+          {rangeFacts?.range.state === 'available' && now < rangeExpiry && regime.state === 'unavailable' &&
+            <p className="text-xs text-muted-foreground">Auto range uses {rangeFacts.range.includedBars} finalized bars.</p>}
           <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} hasMarket={!!form.market}
-            levelMessage={plannerEnabled ? plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error) : 'Draft levels require a fresh validated draft preview.'}
+            levelMessage={createEnabled ? lines.length ? 'Authoritative draft preview levels used when saving.' : 'Authoritative draft levels require a fresh validated draft preview.'
+              : `Hypothetical planner preview. ${plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}`}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" disabled={!form.market || rangeBusy} onClick={autoRange}>Suggest auto-range</Button>

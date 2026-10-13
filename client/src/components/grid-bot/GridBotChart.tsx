@@ -24,7 +24,7 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
     series.setMarkers(markers);
     canvas.timeScale().fitContent();let frame=0;const observer=new ResizeObserver(()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{if(container.current)canvas.applyOptions({width:container.current.clientWidth,height:container.current.clientHeight});});});observer.observe(container.current);
     return()=>{observer.disconnect();cancelAnimationFrame(frame);canvas.remove();};
-  },[chart,surface,fresh]);
+  },[chart,surface,fresh,now]);
   return <div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with persisted Grid levels, range and stop"/>;
 }
 export function GridBotChart({surface,onClose}:{surface:GridBotSurface;onClose:()=>void}){

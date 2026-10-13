@@ -256,8 +256,10 @@ describe('Planner client authority boundaries', () => {
     expect(card.match(/<GridPlannerSheet\b/g)).toHaveLength(1); expect(card).not.toContain('GridCreateSheet');
     expect(readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8')).toContain('rangeBusy={autoApplying}');
     expect(card).toContain('initialIntent={create.intent}'); expect(card).toContain('createEnabled={enabled}');
-    const live = renderToStaticMarkup(createElement(GridDraftCard, { authenticated: false, identity: null }));
-    expect(live).toContain('card-grid-bot-coming-soon'); expect(live).not.toContain('Start bot');
+    for (const props of [{ authenticated: false, identity: null }, { authenticated: true, identity: 'EXAMPLE' }]) {
+      const live = renderToStaticMarkup(createElement(GridDraftCard, props));
+      expect(live).toContain('card-grid-bot-coming-soon'); expect(live).toContain('Coming soon'); expect(live).not.toContain('Start bot');
+    }
     expect(readableDecimal('123456.000001')).toBe('123,456.000001');
   });
   it('retains every Adjust Range intent field through the unified form, including inactive profit sizing', () => {

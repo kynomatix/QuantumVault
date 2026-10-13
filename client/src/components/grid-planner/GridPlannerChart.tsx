@@ -91,7 +91,7 @@ export function GridPlannerChart({ chart, lines, range = null, stale, loading = 
     <div className="h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} /></div>
     {levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}
     <p className="text-xs text-muted-foreground">{note}</p>
-    <p className="text-xs text-muted-foreground">Shaded band and solid edges: your proposed range. Dashed lines: current hypothetical quantized levels. Red line: proposed stop, not certified liquidation protection.</p>
+    <p className="text-xs text-muted-foreground">Shaded band and solid edges: your proposed range. Dashed lines: quantized levels from the preview labelled above. Red line: proposed stop, not certified liquidation protection.</p>
     <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>{label}</DialogDescription></DialogHeader><div className="h-[65vh]"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
   </div>;
 }
