@@ -313,9 +313,9 @@ describe('Planner client authority boundaries', () => {
   it('groups all normal and detailed settings without hiding the chart, plan or actions', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const body = sheet.slice(sheet.indexOf('  return <Sheet'));
-    expect(sheet).toContain("useState<string | null>('range')");
-    expect(sheet).toContain("setExpandedSettingsPanel('range')");
-    for (const title of ['Range', 'Direction & size', 'Stop loss', 'Order sizes', 'Fees & data'])
+    expect(sheet).toContain("useState<string | null>('direction-size')");
+    expect(sheet).toContain("setExpandedSettingsPanel('direction-size')");
+    for (const title of ['Range', 'Order', 'Stop loss', 'Sizing', 'Fees & data'])
       expect(sheet).toContain(`title="${title}"`);
     expect(sheet.match(/<DrawerSettingsPanel\b/g)).toHaveLength(5);
     expect(sheet.match(/icon=\{\w+\} keepMounted/g)).toHaveLength(5);

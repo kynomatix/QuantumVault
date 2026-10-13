@@ -59,7 +59,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [chartRefresh, setChartRefresh] = useState(0);
   const [previewExpiry, setPreviewExpiry] = useState(0), [chartExpiry, setChartExpiry] = useState(0);
   const [marketClock, setMarketClock] = useState({ serverNow: 0, startedAt: 0 });
-  const [expandedSettingsPanel, setExpandedSettingsPanel] = useState<string | null>('range'), [marketLoading, setMarketLoading] = useState(false);
+  const [expandedSettingsPanel, setExpandedSettingsPanel] = useState<string | null>('direction-size'), [marketLoading, setMarketLoading] = useState(false);
   const [width, setWidth] = useState(10), [rangeShortcut, setRangeShortcut] = useState<number | null>(null);
   const [rangeSource, setRangeSource] = useState<'manual' | 'auto'>(initialIntent?.rangeSource ?? 'manual');
   const manual = useRef({ lower: form.lower, upper: form.upper, stop: form.stop });
@@ -163,7 +163,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     return () => { clearTimeout(timer); generation.current.preview.invalidate(); };
   }, [open, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry, plannerEnabled]);
   useEffect(() => {
-    if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setExpandedSettingsPanel('range'); return; }
+    if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setExpandedSettingsPanel('direction-size'); return; }
     const deadlines = [previewExpiry, chartExpiry, referenceExpiry, constraintExpiry, rangeExpiry].filter(t => t > Date.now());
     const timer = deadlines.length ? setTimeout(() => setNow(Date.now()), Math.max(1, Math.min(...deadlines) - Date.now() + 1)) : undefined;
     const wake = () => setNow(Date.now());
@@ -368,7 +368,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           </div>
         </DrawerSettingsPanel>
 
-        <DrawerSettingsPanel id="direction-size" title="Direction & size" icon={ArrowUpDown} keepMounted
+        <DrawerSettingsPanel id="direction-size" title="Order" icon={ArrowUpDown} keepMounted
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-direction-size-toggle">
         <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5"><Label id="grid-side-label">Direction</Label>
@@ -401,7 +401,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             : 'A proposed stop needs observed sizing, or enter a custom stop price.'} A blank custom stop uses the suggested price. Liquidation reachability is unknown.</p>
         </DrawerSettingsPanel>
 
-        <DrawerSettingsPanel id="orders" title="Order sizes" icon={Layers} keepMounted
+        <DrawerSettingsPanel id="orders" title="Sizing" icon={Layers} keepMounted
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-orders-toggle">
             <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
               <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position at the current price</Label>
