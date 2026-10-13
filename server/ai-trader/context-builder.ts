@@ -583,7 +583,7 @@ export async function buildMarketContext(
   //   2. candle       — newest candle close when age < 1 TF interval
   //   3. stale-fail   — all sources dry; cycle aborts (G9 semantics preserved)
   // The paper executor reads markPrice from contextDigest.price automatically.
-  let price = await adapter.getPrice(market, { priority: 'normal' });
+  let price = await adapter.getPrice(market, { priority: 'normal', caller: 'ai.context' });
   let priceSource: 'venue' | 'hl_reference' | 'candle' = 'venue';
   if (price === null) {
     // Tier 1: HL reference — ratio guard vs newest candle close to reject

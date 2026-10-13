@@ -183,7 +183,7 @@ export async function buildTodayStats(walletAddress: string): Promise<TodayStats
  */
 export async function getMarkPricesSafely(): Promise<Record<string, number>> {
   try {
-    return await getDefaultAdapter().getAllPrices();
+    return await getDefaultAdapter().getAllPrices({ caller: 'telegram.summary' });
   } catch {
     return {};
   }

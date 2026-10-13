@@ -2345,7 +2345,7 @@ export async function userInitiatedClose(
     if (bot.paperMode) {
       let markPrice: number | null;
       try {
-        markPrice = await adapter.getPrice(bot.market);
+        markPrice = await adapter.getPrice(bot.market, { caller: 'ai.monitor' });
       } catch (err) {
         return { ok: false, detail: `price read failed: ${err instanceof Error ? err.message : err}` };
       }
@@ -3373,7 +3373,7 @@ export async function runGraduationSweep(): Promise<void> {
         const view = parseOpenDecision(decisions);
         if (view && view.entryPrice !== null) {
           const adapter = getAiTraderAdapter(bot);
-          const price = await adapter.getPrice(bot.market);
+          const price = await adapter.getPrice(bot.market, { caller: 'ai.monitor' });
           if (price !== null && Number.isFinite(price)) {
             const direction = view.side === "long" ? 1 : -1;
             mtm = (price - view.entryPrice) * view.sizeBase * direction;

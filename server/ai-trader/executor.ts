@@ -719,7 +719,7 @@ async function executeLiveEntry(
     let revalidationPrice: number | null = null;
     let priceReadError: unknown = null;
     try {
-      revalidationPrice = await adapter.getPrice(bot.market, { priority: "critical" });
+      revalidationPrice = await adapter.getPrice(bot.market, { priority: "critical", caller: 'ai.executor' });
     } catch (error) {
       priceReadError = error;
     }

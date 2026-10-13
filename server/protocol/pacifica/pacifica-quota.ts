@@ -40,6 +40,7 @@ const ENDPOINT_COSTS: Record<string, number> = {
   '/account/orders/history': 3,
   '/account/orders/stop': 2,
   '/info': 2,
+  '/info/prices': 2,
   '/book': 1,
   '/funding': 1,
   '/funding_history': 2,
@@ -53,6 +54,7 @@ interface CreditEntry {
   timestamp: number;
   credits: number;
   path: string;
+  caller: string;
 }
 
 class PacificaQuota {
@@ -102,12 +104,12 @@ class PacificaQuota {
    * choose the priority; optional work should preserve critical headroom.
    * A failed transport stays charged conservatively.
    */
-  tryClaimImmediate(path: string, priority: RequestPriority): boolean {
+  tryClaimImmediate(path: string, priority: RequestPriority, caller = `direct:${path}`): boolean {
     if (!this.canAfford(path, priority)) {
       this.noteRejection();
       return false;
     }
-    this.record(path);
+    this.record(path, undefined, caller);
     return true;
   }
 
@@ -129,9 +131,11 @@ class PacificaQuota {
    * Record an actual spend. Call this AFTER the fetch returns (success or fail),
    * since Pacifica counts the request regardless of HTTP status.
    */
-  record(path: string, actualCost?: number): void {
+  record(path: string, actualCost?: number, caller = `direct:${path}`): void {
     const cost = actualCost ?? this.estimateCost(path);
-    this.spends.push({ timestamp: Date.now(), credits: cost, path });
+    // Fixed, non-sensitive tags only; bound length and character set in logs.
+    const tag = /^[a-zA-Z0-9_.:/-]{1,80}$/.test(caller) ? caller : 'unknown';
+    this.spends.push({ timestamp: Date.now(), credits: cost, path, caller: tag });
     this.served += 1;
   }
 
@@ -162,21 +166,31 @@ class PacificaQuota {
     requestsServed: number;
     requestsRejected: number;
     topEndpoints: Array<{ path: string; credits: number; calls: number }>;
+    topCallers: Array<{ caller: string; credits: number; calls: number }>;
   } {
     this.evictOld();
     const used = this.currentSpend();
 
     const byPath = new Map<string, { credits: number; calls: number }>();
+    const byCaller = new Map<string, { credits: number; calls: number }>();
     for (const e of this.spends) {
       const cur = byPath.get(e.path) ?? { credits: 0, calls: 0 };
       cur.credits += e.credits;
       cur.calls += 1;
       byPath.set(e.path, cur);
+      const attribution = byCaller.get(e.caller) ?? { credits: 0, calls: 0 };
+      attribution.credits += e.credits;
+      attribution.calls += 1;
+      byCaller.set(e.caller, attribution);
     }
     const topEndpoints = Array.from(byPath.entries())
       .map(([path, v]) => ({ path, ...v }))
       .sort((a, b) => b.credits - a.credits)
       .slice(0, 5);
+    const topCallers = Array.from(byCaller.entries())
+      .map(([caller, v]) => ({ caller, ...v }))
+      .sort((a, b) => b.credits - a.credits)
+      .slice(0, 8);
 
     return {
       creditsUsed: used,
@@ -186,6 +200,7 @@ class PacificaQuota {
       requestsServed: this.served,
       requestsRejected: this.rejected,
       topEndpoints,
+      topCallers,
     };
   }
 

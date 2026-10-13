@@ -649,8 +649,8 @@ export interface ProtocolAdapter {
   getMarkets(): Promise<ProtocolMarket[]>;
   /** Pacifica's fresh /info/prices mark, for opening admission. */
   getMarkPrice?(internalSymbol: string): Promise<import('./market-constraints').MarkPriceAuthority>;
-  getPrice(internalSymbol: string, opts?: { priority?: 'critical' | 'normal' | 'background' }): Promise<number | null>;
-  getAllPrices(): Promise<Record<string, number>>;
+  getPrice(internalSymbol: string, opts?: { priority?: 'critical' | 'normal' | 'background'; caller?: string }): Promise<number | null>;
+  getAllPrices(opts?: { caller?: string }): Promise<Record<string, number>>;
   /**
    * DASH-PRICE-FAILFAST-01 — Synchronous cached-price snapshot for display-only
    * enrichment on the dashboard request path.

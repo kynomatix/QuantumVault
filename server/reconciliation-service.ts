@@ -326,7 +326,7 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number, 
 
 async function fetchMarketPrice(market: string, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<number | null> {
   try {
-    return await adapter.getPrice(market);
+    return await adapter.getPrice(market, { caller: 'reconciliation.price' });
   } catch {
     return null;
   }

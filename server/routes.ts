@@ -1003,11 +1003,11 @@ function _mapAccountInfoToDrift(info: { balance: number; equity: number; availab
 }
 
 async function getMarketPrice(symbol: string, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<number | null> {
-  return adapter.getPrice(symbol);
+  return adapter.getPrice(symbol, { caller: 'routes.price' });
 }
 
 async function getAllPrices(): Promise<Record<string, number>> {
-  return getDefaultAdapter().getAllPrices();
+  return getDefaultAdapter().getAllPrices({ caller: 'routes.all-prices' });
 }
 
 /**
@@ -1050,7 +1050,7 @@ function getCachedDisplayPricesWithMeta(internalSymbols: string[]): {
 }
 
 async function forceRefreshPrices(): Promise<Record<string, number>> {
-  return getDefaultAdapter().getAllPrices();
+  return getDefaultAdapter().getAllPrices({ caller: 'routes.dashboard' });
 }
 
 async function buildDepositTransaction(walletAddress: string, amountUsdc: number) {
@@ -22395,7 +22395,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       const adapter = getDefaultAdapter();
       // Single-flight: join an existing owned sweep if one is running.
-      const sweep = adapter.getAllPrices();
+      const sweep = adapter.getAllPrices({ caller: 'routes.api-prices' });
       // Suppress unhandled rejection for this consumer's reference if the
       // consumer deadline fires before the sweep settles. The owned sweep
       // inside the adapter continues regardless and will be joined by the
@@ -22422,7 +22422,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(503).json({ error: 'prices temporarily unavailable', degraded: true });
       }
 
-      appendTelemetry(`[prices] consumer timeout: serving ${cacheSize} stale cached prices`);
+      appendTelemetry(`[prices] consumer timeout: serving ${cacheSize} cached prices`);
       return res.json(cached);
     } catch (error) {
       console.error("Get prices error:", error);

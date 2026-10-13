@@ -814,7 +814,7 @@ export function registerAiTraderRoutes(app: Express): void {
         await Promise.all(
           [...marketToBot.entries()].map(async ([key, bot]) => {
             try {
-              const p = await getAiTraderAdapter(bot).getPrice(bot.market);
+              const p = await getAiTraderAdapter(bot).getPrice(bot.market, { caller: 'ai.routes' });
               // Reject zero/negative prices — treat as unavailable.
               priceCache.set(key, p !== null && Number.isFinite(p) && p > 0 ? p : null);
             } catch {
@@ -959,7 +959,7 @@ export function registerAiTraderRoutes(app: Express): void {
         try {
           const adapter = getAiTraderAdapter(bot);
           const venueMarkStartedAt = Date.now();
-          markPrice = await adapter.getPrice(bot.market);
+          markPrice = await adapter.getPrice(bot.market, { caller: 'ai.routes' });
           recordRequestSubspan("botVenueMarkMs", Date.now() - venueMarkStartedAt);
         } catch {
           markPrice = null;
@@ -1596,7 +1596,7 @@ export function registerAiTraderRoutes(app: Express): void {
       const recordedPrice = Number((decision.contextDigest as any)?.price);
       let livePrice: number | null = null;
       try {
-        livePrice = await adapter.getPrice(bot.market);
+        livePrice = await adapter.getPrice(bot.market, { caller: 'ai.routes' });
       } catch {
         livePrice = null; // fail open on the price-drift check only — time-based expiry still applies
       }

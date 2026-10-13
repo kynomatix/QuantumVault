@@ -44,7 +44,7 @@ import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter
 // Internal helpers — mirrors dash-price-failfast.test.ts conventions
 // ---------------------------------------------------------------------------
 
-const STALE_AGE_MS = 5 * 60 * 1000; // 5 minutes — well past the 60 s TTL
+const OBSERVATION_AGE_MS = 5_000; // A usable observation within the existing 60-second limit.
 const PRICE_STALENESS_THRESHOLD_MS = 60_000; // must match routes.ts constant
 
 function seedPrice(
@@ -261,6 +261,14 @@ describe('DASH-PRICE-FAILFAST-02 [A]: PacificaAdapter.getCachedPriceMeta', () =>
     expect(Math.abs(oldestFetchedAt! - (now - 5000))).toBeLessThan(50);
   });
 
+  it('expired observations produce an unavailable display snapshot without renewing timestamps', () => {
+    seedPrice(adapter, 'SOL-PERP', 160, 60_000);
+    const original = readRawEntry(adapter, 'SOL-PERP')?.fetchedAt;
+    expect(simulateCachedDisplayPricesWithMeta(adapter, ['SOL-PERP']))
+      .toEqual({ prices: {}, pricesAsOf: null, pricesStale: true });
+    expect(readRawEntry(adapter, 'SOL-PERP')?.fetchedAt).toBe(original);
+  });
+
   // A02 — returns null when no valid entries
   it('[A02] returns null when cache is empty', () => {
     const { oldestFetchedAt } = adapter.getCachedPriceMeta(['SOL-PERP', 'BTC-PERP']);
@@ -278,8 +286,8 @@ describe('DASH-PRICE-FAILFAST-02 [A]: PacificaAdapter.getCachedPriceMeta', () =>
 
   // A04 — never mutates fetchedAt
   it('[A04] getCachedPriceMeta does not mutate fetchedAt', () => {
-    const originalFetchedAt = Date.now() - STALE_AGE_MS;
-    seedPrice(adapter, 'SOL-PERP', 145, STALE_AGE_MS);
+    const originalFetchedAt = Date.now() - OBSERVATION_AGE_MS;
+    seedPrice(adapter, 'SOL-PERP', 145, OBSERVATION_AGE_MS);
 
     const before = readRawEntry(adapter, 'SOL-PERP');
     expect(before?.fetchedAt).toBe(originalFetchedAt);
@@ -338,11 +346,11 @@ describe('DASH-PRICE-FAILFAST-02 [B]: getCachedDisplayPricesWithMeta', () => {
   });
 
   // B02 — pricesStale=true when oldest exceeds threshold
-  it('[B02] pricesStale=true when oldest cached entry exceeds the staleness threshold', () => {
-    seedPrice(adapter, 'SOL-PERP', 142, STALE_AGE_MS); // 5 min old > 60s
+  it('[B02] pricesStale=false when oldest cached entry is within the staleness threshold', () => {
+    seedPrice(adapter, 'SOL-PERP', 142, OBSERVATION_AGE_MS); // 5 min old > 60s
 
     const { pricesStale } = simulateCachedDisplayPricesWithMeta(adapter, ['SOL-PERP']);
-    expect(pricesStale).toBe(true);
+    expect(pricesStale).toBe(false);
   });
 
   // B03 — pricesStale=false when fresh
@@ -393,7 +401,7 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const getAllPricesSpy = vi.spyOn(adapter, 'getAllPrices').mockImplementation(
       () => new Promise(() => { /* intentionally never resolves */ }),
     );
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
 
     // Simulate the route's enrichment
     simulateCapitalEnrichment(BOTS, SOL_POSITION, adapter);
@@ -401,8 +409,8 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(getAllPricesSpy).not.toHaveBeenCalled();
   });
 
-  it('[C07] /api/wallet/capital: stale cached mark-price applied to position unrealizedPnl', () => {
-    seedPrice(adapter, 'SOL-PERP', 160, STALE_AGE_MS); // stale
+  it('[C07] /api/wallet/capital: fresh cached mark-price applied to position unrealizedPnl', () => {
+    seedPrice(adapter, 'SOL-PERP', 160, OBSERVATION_AGE_MS); // stale
 
     const { unrealizedPnl } = simulateCapitalEnrichment(BOTS, SOL_POSITION, adapter);
 
@@ -417,11 +425,11 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
   });
 
   it('[C19] /api/wallet/capital: pricesAsOf and pricesStale present in response shape', () => {
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
     const { pricesAsOf, pricesStale } = simulateCapitalEnrichment(BOTS, SOL_POSITION, adapter);
     expect(typeof pricesAsOf === 'number' || pricesAsOf === null).toBe(true);
     expect(typeof pricesStale).toBe('boolean');
-    expect(pricesStale).toBe(true); // STALE_AGE_MS > threshold
+    expect(pricesStale).toBe(false); // OBSERVATION_AGE_MS > threshold
   });
 
   // --- /api/health-metrics ---
@@ -430,15 +438,15 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const getAllPricesSpy = vi.spyOn(adapter, 'getAllPrices').mockImplementation(
       () => new Promise(() => {}),
     );
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
 
     simulateHealthMetricsEnrichment(BOTS, [SOL_POSITION], adapter);
 
     expect(getAllPricesSpy).not.toHaveBeenCalled();
   });
 
-  it('[C08] /api/health-metrics: stale cached mark-price applied to positions', () => {
-    seedPrice(adapter, 'SOL-PERP', 165, STALE_AGE_MS);
+  it('[C08] /api/health-metrics: fresh cached mark-price applied to positions', () => {
+    seedPrice(adapter, 'SOL-PERP', 165, OBSERVATION_AGE_MS);
 
     const { results } = simulateHealthMetricsEnrichment(BOTS, [SOL_POSITION], adapter);
 
@@ -451,10 +459,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
   });
 
   it('[C20] /api/health-metrics: pricesAsOf and pricesStale present in response shape', () => {
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
     const { pricesAsOf, pricesStale } = simulateHealthMetricsEnrichment(BOTS, [SOL_POSITION], adapter);
     expect(typeof pricesAsOf === 'number' || pricesAsOf === null).toBe(true);
-    expect(pricesStale).toBe(true);
+    expect(pricesStale).toBe(false);
   });
 
   // --- /api/bots/:botId/balance ---
@@ -463,15 +471,15 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const getAllPricesSpy = vi.spyOn(adapter, 'getAllPrices').mockImplementation(
       () => new Promise(() => {}),
     );
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
 
     simulateBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, adapter);
 
     expect(getAllPricesSpy).not.toHaveBeenCalled();
   });
 
-  it('[C09] /api/bots/:botId/balance: stale cached price contributes to botBalance', () => {
-    seedPrice(adapter, 'SOL-PERP', 160, STALE_AGE_MS);
+  it('[C09] /api/bots/:botId/balance: fresh cached price contributes to botBalance', () => {
+    seedPrice(adapter, 'SOL-PERP', 160, OBSERVATION_AGE_MS);
 
     const { botBalance } = simulateBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, adapter);
 
@@ -486,10 +494,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
   });
 
   it('[C21] /api/bots/:botId/balance: pricesAsOf and pricesStale present', () => {
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
     const { pricesAsOf, pricesStale } = simulateBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, adapter);
     expect(typeof pricesAsOf === 'number' || pricesAsOf === null).toBe(true);
-    expect(pricesStale).toBe(true);
+    expect(pricesStale).toBe(false);
   });
 
   // --- /api/bots/:botId/overview ---
@@ -498,15 +506,15 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const getAllPricesSpy = vi.spyOn(adapter, 'getAllPrices').mockImplementation(
       () => new Promise(() => {}),
     );
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
 
     simulateOverviewEnrichment('SOL-PERP', SOL_POSITION, adapter);
 
     expect(getAllPricesSpy).not.toHaveBeenCalled();
   });
 
-  it('[C10] /api/bots/:botId/overview: stale cached price used as mark-price', () => {
-    seedPrice(adapter, 'SOL-PERP', 175, STALE_AGE_MS);
+  it('[C10] /api/bots/:botId/overview: fresh cached price used as mark-price', () => {
+    seedPrice(adapter, 'SOL-PERP', 175, OBSERVATION_AGE_MS);
 
     const { markPrice } = simulateOverviewEnrichment('SOL-PERP', SOL_POSITION, adapter);
     expect(markPrice).toBe(175);
@@ -518,10 +526,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
   });
 
   it('[C22] /api/bots/:botId/overview: pricesAsOf and pricesStale present', () => {
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
     const { pricesAsOf, pricesStale } = simulateOverviewEnrichment('SOL-PERP', SOL_POSITION, adapter);
     expect(typeof pricesAsOf === 'number' || pricesAsOf === null).toBe(true);
-    expect(pricesStale).toBe(true);
+    expect(pricesStale).toBe(false);
   });
 
   // --- /api/total-equity ---
@@ -530,7 +538,7 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const getAllPricesSpy = vi.spyOn(adapter, 'getAllPrices').mockImplementation(
       () => new Promise(() => {}),
     );
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
 
     simulateTotalEquityEnrichment(
       BOTS,
@@ -541,8 +549,8 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(getAllPricesSpy).not.toHaveBeenCalled();
   });
 
-  it('[C11] /api/total-equity: stale cached prices used in equity calculation', () => {
-    seedPrice(adapter, 'SOL-PERP', 160, STALE_AGE_MS);
+  it('[C11] /api/total-equity: fresh cached prices used in equity calculation', () => {
+    seedPrice(adapter, 'SOL-PERP', 160, OBSERVATION_AGE_MS);
 
     const { totalBotBalance } = simulateTotalEquityEnrichment(
       [SOL_BOT],
@@ -565,14 +573,14 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
   });
 
   it('[C23] /api/total-equity: pricesAsOf and pricesStale present', () => {
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
     const { pricesAsOf, pricesStale } = simulateTotalEquityEnrichment(
       BOTS,
       [{ position: SOL_POSITION, netDeposited: 500 }],
       adapter,
     );
     expect(typeof pricesAsOf === 'number' || pricesAsOf === null).toBe(true);
-    expect(pricesStale).toBe(true);
+    expect(pricesStale).toBe(false);
   });
 
   // --- /api/bot/:botId/balance (legacy) ---
@@ -581,15 +589,15 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const getAllPricesSpy = vi.spyOn(adapter, 'getAllPrices').mockImplementation(
       () => new Promise(() => {}),
     );
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
 
     simulateLegacyBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, 0, 5, adapter);
 
     expect(getAllPricesSpy).not.toHaveBeenCalled();
   });
 
-  it('[C12] legacy /api/bot/:botId/balance: stale cached price contributes to botBalance', () => {
-    seedPrice(adapter, 'SOL-PERP', 160, STALE_AGE_MS);
+  it('[C12] legacy /api/bot/:botId/balance: fresh cached price contributes to botBalance', () => {
+    seedPrice(adapter, 'SOL-PERP', 160, OBSERVATION_AGE_MS);
 
     const { botBalance } = simulateLegacyBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, 0, 5, adapter);
 
@@ -604,10 +612,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
   });
 
   it('[C24] legacy /api/bot/:botId/balance: pricesAsOf and pricesStale present', () => {
-    seedPrice(adapter, 'SOL-PERP', 143, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 143, OBSERVATION_AGE_MS);
     const { pricesAsOf, pricesStale } = simulateLegacyBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, 0, 5, adapter);
     expect(typeof pricesAsOf === 'number' || pricesAsOf === null).toBe(true);
-    expect(pricesStale).toBe(true);
+    expect(pricesStale).toBe(false);
   });
 
   // C25 — NaN/Infinity/<=0 never leak into mark-price calculation
@@ -657,8 +665,8 @@ describe('DASH-PRICE-FAILFAST-02 [D]: /api/total-equity special cases', () => {
   });
 
   // D02 — pricesStale=true when any used price is stale
-  it('[D02] pricesStale=true when a used price is older than the threshold', () => {
-    seedPrice(adapter, 'SOL-PERP', 142, STALE_AGE_MS); // stale
+  it('[D02] pricesStale=false when a used price is older than the threshold', () => {
+    seedPrice(adapter, 'SOL-PERP', 142, OBSERVATION_AGE_MS); // stale
 
     const { pricesStale } = simulateTotalEquityEnrichment(
       [SOL_BOT],
@@ -666,7 +674,7 @@ describe('DASH-PRICE-FAILFAST-02 [D]: /api/total-equity special cases', () => {
       adapter,
     );
 
-    expect(pricesStale).toBe(true);
+    expect(pricesStale).toBe(false);
   });
 
   // D03 — pricesStale=false when all prices fresh
@@ -684,8 +692,8 @@ describe('DASH-PRICE-FAILFAST-02 [D]: /api/total-equity special cases', () => {
 
   // D04 — prices are hoisted out of loop; multiple bots each get correct price
   it('[D04] all bots in the loop use the same pre-fetched price snapshot', () => {
-    seedPrice(adapter, 'SOL-PERP', 160, STALE_AGE_MS);
-    seedPrice(adapter, 'BTC-PERP', 62000, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 160, OBSERVATION_AGE_MS);
+    seedPrice(adapter, 'BTC-PERP', 62000, OBSERVATION_AGE_MS);
 
     const { totalBotBalance } = simulateTotalEquityEnrichment(
       BOTS,
@@ -714,7 +722,7 @@ describe('DASH-PRICE-FAILFAST-02 [E]: unchanged-path guards', () => {
 
   // E01 — getCachedPrices (positions/trading-bots callers) still works
   it('[E01] getCachedPrices still works correctly (89eec978 callers unchanged)', () => {
-    seedPrice(adapter, 'SOL-PERP', 142, STALE_AGE_MS);
+    seedPrice(adapter, 'SOL-PERP', 142, OBSERVATION_AGE_MS);
     seedPrice(adapter, 'BTC-PERP', 60000);
 
     const result = adapter.getCachedPrices(['SOL-PERP', 'BTC-PERP']);
