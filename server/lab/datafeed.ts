@@ -2234,6 +2234,7 @@ async function fetchDirectPerpCandles(
   deadlineAt: number,
   callerClass: CandleReadCallerClass,
   signal?: AbortSignal,
+  onlyProvider?: DirectPerpProvider,
 ): Promise<DirectPerpFetchResult> {
   const instId = symbolToOkxInstId(symbol);
   const contract = symbolToGateFuturesContract(symbol);
@@ -2241,7 +2242,7 @@ async function fetchDirectPerpCandles(
   const interval = mapTimeframeToGate(timeframe);
   const timeframeMs = getTimeframeSeconds(timeframe) * 1000;
   const finalityCutoffMs = Math.min(endMs, Date.now());
-  const endpoints: readonly Readonly<{
+  const allEndpoints: readonly Readonly<{
     provider: DirectPerpProvider;
     id: DirectPerpEndpoint;
     origin: string;
@@ -2251,6 +2252,7 @@ async function fetchDirectPerpCandles(
     { provider: "okx", ...OKX_ENDPOINTS[1] },
     { provider: "gate", ...GATE_FUTURES_ENDPOINTS[1] },
   ];
+  const endpoints = allEndpoints.filter((endpoint) => !onlyProvider || endpoint.provider === onlyProvider);
   const providerReachable = new Set<DirectPerpProvider>();
   const providerTransportFailed = new Set<DirectPerpProvider>();
   const providerLastFailure = new Map<DirectPerpProvider, OkxRequestDiagnosticContext>();
@@ -2291,33 +2293,35 @@ async function fetchDirectPerpCandles(
   };
 
   try {
-  const hyperliquid = await tryHyperliquidCandles(
-    symbol,
-    timeframe,
-    startMs,
-    endMs,
-    deadlineAt,
-    callerClass,
-    signal,
-  );
-  trace.push(hyperliquid.trace);
-  sawMalformedProvenance ||= hyperliquid.sawMalformedProvenance;
-  if (hyperliquid.reachable) providerReachable.add("hyperliquid");
-  if (hyperliquid.transportFailed) providerTransportFailed.add("hyperliquid");
-  if (hyperliquid.otherwiseAdmissible) providerOtherwiseAdmissible.add("hyperliquid");
-  if (hyperliquid.circuitBlocked) providerCircuitBlocked.add("hyperliquid");
-  if (hyperliquid.candles.length > 0) lastPureProviderCandles = hyperliquid.candles;
-  const hyperliquidEligible = hyperliquid.candles.filter((candle) =>
-    candle.provenance.finality === "finalized" && candle.provenance.proxy === "direct",
-  );
-  if (hyperliquidEligible.length > 0) {
-    return {
-      candles: hyperliquidEligible,
-      sawMalformedProvenance,
-      unavailableReason: null,
-      trace,
-    };
-  }
+    if (!onlyProvider || onlyProvider === "hyperliquid") {
+      const hyperliquid = await tryHyperliquidCandles(
+        symbol,
+        timeframe,
+        startMs,
+        endMs,
+        deadlineAt,
+        callerClass,
+        signal,
+      );
+      trace.push(hyperliquid.trace);
+      sawMalformedProvenance ||= hyperliquid.sawMalformedProvenance;
+      if (hyperliquid.reachable) providerReachable.add("hyperliquid");
+      if (hyperliquid.transportFailed) providerTransportFailed.add("hyperliquid");
+      if (hyperliquid.otherwiseAdmissible) providerOtherwiseAdmissible.add("hyperliquid");
+      if (hyperliquid.circuitBlocked) providerCircuitBlocked.add("hyperliquid");
+      if (hyperliquid.candles.length > 0) lastPureProviderCandles = hyperliquid.candles;
+      const hyperliquidEligible = hyperliquid.candles.filter((candle) =>
+        candle.provenance.finality === "finalized" && candle.provenance.proxy === "direct",
+      );
+      if (hyperliquidEligible.length > 0) {
+        return {
+          candles: hyperliquidEligible,
+          sawMalformedProvenance,
+          unavailableReason: null,
+          trace,
+        };
+      }
+    }
   for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex++) {
     throwIfAborted(signal);
     const endpoint = endpoints[endpointIndex];
@@ -2536,6 +2540,18 @@ async function fetchDirectPerpCandles(
       );
     }
   }
+}
+
+/** Planner pool entry: existing direct-perpetual transport/breakers, without database caches or spot fallback. */
+export async function readPlannerPerpSource(provider: "okx" | "gate" | "hyperliquid", symbol: string,
+  timeframe: string, startMs: number, endMs: number, signal: AbortSignal): Promise<ProvenancedOHLCV[]> {
+  throwIfAborted(signal);
+  const result = await fetchDirectPerpCandles(symbol, timeframe, startMs, endMs,
+    Date.now() + 3_000, 'grid-bot', signal, provider);
+  throwIfAborted(signal);
+  return deduplicateCandles(result.candles.filter(c => c.provenance.source === provider
+    && c.provenance.venue === provider && c.provenance.basis === 'perp'
+    && c.provenance.proxy === 'direct' && c.provenance.finality === 'finalized'));
 }
 
 const TIMEFRAME_MS: Record<string, number> = {

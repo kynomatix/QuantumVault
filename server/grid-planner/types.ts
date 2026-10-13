@@ -24,7 +24,7 @@ export interface PlannerDeps {
   refreshReference?(market: string, symbol: string, signal: AbortSignal): Promise<void>;
   cachedReference(market: string): { price: number; observedAt: number | null } | null;
   candles(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<PlannerCandle[]>;
-  rangeCandles?(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<ProvenancedOHLCV[]>;
+  rangeCandles?(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<PlannerCandle[]>;
   btcWeeklyCandles?(signal: AbortSignal, start: number, end: number): Promise<BtcStoredWeek[]>;
   btcWeeklyStore?: BtcWeeklyStore;
   now(): number;

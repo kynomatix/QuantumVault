@@ -2,18 +2,20 @@ import Decimal from 'decimal.js';
 import {canonicalRequest,type DurableGridOperation} from './launch-storage';
 import {orderedGridFills,gridPnl,GridNumber,exactGridPosition,type GridEconomicFill} from './pnl';
 import type {GridVenueOrder} from './order-identity';
+import {GRID_HISTORY_PUBLICATION_LAG_MS} from './history-safety';
 const D=Decimal.clone({precision:200});
 export interface GridTrade {tradeId:string;orderId:string;clientOrderId:string|null;symbol:string;side:'open_long'|'open_short'|'close_long'|'close_short';time:number;size:string;price:string;fee:string}
-export interface GridHistoryWindow {from:number;through:number;inclusive:true;publicationLagMs:number;source:string}
+export interface GridHistoryWindow {from:number;through:number;inclusive:true;publicationLagMs:number;source:string;lastId?:string;lastIds?:{orders:string;positions:string}}
 export interface GridObservation {
   account:string;symbol:string;observedAt:number;orders:GridVenueOrder[];trades:GridTrade[];
   position:{direction:'long'|'short';size:string}|null;inventoryComplete:boolean;
   history:GridHistoryWindow|null;mark:{price:string;observedAt:number}|null;
+  qualification?:{observedAt:number;leverage:string;maxLeverage:string;feeRate:string;minOrderSize:string;lotSize:string;tickSize:string;recycler:boolean}|null;
 }
 export interface ReconciliationOperation extends DurableGridOperation {venue_order_id:string|null;level_id:string|null}
 export function validGridHistory(h:GridHistoryWindow|null,start:number,now:number):h is GridHistoryWindow{
   return !!h&&h.inclusive===true&&!!h.source&&[h.from,h.through,h.publicationLagMs].every(Number.isSafeInteger)
-    &&h.from>=0&&h.from<=start&&h.through>=start&&h.publicationLagMs>=0&&h.publicationLagMs<=5000
+    &&h.from>=0&&h.from<=start&&h.through>=start&&h.publicationLagMs>=0&&h.publicationLagMs<=GRID_HISTORY_PUBLICATION_LAG_MS
     &&h.through<=now-h.publicationLagMs&&now-h.through<=5000+h.publicationLagMs;
 }
 /** Opaque CLOIDs are owned only through retained operations, never through a prefix. */

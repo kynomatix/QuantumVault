@@ -84,7 +84,9 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     const controller = new AbortController(), onClose = () => controller.abort();
     const timer = setTimeout(onClose, 15_000); res.on('close', onClose);
     try {
-      const result = await ranges.read(row, String(timeframe) as '15m' | '1h' | '4h', Number(bars) as 100 | 200, deps, controller.signal);
+      charts ??= new PlannerCharts(deps);
+      const chart = await charts.read(market, String(timeframe), Number(bars), controller.signal);
+      const result = await ranges.read(row, String(timeframe) as '15m' | '1h' | '4h', Number(bars) as 100 | 200, deps, controller.signal, chart);
       if (!res.destroyed) res.json(result);
     } finally { clearTimeout(timer); res.off('close', onClose); }
   }));

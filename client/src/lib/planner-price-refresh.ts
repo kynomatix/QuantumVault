@@ -2,6 +2,7 @@ import { clientObservationDeadline, isPlannerMarket, plannerRangeAround, Planner
 
 export type PlannerMarketObservation = { markets: PlannerMarket[]; serverNow: number; startedAt: number };
 type Range = NonNullable<ReturnType<typeof plannerRangeAround>>;
+export const PRICE_BUSY_MESSAGE = 'Price busy, retrying';
 
 /** Owns both periodic reads and delayed shortcuts, so late responses cannot edit a newer form. */
 export class PlannerPriceRefresh {
@@ -11,16 +12,20 @@ export class PlannerPriceRefresh {
   private intent = 0;
   private disposed = false;
   private paused = false;
+  private busyFailures = 0;
+  private retryAt = 0;
   constructor(private market: string, private read: (signal: AbortSignal) => Promise<unknown>,
     private onObservation: (value: PlannerMarketObservation) => void,
     private onStatus: (loading: boolean, error: string) => void, private now = Date.now) {}
   cancelShortcut() { this.intent++; }
   pause() { this.paused = true; this.cancelShortcut(); this.generation.invalidate(); this.pending = null; this.onStatus(false, ''); }
   dispose() { this.disposed = true; this.cancelShortcut(); this.generation.invalidate(); this.pending = null; }
+  retryDelay() { return this.retryAt ? Math.max(1, this.retryAt - this.now()) : 20_000; }
   refresh(): Promise<PlannerMarketObservation | null> {
     if (this.disposed) return Promise.resolve(null);
     this.paused = false;
     if (this.pending) return this.pending;
+    if (this.now() < this.retryAt) { this.onStatus(false, PRICE_BUSY_MESSAGE); return Promise.resolve(null); }
     const request = this.generation.start(), startedAt = this.now();
     this.onStatus(true, '');
     const pending = Promise.resolve().then(() => this.read(AbortSignal.any([request.signal, AbortSignal.timeout(20_000)])))
@@ -33,12 +38,22 @@ export class PlannerPriceRefresh {
           || response.markets.some((m: PlannerMarket) => m.reference.state === 'available' && m.reference.value.observedAt > response.retrievedAt)) throw Error('Invalid market response');
         const observation = { markets: response.markets as PlannerMarket[], serverNow: response.retrievedAt, startedAt };
         this.observation = observation; this.onObservation(observation);
+        this.busyFailures = 0; this.retryAt = 0;
         const selected = observation.markets.find(m => m.market === this.market);
         const reason = !this.market ? '' : selected?.reference.state === 'unavailable' ? selected.reference.reason
           : this.range(observation, 1) ? '' : 'Fresh price unavailable: observation expired or market missing';
         this.onStatus(false, reason);
         return observation;
-      }).catch(error => { if (request.current()) this.onStatus(false, error instanceof Error ? error.message : 'Fresh price unavailable'); return null; })
+      }).catch(error => {
+        if (request.current()) {
+          const message = error instanceof Error ? error.message : 'Fresh price unavailable';
+          if (message === PRICE_BUSY_MESSAGE) {
+            this.retryAt = this.now() + Math.min(60_000, 5_000 * 2 ** Math.min(this.busyFailures++, 4));
+          } else { this.busyFailures = 0; this.retryAt = 0; }
+          this.onStatus(false, message);
+        }
+        return null;
+      })
       .finally(() => { if (this.pending === pending) this.pending = null; });
     this.pending = pending;
     return pending;
@@ -61,13 +76,18 @@ export class PlannerPriceRefresh {
 
 export function watchPlannerPrice(controller: PlannerPriceRefresh,
   visibility: Pick<Document, 'hidden' | 'addEventListener' | 'removeEventListener'> = document) {
-  let timer: ReturnType<typeof setInterval> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
+  const tick = async (current: number) => {
+    await controller.refresh();
+    if (current === generation && !visibility.hidden) timer = setTimeout(() => { void tick(current); }, controller.retryDelay());
+  };
   const wake = () => {
-    clearInterval(timer); timer = undefined;
+    generation++;
+    clearTimeout(timer); timer = undefined;
     if (visibility.hidden) { controller.pause(); return; }
-    void controller.refresh();
-    timer = setInterval(() => { void controller.refresh(); }, 20_000);
+    void tick(generation);
   };
   visibility.addEventListener('visibilitychange', wake); wake();
-  return () => { clearInterval(timer); visibility.removeEventListener('visibilitychange', wake); controller.dispose(); };
+  return () => { generation++; clearTimeout(timer); visibility.removeEventListener('visibilitychange', wake); controller.dispose(); };
 }

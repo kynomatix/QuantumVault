@@ -29,6 +29,15 @@ const assertReadOnly = () => {
 describe('Planner fresh Pacifica price observations', () => {
   const clock = 1_800_000_000_000;
   const bulk = (timestamp = clock, mid = '100') => ({ success: true, data: [{ symbol: 'BTC', timestamp, mid }] });
+  it.each(['http','validation'] as const)('logs %s failures distinctly and retains the last good observation clock', async reason => {
+    const refs = new PlannerReferences(() => clock), log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const transport = vi.fn(async () => json(bulk())); vi.stubGlobal('fetch', transport);
+    await refs.refresh('BTC-PERP','BTC',new AbortController().signal);
+    transport.mockImplementation(async () => reason === 'http' ? new Response('', {status:503}) : json({ success:true, data:[] }));
+    await expect(refs.refresh('BTC-PERP','BTC',new AbortController().signal)).rejects.toThrow();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(`reason=${reason}`));
+    expect(refs.cached('BTC-PERP')).toEqual({price:100,observedAt:clock}); assertReadOnly();
+  });
   it('reads the bulk midpoint with background quota and preserves venue age and transit time', async () => {
     let now = clock;
     const refs = new PlannerReferences(() => now), transport = vi.fn(async () => { now += 5_000; return json(bulk(clock - 10_000)); });
@@ -71,7 +80,9 @@ describe('Planner fresh Pacifica price observations', () => {
     const canceled = new AbortController(); canceled.abort();
     await expect(refs.refresh('BTC-PERP', 'BTC', canceled.signal)).rejects.toThrow();
     sentinels.quota.mockReturnValue(false);
-    await expect(refs.refresh('BTC-PERP', 'BTC', new AbortController().signal)).rejects.toThrow(/quota/);
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await expect(refs.refresh('BTC-PERP', 'BTC', new AbortController().signal)).rejects.toThrow('Price busy, retrying');
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('reason=quota'));
     expect(transport).not.toHaveBeenCalled();
     sentinels.quota.mockReturnValue(true);
     for (let i = 0; i < 30; i++) await refs.refresh('BTC-PERP', 'BTC', new AbortController().signal);
@@ -92,32 +103,58 @@ describe('Planner fresh Pacifica price observations', () => {
   });
 });
 describe('Planner real chart dependency path', () => {
-  it.each([['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000]] as const)('falls back to native Pacifica %s trade candles when OKX has no usable candles', async (timeframe, step) => {
+  it.each(['okx', 'gate', 'hyperliquid'] as const)('selects verified %s candles in pool order and stops before later entries', async venue => {
+    const step = 3_600_000, end = Math.floor(Date.now() / step) * step;
+    const candles = Array.from({ length: 100 }, (_, i) => ({ time: end - (100 - i) * step,
+      open: 100, high: 110, low: 90, close: 101, volume: 1,
+      provenance: { source: venue, venue, basis: 'perp' as const, proxy: 'direct' as const,
+        finality: 'finalized' as const, timeSemantic: 'open_time' as const } }));
+    const source = vi.spyOn(datafeed, 'readPlannerPerpSource').mockImplementation(async provider => provider === venue ? candles : []);
+    const transport = vi.fn(); vi.stubGlobal('fetch', transport);
+    expect(await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal)).toEqual(candles);
+    expect(source.mock.calls.map(call => call[0])).toEqual(['okx', 'gate', 'hyperliquid'].slice(0, ['okx', 'gate', 'hyperliquid'].indexOf(venue) + 1));
+    expect(transport).not.toHaveBeenCalled(); assertReadOnly();
+  });
+  it('uses the existing native Gate futures endpoint when OKX is unavailable', async () => {
+    const step = 3_600_000, end = Math.floor(Date.now() / step) * step;
+    const transport = vi.fn(async (url: string | URL | Request) => String(url).includes('/futures/usdt/candlesticks')
+      ? json(Array.from({ length: 100 }, (_, i) => ({ t: (end - (100 - i) * step) / 1000, o: '100', h: '110', l: '90', c: '101', v: '1' })))
+      : json({ code: '51001', data: [] }));
+    vi.stubGlobal('fetch', transport);
+    const candles = await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal);
+    expect(candles).toHaveLength(100);
+    expect(candles.every(c => c.provenance.source === 'gate' && c.provenance.basis === 'perp' && c.provenance.proxy === 'direct')).toBe(true);
+    expect(transport.mock.calls.map(call => String(call[0])).some(url => url.includes('contract=BTC_USDT'))).toBe(true);
+    expect(sentinels.quota).not.toHaveBeenCalled(); assertReadOnly();
+  });
+  it.each([['15m', 900_000], ['1h', 3_600_000], ['4h', 14_400_000]] as const)('falls back through the ordered perpetual pool to native Pacifica %s candles', async (timeframe, step) => {
     const now = Date.now(), opening = Math.floor(now / step) * step;
-    const primary = vi.spyOn(datafeed, 'fetchOHLCV').mockResolvedValue([]);
+    const primary = vi.spyOn(datafeed, 'readPlannerPerpSource').mockResolvedValue([]);
     const transport = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => json({ success: true,
-      data: [nativeRow(opening, timeframe, step), nativeRow(opening - step, timeframe, step)] }));
+      data: Array.from({ length: 100 }, (_, i) => nativeRow(opening - (100 - i) * step, timeframe, step)) }));
     vi.stubGlobal('fetch', transport);
     const bars = await defaultPlannerDeps.candles('BTC-PERP', timeframe, 100, new AbortController().signal);
-    expect(bars).toHaveLength(2);
-    expect(bars[0]).toMatchObject({ time: opening - step, provenance: { source: 'pacifica', venue: 'pacifica', basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'finalized' } });
-    expect(bars[1].provenance.finality).toBe('forming'); expect(transport).toHaveBeenCalledTimes(1);
+    expect(bars).toHaveLength(100);
+    expect(bars[0]).toMatchObject({ time: opening - 100 * step, provenance: { source: 'pacifica', venue: 'pacifica', basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'finalized' } });
+    expect(bars.every(c => c.provenance.finality === 'finalized')).toBe(true); expect(transport).toHaveBeenCalledTimes(1);
+    expect(primary.mock.calls.map(call => call[0])).toEqual(['okx', 'gate', 'hyperliquid']);
     expect(primary.mock.invocationCallOrder[0]).toBeLessThan(transport.mock.invocationCallOrder[0]);
     const url = new URL(String(transport.mock.calls[0][0]));
     expect(url.origin + url.pathname).toBe('https://api.pacifica.fi/api/v1/kline');
     expect(url.searchParams.get('symbol')).toBe('BTC'); expect(url.searchParams.get('interval')).toBe(timeframe);
-    expect(url.searchParams.get('limit')).toBe('100'); expect(Number(url.searchParams.get('start_time'))).toBe(opening - 99 * step);
+    expect(url.searchParams.get('limit')).toBe('100'); expect(Number(url.searchParams.get('start_time'))).toBe(opening - 100 * step);
+    expect(Number(url.searchParams.get('end_time'))).toBe(opening - 1);
     expect(sentinels.quota).toHaveBeenCalledWith('/kline', 'background'); assertReadOnly();
   });
   it.each(['failure', 'invalid geometry', 'spot provenance'])('uses verified Pacifica fallback after OKX %s', async failure => {
     const now = Date.now(), opening = Math.floor(now / 3_600_000) * 3_600_000;
-    const primary = vi.spyOn(datafeed, 'fetchOHLCV');
+    const primary = vi.spyOn(datafeed, 'readPlannerPerpSource');
     if (failure === 'failure') primary.mockRejectedValue(new Error('EXAMPLE provider unavailable'));
-    else primary.mockResolvedValue([{ time: opening, open: 100, high: failure === 'invalid geometry' ? 99 : 110, low: 90, close: 101, volume: 2,
-      provenance: { source: 'okx', venue: 'okx', basis: failure === 'spot provenance' ? 'spot' : 'perp', proxy: 'direct', finality: 'forming', timeSemantic: 'open_time' } }]);
-    const transport = vi.fn(async () => json({ success: true, data: [nativeRow(opening)] })); vi.stubGlobal('fetch', transport);
+    else primary.mockResolvedValue([{ time: opening - 3_600_000, open: 100, high: failure === 'invalid geometry' ? 99 : 110, low: 90, close: 101, volume: 2,
+      provenance: { source: 'okx', venue: 'okx', basis: failure === 'spot provenance' ? 'spot' : 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } }]);
+    const transport = vi.fn(async () => json({ success: true, data: Array.from({ length: 100 }, (_, i) => nativeRow(opening - (100 - i) * 3_600_000)) })); vi.stubGlobal('fetch', transport);
     const candles = await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal);
-    expect(candles).toHaveLength(1); expect(candles[0].provenance.source).toBe('pacifica');
+    expect(candles).toHaveLength(100); expect(candles[0].provenance.source).toBe('pacifica');
     expect(transport).toHaveBeenCalledTimes(1); assertReadOnly();
   });
   it('refuses corrupt Pacifica identity, timing, numbers, ordering duplicates and oversized responses', async () => {
@@ -134,28 +171,30 @@ describe('Planner real chart dependency path', () => {
     expect(defaultPlannerDeps.cachedReference('BTC-PERP')).toEqual({ price: 100, observedAt: 1_800_000_000_000 }); assertReadOnly();
   });
   it('fetches bounded direct OKX perp candles with no persistent cache access or save', async () => {
-    const now = Date.now(), step = 3_600_000;
+    const now = Math.floor(Date.now() / 3_600_000) * 3_600_000, step = 3_600_000;
     const transport = vi.fn(async (url: string | URL | Request, _options?: RequestInit) => String(url).includes('pacifica.fi') ? json({ success: false, data: [] }) : new Response(JSON.stringify({ code: '0', data: [
-      [String(now - step), '100', '110', '90', '101', '1', '1', '1', '0'],
-      [String(now - 101 * step), '100', '110', '90', '101', '1', '1', '1', '1'],
+      ...Array.from({ length: 100 }, (_, i) => [String(now - (i + 1) * step), '100', '110', '90', '101', '1', '1', '1', '1']),
     ] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
     vi.stubGlobal('fetch', transport);
     const bars = await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal);
-    expect(bars).toHaveLength(1); expect(bars[0]).toMatchObject({ open: 100, close: 101, provenance: { source: 'okx', basis: 'perp', proxy: 'direct', finality: 'forming' } });
+    expect(bars).toHaveLength(100); expect(bars[0]).toMatchObject({ open: 100, close: 101, provenance: { source: 'okx', basis: 'perp', proxy: 'direct', finality: 'finalized' } });
     expect(transport).toHaveBeenCalledTimes(1); expect(String(transport.mock.calls[0][0])).toContain('instId=BTC-USDT-SWAP');
     expect(sentinels.quota).not.toHaveBeenCalled(); assertReadOnly();
   });
   it('permanent missing instrument has no spot fallback and no persistence', async () => {
-    const transport = vi.fn(async () => new Response(JSON.stringify({ code: '51001', msg: "Instrument doesn't exist", data: [] }), { status: 200 }));
+    const transport = vi.fn(async (_url: string | URL | Request) => new Response(JSON.stringify({ code: '51001', msg: "Instrument doesn't exist", data: [] }), { status: 200 }));
     vi.stubGlobal('fetch', transport);
     const bars = await defaultPlannerDeps.candles('EXAMPLE-PERP', '1h', 100, new AbortController().signal).catch(() => []);
-    expect(bars).toEqual([]); expect(transport).toHaveBeenCalledTimes(2); assertReadOnly();
+    expect(bars).toEqual([]);
+    expect(transport.mock.calls.every(call => !String(call[0]).includes('/spot/'))).toBe(true); assertReadOnly();
   });
-  it('quota exhaustion skips Pacifica after the OKX primary fails', async () => {
+  it('quota exhaustion skips Pacifica and records the refusal after the earlier entries fail', async () => {
     sentinels.quota.mockReturnValue(false);
-    const transport = vi.fn(async (_url: string | URL | Request, _options?: RequestInit) => json({ code: '51001', data: [] })); vi.stubGlobal('fetch', transport);
+    vi.spyOn(datafeed, 'readPlannerPerpSource').mockResolvedValue([]);
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const transport = vi.fn(); vi.stubGlobal('fetch', transport);
     await defaultPlannerDeps.candles('BTC-PERP', '1h', 100, new AbortController().signal).catch(() => []);
-    expect(transport).toHaveBeenCalledTimes(1); expect(String(transport.mock.calls[0][0])).toContain('okx.com'); assertReadOnly();
+    expect(transport).not.toHaveBeenCalled(); expect(log).toHaveBeenCalledWith(expect.stringContaining('reason=quota')); assertReadOnly();
   });
   it('an in-flight caller abort stops OKX without starting Pacifica fallback', async () => {
     const transport = vi.fn((_url: string | URL | Request, options?: RequestInit) => new Promise<Response>((_resolve, reject) => {

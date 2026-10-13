@@ -10,11 +10,17 @@ import {parseGridVenueOrders,type GridVenueOrder} from '../../server/grid-bot/or
 import {gridWindow,type WindowLevel} from '../../server/grid-bot/window';
 import {executeGridWindow} from '../../server/grid-bot/placement';
 import {reconcileGridLaunch} from '../../server/grid-bot/launch-reconciliation';
+import {GridMarginDenied} from '../../server/grid-bot/margin';
 const request=():ExactGridRequest=>({kind:'limit',botId:randomUUID(),account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',path:'/orders/create',operationType:'create_order',timestamp:1000,expiryMs:5000,data:{symbol:'BTC',price:'90',amount:'1',side:'bid',reduce_only:false,tif:'ALO',client_order_id:randomUUID()},authority:{}});
 const claim:GridClaim={credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:1000,expiresAt:6000};
 function harness(){const r=request();let row:DurableGridOperation|null=null;
   const deps:GridExecutionDeps={storage:{read:vi.fn(async()=>row),prepare:vi.fn(async()=>row={id:randomUUID(),state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null}),submit:vi.fn(async()=>{row!.state='submitted';return true;}),settle:vi.fn(async(_op,outcome)=>{row!.state=outcome.state;row!.failure_classification=outcome.reason;})},preflight:vi.fn(async()=>true),send:vi.fn(async()=>({rateLimited:false})),reconcile:vi.fn(async()=>({state:'unknown' as const}))};return {r,deps,execution:new GridExecution(deps),get row(){return row;}};}
 describe('write ahead and exact identity execution',()=>{
+  it.each(['before_post','venue_rejection'])('settles margin denial once and never retries %s',async source=>{
+    const h=harness();vi.mocked(h.deps.send).mockImplementation(async()=>{if(source==='before_post')throw new GridMarginDenied('EXAMPLE');return {rateLimited:false,marginRejectedDigest:requestDigest(h.r)};});
+    expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');expect(h.row?.failure_classification).toBe('margin');
+    expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');expect(h.deps.send).toHaveBeenCalledOnce();expect(h.deps.reconcile).not.toHaveBeenCalled();
+  });
   it.each(['Grid fixed quota share exhausted','Durable Grid rate-limit backoff'])('returns pending without submitting or sending for %s',async reason=>{
     const h=harness();vi.mocked(h.deps.storage.prepare).mockRejectedValue(new GridLaunchTransientError(reason));
     expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');
@@ -62,7 +68,7 @@ describe('write ahead and exact identity execution',()=>{
     const r={...request(),account:bs58.encode(sub.publicKey),masterAccount:bs58.encode(master.publicKey)};
     const fetcher=vi.fn(async()=>new Response(null,{status:429})),key='EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9));
     // This test exercises signing/transport only; concrete book authority has its own boundary tests.
-    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{}});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true});
     const [url,init]=fetcher.mock.calls[0] as unknown as [string,RequestInit];expect(url).toBe('https://api.pacifica.fi/api/v1/orders/create');expect(init.redirect).toBe('error');expect(new Headers(init.headers).get('PF-API-KEY')).toBe(key);
     expect(JSON.parse(String(init.body))).toMatchObject({account:r.account,timestamp:1000,expiry_window:5000,tif:'ALO'});
     await expect(sender.send({...r,path:'/EXAMPLE'},Buffer.from(sub.secretKey))).rejects.toThrow();expect(fetcher).toHaveBeenCalledOnce();
@@ -79,6 +85,18 @@ describe('bounded rolling placement',()=>{
 });
 
 describe('Grid terminal sweep sender',()=>{
+  it.each([5,6])('recognizes only the documented venue margin error at the final sender boundary: %s',async code=>{
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),account:bs58.encode(sub.publicKey)};
+    const fetcher=vi.fn(async()=>new Response(JSON.stringify({success:false,code,error:'EXAMPLE_DENIAL'}),{status:422}));
+    const finalMargin=vi.fn(async(_r:ExactGridRequest,lease:string)=>{expect(lease).toBe('EXAMPLE_LEASE');expect(fetcher).not.toHaveBeenCalled();});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin});
+    expect(await sender.send(r,Buffer.from(sub.secretKey),undefined,'EXAMPLE_LEASE')).toEqual(code===5?{rateLimited:false,marginRejectedDigest:requestDigest(r)}:{rateLimited:false});expect(finalMargin).toHaveBeenCalledOnce();expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it('unknown final margin sends no POST after obtaining book authority',async()=>{
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),account:bs58.encode(sub.publicKey)},post=vi.fn();
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{throw new GridMarginDenied('EXAMPLE_UNKNOWN');}});
+    await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow(GridMarginDenied);expect(post).not.toHaveBeenCalled();
+  });
   it.each([true,false])('requires the full nested terminal envelope: %s',async terminal=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));const r:ExactGridRequest={...request(),kind:'sweep',account:bs58.encode(sub.publicKey),path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:'EXAMPLE_MASTER',amount:'1'},authority:{settlementComplete:true}};
     const body=terminal?{success:true,error:null,data:{success:true,error:null}}:{success:true};const fetcher=vi.fn(async()=>new Response(JSON.stringify(body),{status:200}));

@@ -13,6 +13,7 @@ import {GridCustody} from '../../server/grid-bot/custody';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 import {gridDraftRevision} from '../../client/src/lib/grid-draft-view';
 import {policy,umk,intent} from './draft-fixtures';
+import {marginTestReading} from './margin-fixture';
 import type {GridObservation} from '../../server/grid-bot/reconciliation';
 import {GRID_START_ROUTE_ENABLED,GRID_WORKER_ENABLED} from '../../server/grid-bot/service';
 const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql'].map(p=>readFileSync(new URL('../../migrations/'+p,import.meta.url),'utf8'));
@@ -22,7 +23,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   beforeAll(async()=>{const url=process.env.DATABASE_URL;if(!url||new URL(url).pathname!=='/qvtest')throw Error('FRACTAL isolated qvtest schema required');
     admin=new Pool({connectionString:url,max:1});await admin.query('CREATE SCHEMA '+schema);pool=new Pool({connectionString:url,max:5,options:'-c search_path='+schema});
     await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
-    for(const sql of migrations)await pool.query(sql);launch=new GridLaunchStorage(pool,async()=>{});storage=new GridMonitorStorage(launch);
+    for(const sql of migrations)await pool.query(sql);launch=new GridLaunchStorage(pool,async()=>{},async r=>marginTestReading(r));storage=new GridMonitorStorage(launch);
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_wallet_safety,grid_monitor_orders,grid_monitor_state,grid_profit_allocations,grid_exact_fills,grid_read_claims,grid_execution_claims,grid_launch_accounts,grid_master_quota,grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query('INSERT INTO wallets VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
@@ -42,6 +43,60 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     return {bot,claim,level,op,request,observe};
   }
   async function landed(){const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false,orderId:'10'});return f;}
+  it('commits a typed margin pause and one outbox incident across denial and restart',async()=>{
+    const f=await fixture(),denied=new GridLaunchStorage(pool,async()=>{},async()=>null);
+    expect(await denied.submit(f.op,f.claim.leaseToken)).toBe(false);expect(await new GridLaunchStorage(pool,async()=>{},async()=>null).submit(f.op,f.claim.leaseToken)).toBe(false);
+    const b=(await pool.query('SELECT status,pause_reason FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0];expect(b).toEqual({status:'pausing',pause_reason:'margin'});
+    expect((await pool.query("SELECT * FROM grid_risk_events WHERE bot_id=$1 AND kind='margin_pause'",[f.bot.id])).rowCount).toBe(1);
+    expect((await pool.query("SELECT * FROM grid_control_requests WHERE bot_id=$1 AND action='pause' AND state='pending'",[f.bot.id])).rowCount).toBe(1);
+    expect((await pool.query('SELECT state FROM grid_operations WHERE id=$1',[f.op.id])).rows[0].state).toBe('prepared');
+  });
+  it('refuses new prepare exposure without rolling back its durable pause',async()=>{
+    const f=await fixture(),now=Date.now(),denied=new GridLaunchStorage(pool,async()=>{},async()=>null);
+    await expect(denied.prepare('EXAMPLE_MARGIN_DENIED',{...f.request,timestamp:now},{credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},f.claim.leaseToken)).rejects.toThrow('margin pause');
+    expect((await pool.query('SELECT pause_reason FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0].pause_reason).toBe('margin');expect((await pool.query('SELECT * FROM grid_operations WHERE bot_id=$1',[f.bot.id])).rowCount).toBe(1);
+  });
+  it('serializes competing attempts against outstanding committed margin and notifies once',async()=>{
+    const f=await fixture(),now=Date.now(),limited=new GridLaunchStorage(pool,async()=>{},async r=>({...marginTestReading(r),available:'100'}));
+    const admission={credits:'10',slots:1 as const,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000};
+    const results=await Promise.allSettled(['EXAMPLE_MARGIN_A','EXAMPLE_MARGIN_B'].map(key=>limited.prepare(key,{...f.request,timestamp:now,data:{...f.request.data,client_order_id:randomUUID()}},admission,f.claim.leaseToken)));
+    expect(results.every(x=>x.status==='rejected')).toBe(true);expect((await pool.query('SELECT count(*) AS n FROM grid_operations WHERE bot_id=$1',[f.bot.id])).rows[0].n).toBe('1');
+    expect((await pool.query("SELECT count(*) AS n FROM grid_risk_events WHERE bot_id=$1 AND kind='margin_pause'",[f.bot.id])).rows[0].n).toBe('1');
+    let calls=0;const notify=new GridNotifications(pool,async()=>{calls++;return 'sent';});expect(await notify.deliverNext()).toBe(true);expect(await new GridNotifications(pool,async()=>{calls++;return 'sent';}).deliverNext()).toBe(false);expect(calls).toBe(1);
+  });
+  it('re-reads final margin after submit and fences a replacement lease',async()=>{
+    const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);
+    await launch.finalMargin(f.request,f.claim.leaseToken);
+    await expect(launch.finalMargin(f.request,randomUUID())).rejects.toThrow('ownership');expect((await pool.query('SELECT status FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0].status).toBe('provisioning');
+    await expect(new GridLaunchStorage(pool,async()=>{},async()=>null).finalMargin(f.request,f.claim.leaseToken)).rejects.toThrow('margin authority');
+    expect((await pool.query('SELECT pause_reason FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0].pause_reason).toBe('margin');
+  });
+  it('does not certify a durable per-stream LastID regression masked by a higher order ID',async()=>{
+    const f=await landed(),boot=randomUUID(),o=f.observe();o.history={...o.history!,lastId:'100',lastIds:{orders:'100',positions:'90'}};
+    expect((await storage.reconcile(f.claim,boot,o)).entriesAllowed).toBe(true);
+    o.history.lastIds!.positions='89';o.observedAt=Date.now();expect((await storage.reconcile(f.claim,boot,o)).entriesAllowed).toBe(false);
+  });
+  it('persists full generation and requires two subsequent lease ticks after certification',async()=>{
+    const f=await landed(),first=Date.now()-33*60000;
+    await pool.query("UPDATE grid_bots SET status='canary',created_at=$2,canary_started_at=$2,consecutive_failures=0 WHERE id=$1",[f.bot.id,new Date(first)]);
+    const boot=randomUUID(),clock={bootId:boot,firstConfirmedAt:first,cleanSince:first,lastTickId:'EXAMPLE_PRIOR',lastObservedAt:Date.now()-15000,certifiedGeneration:null,certifiedSafeThrough:null,certifiedTickId:null,cleanTicks:0,promoted:false};
+    await pool.query("INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at) VALUES($1,'canary-clock','internal_canary_clock',$2,clock_timestamp())",[f.bot.id,{clock,full:null}]);
+    const observe=()=>({...f.observe(),history:{from:0,through:Date.now()-120000,inclusive:true as const,publicationLagMs:120000,source:'EXAMPLE_FULL_REPLAY',lastId:'100'},qualification:{observedAt:Date.now(),leverage:String(policy().leverage),maxLeverage:'10',feeRate:'0.001',minOrderSize:'0.00000001',lotSize:'0.00000001',tickSize:'0.00000001',recycler:true}});
+    await storage.reconcile(f.claim,boot,observe());
+    const read=async()=>(await pool.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='canary-clock'",[f.bot.id])).rows[0].evidence;
+    expect((await read()).clock.cleanTicks).toBe(0);expect((await read()).full.generation).toBeTruthy();expect((await read()).full.safeThrough).toBeGreaterThanOrEqual(first+30*60000);
+    await new GridMonitorStorage(launch).reconcile(f.claim,boot,observe());expect((await read()).clock.cleanTicks).toBe(0);
+    for(let i=1;i<=2;i++){
+      f.claim.leaseToken=randomUUID();await pool.query('UPDATE grid_bots SET lease_token=$2 WHERE id=$1',[f.bot.id,f.claim.leaseToken]);
+      // Distinct observations are strictly increasing even on fast desktop runs.
+      await pool.query("UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{clock,lastObservedAt}',to_jsonb(($2::bigint))) WHERE bot_id=$1 AND event_key='canary-clock'",[f.bot.id,Date.now()-1]);
+      await storage.reconcile(f.claim,boot,observe());expect((await read()).clock.cleanTicks).toBe(i);
+    }
+    expect((await pool.query('SELECT status FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0].status).toBe('active');
+    await pool.query("UPDATE grid_bots SET status='canary' WHERE id=$1",[f.bot.id]);
+    await storage.reconcile(f.claim,randomUUID(),observe());expect((await read()).clock.cleanTicks).toBe(0);expect((await read()).clock.cleanSince).toBeGreaterThan(first);expect((await read()).clock.certifiedGeneration).toBeNull();
+    await storage.block(f.claim,'quota_unavailable');expect((await read()).clock).toBeNull();
+  });
   it('keeps production start and worker gates disabled',()=>{expect(GRID_START_ROUTE_ENABLED).toBe(false);expect(GRID_WORKER_ENABLED).toBe(false);});
   it('admits only an authoritative stop close past an uncertain owned entry cancel',async()=>{
     const f=await landed(),control=new GridLifecycleStorage(storage),stop=await control.request(wallet,f.bot.id,randomUUID(),'stop');
@@ -99,7 +154,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   });
   it('opaque orphan orders keep startup blocked and cannot create operations',async()=>{const f=await landed(),o=f.observe();o.orders.push({...o.orders[0],orderId:'99',clientOrderId:randomUUID()});const service=new GridMonitorService({storage,observe:async()=>o});expect((await service.tick(f.claim,new AbortController().signal)).entriesAllowed).toBe(false);expect((await pool.query('SELECT count(*) AS n FROM grid_operations')).rows[0].n).toBe('1');});
   it('recovers an attributable seed after send without replaying it or inventing a level',async()=>{
-    const f=await fixture();f.op.exact_request={...f.op.exact_request,kind:'seed',path:'/orders/create_market',operationType:'create_market_order',data:{...f.op.exact_request.data,slippage_percent:'0.5'}};f.op.exact_request_digest=requestDigest(f.op.exact_request);
+    const f=await fixture();f.op.exact_request={...f.op.exact_request,kind:'seed',path:'/orders/create_market',operationType:'create_market_order',data:{...f.op.exact_request.data,slippage_percent:'0.5'},authority:{...f.op.exact_request.authority,seedWorstPrice:'100'}};f.op.exact_request_digest=requestDigest(f.op.exact_request);
     await pool.query("UPDATE grid_operations SET exact_request=$2,exact_request_digest=$3,level_id=NULL,type='seed_position' WHERE id=$1",[f.op.id,f.op.exact_request,f.op.exact_request_digest]);
     expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);const o=f.observe();o.orders[0].orderType='market';o.orders[0].status='filled';o.orders[0].filledAmount='1';o.trades[0].size='1';o.position!.size='1';
     const service=new GridMonitorService({storage,observe:async()=>o});expect((await service.tick(f.claim,new AbortController().signal)).entriesAllowed).toBe(true);expect((await pool.query('SELECT level_id FROM grid_exact_fills')).rows[0].level_id).toBeNull();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(false);

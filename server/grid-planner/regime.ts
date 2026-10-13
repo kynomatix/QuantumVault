@@ -1,16 +1,16 @@
 import { adx } from '../lab/indicators';
 import { gridAdxLabel } from '../grid-bot/runtime-policy';
 import { gridTimeframeMs } from '../grid-bot/range';
-import type { ProvenancedOHLCV } from '../lab/datafeed';
+import type { PlannerCandle } from './types';
 import type { GridRegime } from '../../shared/grid-regime';
 
 /** Advisory only: finalized direct perpetual observations, independent of range detection. */
-export function plannerRegime(market: string, timeframe: string, candles: ProvenancedOHLCV[], now: number): GridRegime {
+export function plannerRegime(market: string, timeframe: string, candles: PlannerCandle[], now: number): GridRegime {
   const unknown = (reason: string): GridRegime => ({ state: 'unavailable', reason });
   const duration = gridTimeframeMs(timeframe), first = candles[0]?.provenance;
   if (!duration || !Number.isSafeInteger(now) || candles.length < 28 || candles.length > 200)
     return unknown('At least 28 finalized candles are needed');
-  if (!first || !['okx', 'gate', 'hyperliquid'].includes(first.source) || first.source !== first.venue)
+  if (!first || !['okx', 'gate', 'hyperliquid', 'pacifica'].includes(first.source) || first.source !== first.venue)
     return unknown('Direct perpetual provenance unavailable');
   if (!candles.every((c, i) => Number.isSafeInteger(c.time) && c.time > 0 && c.time % duration === 0 && c.time + duration <= now
     && (i === 0 || c.time === candles[i - 1].time + duration)
@@ -25,5 +25,5 @@ export function plannerRegime(market: string, timeframe: string, candles: Proven
   const label = gridAdxLabel(value);
   if (value === null || label === 'UNKNOWN') return unknown('ADX unavailable');
   return { state: 'available', market, timeframe, adx: value, label,
-    venue: first.venue as 'okx' | 'gate' | 'hyperliquid', bars: candles.length, latestFinalizedTime: latest.time };
+    venue: first.venue as 'okx' | 'gate' | 'hyperliquid' | 'pacifica', bars: candles.length, latestFinalizedTime: latest.time };
 }

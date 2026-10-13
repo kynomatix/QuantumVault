@@ -6,7 +6,7 @@ export function validateCandles(candles: Awaited<ReturnType<PlannerDeps['candles
     && (i === 0 || c.time > candles[i - 1].time)
     && [c.open, c.high, c.low, c.close].every(n => Number.isFinite(n) && n > 0)
     && c.low <= Math.min(c.open, c.close) && c.high >= Math.max(c.open, c.close) && c.high >= c.low
-    && ['okx', 'pacifica'].includes(c.provenance?.source) && c.provenance.venue === c.provenance.source
+    && ['okx', 'gate', 'hyperliquid', 'pacifica'].includes(c.provenance?.source) && c.provenance.venue === c.provenance.source
     && c.provenance.source === candles[0].provenance.source && c.provenance.basis === 'perp'
     && c.provenance.proxy === 'direct' && c.provenance.timeSemantic === 'open_time'
     && ['finalized', 'forming'].includes(c.provenance.finality));

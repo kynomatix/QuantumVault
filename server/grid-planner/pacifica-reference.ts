@@ -20,11 +20,15 @@ export class PlannerReferences {
     if (!job) {
       const startedAt = this.now();
       this.starts = this.starts.filter(t => startedAt - t < 60_000);
-      if (this.jobs.size >= 10 || this.starts.length >= 30) throw Error('Planner price refresh is busy; try again shortly');
-      if (!/^[A-Z0-9]+$/.test(symbol)) throw Error('Invalid Pacifica price symbol');
+      if (this.jobs.size >= 10 || this.starts.length >= 30) {
+        console.info(`[GridPlannerPrice] market=${market} reason=capacity`);
+        throw Error('Price busy, retrying');
+      }
+      if (!/^[A-Za-z0-9-]+$/.test(symbol)) throw Error('Invalid Pacifica price symbol');
       if (!this.bulkJob) {
         if (!pacificaQuota.tryClaimImmediate('/info/prices', 'background', 'grid-planner.reference')) {
-          throw Error('Pacifica price quota is unavailable; try again shortly');
+          console.info(`[GridPlannerPrice] market=${market} reason=quota`);
+          throw Error('Price busy, retrying');
         }
         this.bulkJob = this.readBulk().finally(() => { this.bulkJob = null; });
       }
@@ -37,9 +41,18 @@ export class PlannerReferences {
     signal.throwIfAborted();
   }
   private async read(market: string, symbol: string, startedAt: number) {
+    let observation: Observation | undefined;
+    try { observation = (await this.bulkJob!).get(symbol); }
+    catch (error) {
+      const reason = error instanceof Error && error.message.startsWith('Pacifica midpoint unavailable (') ? 'http' : 'transport';
+      console.info(`[GridPlannerPrice] market=${market} reason=${reason}`);
+      throw error;
+    }
     // Different markets share one physical read without renewing any row.
-    const observation = (await this.bulkJob!).get(symbol);
-    if (!observation) throw Error('Fresh Pacifica midpoint unavailable: invalid, missing or expired observation');
+    if (!observation) {
+      console.info(`[GridPlannerPrice] market=${market} reason=validation`);
+      throw Error('Fresh Pacifica midpoint unavailable: invalid, missing or expired observation');
+    }
     // Retain the Planner's conservative transit-time limit as well as venue age.
     const { price } = observation, observedAt = Math.min(startedAt, observation.observedAt);
     if (!freshPacificaPrice({ price, observedAt }, this.now(), 60_000)) throw Error('Fresh Pacifica midpoint expired');

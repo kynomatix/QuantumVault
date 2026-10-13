@@ -17,10 +17,10 @@ import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGene
 import { GridPlannerChart } from './GridPlannerChart';
 import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
 import { GridDirectionBadge } from './GridDirectionBadge';
-import { PlannerPriceRefresh, watchPlannerPrice } from '@/lib/planner-price-refresh';
+import { PlannerPriceRefresh, watchPlannerPrice, PRICE_BUSY_MESSAGE } from '@/lib/planner-price-refresh';
 
 import { GRID_SETUP_INITIAL as INITIAL, gridSetupForm, gridSetupIntent, isGridRegime } from '@/lib/grid-setup-view';
-import { gridWidth, type GridDraftPreview } from '@/lib/grid-draft-view';
+import { gridDraftRevision, gridWidth, type GridDraftPreview } from '@/lib/grid-draft-view';
 import { GridDraftActions } from '../grid-bot/GridDraftActions';
 import { GridRegimeHint } from './GridRegimeHint';
 import type { GridIntent } from '../../../../shared/grid-draft';
@@ -36,6 +36,16 @@ async function readPlanner(path: string, signal: AbortSignal, plannerEnabled = t
   const value = await res.json();
   if (!res.ok) throw new Error(typeof value?.reason === 'string' ? value.reason : `Planner request failed (${res.status})`);
   return value;
+}
+
+function PriceAge({ observedAt, clock }: { observedAt: number; clock: { serverNow: number; startedAt: number } }) {
+  const [clientNow, setClientNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setClientNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.floor((clock.serverNow + Math.max(0, clientNow - clock.startedAt) - observedAt) / 1000));
+  return <>Pacifica book · {seconds}s ago</>;
 }
 
 export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled = true, createEnabled = false,
@@ -65,6 +75,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const referenceExpiry = selected?.reference.state === 'available' ? clientObservationDeadline(selected.reference.value.expiresAt, marketClock.serverNow, marketClock.startedAt) : 0;
   const constraintExpiry = selected?.constraints.state === 'available' ? clientObservationDeadline(selected.constraints.value.expiresAt, marketClock.serverNow, marketClock.startedAt) : 0;
   const reference = selected?.reference.state === 'available' && now < referenceExpiry ? selected.reference.value : null;
+  const lastPrice = selected?.reference.state === 'available' ? selected.reference.value : null;
+  const hasEnteredRange = !!gridWidth(form.lower, form.upper, String(width));
   // Editable input proposal only; server checks still decide whether the tick/stop is valid.
   const suggestedStop = selected?.constraints.state === 'available'
     ? proposedPlannerStop(form.lower, form.upper, form.side, selected.constraints.value.tick) : null;
@@ -76,6 +88,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     setAutoApplying(false);
     priceRefresh.current?.cancelShortcut();
     invalidate();
+    if (key === 'market') setRangeSource('manual');
     if (['lower', 'upper', 'stop'].includes(key)) {
       setRangeSource('manual'); manual.current = { lower: form.lower, upper: form.upper, stop: form.stop, [key]: value } as typeof manual.current;
     }
@@ -198,7 +211,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     const r = rangeFacts.range;
     if (rangeSource === 'manual') manual.current = { lower: form.lower, upper: form.upper, stop: form.stop };
     priceRefresh.current?.cancelShortcut(); invalidate(); setRangeShortcut(null); setRangeSource('auto');
-    setForm(previous => ({ ...previous, lower: r.lowerPrice, upper: r.upperPrice, stop: form.side === 'long' ? r.longStop : r.shortStop }));
+    setForm(previous => ({ ...previous, lower: r.lowerPrice, upper: r.upperPrice, stop: previous.side === 'long' ? r.longStop : r.shortStop }));
   };
   const restoreManual = () => {
     if (draftBusy) return;
@@ -219,9 +232,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     });
   };
   const shortcutReason = plannerShortcutReason(form.market, !!reference, marketError, marketLoading);
-  const lines = useMemo(() => plannerEnabled ? plannerOverlays(preview, previewExpiry, now)
-    : draftPreview?.state === 'ready' && now < draftPreview.expiresAt ? draftPreview.plan?.lines ?? [] : [], [plannerEnabled, preview, previewExpiry, now, draftPreview]);
   const draftIntent = useMemo(() => gridSetupIntent(form, effectiveStop, rangeSource), [form, effectiveStop, rangeSource]);
+  const lines = useMemo(() => createEnabled
+    ? draftPreview?.state === 'ready' && now < draftPreview.expiresAt && draftPreview.draftRevision === gridDraftRevision(draftIntent)
+      ? draftPreview.plan?.lines ?? [] : []
+    : plannerEnabled ? plannerOverlays(preview, previewExpiry, now) : [], [createEnabled, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
   const regime = rangeFacts && now < rangeExpiry ? rangeFacts.regime : { state: 'unavailable' as const,
     reason: rangeError || (rangeBusy ? 'Loading finalized candles' : !form.market ? 'Choose a market' : 'Observation expired or unavailable; refresh observations') };
   const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
@@ -266,12 +281,14 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
               </SelectItem>)}</SelectContent>
             </Select>
             {marketLoading && <p role="status" className="text-xs text-muted-foreground">Refreshing market observations…</p>}
-            {marketError && <p role="alert" className="text-sm text-destructive">{marketError}</p>}
+            {marketError && <p role={marketError === PRICE_BUSY_MESSAGE ? 'status' : 'alert'}
+              className={marketError === PRICE_BUSY_MESSAGE ? 'text-xs text-muted-foreground' : 'text-sm text-destructive'}>{marketError}</p>}
           </div>
           <div className="space-y-1 sm:text-right sm:max-w-[50%]">
-            <p className="text-xs text-muted-foreground">Price now</p>
-            <p className="font-semibold text-xl tabular-nums">{reference ? readableDecimal(reference.price) : 'Unavailable'}</p>
-            <p className="text-xs text-muted-foreground">{reference ? 'Cached Pacifica book reference'
+            <p className="text-xs text-muted-foreground">{reference ? 'Price now' : lastPrice ? 'Last observed price' : 'Price'}</p>
+            <p className="font-semibold text-xl tabular-nums">{lastPrice ? readableDecimal(lastPrice.price) : 'Unavailable'}</p>
+            <p className="text-xs text-muted-foreground">{lastPrice ? <PriceAge observedAt={lastPrice.observedAt} clock={marketClock} />
+              : marketError === PRICE_BUSY_MESSAGE ? 'Waiting for a fresh observation.'
               : selected ? `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`
               : marketLoading ? 'Refreshing price…' : form.market ? 'Market observation unavailable' : 'Choose a market to see its observed price.'}</p>
             <Button type="button" size="sm" variant="outline" disabled={marketLoading} onClick={refreshObservations}>
@@ -293,13 +310,16 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             </div>
           </div>
           <GridRegimeHint timeframe={form.timeframe} regime={regime} />
+          {rangeFacts?.range.state === 'available' && now < rangeExpiry && regime.state === 'unavailable' &&
+            <p className="text-xs text-muted-foreground">Auto range uses {rangeFacts.range.includedBars} finalized bars.</p>}
           <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} hasMarket={!!form.market}
-            levelMessage={plannerEnabled ? plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error) : 'Draft levels require a fresh validated draft preview.'}
+            levelMessage={createEnabled ? lines.length ? 'Authoritative draft preview levels used when saving.' : 'Authoritative draft levels require a fresh validated draft preview.'
+              : `Hypothetical planner preview. ${plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}`}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" disabled={!form.market || rangeBusy} onClick={autoRange}>Suggest auto-range</Button>
-            <Button type="button" variant="ghost" disabled={rangeSource !== 'auto'} onClick={restoreManual}>Use manual range</Button>
-            <span className="text-xs text-muted-foreground self-center">{rangeSource === 'auto' ? 'Auto-range with structural stop' : 'Manual range'}</span>
+            {rangeSource === 'auto' && <Button type="button" variant="ghost" onClick={restoreManual}>Restore entered range</Button>}
+            <span className="text-xs text-muted-foreground self-center">{rangeSource === 'auto' ? 'Auto' : 'Manual'}</span>
           </div>
           {rangeError && <p role="status" className="text-xs text-muted-foreground">{rangeError}</p>}
           <div className="grid grid-cols-3 gap-2" aria-label="Range presets">
@@ -311,15 +331,14 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{numberField('lower', 'Lower price')}{numberField('upper', 'Upper price')}</div>
           <div className="rounded-lg border border-border/60 px-3 py-3 space-y-3">
-            <div className="flex items-center justify-between gap-2"><Label htmlFor="grid-width">Range width around price now</Label>
-              <span className="text-xs text-muted-foreground">{rangeShortcut === null ? 'Manual range' : `±${width}%`}</span></div>
-            <Slider id="grid-width" aria-label="Range half-width percent" min={1} max={40} step={1} value={[width]}
-              disabled={!!shortcutReason} aria-describedby="grid-shortcut-hint" onValueChange={([value]) => preset(value)} />
-            <p id="grid-shortcut-hint" className="text-xs text-muted-foreground">{shortcutReason || (marketLoading && !reference ? 'Fetching a fresh price before applying your range…' : 'Use a shortcut or enter both prices yourself. An expired price is refreshed before applying a shortcut.')}</p>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="grid-midpoint-width">Resize around your entered range midpoint</Label>
-            <Slider id="grid-midpoint-width" min={1} max={40} step={0.5} value={[width]} disabled={!gridWidth(form.lower, form.upper, String(width))} onValueChange={([value]) => resizeManual(value)} />
+            <div className="flex items-center justify-between gap-2"><Label htmlFor="grid-width">Range width</Label>
+              <span className="text-xs text-muted-foreground">±{width}%</span></div>
+            <Slider id="grid-width" aria-label="Range half-width percent" min={1} max={40} step={0.5} value={[width]}
+              disabled={!hasEnteredRange && !!shortcutReason} aria-describedby="grid-shortcut-hint"
+              onValueChange={([value]) => hasEnteredRange ? resizeManual(value) : preset(value)} />
+            <p id="grid-shortcut-hint" className="text-xs text-muted-foreground">{hasEnteredRange
+              ? 'Around your entered range midpoint. Presets use the current price.'
+              : shortcutReason || 'Around the current price. Enter both prices to resize around their midpoint.'}</p>
           </div>
         </section>
 

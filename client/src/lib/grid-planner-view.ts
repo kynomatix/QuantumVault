@@ -100,7 +100,7 @@ export function isPlannerChart(v: unknown): v is PlannerChart {
     && v.candles.every((c: any, i: number) => record(c) && clock(c.time) && c.time <= v.retrievedAt
       && (!i || c.time > v.candles[i - 1].time) && [c.open, c.high, c.low, c.close].every(n => typeof n === 'number' && Number.isFinite(n) && n > 0)
       && c.low <= Math.min(c.open, c.close) && c.high >= Math.max(c.open, c.close)
-      && record(c.provenance) && ['okx', 'pacifica'].includes(c.provenance.source) && c.provenance.venue === c.provenance.source
+      && record(c.provenance) && ['okx', 'gate', 'hyperliquid', 'pacifica'].includes(c.provenance.source) && c.provenance.venue === c.provenance.source
       && c.provenance.source === v.candles[0].provenance.source && c.provenance.basis === 'perp'
       && c.provenance.proxy === 'direct' && c.provenance.timeSemantic === 'open_time' && ['finalized', 'forming'].includes(c.provenance.finality));
 }
