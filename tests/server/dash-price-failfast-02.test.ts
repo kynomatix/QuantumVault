@@ -26,12 +26,12 @@
  *   [B04] getCachedDisplayPricesWithMeta: pricesStale=true (pricesAsOf=null) when no entries
  *   [B05] getCachedDisplayPricesWithMeta: adapter-absent falls back gracefully
  *   [C01-C06] Per-route: zero getAllPrices calls (even with hanging mock)
- *   [C07-C12] Per-route: stale cached prices applied correctly
- *   [C13-C18] Per-route: entry-price fallback when cache empty
+ *   [C07-C12] Per-route: usable cached observations applied correctly
+ *   [C13-C18] Per-route: UNKNOWN mark when cache empty
  *   [C19-C24] Per-route: pricesAsOf and pricesStale present in response shape
  *   [C25] NaN/Infinity/<=0 never leak into mark-price calculation
- *   [D01] total-equity: equity number uses entry-price fallback for absent prices (never zero)
- *   [D02] total-equity: pricesStale=true when a used price is stale
+ *   [D01] total-equity: absent prices leave marked equity UNKNOWN
+ *   [D02] total-equity: usable cached observations remain fresh
  *   [D03] total-equity: pricesStale=false when all used prices are fresh
  *   [E01] Zero-diff guard: getCachedPrices (positions/trading-bots callers) unchanged
  *   [E02] Two excluded routes (prices / prices/stream) are unchanged: they still call getAllPrices
@@ -92,13 +92,13 @@ function simulateCapitalEnrichment(
 ) {
   const botMarketsCap = [...new Set(bots.map((b) => b.market))];
   const { prices, pricesAsOf, pricesStale } = simulateCachedDisplayPricesWithMeta(adapter, botMarketsCap);
-  let unrealizedPnl = 0;
+  let unrealizedPnl: number | null = 0;
   if (position) {
     const baseSize = parseFloat(position.baseSize);
     const entryPrice = parseFloat(position.avgEntryPrice);
-    const markPrice = prices[position.market] || entryPrice;
-    if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-      unrealizedPnl = baseSize > 0
+    const markPrice = prices[position.market] || null;
+    if (Math.abs(baseSize) > 0.0001) {
+      unrealizedPnl = markPrice === null ? null : baseSize > 0
         ? (markPrice - entryPrice) * Math.abs(baseSize)
         : (entryPrice - markPrice) * Math.abs(baseSize);
     }
@@ -117,7 +117,7 @@ function simulateHealthMetricsEnrichment(
   const results = dbPositions.map((pos) => {
     const baseSize = parseFloat(pos.baseSize);
     const entryPrice = parseFloat(pos.avgEntryPrice);
-    const markPrice = prices[pos.market] || entryPrice;
+    const markPrice = prices[pos.market] || null;
     return { market: pos.market, markPrice, entryPrice };
   });
   return { results, pricesAsOf, pricesStale };
@@ -131,20 +131,20 @@ function simulateBotBalanceEnrichment(
   adapter: PriceAdapter,
 ) {
   const { prices, pricesAsOf, pricesStale } = simulateCachedDisplayPricesWithMeta(adapter, [botMarket]);
-  let unrealizedPnl = 0;
+  let unrealizedPnl: number | null = 0;
   if (position) {
     const baseSize = parseFloat(position.baseSize);
     const entryPrice = parseFloat(position.avgEntryPrice);
-    const markPrice = prices[position.market] || entryPrice;
-    if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-      unrealizedPnl = baseSize > 0
+    const markPrice = prices[position.market] || null;
+    if (Math.abs(baseSize) > 0.0001) {
+      unrealizedPnl = markPrice === null ? null : baseSize > 0
         ? (markPrice - entryPrice) * Math.abs(baseSize)
         : (entryPrice - markPrice) * Math.abs(baseSize);
     }
   }
   const realizedPnl = parseFloat(position?.realizedPnl || '0');
   const totalFees = parseFloat(position?.totalFees || '0');
-  const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+  const botBalance = unrealizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
   return { botBalance, pricesAsOf, pricesStale };
 }
 
@@ -155,14 +155,14 @@ function simulateOverviewEnrichment(
   adapter: PriceAdapter,
 ) {
   const { prices, pricesAsOf, pricesStale } = simulateCachedDisplayPricesWithMeta(adapter, [botMarket]);
-  let unrealizedPnl = 0;
-  let markPrice = 0;
+  let unrealizedPnl: number | null = 0;
+  let markPrice: number | null = null;
   if (dbPosition) {
     const baseSize = parseFloat(dbPosition.baseSize);
     const entryPrice = parseFloat(dbPosition.avgEntryPrice);
-    markPrice = prices[dbPosition.market] || entryPrice;
-    if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-      unrealizedPnl = baseSize > 0
+    markPrice = prices[dbPosition.market] || null;
+    if (Math.abs(baseSize) > 0.0001) {
+      unrealizedPnl = markPrice === null ? null : baseSize > 0
         ? (markPrice - entryPrice) * Math.abs(baseSize)
         : (entryPrice - markPrice) * Math.abs(baseSize);
     }
@@ -178,20 +178,20 @@ function simulateTotalEquityEnrichment(
 ) {
   const teBotMarkets = [...new Set(bots.map((b) => b.market))];
   const { prices: teDbPrices, pricesAsOf, pricesStale } = simulateCachedDisplayPricesWithMeta(adapter, teBotMarkets);
-  let totalBotBalance = 0;
+  let totalBotBalance: number | null = 0;
   for (const { position, netDeposited } of perBotData) {
-    let unrealizedPnl = 0;
+    let unrealizedPnl: number | null = 0;
     if (position) {
       const baseSize = parseFloat(position.baseSize);
       const entryPrice = parseFloat(position.avgEntryPrice);
-      const markPrice = teDbPrices[position.market] || entryPrice;
-      if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-        unrealizedPnl = baseSize > 0
+      const markPrice = teDbPrices[position.market] || null;
+      if (Math.abs(baseSize) > 0.0001) {
+        unrealizedPnl = markPrice === null ? null : baseSize > 0
           ? (markPrice - entryPrice) * Math.abs(baseSize)
           : (entryPrice - markPrice) * Math.abs(baseSize);
       }
     }
-    totalBotBalance += netDeposited + unrealizedPnl;
+    totalBotBalance = totalBotBalance === null || unrealizedPnl === null ? null : totalBotBalance + netDeposited + unrealizedPnl;
   }
   return { totalBotBalance, pricesAsOf, pricesStale };
 }
@@ -206,18 +206,18 @@ function simulateLegacyBotBalanceEnrichment(
   adapter: PriceAdapter,
 ) {
   const { prices: legPrices, pricesAsOf, pricesStale } = simulateCachedDisplayPricesWithMeta(adapter, [botMarket]);
-  let unrealizedPnl = 0;
+  let unrealizedPnl: number | null = 0;
   if (position) {
     const baseSize = parseFloat(position.baseSize);
     const entryPrice = parseFloat(position.avgEntryPrice);
-    const markPrice = legPrices[position.market] || entryPrice;
-    if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-      unrealizedPnl = baseSize > 0
+    const markPrice = legPrices[position.market] || null;
+    if (Math.abs(baseSize) > 0.0001) {
+      unrealizedPnl = markPrice === null ? null : baseSize > 0
         ? (markPrice - entryPrice) * Math.abs(baseSize)
         : (entryPrice - markPrice) * Math.abs(baseSize);
     }
   }
-  const botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+  const botBalance = unrealizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
   return { botBalance, pricesAsOf, pricesStale };
 }
 
@@ -347,7 +347,7 @@ describe('DASH-PRICE-FAILFAST-02 [B]: getCachedDisplayPricesWithMeta', () => {
 
   // B02 — pricesStale=true when oldest exceeds threshold
   it('[B02] pricesStale=false when oldest cached entry is within the staleness threshold', () => {
-    seedPrice(adapter, 'SOL-PERP', 142, OBSERVATION_AGE_MS); // 5 min old > 60s
+    seedPrice(adapter, 'SOL-PERP', 142, OBSERVATION_AGE_MS); // 5 seconds old, within the 60-second limit
 
     const { pricesStale } = simulateCachedDisplayPricesWithMeta(adapter, ['SOL-PERP']);
     expect(pricesStale).toBe(false);
@@ -410,7 +410,7 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
   });
 
   it('[C07] /api/wallet/capital: fresh cached mark-price applied to position unrealizedPnl', () => {
-    seedPrice(adapter, 'SOL-PERP', 160, OBSERVATION_AGE_MS); // stale
+    seedPrice(adapter, 'SOL-PERP', 160, OBSERVATION_AGE_MS); // fresh
 
     const { unrealizedPnl } = simulateCapitalEnrichment(BOTS, SOL_POSITION, adapter);
 
@@ -418,10 +418,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(unrealizedPnl).toBeCloseTo(200, 6);
   });
 
-  it('[C13] /api/wallet/capital: entry-price fallback when cache empty → unrealizedPnl=0', () => {
+  it('[C13] /api/wallet/capital: UNKNOWN PnL when cache empty', () => {
     const { unrealizedPnl } = simulateCapitalEnrichment(BOTS, SOL_POSITION, adapter);
-    // markPrice === entryPrice → unrealizedPnl = 0
-    expect(unrealizedPnl).toBe(0);
+    // Entry price cannot supply a current mark or MTM.
+    expect(unrealizedPnl).toBeNull();
   });
 
   it('[C19] /api/wallet/capital: pricesAsOf and pricesStale present in response shape', () => {
@@ -429,7 +429,7 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const { pricesAsOf, pricesStale } = simulateCapitalEnrichment(BOTS, SOL_POSITION, adapter);
     expect(typeof pricesAsOf === 'number' || pricesAsOf === null).toBe(true);
     expect(typeof pricesStale).toBe('boolean');
-    expect(pricesStale).toBe(false); // OBSERVATION_AGE_MS > threshold
+    expect(pricesStale).toBe(false); // OBSERVATION_AGE_MS < threshold
   });
 
   // --- /api/health-metrics ---
@@ -453,9 +453,9 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(results[0].markPrice).toBe(165);
   });
 
-  it('[C14] /api/health-metrics: entry-price fallback when cache empty', () => {
+  it('[C14] /api/health-metrics: UNKNOWN mark when cache empty', () => {
     const { results } = simulateHealthMetricsEnrichment(BOTS, [SOL_POSITION], adapter);
-    expect(results[0].markPrice).toBe(140); // entryPrice
+    expect(results[0].markPrice).toBeNull();
   });
 
   it('[C20] /api/health-metrics: pricesAsOf and pricesStale present in response shape', () => {
@@ -487,10 +487,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(botBalance).toBeCloseTo(500 + 200 - 5, 6);
   });
 
-  it('[C15] /api/bots/:botId/balance: entry-price fallback when cache empty → unrealizedPnl=0', () => {
+  it('[C15] /api/bots/:botId/balance: UNKNOWN PnL when cache empty', () => {
     const { botBalance } = simulateBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, adapter);
-    // unrealizedPnl = 0 (entry-price fallback), totalFees=5
-    expect(botBalance).toBeCloseTo(500 - 5, 6);
+    // Missing mark leaves PnL and marked balance UNKNOWN.
+    expect(botBalance).toBeNull();
   });
 
   it('[C21] /api/bots/:botId/balance: pricesAsOf and pricesStale present', () => {
@@ -520,9 +520,9 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(markPrice).toBe(175);
   });
 
-  it('[C16] /api/bots/:botId/overview: entry-price fallback when cache empty', () => {
+  it('[C16] /api/bots/:botId/overview: UNKNOWN mark when cache empty', () => {
     const { markPrice } = simulateOverviewEnrichment('SOL-PERP', SOL_POSITION, adapter);
-    expect(markPrice).toBe(140); // entryPrice
+    expect(markPrice).toBeNull();
   });
 
   it('[C22] /api/bots/:botId/overview: pricesAsOf and pricesStale present', () => {
@@ -562,14 +562,14 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(totalBotBalance).toBeCloseTo(700, 6);
   });
 
-  it('[C17] /api/total-equity: entry-price fallback when cache empty', () => {
+  it('[C17] /api/total-equity: UNKNOWN mark when cache empty', () => {
     const { totalBotBalance } = simulateTotalEquityEnrichment(
       [SOL_BOT],
       [{ position: SOL_POSITION, netDeposited: 500 }],
       adapter,
     );
-    // unrealizedPnl=0 (entry-price fallback)
-    expect(totalBotBalance).toBeCloseTo(500, 6);
+    // Missing mark leaves the marked balance UNKNOWN.
+    expect(totalBotBalance).toBeNull();
   });
 
   it('[C23] /api/total-equity: pricesAsOf and pricesStale present', () => {
@@ -605,10 +605,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     expect(botBalance).toBeCloseTo(695, 6);
   });
 
-  it('[C18] legacy /api/bot/:botId/balance: entry-price fallback when cache empty', () => {
+  it('[C18] legacy /api/bot/:botId/balance: UNKNOWN mark when cache empty', () => {
     const { botBalance } = simulateLegacyBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, 0, 5, adapter);
     // unrealizedPnl=0, totalFees=5 → 500-5=495
-    expect(botBalance).toBeCloseTo(495, 6);
+    expect(botBalance).toBeNull();
   });
 
   it('[C24] legacy /api/bot/:botId/balance: pricesAsOf and pricesStale present', () => {
@@ -628,10 +628,10 @@ describe('DASH-PRICE-FAILFAST-02 [C]: per-route isolation and staleness fields',
     const prices = adapter.getCachedPrices(['SOL-PERP']);
     expect(prices['SOL-PERP']).toBeUndefined();
 
-    // Route logic falls back to entryPrice
+    // Route logic keeps the absent mark UNKNOWN.
     const { botBalance } = simulateBotBalanceEnrichment('SOL-PERP', SOL_POSITION, 500, adapter);
-    // unrealizedPnl=0 (NaN excluded → entryPrice fallback)
-    expect(botBalance).toBeCloseTo(500 - 5, 6);
+    // NaN is excluded; entry price cannot supply MTM.
+    expect(botBalance).toBeNull();
   });
 });
 
@@ -651,22 +651,21 @@ describe('DASH-PRICE-FAILFAST-02 [D]: /api/total-equity special cases', () => {
     vi.restoreAllMocks();
   });
 
-  // D01 — absent price → entry-price fallback, never zero equity
-  it('[D01] absent price uses entry-price fallback — botBalance never incorrectly zeroed', () => {
-    // Cache has no SOL-PERP entry — markPrice falls back to entryPrice
+  // D01 — absent price keeps marked equity UNKNOWN.
+  it('[D01] absent price keeps botBalance UNKNOWN', () => {
+    // Cache has no SOL-PERP entry; the mark stays UNKNOWN.
     const { totalBotBalance } = simulateTotalEquityEnrichment(
       [SOL_BOT],
       [{ position: SOL_POSITION, netDeposited: 500 }],
       adapter,
     );
-    // unrealizedPnl=0 because markPrice===entryPrice; netDeposited=500 still counts
-    expect(totalBotBalance).toBeGreaterThan(0);
-    expect(totalBotBalance).toBeCloseTo(500, 6);
+    // Deposits alone cannot establish marked equity for an open position.
+        expect(totalBotBalance).toBeNull();
   });
 
   // D02 — pricesStale=true when any used price is stale
   it('[D02] pricesStale=false when a used price is older than the threshold', () => {
-    seedPrice(adapter, 'SOL-PERP', 142, OBSERVATION_AGE_MS); // stale
+    seedPrice(adapter, 'SOL-PERP', 142, OBSERVATION_AGE_MS); // fresh
 
     const { pricesStale } = simulateTotalEquityEnrichment(
       [SOL_BOT],

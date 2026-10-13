@@ -19,9 +19,9 @@ async function fetchPerpPositions(agentPublicKey: string, subaccountId: number, 
       entryPrice: p.entryPrice,
       markPrice: p.markPrice,
       unrealizedPnl: p.unrealizedPnl,
-      unrealizedPnlPercent: p.entryPrice > 0
+      unrealizedPnlPercent: p.markPrice !== null && p.entryPrice > 0
         ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
-        : 0,
+        : null,
       liquidationPrice: p.liquidationPrice ?? null,
     })), fetchFailed: false };
   } catch (err) {
@@ -61,9 +61,9 @@ export interface OnChainPosition {
   side: 'LONG' | 'SHORT' | 'FLAT';
   baseAssetAmount: number;
   entryPrice: number;
-  markPrice: number;
-  unrealizedPnl: number;
-  unrealizedPnlPercent: number;
+  markPrice: number | null;
+  unrealizedPnl: number | null;
+  unrealizedPnlPercent: number | null;
   /** Venue-reported liquidation price, when the adapter provides it. */
   liquidationPrice?: number | null;
 }
@@ -79,9 +79,9 @@ export interface PositionData {
     side: 'LONG' | 'SHORT' | 'FLAT';
     size: number;
     avgEntryPrice: number;
-    currentPrice: number;
-    unrealizedPnl: number;
-    unrealizedPnlPercent: number;
+    currentPrice: number | null;
+    unrealizedPnl: number | null;
+    unrealizedPnlPercent: number | null;
     realizedPnl: number;
     totalFees: number;
   } | null;
@@ -140,9 +140,9 @@ export class PositionService {
             entryPrice: p.entryPrice,
             markPrice: p.markPrice,
             unrealizedPnl: p.unrealizedPnl,
-            unrealizedPnlPercent: p.entryPrice > 0 && p.baseSize !== 0
+            unrealizedPnlPercent: p.unrealizedPnl !== null && p.entryPrice > 0 && p.baseSize !== 0
               ? ((p.unrealizedPnl / (Math.abs(p.baseSize) * p.entryPrice)) * 100)
-              : 0,
+              : null,
             liquidationPrice: p.liquidationPrice ?? null,
           })), fetchFailed: false };
         } catch (err) {
@@ -235,7 +235,7 @@ export class PositionService {
           const posSize = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainSize : dbSize;
           const posMarket = onChainPos?.market || dbPosition?.market || market;
           const posSide = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.side : (dbSize > 0 ? 'LONG' : 'SHORT');
-          const posMarkPrice = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.markPrice : (dbPosition ? parseFloat(dbPosition.avgEntryPrice) : 0);
+          const posMarkPrice = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.markPrice : null;
 
           // Prefer the venue's OWN liquidation price when the adapter provides
           // it (Pacifica does). The local estimate below conflates "no free
@@ -244,7 +244,7 @@ export class PositionService {
           const venueLiqPrice = (onChainPos && Math.abs(onChainSize) > 0.0001) ? onChainPos.liquidationPrice : null;
           if (typeof venueLiqPrice === 'number' && Number.isFinite(venueLiqPrice) && venueLiqPrice > 0) {
             liquidationPrice = venueLiqPrice;
-          } else if (Math.abs(posSize) > 0.0001 && posMarkPrice > 0) {
+          } else if (Math.abs(posSize) > 0.0001 && posMarkPrice !== null && posMarkPrice > 0) {
             if (accountInfo.freeCollateral <= 0) {
               liquidationPrice = posMarkPrice;
             } else {
@@ -295,9 +295,9 @@ export class PositionService {
           side: dbSize > 0 ? 'LONG' : 'SHORT',
           size: Math.abs(dbSize),
           avgEntryPrice: entryPrice,
-          currentPrice: entryPrice,
-          unrealizedPnl: 0,
-          unrealizedPnlPercent: 0,
+          currentPrice: null,
+          unrealizedPnl: null,
+          unrealizedPnlPercent: null,
           realizedPnl,
           totalFees,
         };
@@ -344,9 +344,9 @@ export class PositionService {
           side: baseSize > 0 ? 'LONG' : 'SHORT',
           size: Math.abs(baseSize),
           avgEntryPrice: fallbackEntryPrice,
-          currentPrice: fallbackEntryPrice,
-          unrealizedPnl: 0,
-          unrealizedPnlPercent: 0,
+          currentPrice: null,
+          unrealizedPnl: null,
+          unrealizedPnlPercent: null,
           realizedPnl: parseFloat(dbPosition.realizedPnl),
           totalFees: parseFloat(dbPosition.totalFees || "0"),
         } : null,

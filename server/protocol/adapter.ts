@@ -656,7 +656,7 @@ export interface ProtocolAdapter {
    * enrichment on the dashboard request path.
    *
    * Contract (callers must rely on these):
-   *   - Returns only finite positive values; stale values are permitted.
+   *   - Returns only finite positive values within the adapter's freshness limit.
    *   - MUST NOT initiate any async work, network request, or quota operation.
    *   - MUST NOT mutate cache entries, timestamps, or expiry state.
    *   - Returns an ordinary Record, never a Promise.

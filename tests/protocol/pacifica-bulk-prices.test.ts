@@ -3,6 +3,8 @@ import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter
 import { pacificaCache } from '../../server/protocol/pacifica/pacifica-cache';
 import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota';
 import { parsePacificaPrices } from '../../server/protocol/pacifica/pacifica-prices';
+import { readFileSync } from 'node:fs';
+import { buildPacificaMappings, SymbolRegistry } from '../../server/protocol/symbol-registry';
 
 const clock = 1_800_000_000_000;
 const row = (symbol = 'BTC', mid = '100', timestamp = clock - 5_000) => ({ symbol, mid, timestamp, mark: '110', oracle: '120' });
@@ -34,7 +36,7 @@ describe('Pacifica documented bulk midpoint parser', () => {
     { ...row(), mid: 'Infinity' }, { ...row(), mid: 100 }, { ...row(), mid: '1e2' },
     { ...row(), timestamp: clock - 60_000 }, { ...row(), timestamp: clock + 1 },
     { ...row(), timestamp: 0 }, { ...row(), timestamp: String(clock) }, { ...row(), timestamp: clock - 0.5 },
-    { ...row(), symbol: 'btc' }, { ...row(), symbol: 'BTC-PERP' }, null,
+    { ...row(), symbol: 'BTC/USDC' }, { ...row(), symbol: 'BTC\n' }, { ...row(), symbol: '' }, null,
   ])('omits invalid or expired rows without substituting another price %j', bad => {
     expect([...parsePacificaPrices(envelope(bad, row('ETH', '200')), clock, 60_000).keys()]).toEqual(['ETH']);
   });
@@ -42,6 +44,40 @@ describe('Pacifica documented bulk midpoint parser', () => {
     for (const rows of [[row(), row('BTC', '101')], [row(), { ...row(), mid: null }], [{ ...row(), mid: null }, row()]]) {
       expect(parsePacificaPrices(envelope(...rows), clock, 60_000).size).toBe(0);
     }
+  });
+  it('prices all 78 captured venue symbols, matching the legacy per-market book symbol set', async () => {
+    const prices = JSON.parse(readFileSync('tests/fixtures/pacifica/public-prices.json', 'utf8')).payload;
+    const info = JSON.parse(readFileSync('tests/fixtures/pacifica/public-info.json', 'utf8')).payload;
+    const capturedNow = Math.max(...prices.data.map((p: { timestamp: number }) => p.timestamp));
+    const parsed = parsePacificaPrices(prices, capturedNow, 60_000);
+    const symbols = info.data.map((m: { symbol: string }) => m.symbol);
+    expect(symbols).toHaveLength(78);
+    expect(parsed.size).toBe(78);
+    expect([...parsed.keys()].sort()).toEqual([...symbols].sort());
+    for (const symbol of ['kPEPE', 'kBONK', 'kSHIB', 'SOL-USDC']) expect(parsed.has(symbol)).toBe(true);
+
+    const mappings = buildPacificaMappings(symbols);
+    const markets = mappings.map(m => ({ internalSymbol: m.internal, protocolSymbol: m.protocol }));
+    // Replay the former depth-1 /book loop with successful books for every captured
+    // market. Prices are synthetic here; this assertion compares symbol coverage.
+    const bookRead = vi.fn(async (symbol: string) => {
+      const mid = Number(prices.data.find((p: { symbol: string }) => p.symbol === symbol).mid);
+      return { l: [[{ p: String(mid * 0.999) }], [{ p: String(mid * 1.001) }]] };
+    });
+    const legacy: Record<string, number> = {};
+    for (const market of markets) {
+      const book = await bookRead(market.protocolSymbol);
+      legacy[market.internalSymbol] = (parseFloat(book.l[0][0].p) + parseFloat(book.l[1][0].p)) / 2;
+    }
+    expect(bookRead).toHaveBeenCalledTimes(78);
+    vi.mocked(Date.now).mockReturnValue(capturedNow);
+    const a = adapter();
+    (a as any).registry = new SymbolRegistry(mappings);
+    (a as any).marketCache = { fetchedAt: capturedNow, data: markets };
+    vi.stubGlobal('fetch', vi.fn(async () => response(prices)));
+    const bulk = await a.getAllPrices();
+    expect(Object.keys(bulk)).toHaveLength(78);
+    expect(Object.keys(bulk).sort()).toEqual(Object.keys(legacy).sort());
   });
 });
 
@@ -95,16 +131,45 @@ describe('shared adapter bulk cache and consumer fail-closed reads', () => {
     const fetchSpy = vi.fn(); vi.stubGlobal('fetch', fetchSpy);
     expect(await adapter().getPrice('EXAMPLE')).toBeNull(); expect(fetchSpy).not.toHaveBeenCalled();
   });
-  it('positions refuse missing prices instead of substituting entry price', async () => {
-    const a = adapter(); vi.spyOn(a as any, 'get').mockResolvedValue([{ symbol: 'BTC', amount: '1', entry_price: '90', side: 'bid' }]);
+  it('one unknown mark preserves every position and never substitutes entry price or zero P&L', async () => {
+    const a = adapter();
+    (a as any).registry = new SymbolRegistry(['BTC', 'ETH'].map(symbol => ({ internal: symbol, protocol: symbol, aliases: [] })));
+    vi.spyOn(a as any, 'get').mockResolvedValue([
+      { symbol: 'BTC', amount: '1', entry_price: '90', side: 'bid' },
+      { symbol: 'ETH', amount: '2', entry_price: '190', mark_price: '200', side: 'ask' },
+    ]);
     vi.spyOn(a, 'getAllPrices').mockResolvedValue({});
-    await expect(a.getPositions('EXAMPLE')).rejects.toThrow(/position price unavailable/);
+    await expect(a.getPositions('EXAMPLE')).resolves.toMatchObject([
+      { internalSymbol: 'BTC', baseSize: 1, entryPrice: 90, markPrice: null, unrealizedPnl: null },
+      { internalSymbol: 'ETH', baseSize: -2, markPrice: 200, unrealizedPnl: -20 },
+    ]);
+  });
+  it.each(['0', '-1', 'NaN', 'Infinity', '100junk'])('treats malformed venue mark %s as unknown during bulk failure', async mark_price => {
+    const a = adapter();
+    (a as any).registry = new SymbolRegistry([{ internal: 'BTC', protocol: 'BTC', aliases: [] }]);
+    vi.spyOn(a as any, 'get').mockResolvedValue([{ symbol: 'BTC', amount: '1', entry_price: '90', mark_price, side: 'bid' }]);
+    vi.spyOn(a, 'getAllPrices').mockRejectedValue(new Error('EXAMPLE bulk unavailable'));
+    expect((await a.getPositions('EXAMPLE'))[0]).toMatchObject({ markPrice: null, unrealizedPnl: null });
+  });
+  it('retains fresh bulk fallback and authoritative zero venue P&L without recomputing it', async () => {
+    const a = adapter();
+    (a as any).registry = new SymbolRegistry([{ internal: 'BTC', protocol: 'BTC', aliases: [] }]);
+    vi.spyOn(a as any, 'get').mockResolvedValue([{ symbol: 'BTC', amount: '1', entry_price: '90', unrealized_pnl: '0', side: 'bid' }]);
+    vi.spyOn(a, 'getAllPrices').mockResolvedValue({ BTC: 100 });
+    expect((await a.getPositions('EXAMPLE'))[0]).toMatchObject({ markPrice: 100, unrealizedPnl: 0 });
   });
   it('keeps orderbook bid/ask reads independent of the bulk midpoint cache', async () => {
     const a = adapter(); vi.spyOn(a as any, 'get').mockResolvedValue({ l: [[{ p: '99', a: '2' }], [{ p: '101', a: '3' }]] });
     vi.spyOn(a as any, 'getRegistry').mockReturnValue({ internalToProtocol: (symbol: string) => symbol });
     await a.getOrderbook('BTC');
     expect((a as any).get).toHaveBeenCalledWith('/book', expect.objectContaining({ symbol: 'BTC' }), expect.objectContaining({ caller: 'adapter.orderbook' }));
+  });
+  it('attributes execution mark reads to their caller', async () => {
+    const a = adapter();
+    vi.spyOn(a as any, 'getRegistry').mockReturnValue({ internalToProtocol: (symbol: string) => symbol });
+    vi.spyOn(a as any, 'get').mockResolvedValue(envelope(row('BTC', '100', clock)));
+    expect(await a.getMarkPrice('BTC')).toMatchObject({ kind: 'available', field: 'mark', exact: '110' });
+    expect((a as any).get).toHaveBeenCalledWith('/info/prices', undefined, expect.objectContaining({ caller: 'adapter.mark-price' }));
   });
 });
 

@@ -997,6 +997,20 @@ describe("buildMarketContext (WO-3)", () => {
     expect(result.user).not.toContain("Open position: none (flat)");
   });
 
+  it("UNKNOWN live mark blocks new-exposure analysis without inventing entry-price MTM", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const getPositions = vi.fn(async () => [{
+      internalSymbol: "SOL-PERP", baseSize: 2, entryPrice: 150,
+      markPrice: null, unrealizedPnl: null, leverage: 2,
+      liquidationPrice: null, marginMode: "cross" as const,
+    }]);
+    await expect(buildMarketContext({
+      market: "SOL-PERP", timeframe: "15m", adapter: makeAdapter({ getPositions }),
+      bot: makeBot({ paperMode: false }), preClaimBotStatus: "open",
+      recentClosedDecisions: [], paperPositionRows: [], agentPublicKey: AGENT_PUBKEY,
+    })).rejects.toThrow("Live position mark is UNKNOWN");
+  });
+
   it("live read failure does not produce flat", async () => {
     const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
     const getPositions = vi.fn().mockRejectedValue(new Error("venue down"));
@@ -1731,8 +1745,8 @@ describe("PRICE-STARVE fix — priority + fallback chain", () => {
       paperPositionRows: [],
       agentPublicKey: AGENT_PUBKEY,
     });
-    // The first positional arg is the symbol; second must be { priority: 'normal' }.
-    expect(getPriceSpy.mock.calls[0]).toEqual(["SOL-PERP", { priority: "normal" }]);
+    // Preserve normal analysis priority and the bulk-pipeline caller attribution.
+    expect(getPriceSpy.mock.calls[0]).toEqual(["SOL-PERP", { priority: "normal", caller: "ai.context" }]);
   });
 
   it("hl_reference tier: venue null + fresh HL snapshot within ratio band → priceSource='hl_reference', price=HL markPrice, prompt label injected", async () => {

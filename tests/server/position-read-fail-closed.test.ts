@@ -143,6 +143,13 @@ describe('PositionService strict execution reads', () => {
     });
   });
 
+  it('keeps close size and side authoritative when the display mark and PnL are UNKNOWN', async () => {
+    mocks.adapter.getPositions.mockResolvedValueOnce([{ ...openPosition, markPrice: null, unrealizedPnl: null }]);
+    await expect(PositionService.getPositionForExecution(
+      'EXAMPLE-bot', 'EXAMPLE-agent', 0, 'BTC-PERP', 'EXAMPLE-subaccount', adapter,
+    )).resolves.toMatchObject({ size: 1, side: 'LONG', source: 'on-chain', entryPrice: 100 });
+  });
+
   it('does not reach a skipped-close or signed-close continuation for either failed read form', async () => {
     const continueClose = vi.fn();
     mocks.adapter.getPositions.mockRejectedValue(new Error('venue unavailable'));

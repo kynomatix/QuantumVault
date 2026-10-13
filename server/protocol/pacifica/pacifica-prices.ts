@@ -16,7 +16,7 @@ export function parsePacificaPrices(payload: unknown, now: number, maxAgeMs: num
   for (const row of envelope.data) {
     if (!row || typeof row !== 'object' || Array.isArray(row)) continue;
     const { symbol, mid, timestamp } = row as Record<string, unknown>;
-    if (typeof symbol !== 'string' || !/^[A-Z0-9]+$/.test(symbol)) continue;
+    if (typeof symbol !== 'string' || symbol.trim() !== symbol || !/^[A-Za-z0-9-]+$/.test(symbol)) continue;
     // Conflicting/duplicate observations are unavailable regardless of row order.
     if (seen.has(symbol)) { result.delete(symbol); continue; }
     seen.add(symbol);

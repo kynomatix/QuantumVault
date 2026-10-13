@@ -39,7 +39,7 @@ async function _lookupMainWallet(agentPublicKey: string): Promise<string> {
   return w.address;
 }
 
-function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number; unrealizedPnl: number }) {
+function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number | null; unrealizedPnl: number | null }) {
   return {
     marketIndex: 0,
     market: p.internalSymbol,
@@ -47,13 +47,13 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
     quoteAssetAmount: 0,
     quoteEntryAmount: 0,
     side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
-    sizeUsd: Math.abs(p.baseSize) * p.markPrice,
+    sizeUsd: p.markPrice === null ? null : Math.abs(p.baseSize) * p.markPrice,
     entryPrice: p.entryPrice,
     markPrice: p.markPrice,
     unrealizedPnl: p.unrealizedPnl,
-    unrealizedPnlPercent: p.entryPrice > 0
+    unrealizedPnlPercent: p.markPrice !== null && p.entryPrice > 0
       ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
-      : 0,
+      : null,
   };
 }
 

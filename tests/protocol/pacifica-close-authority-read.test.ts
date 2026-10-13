@@ -54,7 +54,8 @@ describe('Pacifica strict close-authority position read', () => {
       internalSymbol: 'BTC-PERP',
       baseSize: 0.25,
       entryPrice: 64000,
-      markPrice: 64000,
+      markPrice: null,
+      unrealizedPnl: null,
     });
     expect(priceSweep).not.toHaveBeenCalled();
     expect(fetchSpy).toHaveBeenCalledTimes(1);

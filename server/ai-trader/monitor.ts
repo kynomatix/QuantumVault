@@ -3196,12 +3196,14 @@ async function monitorLiveBot(bot: AiTraderBot, view: OpenDecisionView): Promise
       const dailyRealized = recentClosed
         .filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= dayStart)
         .reduce((sum, d) => sum + (num(d.realizedPnl) ?? 0), 0);
-      const unrealized = Number.isFinite(position.unrealizedPnl) ? position.unrealizedPnl : 0;
-      if (dailyRealized + unrealized <= -(DAILY_LOSS_BREAKER_PCT / 100) * allocation) {
+      const unrealized = position.unrealizedPnl !== null && Number.isFinite(position.unrealizedPnl) ? position.unrealizedPnl : null;
+      const lossLimit = -(DAILY_LOSS_BREAKER_PCT / 100) * allocation;
+      // Proven realized loss still permits a protective close with UNKNOWN open MTM.
+      if (dailyRealized <= lossLimit || (unrealized !== null && dailyRealized + unrealized <= lossLimit)) {
         await closeLivePositionAndPause(bot, view, adapter, {
           pauseReason: "daily_loss_breaker",
           exitReason: "circuit_breaker",
-          detail: `G7 daily-loss breaker: realized ${dailyRealized.toFixed(2)} + open MTM ${unrealized.toFixed(2)} breached −${DAILY_LOSS_BREAKER_PCT}% of allocation — force-flat`,
+          detail: `G7 daily-loss breaker: realized ${dailyRealized.toFixed(2)} + open MTM ${unrealized === null ? "UNKNOWN" : unrealized.toFixed(2)} breached −${DAILY_LOSS_BREAKER_PCT}% of allocation — force-flat`,
         });
         return;
       }

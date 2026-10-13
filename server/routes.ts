@@ -970,7 +970,7 @@ async function _lookupMainWallet(agentPublicKey: string): Promise<string> {
   return w.address;
 }
 
-function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number; unrealizedPnl: number; liquidationPrice?: number | null }) {
+function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entryPrice: number; markPrice: number | null; unrealizedPnl: number | null; liquidationPrice?: number | null }) {
   return {
     marketIndex: 0,
     market: p.internalSymbol,
@@ -978,13 +978,13 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
     quoteAssetAmount: 0,
     quoteEntryAmount: 0,
     side: (p.baseSize >= 0 ? 'LONG' : 'SHORT') as 'LONG' | 'SHORT',
-    sizeUsd: Math.abs(p.baseSize) * p.markPrice,
+    sizeUsd: p.markPrice === null ? null : Math.abs(p.baseSize) * p.markPrice,
     entryPrice: p.entryPrice,
     markPrice: p.markPrice,
     unrealizedPnl: p.unrealizedPnl,
-    unrealizedPnlPercent: p.entryPrice > 0
+    unrealizedPnlPercent: p.markPrice !== null && p.entryPrice > 0
       ? ((p.markPrice - p.entryPrice) / p.entryPrice) * 100 * (p.baseSize >= 0 ? 1 : -1)
-      : 0,
+      : null,
     liquidationPrice: p.liquidationPrice ?? null,
   };
 }
@@ -8414,18 +8414,18 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             realizedPnl = parseFloat(position?.realizedPnl || '0');
             const totalFees = parseFloat(position?.totalFees || '0');
 
-            let unrealizedPnl = 0;
+            let unrealizedPnl: number | null = 0;
             if (position) {
               const baseSize = parseFloat(position.baseSize);
               const entryPrice = parseFloat(position.avgEntryPrice);
-              const markPrice = prices[position.market] || entryPrice;
-              if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-                unrealizedPnl = baseSize > 0
+              const markPrice = prices[position.market] || null;
+              if (Math.abs(baseSize) > 0.0001) {
+                unrealizedPnl = markPrice === null ? null : baseSize > 0
                   ? (markPrice - entryPrice) * Math.abs(baseSize)
                   : (entryPrice - markPrice) * Math.abs(baseSize);
               }
             }
-            botBalance = netDeposited + realizedPnl + unrealizedPnl - totalFees;
+            botBalance = unrealizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
           }
         } catch (err) {
           console.warn(`[capital] Failed to calc bot balance for ${bot.id}:`, err);
@@ -9283,20 +9283,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const side = baseSize > 0 ? 'LONG' : 'SHORT';
         const entryPrice = parseFloat(pos.avgEntryPrice);
         const rawMarkPrice = prices[pos.market] || 0;
-        const markPrice = rawMarkPrice > 0 ? rawMarkPrice : entryPrice;
-        const sizeUsd = Math.abs(baseSize) * markPrice;
+        const markPrice = rawMarkPrice > 0 ? rawMarkPrice : null;
+        const sizeUsd = markPrice === null ? null : Math.abs(baseSize) * markPrice;
         const realizedPnl = parseFloat(pos.realizedPnl);
         const totalFees = parseFloat(pos.totalFees || "0");
         
-        const unrealizedPnl = rawMarkPrice > 0
+        const unrealizedPnl = markPrice !== null
           ? (side === 'LONG'
               ? (markPrice - entryPrice) * Math.abs(baseSize)
               : (entryPrice - markPrice) * Math.abs(baseSize))
-          : 0;
+          : null;
         
-        const unrealizedPnlPercent = rawMarkPrice > 0 && Math.abs(entryPrice * Math.abs(baseSize)) > 0
+        const unrealizedPnlPercent = unrealizedPnl !== null && Math.abs(entryPrice * Math.abs(baseSize)) > 0
           ? (unrealizedPnl / (entryPrice * Math.abs(baseSize))) * 100
-          : 0;
+          : null;
 
         positions.push({
           botId: bot.id,
@@ -9395,7 +9395,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       let totalCollateral = 0;
       let freeCollateral = 0;
-      let unrealizedPnl = 0;
+      let unrealizedPnl: number | null = 0;
       const formattedPositions: any[] = [];
       // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
       // bots loaded above covers the same markets as dbPositions for this wallet.
@@ -9425,14 +9425,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const baseSize = parseFloat(pos.baseSize);
         if (Math.abs(baseSize) < 0.0001) continue;
         const entryPrice = parseFloat(pos.avgEntryPrice);
-        const markPrice = prices[pos.market] || entryPrice;
-        const posUnrealizedPnl = baseSize > 0
+        const markPrice = prices[pos.market] || null;
+        const posUnrealizedPnl = markPrice === null ? null : baseSize > 0
           ? (markPrice - entryPrice) * Math.abs(baseSize)
           : (entryPrice - markPrice) * Math.abs(baseSize);
-        unrealizedPnl += posUnrealizedPnl;
+        unrealizedPnl = unrealizedPnl === null || posUnrealizedPnl === null ? null : unrealizedPnl + posUnrealizedPnl;
 
         let estLiqPrice: number | null = null;
-        if (freeCollateral > 0 && Math.abs(baseSize) > 0.0001) {
+        if (markPrice !== null && freeCollateral > 0 && Math.abs(baseSize) > 0.0001) {
           const priceBuffer = freeCollateral / Math.abs(baseSize);
           estLiqPrice = baseSize > 0
             ? Math.max(0, markPrice - priceBuffer)
@@ -9443,7 +9443,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           marketIndex: 0,
           market: pos.market,
           baseSize,
-          notionalValue: Math.abs(baseSize) * markPrice,
+          notionalValue: markPrice === null ? null : Math.abs(baseSize) * markPrice,
           liquidationPrice: estLiqPrice,
           entryPrice,
           unrealizedPnl: posUnrealizedPnl,
@@ -15533,20 +15533,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         : parseFloat(position?.realizedPnl || '0');
       const totalFees = parseFloat(position?.totalFees || '0');
       
-      let unrealizedPnl = 0;
+      let unrealizedPnl: number | null = 0;
       const hasOpenPositions = !!(position && Math.abs(parseFloat(position.baseSize)) > 0.0001);
       if (position) {
         const baseSize = parseFloat(position.baseSize);
         const entryPrice = parseFloat(position.avgEntryPrice);
-        const markPrice = prices[position.market] || entryPrice;
-        if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-          unrealizedPnl = baseSize > 0
+        const markPrice = prices[position.market] || null;
+        if (Math.abs(baseSize) > 0.0001) {
+          unrealizedPnl = markPrice === null ? null : baseSize > 0
             ? (markPrice - entryPrice) * Math.abs(baseSize)
             : (entryPrice - markPrice) * Math.abs(baseSize);
         }
       }
       
-      const botBalance = realizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
+      const botBalance = realizedPnl === null || unrealizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
       const freeCollateral = realizedPnl === null ? null : netDeposited + realizedPnl - totalFees;
       
       res.json({ 
@@ -15655,20 +15655,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           : parseFloat(dbPosition?.realizedPnl || '0');
         const totalFees = parseFloat(dbPosition?.totalFees || '0');
         
-        let unrealizedPnl = 0;
+        let unrealizedPnl: number | null = 0;
         const hasOpenPositions = !!(dbPosition && Math.abs(parseFloat(dbPosition.baseSize)) > 0.0001);
         if (dbPosition) {
           const baseSize = parseFloat(dbPosition.baseSize);
           const entryPrice = parseFloat(dbPosition.avgEntryPrice);
-          const markPrice = prices[dbPosition.market] || entryPrice;
-          if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-            unrealizedPnl = baseSize > 0
+          const markPrice = prices[dbPosition.market] || null;
+          if (Math.abs(baseSize) > 0.0001) {
+            unrealizedPnl = markPrice === null ? null : baseSize > 0
               ? (markPrice - entryPrice) * Math.abs(baseSize)
               : (entryPrice - markPrice) * Math.abs(baseSize);
           }
         }
         
-        const botBalance = realizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
+        const botBalance = realizedPnl === null || unrealizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
         const botFreeCollateral = realizedPnl === null ? null : Math.max(0, netDeposited + realizedPnl - totalFees);
         
         accountInfo = {
@@ -15687,8 +15687,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       // Build position response — use oracle price for currentPrice/unrealizedPnl
       // to match /api/positions behavior (Pacifica may omit mark_price)
-      let enrichedCurrentPrice = posData.position?.currentPrice ?? 0;
-      let enrichedUnrealizedPnl = posData.position?.unrealizedPnl ?? 0;
+      let enrichedCurrentPrice = posData.position?.currentPrice ?? null;
+      let enrichedUnrealizedPnl = posData.position?.unrealizedPnl ?? null;
       if (posData.position?.hasPosition && posData.position.avgEntryPrice) {
         const oraclePrice = prices[posData.position.market] || prices[bot.market] || 0;
         if (oraclePrice > 0) {
@@ -23149,19 +23149,19 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       // DASH-PRICE-FAILFAST-02: synchronous cached-price snapshot; no network.
       const { prices: legPrices, pricesAsOf: legPricesAsOf, pricesStale: legPricesStale } = getCachedDisplayPricesWithMeta([bot.market]);
-      let unrealizedPnl = 0;
+      let unrealizedPnl: number | null = 0;
       if (position) {
         const baseSize = parseFloat(position.baseSize);
         const entryPrice = parseFloat(position.avgEntryPrice);
-        const markPrice = legPrices[position.market] || entryPrice;
-        if (Math.abs(baseSize) > 0.0001 && markPrice > 0) {
-          unrealizedPnl = baseSize > 0
+        const markPrice = legPrices[position.market] || null;
+        if (Math.abs(baseSize) > 0.0001) {
+          unrealizedPnl = markPrice === null ? null : baseSize > 0
             ? (markPrice - entryPrice) * Math.abs(baseSize)
             : (entryPrice - markPrice) * Math.abs(baseSize);
         }
       }
       
-      const botBalance = realizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
+      const botBalance = realizedPnl === null || unrealizedPnl === null ? null : netDeposited + realizedPnl + unrealizedPnl - totalFees;
       
       res.json({ 
         driftSubaccountId: bot.driftSubaccountId ?? 0,

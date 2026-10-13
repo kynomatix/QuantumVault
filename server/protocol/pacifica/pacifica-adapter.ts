@@ -1101,7 +1101,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const startedAt = Date.now();
     try {
       envelope = await this.get('/info/prices', undefined, {
-        priority: 'normal', cachePolicy: 'fresh-required', responseShape: 'envelope',
+        priority: 'normal', cachePolicy: 'fresh-required', responseShape: 'envelope', caller: 'adapter.mark-price',
       });
     } catch (error) {
       if (error instanceof QuotaExhaustedError) return fail('quota_unavailable');
@@ -1337,8 +1337,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     let prices: Record<string, number> = {};
     try {
       prices = await this.getAllPrices({ caller: 'adapter.positions.prices' });
-    } catch { /* Missing prices are rejected by mapPosition below. */ }
-    return response.map((p) => this.mapPosition(p, prices, true));
+    } catch { /* Position identity remains usable for closes; missing marks are UNKNOWN. */ }
+    return response.map((p) => this.mapPosition(p, prices));
   }
 
   private async getStrictAccountLeverageForMarket(
@@ -1451,10 +1451,6 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (!Number.isFinite(mapped.baseSize) || !Number.isFinite(mapped.entryPrice)) {
       throw new Error(`PacificaAdapter: strict ${internalSymbol} position mapping is invalid`);
     }
-    if (!Number.isFinite(mapped.markPrice) || mapped.markPrice <= 0) {
-      mapped.markPrice = mapped.entryPrice;
-    }
-    if (!Number.isFinite(mapped.unrealizedPnl)) mapped.unrealizedPnl = 0;
     mapped.reductionContext = { venue: 'pacifica', source: '/positions', account: agentPublicKey,
       internalSymbol, subaccountId, observedAt: Date.now(), baseSize: mapped.baseSize };
     this.reductionObservations.set(this.reductionKey(agentPublicKey, internalSymbol, subaccountId), mapped.reductionContext);
@@ -3993,26 +3989,21 @@ export class PacificaAdapter implements ProtocolAdapter {
     });
   }
 
-  private mapPosition(p: PacificaPositionResponse, oraclePrices: Record<string, number> = {}, requirePrice = false): ProtocolPosition {
+  private mapPosition(p: PacificaPositionResponse, midPrices: Record<string, number> = {}): ProtocolPosition {
     const rawAmount = parseFloat(p.amount || p.size || '0');
     const size = p.side === 'ask' ? -rawAmount : rawAmount;
     const entryPrice = parseFloat(p.entry_price);
     const internalSymbol = this.safeProtocolToInternal(p.symbol);
 
-    let markPrice = p.mark_price ? parseFloat(p.mark_price) : 0;
-    if (!markPrice || markPrice === 0) {
-      markPrice = oraclePrices[internalSymbol];
-    }
-    if (requirePrice && (!Number.isFinite(markPrice) || markPrice <= 0)) {
-      throw new Error(`Fresh Pacifica position price unavailable for ${internalSymbol}`);
-    }
-
-    let unrealizedPnl = p.unrealized_pnl ? parseFloat(p.unrealized_pnl) : 0;
-    if (unrealizedPnl === 0 && Math.abs(size) > 0.0001 && markPrice > 0 && entryPrice > 0 && markPrice !== entryPrice) {
-      unrealizedPnl = size > 0
-        ? (markPrice - entryPrice) * Math.abs(size)
-        : (entryPrice - markPrice) * Math.abs(size);
-    }
+    const venueMark = Number(p.mark_price);
+    const mid = midPrices[internalSymbol];
+    const markPrice = Number.isFinite(venueMark) && venueMark > 0 ? venueMark
+      : Number.isFinite(mid) && mid > 0 ? mid : null;
+    const venuePnl = p.unrealized_pnl == null || String(p.unrealized_pnl).trim() === ''
+      ? NaN : Number(p.unrealized_pnl);
+    const unrealizedPnl = Number.isFinite(venuePnl) ? venuePnl
+      : markPrice !== null && Number.isFinite(entryPrice) && entryPrice > 0
+        ? (markPrice - entryPrice) * size : null;
 
     return {
       internalSymbol,

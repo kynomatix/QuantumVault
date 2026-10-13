@@ -134,7 +134,8 @@ export function marketToDatafeedTicker(market: string): string {
   return `${base}/USDT`;
 }
 
-function fmtPrice(v: number): string {
+function fmtPrice(v: number | null): string {
+  if (v === null) return "unknown";
   if (!Number.isFinite(v)) return "n/a";
   const abs = Math.abs(v);
   const decimals = abs >= 1 ? 2 : abs >= 0.01 ? 4 : abs >= 0.0001 ? 6 : 8;
@@ -870,6 +871,9 @@ export async function buildMarketContext(
     // the context, digest, and decision from being produced.
     const positions = await adapter.getPositions(bot.protocol === "phoenix"
       ? assertPhoenixAiBinding(bot).identity.traderAccountAddress : bot.protocolSubaccountId ?? input.agentPublicKey, undefined);
+    if (positions.some(position => position.baseSize !== 0 && position.markPrice === null)) {
+      throw new Error('Live position mark is UNKNOWN; new-exposure analysis requires current pricing');
+    }
     const openPosition = positions.find((position) => position.internalSymbol.toUpperCase() === market.toUpperCase());
     accountBlock = openPosition
       ? [
