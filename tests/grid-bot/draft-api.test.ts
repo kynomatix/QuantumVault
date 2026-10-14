@@ -14,6 +14,8 @@ vi.mock('../../server/grid-bot/draft-default-deps',()=>({readGridRange:async()=>
 import type { ProtocolMarket } from '../../server/protocol/protocol-types';
 import { defaultPlannerDeps } from '../../server/grid-planner/default-deps';
 import { registerGridBotRoutes } from '../../server/grid-bot/draft-routes';
+import { registerGridPlannerRoutes } from '../../server/grid-planner/routes';
+import { observePacificaConstraints } from '../../server/protocol/market-constraints';
 function memory() {
   const bots=new Map<string,StoredBot>(),levels=new Map<string,StoredLevel[]>();
   return {bots,levels,createDraftWithLevels:vi.fn(async(bot:DraftRecord,l:StoredLevel[])=>{
@@ -47,6 +49,34 @@ describe('server authoritative Grid drafts',()=>{
 const servers:Server[]=[];afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>new Promise<void>(resolve=>{s.close(()=>resolve());s.closeAllConnections();})));});
 async function api(enabled=true) {const {storage,deps}=setup(),app=express();app.use(express.json());registerGridBotRoutes(app,(req,res,next)=>{const wallet=req.headers['x-wallet'];if(!wallet){res.sendStatus(401);return;}(req as typeof req & {walletAddress:string}).walletAddress=String(wallet);next();},{deps,storage:storage as unknown as GridStorage,enabled:()=>enabled});const server=await new Promise<Server>(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});servers.push(server);const address=server.address();if(!address||typeof address==='string')throw Error();return{...{storage,deps},url:'http://127.0.0.1:'+address.port};}
 describe('Grid owner-only routes',()=>{
+  it.each(['grid-bots', 'grid-planner'])('maps time periods on %s read-only routes and shares chart context with range facts', async namespace => {
+    const now = defaultPlannerDeps.now(), duration = 3_600_000, end = Math.floor(now / duration) * duration;
+    const market = { internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC', fullName: 'Bitcoin', maxLeverage: 50, maxLeverageSource: 'venue',
+      constraintObservation: observePacificaConstraints({ tick_size: '0.1', lot_size: '0.01', min_order_size: '10' }, 'BTC-PERP', now) } as ProtocolMarket;
+    const markets = vi.spyOn(defaultPlannerDeps, 'getMarkets').mockResolvedValue([market]);
+    const candles = vi.spyOn(defaultPlannerDeps, 'candles').mockImplementation(async (_market, _tf, count) => Array.from({ length: count }, (_, i) => ({
+      time: end - (count - i) * duration, open: 100, high: 102, low: 98, close: 100, volume: 1,
+      provenance: { source: 'okx', venue: 'okx', basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } })));
+    const { storage, deps } = setup(), app = express();
+    const auth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (!req.headers['x-wallet']) { res.sendStatus(401); return; }
+      (req as express.Request & { walletAddress: string }).walletAddress = 'EXAMPLE'; next();
+    };
+    if (namespace === 'grid-bots') registerGridBotRoutes(app, auth, { deps, storage: storage as unknown as GridStorage, enabled: () => true });
+    else registerGridPlannerRoutes(app, auth, async () => defaultPlannerDeps, true);
+    const server = await new Promise<Server>(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); }); servers.push(server);
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('EXAMPLE listener unavailable');
+    const root = `http://127.0.0.1:${address.port}/api/${namespace}`, query = '?market=BTC-PERP&timeframe=1h&period=week', headers = { 'x-wallet': 'EXAMPLE' };
+    try {
+      expect((await fetch(root + '/chart' + query)).status).toBe(401);
+      const [chart, range] = await Promise.all([fetch(root + '/chart' + query, { headers }), fetch(root + '/range' + query, { headers })]);
+      expect(await chart.json()).toMatchObject({ state: 'available', requestedBars: 252, actualBars: 252 });
+      expect(await range.json()).toMatchObject({ state: 'available', requestedBars: 168, regime: { state: 'available', bars: 200 }, range: { state: 'available', includedBars: 168 } });
+      expect(candles).toHaveBeenCalledTimes(1); expect(storage.createDraftWithLevels).not.toHaveBeenCalled();
+      for (const suffix of ['&period=year', namespace === 'grid-bots' ? '&lookback=100' : '&bars=100', '&extra=1'])
+        expect((await fetch(root + '/range' + query + suffix, { headers })).status).toBe(400);
+    } finally { markets.mockRestore(); candles.mockRestore(); }
+  });
   it('refreshes the selected Pacifica price in draft-only setup while preserving auth and the draft flag',async()=>{
     const markets=vi.spyOn(defaultPlannerDeps,'getMarkets').mockResolvedValue([{internalSymbol:'BTC-PERP',protocolSymbol:'BTC',fullName:'Bitcoin'} as ProtocolMarket]);
     const cached=vi.spyOn(defaultPlannerDeps,'cachedReference').mockReturnValue({price:100,observedAt:defaultPlannerDeps.now()});

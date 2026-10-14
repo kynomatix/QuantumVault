@@ -6,6 +6,7 @@ import { PlannerDirection } from './direction';
 import { PlannerRangeFacts } from './range-facts';
 import { marketSnapshot } from './market-snapshot';
 import { previewGrid, validatePreviewQuery } from './preview';
+import { gridHistoryRequest } from '../../shared/grid-lookback';
 
 export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHandler,
   loadDeps: () => Promise<PlannerDeps> = async () => (await import('./default-deps')).defaultPlannerDeps,
@@ -74,26 +75,26 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     const result = await direction.read();
     if (!res.destroyed) res.json(result);
   }));
-  app.get('/api/grid-planner/range', requireWallet, route(['market', 'timeframe', 'bars'], async (req, res, deps) => {
-    const { market, timeframe, bars } = req.query;
-    if (typeof market !== 'string' || !['15m', '1h', '4h'].includes(String(timeframe)) || !['100', '200'].includes(String(bars))) {
-      res.status(400).json({ state: 'unavailable', reason: 'Choose market, 15m/1h/4h and 100/200 bars' }); return;
+  app.get('/api/grid-planner/range', requireWallet, route(['market', 'timeframe', 'bars', 'period'], async (req, res, deps) => {
+    const { market, timeframe, bars, period } = req.query, window = gridHistoryRequest(timeframe, period, bars);
+    if (typeof market !== 'string' || !window) {
+      res.status(400).json({ state: 'unavailable', reason: 'Choose market, 15m/1h/4h and last day/week/month' }); return;
     }
     const row = (await boundedMetadata(deps)).find(r => r.internalSymbol === market);
     if (!row) { res.status(404).json({ state: 'unavailable', reason: 'Unknown Pacifica market' }); return; }
     const controller = new AbortController(), onClose = () => controller.abort();
-    const timer = setTimeout(onClose, 15_000); res.on('close', onClose);
+    const timer = setTimeout(onClose, window.chartBars > 200 ? 30_000 : 15_000); res.on('close', onClose);
     try {
       charts ??= new PlannerCharts(deps);
-      const chart = await charts.read(market, String(timeframe), Number(bars), controller.signal);
-      const result = await ranges.read(row, String(timeframe) as '15m' | '1h' | '4h', Number(bars) as 100 | 200, deps, controller.signal, chart);
+      const chart = await charts.read(market, String(timeframe), window.chartBars, controller.signal);
+      const result = await ranges.read(row, String(timeframe) as '15m' | '1h' | '4h', window.rangeBars, deps, controller.signal, chart, window.period);
       if (!res.destroyed) res.json(result);
     } finally { clearTimeout(timer); res.off('close', onClose); }
   }));
-  app.get('/api/grid-planner/chart', requireWallet, route(['market', 'timeframe', 'bars'], async (req, res, deps) => {
-    const { market, timeframe, bars } = req.query;
-    if (typeof market !== 'string' || !['15m', '1h', '4h'].includes(String(timeframe)) || !['100', '200'].includes(String(bars))) {
-      res.status(400).json({ state: 'unavailable', reason: 'Choose market, 15m/1h/4h and 100/200 bars' }); return;
+  app.get('/api/grid-planner/chart', requireWallet, route(['market', 'timeframe', 'bars', 'period'], async (req, res, deps) => {
+    const { market, timeframe, bars, period } = req.query, window = gridHistoryRequest(timeframe, period, bars);
+    if (typeof market !== 'string' || !window) {
+      res.status(400).json({ state: 'unavailable', reason: 'Choose market, 15m/1h/4h and last day/week/month' }); return;
     }
     const row = (await boundedMetadata(deps)).find(r => r.internalSymbol === market);
     if (!row) { res.status(404).json({ state: 'unavailable', reason: 'Unknown Pacifica market' }); return; }
@@ -101,7 +102,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     res.on('close', onClose);
     try {
       charts ??= new PlannerCharts(deps);
-      const result = await charts.read(market, String(timeframe), Number(bars), controller.signal);
+      const result = await charts.read(market, String(timeframe), window.chartBars, controller.signal);
       if (!res.destroyed) res.status(result.state === 'available' ? 200 : 503).json(result);
     } finally { res.off('close', onClose); }
   }));

@@ -13,6 +13,12 @@ const bars = (source: 'okx' | 'gate' | 'hyperliquid' | 'pacifica', start: number
     provenance: { source, venue: source, basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'finalized' } } as PlannerCandle));
 afterEach(() => vi.resetAllMocks());
 describe('shared native perpetual chart pool', () => {
+  it('skips Hyperliquid beyond its 5000-candle limit and continues to Pacifica', async () => {
+    const duration = PERP_CHART_INTERVAL_MS['1h'], end = Math.floor(Date.now() / duration) * duration, start = end - 5001 * duration;
+    mocks.read.mockResolvedValue([]); mocks.pacifica.mockResolvedValue(bars('pacifica', end - 3 * duration, duration));
+    expect(await chartPoolCandles('BTC', '1h', start, end, new AbortController().signal)).toHaveLength(3);
+    expect(mocks.read.mock.calls.map(c => c[0])).toEqual(['okx', 'gate']);
+  });
   it.each(['1h', '2h', '4h', '12h', '1d'])('serves %s through Pacifica after earlier sources fail, skipping unsupported Gate intervals', async timeframe => {
     const duration = PERP_CHART_INTERVAL_MS[timeframe], end = Math.floor(Date.now() / duration) * duration, start = end - 3 * duration;
     mocks.read.mockResolvedValue([]); mocks.pacifica.mockResolvedValue(bars('pacifica', start, duration));

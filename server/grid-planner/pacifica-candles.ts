@@ -1,11 +1,12 @@
 import { pacificaQuota } from '../protocol/pacifica/pacifica-quota';
 import { validateCandles } from './chart';
 import type { PlannerCandle } from './types';
+import { GRID_HISTORY_MAX_BARS } from '../../shared/grid-lookback';
 
 // Venue trade candles, not mark/index candles: https://docs.pacifica.fi/api-documentation/api/rest-api/markets/get-candle-data
 export async function pacificaPlannerCandles(symbol: string, timeframe: string, bars: number,
   end: number, signal: AbortSignal): Promise<PlannerCandle[]> {
-  if (!['15m', '1h', '4h'].includes(timeframe) || ![100, 200].includes(bars)) return [];
+  if (!['15m', '1h', '4h'].includes(timeframe) || !Number.isSafeInteger(bars) || bars < 1 || bars > GRID_HISTORY_MAX_BARS) return [];
   const duration = PERP_CHART_INTERVAL_MS[timeframe];
   return pacificaPerpWindow(symbol, timeframe, Math.floor(end / duration) * duration - bars * duration, end, signal, end, bars);
 }
@@ -20,7 +21,8 @@ export async function pacificaPerpWindow(symbol: string, timeframe: string, star
   signal.throwIfAborted();
   const duration = PERP_CHART_INTERVAL_MS[timeframe];
   if (!duration || !/^[A-Za-z0-9-]+$/.test(symbol) || !Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start >= end) return [];
-  const bars = Math.min(maxPageBars, Math.ceil((end - start) / duration));
+  if (!Number.isSafeInteger(maxPageBars) || maxPageBars < 1) return [];
+  const bars = Math.min(4_000, maxPageBars, Math.ceil((end - start) / duration));
   // Optional chart work preserves the adapter's critical-request headroom. No quota waiting/retries.
   const refuse = (reason: string) => { console.info(`[GridPlannerCandles] source=pacifica market=${symbol}-PERP reason=${reason}`); return []; };
   const candles: PlannerCandle[] = [];

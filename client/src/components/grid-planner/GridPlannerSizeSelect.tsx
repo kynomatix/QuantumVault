@@ -6,7 +6,7 @@ export function GridPlannerSizeSelect({ id, label, value, side, startingPosition
   id: string; label: string; value: string; side: string; startingPosition?: boolean; enabled?: boolean; onChange: (value: string) => void;
 }) {
   const hint = enabled ? plannerSizeHint(side, value, startingPosition)
-    : 'Enable “Start with a position at the current price” to choose how that position is closed in pieces.';
+    : 'Only used when "Start with a position" is on.';
   return <div className="space-y-1.5">
     <Label htmlFor={id}>{label}</Label>
     <Select value={value} onValueChange={onChange} disabled={!enabled}>

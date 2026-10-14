@@ -1,4 +1,5 @@
 import Decimal from 'decimal.js';
+import { GRID_HISTORY_MAX_BARS } from '../../../shared/grid-lookback';
 import type { PlannerChart, PlannerMarket, PlannerPreview } from '../../../server/grid-planner/types';
 export type { PlannerChart, PlannerMarket, PlannerPreview };
 export const PLANNING_BANNER = 'Planning only — no orders are placed';
@@ -18,14 +19,13 @@ export function plannerShortcutReason(market: string, hasFreshPrice: boolean, er
   return !market ? 'Choose a market to use the presets and width slider.'
     : !hasFreshPrice && error && !loading ? `Fresh price unavailable: ${error}. Refresh price to retry.` : '';
 }
-export function plannerSizeHint(side: string, scale: string, startingPosition = false): string {
-  const action = startingPosition ? side === 'long' ? 'sold to close the starting long' : 'bought back to close the starting short'
-    : side === 'long' ? 'bought' : 'sold short';
-  const move = startingPosition ? side === 'long' ? 'rises' : 'falls' : side === 'long' ? 'falls' : 'rises';
-  const near = startingPosition ? side === 'long' ? 'above' : 'below' : side === 'long' ? 'below' : 'above';
-  return scale === 'flat' ? `Equal quote value is ${action} at each level; base quantities vary with price and lot rounding.`
-    : scale === 'ascending' ? `More quote value is ${action} as price ${move} further from the entry price; base quantities depend on price and lot rounding.`
-      : `More quote value is ${action} at levels just ${near} the entry price; base quantities depend on price and lot rounding.`;
+export function plannerSizeHint(_side: string, scale: string, startingPosition = false): string {
+  if (startingPosition) return scale === 'flat' ? 'Your starting position is closed in equal pieces at each level.'
+    : scale === 'ascending' ? 'Bigger pieces are closed the further price moves in your favour.'
+      : 'Bigger pieces are closed at the levels nearest the entry price.';
+  return scale === 'flat' ? 'Every grid order is the same size.'
+    : scale === 'ascending' ? 'Orders get bigger the further price moves from the entry price.'
+      : 'Orders are biggest close to the entry price.';
 }
 
 /** A shortcut uses only an unexpired, observed Pacifica price; never chart closes. */
@@ -93,7 +93,7 @@ export function isPlannerChart(v: unknown): v is PlannerChart {
   if (!record(v)) return false;
   if (v.state === 'unavailable') return typeof v.reason === 'string';
   return v.state === 'available' && typeof v.market === 'string' && ['15m', '1h', '4h'].includes(v.timeframe)
-    && [100, 200].includes(v.requestedBars) && clock(v.retrievedAt) && clock(v.cacheInsertedAt)
+    && Number.isSafeInteger(v.requestedBars) && v.requestedBars >= 1 && v.requestedBars <= GRID_HISTORY_MAX_BARS && clock(v.retrievedAt) && clock(v.cacheInsertedAt)
     && typeof v.validForMs === 'number' && v.validForMs > 0 && v.validForMs <= 300_000
     && Array.isArray(v.candles) && v.candles.length > 0 && v.candles.length <= v.requestedBars
     && v.actualBars === v.candles.length && v.partial === (v.actualBars < v.requestedBars)

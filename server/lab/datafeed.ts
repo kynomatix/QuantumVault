@@ -2566,8 +2566,10 @@ async function fetchDirectPerpCandles(
 export async function readPlannerPerpSource(provider: "okx" | "gate" | "hyperliquid", symbol: string,
   timeframe: string, startMs: number, endMs: number, signal: AbortSignal): Promise<ProvenancedOHLCV[]> {
   throwIfAborted(signal);
+  const duration = getTimeframeSeconds(timeframe) * 1_000;
+  const budgetMs = duration && (endMs - startMs) / duration > 200 ? 6_000 : 3_000;
   const result = await fetchDirectPerpCandles(symbol, timeframe, startMs, endMs,
-    Date.now() + 3_000, 'grid-bot', signal, provider);
+    Date.now() + budgetMs, 'grid-bot', signal, provider);
   throwIfAborted(signal);
   return deduplicateCandles(result.candles.filter(c => c.provenance.source === provider
     && c.provenance.venue === provider && c.provenance.basis === 'perp'

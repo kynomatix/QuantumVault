@@ -3,7 +3,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { GridRegimeHint } from '../../client/src/components/grid-planner/GridRegimeHint';
-import { gridSetupAccess, gridSetupForm, gridSetupIntent, isGridRegime } from '../../client/src/lib/grid-setup-view';
+import { gridSetupAccess, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange } from '../../client/src/lib/grid-setup-view';
+import { gridHistoryWindow, gridHistoryRequest } from '../../shared/grid-lookback';
 import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
@@ -22,6 +23,45 @@ const market = marketSnapshot({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC
 const preview = previewGrid({ market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat', seed: true,
   leverage: '1', investment: '1000', stop: '70', fee: '0' }, market, now);
 afterEach(() => vi.useRealTimers());
+describe('Market range ownership and time windows', () => {
+  it.each([['manual', null, 'manual'], ['manual', 10, 'percent'], ['auto', null, 'auto']] as const)
+    ('clears every old-market price before resolving a %s range', (source, percent, mode) => {
+      const old = { ...gridSetupForm(), market: 'BTC-PERP', lower: '80', upper: '120', stop: '70' };
+      const next = gridMarketChange(old, 'ETH-PERP', source, percent);
+      expect(next.form).toMatchObject({ market: 'ETH-PERP', lower: '', upper: '', stop: '' });
+      expect(next.mode).toBe(mode); expect(next.note).toBe('Enter a range for ETH-PERP');
+      expect(plannerChartRange(next.form.lower, next.form.upper, next.form.stop)).toBeNull();
+      expect(gridMarketChange(next.form, '', source, percent).note).toBe('');
+    });
+  it.each([
+    ['15m', 'day', 96, 144], ['15m', 'week', 672, 1008], ['15m', 'month', 2880, 4320],
+    ['1h', 'day', 24, 100], ['1h', 'week', 168, 252], ['1h', 'month', 720, 1080],
+    ['4h', 'day', 6, 100], ['4h', 'week', 42, 100], ['4h', 'month', 180, 270],
+  ])('maps %s last %s to a range and context without shrinking the period', (timeframe, period, rangeBars, chartBars) => {
+    expect(gridHistoryWindow(String(timeframe), String(period))).toMatchObject({ rangeBars, chartBars });
+  });
+  it('defaults to last week and rejects unbounded or mixed requests while retaining legacy draft metadata', () => {
+    expect(gridSetupForm().rangeWindow).toBe('week');
+    expect(gridHistoryRequest('1h', undefined, '200')).toMatchObject({ rangeBars: 200, chartBars: 200 });
+    for (const args of [['2h', 'week', undefined], ['1h', 'year', undefined], ['1h', 'week', '100'], ['1h', undefined, '4321']])
+      expect(gridHistoryRequest(...args as [string, string | undefined, string | undefined])).toBeNull();
+    const form = { ...gridSetupForm(), lower: '80', upper: '120' };
+    expect(gridSetupIntent(form, '70', 'auto').rangeSource).toBe('auto');
+    expect(gridSetupIntent(form, '70', 'auto', true)).toMatchObject({ rangeSource: 'manual', lowerPrice: '80', upperPrice: '120', lookback: 100 });
+  });
+  it('disposes an old-market pending shortcut before accepting a fresh new-market price', async () => {
+    let resolveOld!: (v: unknown) => void;
+    const changed = vi.fn(), observedOld = vi.fn();
+    const old = new PlannerPriceRefresh('BTC-PERP', () => new Promise(r => { resolveOld = r; }), observedOld, vi.fn(), () => now);
+    const pending = old.apply(10, changed); await Promise.resolve(); old.dispose();
+    const freshMarket = { ...market, market: 'ETH-PERP', reference: { state: 'available' as const, value: { price: '200', observedAt: now, expiresAt: now + 60_000, label: 'Cached Pacifica book reference price' as const } } };
+    const fresh = new PlannerPriceRefresh('ETH-PERP', async () => ({ state: 'available', retrievedAt: now, markets: [freshMarket] }), vi.fn(), vi.fn(), () => now);
+    expect(await fresh.apply(10, changed)).toBe(true);
+    resolveOld({ state: 'available', retrievedAt: now, markets: [market] });
+    expect(await pending).toBe(false); expect(observedOld).not.toHaveBeenCalled();
+    expect(changed).toHaveBeenCalledTimes(1); expect(changed).toHaveBeenCalledWith({ lower: '180', upper: '220' }); fresh.dispose();
+  });
+});
 const priceResponse = (price: string, observedAt = now, retrievedAt = observedAt) => ({ state: 'available', retrievedAt,
   markets: [{ ...market, reference: { state: 'available', value: { price, observedAt, expiresAt: observedAt + 60_000, label: 'Cached Pacifica book reference price' } } }] });
 describe('Planner fresh-price shortcuts and visibility', () => {
@@ -135,32 +175,28 @@ describe('Planner fresh-price shortcuts and visibility', () => {
   });
 });
 describe('Planner client authority boundaries', () => {
-  it('size labels describe distance and quote allocation for both sides and both order roles', () => {
+  it('uses the owner-approved sizing hints verbatim for both directions', () => {
     expect(ORDER_SIZES).toEqual([
       { value: 'flat', label: 'Equal' }, { value: 'ascending', label: 'Larger further from entry price' }, { value: 'descending', label: 'Larger near entry price' },
     ]);
-    for (const side of ['long', 'short']) for (const seed of [false, true]) {
-      const move = side === 'long' ? (seed ? 'rises' : 'falls') : (seed ? 'falls' : 'rises');
-      const near = side === 'long' ? (seed ? 'above' : 'below') : (seed ? 'below' : 'above');
-      expect(plannerSizeHint(side, 'ascending', seed)).toContain(`price ${move} further`);
-      expect(plannerSizeHint(side, 'descending', seed)).toContain(`just ${near} the entry price`);
-      expect(plannerSizeHint(side, 'flat', seed)).toContain('Equal quote value');
-      expect(plannerSizeHint(side, 'flat', seed)).toContain('base quantities vary');
+    for (const side of ['long', 'short']) {
+      expect(plannerSizeHint(side, 'flat')).toBe('Every grid order is the same size.');
+      expect(plannerSizeHint(side, 'ascending')).toBe('Orders get bigger the further price moves from the entry price.');
+      expect(plannerSizeHint(side, 'descending')).toBe('Orders are biggest close to the entry price.');
+      expect(plannerSizeHint(side, 'flat', true)).toBe('Your starting position is closed in equal pieces at each level.');
+      expect(plannerSizeHint(side, 'ascending', true)).toBe('Bigger pieces are closed the further price moves in your favour.');
+      expect(plannerSizeHint(side, 'descending', true)).toBe('Bigger pieces are closed at the levels nearest the entry price.');
     }
-    expect(plannerSizeHint('long', 'ascending')).toContain('bought');
-    expect(plannerSizeHint('short', 'ascending')).toContain('sold short');
-    expect(plannerSizeHint('long', 'ascending', true)).toContain('sold to close the starting long');
-    expect(plannerSizeHint('short', 'ascending', true)).toContain('bought back to close the starting short');
   });
   it('starting-position sizing is disabled with a reason until enabled, then explains the selected direction', () => {
-    const props = { id: 'grid-profitScale', label: 'How the starting position is taken profit on', value: 'ascending', side: 'short', startingPosition: true, onChange: () => {} };
+    const props = { id: 'grid-profitScale', label: 'Take-profit sizes', value: 'ascending', side: 'short', startingPosition: true, onChange: () => {} };
     const disabled = renderToStaticMarkup(createElement(GridPlannerSizeSelect, { ...props, enabled: false }));
-    expect(disabled).toContain('How the starting position is taken profit on');
-    expect(disabled).toContain('disabled=""'); expect(disabled).toContain('to choose how that position is closed in pieces.');
+    expect(disabled).toContain('Take-profit sizes');
+    expect(disabled).toContain('disabled=""'); expect(disabled).toContain('Only used when &quot;Start with a position&quot; is on.');
     expect(disabled).toContain('aria-describedby="grid-profitScale-hint"');
     expect(disabled).toContain('Entry price = the price when your bot starts');
     const enabled = renderToStaticMarkup(createElement(GridPlannerSizeSelect, { ...props, enabled: true }));
-    expect(enabled).not.toContain('disabled=""'); expect(enabled).toContain('bought back to close the starting short'); expect(enabled).toContain('price falls further');
+    expect(enabled).not.toContain('disabled=""'); expect(enabled).toContain('Bigger pieces are closed the further price moves in your favour.');
     expect(enabled).toContain('Entry price = the price when your bot starts');
   });
   it('blank, explicit zero and decimal percentages preserve meaning without floats', () => {
@@ -342,7 +378,7 @@ describe('Planner client authority boundaries', () => {
     expect(sheet.split(stopHint)).toHaveLength(2); expect(panel('stop')).toContain(stopHint);
     for (const control of ['id="grid-seed"', 'id="grid-entryScale"', 'id="grid-profitScale"', 'startingPosition enabled={form.seed}'])
       expect(panel('orders')).toContain(control);
-    expect(panel('fees')).toContain("choice('bars'"); expect(panel('fees')).toContain('Observation and sizing details');
+    expect(panel('fees')).toContain("choice('rangeWindow'"); expect(panel('fees')).toContain('Observation and sizing details');
     expect(panel('fees')).toContain('testId="grid-advanced-toggle"');
     expect(sheet).toContain('grid grid-cols-1 sm:grid-cols-2');
   });

@@ -7,11 +7,14 @@ import { PlannerCharts } from '../grid-planner/chart';
 import { defaultPlannerDeps } from '../grid-planner/default-deps';
 import { readGridRange } from './draft-default-deps';
 import { PlannerRangeFacts } from '../grid-planner/range-facts';
+import { gridHistoryRequest } from '../../shared/grid-lookback';
 import { marketSnapshot } from '../grid-planner/market-snapshot';
 import type {GridLifecycleStorage} from './lifecycle-storage';
 
 const uuid=z.string().uuid();
 const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),lookback:z.enum(['100','200'])}).strict();
+const advisoryQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),
+  lookback:z.enum(['100','200']).optional(),period:z.enum(['day','week','month']).optional()}).strict();
 export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean;lifecycle?:Pick<GridLifecycleStorage,'request'>}) {
   // Unit 4 is buildable and reviewable, but no production money route is enabled.
   app.post('/api/grid-bots/:id/start',requireWallet,(_req,res)=>{res.status(503).json({error:'Grid live launch requires the owner’s separate launch authorization.'});});
@@ -65,11 +68,13 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
     if(!res.destroyed)res.json({state:'available',retrievedAt:defaultPlannerDeps.now(),markets:rows.map(row=>marketSnapshot(row,defaultPlannerDeps))});
   },true));
   app.get('/api/grid-bots/range',requireWallet,gate,work(async(req,res)=>{
-    const parsed=rangeQuery.safeParse(req.query);if(!parsed.success){res.status(400).json({error:'Invalid advisory request'});return;}
+    const parsed=advisoryQuery.safeParse(req.query);if(!parsed.success){res.status(400).json({error:'Invalid advisory request'});return;}
+    const window=gridHistoryRequest(parsed.data.timeframe,parsed.data.period,parsed.data.lookback);if(!window){res.status(400).json({error:'Invalid advisory window'});return;}
     const rows=await defaultPlannerDeps.getMarkets(),row=rows.find(m=>m.internalSymbol===parsed.data.market);
     if(!row){res.status(400).json({error:'Unknown Pacifica market'});return;}
-    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15_000);res.once('close',()=>controller.abort());
-    try{const value=await rangeFacts.read(row,parsed.data.timeframe,Number(parsed.data.lookback) as 100|200,defaultPlannerDeps,controller.signal);if(!res.destroyed)res.json(value);}finally{clearTimeout(timer);}
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),window.chartBars>200?30_000:15_000);res.once('close',()=>controller.abort());
+    try{const chart=await charts.read(parsed.data.market,parsed.data.timeframe,window.chartBars,controller.signal);
+      const value=await rangeFacts.read(row,parsed.data.timeframe,window.rangeBars,defaultPlannerDeps,controller.signal,chart,window.period);if(!res.destroyed)res.json(value);}finally{clearTimeout(timer);}
   },true));
   app.get('/api/grid-bots/suggest-range',requireWallet,gate,work(async(req,res)=>{
     const parsed=rangeQuery.safeParse(req.query);if(!parsed.success){res.status(400).json({error:'Invalid range request'});return;}
@@ -77,10 +82,11 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
     try {res.json(await readGridRange({...parsed.data,lookback:Number(parsed.data.lookback) as 100|200},controller.signal));}finally{clearTimeout(timer);}
   },true));
   app.get('/api/grid-bots/chart',requireWallet,gate,work(async(req,res)=>{
-    const parsed=rangeQuery.safeParse(req.query);if(!parsed.success){res.status(400).json({error:'Invalid chart request'});return;}
+    const parsed=advisoryQuery.safeParse(req.query);if(!parsed.success){res.status(400).json({error:'Invalid chart request'});return;}
+    const window=gridHistoryRequest(parsed.data.timeframe,parsed.data.period,parsed.data.lookback);if(!window){res.status(400).json({error:'Invalid chart window'});return;}
     const markets=await defaultPlannerDeps.getMarkets();if(!markets.some(m=>m.internalSymbol===parsed.data.market)){res.status(400).json({error:'Unknown Pacifica market'});return;}
     const controller=new AbortController();res.once('close',()=>controller.abort());
-    res.json(await charts.read(parsed.data.market,parsed.data.timeframe,Number(parsed.data.lookback),controller.signal));
+    res.json(await charts.read(parsed.data.market,parsed.data.timeframe,window.chartBars,controller.signal));
   },true));
   app.post('/api/grid-bots/preview',requireWallet,gate,work(async(req,res)=>{
     const p=gridPreviewRequestSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid preview request'});return;}

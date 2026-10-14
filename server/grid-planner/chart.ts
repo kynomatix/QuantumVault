@@ -1,4 +1,5 @@
 import type { PlannerChart, PlannerDeps } from './types';
+import { GRID_HISTORY_MAX_BARS } from '../../shared/grid-lookback';
 
 const TTL: Record<string, number> = { '15m': 60_000, '1h': 120_000, '4h': 300_000 };
 export function validateCandles(candles: Awaited<ReturnType<PlannerDeps['candles']>>, now: number): boolean {
@@ -20,6 +21,9 @@ export class PlannerCharts {
   private waiting = 0;
   constructor(private deps: PlannerDeps) {}
   async read(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<PlannerChart> {
+    if (!TTL[timeframe] || !Number.isSafeInteger(bars) || bars < 1 || bars > GRID_HISTORY_MAX_BARS)
+      return { state: 'unavailable', reason: 'Unsupported chart history window' };
+    const budgetMs = bars > 200 ? 30_000 : 15_000;
     const key = `${market}:${timeframe}:${bars}`, now = this.deps.now(), cached = this.cache.get(key);
     if (cached && now >= cached.retrievedAt && now < cached.retrievedAt + TTL[timeframe]) {
       this.cache.delete(key); this.cache.set(key, cached);
@@ -32,13 +36,13 @@ export class PlannerCharts {
       return { state: 'unavailable', reason: 'Planner chart is busy; refresh later' };
     if (!job) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15_000);
+      const timer = setTimeout(() => controller.abort(), budgetMs);
       const created = { controller, users: 0, promise: Promise.resolve<PlannerChart>({ state: 'unavailable', reason: 'Not started' }) };
       this.starts.push(now); this.jobs.set(key, created);
       created.promise = Promise.resolve().then(() => this.deps.candles(market, timeframe, bars, controller.signal)).then(raw => {
         const retrievedAt = this.deps.now(), candles = raw.slice(-bars);
         if (controller.signal.aborted) return { state: 'unavailable' as const, reason: 'Chart deadline or cancellation' };
-        if (!validateCandles(candles, retrievedAt)) return { state: 'unavailable' as const, reason: 'The price sources did not return usable candles with verified perpetual provenance.' };
+        if (!validateCandles(candles, retrievedAt)) return { state: 'unavailable' as const, reason: 'No perpetual source could cover this window within its history, quota and request limits. Try a shorter period or refresh later.' };
         const response: Extract<PlannerChart, { state: 'available' }> = { state: 'available', market, timeframe, requestedBars: bars,
           actualBars: candles.length, partial: candles.length < bars, retrievedAt, cacheInsertedAt: retrievedAt,
           validForMs: TTL[timeframe], candles };
@@ -60,7 +64,7 @@ export class PlannerCharts {
         resolve(value);
       };
       const abort = () => finish({ state: 'unavailable', reason: 'Request cancelled' });
-      const deadline = setTimeout(() => finish({ state: 'unavailable', reason: 'Chart deadline exceeded' }), 15_000);
+      const deadline = setTimeout(() => finish({ state: 'unavailable', reason: 'Chart deadline exceeded' }), budgetMs);
       signal.addEventListener('abort', abort, { once: true });
       owned.promise.then(finish);
     });

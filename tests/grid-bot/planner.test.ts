@@ -1,5 +1,5 @@
 import { plannerRegime } from '../../server/grid-planner/regime';
-import { PlannerRangeFacts } from '../../server/grid-planner/range-facts';
+import { PlannerRangeFacts, timeWindowRange } from '../../server/grid-planner/range-facts';
 import { PlannerCharts } from '../../server/grid-planner/chart';
 import type { PlannerCandle } from '../../server/grid-planner/types';
 import type { ProvenancedOHLCV } from '../../server/lab/datafeed';
@@ -129,6 +129,43 @@ describe('Persistent finalized timeframe ADX and independent auto-range', () => 
     return Array.from({length:count},(_,i)=>({time:end-(count-i)*duration,open:100,high:102,low:98,close:100,volume:1,
       provenance:{source:'okx',venue:'okx',basis:'perp',proxy:'direct',finality:'finalized',timeSemantic:'open_time'}}));
   };
+  it.each(['okx', 'gate', 'hyperliquid', 'pacifica'] as const)('uses last-week high/low and a half ATR buffer on shared %s chart history', async venue => {
+    const candles: PlannerCandle[] = history(252).map(c => venue === 'pacifica'
+      ? { ...c, provenance: { ...c.provenance, source: 'pacifica', venue: 'pacifica' } }
+      : { ...c, provenance: { ...c.provenance, source: venue, venue } });
+    candles[0].high = 500; // Context must not become the selected period's high.
+    const d = { ...deps(), candles: vi.fn(async () => candles), rangeCandles: vi.fn(async () => []) };
+    const charts = new PlannerCharts(d), signal = new AbortController().signal;
+    const [chart, rangeChart] = await Promise.all([charts.read('BTC-PERP', '1h', 252, signal), charts.read('BTC-PERP', '1h', 252, signal)]);
+    const result = await new PlannerRangeFacts().read(row(), '1h', 168, d, signal, rangeChart, 'week');
+    expect(chart).toMatchObject({ state: 'available', actualBars: 252, partial: false });
+    expect(result.regime).toMatchObject({ state: 'available', venue, bars: 200 });
+    expect(result.range).toMatchObject({ state: 'available', includedBars: 168, lowerPrice: '96', upperPrice: '104', atr: '4', buffer: '2' });
+    expect(d.candles).toHaveBeenCalledTimes(1); expect(d.rangeCandles).not.toHaveBeenCalled();
+  });
+  it('covers a six-bar last day on 4h using context for ATR and the unchanged ADX minimum', async () => {
+    const duration = 14_400_000, end = Math.floor(now / duration) * duration;
+    const candles = history().map((c, i) => ({ ...c, time: end - (100 - i) * duration }));
+    const d = { ...deps(), rangeCandles: vi.fn(async () => candles) };
+    const result = await new PlannerRangeFacts().read(row(), '4h', 6, d, new AbortController().signal, undefined, 'day');
+    expect(result.range).toMatchObject({ state: 'available', includedBars: 6, lowerPrice: '96', upperPrice: '104' });
+    expect(result.regime).toMatchObject({ state: 'available', bars: 100 });
+    expect(d.rangeCandles).toHaveBeenCalledWith('BTC-PERP', '4h', 100, expect.any(AbortSignal));
+  });
+  it('keeps independent ADX while explaining incomplete period coverage', async () => {
+    const d = { ...deps(), rangeCandles: vi.fn(async () => history(28)) };
+    const result = await new PlannerRangeFacts().read(row(), '1h', 168, d, new AbortController().signal, undefined, 'week');
+    expect(result.regime.state).toBe('available'); expect(result.range.state).toBe('unavailable');
+    if (result.range.state === 'unavailable') expect(result.range.reason).toContain('okx returned 28 of 168 finalized bars');
+  });
+  it.each(['gap', 'mixed', 'forming', 'stale'] as const)('refuses a %s time window instead of presenting a narrower auto-range', kind => {
+    const candles = history(1080);
+    if (kind === 'gap') candles[400].time += 1;
+    if (kind === 'mixed') candles[400].provenance.venue = 'gate';
+    if (kind === 'forming') candles[500].provenance.finality = 'forming';
+    if (kind === 'stale') candles.forEach(c => { c.time -= 3_600_000; });
+    expect(timeWindowRange('BTC-PERP', '1h', 'month', candles, now).state).toBe('unavailable');
+  });
   it('computes a valid 28-candle advisory and preserves selected market and timeframe provenance',()=>{
     expect(plannerRegime('BTC-PERP','1h',history(28),now)).toMatchObject({state:'available',adx:0,label:'ranging',market:'BTC-PERP',timeframe:'1h',venue:'okx',bars:28});
     expect(plannerRegime('BTC-PERP','1h',history(27),now)).toEqual({state:'unavailable',reason:'ADX needs 28 bars'});

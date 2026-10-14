@@ -140,6 +140,43 @@ describe('Planner fresh Pacifica price observations', () => {
   });
 });
 describe('Planner real chart dependency path', () => {
+  it('continues past a short first source to full month context without mixing sources', async () => {
+    const step = 900_000, end = Math.floor(Date.now() / step) * step;
+    const series = (count: number, venue: 'okx' | 'gate') => Array.from({ length: count }, (_, i) => ({ time: end - (count - i) * step,
+      open: 100, high: 110, low: 90, close: 101, volume: 1,
+      provenance: { source: venue, venue, basis: 'perp' as const, proxy: 'direct' as const, finality: 'finalized' as const, timeSemantic: 'open_time' as const } }));
+    const primary = vi.spyOn(datafeed, 'readPlannerPerpSource').mockImplementation(async provider => series(provider === 'okx' ? 200 : 4320, provider === 'okx' ? 'okx' : 'gate'));
+    vi.stubGlobal('fetch', vi.fn());
+    const result = await defaultPlannerDeps.candles('BTC-PERP', '15m', 4320, new AbortController().signal);
+    expect(result).toHaveLength(4320); expect(result.every(c => c.provenance.source === 'gate')).toBe(true);
+    expect(primary.mock.calls.map(c => c[0])).toEqual(['okx', 'gate']); assertReadOnly();
+  });
+  it('pages Pacifica month context within 4000 candles and claims background quota for each page', async () => {
+    const step = 900_000, end = Math.floor(Date.now() / step) * step;
+    const transport = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input)), start = Number(url.searchParams.get('start_time')), stop = Number(url.searchParams.get('end_time')) + 1;
+      const count = (stop - start) / step;
+      return json({ success: true, data: Array.from({ length: count }, (_, i) => nativeRow(start + i * step, '15m', step)) });
+    });
+    vi.stubGlobal('fetch', transport);
+    const result = await pacificaPlannerCandles('BTC', '15m', 4320, end, new AbortController().signal);
+    expect(result).toHaveLength(4320); expect(transport).toHaveBeenCalledTimes(2);
+    const urls = transport.mock.calls.map(c => new URL(String(c[0])));
+    expect(urls.every(u => Number(u.searchParams.get('limit')) <= 4000)).toBe(true);
+    expect(Number(urls[0].searchParams.get('end_time')) + 1).toBe(Number(urls[1].searchParams.get('start_time')));
+    expect(sentinels.quota).toHaveBeenCalledTimes(2); assertReadOnly();
+  });
+  it('stops Pacifica paging immediately when the second background quota claim is refused', async () => {
+    const step = 900_000, end = Math.floor(Date.now() / step) * step;
+    sentinels.quota.mockReturnValueOnce(true).mockReturnValue(false);
+    const transport = vi.fn(async (input: string | URL | Request) => {
+      const start = Number(new URL(String(input)).searchParams.get('start_time'));
+      return json({ success: true, data: Array.from({ length: 4000 }, (_, i) => nativeRow(start + i * step, '15m', step)) });
+    });
+    vi.stubGlobal('fetch', transport);
+    expect(await pacificaPlannerCandles('BTC', '15m', 4320, end, new AbortController().signal)).toEqual([]);
+    expect(transport).toHaveBeenCalledTimes(1); expect(sentinels.quota).toHaveBeenCalledTimes(2); assertReadOnly();
+  });
   it.each([
     ['timeout', new DOMException('EXAMPLE timeout', 'TimeoutError')],
     ['timeout', { name: 'TimeoutError', message: 'EXAMPLE timeout' }],

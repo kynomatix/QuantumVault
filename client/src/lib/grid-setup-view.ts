@@ -2,19 +2,25 @@ import type { GridIntent } from '../../../shared/grid-draft';
 import type { GridRegime } from '../../../shared/grid-regime';
 
 export const GRID_SETUP_INITIAL = { market: '', side: 'long', lower: '', upper: '', intervals: '10', entryScale: 'flat', profitScale: 'flat',
-  seed: true, leverage: '1', investment: '', stop: '', feePercent: '', timeframe: '1h', bars: '100' };
+  seed: true, leverage: '1', investment: '', stop: '', feePercent: '', timeframe: '1h', bars: '100', rangeWindow: 'week' };
 export type GridSetupForm = typeof GRID_SETUP_INITIAL;
+/** Clear old-market geometry synchronously, before either new-market request resolves. */
+export function gridMarketChange(form: GridSetupForm, market: string, source: 'manual' | 'auto', percent: number | null) {
+  return { form: { ...form, market, lower: '', upper: '', stop: '' },
+    mode: source === 'auto' ? 'auto' as const : percent !== null ? 'percent' as const : 'manual' as const,
+    note: market ? `Enter a range for ${market}` : '' };
+}
 export function gridSetupForm(intent?: GridIntent): GridSetupForm {
   return intent ? { ...GRID_SETUP_INITIAL, market: intent.market, side: intent.direction, lower: intent.lowerPrice, upper: intent.upperPrice,
     intervals: String(intent.gridCount), entryScale: intent.entryScaleType, profitScale: intent.profitScaleType, seed: intent.seedAtCreation,
     leverage: intent.leverage, investment: intent.totalInvestment, stop: intent.stopPrice, timeframe: intent.timeframe, bars: String(intent.lookback) } : { ...GRID_SETUP_INITIAL };
 }
-export function gridSetupIntent(form: GridSetupForm, stop: string, rangeSource: 'manual' | 'auto'): GridIntent {
+export function gridSetupIntent(form: GridSetupForm, stop: string, rangeSource: 'manual' | 'auto', timeRangeApplied = false): GridIntent {
   return { schemaVersion: 1, protocol: 'pacifica', market: form.market, direction: form.side as GridIntent['direction'],
     lowerPrice: form.lower, upperPrice: form.upper, stopPrice: stop, gridCount: Number(form.intervals),
     entryScaleType: form.entryScale as GridIntent['entryScaleType'], profitScaleType: form.profitScale as GridIntent['profitScaleType'],
     seedAtCreation: form.seed, totalInvestment: form.investment, leverage: form.leverage, timeframe: form.timeframe as GridIntent['timeframe'],
-    lookback: Number(form.bars) as GridIntent['lookback'], rangeSource };
+    lookback: Number(form.bars) as GridIntent['lookback'], rangeSource: timeRangeApplied ? 'manual' : rangeSource };
 }
 export function gridSetupAccess(planner: boolean, drafts: boolean, start: boolean, worker: boolean) {
   return { setup: planner || drafts, drafts, live: drafts && start && worker };
