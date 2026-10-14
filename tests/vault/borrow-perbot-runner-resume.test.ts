@@ -126,6 +126,9 @@ vi.mock("../../server/vault/jupiter-lend-borrow-executor", () => ({
   executeBorrowOpen: h.executeBorrowOpenMock,
   supplyToExistingBotPosition: h.supplyToExistingBotPositionMock,
   borrowMoreOnExistingBotPosition: h.borrowMoreOnExistingBotPositionMock,
+  withdrawFromExistingBotPosition: vi.fn(async () => {
+    throw new Error("Unexpected withdraw from an existing bot position in the borrow runner resume tests");
+  }),
 }));
 
 vi.mock("../../server/vault/jupiter-lend-borrow-route", async (importOriginal) => {

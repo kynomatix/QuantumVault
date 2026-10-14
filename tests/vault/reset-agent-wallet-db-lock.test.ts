@@ -7,6 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import pg from "pg";
+import { Keypair } from "@solana/web3.js";
+import { derivePhoenixIdentity } from "../../server/protocol/phoenix/identity";
 
 const hasDb = !!process.env.DATABASE_URL;
 const TIMEOUT = 30_000;
@@ -36,7 +38,7 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
     await pool?.end();
   });
 
-  async function seed(suffix: string) {
+  async function seed(suffix: string, activeProtocol: "drift" | "phoenix" = "drift") {
     const wallet = `wo-r1-reset-${Date.now()}-${suffix}`;
     const oldKey = "11111111111111111111111111111111";
     walletsToDelete.push(wallet);
@@ -46,13 +48,30 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
        VALUES ($1, $2, $3, $4)`,
       [wallet, oldKey, `old-v3-${suffix}`, `old-mnemonic-${suffix}`],
     );
-    await pool.query(
-      `INSERT INTO trading_bots
-         (wallet_address, name, market, webhook_secret, drift_subaccount_id,
-          active_protocol, subaccount_auth_mode, subaccount_status)
-       VALUES ($1, $2, 'SOL-PERP', $3, NULL, 'drift', 'main_plus_id', 'none')`,
-      [wallet, `reset-test-${suffix}`, `reset-secret-${Date.now()}-${suffix}`],
-    );
+    if (activeProtocol === "phoenix") {
+      const identity = derivePhoenixIdentity(Keypair.generate().publicKey.toBase58());
+      await pool.query(
+        `INSERT INTO trading_bots
+           (wallet_address, name, market, webhook_secret, drift_subaccount_id,
+            active_protocol, subaccount_auth_mode, subaccount_status,
+            protocol_subaccount_id, derivation_index, derivation_path_version,
+            phoenix_authority_wallet, phoenix_trader_account, phoenix_network,
+            phoenix_program_address, phoenix_portfolio_index, phoenix_subaccount_index)
+         VALUES ($1, $2, 'SOL-PERP', $3, NULL, 'phoenix', 'main_plus_id', 'none',
+                 $4, 1, 1, $5, $4, $6, $7, 0, 0)`,
+        [wallet, `reset-test-${suffix}`, `reset-secret-${Date.now()}-${suffix}`,
+         identity.traderAccountAddress, identity.authorityWalletAddress,
+         identity.network, identity.programAddress],
+      );
+    } else {
+      await pool.query(
+        `INSERT INTO trading_bots
+           (wallet_address, name, market, webhook_secret, drift_subaccount_id,
+            active_protocol, subaccount_auth_mode, subaccount_status)
+         VALUES ($1, $2, 'SOL-PERP', $3, NULL, 'drift', 'main_plus_id', 'none')`,
+        [wallet, `reset-test-${suffix}`, `reset-secret-${Date.now()}-${suffix}`],
+      );
+    }
     return { wallet, oldKey };
   }
 
@@ -89,9 +108,9 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
   }, TIMEOUT);
 
   it("retains an inactive unlinked Phoenix identity inside the final reset transaction", async () => {
-    const { wallet, oldKey } = await seed("phoenix-retained");
+    const { wallet, oldKey } = await seed("phoenix-retained", "phoenix");
     await pool.query(
-      "UPDATE trading_bots SET active_protocol = 'phoenix', is_active = false WHERE wallet_address = $1",
+      "UPDATE trading_bots SET is_active = false WHERE wallet_address = $1",
       [wallet],
     );
     const before = await pool.query("SELECT * FROM wallets WHERE address = $1", [wallet]);
