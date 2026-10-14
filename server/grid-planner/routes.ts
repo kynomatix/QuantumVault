@@ -3,6 +3,7 @@ import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { PlannerDeps, PlannerQuery } from './types';
 import { PlannerCharts } from './chart';
 import { PlannerDirection } from './direction';
+import { PlannerWeeklyStructure } from './weekly-structure';
 import { PlannerRangeFacts } from './range-facts';
 import { marketSnapshot } from './market-snapshot';
 import { previewGrid, validatePreviewQuery } from './preview';
@@ -14,6 +15,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   if (!enabled) return;
   let depsPromise: Promise<PlannerDeps> | undefined, charts: PlannerCharts | undefined;
   let direction: PlannerDirection | undefined;
+  let weekly: PlannerWeeklyStructure | undefined;
   const ranges = new PlannerRangeFacts();
   let metadata: { rows: ProtocolMarket[]; observedAt: number } | undefined;
   let metadataJob: Promise<ProtocolMarket[]> | undefined, lastAttempt = -Infinity;
@@ -74,6 +76,20 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     direction ??= new PlannerDirection(deps);
     const result = await direction.read();
     if (!res.destroyed) res.json(result);
+  }));
+  app.get('/api/grid-planner/signals', requireWallet, route(['market'], async (req, res, deps) => {
+    const market = req.query.market;
+    if (typeof market !== 'string' || !(await boundedMetadata(deps)).some(r => r.internalSymbol === market)) {
+      res.status(400).json({ state: 'unavailable', reason: 'Choose a known Pacifica market' }); return;
+    }
+    weekly ??= new PlannerWeeklyStructure(deps);
+    const unknown = (reason: string) => ({ state: 'unavailable' as const, reason });
+    const [structure, funding] = await Promise.all([
+      weekly.read(market),
+      deps.fundingSignal ? deps.fundingSignal(market).catch(() => unknown('Pacifica funding unavailable.'))
+        : Promise.resolve(unknown('Pacifica funding reader unavailable.')),
+    ]);
+    if (!res.destroyed) res.json({ market, serverNow: deps.now(), weekly: structure, funding });
   }));
   app.get('/api/grid-planner/range', requireWallet, route(['market', 'timeframe', 'bars', 'period'], async (req, res, deps) => {
     const { market, timeframe, bars, period } = req.query, window = gridHistoryRequest(timeframe, period, bars);

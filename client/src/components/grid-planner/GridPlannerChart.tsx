@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { LineStyle, type CandlestickData, type ISeriesPrimitive, type UTCTimestamp } from 'lightweight-charts';
+import { LineStyle, type CandlestickData, type ISeriesPrimitive, type Logical, type UTCTimestamp } from 'lightweight-charts';
 import { Maximize2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { createSharedTradePriceChart } from '../SharedTradePriceChart';
 import { readableTime, type PlannerChart, type PlannerRange } from '@/lib/grid-planner-view';
 import type { GridLine } from '../../../../server/grid-bot/engine-types';
+import { gridMeasuredStart } from '../../../../shared/grid-lookback';
 
-function PriceCanvas({ chart, lines, range }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: GridLine[]; range: PlannerRange | null }) {
+function PriceCanvas({ chart, lines, range, period }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: GridLine[]; range: PlannerRange | null; period?: string }) {
   const container = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!container.current) return;
@@ -25,9 +26,33 @@ function PriceCanvas({ chart, lines, range }: { chart: Extract<PlannerChart, { s
       grid: { vertLines: { color: color('border', 0.3) }, horzLines: { color: color('border', 0.3) } },
       timeScale: { borderColor: color('border') }, rightPriceScale: { borderColor: color('border') } });
     const series = canvas.addCandlestickSeries({ upColor: up, downColor: down, borderVisible: false, wickUpColor: up, wickDownColor: down });
-    const candles = chart.candles.map(c => ({ time: Math.floor(c.time / 1000) as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close }));
+    const finalized = chart.candles.filter(c => c.provenance.finality === 'finalized');
+    const measuredStart = period && finalized.length ? gridMeasuredStart(chart.timeframe, period, finalized.at(-1)!.time) : null;
+    const candles = chart.candles.map(c => {
+      const dim = measuredStart !== null && c.time < measuredStart;
+      const tint = color(c.close >= c.open ? 'chart-4' : 'destructive', dim ? 0.38 : 1);
+      return { time: Math.floor(c.time / 1000) as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close, color: tint, wickColor: tint };
+    });
     const uniqueSeconds = candles.every((c, i) => !i || c.time > candles[i - 1].time);
     if (uniqueSeconds) series.setData(candles as CandlestickData[]);
+    const periodFill = color('primary', 0.035), periodLine = color('muted-foreground', 0.65), periodText = color('muted-foreground');
+    if (measuredStart !== null && chart.candles.length > 1) {
+      const duration = chart.candles[1].time - chart.candles[0].time;
+      const measuredPeriod: ISeriesPrimitive = { paneViews: () => [{ zOrder: () => 'bottom', renderer: () => ({ draw(target) {
+        target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
+          const start = canvas.timeScale().logicalToCoordinate((measuredStart - chart.candles[0].time) / duration as Logical);
+          const end = canvas.timeScale().logicalToCoordinate(((finalized.at(-1)!.time - chart.candles[0].time) / duration + 1) as Logical);
+          if (start === null || end === null) return;
+          ctx.save(); ctx.beginPath(); ctx.rect(0, 0, mediaSize.width, mediaSize.height); ctx.clip();
+          ctx.fillStyle = periodFill; ctx.fillRect(Math.max(0, start), 0, Math.max(0, end - Math.max(0, start)), mediaSize.height);
+          ctx.strokeStyle = periodLine; ctx.lineWidth = 1; ctx.setLineDash([3, 4]);
+          ctx.beginPath(); ctx.moveTo(start, 0); ctx.lineTo(start, mediaSize.height); ctx.stroke();
+          ctx.setLineDash([]); ctx.fillStyle = periodText; ctx.font = '11px sans-serif';
+          ctx.fillText('Range period', Math.max(6, start + 6), 16); ctx.restore();
+        });
+      } }) }] };
+      series.attachPrimitive(measuredPeriod);
+    }
     const precision = Math.min(12, Math.max(...chart.candles.map(c => String(c.close).split('.')[1]?.length ?? 0),
       ...lines.map(l => l.price.split('.')[1]?.length ?? 0),
       ...[range?.lower, range?.upper, range?.stop].map(p => p?.split('.')[1]?.length ?? 0)));
@@ -66,12 +91,12 @@ function PriceCanvas({ chart, lines, range }: { chart: Extract<PlannerChart, { s
     });
     observer.observe(container.current);
     return () => { observer.disconnect(); cancelAnimationFrame(frame); canvas.remove(); };
-  }, [chart, lines, range]);
-  return <div ref={container} className="h-full min-h-[280px] w-full" aria-label="Direct perpetual candle chart with proposed range band, stop and hypothetical grid levels" />;
+  }, [chart, lines, range, period]);
+  return <div ref={container} className="h-full min-h-[280px] w-full" aria-label="Direct perpetual candle chart with measured range period, dimmed context candles, proposed range band, stop and hypothetical grid levels" />;
 }
-export function GridPlannerChart({ chart, lines, range = null, stale, loading = false, hasMarket = false, error = '', onRetry, levelMessage }: {
+export function GridPlannerChart({ chart, lines, range = null, period, stale, loading = false, hasMarket = false, error = '', onRetry, levelMessage }: {
   chart: PlannerChart | null; lines: GridLine[]; range?: PlannerRange | null; stale: boolean; loading?: boolean;
-  hasMarket?: boolean; error?: string; onRetry?: () => void; levelMessage?: string;
+  hasMarket?: boolean; error?: string; onRetry?: () => void; levelMessage?: string; period?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
   if (!chart || chart.state === 'unavailable') return <div className="flex min-h-[280px] flex-col items-center justify-center gap-3 rounded-xl border border-border bg-card/40 p-5 text-center">
@@ -88,10 +113,11 @@ export function GridPlannerChart({ chart, lines, range = null, stale, loading = 
   const note = `Retrieved ${readableTime(chart.retrievedAt)}. Candle times are opening times; forming candles are unfinished. ${stale ? 'Chart cache expired; refresh for a new observation.' : `These are ${provenance.venue.toUpperCase()} trade candle prices, separate from the Pacifica book reference.`}`;
   return <div className="space-y-2">
     <div className="flex items-center justify-between gap-2"><p className="text-xs text-muted-foreground">{label}</p><Button type="button" size="sm" variant="outline" onClick={() => setExpanded(true)} aria-label="Expand Planner chart"><Maximize2 className="h-4 w-4" /></Button></div>
-    <div className="h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} /></div>
+    <div className="h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} period={period} /></div>
     {levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}
     <p className="text-xs text-muted-foreground">{note}</p>
+    {period && <p className="text-xs text-muted-foreground">Range period: {period === 'day' ? '24 hours' : period === 'week' ? '7 days' : '30 days'}, ending at the latest finalized candle close. Earlier context candles are dimmed and still feed ATR/ADX.</p>}
     <p className="text-xs text-muted-foreground">Shaded band and solid edges: your proposed range. Dashed lines: quantized levels from the preview labelled above. Red line: proposed stop, not certified liquidation protection.</p>
-    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>{label}</DialogDescription></DialogHeader><div className="h-[65vh]"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
+    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>{label}</DialogDescription></DialogHeader><div className="h-[65vh]"><PriceCanvas chart={chart} lines={lines} range={stale ? null : range} period={period} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
   </div>;
 }

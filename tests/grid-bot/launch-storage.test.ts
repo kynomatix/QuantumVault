@@ -65,7 +65,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     v.request.timestamp=Date.now();expect((await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).state).toBe('prepared');
   });
   it('stores independent Grid ownership and decrypts only the matching owner/account/UMK',async()=>{const {account}=await reserve();const p=(await pool.query('SELECT bot_id,status FROM protocol_subaccounts')).rows[0];expect(p).toEqual({bot_id:null,status:'grid_reserved'});
-    let captured:Buffer|undefined;await custody.withSecret(account,umk(),async secret=>{captured=secret;expect(bs58.encode(secret.subarray(32))).toBe(account.account);});expect(captured!.every(x=>x===0)).toBe(true);
+    let captured:Buffer|undefined;await custody.withSecret(account,umk(),async keyBytes=>{captured=keyBytes;expect(bs58.encode(keyBytes.subarray(32))).toBe(account.account);});expect(captured!.every(x=>x===0)).toBe(true);
     await expect(custody.withSecret({...account,wallet:'EXAMPLE_WRONG'},umk(),async()=>{})).rejects.toThrow();await expect(custody.withSecret(account,Buffer.alloc(32,8),async()=>{})).rejects.toThrow();
   });
   it('refuses custody signing after master generation changes',async()=>{const {account}=await reserve();await pool.query('UPDATE wallets SET agent_public_key=$1 WHERE address=$2',['EXAMPLE_ROTATED',wallet]);await expect(custody.withSecret(account,umk(),async()=>{})).rejects.toThrow('ownership');});
@@ -93,7 +93,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const {account}=await reserve(),now=Date.now();await expect(custody.releaseReservation({...account,leaseToken:randomUUID()},umk(),{account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000},now)).rejects.toThrow();
     expect(await custody.releaseReservation(account,umk(),{account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000},now)).toBe('spare');
     const next=await reserve();expect(next.account).toMatchObject({account:account.account,reused:true});expect((await pool.query('SELECT bot_id FROM protocol_subaccounts')).rows[0].bot_id).toBeNull();
-    await custody.withSecret(next.account,umk(),async secret=>expect(bs58.encode(secret.subarray(32))).toBe(account.account));
+    await custody.withSecret(next.account,umk(),async keyBytes=>expect(bs58.encode(keyBytes.subarray(32))).toBe(account.account));
   });
   it('unknown reservation state quarantines while retaining the encrypted key',async()=>{const {account}=await reserve(),now=Date.now();expect(await custody.releaseReservation(account,umk(),{account:account.account,masterAccount:account.masterAccount,state:'unknown',observedAt:now,expiresAt:now+5000},now)).toBe('quarantined');const p=(await pool.query('SELECT status,subaccount_key_encrypted_v3 FROM protocol_subaccounts')).rows[0];expect(p.status).toBe('grid_quarantined');expect(p.subaccount_key_encrypted_v3).toBeTruthy();});
   it('will not understate seed canary commitment',async()=>{const {account}=await reserve(),v=input(account);v.request={...v.request,kind:'seed',data:{amount:'2'},authority:{seedWorstPrice:'100'}};v.claim.canaryIncrement='199';await expect(storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).rejects.toThrow('Understated');});

@@ -368,7 +368,7 @@ describe('Planner client authority boundaries', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const panel = (id: string) => sheet.slice(sheet.indexOf(`<DrawerSettingsPanel id="${id}"`)).split('</DrawerSettingsPanel>')[0];
     const direction = panel('direction-size');
-    for (const control of ['<GridDirectionBadge', "edit('side'", "numberField('investment'", 'id="grid-leverage"', "numberField('intervals', 'Number of grids (1–100)'"])
+    for (const control of ['<GridDirectionSignals', "edit('side'", "numberField('investment'", 'id="grid-leverage"', "numberField('intervals', 'Number of grids (1–100)'"])
       expect(direction).toContain(control);
     for (const field of ['lower', 'upper', 'investment', 'intervals', 'stop', 'feePercent'])
       expect(sheet.match(new RegExp(`numberField\\('${field}'`, 'g'))).toHaveLength(1);
@@ -378,7 +378,11 @@ describe('Planner client authority boundaries', () => {
     expect(sheet.split(stopHint)).toHaveLength(2); expect(panel('stop')).toContain(stopHint);
     for (const control of ['id="grid-seed"', 'id="grid-entryScale"', 'id="grid-profitScale"', 'startingPosition enabled={form.seed}'])
       expect(panel('orders')).toContain(control);
-    expect(panel('fees')).toContain("choice('rangeWindow'"); expect(panel('fees')).toContain('Observation and sizing details');
+    expect(panel('range')).toContain('id="grid-period-label"');
+    expect(panel('range')).toContain('Suggest auto-range');
+    expect(panel('range')).toContain("'Day' : period === 'week' ? 'Week' : 'Month'");
+    expect(panel('range')).toContain('Highs and lows from this period set the range; the candle size sets the safety buffer.');
+    expect(panel('fees')).not.toContain("choice('rangeWindow'"); expect(panel('fees')).toContain('Observation and sizing details');
     expect(panel('fees')).toContain('testId="grid-advanced-toggle"');
     expect(sheet).toContain('grid grid-cols-1 sm:grid-cols-2');
   });

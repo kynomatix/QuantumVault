@@ -16,7 +16,7 @@ import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGene
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
 import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
-import { GridDirectionBadge } from './GridDirectionBadge';
+import { GridDirectionSignals } from './GridDirectionSignals';
 import { PlannerPriceRefresh, watchPlannerPrice, PRICE_BUSY_MESSAGE } from '@/lib/planner-price-refresh';
 
 import { GRID_SETUP_INITIAL as INITIAL, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange } from '@/lib/grid-setup-view';
@@ -297,7 +297,6 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     <DrawerSettingsPanel id="fees" title="Fees & data" icon={Receipt} keepMounted
       expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-advanced-toggle">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {choice('rangeWindow', 'Range based on:', [{ value: 'day', label: 'Last day' }, { value: 'week', label: 'Last week' }, { value: 'month', label: 'Last month' }])}
         {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
       </div>
       <p className="text-xs text-muted-foreground">Sizes are in USDC; coin amounts are rounded to Pacifica's minimum step.</p>
@@ -368,7 +367,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
               <Button type="button" size="sm" variant="ghost" disabled={marketLoading} onClick={refreshObservations}>Refresh observations</Button>
             </div>
           </div>
-          <GridPlannerChart chart={chart} lines={lines} range={range} stale={now >= chartExpiry} hasMarket={!!form.market}
+          <GridPlannerChart chart={chart} lines={lines} range={range} period={form.rangeWindow} stale={now >= chartExpiry} hasMarket={!!form.market}
             levelMessage={createEnabled ? lines.length ? 'Authoritative draft preview levels used when saving.' : 'Authoritative draft levels require a fresh validated draft preview.'
               : `Hypothetical planner preview. ${plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}`}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
@@ -381,9 +380,17 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             <p className="text-xs text-muted-foreground">Auto range uses {rangeFacts.range.includedBars} finalized bars.</p>}
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="outline" disabled={!form.market || rangeBusy} onClick={autoRange}>Suggest auto-range</Button>
+            <div className="flex items-center gap-2"><Label id="grid-period-label" className="text-xs">Range based on:</Label>
+              <div role="group" aria-labelledby="grid-period-label" className="flex rounded-md border border-border/60 p-0.5">
+                {(['day', 'week', 'month'] as const).map(period => <Button key={period} type="button" size="sm"
+                  variant={form.rangeWindow === period ? 'secondary' : 'ghost'} aria-pressed={form.rangeWindow === period}
+                  className="h-7 px-2 text-xs" onClick={() => edit('rangeWindow', period)}>{period === 'day' ? 'Day' : period === 'week' ? 'Week' : 'Month'}</Button>)}
+              </div>
+            </div>
             {rangeSource === 'auto' && <Button type="button" variant="ghost" onClick={restoreManual}>Restore entered range</Button>}
             <span className="text-xs text-muted-foreground self-center">{rangeSource === 'auto' ? 'Auto' : 'Manual'}</span>
           </div>
+          <p className="text-xs text-muted-foreground">Highs and lows from this period set the range; the candle size sets the safety buffer.</p>
           {rangeError && <p role="status" className="text-xs text-muted-foreground">{rangeError}</p>}
           {rangeNote && <p role="status" className="text-xs text-muted-foreground">{rangeNote}</p>}
           {createEnabled && rangeSource === 'auto' && timeRangeApplied &&
@@ -413,8 +420,9 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         <DrawerSettingsPanel id="direction-size" title="Order" icon={ArrowUpDown} keepMounted
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-direction-size-toggle">
         <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-1.5"><Label id="grid-side-label">Direction</Label>
-            <GridDirectionBadge active={open} identity={identity}/>
+          <div className="space-y-1.5"><div className="flex items-center justify-between gap-2"><Label id="grid-side-label">Direction</Label>
+            <GridDirectionSignals active={open} identity={identity} market={form.market} timeframe={form.timeframe} regime={regime} refresh={refresh}/>
+          </div>
             <div role="group" aria-labelledby="grid-side-label" className="flex gap-2 rounded-lg border border-border/60 bg-card/40 p-1">
               {['long', 'short'].map(side => <Button key={side} type="button" className="flex-1" variant={form.side === side ? 'default' : 'ghost'}
                 aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}

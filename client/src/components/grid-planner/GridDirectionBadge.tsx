@@ -14,7 +14,7 @@ export function GridDirectionHint({ suggestion }: { suggestion: GridDirectionSug
 }
 
 // No direction value or editing callback is accepted. This GET can only update the advisory display.
-export function GridDirectionBadge({ active, identity }: { active: boolean; identity?: string }) {
+export function useGridDirectionSuggestion({ active, identity, refresh = 0 }: { active: boolean; identity?: string; refresh?: number }) {
   const [suggestion, setSuggestion] = useState<GridDirectionSuggestion | null>(null);
   useEffect(() => {
     setSuggestion(null);
@@ -34,6 +34,10 @@ export function GridDirectionBadge({ active, identity }: { active: boolean; iden
         expiry = setTimeout(() => setSuggestion(null), remaining);
       }).catch(() => { if (!controller.signal.aborted) setSuggestion(null); });
     return () => { controller.abort(); clearTimeout(expiry); };
-  }, [active, identity]);
+  }, [active, identity, refresh]);
+  return suggestion;
+}
+export function GridDirectionBadge(props: { active: boolean; identity?: string }) {
+  const suggestion = useGridDirectionSuggestion(props);
   return <div aria-live="polite"><GridDirectionHint suggestion={suggestion}/></div>;
 }

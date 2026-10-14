@@ -3,6 +3,7 @@ import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { ProvenancedOHLCV } from '../lab/datafeed';
 import type { BtcStoredWeek } from '../../shared/grid-direction';
 import type { BtcWeeklyStore } from './weekly-store';
+import type { FundingSignal } from '../../shared/grid-signals';
 
 // Pacifica candles are Planner-only; shared datafeed consumers keep their existing sources.
 export type PlannerCandle = ProvenancedOHLCV | (Omit<ProvenancedOHLCV, 'provenance'> & {
@@ -27,6 +28,8 @@ export interface PlannerDeps {
   rangeCandles?(market: string, timeframe: string, bars: number, signal: AbortSignal): Promise<PlannerCandle[]>;
   btcWeeklyCandles?(signal: AbortSignal, start: number, end: number): Promise<BtcStoredWeek[]>;
   btcWeeklyStore?: BtcWeeklyStore;
+  structureCandles?(market: string, signal: AbortSignal): Promise<PlannerCandle[]>;
+  fundingSignal?(market: string): Promise<FundingSignal>;
   now(): number;
 }
 export interface PlannerQuery {

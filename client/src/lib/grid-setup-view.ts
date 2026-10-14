@@ -30,6 +30,7 @@ export function isGridRegime(value: unknown, market: string, timeframe: string):
   if (!r || r.state !== 'available') return (value as GridRegime)?.state === 'unavailable' && typeof (value as { reason?: unknown }).reason === 'string';
   return r.market === market && r.timeframe === timeframe && Number.isFinite(r.adx) && r.adx >= 0 && r.adx <= 100
     && r.label === (r.adx < 20 ? 'ranging' : r.adx <= 25 ? 'transitional' : 'trending')
+    && [r.plusDi, r.minusDi].every(di => di === undefined || Number.isFinite(di) && di >= 0 && di <= 100)
     && ['okx', 'gate', 'hyperliquid', 'pacifica'].includes(r.venue) && Number.isSafeInteger(r.bars) && r.bars >= 28 && r.bars <= 200
     && Number.isSafeInteger(r.latestFinalizedTime) && r.latestFinalizedTime > 0;
 }

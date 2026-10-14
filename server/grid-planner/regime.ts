@@ -1,4 +1,4 @@
-import { adx } from '../lab/indicators';
+import { adx, atr, rma } from '../lab/indicators';
 import { gridAdxLabel } from '../grid-bot/runtime-policy';
 import { gridTimeframeMs } from '../grid-bot/range';
 import type { PlannerCandle } from './types';
@@ -26,6 +26,16 @@ export function plannerRegime(market: string, timeframe: string, candles: Planne
   const value = adx(candles.map(c => c.high), candles.map(c => c.low), candles.map(c => c.close), 14).at(-1) ?? null;
   const label = gridAdxLabel(value);
   if (value === null || label === 'UNKNOWN') return unknown('ADX unavailable');
+  // Wilder directional movement, using the same smoothing and ATR as the existing ADX.
+  const plus = [0], minus = [0];
+  for (let i = 1; i < candles.length; i++) {
+    const up = candles[i].high - candles[i - 1].high, down = candles[i - 1].low - candles[i].low;
+    plus.push(up > down && up > 0 ? up : 0); minus.push(down > up && down > 0 ? down : 0);
+  }
+  const volatility = atr(candles.map(c => c.high), candles.map(c => c.low), candles.map(c => c.close), 14).at(-1)!;
+  const plusDi = volatility === 0 ? 0 : rma(plus, 14).at(-1)! / volatility * 100;
+  const minusDi = volatility === 0 ? 0 : rma(minus, 14).at(-1)! / volatility * 100;
+  if (![plusDi, minusDi].every(Number.isFinite)) return unknown('Directional movement unavailable');
   return { state: 'available', market, timeframe, adx: value, label,
-    venue: first.venue as 'okx' | 'gate' | 'hyperliquid' | 'pacifica', bars: candles.length, latestFinalizedTime: latest.time };
+    venue: first.venue as 'okx' | 'gate' | 'hyperliquid' | 'pacifica', bars: candles.length, latestFinalizedTime: latest.time, plusDi, minusDi };
 }

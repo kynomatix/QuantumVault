@@ -10,6 +10,12 @@ export function gridHistoryWindow(timeframe: string, period: string) {
   return { period: period as GridRangePeriod, duration, rangeBars, chartBars: Math.max(100, Math.ceil(rangeBars * 1.5)) };
 }
 
+/** Match the range service's finalized-candle close boundary, independent of chart context. */
+export function gridMeasuredStart(timeframe: string, period: string, latestFinalizedOpen: number): number | null {
+  const window = gridHistoryWindow(timeframe, period);
+  return window && Number.isSafeInteger(latestFinalizedOpen) ? latestFinalizedOpen + window.duration - window.rangeBars * window.duration : null;
+}
+
 /** Legacy 100/200 requests stay supported; a period and a bar count cannot be mixed. */
 export function gridHistoryRequest(timeframe: unknown, period: unknown, bars: unknown) {
   if (typeof timeframe !== 'string') return null;

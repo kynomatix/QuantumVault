@@ -5,12 +5,17 @@ import { pool } from '../db';
 import { PostgresBtcWeeklyStore } from './weekly-store';
 import type { PlannerDeps } from './types';
 import { PlannerReferences } from './pacifica-reference';
+import { plannerStructureCandles } from './weekly-structure';
+import { PlannerFunding } from './funding';
 
 const references = new PlannerReferences();
+const funding = new PlannerFunding();
 
 export const defaultPlannerDeps: PlannerDeps = {
   now: Date.now,
   btcWeeklyCandles: plannerBtcWeeklyCandles,
+  structureCandles: plannerStructureCandles,
+  fundingSignal: market => funding.read(market),
   btcWeeklyStore: new PostgresBtcWeeklyStore(pool),
   getMarkets: () => getAdapter('pacifica').getMarkets(),
   rangeCandles: plannerPoolCandles,

@@ -74,25 +74,25 @@ describe('display-only direction badge', () => {
   it('keeps the unified integration independent of direction editing and draft admission', () => {
     const planner = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const create = readFileSync('client/src/components/grid-bot/GridDraftActions.tsx', 'utf8');
-    expect(planner).toContain('<GridDirectionBadge active={open} identity={identity}/>');
+    expect(planner).toContain('<GridDirectionSignals active={open} identity={identity} market={form.market}');
     expect(planner).toContain("onClick={() => edit('side', side)}");
     expect(create).not.toContain('GridDirectionBadge');
     const parent = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
     expect(parent).toContain('identity={identity}');
     expect(create).toContain('submitGridDraftRequest');
-    expect(planner.match(/<GridDirectionBadge\b/g)).toHaveLength(1);
+    expect(planner.match(/<GridDirectionSignals\b/g)).toHaveLength(1);
     expect(create).not.toMatch(/direction\s*[:=]\s*['"](?:long|short)['"]/);
   });
   it('binds the effect to wallet identity and aborts the old wallet read before refetching', async () => {
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
     GridDirectionBadge({ active: true, identity: 'EXAMPLE_A' });
-    expect(hooks.dependencies).toEqual([true, 'EXAMPLE_A']);
+    expect(hooks.dependencies).toEqual([true, 'EXAMPLE_A', 0]);
     const firstCleanup = hooks.effect?.();
     const firstSignal = vi.mocked(fetch).mock.calls[0][1]?.signal;
     if (typeof firstCleanup === 'function') firstCleanup();
     expect(firstSignal?.aborted).toBe(true);
     GridDirectionBadge({ active: true, identity: 'EXAMPLE_B' });
-    expect(hooks.dependencies).toEqual([true, 'EXAMPLE_B']);
+    expect(hooks.dependencies).toEqual([true, 'EXAMPLE_B', 0]);
     const secondCleanup = hooks.effect?.();
     expect(fetch).toHaveBeenCalledTimes(2);
     if (typeof secondCleanup === 'function') secondCleanup();
