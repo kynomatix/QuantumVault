@@ -6,6 +6,7 @@ import { GridRegimeHint } from '../../client/src/components/grid-planner/GridReg
 import { gridSetupAccess, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange } from '../../client/src/lib/grid-setup-view';
 import { gridHistoryWindow, gridHistoryRequest } from '../../shared/grid-lookback';
 import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
+import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraftActions';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, plannerLevelMessage, isPlannerMarket, isPlannerChart, isPlannerPreview,
@@ -348,7 +349,7 @@ describe('Planner client authority boundaries', () => {
   });
   it('groups all normal and detailed settings without hiding the chart, plan or actions', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
-    const body = sheet.slice(sheet.indexOf('  return <Sheet'));
+    const body = sheet.slice(sheet.indexOf('  const renderSetup ='));
     expect(sheet).toContain("useState<string | null>('direction-size')");
     expect(sheet).toContain("setExpandedSettingsPanel('direction-size')");
     for (const title of ['Range', 'Order', 'Stop loss', 'Sizing', 'Fees & data'])
@@ -360,8 +361,9 @@ describe('Planner client authority boundaries', () => {
     expect(body).toContain('aria-labelledby="grid-plan-heading"');
     expect(body).toContain('<section aria-labelledby="grid-range-heading"');
     expect(body).toContain('<h3 id="grid-range-heading"');
-    expect(body.slice(body.indexOf('        </fieldset>'))).toContain('<GridDraftActions');
-    expect(body).toContain('!createEnabled && feesPanel()');
+    expect(body.slice(body.indexOf('        </fieldset>'))).toContain('{details ?? feesPanel()}');
+    expect(body).toContain('createEnabled ? <GridDraftActions');
+    expect(body).toContain(': renderSetup()');
     expect(sheet).toContain('const feesPanel = (draftDetails?: React.ReactNode) => <fieldset disabled={draftBusy}>');
   });
   it('puts grid count with direction, investment and leverage and keeps every editable field', () => {
@@ -390,14 +392,71 @@ describe('Planner client authority boundaries', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const actions = readFileSync('client/src/components/grid-bot/GridDraftActions.tsx', 'utf8');
     expect(sheet).toContain('rangeBusy={autoApplying} renderDetails={feesPanel}');
-    const details = actions.slice(actions.indexOf('  const details = <>'), actions.indexOf('  return <section'));
+    const details = actions.slice(actions.indexOf('  const details = <>'), actions.indexOf('  const status ='));
     for (const text of ['Draft sizing, observed fees and funds', 'Capacity before trading', 'Unknown capacity does not prevent saving a draft.'])
       expect(details).toContain(text);
     expect(details).not.toContain('<Button'); expect(details).not.toContain('role="status"');
-    const visible = actions.slice(actions.indexOf('  return <section'));
-    expect(visible).toContain('{renderDetails ? renderDetails(details) : details}');
+    const visible = actions.slice(actions.indexOf('  const status ='));
+    expect(visible).toContain('details: renderDetails ? renderDetails(details) : details');
     expect(visible).toContain('role="status"'); expect(visible).toContain('<DepositDialog');
     expect(actions).toContain("cash.shortfall!=='0.00'");
     expect(actions).toContain('session.current.beginCreate');
+  });
+  it('uses the create Dialog layout with fixed header and footer around the scrolling setup', () => {
+    const setup = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
+    const layout = setup.slice(setup.indexOf('  const renderSetup ='), setup.indexOf('  return <Dialog'));
+    expect(setup).toContain("from '@/components/ui/dialog'");
+    expect(setup).not.toContain("from '@/components/ui/sheet'");
+    expect(setup).toContain('<Dialog open={open} onOpenChange={handleOpenChange}>');
+    expect(layout).toContain('max-w-lg sm:max-w-3xl max-h-[90vh] flex flex-col');
+    expect(layout).toContain('data-testid="sheet-grid-planner"');
+    expect(layout).toContain('<DialogHeader>');
+    expect(layout).toContain('<DialogTitle className="flex items-center gap-2 text-xl">');
+    expect(layout).toContain('flex-1 min-h-0 overflow-y-auto space-y-5 py-2 pr-1');
+    const footer = layout.slice(layout.indexOf('<DialogFooter'), layout.indexOf('</DialogFooter>'));
+    expect(footer).toContain('pt-2 border-t border-border/40');
+    expect(footer).toContain('variant="outline" disabled={draftBusy} onClick={() => handleOpenChange(false)}>Cancel');
+    expect(footer).toContain('{actions}');
+    expect(footer).not.toContain('overflow-y-auto');
+    expect(layout.indexOf('</DialogHeader>')).toBeLessThan(layout.indexOf('overflow-y-auto'));
+    expect(layout.indexOf('{status}')).toBeLessThan(layout.indexOf('<DialogFooter'));
+    expect(layout).toContain('{depositDialog}');
+    expect(setup).toContain('renderDetails={feesPanel} renderLayout={renderSetup}');
+    const close = setup.slice(setup.indexOf('  const handleOpenChange'), setup.indexOf('  const renderSetup'));
+    expect(close).toContain('if (draftBusy) return;');
+    expect(close).toContain('priceRefresh.current?.dispose()');
+    expect(close).toContain('Object.values(generation.current).forEach(g => g.invalidate())');
+    expect(close).toContain("setExpandedSettingsPanel('direction-size')");
+    expect(close).toContain('onOpenChange(value)');
+  });
+  it('places the existing draft controls in a supplied footer while retaining details and status', () => {
+    const props = { open: false, intent: gridSetupIntent(gridSetupForm(), '', 'manual'), onSaved: vi.fn(),
+      onBusyChange: vi.fn(), liveEnabled: false, rangeBusy: false, onPreview: vi.fn() };
+    const html = renderToStaticMarkup(createElement(GridDraftActions, { ...props,
+      renderDetails: details => createElement('article', { 'data-testid': 'draft-details' }, details),
+      renderLayout: ({ details, status, actions, depositDialog }) => createElement('main', null,
+        details, status, createElement('footer', null, actions), depositDialog),
+    }));
+    expect(html).toContain('data-testid="draft-details"');
+    expect(html).toContain('Draft sizing, observed fees and funds');
+    expect(html).toContain('Capacity before trading');
+    expect(html).toContain('role="status" aria-live="polite"');
+    const footer = html.slice(html.indexOf('<footer>'), html.indexOf('</footer>'));
+    expect(footer).toContain('Refresh preview and funds'); expect(footer).toContain('Save draft');
+    expect(footer).toContain('bg-gradient-to-r from-primary to-accent');
+    expect(footer.match(/disabled=""/g)).toHaveLength(1);
+    expect(html.slice(0, html.indexOf('<footer>'))).not.toContain('<button');
+    const live = renderToStaticMarkup(createElement(GridDraftActions, { ...props, liveEnabled: true }));
+    expect(live).toContain('aria-label="Save Grid draft"'); expect(live).toContain('Create bot');
+    expect(live).toContain('Refresh preview and funds');
+  });
+  it('keeps active management in its sheet and routes Adjust Range intent to the setup Dialog', () => {
+    const drawer = readFileSync('client/src/components/grid-bot/GridBotDrawer.tsx', 'utf8');
+    const card = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
+    expect(drawer).toContain('<Sheet open onOpenChange=');
+    expect(drawer).toContain('Adjust Range');
+    expect(drawer).toContain("onAdjust({...surface.bot.createIntent,rangeSource:'manual'})");
+    expect(card).toContain('initialIntent={create.intent}');
+    expect(card).toContain('onAdjust={intent=>{setSelected(null);setCreate({key:Date.now(),intent});}}');
   });
 });

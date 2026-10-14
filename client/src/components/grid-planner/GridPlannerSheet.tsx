@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart3, RefreshCw, SlidersHorizontal, ArrowUpDown, Shield, Layers, Receipt } from 'lucide-react';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -22,7 +22,7 @@ import { PlannerPriceRefresh, watchPlannerPrice, PRICE_BUSY_MESSAGE } from '@/li
 import { GRID_SETUP_INITIAL as INITIAL, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange } from '@/lib/grid-setup-view';
 import { gridHistoryWindow } from '../../../../shared/grid-lookback';
 import { gridDraftRevision, gridWidth, type GridDraftPreview } from '@/lib/grid-draft-view';
-import { GridDraftActions } from '../grid-bot/GridDraftActions';
+import { GridDraftActions, type GridDraftContent } from '../grid-bot/GridDraftActions';
 import { GridRegimeHint } from './GridRegimeHint';
 import type { GridIntent } from '../../../../shared/grid-draft';
 import type { PlannerRangeFacts } from '../../../../server/grid-planner/range-facts';
@@ -316,18 +316,23 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       {draftDetails}
     </DrawerSettingsPanel>
   </fieldset>;
-  return <Sheet open={open} onOpenChange={value => {
+  const handleOpenChange = (value: boolean) => {
     if (draftBusy) return;
-    if (!value) { priceRefresh.current?.dispose(); Object.values(generation.current).forEach(g => g.invalidate()); } onOpenChange(value);
-  }}>
-    <SheetContent className="w-full sm:max-w-[760px] p-0 overflow-hidden" data-testid="sheet-grid-planner">
-      <div className="h-full overflow-y-auto p-5 sm:p-6 space-y-6">
-        <SheetHeader className="text-left pr-6">
-          <SheetTitle className="flex items-center gap-2 text-xl"><BarChart3 className="h-5 w-5 text-primary" />Grid Bot</SheetTitle>
-          <SheetDescription>Choose a price range and explore your grid before starting a bot.</SheetDescription>
+    if (!value) {
+      priceRefresh.current?.dispose(); Object.values(generation.current).forEach(g => g.invalidate());
+      setExpandedSettingsPanel('direction-size');
+    }
+    onOpenChange(value);
+  };
+  const renderSetup = ({ details, status, actions, depositDialog }: Partial<GridDraftContent> = {}) =>
+    <DialogContent className="max-w-lg sm:max-w-3xl max-h-[90vh] flex flex-col" data-testid="sheet-grid-planner">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-xl"><BarChart3 className="h-5 w-5 text-primary" />Grid Bot</DialogTitle>
+          <DialogDescription>Choose a price range and explore your grid before starting a bot.</DialogDescription>
           <Badge variant="secondary" className="w-fit mt-2">{liveEnabled ? 'Review your setup before creating a bot' : PLANNING_BANNER}</Badge>
-        </SheetHeader>
+        </DialogHeader>
 
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-5 py-2 pr-1">
         <fieldset disabled={draftBusy} className="space-y-6">
         <section aria-label="Market and price" className="rounded-xl border border-border bg-card/40 p-4 flex flex-col sm:flex-row gap-4 sm:items-start sm:justify-between">
           <div className="space-y-1.5 sm:w-64">
@@ -514,11 +519,19 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         </section>}
 
         </fieldset>
-        {createEnabled && <GridDraftActions open={open} intent={draftIntent} onSaved={onSaved} onBusyChange={setDraftBusy}
-          onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} renderDetails={feesPanel} />}
-        {!createEnabled && feesPanel()}
+        {details ?? feesPanel()}
+        {status}
         <p className="text-center text-xs text-muted-foreground pb-2">{liveEnabled ? 'Creating a bot saves this reviewed setup through the existing draft path.' : PLANNING_BANNER}</p>
       </div>
-    </SheetContent>
-  </Sheet>;
+      <DialogFooter className="pt-2 border-t border-border/40 gap-2 sm:gap-0 sm:flex-wrap sm:gap-y-2">
+        <Button variant="outline" disabled={draftBusy} onClick={() => handleOpenChange(false)}>Cancel</Button>
+        {actions}
+      </DialogFooter>
+      {depositDialog}
+    </DialogContent>;
+  return <Dialog open={open} onOpenChange={handleOpenChange}>
+    {createEnabled ? <GridDraftActions open={open} intent={draftIntent} onSaved={onSaved} onBusyChange={setDraftBusy}
+      onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} renderDetails={feesPanel} renderLayout={renderSetup} />
+      : renderSetup()}
+  </Dialog>;
 }
