@@ -334,7 +334,7 @@ describe('Round 2 mark and exit settlements', () => {
     expect(await a.getMarkPrice('SOL-PERP')).toMatchObject({ kind: 'unavailable', code: 'mark_price_unavailable',
       reason, internalSymbol: 'SOL-PERP', protocolSymbol: 'SOL', source: '/info/prices', field: 'mark' });
     expect(a.get).toHaveBeenCalledWith('/info/prices', undefined,
-      { priority: 'normal', cachePolicy: 'fresh-required', responseShape: 'envelope' });
+      { priority: 'normal', cachePolicy: 'fresh-required', responseShape: 'envelope', caller: 'adapter.mark-price' });
   });
 
   it('uses original venue time and accepts exactly five seconds without requiring oracle', async () => {

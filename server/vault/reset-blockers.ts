@@ -67,6 +67,7 @@ export async function assessResetBlockers(
       loopPositions,
       operations,
       tradingBots: tradingBots.map((row) => ({
+        activeProtocol: row.activeProtocol,
         driftSubaccountId: row.driftSubaccountId,
         protocolSubaccountId: row.protocolSubaccountId,
       })),

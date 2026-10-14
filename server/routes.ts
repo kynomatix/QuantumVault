@@ -7938,9 +7938,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // Reset Agent Wallet - Withdraw all funds to user wallet and generate a new agent wallet
   app.post("/api/wallet/reset-agent-wallet", requireWallet, async (req, res) => {
     try {
-      if ((await storage.getTradingBots(req.walletAddress!)).some(bot => bot.activeProtocol === 'phoenix')) {
-        return res.status(409).json({ code: 'PHOENIX_RECOVERY_RETAINED', error: 'Phoenix recovery identities must be retained. Resolve wallet, venue, transfer, vault, debt and payout residuals before reset.' });
-      }
       const wallet = await storage.getWallet(req.walletAddress!);
       if (!wallet) {
         return res.status(404).json({ error: "Wallet not found" });
@@ -8020,12 +8017,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(409).json({
           error: "reset-blocked",
           phase: "pre-transfer",
+          ...(preTransferAssessment.reason === "phoenix_recovery_retained" ? { code: "PHOENIX_RECOVERY_RETAINED" } : {}),
           message:
-            preTransferAssessment.reason === "vault_state_unreadable"
-              ? "Could not verify all activity tied to this trading account, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly."
-              : preTransferAssessment.reason === "active_vault_state"
-                ? "You have active vault borrow or loop activity tied to this agent wallet. Close or resolve it first — nothing was transferred and your agent key is unchanged."
-                : "A trading account or recovery record is still tied to your current agent key. Delete or unlink visible bots in Wallet Management. If none are shown, keep trading enabled so recovery can finish, retry later, or contact support — nothing was transferred and your agent key is unchanged.",
+            preTransferAssessment.reason === "phoenix_recovery_retained"
+              ? "Phoenix recovery identities must be retained. Resolve wallet, venue, transfer, vault, debt and payout residuals before reset. Nothing was transferred and your agent key is unchanged."
+              : preTransferAssessment.reason === "vault_state_unreadable"
+                ? "Could not verify all activity tied to this trading account, so the reset was not started. Nothing was transferred and your agent key is unchanged. Please try again shortly."
+                : preTransferAssessment.reason === "active_vault_state"
+                  ? "You have active vault borrow or loop activity tied to this agent wallet. Close or resolve it first — nothing was transferred and your agent key is unchanged."
+                  : "A trading account or recovery record is still tied to your current agent key. Delete or unlink visible bots in Wallet Management. If none are shown, keep trading enabled so recovery can finish, retry later, or contact support — nothing was transferred and your agent key is unchanged.",
         });
       }
 
@@ -8125,8 +8125,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(409).json({
           error: "reset-blocked",
           phase: "pre-key-rotation",
+          ...(preRotationAssessment.reason === "phoenix_recovery_retained" ? { code: "PHOENIX_RECOVERY_RETAINED" } : {}),
           message:
-            "Reset stopped before key rotation because activity, a linked bot, or a recovery record tied to the current trading account appeared or could not be verified after funds were moved. Completed transfers are not rolled back, and your existing agent key remains authoritative — no new key or mnemonic was stored. Keep trading enabled for recovery; delete or unlink visible bots in Wallet Management, then retry or contact support.",
+            preRotationAssessment.reason === "phoenix_recovery_retained"
+              ? "Reset stopped before key rotation because Phoenix recovery identities must be retained. Resolve wallet, venue, transfer, vault, debt and payout residuals before reset. Completed transfers are not rolled back, and your existing agent key remains authoritative — no new key or mnemonic was stored."
+              : "Reset stopped before key rotation because activity, a linked bot, or a recovery record tied to the current trading account appeared or could not be verified after funds were moved. Completed transfers are not rolled back, and your existing agent key remains authoritative — no new key or mnemonic was stored. Keep trading enabled for recovery; delete or unlink visible bots in Wallet Management, then retry or contact support.",
         });
       }
 
@@ -8211,7 +8214,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(409).json({
           error: "reset-blocked",
           phase: "pre-key-rotation",
-          message: "Reset stopped before key rotation because activity, a linked bot, or a recovery record tied to the current trading account appeared or could not be verified. Completed transfers are not rolled back, and your existing agent key remains authoritative. Keep trading enabled for recovery; delete or unlink visible bots in Wallet Management, then retry or contact support.",
+          ...(finalized.reason === "phoenix_recovery_retained" ? { code: "PHOENIX_RECOVERY_RETAINED" } : {}),
+          message: finalized.reason === "phoenix_recovery_retained"
+            ? "Reset stopped before key rotation because Phoenix recovery identities must be retained. Resolve wallet, venue, transfer, vault, debt and payout residuals before reset. Completed transfers are not rolled back, and your existing agent key remains authoritative."
+            : "Reset stopped before key rotation because activity, a linked bot, or a recovery record tied to the current trading account appeared or could not be verified. Completed transfers are not rolled back, and your existing agent key remains authoritative. Keep trading enabled for recovery; delete or unlink visible bots in Wallet Management, then retry or contact support.",
         });
       }
       if (finalized.outcome === "lost_race") {

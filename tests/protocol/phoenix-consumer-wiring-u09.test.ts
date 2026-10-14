@@ -15,10 +15,28 @@ function route(method: string, path: string): string {
   walk(ast); if (!result) throw new Error(`Missing route ${method} ${path}`); return result;
 }
 describe('U09 HTTP and worker fail-closed wiring', () => {
-  it.each(['/api/wallet/reset-account','/api/wallet/reset-agent-wallet'])('%s retains all Phoenix identities before wallet mutation', path => {
-    const body = route('post',path);
+  it('reset-account retains all Phoenix identities before wallet mutation', () => {
+    const body = route('post','/api/wallet/reset-account');
     expect(body.indexOf("bot.activeProtocol === 'phoenix'")).toBeGreaterThan(0);
     expect(body.indexOf('PHOENIX_RECOVERY_RETAINED')).toBeLessThan(body.indexOf('storage.getWallet('));
+  });
+  it('reset-agent-wallet assesses retained Phoenix custody at both checkpoints and finalization', () => {
+    const body = route('post','/api/wallet/reset-agent-wallet');
+    const beforeTransfers = body.indexOf('const preTransferAssessment = await assessResetBlockers(');
+    const beforeRotation = body.indexOf('const preRotationAssessment = await assessResetBlockers(');
+    expect(beforeTransfers).toBeGreaterThan(0);
+    expect(beforeTransfers).toBeLessThan(body.indexOf('await executeAgentWithdraw('));
+    expect(beforeRotation).toBeGreaterThan(beforeTransfers);
+    expect(beforeRotation).toBeLessThan(body.indexOf('generateAgentWalletWithMnemonic()'));
+    expect(body).toContain('PHOENIX_RECOVERY_RETAINED');
+    const policy = readFileSync('server/vault/reset-blocker-policy.ts', 'utf8');
+    expect(policy).toContain('bot.activeProtocol === "phoenix"');
+    const preflight = readFileSync('server/vault/reset-blockers.ts', 'utf8');
+    expect(preflight).toContain('activeProtocol: row.activeProtocol');
+    const storage = readFileSync('server/storage.ts', 'utf8');
+    const finalizer = storage.slice(storage.indexOf('async finalizeAgentWalletReset('), storage.indexOf('async claimSpareSubaccount('));
+    expect(finalizer).toContain('activeProtocol: tradingBots.activeProtocol');
+    expect(finalizer).toContain('assessResetBlockerRows(');
   });
   it('disabled creation returns the common handoff before legacy creation', () => {
     const body = route('post','/api/trading-bots');

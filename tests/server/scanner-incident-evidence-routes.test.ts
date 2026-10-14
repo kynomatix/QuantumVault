@@ -21,7 +21,8 @@ vi.mock("../../server/storage", () => {
 vi.mock("../../server/session", () => ({
   sessionMiddleware: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
-vi.mock("../../server/db", () => ({ db: {}, isConnectionClassError: vi.fn(() => false) }));
+// These routes do not use SQL; unexpected pool operations must fail.
+vi.mock("../../server/db", () => ({ db: {}, pool: {}, isConnectionClassError: vi.fn(() => false) }));
 vi.mock("../../server/analytics-indexer", () => ({
   startAnalyticsIndexer: vi.fn(),
   getMetrics: vi.fn(),

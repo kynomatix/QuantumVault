@@ -1542,6 +1542,7 @@ export class DatabaseStorage implements IStorage {
           eq(borrowOperations.walletAddress, p.walletAddress),
         );
         const resetTradingBots = await tx.select({
+          activeProtocol: tradingBots.activeProtocol,
           driftSubaccountId: tradingBots.driftSubaccountId,
           protocolSubaccountId: tradingBots.protocolSubaccountId,
         }).from(tradingBots).where(eq(tradingBots.walletAddress, p.walletAddress));

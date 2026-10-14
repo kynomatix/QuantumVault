@@ -13,6 +13,7 @@ vi.mock("../../server/storage", () => ({
 
 vi.mock("../../server/db", () => ({
   db: {},
+  pool: {}, // These routes do not use SQL; unexpected pool operations must fail.
   isConnectionClassError: vi.fn(() => false),
 }));
 

@@ -829,10 +829,14 @@ describe("provider response-body cancellation lifetime", () => {
     );
     pending.catch(() => {});
     await vi.advanceTimersByTimeAsync(50_000);
-    await expect(pending).rejects.toMatchObject({ name: "CandleSourceUnavailableError" });
+    // OKX 429s prove reachability without admitting candles or tripping its breaker.
+    await expect(pending).rejects.toMatchObject({ name: "CandleBasisUnavailableError", reason: "no_acceptable_source" });
     expect(fetchSpy).toHaveBeenCalledTimes(4);
+    expect(internalSignals).toHaveLength(4);
     expect(internalSignals.every((signal) => signal.aborted)).toBe(true);
     expect(mockSave).not.toHaveBeenCalled();
+    expect(okxDiagnostics.filter((record) => record.kind === "okx_source_breaker_increment"))
+      .toHaveLength(0);
     expect(okxDiagnostics.filter((record) => record.kind === "okx_request_terminal"))
       .toHaveLength(4);
     expect(okxDiagnostics.filter((record) => record.kind === "okx_request_terminal"))

@@ -26,6 +26,7 @@ function clean(overrides: Partial<ResetBlockerRows> = {}): ResetBlockerRows {
 
 function trading(overrides: Record<string, unknown> = {}) {
   return {
+    activeProtocol: "drift",
     driftSubaccountId: null,
     protocolSubaccountId: null,
     subaccountAuthMode: "external_key",
@@ -50,6 +51,12 @@ function protocol(overrides: Record<string, unknown> = {}) {
 describe("reset agent-authority custody policy", () => {
   it("allows a completely clean wallet", () => {
     expect(assessResetBlockerRows(clean())).toEqual({ blocked: false });
+  });
+
+  it("retains an inactive Phoenix identity even without visible subaccount linkage", () => {
+    expect(assessResetBlockerRows(clean({
+      tradingBots: [trading({ activeProtocol: "phoenix", isActive: false })],
+    }))).toEqual({ blocked: true, reason: "phoenix_recovery_retained" });
   });
 
   it.each([

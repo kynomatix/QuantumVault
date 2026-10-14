@@ -328,6 +328,11 @@ describe("reset guard checkpoint 1 — DB read failures fail CLOSED", () => {
   describe("all durable custody tables", () => {
     const custodyCases = [
       {
+        label: "retained inactive Phoenix bot without subaccount linkage",
+        method: "getTradingBots",
+        row: { activeProtocol: "phoenix", isActive: false, driftSubaccountId: null, protocolSubaccountId: null },
+      },
+      {
         label: "linked main-plus-id trading bot",
         method: "getTradingBots",
         row: {
@@ -395,6 +400,10 @@ describe("reset guard checkpoint 1 — DB read failures fail CLOSED", () => {
       const { status, body } = await postReset();
       expect(status).toBe(409);
       expect(body).toMatchObject({ error: "reset-blocked", phase: "pre-transfer" });
+      if ("activeProtocol" in row && row.activeProtocol === "phoenix") {
+        expect(body.code).toBe("PHOENIX_RECOVERY_RETAINED");
+        expect(body.message).toMatch(/Phoenix recovery identities must be retained/);
+      }
       expectNoTransfersAndNoKeyEffects();
       expect(keyCleanup).toHaveBeenCalledTimes(1);
       expect(JSON.stringify(body)).not.toContain("venue-subaccount");
@@ -408,6 +417,10 @@ describe("reset guard checkpoint 1 — DB read failures fail CLOSED", () => {
       const { status, body } = await postReset();
       expect(status).toBe(409);
       expect(body).toMatchObject({ error: "reset-blocked", phase: "pre-key-rotation" });
+      if ("activeProtocol" in row && row.activeProtocol === "phoenix") {
+        expect(body.code).toBe("PHOENIX_RECOVERY_RETAINED");
+        expect(body.message).toMatch(/Phoenix recovery identities must be retained/);
+      }
       expect(executeAgentWithdraw).toHaveBeenCalledTimes(1);
       expectNoKeyEffects();
       expect(keyCleanup).toHaveBeenCalledTimes(1);

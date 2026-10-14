@@ -88,6 +88,29 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
     expect(bot.rows[0].drift_subaccount_id).toBeNull();
   }, TIMEOUT);
 
+  it("retains an inactive unlinked Phoenix identity inside the final reset transaction", async () => {
+    const { wallet, oldKey } = await seed("phoenix-retained");
+    await pool.query(
+      "UPDATE trading_bots SET active_protocol = 'phoenix', is_active = false WHERE wallet_address = $1",
+      [wallet],
+    );
+    const before = await pool.query("SELECT * FROM wallets WHERE address = $1", [wallet]);
+
+    const outcome = await storage.finalizeAgentWalletReset({
+      walletAddress: wallet,
+      observedAgentPublicKey: oldKey,
+      encryptedMnemonicWords: "new-mnemonic-phoenix",
+      newAgentPublicKey: "new-agent-phoenix",
+      newAgentPrivateKeyEncryptedV3: "new-v3-phoenix",
+    });
+
+    expect(outcome).toEqual({ outcome: "blocked", reason: "phoenix_recovery_retained" });
+    const after = await pool.query("SELECT * FROM wallets WHERE address = $1", [wallet]);
+    expect(after.rows).toEqual(before.rows);
+    const bots = await pool.query("SELECT active_protocol, is_active FROM trading_bots WHERE wallet_address = $1", [wallet]);
+    expect(bots.rows).toEqual([{ active_protocol: "phoenix", is_active: false }]);
+  }, TIMEOUT);
+
   it("an entry-key CAS loser cannot overwrite the installed generation", async () => {
     const { wallet, oldKey } = await seed("cas");
     const first = await storage.finalizeAgentWalletReset({

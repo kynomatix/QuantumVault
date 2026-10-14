@@ -102,6 +102,9 @@ vi.mock("../../server/storage", () => ({
 
 vi.mock("../../server/agent-wallet", () => ({
   getServerConnection: () => ({}),
+  executeAgentSwap: vi.fn(async () => {
+    throw new Error("Unexpected swap in the borrow runner resume tests");
+  }),
   // Real USDC mint literal (inlined: a hoisted vi.mock factory evaluates this
   // eagerly, so it cannot reference a top-level const — that would TDZ-throw).
   USDC_MINT: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",

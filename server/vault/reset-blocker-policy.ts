@@ -15,6 +15,7 @@ export const TERMINAL_OPERATION_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 export interface ResetTradingBotProjection {
+  activeProtocol: string | null;
   driftSubaccountId: number | null;
   protocolSubaccountId: string | null;
 }
@@ -48,6 +49,7 @@ export interface ResetBlockerRows {
 
 export type ResetBlockerReason =
   | "active_vault_state"
+  | "phoenix_recovery_retained"
   | "agent_authority_custody"
   | "custody_transition_in_flight"
   | "vault_state_unreadable";
@@ -82,6 +84,11 @@ export function assessResetBlockerRows(rows: ResetBlockerRows): ResetBlockerAsse
   }
 
   for (const bot of rows.tradingBots) {
+    // Phoenix recovery identities remain custody evidence even after a bot is
+    // paused/archived or loses its visible subaccount linkage.
+    if (bot.activeProtocol === "phoenix") {
+      return { blocked: true, reason: "phoenix_recovery_retained" };
+    }
     const hasLinkage = (
       bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined
     ) || hasText(bot.protocolSubaccountId);
