@@ -11,6 +11,7 @@ import type {GridVenueOrder} from '../../server/grid-bot/order-identity';
 import {PER_BOT_ORDINARY_MAX,VENUE_OPEN_ORDER_CAPACITY,GRID_PROTECTION_RESERVE} from '../../shared/grid-capacity';
 import {gridNotificationText} from '../../server/grid-bot/notifications';
 
+const sendOwned=async<T>(_r:ExactGridRequest,_lease:string,post:()=>Promise<T>)=>post();
 const levels=(count=101):WindowLevel[]=>Array.from({length:count},(_,i)=>({id:'EXAMPLE_'+i,ordinal:i+1,price:String(100+i),size:'1',side:'buy',reduceOnly:false,attempt:0}));
 const facts=()=>({levels:levels(),owned:[],positionSize:'0',bookPrice:'100',freeSlots:100,inventoryComplete:true,entriesAllowed:true,canaryRemaining:'100000'});
 const request=(i=0):ExactGridRequest=>({kind:'limit',botId:'EXAMPLE_BOT',account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',path:'/orders/create',operationType:'create_order',timestamp:1000,expiryMs:5000,data:{symbol:'BTC',price:String(100+i),amount:'1',side:'bid',reduce_only:false,tif:'ALO',client_order_id:randomUUID()},authority:{}});
@@ -61,9 +62,9 @@ describe('100-order policy with observed account capacity and protection reserve
 
 describe('typed Pacifica capacity response',()=>{
   it.each([{success:false,code:10},{success:false,error_code:10},{success:false,error:'OPEN_ORDER_LIMIT_REACHED'}])('recognizes only exact documented rejection %j',async response=>{
-    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r=request();r.account=bs58.encode(sub.publicKey);
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r=request();r.timestamp=Date.now();r.account=bs58.encode(sub.publicKey);
     const fetcher=vi.fn(async()=>new Response(JSON.stringify(response),{status:422}));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{}});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{},sendOwned});
     expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:false,capacityRejectedDigest:requestDigest(r)});expect(fetcher).toHaveBeenCalledOnce();
   });
   it('gives the capacity outbox an explicit owner-facing message',()=>expect(gridNotificationText({bot_id:'EXAMPLE_BOT',event_key:'venue_order_capacity',kind:'venue_capacity',evidence:{},wallet_address:'EXAMPLE',market:'BTC-PERP'}).body).toContain('new placements paused'));

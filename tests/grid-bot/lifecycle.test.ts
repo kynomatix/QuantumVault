@@ -76,6 +76,25 @@ describe('Grid lifecycle boundary and failure drills',()=>{
     expect(f.monitor.reconcile).toHaveBeenCalled();expect(f.deps.send).toHaveBeenLastCalledWith(f.claim,expect.objectContaining({kind:'close',data:expect.objectContaining({amount:'0.25',reduce_only:true})}));
     expect(f.deps.send.mock.calls.filter(c=>c[1].kind==='cancel')).toHaveLength(1);expect(cancel.state).toBe('unconfirmed');expect(f.deps.recycle).not.toHaveBeenCalled();
   });
+
+  it.each(['fund','sweep'] as const)('expired unknown %s keeps Stop protection but blocks transfer replay and recycling pending C4',async kind=>{
+    const f=fixture();f.own(true);f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});
+    const r:ExactGridRequest={...f.request,kind,path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:Date.now()-6000,expiryMs:5000,data:{to_account:kind==='fund'?f.claim.account:f.claim.masterAccount,amount:'1'},authority:{}};
+    const transfer={id:randomUUID(),state:'unconfirmed',exact_request:r,exact_request_digest:requestDigest(r)};f.operations.push(transfer);
+    await f.service.tick(f.claim,signal());expect(f.deps.send).toHaveBeenCalledWith(f.claim,expect.objectContaining({kind:'close',data:expect.objectContaining({reduce_only:true,amount:'1'})}));
+    const close=f.operations.find(op=>op.exact_request.kind==='close');f.deps.recover.mockImplementation(async(_claim:any,op:any)=>op.id===close.id?{state:'confirmed',requestDigest:op.exact_request_digest,releaseSlot:true} as never:{state:'unknown'});
+    f.observation.position!.size='0';await f.service.tick(f.claim,signal());f.observation.orders=[];
+    expect(await f.service.tick(f.claim,signal())).toBe('transfer_recovery_requires_C4');expect(f.deps.send).toHaveBeenCalledOnce();expect(transfer.state).toBe('unconfirmed');expect(f.deps.settlement).not.toHaveBeenCalled();expect(f.deps.recycle).not.toHaveBeenCalled();
+  });
+  it('unknown expired transfer permits only retained entry cancellation before Stop close',async()=>{
+    const f=fixture();f.own();const r:ExactGridRequest={...f.request,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:Date.now()-6000,data:{to_account:f.claim.account,amount:'1'},authority:{}};
+    f.operations.push({id:randomUUID(),state:'submitted',exact_request:r,exact_request_digest:requestDigest(r)});await f.service.tick(f.claim,signal());
+    expect(f.deps.send).toHaveBeenCalledWith(f.claim,expect.objectContaining({kind:'cancel',data:{symbol:'BTC',order_id:'10'}}));expect(f.deps.recycle).not.toHaveBeenCalled();
+  });
+  it.each([{timestamp:Date.now(),account:'EXAMPLE_SUB'},{timestamp:Date.now()-6000,account:'EXAMPLE_FOREIGN'}])('live or mismatched transfer stays fully blocked: %j',async patch=>{
+    const f=fixture(),r:ExactGridRequest={...f.request,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',...patch,data:{to_account:f.claim.account,amount:'1'},authority:{}};
+    f.operations.push({id:randomUUID(),state:'unconfirmed',exact_request:r,exact_request_digest:requestDigest(r)});expect(await f.service.tick(f.claim,signal())).toBe('venue_operation_unresolved');expect(f.deps.send).not.toHaveBeenCalled();
+  });
   it('resume reconciles and denies missing current authority',async()=>{const f=fixture('resume');expect(await f.service.tick(f.claim,signal())).toBe('resume_authority_unavailable');expect(f.monitor.reconcile).toHaveBeenCalledOnce();expect(f.storage.complete).not.toHaveBeenCalled();expect(f.deps.send).not.toHaveBeenCalled();});
   it('resume cannot bypass unresolved inventory',async()=>{const f=fixture('resume');f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});expect(await f.service.tick(f.claim,signal())).toBe('reconciliation_required');expect(f.deps.resume).not.toHaveBeenCalled();});
   it('re-sync reconciles without silently resuming entries',async()=>{const f=fixture('resync');expect(await f.service.tick(f.claim,signal())).toBe('paused');expect(f.storage.complete).toHaveBeenCalledWith(f.claim,f.life.active_request,'paused');});

@@ -25,7 +25,7 @@ export function validExactRequest(r:ExactGridRequest):boolean{
 }
 /** Only this Grid-specific boundary signs and posts. No enrollment, leverage or legacy adapter side effects. */
 export class GridPacificaSender {
-  constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary,private margin?:Pick<GridLaunchStorage,'finalMargin'>){}
+  constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary,private margin?:Pick<GridLaunchStorage,'finalMargin'|'sendOwned'>){}
   async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer,leaseToken?:string):Promise<GridSendResult>{
     if(!validExactRequest(r) || this.transport.keyStatus!=='present')throw Error('Grid transport authority unavailable');
     const sub=new PacificaSigner(subaccountSecret);
@@ -48,6 +48,11 @@ export class GridPacificaSender {
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired during preparation; recover or confirm a fresh preview.');
     if(gridAddsExposure(r)){if(!this.margin)throw new GridMarginDenied('Grid final margin boundary unavailable');await this.margin.finalMargin(r,leaseToken??'');}
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired during margin observation.');
+    if(!this.margin)throw new GridLaunchTransientError('Grid send ownership boundary unavailable');
+    return this.margin.sendOwned(r,leaseToken??'',async()=>{
+    // A suspended process cannot use a permission obtained before the signed window expired.
+    if(Date.now()>=r.timestamp+r.expiryMs)throw new GridLaunchTransientError('Grid signed request expired before POST');
+    if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired before POST.');
     // One bounded request only. Header/HTTP success alone never settles money or an order.
     const response=this.transport.response(await this.fetcher(url,init));
     if(response.status===400||response.status===403||response.status===429){
@@ -69,6 +74,7 @@ export class GridPacificaSender {
       if(gridAddsExposure(r)&&result.success===false&&(result.error_code===5||result.code===5||result.error==='INSUFFICIENT_BALANCE'||result.error==='Insufficient margin'))return {rateLimited:false,marginRejectedDigest:requestDigest(r)};
     }else await response.body?.cancel().catch(()=>undefined);
     return {rateLimited:response.status===429};
+    });
   }
 }
 export type GridReconciliation={state:'unknown'}|{state:'confirmed'|'rejected'|'expected_alo_cross';requestDigest:string;releaseSlot:boolean;orderId?:string;orderStatus?:GridVenueOrder['status'];failureClass?:GridTerminalFailureClass};
@@ -94,7 +100,7 @@ export class GridExecution {
       if(op.exact_request_digest!==requestDigest(request))throw Error('Grid retry payload changed');
       if(op.state==='confirmed')return 'confirmed';
       if(op.state==='failed')return op.failure_classification==='expected_rejection'?'pending':'failed';
-      if(op.state==='submitted'||op.state==='unconfirmed')return this.reconcile(op);
+      if(op.state==='submitted'||op.state==='unconfirmed')return this.reconcile(op,leaseToken);
       if(op.state==='prepared'&&this.deps.storage.expirePrepared&&request.timestamp+request.expiryMs<=(this.deps.now?.()??Date.now())){
         return await this.deps.storage.expirePrepared(op,leaseToken)?'failed':'not_sent';
       }
@@ -102,7 +108,7 @@ export class GridExecution {
     if(!validExactRequest(request) || !await this.deps.preflight(request))return 'not_sent';
     try{op??=await this.deps.storage.prepare(key,request,claim,leaseToken);}
     catch(error){if(error instanceof GridLaunchTransientError)return 'pending';throw error;}
-    if(op.state!=='prepared')return this.reconcile(op);
+    if(op.state!=='prepared')return this.reconcile(op,leaseToken);
     // Re-read current authority after the transaction and immediately before acquiring send permission.
     if(!await this.deps.preflight(op.exact_request))return 'not_sent';
     if(!await this.deps.storage.submit(op,leaseToken))return 'not_sent';
@@ -114,15 +120,15 @@ export class GridExecution {
     if(marginRejectedDigest===op.exact_request_digest){await this.deps.storage.settle(op,{state:'failed',reason:'margin',releaseSlot:true},leaseToken);return 'failed';}
     if(capacityRejectedDigest===op.exact_request_digest){await this.deps.storage.settle(op,{state:'failed',reason:'venue_rejection',releaseSlot:true,capacityRejected:true},leaseToken);return 'failed';}
     if((request.kind==='fund'||request.kind==='sweep')&&terminalTransferDigest===op.exact_request_digest){
-      await this.deps.storage.settle(op,{state:'confirmed',reason:null,releaseSlot:true});return 'confirmed';
+      await this.deps.storage.settle(op,{state:'confirmed',reason:null,releaseSlot:true},leaseToken);return 'confirmed';
     }
-    await this.deps.storage.settle(op,{state:'unconfirmed',reason:rateLimited?'quota':'unknown',releaseSlot:false,rateLimited});
-    return this.reconcile({...op,state:'unconfirmed'});
+    await this.deps.storage.settle(op,{state:'unconfirmed',reason:rateLimited?'quota':'unknown',releaseSlot:false,rateLimited},leaseToken);
+    return this.reconcile({...op,state:'unconfirmed'},leaseToken);
   }
-  private async reconcile(op:DurableGridOperation):Promise<'confirmed'|'pending'|'failed'>{
+  private async reconcile(op:DurableGridOperation,leaseToken:string):Promise<'confirmed'|'pending'|'failed'>{
     let result:GridReconciliation;try{result=await this.deps.reconcile(op);}catch{return 'pending';}
     if(result.state==='unknown' || result.requestDigest!==op.exact_request_digest)return 'pending';
-    await this.deps.storage.settle(op,gridReconciliationOutcome(result));
+    await this.deps.storage.settle(op,gridReconciliationOutcome(result),leaseToken);
     return result.state==='confirmed'?'confirmed':result.state==='expected_alo_cross'?'pending':'failed';
   }
 }

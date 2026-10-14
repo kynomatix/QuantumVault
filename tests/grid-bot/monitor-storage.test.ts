@@ -1,3 +1,4 @@
+import {GridLifecycleService,type GridLifecycleDeps} from '../../server/grid-bot/lifecycle-service';
 import {GridLifecycleStorage} from '../../server/grid-bot/lifecycle-storage';
 import {GridNotifications} from '../../server/grid-bot/notifications';
 import {beforeAll,afterAll,beforeEach,describe,it,expect} from 'vitest';
@@ -27,14 +28,18 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_wallet_safety,grid_monitor_orders,grid_monitor_state,grid_profit_allocations,grid_exact_fills,grid_read_claims,grid_execution_claims,grid_launch_accounts,grid_master_quota,grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query('INSERT INTO wallets VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
-  async function fixture(){const p=policy(),h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;
+  async function reservation(){const p=policy(),h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;
     const bot:DraftRecord={...snapshot,walletAddress:wallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:gridDraftRevision(intent),createIntent:intent,authoritySnapshot:{state:'EXAMPLE'},policyHmac:h.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};
     await new GridStorage(pool,async()=>{}).createDraftWithLevels(bot,levels);
     const account=await new GridCustody(launch).reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:bot.policyHmac,canaryLimit:'250'},umk());
     const claim:GridMonitorClaim={id:bot.id,leaseToken:account.leaseToken,account:account.account,masterAccount:account.masterAccount};
     const level=(await pool.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal LIMIT 1',[bot.id])).rows[0];
+    const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:Date.now(),inventoryComplete:true,history:{from:0,through:Date.now(),inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED_AUTHORITY'},mark:null,position:{direction:'long',size:'0'},orders:[],trades:[]});
+    return {bot,claim,level,observe};
+  }
+  async function fixture(){const {bot,claim,level}=await reservation();
     const now=Date.now(),cloid=randomUUID();
-    const request:ExactGridRequest={kind:'limit',botId:bot.id,account:account.account,masterAccount:account.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:now,expiryMs:5000,
+    const request:ExactGridRequest={kind:'limit',botId:bot.id,account:claim.account,masterAccount:claim.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:now,expiryMs:5000,
       data:{symbol:'BTC',client_order_id:cloid,side:'bid',reduce_only:false,amount:'1',price:'90'},authority:{levelId:level.id,levelAttempt:0}};
     const op=await launch.prepare('EXAMPLE_OPERATION',request,{credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},claim.leaseToken);
     const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:Date.now(),inventoryComplete:true,history:{from:0,through:Date.now(),inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED_AUTHORITY'},mark:null,position:{direction:'long',size:'0.98'},
@@ -121,7 +126,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     await expect(new GridStorage(pool,async()=>{}).getBotSnapshot('EXAMPLE_OTHER',f.bot.id,true)).rejects.toThrow('not_found');
     await control.complete(f.claim,(await control.state(f.claim)).life.active_request,'paused');
     expect(await new GridNotifications(pool,async()=>{calls++;return 'sent';}).deliverNext()).toBe(true);expect(calls).toBe(2);
-    expect((await pool.query('SELECT count(*) AS n FROM grid_risk_events WHERE delivered_at IS NOT NULL')).rows[0].n).toBe('1');
+    expect((await pool.query("SELECT count(*) AS n FROM grid_risk_events WHERE delivered_at IS NOT NULL AND kind NOT LIKE 'internal_%'")).rows[0].n).toBe('1');
     expect((await storage.snapshot(f.claim)).operations).toHaveLength(1);
   });
   it('repeat boot avoids DDL locks and preserves exact columns',async()=>{const c=await pool.connect();await c.query('BEGIN');await c.query('LOCK TABLE grid_exact_fills IN ACCESS SHARE MODE');try{await pool.query("SET lock_timeout='500ms'");await pool.query(migrations[2]);}finally{await c.query('ROLLBACK');c.release();}
@@ -139,8 +144,83 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   it('unknown history exposes no fabricated zero PnL',async()=>{const f=await landed(),o=f.observe();o.trades=[];o.history=null;await storage.reconcile(f.claim,randomUUID(),o);expect(await storage.pnl(wallet,f.bot.id)).toMatchObject({available:false,label:'PnL excludes funding'});});
   it('owner-only PnL and stale marks fail closed',async()=>{const f=await landed();const o=f.observe();o.mark={price:'100',observedAt:Date.now()};await storage.reconcile(f.claim,randomUUID(),o);expect(await storage.pnl('EXAMPLE_OTHER',f.bot.id)).toBeNull();await pool.query("UPDATE grid_monitor_state SET reconciled_at=clock_timestamp()-interval '1 minute'");expect(await storage.pnl(wallet,f.bot.id)).toMatchObject({unrealised:null,total:null});});
   it('an unavailable position cannot publish marked PnL from a nominal flat ledger',async()=>{const f=await landed(),o=f.observe();o.position=null;o.mark={price:'100',observedAt:Date.now()};await storage.reconcile(f.claim,randomUUID(),o);expect(await storage.pnl(wallet,f.bot.id)).toMatchObject({available:false});});
-  it('never steals an expired lease from an uncertain old worker',async()=>{const f=await fixture();await pool.query("UPDATE grid_bots SET lease_expires_at=clock_timestamp()-interval '1 second'");expect(await storage.claim()).toBeNull();await expect(storage.reconcile(f.claim,randomUUID(),f.observe())).rejects.toThrow('ownership');});
-  it('claims only unowned bots and excludes the same bot across workers',async()=>{const f=await fixture();await storage.release(f.claim);await pool.query('UPDATE grid_bots SET last_tick_at=NULL');const result=await Promise.all([storage.claim(),storage.claim()]);expect(result.filter(Boolean)).toHaveLength(1);});
+  it('never adopts an unregistered expired legacy owner',async()=>{const f=await fixture();await pool.query("DELETE FROM grid_risk_events WHERE event_key='worker-ownership'");await pool.query("UPDATE grid_bots SET lease_expires_at=clock_timestamp()-interval '1 second'");expect(await storage.claim()).toBeNull();await expect(storage.reconcile(f.claim,randomUUID(),f.observe())).rejects.toThrow('ownership');});
+
+  async function expireOwner(f:{bot:{id:string}}){
+    await pool.query("UPDATE grid_bots SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[f.bot.id]);
+    // Let the real signed window elapse; do not rewrite the retained request to simulate time.
+    await new Promise(resolve=>setTimeout(resolve,5100));
+  }
+  it('recovers a crash after custody reservation without manual lease SQL in the recovery path',async()=>{
+    const f=await reservation();
+    await pool.query("UPDATE grid_bots SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1",[f.bot.id]);
+    const next=await storage.claim();expect(next?.id).toBe(f.bot.id);expect(next?.leaseToken).not.toBe(f.claim.leaseToken);
+    const recovered=await new GridCustody(launch).recover(f.bot.id,wallet,next!.leaseToken);expect(recovered.account).toBe(f.claim.account);
+    expect((await pool.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key=$2",[f.bot.id,'worker-retired:'+f.claim.leaseToken])).rows[0].evidence).toMatchObject({retiredGeneration:f.claim.leaseToken,replacementGeneration:next!.leaseToken,signedWindowsExpired:true});
+    await expect(storage.snapshot(f.claim)).rejects.toThrow('ownership');
+    const observe=()=>({...f.observe(),orders:[],trades:[],position:{direction:'long' as const,size:'0'}});
+    expect((await new GridMonitorService({storage,observe:async()=>observe()}).tick(next!,new AbortController().signal)).entriesAllowed).toBe(true);
+  });
+  it('recovers a prepared crash, keeps its exact payload, and reconciles before admitting entry',async()=>{
+    const f=await fixture();await expireOwner(f);const next=(await storage.claim())!;expect(next.id).toBe(f.bot.id);
+    const now=Date.now(),r={...f.request,timestamp:now};
+    await expect(launch.prepare('EXAMPLE_RECOVERED_ENTRY',r,{credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},next.leaseToken)).rejects.toThrow('requires reconciliation');
+    const observe=()=>({...f.observe(),orders:[],trades:[],position:{direction:'long' as const,size:'0'}});
+    const service=new GridMonitorService({storage,observe:async()=>observe()});expect((await service.tick(next,new AbortController().signal)).entriesAllowed).toBe(true);
+    const op=(await launch.read(f.bot.id,'EXAMPLE_OPERATION'))!;expect(op.state).toBe('failed');expect(op.exact_request).toEqual(f.op.exact_request);expect(op.exact_request_digest).toBe(f.op.exact_request_digest);
+    expect((await pool.query('SELECT slot_released,settled_at FROM grid_execution_claims WHERE operation_id=$1',[op.id])).rows[0]).toMatchObject({slot_released:true,settled_at:expect.any(Date)});
+    expect((await pool.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id])).rows[0].evidence.reconciliationRequired).toBe(false);
+    expect((await storage.planningState(next,service.bootId)).authority.monitorBootId).toBe(service.bootId);
+  },15000);
+  it('recovers a submitted POST by its retained identity without re-preparing or re-sending it',async()=>{
+    const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await expireOwner(f);const next=(await storage.claim())!;
+    const service=new GridMonitorService({storage,observe:async()=>f.observe()});expect((await service.tick(next,new AbortController().signal)).entriesAllowed).toBe(true);
+    const op=(await launch.read(f.bot.id,'EXAMPLE_OPERATION'))!;expect(op.state).toBe('confirmed');expect(op.exact_request).toEqual(f.op.exact_request);expect(op.exact_request_digest).toBe(f.op.exact_request_digest);
+    expect((await pool.query('SELECT count(*) AS n FROM grid_operations WHERE bot_id=$1',[f.bot.id])).rows[0].n).toBe('1');
+    expect(await launch.submit(f.op,next.leaseToken)).toBe(false);
+    let posts=0;await expect(launch.sendOwned(f.request,next.leaseToken,async()=>{posts++;})).rejects.toThrow('ownership');expect(posts).toBe(0);
+  },15000);
+  it('does not overlap a stalled POST and fences the old owner after its sender transaction retires',async()=>{
+    const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);
+    let start!:()=>void,finish!:()=>void;const started=new Promise<void>(resolve=>{start=resolve;}),hold=new Promise<void>(resolve=>{finish=resolve;});
+    await pool.query("UPDATE grid_bots SET lease_expires_at=clock_timestamp()+interval '1 second' WHERE id=$1",[f.bot.id]);
+    const sending=launch.sendOwned(f.request,f.claim.leaseToken,async()=>{start();await hold;return 'EXAMPLE_POST_COMPLETED';});await started;
+    try{await new Promise(resolve=>setTimeout(resolve,5100));expect(await storage.claim()).toBeNull();}finally{finish();}
+    expect(await sending).toBe('EXAMPLE_POST_COMPLETED');const next=(await storage.claim())!;expect(next.leaseToken).not.toBe(f.claim.leaseToken);
+    await expect(launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false},f.claim.leaseToken)).rejects.toThrow('ownership');
+    await expect(launch.sendOwned({...f.request,timestamp:Date.now()},f.claim.leaseToken,async()=>{throw Error('old sender entered');})).rejects.toThrow('ownership');
+    await expect(launch.prepare('EXAMPLE_OLD_GENERATION',{...f.request,timestamp:Date.now()},{credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:Date.now(),expiresAt:Date.now()+5000},f.claim.leaseToken)).rejects.toThrow('ownership');
+    await storage.release(f.claim);expect((await storage.snapshot(next)).bot.lease_token).toBe(next.leaseToken);
+  },15000);
+
+  it.each(['fund','sweep'] as const)('takeover retains an unknown %s and restores latched Stop reductions without replay',async kind=>{
+    const f=await reservation();
+    const now=Date.now(),transfer:ExactGridRequest={botId:f.bot.id,account:f.claim.account,masterAccount:f.claim.masterAccount,timestamp:now,expiryMs:5000,kind,path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:kind==='fund'?f.claim.account:f.claim.masterAccount,amount:'1'},authority:{}};
+    const life=new GridLifecycleStorage(storage);
+    let op:Awaited<ReturnType<typeof launch.prepare>>;
+    if(kind==='fund')op=await launch.prepare('EXAMPLE_UNKNOWN_TRANSFER',transfer,{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},f.claim.leaseToken);
+    else {
+      // A lost terminal sweep is already retained; the test fixture models its prior valid admission.
+      const id=randomUUID(),digest=requestDigest(transfer);
+      op=(await pool.query("INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type,exact_request,exact_request_digest,state,submitted_at) VALUES($1,$2,'EXAMPLE_UNKNOWN_TRANSFER',$3,'sweep_subaccount',$4,$3,'submitted',clock_timestamp()) RETURNING *",[id,f.bot.id,digest,transfer])).rows[0];
+    }
+    if(kind==='fund')expect(await launch.submit(op,f.claim.leaseToken)).toBe(true);
+    const control=await life.request(wallet,f.bot.id,'EXAMPLE_LATCHED_STOP','stop');await expireOwner(f);const next=(await storage.claim())!;
+    expect((await life.state(next)).life.active_request).toBe(control.id);
+    let posts=0,settlements=0,recycles=0;
+    const observation=()=>({...f.observe(),orders:[],trades:[],position:{direction:'long' as const,size:'0.98'}});
+    const deps:GridLifecycleDeps={storage:life,observe:async()=>observation(),sol:async()=>({balance:'0.1',observedAt:Date.now()}),recover:async()=>({state:'unknown'}),
+      send:async(claim,r)=>launch.sendOwned(r,claim.leaseToken,async()=>{posts++;expect(r.kind).toBe('close');return {rateLimited:false};}),resume:async()=>null,settlement:async()=>{settlements++;return null;},recycle:async()=>{recycles++;}};
+    expect(await new GridLifecycleService(deps).tick(next,new AbortController().signal)).toBe('pending');expect(posts).toBe(1);
+    expect((await launch.read(f.bot.id,'EXAMPLE_UNKNOWN_TRANSFER'))!.exact_request).toEqual(op.exact_request);
+    expect((await pool.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id])).rows[0].evidence.reconciliationRequired).toBe(true);
+    const close=(await pool.query("SELECT * FROM grid_operations WHERE bot_id=$1 AND type='close_position'",[f.bot.id])).rows[0];
+    await launch.settle(close,{state:'confirmed',reason:null,releaseSlot:true},next.leaseToken);
+    deps.observe=async()=>({...observation(),position:{direction:'long',size:'0'}});
+    expect(await new GridLifecycleService(deps).tick(next,new AbortController().signal)).toBe('transfer_recovery_requires_C4');
+    expect(posts).toBe(1);expect(settlements).toBe(0);expect(recycles).toBe(0);expect((await launch.read(f.bot.id,'EXAMPLE_UNKNOWN_TRANSFER'))!.state).toBe('submitted');
+  },15000);
+  it('claims a released generation once across workers',async()=>{const f=await landed();await storage.release(f.claim);await pool.query('UPDATE grid_bots SET last_tick_at=NULL');const result=await Promise.all([storage.claim(),storage.claim()]);expect(result.filter(Boolean)).toHaveLength(1);});
   it('recovers an expired provably unsent preparation, releases claims and advances its attempt once',async()=>{const f=await fixture();f.op.exact_request.timestamp-=10000;f.op.exact_request_digest=requestDigest(f.op.exact_request);
     await pool.query('UPDATE grid_operations SET exact_request=$2,exact_request_digest=$3 WHERE id=$1',[f.op.id,f.op.exact_request,f.op.exact_request_digest]);
     expect(await launch.expirePrepared(f.op,f.claim.leaseToken)).toBe(true);expect(await launch.expirePrepared(f.op,f.claim.leaseToken)).toBe(false);expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(false);
@@ -237,7 +317,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   it('SOL warnings deduplicate by transition and unknown remains unknown',async()=>{
     const f=await landed(),control=new GridLifecycleStorage(storage);
     await control.sol(f.claim,{balance:'0.05',observedAt:Date.now()});await control.sol(f.claim,{balance:'0.05',observedAt:Date.now()});
-    expect((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n).toBe('1');
+    expect((await pool.query("SELECT count(*) AS n FROM grid_risk_events WHERE kind LIKE 'sol_%'")).rows[0].n).toBe('1');
     await control.sol(f.claim,null);expect((await control.state(f.claim)).bot).toMatchObject({sol_balance:null,sol_guard_state:'unknown'});
   });
   it('pause completion cannot terminalize a stop or bypass an uncertain operation',async()=>{
@@ -339,5 +419,5 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     await pool.query("UPDATE grid_operations SET terminal_at=clock_timestamp()+interval '1 second' WHERE id=$1",[failed.id]);
     await storage.reconcile(f.claim,randomUUID(),o);expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(2);
   });
- it('wallet SOL incident survives another storage instance and closes on health',async()=>{const f=await landed(),a=new GridLifecycleStorage(storage),b=new GridLifecycleStorage(storage);await a.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});await b.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});expect((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n).toBe('1');expect((await pool.query('SELECT * FROM grid_wallet_safety')).rows[0]).toMatchObject({execution_wallet:'EXAMPLE_MASTER',balance_lamports:'49999999',guard_state:'entry_blocked',policy_version:'1.0.0'});await b.sol(f.claim,{balance:'0.05',observedAt:Date.now()});await a.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});expect((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n).toBe('2');await b.sol(f.claim,{balance:'0.1',observedAt:Date.now()});expect((await pool.query('SELECT incident_id FROM grid_wallet_safety')).rows[0].incident_id).toBeNull();});
+ it('wallet SOL incident survives another storage instance and closes on health',async()=>{const f=await landed(),a=new GridLifecycleStorage(storage),b=new GridLifecycleStorage(storage);await a.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});await b.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});expect((await pool.query("SELECT count(*) AS n FROM grid_risk_events WHERE kind LIKE 'sol_%'")).rows[0].n).toBe('1');expect((await pool.query('SELECT * FROM grid_wallet_safety')).rows[0]).toMatchObject({execution_wallet:'EXAMPLE_MASTER',balance_lamports:'49999999',guard_state:'entry_blocked',policy_version:'1.0.0'});await b.sol(f.claim,{balance:'0.05',observedAt:Date.now()});await a.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});expect((await pool.query("SELECT count(*) AS n FROM grid_risk_events WHERE kind LIKE 'sol_%'")).rows[0].n).toBe('2');await b.sol(f.claim,{balance:'0.1',observedAt:Date.now()});expect((await pool.query('SELECT incident_id FROM grid_wallet_safety')).rows[0].incident_id).toBeNull();});
 });

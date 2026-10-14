@@ -8,6 +8,7 @@ import {GridPacificaSender} from '../../server/grid-bot/execution';
 import {PacificaTransportAuthority} from '../../server/protocol/pacifica/pacifica-transport';
 import {policy as basePolicy} from './draft-fixtures';
 
+const sendOwned=async<T>(_r:ExactGridRequest,_lease:string,post:()=>Promise<T>)=>post();
 const base=basePolicy();
 const policy=()=>({...base,startPrice:'100.50000000',lowerPrice:'100.00000000',upperPrice:'102.00000000',gridCount:2,
   levels:[100,101,102].map((price,i)=>({ordinal:i+1,price:price.toFixed(8),size:'1.00000000',side:'buy' as const,reduceOnly:false}))});
@@ -66,15 +67,17 @@ describe('first-placement signing boundary',()=>{
   it.each([5000,5001])('rechecks after synchronous signing/preparation at %s ms',async delay=>{
     const h=harness(),r={...request(),account:bs58.encode(sub.publicKey)},transport=new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9)));
     const original=transport.restInit.bind(transport);vi.spyOn(transport,'restInit').mockImplementation((...args)=>{const init=original(...args);h.setNow(1000+delay);return init;});
-    const post=vi.fn(async()=>new Response(null,{status:200})),sender=new GridPacificaSender(transport,post as typeof fetch,h.authority,{finalMargin:async()=>{}});
+    const clock=vi.spyOn(Date,'now').mockReturnValue(1000);
+    const post=vi.fn(async()=>new Response(null,{status:200})),sender=new GridPacificaSender(transport,post as typeof fetch,h.authority,{finalMargin:async()=>{},sendOwned});
     if(delay===5000){await sender.send(r,Buffer.from(sub.secretKey));expect(post).toHaveBeenCalledOnce();}
     else {await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('expired');expect(post).not.toHaveBeenCalled();}
+    clock.mockRestore();
   });
   it('fails closed when the concrete authority is absent, while reduce-only orders remain usable',async()=>{
     const r={...request(),account:bs58.encode(sub.publicKey)},post=vi.fn(async()=>new Response(null,{status:200}));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post as typeof fetch);
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post as typeof fetch,undefined,{finalMargin:async()=>{},sendOwned});
     await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('first placement');expect(post).not.toHaveBeenCalled();
-    await sender.send({...r,data:{...r.data,reduce_only:true}},Buffer.from(sub.secretKey));expect(post).toHaveBeenCalledOnce();
+    await sender.send({...r,timestamp:Date.now(),data:{...r.data,reduce_only:true}},Buffer.from(sub.secretKey));expect(post).toHaveBeenCalledOnce();
   });
 });
 

@@ -6,29 +6,48 @@ import type {GridEconomicFill} from './pnl';
 import Decimal from 'decimal.js';
 import {advanceGridCanary,gridCanaryPolicyCurrent,type GridCanaryClock} from './canary-clock';
 import {GRID_HISTORY_PUBLICATION_LAG_MS} from './history-safety';
+import {gridWorkerFence,recordGridWorker} from './worker-ownership';
 const D=Decimal.clone({precision:200});
 const states=['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping'];
 export interface GridMonitorClaim {id:string;leaseToken:string;account:string;masterAccount:string}
 const fillsFromRows=(rows:Record<string,any>[]):GridEconomicFill[]=>rows.map(r=>({tradeId:r.trade_id,operationId:r.operation_id,orderId:r.order_id,levelId:r.level_id,time:Number(r.venue_time),leg:r.leg,size:r.size,price:r.price,fee:r.fee}));
 export class GridMonitorStorage {
   constructor(readonly launch:GridLaunchStorage){}
-  /** Expiry alone never proves the old worker is dead. Only unowned rows are claimable. */
+  /** Expiry nominates a generation; the send fence retires it. Unregistered legacy owners stay blocked. */
   async claim(exclude:string[]=[]):Promise<GridMonitorClaim|null>{return this.launch.transaction(async c=>{
-    const row=(await c.query(`SELECT b.id,a.account,a.master_account FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
-      WHERE b.status=ANY($1::text[]) AND b.lease_token IS NULL AND a.released_at IS NULL AND NOT(b.id=ANY($2::uuid[]))
+    const rows=(await c.query(`SELECT b.id,b.lease_token,a.account,a.master_account FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
+      WHERE b.status=ANY($1::text[]) AND a.released_at IS NULL AND NOT(b.id=ANY($2::uuid[]))
+      AND (b.lease_token IS NULL OR (b.lease_expires_at<=clock_timestamp() AND EXISTS
+        (SELECT 1 FROM grid_risk_events e WHERE e.bot_id=b.id AND e.event_key='worker-ownership'
+          AND e.evidence->>'version'='1' AND e.evidence->>'generation'=b.lease_token::text)))
       AND (b.last_tick_at IS NULL OR b.last_tick_at<=clock_timestamp()-interval '15 seconds')
-      ORDER BY b.last_tick_at NULLS FIRST,b.id FOR UPDATE OF b SKIP LOCKED LIMIT 1`,[states,exclude])).rows[0];
-    if(!row)return null;
-    const token=randomUUID();
-    await c.query("UPDATE grid_bots SET lease_token=$2,lease_expires_at=clock_timestamp()+interval '120 seconds' WHERE id=$1",[row.id,token]);
-    return {id:row.id,leaseToken:token,account:row.account,masterAccount:row.master_account};
+      ORDER BY b.last_tick_at NULLS FIRST,b.id FOR UPDATE OF b SKIP LOCKED LIMIT 2`,[states,exclude])).rows;
+    for(const row of rows){
+      if(!await gridWorkerFence(c,row.id))continue;
+      // Even a disconnected sender cannot leave a still-valid signed request behind at takeover.
+      const operations=(await c.query("SELECT exact_request FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[row.id])).rows;
+      const now=Number((await c.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS now')).rows[0].now);
+      if(operations.some(({exact_request:r})=>!r||!Number.isSafeInteger(r.timestamp)||!Number.isSafeInteger(r.expiryMs)
+        ||r.expiryMs<1||r.expiryMs>15000||r.timestamp+r.expiryMs>now))continue;
+      const token=randomUUID();
+      if(row.lease_token)await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at)
+        VALUES($1,$2,'internal_worker_retirement',$3,clock_timestamp())`,[row.id,'worker-retired:'+row.lease_token,
+        {version:1,retiredGeneration:row.lease_token,replacementGeneration:token,retiredAt:now,fence:'exclusive_postgres_sender_lock',signedWindowsExpired:true}]);
+      await c.query("UPDATE grid_bots SET lease_token=$2,lease_expires_at=clock_timestamp()+interval '120 seconds',startup_reconciled_at=NULL WHERE id=$1",[row.id,token]);
+      await recordGridWorker(c,row.id,token,true);
+      await c.query(`INSERT INTO grid_monitor_state(bot_id,blocked_reasons) VALUES($1,'["ownership_recovery_reconciliation_required"]')
+        ON CONFLICT(bot_id) DO UPDATE SET boot_id=NULL,pnl=NULL,generation=grid_monitor_state.generation+1,
+        blocked_reasons=EXCLUDED.blocked_reasons`,[row.id]);
+      return {id:row.id,leaseToken:token,account:row.account,masterAccount:row.master_account};
+    }
+    return null;
   });}
   async assertLease(c:PoolClient,claim:GridMonitorClaim){const bot=(await c.query(`SELECT b.*,a.account,a.master_account,clock_timestamp() AS db_now
     FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 AND b.lease_token=$2
     AND b.lease_expires_at>clock_timestamp() AND a.released_at IS NULL AND b.status=ANY($3::text[]) FOR UPDATE OF b`,[claim.id,claim.leaseToken,states])).rows[0];
     if(!bot||bot.account!==claim.account||bot.master_account!==claim.masterAccount)throw Error('Grid ownership uncertain');return bot;
   }
-  async release(claim:GridMonitorClaim){await this.launch.transaction(async c=>{await c.query(`UPDATE grid_bots SET lease_token=NULL,lease_expires_at=NULL,last_tick_at=clock_timestamp()
+  async release(claim:GridMonitorClaim){await this.launch.transaction(async c=>{if(!await gridWorkerFence(c,claim.id))throw Error('Grid sender still active');await c.query(`UPDATE grid_bots SET lease_token=NULL,lease_expires_at=NULL,last_tick_at=clock_timestamp()
     WHERE id=$1 AND lease_token=$2`,[claim.id,claim.leaseToken]);});}
   async snapshot(claim:GridMonitorClaim){return this.launch.transaction(async c=>{const bot=await this.assertLease(c,claim);
     const operations=(await c.query('SELECT * FROM grid_operations WHERE bot_id=$1 ORDER BY created_at,id',[claim.id])).rows as ReconciliationOperation[];
@@ -113,6 +132,8 @@ export class GridMonitorStorage {
       observation=EXCLUDED.observation,pnl=EXCLUDED.pnl,blocked_reasons=EXCLUDED.blocked_reasons,reconciled_at=EXCLUDED.reconciled_at`,
       [claim.id,result.entriesAllowed?bootId:null,safe,JSON.stringify(observation),economicUnknown?null:JSON.stringify(result.pnl),JSON.stringify(result.reasons)]);
     await c.query(`UPDATE grid_bots SET last_reconciliation_at=clock_timestamp(),startup_reconciled_at=CASE WHEN $2 THEN clock_timestamp() ELSE NULL END WHERE id=$1`,[claim.id,result.entriesAllowed]);
+    if(result.entriesAllowed)await c.query(`UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{reconciliationRequired}','false'::jsonb)
+      WHERE bot_id=$1 AND event_key='worker-ownership' AND evidence->>'generation'=$2`,[claim.id,claim.leaseToken]);
     // Every eligible monitor tick performs a full replay; this exceeds the 30-minute
     // cadence without creating another scheduler. Completion and safe-through are
     // committed with fills and the durable canary checkpoint in this transaction.

@@ -8,6 +8,7 @@ import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../storage';
 import type {GridSettlementFact} from './lifecycle-service';
 import {gridRecyclerGate} from './runtime-policy';
 import {freshGridFact} from './lifecycle-policy';
+import {recordGridWorker} from './worker-ownership';
 
 // Leave recovery time beyond the durable 60-second rate-limit backoff.
 export const GRID_LAUNCH_LEASE_MS = 120_000;
@@ -58,6 +59,7 @@ export class GridCustody {
           VALUES($1,'pacifica',$2,'grid_reserved',$3,$4,1,$5,clock_timestamp()) RETURNING id`,[input.wallet,account,input.masterAccount,encrypted,leaseToken])).rows[0];
         await c.query('INSERT INTO grid_launch_accounts(bot_id,protocol_subaccount_id,master_account,account,canary_limit,reused) VALUES($1,$2,$3,$4,$5,$6)',[input.botId,row.id,input.masterAccount,chosenAccount,input.canaryLimit,!!spare]);
         await c.query("UPDATE grid_bots SET protocol_subaccount_id=$2,status='provisioning',lease_token=$3,lease_expires_at=clock_timestamp()+$4*interval '1 millisecond',updated_at=clock_timestamp() WHERE id=$1",[input.botId,row.id,leaseToken,GRID_LAUNCH_LEASE_MS]);
+        await recordGridWorker(c,input.botId,leaseToken,false);
         return {botId:input.botId,wallet:input.wallet,masterAccount:input.masterAccount,account:chosenAccount,leaseToken,reused:!!spare};
       });
     } finally {zeroizeBuffer(secret);keypair.secretKey.fill(0);zeroizeBuffer(subkey);}

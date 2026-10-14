@@ -6,7 +6,7 @@ import {GridExecution,gridReconciliationOutcome,type GridReconciliation} from '.
 import {requestDigest,type ExactGridRequest,type DurableGridOperation} from './launch-storage';
 import type {GridSendResult} from './execution-failure';
 import type {GridObservation} from './reconciliation';
-import {gridOwnedLive,gridRiskTrigger,freshGridFact,gridEntrySafety,gridUnresolvedEntryCancel} from './lifecycle-policy';
+import {gridOwnedLive,gridRiskTrigger,freshGridFact,gridEntrySafety,gridUnresolvedEntryCancel,gridUnresolvedTransfer} from './lifecycle-policy';
 import {preflightGridLaunch,type LaunchFacts} from './provision';
 import type {GridPolicy} from './policy-hmac';
 import {gridRecyclerGate} from './runtime-policy';
@@ -59,12 +59,16 @@ export class GridLifecycleService {
     await s.sol(claim,sol);({bot,life}=await s.state(claim));
     const snapshot=await monitor.snapshot(claim);
     // Recover uncertain requests first. Acknowledgments and disappearance are never terminal facts.
-    let unresolvedEntryCancel=false;
+    let unresolvedEntryCancel=false,unresolvedTransfer=false;
     for(const op of snapshot.operations.filter(op=>['prepared','submitted','unconfirmed'].includes(op.state))){
       if(!op.exact_request||requestDigest(op.exact_request)!==op.exact_request_digest)return block('operation_identity_unavailable');
       if(op.state==='prepared'){await launch.expirePrepared(op,claim.leaseToken);return block('prepared_operation_pending');}
       const result=await this.deps.recover(claim,op,signal);signal.throwIfAborted();
       if(result.state==='unknown'||result.requestDigest!==op.exact_request_digest){
+        if(life?.state==='pending'&&life.action==='stop'&&bot.status==='stopping'
+          &&gridUnresolvedTransfer(op,{botId:claim.id,account:claim.account,masterAccount:claim.masterAccount},Date.now())){
+          unresolvedTransfer=true;continue;
+        }
         if(life?.state==='pending'&&life.action==='stop'&&bot.status==='stopping'
           &&gridUnresolvedEntryCancel(op,{botId:claim.id,account:claim.account,masterAccount:claim.masterAccount})){
           unresolvedEntryCancel=true;continue;
@@ -128,6 +132,7 @@ export class GridLifecycleService {
     // Flat now is not terminal: the retained entry may still fill on a later tick.
     if(unresolvedEntryCancel)return block('venue_operation_unresolved');
     const exit=owned.find(x=>x.operation);if(exit)return cancel(exit);
+    if(unresolvedTransfer)return block('transfer_recovery_requires_C4');
     if(!reconciled.entriesAllowed)return block('terminal_history_unavailable');
     const settlement=await this.deps.settlement(claim,signal);
     if(!settlement||settlement.account!==claim.account||settlement.masterAccount!==claim.masterAccount||!settlement.settlementComplete||!settlement.source

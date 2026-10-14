@@ -142,13 +142,13 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     await s.settle(op,{state:'failed',reason:'venue_rejection',capacityRejected:true,releaseSlot:true},account.leaseToken);
     expect((await pool.query('SELECT state,failure_classification FROM grid_operations WHERE id=$1',[op.id])).rows[0]).toEqual({state:'failed',failure_classification:'venue_rejection'});
     expect((await pool.query('SELECT status,pause_reason FROM grid_bots WHERE id=$1',[account.botId])).rows[0]).toEqual({status:'paused',pause_reason:'venue_capacity'});
-    expect((await pool.query('SELECT evidence FROM grid_risk_events WHERE bot_id=$1',[account.botId])).rows[0].evidence).toMatchObject({classification:'venue_capacity',observedOpenOrders:38,account:account.account});
+    expect((await pool.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='venue_order_capacity'",[account.botId])).rows[0].evidence).toMatchObject({classification:'venue_capacity',observedOpenOrders:38,account:account.account});
     expect((await pool.query('SELECT slot_released,settled_at IS NOT NULL AS settled FROM grid_execution_claims WHERE operation_id=$1',[op.id])).rows[0]).toEqual({slot_released:true,settled:true});
     await expect(s.settle(op,{state:'failed',reason:'venue_rejection',capacityRejected:true,releaseSlot:true},account.leaseToken)).rejects.toThrow('CAS');
     await pool.query("UPDATE grid_bots SET status='active',pause_reason=NULL WHERE id=$1",[account.botId]);
     await expect(new GridLaunchStorage(pool,async()=>{}).prepare('EXAMPLE_AFTER_RESUME',input(account).request,input(account).claim,account.leaseToken)).rejects.toThrow('venue-capacity pause');
     expect(await new GridLaunchStorage(pool,async()=>{}).submit(op,account.leaseToken)).toBe(false);
-    expect((await pool.query('SELECT event_key FROM grid_risk_events WHERE bot_id=$1',[account.botId])).rowCount).toBe(1);
+    expect((await pool.query("SELECT event_key FROM grid_risk_events WHERE bot_id=$1 AND event_key='venue_order_capacity'",[account.botId])).rowCount).toBe(1);
     // Existing reduction authority still applies, but capacity itself never blocks these operations.
     for(const r of [{...v.request,kind:'cancel' as const},{...v.request,kind:'close' as const},{...v.request,kind:'sweep' as const},{...v.request,data:{...v.request.data,reduce_only:true}}])
       expect(await (s as any).capacityBlocked(pool,r)).toBe(false);

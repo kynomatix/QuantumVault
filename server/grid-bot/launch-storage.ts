@@ -4,7 +4,8 @@ import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
 import type {Pool,PoolClient} from 'pg';
 import {requireSchemaCapabilityReady} from '../schema-readiness';
-import {gridEntrySafety,freshGridFact,gridUnresolvedEntryCancel} from './lifecycle-policy';
+import {gridEntrySafety,freshGridFact,gridUnresolvedStopReduction} from './lifecycle-policy';
+import {gridWorkerFence,gridWorkerEntryBlocked} from './worker-ownership';
 import {gridRecyclerGate} from './runtime-policy';
 import {canonicalGridPolicy,type GridPolicy} from './policy-hmac';
 import type {GridFirstPlacementContext} from './first-placement';
@@ -41,10 +42,28 @@ function reductionAuthority(r:ExactGridRequest,monitor:any,now:number){
     &&new Decimal(proof.balance).gt(0)&&new Decimal(proof.balance).eq(proof.withdrawable)&&new Decimal(proof.balance).eq(String(r.data.amount));
 }
 export class GridLaunchTransientError extends Error {}
-/** Lock order is always master, then bot. No deployment identity partitions a master's quota. */
+/** Reservations lock master, then bot. The POST fence takes no quota lock. */
 export class GridLaunchStorage {
   constructor(private pool:Pool,private ready=()=>requireSchemaCapabilityReady('grid_bot',async(q,v)=>pool.query(q,v?[...v]:undefined)),
     private marginRead?:(r:ExactGridRequest)=>Promise<GridMarginReading|null>){}
+  /** All POST kinds share the takeover fence through completion. No async gap after final authority. */
+  async sendOwned<T>(r:ExactGridRequest,leaseToken:string,post:()=>Promise<T>):Promise<T>{
+    return this.transaction(async c=>{
+      if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
+      const owned=(await c.query(`SELECT b.id FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
+         JOIN grid_risk_events e ON e.bot_id=b.id AND e.event_key='worker-ownership'
+         LEFT JOIN grid_lifecycle l ON l.bot_id=b.id
+         WHERE b.id=$1 AND b.lease_token=$2::uuid AND b.lease_expires_at>clock_timestamp() AND a.released_at IS NULL
+         AND a.account=$3 AND a.master_account=$4 AND e.evidence->>'version'='1' AND e.evidence->>'generation'=$2::text
+         AND b.status=ANY($5::text[]) AND $6::bigint<=extract(epoch FROM clock_timestamp())*1000
+         AND ($6::bigint+$7::bigint)>extract(epoch FROM clock_timestamp())*1000
+         AND (l.bot_id IS NULL OR l.epoch::text=$9) AND ($10::boolean=false OR b.status='stopping')
+         AND EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.state='submitted' AND o.exact_request_digest=$8) FOR UPDATE OF b`,
+         [r.botId,leaseToken,r.account,r.masterAccount,reduction(r)?liveStates:['provisioning','canary','active'],r.timestamp,r.expiryMs,requestDigest(r),r.authority.lifecycleEpoch??null,['close','sweep'].includes(r.kind)])).rowCount;
+      if(!owned||!reduction(r)&&await gridWorkerEntryBlocked(c,r.botId))throw new GridLaunchTransientError('Grid send ownership unavailable');
+      return post();
+    });
+  }
   private async freshMargin(r:ExactGridRequest){
     if(!gridAddsExposure(r))return null;
     if(this.marginRead){try{return await this.marginRead(r);}catch{return null;}}
@@ -111,6 +130,7 @@ export class GridLaunchStorage {
       const op=(await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND exact_request_digest=$2 AND state='submitted'",[r.botId,requestDigest(r)])).rows[0];
       if(!bot||bot.account!==r.account||bot.master_account!==r.masterAccount||!op)return null;
       const now=new Date(bot.now).getTime();
+      if(await gridWorkerEntryBlocked(c,r.botId))return null;
       if(!leaseToken||bot.lease_token!==leaseToken||new Date(bot.lease_expires_at).getTime()<=now||!['provisioning','canary','active'].includes(bot.status)||r.timestamp+ r.expiryMs<=now)return null;
       return this.marginGate(c,bot,r,reading,now,op.id);
     });
@@ -216,6 +236,7 @@ export class GridLaunchStorage {
       const bot=(await c.query('SELECT b.*,a.account,a.master_account,a.canary_limit,a.canary_committed,a.released_at FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 FOR UPDATE OF b,a',[request.botId])).rows[0];
       if(!bot || bot.released_at || bot.account!==request.account || bot.master_account!==request.masterAccount || bot.lease_token!==leaseToken
         || new Date(bot.lease_expires_at).getTime()<=now || !(reduction(request)?liveStates:['provisioning','canary','active']).includes(bot.status))throw Error('Lost Grid ownership');
+      if(!reduction(request)&&await gridWorkerEntryBlocked(c,request.botId))throw new GridLaunchTransientError('Grid ownership recovery requires reconciliation');
       const lifecycle=(await c.query('SELECT * FROM grid_lifecycle WHERE bot_id=$1',[request.botId])).rows[0];
       if(lifecycle&&String(lifecycle.epoch)!==String(request.authority.lifecycleEpoch))throw Error('Grid lifecycle changed');
       if(['close','sweep'].includes(request.kind)&&bot.status!=='stopping')throw Error('Stop intent required');
@@ -238,10 +259,10 @@ export class GridLaunchStorage {
         ||!new Decimal(monitor.observation.position.size).isZero()||request.data.to_account!==request.masterAccount||request.authority.settlementComplete!==true))throw Error('Sweep settlement authority unavailable');
       if(!reductionAuthority(request,monitor,now))throw Error('Grid reduction authority unavailable');
       const unresolved=(await c.query("SELECT * FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[request.botId])).rows;
-      if(unresolved.length&&!(request.kind==='close'&&request.data.reduce_only===true&&bot.status==='stopping'
+      if(unresolved.length&&!(['close','cancel'].includes(request.kind)&&bot.status==='stopping'
         &&lifecycle?.active_request===request.authority.controlRequestId
         &&(await c.query("SELECT id FROM grid_control_requests WHERE id=$1 AND bot_id=$2 AND action='stop' AND state='pending'",[lifecycle.active_request,request.botId])).rowCount
-        &&unresolved.every(op=>gridUnresolvedEntryCancel(op,request))))throw Error('Unresolved operation barrier');
+        &&unresolved.every(op=>gridUnresolvedStopReduction(op,request,now))))throw Error('Unresolved operation barrier');
       if(!Number.isSafeInteger(claim.observedAt) || !Number.isSafeInteger(claim.expiresAt) || claim.observedAt>now || claim.expiresAt<=now
         || claim.expiresAt-claim.observedAt>5000 || request.timestamp>now || request.timestamp+request.expiryMs<=now)throw Error('Stale admission');
       if(new Date(master.backoff_until).getTime()>now)throw new GridLaunchTransientError('Durable Grid rate-limit backoff');
@@ -310,6 +331,7 @@ export class GridLaunchStorage {
       if(!q||q.blocked)return false;
       const bot=(await c.query('SELECT *,clock_timestamp() AS now FROM grid_bots WHERE id=$1 FOR UPDATE',[op.exact_request.botId])).rows[0];
       if(!bot)return false;
+      if(!reduction(op.exact_request)&&await gridWorkerEntryBlocked(c,op.exact_request.botId))return false;
       const account=(await c.query('SELECT account,master_account FROM grid_launch_accounts WHERE bot_id=$1 AND released_at IS NULL',[op.exact_request.botId])).rows[0];
       if(!account||account.account!==op.exact_request.account||account.master_account!==op.exact_request.masterAccount)return false;
       if(await this.capacityBlocked(c,op.exact_request))return false;

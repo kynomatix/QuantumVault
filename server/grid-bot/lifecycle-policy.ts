@@ -16,6 +16,19 @@ export function gridUnresolvedEntryCancel(op:{state:string;exact_request:ExactGr
     &&original?.kind==='limit'&&original.data.reduce_only===false&&original.botId===r.botId
     &&original.account===r.account&&original.masterAccount===r.masterAccount&&original.data.symbol===r.data.symbol;
 }
+/** C4 uncertainty never authorizes another transfer, but must not prevent retained Stop reductions. */
+export function gridUnresolvedTransfer(op:{state:string;exact_request:ExactGridRequest;exact_request_digest:string},identity:{botId:string;account:string;masterAccount:string},now:number){
+  const r=op.exact_request;
+  return ['submitted','unconfirmed'].includes(op.state)&&r&&['fund','sweep'].includes(r.kind)&&requestDigest(r)===op.exact_request_digest
+    &&r.botId===identity.botId&&r.account===identity.account&&r.masterAccount===identity.masterAccount
+    &&r.path==='/account/subaccount/transfer'&&r.operationType==='transfer_funds'
+    &&r.data.to_account===(r.kind==='fund'?r.account:r.masterAccount)&&positive(r.data.amount)
+    &&Number.isSafeInteger(r.timestamp)&&Number.isSafeInteger(r.expiryMs)&&r.expiryMs>0&&r.expiryMs<=15000&&r.timestamp+r.expiryMs<=now;
+}
+export function gridUnresolvedStopReduction(op:{state:string;exact_request:ExactGridRequest;exact_request_digest:string},r:ExactGridRequest,now:number){
+  return r.kind==='close'&&r.data.reduce_only===true&&gridUnresolvedEntryCancel(op,r)
+    ||(r.kind==='cancel'||r.kind==='close'&&r.data.reduce_only===true)&&gridUnresolvedTransfer(op,r,now);
+}
 export function gridEntrySafety(input:{sol:string|null;solObservedAt:number|null;failures:number;mark:GridObservation['mark']},now:number){
   const sol=input.solObservedAt!==null&&freshGridFact(input.solObservedAt,now)?input.sol:null;
   const wallet=gridWalletEntryGate(sol),reasons:string[]=[];

@@ -11,6 +11,7 @@ import {gridWindow,type WindowLevel} from '../../server/grid-bot/window';
 import {executeGridWindow} from '../../server/grid-bot/placement';
 import {reconcileGridLaunch} from '../../server/grid-bot/launch-reconciliation';
 import {GridMarginDenied} from '../../server/grid-bot/margin';
+const sendOwned=async<T>(_r:ExactGridRequest,_lease:string,post:()=>Promise<T>)=>post();
 const request=():ExactGridRequest=>({kind:'limit',botId:randomUUID(),account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',path:'/orders/create',operationType:'create_order',timestamp:1000,expiryMs:5000,data:{symbol:'BTC',price:'90',amount:'1',side:'bid',reduce_only:false,tif:'ALO',client_order_id:randomUUID()},authority:{}});
 const claim:GridClaim={credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:1000,expiresAt:6000};
 function harness(){const r=request();let row:DurableGridOperation|null=null;
@@ -50,9 +51,9 @@ describe('write ahead and exact identity execution',()=>{
     [500,{error:'Invalid signature'},null],[503,null,null],[504,null,null]
   ] as const)('classifies only authoritative POST denial %s %j',async(status,body,classification)=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));
-    const r={...request(),kind:'cancel' as const,path:'/orders/cancel',operationType:'cancel_order',account:bs58.encode(sub.publicKey),data:{symbol:'BTC',order_id:'10'}};
+    const r={...request(),kind:'cancel' as const,timestamp:Date.now(),path:'/orders/cancel',operationType:'cancel_order',account:bs58.encode(sub.publicKey),data:{symbol:'BTC',order_id:'10'}};
     const fetcher=vi.fn(async()=>new Response(body===null?null:JSON.stringify(body),{status}));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch);
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,undefined,{finalMargin:async()=>{},sendOwned});
     const result=await sender.send(r,Buffer.from(sub.secretKey));
     expect(result.terminalFailure).toEqual(classification?{requestDigest:requestDigest(r),classification}:undefined);
     expect(result.rateLimited).toBe(status===429);expect(fetcher).toHaveBeenCalledOnce();
@@ -95,7 +96,7 @@ describe('write ahead and exact identity execution',()=>{
   it.each(['timeout','http-success','429'])('%s stays unresolved across restart without a second send',async(mode)=>{const h=harness();if(mode==='timeout')vi.mocked(h.deps.send).mockRejectedValue(Error('EXAMPLE'));if(mode==='429')vi.mocked(h.deps.send).mockResolvedValue({rateLimited:true});
     expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');expect(h.row?.state).toBe('unconfirmed');
     const restart=new GridExecution(h.deps);expect(await restart.run('EXAMPLE',h.r,claim,'EXAMPLE_NEW_LEASE')).toBe('pending');expect(h.deps.send).toHaveBeenCalledOnce();
-    if(mode==='429')expect(h.deps.storage.settle).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({rateLimited:true,reason:'quota'}));
+    if(mode==='429')expect(h.deps.storage.settle).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({rateLimited:true,reason:'quota'}),'EXAMPLE');
   });
   it('crash between submitted marker and send never replays',async()=>{const h=harness();await h.deps.storage.prepare('EXAMPLE',h.r,claim,'EXAMPLE');await h.deps.storage.submit(h.row!,'EXAMPLE');expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');expect(h.deps.send).not.toHaveBeenCalled();});
   it('rejects changed payload on retry and wrong reconciliation digest',async()=>{const h=harness();await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE');await expect(h.execution.run('EXAMPLE',{...h.r,timestamp:1001},claim,'EXAMPLE')).rejects.toThrow('changed');vi.mocked(h.deps.reconcile).mockResolvedValue({state:'confirmed',requestDigest:'EXAMPLE_HASH',releaseSlot:false});expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');});
@@ -114,12 +115,12 @@ describe('write ahead and exact identity execution',()=>{
   });
   it('signs only synthetic identities through the Grid transport with the retained timestamp and no redirects',async()=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),master=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(8));
-    const r={...request(),account:bs58.encode(sub.publicKey),masterAccount:bs58.encode(master.publicKey)};
+    const r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey),masterAccount:bs58.encode(master.publicKey)};
     const fetcher=vi.fn(async()=>new Response(null,{status:429})),key='EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9));
     // This test exercises signing/transport only; concrete book authority has its own boundary tests.
-    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{}});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true,terminalFailure:{requestDigest:requestDigest(r),classification:'quota'}});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{},sendOwned});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true,terminalFailure:{requestDigest:requestDigest(r),classification:'quota'}});
     const [url,init]=fetcher.mock.calls[0] as unknown as [string,RequestInit];expect(url).toBe('https://api.pacifica.fi/api/v1/orders/create');expect(init.redirect).toBe('error');expect(new Headers(init.headers).get('PF-API-KEY')).toBe(key);
-    expect(JSON.parse(String(init.body))).toMatchObject({account:r.account,timestamp:1000,expiry_window:5000,tif:'ALO'});
+    expect(JSON.parse(String(init.body))).toMatchObject({account:r.account,timestamp:r.timestamp,expiry_window:5000,tif:'ALO'});
     await expect(sender.send({...r,path:'/EXAMPLE'},Buffer.from(sub.secretKey))).rejects.toThrow();expect(fetcher).toHaveBeenCalledOnce();
   });
 });
@@ -135,21 +136,32 @@ describe('bounded rolling placement',()=>{
 
 describe('Grid terminal sweep sender',()=>{
   it.each([5,6])('recognizes only the documented venue margin error at the final sender boundary: %s',async code=>{
-    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),account:bs58.encode(sub.publicKey)};
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey)};
     const fetcher=vi.fn(async()=>new Response(JSON.stringify({success:false,code,error:'EXAMPLE_DENIAL'}),{status:422}));
     const finalMargin=vi.fn(async(_r:ExactGridRequest,lease:string)=>{expect(lease).toBe('EXAMPLE_LEASE');expect(fetcher).not.toHaveBeenCalled();});
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin,sendOwned});
     expect(await sender.send(r,Buffer.from(sub.secretKey),undefined,'EXAMPLE_LEASE')).toEqual(code===5?{rateLimited:false,marginRejectedDigest:requestDigest(r)}:{rateLimited:false});expect(finalMargin).toHaveBeenCalledOnce();expect(fetcher).toHaveBeenCalledOnce();
   });
   it('unknown final margin sends no POST after obtaining book authority',async()=>{
-    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),account:bs58.encode(sub.publicKey)},post=vi.fn();
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{throw new GridMarginDenied('EXAMPLE_UNKNOWN');}});
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey)},post=vi.fn();
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{throw new GridMarginDenied('EXAMPLE_UNKNOWN');},sendOwned});
     await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow(GridMarginDenied);expect(post).not.toHaveBeenCalled();
   });
+
+  it('requires the final ownership fence for reductions as well as entries',async()=>{
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey),data:{...request().data,reduce_only:true}},post=vi.fn();
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post);
+    await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('ownership boundary');expect(post).not.toHaveBeenCalled();
+  });
+  it('rejects a stalled process whose signed window expired before the owned POST callback',async()=>{
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),account:bs58.encode(sub.publicKey),data:{...request().data,reduce_only:true}},post=vi.fn();
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,undefined,{finalMargin:async()=>{},sendOwned});
+    await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('expired before POST');expect(post).not.toHaveBeenCalled();
+  });
   it.each([true,false])('requires the full nested terminal envelope: %s',async terminal=>{
-    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));const r:ExactGridRequest={...request(),kind:'sweep',account:bs58.encode(sub.publicKey),path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:'EXAMPLE_MASTER',amount:'1'},authority:{settlementComplete:true}};
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));const r:ExactGridRequest={...request(),kind:'sweep',timestamp:Date.now(),account:bs58.encode(sub.publicKey),path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:'EXAMPLE_MASTER',amount:'1'},authority:{settlementComplete:true}};
     const body=terminal?{success:true,error:null,data:{success:true,error:null}}:{success:true};const fetcher=vi.fn(async()=>new Response(JSON.stringify(body),{status:200}));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch);
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,undefined,{finalMargin:async()=>{},sendOwned});
     expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual(terminal?{rateLimited:false,terminalTransferDigest:requestDigest(r)}:{rateLimited:false});
     expect(JSON.parse(String((fetcher.mock.calls[0] as unknown as [string,RequestInit])[1].body))).toMatchObject({account:r.account,to_account:r.masterAccount,amount:'1'});
   });
