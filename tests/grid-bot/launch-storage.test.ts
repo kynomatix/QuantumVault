@@ -1,5 +1,5 @@
 import {beforeAll,afterAll,beforeEach,describe,it,expect} from 'vitest';
-import {Pool} from 'pg';
+import {Pool,type PoolClient} from 'pg';
 import {randomUUID} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import nacl from 'tweetnacl';
@@ -11,6 +11,7 @@ import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../../server/storage';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 import {policy,umk,intent} from './draft-fixtures';
 import {gridDraftRevision} from '../../client/src/lib/grid-draft-view';
+import {marginTestReading} from './margin-fixture';
 const migration=readFileSync(new URL('../../migrations/0005_grid_launch.sql',import.meta.url),'utf8');
 describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
   let admin:Pool,pool:Pool,storage:GridLaunchStorage,custody:GridCustody;
@@ -25,13 +26,109 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_read_claims,grid_execution_claims,grid_launch_accounts,grid_master_quota,grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query('INSERT INTO wallets VALUES($1,NULL)',[wallet]);});
-  async function draft(){const p=policy(),h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;
-    const bot:DraftRecord={...snapshot,walletAddress:wallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:gridDraftRevision(intent),createIntent:intent,authoritySnapshot:{state:'EXAMPLE'},policyHmac:h.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};
+  async function draft(draftWallet=wallet){const p=policy(),h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;
+    const bot:DraftRecord={...snapshot,walletAddress:draftWallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:gridDraftRevision(intent),createIntent:intent,authoritySnapshot:{state:'EXAMPLE'},policyHmac:h.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};
     await new GridStorage(pool,async()=>{}).createDraftWithLevels(bot,levels);return bot;
   }
   async function reserve(master='EXAMPLE_MASTER',share='0.5'){const bot=await draft();await pool.query('UPDATE wallets SET agent_public_key=$1 WHERE address=$2',[master,wallet]);const account=await custody.reserve({botId:bot.id,wallet,masterAccount:master,policyHmac:bot.policyHmac,canaryLimit:'250',share},umk());return {bot,account};}
   const input=(account:Awaited<ReturnType<typeof reserve>>['account'])=>{const now=Date.now();return {request:{kind:'fund',botId:account.botId,account:account.account,masterAccount:account.masterAccount,path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now,expiryMs:5000,data:{to_account:account.account,amount:'100'},authority:{}} as ExactGridRequest,
     claim:{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000} as GridClaim};};
+  const exposureStorage=()=>new GridLaunchStorage(pool,async()=>{},async r=>({...marginTestReading(r),leverage:String((await pool.query('SELECT leverage FROM grid_bots WHERE id=$1',[r.botId])).rows[0].leverage)}));
+  function seed(account:Awaited<ReturnType<typeof reserve>>['account'],amount:string,notional:string){const v=input(account);
+    v.request={...v.request,kind:'seed',path:'/orders/create_market',operationType:'create_market_order',data:{symbol:'BTC',amount,side:'bid',reduce_only:false},authority:{seedWorstPrice:'100'}};
+    v.claim.canaryIncrement=notional;return v;
+  }
+  it('C2 admits exactly two concurrent launches on four independent database connections',async()=>{
+    const candidates=await Promise.all([0,1,2,3].map(async i=>{
+      // Custody AAD decodes the wallet as a 32-byte base58 public key before opening a transaction.
+      const address=bs58.encode(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(i+4)).publicKey),master='EXAMPLE_C2_MASTER_'+i;
+      await pool.query('INSERT INTO wallets VALUES($1,$2)',[address,master]);return {bot:await draft(address),address,master};
+    }));
+    // Each worker owns a separate one-connection pool; the suite pool cannot serialize them.
+    const workerPools=candidates.map(()=>new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000,options:'-c search_path='+schema}));
+    const backendPids=new Set<number>();let started=0,release!:()=>void;
+    const allStarted=new Promise<void>(resolve=>{release=resolve;});
+    class ConcurrentStorage extends GridLaunchStorage {
+      override transaction<T>(work:(client:PoolClient)=>Promise<T>):Promise<T>{
+        return super.transaction(async client=>{
+          await client.query("SET LOCAL statement_timeout='10s'");
+          backendPids.add((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+          // All four BEGINs must be live before any reserve can acquire admission authority.
+          if(++started===candidates.length)release();
+          await allStarted;
+          return work(client);
+        }).catch(error=>{release();throw error;});
+      }
+    }
+    try{
+      const results=await Promise.allSettled(candidates.map(({bot,address,master},i)=>new GridCustody(new ConcurrentStorage(workerPools[i],async()=>{}))
+        .reserve({botId:bot.id,wallet:address,masterAccount:master,policyHmac:bot.policyHmac,canaryLimit:'250'},umk()).catch(error=>{release();throw error;})));
+      const outcomes=results.map((r,i)=>`worker ${i+1}: ${r.status}${r.status==='rejected'?` (${String(r.reason?.message??r.reason)})`:''}`).join('; ');
+      const denialMessages=results.flatMap(r=>r.status==='rejected'?[String(r.reason?.message??r.reason)]:[]);
+      expect(denialMessages,outcomes).toEqual(['Grid pilot admission exhausted','Grid pilot admission exhausted']);
+      expect(started,outcomes).toBe(4);expect(backendPids.size,outcomes).toBe(4);
+      expect(results.filter(r=>r.status==='fulfilled'),outcomes).toHaveLength(2);
+      expect((await pool.query('SELECT count(*) AS count FROM grid_launch_accounts WHERE released_at IS NULL')).rows[0].count).toBe('2');
+    }finally{release();await Promise.all(workerPools.map(worker=>worker.end()));}
+  },30000);
+  it.each(['pausing','paused','resuming','reconciling','range_exhausted','stopping','stopped','failed'])('C2 retains the global slot while an unreleased bot is %s',async status=>{
+    const a=await reserve(),b=await reserve();await pool.query('UPDATE grid_bots SET status=$2 WHERE id=$1',[a.bot.id,status]);
+    await expect(reserve()).rejects.toThrow('pilot admission');
+    expect((await pool.query('SELECT released_at FROM grid_launch_accounts WHERE bot_id=$1',[b.bot.id])).rows[0].released_at).toBeNull();
+  });
+  it.each(['250.000001','Infinity','NaN','0','-1'])('C2 rejects an invalid or oversized custody allocation before mutation (%s)',async limit=>{
+    const bot=await draft();await expect(custody.reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:bot.policyHmac,canaryLimit:limit},umk())).rejects.toThrow('pilot exposure limit');
+    expect((await pool.query('SELECT bot_id FROM grid_launch_accounts')).rowCount).toBe(0);
+    expect((await pool.query('SELECT status FROM grid_bots WHERE id=$1',[bot.id])).rows[0].status).toBe('draft');
+  });
+  it('C2 serializes competing exposure admissions and refuses the first dollar beyond the retained cap',async()=>{
+    const {account}=await reserve(),s=exposureStorage(),first=seed(account,'1.45','145');
+    const initial=await s.prepare('EXAMPLE_INITIAL_RISK',first.request,first.claim,account.leaseToken);await s.submit(initial,account.leaseToken);await s.settle(initial,{state:'confirmed',reason:null,releaseSlot:true});
+    const attempts=[seed(account,'1','100'),seed(account,'1','100')];
+    const results=await Promise.allSettled(attempts.map((v,i)=>exposureStorage().prepare('EXAMPLE_PARALLEL_RISK_'+i,v.request,v.claim,account.leaseToken)));
+    expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+    const winner=results.find(r=>r.status==='fulfilled');if(!winner||winner.status!=='fulfilled')throw Error('Missing admitted operation');
+    expect((await pool.query('SELECT canary_committed FROM grid_launch_accounts WHERE bot_id=$1',[account.botId])).rows[0].canary_committed).toBe('245');
+    await s.submit(winner.value,account.leaseToken);await s.settle(winner.value,{state:'confirmed',reason:null,releaseSlot:true});
+    const over=seed(account,'0.06','6');await expect(s.prepare('EXAMPLE_OVER_CAP',over.request,over.claim,account.leaseToken)).rejects.toThrow('pilot exposure limit');
+    expect((await pool.query('SELECT count(*) AS count FROM grid_operations WHERE bot_id=$1',[account.botId])).rows[0].count).toBe('2');
+  });
+  it('C2 allows $250 for each bot at 10x and retains the ceiling after promotion and storage restart',async()=>{
+    const a=await reserve(),b=await reserve(),s=exposureStorage();
+    for(const {account} of [a,b]){
+      await pool.query('UPDATE grid_bots SET leverage=10 WHERE id=$1',[account.botId]);
+      const v=seed(account,'2.5','250'),op=await s.prepare('EXAMPLE_FULL_'+account.botId,v.request,v.claim,account.leaseToken);
+      expect(await s.submit(op,account.leaseToken)).toBe(true);await s.settle(op,{state:'confirmed',reason:null,releaseSlot:true});
+      await pool.query("UPDATE grid_bots SET status='active',canary_promoted_at=clock_timestamp() WHERE id=$1",[account.botId]);
+      const over=seed(account,'0.001','0.1');await expect(exposureStorage().prepare('EXAMPLE_PROMOTED_'+account.botId,over.request,over.claim,account.leaseToken)).rejects.toThrow('pilot exposure limit');
+    }
+    expect((await pool.query('SELECT sum(canary_committed) AS total FROM grid_launch_accounts')).rows[0].total).toBe('500');
+  });
+  it('C2 revalues retained submitted risk at both final authority boundaries without granting POST',async()=>{
+    const {account}=await reserve(),s=exposureStorage(),v=seed(account,'2.5','250');
+    const op=await s.prepare('EXAMPLE_FINAL_CAP',v.request,v.claim,account.leaseToken);expect(await s.submit(op,account.leaseToken)).toBe(true);
+    const now=Date.now(),observation={account:account.account,symbol:'BTC',inventoryComplete:true,observedAt:now,orders:[],trades:[],position:{direction:'long',size:'0'},mark:{price:'101',observedAt:now}};
+    await pool.query('INSERT INTO grid_monitor_state(bot_id,observation,reconciled_at) VALUES($1,$2,clock_timestamp())',[account.botId,observation]);
+    await expect(s.finalMargin(v.request,account.leaseToken)).rejects.toThrow('pilot exposure limit');
+    let posts=0;await expect(s.sendOwned(v.request,account.leaseToken,async()=>{posts++;})).rejects.toThrow('pilot exposure limit');expect(posts).toBe(0);
+    expect((await pool.query('SELECT state FROM grid_operations WHERE id=$1',[op.id])).rows[0].state).toBe('submitted');
+    expect((await pool.query('SELECT canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[account.botId])).rows[0]).toEqual({canary_committed:'250',released_at:null});
+    // Recovery/settlement remains available with the oversized current mark.
+    await s.settle(op,{state:'unconfirmed',reason:'unknown',releaseSlot:false});
+    expect((await custody.recover(account.botId,wallet,account.leaseToken)).account).toBe(account.account);
+  });
+  it('C2 checks exposure observation expiry in the last ownership statement before POST',async()=>{
+    const {account}=await reserve(),s=exposureStorage(),v=seed(account,'1','100');
+    const op=await s.prepare('EXAMPLE_EXPIRING_EXPOSURE',v.request,v.claim,account.leaseToken);expect(await s.submit(op,account.leaseToken)).toBe(true);
+    const expired=new class extends GridLaunchStorage {
+      override async pilotExposure(...args:Parameters<GridLaunchStorage['pilotExposure']>){
+        // Simulate an observation ageing out after accounting, before final authority.
+        return {...await super.pilotExposure(...args),validUntil:0};
+      }
+    }(pool,async()=>{});
+    let posts=0;await expect(expired.sendOwned(v.request,account.leaseToken,async()=>{posts++;})).rejects.toThrow('send ownership');
+    expect(posts).toBe(0);expect((await pool.query('SELECT state FROM grid_operations WHERE id=$1',[op.id])).rows[0].state).toBe('submitted');
+  });
 
   it('counts five exact terminal denials once, invalidates canary and persists the entry pause',async()=>{
     const {account}=await reserve();
@@ -167,11 +264,12 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
   it('reserve rollback leaves a draft and no quota or custody row after a bad policy',async()=>{const bot=await draft();await expect(custody.reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:'EXAMPLE_HASH',canaryLimit:'250'},umk())).rejects.toThrow();expect((await pool.query('SELECT * FROM protocol_subaccounts')).rowCount).toBe(0);expect((await pool.query('SELECT status FROM grid_bots')).rows[0].status).toBe('draft');});
   it('read traffic and mutations consume one master budget and share durable backoff',async()=>{const {account}=await reserve();await storage.claimRead(account.masterAccount,'145');expect(await storage.availableCredits(account.masterAccount)).toBe('5');const v=input(account);await expect(storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).rejects.toThrow('quota');await storage.recordRateLimit(account.masterAccount);expect(await storage.availableCredits(account.masterAccount)).toBe('0');await expect(storage.claimRead(account.masterAccount)).rejects.toThrow('authority');});
   it('returns only an exactly proven empty owned reservation to the spare pool and reclaims its retained key',async()=>{
-    const {account}=await reserve(),now=Date.now();await expect(custody.releaseReservation({...account,leaseToken:randomUUID()},umk(),{account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000},now)).rejects.toThrow();
+    const {account}=await reserve();await reserve();await expect(reserve()).rejects.toThrow('pilot admission');
+    const now=Date.now();await expect(custody.releaseReservation({...account,leaseToken:randomUUID()},umk(),{account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000},now)).rejects.toThrow();
     expect(await custody.releaseReservation(account,umk(),{account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000},now)).toBe('spare');
     const next=await reserve();expect(next.account).toMatchObject({account:account.account,reused:true});expect((await pool.query('SELECT bot_id FROM protocol_subaccounts')).rows[0].bot_id).toBeNull();
     await custody.withSecret(next.account,umk(),async keyBytes=>expect(bs58.encode(keyBytes.subarray(32))).toBe(account.account));
   });
-  it('unknown reservation state quarantines while retaining the encrypted key',async()=>{const {account}=await reserve(),now=Date.now();expect(await custody.releaseReservation(account,umk(),{account:account.account,masterAccount:account.masterAccount,state:'unknown',observedAt:now,expiresAt:now+5000},now)).toBe('quarantined');const p=(await pool.query('SELECT status,subaccount_key_encrypted_v3 FROM protocol_subaccounts')).rows[0];expect(p.status).toBe('grid_quarantined');expect(p.subaccount_key_encrypted_v3).toBeTruthy();});
+  it('unknown reservation state quarantines while retaining the encrypted key and C2 slot',async()=>{const {account}=await reserve(),now=Date.now();expect(await custody.releaseReservation(account,umk(),{account:account.account,masterAccount:account.masterAccount,state:'unknown',observedAt:now,expiresAt:now+5000},now)).toBe('quarantined');const p=(await pool.query('SELECT status,subaccount_key_encrypted_v3 FROM protocol_subaccounts')).rows[0];expect(p.status).toBe('grid_quarantined');expect(p.subaccount_key_encrypted_v3).toBeTruthy();await reserve();await expect(reserve()).rejects.toThrow('pilot admission');expect((await pool.query('SELECT released_at FROM grid_launch_accounts WHERE bot_id=$1',[account.botId])).rows[0].released_at).toBeNull();});
   it('will not understate seed canary commitment',async()=>{const {account}=await reserve(),v=input(account);v.request={...v.request,kind:'seed',data:{amount:'2'},authority:{seedWorstPrice:'100'}};v.claim.canaryIncrement='199';await expect(storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).rejects.toThrow('Understated');});
 });

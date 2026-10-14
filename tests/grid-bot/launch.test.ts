@@ -11,13 +11,13 @@ import {GridLaunchTransientError,requestDigest,type DurableGridOperation,type Ex
 import {GRID_START_ROUTE_ENABLED,GRID_WORKER_ENABLED} from '../../server/grid-bot/service';
 import {policy as basePolicy,umk,clock} from './draft-fixtures';
 
-export function launchFixture(seed=false,start='100'){
-  const calc=calculateGrid({side:'long',lower:'90',upper:'110',start,intervals:20,entryScale:'flat',profitScale:'flat',seed,leverage:'2',tick:'0.01',lot:'0.001',minimumQuote:'1',investmentStep:'0.01',transferFloor:'1',effectiveMakerCostRate:'0',investment:'100'});
+export function launchFixture(seed=false,start='100',investment='100',leverage=2){
+  const calc=calculateGrid({side:'long',lower:'90',upper:'110',start,intervals:20,entryScale:'flat',profitScale:'flat',seed,leverage:String(leverage),tick:'0.01',lot:'0.001',minimumQuote:'1',investmentStep:'0.01',transferFloor:'1',effectiveMakerCostRate:'0',investment});
   if(!calc.ok)throw Error(JSON.stringify(calc.issues));const plan=calc.plan;
-  const policy:GridPolicy={...basePolicy(),startPrice:new Decimal(start).toFixed(8),gridCount:20,leverage:2,seedAtCreation:seed,levels:plan.lines.map(l=>({ordinal:l.ordinal+1,price:new Decimal(l.price).toFixed(8),size:new Decimal(l.quantity).toFixed(8),side:l.role==='seed_exit'?'sell':'buy',reduceOnly:l.role==='seed_exit'}))};
+  const policy:GridPolicy={...basePolicy(),totalInvestment:new Decimal(investment).toFixed(2),startPrice:new Decimal(start).toFixed(8),stopLossPrice:leverage>2?new Decimal(start).mul('0.96').toFixed(8):basePolicy().stopLossPrice,gridCount:20,leverage,seedAtCreation:seed,levels:plan.lines.map(l=>({ordinal:l.ordinal+1,price:new Decimal(l.price).toFixed(8),size:new Decimal(l.quantity).toFixed(8),side:l.role==='seed_exit'?'sell':'buy',reduceOnly:l.role==='seed_exit'}))};
   const h=computeGridPolicyHmac(policy,umk());if(!h.ok)throw Error();
   const quote=(role:'maker'|'taker',intent:'entry'|'profit')=>{const r=createGridFeeQuote({account:'EXAMPLE_MASTER',subaccountId:null,market:'BTC-PERP',liquidityRole:role,builderCode:'CARRY',intent},{account:'EXAMPLE_MASTER',maker_fee:'0',taker_fee:'0'},[{builder_code:'CARRY',fee_rate:'0'}],[{builder_code:'CARRY',max_fee_rate:'0'}],clock);if(r.availability!=='available')throw Error(r.reason);return r.quote;};
-  const facts:LaunchFacts={observedAt:clock,expiresAt:clock+5000,masterAccount:'EXAMPLE_MASTER',account:null,bookPrice:'100',bookSource:'/book',tick:'0.01',lot:'0.001',minimumQuote:'1',maximumQuote:'10000',minimumPrice:'1',maximumPrice:'10000',maxLeverage:'10',restrictions:'unrestricted',maker:quote('maker','entry'),profit:quote('maker','profit'),taker:quote('taker','entry'),masterWithdrawable:'100',sol:'0.1',availableSlots:100,subaccountCount:0,observedCredits:'300',availableGridCredits:'150',transportReady:true,inventoryComplete:true,recycler:{reuse:true,recycle:true,deployment:'EXAMPLE',expectedDeployment:'EXAMPLE',checkedAt:clock}};
+  const facts:LaunchFacts={observedAt:clock,expiresAt:clock+5000,masterAccount:'EXAMPLE_MASTER',account:null,bookPrice:'100',bookSource:'/book',tick:'0.01',lot:'0.001',minimumQuote:'1',maximumQuote:'10000',minimumPrice:'1',maximumPrice:'10000',maxLeverage:'10',restrictions:'unrestricted',maker:quote('maker','entry'),profit:quote('maker','profit'),taker:quote('taker','entry'),masterWithdrawable:investment,sol:'0.1',availableSlots:100,subaccountCount:0,observedCredits:'300',availableGridCredits:'150',transportReady:true,inventoryComplete:true,recycler:{reuse:true,recycle:true,deployment:'EXAMPLE',expectedDeployment:'EXAMPLE',checkedAt:clock}};
   facts.bookPrice=start;return {policy,policyHash:h.digest,facts,plan};
 }
 function prepareFirstEntry({account,policy,policyHmac,admission,facts,now}:Parameters<NonNullable<import('../../server/grid-bot/provision').GridProvisionDeps['prepareFirstEntry']>>[0]){
@@ -105,6 +105,22 @@ describe('Grid launch preflight and hard production gates',()=>{
     expect(requests[3].data.client_order_id).not.toBe(requests[1].data.idempotency_key);
   },15000);
   it('admits unchanged seed-off geometry with a funded stop and valid canary entry',()=>{const f=launchFixture();expect(preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock)).toMatchObject({ok:true});});
+  it.each([false,true])('C2 fits the unchanged minimum entry and optional seed at $25 collateral and 10x (seed=%s)',seed=>{
+    const f=launchFixture(seed,'109','25',10);f.facts.bookPrice='109';
+    const before=JSON.stringify(f.policy.levels),admission=preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock);
+    expect(admission.ok).toBe(true);if(!admission.ok)throw Error(admission.reason);
+    const first=f.policy.levels.find(l=>l.ordinal===admission.firstEntryOrdinal)!;
+    expect(new Decimal(admission.seedNotional).plus(new Decimal(first.price).mul(first.size)).lte(admission.canaryLimit)).toBe(true);
+    expect(new Decimal(admission.canaryLimit).lte('250')).toBe(true);expect(new Decimal(admission.canaryLimit).lte(new Decimal(f.plan.allocatedNotional).mul('0.25'))).toBe(true);
+    expect(JSON.stringify(f.policy.levels)).toBe(before);
+  });
+  it('C2 plainly refuses an oversized unchanged seed plus entry before custody or execution',async()=>{
+    const f=launchFixture(true),reserve=vi.fn(),run=vi.fn();
+    const provision=new GridProvision({now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup:vi.fn()}),observe:async()=>f.facts,custody:{reserve,confirmCreated:vi.fn(),confirmReused:vi.fn()},verifyEmpty:vi.fn(),execution:{run},existing:vi.fn(),markCanary:vi.fn()});
+    const result=await provision.start({wallet:'EXAMPLE',policy:f.policy,policyHmac:f.policyHash});
+    expect(result).toMatchObject({state:'denied'});expect(result.reason).toContain('unchanged seed and one valid entry');expect(result.reason).toContain('$250 per bot');
+    expect(reserve).not.toHaveBeenCalled();expect(run).not.toHaveBeenCalled();
+  });
   it.each(['policy','fees','price','constraints','quota','recycler','slots','stop','canary','sol','transport','balance','durable security'])('failed %s preflight reserves and sends nothing',async defect=>{
     const f=launchFixture(defect==='canary');
     if(defect==='policy')f.policy.upperPrice='111.00000000';if(defect==='fees')f.facts.maker={...f.facts.maker,expiresAt:clock};

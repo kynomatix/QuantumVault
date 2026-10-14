@@ -63,7 +63,7 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
       ||new Decimal(stop.projection.seedWorstPrice).lt(f.minimumPrice)||new Decimal(stop.projection.seedWorstPrice).gt(f.maximumPrice)))return deny('The unchanged aggregate seed exceeds current market bounds.');
     const entries=plan.lines.filter(l=>l.role==='entry'&&new Decimal(l.quantity).gt(0)).sort((a,b)=>new Decimal(a.price).minus(plan.start).abs().cmp(new Decimal(b.price).minus(plan.start).abs()));
     const first=entries.find(l=>seedNotional.plus(l.notional).lte(canaryLimit));
-    if(!first)return deny('The unchanged seed and one valid entry exceed the canary budget; reduce the footprint or disable the seed.');
+    if(!first)return deny('The unchanged seed and one valid entry exceed the pilot exposure budget (at most $250 per bot); reduce the footprint or disable the seed.');
     return {ok:true,plan,canaryLimit,seedNotional:seedNotional.toFixed(),firstEntryOrdinal:first.ordinal+1,stop};
   }catch{return deny('A required launch input is unknown or invalid.');}
 }

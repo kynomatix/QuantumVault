@@ -6,7 +6,10 @@ import type {Pool,PoolClient} from 'pg';
 import {requireSchemaCapabilityReady} from '../schema-readiness';
 import {gridEntrySafety,freshGridFact,gridUnresolvedStopReduction} from './lifecycle-policy';
 import {gridWorkerFence,gridWorkerEntryBlocked} from './worker-ownership';
-import {gridRecyclerGate} from './runtime-policy';
+import {gridRecyclerGate,gridPilotLimit} from './runtime-policy';
+import {gridPilotExposure} from './pilot-exposure';
+import type {GridObservation} from './reconciliation';
+import type {GridEconomicFill} from './pnl';
 import {canonicalGridPolicy,type GridPolicy} from './policy-hmac';
 import type {GridFirstPlacementContext} from './first-placement';
 import {gridAddsExposure,gridMarginAllowed,gridRequiredMargin,readGridMargin,GridMarginDenied,type GridMarginReading} from './margin';
@@ -50,6 +53,13 @@ export class GridLaunchStorage {
   async sendOwned<T>(r:ExactGridRequest,leaseToken:string,post:()=>Promise<T>):Promise<T>{
     return this.transaction(async c=>{
       if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
+      let pilotUntil:number|null=null;
+      if(gridAddsExposure(r)){
+        const bot=(await c.query('SELECT id,clock_timestamp() AS now FROM grid_bots WHERE id=$1 FOR UPDATE',[r.botId])).rows[0];
+        if(!bot)throw new GridLaunchTransientError('Grid send ownership unavailable');
+        pilotUntil=(await this.pilotGate(c,r.botId,new Date(bot.now).getTime())).validUntil;
+      }
+      if(!reduction(r)&&await gridWorkerEntryBlocked(c,r.botId))throw new GridLaunchTransientError('Grid send ownership unavailable');
       const owned=(await c.query(`SELECT b.id FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
          JOIN grid_risk_events e ON e.bot_id=b.id AND e.event_key='worker-ownership'
          LEFT JOIN grid_lifecycle l ON l.bot_id=b.id
@@ -58,9 +68,10 @@ export class GridLaunchStorage {
          AND b.status=ANY($5::text[]) AND $6::bigint<=extract(epoch FROM clock_timestamp())*1000
          AND ($6::bigint+$7::bigint)>extract(epoch FROM clock_timestamp())*1000
          AND (l.bot_id IS NULL OR l.epoch::text=$9) AND ($10::boolean=false OR b.status='stopping')
+         AND ($11::bigint IS NULL OR $11::bigint>=extract(epoch FROM clock_timestamp())*1000)
          AND EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.state='submitted' AND o.exact_request_digest=$8) FOR UPDATE OF b`,
-         [r.botId,leaseToken,r.account,r.masterAccount,reduction(r)?liveStates:['provisioning','canary','active'],r.timestamp,r.expiryMs,requestDigest(r),r.authority.lifecycleEpoch??null,['close','sweep'].includes(r.kind)])).rowCount;
-      if(!owned||!reduction(r)&&await gridWorkerEntryBlocked(c,r.botId))throw new GridLaunchTransientError('Grid send ownership unavailable');
+         [r.botId,leaseToken,r.account,r.masterAccount,reduction(r)?liveStates:['provisioning','canary','active'],r.timestamp,r.expiryMs,requestDigest(r),r.authority.lifecycleEpoch??null,['close','sweep'].includes(r.kind),pilotUntil])).rowCount;
+      if(!owned)throw new GridLaunchTransientError('Grid send ownership unavailable');
       return post();
     });
   }
@@ -69,6 +80,45 @@ export class GridLaunchStorage {
     if(this.marginRead){try{return await this.marginRead(r);}catch{return null;}}
     const [{GridLaunchReads},{pacificaTransportAuthority}]=await Promise.all([import('./launch-reads'),import('../protocol/pacifica/pacifica-transport')]);
     return readGridMargin(new GridLaunchReads(pacificaTransportAuthority(),this,'0.5'),r);
+  }
+  /** Caller holds the bot lock. Durable claims, exact fills and the monitor snapshot are
+   * read together; neither promotion nor a replacement worker supplies fresh capacity. */
+  async pilotExposure(c:PoolClient,botId:string,now:number,snapshot?:{observation:GridObservation;fills:GridEconomicFill[];authoritative:boolean},candidate?:{request:ExactGridRequest;increment:string}){
+    const account=(await c.query('SELECT canary_limit,canary_committed FROM grid_launch_accounts WHERE bot_id=$1 AND released_at IS NULL',[botId])).rows[0];
+    const limitUsd=account?gridPilotLimit(account.canary_limit):null;
+    if(!limitUsd)return {limitUsd:null,exposureUsd:null,reason:'pilot_exposure_reservation_unavailable',validUntil:null};
+    const operations=(await c.query(`SELECT o.id,o.state,o.venue_order_id,o.exact_request,c.canary_increment FROM grid_operations o
+      LEFT JOIN grid_execution_claims c ON c.operation_id=o.id WHERE o.bot_id=$1`,[botId])).rows;
+    const monitor=snapshot?null:(await c.query('SELECT * FROM grid_monitor_state WHERE bot_id=$1',[botId])).rows[0];
+    const fills=snapshot?.fills??(await c.query(`SELECT trade_id AS "tradeId",operation_id AS "operationId",order_id AS "orderId",level_id AS "levelId",
+      venue_time AS time,leg,size,price,fee FROM grid_exact_fills WHERE bot_id=$1`,[botId])).rows.map(f=>({...f,time:Number(f.time)}));
+    const reconciledAt=monitor?new Date(monitor.reconciled_at).getTime():null;
+    const authoritative=snapshot?.authoritative??(!!monitor?.boot_id&&!monitor.blocked_reasons.length&&reconciledAt!==null&&reconciledAt<=now&&now-reconciledAt<=5000);
+    const observation=snapshot?.observation??monitor?.observation??null;
+    // The final ownership statement also checks the observations have not aged out
+    // during these reads. A retained signed reservation without a mark has no deadline.
+    const deadlines:number[]=[];
+    if(authoritative&&observation){deadlines.push(observation.observedAt+5000);if(reconciledAt!==null)deadlines.push(reconciledAt+5000);}
+    if(observation?.mark&&observation.mark.observedAt<=now&&now-observation.mark.observedAt<=5000)deadlines.push(observation.mark.observedAt+5000);
+    const validUntil=deadlines.length?Math.min(...deadlines):null;
+    const exposure=gridPilotExposure({operations,fills,observation,authoritative,retainedUsd:account.canary_committed,now});
+    if(candidate&&exposure.exposureUsd!==null){
+      const pending={id:'pending-admission',state:'prepared',venue_order_id:null,exact_request:candidate.request,canary_increment:candidate.increment};
+      const extra=gridPilotExposure({operations:[pending],fills:[],observation,authoritative:false,retainedUsd:'0',now});
+      if(extra.exposureUsd===null)return {limitUsd,...extra,validUntil};
+      const proposed=gridPilotExposure({operations:[...operations,pending],fills,observation,authoritative,retainedUsd:account.canary_committed,now});
+      if(proposed.exposureUsd===null)return {limitUsd,...proposed,validUntil};
+      // Revalue existing filled risk at the candidate's worst price as well. Retained
+      // high-water reservations must also gain the ENTIRE new reservation, not max(old,new).
+      exposure.exposureUsd=Decimal.max(proposed.exposureUsd,new Decimal(exposure.exposureUsd).plus(extra.exposureUsd)).toFixed();
+    }
+    return {limitUsd,...exposure,validUntil};
+  }
+  private async pilotGate(c:PoolClient,botId:string,now:number,candidate?:{request:ExactGridRequest;increment:string}){
+    const exposure=await this.pilotExposure(c,botId,now,undefined,candidate);
+    if(exposure.exposureUsd===null||exposure.limitUsd===null)throw new GridLaunchTransientError('Grid pilot exposure is unknown; reconcile before adding risk.');
+    if(new Decimal(exposure.exposureUsd).gt(exposure.limitUsd))throw new GridLaunchTransientError('Grid pilot exposure limit exceeded (at most $250 per bot).');
+    return {...exposure,exposureUsd:exposure.exposureUsd};
   }
   private async capacityBlocked(c:PoolClient,r:ExactGridRequest){
     return !reduction(r)&&!!(await c.query("SELECT 1 FROM grid_risk_events WHERE bot_id=$1 AND event_key='venue_order_capacity'",[r.botId])).rowCount;
@@ -122,6 +172,8 @@ export class GridLaunchStorage {
   }
   /** Final transport boundary, after book observation and before POST. No optional entry bypass. */
   async finalMargin(r:ExactGridRequest,leaseToken:string):Promise<void>{
+    // Reductions bypass every entry-only check below, including status and the pilot cap.
+    // sendOwned still fences their submitted operation, lease and stopping authority.
     if(!gridAddsExposure(r))return;
     const reading=await this.freshMargin(r);
     const allowed=await this.transaction(async c=>{
@@ -132,6 +184,7 @@ export class GridLaunchStorage {
       const now=new Date(bot.now).getTime();
       if(await gridWorkerEntryBlocked(c,r.botId))return null;
       if(!leaseToken||bot.lease_token!==leaseToken||new Date(bot.lease_expires_at).getTime()<=now||!['provisioning','canary','active'].includes(bot.status)||r.timestamp+ r.expiryMs<=now)return null;
+      await this.pilotGate(c,r.botId,now);
       return this.marginGate(c,bot,r,reading,now,op.id);
     });
     if(allowed===null)throw new GridLaunchTransientError('Final Grid submit ownership unavailable');
@@ -230,6 +283,7 @@ export class GridLaunchStorage {
     const minimumRisk=request.kind==='limit'&&request.data.reduce_only===false?new Decimal(String(request.data.price)).mul(String(request.data.amount))
       :request.kind==='seed'?new Decimal(String(request.authority.seedWorstPrice)).mul(String(request.data.amount)):new Decimal(0);
     if(new Decimal(claim.canaryIncrement).lt(minimumRisk))throw Error('Understated canary commitment');
+    if(!gridAddsExposure(request)&&!new Decimal(claim.canaryIncrement).isZero())throw Error('Only entries reserve pilot exposure');
     const prepared=await this.transaction(async c=>{
       const master=(await c.query('SELECT *,clock_timestamp() AS clock FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[request.masterAccount])).rows[0];
       if(!master)throw Error('Master quota unavailable');const now=new Date(master.clock).getTime();
@@ -273,7 +327,7 @@ export class GridLaunchStorage {
       const ceiling=Decimal.min(300,claim.observedCredits).mul(master.share).floor();
       if(!ceiling.gt(0) || new Decimal(quota.used).plus(claim.credits).gt(ceiling))throw new GridLaunchTransientError('Grid fixed quota share exhausted');
       if(claim.slots && await this.slotBudget(c,request,monitor,claim.availableSlots)<claim.slots)throw Error('Grid subaccount slots unavailable');
-      if(bot.status!=='active' && new Decimal(bot.canary_committed).plus(claim.canaryIncrement).gt(bot.canary_limit))throw Error('Canary commitment exceeded');
+      const committed=gridAddsExposure(request)?(await this.pilotGate(c,request.botId,now,{request,increment:claim.canaryIncrement})).exposureUsd:null;
       const id=randomUUID();
       const levelId=request.authority.levelId??null;
       if(request.kind==='cancel'){
@@ -318,7 +372,7 @@ export class GridLaunchStorage {
         if(backing==null||new Decimal(outstanding).gt(backing))throw Error('Exit position backing unavailable');
       }
       await c.query('INSERT INTO grid_execution_claims(operation_id,bot_id,master_account,account,credits,slots,canary_increment) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,request.botId,request.masterAccount,request.account,claim.credits,claim.slots,claim.canaryIncrement]);
-      if(bot.status!=='active')await c.query('UPDATE grid_launch_accounts SET canary_committed=canary_committed+$2 WHERE bot_id=$1',[request.botId,claim.canaryIncrement]);
+      if(committed!==null)await c.query('UPDATE grid_launch_accounts SET canary_committed=$2 WHERE bot_id=$1',[request.botId,committed]);
       return result.rows[0];
     });
     if(!prepared)throw new GridLaunchTransientError('Durable Grid margin pause');return prepared;
@@ -346,6 +400,7 @@ export class GridLaunchStorage {
       if(!reduction(op.exact_request)&&!['provisioning','canary','active'].includes(bot.status))return false;
       if(['close','sweep'].includes(op.exact_request.kind)&&bot.status!=='stopping')return false;
       if(!reductionAuthority(op.exact_request,monitor,new Date(bot.now).getTime()))return false;
+      if(gridAddsExposure(op.exact_request))await this.pilotGate(c,op.exact_request.botId,new Date(bot.now).getTime());
       if(monitor&&!reduction(op.exact_request)&&['limit','seed'].includes(op.exact_request.kind)
         &&!gridEntrySafety({sol:bot.sol_balance,solObservedAt:bot.sol_balance_observed_at?new Date(bot.sol_balance_observed_at).getTime():null,failures:bot.consecutive_failures,mark:monitor.observation?.mark??null},new Date(bot.now).getTime()).allowed)return false;
       // The CAS makes a crash before POST uncertain. A new worker never adopts permission to resend.
