@@ -320,7 +320,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     if (draftBusy) return;
     if (!value) { priceRefresh.current?.dispose(); Object.values(generation.current).forEach(g => g.invalidate()); } onOpenChange(value);
   }}>
-    <SheetContent className="w-full sm:max-w-[760px] p-0" data-testid="sheet-grid-planner">
+    <SheetContent className="w-full sm:max-w-[760px] p-0 overflow-hidden" data-testid="sheet-grid-planner">
       <div className="h-full overflow-y-auto p-5 sm:p-6 space-y-6">
         <SheetHeader className="text-left pr-6">
           <SheetTitle className="flex items-center gap-2 text-xl"><BarChart3 className="h-5 w-5 text-primary" />Grid Bot</SheetTitle>

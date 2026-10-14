@@ -29,7 +29,7 @@ export function GridBotDrawer({id,createEnabled,onClose,onAdjust}:{id:string;cre
   };
   const fresh=surface&&gridFactsFresh(surface,now);
   const breakeven=surface?gridBreakevenView(surface,now):null;
-  return <Sheet open onOpenChange={open=>{if(!open)onClose();}}><SheetContent className="flex h-full w-full flex-col p-0 sm:max-w-2xl">
+  return <Sheet open onOpenChange={open=>{if(!open)onClose();}}><SheetContent className="flex h-full w-full flex-col p-0 sm:max-w-2xl overflow-hidden">
     <SheetHeader className="border-b px-6 py-4"><SheetTitle>{surface?.bot.market??'Pacifica'} Grid Bot</SheetTitle><SheetDescription>PnL excludes funding. Live start and worker are disabled.</SheetDescription></SheetHeader>
     <div className="flex-1 space-y-5 overflow-y-auto px-6 py-4">
       <p role="status" aria-live="polite" className="text-sm">{message||(!surface?'Loading current bot state…':'')}</p>
