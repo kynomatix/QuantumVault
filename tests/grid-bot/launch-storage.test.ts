@@ -40,7 +40,8 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
   }
   it('C2 admits exactly two concurrent launches on four independent database connections',async()=>{
     const candidates=await Promise.all([0,1,2,3].map(async i=>{
-      const address='EXAMPLE_C2_WALLET_'+i,master='EXAMPLE_C2_MASTER_'+i;
+      // Custody AAD decodes the wallet as a 32-byte base58 public key before opening a transaction.
+      const address=bs58.encode(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(i+4)).publicKey),master='EXAMPLE_C2_MASTER_'+i;
       await pool.query('INSERT INTO wallets VALUES($1,$2)',[address,master]);return {bot:await draft(address),address,master};
     }));
     // Each worker owns a separate one-connection pool; the suite pool cannot serialize them.
@@ -62,10 +63,11 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     try{
       const results=await Promise.allSettled(candidates.map(({bot,address,master},i)=>new GridCustody(new ConcurrentStorage(workerPools[i],async()=>{}))
         .reserve({botId:bot.id,wallet:address,masterAccount:master,policyHmac:bot.policyHmac,canaryLimit:'250'},umk()).catch(error=>{release();throw error;})));
-      expect(started).toBe(4);expect(backendPids.size).toBe(4);
-      expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(2);
-      const denied=results.filter(r=>r.status==='rejected');expect(denied).toHaveLength(2);
-      for(const result of denied)if(result.status==='rejected')expect(result.reason.message).toBe('Grid pilot admission exhausted');
+      const outcomes=results.map((r,i)=>`worker ${i+1}: ${r.status}${r.status==='rejected'?` (${String(r.reason?.message??r.reason)})`:''}`).join('; ');
+      const denialMessages=results.flatMap(r=>r.status==='rejected'?[String(r.reason?.message??r.reason)]:[]);
+      expect(denialMessages,outcomes).toEqual(['Grid pilot admission exhausted','Grid pilot admission exhausted']);
+      expect(started,outcomes).toBe(4);expect(backendPids.size,outcomes).toBe(4);
+      expect(results.filter(r=>r.status==='fulfilled'),outcomes).toHaveLength(2);
       expect((await pool.query('SELECT count(*) AS count FROM grid_launch_accounts WHERE released_at IS NULL')).rows[0].count).toBe('2');
     }finally{release();await Promise.all(workerPools.map(worker=>worker.end()));}
   },30000);
