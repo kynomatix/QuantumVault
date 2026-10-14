@@ -262,21 +262,21 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     <DrawerSettingsPanel id="fees" title="Fees & data" icon={Receipt} keepMounted
       expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-advanced-toggle">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {choice('bars', 'History bars', [{ value: '100', label: '100 bars' }, { value: '200', label: '200 bars' }])}
-              {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
+        {choice('bars', 'History bars', [{ value: '100', label: '100 bars' }, { value: '200', label: '200 bars' }])}
+        {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
       </div>
-            <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines. Technical scales: flat = equal quote allocation; ascending = larger allocation further from current price; descending = larger allocation near current price. These apply separately to entries and starting-position exits. Base quantities also depend on price and lot rounding.</p>
-            <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption. A blank custom stop uses the suggested price.</p>
-            <div className="space-y-2 border-t border-border/60 pt-4 text-xs text-muted-foreground">
-              <h4 className="font-medium text-foreground">Observation and sizing details</h4>
-              {selected ? <>
-                <p>{reference ? `Cached Pacifica book reference price: ${readableDecimal(reference.price)} · observed ${readableTime(reference.observedAt)}`
-                  : `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`}</p>
-                {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
-                  : <p>Sizing unavailable: {selected.constraints.reason}</p>}
-              </> : <p>Choose a market and refresh observations to see tick and lot details.</p>}
-              {preview && <p>Policy model: {preview.policy.ordinaryWindow} ordinary window orders, {preview.policy.requiredAvailableSlots} required available slots including {preview.policy.reserveSlots} reserved, up to 100 intervals / 101 lines; transport batches up to 10. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
-            </div>
+      <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines. Technical scales: flat = equal quote allocation; ascending = larger allocation further from current price; descending = larger allocation near current price. These apply separately to entries and starting-position exits. Base quantities also depend on price and lot rounding.</p>
+      <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption.</p>
+      <div className="space-y-2 border-t border-border/60 pt-4 text-xs text-muted-foreground">
+        <h4 className="font-medium text-foreground">Observation and sizing details</h4>
+        {selected ? <>
+          <p>{reference ? `Cached Pacifica book reference price: ${readableDecimal(reference.price)} · observed ${readableTime(reference.observedAt)}`
+            : `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`}</p>
+          {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
+            : <p>Sizing unavailable: {selected.constraints.reason}</p>}
+        </> : <p>Choose a market and refresh observations to see tick and lot details.</p>}
+        {preview && <p>Policy model: {preview.policy.ordinaryWindow} ordinary window orders, {preview.policy.requiredAvailableSlots} required available slots including {preview.policy.reserveSlots} reserved, up to 100 intervals / 101 lines; transport batches up to 10. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
+      </div>
       {draftDetails}
     </DrawerSettingsPanel>
   </fieldset>;
@@ -319,7 +319,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           </div>
         </section>
 
-        <section aria-label="Range chart and timeframe" className="space-y-3">
+        <section aria-labelledby="grid-range-heading" className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 id="grid-range-heading" className="text-sm font-semibold">Your range</h3>
             <div className="flex flex-wrap items-center gap-2">

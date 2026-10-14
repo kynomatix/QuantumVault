@@ -136,6 +136,14 @@ describe('Persistent finalized timeframe ADX and independent auto-range', () => 
     const bars=history();bars.forEach((b,i)=>{b.open=100+i;b.close=101+i;b.high=102+i;b.low=99+i;});
     expect(plannerRegime('BTC-PERP','1h',bars,now)).toMatchObject({state:'available',label:'trending'});
   });
+  it('distinguishes short history from excessive history, unsupported timeframes and invalid clocks',()=>{
+    expect(plannerRegime('BTC-PERP','1h',history(201),now)).toEqual({state:'unavailable',reason:'ADX history exceeds 200 bars'});
+    expect(plannerRegime('BTC-PERP','EXAMPLE',history(),now)).toEqual({state:'unavailable',reason:'ADX timeframe is unsupported'});
+    for(const clock of [NaN,Infinity,now+0.5,Number.MAX_SAFE_INTEGER+1])
+      expect(plannerRegime('BTC-PERP','1h',history(),clock)).toEqual({state:'unavailable',reason:'ADX clock is invalid'});
+    expect(plannerRegime('BTC-PERP','EXAMPLE',history(27),now)).toEqual({state:'unavailable',reason:'ADX timeframe is unsupported'});
+    expect(plannerRegime('BTC-PERP','1h',history(27),NaN)).toEqual({state:'unavailable',reason:'ADX clock is invalid'});
+  });
   it.each(['forming','spot','proxy','mixed','gap','nan','volume','stale'])('reports UNKNOWN for %s observations',kind=>{
     const bars=history();if(kind==='forming')bars[99].provenance.finality='forming';if(kind==='spot')bars[0].provenance.basis='spot';if(kind==='proxy')bars[0].provenance.proxy='proxy';
     if(kind==='mixed')bars[0].provenance.venue='gate';if(kind==='gap')bars[3].time+=1;if(kind==='nan')bars[1].high=NaN;if(kind==='volume')bars[1].volume=-1;if(kind==='stale')bars.forEach(b=>b.time-=3_600_000);

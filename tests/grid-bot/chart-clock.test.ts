@@ -14,6 +14,7 @@ vi.mock('../../client/src/components/grid-bot/GridDraftCard', () => ({ gridJson:
 vi.mock('../../client/src/components/ui/dialog', () => ({ Dialog: 'div', DialogContent: 'div', DialogHeader: 'div', DialogTitle: 'div', DialogDescription: 'div' }));
 vi.mock('../../client/src/components/ui/button', () => ({ Button: 'button' }));
 import { GridBotChart } from '../../client/src/components/grid-bot/GridBotChart';
+import { gridJson } from '../../client/src/components/grid-bot/GridDraftCard';
 
 type Props = { chart: Extract<PlannerChart, { state: 'available' }>; surface: GridBotSurface; fresh: boolean; now: number };
 type Effect = { deps: unknown[]; cleanup?: () => void };
@@ -23,15 +24,16 @@ function findCanvas(node: unknown): ReactElement<Props> | null {
   if (typeof node.type === 'function' && node.type.name === 'Canvas') return node as ReactElement<Props>;
   return findCanvas(node.props.children);
 }
-afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('Grid chart clock and viewport', () => {
-  it('updates live lines on ticks and expiry without rebuilding or fitting the viewport', () => {
+  it('updates polled data and live lines without rebuilding or resetting the viewport', () => {
     const now = 1_800_000_000_000;
     const surface: GridBotSurface = {
       bot: { id: 'EXAMPLE', name: 'Grid', market: 'BTC-PERP', direction: 'long', status: 'active', lowerPrice: '90', upperPrice: '110',
         totalInvestment: '1000', stopLossPrice: '80', gridCount: 4, chartTimeframe: '1h', updatedAt: new Date(now).toISOString() },
-      levels: [], operations: [], lifecycle: { action: null, state: null, blocker: null },
+      levels: [{ id: 'EXAMPLE', ordinal: 1, price: '95', size: '1', side: 'buy', reduceOnly: false, status: 'open', cumulativeFilledSize: '0' }],
+      operations: [], lifecycle: { action: null, state: null, blocker: null },
       pnl: { realised: null, unrealised: null, total: null, fees: null, averageEntry: '100', breakeven: '100' },
       fills: [], cycles: null, position: { size: '1', direction: 'long' }, mark: '105', observedAt: new Date(now).toISOString(),
       residual: null, sweep: 'EXAMPLE', capacity: { ordinaryWindow: 0, reservedSlots: 0, liveOrders: null, venueMaximum: null },
@@ -50,8 +52,9 @@ describe('Grid chart clock and viewport', () => {
     const priceLines: { title: string; applyOptions: ReturnType<typeof vi.fn> }[] = [];
     const series = { setData: vi.fn(), setMarkers: vi.fn(), applyOptions: vi.fn(), removePriceLine: vi.fn(),
       createPriceLine: vi.fn((options: { title: string }) => { const line = { title: options.title, applyOptions: vi.fn() }; priceLines.push(line); return line; }) };
-    const fitContent = vi.fn(), remove = vi.fn();
-    chartFactory.mockReturnValue({ addCandlestickSeries: () => series, timeScale: () => ({ fitContent }), applyOptions: vi.fn(), remove });
+    const fitContent = vi.fn(), remove = vi.fn(), viewport = { from: -2.5, to: 0.5 };
+    const getVisibleLogicalRange = vi.fn(() => viewport), setVisibleLogicalRange = vi.fn();
+    chartFactory.mockReturnValue({ addCandlestickSeries: () => series, timeScale: () => ({ fitContent, getVisibleLogicalRange, setVisibleLogicalRange }), applyOptions: vi.fn(), remove });
     const disconnect = vi.fn();
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect = disconnect; });
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
@@ -67,6 +70,8 @@ describe('Grid chart clock and viewport', () => {
     });
     const render = (props: Props) => { refIndex = 0; effectIndex = 0; pending = []; Canvas(props); pending.forEach(run => run()); };
     render({ chart, surface, fresh: true, now });
+    const level = priceLines.find(line => line.title.startsWith('1 buy'))!;
+    const lower = priceLines.find(line => line.title === 'Lower range')!;
     const breakeven = priceLines.find(line => line.title.startsWith('Breakeven'))!;
     const mark = priceLines.find(line => line.title === 'Pacifica mark')!;
     expect(breakeven.title).toContain('5.00%');
@@ -76,8 +81,50 @@ describe('Grid chart clock and viewport', () => {
     expect(series.removePriceLine).toHaveBeenCalledWith(breakeven); expect(series.removePriceLine).toHaveBeenCalledWith(mark);
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();
     expect(series.setData).toHaveBeenCalledTimes(1);
-    render({ chart: { ...chart, candles: [...chart.candles] }, surface, fresh: true, now: now + 2000 });
+    const polled: GridBotSurface = { ...surface, bot: { ...surface.bot, lowerPrice: '91' }, mark: '106',
+      levels: [{ ...surface.levels[0], price: '96', status: 'filled' }],
+      fills: [{ tradeId: 'EXAMPLE', time: chart.candles[0].time, leg: 'entry', size: '1', price: '96' }] };
+    render({ chart, surface: polled, fresh: true, now: now + 2000 });
+    expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();
+    expect(level.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 96, title: '1 buy 1 · filled' }));
+    expect(lower.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 91 }));
+    expect(series.setMarkers).toHaveBeenLastCalledWith([expect.objectContaining({ text: 'entry 1 @ 96', shape: 'arrowUp' })]);
+    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith(viewport);
+    expect(series.setData).toHaveBeenCalledTimes(2);
+    render({ chart: { ...chart, candles: [{ ...chart.candles[0], close: 106 }] }, surface: { ...polled, levels: [], fills: [] }, fresh: true, now: now + 3000 });
+    expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1);
+    expect(series.removePriceLine).toHaveBeenCalledWith(level); expect(series.setMarkers).toHaveBeenLastCalledWith([]);
+    expect(series.setData).toHaveBeenLastCalledWith([expect.objectContaining({ close: 106 })]);
+    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith(viewport);
+    const expanded = { ...chart, candles: [{ ...chart.candles[0], time: chart.candles[0].time - 7_200_000 }, ...chart.candles] };
+    render({ chart: expanded, surface: polled, fresh: true, now: now + 3500 });
+    expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1);
+    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith({ from: viewport.from + 1, to: viewport.to + 1 });
+    render({ chart: { ...chart, timeframe: '4h' }, surface: polled, fresh: true, now: now + 4000 });
     expect(chartFactory).toHaveBeenCalledTimes(2); expect(fitContent).toHaveBeenCalledTimes(2); expect(remove).toHaveBeenCalledTimes(1);
-    effects.forEach(effect => effect.cleanup?.()); expect(remove).toHaveBeenCalledTimes(2); expect(disconnect).toHaveBeenCalledTimes(2);
+    render({ chart: { ...chart, timeframe: '4h' }, surface: { ...polled, bot: { ...polled.bot, id: 'EXAMPLE-OTHER' } }, fresh: true, now: now + 5000 });
+    expect(chartFactory).toHaveBeenCalledTimes(3); expect(fitContent).toHaveBeenCalledTimes(3); expect(remove).toHaveBeenCalledTimes(2);
+    effects.forEach(effect => effect.cleanup?.()); expect(remove).toHaveBeenCalledTimes(3); expect(disconnect).toHaveBeenCalledTimes(3);
+  });
+  it('retains displayed chart data and its expiry while a refresh request is pending', () => {
+    vi.useFakeTimers();
+    const now = Date.now(), setChart = vi.fn(), setExpired = vi.fn();
+    const chart: Props['chart'] = { state: 'available', market: 'BTC-PERP', timeframe: '1h', requestedBars: 100,
+      actualBars: 0, partial: true, retrievedAt: now, cacheInsertedAt: now, validForMs: 3000, candles: [] };
+    const surface = { bot: { id: 'EXAMPLE', market: 'BTC-PERP' }, observedAt: null } as GridBotSurface;
+    const effects: { setup: () => (() => void) | undefined; deps: unknown[] }[] = [];
+    hooks.useState.mockImplementation(initial => [initial, vi.fn()])
+      .mockReturnValueOnce([chart, setChart]).mockReturnValueOnce(['1h', vi.fn()])
+      .mockReturnValueOnce([1, vi.fn()]).mockReturnValueOnce([false, setExpired]);
+    hooks.useEffect.mockImplementation((setup, deps) => effects.push({ setup, deps }));
+    vi.mocked(gridJson).mockReturnValue(new Promise(() => {}));
+    expect(findCanvas(GridBotChart({ surface, onClose: vi.fn() }))).not.toBeNull();
+    const expiryCleanup = effects.find(effect => effect.deps.length === 1 && effect.deps[0] === chart)!.setup();
+    const requestCleanup = effects.find(effect => effect.deps.length === 3 && effect.deps[2] === 1)!.setup();
+    expect(setChart).not.toHaveBeenCalled();
+    requestCleanup?.();
+    vi.advanceTimersByTime(3000);
+    expect(setExpired).toHaveBeenCalledWith(true);
+    expiryCleanup?.();
   });
 });

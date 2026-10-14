@@ -8,8 +8,10 @@ import type { GridRegime } from '../../shared/grid-regime';
 export function plannerRegime(market: string, timeframe: string, candles: PlannerCandle[], now: number): GridRegime {
   const unknown = (reason: string): GridRegime => ({ state: 'unavailable', reason });
   const duration = gridTimeframeMs(timeframe), first = candles[0]?.provenance;
-  if (!duration || !Number.isSafeInteger(now) || candles.length < 28 || candles.length > 200)
-    return unknown('ADX needs 28 bars');
+  if (!duration) return unknown('ADX timeframe is unsupported');
+  if (!Number.isSafeInteger(now)) return unknown('ADX clock is invalid');
+  if (candles.length < 28) return unknown('ADX needs 28 bars');
+  if (candles.length > 200) return unknown('ADX history exceeds 200 bars');
   if (!first || !['okx', 'gate', 'hyperliquid', 'pacifica'].includes(first.source) || first.source !== first.venue)
     return unknown('Direct perpetual provenance unavailable');
   if (!candles.every((c, i) => Number.isSafeInteger(c.time) && c.time > 0 && c.time % duration === 0 && c.time + duration <= now

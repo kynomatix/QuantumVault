@@ -322,6 +322,8 @@ describe('Planner client authority boundaries', () => {
     expect(sheet).not.toContain('<Collapsible'); expect(sheet).not.toContain('Advanced settings');
     expect(body.indexOf('<GridPlannerChart')).toBeLessThan(body.indexOf('<DrawerSettingsPanel'));
     expect(body).toContain('aria-labelledby="grid-plan-heading"');
+    expect(body).toContain('<section aria-labelledby="grid-range-heading"');
+    expect(body).toContain('<h3 id="grid-range-heading"');
     expect(body.slice(body.indexOf('        </fieldset>'))).toContain('<GridDraftActions');
     expect(body).toContain('!createEnabled && feesPanel()');
     expect(sheet).toContain('const feesPanel = (draftDetails?: React.ReactNode) => <fieldset disabled={draftBusy}>');
@@ -336,6 +338,8 @@ describe('Planner client authority boundaries', () => {
       expect(sheet.match(new RegExp(`numberField\\('${field}'`, 'g'))).toHaveLength(1);
     expect(panel('range')).toContain('<GridRegimeHint'); expect(panel('range')).toContain('id="grid-width"');
     expect(panel('stop')).toContain("numberField('stop'"); expect(panel('stop')).toContain('Suggested stop:');
+    const stopHint = 'A blank custom stop uses the suggested price.';
+    expect(sheet.split(stopHint)).toHaveLength(2); expect(panel('stop')).toContain(stopHint);
     for (const control of ['id="grid-seed"', 'id="grid-entryScale"', 'id="grid-profitScale"', 'startingPosition enabled={form.seed}'])
       expect(panel('orders')).toContain(control);
     expect(panel('fees')).toContain("choice('bars'"); expect(panel('fees')).toContain('Observation and sizing details');
