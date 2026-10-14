@@ -408,7 +408,7 @@ describe('Planner client authority boundaries', () => {
     expect(setup).toContain("from '@/components/ui/dialog'");
     expect(setup).not.toContain("from '@/components/ui/sheet'");
     expect(setup).toContain('<Dialog open={open} onOpenChange={handleOpenChange}>');
-    expect(layout).toContain('max-w-lg sm:max-w-3xl max-h-[90vh] flex flex-col');
+    expect(layout).toContain('max-w-lg sm:max-w-[760px] max-h-[90vh] flex flex-col');
     expect(layout).toContain('data-testid="sheet-grid-planner"');
     expect(layout).toContain('<DialogHeader>');
     expect(layout).toContain('<DialogTitle className="flex items-center gap-2 text-xl">');

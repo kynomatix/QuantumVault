@@ -325,7 +325,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     onOpenChange(value);
   };
   const renderSetup = ({ details, status, actions, depositDialog }: Partial<GridDraftContent> = {}) =>
-    <DialogContent className="max-w-lg sm:max-w-3xl max-h-[90vh] flex flex-col" data-testid="sheet-grid-planner">
+    <DialogContent className="max-w-lg sm:max-w-[760px] max-h-[90vh] flex flex-col" data-testid="sheet-grid-planner">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-xl"><BarChart3 className="h-5 w-5 text-primary" />Grid Bot</DialogTitle>
           <DialogDescription>Choose a price range and explore your grid before starting a bot.</DialogDescription>
