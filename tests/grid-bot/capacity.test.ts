@@ -13,14 +13,16 @@ describe('shared capacity observation versus product window', () => {
     const s = gridCapacitySnapshot(input());
     expect(s.observedUse).toMatchObject({ totalResting: 4, byCategory: { grid: 1, 'non-grid': 1, protection: 1, unclassified: 1 }, pendingReservedSlots: 2 });
     expect(s.restingCapacity).toMatchObject({ ruling: 'H.5/2026-09-28', provenFloor: 100, newSlotProofRequired: false, guaranteedAvailable: 94, actualVenueMaximum: null });
-    expect(s.policyWindow).toEqual({ ordinaryLimit: 20, sharedReserved: 5, requiredAvailable: 25, admittedOrdinaryLimit: 20 });
+    expect(s.policyWindow).toEqual({ ordinaryLimit: 100, sharedReserved: 5, requiredAvailable: 105, admittedOrdinaryLimit: 89 });
     expect(s.batchActionLimit).toBe(10); expect(GRID_CAPS.subaccountsPerAgent).toBe(10);
   });
   it('counts non-Grid, protection, unclassified inventory and pending reservations against one domain', () => {
     const i = input(); i.orders = Array.from({ length: 75 }, (_, n) => ({ orderId: String(n + 1), category: 'non-grid' })); i.reservations = [];
     expect(gridCapacitySnapshot(i).policyWindow.admittedOrdinaryLimit).toBe(20);
     i.reservations = [{ id: 'EXAMPLE_PENDING', slots: 1 }];
-    expect(gridCapacitySnapshot(i)).toMatchObject({ reason: 'insufficient_shared_slots', restingCapacity: { guaranteedAvailable: 24 }, policyWindow: { admittedOrdinaryLimit: 0 } });
+    expect(gridCapacitySnapshot(i)).toMatchObject({ reason: null, restingCapacity: { guaranteedAvailable: 24 }, policyWindow: { admittedOrdinaryLimit: 19 } });
+    i.orders = Array.from({ length: 95 }, (_, n) => ({ orderId: String(n + 1), category: 'non-grid' })); i.reservations = [];
+    expect(gridCapacitySnapshot(i)).toMatchObject({ reason: 'insufficient_shared_slots', policyWindow: { admittedOrdinaryLimit: 0 } });
     i.orders = Array.from({ length: 105 }, (_, n) => ({ orderId: String(n + 1), category: 'grid' }));
     expect(gridCapacitySnapshot(i).restingCapacity.guaranteedAvailable).toBe(0);
   });

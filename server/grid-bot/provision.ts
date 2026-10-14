@@ -1,4 +1,5 @@
 import Decimal from 'decimal.js';
+import {GRID_MINIMUM_LAUNCH_SLOTS} from '../../shared/grid-capacity';
 import type {GridPlan} from './engine-types';
 import {calculateGrid} from './engine';
 import {verifyGridPolicyHmac,type GridPolicy} from './policy-hmac';
@@ -33,7 +34,7 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
     if(!f.masterAccount||!f.transportReady||!f.inventoryComplete)return deny('Grid transport or account inventory is unavailable.');
     if(!gridRecyclerGate(f.recycler,now))return deny('Subaccount reuse and recycling must both be enabled for this deployment.');
     if(!gridWalletEntryGate(f.sol).entryAllowed)return deny('Wallet SOL reserve is below the entry minimum or unknown.');
-    if(!Number.isSafeInteger(f.availableSlots)||f.availableSlots<25||!Number.isSafeInteger(f.subaccountCount)||f.subaccountCount<0||f.subaccountCount>(f.account||f.reusableAccountAvailable===true?10:9))return deny('Subaccount or order slot capacity is unavailable.');
+    if(!Number.isSafeInteger(f.availableSlots)||f.availableSlots<GRID_MINIMUM_LAUNCH_SLOTS||!Number.isSafeInteger(f.subaccountCount)||f.subaccountCount<0||f.subaccountCount>(f.account||f.reusableAccountAvailable===true?10:9))return deny('Subaccount or order slot capacity is unavailable.');
     if(f.restrictions!=='unrestricted'||!new Decimal(f.maxLeverage).gte(policy.leverage)||!alreadyFunded&&!new Decimal(f.masterWithdrawable).gte(policy.totalInvestment)
       || !new Decimal(f.observedCredits).gt(0))return deny('Funding, leverage, quota or market restrictions deny launch.');
     if(!new Decimal(f.availableGridCredits).gte(alreadyFunded?10:policy.seedAtCreation?50:40))return {ok:false,transient:true,reason:'Grid quota is temporarily unavailable.'};

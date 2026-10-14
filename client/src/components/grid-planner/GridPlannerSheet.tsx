@@ -311,7 +311,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
             : <p>Sizing unavailable: {selected.constraints.reason}</p>}
         </> : <p>Choose a market and refresh observations to see tick and lot details.</p>}
-        {preview && <p>Policy model: {preview.policy.ordinaryWindow} ordinary window orders, {preview.policy.requiredAvailableSlots} required available slots including {preview.policy.reserveSlots} reserved, up to 100 intervals / 101 lines; transport batches up to 10. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
+        {preview && <p>Policy model: up to {preview.policy.ordinaryWindow} ordinary resting orders. A full window needs {preview.policy.requiredAvailableSlots} available slots including {preview.policy.reserveSlots} reserved; observed capacity can require a smaller window. Up to {preview.policy.maximumIntervals} intervals; transport batches up to {preview.policy.transportBatch}. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
       </div>
       {draftDetails}
     </DrawerSettingsPanel>

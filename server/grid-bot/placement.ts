@@ -5,6 +5,7 @@ import type {GridAccount} from './custody';
 import {GridExecution} from './execution';
 import type {ExactGridRequest,GridClaim} from './launch-storage';
 import type {WindowAction,WindowLevel} from './window';
+import {GRID_TRANSPORT_BATCH_ACTIONS} from '../../shared/grid-capacity';
 
 export function gridLevelRequest(input:{account:GridAccount;level:WindowLevel;market:string;protocolSymbol:string;signerGeneration:string;deployment:string;
   fee:GridFeeQuote;constraint:MarketConstraintObservation;now:number;authority:Record<string,unknown>}):ExactGridRequest{
@@ -27,7 +28,7 @@ export function validGridLevelAuthority(r:ExactGridRequest,current:Parameters<ty
 /** Re-observation and exact preparation happen per action, never once for an entire chunk. */
 export async function executeGridWindow(chunks:WindowAction[][],execution:Pick<GridExecution,'run'>,
   prepare:(action:WindowAction)=>Promise<{key:string;request:ExactGridRequest;claim:GridClaim;leaseToken:string}>){
-  if(chunks.some(c=>c.length>10))throw Error('Grid transport chunk exceeds 10 actions');
+  if(chunks.some(c=>c.length>GRID_TRANSPORT_BATCH_ACTIONS))throw Error('Grid transport chunk exceeds '+GRID_TRANSPORT_BATCH_ACTIONS+' actions');
   const actions=chunks.flat();
   // The planner puts exits first; defend this invariant at the execution boundary too.
   let sawEntry=false;

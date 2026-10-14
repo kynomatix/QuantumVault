@@ -25,7 +25,7 @@ export function validExactRequest(r:ExactGridRequest):boolean{
 /** Only this Grid-specific boundary signs and posts. No enrollment, leverage or legacy adapter side effects. */
 export class GridPacificaSender {
   constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary,private margin?:Pick<GridLaunchStorage,'finalMargin'>){}
-  async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer,leaseToken?:string):Promise<{rateLimited:boolean;terminalTransferDigest?:string;marginRejectedDigest?:string}>{
+  async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer,leaseToken?:string):Promise<{rateLimited:boolean;terminalTransferDigest?:string;marginRejectedDigest?:string;capacityRejectedDigest?:string}>{
     if(!validExactRequest(r) || this.transport.keyStatus!=='present')throw Error('Grid transport authority unavailable');
     const sub=new PacificaSigner(subaccountSecret);
     if(sub.getPublicKey()!==r.account)throw Error('Grid signing account mismatch');
@@ -55,10 +55,11 @@ export class GridPacificaSender {
       // The digest binds this in-flight result to the retained signed request, never a later balance guess.
       if(result?.success===true&&result.error===null&&result.data?.success===true&&result.data.error===null)
         return {rateLimited:false,terminalTransferDigest:requestDigest(r)};
-    }else if(response.status===422&&gridAddsExposure(r)){
+    }else if(response.status===422&&(r.kind==='limit'||gridAddsExposure(r))){
       const result=await response.json() as {success?:unknown;error_code?:unknown;code?:unknown;error?:unknown};
+      if(result.success===false&&(result.error_code===10||result.code===10||result.error==='OPEN_ORDER_LIMIT_REACHED'))return {rateLimited:false,capacityRejectedDigest:requestDigest(r)};
       // Pacifica error-code 5 / INSUFFICIENT_BALANCE is a terminal margin denial.
-      if(result.success===false&&(result.error_code===5||result.code===5||result.error==='INSUFFICIENT_BALANCE'||result.error==='Insufficient margin'))return {rateLimited:false,marginRejectedDigest:requestDigest(r)};
+      if(gridAddsExposure(r)&&result.success===false&&(result.error_code===5||result.code===5||result.error==='INSUFFICIENT_BALANCE'||result.error==='Insufficient margin'))return {rateLimited:false,marginRejectedDigest:requestDigest(r)};
     }else await response.body?.cancel().catch(()=>undefined);
     return {rateLimited:response.status===429};
   }
@@ -68,7 +69,7 @@ export interface GridExecutionDeps {
   storage:Pick<GridLaunchStorage,'read'|'prepare'|'submit'|'settle'> & Partial<Pick<GridLaunchStorage,'expirePrepared'>>;
   now?:()=>number;
   preflight:(r:ExactGridRequest)=>Promise<boolean>;
-  send:(r:ExactGridRequest)=>Promise<{rateLimited:boolean;terminalTransferDigest?:string;marginRejectedDigest?:string}>;
+  send:(r:ExactGridRequest)=>Promise<{rateLimited:boolean;terminalTransferDigest?:string;marginRejectedDigest?:string;capacityRejectedDigest?:string}>;
   reconcile:(op:DurableGridOperation)=>Promise<GridReconciliation>;
 }
 export class GridExecution {
@@ -92,10 +93,11 @@ export class GridExecution {
     // Re-read current authority after the transaction and immediately before acquiring send permission.
     if(!await this.deps.preflight(op.exact_request))return 'not_sent';
     if(!await this.deps.storage.submit(op,leaseToken))return 'not_sent';
-    let rateLimited=false,terminalTransferDigest:string|undefined,marginRejectedDigest:string|undefined;
-    try {const sent=await this.deps.send(structuredClone(op.exact_request));rateLimited=sent.rateLimited;terminalTransferDigest=sent.terminalTransferDigest;marginRejectedDigest=sent.marginRejectedDigest;}
+    let rateLimited=false,terminalTransferDigest:string|undefined,marginRejectedDigest:string|undefined,capacityRejectedDigest:string|undefined;
+    try {const sent=await this.deps.send(structuredClone(op.exact_request));rateLimited=sent.rateLimited;terminalTransferDigest=sent.terminalTransferDigest;marginRejectedDigest=sent.marginRejectedDigest;capacityRejectedDigest=sent.capacityRejectedDigest;}
     catch(error){if(error instanceof GridMarginDenied){await this.deps.storage.settle(op,{state:'failed',reason:'margin',releaseSlot:true},leaseToken);return 'failed';}/* Other errors include crash/timeout after POST. */}
     if(marginRejectedDigest===op.exact_request_digest){await this.deps.storage.settle(op,{state:'failed',reason:'margin',releaseSlot:true},leaseToken);return 'failed';}
+    if(capacityRejectedDigest===op.exact_request_digest){await this.deps.storage.settle(op,{state:'failed',reason:'venue_rejection',releaseSlot:true,capacityRejected:true},leaseToken);return 'failed';}
     if((request.kind==='fund'||request.kind==='sweep')&&terminalTransferDigest===op.exact_request_digest){
       await this.deps.storage.settle(op,{state:'confirmed',reason:null,releaseSlot:true});return 'confirmed';
     }
