@@ -1,5 +1,6 @@
 import type {GridBotSurface,GridBotSummary} from '../../shared/grid-surface';
 import type {StoredBot} from './storage';
+import {GRID_CAPS} from './grid-caps';
 export function gridBotSummary(bot:StoredBot):GridBotSummary{
   return {id:bot.id,name:bot.name,market:bot.market,direction:bot.direction,status:bot.status,lowerPrice:bot.lowerPrice,
     upperPrice:bot.upperPrice,totalInvestment:bot.totalInvestment,stopLossPrice:bot.stopLossPrice,gridCount:bot.gridCount,
@@ -22,6 +23,6 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
     mark:fresh&&o.mark&&o.mark.observedAt<=now&&now-o.mark.observedAt<=15000?decimal(o.mark.price):null,
     observedAt:fresh?new Date(o.observedAt).toISOString():null,residual:residualFresh?decimal(snapshot.bot.residualUsdc):null,
     sweep:snapshot.bot.status==='stopped'?'Confirmed terminal':snapshot.operations.some((x:any)=>x.type==='sweep_subaccount')?'Sweep unconfirmed':snapshot.bot.status==='stopping'?'Awaiting venue settlement':'Not terminal',
-    capacity:{ordinaryWindow:20,reservedSlots:5,liveOrders:fresh?o.orders.filter((x:any)=>['open','partially_filled'].includes(x.status)).length:null,venueMaximum:null},
+    capacity:{ordinaryWindow:GRID_CAPS.ordinaryRestingPerBot,reservedSlots:GRID_CAPS.sharedProtectionReserve,liveOrders:fresh?o.orders.filter((x:any)=>['open','partially_filled'].includes(x.status)).length:null,venueMaximum:null},
     authorities:{safeWindow:false,resume:false,lostSweepLookup:false,breaker:'not_monitored_by_venue_error_class'},notifications:events,workerEnabled:false,startEnabled:false};
 }

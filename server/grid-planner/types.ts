@@ -3,6 +3,7 @@ import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { ProvenancedOHLCV } from '../lab/datafeed';
 import type { BtcStoredWeek } from '../../shared/grid-direction';
 import type { BtcWeeklyStore } from './weekly-store';
+import {PER_BOT_ORDINARY_MAX,GRID_FULL_WINDOW_SLOTS,GRID_PROTECTION_RESERVE,GRID_TRANSPORT_BATCH_ACTIONS} from '../../shared/grid-capacity';
 
 // Pacifica candles are Planner-only; shared datafeed consumers keep their existing sources.
 export type PlannerCandle = ProvenancedOHLCV | (Omit<ProvenancedOHLCV, 'provenance'> & {
@@ -44,8 +45,8 @@ export interface PlannerPreview {
   policy: typeof PLANNER_POLICY;
 }
 export const PLANNER_POLICY = {
-  source: 'Owner runtime policy 2026-09-09; H.5 capacity ruling 2026-09-28',
-  ordinaryWindow: 20, requiredAvailableSlots: 25, reserveSlots: 5, maximumIntervals: 100, transportBatch: 10,
+  source: 'Owner 100-grid ruling 2026-10-14; H.5 capacity floor 2026-09-28',
+  ordinaryWindow: PER_BOT_ORDINARY_MAX, requiredAvailableSlots: GRID_FULL_WINDOW_SLOTS, reserveSlots: GRID_PROTECTION_RESERVE, maximumIntervals: 100, transportBatch: GRID_TRANSPORT_BATCH_ACTIONS,
   liveAvailableSlots: { state: 'unavailable', reason: 'No account inventory is read by the Planner' },
   venueRestingMaximum: { state: 'unavailable', reason: 'Not established by the transport batch limit' },
   seedTakerFee: { state: 'unavailable', reason: 'No venue fee quote is read by the Planner' },

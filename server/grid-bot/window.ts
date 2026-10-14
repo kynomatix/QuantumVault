@@ -1,6 +1,7 @@
 import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
 import {GRID_CAPS} from './grid-caps';
+import {gridPlacementBudget} from '../../shared/grid-capacity';
 export interface WindowLevel {id:string;ordinal:number;price:string;size:string;reduceOnly:boolean;side:'buy'|'sell';attempt:number}
 export interface WindowOrder {levelId:string;orderId:string;clientOrderId:string;remaining:string;reduceOnly:boolean}
 export type WindowAction={kind:'cancel';order:WindowOrder}|{kind:'place';level:WindowLevel};
@@ -19,9 +20,9 @@ export function gridWindow(input:{levels:WindowLevel[];owned:WindowOrder[];posit
     if(!amount.gte(0)||amount.gt(l.size)||amount.gt(backing))throw Error('Profit exits exceed confirmed position backing');
     backing=backing.minus(amount);desired.push(l);
   }
-  if(desired.length>20)throw Error('Backed exits exceed ordinary Grid slot cap');
+  if(desired.length>GRID_CAPS.ordinaryRestingPerBot)throw Error('Backed exits exceed ordinary Grid slot cap');
   let remaining=budget;
-  if(input.entriesAllowed)for(const l of entries){if(desired.length>=20)break;
+  if(input.entriesAllowed)for(const l of entries){if(desired.length>=GRID_CAPS.ordinaryRestingPerBot)break;
     const already=input.owned.some(o=>o.levelId===l.id),notional=new Decimal(l.price).mul(l.size);
     if(!already && notional.gt(remaining))continue;
     desired.push(l);if(!already)remaining=remaining.minus(notional);
@@ -30,7 +31,7 @@ export function gridWindow(input:{levels:WindowLevel[];owned:WindowOrder[];posit
   // Cancels must settle on venue before this plan can be recalculated for placements.
   const cancels=input.owned.filter(o=>!o.reduceOnly&&!keep.has(o.levelId)).map(order=>({kind:'cancel' as const,order}));
   const actions:WindowAction[]=cancels.length?cancels:[];
-  if(!cancels.length){let free=Math.min(20-input.owned.length,Math.max(0,input.freeSlots-5));
+  if(!cancels.length){let free=gridPlacementBudget(input.owned.length,input.freeSlots);
     for(const level of desired){if(free<=0)break;if(input.owned.some(o=>o.levelId===level.id))continue;
       actions.push({kind:'place',level});free--;
     }

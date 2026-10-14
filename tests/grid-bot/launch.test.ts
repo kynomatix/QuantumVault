@@ -109,7 +109,7 @@ describe('Grid launch preflight and hard production gates',()=>{
     const f=launchFixture(defect==='canary');
     if(defect==='policy')f.policy.upperPrice='111.00000000';if(defect==='fees')f.facts.maker={...f.facts.maker,expiresAt:clock};
     if(defect==='price')f.facts.bookPrice='101';if(defect==='constraints')f.facts.maxLeverage='1';if(defect==='quota')f.facts.observedCredits='0';
-    if(defect==='recycler')f.facts.recycler.reuse=false;if(defect==='slots')f.facts.availableSlots=24;
+    if(defect==='recycler')f.facts.recycler.reuse=false;if(defect==='slots')f.facts.availableSlots=5;
     if(defect==='stop'){f.policy.stopLossPrice='1.00000000';const h=computeGridPolicyHmac(f.policy,umk());if(h.ok)f.policyHash=h.digest;}
     if(defect==='sol')f.facts.sol=null;if(defect==='transport')f.facts.transportReady=false;if(defect==='balance')f.facts.masterWithdrawable='99';
     const reserve=vi.fn(),send=vi.fn(),cleanup=vi.fn();

@@ -65,7 +65,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     v.request.timestamp=Date.now();expect((await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).state).toBe('prepared');
   });
   it('stores independent Grid ownership and decrypts only the matching owner/account/UMK',async()=>{const {account}=await reserve();const p=(await pool.query('SELECT bot_id,status FROM protocol_subaccounts')).rows[0];expect(p).toEqual({bot_id:null,status:'grid_reserved'});
-    let captured:Buffer|undefined;await custody.withSecret(account,umk(),async secret=>{captured=secret;expect(bs58.encode(secret.subarray(32))).toBe(account.account);});expect(captured!.every(x=>x===0)).toBe(true);
+    let captured:Buffer|undefined;await custody.withSecret(account,umk(),async (secret)=>{captured=secret;expect(bs58.encode(secret.subarray(32))).toBe(account.account);});expect(captured!.every(x=>x===0)).toBe(true);
     await expect(custody.withSecret({...account,wallet:'EXAMPLE_WRONG'},umk(),async()=>{})).rejects.toThrow();await expect(custody.withSecret(account,Buffer.alloc(32,8),async()=>{})).rejects.toThrow();
   });
   it('refuses custody signing after master generation changes',async()=>{const {account}=await reserve();await pool.query('UPDATE wallets SET agent_public_key=$1 WHERE address=$2',['EXAMPLE_ROTATED',wallet]);await expect(custody.withSecret(account,umk(),async()=>{})).rejects.toThrow('ownership');});
@@ -76,6 +76,46 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const loser=results[0].status==='rejected'?{v:av,a:a.account}:{v:bv,a:b.account};await expect(storage.prepare('EXAMPLE_RETRY',loser.v.request,loser.v.claim,loser.a.leaseToken)).rejects.toThrow('quota');
   });
   it('retains quota for a full window after confirmation of an old uncertain send',async()=>{const {account}=await reserve(),v=input(account);v.claim.credits='150';const op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);await storage.submit(op,account.leaseToken);await pool.query("UPDATE grid_execution_claims SET prepared_at=clock_timestamp()-interval '2 minutes'");await storage.settle(op,{state:'confirmed',reason:null,releaseSlot:true});expect(await storage.availableCredits(account.masterAccount)).toBe('0');});
+  it('paces 95 serial placements through the same durable rolling quota across worker restarts',async()=>{
+    const {account}=await reserve();let windows=1;
+    // Exercise the shared write ledger without consuming level/fill authority; every write costs the same ten credits.
+    for(let i=0;i<95;i++){
+      const s=new GridLaunchStorage(pool,async()=>{}),v=input(account);
+      if(i&&i%15===0){
+        await expect(s.prepare('EXAMPLE_DENIED_'+i,v.request,v.claim,account.leaseToken)).rejects.toBeInstanceOf(GridLaunchTransientError);
+        expect(await s.availableCredits(account.masterAccount)).toBe('0');
+        await pool.query("UPDATE grid_execution_claims SET settled_at=clock_timestamp()-interval '61 seconds' WHERE settled_at IS NOT NULL");windows++;
+      }
+      const op=await s.prepare('EXAMPLE_WRITE_'+i,v.request,v.claim,account.leaseToken);
+      expect(await s.submit(op,account.leaseToken)).toBe(true);expect(await s.submit(op,account.leaseToken)).toBe(false);
+      await s.settle(op,{state:'confirmed',reason:null,releaseSlot:true});
+      expect((await s.read(account.botId,'EXAMPLE_WRITE_'+i))?.state).toBe('confirmed');
+    }
+    expect(windows).toBe(7);expect((await pool.query('SELECT id FROM grid_operations')).rowCount).toBe(95);
+    expect(await storage.availableCredits(account.masterAccount)).toBe('100');
+  });
+  it('commits capacity failure, observed count and one outbox entry atomically; the latch survives restart and resume',async()=>{
+    const {account}=await reserve(),v=input(account),level=(await pool.query('SELECT id FROM grid_levels WHERE bot_id=$1 AND ordinal=1',[account.botId])).rows[0];
+    const s=new GridLaunchStorage(pool,async()=>{},async r=>({account:r.account,symbol:'BTC',available:'100000',leverage:'1',feeRate:'0',observedAt:Date.now(),accountUpdatedAt:Date.now()}));
+    v.request={...v.request,kind:'limit',path:'/orders/create',operationType:'create_order',data:{symbol:'BTC',price:'90.00000000',amount:'1.00000000',side:'bid',reduce_only:false,tif:'ALO',client_order_id:randomUUID()},authority:{levelId:level.id,levelAttempt:0}};
+    v.claim={...v.claim,slots:1,canaryIncrement:'90'};
+    const op=await s.prepare('EXAMPLE_CAPACITY',v.request,v.claim,account.leaseToken);expect(await s.submit(op,account.leaseToken)).toBe(true);
+    const observation={account:account.account,inventoryComplete:true,observedAt:Date.now(),orders:Array.from({length:38},(_,i)=>({orderId:String(i+1),status:'open'}))};
+    await pool.query('INSERT INTO grid_monitor_state(bot_id,observation,reconciled_at) VALUES($1,$2,clock_timestamp())',[account.botId,observation]);
+    await s.settle(op,{state:'failed',reason:'venue_rejection',capacityRejected:true,releaseSlot:true},account.leaseToken);
+    expect((await pool.query('SELECT state,failure_classification FROM grid_operations WHERE id=$1',[op.id])).rows[0]).toEqual({state:'failed',failure_classification:'venue_rejection'});
+    expect((await pool.query('SELECT status,pause_reason FROM grid_bots WHERE id=$1',[account.botId])).rows[0]).toEqual({status:'paused',pause_reason:'venue_capacity'});
+    expect((await pool.query('SELECT evidence FROM grid_risk_events WHERE bot_id=$1',[account.botId])).rows[0].evidence).toMatchObject({classification:'venue_capacity',observedOpenOrders:38,account:account.account});
+    expect((await pool.query('SELECT slot_released,settled_at IS NOT NULL AS settled FROM grid_execution_claims WHERE operation_id=$1',[op.id])).rows[0]).toEqual({slot_released:true,settled:true});
+    await expect(s.settle(op,{state:'failed',reason:'venue_rejection',capacityRejected:true,releaseSlot:true},account.leaseToken)).rejects.toThrow('CAS');
+    await pool.query("UPDATE grid_bots SET status='active',pause_reason=NULL WHERE id=$1",[account.botId]);
+    await expect(new GridLaunchStorage(pool,async()=>{}).prepare('EXAMPLE_AFTER_RESUME',input(account).request,input(account).claim,account.leaseToken)).rejects.toThrow('venue-capacity pause');
+    expect(await new GridLaunchStorage(pool,async()=>{}).submit(op,account.leaseToken)).toBe(false);
+    expect((await pool.query('SELECT event_key FROM grid_risk_events WHERE bot_id=$1',[account.botId])).rowCount).toBe(1);
+    // Existing reduction authority still applies, but capacity itself never blocks these operations.
+    for(const r of [{...v.request,kind:'cancel' as const},{...v.request,kind:'close' as const},{...v.request,kind:'sweep' as const},{...v.request,data:{...v.request.data,reduce_only:true}}])
+      expect(await (s as any).capacityBlocked(pool,r)).toBe(false);
+  });
   it('does not partition different masters together and enforces the global pilot',async()=>{const a=await reserve('EXAMPLE_A'),b=await reserve('EXAMPLE_B');for(const account of [a.account,b.account]){const v=input(account);v.claim.credits='150';await storage.prepare(randomUUID(),v.request,v.claim,account.leaseToken);}await expect(reserve('EXAMPLE_C')).rejects.toThrow('pilot');});
   it('persists rate-limit backoff and blocks a prepared send after another worker receives 429',async()=>{const a=await reserve(),b=await reserve(),av=input(a.account),bv=input(b.account);const op=await storage.prepare('EXAMPLE_A',av.request,av.claim,a.account.leaseToken),other=await storage.prepare('EXAMPLE_B',bv.request,bv.claim,b.account.leaseToken);
     expect(await storage.submit(op,a.account.leaseToken)).toBe(true);await storage.settle(op,{state:'unconfirmed',reason:'quota',releaseSlot:false,rateLimited:true});
@@ -93,7 +133,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const {account}=await reserve(),now=Date.now();await expect(custody.releaseReservation({...account,leaseToken:randomUUID()},umk(),{account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000},now)).rejects.toThrow();
     expect(await custody.releaseReservation(account,umk(),{account:account.account,masterAccount:account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000},now)).toBe('spare');
     const next=await reserve();expect(next.account).toMatchObject({account:account.account,reused:true});expect((await pool.query('SELECT bot_id FROM protocol_subaccounts')).rows[0].bot_id).toBeNull();
-    await custody.withSecret(next.account,umk(),async secret=>expect(bs58.encode(secret.subarray(32))).toBe(account.account));
+    await custody.withSecret(next.account,umk(),async (secret)=>expect(bs58.encode(secret.subarray(32))).toBe(account.account));
   });
   it('unknown reservation state quarantines while retaining the encrypted key',async()=>{const {account}=await reserve(),now=Date.now();expect(await custody.releaseReservation(account,umk(),{account:account.account,masterAccount:account.masterAccount,state:'unknown',observedAt:now,expiresAt:now+5000},now)).toBe('quarantined');const p=(await pool.query('SELECT status,subaccount_key_encrypted_v3 FROM protocol_subaccounts')).rows[0];expect(p.status).toBe('grid_quarantined');expect(p.subaccount_key_encrypted_v3).toBeTruthy();});
   it('will not understate seed canary commitment',async()=>{const {account}=await reserve(),v=input(account);v.request={...v.request,kind:'seed',data:{amount:'2'},authority:{seedWorstPrice:'100'}};v.claim.canaryIncrement='199';await expect(storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).rejects.toThrow('Understated');});

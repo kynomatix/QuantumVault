@@ -1,4 +1,5 @@
 import Decimal from 'decimal.js';
+import {PER_BOT_ORDINARY_MAX,GRID_FULL_WINDOW_SLOTS,GRID_PROTECTION_RESERVE} from '../../../shared/grid-capacity';
 import type { PlannerChart, PlannerMarket, PlannerPreview } from '../../../server/grid-planner/types';
 export type { PlannerChart, PlannerMarket, PlannerPreview };
 export const PLANNING_BANNER = 'Planning only — no orders are placed';
@@ -123,7 +124,7 @@ export function isPlannerPreview(v: unknown): v is PlannerPreview {
     && Array.isArray(v.feeRows) && v.feeRows.length <= 100 && v.feeRows.every((r: any) => record(r) && Number.isInteger(r.ordinal)
       && positive(r.entryPrice) && positive(r.exitPrice) && decimal(r.quantity) && decimal(r.spread) && decimal(r.requiredSpread)
       && decimal(r.assumedRoundTripFee) && typeof r.clears === 'boolean') && record(v.policy)
-    && v.policy.ordinaryWindow === 20 && v.policy.requiredAvailableSlots === 25 && v.policy.reserveSlots === 5
+    && v.policy.ordinaryWindow === PER_BOT_ORDINARY_MAX && v.policy.requiredAvailableSlots === GRID_FULL_WINDOW_SLOTS && v.policy.reserveSlots === GRID_PROTECTION_RESERVE
     && v.policy.maximumIntervals === 100 && v.policy.transportBatch === 10 && typeof v.policy.source === 'string';
 }
 export function plannerOverlays(preview: PlannerPreview | null, expiresAt: number, now: number) {

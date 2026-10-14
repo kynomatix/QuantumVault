@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { GRID_RUNTIME_POLICY as P, GRID_RECYCLER_MAX_AGE_MS, gridWalletEntryGate, gridCanaryBudget, gridCanaryAdmission, gridRecyclerGate, gridStopReachable, gridFirstPlacementGate, gridAdxLabel } from '../../server/grid-bot/runtime-policy.js';
 describe('approved policy boundaries', () => {
   it('pins versioned pilot, mandatory stops, geometry, cadence and final-bar range rules', () => {
-    expect(P.version).toBe('1.0.0'); expect(P.caps).toMatchObject({ ordinaryRestingPerBot: 20, sharedProtectionReserve: 5, intervals: 100, lines: 101, pilotBotsPerQuotaDomain: 2 });
+    expect(P.version).toBe('1.0.0'); expect(P.caps).toMatchObject({ ordinaryRestingPerBot: 100, sharedProtectionReserve: 5, intervals: 100, lines: 101, pilotBotsPerQuotaDomain: 2 });
     expect(P.monitor).toMatchObject({ intervalMs: 15_000, globalStartSpacingMs: 1000, globalConcurrency: 1, perBotExclusion: true, catchUp: false, skipPriceMaxAgeMs: 5000, accountPositionsEveryMs: 60_000 });
     expect(P.range.timeframes).toEqual(['15m', '1h', '4h']); expect(P.range.selectableBars).toEqual([100, 200]);
     expect(P.range).toMatchObject({ walkbackMaximumBars: 400, partialFallback: false, intrabarEscapeStrictlyAboveAtr: 3, driftEscapeStrictlyAboveAtr: 6 });

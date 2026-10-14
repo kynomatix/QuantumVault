@@ -16,6 +16,13 @@ const claim:GridClaim={credits:'10',slots:1,canaryIncrement:'90',observedCredits
 function harness(){const r=request();let row:DurableGridOperation|null=null;
   const deps:GridExecutionDeps={storage:{read:vi.fn(async()=>row),prepare:vi.fn(async()=>row={id:randomUUID(),state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null}),submit:vi.fn(async()=>{row!.state='submitted';return true;}),settle:vi.fn(async(_op,outcome)=>{row!.state=outcome.state;row!.failure_classification=outcome.reason;})},preflight:vi.fn(async()=>true),send:vi.fn(async()=>({rateLimited:false})),reconcile:vi.fn(async()=>({state:'unknown' as const}))};return {r,deps,execution:new GridExecution(deps),get row(){return row;}};}
 describe('write ahead and exact identity execution',()=>{
+  it('settles a typed capacity denial once, releases the rejected slot and never resends after restart',async()=>{
+    const h=harness();vi.mocked(h.deps.send).mockResolvedValue({rateLimited:false,capacityRejectedDigest:requestDigest(h.r)});
+    expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');
+    expect(h.deps.storage.settle).toHaveBeenCalledWith(expect.anything(),{state:'failed',reason:'venue_rejection',releaseSlot:true,capacityRejected:true},'EXAMPLE');
+    expect(await new GridExecution(h.deps).run('EXAMPLE',h.r,claim,'EXAMPLE_NEW_LEASE')).toBe('failed');
+    expect(h.deps.send).toHaveBeenCalledOnce();expect(h.deps.reconcile).not.toHaveBeenCalled();
+  });
   it.each(['before_post','venue_rejection'])('settles margin denial once and never retries %s',async source=>{
     const h=harness();vi.mocked(h.deps.send).mockImplementation(async()=>{if(source==='before_post')throw new GridMarginDenied('EXAMPLE');return {rateLimited:false,marginRejectedDigest:requestDigest(h.r)};});
     expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');expect(h.row?.failure_classification).toBe('margin');
