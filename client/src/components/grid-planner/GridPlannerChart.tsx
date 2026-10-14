@@ -57,7 +57,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
     }
     const priceFormat = plannerPriceFormat(tick, [...chart.candles.map(c => c.close), ...lines.map(l => l.price),
       ...[range?.lower, range?.upper, range?.stop].filter((p): p is string => !!p)]);
-    canvas.applyOptions({ localization: { priceFormatter: price => price.toFixed(priceFormat.precision) } });
+    canvas.applyOptions({ localization: { priceFormatter: (price: number) => price.toFixed(priceFormat.precision) } });
     series.applyOptions({ title: 'Current price', priceFormat: { type: 'price', ...priceFormat } });
     for (const line of lines) series.createPriceLine({ price: Number(line.price), color: line.role === 'entry' ? color('primary', 0.5) : color('chart-2', 0.5),
       lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
