@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {GridReadOrder,GridActionKeys,gridAdjustReady,gridFactsFresh,gridRangeState,gridBreakevenView} from '../../client/src/lib/grid-live-view';
+import {GridReadOrder,GridActionKeys,gridAdjustReady,gridFactsFresh,gridRangeState,gridBreakevenView,gridVisibleActions} from '../../client/src/lib/grid-live-view';
 import {gridActionAllowed} from '../../shared/grid-surface';
 import {gridSurface} from '../../server/grid-bot/surface';
 const snapshot=()=>({bot:{id:'EXAMPLE',name:'Grid',market:'BTC-PERP',direction:'long',status:'stopping',lowerPrice:'90',upperPrice:'110',gridCount:20,updatedAt:new Date(),createIntent:{lowerPrice:'90'},residualUsdc:'0',residualObservedAt:new Date()},levels:[],operations:[]});
@@ -16,9 +16,17 @@ describe('Grid owner surface request and settlement guards',()=>{
   });
   it('uses inclusive boundaries and only a fresh positive Pacifica mark for the range badge',()=>{
     const now=Date.now(),s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0},now);s.observedAt=new Date(now).toISOString();
-    for(const [mark,label] of [['89','Out Below'],['90','In Range'],['100','In Range'],['110','In Range'],['111','Out Above']]){s.mark=mark;expect(gridRangeState(s,now)).toBe(label);}
-    expect(gridRangeState(s,now+15001)).toBe('UNKNOWN');s.observedAt=new Date(now+1).toISOString();expect(gridRangeState(s,now)).toBe('UNKNOWN');
-    s.observedAt=new Date(now).toISOString();for(const mark of [null,'0','NaN']){s.mark=mark;expect(gridRangeState(s,now)).toBe('UNKNOWN');}
+    for(const [mark,label] of [['89','Below range'],['90','Within range'],['100','Within range'],['110','Within range'],['111','Above range']]){s.mark=mark;expect(gridRangeState(s,now)).toBe(label);}
+    expect(gridRangeState(s,now+15001)).toBe('Price unavailable');s.observedAt=new Date(now+1).toISOString();expect(gridRangeState(s,now)).toBe('Price unavailable');
+    s.observedAt=new Date(now).toISOString();for(const mark of [null,'0','NaN']){s.mark=mark;expect(gridRangeState(s,now)).toBe('Price unavailable');}
+  });
+  it('offers only applicable requests and never offers unavailable resume authority',()=>{
+    const s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0});
+    for(const [status,actions] of [['draft',[]],['failed',[]],['stopped',[]],['stopping',['stop']],['active',['pause','stop']],['paused',['resync','stop']],['range_exhausted',['resync','stop']]] as const){
+      s.bot.status=status;expect(gridVisibleActions(s)).toEqual(actions);
+      for(const action of gridVisibleActions(s))expect(gridActionAllowed(s.bot,action)).toBe(true);
+    }
+    expect(gridAdjustReady(s)).toBe(false);
   });
   it('shows a position-only fee-inclusive breakeven with direction-aware profit and loss, then removes stale authority',()=>{
     const now=Date.now(),s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0},now);s.observedAt=new Date(now).toISOString();s.pnl.breakeven='100';s.mark='110';s.position={size:'2',direction:'long'};

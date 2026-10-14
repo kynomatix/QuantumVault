@@ -74,7 +74,8 @@ describe('signal row never edits direction', () => {
   it('renders four independent buttons and preserves a working weekly signal when funding is unavailable', () => {
     hooks.value = { ...response(), funding: { state: 'unavailable', reason: 'EXAMPLE quota' } };
     const element = GridDirectionSignals(props);
-    const children = element.props.children;
+    expect(element.props.children[0].props.children).toBe('Signals');
+    const children = element.props.children[1].props.children;
     expect(children).toHaveLength(4);
     expect(children.map((c: { props: { signal: { name: string } } }) => c.props.signal.name)).toEqual(['Macro', 'Weekly structure', 'Trend', 'Funding']);
     expect(children[1].props.signal.direction).toBe('long');
@@ -89,12 +90,17 @@ describe('accessible hover, keyboard and touch popovers', () => {
     const trigger = tree.props.children[0].props.children;
     expect(trigger.type).toBe('button'); expect(trigger.props.type).toBe('button');
     expect(trigger.props['aria-label']).toContain('Funding: Unavailable'); expect(trigger.props.disabled).toBeUndefined();
+    expect(trigger.props['aria-label']).toContain('Advisory only');
+    expect(trigger.props.className).toContain('h-11 w-11');
     trigger.props.onPointerEnter({ pointerType: 'mouse' }); expect(hooks.value).toBe(true);
     trigger.props.onPointerLeave(); await vi.advanceTimersByTimeAsync(150); expect(hooks.value).toBe(false);
     trigger.props.onPointerEnter({ pointerType: 'touch' }); expect(hooks.value).toBe(false);
     tree.props.onOpenChange(true); trigger.props.onPointerLeave(); await vi.advanceTimersByTimeAsync(150); expect(hooks.value).toBe(true);
     tree.props.onOpenChange(false); expect(hooks.value).toBe(false);
     const content = tree.props.children[1]; expect(content.props['aria-label']).toContain('Funding signal details');
+    expect(content.props.children[1].type).toBe('details');
+    expect(content.props.collisionPadding).toBe(12);
+    expect(content.props.className).toContain('--radix-popover-content-available-width');
     expect(content.props.children.at(-1).props.children).toContain('Choose either direction');
   });
 });

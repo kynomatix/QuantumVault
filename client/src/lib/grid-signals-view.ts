@@ -7,7 +7,7 @@ import { gridHistoryWindow } from '../../../shared/grid-lookback';
 
 export interface GridSignalView {
   name: 'Macro' | 'Weekly structure' | 'Trend' | 'Funding';
-  direction: SignalDirection; unavailable: boolean; summary: string; detail: string; basis: string;
+  direction: SignalDirection; unavailable: boolean; summary: string; brief?: string; detail: string; basis: string;
 }
 const utc = (time: number) => new Date(time).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
 const unknown = (name: GridSignalView['name'], reason: string, basis: string): GridSignalView => ({
@@ -68,6 +68,7 @@ export function gridSignalViews(macro: GridDirectionSuggestion | null, signals: 
   const fundingView: GridSignalView = funding?.state === 'available' ? {
     name: 'Funding', direction: funding.hourlyRate > 0 ? 'short' : funding.hourlyRate < 0 ? 'long' : 'neutral', unavailable: false,
     summary: funding.hourlyRate > 0 ? 'Longs pay shorts' : funding.hourlyRate < 0 ? 'Shorts pay longs' : 'No funding payment at this rate',
+    brief: funding.hourlyRate === 0 ? 'No funding payment at this rate' : `${funding.hourlyRate > 0 ? 'Shorts' : 'Longs'} receive about ${Number(Math.abs(funding.hourlyRate * 2400).toPrecision(3))}%/day of position value if this rate holds`,
     detail: `${funding.hourlyRate > 0 ? 'Longs pay shorts' : funding.hourlyRate < 0 ? 'Shorts pay longs' : 'Neither side pays'}: ${Math.abs(funding.hourlyRate * 100).toFixed(5)}% per hour; roughly ${Math.abs(funding.hourlyRate * 800).toFixed(4)}% per 8h / ${Math.abs(funding.hourlyRate * 2400).toFixed(4)}% per day of position notional if unchanged. The arrow marks the receiving side, a cost hint rather than a price forecast.`,
     basis: `${market}, Pacifica /info; hourly funding, ${funding.basis}. Observed ${utc(funding.observedAt)}. Rates can change each hour.`,
   } : unknown('Funding', funding?.reason || 'No fresh funding quote is available.', `${market}; Pacifica /info hourly funding.`);

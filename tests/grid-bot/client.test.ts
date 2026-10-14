@@ -9,6 +9,10 @@ import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCar
 import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraftActions';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
+import { GridPlanIssues } from '../../client/src/components/grid-planner/GridPlanIssues';
+import { GridBotOverview, GridBotDetails } from '../../client/src/components/grid-bot/GridBotDrawer';
+import { gridSurface } from '../../server/grid-bot/surface';
+import { plannerPriceFormat, plannerIssue, plannerMinimumRows } from '../../client/src/lib/grid-planner-view';
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, plannerLevelMessage, isPlannerMarket, isPlannerChart, isPlannerPreview,
   PLANNING_BANNER, ASSUMPTION_LABEL, readableDecimal, clientObservationDeadline, plannerRangeAround,
   proposedPlannerStop, plannerChartRange, plannerSizeHint, plannerShortcutReason, ORDER_SIZES, RANGE_PRESETS, type PlannerChart } from '../../client/src/lib/grid-planner-view';
@@ -24,6 +28,58 @@ const market = marketSnapshot({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC
 const preview = previewGrid({ market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat', seed: true,
   leverage: '1', investment: '1000', stop: '70', fee: '0' }, market, now);
 afterEach(() => vi.useRealTimers());
+describe('Grid screenshot panel polish', () => {
+  it('uses the exchange price step instead of padded engine precision and retains tiny-price precision', () => {
+    expect(plannerPriceFormat('0.10000000', ['100.000000000000000000', '110.000000000000000000'])).toEqual({ precision: 1, minMove: 0.1 });
+    expect(plannerPriceFormat('0.25', ['100.000000000000000000'])).toEqual({ precision: 2, minMove: 0.25 });
+    expect(plannerPriceFormat(null, ['100.000000000000000000', '101.250000000000000000'])).toEqual({ precision: 2, minMove: 0.01 });
+    expect(plannerPriceFormat('0.00000001', ['0.00000123'])).toEqual({ precision: 8, minMove: 0.00000001 });
+    expect(plannerPriceFormat(null, ['0.000000000000000001'])).toEqual({ precision: 18, minMove: 1e-18 });
+    expect(plannerPriceFormat('EXAMPLE', ['EXAMPLE', 100])).toEqual({ precision: 0, minMove: 1 });
+    expect(readableDecimal('100.000000000000000000')).toBe('100');
+    expect(readableDecimal('0.000001230000')).toBe('0.00000123');
+  });
+  it('merges equal minimum investments but preserves different and unavailable fee checks', () => {
+    const base = { ...preview, minimum: { state: 'available' as const, value: '10' }, assumedMinimum: { state: 'available' as const, value: '10.00' } };
+    expect(plannerMinimumRows(base)).toEqual([{ label: 'Minimum investment · includes your fee assumption', value: '10 USDC' }]);
+    expect(plannerMinimumRows({ ...base, assumedMinimum: { state: 'available', value: '11' } })).toHaveLength(2);
+    expect(plannerMinimumRows({ ...base, assumedMinimum: { state: 'unavailable', reason: 'EXAMPLE missing fee data' } })[1].value).toContain('EXAMPLE missing fee data');
+    expect(plannerMinimumRows({ ...base, fee: { state: 'unknown' } })).toEqual([{ label: 'Minimum investment', value: '10 USDC' }]);
+    expect(plannerMinimumRows(null)).toEqual([{ label: 'Minimum investment', value: 'Awaiting preview' }]);
+  });
+  it('shows real rejection causes and settings links, keeping original details reachable', () => {
+    const reasons = ['Stop must align to the venue tick', 'Investment is below the minimum capital', 'Fee assumption must be nonnegative plain decimal'];
+    const html = renderToStaticMarkup(createElement(GridPlanIssues, { reasons, onReview: vi.fn() }));
+    expect(html).toContain('This plan can&#x27;t run yet:');
+    for (const reason of reasons) expect(html).toContain(reason);
+    for (const setting of ['Stop loss', 'Investment', 'Fees &amp; data', 'Source details']) expect(html).toContain(setting);
+    expect(plannerIssue(reasons[0])).toMatchObject({ field: 'grid-stop', panel: 'stop' });
+    expect(plannerIssue(reasons[1])).toMatchObject({ field: 'grid-investment', panel: 'direction-size' });
+    expect(plannerIssue(reasons[2]).message).toBe(reasons[2]);
+    expect(plannerIssue('Leverage exceeds the observed Pacifica maximum')).toMatchObject({ field: 'grid-leverage' });
+    expect(renderToStaticMarkup(createElement(GridPlanIssues, { reasons: [] }))).toBe('');
+    const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
+    const plan = sheet.slice(sheet.indexOf('<h3 id="grid-plan-heading"'));
+    expect(plan.indexOf('<GridPlanIssues')).toBeLessThan(plan.indexOf('<dl'));
+    expect(sheet).toContain('10 grids make 11 price lines.');
+    expect(sheet).toContain('Choose a market to see its price');
+    expect(sheet).toContain('{form.market || undefined}</SelectValue>');
+  });
+  it('shows a readable bot overview while retaining settlement, capacity and ledger details', () => {
+    const surface = gridSurface({ bot: { id: 'EXAMPLE', name: 'Grid', market: 'BTC-PERP', direction: 'long', status: 'stopped', lowerPrice: '90', upperPrice: '110', gridCount: 10, updatedAt: new Date(now) }, levels: [], operations: [] }, null, null, { pending: 0, uncertain: 0 }, now);
+    const overview = renderToStaticMarkup(createElement(GridBotOverview, { surface, now }));
+    for (const text of ['Total P&amp;L', 'Price unavailable', '10 grids', 'Range', 'Stop', 'Position', 'Not loaded yet.']) expect(overview).toContain(text);
+    expect(overview).not.toContain('UNKNOWN'); expect(overview).not.toContain('Capacity and launch authorities');
+    surface.sweep = 'Confirmed terminal';
+    const details = renderToStaticMarkup(createElement(GridBotDetails, { surface, now }));
+    for (const text of ['<details', 'Settlement complete', 'Mark price', 'USDC left', 'Last updated', 'No pending action', 'Capacity and launch authorities', 'Resume LaunchFacts provider: unavailable', 'Grid levels']) expect(details).toContain(text);
+    expect(details).not.toContain('No pending action ·');
+    expect(surface.sweep).toBe('Confirmed terminal');
+    surface.observedAt = new Date(now - 15_001).toISOString(); surface.pnl.total = '123';
+    const stale = renderToStaticMarkup(createElement(GridBotOverview, { surface, now }));
+    expect(stale).not.toContain('123'); expect(stale).toContain('out of date');
+  });
+});
 describe('Market range ownership and time windows', () => {
   it.each([['manual', null, 'manual'], ['manual', 10, 'percent'], ['auto', null, 'auto']] as const)
     ('clears every old-market price before resolving a %s range', (source, percent, mode) => {
@@ -248,7 +304,7 @@ describe('Planner client authority boundaries', () => {
     expect(message(preview)).toContain('at your investment');
     expect(message(preview)).toContain('Some checks are unavailable');
     expect(message({ ...preview, state: 'rejected', requestedPlan: null, minimumPlan: preview.requestedPlan, reasons: ['Investment is too low'] })).toContain('at the minimum investment, not your entered investment');
-    expect(message({ ...preview, state: 'rejected', reasons: ['Assumed fee check failed'] })).toContain('Checks did not pass: Assumed fee check failed');
+    expect(message({ ...preview, state: 'rejected', reasons: ['Assumed fee check failed'] })).toContain('Checks did not pass; see Your plan.');
   });
   it('observation deadlines subtract transit and do not depend on client/server wall-clock agreement', () => {
     expect(clientObservationDeadline(now + 60_000, now, 1000)).toBe(61_000);
@@ -294,6 +350,9 @@ describe('Planner client authority boundaries', () => {
     expect(nativeHtml).toContain('PACIFICA direct perpetual candles');
     expect(nativeHtml).toContain('PACIFICA trade candle prices');
     const html = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: false }));
+    expect(html).toContain('How this preview works');
+    expect(html.match(/No orders are placed/g)).toHaveLength(1);
+    expect(html).toContain('Fees are estimates. We can&#x27;t confirm this stop avoids liquidation.');
     for (const text of ['OKX direct perpetual candles', '15m', '1/100 bars', 'partial coverage', 'opening times', 'forming candles', 'separate from the Pacifica', 'Expand Planner chart']) expect(html).toContain(text);
     const expired = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: true }));
     expect(expired).toContain('Chart cache expired');
@@ -340,11 +399,11 @@ describe('Planner client authority boundaries', () => {
     expect(html).toContain('ADX(14)'); expect(html).toContain('1h'); expect(html.toLowerCase()).toContain('trending');
     expect(html).toContain('Caution'); expect(html).not.toMatch(/<input|<select|disabled/);
     const unknown = renderToStaticMarkup(createElement(GridRegimeHint, { timeframe: '4h', regime: { state: 'unavailable', reason: 'EXAMPLE' } }));
-    expect(unknown).toContain('UNKNOWN'); expect(unknown).toContain('>EXAMPLE</p>'); expect(unknown).toContain('role="status"'); expect(unknown).toContain('4h');
+    expect(unknown).toContain('—'); expect(unknown).toContain('Not loaded yet. EXAMPLE</p>'); expect(unknown).toContain('role="status"'); expect(unknown).toContain('4h');
   });
   it('shows the short-history ADX reason as visible text on touch screens', () => {
     const html = renderToStaticMarkup(createElement(GridRegimeHint, { timeframe: '1h', regime: { state: 'unavailable', reason: 'ADX needs 28 bars' } }));
-    expect(html).toContain('UNKNOWN'); expect(html).toContain('>ADX needs 28 bars</p>');
+    expect(html).toContain('—'); expect(html).toContain('Not loaded yet. ADX needs 28 bars</p>');
     expect(html).not.toMatch(/<input|<select|disabled/);
   });
   it('groups all normal and detailed settings without hiding the chart, plan or actions', () => {
@@ -391,7 +450,7 @@ describe('Planner client authority boundaries', () => {
   it('folds draft funding and capacity details without changing the action owner or save guards', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const actions = readFileSync('client/src/components/grid-bot/GridDraftActions.tsx', 'utf8');
-    expect(sheet).toContain('rangeBusy={autoApplying} renderDetails={feesPanel}');
+    expect(sheet).toContain('rangeBusy={autoApplying} onIssue={showIssue} renderDetails={feesPanel}');
     const details = actions.slice(actions.indexOf('  const details = <>'), actions.indexOf('  const status ='));
     for (const text of ['Draft sizing, observed fees and funds', 'Capacity before trading', 'Unknown capacity does not prevent saving a draft.'])
       expect(details).toContain(text);
@@ -408,11 +467,12 @@ describe('Planner client authority boundaries', () => {
     expect(setup).toContain("from '@/components/ui/dialog'");
     expect(setup).not.toContain("from '@/components/ui/sheet'");
     expect(setup).toContain('<Dialog open={open} onOpenChange={handleOpenChange}>');
-    expect(layout).toContain('max-w-lg sm:max-w-[760px] max-h-[90vh] flex flex-col');
+    expect(layout).toContain('max-w-lg sm:max-w-[760px] max-h-[90dvh] flex flex-col');
     expect(layout).toContain('data-testid="sheet-grid-planner"');
     expect(layout).toContain('<DialogHeader>');
     expect(layout).toContain('<DialogTitle className="flex items-center gap-2 text-xl">');
-    expect(layout).toContain('flex-1 min-h-0 overflow-y-auto space-y-5 py-2 pr-1');
+    expect(layout).toContain('flex-1 min-h-0 overflow-y-auto space-y-3 sm:space-y-5 py-2 pr-1');
+    expect(layout).toContain('pb-[max(2rem,env(safe-area-inset-bottom))]');
     const footer = layout.slice(layout.indexOf('<DialogFooter'), layout.indexOf('</DialogFooter>'));
     expect(footer).toContain('pt-2 border-t border-border/40');
     expect(footer).toContain('variant="outline" disabled={draftBusy} onClick={() => handleOpenChange(false)}>Cancel');

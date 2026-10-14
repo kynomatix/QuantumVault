@@ -1,4 +1,4 @@
-import type {GridBotSurface,GridOwnerAction} from '../../../shared/grid-surface';
+import {gridActionAllowed,type GridBotSurface,type GridOwnerAction} from '../../../shared/grid-surface';
 import Decimal from 'decimal.js';
 /** Invalidate reads on selection, identity, action submission and newer reads. */
 export class GridReadOrder {
@@ -14,14 +14,16 @@ export class GridActionKeys {
 }
 export function gridAdjustReady(surface:GridBotSurface){return surface.bot.status==='stopped'&&surface.lifecycle.state==='complete'&&surface.sweep==='Confirmed terminal';}
 export function gridFactsFresh(surface:GridBotSurface,now:number){const at=Date.parse(surface.observedAt??'');return at<=now&&now-at<=15000;}
+/** Only offer currently applicable requests. Resume authority remains unavailable. */
+export function gridVisibleActions(surface:GridBotSurface){return (['pause','resync','stop'] as const).filter(action=>gridActionAllowed(surface.bot,action));}
 const positive = (value: string | null) => {
   if (typeof value !== 'string' || value.length > 100 || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
   const number = new Decimal(value); return number.gt(0) ? number : null;
 };
 export function gridRangeState(surface: GridBotSurface, now: number) {
   const mark = positive(surface.mark), lower = positive(surface.bot.lowerPrice), upper = positive(surface.bot.upperPrice);
-  if (!gridFactsFresh(surface, now) || !mark || !lower || !upper || !lower.lt(upper)) return 'UNKNOWN';
-  return mark.gt(upper) ? 'Out Above' : mark.lt(lower) ? 'Out Below' : 'In Range';
+  if (!gridFactsFresh(surface, now) || !mark || !lower || !upper || !lower.lt(upper)) return 'Price unavailable';
+  return mark.gt(upper) ? 'Above range' : mark.lt(lower) ? 'Below range' : 'Within range';
 }
 /** Position-only display; existing ledger accounting remains the authority. */
 export function gridBreakevenView(surface: GridBotSurface, now: number) {
