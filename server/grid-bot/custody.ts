@@ -6,7 +6,7 @@ import {deriveSubkey,encryptToBase64,decryptFromBase64,buildPooledSubaccountAAD,
 import {GridLaunchStorage} from './launch-storage';
 import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../storage';
 import type {GridSettlementFact} from './lifecycle-service';
-import {gridRecyclerGate} from './runtime-policy';
+import {gridRecyclerGate,gridPilotLimit,GRID_RUNTIME_POLICY} from './runtime-policy';
 import {freshGridFact} from './lifecycle-policy';
 import {recordGridWorker} from './worker-ownership';
 
@@ -23,7 +23,8 @@ export function validGridEmptyProof(a:GridAccount,p:GridEmptyProof,now:number){r
 export class GridCustody {
   constructor(private storage:GridLaunchStorage){}
   async reserve(input:{botId:string;wallet:string;masterAccount:string;policyHmac:string;canaryLimit:string;share?:string},umk:Buffer):Promise<GridAccount>{
-    if(umk.length!==32 || !new Decimal(input.canaryLimit).gt(0))throw Error('Grid durable custody unavailable');
+    const limit=gridPilotLimit(input.canaryLimit);
+    if(umk.length!==32 || limit===null || !new Decimal(limit).eq(input.canaryLimit))throw Error('Grid pilot exposure limit must be positive and at most $250.');
     const share=new Decimal(input.share??'0.5');if(!share.gt(0)||share.gt(1))throw Error('Invalid Grid quota share');
     const keypair=nacl.sign.keyPair(),secret=Buffer.from(keypair.secretKey),account=bs58.encode(keypair.publicKey),subkey=deriveSubkey(umk,purpose),leaseToken=randomUUID();
     try {
@@ -39,7 +40,9 @@ export class GridCustody {
         if(!new Decimal(quota.share).eq(share))throw Error('Grid quota configuration differs across workers');
         const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[input.botId,input.wallet])).rows[0];
         if(!bot || bot.status!=='draft' || bot.policy_hmac!==input.policyHmac || bot.protocol_subaccount_id!==null)throw Error('Grid draft changed or already reserved');
-        if(((await c.query("SELECT a.bot_id FROM grid_launch_accounts a JOIN grid_bots b ON b.id=a.bot_id WHERE b.status IN ('provisioning','canary','active') FOR UPDATE OF a")).rowCount??0)>=2)throw Error('Grid pilot admission exhausted');
+        // Global admission lock serializes launches across wallets and masters. Only a proved
+        // custody release frees a slot; status changes and worker recovery cannot free one.
+        if(((await c.query('SELECT bot_id FROM grid_launch_accounts WHERE released_at IS NULL')).rowCount??0)>=GRID_RUNTIME_POLICY.pilot.maximumUnreleasedBots)throw Error('Grid pilot admission exhausted');
         // Claim an eligible random-key spare directly; never call the trading_bots finalizer.
         // A failed claim/decryption is terminal for this transaction, never a fresh-create fallback.
         const spare=(await c.query(`SELECT p.* FROM protocol_subaccounts p WHERE wallet_address=$1 AND protocol='pacifica'

@@ -7,6 +7,7 @@ import Decimal from 'decimal.js';
 import {advanceGridCanary,gridCanaryPolicyCurrent,type GridCanaryClock} from './canary-clock';
 import {GRID_HISTORY_PUBLICATION_LAG_MS} from './history-safety';
 import {gridWorkerFence,recordGridWorker} from './worker-ownership';
+import {gridPilotEntryBlock} from './pilot-exposure';
 const D=Decimal.clone({precision:200});
 const states=['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping'];
 export interface GridMonitorClaim {id:string;leaseToken:string;account:string;masterAccount:string}
@@ -74,6 +75,7 @@ export class GridMonitorStorage {
     if(observation.history?.lastId&&previousFull?.lastId&&BigInt(observation.history.lastId)<BigInt(previousFull.lastId))observation={...observation,history:null};
     const result=reconcileGridObservation({account:claim.account,symbol:bot.market.replace(/-PERP$/,''),direction:bot.direction,
       start:new Date(bot.created_at).getTime(),now,operations,prior,observation});
+    const exposure=await this.launch.pilotExposure(c,claim.id,now,{observation,fills:result.fills,authoritative:result.entriesAllowed});
     const lastFailure=(await c.query("SELECT max(terminal_at) AS at FROM grid_operations WHERE bot_id=$1 AND state='failed' AND failure_classification IN ('authentication','quota','transport')",[claim.id])).rows[0]?.at;
     let authoritativeRecovery=false;
     // All downstream decisions use exact operation progress, not scale-eight compatibility columns.
@@ -124,21 +126,28 @@ export class GridMonitorStorage {
     // Observe actual residuals; never convert the 98% threshold into a synthetic fill.
     for(const owned of result.owned){if(owned.levelId)await c.query(`UPDATE grid_levels SET status=CASE WHEN $3::numeric>0 THEN 'partially_filled' ELSE 'active' END
       WHERE id=$1 AND bot_id=$2 AND venue_order_id=$4 AND status IN ('active','partially_filled')`,[owned.levelId,claim.id,owned.order.filledAmount,owned.order.orderId]);}
-    const safe=result.entriesAllowed?observation.history!.through:null;
+    // Settle/reconcile reductions above even when marked exposure exceeds the entry cap.
+    // The existing <=limit column cannot store a mark-driven overshoot; the immutable
+    // fills and monitor observation retain it while the last reservation stays held.
+    const reconciliationComplete=result.entriesAllowed;
+    if(exposure.exposureUsd===null||exposure.limitUsd===null||new D(exposure.exposureUsd).gt(exposure.limitUsd)){
+      result.reasons.push(exposure.reason??'pilot_exposure_limit_exceeded');result.entriesAllowed=false;
+    }else if(result.entriesAllowed)await c.query('UPDATE grid_launch_accounts SET canary_committed=$2 WHERE bot_id=$1',[claim.id,exposure.exposureUsd]);
+    const safe=reconciliationComplete?observation.history!.through:null;
     const economicUnknown=result.reasons.some(r=>['unowned_trade','history_safe_through_unavailable','order_trade_mismatch','vanished_order_unresolved','position_mismatch_or_unavailable'].includes(r));
     await c.query(`INSERT INTO grid_monitor_state(bot_id,boot_id,generation,safe_through,observation,pnl,blocked_reasons,reconciled_at)
       VALUES($1,$2,1,$3,$4,$5,$6,clock_timestamp()) ON CONFLICT(bot_id) DO UPDATE SET boot_id=EXCLUDED.boot_id,
       generation=grid_monitor_state.generation+1,safe_through=CASE WHEN EXCLUDED.safe_through IS NULL THEN grid_monitor_state.safe_through ELSE GREATEST(grid_monitor_state.safe_through,EXCLUDED.safe_through) END,
       observation=EXCLUDED.observation,pnl=EXCLUDED.pnl,blocked_reasons=EXCLUDED.blocked_reasons,reconciled_at=EXCLUDED.reconciled_at`,
-      [claim.id,result.entriesAllowed?bootId:null,safe,JSON.stringify(observation),economicUnknown?null:JSON.stringify(result.pnl),JSON.stringify(result.reasons)]);
-    await c.query(`UPDATE grid_bots SET last_reconciliation_at=clock_timestamp(),startup_reconciled_at=CASE WHEN $2 THEN clock_timestamp() ELSE NULL END WHERE id=$1`,[claim.id,result.entriesAllowed]);
-    if(result.entriesAllowed)await c.query(`UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{reconciliationRequired}','false'::jsonb)
+      [claim.id,reconciliationComplete?bootId:null,safe,JSON.stringify(observation),economicUnknown?null:JSON.stringify(result.pnl),JSON.stringify(result.reasons)]);
+    await c.query(`UPDATE grid_bots SET last_reconciliation_at=clock_timestamp(),startup_reconciled_at=CASE WHEN $2 THEN clock_timestamp() ELSE NULL END WHERE id=$1`,[claim.id,reconciliationComplete]);
+    if(reconciliationComplete)await c.query(`UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{reconciliationRequired}','false'::jsonb)
       WHERE bot_id=$1 AND event_key='worker-ownership' AND evidence->>'generation'=$2`,[claim.id,claim.leaseToken]);
     // Every eligible monitor tick performs a full replay; this exceeds the 30-minute
     // cadence without creating another scheduler. Completion and safe-through are
     // committed with fills and the durable canary checkpoint in this transaction.
     const generation=String((await c.query('SELECT generation FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0].generation);
-    const full=result.entriesAllowed?{generation,safeThrough:safe,completedAt:now,lastId:observation.history?.lastId??null,lastIds:observation.history?.lastIds??null}:previousFull??null;
+    const full=reconciliationComplete?{generation,safeThrough:safe,completedAt:now,lastId:observation.history?.lastId??null,lastIds:observation.history?.lastIds??null}:previousFull??null;
     const q=observation.qualification;
     const quota=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1',[claim.masterAccount])).rows[0];
     const levels=(await c.query('SELECT price,size::text AS exact_size,reduce_only FROM grid_levels WHERE bot_id=$1 ORDER BY price,ordinal',[claim.id])).rows;
@@ -159,11 +168,11 @@ export class GridMonitorStorage {
     if(bot.status==='canary')await c.query(`UPDATE grid_bots SET canary_clean_since=$2,canary_clean_ticks=$3,
       status=CASE WHEN $4 THEN 'active' ELSE status END,canary_promoted_at=CASE WHEN $4 THEN clock_timestamp() ELSE canary_promoted_at END WHERE id=$1`,
       [claim.id,clock?.cleanSince===null||!clock?null:new Date(clock.cleanSince),clock?.cleanTicks??0,clock?.promoted??false]);
-    return result;
+    return {...result,reconciliationComplete};
   });}
   async planningState(claim:GridMonitorClaim,bootId:string){return this.launch.transaction(async c=>{
     await this.assertLease(c,claim);const state=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0];
-    if(!state?.fresh||state.boot_id!==bootId||state.blocked_reasons.length)throw Error('Startup reconciliation unavailable');
+    if(!state?.fresh||state.boot_id!==bootId||state.blocked_reasons.some((reason:string)=>!gridPilotEntryBlock(reason)))throw Error('Startup reconciliation unavailable');
     const fills=fillsFromRows((await c.query('SELECT * FROM grid_exact_fills WHERE bot_id=$1',[claim.id])).rows);
     const reserved=(await c.query(`SELECT a.trade_id AS "tradeId",(a.size-a.released_size)::text AS size FROM grid_profit_allocations a JOIN grid_operations o ON o.id=a.operation_id
       WHERE o.bot_id=$1 AND a.released_at IS NULL`,[claim.id])).rows;
@@ -171,7 +180,7 @@ export class GridMonitorStorage {
       FROM grid_levels l LEFT JOIN LATERAL (SELECT p.* FROM grid_monitor_orders p JOIN grid_operations o ON o.id=p.operation_id
         WHERE o.level_id=l.id AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1) p ON true WHERE l.bot_id=$1 ORDER BY l.ordinal`,[claim.id])).rows;
     const life=(await c.query('SELECT epoch FROM grid_lifecycle WHERE bot_id=$1',[claim.id])).rows[0];
-    return {fills,reserved,levels,authority:{monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
+    return {fills,reserved,levels,entriesAllowed:state.blocked_reasons.length===0,authority:{monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
   });}
   async pnl(wallet:string,id:string){return this.launch.transaction(async c=>{
     if(!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rowCount)return null;

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { GRID_RUNTIME_POLICY as P, GRID_RECYCLER_MAX_AGE_MS, gridWalletEntryGate, gridCanaryBudget, gridCanaryAdmission, gridRecyclerGate, gridStopReachable, gridFirstPlacementGate, gridAdxLabel } from '../../server/grid-bot/runtime-policy.js';
+import { GRID_RUNTIME_POLICY as P, GRID_RECYCLER_MAX_AGE_MS, gridWalletEntryGate, gridCanaryBudget, gridCanaryAdmission, gridPilotLimit, gridRecyclerGate, gridStopReachable, gridFirstPlacementGate, gridAdxLabel } from '../../server/grid-bot/runtime-policy.js';
 describe('approved policy boundaries', () => {
+  it('C2 retains the reduced allocation and the per-bot pilot ceiling through promotion',()=>{
+    expect(P.pilot).toEqual({maximumExposureUsd:'250',maximumUnreleasedBots:2,promotionRaisesLimit:false});
+    expect(Object.isFrozen(P.pilot)).toBe(true);
+    expect(gridPilotLimit('250')).toBe('250');expect(gridPilotLimit('25')).toBe('25');expect(gridPilotLimit('1000')).toBe('250');
+    for(const limit of ['0','-1','NaN','Infinity',''])expect(gridPilotLimit(limit)).toBeNull();
+  });
   it('pins versioned pilot, mandatory stops, geometry, cadence and final-bar range rules', () => {
     expect(P.version).toBe('1.0.0'); expect(P.caps).toMatchObject({ ordinaryRestingPerBot: 100, sharedProtectionReserve: 5, intervals: 100, lines: 101, pilotBotsPerQuotaDomain: 2 });
     expect(P.monitor).toMatchObject({ intervalMs: 15_000, globalStartSpacingMs: 1000, globalConcurrency: 1, perBotExclusion: true, catchUp: false, skipPriceMaxAgeMs: 5000, accountPositionsEveryMs: 60_000 });

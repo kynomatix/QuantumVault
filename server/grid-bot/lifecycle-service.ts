@@ -100,7 +100,7 @@ export class GridLifecycleService {
       await s.complete(claim,life.active_request,life.action==='band'?'range_exhausted':'paused');return 'paused';
     }
     await s.safetyObservation(claim,observation);
-    let reconciled:{entriesAllowed:boolean}={entriesAllowed:false};
+    let reconciled:{entriesAllowed:boolean;reconciliationComplete?:boolean}={entriesAllowed:false};
     try{reconciled=await monitor.reconcile(claim,randomUUID(),observation);}catch(error){
       if(life.action!=='stop')throw error; // Economic uncertainty must not disable a retained reduce-only stop.
     }
@@ -133,7 +133,7 @@ export class GridLifecycleService {
     if(unresolvedEntryCancel)return block('venue_operation_unresolved');
     const exit=owned.find(x=>x.operation);if(exit)return cancel(exit);
     if(unresolvedTransfer)return block('transfer_recovery_requires_C4');
-    if(!reconciled.entriesAllowed)return block('terminal_history_unavailable');
+    if(!(reconciled.reconciliationComplete??reconciled.entriesAllowed))return block('terminal_history_unavailable');
     const settlement=await this.deps.settlement(claim,signal);
     if(!settlement||settlement.account!==claim.account||settlement.masterAccount!==claim.masterAccount||!settlement.settlementComplete||!settlement.source
       ||!freshGridFact(settlement.observedAt,Date.now())||!gridRecyclerGate(settlement.recycler,Date.now()))return block('settlement_or_recycler_unavailable');

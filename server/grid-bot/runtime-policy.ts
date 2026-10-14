@@ -20,6 +20,7 @@ export const GRID_RUNTIME_POLICY = Object.freeze({
     spacingFractionMultiplier: '0.5', sideFlipOrInvalidRangeAborts: true, equalityAllowed: true, geometryImmutable: true }), // 16–17
   fees: Object.freeze({ liveFallback: false, retainedQuoteRequired: true }), // 18
   recycler: Object.freeze({ reuseOnCreate: true, recycleOnDelete: true, justInTimeEveryCreate: true, deploymentBound: true }), // 19–20
+  pilot: Object.freeze({ maximumExposureUsd: '250', maximumUnreleasedBots: 2, promotionRaisesLimit: false }), // C2, owner ruling 2026-10-15
   canary: Object.freeze({ targetFraction: '0.25', maximumUsd: '250', unchangedQuantizedSubset: true,
     includeSeedOpenRiskAndCommitments: true, reduceOnlyExitDoubleCount: false, shrinkOrders: false,
     durationMs: 30 * 60_000, startsOnVenueConfirmation: true, fullReconcileAtOrAfterBoundary: true, cleanTicks: 2,
@@ -41,6 +42,11 @@ export const GRID_RUNTIME_POLICY = Object.freeze({
 });
 export const GRID_RUNTIME_POLICY_DIGEST = createHash('sha256').update(JSON.stringify(GRID_RUNTIME_POLICY)).digest('hex');
 const decimal = (x: string) => /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(x) && x.length <= 80 ? new D(x) : null;
+/** Promotion never raises either the retained reduced-notional allocation or the pilot ceiling. */
+export function gridPilotLimit(retainedLimit: string): string | null {
+  const d = decimal(retainedLimit);
+  return d && d.gt(0) ? D.min(d, GRID_RUNTIME_POLICY.pilot.maximumExposureUsd).toFixed() : null;
+}
 export function gridWalletEntryGate(sol: string | null) {
   const d = sol === null ? null : decimal(sol);
   return { entryAllowed: !!d && d.gte('.05'), warning: !!d && d.lt('.10'), reason: !d ? 'wallet_balance_unknown' : d.lt('.05') ? 'wallet_entry_reserve' : null };

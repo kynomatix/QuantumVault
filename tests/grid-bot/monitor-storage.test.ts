@@ -42,12 +42,57 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     const request:ExactGridRequest={kind:'limit',botId:bot.id,account:claim.account,masterAccount:claim.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:now,expiryMs:5000,
       data:{symbol:'BTC',client_order_id:cloid,side:'bid',reduce_only:false,amount:'1',price:'90'},authority:{levelId:level.id,levelAttempt:0}};
     const op=await launch.prepare('EXAMPLE_OPERATION',request,{credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},claim.leaseToken);
-    const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:Date.now(),inventoryComplete:true,history:{from:0,through:Date.now(),inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED_AUTHORITY'},mark:null,position:{direction:'long',size:'0.98'},
+    const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:Date.now(),inventoryComplete:true,history:{from:0,through:Date.now(),inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED_AUTHORITY'},mark:{price:'90',observedAt:Date.now()},position:{direction:'long',size:'0.98'},
       orders:[{orderId:'10',clientOrderId:cloid,symbol:'BTC',side:'long',price:'90',amount:'1',filledAmount:'0.98',cancelledAmount:'0',reduceOnly:false,orderType:'limit',createdAt:now,updatedAt:now,status:'partially_filled'}],
       trades:[{tradeId:'1',orderId:'10',clientOrderId:cloid,symbol:'BTC',side:'open_long',time:now,size:'0.98',price:'90',fee:'0.000000000000000001'}]});
     return {bot,claim,level,op,request,observe};
   }
   async function landed(){const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false,orderId:'10'});return f;}
+  it('C2 blocks mark-driven excess while stop close and terminal recovery remain usable',async()=>{
+    const f=await landed(),boot=randomUUID(),o=f.observe();o.mark={price:'300',observedAt:Date.now()};
+    const result=await storage.reconcile(f.claim,boot,o);expect(result.entriesAllowed).toBe(false);expect(result.reconciliationComplete).toBe(true);expect(result.reasons).toContain('pilot_exposure_limit_exceeded');
+    expect((await pool.query('SELECT canary_limit,canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0]).toEqual({canary_limit:'250',canary_committed:'90',released_at:null});
+    const control=new GridLifecycleStorage(storage);await control.request(wallet,f.bot.id,randomUUID(),'stop');await control.safetyObservation(f.claim,o);
+    const life=(await control.state(f.claim)).life,now=Date.now();
+    const request:ExactGridRequest={...f.request,kind:'close',path:'/orders/create_market',operationType:'create_market_order',timestamp:now,data:{symbol:'BTC',side:'ask',amount:'0.98',reduce_only:true,slippage_percent:'0.5',client_order_id:randomUUID()},authority:{lifecycleEpoch:life.epoch}};
+    const close=await launch.prepare('EXAMPLE_C2_CLOSE',request,{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},f.claim.leaseToken);
+    expect(await launch.submit(close,f.claim.leaseToken)).toBe(true);await launch.finalMargin(request,f.claim.leaseToken);
+    let posts=0;await launch.sendOwned(request,f.claim.leaseToken,async()=>{posts++;});expect(posts).toBe(1);
+    await launch.settle(close,{state:'confirmed',reason:null,releaseSlot:true,orderId:'20'});
+    const terminal=f.observe();terminal.mark={price:'300',observedAt:Date.now()};terminal.position!.size='0';terminal.orders[0].status='cancelled';terminal.orders[0].cancelledAmount='0.02';
+    terminal.orders.push({orderId:'20',clientOrderId:String(request.data.client_order_id),symbol:'BTC',side:'short',price:'300',amount:'0.98',filledAmount:'0.98',cancelledAmount:'0',reduceOnly:true,orderType:'market',createdAt:now,updatedAt:Date.now(),status:'filled'});
+    terminal.trades.push({tradeId:'2',orderId:'20',clientOrderId:String(request.data.client_order_id),symbol:'BTC',side:'close_long',time:now,size:'0.98',price:'300',fee:'0'});
+    expect((await storage.reconcile(f.claim,boot,terminal)).entriesAllowed).toBe(true);
+    expect((await pool.query('SELECT canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0]).toEqual({canary_committed:'0',released_at:null});
+  });
+  it('C2 retains reservations when a filled position cannot be freshly priced',async()=>{
+    const f=await landed(),o=f.observe();o.mark=null;
+    const result=await storage.reconcile(f.claim,randomUUID(),o);expect(result.entriesAllowed).toBe(false);expect(result.reasons).toContain('pilot_exposure_mark_unavailable');
+    expect((await pool.query('SELECT canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0]).toEqual({canary_committed:'90',released_at:null});
+    o.mark={price:'90',observedAt:Date.now()};o.observedAt=Date.now();
+    expect((await storage.reconcile(f.claim,randomUUID(),o)).entriesAllowed).toBe(true);
+  });
+  it('C2 keeps profit-exit planning and send authority when the entry cap is exceeded',async()=>{
+    const f=await landed(),boot=randomUUID(),o=f.observe();o.mark={price:'300',observedAt:Date.now()};await storage.reconcile(f.claim,boot,o);
+    const state=await storage.planningState(f.claim,boot);expect(state.entriesAllowed).toBe(false);
+    const level=(await pool.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal DESC LIMIT 1',[f.bot.id])).rows[0],now=Date.now();
+    const request:ExactGridRequest={...f.request,timestamp:now,data:{...f.request.data,client_order_id:randomUUID(),side:'ask',reduce_only:true,price:'110',amount:'0.98'},
+      authority:{...state.authority,levelId:level.id,levelAttempt:0,fillAllocations:[{tradeId:'1',size:'0.98'}]}};
+    const op=await launch.prepare('EXAMPLE_C2_PROFIT_EXIT',request,{credits:'10',slots:1,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},f.claim.leaseToken);
+    expect(await launch.submit(op,f.claim.leaseToken)).toBe(true);await launch.finalMargin(request,f.claim.leaseToken);
+    let posts=0;await launch.sendOwned(request,f.claim.leaseToken,async()=>{posts++;});expect(posts).toBe(1);
+    expect((await pool.query('SELECT canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0]).toEqual({canary_committed:'90',released_at:null});
+  });
+  it('C2 revalues filled risk at a new seed worst price before reserving more exposure',async()=>{
+    const f=await landed(),boot=randomUUID();await storage.reconcile(f.claim,boot,f.observe());
+    await pool.query("UPDATE grid_bots SET sol_balance='0.1',sol_balance_observed_at=clock_timestamp() WHERE id=$1",[f.bot.id]);
+    const state=await storage.planningState(f.claim,boot),now=Date.now(),request:ExactGridRequest={...f.request,kind:'seed',timestamp:now,
+      data:{symbol:'BTC',amount:'1.1',side:'bid',reduce_only:false},authority:{...state.authority,seedWorstPrice:'140'}};
+    // Old $90 plus new $154 would appear to fit; repricing the filled 0.98 makes $293.
+    await expect(launch.prepare('EXAMPLE_C2_REPRICE',request,{credits:'10',slots:0,canaryIncrement:'154',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},f.claim.leaseToken)).rejects.toThrow('pilot exposure limit');
+    expect((await pool.query('SELECT canary_committed FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0].canary_committed).toBe('90');
+    expect((await pool.query('SELECT count(*) AS count FROM grid_operations WHERE bot_id=$1',[f.bot.id])).rows[0].count).toBe('1');
+  });
   it('commits a typed margin pause and one outbox incident across denial and restart',async()=>{
     const f=await fixture(),denied=new GridLaunchStorage(pool,async()=>{},async()=>null);
     expect(await denied.submit(f.op,f.claim.leaseToken)).toBe(false);expect(await new GridLaunchStorage(pool,async()=>{},async()=>null).submit(f.op,f.claim.leaseToken)).toBe(false);
@@ -98,6 +143,10 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
       await storage.reconcile(f.claim,boot,observe());expect((await read()).clock.cleanTicks).toBe(i);
     }
     expect((await pool.query('SELECT status FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0].status).toBe('active');
+    expect((await pool.query('SELECT canary_limit,canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0]).toEqual({canary_limit:'250',canary_committed:'90',released_at:null});
+    await pool.query("UPDATE grid_bots SET sol_balance='0.1',sol_balance_observed_at=clock_timestamp() WHERE id=$1",[f.bot.id]);
+    const state=await storage.planningState(f.claim,boot),now=Date.now(),extra:ExactGridRequest={...f.request,kind:'seed',timestamp:now,data:{symbol:'BTC',amount:'2',side:'bid',reduce_only:false},authority:{...state.authority,seedWorstPrice:'100'}};
+    await expect(launch.prepare('EXAMPLE_C2_PROMOTED_RISK',extra,{credits:'10',slots:0,canaryIncrement:'200',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},f.claim.leaseToken)).rejects.toThrow('pilot exposure limit');
     await pool.query("UPDATE grid_bots SET status='canary' WHERE id=$1",[f.bot.id]);
     await storage.reconcile(f.claim,randomUUID(),observe());expect((await read()).clock.cleanTicks).toBe(0);expect((await read()).clock.cleanSince).toBeGreaterThan(first);expect((await read()).clock.certifiedGeneration).toBeNull();
     await storage.block(f.claim,'quota_unavailable');expect((await read()).clock).toBeNull();
@@ -174,9 +223,12 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   },15000);
   it('recovers a submitted POST by its retained identity without re-preparing or re-sending it',async()=>{
     const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await expireOwner(f);const next=(await storage.claim())!;
+    expect((await pool.query('SELECT canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0]).toEqual({canary_committed:'90',released_at:null});
+    expect((await pool.query('SELECT canary_increment,slot_released,settled_at FROM grid_execution_claims WHERE operation_id=$1',[f.op.id])).rows[0]).toEqual({canary_increment:'90',slot_released:false,settled_at:null});
     const service=new GridMonitorService({storage,observe:async()=>f.observe()});expect((await service.tick(next,new AbortController().signal)).entriesAllowed).toBe(true);
     const op=(await launch.read(f.bot.id,'EXAMPLE_OPERATION'))!;expect(op.state).toBe('confirmed');expect(op.exact_request).toEqual(f.op.exact_request);expect(op.exact_request_digest).toBe(f.op.exact_request_digest);
     expect((await pool.query('SELECT count(*) AS n FROM grid_operations WHERE bot_id=$1',[f.bot.id])).rows[0].n).toBe('1');
+    expect((await pool.query('SELECT canary_committed,released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0]).toEqual({canary_committed:'90',released_at:null});
     expect(await launch.submit(f.op,next.leaseToken)).toBe(false);
     let posts=0;await expect(launch.sendOwned(f.request,next.leaseToken,async()=>{posts++;})).rejects.toThrow('ownership');expect(posts).toBe(0);
   },15000);
