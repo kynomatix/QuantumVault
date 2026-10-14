@@ -31,6 +31,13 @@ function fixture(action:string|null='stop'){
   return {claim,request,order,bot,observation,operations,launch,monitor,storage,deps,service,proof,own,get life(){return life;}};
 }
 describe('Grid lifecycle boundary and failure drills',()=>{
+  it.each(['authentication','quota','transport'] as const)('lifecycle recovery preserves terminal %s and never resends',async failureClass=>{
+    const f=fixture();f.own();const op=f.operations[0];op.state='unconfirmed';
+    f.deps.recover.mockResolvedValue({state:'rejected',requestDigest:requestDigest(f.request),failureClass,releaseSlot:true} as any);
+    await f.service.tick(f.claim,signal());
+    expect(f.launch.settle).toHaveBeenCalledWith(op,expect.objectContaining({state:'failed',reason:failureClass,terminalFailure:{classification:failureClass,requestDigest:requestDigest(f.request)}}),f.claim.leaseToken);
+    expect(f.deps.send).not.toHaveBeenCalled();
+  });
   it.each([['0.049999999',false],['0.05',true],['0.099999999',true],['0.10',true],[null,false]] as const)('SOL boundary %s entry %s',(sol,allowed)=>{
     const now=Date.now();expect(gridEntrySafety({sol,solObservedAt:now,failures:0,mark:{price:'100',observedAt:now}},now).allowed).toBe(allowed);
   });

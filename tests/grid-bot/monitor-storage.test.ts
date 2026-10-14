@@ -305,7 +305,39 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
 
 
  it('generic rejection blocks entries without counting a qualifying breaker failure',async()=>{const f=await fixture();await launch.submit(f.op,f.claim.leaseToken);await launch.settle(f.op,{state:'failed',reason:'venue_rejection',releaseSlot:true},f.claim.leaseToken);const b=(await storage.snapshot(f.claim)).bot;expect(b.consecutive_failures).toBe(0);expect(b.pause_reason).toBe('venue_rejection');expect(b.status).toBe('pausing');});
- it('qualified terminal failure crosses the breaker exactly once',async()=>{const f=await fixture();await pool.query('UPDATE grid_bots SET consecutive_failures=4');await launch.submit(f.op,f.claim.leaseToken);await launch.settle(f.op,{state:'failed',reason:'authentication',releaseSlot:true},f.claim.leaseToken);expect((await storage.snapshot(f.claim)).bot).toMatchObject({consecutive_failures:5,status:'pausing',pause_reason:'circuit_breaker'});await expect(launch.settle(f.op,{state:'failed',reason:'authentication',releaseSlot:true},f.claim.leaseToken)).rejects.toThrow();expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(5);});
- it('a newly proved healthy terminal fill resets the breaker but replay does not',async()=>{const f=await landed(),o=f.observe();o.orders[0].status='filled';o.orders[0].filledAmount='1';o.trades[0].size='1';o.position!.size='1';await pool.query('UPDATE grid_bots SET consecutive_failures=4');await storage.reconcile(f.claim,randomUUID(),o);expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(0);await pool.query('UPDATE grid_bots SET consecutive_failures=2');await storage.reconcile(f.claim,randomUUID(),o);expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(2);});
+ it.each(['authentication','quota','transport'] as const)('monitor recovery retains terminal %s once across repeated ticks',async failureClass=>{
+    const f=await landed(),now=Date.now();
+    const r:ExactGridRequest={...f.request,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now,data:{to_account:f.claim.account,amount:'1'},authority:{}};
+    const op=await launch.prepare('EXAMPLE_RECOVERY',r,{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},f.claim.leaseToken);
+    await launch.submit(op,f.claim.leaseToken);await launch.settle(op,{state:'unconfirmed',reason:'unknown',releaseSlot:false});
+    let recoveries=0;
+    const service=new GridMonitorService({storage,observe:async()=>f.observe(),recover:async retained=>{recoveries++;return {state:'rejected',requestDigest:retained.exact_request_digest!,failureClass,releaseSlot:false};}});
+    await service.tick(f.claim,new AbortController().signal);await new GridMonitorService({storage,observe:async()=>f.observe()}).tick(f.claim,new AbortController().signal);
+    expect(recoveries).toBe(1);expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(1);
+    expect((await pool.query('SELECT slot_released FROM grid_execution_claims WHERE operation_id=$1',[op.id])).rows[0].slot_released).toBe(true);
+    expect((await launch.read(f.bot.id,'EXAMPLE_RECOVERY'))?.failure_classification).toBe(failureClass);
+  });
+ it('qualified terminal failure crosses the breaker exactly once',async()=>{const f=await fixture();await pool.query('UPDATE grid_bots SET consecutive_failures=4');await launch.submit(f.op,f.claim.leaseToken);await launch.settle(f.op,{state:'failed',reason:'authentication',releaseSlot:true,terminalFailure:{requestDigest:f.op.exact_request_digest,classification:'authentication'}},f.claim.leaseToken);expect((await storage.snapshot(f.claim)).bot).toMatchObject({consecutive_failures:5,status:'pausing',pause_reason:'circuit_breaker'});await expect(launch.settle(f.op,{state:'failed',reason:'authentication',releaseSlot:true,terminalFailure:{requestDigest:f.op.exact_request_digest,classification:'authentication'}},f.claim.leaseToken)).rejects.toThrow();expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(5);});
+ it('requires full authoritative health and a terminal success after the latest failure to reset',async()=>{
+    const f=await landed(),o=f.observe(),now=Date.now();
+    const r:ExactGridRequest={...f.request,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now,data:{to_account:f.claim.account,amount:'1'},authority:{}};
+    const failed=await launch.prepare('EXAMPLE_FAILURE',r,{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},f.claim.leaseToken);
+    await launch.submit(failed,f.claim.leaseToken);
+    await launch.settle(failed,{state:'failed',reason:'transport',releaseSlot:true,terminalFailure:{classification:'transport',requestDigest:failed.exact_request_digest}});
+    await pool.query("UPDATE grid_operations SET terminal_at=clock_timestamp()-interval '1 second' WHERE id=$1",[failed.id]);
+    o.orders[0].status='filled';o.orders[0].filledAmount='1';o.orders[0].updatedAt=Date.now();o.trades[0].size='1';o.position!.size='1';o.observedAt=Date.now();
+    await storage.reconcile(f.claim,randomUUID(),o);
+    expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(1); // Parity alone is insufficient.
+    await pool.query("UPDATE grid_bots SET created_at=clock_timestamp()-interval '3 minutes' WHERE id=$1",[f.bot.id]);
+    o.history={from:0,through:Date.now()-120000,inclusive:true,publicationLagMs:120000,source:'EXAMPLE_FULL_REPLAY',lastId:'100'};
+    o.qualification={observedAt:Date.now(),leverage:String(policy().leverage),maxLeverage:'10',feeRate:'0.001',minOrderSize:'0.00000001',lotSize:'0.00000001',tickSize:'0.00000001',recycler:true};
+    await pool.query("UPDATE grid_master_quota SET backoff_until=clock_timestamp()+interval '60 seconds'");
+    await storage.reconcile(f.claim,randomUUID(),o);expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(1);
+    await pool.query("UPDATE grid_master_quota SET backoff_until=clock_timestamp()-interval '1 second'");
+    await storage.reconcile(f.claim,randomUUID(),o);expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(0);
+    await pool.query('UPDATE grid_bots SET consecutive_failures=2');
+    await pool.query("UPDATE grid_operations SET terminal_at=clock_timestamp()+interval '1 second' WHERE id=$1",[failed.id]);
+    await storage.reconcile(f.claim,randomUUID(),o);expect((await storage.snapshot(f.claim)).bot.consecutive_failures).toBe(2);
+  });
  it('wallet SOL incident survives another storage instance and closes on health',async()=>{const f=await landed(),a=new GridLifecycleStorage(storage),b=new GridLifecycleStorage(storage);await a.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});await b.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});expect((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n).toBe('1');expect((await pool.query('SELECT * FROM grid_wallet_safety')).rows[0]).toMatchObject({execution_wallet:'EXAMPLE_MASTER',balance_lamports:'49999999',guard_state:'entry_blocked',policy_version:'1.0.0'});await b.sol(f.claim,{balance:'0.05',observedAt:Date.now()});await a.sol(f.claim,{balance:'0.049999999',observedAt:Date.now()});expect((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n).toBe('2');await b.sol(f.claim,{balance:'0.1',observedAt:Date.now()});expect((await pool.query('SELECT incident_id FROM grid_wallet_safety')).rows[0].incident_id).toBeNull();});
 });

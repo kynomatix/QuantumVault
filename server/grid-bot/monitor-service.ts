@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import type {GridMonitorStorage,GridMonitorClaim} from './monitor-storage';
 import type {GridObservation,ReconciliationOperation} from './reconciliation';
 import type {GridReconciliation} from './execution';
-import {reconcileGridLimit} from './execution';
+import {reconcileGridLimit,gridReconciliationOutcome} from './execution';
 import {reconcileGridLaunch} from './launch-reconciliation';
 import {requestDigest} from './launch-storage';
 import {gridWindow,type WindowLevel} from './window';
@@ -35,7 +35,8 @@ export class GridMonitorService {
       else if(this.deps.recover)result=await this.deps.recover(op,observation,signal);
       signal.throwIfAborted();
       if(result.state!=='unknown'&&result.requestDigest===op.exact_request_digest){
-        await this.deps.storage.launch.settle(op,{state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':'venue_rejection',releaseSlot:op.exact_request.kind==='limit'&&result.state==='confirmed'?false:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus},claim.leaseToken);
+        const outcome=gridReconciliationOutcome(result);
+        await this.deps.storage.launch.settle(op,{...outcome,releaseSlot:op.exact_request.kind==='limit'&&result.state==='confirmed'?false:outcome.releaseSlot},claim.leaseToken);
       }
     }
     signal.throwIfAborted();const result=await this.deps.storage.reconcile(claim,this.bootId,observation);

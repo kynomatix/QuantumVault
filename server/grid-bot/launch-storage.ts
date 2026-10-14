@@ -1,3 +1,4 @@
+import type {GridSettlementOutcome} from './execution-failure';
 import {createHash,randomUUID} from 'node:crypto';
 import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
@@ -333,7 +334,9 @@ export class GridLaunchStorage {
       [op.id,op.exact_request_digest,leaseToken,op.exact_request.timestamp,op.exact_request.expiryMs]);return !!r.rowCount;
     });
   }
-  async settle(op:DurableGridOperation,outcome:{state:'confirmed'|'failed'|'unconfirmed';reason:string|null;releaseSlot:boolean;rateLimited?:boolean;capacityRejected?:boolean;orderId?:string;orderStatus?:string},leaseToken?:string){
+  async settle(op:DurableGridOperation,outcome:GridSettlementOutcome,leaseToken?:string){
+    const qualifying=outcome.state==='failed'&&['authentication','quota','transport'].includes(outcome.reason??'');
+    if(qualifying&&(!outcome.terminalFailure||outcome.terminalFailure.requestDigest!==op.exact_request_digest||outcome.terminalFailure.classification!==outcome.reason))throw Error('Grid terminal failure authority unavailable');
     return this.transaction(async c=>{
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount]);
       if(leaseToken&&!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE',[op.exact_request.botId,leaseToken])).rowCount)throw Error('Grid recovery ownership lost');
@@ -346,9 +349,11 @@ export class GridLaunchStorage {
         await this.marginPause(c,bot,op.exact_request,'venue_insufficient_margin');
       }
       // Only terminal venue results alter the breaker; an uncertain HTTP send is not counted repeatedly.
-      if(outcome.state==='failed'&&['authentication','quota','transport'].includes(outcome.reason??''))await c.query("UPDATE grid_bots SET consecutive_failures=consecutive_failures+1,status=CASE WHEN consecutive_failures+1>=5 AND status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=CASE WHEN consecutive_failures+1>=5 THEN 'circuit_breaker' ELSE pause_reason END WHERE id=$1",[op.exact_request.botId]);
+      if(qualifying){
+        await c.query("UPDATE grid_bots SET canary_clean_since=NULL,canary_clean_ticks=0,consecutive_failures=consecutive_failures+1,status=CASE WHEN consecutive_failures+1>=5 AND status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=CASE WHEN consecutive_failures+1>=5 THEN 'circuit_breaker' ELSE pause_reason END WHERE id=$1",[op.exact_request.botId]);
+        await c.query("UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{clock}', 'null'::jsonb) WHERE bot_id=$1 AND event_key='canary-clock'",[op.exact_request.botId]);
+      }
       if(outcome.state==='failed'&&!outcome.capacityRejected&&['venue_rejection','policy','invariant'].includes(outcome.reason??''))await c.query("UPDATE grid_bots SET status=CASE WHEN status IN ('provisioning','active','canary','resuming') THEN 'pausing' ELSE status END,pause_reason=$2 WHERE id=$1",[op.exact_request.botId,outcome.reason]);
-      if(outcome.state==='confirmed'&&outcome.releaseSlot)await c.query('UPDATE grid_bots SET consecutive_failures=0 WHERE id=$1',[op.exact_request.botId]);
       if(outcome.state==='failed'&&outcome.reason==='expected_rejection')await c.query('UPDATE grid_profit_allocations SET released_at=clock_timestamp(),released_size=size WHERE operation_id=$1 AND released_at IS NULL',[op.id]);
       if(outcome.state!=='unconfirmed')await c.query('UPDATE grid_execution_claims SET settled_at=clock_timestamp(),slot_released=$2 WHERE operation_id=$1',[op.id,outcome.releaseSlot]);
       if(outcome.orderId)await c.query('UPDATE grid_operations SET venue_order_id=$2 WHERE id=$1',[op.id,outcome.orderId]);

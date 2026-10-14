@@ -16,6 +16,48 @@ const claim:GridClaim={credits:'10',slots:1,canaryIncrement:'90',observedCredits
 function harness(){const r=request();let row:DurableGridOperation|null=null;
   const deps:GridExecutionDeps={storage:{read:vi.fn(async()=>row),prepare:vi.fn(async()=>row={id:randomUUID(),state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null}),submit:vi.fn(async()=>{row!.state='submitted';return true;}),settle:vi.fn(async(_op,outcome)=>{row!.state=outcome.state;row!.failure_classification=outcome.reason;})},preflight:vi.fn(async()=>true),send:vi.fn(async()=>({rateLimited:false})),reconcile:vi.fn(async()=>({state:'unknown' as const}))};return {r,deps,execution:new GridExecution(deps),get row(){return row;}};}
 describe('write ahead and exact identity execution',()=>{
+  it.each(['authentication','quota','transport'] as const)('retains a terminal %s denial once across restart',async classification=>{
+    const h=harness(),terminalFailure={requestDigest:requestDigest(h.r),classification};
+    vi.mocked(h.deps.send).mockResolvedValue({rateLimited:classification==='quota',terminalFailure});
+    expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');
+    expect(h.deps.storage.settle).toHaveBeenCalledWith(expect.anything(),expect.objectContaining({state:'failed',reason:classification,terminalFailure,releaseSlot:true}),'EXAMPLE');
+    expect(await new GridExecution(h.deps).run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');
+    expect(h.deps.send).toHaveBeenCalledOnce();expect(h.deps.storage.settle).toHaveBeenCalledOnce();
+  });
+  it.each(['authentication','quota','transport'] as const)('preserves an exact recovered %s denial without another POST',async failureClass=>{
+    const h=harness();await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE');
+    vi.mocked(h.deps.reconcile).mockResolvedValue({state:'rejected',requestDigest:requestDigest(h.r),failureClass,releaseSlot:true});
+    expect(await new GridExecution(h.deps).run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');
+    expect(h.row?.failure_classification).toBe(failureClass);expect(h.deps.send).toHaveBeenCalledOnce();
+  });
+  it('retains mismatched failure receipts and recovery as unknown',async()=>{
+    const h=harness();vi.mocked(h.deps.send).mockResolvedValue({rateLimited:false,terminalFailure:{requestDigest:'EXAMPLE',classification:'authentication'}});
+    vi.mocked(h.deps.reconcile).mockResolvedValue({state:'rejected',requestDigest:'EXAMPLE',failureClass:'transport',releaseSlot:true});
+    expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');expect(h.row?.state).toBe('unconfirmed');
+    expect(await new GridExecution(h.deps).run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');expect(h.deps.send).toHaveBeenCalledOnce();
+    expect(h.deps.storage.settle).toHaveBeenCalledOnce();
+  });
+  it('settles expected ALO crossing separately without resending',async()=>{
+    const h=harness();vi.mocked(h.deps.reconcile).mockResolvedValue({state:'expected_alo_cross',requestDigest:requestDigest(h.r),releaseSlot:true});
+    expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');expect(h.row?.failure_classification).toBe('expected_rejection');
+    expect(await new GridExecution(h.deps).run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');expect(h.deps.send).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [400,{error:'Invalid signature'},'authentication'],[400,{error:'Invalid public key'},'authentication'],[400,{error:'Verification failed'},'authentication'],
+    [400,{error:'Invalid message'},'transport'],[403,null,'transport'],[429,null,'quota'],
+    [400,{error:'signature maybe invalid'},null],[400,null,null],[200,{success:true},null],
+    [422,{success:false,code:26,error:'CHANNEL_CLOSED'},null],[422,{success:false,code:27,error:'RESPONSE_DROPPED'},null],
+    [500,{error:'Invalid signature'},null],[503,null,null],[504,null,null]
+  ] as const)('classifies only authoritative POST denial %s %j',async(status,body,classification)=>{
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));
+    const r={...request(),kind:'cancel' as const,path:'/orders/cancel',operationType:'cancel_order',account:bs58.encode(sub.publicKey),data:{symbol:'BTC',order_id:'10'}};
+    const fetcher=vi.fn(async()=>new Response(body===null?null:JSON.stringify(body),{status}));
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch);
+    const result=await sender.send(r,Buffer.from(sub.secretKey));
+    expect(result.terminalFailure).toEqual(classification?{requestDigest:requestDigest(r),classification}:undefined);
+    expect(result.rateLimited).toBe(status===429);expect(fetcher).toHaveBeenCalledOnce();
+  });
+
   it('settles a typed capacity denial once, releases the rejected slot and never resends after restart',async()=>{
     const h=harness();vi.mocked(h.deps.send).mockResolvedValue({rateLimited:false,capacityRejectedDigest:requestDigest(h.r)});
     expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('failed');
@@ -75,7 +117,7 @@ describe('write ahead and exact identity execution',()=>{
     const r={...request(),account:bs58.encode(sub.publicKey),masterAccount:bs58.encode(master.publicKey)};
     const fetcher=vi.fn(async()=>new Response(null,{status:429})),key='EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9));
     // This test exercises signing/transport only; concrete book authority has its own boundary tests.
-    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{}});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{}});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true,terminalFailure:{requestDigest:requestDigest(r),classification:'quota'}});
     const [url,init]=fetcher.mock.calls[0] as unknown as [string,RequestInit];expect(url).toBe('https://api.pacifica.fi/api/v1/orders/create');expect(init.redirect).toBe('error');expect(new Headers(init.headers).get('PF-API-KEY')).toBe(key);
     expect(JSON.parse(String(init.body))).toMatchObject({account:r.account,timestamp:1000,expiry_window:5000,tif:'ALO'});
     await expect(sender.send({...r,path:'/EXAMPLE'},Buffer.from(sub.secretKey))).rejects.toThrow();expect(fetcher).toHaveBeenCalledOnce();

@@ -55,6 +55,8 @@ export class GridMonitorStorage {
     if(observation.history?.lastId&&previousFull?.lastId&&BigInt(observation.history.lastId)<BigInt(previousFull.lastId))observation={...observation,history:null};
     const result=reconcileGridObservation({account:claim.account,symbol:bot.market.replace(/-PERP$/,''),direction:bot.direction,
       start:new Date(bot.created_at).getTime(),now,operations,prior,observation});
+    const lastFailure=(await c.query("SELECT max(terminal_at) AS at FROM grid_operations WHERE bot_id=$1 AND state='failed' AND failure_classification IN ('authentication','quota','transport')",[claim.id])).rows[0]?.at;
+    let authoritativeRecovery=false;
     // All downstream decisions use exact operation progress, not scale-eight compatibility columns.
     for(const order of observation.orders){const op=operations.find(op=>op.venue_order_id===order.orderId||op.exact_request?.data.client_order_id===order.clientOrderId&&order.clientOrderId!==null);
       if(!op||!['seed','limit','close'].includes(op.exact_request?.kind))continue;
@@ -68,7 +70,7 @@ export class GridMonitorStorage {
         ON CONFLICT(operation_id) DO UPDATE SET status=EXCLUDED.status,filled=EXCLUDED.filled,remaining=EXCLUDED.remaining,observed_at=EXCLUDED.observed_at`,[op.id,order.orderId,order.status,actual.toFixed(),remaining.toFixed(),observation.observedAt]);
       if(['filled','cancelled','rejected'].includes(order.status)){
         if(order.status==='filled'&&!actual.eq(order.amount))throw Error('False terminal fill');
-        if(result.entriesAllowed&&['filled','cancelled'].includes(order.status)&&(!old||!['filled','cancelled','rejected'].includes(old.status)))await c.query('UPDATE grid_bots SET consecutive_failures=0 WHERE id=$1',[claim.id]);
+        if(['filled','cancelled'].includes(order.status)&&lastFailure&&order.updatedAt>new Date(lastFailure).getTime())authoritativeRecovery=true;
         await c.query('UPDATE grid_execution_claims SET slot_released=true WHERE operation_id=$1',[op.id]);
         if(op.level_id)await c.query(`UPDATE grid_levels SET status=$3,placement_attempt=placement_attempt+1,updated_at=clock_timestamp()
           WHERE id=$1 AND bot_id=$2 AND venue_order_id=$4 AND status IN ('active','partially_filled','cancelling')`,[op.level_id,claim.id,order.status==='filled'?'filled':'cancelled',order.orderId]);
@@ -120,6 +122,12 @@ export class GridMonitorStorage {
     const quota=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1',[claim.masterAccount])).rows[0];
     const levels=(await c.query('SELECT price,size::text AS exact_size,reduce_only FROM grid_levels WHERE bot_id=$1 ORDER BY price,ordinal',[claim.id])).rows;
     const currentPolicy=gridCanaryPolicyCurrent(q,levels,bot.leverage,now,bot.direction);
+    const healthy=result.entriesAllowed&&quota&&!quota.blocked&&currentPolicy
+      &&observation.history?.publicationLagMs===GRID_HISTORY_PUBLICATION_LAG_MS&&!!observation.history.lastId;
+    if(authoritativeRecovery&&healthy){
+      await c.query('UPDATE grid_bots SET consecutive_failures=0 WHERE id=$1',[claim.id]);
+      bot.consecutive_failures=0;
+    }
     const qualifying=bot.status==='canary'&&result.entriesAllowed&&bot.consecutive_failures===0&&quota&&!quota.blocked&&currentPolicy
       &&observation.history?.publicationLagMs===GRID_HISTORY_PUBLICATION_LAG_MS&&!!observation.history.lastId;
     const first=bot.canary_started_at?new Date(bot.canary_started_at).getTime():null;

@@ -5,6 +5,7 @@ import {GridLaunchStorage,GridLaunchTransientError,requestDigest,type ExactGridR
 import type {GridVenueOrder} from './order-identity';
 import {gridNeedsBook,type GridFirstPlacementBoundary} from './first-placement';
 import {gridAddsExposure,GridMarginDenied} from './margin';
+import {gridTerminalHttpFailure,type GridSendResult,type GridSettlementOutcome,type GridTerminalFailure,type GridTerminalFailureClass} from './execution-failure';
 
 const endpoints={create:['/account/subaccount/create','subaccount_confirm'],fund:['/account/subaccount/transfer','transfer_funds'],
   leverage:['/account/leverage','update_leverage'],seed:['/orders/create_market','create_market_order'],
@@ -25,7 +26,7 @@ export function validExactRequest(r:ExactGridRequest):boolean{
 /** Only this Grid-specific boundary signs and posts. No enrollment, leverage or legacy adapter side effects. */
 export class GridPacificaSender {
   constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary,private margin?:Pick<GridLaunchStorage,'finalMargin'>){}
-  async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer,leaseToken?:string):Promise<{rateLimited:boolean;terminalTransferDigest?:string;marginRejectedDigest?:string;capacityRejectedDigest?:string}>{
+  async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer,leaseToken?:string):Promise<GridSendResult>{
     if(!validExactRequest(r) || this.transport.keyStatus!=='present')throw Error('Grid transport authority unavailable');
     const sub=new PacificaSigner(subaccountSecret);
     if(sub.getPublicKey()!==r.account)throw Error('Grid signing account mismatch');
@@ -49,6 +50,12 @@ export class GridPacificaSender {
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired during margin observation.');
     // One bounded request only. Header/HTTP success alone never settles money or an order.
     const response=this.transport.response(await this.fetcher(url,init));
+    if(response.status===400||response.status===403||response.status===429){
+      const body=response.status===400?await response.json().catch(()=>null):null;
+      const terminalFailure=gridTerminalHttpFailure(response.status,body,requestDigest(r));
+      if(response.status!==400)await response.body?.cancel().catch(()=>undefined);
+      return {rateLimited:response.status===429,...(terminalFailure?{terminalFailure}:{})};
+    }
     if((r.kind==='fund'||r.kind==='sweep')&&response.status===200){
       const result=await response.json() as {success?:unknown;error?:unknown;data?:{success?:unknown;error?:unknown}};
       // Pacifica documents this exact nested envelope as "Transfer completed successfully".
@@ -64,12 +71,18 @@ export class GridPacificaSender {
     return {rateLimited:response.status===429};
   }
 }
-export type GridReconciliation={state:'unknown'}|{state:'confirmed'|'rejected'|'expected_alo_cross';requestDigest:string;releaseSlot:boolean;orderId?:string;orderStatus?:GridVenueOrder['status']};
+export type GridReconciliation={state:'unknown'}|{state:'confirmed'|'rejected'|'expected_alo_cross';requestDigest:string;releaseSlot:boolean;orderId?:string;orderStatus?:GridVenueOrder['status'];failureClass?:GridTerminalFailureClass};
+/** All recovery callers preserve the same exact-request terminal classification. */
+export function gridReconciliationOutcome(result:Exclude<GridReconciliation,{state:'unknown'}>):GridSettlementOutcome {
+  const terminalFailure=result.state==='rejected'&&result.failureClass?{requestDigest:result.requestDigest,classification:result.failureClass}:undefined;
+  return {state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':terminalFailure?.classification??'venue_rejection',
+    releaseSlot:terminalFailure?true:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus,...(terminalFailure?{terminalFailure,rateLimited:terminalFailure.classification==='quota'}:{})};
+}
 export interface GridExecutionDeps {
   storage:Pick<GridLaunchStorage,'read'|'prepare'|'submit'|'settle'> & Partial<Pick<GridLaunchStorage,'expirePrepared'>>;
   now?:()=>number;
   preflight:(r:ExactGridRequest)=>Promise<boolean>;
-  send:(r:ExactGridRequest)=>Promise<{rateLimited:boolean;terminalTransferDigest?:string;marginRejectedDigest?:string;capacityRejectedDigest?:string}>;
+  send:(r:ExactGridRequest)=>Promise<GridSendResult>;
   reconcile:(op:DurableGridOperation)=>Promise<GridReconciliation>;
 }
 export class GridExecution {
@@ -93,9 +106,11 @@ export class GridExecution {
     // Re-read current authority after the transaction and immediately before acquiring send permission.
     if(!await this.deps.preflight(op.exact_request))return 'not_sent';
     if(!await this.deps.storage.submit(op,leaseToken))return 'not_sent';
+    let terminalFailure:GridTerminalFailure|undefined;
     let rateLimited=false,terminalTransferDigest:string|undefined,marginRejectedDigest:string|undefined,capacityRejectedDigest:string|undefined;
-    try {const sent=await this.deps.send(structuredClone(op.exact_request));rateLimited=sent.rateLimited;terminalTransferDigest=sent.terminalTransferDigest;marginRejectedDigest=sent.marginRejectedDigest;capacityRejectedDigest=sent.capacityRejectedDigest;}
+    try {const sent=await this.deps.send(structuredClone(op.exact_request));rateLimited=sent.rateLimited;terminalFailure=sent.terminalFailure;terminalTransferDigest=sent.terminalTransferDigest;marginRejectedDigest=sent.marginRejectedDigest;capacityRejectedDigest=sent.capacityRejectedDigest;}
     catch(error){if(error instanceof GridMarginDenied){await this.deps.storage.settle(op,{state:'failed',reason:'margin',releaseSlot:true},leaseToken);return 'failed';}/* Other errors include crash/timeout after POST. */}
+    if(terminalFailure?.requestDigest===op.exact_request_digest){await this.deps.storage.settle(op,{state:'failed',reason:terminalFailure.classification,terminalFailure,releaseSlot:true,rateLimited},leaseToken);return 'failed';}
     if(marginRejectedDigest===op.exact_request_digest){await this.deps.storage.settle(op,{state:'failed',reason:'margin',releaseSlot:true},leaseToken);return 'failed';}
     if(capacityRejectedDigest===op.exact_request_digest){await this.deps.storage.settle(op,{state:'failed',reason:'venue_rejection',releaseSlot:true,capacityRejected:true},leaseToken);return 'failed';}
     if((request.kind==='fund'||request.kind==='sweep')&&terminalTransferDigest===op.exact_request_digest){
@@ -107,8 +122,7 @@ export class GridExecution {
   private async reconcile(op:DurableGridOperation):Promise<'confirmed'|'pending'|'failed'>{
     let result:GridReconciliation;try{result=await this.deps.reconcile(op);}catch{return 'pending';}
     if(result.state==='unknown' || result.requestDigest!==op.exact_request_digest)return 'pending';
-    await this.deps.storage.settle(op,{state:result.state==='confirmed'?'confirmed':'failed',
-      reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':'venue_rejection',releaseSlot:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus});
+    await this.deps.storage.settle(op,gridReconciliationOutcome(result));
     return result.state==='confirmed'?'confirmed':result.state==='expected_alo_cross'?'pending':'failed';
   }
 }

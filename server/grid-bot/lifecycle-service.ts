@@ -2,8 +2,9 @@ import {randomUUID} from 'node:crypto';
 import Decimal from 'decimal.js';
 import type {GridMonitorClaim} from './monitor-storage';
 import {GridLifecycleStorage} from './lifecycle-storage';
-import {GridExecution,type GridReconciliation} from './execution';
+import {GridExecution,gridReconciliationOutcome,type GridReconciliation} from './execution';
 import {requestDigest,type ExactGridRequest,type DurableGridOperation} from './launch-storage';
+import type {GridSendResult} from './execution-failure';
 import type {GridObservation} from './reconciliation';
 import {gridOwnedLive,gridRiskTrigger,freshGridFact,gridEntrySafety,gridUnresolvedEntryCancel} from './lifecycle-policy';
 import {preflightGridLaunch,type LaunchFacts} from './provision';
@@ -31,7 +32,7 @@ export function gridResumeClearance(risk:GridResumeRisk|undefined,o:GridObservat
 export interface GridLifecycleDeps {
   storage:GridLifecycleStorage;
   observe:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<GridObservation>;
-  send:(claim:GridMonitorClaim,r:ExactGridRequest)=>Promise<{rateLimited:boolean;terminalTransferDigest?:string}>;
+  send:(claim:GridMonitorClaim,r:ExactGridRequest)=>Promise<GridSendResult>;
   recover:(claim:GridMonitorClaim,op:DurableGridOperation,signal:AbortSignal)=>Promise<GridReconciliation>;
   sol:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<{balance:string;observedAt:number}|null>;
   resume:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<{policy:GridPolicy;policyHmac:string;umk:Buffer;facts:LaunchFacts;risk:GridResumeRisk;cleanup:()=>void}|null>;
@@ -70,7 +71,7 @@ export class GridLifecycleService {
         }
         return block('venue_operation_unresolved');
       }
-      await launch.settle(op,{state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':'venue_rejection',releaseSlot:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus},claim.leaseToken);
+      await launch.settle(op,gridReconciliationOutcome(result),claim.leaseToken);
       return block('recovered_reobserve_required');
     }
     if(!life||life.state!=='pending')return trigger.kind==='unavailable'?trigger.reason:'idle';

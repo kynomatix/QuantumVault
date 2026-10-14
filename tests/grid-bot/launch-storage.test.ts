@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import {GridStorage,type DraftRecord} from '../../server/grid-bot/storage';
-import {GridLaunchStorage,GridLaunchTransientError,type ExactGridRequest,type GridClaim} from '../../server/grid-bot/launch-storage';
+import {GridLaunchStorage,GridLaunchTransientError,requestDigest,type ExactGridRequest,type GridClaim} from '../../server/grid-bot/launch-storage';
 import {GridCustody,GRID_LAUNCH_LEASE_MS} from '../../server/grid-bot/custody';
 import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../../server/storage';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
@@ -32,6 +32,43 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
   async function reserve(master='EXAMPLE_MASTER',share='0.5'){const bot=await draft();await pool.query('UPDATE wallets SET agent_public_key=$1 WHERE address=$2',[master,wallet]);const account=await custody.reserve({botId:bot.id,wallet,masterAccount:master,policyHmac:bot.policyHmac,canaryLimit:'250',share},umk());return {bot,account};}
   const input=(account:Awaited<ReturnType<typeof reserve>>['account'])=>{const now=Date.now();return {request:{kind:'fund',botId:account.botId,account:account.account,masterAccount:account.masterAccount,path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now,expiryMs:5000,data:{to_account:account.account,amount:'100'},authority:{}} as ExactGridRequest,
     claim:{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000} as GridClaim};};
+
+  it('counts five exact terminal denials once, invalidates canary and persists the entry pause',async()=>{
+    const {account}=await reserve();
+    await pool.query("UPDATE grid_bots SET canary_clean_since=clock_timestamp(),canary_clean_ticks=2 WHERE id=$1",[account.botId]);
+    await pool.query("INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at) VALUES($1,'canary-clock','internal_canary_clock',$2,clock_timestamp())",[account.botId,{clock:{cleanTicks:2},full:{generation:'EXAMPLE'}}]);
+    const classes=['authentication','transport','authentication','transport','quota'] as const;
+    for(const [i,classification] of classes.entries()){
+      const v=input(account),op=await storage.prepare('EXAMPLE_FAILURE_'+i,v.request,v.claim,account.leaseToken);
+      expect(await storage.submit(op,account.leaseToken)).toBe(true);
+      const outcome={state:'failed' as const,reason:classification,releaseSlot:true,rateLimited:classification==='quota',terminalFailure:{requestDigest:requestDigest(v.request),classification}};
+      const attempts=await Promise.allSettled([storage.settle(op,outcome),new GridLaunchStorage(pool,async()=>{}).settle(op,outcome)]);
+      expect(attempts.filter(x=>x.status==='fulfilled')).toHaveLength(1);
+      expect(attempts.filter(x=>x.status==='rejected')).toHaveLength(1);
+      const b=(await pool.query('SELECT consecutive_failures,status,canary_clean_since,canary_clean_ticks FROM grid_bots WHERE id=$1',[account.botId])).rows[0];
+      expect(b).toMatchObject({consecutive_failures:i+1,canary_clean_since:null,canary_clean_ticks:0,status:i===4?'pausing':'provisioning'});
+      expect((await pool.query('SELECT state,failure_classification FROM grid_operations WHERE id=$1',[op.id])).rows[0]).toEqual({state:'failed',failure_classification:classification});
+      expect((await pool.query('SELECT slot_released,settled_at IS NOT NULL AS settled FROM grid_execution_claims WHERE operation_id=$1',[op.id])).rows[0]).toEqual({slot_released:true,settled:true});
+    }
+    const checkpoint=(await pool.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='canary-clock'",[account.botId])).rows[0].evidence;
+    expect(checkpoint).toEqual({clock:null,full:{generation:'EXAMPLE'}});
+    const v=input(account);
+    await expect(storage.prepare('EXAMPLE_DENIED',v.request,v.claim,account.leaseToken)).rejects.toThrow('ownership');
+    expect((await pool.query('SELECT pause_reason FROM grid_bots WHERE id=$1',[account.botId])).rows[0].pause_reason).toBe('circuit_breaker');
+  });
+  it('rejects unbound failure evidence and excludes unknown sends and expected ALO from counting or resetting',async()=>{
+    const {account}=await reserve(),v=input(account),op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);
+    await storage.submit(op,account.leaseToken);await pool.query('UPDATE grid_bots SET consecutive_failures=2 WHERE id=$1',[account.botId]);
+    await expect(storage.settle(op,{state:'failed',reason:'authentication',releaseSlot:true})).rejects.toThrow('authority');
+    await expect(storage.settle(op,{state:'failed',reason:'authentication',releaseSlot:true,terminalFailure:{classification:'authentication',requestDigest:'EXAMPLE'}})).rejects.toThrow('authority');
+    await storage.settle(op,{state:'unconfirmed',reason:'unknown',releaseSlot:false});
+    expect((await pool.query('SELECT consecutive_failures FROM grid_bots WHERE id=$1',[account.botId])).rows[0].consecutive_failures).toBe(2);
+    await storage.settle(op,{state:'failed',reason:'expected_rejection',releaseSlot:true});
+    expect((await pool.query('SELECT consecutive_failures FROM grid_bots WHERE id=$1',[account.botId])).rows[0].consecutive_failures).toBe(2);
+    const next=input(account),success=await storage.prepare('EXAMPLE_SUCCESS',next.request,next.claim,account.leaseToken);
+    await storage.submit(success,account.leaseToken);await storage.settle(success,{state:'confirmed',reason:null,releaseSlot:true});
+    expect((await pool.query('SELECT consecutive_failures FROM grid_bots WHERE id=$1',[account.botId])).rows[0].consecutive_failures).toBe(2);
+  });
   it('migration repeats without table DDL and enforces exact-request pairs',async()=>{
     const c=await pool.connect();await c.query('BEGIN');await c.query('LOCK TABLE grid_operations IN ACCESS SHARE MODE');
     try{await pool.query("SET lock_timeout='500ms'");await pool.query(migration);}finally{await c.query('ROLLBACK');c.release();}
