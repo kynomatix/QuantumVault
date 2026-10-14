@@ -1,5 +1,5 @@
 import {beforeAll,afterAll,beforeEach,describe,it,expect} from 'vitest';
-import {Pool} from 'pg';
+import {Pool,type PoolClient} from 'pg';
 import {randomUUID} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import nacl from 'tweetnacl';
@@ -38,15 +38,37 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     v.request={...v.request,kind:'seed',path:'/orders/create_market',operationType:'create_market_order',data:{symbol:'BTC',amount,side:'bid',reduce_only:false},authority:{seedWorstPrice:'100'}};
     v.claim.canaryIncrement=notional;return v;
   }
-  it('C2 admits exactly two parallel launches across independent wallets, masters and custody workers',async()=>{
+  it('C2 admits exactly two concurrent launches on four independent database connections',async()=>{
     const candidates=await Promise.all([0,1,2,3].map(async i=>{
       const address='EXAMPLE_C2_WALLET_'+i,master='EXAMPLE_C2_MASTER_'+i;
       await pool.query('INSERT INTO wallets VALUES($1,$2)',[address,master]);return {bot:await draft(address),address,master};
     }));
-    const results=await Promise.allSettled(candidates.map(({bot,address,master})=>new GridCustody(new GridLaunchStorage(pool,async()=>{})).reserve({botId:bot.id,wallet:address,masterAccount:master,policyHmac:bot.policyHmac,canaryLimit:'250'},umk())));
-    expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(2);expect(results.filter(r=>r.status==='rejected')).toHaveLength(2);
-    expect((await pool.query('SELECT count(*) AS count FROM grid_launch_accounts WHERE released_at IS NULL')).rows[0].count).toBe('2');
-  });
+    // Each worker owns a separate one-connection pool; the suite pool cannot serialize them.
+    const workerPools=candidates.map(()=>new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000,options:'-c search_path='+schema}));
+    const backendPids=new Set<number>();let started=0,release!:()=>void;
+    const allStarted=new Promise<void>(resolve=>{release=resolve;});
+    class ConcurrentStorage extends GridLaunchStorage {
+      override transaction<T>(work:(client:PoolClient)=>Promise<T>):Promise<T>{
+        return super.transaction(async client=>{
+          await client.query("SET LOCAL statement_timeout='10s'");
+          backendPids.add((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+          // All four BEGINs must be live before any reserve can acquire admission authority.
+          if(++started===candidates.length)release();
+          await allStarted;
+          return work(client);
+        }).catch(error=>{release();throw error;});
+      }
+    }
+    try{
+      const results=await Promise.allSettled(candidates.map(({bot,address,master},i)=>new GridCustody(new ConcurrentStorage(workerPools[i],async()=>{}))
+        .reserve({botId:bot.id,wallet:address,masterAccount:master,policyHmac:bot.policyHmac,canaryLimit:'250'},umk()).catch(error=>{release();throw error;})));
+      expect(started).toBe(4);expect(backendPids.size).toBe(4);
+      expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(2);
+      const denied=results.filter(r=>r.status==='rejected');expect(denied).toHaveLength(2);
+      for(const result of denied)if(result.status==='rejected')expect(result.reason.message).toBe('Grid pilot admission exhausted');
+      expect((await pool.query('SELECT count(*) AS count FROM grid_launch_accounts WHERE released_at IS NULL')).rows[0].count).toBe('2');
+    }finally{release();await Promise.all(workerPools.map(worker=>worker.end()));}
+  },30000);
   it.each(['pausing','paused','resuming','reconciling','range_exhausted','stopping','stopped','failed'])('C2 retains the global slot while an unreleased bot is %s',async status=>{
     const a=await reserve(),b=await reserve();await pool.query('UPDATE grid_bots SET status=$2 WHERE id=$1',[a.bot.id,status]);
     await expect(reserve()).rejects.toThrow('pilot admission');

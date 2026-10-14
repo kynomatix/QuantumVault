@@ -172,6 +172,8 @@ export class GridLaunchStorage {
   }
   /** Final transport boundary, after book observation and before POST. No optional entry bypass. */
   async finalMargin(r:ExactGridRequest,leaseToken:string):Promise<void>{
+    // Reductions bypass every entry-only check below, including status and the pilot cap.
+    // sendOwned still fences their submitted operation, lease and stopping authority.
     if(!gridAddsExposure(r))return;
     const reading=await this.freshMargin(r);
     const allowed=await this.transaction(async c=>{

@@ -56,6 +56,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     const life=(await control.state(f.claim)).life,now=Date.now();
     const request:ExactGridRequest={...f.request,kind:'close',path:'/orders/create_market',operationType:'create_market_order',timestamp:now,data:{symbol:'BTC',side:'ask',amount:'0.98',reduce_only:true,slippage_percent:'0.5',client_order_id:randomUUID()},authority:{lifecycleEpoch:life.epoch}};
     const close=await launch.prepare('EXAMPLE_C2_CLOSE',request,{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},f.claim.leaseToken);
+    expect((await pool.query('SELECT status FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0].status).toBe('stopping');
     expect(await launch.submit(close,f.claim.leaseToken)).toBe(true);await launch.finalMargin(request,f.claim.leaseToken);
     let posts=0;await launch.sendOwned(request,f.claim.leaseToken,async()=>{posts++;});expect(posts).toBe(1);
     await launch.settle(close,{state:'confirmed',reason:null,releaseSlot:true,orderId:'20'});

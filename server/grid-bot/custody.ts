@@ -26,7 +26,7 @@ export class GridCustody {
     const limit=gridPilotLimit(input.canaryLimit);
     if(umk.length!==32 || limit===null || !new Decimal(limit).eq(input.canaryLimit))throw Error('Grid pilot exposure limit must be positive and at most $250.');
     const share=new Decimal(input.share??'0.5');if(!share.gt(0)||share.gt(1))throw Error('Invalid Grid quota share');
-    const keypair=nacl.sign.keyPair(),secret=Buffer.from(keypair.secretKey),account=bs58.encode(keypair.publicKey),subkey=deriveSubkey(umk,purpose),leaseToken=randomUUID();
+    const keypair=nacl.sign.keyPair(),secret: Buffer = Buffer.from(keypair.secretKey),account=bs58.encode(keypair.publicKey),subkey=deriveSubkey(umk,purpose),leaseToken=randomUUID();
     try {
       const encrypted=encryptToBase64(secret,subkey,buildPooledSubaccountAAD('grid:pacifica',input.wallet,account));
       return await this.storage.transaction(async c=>{
@@ -80,7 +80,7 @@ export class GridCustody {
       AND b.lease_token=$4 AND b.lease_expires_at>clock_timestamp() RETURNING p.id`,[identity.botId,identity.account,identity.masterAccount,identity.leaseToken]);
       if(!r.rowCount)throw Error('Grid reuse ownership changed');});
   }
-  async withSecret<T>(identity:GridAccount,umk:Buffer,work:(secret:Buffer)=>Promise<T>):Promise<T>{
+  async withSecret<T>(identity:GridAccount,umk:Buffer,work:(secret: Buffer) => Promise<T>):Promise<T>{
     const envelope=await this.storage.transaction(async c=>{
       const r=(await c.query(`SELECT p.subaccount_key_encrypted_v3,p.aad_version FROM grid_launch_accounts a
         JOIN grid_bots b ON b.id=a.bot_id JOIN protocol_subaccounts p ON p.id=a.protocol_subaccount_id
@@ -90,8 +90,8 @@ export class GridCustody {
       [identity.botId,identity.wallet,identity.account,identity.masterAccount,identity.leaseToken])).rows[0];
       if(!r || r.aad_version!==1 || !r.subaccount_key_encrypted_v3)throw Error('Grid custody ownership unavailable');return r.subaccount_key_encrypted_v3 as string;
     });
-    const key=deriveSubkey(umk,purpose);let secret:Buffer|undefined;
-    try {secret=decryptFromBase64(envelope,key,buildPooledSubaccountAAD('grid:pacifica',identity.wallet,identity.account));
+    const key=deriveSubkey(umk,purpose);let secret: Buffer | undefined;
+    try {const decoded=decryptFromBase64(envelope,key,buildPooledSubaccountAAD('grid:pacifica',identity.wallet,identity.account));secret=decoded;
       if(secret.length!==64 || bs58.encode(nacl.sign.keyPair.fromSecretKey(secret).publicKey)!==identity.account)throw Error('Grid custody identity mismatch');
       return await work(secret);
     } finally {zeroizeBuffer(key);if(secret)zeroizeBuffer(secret);}

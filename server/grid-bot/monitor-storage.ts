@@ -7,7 +7,7 @@ import Decimal from 'decimal.js';
 import {advanceGridCanary,gridCanaryPolicyCurrent,type GridCanaryClock} from './canary-clock';
 import {GRID_HISTORY_PUBLICATION_LAG_MS} from './history-safety';
 import {gridWorkerFence,recordGridWorker} from './worker-ownership';
-import {gridPilotEntryBlock} from './pilot-exposure';
+import {isGridPilotExposureBlockReason} from './pilot-exposure';
 const D=Decimal.clone({precision:200});
 const states=['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping'];
 export interface GridMonitorClaim {id:string;leaseToken:string;account:string;masterAccount:string}
@@ -172,7 +172,7 @@ export class GridMonitorStorage {
   });}
   async planningState(claim:GridMonitorClaim,bootId:string){return this.launch.transaction(async c=>{
     await this.assertLease(c,claim);const state=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0];
-    if(!state?.fresh||state.boot_id!==bootId||state.blocked_reasons.some((reason:string)=>!gridPilotEntryBlock(reason)))throw Error('Startup reconciliation unavailable');
+    if(!state?.fresh||state.boot_id!==bootId||state.blocked_reasons.some((reason:string)=>!isGridPilotExposureBlockReason(reason)))throw Error('Startup reconciliation unavailable');
     const fills=fillsFromRows((await c.query('SELECT * FROM grid_exact_fills WHERE bot_id=$1',[claim.id])).rows);
     const reserved=(await c.query(`SELECT a.trade_id AS "tradeId",(a.size-a.released_size)::text AS size FROM grid_profit_allocations a JOIN grid_operations o ON o.id=a.operation_id
       WHERE o.bot_id=$1 AND a.released_at IS NULL`,[claim.id])).rows;

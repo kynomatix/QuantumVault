@@ -8,7 +8,7 @@ export interface GridPilotOperation {
   id:string;state:string;venue_order_id:string|null;exact_request:ExactGridRequest;canary_increment:string|null;
 }
 /** These deny new risk, never the economic replay or its reduce-only exit authority. */
-export const gridPilotEntryBlock=(reason:string)=>['pilot_exposure_limit_exceeded','pilot_exposure_mark_unavailable','pilot_exposure_unknown','pilot_exposure_reservation_unavailable'].includes(reason);
+export const isGridPilotExposureBlockReason=(reason:string)=>['pilot_exposure_limit_exceeded','pilot_exposure_mark_unavailable','pilot_exposure_unknown','pilot_exposure_reservation_unavailable'].includes(reason);
 const quantity=(s:unknown)=>{
   if(typeof s!=='string'||s.length>80||!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(s))throw Error('Unknown pilot exposure');
   return new D(s);
