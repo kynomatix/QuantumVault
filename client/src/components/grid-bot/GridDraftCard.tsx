@@ -8,7 +8,7 @@ import type {GridBotSummary} from '../../../../shared/grid-surface';
 import type {GridIntent} from '../../../../shared/grid-draft';
 import {GridPlannerSheet} from '../grid-planner/GridPlannerSheet';
 import {gridSetupAccess} from '@/lib/grid-setup-view';
-import {PLANNING_BANNER} from '@/lib/grid-planner-view';
+import {PLANNING_BANNER,readableDecimal} from '@/lib/grid-planner-view';
 import {GridBotDrawer} from './GridBotDrawer';
 export const gridJson=async(path:string,options:RequestInit={})=>{
   const r=await fetch('/api/grid-bots'+path,{...options,credentials:'include',headers:{...walletAuthHeaders(),'Content-Type':'application/json',...options.headers}});
@@ -38,14 +38,14 @@ function GridCollection({authenticated,identity}:{authenticated:boolean;identity
   },[authenticated,identity,refresh]);
   const access=gridSetupAccess(planner,enabled,start,worker);
   if(!access.setup&&!bots.length)return <GridComingSoon/>;
-  return <Card data-testid="card-grid-bot"><CardHeader><CardTitle className="text-amber-500">Grid Bot</CardTitle></CardHeader><CardContent className="space-y-3">
-    <p className="text-sm text-muted-foreground">Choose a range and plan your Pacifica grid. PnL excludes funding.</p>
+  return <Card data-testid="card-grid-bot"><CardHeader><CardTitle className="flex items-center gap-2 text-foreground"><BarChart3 className="h-5 w-5 text-amber-500" aria-hidden="true"/>Grid Bot</CardTitle></CardHeader><CardContent className="space-y-3">
+    <p className="text-sm text-muted-foreground">Choose a range and plan your Pacifica grid. P&L excludes funding.</p>
     {!access.live&&<p className="text-sm text-muted-foreground">{PLANNING_BANNER}</p>}
     {!authenticated?<p className="text-sm">Connect your wallet to view your Grid bots.</p>:<>
-      <div className="flex flex-wrap gap-2">{access.setup?<Button onClick={()=>setCreate({key:Date.now()})}>{access.live?'Set up Grid Bot':'Open Grid Bot'}</Button>:null}<Button variant="outline" onClick={()=>setRefresh(v=>v+1)}>Refresh bots</Button></div>
+      <div className="flex flex-wrap gap-2">{access.setup?<Button onClick={()=>setCreate({key:Date.now()})}>Plan a grid</Button>:null}<Button variant="outline" onClick={()=>setRefresh(v=>v+1)}>Refresh bots</Button></div>
       <p role="status" className="text-sm">{error||(!bots.length?'No Grid bots loaded.':'')}</p>
       <div className="grid gap-3 sm:grid-cols-2">{bots.map(bot=><button key={bot.id} onClick={()=>setSelected(bot.id)} className="rounded-xl border p-4 text-left hover:bg-muted/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
-        <span className="block font-medium">{bot.market} · {bot.direction}</span><span className="block text-sm capitalize">{bot.status.replaceAll('_',' ')}</span><span className="block text-xs text-muted-foreground">{bot.lowerPrice} – {bot.upperPrice} · {bot.gridCount} intervals</span><span className="block text-xs">Realised / unrealised PnL: UNKNOWN until details refresh · excludes funding</span>
+        <span className="block font-medium">{bot.market} · {bot.direction}</span><span className="block text-sm capitalize">{bot.status.replaceAll('_',' ')}</span><span className="block text-sm text-muted-foreground">{readableDecimal(bot.lowerPrice)} – {readableDecimal(bot.upperPrice)} · {bot.gridCount} grids</span><span className="mt-2 block text-sm">P&L unavailable</span><span className="mt-2 block text-sm font-medium text-primary">View bot</span>
       </button>)}</div>
     </>}
     {selected&&identity?<GridBotDrawer key={identity+selected} id={selected} createEnabled={enabled} onClose={()=>{setSelected(null);setRefresh(v=>v+1);}} onAdjust={intent=>{setSelected(null);setCreate({key:Date.now(),intent});}}/>:null}

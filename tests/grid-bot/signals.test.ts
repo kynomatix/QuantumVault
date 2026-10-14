@@ -142,8 +142,16 @@ describe('independent advisory display and context indicators', () => {
   it('labels funding as a receiving-side cost hint with hourly, 8-hour and day arithmetic', () => {
     const view = gridSignalViews(null, signals(), 'BTC-PERP', '1h', { state: 'unavailable', reason: 'EXAMPLE' })[3];
     expect(view).toMatchObject({ direction: 'short', summary: 'Longs pay shorts' });
+    expect(view.brief).toBe('Shorts receive about 0.48%/day of position value if this rate holds');
     expect(view.detail).toContain('0.02000% per hour'); expect(view.detail).toContain('0.1600% per 8h / 0.4800% per day');
     expect(view.basis).toContain('next-hour estimate'); expect(view.detail).toContain('if unchanged');
+  });
+  it('keeps negative, zero and tiny funding summaries truthful', () => {
+    for (const [rate, direction, brief] of [[-0.0000125, 'long', 'Longs receive about 0.03%/day'], [0, 'neutral', 'No funding payment at this rate'], [0.000000001, 'short', 'Shorts receive about 0.0000024%/day']] as const) {
+      const data = signals(); data.funding = { ...data.funding, state: 'available', market: 'BTC-PERP', hourlyRate: rate, basis: 'next-hour estimate', observedAt: now, expiresAt: now + 300_000 };
+      const view = gridSignalViews(null, data, 'BTC-PERP', '1h', { state: 'unavailable', reason: 'EXAMPLE' })[3];
+      expect(view.direction).toBe(direction); expect(view.brief).toContain(brief);
+    }
   });
   it('rejects wrong-market, expired, malformed and stale signal payloads', () => {
     const good = signals(); expect(isGridSignals(good, 'BTC-PERP')).toBe(true);

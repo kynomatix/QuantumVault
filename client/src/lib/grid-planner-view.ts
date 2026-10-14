@@ -140,16 +140,51 @@ export function plannerLevelMessage(preview: PlannerPreview | null, expiresAt: n
   if (missing.length) return `To show grid levels, enter ${missing.join(', ')}.`;
   if (error) return `Grid levels are unavailable: ${error}`;
   if (loading) return 'Calculating grid levels from your inputs…';
-  if (!preview) return 'Waiting for a grid preview. Refresh observations if it does not appear.';
-  if (now >= expiresAt && preview.validForMs > 0) return 'Grid levels have expired. Refresh observations to get a fresh price and market details.';
+  if (!preview) return 'Waiting for a grid preview. Refresh chart if it does not appear.';
+  if (now >= expiresAt && preview.validForMs > 0) return 'Grid levels have expired. Refresh chart to get a fresh price and market details.';
   if (!plannerOverlays(preview, expiresAt, now).length) return `Grid levels are unavailable: ${preview.reasons.join('; ') || 'a fresh price and usable market details are required.'}`;
   const basis = preview.requestedPlan ? 'your investment' : 'the minimum investment, not your entered investment';
-  const warning = preview.state === 'rejected' ? ` Checks did not pass: ${preview.reasons.join('; ')}`
+  const warning = preview.state === 'rejected' ? ' Checks did not pass; see Your plan.'
     : preview.state === 'diagnostic' ? ' Some checks are unavailable.' : '';
-  return `Dashed grid levels are hypothetical geometry at ${basis}.${warning} No orders are placed.`;
+  return `Dashed grid levels are hypothetical geometry at ${basis}.${warning}`;
+}
+/** Display precision comes from the exchange step, never padded engine decimals. */
+export function plannerPriceFormat(tick: string | null | undefined, prices: (string | number)[]) {
+  if (tick && plainPrice(tick)) return { precision: new D(tick).decimalPlaces(), minMove: Number(tick) };
+  const precision = Math.min(18, Math.max(0, ...prices.map(price => {
+    try { return new D(price).isFinite() ? new D(price).decimalPlaces() : 0; } catch { return 0; }
+  })));
+  return { precision, minMove: 10 ** -precision };
+}
+export type PlannerIssue = { message: string; panel: string; field?: string; setting: string; original: string };
+export function plannerIssue(reason: string): PlannerIssue {
+  const issue = (message: string, panel: string, setting: string, field?: string): PlannerIssue => ({ message, panel, setting, field, original: reason });
+  const message = reason.replace(/quantized levels/gi, 'grid levels').replace(/quantized/gi, 'rounded')
+    .replace(/venue tick/gi, "the exchange's price step").replace(/observed Pacifica maximum/gi, 'exchange maximum')
+    .replace(/intervals/gi, 'grids').replace(/minimum capital/gi, 'minimum investment');
+  // Keep the actual failure: malformed fees, missing data and inadequate spreads are different problems.
+  if (/stop/i.test(reason)) return issue(message, 'stop', 'Stop loss', 'grid-stop');
+  if (/leverage/i.test(reason)) return issue(message, 'direction-size', 'Leverage', 'grid-leverage');
+  if (/fee|round-trip cost/i.test(reason)) return issue(message, 'fees', 'Fees & data', 'grid-feePercent');
+  if (/investment|below.*minimum|underfund|transfer floor/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');
+  if (/collaps|duplicate|interval|geometry/i.test(reason)) return issue(message, 'direction-size', 'Number of grids', 'grid-intervals');
+  if (/reference price|range boundary|lower|upper/i.test(reason)) return issue(message, 'range', 'Range', 'grid-lower');
+  if (/size scale|entryScale|profitScale/i.test(reason)) return issue(message, 'orders', 'Sizing', 'grid-entryScale');
+  return issue(message, 'fees', 'Fees & data');
+}
+export function plannerMinimumRows(preview: PlannerPreview | null) {
+  if (!preview) return [{ label: 'Minimum investment', value: 'Awaiting preview' }];
+  const describe = (fact: PlannerPreview['minimum']) => fact.state === 'available' ? `${readableDecimal(fact.value)} USDC` : `Unavailable — ${fact.reason}`;
+  const base = { label: 'Minimum investment', value: describe(preview.minimum) };
+  if (preview.fee.state === 'unknown') return [base];
+  const assumed = preview.assumedMinimum;
+  if (preview.minimum.state === 'available' && assumed.state === 'available' && new D(preview.minimum.value).eq(assumed.value))
+    return [{ ...base, label: 'Minimum investment · includes your fee assumption' }];
+  return [base, { label: 'Minimum with your fee assumption', value: describe(assumed) }];
 }
 export function readableDecimal(value: string): string {
   const [whole, fraction] = value.split('.');
-  return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (fraction ? '.' + fraction : '');
+  const trimmed = fraction?.replace(/0+$/, '');
+  return whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + (trimmed ? '.' + trimmed : '');
 }
 export const readableTime = (ms: number) => new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });

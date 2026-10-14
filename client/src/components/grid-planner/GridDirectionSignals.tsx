@@ -9,6 +9,7 @@ import type { GridRegime } from '../../../../shared/grid-regime';
 
 export function GridSignalButton({ signal }: { signal: GridSignalView }) {
   const [open, setOpen] = useState(false);
+  const trigger = useRef<HTMLButtonElement>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined), hovering = useRef(false);
   useEffect(() => () => clearTimeout(timer.current), []);
   const enter = () => { clearTimeout(timer.current); hovering.current = true; setOpen(true); };
@@ -16,15 +17,16 @@ export function GridSignalButton({ signal }: { signal: GridSignalView }) {
   const Icon = { Macro: Globe2, 'Weekly structure': ChartNoAxesCombined, Trend: Activity, Funding: Percent }[signal.name];
   const Arrow = signal.direction === 'long' ? ArrowUp : signal.direction === 'short' ? ArrowDown : ArrowRight;
   return <Popover open={open} onOpenChange={value => { hovering.current = false; clearTimeout(timer.current); setOpen(value); }}>
-    <PopoverTrigger asChild><button type="button" aria-label={`${signal.name}: ${signal.summary}. Show details and basis.`}
+    <PopoverTrigger asChild><button ref={trigger} type="button" aria-label={`${signal.name}: ${signal.brief ?? signal.summary}. Advisory only. Show details and basis.`}
       onPointerEnter={event => { if (event.pointerType === 'mouse') enter(); }} onPointerLeave={leave}
-      className="inline-flex h-8 w-9 items-center justify-center gap-0.5 rounded-md border border-border/60 bg-card/40 text-muted-foreground hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-0.5 rounded-md border border-border/60 bg-card/40 text-muted-foreground hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
       <Icon className="h-3.5 w-3.5" aria-hidden="true"/><Arrow aria-hidden="true" className={`h-3 w-3 ${signal.unavailable || signal.direction === 'neutral' ? 'text-muted-foreground' : signal.direction === 'long' ? 'text-teal-500' : 'text-red-500'}`}/>
     </button></PopoverTrigger>
-    <PopoverContent side="top" align="start" className="w-80 max-w-[calc(100vw-2rem)] space-y-2 text-xs" aria-label={`${signal.name} signal details`}
+    <PopoverContent side="top" align="start" collisionBoundary={trigger.current?.closest('[data-testid="sheet-grid-planner"]') ?? undefined} collisionPadding={12}
+      className="w-80 max-w-[min(calc(100vw-2rem),var(--radix-popover-content-available-width))] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto space-y-2 text-xs" aria-label={`${signal.name} signal details`}
       onOpenAutoFocus={event => event.preventDefault()} onPointerEnter={() => clearTimeout(timer.current)} onPointerLeave={leave}>
-      <p className="font-medium text-sm">{signal.name} · {signal.summary}</p>
-      <p className="leading-relaxed">{signal.detail}</p><p className="text-muted-foreground leading-relaxed">{signal.basis}</p>
+      <p className="font-medium text-sm">{signal.name} · {signal.brief ?? signal.summary}</p>
+      <details><summary className="cursor-pointer">Details and basis</summary><div className="mt-2 space-y-2"><p className="leading-relaxed">{signal.detail}</p><p className="text-muted-foreground leading-relaxed">{signal.basis}</p></div></details>
       <p className="text-muted-foreground">Advisory only. Choose either direction.</p>
     </PopoverContent>
   </Popover>;
@@ -62,8 +64,8 @@ export function GridDirectionSignals({ active, identity, market, timeframe, regi
       }).catch(() => { if (!controller.signal.aborted) setSignals({ market, serverNow: Date.now(), weekly: missing, funding: missing }); });
     return () => { controller.abort(); timers.forEach(clearTimeout); };
   }, [active, identity, market, refresh]);
-  return <div role="group" aria-label="Independent direction signals" className="flex items-center gap-1">
-    {gridSignalViews(macro, signals, market, timeframe, regime).map(signal =>
-      <GridSignalButton key={`${market}:${timeframe}:${signal.name}`} signal={signal}/>)}
+  return <div role="group" aria-label="Independent direction signals" className="flex flex-wrap items-center gap-2">
+    <span className="text-xs text-muted-foreground">Signals</span><div className="flex gap-1">{gridSignalViews(macro, signals, market, timeframe, regime).map(signal =>
+      <GridSignalButton key={`${market}:${timeframe}:${signal.name}`} signal={signal}/>)}</div>
   </div>;
 }

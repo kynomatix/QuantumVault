@@ -10,11 +10,12 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { DrawerSettingsPanel } from '@/components/ui/settings-panel';
 import { walletAuthHeaders } from '@/lib/queryClient';
-import { PLANNING_BANNER, ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart,
+import { ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart, plannerIssue, plannerMinimumRows,
   isPlannerPreview, plannerOverlays, plannerLevelMessage, readableDecimal, readableTime, clientObservationDeadline,
   RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange, plannerRangeAround,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
+import { GridPlanIssues } from './GridPlanIssues';
 import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
 import { GridDirectionSignals } from './GridDirectionSignals';
 import { PlannerPriceRefresh, watchPlannerPrice, PRICE_BUSY_MESSAGE } from '@/lib/planner-price-refresh';
@@ -273,9 +274,20 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       ? draftPreview.plan?.lines ?? [] : []
     : plannerEnabled ? plannerOverlays(preview, previewExpiry, now) : [], [createEnabled, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
   const regime = rangeFacts && now < rangeExpiry ? rangeFacts.regime : { state: 'unavailable' as const,
-    reason: rangeError || (rangeBusy ? 'Loading finalized candles' : !form.market ? 'Choose a market' : 'Observation expired or unavailable; refresh observations') };
+    reason: rangeError || (rangeBusy ? 'Loading finalized candles' : !form.market ? 'Choose a market' : 'Observation expired or unavailable; refresh chart') };
   const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
-  const stale = preview !== null && now >= previewExpiry;
+  const stale = preview !== null && preview.validForMs > 0 && now >= previewExpiry;
+  const showIssue = (reason: string) => {
+    const issue = plannerIssue(reason);
+    setExpandedSettingsPanel(issue.panel);
+    requestAnimationFrame(() => {
+      const target = issue.field ? document.getElementById(issue.field)
+        : document.querySelector<HTMLElement>('[data-testid="grid-advanced-toggle"]');
+      target?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      target?.focus({ preventScroll: true });
+    });
+  };
+  const issues = [...new Set([query.error || error, ...(preview?.reasons ?? [])].filter(Boolean))];
   const range = useMemo(() => plannerChartRange(form.lower, form.upper, effectiveStop), [form.lower, form.upper, effectiveStop]);
   const numberField = (key: keyof typeof INITIAL, label: string, placeholder?: string) => <div className="space-y-1.5">
     <Label htmlFor={`grid-${key}`}>{label}</Label>
@@ -299,8 +311,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
       </div>
-      <p className="text-xs text-muted-foreground">Sizes are in USDC; coin amounts are rounded to Pacifica's minimum step.</p>
-      <p className="text-xs text-muted-foreground">The number of levels sets the engine's intervals: 1–100 steps produce 2–101 quantized price lines.</p>
+      <p className="text-xs text-muted-foreground">Sizes are in USDC; coin amounts are rounded to the exchange's minimum step.</p>
       <p className="text-xs text-muted-foreground">The suggested range covers the highs and lows of this period, with a small buffer.</p>
       <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption.</p>
       <div className="space-y-2 border-t border-border/60 pt-4 text-xs text-muted-foreground">
@@ -310,8 +321,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             : `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`}</p>
           {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
             : <p>Sizing unavailable: {selected.constraints.reason}</p>}
-        </> : <p>Choose a market and refresh observations to see tick and lot details.</p>}
-        {preview && <p>Policy model: up to {preview.policy.ordinaryWindow} ordinary resting orders. A full window needs {preview.policy.requiredAvailableSlots} available slots including {preview.policy.reserveSlots} reserved; observed capacity can require a smaller window. Up to {preview.policy.maximumIntervals} intervals; transport batches up to {preview.policy.transportBatch}. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
+        </> : <p>Choose a market and refresh its price to see the exchange's price and quantity steps.</p>}
+        {preview && <p>Policy model: up to {preview.policy.ordinaryWindow} ordinary resting orders. A full window needs {preview.policy.requiredAvailableSlots} available slots including {preview.policy.reserveSlots} reserved; observed capacity can require a smaller window. Up to {preview.policy.maximumIntervals} grids; transport batches up to {preview.policy.transportBatch}. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
       </div>
       {draftDetails}
     </DrawerSettingsPanel>
@@ -325,39 +336,39 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     onOpenChange(value);
   };
   const renderSetup = ({ details, status, actions, depositDialog }: Partial<GridDraftContent> = {}) =>
-    <DialogContent className="max-w-lg sm:max-w-[760px] max-h-[90vh] flex flex-col" data-testid="sheet-grid-planner">
+    <DialogContent className="max-w-lg sm:max-w-[760px] max-h-[90dvh] flex flex-col" data-testid="sheet-grid-planner">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-xl"><BarChart3 className="h-5 w-5 text-primary" />Grid Bot</DialogTitle>
-          <DialogDescription>Choose a price range and explore your grid before starting a bot.</DialogDescription>
-          <Badge variant="secondary" className="w-fit mt-2">{liveEnabled ? 'Review your setup before creating a bot' : PLANNING_BANNER}</Badge>
+          <DialogDescription>Choose a range and plan your grid.</DialogDescription>
+          <Badge variant="secondary" className="w-fit mt-1">{liveEnabled ? 'Review your setup before creating a bot' : 'Planning only'}</Badge>
         </DialogHeader>
 
-      <div className="flex-1 min-h-0 overflow-y-auto space-y-5 py-2 pr-1">
-        <fieldset disabled={draftBusy} className="space-y-6">
-        <section aria-label="Market and price" className="rounded-xl border border-border bg-card/40 p-4 flex flex-col sm:flex-row gap-4 sm:items-start sm:justify-between">
-          <div className="space-y-1.5 sm:w-64">
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-3 sm:space-y-5 py-2 pr-1 pb-[max(2rem,env(safe-area-inset-bottom))]">
+        <fieldset disabled={draftBusy} className="space-y-3 sm:space-y-6">
+        <section aria-label="Market and price" className="rounded-xl border border-border bg-card/40 p-3 sm:p-4 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+          <div className="space-y-1.5 sm:w-64 min-w-0">
             <Label htmlFor="grid-market">Pacifica market</Label>
             <Select value={form.market} onValueChange={v => edit('market', v === '__clear__' ? '' : v)} disabled={marketLoading}>
-              <SelectTrigger id="grid-market"><SelectValue placeholder="Choose a market" /></SelectTrigger>
+              <SelectTrigger id="grid-market"><SelectValue placeholder="Choose a market">{form.market || undefined}</SelectValue></SelectTrigger>
               <SelectContent><SelectItem value="__clear__">Choose a market</SelectItem>{markets.map(m => <SelectItem key={m.market} value={m.market}>
                 {m.market}{m.constraints.state === 'unavailable' ? ' — sizing unavailable' : ''}
               </SelectItem>)}</SelectContent>
             </Select>
             {marketLoading && <p role="status" className="text-xs text-muted-foreground">Refreshing market observations…</p>}
-            {marketError && <p role={marketError === PRICE_BUSY_MESSAGE ? 'status' : 'alert'}
-              className={marketError === PRICE_BUSY_MESSAGE ? 'text-xs text-muted-foreground' : 'text-sm text-destructive'}>{marketError}</p>}
           </div>
-          <div className="space-y-1 sm:text-right sm:max-w-[50%]">
+          <div className="space-y-1 text-right max-w-40">
             <p className="text-xs text-muted-foreground">{reference ? 'Price now' : lastPrice ? 'Last observed price' : 'Price'}</p>
-            <p className="font-semibold text-xl tabular-nums">{lastPrice ? readableDecimal(lastPrice.price) : 'Unavailable'}</p>
+            <p className="font-semibold text-lg sm:text-xl tabular-nums break-words">{lastPrice ? readableDecimal(lastPrice.price) : '—'}</p>
             <p className="text-xs text-muted-foreground">{lastPrice ? <PriceAge observedAt={lastPrice.observedAt} clock={marketClock} />
               : marketError === PRICE_BUSY_MESSAGE ? 'Waiting for a fresh observation.'
-              : selected ? `Reference price unavailable: ${selected.reference.state === 'unavailable' ? selected.reference.reason : 'observation expired'}`
-              : marketLoading ? 'Refreshing price…' : form.market ? 'Market observation unavailable' : 'Choose a market to see its observed price.'}</p>
+              : marketLoading ? 'Refreshing price…' : !form.market ? 'Choose a market to see its price' : null}</p>
             <Button type="button" size="sm" variant="outline" disabled={marketLoading} onClick={refreshObservations}>
               <RefreshCw className="h-3.5 w-3.5 mr-2" />Refresh price
             </Button>
           </div>
+          {(marketError || selected?.reference.state === 'unavailable') && <p role={marketError === PRICE_BUSY_MESSAGE ? 'status' : 'alert'}
+            className={`col-span-2 text-sm ${marketError === PRICE_BUSY_MESSAGE ? 'text-muted-foreground' : 'text-destructive'}`}>
+            {marketError || (selected?.reference.state === 'unavailable' ? selected.reference.reason : '')}</p>}
         </section>
 
         <section aria-labelledby="grid-range-heading" className="space-y-3">
@@ -369,12 +380,21 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
                 {['15m', '1h', '4h'].map(t => <Button key={t} type="button" size="sm" variant={form.timeframe === t ? 'default' : 'outline'}
                   aria-pressed={form.timeframe === t} onClick={() => edit('timeframe', t)}>{t}</Button>)}
               </div>
-              <Button type="button" size="sm" variant="ghost" disabled={marketLoading} onClick={refreshObservations}>Refresh observations</Button>
+              <Button type="button" size="sm" variant="ghost" disabled={marketLoading} onClick={refreshObservations}>Refresh chart</Button>
             </div>
           </div>
           <GridPlannerChart chart={chart} lines={lines} range={range} period={form.rangeWindow} stale={now >= chartExpiry} hasMarket={!!form.market}
             levelMessage={createEnabled ? lines.length ? 'Authoritative draft preview levels used when saving.' : 'Authoritative draft levels require a fresh validated draft preview.'
               : `Hypothetical planner preview. ${plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}`}
+            tick={selected?.constraints.state === 'available' ? selected.constraints.value.tick : null}
+            previewDetails={<>
+              <p>{form.stop ? "Your custom stop must align to the exchange's price step and lie beyond the loss side of the range."
+                : "The suggested stop is 3% beyond the loss side of your range, rounded outwards to the exchange's observed price step. Change it in Stop loss settings."}</p>
+              <p>{preview?.fee.state === 'unknown' || form.feePercent === '' ? 'No fee assumed — fee checks have not been evaluated.' : ASSUMPTION_LABEL} Taker fees for a starting position, slippage, exchange fee rounding and funding are unavailable. {preview?.stop.reason}</p>
+              {preview?.fee.state === 'unknown' && <p>Minimum with your fee assumption: {preview.assumedMinimum.state === 'available' ? `${readableDecimal(preview.assumedMinimum.value)} USDC` : preview.assumedMinimum.reason}</p>}
+              <p>No profit or fill forecasts. Minimum investment uses a 0.01 USDC display step and no modeled transfer floor; it does not establish funding, liquidation safety, live capacity or executable partial fills. This hypothetical plan does not establish live capacity or balances; draft funds are checked separately below.</p>
+              {liveEnabled && <p>Creating a bot saves this reviewed setup through the existing draft path.</p>}
+            </>}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
         </section>
 
@@ -425,9 +445,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         <DrawerSettingsPanel id="direction-size" title="Order" icon={ArrowUpDown} keepMounted
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-direction-size-toggle">
         <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-1.5"><div className="flex items-center justify-between gap-2"><Label id="grid-side-label">Direction</Label>
+          <div className="space-y-2"><Label id="grid-side-label">Direction</Label>
             <GridDirectionSignals active={open} identity={identity} market={form.market} timeframe={form.timeframe} regime={regime} refresh={refresh}/>
-          </div>
             <div role="group" aria-labelledby="grid-side-label" className="flex gap-2 rounded-lg border border-border/60 bg-card/40 p-1">
               {['long', 'short'].map(side => <Button key={side} type="button" className="flex-1" variant={form.side === side ? 'default' : 'ghost'}
                 aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}
@@ -446,14 +465,15 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         </section>
 
           {numberField('intervals', 'Number of grids (1–100)')}
+          <p className="text-xs text-muted-foreground">10 grids make 11 price lines.</p>
         </DrawerSettingsPanel>
 
         <DrawerSettingsPanel id="stop" title="Stop loss" icon={Shield} keepMounted
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-stop-toggle">
           {numberField('stop', 'Custom stop price', suggestedStop ?? 'Enter a proposed stop')}
-          <p className="text-xs text-muted-foreground">{form.stop ? 'Your custom stop must align to the venue tick and lie beyond the loss side of the range.'
-            : suggestedStop ? `Suggested stop: ${readableDecimal(suggestedStop)}. It is 3% beyond the loss side of your range, rounded outwards to the observed tick.`
-            : 'A proposed stop needs observed sizing, or enter a custom stop price.'} A blank custom stop uses the suggested price. Liquidation reachability is unknown.</p>
+          <p className="text-xs text-muted-foreground">{form.stop ? "Your custom stop must align to the exchange's price step and lie beyond the loss side of the range."
+            : suggestedStop ? `Suggested stop: ${readableDecimal(suggestedStop)}. It is 3% beyond the loss side of your range, rounded outwards to the exchange's observed price step.`
+            : 'A proposed stop needs observed sizing, or enter a custom stop price.'} A blank custom stop uses the suggested price.</p>
         </DrawerSettingsPanel>
 
         <DrawerSettingsPanel id="orders" title="Sizing" icon={Layers} keepMounted
@@ -471,30 +491,26 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           </div>
         </DrawerSettingsPanel>
 
+        {status}
         {plannerEnabled && <section aria-labelledby="grid-plan-heading" className="rounded-xl border border-primary/20 bg-card/40 p-4 sm:p-5 space-y-4">
           <h3 id="grid-plan-heading" className="text-sm font-semibold">Your plan</h3>
-          {(query.error || error) && <p role="alert" className="text-sm text-destructive">{query.error || error}</p>}
+          <GridPlanIssues reasons={issues} onReview={showIssue} />
           {loading ? <p role="status" className="text-sm">Calculating hypothetical geometry…</p>
             : preview ? <p role="status" className="text-sm font-medium">{stale ? 'Observation expired — refresh before using this preview'
               : preview.state === 'rejected' ? 'Requested plan rejected' : preview.state === 'unavailable' ? 'Preview unavailable'
               : preview.state === 'diagnostic' ? 'Diagnostic geometry — some checks unavailable' : 'Hypothetical checks passed'}</p>
             : <p className="text-sm text-muted-foreground">Choose a market, range and investment to see your plan.{!effectiveStop && ' A proposed stop needs observed sizing, or enter one in Stop loss settings.'}</p>}
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-            <div><dt className="text-xs text-muted-foreground">Price levels</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length} price lines` : 'Awaiting preview'}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Grids</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length - 1} grids` : 'Awaiting preview'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Range you chose</dt><dd className="font-medium mt-1 break-words">{range ? `${readableDecimal(range.lower)} – ${readableDecimal(range.upper)}` : 'Enter lower and upper prices'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Proposed stop</dt><dd className="font-medium mt-1 break-words">{effectiveStop ? `${readableDecimal(effectiveStop)}${form.stop ? ' · custom' : ' · suggested'}` : 'Unavailable'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Grid order sizes</dt><dd className="font-medium mt-1">{ORDER_SIZES.find(o => o.value === form.entryScale)?.label}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Minimum capital for this geometry</dt><dd className="font-medium mt-1">{preview ? preview.minimum.state === 'available' ? `${readableDecimal(preview.minimum.value)} USDC` : `Unavailable — ${preview.minimum.reason}` : 'Awaiting preview'}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Minimum with your fee assumption</dt><dd className="font-medium mt-1">{preview ? preview.assumedMinimum.state === 'available' ? `${readableDecimal(preview.assumedMinimum.value)} USDC` : `Unavailable — ${preview.assumedMinimum.reason}` : form.feePercent === '' ? 'Unknown — no fee assumed' : 'Awaiting preview'}</dd></div>
+            {plannerMinimumRows(preview).map(row => <div key={row.label}><dt className="text-xs text-muted-foreground">{row.label}</dt><dd className="font-medium mt-1">{row.value}</dd></div>)}
           </dl>
-          <p className="text-xs text-muted-foreground">{form.stop ? 'Your custom stop must align to the venue tick and lie beyond the loss side of the range.'
-            : 'The suggested stop is 3% beyond the loss side of your range, rounded outwards to the observed tick. Change it in Stop loss settings.'} Liquidation reachability is unknown.</p>
-          {preview?.reasons.map((reason, i) => <p key={i} className="text-xs text-muted-foreground">{reason}</p>)}
-          <p className="text-xs text-muted-foreground">{preview?.fee.state === 'unknown' || form.feePercent === '' ? 'Fee unknown — fee gate was not evaluated.' : ASSUMPTION_LABEL} Taker fees for a starting position, slippage, venue fee rounding and funding are unavailable. {preview?.stop.reason}</p>
-          <p className="text-xs text-muted-foreground">No profit or fill forecasts. Minimum capital uses a 0.01 USDC display quantum and no modeled transfer floor; it does not establish funding, liquidation safety, live capacity or executable partial fills. This hypothetical plan does not establish live capacity or balances; draft funds are checked separately below.</p>
+          {(preview?.fee.state === 'unknown' || form.feePercent === '') && <p className="text-xs text-muted-foreground">Fee assumption not set — fees haven't been checked.</p>}
 
           {displayPlan && <details className="border-t border-border/60 pt-3">
-            <summary className="cursor-pointer text-sm font-medium">View all quantized levels and quantities</summary>
+            <summary className="cursor-pointer text-sm font-medium">View all grid levels and quantities</summary>
             <p className="text-xs text-muted-foreground mt-3">{stale && 'Expired observation. '}{preview?.minimumPlan ? 'Diagnostic quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Starting position quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p>
             <div className="overflow-x-auto max-h-72 mt-2"><table className="w-full text-xs text-left">
               <caption className="text-left py-2">Hypothetical levels ({displayPlan.lines.length} price lines)</caption>
@@ -520,8 +536,6 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
 
         </fieldset>
         {details ?? feesPanel()}
-        {status}
-        <p className="text-center text-xs text-muted-foreground pb-2">{liveEnabled ? 'Creating a bot saves this reviewed setup through the existing draft path.' : PLANNING_BANNER}</p>
       </div>
       <DialogFooter className="pt-2 border-t border-border/40 gap-2 sm:gap-0 sm:flex-wrap sm:gap-y-2">
         <Button variant="outline" disabled={draftBusy} onClick={() => handleOpenChange(false)}>Cancel</Button>
@@ -531,7 +545,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     </DialogContent>;
   return <Dialog open={open} onOpenChange={handleOpenChange}>
     {createEnabled ? <GridDraftActions open={open} intent={draftIntent} onSaved={onSaved} onBusyChange={setDraftBusy}
-      onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} renderDetails={feesPanel} renderLayout={renderSetup} />
+      onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} onIssue={showIssue} renderDetails={feesPanel} renderLayout={renderSetup} />
       : renderSetup()}
   </Dialog>;
 }
