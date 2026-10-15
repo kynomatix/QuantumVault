@@ -284,7 +284,14 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     for(const r of [{...v.request,kind:'cancel' as const},{...v.request,kind:'close' as const},{...v.request,kind:'sweep' as const},{...v.request,data:{...v.request.data,reduce_only:true}}])
       expect(await (s as any).capacityBlocked(pool,r)).toBe(false);
   });
-  it('does not partition different masters together and enforces the global pilot',async()=>{const a=await reserve('EXAMPLE_A'),b=await reserve('EXAMPLE_B');for(const account of [a.account,b.account]){const v=input(account);v.claim.credits='150';await storage.prepare(randomUUID(),v.request,v.claim,account.leaseToken);}await expect(reserve('EXAMPLE_C')).rejects.toThrow('pilot');});
+  it('does not partition different masters together',async()=>{
+    const a=await reserve('EXAMPLE_A'),b=await reserve('EXAMPLE_B');
+    for(const account of [a.account,b.account]){const v=input(account);v.claim.credits='150';await storage.prepare(randomUUID(),v.request,v.claim,account.leaseToken);}
+    const c=await reserve('EXAMPLE_C');
+    expect(c.account.masterAccount).toBe('EXAMPLE_C');
+    expect(c.account.account).not.toBe(a.account.account);
+    expect(c.account.account).not.toBe(b.account.account);
+  });
   it('persists rate-limit backoff and blocks a prepared send after another worker receives 429',async()=>{const a=await reserve(),b=await reserve(),av=input(a.account),bv=input(b.account);const op=await storage.prepare('EXAMPLE_A',av.request,av.claim,a.account.leaseToken),other=await storage.prepare('EXAMPLE_B',bv.request,bv.claim,b.account.leaseToken);
     expect(await storage.submit(op,a.account.leaseToken)).toBe(true);await storage.settle(op,{state:'unconfirmed',reason:'quota',releaseSlot:false,rateLimited:true});
     expect(await new GridLaunchStorage(pool,async()=>{}).submit(other,b.account.leaseToken)).toBe(false);expect((await pool.query('SELECT settled_at FROM grid_execution_claims WHERE operation_id=$1',[op.id])).rows[0].settled_at).toBe(null);
