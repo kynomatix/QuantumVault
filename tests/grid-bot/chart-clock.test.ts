@@ -37,8 +37,9 @@ describe('Grid chart clock and viewport', () => {
       pnl: { realised: null, unrealised: null, total: null, fees: null, averageEntry: '100', breakeven: '100' },
       fills: [], cycles: null, position: { size: '1', direction: 'long' }, mark: '105', observedAt: new Date(now).toISOString(),
       residual: null, sweep: 'EXAMPLE', capacity: { ordinaryWindow: 0, reservedSlots: 0, liveOrders: null, venueMaximum: null },
-      authorities: { safeWindow: false, resume: false, lostSweepLookup: false, breaker: 'not_monitored_by_venue_error_class' },
-      notifications: { pending: 0, uncertain: 0 }, workerEnabled: false, startEnabled: false,
+      qualification: {firstConfirmedAt:null,cleanSince:null,cleanTicks:null,promotedAt:null},
+      authorities: { safeWindow: false, safeWindowState:'unavailable', resume: false, lostSweepLookup: false, breaker: 'retained_terminal_failures' },
+      returnedFunds:{amount:null,confirmedAt:null},entriesBlockedReasons:[],startDraft:null,notifications: { pending: 0, uncertain: 0 }, draftEnabled:false,startConfigured:false,workerEnabled: false, workerRunning:false, startEnabled: false,
     };
     const chart: Props['chart'] = { state: 'available', market: 'BTC-PERP', timeframe: '1h', requestedBars: 100, actualBars: 1,
       partial: true, retrievedAt: now, cacheInsertedAt: now, validForMs: 60_000, candles: [{ time: now - 3_600_000, open: 100, high: 110, low: 90, close: 105, volume: 1,

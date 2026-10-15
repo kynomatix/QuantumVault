@@ -22,6 +22,8 @@ import {durableGridUmk} from './service';
 import {observePacificaConstraints} from '../protocol/market-constraints';
 import {pacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
 import type {WindowLevel,WindowOrder} from './window';
+import {startRetainedGrid} from './start-service';
+import type {GridStartRequest} from '../../shared/grid-start';
 
 const claimFor=(a:GridAccount):GridMonitorClaim=>({id:a.botId,leaseToken:a.leaseToken,account:a.account,masterAccount:a.masterAccount});
 const constraintFor=(f:LaunchFacts)=>observePacificaConstraints({tick_size:f.tick,lot_size:f.lot,min_order_size:f.minimumQuote},f.market,f.observedAt);
@@ -203,16 +205,21 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
     provision:async(claim,signal)=>{const {bot,levels}=await storage.snapshot(claim),account=await custody.recover(claim.id,bot.wallet_address,claim.leaseToken);
       return provision(bot.wallet_address,retainedGridPolicy(bot,levels),bot.policy_hmac,signal,account);}});
   return {async tick(claim:GridMonitorClaim,signal:AbortSignal){leases.set(claim.id,claim.leaseToken);try{return await executor.tick(claim,signal);}finally{leases.delete(claim.id);}},
-    async start(wallet:string,id:string,signal:AbortSignal){
-      const draft=await ledger.transaction(async c=>{const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rows[0];
-        if(!bot)throw Error('Grid draft is unavailable');
-        return {bot,levels:(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[id])).rows};});
-      if(draft.bot.status!=='draft')return {state:'pending' as const,reason:'Retained Grid work belongs to the lifecycle worker.'};
-      return provision(wallet,retainedGridPolicy(draft.bot,draft.levels),draft.bot.policy_hmac,signal);
+    async start(wallet:string,id:string,expected:GridStartRequest,signal:AbortSignal){
+      return startRetainedGrid(wallet,id,expected,signal,{
+        read:(owner,botId)=>ledger.transaction(async c=>{
+          const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2',[botId,owner])).rows[0];
+          if(!bot)return null;
+          const levels=(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[botId])).rows;
+          return {policy:retainedGridPolicy(bot,levels),policyHmac:bot.policy_hmac,status:bot.status,
+            draftRevision:bot.draft_revision,serverIntentDigest:bot.server_intent_digest};
+        }),
+        provision:(owner,draft,abort)=>provision(owner,draft.policy,draft.policyHmac,abort),
+      });
     }};
 }
 
-/** Initialized only behind the hard-disabled Start gate. Rejected construction may retry on a later request. */
+/** Initialized only behind the release gate. Rejected construction may retry on a later request. */
 let production:Promise<ReturnType<typeof gridExecutorRuntime>>|undefined;
 export function productionGridExecutor(){
   return production??=Promise.all([import('../db'),import('./launch-storage'),import('./monitor-storage'),import('./launch-reads'),import('./monitor-reads')])

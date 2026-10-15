@@ -8,7 +8,7 @@ import {preflightGridLaunch,GridProvision,GRID_FUND_IDENTITY_LEVEL,GRID_SEED_IDE
 import {gridClientOrderId} from '../../server/grid-bot/order-identity';
 import {GridExecution} from '../../server/grid-bot/execution';
 import {GridLaunchTransientError,requestDigest,type DurableGridOperation,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
-import {GRID_START_ROUTE_ENABLED,GRID_WORKER_ENABLED} from '../../server/grid-bot/service';
+import {gridRuntimeGates} from '../../server/grid-bot/service';
 import {policy as basePolicy,umk,clock} from './draft-fixtures';
 
 function launchFixture(seed=false,start='100',investment='100',leverage=2){
@@ -145,7 +145,7 @@ describe('Grid launch preflight and hard production gates',()=>{
   });
   it('denies an aggregate seed exceeding venue limits before custody or funding',()=>{const f=launchFixture(true,'106');f.facts.maximumQuote='20';expect(preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock)).toMatchObject({ok:false,reason:'The unchanged aggregate seed exceeds current market bounds.'});});
   it('denies extra signed levels instead of ignoring them',()=>{const f=launchFixture();f.policy.levels.push({...f.policy.levels[0],ordinal:99});expect(preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock)).toMatchObject({ok:false,reason:'Grid policy signature or version changed.'});});
-  it('production cannot enable start or workers through environment configuration',()=>{process.env.GRID_WORKER_ENABLED='true';expect(GRID_START_ROUTE_ENABLED).toBe(false);expect(GRID_WORKER_ENABLED).toBe(false);delete process.env.GRID_WORKER_ENABLED;});
+  it('a worker can be configured without releasing new Starts',()=>{expect(gridRuntimeGates({GRID_WORKER_ENABLED:'true'})).toMatchObject({workerEnabled:true,startConfigured:false,startEnabled:false});});
   it.each([false,true])('journals exact funding then leverage and optional seed=%s with fresh reserved-account fees',async seed=>{
     const f=launchFixture(seed,'109'),account={botId:f.policy.id,wallet:'EXAMPLE',masterAccount:'EXAMPLE_MASTER',account:'EXAMPLE_SUB',leaseToken:'EXAMPLE',reused:false};
     const done=new Map<string,any>(),calls:string[]=[];

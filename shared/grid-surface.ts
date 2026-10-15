@@ -1,9 +1,11 @@
 import type {GridIntent} from './grid-draft';
+import type {GridStartRequest} from './grid-start';
 export type GridOwnerAction='pause'|'resume'|'resync'|'stop';
 export interface GridBotSummary {
   id:string;name:string;market:string;direction:string;status:string;lowerPrice:string;upperPrice:string;
   totalInvestment:string;stopLossPrice:string|null;gridCount:number;chartTimeframe:string;updatedAt:string;
   createIntent?:GridIntent;
+  seedAtCreation?:boolean;leverage?:number;
 }
 export interface GridBotSurface {
   bot:GridBotSummary;
@@ -13,12 +15,17 @@ export interface GridBotSurface {
   pnl:{realised:string|null;unrealised:string|null;total:string|null;fees:string|null;averageEntry:string|null;breakeven:string|null};
   fills:{tradeId:string;time:number;leg:'entry'|'exit';size:string;price:string}[];
   cycles:number|null;
+  qualification:{firstConfirmedAt:string|null;cleanSince:string|null;cleanTicks:number|null;promotedAt:string|null};
   position:{size:string;direction:string}|null;mark:string|null;observedAt:string|null;
   residual:string|null;sweep:string;
+  returnedFunds:{amount:string|null;confirmedAt:string|null};
   capacity:{ordinaryWindow:number;reservedSlots:number;liveOrders:number|null;venueMaximum:number|null};
-  authorities:{safeWindow:false;resume:false;lostSweepLookup:false;breaker:'not_monitored_by_venue_error_class'};
+  authorities:{safeWindow:boolean;safeWindowState:'inferred'|'unavailable';resume:boolean;lostSweepLookup:false;breaker:'retained_terminal_failures'};
+  entriesBlockedReasons:string[];
+  /** Retained signed confirmation identity, including after admission. */
+  startDraft:GridStartRequest|null;
   notifications:{pending:number;uncertain:number};
-  workerEnabled:false;startEnabled:false;
+  draftEnabled:boolean;startConfigured:boolean;workerEnabled:boolean;workerRunning:boolean;startEnabled:boolean;
 }
 export function gridActionAllowed(bot:GridBotSummary,action:GridOwnerAction){
   if(['draft','failed','stopped'].includes(bot.status))return false;
