@@ -27,7 +27,7 @@ export function gridLaunchState(surface:GridBotSurface){
   if(surface.bot.status==='stopping')return 'Stop pending; waiting for orders, positions and settlement';
   if(surface.bot.status==='stopped')return 'Stopped; terminal settlement confirmed';
   const op=surface.operations[0];
-  if(op){const step=({provision_subaccount:'Creating isolated account',fund_subaccount:'Funding isolated account',set_leverage:'Setting leverage',
+  if(op&&['prepared','submitted','unconfirmed'].includes(op.state)){const step=({provision_subaccount:'Creating isolated account',fund_subaccount:'Funding isolated account',set_leverage:'Setting leverage',
     seed_position:'Placing starting position',place_level_order:'Placing order',cancel_level_order:'Cancelling order',close_position:'Closing position',sweep_subaccount:'Returning funds to master'} as Record<string,string>)[op.type]??op.type.replaceAll('_',' ');
     return step+(['submitted','unconfirmed'].includes(op.state)?'; awaiting exchange confirmation':'; prepared');}
   return ({provisioning:'Provisioning isolated account',canary:'First order confirmed; checking clean trading history',active:'Trading',

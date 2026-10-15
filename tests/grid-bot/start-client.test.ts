@@ -22,6 +22,23 @@ describe('C7 owner Start and controls',()=>{
     s.bot.status='stopping';expect(gridVisibleActions(s)).toEqual(['stop']);expect(gridLaunchState(s)).toContain('Stop pending');
     s.startEnabled=true;s.bot.status='active';expect(gridCanAdjust(s)).toBe(true);
   });
+  it('shows Trading for an active bot with a confirmed last operation',()=>{
+    const s=surface();s.operations=[{id:'EXAMPLE',type:'place_level_order',state:'confirmed'}];
+    expect(gridLaunchState(s)).toBe('Trading');
+  });
+  it('falls through to the bot status label after a failed last operation',()=>{
+    const s=surface();s.bot.status='paused';s.operations=[{id:'EXAMPLE',type:'place_level_order',state:'failed'}];
+    expect(gridLaunchState(s)).toBe('Paused');
+    s.bot.status='active';expect(gridLaunchState(s)).toBe('Trading');
+  });
+  it.each([
+    ['prepared','Placing order; prepared'],
+    ['submitted','Placing order; awaiting exchange confirmation'],
+    ['unconfirmed','Placing order; awaiting exchange confirmation'],
+  ])('shows the operation step while the latest operation is %s',(state,label)=>{
+    const s=surface();s.operations=[{id:'EXAMPLE',type:'place_level_order',state}];
+    expect(gridLaunchState(s)).toBe(label);
+  });
   it('describes funding, first orders and uncertain settlement in plain words',()=>{
     expect(gridStartConfirmation('100',true)).toContain('full $100');expect(gridStartConfirmation('100',true)).toContain('starting position');expect(gridStartConfirmation('100',false)).toContain('A deposit alone does not start');
     const s=surface();s.bot.status='provisioning';s.operations=[{id:'EXAMPLE',type:'fund_subaccount',state:'unconfirmed'}];expect(gridLaunchState(s)).toBe('Funding isolated account; awaiting exchange confirmation');
