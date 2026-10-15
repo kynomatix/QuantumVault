@@ -7,7 +7,7 @@ import { previewGrid } from '../../server/grid-planner/preview';
 import type { PlannerMarket, PlannerQuery } from '../../server/grid-planner/types';
 import { gridSetupForm, gridSetupIntent } from '../../client/src/lib/grid-setup-view';
 import { gridHistoryWindow } from '../../shared/grid-lookback';
-import { RANGE_PRESETS } from '../../client/src/lib/grid-planner-view';
+import { isPlannerPreview, RANGE_PRESETS } from '../../client/src/lib/grid-planner-view';
 
 // Exercise the real sheet, request generations and price controller without a DOM dependency.
 // Only rendering hooks and the periodic price scheduler are replaced.
@@ -56,7 +56,19 @@ type Props = Parameters<typeof GridPlannerSheet>[0];
 type Element = ReactElement<Record<string, any>>;
 type RangeRequest = { market: string; timeframe: string; period: string; signal: AbortSignal;
   resolve: (value: unknown) => void; reject: (error: Error) => void };
-let props: Props, tree: ReactNode, requests: RangeRequest[], listed: string[];
+let props: Props, tree: ReactNode, requests: RangeRequest[], listed: string[], constraintsAvailable: boolean;
+
+function fixtureMarket(market: string, observedAt = Date.now()): PlannerMarket {
+  // Venue constraints last five minutes; reference prices and geometry previews last one.
+  return { market, name: market, protocolSymbol: market,
+    constraints: constraintsAvailable
+      ? { state: 'available', value: { tick: '0.1', lot: '0.01', minimumQuote: '10', observedAt, expiresAt: observedAt + 300_000,
+        maxLeverage: { state: 'available', value: '50' }, maximumQuote: { state: 'unavailable', reason: 'EXAMPLE' },
+        priceBounds: { state: 'unavailable', reason: 'EXAMPLE' }, restrictions: { state: 'unavailable', reason: 'EXAMPLE' }, source: '/info', venue: 'pacifica' } }
+      : { state: 'unavailable', reason: 'EXAMPLE sizing unavailable' },
+    reference: { state: 'available', value: { price: '100', observedAt, expiresAt: observedAt + 60_000,
+      label: 'Cached Pacifica book reference price' } } };
+}
 
 function render(next: Partial<Props> = {}) {
   props = { ...props, ...next };
@@ -115,18 +127,14 @@ async function resolve(request: RangeRequest, value = facts(request)) { request.
 beforeEach(() => {
   hooks.states = []; hooks.refs = []; hooks.effects = []; hooks.pending = []; hooks.controllers = []; hooks.dirty = false;
   props = { open: true, onOpenChange: vi.fn(), identity: 'EXAMPLE_WALLET' };
-  requests = []; listed = ['BTC-PERP', 'ETH-PERP'];
+  requests = []; listed = ['BTC-PERP', 'ETH-PERP']; constraintsAvailable = true;
   vi.stubGlobal('window', new EventTarget()); vi.stubGlobal('document', new EventTarget());
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
   vi.stubGlobal('fetch', vi.fn((url: string, init: RequestInit) => {
     const path = new URL(url, 'https://example.test');
     if (path.pathname.endsWith('/preview')) {
       const observedAt = Date.now(), market = path.searchParams.get('market')!;
-      const fixture: PlannerMarket = { market, name: market, protocolSymbol: market,
-        constraints: { state: 'available', value: { tick: '0.1', lot: '0.01', minimumQuote: '10', observedAt, expiresAt: observedAt + 60_000,
-          maxLeverage: { state: 'available', value: '50' }, maximumQuote: { state: 'unavailable', reason: 'EXAMPLE' },
-          priceBounds: { state: 'unavailable', reason: 'EXAMPLE' }, restrictions: { state: 'unavailable', reason: 'EXAMPLE' }, source: '/info', venue: 'pacifica' } },
-        reference: { state: 'available', value: { price: '100', observedAt, expiresAt: observedAt + 60_000, label: 'Cached Pacifica book reference price' } } };
+      const fixture = fixtureMarket(market, observedAt);
       const query = { ...Object.fromEntries(path.searchParams), intervals: Number(path.searchParams.get('intervals')),
         seed: path.searchParams.get('seed') === 'true', fee: path.searchParams.get('fee') } as unknown as PlannerQuery;
       return Promise.resolve({ ok: true, json: async () => previewGrid(query, fixture, observedAt) });
@@ -138,10 +146,7 @@ beforeEach(() => {
     });
     const observedAt = Date.now();
     const value = path.pathname.endsWith('/markets') || path.pathname.endsWith('/setup-markets')
-      ? { state: 'available', retrievedAt: observedAt, markets: listed.map(market => ({ market, name: market, protocolSymbol: market,
-        constraints: { state: 'unavailable', reason: 'EXAMPLE sizing unavailable' },
-        reference: { state: 'available', value: { price: '100', observedAt, expiresAt: observedAt + 60_000,
-          label: 'Cached Pacifica book reference price' } } })) }
+      ? { state: 'available', retrievedAt: observedAt, markets: listed.map(market => fixtureMarket(market, observedAt)) }
       : { state: 'unavailable', reason: 'EXAMPLE chart unavailable' };
     return Promise.resolve({ ok: true, json: async () => value });
   }));
@@ -183,19 +188,35 @@ describe('Grid setup automatic opening range', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     const original = vi.mocked(fetch).getMockImplementation()!;
     let finish!: () => void, oldSignal: AbortSignal | undefined;
-    vi.mocked(fetch).mockImplementation((url, init) => {
+    let stalePreview!: ReturnType<typeof previewGrid>;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
       if (String(url).includes('/preview?') && !oldSignal) {
         oldSignal = init?.signal as AbortSignal;
-        return new Promise<Response>(resolve => { finish = () => resolve({ ok: true, json: async () => ({ state: 'EXAMPLE invalid superseded response' }) } as Response); });
+        const response = await original(url, init);
+        stalePreview = await response.json();
+        return new Promise<Response>(resolve => { finish = () => resolve({ ...response, json: async () => stalePreview } as Response); });
       }
       return original(url, init);
     });
     await open(); await resolve(requests[0]); await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(isPlannerPreview(stalePreview)).toBe(true);
+    expect(stalePreview.geometry).toMatchObject({ state: 'available', value: expect.arrayContaining([{ ordinal: 0, price: '90' }]) });
     edit('lower', '95'); expect(oldSignal?.aborted).toBe(true);
     finish(); await settle();
     expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
     await vi.advanceTimersByTimeAsync(250); await settle();
     expect(find(node => node.type === GridPlannerChart).props.lines[0].price).toBe('95');
+  });
+  it.each([false, true])('keeps levels unavailable without market constraints with createEnabled=%s', async createEnabled => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    constraintsAvailable = false;
+    await open({ createEnabled }); await resolve(requests[0]);
+    expect(prices()).toEqual({ lower: '90', upper: '110', stop: '85' });
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/preview?'))).toBe(true);
+    const chart = find(node => node.type === GridPlannerChart);
+    expect(chart.props.lines).toEqual([]);
+    expect(chart.props.levelMessage).toBe('Grid levels are unavailable: EXAMPLE sizing unavailable');
   });
   it.each([true, false])('clears automatic application after a markets read failure with plannerEnabled=%s', async plannerEnabled => {
     const original = vi.mocked(fetch).getMockImplementation()!;

@@ -380,7 +380,9 @@ describe('Planner client authority boundaries', () => {
     const message = (p: typeof preview | null, overrides = {}, loading = false, error = '') =>
       plannerLevelMessage(p, now + 60000, now, { ...inputs, ...overrides }, loading, error);
     expect(message(null, { market: '' })).toContain('Choose a market');
-    expect(message(null, { lower: '', upper: '', investment: '', stop: '' })).toContain('a lower price, an upper price, an investment amount, a stop price');
+    expect(message(null, { lower: '', upper: '', investment: '', stop: '' })).toBe('To show grid levels, enter a lower price, an upper price.');
+    expect(message(null, { investment: '', stop: '' })).toContain('Waiting for a grid preview');
+    expect(message(null, { stop: '' })).toBe('To show grid levels, enter a stop price (or fresh market details for a suggested stop).');
     expect(message(null, {}, true)).toContain('Calculating grid levels');
     expect(message(null, {}, false, 'Enter a valid fee percentage')).toContain('Enter a valid fee percentage');
     expect(message(null)).toContain('Waiting for a grid preview');
