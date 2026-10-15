@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Children, isValidElement, type ReactElement, type ReactNode } from 'react';
+import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
+import { Button } from '../../client/src/components/ui/button';
+import { DialogFooter } from '../../client/src/components/ui/dialog';
 import { GridPlannerSheet } from '../../client/src/components/grid-planner/GridPlannerSheet';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraftActions';
@@ -158,6 +160,40 @@ afterEach(() => {
 });
 
 describe('Grid setup automatic opening range', () => {
+  it('shows a disabled Create bot with a visible accessible launch reason and working Cancel in planning mode', async () => {
+    await open();
+    const footer = find(node => node.type === DialogFooter);
+    const buttons = elements(footer).filter(node => node.type === Button);
+    expect(buttons.map(text)).toEqual(['Cancel', 'Create bot']);
+    const create = buttons[1];
+    expect(create.props.disabled).toBe(true);
+    expect(create.props.type).toBe('button');
+    expect(create.props.className).toBe('bg-gradient-to-r from-primary to-accent');
+    expect(create.props.onClick).toBeUndefined();
+    const reason = elements(footer).find(node => node.props.id === create.props['aria-describedby']);
+    expect(reason).toBeDefined();
+    expect(reason!.type).toBe('p');
+    expect(text(reason)).toBe('Opens when Grid trading launches');
+    expect(reason!.props.hidden).toBeUndefined();
+    expect(reason!.props.className).not.toMatch(/sr-only|hidden/);
+    expect(buttons[0].props.disabled).toBe(false);
+    buttons[0].props.onClick();
+    expect(props.onOpenChange).toHaveBeenCalledWith(false);
+  });
+  it.each([false, true])('retains supplied draft actions without the launch placeholder with liveEnabled=%s', async liveEnabled => {
+    await open({ createEnabled: true, liveEnabled });
+    const draft = find(node => node.type === GridDraftActions);
+    const onClick = vi.fn(), label = liveEnabled ? 'Create bot' : 'Save draft';
+    const actions = createElement(Button, { onClick }, label);
+    const layout = draft.props.renderLayout({ actions });
+    const footer = elements(layout).find(node => node.type === DialogFooter)!;
+    const buttons = elements(footer).filter(node => node.type === Button);
+    expect(buttons.map(text)).toEqual(['Cancel', label]);
+    expect(buttons[1].props).toEqual(actions.props);
+    expect(text(footer)).not.toContain('Opens when Grid trading launches');
+    buttons[1].props.onClick();
+    expect(onClick).toHaveBeenCalledOnce();
+  });
   it.each([false, true])('draws quantized levels before investment with createEnabled=%s and replaces them on sizing', async createEnabled => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await open({ createEnabled }); await resolve(requests[0]);
