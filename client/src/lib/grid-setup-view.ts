@@ -13,7 +13,8 @@ export function gridRememberMarket(identity: string, market: string): void {
   catch { /* Market selection still works when browser storage is unavailable. */ }
 }
 export function gridAvailableMarket(preferred: string, markets: readonly { market: string }[]): string {
-  return markets.some(m => m.market === preferred) ? preferred : markets[0]?.market ?? '';
+  if (markets.some(m => m.market === preferred)) return preferred;
+  return markets.some(m => m.market === 'BTC-PERP') ? 'BTC-PERP' : markets[0]?.market ?? '';
 }
 /** Clear old-market geometry synchronously, before either new-market request resolves. */
 export function gridMarketChange(form: GridSetupForm, market: string, source: 'manual' | 'auto', percent: number | null) {
@@ -21,7 +22,7 @@ export function gridMarketChange(form: GridSetupForm, market: string, source: 'm
     mode: source === 'auto' ? 'auto' as const : percent !== null ? 'percent' as const : 'manual' as const,
     note: market ? `Enter a range for ${market}` : '' };
 }
-export function gridSetupForm(intent?: GridIntent, defaultMarket = 'BTC-PERP'): GridSetupForm {
+export function gridSetupForm(intent: GridIntent | undefined, defaultMarket: string): GridSetupForm {
   return intent ? { ...GRID_SETUP_INITIAL, market: intent.market, side: intent.direction, lower: intent.lowerPrice, upper: intent.upperPrice,
     intervals: String(intent.gridCount), entryScale: intent.entryScaleType, profitScale: intent.profitScaleType, seed: intent.seedAtCreation,
     leverage: intent.leverage, investment: intent.totalInvestment, stop: intent.stopPrice, timeframe: intent.timeframe, bars: String(intent.lookback) } : { ...GRID_SETUP_INITIAL, market: defaultMarket };

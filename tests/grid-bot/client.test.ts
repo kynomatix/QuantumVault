@@ -110,19 +110,25 @@ describe('Grid setup default market', () => {
     expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('BTC-PERP');
     expect(gridStoredMarket('EXAMPLE-WALLET-B')).toBe('SOL-PERP');
   });
-  it('uses the first live market when the remembered market or Bitcoin has disappeared', () => {
+  it('keeps a listed remembered market ahead of Bitcoin', () => {
+    expect(gridAvailableMarket('ETH-PERP', [{ market: 'BTC-PERP' }, { market: 'ETH-PERP' }])).toBe('ETH-PERP');
+  });
+  it('uses Bitcoin when the remembered market has disappeared', () => {
     browserStorage();
     gridRememberMarket('EXAMPLE-WALLET-A', 'OLD-PERP');
     const next = gridAvailableMarket(gridStoredMarket('EXAMPLE-WALLET-A'), markets);
-    expect(next).toBe('ETH-PERP');
+    expect(next).toBe('BTC-PERP');
     gridRememberMarket('EXAMPLE-WALLET-A', next);
-    expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('ETH-PERP');
+    expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('BTC-PERP');
+  });
+  it('uses the first live market only when the remembered market and Bitcoin are absent', () => {
+    expect(gridAvailableMarket('OLD-PERP', [{ market: 'SOL-PERP' }, { market: 'ETH-PERP' }])).toBe('SOL-PERP');
     expect(gridAvailableMarket('BTC-PERP', [{ market: 'SOL-PERP' }, { market: 'ETH-PERP' }])).toBe('SOL-PERP');
     expect(gridAvailableMarket('BTC-PERP', [])).toBe('');
   });
   it('keeps Adjust Range intent authoritative even when its market is no longer listed', () => {
     browserStorage(); gridRememberMarket('EXAMPLE-WALLET-A', 'BTC-PERP');
-    const form = { ...gridSetupForm(), market: 'OLD-PERP', side: 'short', lower: '90', upper: '110', stop: '115',
+    const form = { ...gridSetupForm(undefined, ''), market: 'OLD-PERP', side: 'short', lower: '90', upper: '110', stop: '115',
       intervals: '17', investment: '234.56', leverage: '3', seed: false, entryScale: 'ascending', profitScale: 'descending' };
     const intent = gridSetupIntent(form, form.stop, 'manual');
     expect(gridSetupForm(intent, gridStoredMarket('EXAMPLE-WALLET-A'))).toEqual(form);
@@ -147,7 +153,7 @@ describe('Grid setup default market', () => {
 describe('Market range ownership and time windows', () => {
   it.each([['manual', null, 'manual'], ['manual', 10, 'percent'], ['auto', null, 'auto']] as const)
     ('clears every old-market price before resolving a %s range', (source, percent, mode) => {
-      const old = { ...gridSetupForm(), market: 'BTC-PERP', lower: '80', upper: '120', stop: '70' };
+      const old = { ...gridSetupForm(undefined, ''), market: 'BTC-PERP', lower: '80', upper: '120', stop: '70' };
       const next = gridMarketChange(old, 'ETH-PERP', source, percent);
       expect(next.form).toMatchObject({ market: 'ETH-PERP', lower: '', upper: '', stop: '' });
       expect(next.mode).toBe(mode); expect(next.note).toBe('Enter a range for ETH-PERP');
@@ -162,11 +168,11 @@ describe('Market range ownership and time windows', () => {
     expect(gridHistoryWindow(String(timeframe), String(period))).toMatchObject({ rangeBars, chartBars });
   });
   it('defaults to last week and rejects unbounded or mixed requests while retaining legacy draft metadata', () => {
-    expect(gridSetupForm().rangeWindow).toBe('week');
+    expect(gridSetupForm(undefined, '').rangeWindow).toBe('week');
     expect(gridHistoryRequest('1h', undefined, '200')).toMatchObject({ rangeBars: 200, chartBars: 200 });
     for (const args of [['2h', 'week', undefined], ['1h', 'year', undefined], ['1h', 'week', '100'], ['1h', undefined, '4321']])
       expect(gridHistoryRequest(...args as [string, string | undefined, string | undefined])).toBeNull();
-    const form = { ...gridSetupForm(), lower: '80', upper: '120' };
+    const form = { ...gridSetupForm(undefined, ''), lower: '80', upper: '120' };
     expect(gridSetupIntent(form, '70', 'auto').rangeSource).toBe('auto');
     expect(gridSetupIntent(form, '70', 'auto', true)).toMatchObject({ rangeSource: 'manual', lowerPrice: '80', upperPrice: '120', lookback: 100 });
   });
@@ -448,10 +454,10 @@ describe('Planner client authority boundaries', () => {
     expect(readableDecimal('123456.000001')).toBe('123,456.000001');
   });
   it('retains every Adjust Range intent field through the unified form, including inactive profit sizing', () => {
-    const form = { ...gridSetupForm(), market: 'ETH-PERP', side: 'short', lower: '90', upper: '110', stop: '115', intervals: '17',
+    const form = { ...gridSetupForm(undefined, ''), market: 'ETH-PERP', side: 'short', lower: '90', upper: '110', stop: '115', intervals: '17',
       timeframe: '4h', bars: '200', investment: '234.56', leverage: '3', seed: false, entryScale: 'ascending', profitScale: 'descending' };
     const intent = gridSetupIntent(form, form.stop, 'auto');
-    expect(gridSetupForm(intent)).toEqual(form); expect(intent.rangeSource).toBe('auto');
+    expect(gridSetupForm(intent, '')).toEqual(form); expect(intent.rangeSource).toBe('auto');
     expect(intent.seedAtCreation).toBe(false); expect(intent.profitScaleType).toBe('descending');
     expect(gridSetupIntent(form, '120', 'manual').stopPrice).toBe('120');
   });
@@ -556,7 +562,7 @@ describe('Planner client authority boundaries', () => {
     expect(close).toContain('onOpenChange(value)');
   });
   it('places the existing draft controls in a supplied footer while retaining details and status', () => {
-    const props = { open: false, intent: gridSetupIntent(gridSetupForm(), '', 'manual'), onSaved: vi.fn(),
+    const props = { open: false, intent: gridSetupIntent(gridSetupForm(undefined, ''), '', 'manual'), onSaved: vi.fn(),
       onBusyChange: vi.fn(), liveEnabled: false, rangeBusy: false, onPreview: vi.fn() };
     const html = renderToStaticMarkup(createElement(GridDraftActions, { ...props,
       renderDetails: details => createElement('article', { 'data-testid': 'draft-details' }, details),

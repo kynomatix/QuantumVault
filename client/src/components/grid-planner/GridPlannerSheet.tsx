@@ -56,7 +56,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     identity: string; plannerEnabled?: boolean; createEnabled?: boolean; liveEnabled?: boolean; initialIntent?: GridIntent;
     onSaved?: (bot: Record<string, unknown>) => void }) {
   const [form, setForm] = useState(() => gridSetupForm(initialIntent, gridStoredMarket(identity))), [markets, setMarkets] = useState<PlannerMarket[]>([]);
-  const [defaultMarketPending, setDefaultMarketPending] = useState(!initialIntent);
+  const defaultMarketPendingRef = useRef(!initialIntent);
+  const [defaultMarketPending, setDefaultMarketPending] = useState(defaultMarketPendingRef.current);
   const [preview, setPreview] = useState<PlannerPreview | null>(null), [chart, setChart] = useState<PlannerChart | null>(null);
   const [error, setError] = useState(''), [marketError, setMarketError] = useState(''), [chartError, setChartError] = useState('');
   const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [now, setNow] = useState(Date.now());
@@ -94,11 +95,12 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const edit = (key: keyof typeof INITIAL, value: string | boolean) => {
     if (draftBusy) return;
     if (key === 'market') {
+      defaultMarketPendingRef.current = false;
       setDefaultMarketPending(false);
       const change = gridMarketChange(form, String(value), rangeSource, rangePercent.current);
       priceRefresh.current?.dispose();
       Object.values(generation.current).forEach(g => g.invalidate());
-      invalidate(); setDraftPreview(null); setChart(null); setChartError(''); setRangeFacts(null); setRangeError(''); setRangeBusy(false);
+      invalidate(); setDraftPreview(null); setChart(null); setChartError(''); setMarketError(''); setRangeFacts(null); setRangeError(''); setRangeBusy(false);
       manual.current = { lower: '', upper: '', stop: '' };
       pendingPercent.current = change.mode === 'percent' && value ? { market: String(value), percent: rangePercent.current! } : null;
       applyAutoAfterRefresh.current = change.mode === 'auto' && !!value; setAutoApplying(applyAutoAfterRefresh.current);
@@ -129,6 +131,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   useEffect(() => {
     if (!open || !defaultMarketPending || !markets.length) return;
     const market = gridAvailableMarket(form.market, markets);
+    defaultMarketPendingRef.current = false;
     setDefaultMarketPending(false);
     // Use the existing ticker-change handler so any edits made while the list loaded are reset normally.
     if (market !== form.market) edit('market', market);
@@ -153,10 +156,15 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   }, [form, effectiveStop]);
   useEffect(() => {
     if (!open) return;
+    let obsoleteDefault = false;
     const controller = new PlannerPriceRefresh(form.market,
       // Discover the complete list first: a delisted remembered market would make a targeted read return 404.
-      signal => readPlanner(!defaultMarketPending && form.market ? `markets?${new URLSearchParams({ market: form.market })}` : 'markets', signal, plannerEnabled),
+      // The ref changes the next scheduled read without restarting this controller after validation.
+      signal => readPlanner(!defaultMarketPendingRef.current && form.market ? `markets?${new URLSearchParams({ market: form.market })}` : 'markets', signal, plannerEnabled),
       observation => {
+        // Suppress only the delisted default's missing-price status while applying its live fallback.
+        obsoleteDefault = defaultMarketPendingRef.current && observation.markets.length > 0
+          && !observation.markets.some(m => m.market === form.market);
         setMarketClock(observation); setMarkets(observation.markets); setNow(Date.now());
         const pending = pendingPercent.current, market = observation.markets.find(m => m.market === form.market);
         if (pending?.market !== form.market || !market || market.reference.state !== 'available') return;
@@ -167,14 +175,14 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         invalidate(); setRangeNote(''); setRangeSource('manual'); setWidth(pending.percent); setRangeShortcut(pending.percent);
         setForm(previous => previous.market === pending.market ? { ...previous, ...range } : previous);
       },
-      (busy, reason) => { setMarketLoading(busy); setMarketError(reason); setNow(Date.now()); });
+      (busy, reason) => { setMarketLoading(busy); setMarketError(obsoleteDefault ? '' : reason); setNow(Date.now()); });
     priceRefresh.current = controller;
     const stop = watchPlannerPrice(controller);
     return () => { stop(); if (priceRefresh.current === controller) priceRefresh.current = null; };
-  }, [open, identity, form.market, refresh, plannerEnabled, defaultMarketPending]);
+  }, [open, identity, form.market, refresh, plannerEnabled]);
   useEffect(() => { setMarkets([]); setMarketError(''); setNow(Date.now()); }, [open, identity]);
   useEffect(() => {
-    if (!open || !form.market) return;
+    if (!open || defaultMarketPending || !form.market) return;
     const request = generation.current.chart.start(); setChart(null); setChartError('');
     const startedAt = Date.now();
     readPlanner(`chart?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, period: form.rangeWindow })}`, request.signal, plannerEnabled).then(value => {
@@ -188,10 +196,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       setChart(value); setChartExpiry(value.state === 'available' ? startedAt + value.validForMs : 0); setNow(Date.now());
     }).catch(e => { if (request.current()) setChartError(e.message); });
     return () => generation.current.chart.invalidate();
-  }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, chartRefresh, plannerEnabled]);
+  }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, chartRefresh, plannerEnabled, defaultMarketPending]);
   useEffect(() => {
     generation.current.preview.invalidate(); setPreview(null); setLoading(false);
-    if (!open || !plannerEnabled || !form.market || query.error) return;
+    if (!open || defaultMarketPending || !plannerEnabled || !form.market || query.error) return;
     if (!form.lower || !form.upper || !form.investment || !effectiveStop) return;
     const request = generation.current.preview.start(); setLoading(true); setError('');
     const timer = setTimeout(() => {
@@ -204,7 +212,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       }).catch(e => { if (request.current()) setError(e.message); }).finally(() => { if (request.current()) setLoading(false); });
     }, 250);
     return () => { clearTimeout(timer); generation.current.preview.invalidate(); };
-  }, [open, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry, plannerEnabled]);
+  }, [open, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry, plannerEnabled, defaultMarketPending]);
   useEffect(() => {
     if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setExpandedSettingsPanel('direction-size'); return; }
     const deadlines = [previewExpiry, chartExpiry, referenceExpiry, constraintExpiry, rangeExpiry].filter(t => t > Date.now());
@@ -219,7 +227,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   }, [draftBusy]);
   useEffect(() => {
     setRangeFacts(null); setRangeError(''); setRangeBusy(false);
-    if (!open || !form.market) return;
+    if (!open || defaultMarketPending || !form.market) return;
     const request = generation.current.range.start(), startedAt = Date.now(); setRangeBusy(true);
     readPlanner(`range?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, period: form.rangeWindow })}`, request.signal, plannerEnabled)
       .then(value => {
@@ -243,7 +251,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       }).catch(e => { if (request.current()) setRangeError(e.message); })
       .finally(() => { if (request.current()) { setRangeBusy(false); setAutoApplying(false); } });
     return () => generation.current.range.invalidate();
-  }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, rangeRefresh, plannerEnabled]);
+  }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, rangeRefresh, plannerEnabled, defaultMarketPending]);
   const autoRange = () => {
     if (draftBusy || rangeBusy) return;
     pendingPercent.current = null; rangePercent.current = null;
@@ -460,7 +468,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-direction-size-toggle">
         <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-2"><Label id="grid-side-label">Direction</Label>
-            <GridDirectionSignals active={open} identity={identity} market={form.market} timeframe={form.timeframe} regime={regime} refresh={refresh}/>
+            <GridDirectionSignals active={open} identity={identity} market={defaultMarketPending ? '' : form.market} timeframe={form.timeframe} regime={regime} refresh={refresh}/>
             <div role="group" aria-labelledby="grid-side-label" className="flex gap-2 rounded-lg border border-border/60 bg-card/40 p-1">
               {['long', 'short'].map(side => <Button key={side} type="button" className="flex-1" variant={form.side === side ? 'default' : 'ghost'}
                 aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}
