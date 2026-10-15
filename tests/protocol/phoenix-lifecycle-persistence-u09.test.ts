@@ -84,6 +84,16 @@ describe('U09 guarded observed referral completion', () => {
     expect((await pool.query('SELECT status,capital_invested FROM bot_subscriptions')).rows[0]).toEqual({status:'paused',capital_invested:'0'});
     await expect(operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,readyEvidence(op))).rejects.toThrow();
   });
+  it.each(['pause','archive'] as const)('preserves %s after observed completion and confirmed replay', async action => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive);
+    const completed = await operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,readyEvidence(op));
+    await lifecycle.stop(op.bot_id,op.intent.ownerWallet,action);
+    await lifecycle.stop(op.bot_id,op.intent.ownerWallet,'pause');
+    await allocation.persistConfirmed(completed); await new PhoenixProvisioningStore(pool).persistConfirmed(completed);
+    expect((await pool.query('SELECT is_active,execution_active,subaccount_status FROM trading_bots WHERE id=$1',[op.bot_id])).rows[0])
+      .toEqual({is_active:false,execution_active:false,subaccount_status:action === 'archive' ? 'phoenix_archived' : 'phoenix_paused'});
+    expect((await pool.query('SELECT status,capital_invested FROM bot_subscriptions')).rows[0]).toEqual({status:'paused',capital_invested:'0'});
+  });
   it.each(['pause','archive'] as const)('refuses observed completion when %s wins the bot lock', async action => {
     const op = await allocation.allocateAndDerive(baseRequest(),derive);
     await lifecycle.stop(op.bot_id,op.intent.ownerWallet,action);
@@ -131,17 +141,19 @@ describe('U09 guarded observed referral completion', () => {
     const op = await allocation.allocateAndDerive(baseRequest(),derive), binding = referralBinding(op);
     const bound = await operations.bindRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,binding);
     const annotated = await operations.annotatePrepared(op.bot_id,op.intent.ownerWallet,op.id,bound.revision,{stage:'EXAMPLE-retry'});
+    expect(annotated.observation.registrationRoute).toBe('referral');
     expect(annotated.observation.registrationBinding).toEqual(binding);
     await expect(operations.annotatePrepared(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,{registrationBinding:{}})).rejects.toThrow();
     for (const bad of [{...binding,referralCodeSha256:createHash('sha256').update('EXAMPLE-other').digest('hex')},
       {...binding,deploymentPinSha256:createHash('sha256').update('EXAMPLE-other-pin').digest('hex')}]) {
       await expect(operations.bindRegistration(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,bad)).rejects.toThrow('immutable');
     }
-    await expect(operations.recordAttempt(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,{...attempt(),blockhash:authority.publicKey.toBase58()})).rejects.toThrow('claim mismatch');
+    await expect(operations.recordAttempt(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,{...attempt(),blockhash:lifetime.blockhash})).rejects.toThrow('claim mismatch');
     await operations.recordAttempt(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,attempt());
     const pending = (await operations.read(op.bot_id,op.intent.ownerWallet,op.id)).operation;
     const completed = await operations.observe(op.bot_id,op.intent.ownerWallet,op.id,pending.revision,'completed',
       {source:'phoenix-finalized-rpc',reference:attempt().signature,attemptOutcome:'confirmed'});
+    expect(completed.observation.registrationRoute).toBe('referral');
     expect(completed.observation.registrationBinding).toEqual(binding);
   });
 });

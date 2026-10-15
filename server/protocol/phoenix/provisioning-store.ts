@@ -90,7 +90,8 @@ export class PhoenixProvisioningStore {
   }
 
   async persistConfirmed(operation: StoredPhoenixOperation) {
-    if (operation.kind !== 'register' || operation.state !== 'completed' || !operation.intent.registration) throw new Error('Phoenix registration not completed');
+    // Legacy register intents may omit allocation metadata; completion and identity remain required.
+    if (operation.kind !== 'register' || operation.state !== 'completed') throw new Error('Phoenix registration not completed');
     const client = await this.pool.connect();
     try {
       // One guarded statement: a crash between confirmation and this update simply resumes it.
