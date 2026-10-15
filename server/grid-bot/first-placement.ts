@@ -17,6 +17,20 @@ export interface GridFirstPlacementBoundary {
 }
 export const gridNeedsBook=(r:ExactGridRequest)=>r.kind==='seed'||(r.kind==='limit'&&r.data.reduce_only===false);
 
+/** Shared strict Pacifica book parser; request time cannot refresh an old venue book. */
+export function gridBookFact(raw:unknown,symbol:string,readStartedAt:number,now:number):{price:string;observedAt:number}|null{
+  try{
+    const r=raw as {success?:unknown;error?:unknown;data?:{s?:unknown;t?:unknown;l?:unknown}},d=r?.data;
+    if(r.success!==true||r.error!==null||!d||d.s!==symbol||!Number.isSafeInteger(d.t)||!Array.isArray(d.l)||d.l.length!==2)return null;
+    const [bids,asks]=d.l as Array<Array<{p?:unknown;a?:unknown}>>;
+    const positive=(v:unknown)=>typeof v==='string'&&v.length<=80&&v.trim()===v&&/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v)&&new Decimal(v).gt(0);
+    if(!Array.isArray(bids)||!Array.isArray(asks)||!bids.length||!asks.length||![bids[0].p,asks[0].p,bids[0].a,asks[0].a].every(positive))return null;
+    const bid=new Decimal(bids[0].p as string),ask=new Decimal(asks[0].p as string),at=Math.min(readStartedAt,d.t as number);
+    if(bid.gte(ask)||![now,readStartedAt,d.t].every(Number.isSafeInteger)||readStartedAt>now||(d.t as number)>now||now-at>=5000)return null;
+    return {price:bid.plus(ask).div(2).toFixed(),observedAt:at};
+  }catch{return null;}
+}
+
 /** The read begins only after the retained exact funding and owner-confirmed preview are verified. */
 export class GridFirstPlacementAuthority implements GridFirstPlacementBoundary {
   constructor(private storage:Pick<GridLaunchStorage,'firstPlacementContext'>,private reads:Pick<GridLaunchReads,'json'>,private now=Date.now){}

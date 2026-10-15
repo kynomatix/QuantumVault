@@ -96,6 +96,11 @@ describe('Grid lifecycle boundary and failure drills',()=>{
     f.operations.push({id:randomUUID(),state:'unconfirmed',exact_request:r,exact_request_digest:requestDigest(r)});expect(await f.service.tick(f.claim,signal())).toBe('venue_operation_unresolved');expect(f.deps.send).not.toHaveBeenCalled();
   });
   it('resume reconciles and denies missing current authority',async()=>{const f=fixture('resume');expect(await f.service.tick(f.claim,signal())).toBe('resume_authority_unavailable');expect(f.monitor.reconcile).toHaveBeenCalledOnce();expect(f.storage.complete).not.toHaveBeenCalled();expect(f.deps.send).not.toHaveBeenCalled();});
+  it('Stop still processes when production resume authority is unavailable',async()=>{
+    const f=fixture('stop');f.deps.resume.mockRejectedValue(Error('EXAMPLE launch authority unavailable'));
+    f.observation.position!.size='0';expect(await f.service.tick(f.claim,signal())).toBe('stopped');
+    expect(f.deps.resume).not.toHaveBeenCalled();expect(f.deps.recycle).toHaveBeenCalledOnce();
+  });
   it('resume cannot bypass unresolved inventory',async()=>{const f=fixture('resume');f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});expect(await f.service.tick(f.claim,signal())).toBe('reconciliation_required');expect(f.deps.resume).not.toHaveBeenCalled();});
   it('re-sync reconciles without silently resuming entries',async()=>{const f=fixture('resync');expect(await f.service.tick(f.claim,signal())).toBe('paused');expect(f.storage.complete).toHaveBeenCalledWith(f.claim,f.life.active_request,'paused');});
   it.each([null,{direction:'long' as const,size:'0'}])('stop never terminalizes unavailable position or history',async position=>{const f=fixture();f.observation.position=position;f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});await f.service.tick(f.claim,signal());expect(f.deps.recycle).not.toHaveBeenCalled();expect(f.deps.settlement).not.toHaveBeenCalled();});

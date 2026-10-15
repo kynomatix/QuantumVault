@@ -537,6 +537,9 @@ export class PacificaAdapter implements ProtocolAdapter {
     } catch { return unknown('venue_lookup_unavailable'); }
   }
 
+  /** Public identifiers only; production launch reads never take adapter balance defaults. */
+  getGridLaunchConfiguration(){return {builderCode:this.config.builderCode??null,builderOwner:this.config.referralAddress??null};}
+
   async getGridCapacitySnapshot(input: Omit<CapacityInput, 'orders' | 'observedAt' | 'expiresAt' | 'complete' | 'now'> & { ownership?: Record<string, RestingUse['category']> }) {
     const observedAt = Date.now();
     const compose = (snapshot: ReturnType<typeof gridCapacitySnapshot>) => ({ ...snapshot, venueAuthority: this.gridTransport.status(),

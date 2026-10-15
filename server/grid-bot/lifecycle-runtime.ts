@@ -14,6 +14,7 @@ import {durableGridUmk} from './service';
 import {pacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
 import Decimal from 'decimal.js';
 import {GridFirstPlacementAuthority} from './first-placement';
+import {productionGridLaunchAuthority,gridProductionResume} from './launch-authority';
 
 /** Full-account facts, never a single balance interpreted as transfer or settlement evidence. */
 export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObservation,start:number,recycler:GridSettlementFact['recycler'],now:number):GridSettlementFact|null{
@@ -42,8 +43,7 @@ export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonito
   };
   const service=new GridLifecycleService({storage:lifecycle,observe,
     sol:authorities.sol??((claim,signal)=>sharedGridSol(claim.masterAccount,signal)),
-    // Unit 4 has no production LaunchFacts provider. Do not manufacture current fees/margin/HMAC authority.
-    resume:authorities.resume??(async()=>null),
+    resume:authorities.resume??gridProductionResume(storage,productionGridLaunchAuthority(json,storage.launch)),
     send:(claim,r)=>withKey(claim,(identity,umk)=>custody.withSecret(identity,umk,secret=>sender.send(r,secret,undefined,claim.leaseToken))),
     recover:async(claim,op,signal)=>{const o=await observe(claim,signal);if(!o.inventoryComplete)return {state:'unknown'};
       const r=op.exact_request;if(r.kind==='limit')return reconcileGridLimit(r,o.orders);

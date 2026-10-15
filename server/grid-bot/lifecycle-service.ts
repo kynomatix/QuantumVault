@@ -21,7 +21,7 @@ export interface GridResumeRisk {
 /** Existing positions require current liquidation authority, not the launch projection. */
 export function gridResumeClearance(risk:GridResumeRisk|undefined,o:GridObservation,policy:GridPolicy,tick:string,now:number){
   try{
-    if(!risk||!risk.source||risk.account!==o.account||risk.symbol!==o.symbol||!o.position||!freshGridFact(risk.observedAt,now)
+    if(!risk||!risk.source||risk.account!==o.account||risk.symbol!==o.symbol||!o.position||!freshGridFact(o.observedAt,now)||!freshGridFact(risk.observedAt,now)
       ||!new D(risk.positionSize).eq(o.position.size)||!policy.stopLossPrice||!new D(tick).gt(0))return false;
     if(new D(risk.positionSize).isZero())return true;
     if(o.position.direction!==policy.direction||!risk.liquidationPrice||!new D(risk.liquidationPrice).gt(0))return false;
