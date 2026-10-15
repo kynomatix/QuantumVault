@@ -302,6 +302,21 @@ describe('Planner fresh-price shortcuts and visibility', () => {
   });
 });
 describe('Planner client authority boundaries', () => {
+  it('validates price-only responses and rejects fabricated sizing or malformed levels', () => {
+    const input = { market: 'BTC-PERP', side: 'long' as const, lower: '80', upper: '120', intervals: 4,
+      entryScale: 'flat' as const, profitScale: 'flat' as const, seed: true, leverage: '', investment: '', stop: '', fee: null };
+    const geometry = previewGrid(input, market, now);
+    expect(isPlannerPreview(geometry)).toBe(true);
+    expect(plannerMinimumRows(geometry)[0].value).toContain('Enter an investment');
+    if (geometry.geometry?.state !== 'available') throw Error('EXAMPLE missing fixture geometry');
+    const lines = geometry.geometry.value;
+    for (const value of [[], [...lines].reverse(), lines.map(line => ({ ...line, quantity: '0' })),
+      lines.map(line => ({ ...line, price: 'EXAMPLE' })), lines.map(line => ({ ...line, ordinal: 0 }))])
+      expect(isPlannerPreview({ ...geometry, geometry: { state: 'available', value } })).toBe(false);
+    expect(isPlannerPreview({ ...geometry, minimum: { state: 'available', value: '10' } })).toBe(false);
+    expect(isPlannerPreview({ ...geometry, assumedMinimum: { state: 'available', value: '10' } })).toBe(false);
+    expect(isPlannerPreview({ ...geometry, validForMs: 60_001 })).toBe(false);
+  });
   it('uses the owner-approved sizing hints verbatim for both directions', () => {
     expect(ORDER_SIZES).toEqual([
       { value: 'flat', label: 'Equal' }, { value: 'ascending', label: 'Larger further from entry price' }, { value: 'descending', label: 'Larger near entry price' },

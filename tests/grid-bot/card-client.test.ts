@@ -108,6 +108,8 @@ describe('Grid bot setup card and separate bot section', () => {
     for (const removed of ['Refresh bots', 'No Grid bots loaded.', 'funding', 'View bot', bot.name]) expect(top).not.toContain(removed);
     expect(html).toContain('data-testid="section-grid-bots"');
     expect(html).toContain('grid md:grid-cols-2 xl:grid-cols-3 gap-5');
+    expect(html).toContain('title="P&amp;L unavailable" aria-label="P&amp;L unavailable">—</p>');
+    expect(html).not.toContain('>Unavailable</p>');
     expect(app.indexOf('{gridBots}')).toBeGreaterThan(app.indexOf('data-testid="section-signal-bots"'));
   });
 
@@ -215,7 +217,9 @@ describe('Grid bot setup card and separate bot section', () => {
 
   it('does not read or register focus refresh without an authenticated wallet', () => {
     responses();
-    render(false, null);
+    const html = render(false, null);
+    expect(html).toContain('card-grid-bot-coming-soon');
+    expect(html).not.toContain('Connect your wallet');
     expect(hooks.effects[0].run()).toBeUndefined();
     expect(hooks.effects[1].run()).toBeUndefined();
     window.dispatchEvent(new Event('focus'));
@@ -231,9 +235,14 @@ describe('Grid bot setup card and separate bot section', () => {
     await settle();
     const html = render();
     expect(html).toContain('role="status"');
-    expect(html).toContain('Grid bots unavailable. Return to this window to retry.');
+    expect(html).toContain('Grid bots unavailable. Try again.');
     expect(html).toContain('grid-bot-card-EXAMPLE_GRID');
     expect(find(layout.card, 'button-plan-grid')).toBeUndefined();
+    find(layout.bots, 'button-retry-grid-bots')!.props.onClick!();
+    expect(hooks.states[8]).toBe(1);
+    responses([bot]); render(); const retryCleanup = hooks.effects[0].run(); await settle();
+    expect(render()).not.toContain('button-retry-grid-bots');
+    if (typeof retryCleanup === 'function') retryCleanup();
     if (typeof cleanup === 'function') cleanup();
   });
 });

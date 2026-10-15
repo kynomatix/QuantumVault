@@ -1,12 +1,16 @@
 import Decimal from 'decimal.js';
-import { calculateGrid, minimumInvestment, assumedPairFees, validGridDecimal } from '../grid-bot/engine';
+import { calculateGrid, calculateGridPrices, minimumInvestment, assumedPairFees, validGridDecimal } from '../grid-bot/engine';
 import type { GridGeometryInput } from '../grid-bot/engine-types';
 import { PLANNER_POLICY, type PlannerMarket, type PlannerPreview, type PlannerQuery } from './types';
 import { unknown } from './market-snapshot';
 const D = Decimal.clone({ precision: 120 });
 
 export function validatePreviewQuery(q: PlannerQuery): string | null {
-  for (const field of ['lower', 'upper', 'leverage', 'investment', 'stop'] as const)
+  for (const field of ['lower', 'upper'] as const)
+    if (!validGridDecimal(q[field])) return `${field}: enter a positive plain decimal (up to 18 decimal places)`;
+  if (!Number.isInteger(q.intervals) || q.intervals < 1 || q.intervals > 100) return 'Invalid interval count';
+  if (q.investment === '') return null;
+  for (const field of ['leverage', 'investment', 'stop'] as const)
     if (!validGridDecimal(q[field])) return `${field}: enter a positive plain decimal (up to 18 decimal places)`;
   if (q.fee !== null && !validGridDecimal(q.fee, true)) return 'Fee assumption must be a nonnegative plain decimal';
   if (!['long', 'short'].includes(q.side) || !['flat', 'ascending', 'descending'].includes(q.entryScale)
@@ -17,11 +21,24 @@ export function validatePreviewQuery(q: PlannerQuery): string | null {
 
 export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number): PlannerPreview {
   const result: PlannerPreview = { state: 'unavailable', reasons: [], market, retrievedAt: now, validForMs: 0,
+    geometry: unknown('Geometry not evaluated'),
     requestedPlan: null, minimumPlan: null, minimum: unknown('Geometry not evaluated'), assumedMinimum: unknown('Assumed fee not evaluated'), feeRows: [],
-    fee: q.fee === null ? { state: 'unknown' } : { state: 'assumption', rate: q.fee, label: 'Your assumption — not a venue quote' },
+    fee: q.investment === '' || q.fee === null ? { state: 'unknown' } : { state: 'assumption', rate: q.fee, label: 'Your assumption — not a venue quote' },
     stop: { state: 'unavailable', reason: 'Liquidation clearance is unknown; no account or position is read. This stop is not certified reachable.' }, policy: PLANNER_POLICY };
   const invalid = validatePreviewQuery(q);
   if (invalid) return { ...result, state: 'rejected', reasons: [invalid] };
+  if (q.investment === '') {
+    const needsInvestment = unknown<string>('Enter an investment to see order sizes');
+    result.minimum = needsInvestment; result.assumedMinimum = needsInvestment;
+    if (market.market !== q.market || market.constraints.state !== 'available')
+      return { ...result, reasons: [market.market !== q.market ? 'Market identity mismatch' : market.constraints.state === 'unavailable' ? market.constraints.reason : 'Market unavailable'] };
+    const c = market.constraints.value;
+    if (now < c.observedAt || now >= c.expiresAt)
+      return { ...result, reasons: ['Market observations expired or are future-dated'] };
+    const geometry = calculateGridPrices({ lower: q.lower, upper: q.upper, intervals: q.intervals, tick: c.tick });
+    if (!geometry.ok) return { ...result, state: 'rejected', reasons: geometry.issues.map(issue => issue.reason) };
+    return { ...result, state: 'diagnostic', validForMs: Math.min(60_000, c.expiresAt - now), geometry: { state: 'available', value: geometry.lines } };
+  }
   if (market.market !== q.market || market.constraints.state !== 'available' || market.reference.state !== 'available') {
     result.reasons = [market.market !== q.market ? 'Market identity mismatch' : market.constraints.state === 'unavailable'
       ? market.constraints.reason : market.reference.state === 'unavailable' ? market.reference.reason : 'Market unavailable'];

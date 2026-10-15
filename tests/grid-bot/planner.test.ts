@@ -20,6 +20,34 @@ export const deps = (): PlannerDeps => ({ now: () => now, getMarkets: vi.fn(asyn
 const query: PlannerQuery = { market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat',
   seed: true, investment: '1000', leverage: '1', stop: '70', fee: null };
 describe('Pacifica authority and honest planner verdicts', () => {
+  it('returns engine prices before investment without calculating sizes, minimums, fees or stop clearance', () => {
+    const m = marketSnapshot(row(), deps()), input = { ...query, investment: '' };
+    const geometry = previewGrid(input, m, now), sized = previewGrid(query, m, now);
+    expect(geometry).toMatchObject({ state: 'diagnostic', requestedPlan: null, minimumPlan: null,
+      minimum: { state: 'unavailable', reason: 'Enter an investment to see order sizes' },
+      assumedMinimum: { state: 'unavailable' }, fee: { state: 'unknown' }, feeRows: [], stop: { state: 'unavailable' } });
+    expect(geometry.geometry).toEqual({ state: 'available', value: sized.requestedPlan!.lines.map(({ ordinal, price }) => ({ ordinal, price })) });
+    expect(plannerOverlays(geometry, now + geometry.validForMs, now)).toEqual(geometry.geometry?.state === 'available' ? geometry.geometry.value : []);
+    expect(plannerLevelMessage(geometry, now + geometry.validForMs, now, input, false, '')).toBe('Enter an investment to see order sizes');
+    expect(plannerOverlays(geometry, now + geometry.validForMs, now + geometry.validForMs)).toEqual([]);
+    const withoutSizing = previewGrid({ ...input, leverage: '', stop: '', fee: 'EXAMPLE' }, { ...m, reference: { state: 'unavailable', reason: 'EXAMPLE' } }, now);
+    expect(withoutSizing.geometry).toEqual(geometry.geometry); expect(withoutSizing.fee.state).toBe('unknown');
+  });
+  it('keeps invalid or expired geometry unavailable and never interprets a bad investment as absent', () => {
+    const m = marketSnapshot(row(), deps());
+    for (const change of [{ lower: '120', upper: '80' }, { lower: '100', upper: '100.1' }, { intervals: 101 }, { lower: 'EXAMPLE' }]) {
+      const result = previewGrid({ ...query, investment: '', ...change }, m, now);
+      expect(result.state).toBe('rejected'); expect(result.geometry?.state).toBe('unavailable');
+    }
+    for (const investment of ['0', '-1', 'EXAMPLE']) expect(previewGrid({ ...query, investment }, m, now).state).toBe('rejected');
+    if (m.constraints.state !== 'available') throw Error('EXAMPLE missing fixture constraints');
+    const c = m.constraints.value;
+    expect(previewGrid({ ...query, investment: '' }, { ...m, constraints: { state: 'available', value: { ...c, expiresAt: now + 300_000 } } }, now).validForMs).toBe(60_000);
+    for (const at of [c.observedAt - 1, c.expiresAt, c.expiresAt + 1])
+      expect(previewGrid({ ...query, investment: '' }, m, at).geometry?.state).toBe('unavailable');
+    expect(previewGrid({ ...query, investment: '' }, { ...m, market: 'ETH-PERP' }, now).state).toBe('unavailable');
+    expect(previewGrid({ ...query, investment: '' }, { ...m, constraints: { state: 'unavailable', reason: 'EXAMPLE' } }, now).state).toBe('unavailable');
+  });
   it('shows actual quantized minimum-capital lines when entered investment fails, with an honest chart explanation', () => {
     const underfunded = previewGrid({ ...query, investment: '0.01' }, marketSnapshot(row(), deps()), now);
     expect(underfunded.state).toBe('rejected'); expect(underfunded.requestedPlan).toBeNull();

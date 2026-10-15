@@ -119,6 +119,13 @@ export function isPlannerPreview(v: unknown): v is PlannerPreview {
     && isPlannerMarket(v.market) && clock(v.retrievedAt) && Number.isFinite(v.validForMs) && v.validForMs >= 0 && v.validForMs <= 60_000
     && Array.isArray(v.reasons) && v.reasons.every((r: any) => typeof r === 'string')
     && (v.requestedPlan === null || isPlan(v.requestedPlan)) && (v.minimumPlan === null || isPlan(v.minimumPlan))
+    && (v.geometry === undefined || fact(v.geometry, lines => Array.isArray(lines) && lines.length >= 2 && lines.length <= 101
+      && lines.every((line: any, i: number) => record(line) && line.ordinal === i && positive(line.price)
+        && Object.keys(line).every(key => key === 'ordinal' || key === 'price')
+        && (!i || new D(line.price).gt(lines[i - 1].price)))))
+    && (v.geometry?.state !== 'available' || v.state === 'diagnostic' && v.requestedPlan === null && v.minimumPlan === null
+      && v.minimum?.state === 'unavailable' && v.assumedMinimum?.state === 'unavailable' && v.fee?.state === 'unknown'
+      && Array.isArray(v.feeRows) && v.feeRows.length === 0)
     && fact(v.minimum, positive) && fact(v.assumedMinimum, positive) && record(v.stop) && v.stop.state === 'unavailable' && typeof v.stop.reason === 'string'
     && record(v.fee) && (v.fee.state === 'unknown' || v.fee.state === 'assumption' && decimal(v.fee.rate) && v.fee.label === ASSUMPTION_LABEL)
     && Array.isArray(v.feeRows) && v.feeRows.length <= 100 && v.feeRows.every((r: any) => record(r) && Number.isInteger(r.ordinal)
@@ -130,19 +137,20 @@ export function isPlannerPreview(v: unknown): v is PlannerPreview {
 export function plannerOverlays(preview: PlannerPreview | null, expiresAt: number, now: number) {
   if (!preview || now >= expiresAt || preview.state === 'unavailable') return [];
   // Rejected funding/fee checks can retain valid server-calculated diagnostic geometry.
-  return (preview.requestedPlan ?? preview.minimumPlan)?.lines ?? [];
+  return preview.geometry?.state === 'available' ? preview.geometry.value : (preview.requestedPlan ?? preview.minimumPlan)?.lines ?? [];
 }
 export function plannerLevelMessage(preview: PlannerPreview | null, expiresAt: number, now: number,
   inputs: { market: string; lower: string; upper: string; investment: string; stop: string }, loading: boolean, error: string) {
   if (!inputs.market) return 'Choose a market to calculate grid levels.';
   const missing = [!inputs.lower && 'a lower price', !inputs.upper && 'an upper price',
-    !inputs.investment && 'an investment amount', !inputs.stop && 'a stop price (or fresh market details for a suggested stop)'].filter(Boolean);
+    !!inputs.investment && !inputs.stop && 'a stop price (or fresh market details for a suggested stop)'].filter(Boolean);
   if (missing.length) return `To show grid levels, enter ${missing.join(', ')}.`;
   if (error) return `Grid levels are unavailable: ${error}`;
   if (loading) return 'Calculating grid levels from your inputs…';
   if (!preview) return 'Waiting for a grid preview. Refresh chart if it does not appear.';
   if (now >= expiresAt && preview.validForMs > 0) return 'Grid levels have expired. Refresh chart to get a fresh price and market details.';
   if (!plannerOverlays(preview, expiresAt, now).length) return `Grid levels are unavailable: ${preview.reasons.join('; ') || 'a fresh price and usable market details are required.'}`;
+  if (preview.geometry?.state === 'available') return 'Enter an investment to see order sizes';
   const basis = preview.requestedPlan ? 'your investment' : 'the minimum investment, not your entered investment';
   const warning = preview.state === 'rejected' ? ' Checks did not pass; see Your plan.'
     : preview.state === 'diagnostic' ? ' Some checks are unavailable.' : '';

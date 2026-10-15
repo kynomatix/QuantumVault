@@ -124,10 +124,11 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   }));
   app.get('/api/grid-planner/preview', requireWallet, route(['market', 'side', 'lower', 'upper', 'intervals', 'entryScale', 'profitScale', 'seed', 'leverage', 'investment', 'stop', 'fee'], async (req, res, deps) => {
     const raw = req.query;
-    if (!['true', 'false'].includes(String(raw.seed)) || !/^(?:[1-9]\d?|100)$/.test(String(raw.intervals)) || typeof raw.market !== 'string') {
+    const geometryOnly = raw.investment === undefined || raw.investment === '';
+    if (((!geometryOnly || raw.seed !== undefined) && !['true', 'false'].includes(String(raw.seed))) || !/^(?:[1-9]\d?|100)$/.test(String(raw.intervals)) || typeof raw.market !== 'string') {
       res.status(400).json({ state: 'unavailable', reason: 'Invalid market, seed or interval count' }); return;
     }
-    const q = { ...raw, intervals: Number(raw.intervals), seed: raw.seed === 'true', fee: raw.fee === undefined || raw.fee === '' ? null : raw.fee } as unknown as PlannerQuery;
+    const q = { ...raw, investment: raw.investment ?? '', intervals: Number(raw.intervals), seed: raw.seed === 'true', fee: raw.fee === undefined || raw.fee === '' ? null : raw.fee } as unknown as PlannerQuery;
     const invalid = validatePreviewQuery(q);
     if (invalid) { res.status(400).json({ state: 'unavailable', reason: invalid }); return; }
     const now = deps.now(); previewStarts = previewStarts.filter(time => now - time < 60_000);

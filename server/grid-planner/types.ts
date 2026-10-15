@@ -1,4 +1,4 @@
-import type { GridGeometryInput, GridPlan, PairFee } from '../grid-bot/engine-types';
+import type { GridGeometryInput, GridPlan, GridPriceLevel, PairFee } from '../grid-bot/engine-types';
 import type { ProtocolMarket } from '../protocol/protocol-types';
 import type { ProvenancedOHLCV } from '../lab/datafeed';
 import type { BtcStoredWeek } from '../../shared/grid-direction';
@@ -42,6 +42,7 @@ export interface PlannerPreview {
   state: 'diagnostic' | 'hypothetical_checks_passed' | 'rejected' | 'unavailable';
   reasons: string[]; market: PlannerMarket; retrievedAt: number; validForMs: number;
   requestedPlan: GridPlan | null; minimumPlan: GridPlan | null;
+  geometry?: Fact<GridPriceLevel[]>;
   minimum: Fact<string>; assumedMinimum: Fact<string>; feeRows: PairFee[];
   fee: { state: 'unknown' } | { state: 'assumption'; rate: string; label: 'Your assumption — not a venue quote' };
   stop: { state: 'unavailable'; reason: string };

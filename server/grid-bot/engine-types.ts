@@ -6,6 +6,9 @@ export interface GridGeometryInput {
   investmentStep: string; transferFloor: string; effectiveMakerCostRate?: string | null;
 }
 export interface GridInput extends GridGeometryInput { investment: string }
+export type GridPriceInput = Pick<GridGeometryInput, 'lower' | 'upper' | 'intervals' | 'tick'>;
+export interface GridPriceLevel { ordinal: number; price: string }
+export type GridPriceResult = { ok: true; lines: GridPriceLevel[] } | { ok: false; issues: GridIssue[] };
 export type GridIssueCode = 'invalid_decimal' | 'invalid_geometry' | 'invalid_start'
   | 'duplicate_prices' | 'invalid_investment' | 'underfunded' | 'fee_clearance' | 'search_limit';
 export interface GridIssue { code: GridIssueCode; reason: string; ordinal?: number }

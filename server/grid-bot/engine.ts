@@ -1,5 +1,5 @@
 import Decimal from 'decimal.js';
-import type { GridInput, GridGeometryInput, GridLine, GridPlan, GridResult, MinimumResult, PairFee, Scale } from './engine-types';
+import type { GridInput, GridGeometryInput, GridLine, GridPlan, GridResult, GridPriceInput, GridPriceResult, MinimumResult, PairFee, Scale } from './engine-types';
 
 // Private arithmetic cannot be changed by another consumer's Decimal.set().
 const D = Decimal.clone({ precision: 120, rounding: Decimal.ROUND_DOWN, toExpNeg: -120, toExpPos: 120 });
@@ -12,7 +12,7 @@ export function validGridDecimal(value: unknown, allowZero = false): value is st
 }
 const text = (n: Decimal) => n.toFixed();
 const floor = (n: Decimal, step: Decimal) => n.div(step).floor().times(step);
-const failure = (code: Extract<GridResult, { ok: false }>['issues'][number]['code'], reason: string, ordinal?: number): GridResult =>
+const failure = (code: Extract<GridResult, { ok: false }>['issues'][number]['code'], reason: string, ordinal?: number): Extract<GridResult, { ok: false }> =>
   ({ ok: false, issues: [{ code, reason, ...(ordinal === undefined ? {} : { ordinal }) }] });
 
 function weight(index: number, count: number, scale: Scale): number {
@@ -29,6 +29,19 @@ export function assumedPairFees(plan: GridPlan, rate: string): PairFee[] {
   });
 }
 
+/** Price geometry only; never supplies quantities, capital requirements or execution authority. */
+export function calculateGridPrices(input: GridPriceInput): GridPriceResult {
+  for (const key of ['lower', 'upper', 'tick'] as const)
+    if (!validGridDecimal(input[key])) return failure('invalid_decimal', `${key}: use a positive plain decimal with at most 18 decimal places`);
+  if (!Number.isInteger(input.intervals) || input.intervals < 1 || input.intervals > 100 || !new D(input.lower).lt(input.upper))
+    return failure('invalid_geometry', 'Choose an increasing range and 1–100 intervals');
+  const lower = new D(input.lower), tick = new D(input.tick), spacing = new D(input.upper).minus(lower).div(input.intervals);
+  const prices = Array.from({ length: input.intervals + 1 }, (_, i) => floor(lower.plus(spacing.times(i)), tick));
+  if (prices.some((p, i) => p.lte(0) || i > 0 && p.lte(prices[i - 1])))
+    return failure('duplicate_prices', 'Tick rounding collapses grid lines; widen the range or reduce intervals');
+  return { ok: true, lines: prices.map((p, ordinal) => ({ ordinal, price: text(p) })) };
+}
+
 /** Hypothetical full-size geometry only. No fill, liquidation or execution authority. */
 export function calculateGrid(input: GridInput): GridResult {
   const positive = ['lower', 'upper', 'start', 'leverage', 'tick', 'lot', 'minimumQuote', 'investmentStep', 'investment'] as const;
@@ -41,9 +54,9 @@ export function calculateGrid(input: GridInput): GridResult {
     return failure('invalid_geometry', 'Choose long or short, known size scales and 1–100 intervals');
   const lower = new D(input.lower), upper = new D(input.upper), startRaw = new D(input.start), tick = new D(input.tick), lot = new D(input.lot);
   if (!lower.lt(startRaw) || !startRaw.lt(upper)) return failure('invalid_start', 'Reference price must be strictly inside the range');
-  const start = floor(startRaw, tick), spacing = upper.minus(lower).div(input.intervals);
-  const prices = Array.from({ length: input.intervals + 1 }, (_, i) => floor(lower.plus(spacing.times(i)), tick));
-  if (prices.some((p, i) => p.lte(0) || i > 0 && p.lte(prices[i - 1]))) return failure('duplicate_prices', 'Tick rounding collapses grid lines; widen the range or reduce intervals');
+  const start = floor(startRaw, tick), geometry = calculateGridPrices(input);
+  if (!geometry.ok) return geometry;
+  const prices = geometry.lines.map(line => new D(line.price));
   if (!start.gt(prices[0]) || !start.lt(prices[prices.length - 1])) return failure('invalid_start', 'Tick-rounded reference price is on the range boundary');
   const investment = new D(input.investment), step = new D(input.investmentStep);
   if (!investment.mod(step).isZero()) return failure('invalid_investment', 'Investment must align to the supplied quote increment');

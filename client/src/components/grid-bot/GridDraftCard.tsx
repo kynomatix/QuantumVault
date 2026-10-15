@@ -36,7 +36,7 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
       if(status.status==='fulfilled'){setEnabled(status.value.enabled===true);setStart(status.value.startEnabled===true);setWorker(status.value.workerEnabled===true);}
       else{setEnabled(false);setStart(false);setWorker(false);}
       if(list.status==='fulfilled')setBots(list.value.bots);
-      else setError('Grid bots unavailable. Return to this window to retry.');
+      else setError('Grid bots unavailable. Try again.');
       setPlanner(planning.status==='fulfilled'&&planning.value?.enabled===true&&planning.value?.planningOnly===true&&planning.value?.name==='Grid Planner');
     });
     return()=>{controller.abort();order.current.next();};
@@ -64,7 +64,7 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
       </div>
       <p className="text-sm text-muted-foreground">Pick a range and the bot buys low and sells high inside it, again and again.</p>
       {!access.live&&<p className="text-xs text-muted-foreground/70">Planning only for now: no orders are placed.</p>}
-      {!authenticated?<p className="text-sm">Connect your wallet to view your Grid bots.</p>:access.setup&&(
+      {access.setup&&(
         <div className="flex items-center gap-2 mt-auto pt-1">
           <Button className="flex-1 bg-gradient-to-r from-primary to-accent hover:opacity-90" onClick={()=>setCreate({key:Date.now()})} data-testid="button-plan-grid">
             Plan a grid →
@@ -75,7 +75,9 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
   );
   const botSection=authenticated&&(
     <>
-      {error&&<p role="status" className="text-sm text-muted-foreground">{error}</p>}
+      {error&&<div role="status" className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"><p>{error}</p>
+        <Button type="button" size="sm" variant="outline" onClick={()=>setRefresh(value=>value+1)} data-testid="button-retry-grid-bots">Retry loading bots</Button>
+      </div>}
       {bots.length>0&&<div className="space-y-4" data-testid="section-grid-bots">
         <div className="flex items-center gap-3">
           <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider whitespace-nowrap flex items-center gap-1.5">
@@ -101,7 +103,7 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
             <div className="grid grid-cols-3 gap-3 text-center">
               <div className="p-2.5 rounded-lg bg-muted/30"><p className="text-sm font-bold">{readableDecimal(bot.lowerPrice)} – {readableDecimal(bot.upperPrice)}</p><p className="text-xs text-muted-foreground">Range</p></div>
               <div className="p-2.5 rounded-lg bg-muted/30"><p className="text-lg font-bold">{bot.gridCount}</p><p className="text-xs text-muted-foreground">Grids</p></div>
-              <div className="p-2.5 rounded-lg bg-muted/30"><p className="text-sm font-bold">Unavailable</p><p className="text-xs text-muted-foreground">P&amp;L</p></div>
+              <div className="min-w-0 p-2.5 rounded-lg bg-muted/30"><p className="text-lg font-bold text-muted-foreground" title="P&L unavailable" aria-label="P&L unavailable">—</p><p className="text-xs text-muted-foreground">P&amp;L</p></div>
             </div>
             <span className="mt-4 block text-sm font-medium text-primary">View bot</span>
           </button>

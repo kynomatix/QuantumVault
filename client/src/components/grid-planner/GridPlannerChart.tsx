@@ -9,7 +9,9 @@ import type { GridLine } from '../../../../server/grid-bot/engine-types';
 import { gridMeasuredStart } from '../../../../shared/grid-lookback';
 import { GridChartSourceInfo } from './GridChartSourceInfo';
 
-export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: GridLine[]; range: PlannerRange | null; period?: string; tick?: string | null }) {
+type ChartLevel = Pick<GridLine, 'ordinal' | 'price'> & Partial<Pick<GridLine, 'role'>>;
+
+export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: ChartLevel[]; range: PlannerRange | null; period?: string; tick?: string | null }) {
   const container = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState<{ price: string; left: number; top: number } | null>(null);
   useEffect(() => {
@@ -60,7 +62,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       ...[range?.lower, range?.upper, range?.stop].filter((p): p is string => !!p)]);
     canvas.applyOptions({ localization: { priceFormatter: (price: number) => price.toFixed(priceFormat.precision) } });
     series.applyOptions({ title: 'Current price', priceFormat: { type: 'price', ...priceFormat } });
-    for (const line of lines) series.createPriceLine({ price: Number(line.price), color: line.role === 'entry' ? color('primary', 0.85) : color('chart-2', 0.85),
+    for (const line of lines) series.createPriceLine({ price: Number(line.price), color: !line.role || line.role === 'entry' ? color('primary', 0.85) : color('chart-2', 0.85),
       lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
     const showLevel: Parameters<typeof canvas.subscribeCrosshairMove>[0] = event => {
       const point = event.point;
@@ -122,7 +124,7 @@ function PreviewNotes({ children }: { children: React.ReactNode }) {
   </div>;
 }
 export function GridPlannerChart({ chart, lines, range = null, period, stale, loading = false, hasMarket = false, error = '', onRetry, levelMessage, tick, previewDetails }: {
-  chart: PlannerChart | null; lines: GridLine[]; range?: PlannerRange | null; stale: boolean; loading?: boolean;
+  chart: PlannerChart | null; lines: ChartLevel[]; range?: PlannerRange | null; stale: boolean; loading?: boolean;
   hasMarket?: boolean; error?: string; onRetry?: () => void; levelMessage?: string; period?: string; tick?: string | null; previewDetails?: React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);

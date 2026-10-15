@@ -23,7 +23,7 @@ vi.mock('lightweight-charts', () => ({ LineStyle: { Dashed: 2, Solid: 0 } }));
 afterEach(() => { fixture.cleanup?.(); fixture.cleanup = undefined; vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('planner chart prices and interactive grid lines', () => {
-  it.each([640, 390])('shows strong grid lines, labels only boundaries and stop, and exposes prices on a %ipx canvas', width => {
+  it.each([[640, false], [390, false], [640, true], [390, true]] as const)('shows dashed prices on a %ipx canvas (geometry only: %s)', (width, geometryOnly) => {
     fixture.container.clientWidth = width;
     vi.stubGlobal('getComputedStyle', (element: { style?: { color?: string } }) => ({ getPropertyValue: () => '0 0% 50%', color: element.style?.color ?? 'rgb(128, 128, 128)' }));
     vi.stubGlobal('document', { createElement: () => ({ style: {}, remove: vi.fn() }) });
@@ -34,7 +34,8 @@ describe('planner chart prices and interactive grid lines', () => {
       candles: [{ time: 1_799_996_400_000, open: 100, high: 110, low: 90, close: 100, volume: 1,
         provenance: { source: 'okx', venue: 'okx', basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } }] };
     const lines: GridLine[] = [90, 100, 110].map((price, ordinal) => ({ ordinal, price: `${price}.000000000000000000`, quantity: '1', notional: String(price), role: 'entry', pairedExitOrdinal: null }));
-    GridPlannerPriceCanvas({ chart, lines, range: { lower: '90', upper: '110', stop: '80' }, tick: '0.1' });
+    GridPlannerPriceCanvas({ chart, lines: geometryOnly ? lines.map(({ ordinal, price }) => ({ ordinal, price })) : lines,
+      range: { lower: '90', upper: '110', stop: '80' }, tick: '0.1' });
     const cleanup = fixture.effect?.(); if (typeof cleanup === 'function') fixture.cleanup = cleanup;
     expect(fixture.series.applyOptions).toHaveBeenCalledWith({ title: 'Current price', priceFormat: { type: 'price', precision: 1, minMove: 0.1 } });
     const options = fixture.canvas.applyOptions.mock.calls.map(call => call[0]) as { localization?: { priceFormatter: (price: number) => string } }[];

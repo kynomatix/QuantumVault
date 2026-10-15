@@ -68,7 +68,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [width, setWidth] = useState(10), [rangeShortcut, setRangeShortcut] = useState<number | null>(null);
   const [rangeSource, setRangeSource] = useState<'manual' | 'auto'>(initialIntent?.rangeSource ?? 'auto');
   const [timeRangeApplied, setTimeRangeApplied] = useState(false);
-  const manual = useRef({ lower: form.lower, upper: form.upper, stop: form.stop });
+  const manual = useRef<{ lower: string; upper: string; stop: string } | null>(initialIntent && initialIntent.rangeSource !== 'auto'
+    ? { lower: form.lower, upper: form.upper, stop: form.stop } : null);
   const rangePercent = useRef<number | null>(null);
   const pendingPercent = useRef<{ market: string; percent: number } | null>(null);
   const [rangeNote, setRangeNote] = useState('');
@@ -86,6 +87,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const reference = selected?.reference.state === 'available' && now < referenceExpiry ? selected.reference.value : null;
   const lastPrice = selected?.reference.state === 'available' ? selected.reference.value : null;
   const hasEnteredRange = !!gridWidth(form.lower, form.upper, String(width));
+  const hasManualRange = manual.current !== null && !!gridWidth(manual.current.lower, manual.current.upper, String(width));
   // Editable input proposal only; server checks still decide whether the tick/stop is valid.
   const suggestedStop = selected?.constraints.state === 'available'
     ? proposedPlannerStop(form.lower, form.upper, form.side, selected.constraints.value.tick) : null;
@@ -98,7 +100,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     applyAutoAfterRefresh.current = !initialIntent; setAutoApplying(!initialIntent);
     if (initialIntent) return;
     defaultMarketPendingRef.current = true; setDefaultMarketPending(true);
-    manual.current = { lower: '', upper: '', stop: '' };
+    manual.current = null;
     rangePercent.current = null; pendingPercent.current = null;
     setRangeSource('auto'); setTimeRangeApplied(false); setRangeShortcut(null); setRangeNote('');
     setForm(gridSetupForm(undefined, gridStoredMarket(identity)));
@@ -112,7 +114,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       priceRefresh.current?.dispose();
       Object.values(generation.current).forEach(g => g.invalidate());
       invalidate(); setDraftPreview(null); setChart(null); setChartError(''); setMarketError(''); setRangeFacts(null); setRangeError(''); setRangeBusy(false);
-      manual.current = { lower: '', upper: '', stop: '' };
+      manual.current = null;
       pendingPercent.current = change.mode === 'percent' && value ? { market: String(value), percent: rangePercent.current! } : null;
       applyAutoAfterRefresh.current = change.mode === 'auto' && !!value; setAutoApplying(applyAutoAfterRefresh.current);
       setRangeShortcut(null); setRangeNote(change.note); setForm(change.form); return;
@@ -121,7 +123,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     invalidate();
     if (['lower', 'upper', 'stop'].includes(key)) {
       applyAutoAfterRefresh.current = false; setAutoApplying(false);
-      setRangeSource('manual'); manual.current = { lower: form.lower, upper: form.upper, stop: form.stop, [key]: value } as typeof manual.current;
+      setRangeSource('manual'); manual.current = { lower: form.lower, upper: form.upper, stop: form.stop, [key]: value } as NonNullable<typeof manual.current>;
     }
     if (['lower', 'upper'].includes(key)) { rangePercent.current = null; pendingPercent.current = null; setRangeNote(''); }
     if (['timeframe', 'rangeWindow'].includes(key)) {
@@ -156,7 +158,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   };
   const query = useMemo(() => {
     try {
-      const fee = feePercentToRate(form.feePercent);
+      const fee = form.investment ? feePercentToRate(form.feePercent) : null;
       const q = new URLSearchParams({ market: form.market, side: form.side, lower: form.lower, upper: form.upper,
         intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
         leverage: form.leverage, investment: form.investment, stop: effectiveStop });
@@ -166,12 +168,13 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   }, [form, effectiveStop]);
   useEffect(() => {
     if (!open) return;
-    let obsoleteDefault = false;
+    let obsoleteDefault = false, marketReadSucceeded = false;
     const controller = new PlannerPriceRefresh(form.market,
       // Discover the complete list first: a delisted remembered market would make a targeted read return 404.
       // The ref changes the next scheduled read without restarting this controller after validation.
       signal => readPlanner(!defaultMarketPendingRef.current && form.market ? `markets?${new URLSearchParams({ market: form.market })}` : 'markets', signal, plannerEnabled),
       observation => {
+        marketReadSucceeded = true;
         // Suppress only the delisted default's missing-price status while applying its live fallback.
         obsoleteDefault = defaultMarketPendingRef.current && observation.markets.length > 0
           && !observation.markets.some(m => m.market === form.market);
@@ -181,11 +184,15 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         const deadline = clientObservationDeadline(market.reference.value.expiresAt, observation.serverNow, observation.startedAt);
         const range = plannerRangeAround(market, deadline, Date.now(), pending.percent);
         if (!range) return;
-        pendingPercent.current = null; manual.current = { ...range, stop: manual.current.stop };
+        pendingPercent.current = null; manual.current = { ...range, stop: manual.current?.stop ?? '' };
         invalidate(); setRangeNote(''); setRangeSource('manual'); setWidth(pending.percent); setRangeShortcut(pending.percent);
         setForm(previous => previous.market === pending.market ? { ...previous, ...range } : previous);
       },
-      (busy, reason) => { setMarketLoading(busy); setMarketError(obsoleteDefault ? '' : reason); setNow(Date.now()); });
+      (busy, reason) => {
+        if (busy) marketReadSucceeded = false;
+        setMarketLoading(busy); setMarketError(obsoleteDefault ? '' : reason); setNow(Date.now());
+        if (!busy && reason && !marketReadSucceeded && !obsoleteDefault) { applyAutoAfterRefresh.current = false; setAutoApplying(false); }
+      });
     priceRefresh.current = controller;
     const stop = watchPlannerPrice(controller);
     return () => { stop(); if (priceRefresh.current === controller) priceRefresh.current = null; };
@@ -210,7 +217,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   useEffect(() => {
     generation.current.preview.invalidate(); setPreview(null); setLoading(false);
     if (!open || defaultMarketPending || !plannerEnabled || !form.market || query.error) return;
-    if (!form.lower || !form.upper || !form.investment || !effectiveStop) return;
+    if (!form.lower || !form.upper || (form.investment && !effectiveStop)) return;
     const request = generation.current.preview.start(); setLoading(true); setError('');
     const timer = setTimeout(() => {
       const startedAt = Date.now();
@@ -279,10 +286,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     setForm(previous => ({ ...previous, lower: r.lowerPrice, upper: r.upperPrice, stop: previous.side === 'long' ? r.longStop : r.shortStop }));
   };
   const restoreManual = () => {
-    if (draftBusy) return;
+    if (draftBusy || !hasManualRange || !manual.current) return;
+    const entered = manual.current;
     pendingPercent.current = null; rangePercent.current = null; applyAutoAfterRefresh.current = false; setAutoApplying(false);
     priceRefresh.current?.cancelShortcut(); invalidate(); setRangeSource('manual'); setRangeShortcut(null);
-    setForm(previous => ({ ...previous, ...manual.current }));
+    setForm(previous => ({ ...previous, ...entered }));
   };
   const resizeManual = (percent: number) => {
     if (draftBusy) return;
@@ -303,10 +311,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   };
   const shortcutReason = plannerShortcutReason(form.market, !!reference, marketError, marketLoading);
   const draftIntent = useMemo(() => gridSetupIntent(form, effectiveStop, rangeSource, timeRangeApplied), [form, effectiveStop, rangeSource, timeRangeApplied]);
-  const lines = useMemo(() => createEnabled
+  const usingPlannerGeometry = !form.investment && plannerEnabled;
+  const lines = useMemo(() => createEnabled && !usingPlannerGeometry
     ? draftPreview?.state === 'ready' && now < draftPreview.expiresAt && draftPreview.draftRevision === gridDraftRevision(draftIntent)
       ? draftPreview.plan?.lines ?? [] : []
-    : plannerEnabled ? plannerOverlays(preview, previewExpiry, now) : [], [createEnabled, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
+    : plannerEnabled ? plannerOverlays(preview, previewExpiry, now) : [], [createEnabled, usingPlannerGeometry, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
   const regime = rangeFacts && now < rangeExpiry ? rangeFacts.regime : { state: 'unavailable' as const,
     reason: rangeError || (rangeBusy ? 'Loading finalized candles' : !form.market ? 'Choose a market' : 'Observation expired or unavailable; refresh chart') };
   const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
@@ -418,8 +427,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             </div>
           </div>
           <GridPlannerChart chart={chart} lines={lines} range={range} period={form.rangeWindow} stale={now >= chartExpiry} hasMarket={!!form.market}
-            levelMessage={createEnabled ? lines.length ? 'Authoritative draft preview levels used when saving.' : 'Authoritative draft levels require a fresh validated draft preview.'
-              : `Hypothetical planner preview. ${plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}`}
+            levelMessage={createEnabled && !usingPlannerGeometry ? lines.length ? 'Authoritative draft preview levels used when saving.' : 'Authoritative draft levels require a fresh validated draft preview.'
+              : plannerLevelMessage(preview, previewExpiry, now, { ...form, stop: effectiveStop }, loading, query.error || error)}
             tick={selected?.constraints.state === 'available' ? selected.constraints.value.tick : null}
             previewDetails={<>
               <p>{form.stop ? "Your custom stop must align to the exchange's price step and lie beyond the loss side of the range."
@@ -446,7 +455,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
                   className="h-7 px-2 text-xs" onClick={() => edit('rangeWindow', period)}>{period === 'day' ? 'Day' : period === 'week' ? 'Week' : 'Month'}</Button>)}
               </div>
             </div>
-            {rangeSource === 'auto' && <Button type="button" variant="ghost" onClick={restoreManual}>Restore entered range</Button>}
+            {rangeSource === 'auto' && hasManualRange && <Button type="button" variant="ghost" onClick={restoreManual}>Restore entered range</Button>}
             <span className="text-xs text-muted-foreground self-center">{rangeSource === 'auto' ? 'Auto' : 'Manual'}</span>
           </div>
           <p className="text-xs text-muted-foreground">Highs and lows from this period set the range; the candle size sets the safety buffer.</p>
@@ -532,10 +541,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           {loading ? <p role="status" className="text-sm">Calculating hypothetical geometry…</p>
             : preview ? <p role="status" className="text-sm font-medium">{stale ? 'Observation expired — refresh before using this preview'
               : preview.state === 'rejected' ? 'Requested plan rejected' : preview.state === 'unavailable' ? 'Preview unavailable'
+              : preview.geometry?.state === 'available' ? 'Enter an investment to see order sizes'
               : preview.state === 'diagnostic' ? 'Diagnostic geometry — some checks unavailable' : 'Hypothetical checks passed'}</p>
             : <p className="text-sm text-muted-foreground">Choose a market, range and investment to see your plan.{!effectiveStop && ' A proposed stop needs observed sizing, or enter one in Stop loss settings.'}</p>}
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-            <div><dt className="text-xs text-muted-foreground">Grids</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length - 1} grids` : 'Awaiting preview'}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Grids</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length - 1} grids` : preview?.geometry?.state === 'available' ? `${preview.geometry.value.length - 1} grids` : 'Awaiting preview'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Range you chose</dt><dd className="font-medium mt-1 break-words">{range ? `${readableDecimal(range.lower)} – ${readableDecimal(range.upper)}` : 'Enter lower and upper prices'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Proposed stop</dt><dd className="font-medium mt-1 break-words">{effectiveStop ? `${readableDecimal(effectiveStop)}${form.stop ? ' · custom' : ' · suggested'}` : 'Unavailable'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Grid order sizes</dt><dd className="font-medium mt-1">{ORDER_SIZES.find(o => o.value === form.entryScale)?.label}</dd></div>

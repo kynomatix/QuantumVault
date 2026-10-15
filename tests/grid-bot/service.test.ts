@@ -27,6 +27,26 @@ async function serve(enabled: boolean, deps: PlannerDeps) {
 }
 afterEach(async () => { vi.useRealTimers(); for (const s of servers.splice(0)) { s.closeAllConnections(); await new Promise<void>(resolve => s.close(() => resolve())); } });
 describe('bounded read-only Planner HTTP surface', () => {
+  it('serves price-only geometry through the same GET flag, auth, validation and shared preview limit', async () => {
+    const path = 'preview?market=BTC-PERP&lower=80.123&upper=120.987&intervals=4';
+    const off = await serve(false, makeDeps()); expect((await off.get(path)).status).toBe(404);
+    const d = makeDeps(), s = await serve(true, d);
+    expect((await s.get(path, null)).status).toBe(401); expect((await s.get(path, 'REDACTED')).status).toBe(403);
+    expect((await s.get(path, 'EXAMPLE', 'POST')).status).toBe(404); expect(s.load).not.toHaveBeenCalled();
+    for (const bad of [`${path}&investment=0`, `${path}&intervals=4`, `${path}&account=EXAMPLE`, path.replace('intervals=4', 'intervals=101')])
+      expect((await s.get(bad)).status).toBe(400);
+    expect(d.getMarkets).not.toHaveBeenCalled();
+    const response = await s.get(path), geometry = await response.json();
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(geometry).toMatchObject({ state: 'diagnostic', requestedPlan: null, minimumPlan: null,
+      minimum: { state: 'unavailable' }, assumedMinimum: { state: 'unavailable' }, feeRows: [],
+      geometry: { state: 'available', value: [{ ordinal: 0, price: '80.1' }, { ordinal: 1, price: '90.3' },
+        { ordinal: 2, price: '100.5' }, { ordinal: 3, price: '110.7' }, { ordinal: 4, price: '120.9' }] } });
+    for (let i = 1; i < 30; i++) expect((await s.get(`${path}&investment=`)).status).toBe(200);
+    const sized = `${path}&side=long&seed=true&entryScale=flat&profitScale=flat&leverage=1&investment=1000&stop=70`;
+    expect((await s.get(sized)).status).toBe(503); expect((await s.get(path)).status).toBe(503);
+    expect(d.getMarkets).toHaveBeenCalledTimes(1); expect(d.candles).not.toHaveBeenCalled();
+  });
   it('off flag registers no routes and loads no market, price or chart dependencies', async () => {
     const d = makeDeps(), s = await serve(false, d);
     for (const route of ['status', 'markets', 'preview', 'chart']) expect((await s.get(route)).status).toBe(404);

@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Children, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { GridPlannerSheet } from '../../client/src/components/grid-planner/GridPlannerSheet';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
+import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraftActions';
+import { previewGrid } from '../../server/grid-planner/preview';
+import type { PlannerMarket, PlannerQuery } from '../../server/grid-planner/types';
 import { gridSetupForm, gridSetupIntent } from '../../client/src/lib/grid-setup-view';
 import { gridHistoryWindow } from '../../shared/grid-lookback';
 import { RANGE_PRESETS } from '../../client/src/lib/grid-planner-view';
@@ -76,7 +79,9 @@ async function settle() {
 }
 function elements(node: ReactNode = tree): Element[] {
   if (!isValidElement<Record<string, any>>(node)) return [];
-  return [node, ...Children.toArray(node.props.children).flatMap(child => elements(child))];
+  const layout = node.type === GridDraftActions
+    ? node.props.renderLayout({ details: null, status: null, actions: null, depositDialog: null }) : null;
+  return [node, ...Children.toArray(node.props.children).flatMap(child => elements(child)), ...elements(layout)];
 }
 function text(node: ReactNode): string {
   if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -115,6 +120,17 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
   vi.stubGlobal('fetch', vi.fn((url: string, init: RequestInit) => {
     const path = new URL(url, 'https://example.test');
+    if (path.pathname.endsWith('/preview')) {
+      const observedAt = Date.now(), market = path.searchParams.get('market')!;
+      const fixture: PlannerMarket = { market, name: market, protocolSymbol: market,
+        constraints: { state: 'available', value: { tick: '0.1', lot: '0.01', minimumQuote: '10', observedAt, expiresAt: observedAt + 60_000,
+          maxLeverage: { state: 'available', value: '50' }, maximumQuote: { state: 'unavailable', reason: 'EXAMPLE' },
+          priceBounds: { state: 'unavailable', reason: 'EXAMPLE' }, restrictions: { state: 'unavailable', reason: 'EXAMPLE' }, source: '/info', venue: 'pacifica' } },
+        reference: { state: 'available', value: { price: '100', observedAt, expiresAt: observedAt + 60_000, label: 'Cached Pacifica book reference price' } } };
+      const query = { ...Object.fromEntries(path.searchParams), intervals: Number(path.searchParams.get('intervals')),
+        seed: path.searchParams.get('seed') === 'true', fee: path.searchParams.get('fee') } as unknown as PlannerQuery;
+      return Promise.resolve({ ok: true, json: async () => previewGrid(query, fixture, observedAt) });
+    }
     if (path.pathname.endsWith('/range')) return new Promise((complete, reject) => {
       requests.push({ market: path.searchParams.get('market')!, timeframe: path.searchParams.get('timeframe')!,
         period: path.searchParams.get('period')!, signal: init.signal as AbortSignal,
@@ -132,10 +148,90 @@ beforeEach(() => {
 });
 afterEach(() => {
   for (const effect of hooks.effects) effect.cleanup?.();
+  vi.useRealTimers();
   vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks();
 });
 
 describe('Grid setup automatic opening range', () => {
+  it.each([false, true])('draws quantized levels before investment with createEnabled=%s and replaces them on sizing', async createEnabled => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    await open({ createEnabled }); await resolve(requests[0]);
+    expect(field('investment').props.value).toBe('');
+    expect(elements().some(node => text(node) === 'Restore entered range')).toBe(false);
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    let chart = find(node => node.type === GridPlannerChart);
+    expect(chart.props.lines).toHaveLength(11);
+    expect(chart.props.lines[0]).toEqual({ ordinal: 0, price: '90' });
+    expect(chart.props.lines.at(-1)).toEqual({ ordinal: 10, price: '110' });
+    expect(chart.props.lines.every((line: Record<string, unknown>) => Object.keys(line).sort().join(',') === 'ordinal,price')).toBe(true);
+    expect(chart.props.levelMessage).toBe('Enter an investment to see order sizes');
+    edit('intervals', '4'); expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(find(node => node.type === GridPlannerChart).props.lines).toHaveLength(5);
+    edit('investment', '1000'); expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    chart = find(node => node.type === GridPlannerChart);
+    // Draft-enabled setups still require the separate authoritative draft preview after investment.
+    if (createEnabled) expect(chart.props.lines).toEqual([]);
+    else expect(chart.props.lines[0]).toHaveProperty('quantity');
+    edit('investment', ''); await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(find(node => node.type === GridPlannerChart).props.lines).toHaveLength(5);
+    await vi.advanceTimersByTimeAsync(60_001); await settle();
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+  });
+  it('ignores a superseded geometry response after editing the range', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    let finish!: () => void, oldSignal: AbortSignal | undefined;
+    vi.mocked(fetch).mockImplementation((url, init) => {
+      if (String(url).includes('/preview?') && !oldSignal) {
+        oldSignal = init?.signal as AbortSignal;
+        return new Promise<Response>(resolve => { finish = () => resolve({ ok: true, json: async () => ({ state: 'EXAMPLE invalid superseded response' }) } as Response); });
+      }
+      return original(url, init);
+    });
+    await open(); await resolve(requests[0]); await vi.advanceTimersByTimeAsync(250); await settle();
+    edit('lower', '95'); expect(oldSignal?.aborted).toBe(true);
+    finish(); await settle();
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(find(node => node.type === GridPlannerChart).props.lines[0].price).toBe('95');
+  });
+  it.each([true, false])('clears automatic application after a markets read failure with plannerEnabled=%s', async plannerEnabled => {
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation((url, init) => /\/(?:setup-)?markets(?:\?|$)/.test(String(url))
+      ? Promise.reject(Error('EXAMPLE markets read failed')) : original(url, init));
+    await open({ plannerEnabled, createEnabled: true });
+    expect(find(node => node.type === GridDraftActions).props.rangeBusy).toBe(false);
+    expect(requests).toHaveLength(0);
+    vi.mocked(fetch).mockImplementation(original);
+    await hooks.controllers.at(-1)!.refresh(); await settle(); await resolve(requests[0]);
+    expect(prices()).toEqual({ lower: '', upper: '', stop: '' });
+    button('Suggest auto-range').props.onClick(); render(); await settle(); expect(prices().lower).toBe('90');
+  });
+  it('keeps candle-based auto range armed after a successful markets read without a reference price', async () => {
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const response = await original(url, init);
+      if (!/\/markets(?:\?|$)/.test(String(url))) return response;
+      const value = await response.json();
+      return { ...response, json: async () => ({ ...value, markets: value.markets.map((m: PlannerMarket) => ({
+        ...m, reference: { state: 'unavailable', reason: 'EXAMPLE no cached reference' },
+      })) }) } as Response;
+    });
+    await open(); await resolve(requests[0]);
+    expect(prices()).toEqual({ lower: '90', upper: '110', stop: '85' });
+    expect(source()).toBe('Auto');
+  });
+  it('only offers restoration after a real manual range and forgets it when changing markets', async () => {
+    await open(); await resolve(requests[0]);
+    expect(elements().some(node => text(node) === 'Restore entered range')).toBe(false);
+    edit('lower', '88'); edit('upper', '112'); edit('stop', '82'); const entered = prices();
+    button('Suggest auto-range').props.onClick(); render(); await settle(); expect(source()).toBe('Auto');
+    button('Restore entered range').props.onClick(); render(); expect(prices()).toEqual(entered); expect(source()).toBe('Manual');
+    button('Suggest auto-range').props.onClick(); render(); market('ETH-PERP'); await settle(); await resolve(requests.at(-1)!);
+    expect(elements().some(node => text(node) === 'Restore entered range')).toBe(false);
+  });
   it.each([true, false])('fills Week bounds and structural stop once with plannerEnabled=%s', async plannerEnabled => {
     await open({ plannerEnabled });
     expect(requests).toHaveLength(1); expect(requests[0]).toMatchObject({ market: 'BTC-PERP', timeframe: '1h', period: 'week' });
