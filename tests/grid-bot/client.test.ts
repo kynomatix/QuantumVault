@@ -73,7 +73,7 @@ describe('Grid screenshot panel polish', () => {
     expect(overview).not.toContain('UNKNOWN'); expect(overview).not.toContain('Capacity and launch authorities');
     surface.sweep = 'Confirmed terminal';
     const details = renderToStaticMarkup(createElement(GridBotDetails, { surface, now }));
-    for (const text of ['<details', 'Settlement complete', 'Mark price', 'USDC left', 'Last updated', 'No pending action', 'Capacity and launch authorities', 'Resume LaunchFacts provider: unavailable', 'Grid levels']) expect(details).toContain(text);
+    for (const text of ['<details', 'Settlement complete', 'Mark price', 'USDC left', 'Last updated', 'No pending action', 'Capacity and launch authorities', 'Resume: Worker unavailable', 'Grid levels']) expect(details).toContain(text);
     expect(details).not.toContain('No pending action ·');
     expect(surface.sweep).toBe('Confirmed terminal');
     surface.observedAt = new Date(now - 15_001).toISOString(); surface.pnl.total = '123';
@@ -598,6 +598,14 @@ describe('Planner client authority boundaries', () => {
     const live = renderToStaticMarkup(createElement(GridDraftActions, { ...props, liveEnabled: true }));
     expect(live).toContain('aria-label="Save Grid draft"'); expect(live).toContain('Create bot');
     expect(live).toContain('Refresh preview and funds');
+    const liveFooter = renderToStaticMarkup(createElement(GridDraftActions, { ...props, liveEnabled: true,
+      renderLayout: ({ actions }) => createElement('footer', null, actions),
+    }));
+    const createButton = liveFooter.match(/<button\b[^>]*>Create bot<\/button>/)?.[0];
+    const saveButton = liveFooter.match(/<button\b[^>]*>Save draft<\/button>/)?.[0];
+    expect(createButton).toContain('bg-gradient-to-r from-primary to-accent');
+    expect(saveButton).toContain('[border-color:var(--button-outline)]');
+    expect(saveButton).not.toContain('bg-gradient-to-r');
   });
   it('keeps active management in its sheet and routes Adjust Range intent to the setup Dialog', () => {
     const drawer = readFileSync('client/src/components/grid-bot/GridBotDrawer.tsx', 'utf8');
