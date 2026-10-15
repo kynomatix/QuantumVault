@@ -76,17 +76,17 @@ export class GridLaunchAuthority {
     try{
       const master=security.masterAccount,target=account?.account??master,symbol=policy.market.replace(/-PERP$/,'');
       if(!master||account&&(account.wallet!==wallet||account.botId!==policy.id||account.masterAccount!==master||target===master||!account.leaseToken))deny('Grid retained account identity changed.');
-      const configuration=this.deps.configuration(),env=this.deps.environment();
+      const {builderCode,builderOwner}=this.deps.configuration(),env=this.deps.environment();
       const recycler={reuse:env.REUSE_ON_CREATE,recycle:env.RECYCLE_ON_DELETE,deployment:env.REPLIT_DEPLOYMENT??'',expectedDeployment:env.GRID_RECYCLER_DEPLOYMENT??'',checkedAt:started};
-      if(!this.deps.reads.ready()||configuration.builderCode!=='CARRY'||!configuration.builderOwner||configuration.builderOwner.trim()!==configuration.builderOwner
-        ||!gridRecyclerGate(recycler,this.deps.now()))deny('Grid transport, CARRY configuration or recycler authority unavailable.');
+      if(!this.deps.reads.ready()||builderCode!=='CARRY'||!builderOwner||builderOwner.trim()!==builderOwner
+        ||!gridRecyclerGate(recycler,this.deps.now()))return deny('Grid transport, CARRY configuration or recycler authority unavailable.');
       // Settle every read before releasing the signing key, including failure/abort paths.
       const jobs=[
         ()=>this.deps.reads.json(master,'/account',{account:master},signal),
         ()=>this.deps.reads.json(master,'/account',{account:target},signal),
         ()=>this.deps.reads.json(master,'/account/settings',{account:target},signal),
         ()=>this.deps.reads.json(master,'/account/builder_codes/approvals',{account:target},signal),
-        ()=>this.deps.reads.json(master,'/builder/overview',{account:configuration.builderOwner!},signal),
+        ()=>this.deps.reads.json(master,'/builder/overview',{account:builderOwner},signal),
         ()=>this.deps.reads.json(master,'/info',{},signal),()=>this.deps.reads.json(master,'/book',{symbol},signal),
         ()=>this.deps.reads.json(master,'/orders',{account:target},signal),()=>this.deps.reads.json(master,'/positions',{account:target},signal),
         ()=>this.deps.reads.subaccounts(master,security.signingKey,signal),()=>this.deps.sol(master,signal),()=>this.deps.reusable(wallet,master),
@@ -107,15 +107,16 @@ export class GridLaunchAuthority {
       if(!checkEntryConstraints(constraints,policy.market,now).ok)deny('Grid market constraints unavailable.');
       const tick=decimal(market.tick_size,true),lot=decimal(market.lot_size,true),minimumQuote=decimal(market.min_order_size,true),maximumQuote=decimal(market.max_order_size,true),minimumPrice=decimal(market.min_tick,true),maximumPrice=decimal(market.max_tick,true);
       if(!Number.isSafeInteger(market.max_leverage)||(market.max_leverage as number)<1||new D(maximumQuote).lt(minimumQuote)||new D(maximumPrice).lt(minimumPrice))deny('Grid market limits unavailable.');
-      if(!Array.isArray(settings.margin_settings))deny('Grid margin settings unavailable.');
-      const matching=settings.margin_settings.map(object).filter(r=>r.symbol===symbol);
+      const marginSettings=settings.margin_settings;
+      if(!Array.isArray(marginSettings))return deny('Grid margin settings unavailable.');
+      const matching=marginSettings.map(object).filter(r=>r.symbol===symbol);
       // Do not turn Pacifica's omitted default row into actual account leverage authority.
       if(matching.length!==1||typeof matching[0].isolated!=='boolean'||!Number.isSafeInteger(matching[0].leverage)||(matching[0].leverage as number)<1)deny('Explicit Grid leverage and margin mode unavailable.');
       const restrictions=market.instrument_type==='perpetual'&&market.isolated_only===false&&matching[0].isolated===false?'unrestricted':
         market.isolated_only===true||matching[0].isolated===true?'restricted':'unknown';
       if(restrictions!=='unrestricted')deny('Grid cross-margin market restriction authority unavailable.');
       const book=gridBookFact(rawBook,symbol,started,now);if(!book)deny('Fresh Grid book unavailable.');
-      const approvals=rows(rawApprovals,target),overview=rows(rawOverview,configuration.builderOwner);
+      const approvals=rows(rawApprovals,target),overview=rows(rawOverview,builderOwner);
       const fee=(role:'maker'|'taker',intent:'entry'|'profit')=>{
         const result=createGridFeeQuote({account:target,subaccountId:null,market:policy.market,liquidityRole:role,builderCode:'CARRY',intent},a,overview,approvals,started,AGE);
         if(result.availability!=='available')return deny('Current Grid account fees or CARRY approval unavailable.');return result.quote;
@@ -126,9 +127,9 @@ export class GridLaunchAuthority {
       }},{kind:'limit',botId:policy.id,account:target,masterAccount:master,path:'/orders/create',operationType:'create_order',timestamp:started,expiryMs:AGE,data:{symbol,reduce_only:false,builder_code:'CARRY'},authority:{}});
       if(!margin||margin.available!==available||margin.leverage!==String(matching[0].leverage))deny('Strict C1 Grid margin authority unavailable.');
       margin!.observedAt=started;fresh(margin!.accountUpdatedAt,now);
-      const inventory=object(envelope(rawInventory,master));
-      if(inventory.account!==undefined&&inventory.account!==master||!Array.isArray(inventory.subaccounts))deny('Grid master subaccount inventory unavailable.');
-      const addresses=inventory.subaccounts.map(v=>{const r=object(v);if(typeof r.address!=='string'||!r.address||r.address.trim()!==r.address||r.address===master)return deny('Grid subaccount address unavailable.');return r.address;});
+      const inventory=object(envelope(rawInventory,master)),subaccounts=inventory.subaccounts;
+      if(inventory.account!==undefined&&inventory.account!==master||!Array.isArray(subaccounts))return deny('Grid master subaccount inventory unavailable.');
+      const addresses=subaccounts.map((v:unknown)=>{const r=object(v);if(typeof r.address!=='string'||!r.address||r.address.trim()!==r.address||r.address===master)return deny('Grid subaccount address unavailable.');return r.address;});
       if(addresses.length>10||new Set(addresses).size!==addresses.length||account&&!addresses.includes(target))deny('Grid subaccount inventory identity changed.');
       const orders=rows(rawOrders,target);const parsed=parseGridVenueOrders(orders);
       if(!Number.isSafeInteger(a.orders_count)||a.orders_count!==parsed.length)deny('Grid full-account order inventory unavailable.');
@@ -185,7 +186,9 @@ export async function unlockGridLaunchAgent(wallet:string,umk:Buffer):Promise<Gr
   }catch{return null;}finally{signingKey?.fill(0);}
 }
 export function productionGridLaunchAuthority(reads:GridLaunchReads,ledger:GridLaunchStorage):GridLaunchAuthority{
-  return new GridLaunchAuthority({reads,unlock:unlockGridLaunchAgent,sol:sharedSol,now:Date.now,environment:()=>process.env,
+  return new GridLaunchAuthority({reads,unlock:unlockGridLaunchAgent,sol:sharedSol,now:Date.now,environment:()=>({
+    REUSE_ON_CREATE:process.env.REUSE_ON_CREATE,RECYCLE_ON_DELETE:process.env.RECYCLE_ON_DELETE,
+    REPLIT_DEPLOYMENT:process.env.REPLIT_DEPLOYMENT,GRID_RECYCLER_DEPLOYMENT:process.env.GRID_RECYCLER_DEPLOYMENT}),
     configuration:()=>{const adapter=requireGridAdapter();return adapter.getGridLaunchConfiguration?.()??{builderCode:null,builderOwner:null};},
     capacity:(master,account)=>ledger.transaction(async c=>({
       activeBots:Number((await c.query(`SELECT count(*) AS count FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
