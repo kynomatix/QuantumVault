@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as bip39 from 'bip39';
-import { derivePhoenixBotMaterial, withPhoenixBotSigner } from '../../server/protocol/phoenix/custody';
+import { derivePhoenixBotMaterial, withPhoenixBotSigner, signPhoenixReferralLogin, signPhoenixReferralTransaction } from '../../server/protocol/phoenix/custody';
+import { phoenixReferralPin, prepareReferralActivation } from '../../server/protocol/phoenix/referral-activation';
 import { deriveBotSecretKeyFromAgentSeed } from '../../server/bot-derived-secret';
 import { derivePhoenixIdentity, phoenixIdentityColumns } from '../../server/protocol/phoenix/identity';
 import { PublicKey } from '@solana/web3.js';
-import { authority, identity } from '../helpers/phoenix-registration';
+import { authority, identity, pin, lifetime } from '../helpers/phoenix-registration';
 
 const security = vi.hoisted(() => ({ getUmkForWebhook: vi.fn(), decryptMnemonic: vi.fn(), encryptBotSubaccountKeyV3: vi.fn(),
   computeBotPolicyHmac: vi.fn(), verifyBotPolicyHmac: vi.fn(), decryptBotSubaccountKeyV3: vi.fn() }));
@@ -25,6 +26,22 @@ beforeEach(() => {
   security.computeBotPolicyHmac.mockReturnValue('EXAMPLE-policy-hmac');
 });
 describe('U03 key lifetimes with synthetic custody', () => {
+  it.each([false,true])('wipes the purpose-specific referral login window on refusal=%s', async refuse => {
+    const nonce_id = `nonce-${'0'.repeat(8)}-${'0'.repeat(4)}-${'0'.repeat(4)}-${'0'.repeat(4)}-${'0'.repeat(12)}`;
+    const expires_at = new Date(Date.now()+60000).toISOString();
+    const challenge = { nonce_id, expires_at, message: `phoenix-wallet-login-v1\nwallet:${identity.authorityWalletAddress}\nnonce:${nonce_id}\nexpires_at:${expires_at}${refuse ? '\n' : ''}` };
+    const call = withPhoenixBotSigner(bot(), secret => signPhoenixReferralLogin(challenge, identity, secret));
+    if (refuse) await expect(call).rejects.toThrow(); else await expect(call).resolves.toMatch(/^[1-9A-HJ-NP-Za-km-z]+$/);
+    expect(cached.every(b => b === 0)).toBe(true); expect(held.every(b => b === 0)).toBe(true);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+  it('keeps versioned referral signing synchronous and clears the owned secret', async () => {
+    const referralPin = phoenixReferralPin(pin);
+    const signed = await withPhoenixBotSigner(bot(), secret => signPhoenixReferralTransaction(
+      prepareReferralActivation(identity, referralPin, 32, 'missing', lifetime), identity, referralPin, 32, 'missing', lifetime, secret));
+    expect(signed.lastValidBlockHeight).toBe(String(lifetime.lastValidBlockHeight));
+    expect(cached.every(b => b === 0)).toBe(true); expect(held.every(b => b === 0)).toBe(true);
+  });
   it('clears mnemonic, owned secret and UMK after allocation and persists only ciphertext/public identity/policy', async () => {
     let secret: Buffer | undefined;
     security.encryptBotSubaccountKeyV3.mockImplementation((_umk, value) => { secret = value; return 'EXAMPLE-ciphertext'; });

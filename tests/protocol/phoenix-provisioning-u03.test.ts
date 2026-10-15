@@ -4,14 +4,16 @@ vi.mock('../../server/protocol/phoenix/rollout', async importOriginal => ({
   phoenixCanaryAllows: () => true, phoenixExposureAllows: () => true,
 }));
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { Transaction } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { PhoenixOperationStore } from '../../server/protocol/phoenix/operation-store';
 import { PhoenixProvisioningStore, type PhoenixCreationRequest } from '../../server/protocol/phoenix/provisioning-store';
-import { PhoenixProvisioner, phoenixProvisioningEnabled } from '../../server/protocol/phoenix/provisioner';
+import { PhoenixProvisioner, phoenixProvisioningEnabled, type PhoenixRegistrationIO } from '../../server/protocol/phoenix/provisioner';
+import { phoenixReferralPin, referralIdentityHash, referralActivationRequest, type ReferralTraderState } from '../../server/protocol/phoenix/referral-activation';
+import { readPhoenixReferralConfig } from '../../server/protocol/phoenix/referral-config';
 import { PhoenixActivationRefusal } from '../../server/protocol/phoenix/registration-io';
 import { expectedRegistration } from '../../server/protocol/phoenix/registration';
 import { phoenixMigrationFixture } from '../helpers/phoenix-schema';
@@ -22,10 +24,36 @@ let pool: pg.Pool, bootstrap: pg.Pool, allocation: PhoenixProvisioningStore, ope
 const request = (): PhoenixCreationRequest => ({ ownerWallet: 'EXAMPLE-owner', requestId: 'EXAMPLE-request', name: 'EXAMPLE-bot',
   market: 'SOL', maxPositions: 32, maxCostLamports: '20000' });
 let enabled = true;
+let currentCode: string | undefined;
 const derive = vi.fn(async (_request: PhoenixCreationRequest, index: number) => ({ authority: (index === 1 ? authority : key(index + 20)).publicKey.toBase58(),
   encryptedKey: 'EXAMPLE-ciphertext', policyHmac: 'EXAMPLE-policy-hmac' }));
-const io = { eligibility: vi.fn(), build: vi.fn(), lifetime: vi.fn(), estimate: vi.fn(), withSigner: vi.fn(), submit: vi.fn(), confirm: vi.fn() };
-const provisioner = () => new PhoenixProvisioner(allocation, operations, io, pin, derive, () => enabled);
+const io = { eligibility: vi.fn(), build: vi.fn(), lifetime: vi.fn(), estimate: vi.fn(), withSigner: vi.fn(), submit: vi.fn(), confirm: vi.fn(), referral: undefined as PhoenixRegistrationIO['referral'] };
+const provisioner = () => new PhoenixProvisioner(allocation, operations, io, pin, derive, () => enabled,
+  () => readPhoenixReferralConfig({ PHOENIX_REFERRAL_CODE: currentCode }));
+function installReferral(state: ReferralTraderState = 'missing') {
+  currentCode = 'EXAMPLE-Referral'; io.eligibility.mockResolvedValue('gated'); io.confirm.mockResolvedValue('unknown');
+  type ReferralIO = NonNullable<PhoenixRegistrationIO['referral']>;
+  const referralPin = phoenixReferralPin(pin);
+  const referral = { pin: referralPin,
+    state: vi.fn<ReferralIO['state']>(async identity => ({ state, identityHash: referralIdentityHash(identity), observedAt: Date.now(),
+      ...(state !== 'missing' ? { accountSha256: createHash('sha256').update('EXAMPLE-finalized-account').digest('hex') } : {}) })),
+    validateDeployment: vi.fn<ReferralIO['validateDeployment']>(async () => {}), unexpired: vi.fn<ReferralIO['unexpired']>(async () => true),
+    credential: vi.fn<ReferralIO['credential']>(async (_botId, identity) => ({ authority: identity.authorityWalletAddress, bearer: 'EXAMPLE-access', expiresAt: Date.now()+60000 })),
+    estimate: vi.fn<ReferralIO['estimate']>(async () => ({ rentLamports: state === 'missing' ? '1000' : '0', feeLamports: '10000', balanceLamports: '100000' })),
+    submit: vi.fn<ReferralIO['submit']>(async (signed, binding, identity, config) => {
+      const row = (await pool.query('SELECT id,bot_id FROM phoenix_operations WHERE request_key=$1',[request().requestId])).rows[0];
+      const stored = await operations.read(row.bot_id, request().ownerWallet, row.id);
+      expect(stored.operation.state).toBe('submission_pending');
+      expect(stored.attempt?.signature).toBe(signed.signature);
+      expect(stored.operation.observation.registrationBinding).toEqual(binding);
+      expect(referralActivationRequest(signed,binding,identity,referralPin,config).transaction).toBe(signed.transaction);
+      expect(JSON.stringify(stored)).not.toContain('EXAMPLE-Referral');
+      expect(JSON.stringify(stored)).not.toContain('EXAMPLE-access');
+      return { status: 'submitted' };
+    }),
+  };
+  io.referral = referral; return referral;
+}
 
 beforeAll(async () => {
   const url = process.env.DATABASE_URL;
@@ -49,7 +77,7 @@ afterAll(async () => {
   if (bootstrap) { await bootstrap.query(`DROP SCHEMA IF EXISTS ${schemaName} CASCADE`); await bootstrap.end(); }
 });
 beforeEach(async () => {
-  vi.clearAllMocks(); enabled = true;
+  vi.clearAllMocks(); enabled = true; currentCode = undefined; io.referral = undefined;
   await pool.query('TRUNCATE phoenix_operation_attempts, phoenix_operations, trading_bots, wallets');
   await pool.query('INSERT INTO wallets(address) VALUES ($1)', [request().ownerWallet]);
   io.eligibility.mockReset().mockResolvedValue('eligible');
@@ -59,6 +87,131 @@ beforeEach(async () => {
   io.withSigner.mockReset().mockImplementation(async (_id, sign) => { const exampleSigningBytes = authority.secretKey; try { return sign(exampleSigningBytes); } finally { exampleSigningBytes.fill(0); } });
   io.submit.mockReset().mockImplementation(async (wire, identity) => ({ signature: bs58.encode(Transaction.from(Buffer.from(wire, 'base64')).signature!), traderPda: identity.traderAccountAddress }));
   io.confirm.mockReset().mockResolvedValue('confirmed');
+});
+
+describe('U03 gated referral write-ahead claim and recovery', () => {
+  it.each(['\r', '\n', '\u2028', '\u2029'])('rejects a referral fee with a line terminator before signing', async suffix => {
+    const referral = installReferral();
+    referral.estimate.mockResolvedValue({rentLamports:'1000',feeLamports:'10000'+suffix,balanceLamports:'100000'});
+    const reply = await provisioner().create(request());
+    expect(reply.code).toBe('invalid_registration');
+    expect(io.withSigner).not.toHaveBeenCalled(); expect(referral.submit).not.toHaveBeenCalled();
+  });
+  it.each([undefined, '', ' ', 'x'.repeat(257)])('refuses gated new work with OFF/invalid code', async code => {
+    const referral = installReferral(); currentCode = code;
+    const reply = await provisioner().create(request());
+    expect(reply.code).toBe(code === undefined || code === '' ? 'gated' : 'referral_configuration');
+    expect(io.withSigner).not.toHaveBeenCalled(); expect(referral.submit).not.toHaveBeenCalled(); expect(io.build).not.toHaveBeenCalled();
+  });
+  it('keeps independently ungated legacy behavior even with invalid referral configuration', async () => {
+    currentCode = ' '; expect((await provisioner().create(request())).code).toBe('completed');
+    expect(io.build).toHaveBeenCalledTimes(1); expect(io.submit).toHaveBeenCalledTimes(1);
+  });
+  it.each(['missing','inactive'] as const)('uses only referral for %s and records the original signature before one POST', async state => {
+    const referral = installReferral(state), reply = await provisioner().create(request());
+    expect(reply.code).toBe('submission_unknown'); expect(referral.submit).toHaveBeenCalledTimes(1);
+    expect(io.build).not.toHaveBeenCalled(); expect(io.submit).not.toHaveBeenCalled();
+    expect(referral.estimate.mock.calls[0][0].message.compiledInstructions).toHaveLength(state === 'missing' ? 2 : 1);
+    const read = await operations.read(reply.botId!,request().ownerWallet,reply.operationId!);
+    expect(read.operation.observation.registrationBinding.expectedState).toBe(state);
+  });
+  it('admits one POST across concurrent preparation and process restart', async () => {
+    const referral = installReferral();
+    const replies = await Promise.all([provisioner().create(request()),provisioner().create(request())]);
+    expect(new Set(replies.map(r => r.operationId)).size).toBe(1); expect(referral.submit).toHaveBeenCalledTimes(1);
+    const op = (await operations.read(replies[0].botId!,request().ownerWallet,replies[0].operationId!)).operation;
+    await provisioner().resume(op); expect(referral.submit).toHaveBeenCalledTimes(1);
+    expect((await pool.query('SELECT count(*)::int AS count FROM phoenix_operation_attempts')).rows[0].count).toBe(1);
+  });
+  it('does not POST when a successful durable claim acknowledgement is lost', async () => {
+    const referral = installReferral(), original = operations.recordAttempt.bind(operations);
+    const spy = vi.spyOn(operations,'recordAttempt').mockImplementationOnce(async (...args) => { await original(...args); throw new Error('EXAMPLE-lost-ack'); });
+    try {
+      const reply = await provisioner().create(request()); expect(reply.code).toBe('submission_unknown');
+      expect(referral.submit).not.toHaveBeenCalled();
+      const read = await operations.read(reply.botId!,request().ownerWallet,reply.operationId!);
+      expect(read.attempt).toBeDefined();
+      await provisioner().resume(read.operation); expect(referral.submit).not.toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+  it.each(['activated','submitted','already_activated'])('requires finalized reconciliation after the %s hint', async status => {
+    const referral = installReferral(); referral.submit.mockResolvedValue({status});
+    const reply = await provisioner().create(request()); expect(reply.code).toBe('submission_unknown');
+    expect(io.confirm).toHaveBeenCalledTimes(1);
+    const op = (await operations.read(reply.botId!,request().ownerWallet,reply.operationId!)).operation;
+    expect(op.state).toBe('submission_pending');
+    io.confirm.mockResolvedValue('confirmed');
+    expect((await provisioner().resume(op)).code).toBe('completed');
+    expect(referral.submit).toHaveBeenCalledTimes(1);
+  });
+  it.each(['timeout','401','403','429','500','malformed','redirect','mismatch'])('keeps %s ambiguous after claim without retry', async reason => {
+    const referral = installReferral(); referral.submit.mockRejectedValue(new Error(`EXAMPLE-${reason}`));
+    const reply = await provisioner().create(request()); expect(reply.code).toBe('submission_unknown');
+    const op = (await operations.read(reply.botId!,request().ownerWallet,reply.operationId!)).operation;
+    await provisioner().resume(op); await provisioner().resume(op);
+    expect(referral.submit).toHaveBeenCalledTimes(1); expect(io.submit).not.toHaveBeenCalled();
+  });
+  it('reconciles the original attempt before rotated code/pin, ready account and disabled flags', async () => {
+    const referral = installReferral(), reply = await provisioner().create(request());
+    const read = await operations.read(reply.botId!,request().ownerWallet,reply.operationId!);
+    const originalSignature = read.attempt!.signature;
+    enabled = false; currentCode = 'EXAMPLE-rotated';
+    io.referral = { ...referral, pin: phoenixReferralPin({ ...pin, activeTraderBuffer: [key(22).publicKey.toBase58()] }) };
+    await pool.query("UPDATE trading_bots SET subaccount_status='phoenix_paused' WHERE id=$1",[reply.botId]);
+    io.confirm.mockResolvedValue('confirmed');
+    expect((await provisioner().resume(read.operation)).code).toBe('completed');
+    expect(io.confirm).toHaveBeenLastCalledWith(originalSignature,read.operation.intent.identity,read.attempt!.lastValidBlockHeight);
+    expect(referral.submit).toHaveBeenCalledTimes(1);
+    expect((await pool.query('SELECT subaccount_status,is_active FROM trading_bots')).rows[0]).toEqual({subaccount_status:'phoenix_paused',is_active:false});
+  });
+  it.each(['failed','expired'] as const)('resolves %s before preparing again and keeps code/deployment immutable', async outcome => {
+    const referral = installReferral(), reply = await provisioner().create(request());
+    let op = (await operations.read(reply.botId!,request().ownerWallet,reply.operationId!)).operation;
+    io.confirm.mockResolvedValue(outcome);
+    expect((await provisioner().resume(op)).code).toBe(outcome === 'failed' ? 'chain_failed' : 'chain_expired');
+    op = (await operations.read(op.bot_id,op.intent.ownerWallet,op.id)).operation;
+    expect(op.state).toBe('prepared'); expect(op.observation.registrationBinding).toBeDefined();
+    currentCode = 'EXAMPLE-rotated';
+    expect((await provisioner().resume(op)).code).toBe('referral_configuration');
+    currentCode = 'EXAMPLE-Referral';
+    io.referral = { ...referral, pin: phoenixReferralPin({ ...pin, activeTraderBuffer: [key(22).publicKey.toBase58()] }) };
+    expect((await provisioner().resume(op)).code).toBe('referral_configuration');
+    expect(referral.submit).toHaveBeenCalledTimes(1);
+  });
+  it.each(['gated','eligible'] as const)('completes a finalized ready %s account with no attempt/signing/POST', async eligibility => {
+    const referral = installReferral('ready'); io.eligibility.mockResolvedValue(eligibility);
+    const reply = await provisioner().create(request()); expect(reply.code).toBe('completed');
+    expect(io.withSigner).not.toHaveBeenCalled(); expect(referral.credential).not.toHaveBeenCalled();
+    expect(referral.submit).not.toHaveBeenCalled(); expect(io.build).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT count(*)::int AS count FROM phoenix_operation_attempts')).rows[0].count).toBe(0);
+    const op = (await operations.read(reply.botId!,request().ownerWallet,reply.operationId!)).operation;
+    expect(op.observation.observedRegistration.source).toBe('phoenix-finalized-rpc');
+    expect((await provisioner().resume(op)).code).toBe('completed');
+    expect((await pool.query('SELECT is_active FROM trading_bots')).rows[0].is_active).toBe(false);
+  });
+  it('never substitutes account readiness for reconciliation of a pending signature', async () => {
+    const referral = installReferral(), reply = await provisioner().create(request());
+    const op = (await operations.read(reply.botId!,request().ownerWallet,reply.operationId!)).operation;
+    referral.state.mockImplementation(async identity => ({ state:'ready',identityHash:referralIdentityHash(identity),observedAt:Date.now(),accountSha256:createHash('sha256').update('EXAMPLE-ready').digest('hex') }));
+    expect((await provisioner().resume(op)).code).toBe('submission_unknown');
+    expect(referral.submit).toHaveBeenCalledTimes(1); expect((await operations.read(op.bot_id,op.intent.ownerWallet,op.id)).operation.state).toBe('submission_pending');
+  });
+  it.each(['unknown','stale','wrong-identity','changed-account','permission','expired','revoked','cost','balance'] as const)('refuses %s before claim', async defect => {
+    const referral = installReferral();
+    if (defect === 'unknown') referral.state.mockImplementation(async identity => ({state:'unknown',identityHash:referralIdentityHash(identity),observedAt:Date.now()}));
+    if (defect === 'stale') referral.state.mockImplementation(async identity => ({state:'missing',identityHash:referralIdentityHash(identity),observedAt:Date.now()-16000}));
+    if (defect === 'wrong-identity') referral.state.mockImplementation(async () => ({state:'missing',identityHash:createHash('sha256').update('EXAMPLE-other').digest('hex'),observedAt:Date.now()}));
+    if (defect === 'changed-account') referral.state.mockResolvedValueOnce({state:'missing',identityHash:referralIdentityHash((await allocation.allocateAndDerive(request(),derive)).intent.identity),observedAt:Date.now()})
+      .mockImplementation(async identity => ({state:'inactive',identityHash:referralIdentityHash(identity),observedAt:Date.now()}));
+    if (defect === 'permission') referral.validateDeployment.mockRejectedValue(new Error('EXAMPLE-pin-mismatch'));
+    if (defect === 'expired') referral.unexpired.mockResolvedValue(false);
+    if (defect === 'revoked') referral.credential.mockImplementation(async (_id,identity) => { currentCode='EXAMPLE-rotated'; return {authority:identity.authorityWalletAddress,bearer:'EXAMPLE-access',expiresAt:Date.now()+60000}; });
+    if (defect === 'cost') referral.estimate.mockResolvedValue({rentLamports:'1000',feeLamports:'20000',balanceLamports:'100000'});
+    if (defect === 'balance') referral.estimate.mockResolvedValue({rentLamports:'1000',feeLamports:'10000',balanceLamports:'100'});
+    expect((await provisioner().create(request())).status).toBe('refused');
+    expect(referral.submit).not.toHaveBeenCalled(); expect(io.withSigner).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT count(*)::int AS count FROM phoenix_operation_attempts')).rows[0].count).toBe(0);
+  });
 });
 
 describe('U03 durable allocation and recovery on isolated PostgreSQL', () => {

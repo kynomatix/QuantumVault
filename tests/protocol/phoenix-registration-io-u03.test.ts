@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PublicKey } from '@solana/web3.js';
 import { createPhoenixRegistrationIO } from '../../server/protocol/phoenix/registration-io';
 import { prepareRegistration } from '../../server/protocol/phoenix/registration';
-import { identity, instructions, lifetime, pin, traderData } from '../helpers/phoenix-registration';
+import { prepareReferralActivation, signReferralActivation, referralIdentityHash, type ReferralBinding } from '../../server/protocol/phoenix/referral-activation';
+import { readPhoenixReferralConfig } from '../../server/protocol/phoenix/referral-config';
+import { identity, authority, key, instructions, lifetime, pin, traderData } from '../helpers/phoenix-registration';
 
 const metadata = () => ({ traderPda: identity.traderAccountAddress, traderOnboarder: pin.onboarder,
   txFeePayer: identity.authorityWalletAddress, maxPositions: 32, includeRegisterTrader: true });
@@ -26,6 +28,80 @@ beforeEach(() => {
   rpc.simulateTransaction.mockResolvedValue(simulation());
 });
 describe('U03 current API and RPC adapter (no network)', () => {
+  it.each([
+    { gated: true, active: false, runningState: 'active' },
+    { gated: true, active: true, runningState: 'halted' },
+    { gated: true, active: true, runningState: 'unknown' },
+    { gated: 'true', active: true, runningState: 'active' },
+    { gated: true, active: 'true', runningState: 'active' },
+  ])('requires a fresh explicit active gated status %j', async status => {
+    fetcher.mockResolvedValue(response(status)); expect(await io().eligibility()).toBe('unknown');
+    fetcher.mockResolvedValue(response({ gated: false, active: true, runningState: 'active' }));
+    expect(await io().eligibility()).toBe('eligible');
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it('reads finalized identity and all six bits, without an empty/deposit-bit shortcut', async () => {
+    const adapter = io().referral!;
+    expect((await adapter.state(identity)).state).toBe('missing');
+    const data = traderData(), account = { data, owner: new PublicKey(identity.programAddress), executable: false, lamports: 1000 };
+    for (const flags of [0,1,2,4,8,16,32,31,62]) {
+      data.writeUInt32LE(flags,96); rpc.getAccountInfo.mockResolvedValue(account);
+      expect((await adapter.state(identity)).state).toBe('inactive');
+    }
+    data.writeUInt32LE(63,96);
+    expect(await adapter.state(identity)).toMatchObject({ state: 'ready', identityHash: referralIdentityHash(identity) });
+    expect(rpc.getAccountInfo).toHaveBeenLastCalledWith(new PublicKey(identity.traderAccountAddress), 'finalized');
+    for (const bad of [{ ...account, data: Buffer.alloc(0) }, { ...account, executable: true }, { ...account, owner: key(20).publicKey }]) {
+      rpc.getAccountInfo.mockResolvedValue(bad); expect((await adapter.state(identity)).state).toBe('unknown');
+    }
+    for (const offset of [24,56,154,155]) {
+      const bad = traderData(); bad[offset] ^= 1;
+      rpc.getAccountInfo.mockResolvedValue({ ...account, data: bad }); expect((await adapter.state(identity)).state).toBe('unknown');
+    }
+    rpc.getAccountInfo.mockRejectedValue(new Error('EXAMPLE-rpc-timeout'));
+    expect((await adapter.state(identity)).state).toBe('unknown');
+  });
+  it.each(['missing','inactive'] as const)('quotes exact two-signature fees and rent only for %s accounts', async state => {
+    const adapter = io().referral!, tx = prepareReferralActivation(identity, adapter.pin, 32, state, lifetime);
+    if (state === 'inactive') {
+      const data = traderData(); data.writeUInt32LE(0,96);
+      rpc.getAccountInfo.mockResolvedValue({ data, owner: new PublicKey(identity.programAddress), executable: false, lamports: 1000 });
+      const after = simulation(); after.value.accounts[0].lamports = 90000; rpc.simulateTransaction.mockResolvedValue(after);
+    }
+    expect(await adapter.estimate(tx,identity,state,32)).toEqual({ rentLamports: state === 'missing' ? '1000' : '0', feeLamports: '10000', balanceLamports: '100000' });
+    expect(rpc.getFeeForMessage.mock.calls[0][0].header.numRequiredSignatures).toBe(2);
+    expect(rpc.getMinimumBalanceForRentExemption).toHaveBeenCalledTimes(state === 'missing' ? 1 : 0);
+    rpc.getFeeForMessage.mockResolvedValue({ value: null });
+    await expect(adapter.estimate(tx,identity,state,32)).rejects.toThrow();
+  });
+  it('refuses unknown rent, account changes and simulation transfers before signing', async () => {
+    const adapter = io().referral!, tx = prepareReferralActivation(identity,adapter.pin,32,'missing',lifetime);
+    rpc.getMinimumBalanceForRentExemption.mockResolvedValue(0);
+    await expect(adapter.estimate(tx,identity,'missing',32)).rejects.toThrow();
+    rpc.getMinimumBalanceForRentExemption.mockResolvedValue(1000);
+    const after = simulation(); after.value.accounts[0].lamports = 1; rpc.simulateTransaction.mockResolvedValue(after);
+    await expect(adapter.estimate(tx,identity,'missing',32)).rejects.toThrow();
+    rpc.getAccountInfo.mockResolvedValue({ data: traderData(), owner: new PublicKey(identity.programAddress), executable: false, lamports: 1000 });
+    await expect(adapter.estimate(tx,identity,'missing',32)).rejects.toThrow();
+    expect(signer).not.toHaveBeenCalled();
+  });
+  it.each(['activated','submitted','already_activated'])('authenticates one POST for %s, including a missing response signature', async status => {
+    const adapter = io().referral!, config = readPhoenixReferralConfig({ PHOENIX_REFERRAL_CODE: 'EXAMPLE-Referral' });
+    if (config.state !== 'enabled') throw new Error('EXAMPLE-config');
+    const signed = signReferralActivation(prepareReferralActivation(identity,adapter.pin,32,'missing',lifetime),identity,adapter.pin,32,'missing',lifetime,authority.secretKey);
+    const binding: ReferralBinding = { route: 'referral', expectedState: 'missing', maxPositions:32, identityHash:referralIdentityHash(identity),
+      referralCodeSha256:config.referralCodeSha256, deploymentPinSha256:adapter.pin.deploymentPinSha256,
+      signature:signed.signature,transactionHash:signed.transactionHash,blockhash:signed.blockhash,lastValidBlockHeight:signed.lastValidBlockHeight };
+    fetcher.mockResolvedValue(response({ status, trader_pda: identity.traderAccountAddress, referral_code: config.code }));
+    expect(await adapter.submit(signed,binding,identity,config,{ authority:identity.authorityWalletAddress,bearer:'EXAMPLE',expiresAt:Date.now()+60000 })).toEqual({ status });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe('https://perp-api.phoenix.trade/v1/referral/activate-tx');
+    expect(fetcher.mock.calls[0][1]).toMatchObject({ method:'POST', redirect:'error', credentials:'omit', headers:{Authorization:'Bearer EXAMPLE'} });
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toMatchObject({ trader_pda_index:0, trader_subaccount_index:0, transaction:signed.transaction });
+    expect(rpc.getSignatureStatuses).not.toHaveBeenCalled();
+    await expect(adapter.submit(signed,binding,identity,config,{authority:key(20).publicKey.toBase58(),bearer:'EXAMPLE',expiresAt:Date.now()+60000})).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
   it.each([401,403])('keeps public eligibility HTTP %s unknown', async status => {
     fetcher.mockResolvedValue(response({}, status));
     expect(await io().eligibility()).toBe('unknown');

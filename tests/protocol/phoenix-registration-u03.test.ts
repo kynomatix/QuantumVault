@@ -8,6 +8,11 @@ import { prepareRegistration, signRegistration, validateRegistrationInstructions
 import { authority, identity, instructions, key, lifetime, onboarder, pin } from '../helpers/phoenix-registration';
 
 describe('U03 fail-closed registration signer', () => {
+  it('keeps legacy signing restricted to Register plus Onboard even when referral supports Onboard alone', () => {
+    expect(() => prepareRegistration(instructions().slice(1), identity, pin, 32, lifetime)).toThrow();
+    expect(() => prepareRegistration([...instructions(), instructions()[1]], identity, pin, 32, lifetime)).toThrow();
+    expect(prepareRegistration(instructions(), identity, pin, 32, lifetime).instructions).toHaveLength(2);
+  });
   it('produces a payer signature before the onboarder co-sign and keeps the same transaction id', () => {
     const tx = prepareRegistration(instructions(), identity, pin, 32, lifetime);
     const secret = authority.secretKey;

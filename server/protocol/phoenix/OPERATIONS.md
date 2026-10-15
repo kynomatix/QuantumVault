@@ -46,6 +46,52 @@ Run this drill with fake IO and the focused FRACTAL files first. A real-money dr
 5. Restart with risk off and resume original IDs. Keep legacy Pacifica/retired adapter recovery installed while any obligation, custody identity, queue receipt or ambiguous journal remains. Never delete/recycle a bot or signer to implement rollback. A rollback deployment must retain the Phoenix recovery code/schema even if older entry code is restored.
 6. Discharge positions, cancel orders, finish withdrawals, repay liabilities and verify finalized zero balances/debt plus no unresolved operations. Only then may a separately reviewed owner action retire recovery adapters/custody. Check that Pacifica retry ingress still queues through a transient bot lookup failure.
 
+## Optional referral registration (Unit 1)
+
+PHOENIX_REFERRAL_CODE is server-only. Absent or exactly empty is OFF. A nonempty
+value must contain 1–256 printable ASCII bytes excluding spaces; case and bytes
+are preserved. An invalid value refuses gated registration. Independently eligible
+ungated exchanges retain legacy registration regardless of referral configuration.
+
+A valid code alone cannot enable production creation. Unit 2 must separately install
+the production services and creation routes. Existing owner/canary, custody, new-risk
+and approved SOL cost gates remain required. This unit installs no production instance,
+funding service, seed transfer or trading activation, and performs no live activation.
+
+The separate PHOENIX_REFERRAL_DEPLOYMENT roles are reviewed constants. Program,
+log/configuration and ordered arena arrays come from the reviewed registration pin.
+Permission and exchange API observations must match these pins; changes require review.
+The fixed Phoenix HTTPS origin is the only login/refresh/activation destination.
+Wallet challenges must match the reviewed four-line login grammar, the derived bot
+authority, the response nonce and verbatim UTC expiry within fifteen minutes.
+Sessions are isolated per authority, held only in bounded process memory (128 sessions
+and in-flight authentications), with access lifetimes capped at one day and refresh
+lifetimes at thirty days. Failed authentication/refresh clears the session and refuses
+that call. Login signing and transaction signing use synchronous custody windows.
+
+Missing traders use Register + delegated Onboard; registered inactive traders use
+Onboard only. The bot pays real quoted rent/fees from its existing SOL within its cap;
+the version-0 message requires the bot and reviewed onboarder, with no sponsorship,
+lookup tables or extra instructions. The API always receives the bot's bearer credential.
+The raw code appears only in server configuration and the activation POST, never in
+the journal or ordinary logs. Only referralCodeSha256 and deploymentPinSha256 bind it.
+
+The journal binds route, identity, expected state, positions, lifetime, transactionHash
+and locally derived signature before its one send claim. A lost claim acknowledgement
+causes no POST. After any claim, every timeout, HTTP/response error, missing signature,
+submitted or already_activated result remains pending until the original signature and
+finalized full-permission trader state resolve it. There is no HTTP/RPC fallback or
+automatic activation replay. Reconciliation runs before current flags/code/pins are
+examined, including after risk-off or code removal. Confirmed failure or expiry (strictly
+beyond lifetime plus the second absent-history lookup) permits fresh preparation under
+the original route/code/deployment binding. Rotating a code or pin cannot replace it.
+
+A fresh fully ready finalized trader with no attempt may complete under the normal
+bot/operation locks and CAS, without fabricating a transaction. Pending attempts always
+require signature reconciliation. Pause/archive races refuse new completion or sends;
+persistConfirmed preserves pause/archive and never enables trading. Existing funding
+and marketplace settlement ownership remains unchanged.
+
 ## Health and metrics
 
 Repay and unwind still require a readable, fresh, complete lender snapshot at

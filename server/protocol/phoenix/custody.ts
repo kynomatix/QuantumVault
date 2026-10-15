@@ -4,6 +4,20 @@ import type { PhoenixBotIdentityColumns } from './identity';
 import { PublicKey } from '@solana/web3.js';
 import { deriveBotSecretKeyFromAgentSeed } from '../../bot-derived-secret';
 import type { BotPolicyInput } from './policy';
+import nacl from 'tweetnacl';
+import bs58 from 'bs58';
+import type { PhoenixTraderIdentity } from '../../../shared/phoenix-read-contract';
+import { validatePhoenixLoginChallenge, type PhoenixLoginChallenge } from './referral-auth';
+import { PHOENIX_PUBLIC_API } from './sdk-boundary';
+export { signReferralActivation as signPhoenixReferralTransaction } from './referral-activation';
+
+/** Call only within withPhoenixBotSigner. Network IO must precede/follow this synchronous window. */
+export function signPhoenixReferralLogin(challenge: PhoenixLoginChallenge, identity: PhoenixTraderIdentity, secret: Uint8Array,
+  now = Date.now()): string {
+  const checked = validatePhoenixLoginChallenge(challenge, identity, PHOENIX_PUBLIC_API, now);
+  if (secret.length !== 64 || new PublicKey(secret.subarray(32)).toBase58() !== identity.authorityWalletAddress) throw new Error('Phoenix login signer mismatch');
+  return bs58.encode(nacl.sign.detached(Buffer.from(checked.message, 'utf8'), secret));
+}
 
 /** Public-only boundary shared with the existing V3 decrypt/recovery lifetime. */
 export function botSigningAddress(bot: PhoenixBotIdentityColumns): string | null | undefined {

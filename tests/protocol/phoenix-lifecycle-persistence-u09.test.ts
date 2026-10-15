@@ -5,7 +5,9 @@ import { Keypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 import { PhoenixLifecycleStore } from '../../server/protocol/phoenix/lifecycle';
 import { PhoenixProvisioningStore, type PhoenixCreationRequest } from '../../server/protocol/phoenix/provisioning-store';
-import { PhoenixOperationStore, type PhoenixIntent } from '../../server/protocol/phoenix/operation-store';
+import { PhoenixOperationStore, type PhoenixIntent, type StoredPhoenixOperation } from '../../server/protocol/phoenix/operation-store';
+import { referralIdentityHash, type ObservedRegistrationEvidence, type ReferralBinding, phoenixReferralPin } from '../../server/protocol/phoenix/referral-activation';
+import { pin as registrationPin } from '../helpers/phoenix-registration';
 import { PhoenixOrderStore } from '../../server/protocol/phoenix/order-store';
 import { admitPhoenixOrder } from '../../server/protocol/phoenix/order-contract';
 import { signOrderTransaction } from '../../server/protocol/phoenix/order-builder';
@@ -27,6 +29,11 @@ const fundingIntent = (kind: PhoenixIntent['kind'] = 'deposit'): PhoenixIntent =
 const attempt = () => ({ signature: bs58.encode(new Uint8Array(64).fill(8)), blockhash: key.publicKey.toBase58(),
   lastValidBlockHeight: '200', transactionHash: createHash('sha256').update('EXAMPLE-transaction').digest('hex') });
 const stop = (action: 'pause' | 'archive' | 'unsubscribe' = 'archive') => lifecycle.stop(intent().botId, intent().ownerWallet, action);
+const readyEvidence = (op: StoredPhoenixOperation): ObservedRegistrationEvidence => ({ state:'ready', source:'phoenix-finalized-rpc',
+  identityHash:referralIdentityHash(op.intent.identity),observedAt:Date.now(),accountSha256:createHash('sha256').update('EXAMPLE-ready-account').digest('hex') });
+const referralBinding = (op: StoredPhoenixOperation): ReferralBinding => ({ ...attempt(),route:'referral',expectedState:'missing',maxPositions:32,
+  identityHash:referralIdentityHash(op.intent.identity),referralCodeSha256:createHash('sha256').update('EXAMPLE-Referral').digest('hex'),
+  deploymentPinSha256:phoenixReferralPin(registrationPin).deploymentPinSha256 });
 beforeAll(async () => {
   const url = process.env.DATABASE_URL;
   if (!url || new URL(url).pathname !== '/qvtest') throw new Error('Requires FRACTAL qvtest');
@@ -66,10 +73,84 @@ beforeEach(async () => {
   await pool.query("INSERT INTO published_bots(id,trading_bot_id) VALUES ('EXAMPLE-published',$1)", [intent().botId]);
 });
 
+describe('U09 guarded observed referral completion', () => {
+  it('consumes observed completion idempotently while keeping the linked subscriber paused and not trading', async () => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive);
+    await expect(allocation.persistConfirmed(op)).rejects.toThrow();
+    const completed = await operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,readyEvidence(op));
+    await allocation.persistConfirmed(completed); await new PhoenixProvisioningStore(pool).persistConfirmed(completed);
+    expect((await pool.query('SELECT count(*)::int AS count FROM phoenix_operation_attempts WHERE operation_id=$1',[op.id])).rows[0].count).toBe(0);
+    expect((await pool.query('SELECT is_active,subaccount_status FROM trading_bots WHERE id=$1',[op.bot_id])).rows[0]).toEqual({is_active:false,subaccount_status:'active'});
+    expect((await pool.query('SELECT status,capital_invested FROM bot_subscriptions')).rows[0]).toEqual({status:'paused',capital_invested:'0'});
+    await expect(operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,readyEvidence(op))).rejects.toThrow();
+  });
+  it.each(['pause','archive'] as const)('refuses observed completion when %s wins the bot lock', async action => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive);
+    await lifecycle.stop(op.bot_id,op.intent.ownerWallet,action);
+    await expect(operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,readyEvidence(op))).rejects.toThrow();
+    expect((await operations.read(op.bot_id,op.intent.ownerWallet,op.id)).operation.state).toBe('prepared');
+  });
+  it('serializes observed completion against a claim without manufacturing a signature', async () => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive);
+    const outcomes = await Promise.allSettled([
+      operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,readyEvidence(op)),
+      operations.recordAttempt(op.bot_id,op.intent.ownerWallet,op.id,op.revision,attempt()),
+    ]);
+    expect(outcomes.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+    const read = await operations.read(op.bot_id,op.intent.ownerWallet,op.id);
+    expect(read.operation.state).toBe(read.attempt ? 'submission_pending' : 'completed');
+    if (read.attempt) expect(read.operation.observation.observedRegistration).toBeUndefined();
+  });
+  it('refuses observed completion even after a claimed attempt is definitively expired', async () => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive);
+    await operations.recordAttempt(op.bot_id,op.intent.ownerWallet,op.id,op.revision,attempt());
+    const pending = (await operations.read(op.bot_id,op.intent.ownerWallet,op.id)).operation;
+    const prepared = await operations.observe(op.bot_id,op.intent.ownerWallet,op.id,pending.revision,'prepared',
+      {source:'phoenix-finalized-rpc',reference:attempt().signature,attemptOutcome:'expired'});
+    await expect(operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,prepared.revision,readyEvidence(op))).rejects.toThrow('reconciliation');
+  });
+  it('rejects cross-owner, stale, wrong-identity and nonfinalized evidence', async () => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive), evidence = readyEvidence(op);
+    await expect(operations.completeObservedRegistration(op.bot_id,'EXAMPLE-other-owner',op.id,op.revision,evidence)).rejects.toThrow();
+    for (const bad of [{...evidence,observedAt:Date.now()-16000}, {...evidence,observedAt:Date.now()+60000},
+      {...evidence,identityHash:referralIdentityHash(identity)}, {...evidence,source:'EXAMPLE-unfinalized'}]) {
+      await expect(operations.completeObservedRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,bad as ObservedRegistrationEvidence)).rejects.toThrow();
+    }
+  });
+  it('rejects line terminators in durable referral signature and lifetime fields', async () => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive), binding = referralBinding(op);
+    for (const field of ['signature','blockhash','lastValidBlockHeight'] as const) {
+      for (const suffix of ['\r','\n','\u2028','\u2029']) {
+        await expect(operations.bindRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,
+          {...binding,[field]:binding[field]+suffix})).rejects.toThrow('Invalid Phoenix referral binding');
+      }
+    }
+    expect((await operations.read(op.bot_id,op.intent.ownerWallet,op.id)).operation.revision).toBe(op.revision);
+  });
+  it('preserves immutable route/code/deployment bindings through annotations and finality', async () => {
+    const op = await allocation.allocateAndDerive(baseRequest(),derive), binding = referralBinding(op);
+    const bound = await operations.bindRegistration(op.bot_id,op.intent.ownerWallet,op.id,op.revision,binding);
+    const annotated = await operations.annotatePrepared(op.bot_id,op.intent.ownerWallet,op.id,bound.revision,{stage:'EXAMPLE-retry'});
+    expect(annotated.observation.registrationBinding).toEqual(binding);
+    await expect(operations.annotatePrepared(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,{registrationBinding:{}})).rejects.toThrow();
+    for (const bad of [{...binding,referralCodeSha256:createHash('sha256').update('EXAMPLE-other').digest('hex')},
+      {...binding,deploymentPinSha256:createHash('sha256').update('EXAMPLE-other-pin').digest('hex')}]) {
+      await expect(operations.bindRegistration(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,bad)).rejects.toThrow('immutable');
+    }
+    await expect(operations.recordAttempt(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,{...attempt(),blockhash:authority.publicKey.toBase58()})).rejects.toThrow('claim mismatch');
+    await operations.recordAttempt(op.bot_id,op.intent.ownerWallet,op.id,annotated.revision,attempt());
+    const pending = (await operations.read(op.bot_id,op.intent.ownerWallet,op.id)).operation;
+    const completed = await operations.observe(op.bot_id,op.intent.ownerWallet,op.id,pending.revision,'completed',
+      {source:'phoenix-finalized-rpc',reference:attempt().signature,attemptOutcome:'confirmed'});
+    expect(completed.observation.registrationBinding).toEqual(binding);
+  });
+});
+
 describe('U09 durable consumer and lifecycle authority', () => {
   it('credits marketplace totals once when the bound initial deposit is finalized', async () => {
     const registration=await allocation.allocateAndDerive(baseRequest(),derive), botId=registration.bot_id;
-    await pool.query("UPDATE phoenix_operations SET state='completed' WHERE id=$1",[registration.id]);
+    const registered = await operations.completeObservedRegistration(botId,registration.intent.ownerWallet,registration.id,registration.revision,readyEvidence(registration));
+    await allocation.persistConfirmed(registered);
     const deposit:PhoenixIntent={botId,ownerWallet:baseRequest().ownerWallet,requestKey:`consumer:deposit:${botId}`,
       kind:'deposit',identity:registration.intent.identity,mint:PHOENIX_PUBLIC_ADDRESSES.usdcMint,
       destination:registration.intent.identity.traderAccountAddress,amountBaseUnits:'10000000',feeBaseUnits:'0',

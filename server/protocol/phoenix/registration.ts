@@ -21,8 +21,11 @@ export interface RegistrationInstruction {
   data: number[];
 }
 const program = PHOENIX_PUBLIC_ADDRESSES.program;
-const logAuthority = 'GdxfTLSsdSY37G6fZoYtdGDSfgFnbT2EmRpuePZxWShS';
-const globalConfiguration = '2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ';
+export const PHOENIX_REGISTRATION_ACCOUNTS = Object.freeze({ program,
+  logAuthority: 'GdxfTLSsdSY37G6fZoYtdGDSfgFnbT2EmRpuePZxWShS',
+  globalConfiguration: '2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ',
+});
+const { logAuthority, globalConfiguration } = PHOENIX_REGISTRATION_ACCOUNTS;
 const discriminator = (name: string) => createHash('sha256').update(`global:${name}`).digest().subarray(0, 8);
 const meta = (pubkey: string, isWritable = false, isSigner = false) => ({ pubkey, isSigner, isWritable });
 

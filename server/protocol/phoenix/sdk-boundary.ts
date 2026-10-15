@@ -10,6 +10,10 @@ export const PHOENIX_SDK_PIN = Object.freeze({
   sourceCommitHash: '573b773a6a7b38f941aed3a6f0602bc648346114',
 });
 
+// Unit 1 verifies native referral version-0 construction against this same source pin:
+// invite/referralActivationTx.ts, RegisterTrader and OnboardTraderDelegated codecs.
+// Rise remains uninstalled. Referral validation is separate from legacy registration.
+
 export const PHOENIX_PUBLIC_API = 'https://perp-api.phoenix.trade';
 export const PHOENIX_PUBLIC_ADDRESSES = Object.freeze({
   program: 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih',

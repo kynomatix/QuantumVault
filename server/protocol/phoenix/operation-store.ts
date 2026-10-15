@@ -9,6 +9,7 @@ import { phoenixIdentityFromBot, type PhoenixBotIdentityColumns } from './identi
 import { PHOENIX_PUBLIC_ADDRESSES } from './sdk-boundary';
 import { validateFundingIntent, validateFundingReceipt, type FundingTerms, type FundingHistory, type FundingReceipt } from './funding-contract';
 import { planProtection, type ProtectionTerms, type ProtectionProgress, type ProtectionRequest } from './protection-contract';
+import { referralIdentityHash, type ReferralBinding, type ObservedRegistrationEvidence } from './referral-activation';
 
 export type PhoenixOperationKind = 'register' | 'deposit' | 'withdraw' | 'transfer' | 'protection';
 export type PhoenixOperationState = 'prepared' | 'submission_pending' | 'queued' | 'unknown' | 'completed' | 'failed' | 'dropped';
@@ -110,12 +111,76 @@ export class PhoenixOperationStore {
 
   /** Pre-send refusals remain prepared, preserving retry identity and public recovery details. */
   async annotatePrepared(botId: string, ownerWallet: string, operationId: string, revision: number, observation: Record<string, unknown>) {
+    if ('registrationRoute' in observation || 'registrationBinding' in observation || 'observedRegistration' in observation) {
+      throw new Error('Phoenix registration evidence requires guarded admission');
+    }
     return this.transaction(async client => {
       const operation = await this.lockOperation(client, botId, ownerWallet, operationId);
       if (operation.kind === 'register' || operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, botId);
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale preparation');
       const result = await client.query(`UPDATE phoenix_operations SET observation = $2, revision = revision + 1,
-        updated_at = now() WHERE id = $1 RETURNING *`, [operationId, { ...structuredClone(observation), ...(operation.observation?.funding ? { funding: operation.observation.funding } : {}) }]);
+        updated_at = now() WHERE id = $1 RETURNING *`, [operationId, { ...structuredClone(observation),
+          ...this.registrationEvidence(operation), ...(operation.observation?.funding ? { funding: operation.observation.funding } : {}) }]);
+      return result.rows[0] as StoredPhoenixOperation;
+    });
+  }
+
+  private registrationEvidence(operation: StoredPhoenixOperation) {
+    return operation.kind === 'register' ? {
+      ...(operation.observation?.registrationRoute ? { registrationRoute: operation.observation.registrationRoute } : {}),
+      ...(operation.observation?.registrationBinding ? { registrationBinding: operation.observation.registrationBinding } : {}),
+    } : {};
+  }
+
+  /** Preparation may change after a definitive failed/expired attempt; route/code/deployment never do. */
+  async bindRegistration(botId: string, ownerWallet: string, operationId: string, revision: number, input: ReferralBinding) {
+    const binding = structuredClone(input);
+    const fields = ['route', 'referralCodeSha256', 'deploymentPinSha256', 'identityHash', 'expectedState', 'maxPositions',
+      'signature', 'blockhash', 'lastValidBlockHeight', 'transactionHash'];
+    if (Object.keys(binding).length !== fields.length || Object.keys(binding).some(field => !fields.includes(field))
+      || binding.route !== 'referral' || !['missing', 'inactive'].includes(binding.expectedState)
+      || ![binding.referralCodeSha256, binding.deploymentPinSha256, binding.identityHash, binding.transactionHash].every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value) && value.length === 64)
+      || !/^[1-9A-HJ-NP-Za-km-z]{64,88}$/.test(binding.signature) || /[\r\n\u2028\u2029]/.test(binding.signature)
+      || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(binding.blockhash) || /[\r\n\u2028\u2029]/.test(binding.blockhash)
+      || !/^[1-9][0-9]{0,15}$/.test(binding.lastValidBlockHeight) || /[\r\n\u2028\u2029]/.test(binding.lastValidBlockHeight)
+      || BigInt(binding.lastValidBlockHeight) > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Invalid Phoenix referral binding');
+    return this.transaction(async client => {
+      const operation = await this.lockOperation(client, botId, ownerWallet, operationId);
+      await assertPhoenixNewRisk(client, botId);
+      if (operation.kind !== 'register' || operation.state !== 'prepared' || operation.revision !== revision
+        || operation.intent.registration?.maxPositions !== binding.maxPositions || binding.identityHash !== referralIdentityHash(operation.intent.identity)
+        || operation.observation?.registrationRoute === 'legacy') throw new Error('Phoenix stale referral binding');
+      const prior = operation.observation?.registrationBinding as ReferralBinding | undefined;
+      if (prior && (prior.route !== binding.route || prior.referralCodeSha256 !== binding.referralCodeSha256
+        || prior.deploymentPinSha256 !== binding.deploymentPinSha256 || prior.identityHash !== binding.identityHash)) throw new Error('Phoenix referral binding immutable');
+      const pending = await client.query("SELECT 1 FROM phoenix_operation_attempts WHERE operation_id=$1 AND state='submission_pending'", [operationId]);
+      if (pending.rows.length) throw new Error('Phoenix referral attempt unresolved');
+      const result = await client.query(`UPDATE phoenix_operations SET observation=$2,revision=revision+1,updated_at=now() WHERE id=$1 RETURNING *`,
+        [operationId, { ...operation.observation, registrationRoute: 'referral', registrationBinding: binding }]);
+      return result.rows[0] as StoredPhoenixOperation;
+    });
+  }
+
+  /** No fabricated signature: only a fresh finalized identity proof and zero attempts under both locks. */
+  async completeObservedRegistration(botId: string, ownerWallet: string, operationId: string, revision: number, input: ObservedRegistrationEvidence) {
+    const evidence = structuredClone(input);
+    return this.transaction(async client => {
+      const operation = await this.lockOperation(client, botId, ownerWallet, operationId);
+      await assertPhoenixNewRisk(client, botId);
+      if (operation.kind !== 'register' || operation.state !== 'prepared' || operation.revision !== revision
+        || !operation.intent.registration || evidence.state !== 'ready' || evidence.source !== 'phoenix-finalized-rpc'
+        || evidence.identityHash !== referralIdentityHash(operation.intent.identity)
+        || typeof evidence.accountSha256 !== 'string' || !/^[0-9a-f]{64}$/.test(evidence.accountSha256) || evidence.accountSha256.length !== 64
+        || !Number.isSafeInteger(evidence.observedAt) || evidence.observedAt > Date.now() || Date.now() - evidence.observedAt > 15000) {
+        throw new Error('Phoenix observed registration mismatch');
+      }
+      const attempts = await client.query('SELECT 1 FROM phoenix_operation_attempts WHERE operation_id=$1', [operationId]);
+      if (attempts.rows.length) throw new Error('Phoenix registration attempt requires reconciliation');
+      const result = await client.query(`UPDATE phoenix_operations SET state='completed',observation=$2,revision=revision+1,updated_at=now() WHERE id=$1 RETURNING *`,
+        [operationId, { ...this.registrationEvidence(operation), observedRegistration: {
+          state: evidence.state, source: evidence.source, identityHash: evidence.identityHash,
+          accountSha256: evidence.accountSha256, observedAt: evidence.observedAt,
+        } }]);
       return result.rows[0] as StoredPhoenixOperation;
     });
   }
@@ -265,6 +330,11 @@ export class PhoenixOperationStore {
       }
       if (operation.kind === 'register' || operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_funding') await assertPhoenixNewRisk(client, botId);
       if (operation.state !== 'prepared' || operation.revision !== revision) throw new Error('Phoenix stale send claim');
+      const binding = operation.observation?.registrationBinding as ReferralBinding | undefined;
+      if (operation.kind === 'register' && operation.observation?.registrationRoute === 'referral' && !binding) throw new Error('Phoenix referral binding absent');
+      if (operation.kind === 'register' && binding && (binding.signature !== attempt.signature || binding.blockhash !== attempt.blockhash
+        || binding.lastValidBlockHeight !== attempt.lastValidBlockHeight || binding.transactionHash !== attempt.transactionHash
+        || binding.identityHash !== referralIdentityHash(operation.intent.identity))) throw new Error('Phoenix referral claim mismatch');
       if (operation.kind !== 'protection') {
         if (operation.kind === 'deposit' || operation.intent.funding?.leg === 'wallet_return') await excludePhoenixBorrow(client, botId, operation.intent);
         await excludePhoenixParking(client, botId, false, operation.intent.parkingIntentId);
@@ -287,6 +357,8 @@ export class PhoenixOperationStore {
       const inserted = await client.query(`INSERT INTO phoenix_operation_attempts
         (operation_id, attempt_number, signature, blockhash, last_valid_block_height, transaction_hash)
         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`, [operationId, next, attempt.signature, attempt.blockhash, attempt.lastValidBlockHeight, attempt.transactionHash]);
+      if (operation.kind === 'register') await client.query(`UPDATE phoenix_operations SET observation=$2 WHERE id=$1`,
+        [operationId, { ...operation.observation, registrationRoute: binding ? 'referral' : 'legacy' }]);
       await client.query(`UPDATE phoenix_operations SET state = 'submission_pending', revision = revision + 1, updated_at = now() WHERE id = $1`, [operationId]);
       return { attempt: inserted.rows[0], created: true };
     });
@@ -320,7 +392,7 @@ export class PhoenixOperationStore {
         : false;
       if (!allowed) throw new Error('Phoenix invalid state transition');
       if (operation.kind === 'protection' && !evidence.protection) throw new Error('Protection before/after evidence required');
-      let retained: Record<string, unknown> = evidence;
+      let retained: Record<string, unknown> = { ...evidence, ...this.registrationEvidence(operation) };
       if (operation.intent.funding) {
         const prior = operation.observation?.funding as FundingHistory | undefined;
         if (!prior || !Number.isSafeInteger(prior.requestedAt)) throw new Error('Funding request timestamp missing');

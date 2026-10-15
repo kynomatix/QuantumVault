@@ -90,13 +90,15 @@ export class PhoenixProvisioningStore {
   }
 
   async persistConfirmed(operation: StoredPhoenixOperation) {
+    if (operation.kind !== 'register' || operation.state !== 'completed' || !operation.intent.registration) throw new Error('Phoenix registration not completed');
     const client = await this.pool.connect();
     try {
       // One guarded statement: a crash between confirmation and this update simply resumes it.
       const result = await client.query(`UPDATE trading_bots b SET subaccount_status = CASE WHEN b.subaccount_status IN ('phoenix_paused','phoenix_archived') THEN b.subaccount_status ELSE 'active' END, updated_at = now()
         FROM phoenix_operations o WHERE b.id = $1 AND b.wallet_address = $2 AND b.active_protocol = 'phoenix'
-        AND o.id = $3 AND o.bot_id = b.id AND o.kind = 'register' AND o.state = 'completed' AND o.intent_hash = $4 RETURNING b.id`,
-      [operation.bot_id, operation.intent.ownerWallet, operation.id, phoenixIntentHash(operation.intent)]);
+        AND o.id = $3 AND o.bot_id = b.id AND o.kind = 'register' AND o.state = 'completed' AND o.intent_hash = $4
+        AND o.intent->'identity' = $5::jsonb RETURNING b.id`,
+      [operation.bot_id, operation.intent.ownerWallet, operation.id, phoenixIntentHash(operation.intent), JSON.stringify(operation.intent.identity)]);
       if (!result.rows[0]) throw new Error('Phoenix confirmation not persisted');
       // is_active stays false: registration is not trading or funding authorization.
     } finally { client.release(); }
