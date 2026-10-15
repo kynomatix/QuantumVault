@@ -3623,6 +3623,7 @@ export default function AppPage() {
                   const totalInactive = inactiveBots.length + inactiveAiBots.length;
 
                   return (
+                    <GridDraftCard authenticated={sessionConnected} identity={publicKeyString} renderLayout={(gridCard, gridBots) => (
                     <div className="space-y-8">
                       {/* Bot type cards — always visible at the top */}
                       <div className="grid md:grid-cols-3 gap-5">
@@ -3677,7 +3678,7 @@ export default function AppPage() {
                           </div>
                         </div>
 
-                        <GridDraftCard authenticated={sessionConnected} identity={publicKeyString} />
+                        {gridCard}
                       </div>
 
                       {/* Truthful state for the bot lists: if neither list has
@@ -3729,6 +3730,8 @@ export default function AppPage() {
                         </div>
                       )}
 
+                      {gridBots}
+
                       {/* Inactive bots (all types, collapsible) */}
                       {totalInactive > 0 && (
                         <div className="space-y-4">
@@ -3776,6 +3779,7 @@ export default function AppPage() {
                         </div>
                       )}
                     </div>
+                    )} />
                   );
                 })()}
               </motion.div>
