@@ -7,6 +7,7 @@ import { createSharedTradePriceChart } from '../SharedTradePriceChart';
 import { plannerPriceFormat, readableTime, type PlannerChart, type PlannerRange } from '@/lib/grid-planner-view';
 import type { GridLine } from '../../../../server/grid-bot/engine-types';
 import { gridMeasuredStart } from '../../../../shared/grid-lookback';
+import { GridChartSourceInfo } from './GridChartSourceInfo';
 
 export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: GridLine[]; range: PlannerRange | null; period?: string; tick?: string | null }) {
   const container = useRef<HTMLDivElement>(null);
@@ -59,8 +60,8 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       ...[range?.lower, range?.upper, range?.stop].filter((p): p is string => !!p)]);
     canvas.applyOptions({ localization: { priceFormatter: (price: number) => price.toFixed(priceFormat.precision) } });
     series.applyOptions({ title: 'Current price', priceFormat: { type: 'price', ...priceFormat } });
-    for (const line of lines) series.createPriceLine({ price: Number(line.price), color: line.role === 'entry' ? color('primary', 0.5) : color('chart-2', 0.5),
-      lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
+    for (const line of lines) series.createPriceLine({ price: Number(line.price), color: line.role === 'entry' ? color('primary', 0.85) : color('chart-2', 0.85),
+      lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
     const showLevel: Parameters<typeof canvas.subscribeCrosshairMove>[0] = event => {
       const point = event.point;
       if (!point || !container.current) { setHovered(null); return; }
@@ -95,8 +96,8 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       };
       series.attachPrimitive(band);
       for (const [price, title] of [[lower, 'Lower'], [upper, 'Upper']] as const)
-        series.createPriceLine({ price, title, color: primary, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true });
-      if (stop !== null) series.createPriceLine({ price: stop, title: 'Stop', color: down, lineWidth: 2, lineStyle: LineStyle.Solid, axisLabelVisible: true });
+        series.createPriceLine({ price, title, color: primary, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
+      if (stop !== null) series.createPriceLine({ price: stop, title: 'Stop', color: down, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
     }
     swatch.remove();
     canvas.timeScale().fitContent();
@@ -137,7 +138,7 @@ export function GridPlannerChart({ chart, lines, range = null, period, stale, lo
   const label = `${provenance.venue.toUpperCase()} direct perpetual candles · ${chart.timeframe} · ${chart.actualBars}/${chart.requestedBars} bars${chart.partial ? ' · partial coverage' : ''}`;
   const note = `Retrieved ${readableTime(chart.retrievedAt)}. Candle times are opening times; forming candles are unfinished. ${stale ? 'Chart cache expired; refresh for a new observation.' : `These are ${provenance.venue.toUpperCase()} trade candle prices, separate from the Pacifica book reference.`}`;
   return <div className="space-y-2">
-    <div className="flex items-center justify-between gap-2"><p className="text-xs text-muted-foreground">{label}</p><Button type="button" size="sm" variant="outline" onClick={() => setExpanded(true)} aria-label="Expand Planner chart"><Maximize2 className="h-4 w-4" /></Button></div>
+    <div className="flex items-center justify-between gap-2"><GridChartSourceInfo venue={provenance.venue.toUpperCase()} timeframe={chart.timeframe}><p>{label}</p><p>{note}</p></GridChartSourceInfo><Button type="button" size="sm" variant="outline" onClick={() => setExpanded(true)} aria-label="Expand Planner chart"><Maximize2 className="h-4 w-4" /></Button></div>
     <div className="h-[170px] sm:h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><GridPlannerPriceCanvas chart={chart} lines={lines} range={stale ? null : range} period={period} tick={tick} /></div>
     {stale && <p role="status" className="text-xs text-amber-500">Chart cache expired; refresh for a new observation.</p>}
     <PreviewNotes><p>{note}</p>
@@ -145,6 +146,6 @@ export function GridPlannerChart({ chart, lines, range = null, period, stale, lo
       <p>Shaded band and solid edges: your proposed range. Dashed lines: grid levels from the preview. Hover or tap a line for its price, or open the full table in Your plan. Red line: proposed stop, not certified liquidation protection.</p>
       {levelMessage && <p>{levelMessage}</p>}{previewDetails}
     </PreviewNotes>
-    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>{label}</DialogDescription></DialogHeader><div className="h-[65vh]"><GridPlannerPriceCanvas chart={chart} lines={lines} range={stale ? null : range} period={period} tick={tick} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
+    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>Direct perpetual candles with your proposed range, stop and grid levels.</DialogDescription></DialogHeader><GridChartSourceInfo venue={provenance.venue.toUpperCase()} timeframe={chart.timeframe}><p>{label}</p><p>{note}</p></GridChartSourceInfo><div className="h-[65vh]"><GridPlannerPriceCanvas chart={chart} lines={lines} range={stale ? null : range} period={period} tick={tick} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
   </div>;
 }

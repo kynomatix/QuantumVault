@@ -10,8 +10,16 @@ export interface GridSignalView {
   direction: SignalDirection; unavailable: boolean; summary: string; brief?: string; detail: string; basis: string;
 }
 const utc = (time: number) => new Date(time).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+const explanations: Record<GridSignalView['name'], string> = {
+  Macro: 'This is the broad BTC market backdrop, even when you choose another market. The last finalized BTC weekly close is compared with the simple average of 50 weekly closes. Above that average favours long grids; below it favours short grids. It is a slow backdrop, not a forecast for your selected market.',
+  'Weekly structure': 'This describes the selected market\'s longer-term price direction using confirmed weekly swing highs and lows. Higher highs and higher lows favour long grids; lower highs and lower lows favour short grids. Mixed structure gives no clear preference between long and short grids. Confirmation takes time, so recent turns may not appear yet.',
+  Trend: 'ADX measures trend strength; +DI and −DI indicate its direction. Sideways conditions can suit either long or short grids, but do not guarantee a safe range. Outside sideways conditions, higher +DI suggests long grids and higher −DI suggests short grids. A strong trend can carry price beyond a grid\'s range.',
+  Funding: 'Funding is an hourly payment between holders of long and short perpetual positions. A positive rate means long grids pay and short grids receive; a negative rate reverses that. Multiply the hourly rate by 8 or 24 for the displayed estimates if the rate holds. Payments depend on open position value, not total grid investment; receiving funding does not ensure profit.',
+};
 const unknown = (name: GridSignalView['name'], reason: string, basis: string): GridSignalView => ({
-  name, direction: 'neutral', unavailable: true, summary: 'Unavailable', detail: reason, basis: `${basis} As-of unavailable.`,
+  name, direction: 'neutral', unavailable: true, summary: 'Unavailable',
+  detail: `${reason}${name === 'Weekly structure' ? ` ${WEEKLY_SWING_BASIS}` : name === 'Trend' ? ' Below 20: sideways; 20–25: transitional; above 25: trending.' : ''}`,
+  basis: `${basis} As-of unavailable.`,
 });
 const numeric = (n: unknown) => typeof n === 'number' && Number.isFinite(n);
 const stamp = (n: unknown): n is number => Number.isSafeInteger(n) && Number(n) > 0;
@@ -72,5 +80,7 @@ export function gridSignalViews(macro: GridDirectionSuggestion | null, signals: 
     detail: `${funding.hourlyRate > 0 ? 'Longs pay shorts' : funding.hourlyRate < 0 ? 'Shorts pay longs' : 'Neither side pays'}: ${Math.abs(funding.hourlyRate * 100).toFixed(5)}% per hour; roughly ${Math.abs(funding.hourlyRate * 800).toFixed(4)}% per 8h / ${Math.abs(funding.hourlyRate * 2400).toFixed(4)}% per day of position notional if unchanged. The arrow marks the receiving side, a cost hint rather than a price forecast.`,
     basis: `${market}, Pacifica /info; hourly funding, ${funding.basis}. Observed ${utc(funding.observedAt)}. Rates can change each hour.`,
   } : unknown('Funding', funding?.reason || 'No fresh funding quote is available.', `${market}; Pacifica /info hourly funding.`);
-  return [macroView, weeklyView, trendView, fundingView];
+  return [macroView, weeklyView, trendView, fundingView].map(view => ({
+    ...view, detail: `${view.detail} ${explanations[view.name]}${view.unavailable ? ' This observation is unavailable, so it gives no current direction suggestion.' : ''}`,
+  }));
 }

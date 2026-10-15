@@ -347,13 +347,15 @@ describe('Planner client authority boundaries', () => {
       expect(isPlannerChart({ ...pacifica, candles: pacifica.candles.map(c => ({ ...c, provenance: { ...c.provenance, ...change } })) })).toBe(false);
     expect(isPlannerChart({ ...chart, candles: [...chart.candles, { ...pacifica.candles[0], time: now }] })).toBe(false);
     const nativeHtml = renderToStaticMarkup(createElement(GridPlannerChart, { chart: pacifica as PlannerChart, lines: [], range: null, stale: false }));
-    expect(nativeHtml).toContain('PACIFICA direct perpetual candles');
+    expect(nativeHtml).toContain('Chart: PACIFICA');
+    expect(nativeHtml).not.toContain('PACIFICA direct perpetual candles');
     expect(nativeHtml).toContain('PACIFICA trade candle prices');
     const html = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: false }));
     expect(html).toContain('How this preview works');
     expect(html.match(/No orders are placed/g)).toHaveLength(1);
     expect(html).toContain('Fees are estimates. We can&#x27;t confirm this stop avoids liquidation.');
-    for (const text of ['OKX direct perpetual candles', '15m', '1/100 bars', 'partial coverage', 'opening times', 'forming candles', 'separate from the Pacifica', 'Expand Planner chart']) expect(html).toContain(text);
+    for (const text of ['Chart: OKX', '15m', 'opening times', 'forming candles', 'separate from the Pacifica', 'Expand Planner chart']) expect(html).toContain(text);
+    for (const text of ['OKX direct perpetual candles', '1/100 bars', 'partial coverage']) expect(html).not.toContain(text);
     const expired = renderToStaticMarkup(createElement(GridPlannerChart, { chart, lines: [], range: null, stale: true }));
     expect(expired).toContain('Chart cache expired');
     const unavailable = renderToStaticMarkup(createElement(GridPlannerChart, { chart: { state: 'unavailable', reason: 'EXAMPLE' }, hasMarket: true, onRetry: () => {}, lines: [], range: null, stale: false }));

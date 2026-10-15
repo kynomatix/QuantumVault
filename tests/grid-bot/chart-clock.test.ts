@@ -49,12 +49,18 @@ describe('Grid chart clock and viewport', () => {
     expect(element).not.toBeNull();
     const Canvas = element.type as (props: Props) => unknown;
 
-    const priceLines: { title: string; applyOptions: ReturnType<typeof vi.fn> }[] = [];
+    const priceLines: { price: number; title: string; axisLabelVisible: boolean; lineWidth: number; lineStyle: number; applyOptions: ReturnType<typeof vi.fn> }[] = [];
     const series = { setData: vi.fn(), setMarkers: vi.fn(), applyOptions: vi.fn(), removePriceLine: vi.fn(),
-      createPriceLine: vi.fn((options: { title: string }) => { const line = { title: options.title, applyOptions: vi.fn() }; priceLines.push(line); return line; }) };
+      attachPrimitive: vi.fn((_primitive: { autoscaleInfo: () => unknown }) => {}), priceToCoordinate: vi.fn((price: number) => price),
+      createPriceLine: vi.fn((options: { price: number; title: string; axisLabelVisible: boolean; lineWidth: number; lineStyle: number }) => { const line = { ...options, applyOptions: vi.fn() }; priceLines.push(line); return line; }) };
     const fitContent = vi.fn(), remove = vi.fn(), viewport = { from: -2.5, to: 0.5 };
     const getVisibleLogicalRange = vi.fn(() => viewport), setVisibleLogicalRange = vi.fn();
-    chartFactory.mockReturnValue({ addCandlestickSeries: () => series, timeScale: () => ({ fitContent, getVisibleLogicalRange, setVisibleLogicalRange }), applyOptions: vi.fn(), remove });
+    type PointEvent = { point?: { x: number; y: number } };
+    const subscribeCrosshairMove = vi.fn((_callback: (event: PointEvent) => void) => {}), subscribeClick = vi.fn((_callback: (event: PointEvent) => void) => {});
+    const unsubscribeCrosshairMove = vi.fn(), unsubscribeClick = vi.fn(), setHovered = vi.fn();
+    hooks.useState.mockImplementation(initial => [initial, setHovered]);
+    chartFactory.mockReturnValue({ addCandlestickSeries: () => series, timeScale: () => ({ fitContent, getVisibleLogicalRange, setVisibleLogicalRange }), applyOptions: vi.fn(), remove,
+      subscribeCrosshairMove, subscribeClick, unsubscribeCrosshairMove, unsubscribeClick });
     const disconnect = vi.fn();
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect = disconnect; });
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
@@ -70,10 +76,19 @@ describe('Grid chart clock and viewport', () => {
     });
     const render = (props: Props) => { refIndex = 0; effectIndex = 0; pending = []; Canvas(props); pending.forEach(run => run()); };
     render({ chart, surface, fresh: true, now });
-    const level = priceLines.find(line => line.title.startsWith('1 buy'))!;
+    const level = priceLines.find(line => line.price === 95 && !line.axisLabelVisible)!;
     const lower = priceLines.find(line => line.title === 'Lower range')!;
     const breakeven = priceLines.find(line => line.title.startsWith('Breakeven'))!;
     const mark = priceLines.find(line => line.title === 'Pacifica mark')!;
+    expect(level).toMatchObject({ title: '', lineWidth: 2, lineStyle: 2, axisLabelVisible: false });
+    for (const title of ['Lower range', 'Upper range', 'Stop']) expect(priceLines.find(line => line.title === title)).toMatchObject({ lineWidth: 3, lineStyle: 0, axisLabelVisible: true });
+    expect(series.attachPrimitive.mock.calls[0][0].autoscaleInfo()).toEqual({ priceRange: { minValue: 80, maxValue: 110 } });
+    const hover = subscribeCrosshairMove.mock.calls[0][0], tap = subscribeClick.mock.calls[0][0];
+    hover({ point: { x: 799, y: 96 } }); expect(setHovered).toHaveBeenLastCalledWith({ price: '95.00', detail: '1 buy 1 · open', left: 580, top: 44 });
+    (refs[0].current as { clientWidth: number }).clientWidth = 390;
+    tap({ point: { x: 389, y: 95 } }); expect(setHovered).toHaveBeenLastCalledWith({ price: '95.00', detail: '1 buy 1 · open', left: 170, top: 43 });
+    hover({ point: { x: 20, y: 50 } }); expect(setHovered).toHaveBeenLastCalledWith(null);
+    hover({}); expect(setHovered).toHaveBeenLastCalledWith(null);
     expect(breakeven.title).toContain('5.00%');
     render({ chart, surface, fresh: true, now: now + 1000 });
     expect(breakeven.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 100, title: 'Breakeven · 5.00%', color: '#10b981' }));
@@ -86,7 +101,8 @@ describe('Grid chart clock and viewport', () => {
       fills: [{ tradeId: 'EXAMPLE', time: chart.candles[0].time, leg: 'entry', size: '1', price: '96' }] };
     render({ chart, surface: polled, fresh: true, now: now + 2000 });
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();
-    expect(level.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 96, title: '1 buy 1 · filled' }));
+    expect(level.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 96, title: '', axisLabelVisible: false, lineWidth: 2 }));
+    tap({ point: { x: 20, y: 96 } }); expect(setHovered).toHaveBeenLastCalledWith(expect.objectContaining({ price: '96.00', detail: '1 buy 1 · filled' }));
     expect(lower.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 91 }));
     expect(series.setMarkers).toHaveBeenLastCalledWith([expect.objectContaining({ text: 'entry 1 @ 96', shape: 'arrowUp' })]);
     expect(setVisibleLogicalRange).toHaveBeenLastCalledWith(viewport);
@@ -94,6 +110,7 @@ describe('Grid chart clock and viewport', () => {
     render({ chart: { ...chart, candles: [{ ...chart.candles[0], close: 106 }] }, surface: { ...polled, levels: [], fills: [] }, fresh: true, now: now + 3000 });
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1);
     expect(series.removePriceLine).toHaveBeenCalledWith(level); expect(series.setMarkers).toHaveBeenLastCalledWith([]);
+    tap({ point: { x: 20, y: 96 } }); expect(setHovered).toHaveBeenLastCalledWith(null);
     expect(series.setData).toHaveBeenLastCalledWith([expect.objectContaining({ close: 106 })]);
     expect(setVisibleLogicalRange).toHaveBeenLastCalledWith(viewport);
     const expanded = { ...chart, candles: [{ ...chart.candles[0], time: chart.candles[0].time - 7_200_000 }, ...chart.candles] };
@@ -105,6 +122,7 @@ describe('Grid chart clock and viewport', () => {
     render({ chart: { ...chart, timeframe: '4h' }, surface: { ...polled, bot: { ...polled.bot, id: 'EXAMPLE-OTHER' } }, fresh: true, now: now + 5000 });
     expect(chartFactory).toHaveBeenCalledTimes(3); expect(fitContent).toHaveBeenCalledTimes(3); expect(remove).toHaveBeenCalledTimes(2);
     effects.forEach(effect => effect.cleanup?.()); expect(remove).toHaveBeenCalledTimes(3); expect(disconnect).toHaveBeenCalledTimes(3);
+    expect(unsubscribeCrosshairMove).toHaveBeenCalledWith(hover); expect(unsubscribeClick).toHaveBeenCalledWith(tap);
   });
   it('retains displayed chart data and its expiry while a refresh request is pending', () => {
     vi.useFakeTimers();

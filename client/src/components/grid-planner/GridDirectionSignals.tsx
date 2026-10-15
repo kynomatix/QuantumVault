@@ -26,7 +26,8 @@ export function GridSignalButton({ signal }: { signal: GridSignalView }) {
       className="w-80 max-w-[min(calc(100vw-2rem),var(--radix-popover-content-available-width))] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto space-y-2 text-xs" aria-label={`${signal.name} signal details`}
       onOpenAutoFocus={event => event.preventDefault()} onPointerEnter={() => clearTimeout(timer.current)} onPointerLeave={leave}>
       <p className="font-medium text-sm">{signal.name} · {signal.brief ?? signal.summary}</p>
-      <details><summary className="cursor-pointer">Details and basis</summary><div className="mt-2 space-y-2"><p className="leading-relaxed">{signal.detail}</p><p className="text-muted-foreground leading-relaxed">{signal.basis}</p></div></details>
+      <p className="leading-relaxed">{signal.detail}</p>
+      <p className="text-muted-foreground leading-relaxed">{signal.basis}</p>
       <p className="text-muted-foreground">Advisory only. Choose either direction.</p>
     </PopoverContent>
   </Popover>;

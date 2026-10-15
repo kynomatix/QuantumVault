@@ -23,8 +23,9 @@ vi.mock('lightweight-charts', () => ({ LineStyle: { Dashed: 2, Solid: 0 } }));
 afterEach(() => { fixture.cleanup?.(); fixture.cleanup = undefined; vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('planner chart prices and interactive grid lines', () => {
-  it('formats the axis at the market step, labels only boundaries and stop, and exposes grid prices on hover and tap', () => {
-    vi.stubGlobal('getComputedStyle', () => ({ getPropertyValue: () => '0 0% 50%', color: 'rgb(128, 128, 128)' }));
+  it.each([640, 390])('shows strong grid lines, labels only boundaries and stop, and exposes prices on a %ipx canvas', width => {
+    fixture.container.clientWidth = width;
+    vi.stubGlobal('getComputedStyle', (element: { style?: { color?: string } }) => ({ getPropertyValue: () => '0 0% 50%', color: element.style?.color ?? 'rgb(128, 128, 128)' }));
     vi.stubGlobal('document', { createElement: () => ({ style: {}, remove: vi.fn() }) });
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
@@ -38,11 +39,13 @@ describe('planner chart prices and interactive grid lines', () => {
     expect(fixture.series.applyOptions).toHaveBeenCalledWith({ title: 'Current price', priceFormat: { type: 'price', precision: 1, minMove: 0.1 } });
     const options = fixture.canvas.applyOptions.mock.calls.map(call => call[0]) as { localization?: { priceFormatter: (price: number) => string } }[];
     expect(options.find(option => option.localization)?.localization?.priceFormatter(100)).toBe('100.0');
-    const priceLines = fixture.series.createPriceLine.mock.calls.map(call => call[0]) as { title: string; axisLabelVisible: boolean }[];
+    const priceLines = fixture.series.createPriceLine.mock.calls.map(call => call[0]) as { title: string; axisLabelVisible: boolean; color: string; lineWidth: number; lineStyle: number }[];
     expect(priceLines.filter(line => line.axisLabelVisible).map(line => line.title)).toEqual(['Lower', 'Upper', 'Stop']);
     expect(priceLines.slice(0, lines.length).every(line => line.axisLabelVisible === false && line.title === '')).toBe(true);
+    expect(priceLines.slice(0, lines.length).every(line => line.lineWidth === 2 && line.lineStyle === 2 && line.color === 'hsl(0 0% 50% / 0.85)')).toBe(true);
+    expect(priceLines.slice(lines.length).every(line => line.lineWidth === 3 && line.lineStyle === 0)).toBe(true);
     const hover = fixture.canvas.subscribeCrosshairMove.mock.calls[0][0], tap = fixture.canvas.subscribeClick.mock.calls[0][0];
-    hover({ point: { x: 600, y: 101 } }); expect(fixture.setHovered).toHaveBeenLastCalledWith({ price: '100.0', left: 500, top: 71 });
+    hover({ point: { x: width - 1, y: 101 } }); expect(fixture.setHovered).toHaveBeenLastCalledWith({ price: '100.0', left: width === 640 ? 500 : 250, top: 71 });
     tap({ point: { x: 1, y: 90 } }); expect(fixture.setHovered).toHaveBeenLastCalledWith({ price: '90.0', left: 9, top: 60 });
     hover({ point: { x: 20, y: 50 } }); expect(fixture.setHovered).toHaveBeenLastCalledWith(null);
     hover({}); expect(fixture.setHovered).toHaveBeenLastCalledWith(null);

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { GridDirectionSignals, GridSignalButton } from '../../client/src/components/grid-planner/GridDirectionSignals';
+import { GridChartSourceInfo } from '../../client/src/components/grid-planner/GridChartSourceInfo';
+import { gridSignalViews } from '../../client/src/lib/grid-signals-view';
 import { computeWeeklyStructure } from '../../server/grid-planner/weekly-structure';
 import { btcUtcWeekStart, BTC_TREND_WEEK_MS as WEEK } from '../../shared/grid-direction';
 import type { GridSignals } from '../../shared/grid-signals';
@@ -79,7 +81,8 @@ describe('signal row never edits direction', () => {
     expect(children).toHaveLength(4);
     expect(children.map((c: { props: { signal: { name: string } } }) => c.props.signal.name)).toEqual(['Macro', 'Weekly structure', 'Trend', 'Funding']);
     expect(children[1].props.signal.direction).toBe('long');
-    expect(children[3].props.signal).toMatchObject({ unavailable: true, direction: 'neutral', detail: 'EXAMPLE quota' });
+    expect(children[3].props.signal).toMatchObject({ unavailable: true, direction: 'neutral' });
+    expect(children[3].props.signal.detail).toContain('EXAMPLE quota');
   });
 });
 
@@ -98,9 +101,45 @@ describe('accessible hover, keyboard and touch popovers', () => {
     tree.props.onOpenChange(true); trigger.props.onPointerLeave(); await vi.advanceTimersByTimeAsync(150); expect(hooks.value).toBe(true);
     tree.props.onOpenChange(false); expect(hooks.value).toBe(false);
     const content = tree.props.children[1]; expect(content.props['aria-label']).toContain('Funding signal details');
-    expect(content.props.children[1].type).toBe('details');
+    expect(content.props.children[1].type).toBe('p');
+    expect(content.props.children[1].props.children).toBe('EXAMPLE quota');
+    expect(content.props.children[2].props.children).toBe('Pacifica /info; as-of unavailable.');
     expect(content.props.collisionPadding).toBe(12);
     expect(content.props.className).toContain('--radix-popover-content-available-width');
     expect(content.props.children.at(-1).props.children).toContain('Choose either direction');
+  });
+  it.each(['Macro', 'Weekly structure', 'Trend', 'Funding'])('shows the full %s explanation and basis immediately below its summary', name => {
+    const signal = gridSignalViews(null, response(), 'BTC-PERP', '1h', props.regime).find(view => view.name === name)!;
+    const content = GridSignalButton({ signal }).props.children[1];
+    expect(content.props.children.map((child: { type: string }) => child.type)).toEqual(['p', 'p', 'p', 'p']);
+    expect(content.props.children[0].props.children).toEqual([name, ' · ', signal.brief ?? signal.summary]);
+    expect(content.props.children[1].props.children).toBe(signal.detail);
+    expect(content.props.children[2].props.children).toBe(signal.basis);
+    expect(signal.detail).toContain('long grids'); expect(signal.detail).toContain('short grids');
+    expect(content.props.className).toContain('--radix-popover-content-available-height');
+    expect(content.props.className).toContain('overflow-y-auto');
+  });
+});
+
+describe('chart source information on demand', () => {
+  it('keeps the caption short, retains all technical detail in the popup, and supports mouse, keyboard toggling and touch', async () => {
+    vi.useFakeTimers(); hooks.value = false;
+    const detail = 'OKX direct perpetual candles · 1h · 252/252 bars · EXAMPLE retrieved time';
+    const tree = GridChartSourceInfo({ venue: 'OKX', timeframe: '1h', children: detail });
+    const trigger = tree.props.children[0].props.children, content = tree.props.children[1];
+    expect(trigger.props['aria-label']).toBe('Chart: OKX · 1h. Show source and candle details.');
+    expect(trigger.props.type).toBe('button'); expect(trigger.props.className).toContain('min-h-11');
+    expect(content.props.children).toBe(detail);
+    expect(content.props.collisionPadding).toBe(12);
+    expect(content.props.className).toContain('--radix-popover-content-available-width');
+    expect(content.props.className).toContain('--radix-popover-content-available-height');
+    trigger.props.onPointerEnter({ pointerType: 'mouse' }); expect(hooks.value).toBe(true);
+    trigger.props.onPointerLeave(); content.props.onPointerEnter();
+    await vi.advanceTimersByTimeAsync(150); expect(hooks.value).toBe(true);
+    content.props.onPointerLeave(); await vi.advanceTimersByTimeAsync(150); expect(hooks.value).toBe(false);
+    trigger.props.onPointerEnter({ pointerType: 'touch' }); expect(hooks.value).toBe(false);
+    tree.props.onOpenChange(true); trigger.props.onPointerLeave();
+    await vi.advanceTimersByTimeAsync(150); expect(hooks.value).toBe(true);
+    tree.props.onOpenChange(false); expect(hooks.value).toBe(false);
   });
 });

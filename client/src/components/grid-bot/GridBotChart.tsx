@@ -7,32 +7,46 @@ import type {PlannerChart} from '@/lib/grid-planner-view';
 import type {GridBotSurface} from '../../../../shared/grid-surface';
 import {gridFactsFresh,gridBreakevenView} from '@/lib/grid-live-view';
 import {gridJson} from './GridDraftCard';
-function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPriceLine>,key:string,price:string|null,title:string,color:string){
+import {GridChartSourceInfo} from '../grid-planner/GridChartSourceInfo';
+function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPriceLine>,key:string,price:string|null,title:string,color:string,kind:'level'|'boundary'|'live'='live'){
   const line=lines.get(key);
   if(price===null||!Number.isFinite(Number(price))||Number(price)<=0){if(line)series.removePriceLine(line);lines.delete(key);return;}
-  const options={price:Number(price),title,color,lineWidth:1 as const,lineStyle:LineStyle.Dashed,axisLabelVisible:true};
+  const options={price:Number(price),title:kind==='level'?'':title,color,lineWidth:kind==='boundary'?3 as const:kind==='level'?2 as const:1 as const,lineStyle:kind==='boundary'?LineStyle.Solid:LineStyle.Dashed,axisLabelVisible:kind!=='level'};
   if(line)line.applyOptions(options);else lines.set(key,series.createPriceLine(options));
 }
 function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'available'}>;surface:GridBotSurface;fresh:boolean;now:number}){
   const container=useRef<HTMLDivElement>(null);
-  const liveLines=useRef<{canvas:IChartApi;series:ISeriesApi<'Candlestick'>;levels:Map<string,IPriceLine>;live:Map<string,IPriceLine>;fitted:boolean;times:UTCTimestamp[]}|null>(null);
+  const [hovered,setHovered]=useState<{price:string;detail:string;left:number;top:number}|null>(null);
+  const liveLines=useRef<{canvas:IChartApi;series:ISeriesApi<'Candlestick'>;levels:Map<string,IPriceLine>;live:Map<string,IPriceLine>;fitted:boolean;times:UTCTimestamp[];hoverLevels:GridBotSurface['levels'];precision:number;prices:number[]}|null>(null);
   useEffect(()=>{if(!container.current)return;const canvas=createSharedTradePriceChart(container.current);
     const series=canvas.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
-    liveLines.current={canvas,series,levels:new Map(),live:new Map(),fitted:false,times:[]};
+    const state={canvas,series,levels:new Map<string,IPriceLine>(),live:new Map<string,IPriceLine>(),fitted:false,times:[] as UTCTimestamp[],hoverLevels:[] as GridBotSurface['levels'],precision:2,prices:[] as number[]};
+    liveLines.current=state;
+    series.attachPrimitive({autoscaleInfo:()=>state.prices.length?{priceRange:{minValue:Math.min(...state.prices),maxValue:Math.max(...state.prices)}}:null});
+    const showLevel:Parameters<IChartApi['subscribeCrosshairMove']>[0]=event=>{
+      const point=event.point;if(!point||!container.current){setHovered(null);return;}
+      const nearby=state.hoverLevels.map(level=>{const y=series.priceToCoordinate(Number(level.price));return {level,distance:y===null?Infinity:Math.abs(y-point.y)};}).sort((a,b)=>a.distance-b.distance)[0];
+      setHovered(nearby&&nearby.distance<=8?{price:Number(nearby.level.price).toFixed(state.precision),detail:`${nearby.level.ordinal} ${nearby.level.side} ${nearby.level.size} · ${nearby.level.status}`,
+        left:Math.max(4,Math.min(point.x+8,container.current.clientWidth-220)),top:Math.max(4,Math.min(point.y-52,container.current.clientHeight-52))}:null);
+    };
+    canvas.subscribeCrosshairMove(showLevel);canvas.subscribeClick(showLevel);
     let frame=0;const observer=new ResizeObserver(()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(()=>{if(container.current)canvas.applyOptions({width:container.current.clientWidth,height:container.current.clientHeight});});});observer.observe(container.current);
-    return()=>{liveLines.current=null;observer.disconnect();cancelAnimationFrame(frame);canvas.remove();};
+    return()=>{liveLines.current=null;observer.disconnect();cancelAnimationFrame(frame);canvas.unsubscribeCrosshairMove(showLevel);canvas.unsubscribeClick(showLevel);canvas.remove();};
   },[surface.bot.id,chart.timeframe]);
   useEffect(()=>{const live=liveLines.current;if(!live)return;const {canvas,series,levels}=live;
+    setHovered(null);live.hoverLevels=surface.levels.filter(level=>Number.isFinite(Number(level.price))&&Number(level.price)>0);
+    live.prices=[...live.hoverLevels.map(level=>Number(level.price)),...([surface.bot.lowerPrice,surface.bot.upperPrice,surface.bot.stopLossPrice].filter((price):price is string=>price!==null).map(Number))].filter(price=>Number.isFinite(price)&&price>0);
     const candles=chart.candles.map(c=>({time:Math.floor(c.time/1000) as UTCTimestamp,open:c.open,high:c.high,low:c.low,close:c.close}));
     const timeScale=canvas.timeScale(),viewport=live.fitted?timeScale.getVisibleLogicalRange():null,previousTimes=live.times;
     const valid=candles.every((c,i)=>!i||c.time>candles[i-1].time);
     if(valid){series.setData(candles as CandlestickData[]);live.times=candles.map(c=>c.time);}
     const precision=Math.min(12,Math.max(2,...surface.levels.map(l=>l.price.split('.')[1]?.length??0)));
+    live.precision=precision;
     series.applyOptions({priceFormat:{type:'price',precision,minMove:10**-precision}});
     const retained=new Set<string>();
-    const line=(key:string,price:string|null,title:string,color:string)=>{retained.add(key);updatePriceLine(series,levels,key,price,title,color);};
-    for(const l of surface.levels)line('level:'+l.id,l.price,`${l.ordinal} ${l.side} ${l.size} · ${l.status}`,l.reduceOnly?'#a78bfa':'#f59e0b');
-    line('lower',surface.bot.lowerPrice,'Lower range','#94a3b8');line('upper',surface.bot.upperPrice,'Upper range','#94a3b8');line('stop',surface.bot.stopLossPrice,'Stop','#ef4444');
+    const line=(key:string,price:string|null,title:string,color:string,kind:'level'|'boundary')=>{retained.add(key);updatePriceLine(series,levels,key,price,title,color,kind);};
+    for(const l of surface.levels)line('level:'+l.id,l.price,'',l.reduceOnly?'#a78bfa':'#f59e0b','level');
+    line('lower',surface.bot.lowerPrice,'Lower range','#94a3b8','boundary');line('upper',surface.bot.upperPrice,'Upper range','#94a3b8','boundary');line('stop',surface.bot.stopLossPrice,'Stop','#ef4444','boundary');
     for(const [key,priceLine] of levels)if(!retained.has(key)){series.removePriceLine(priceLine);levels.delete(key);}
     const period=chart.timeframe==='15m'?900:chart.timeframe==='4h'?14400:3600;
     const markers=surface.fills.map(f=>({time:(Math.floor(f.time/1000/period)*period) as UTCTimestamp,position:f.leg==='entry'?'belowBar' as const:'aboveBar' as const,color:f.leg==='entry'?'#f59e0b':'#a78bfa',shape:f.leg==='entry'?'arrowUp' as const:'arrowDown' as const,text:f.leg+' '+f.size+' @ '+f.price})).filter(m=>candles.length&&m.time>=candles[0].time&&m.time<=candles[candles.length-1].time);
@@ -49,7 +63,9 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
     const b=fresh?gridBreakevenView(surface,now):null;
     update('breakeven',b?.price??null,`Breakeven${b?.percent==null?'':` · ${b.percent}%`}`,b?.tone==='profit'?'#10b981':b?.tone==='loss'?'#ef4444':'#94a3b8');
   },[chart,surface,fresh,now]);
-  return <div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with persisted Grid levels, range and stop"/>;
+  return <div className="relative h-full w-full"><div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with persisted Grid levels, range and stop"/>
+    {hovered&&<div role="status" className="pointer-events-none absolute max-w-[min(212px,calc(100%-0.5rem))] break-words rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow" style={{left:hovered.left,top:hovered.top}}>Grid price {hovered.price}<span className="block text-muted-foreground">{hovered.detail}</span></div>}
+  </div>;
 }
 export function GridBotChart({surface,onClose}:{surface:GridBotSurface;onClose:()=>void}){
   const [chart,setChart]=useState<PlannerChart|null>(null),[timeframe,setTimeframe]=useState('1h'),[refresh,setRefresh]=useState(0),[expired,setExpired]=useState(false);
@@ -64,6 +80,6 @@ export function GridBotChart({surface,onClose}:{surface:GridBotSurface;onClose:(
   },[chart]);
   return <Dialog open onOpenChange={open=>{if(!open)onClose();}}><DialogContent className="flex max-h-[95dvh] w-[1200px] max-w-[95vw] flex-col overflow-y-auto"><DialogHeader><DialogTitle>{surface.bot.market} Grid trade chart</DialogTitle><DialogDescription>PnL excludes funding. Persisted levels and stop overlay direct perpetual candles; these are chart prices, separate from the Pacifica execution mark.</DialogDescription></DialogHeader>
     <div className="flex flex-wrap gap-2">{['15m','1h','4h'].map(t=><Button key={t} size="sm" variant={t===timeframe?'default':'outline'} aria-pressed={t===timeframe} onClick={()=>setTimeframe(t)}>{t}</Button>)}<Button size="sm" variant="outline" onClick={()=>setRefresh(v=>v+1)}>Refresh chart</Button></div>
-    {chart?.state==='available'?<><p className="text-xs">{chart.candles[0]?.provenance.venue.toUpperCase()} · {chart.actualBars}/{chart.requestedBars} bars · {new Date(chart.retrievedAt).toLocaleString()}{expired?' · STALE':''}</p><div className="h-[60dvh] min-h-[280px]"><Canvas chart={chart} surface={surface} fresh={gridFactsFresh(surface,now)} now={now}/></div><p className="text-xs">Levels show the persisted ledger state, not a guarantee of resting venue orders. Up to 100 recent confirmed fills are marked within candle coverage. Forming candles are unfinished.</p></>:<p role="status">{chart?.state==='unavailable'?chart.reason:'Loading chart…'}</p>}
+    {chart?.state==='available'?<><GridChartSourceInfo venue={chart.candles[0]?.provenance.venue.toUpperCase()??'Unknown'} timeframe={chart.timeframe}><p>{chart.candles[0]?.provenance.venue.toUpperCase()} direct perpetual candles · {chart.timeframe} · {chart.actualBars}/{chart.requestedBars} bars{chart.partial?' · partial coverage':''}</p><p>Retrieved {new Date(chart.retrievedAt).toLocaleString()}{expired?' · STALE':''}. Candle times are opening times; forming candles are unfinished. These are chart prices, separate from the Pacifica execution mark.</p></GridChartSourceInfo>{expired&&<p role="status" className="text-xs text-amber-500">Chart cache expired; refresh for a new observation.</p>}<div className="h-[60dvh] min-h-[280px]"><Canvas chart={chart} surface={surface} fresh={gridFactsFresh(surface,now)} now={now}/></div><p className="text-xs">Levels show the persisted ledger state, not a guarantee of resting venue orders. Hover or tap a line for its price and ledger state. Up to 100 recent confirmed fills are marked within candle coverage. Forming candles are unfinished.</p></>:<p role="status">{chart?.state==='unavailable'?chart.reason:'Loading chart…'}</p>}
   </DialogContent></Dialog>;
 }
