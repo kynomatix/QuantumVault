@@ -87,7 +87,8 @@ export class GridStorage {
       const events=(await c.query(`SELECT count(*) FILTER (WHERE delivered_at IS NULL AND evidence->'notificationDelivery' IS NULL)::int AS pending,
         count(*) FILTER (WHERE delivered_at IS NULL AND evidence->'notificationDelivery' IS NOT NULL)::int AS uncertain FROM grid_risk_events WHERE bot_id=$1`,[id])).rows[0];
       const fills=(await c.query('SELECT trade_id,venue_time,leg,size::text,price::text FROM grid_exact_fills WHERE bot_id=$1 ORDER BY venue_time DESC,trade_id DESC LIMIT 100',[id])).rows;
-      return {...snapshot,surface:gridSurface({...snapshot,fills},monitor,life,events)};
+      const returnedFunds=(await c.query("SELECT exact_request->'data'->>'amount' AS amount,terminal_at FROM grid_operations WHERE bot_id=$1 AND type='sweep_subaccount' AND state='confirmed' ORDER BY terminal_at DESC,id DESC LIMIT 1",[id])).rows[0];
+      return {...snapshot,surface:gridSurface({...snapshot,fills,returnedFunds},monitor,life,events)};
     });
   }
   async listFills(wallet: string, id: string, limit: number, cursor: { time: string; trade: string } | null) {

@@ -21,7 +21,7 @@ import {gridDraftRevision} from '../../client/src/lib/grid-draft-view';
 import {policy,umk,intent} from './draft-fixtures';
 import {marginTestReading} from './margin-fixture';
 import type {GridObservation} from '../../server/grid-bot/reconciliation';
-import {GRID_START_ROUTE_ENABLED,GRID_WORKER_ENABLED} from '../../server/grid-bot/service';
+import {gridRuntimeGates} from '../../server/grid-bot/service';
 const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql'].map(p=>readFileSync(new URL('../../migrations/'+p,import.meta.url),'utf8'));
 describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   let admin:Pool,pool:Pool,launch:GridLaunchStorage,storage:GridMonitorStorage;
@@ -311,7 +311,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     await storage.reconcile(f.claim,randomUUID(),observe());expect((await read()).clock.cleanTicks).toBe(0);expect((await read()).clock.cleanSince).toBeGreaterThan(first);expect((await read()).clock.certifiedGeneration).toBeNull();
     await storage.block(f.claim,'quota_unavailable');expect((await read()).clock).toBeNull();
   });
-  it('keeps production start and worker gates disabled',()=>{expect(GRID_START_ROUTE_ENABLED).toBe(false);expect(GRID_WORKER_ENABLED).toBe(false);});
+  it('keeps production Start and worker gates disabled by default',()=>{expect(gridRuntimeGates({})).toMatchObject({startEnabled:false,workerEnabled:false,workerRunning:false});});
   it('admits only an authoritative stop close past an uncertain owned entry cancel',async()=>{
     const f=await landed(),control=new GridLifecycleStorage(storage),stop=await control.request(wallet,f.bot.id,randomUUID(),'stop');
     await control.safetyObservation(f.claim,f.observe());const life=(await control.state(f.claim)).life,now=Date.now();

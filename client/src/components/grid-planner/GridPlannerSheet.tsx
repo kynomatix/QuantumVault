@@ -438,7 +438,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
               <p>{preview?.fee.state === 'unknown' || form.feePercent === '' ? 'No fee assumed — fee checks have not been evaluated.' : ASSUMPTION_LABEL} Taker fees for a starting position, slippage, exchange fee rounding and funding are unavailable. {preview?.stop.reason}</p>
               {preview?.fee.state === 'unknown' && <p>Minimum with your fee assumption: {preview.assumedMinimum.state === 'available' ? `${readableDecimal(preview.assumedMinimum.value)} USDC` : preview.assumedMinimum.reason}</p>}
               <p>No profit or fill forecasts. Minimum investment uses a 0.01 USDC display step and no modeled transfer floor; it does not establish funding, liquidation safety, live capacity or executable partial fills. This hypothetical plan does not establish live capacity or balances; draft funds are checked separately below.</p>
-              {liveEnabled && <p>Creating a bot saves this reviewed setup through the existing draft path.</p>}
+                  {liveEnabled && <p>Create bot asks you to confirm isolated funding and trading, then saves and starts this setup. Save draft keeps it for later.</p>}
             </>}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
         </section>

@@ -14,8 +14,26 @@ export class GridActionKeys {
 }
 export function gridAdjustReady(surface:GridBotSurface){return surface.bot.status==='stopped'&&surface.lifecycle.state==='complete'&&surface.sweep==='Confirmed terminal';}
 export function gridFactsFresh(surface:GridBotSurface,now:number){const at=Date.parse(surface.observedAt??'');return at<=now&&now-at<=15000;}
-/** Only offer currently applicable requests. Resume authority remains unavailable. */
-export function gridVisibleActions(surface:GridBotSurface){return (['pause','resync','stop'] as const).filter(action=>gridActionAllowed(surface.bot,action));}
+/** Capability is not admission: Resume still performs fresh production checks. */
+export function gridVisibleActions(surface:GridBotSurface):GridOwnerAction[]{
+  if(!surface.workerRunning)return [];
+  return (['pause','resume','resync','stop'] as const).filter(action=>gridActionAllowed(surface.bot,action)
+    &&(action!=='resume'||surface.authorities.resume));
+}
+export function gridCanAdjust(surface:GridBotSurface){return surface.startEnabled&&surface.workerRunning&&!!surface.bot.createIntent
+  &&(gridAdjustReady(surface)||gridActionAllowed(surface.bot,'stop'));}
+export function gridLaunchState(surface:GridBotSurface){
+  if(surface.bot.status==='draft')return surface.startEnabled?'Draft ready for review and Start':'Draft saved; Start is off';
+  if(surface.bot.status==='stopping')return 'Stop pending; waiting for orders, positions and settlement';
+  if(surface.bot.status==='stopped')return 'Stopped; terminal settlement confirmed';
+  const op=surface.operations[0];
+  if(op&&['prepared','submitted','unconfirmed'].includes(op.state)){const step=({provision_subaccount:'Creating isolated account',fund_subaccount:'Funding isolated account',set_leverage:'Setting leverage',
+    seed_position:'Placing starting position',place_level_order:'Placing order',cancel_level_order:'Cancelling order',close_position:'Closing position',sweep_subaccount:'Returning funds to master'} as Record<string,string>)[op.type]??op.type.replaceAll('_',' ');
+    return step+(['submitted','unconfirmed'].includes(op.state)?'; awaiting exchange confirmation':'; prepared');}
+  return ({provisioning:'Provisioning isolated account',canary:'First order confirmed; checking clean trading history',active:'Trading',
+    pausing:'Pause pending',paused:'Paused',resuming:'Checking current authority before resuming',reconciling:'Checking exchange state',
+    range_exhausted:'Range exhausted; entries paused'} as Record<string,string>)[surface.bot.status]??surface.bot.status.replaceAll('_',' ');
+}
 const positive = (value: string | null) => {
   if (typeof value !== 'string' || value.length > 100 || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
   const number = new Decimal(value); return number.gt(0) ? number : null;

@@ -2,7 +2,7 @@ import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
 import Decimal from 'decimal.js';
 import * as production from '../../server/grid-bot/launch-authority';
 import {GridProvision,type GridProvisionDeps} from '../../server/grid-bot/provision';
-import {GRID_START_ROUTE_ENABLED,GRID_WORKER_ENABLED} from '../../server/grid-bot/service';
+import {gridRuntimeGates,gridWorkerState} from '../../server/grid-bot/service';
 import {gridClientOrderId} from '../../server/grid-bot/order-identity';
 import {requestDigest,GridLaunchTransientError,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import {launchAuthorityFixture,clock,umk} from './launch-authority-fixtures';
@@ -38,9 +38,9 @@ describe('C5 default provision wiring',()=>{
     expect(await p.start({wallet:f.account.wallet,policy:f.policy,policyHmac:f.policyHash})).toMatchObject({state:'denied'});
     expect(reserve).not.toHaveBeenCalled();expect(run).not.toHaveBeenCalled();expect(cleanup).toHaveBeenCalledOnce();expect(f.cleanup).toHaveBeenCalledOnce();
   });
-  it('keeps both production gates hard false even with enabling environment values',()=>{
-    vi.stubEnv('GRID_START_ROUTE_ENABLED','true');vi.stubEnv('GRID_WORKER_ENABLED','true');
-    expect(GRID_START_ROUTE_ENABLED).toBe(false);expect(GRID_WORKER_ENABLED).toBe(false);
+  it('keeps new Starts off until an explicitly released worker is running',()=>{
+    gridWorkerState(false);
+    expect(gridRuntimeGates({GRID_BOT_ENABLED:'true',GRID_START_ENABLED:'true',GRID_WORKER_ENABLED:'true'})).toMatchObject({startEnabled:false,workerEnabled:true,workerRunning:false});
   });
   it('preserves quota/backoff as pending while sending and reserving nothing',async()=>{
     const f=launchAuthorityFixture();vi.spyOn(production,'defaultGridLaunchAuthority').mockResolvedValue(f.authority);
