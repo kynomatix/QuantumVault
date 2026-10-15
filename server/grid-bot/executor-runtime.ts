@@ -6,7 +6,7 @@ import {GridFirstPlacementAuthority} from './first-placement';
 import {productionGridLaunchAuthority,retainedGridPolicy,unlockGridLaunchAgent,gridProductionResume,type GridLaunchSecurity} from './launch-authority';
 import type {GridLaunchReads} from './launch-reads';
 import {reconcileGridLaunch} from './launch-reconciliation';
-import {GridLaunchTransientError,requestDigest,type ExactGridRequest,type DurableGridOperation,type GridClaim} from './launch-storage';
+import {GridLaunchTransientError,requestDigest,GRID_ACTION_CREDITS,gridProvisionAttempt,gridOperationCouldHaveLanded,type ExactGridRequest,type DurableGridOperation,type GridClaim} from './launch-storage';
 import {gridOwnedLive,reconcileGridReduction} from './lifecycle-policy';
 import {gridLifecycleRuntime} from './lifecycle-runtime';
 import {gridResumeClearance} from './lifecycle-service';
@@ -26,7 +26,7 @@ import type {WindowLevel,WindowOrder} from './window';
 const claimFor=(a:GridAccount):GridMonitorClaim=>({id:a.botId,leaseToken:a.leaseToken,account:a.account,masterAccount:a.masterAccount});
 const constraintFor=(f:LaunchFacts)=>observePacificaConstraints({tick_size:f.tick,lot_size:f.lot,min_order_size:f.minimumQuote},f.market,f.observedAt);
 const generation=(a:GridAccount,f:LaunchFacts)=>`${a.masterAccount}:${f.agentGeneration.umkVersion}:${a.leaseToken}`;
-const quotaClaim=(f:LaunchFacts,slots:0|1,increment='0'):GridClaim=>({credits:'10',slots,canaryIncrement:increment,observedCredits:f.observedCredits,
+const quotaClaim=(f:LaunchFacts,slots:0|1,increment='0'):GridClaim=>({credits:GRID_ACTION_CREDITS,slots,canaryIncrement:increment,observedCredits:f.observedCredits,
   availableSlots:f.availableSlots,observedAt:f.observedAt,expiresAt:f.expiresAt});
 
 /** Explicit production composition. No caller-supplied facts or session keys enter this path. */
@@ -133,8 +133,8 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
       const p=new GridProvision({now:Date.now,durableUmk:async()=>({umk:key.umk,cleanup:()=>{}}),
         observe:async(p,a)=>{
           // A restart may own a reserved address that has never existed at the venue.
-          const created=a&&!a.reused?await ledger.read(a.botId,`grid:${a.botId}:launch:create`):null;
-          const absent=a&&!a.reused&&!created&&(await empty(a,signal)).state==='absent';
+          const created=a&&!a.reused?(await gridProvisionAttempt((id,botId)=>ledger.read(botId,id),a.botId,'create',Date.now())).op:null;
+          const absent=a&&!a.reused&&!gridOperationCouldHaveLanded(created)&&(await empty(a,signal)).state==='absent';
           return authority.observe(wallet,p,absent?null:a,key.umk,signal);
         },custody:{reserve:async(input,umk)=>{
           account=await custody.reserve(input,umk);leases.set(account.botId,account.leaseToken);return account;
@@ -144,16 +144,19 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
           if(!account||account.leaseToken!==token)throw Error('Grid launch custody unavailable');return execution(account,policy,policyHmac,key.umk,signal).run(id,r,c,token);
         }},prepareFirstEntry:async({account:a,admission,facts,now})=>{
           const state=await storage.planningState(claimFor(a),monitor.bootId),line=state.levels.find(l=>l.ordinal===admission.firstEntryOrdinal);
-          if(!line||line.placement_attempt!==0||line.status!=='pending')throw new GridLaunchTransientError('Grid first level requires recovery');
-          const level:WindowLevel={id:line.id,ordinal:line.ordinal,price:line.price,size:line.size,side:line.side,reduceOnly:line.reduce_only,attempt:0};
+          if(!line||!Number.isSafeInteger(line.placement_attempt)||line.placement_attempt<0||line.status!=='pending')throw new GridLaunchTransientError('Grid first level requires recovery');
+          const level:WindowLevel={id:line.id,ordinal:line.ordinal,price:line.price,size:line.size,side:line.side,reduceOnly:line.reduce_only,attempt:line.placement_attempt};
           return {request:gridLevelRequest({account:a,level,market:policy.market,protocolSymbol:policy.market.replace(/-PERP$/,''),signerGeneration:generation(a,facts),
             deployment:facts.recycler.deployment,fee:facts.maker,constraint:constraintFor(facts),now,authority:{...state.authority,policy,policyHmac,facts}}),
             claim:quotaClaim(facts,1,new Decimal(level.price).mul(level.size).toFixed())};
         }});
-      return await p.start({wallet,policy,policyHmac,...(retained?{account:retained}:{})});
+      const result=await p.start({wallet,policy,policyHmac,...(retained?{account:retained}:{})});
+      const deniedAccount=result.account??account;
+      if(result.state==='denied'&&deniedAccount)await storage.provisioningDenied(claimFor(deniedAccount),result.reason??'Launch authority unavailable');
+      return result;
     }finally{key.cleanup();if(!retained&&account){try{await storage.release(claimFor(account));}finally{leases.delete(account.botId);}}}
   }
-  async function roll(claim:GridMonitorClaim,signal:AbortSignal){
+  async function roll(claim:GridMonitorClaim,signal:AbortSignal,entriesAllowed:boolean){
     const {bot,levels,operations}=await storage.snapshot(claim),policy=retainedGridPolicy(bot,levels),key=await durableGridUmk(bot.wallet_address);
     if(!key)throw Error('Grid durable security unavailable');
     try{
@@ -170,7 +173,7 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
           remaining:new Decimal(order.amount).minus(order.filledAmount).minus(order.cancelledAmount??'0').toFixed()};
       });
       const plan=await monitor.plan(claim,{owned,bookPrice:facts.bookPrice,lot:facts.lot,minimumQuote:facts.minimumQuote,freeSlots:facts.availableSlots,
-        canaryRemaining:clearance?remaining:'0'});
+        canaryRemaining:clearance&&entriesAllowed?remaining:'0'});
       const action=plan.chunks.flat()[0];if(!action)return;
       // One action per generation: the next tick must reconcile any cancellation/fill before planning again.
       return executeGridWindow([[action]],execution(account,policy,bot.policy_hmac,key.umk,signal),async current=>{

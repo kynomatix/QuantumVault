@@ -10,7 +10,7 @@ import {gridClientOrderId} from './order-identity';
 import {validGridEmptyProof,type GridCustody,type GridAccount,type GridEmptyProof} from './custody';
 import type {GridExecution} from './execution';
 import type {ExactGridRequest,GridClaim,DurableGridOperation} from './launch-storage';
-import {GridLaunchTransientError} from './launch-storage';
+import {GridLaunchTransientError,GRID_ACTION_CREDITS,gridProvisionAttempt} from './launch-storage';
 import {executeGridWindow} from './placement';
 import {defaultGridLaunchAuthority,GridLaunchAuthorityUnavailable} from './launch-authority';
 import {durableGridUmk} from './service';
@@ -103,18 +103,19 @@ export class GridProvision {
       catch(error){if(error instanceof GridLaunchAuthorityUnavailable||error instanceof GridLaunchTransientError)throw error;throw new GridLaunchAuthorityUnavailable('Production Grid launch authority unavailable.');}
     };
     let retainedAccount=input.account;
+    const attempt=(kind:string)=>gridProvisionAttempt(this.deps.existing,input.policy.id,kind,this.deps.now());
     try {
       if(!verifyGridPolicyHmac(input.policy,security.umk,input.policyHmac).ok)return {state:'denied',reason:'Grid policy signature changed.'};
       // Recovery precedes new market/fee reads. A disappeared response cannot grant a new send.
       for(const kind of ['create','fund','leverage','seed','entry']){
-        const key=`grid:${input.policy.id}:launch:${kind}`,old=await this.deps.existing(key,input.policy.id);
-        if(old && ['submitted','unconfirmed'].includes(old.state)){
+        const {key,op:old}=await attempt(kind);
+        if(old && ['prepared','submitted','unconfirmed'].includes(old.state)){
           if(!input.account)return {state:'pending',reason:'Recover the retained Grid custody identity before resuming.'};
-          const unused:GridClaim={credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:0,expiresAt:0};
-          if(await this.deps.execution.run(key,old.exact_request,unused,input.account.leaseToken)!=='confirmed')return {state:'pending',account:input.account};
+          const result=await this.deps.execution.run(key,old.exact_request,{recoveryOnly:true},input.account.leaseToken);
+          if(result!=='confirmed'&&(await attempt(kind)).op!==null)return {state:'pending',account:input.account};
         }
       }
-      const funding=await this.deps.existing(`grid:${input.policy.id}:launch:fund`,input.policy.id);
+      const {op:funding}=await attempt('fund');
       const facts=await observe(input.account??null),now=this.deps.now();
       const admission=preflightGridLaunch(input.policy,input.policyHmac,security.umk,facts,now,funding?.state==='confirmed');
       if(!admission.ok)return {state:admission.transient?'pending':'denied',reason:admission.reason,account:retainedAccount};
@@ -138,11 +139,11 @@ export class GridProvision {
         data:{symbol,amount:admission.plan.seedQuantity,side:input.policy.direction==='long'?'bid':'ask',reduce_only:false,slippage_percent:GRID_SEED_MAX_SLIPPAGE_PERCENT,
           client_order_id:gridClientOrderId({botId:input.policy.id,level:GRID_SEED_IDENTITY_LEVEL,attempt:0,leg:'entry'}),...(facts.taker?.builder?{builder_code:facts.taker.builder.code}:{})}});
       for(const step of steps){
-        const key=`grid:${input.policy.id}:launch:${step.kind}`,old=await this.deps.existing(key,input.policy.id);
+        const {key,op:old}=await attempt(step.kind);
         if(old?.state==='confirmed'){if(step.kind==='create')await this.deps.custody.confirmCreated(account);continue;}
         const authority=await this.deps.beforeStep?.(account,step.kind)??{};
         const current=await observe(step.kind==='create'?null:account),timestamp=this.deps.now();
-        const funded=await this.deps.existing(`grid:${input.policy.id}:launch:fund`,input.policy.id);
+        const {op:funded}=await attempt('fund');
         const latest=preflightGridLaunch(input.policy,input.policyHmac,security.umk,current,timestamp,funded?.state==='confirmed');
         if(!latest.ok)return {state:latest.transient?'pending':'denied',reason:latest.reason,account};
         if((step.kind!=='create'&&current.account!==account.account)||current.masterAccount!==account.masterAccount)return {state:'denied',reason:'Reserved account authority changed.',account};
@@ -158,13 +159,13 @@ export class GridProvision {
         }
         const request:ExactGridRequest=old?.exact_request??{...step,botId:input.policy.id,account:account.account,masterAccount:account.masterAccount,timestamp,expiryMs:5000,
           authority:{...authority,policyHmac:input.policyHmac,policy:input.policy,admission:latest,facts:current,seedWorstPrice:latest.stop.state==='available'?latest.stop.projection.seedWorstPrice:null}};
-        const claim:GridClaim={credits:'10',slots:0,canaryIncrement:step.kind==='seed'?latest.seedNotional:'0',observedCredits:current.observedCredits,
+        const claim:GridClaim={credits:GRID_ACTION_CREDITS,slots:0,canaryIncrement:step.kind==='seed'?latest.seedNotional:'0',observedCredits:current.observedCredits,
           availableSlots:current.availableSlots,observedAt:current.observedAt,expiresAt:current.expiresAt};
         const result=await this.deps.execution.run(key,request,claim,account.leaseToken);
-        if(result!=='confirmed')return {state:'pending',reason:result==='failed'?'A launch operation was rejected; reconcile before recovery.':undefined,account};
+        if(result!=='confirmed')return {state:result==='failed'?'denied':'pending',reason:result==='failed'?'A launch operation was rejected; custody remains retained.':undefined,account};
         if(step.kind==='create')await this.deps.custody.confirmCreated(account);
       }
-      const entryKey=`grid:${input.policy.id}:launch:entry`,oldEntry=await this.deps.existing(entryKey,input.policy.id);
+      const {key:entryKey,op:oldEntry}=await attempt('entry');
       if(oldEntry?.state!=='confirmed'){
         await this.deps.beforeStep?.(account,'limit');
         const current=await observe(account),timestamp=this.deps.now();
@@ -179,12 +180,13 @@ export class GridProvision {
           ||request.masterAccount!==account.masterAccount||request.data.symbol!==symbol||request.data.reduce_only!==false
           ||request.data.tif!=='ALO'||request.data.price!==line.price||request.data.amount!==line.size
           ||request.data.side!==(line.side==='buy'?'bid':'ask')||request.authority.policyHmac!==input.policyHmac
-          ||request.data.client_order_id!==gridClientOrderId({botId:input.policy.id,level:line.ordinal,attempt:0,leg:'entry'})
-          ||typeof request.authority.levelId!=='string'||request.authority.levelAttempt!==0||claim.slots!==1
+          ||!Number.isSafeInteger(request.authority.levelAttempt)||(request.authority.levelAttempt as number)<0
+          ||request.data.client_order_id!==gridClientOrderId({botId:input.policy.id,level:line.ordinal,attempt:request.authority.levelAttempt as number,leg:'entry'})
+          ||typeof request.authority.levelId!=='string'||request.authority.levelAttempt!==prepared.request.authority.levelAttempt||claim.slots!==1
           ||!new Decimal(claim.canaryIncrement).eq(new Decimal(line.price).mul(line.size)))return {state:'pending',reason:'First entry would change the confirmed geometry or identity; recover or confirm a new preview.',account};
-        const result=await executeGridWindow([[{kind:'place',level:{...line,id:request.authority.levelId,attempt:0}}]],this.deps.execution,
+        const result=await executeGridWindow([[{kind:'place',level:{...line,id:request.authority.levelId,attempt:request.authority.levelAttempt as number}}]],this.deps.execution,
           async()=>({key:entryKey,request,claim,leaseToken:account.leaseToken}));
-        if(result.state!=='confirmed')return {state:'pending',reason:'First resting entry remains attributable to its retained operation.',account};
+        if(result.state!=='confirmed')return {state:result.state==='failed'?'denied':'pending',reason:result.state==='failed'?'First resting entry was rejected; custody remains retained.':'First resting entry remains attributable to its retained operation.',account};
       }
       await this.deps.markCanary(account);return {state:'canary',account};
     }catch(error){

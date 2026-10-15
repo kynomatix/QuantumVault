@@ -1,7 +1,7 @@
 import Decimal from 'decimal.js';
 import {PacificaSigner,buildSigningMessage} from '../protocol/pacifica/pacifica-signer';
 import {PacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
-import {GridLaunchStorage,GridLaunchTransientError,requestDigest,type ExactGridRequest,type GridClaim,type DurableGridOperation} from './launch-storage';
+import {GridLaunchStorage,GridLaunchTransientError,requestDigest,type ExactGridRequest,type GridClaim,type GridRecoveryClaim,type DurableGridOperation} from './launch-storage';
 import type {GridVenueOrder} from './order-identity';
 import {gridNeedsBook,type GridFirstPlacementBoundary} from './first-placement';
 import {gridAddsExposure,GridMarginDenied} from './margin';
@@ -93,8 +93,8 @@ export interface GridExecutionDeps {
 }
 export class GridExecution {
   constructor(private deps:GridExecutionDeps){}
-  async run(key:string,request:ExactGridRequest,claim:GridClaim,leaseToken:string):Promise<'confirmed'|'pending'|'failed'|'not_sent'>{
-    // A restart reads the retained payload; it cannot refresh identity/timestamp and resend.
+  async run(key:string,request:ExactGridRequest,claim:GridClaim|GridRecoveryClaim,leaseToken:string):Promise<'confirmed'|'pending'|'failed'|'not_sent'>{
+    // A retained key never changes payload or resends. Proven unsent expiry needs a separate attempt key.
     let op=await this.deps.storage.read(request.botId,key);
     if(op){
       if(op.exact_request_digest!==requestDigest(request))throw Error('Grid retry payload changed');
@@ -105,7 +105,7 @@ export class GridExecution {
         return await this.deps.storage.expirePrepared(op,leaseToken)?'failed':'not_sent';
       }
     }
-    if(!validExactRequest(request) || !await this.deps.preflight(request))return 'not_sent';
+    if('recoveryOnly' in claim||!validExactRequest(request) || !await this.deps.preflight(request))return 'not_sent';
     try{op??=await this.deps.storage.prepare(key,request,claim,leaseToken);}
     catch(error){if(error instanceof GridLaunchTransientError)return 'pending';throw error;}
     if(op.state!=='prepared')return this.reconcile(op,leaseToken);

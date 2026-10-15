@@ -6,7 +6,7 @@ export interface GridExecutorDeps {
   status(claim:GridMonitorClaim):Promise<string>;
   provision(claim:GridMonitorClaim,signal:AbortSignal):Promise<unknown>;
   reconcile(claim:GridMonitorClaim,signal:AbortSignal):Promise<{entriesAllowed:boolean;reconciliationComplete?:boolean}>;
-  roll(claim:GridMonitorClaim,signal:AbortSignal):Promise<unknown>;
+  roll(claim:GridMonitorClaim,signal:AbortSignal,entriesAllowed:boolean):Promise<unknown>;
 }
 /** Recovery may settle old requests, but only lifecycle and fresh authority can permit a new send. */
 export class GridExecutor {
@@ -19,6 +19,6 @@ export class GridExecutor {
     const reconciled=await this.deps.reconcile(claim,signal);signal.throwIfAborted();
     if(!(reconciled.reconciliationComplete??reconciled.entriesAllowed))return;
     // Pause/Stop own their orders. Range exhaustion preserves exits through lifecycle.
-    if(['active','canary'].includes(await this.deps.status(claim)))return this.deps.roll(claim,signal);
+    if(['active','canary'].includes(await this.deps.status(claim)))return this.deps.roll(claim,signal,reconciled.entriesAllowed);
   }
 }

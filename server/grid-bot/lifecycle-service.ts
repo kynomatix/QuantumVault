@@ -3,7 +3,7 @@ import Decimal from 'decimal.js';
 import type {GridMonitorClaim} from './monitor-storage';
 import {GridLifecycleStorage} from './lifecycle-storage';
 import {GridExecution,gridReconciliationOutcome,type GridReconciliation} from './execution';
-import {requestDigest,type ExactGridRequest,type DurableGridOperation} from './launch-storage';
+import {GRID_ACTION_CREDITS,requestDigest,type ExactGridRequest,type DurableGridOperation} from './launch-storage';
 import type {GridSendResult} from './execution-failure';
 import type {GridObservation} from './reconciliation';
 import {gridOwnedLive,gridRiskTrigger,freshGridFact,gridEntrySafety,gridUnresolvedEntryCancel,gridUnresolvedTransfer} from './lifecycle-policy';
@@ -90,7 +90,7 @@ export class GridLifecycleService {
         signal.throwIfAborted();const current=await s.state(claim);
         return current.life?.active_request===life.active_request&&String(current.life.epoch)===String(life.epoch)&&requestDigest(retained)===requestDigest(r)&&freshGridFact(observation.observedAt,Date.now());
       },send:retained=>this.deps.send(claim,retained),reconcile:op=>this.deps.recover(claim,op,signal)});
-      return execution.run('control:'+life.active_request+':'+randomUUID(),r,{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},claim.leaseToken);
+        return execution.run('control:'+life.active_request+':'+randomUUID(),r,{credits:GRID_ACTION_CREDITS,slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},claim.leaseToken);
     };
     const cancel=async(target:NonNullable<typeof entry>)=>act('cancel',{symbol:target.order.symbol,order_id:target.order.orderId},{levelId:target.operation!.level_id,originalRequest:target.operation!.exact_request});
     if(entry&&!unresolvedEntryCancel)return cancel(entry);

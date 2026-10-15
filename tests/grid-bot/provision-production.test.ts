@@ -3,7 +3,7 @@ import Decimal from 'decimal.js';
 import {GridProvision,type GridProvisionDeps} from '../../server/grid-bot/provision';
 import {GridExecution} from '../../server/grid-bot/execution';
 import {gridLevelRequest} from '../../server/grid-bot/placement';
-import {requestDigest,GridLaunchTransientError,type DurableGridOperation,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
+import {requestDigest,GridLaunchTransientError,gridProvisionAttempt,gridOperationCouldHaveLanded,type DurableGridOperation,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import {observePacificaConstraints} from '../../server/protocol/market-constraints';
 import {launchAuthorityFixture,clock,umk} from './launch-authority-fixtures';
 beforeEach(()=>vi.spyOn(Date,'now').mockReturnValue(clock));
@@ -11,8 +11,10 @@ afterEach(()=>vi.restoreAllMocks());
 function fixture(seed=false,reused=false){
   const f=launchAuthorityFixture(seed),account={...f.account,reused},operations=new Map<string,DurableGridOperation>(),sent:ExactGridRequest[]=[],steps:string[]=[];
   const execution=new GridExecution({now:()=>clock,storage:{read:async(_bot,key)=>operations.get(key)??null,
-    prepare:async(key,r)=>{const op={id:key,state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null};operations.set(key,op);return op;},
-    submit:async op=>{op.state='submitted';return true;},settle:async(op,outcome)=>{op.state=outcome.state;}},
+    prepare:async(key,r)=>{const op={id:key,state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null,submitted_at:null};operations.set(key,op);return op;},
+    submit:async op=>{op.state='submitted';op.submitted_at=new Date(clock);return true;},settle:async(op,outcome)=>{op.state=outcome.state;},
+    expirePrepared:async op=>{if(op.state!=='prepared'||op.submitted_at!==null||op.exact_request.timestamp+op.exact_request.expiryMs>clock)return false;
+      op.state='failed';op.failure_classification='policy';return true;}},
     preflight:async()=>true,send:async r=>{sent.push(r);return {rateLimited:false,...(r.kind==='fund'?{terminalTransferDigest:requestDigest(r)}:{})};},
     reconcile:async op=>({state:'confirmed',requestDigest:op.exact_request_digest,releaseSlot:false})});
   const deps:GridProvisionDeps={now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup:vi.fn()}),
@@ -27,9 +29,15 @@ function fixture(seed=false,reused=false){
         now,authority:{policy,policyHmac,facts}}),claim:{credits:'10',slots:1,canaryIncrement:new Decimal(l.price).mul(l.size).toFixed(),
           observedCredits:facts.observedCredits,availableSlots:facts.availableSlots,observedAt:facts.observedAt,expiresAt:facts.expiresAt}};
     }};
-  return {...f,account,operations,sent,steps,deps,start:()=>new GridProvision(deps).start({wallet:account.wallet,policy:f.policy,policyHmac:f.policyHash})};
+  return {...f,authorityDeps:f.deps,account,operations,sent,steps,deps,start:()=>new GridProvision(deps).start({wallet:account.wallet,policy:f.policy,policyHmac:f.policyHash})};
 }
 describe('C6 provisioning with the real C5 raw-read authority',()=>{
+  it.each(['submitted','unconfirmed','confirmed','failed'] as const)('never replaces a %s funding attempt with send history',async state=>{
+    const f=fixture();await f.start();const key=`grid:${f.policy.id}:launch:fund`,op=f.operations.get(key);if(!op)throw Error('EXAMPLE funding absent');
+    op.state=state;op.failure_classification='policy';op.exact_request.timestamp=clock-6000;op.exact_request_digest=requestDigest(op.exact_request);
+    expect(op.submitted_at).not.toBeNull();expect(gridOperationCouldHaveLanded(op)).toBe(true);
+    expect(await gridProvisionAttempt(f.deps.existing,f.policy.id,'fund',clock)).toEqual({key,op});
+  });
   it.each([{seed:false,reused:false},{seed:true,reused:false},{seed:false,reused:true}])('progresses full funding and unchanged seed/ALO geometry: %j',async({seed,reused})=>{
     const f=fixture(seed,reused);expect((await f.start()).state).toBe('canary');
     const expected=[...(!reused?['create']:[]),'fund','leverage',...(seed?['seed']:[]),'limit'];
@@ -55,5 +63,34 @@ describe('C6 provisioning with the real C5 raw-read authority',()=>{
     const observe=vi.fn(f.deps.observe);f.deps.observe=observe;f.deps.execution={run:vi.fn(async()=> 'pending' as const)};
     expect((await new GridProvision(f.deps).start({wallet:f.account.wallet,policy:f.policy,policyHmac:f.policyHash,account:f.account})).state).toBe('pending');
     expect(observe).not.toHaveBeenCalled();expect(f.sent).toEqual([]);
+  });
+  it.each(['create','fund','leverage','seed','limit'] as const)('restarts a crash after preparing %s with fresh authority, preserving the unsent attempt',async kind=>{
+    const f=fixture(true);let crashed=false,now=clock;
+    vi.mocked(Date.now).mockImplementation(()=>now);f.deps.now=()=>now;
+    f.deps.verifyEmpty=async()=>({account:f.account.account,masterAccount:f.account.masterAccount,state:'empty',observedAt:now,expiresAt:now+5000});
+    // Crash immediately after durable prepare, before the submit CAS or sender.
+    const ledger=new Map<string,DurableGridOperation>();
+    f.deps.execution=new GridExecution({now:()=>now,storage:{read:async(_bot,key)=>ledger.get(key)??null,
+      prepare:async(key,r)=>{const op:DurableGridOperation={id:'EXAMPLE_'+ledger.size,state:'prepared',submitted_at:null,exact_request:structuredClone(r),exact_request_digest:requestDigest(r),failure_classification:null};
+        ledger.set(key,op);if(r.kind===kind&&!crashed){crashed=true;throw Error('EXAMPLE process crash');}return op;},
+      submit:async op=>{op.state='submitted';op.submitted_at=new Date(now);return true;},settle:async(op,outcome)=>{op.state=outcome.state;},
+      expirePrepared:async op=>{if(op.state!=='prepared'||op.submitted_at!==null||op.exact_request.timestamp+op.exact_request.expiryMs>now)return false;
+        op.state='failed';op.failure_classification='policy';return true;}},
+      preflight:async r=>{const facts=r.authority.facts as {observedAt:number;expiresAt:number};return facts.observedAt===now&&facts.expiresAt>now;},
+      send:async r=>{f.sent.push(r);return {rateLimited:false,...(r.kind==='fund'?{terminalTransferDigest:requestDigest(r)}:{})};},
+      reconcile:async op=>({state:'confirmed',requestDigest:op.exact_request_digest,releaseSlot:false})});
+    f.deps.existing=async key=>ledger.get(key)??null;
+    await expect(f.start()).rejects.toThrow('process crash');
+    const expired=[...ledger.values()].find(op=>op.state==='prepared');if(!expired)throw Error('EXAMPLE crash record absent');
+    const retainedDigest=expired.exact_request_digest,retainedRequest=structuredClone(expired.exact_request);
+    now+=6000;f.raw.master.updated_at=now;f.raw.sub.updated_at=now;f.raw.book.t=now;
+    f.authorityDeps.sol=async()=>({balance:'0.1',observedAt:now});
+    const restart=()=>new GridProvision(f.deps).start({wallet:f.account.wallet,policy:f.policy,policyHmac:f.policyHash,account:f.account});
+    expect((await restart()).state).toBe('canary');expect((await restart()).state).toBe('canary');
+    expect(f.sent.map(r=>r.kind)).toEqual(['create','fund','leverage','seed','limit']);
+    expect(expired.state).toBe('failed');expect(expired.submitted_at).toBeNull();expect(expired.exact_request_digest).toBe(retainedDigest);
+    expect(expired.exact_request).toEqual(retainedRequest);
+    const retry=await gridProvisionAttempt(f.deps.existing,f.policy.id,kind==='limit'?'entry':kind,now);
+    expect(retry.key).toContain(':retry:');expect(retry.op?.state).toBe('confirmed');expect(retry.op?.exact_request.timestamp).toBe(now);
   });
 });

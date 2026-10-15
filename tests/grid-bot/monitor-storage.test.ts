@@ -7,7 +7,7 @@ import {randomUUID} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import bs58 from 'bs58';
 import {GridStorage,type DraftRecord} from '../../server/grid-bot/storage';
-import {GridLaunchStorage,requestDigest,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
+import {GridLaunchStorage,requestDigest,gridProvisionAttempt,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import {GridMonitorStorage,type GridMonitorClaim} from '../../server/grid-bot/monitor-storage';
 import {GridMonitorService} from '../../server/grid-bot/monitor-service';
 import {GridExecution,reconcileGridLimit} from '../../server/grid-bot/execution';
@@ -39,7 +39,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     const claim:GridMonitorClaim={id:bot.id,leaseToken:account.leaseToken,account:account.account,masterAccount:account.masterAccount};
     const level=(await pool.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal LIMIT 1',[bot.id])).rows[0];
     const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:Date.now(),inventoryComplete:true,history:{from:0,through:Date.now(),inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED_AUTHORITY'},mark:null,position:{direction:'long',size:'0'},orders:[],trades:[]});
-    return {bot,claim,level,observe};
+    return {bot,claim,level,observe,account};
   }
   async function fixture(){const {bot,claim,level}=await reservation();
     const now=Date.now(),cloid=randomUUID();
@@ -52,6 +52,12 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     return {bot,claim,level,op,request,observe};
   }
   async function landed(){const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false,orderId:'10'});return f;}
+  // Retain a snapshot from a crashed earlier process, without sleeping or bypassing fresh admission.
+  async function crashPrepared(key:string,request:ExactGridRequest){const digest=requestDigest(request);
+    return (await pool.query(`INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type,exact_request,exact_request_digest,state)
+      VALUES($1,$2,$3,$4,$5,$6,$4,'prepared') RETURNING *`,[randomUUID(),request.botId,key,digest,
+      request.kind==='create'?'provision_subaccount':'fund_subaccount',request])).rows[0];
+  }
   it('C6 authorizes only an untouched signed-absent reservation without inventing monitor authority',async()=>{
     const f=await reservation(),account=await new GridCustody(launch).recover(f.bot.id,wallet,f.claim.leaseToken);
     await pool.query("UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{reconciliationRequired}','true'::jsonb) WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id]);
@@ -67,6 +73,37 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     const f=await landed(),account=await new GridCustody(launch).recover(f.bot.id,wallet,f.claim.leaseToken);
     await expect(storage.authorizeProvisioning(f.claim,account,{state:'absent',account:account.account,masterAccount:account.masterAccount,
       observedAt:Date.now(),expiresAt:Date.now()+5000})).rejects.toThrow('Untouched provisioning required');
+  });
+  it('C6 authorizes signed absence after a prepared create expires, retaining its immutable request',async()=>{
+    const f=await reservation(),now=Date.now();
+    const request:ExactGridRequest={kind:'create',botId:f.bot.id,account:f.claim.account,masterAccount:f.claim.masterAccount,path:'/account/subaccount/create',
+      operationType:'subaccount_confirm',timestamp:now-6000,expiryMs:5000,data:{},authority:{}};
+    const op=await crashPrepared(`grid:${f.bot.id}:launch:create`,request);
+    expect(await launch.expirePrepared(op,f.claim.leaseToken)).toBe(true);
+    await storage.authorizeProvisioning(f.claim,f.account,{state:'absent',account:f.account.account,masterAccount:f.account.masterAccount,observedAt:Date.now(),expiresAt:Date.now()+5000});
+    const old=(await pool.query('SELECT state,submitted_at,exact_request,exact_request_digest FROM grid_operations WHERE id=$1',[op.id])).rows[0];
+    expect(old).toMatchObject({state:'failed',submitted_at:null,exact_request:request,exact_request_digest:requestDigest(request)});
+    expect((await pool.query('SELECT released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0].released_at).toBeNull();
+  });
+  it('C6 deduplicates terminal provisioning denials into the owner notification outbox',async()=>{
+    const f=await reservation();await storage.provisioningDenied(f.claim,'EXAMPLE terminal rejection');await storage.provisioningDenied(f.claim,'EXAMPLE terminal rejection');
+    const events=(await pool.query("SELECT kind,evidence FROM grid_risk_events WHERE bot_id=$1 AND kind='provisioning_denied'",[f.bot.id])).rows;
+    expect(events).toEqual([{kind:'provisioning_denied',evidence:{reason:'EXAMPLE terminal rejection'}}]);
+    expect((await pool.query('SELECT released_at FROM grid_launch_accounts WHERE bot_id=$1',[f.bot.id])).rows[0].released_at).toBeNull();
+  });
+  it('C6 first-placement authority follows terminal funding after an expired unsent fund',async()=>{
+    const f=await reservation(),now=Date.now(),p={...policy(),id:f.bot.id};
+    const fund:ExactGridRequest={kind:'fund',botId:f.bot.id,account:f.claim.account,masterAccount:f.claim.masterAccount,path:'/account/subaccount/transfer',operationType:'transfer_funds',
+      timestamp:now-6000,expiryMs:5000,data:{to_account:f.claim.account,amount:p.totalInvestment},authority:{policyHmac:f.bot.policyHmac}};
+    const budget={credits:'10',slots:0 as const,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000};
+    const old=await crashPrepared(`grid:${f.bot.id}:launch:fund`,fund);expect(await launch.expirePrepared(old,f.claim.leaseToken)).toBe(true);
+    const attempt=await gridProvisionAttempt((key,id)=>launch.read(id,key),f.bot.id,'fund',Date.now());
+    const retry=await launch.prepare(attempt.key,{...fund,timestamp:Date.now()},budget,f.claim.leaseToken);
+    expect(await launch.submit(retry,f.claim.leaseToken)).toBe(true);await launch.settle(retry,{state:'confirmed',reason:null,releaseSlot:true},f.claim.leaseToken);
+    const entry:ExactGridRequest={...fund,kind:'limit',path:'/orders/create',operationType:'create_order',timestamp:Date.now(),data:{symbol:'BTC',reduce_only:false},
+      authority:{policy:p,policyHmac:f.bot.policyHmac}};
+    expect(await launch.firstPlacementContext(entry)).toMatchObject({policy:p,alreadyPlaced:false});
+    expect((await launch.read(f.bot.id,`grid:${f.bot.id}:launch:fund`))?.state).toBe('failed');
   });
   it.each(['0.98','1'])('C6 executes an actual %s entry fill through backed exits and one recycled entry',async initial=>{
     const f=await landed(),o=f.observe(),signal=new AbortController().signal;

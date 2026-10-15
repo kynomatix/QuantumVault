@@ -26,7 +26,24 @@ export interface GridClaim {
   credits:string; slots:0|1; canaryIncrement:string; observedCredits:string; availableSlots:number;
   observedAt:number; expiresAt:number;
 }
-export interface DurableGridOperation {id:string;state:string;exact_request:ExactGridRequest;exact_request_digest:string;failure_classification:string|null}
+export const GRID_ACTION_CREDITS='10';
+/** Recovery has no admission budget and can never prepare or submit a request. */
+export type GridRecoveryClaim={recoveryOnly:true};
+export interface DurableGridOperation {id:string;state:string;exact_request:ExactGridRequest;exact_request_digest:string;failure_classification:string|null;submitted_at?:Date|string|null}
+export const gridOperationCouldHaveLanded=(op:DurableGridOperation|null)=>!!op&&(['submitted','unconfirmed','confirmed'].includes(op.state)||op.submitted_at!=null);
+/** Keep every expired attempt immutable. Only the submit CAS's explicit NULL permits a fresh key. */
+export async function gridProvisionAttempt(read:(key:string,botId:string)=>Promise<DurableGridOperation|null>,botId:string,kind:string,now:number){
+  const base=`grid:${botId}:launch:${kind}`,seen=new Set<string>();let key=base;
+  for(;;){
+    const op=await read(key,botId);
+    if(!op||op.state!=='failed'||op.failure_classification!=='policy'||op.submitted_at!==null
+      ||!Number.isSafeInteger(op.exact_request.timestamp)||!Number.isSafeInteger(op.exact_request.expiryMs)||op.exact_request.expiryMs<=0
+      ||op.exact_request.timestamp+op.exact_request.expiryMs>now)return {key,op};
+    if(seen.has(op.id)||op.exact_request.botId!==botId||op.exact_request.kind!==(kind==='entry'?'limit':kind)
+      ||requestDigest(op.exact_request)!==op.exact_request_digest)throw Error('Grid expired attempt identity changed');
+    seen.add(op.id);key=`${base}:retry:${op.id}`;
+  }
+}
 const typeFor={create:'provision_subaccount',fund:'fund_subaccount',leverage:'set_leverage',seed:'seed_position',limit:'place_level_order',cancel:'cancel_level_order',close:'close_position',sweep:'sweep_subaccount'};
 const reduction=(r:ExactGridRequest)=>['cancel','close','sweep'].includes(r.kind)||r.kind==='limit'&&r.data.reduce_only===true;
 const liveStates=['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping'];
@@ -212,8 +229,9 @@ export class GridLaunchStorage {
         stopLossPercent:b.stop_loss_percent,stopLossPrice:b.stop_loss_price,seedAtCreation:b.seed_at_creation,
         levels:levels.map(l=>({ordinal:l.ordinal,price:l.price,size:l.size,side:l.side,reduceOnly:l.reduce_only}))};
       if(!canonicalGridPolicy(policy)||canonicalGridPolicy(policy)!==canonicalGridPolicy(r.authority.policy as GridPolicy))return null;
-      const ops=(await c.query('SELECT state,exact_request,exact_request_digest,terminal_at,idempotency_key FROM grid_operations WHERE bot_id=$1',[r.botId])).rows;
-      const fund=ops.find(o=>o.idempotency_key===`grid:${r.botId}:launch:fund`),f=fund?.exact_request as ExactGridRequest|undefined;
+      const ops=(await c.query('SELECT id,state,exact_request,exact_request_digest,terminal_at,idempotency_key,failure_classification,submitted_at FROM grid_operations WHERE bot_id=$1',[r.botId])).rows;
+      const {op}=await gridProvisionAttempt(async key=>ops.find(o=>o.idempotency_key===key)??null,r.botId,'fund',Date.now());
+      const fund=op as (DurableGridOperation&{terminal_at:Date|string|null})|null,f=fund?.exact_request;
       if(!fund||fund.state!=='confirmed'||!fund.terminal_at||!f||requestDigest(f)!==fund.exact_request_digest||f.kind!=='fund'
         ||f.account!==r.account||f.masterAccount!==r.masterAccount||f.data.to_account!==r.account||f.data.amount!==policy.totalInvestment
         ||f.authority.policyHmac!==b.policy_hmac||f.path!=='/account/subaccount/transfer'||f.operationType!=='transfer_funds')return null;
@@ -277,7 +295,7 @@ export class GridLaunchStorage {
     const exact=JSON.parse(canonicalRequest(request)) as ExactGridRequest,digest=requestDigest(exact);
     if(!request.botId || !request.account || !request.masterAccount || !Number.isSafeInteger(request.timestamp)
       || !Number.isSafeInteger(request.expiryMs) || request.expiryMs<1 || request.expiryMs>15000
-      || !new Decimal(claim.credits).gte(10) || !new Decimal(claim.canaryIncrement).gte(0)
+      || !new Decimal(claim.credits).gte(GRID_ACTION_CREDITS) || !new Decimal(claim.canaryIncrement).gte(0)
       || !Number.isSafeInteger(claim.availableSlots) || ![0,1].includes(claim.slots))throw Error('Invalid exact claim');
     if(claim.slots!==(request.kind==='limit'?1:0))throw Error('Invalid resting slot claim');
     const minimumRisk=request.kind==='limit'&&request.data.reduce_only===false?new Decimal(String(request.data.price)).mul(String(request.data.amount))

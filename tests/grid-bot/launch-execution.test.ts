@@ -17,6 +17,16 @@ const claim:GridClaim={credits:'10',slots:1,canaryIncrement:'90',observedCredits
 function harness(){const r=request();let row:DurableGridOperation|null=null;
   const deps:GridExecutionDeps={storage:{read:vi.fn(async()=>row),prepare:vi.fn(async()=>row={id:randomUUID(),state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null}),submit:vi.fn(async()=>{row!.state='submitted';return true;}),settle:vi.fn(async(_op,outcome)=>{row!.state=outcome.state;row!.failure_classification=outcome.reason;})},preflight:vi.fn(async()=>true),send:vi.fn(async()=>({rateLimited:false})),reconcile:vi.fn(async()=>({state:'unknown' as const}))};return {r,deps,execution:new GridExecution(deps),get row(){return row;}};}
 describe('write ahead and exact identity execution',()=>{
+  it.each(['absent','prepared','submitted'] as const)('recovery-only %s work never claims a budget or sends',async state=>{
+    const h=harness();
+    if(state!=='absent')await h.deps.storage.prepare('EXAMPLE',h.r,claim,'EXAMPLE');
+    if(state==='submitted')await h.deps.storage.submit(h.row!,'EXAMPLE');
+    vi.mocked(h.deps.storage.prepare).mockClear();vi.mocked(h.deps.storage.submit).mockClear();
+    expect(await h.execution.run('EXAMPLE',h.r,{recoveryOnly:true},'EXAMPLE')).toBe(state==='submitted'?'pending':'not_sent');
+    expect(h.deps.storage.prepare).not.toHaveBeenCalled();expect(h.deps.storage.submit).not.toHaveBeenCalled();
+    expect(h.deps.preflight).not.toHaveBeenCalled();expect(h.deps.send).not.toHaveBeenCalled();
+    if(state==='submitted')expect(h.deps.reconcile).toHaveBeenCalledOnce();
+  });
   it.each(['authentication','quota','transport'] as const)('retains a terminal %s denial once across restart',async classification=>{
     const h=harness(),terminalFailure={requestDigest:requestDigest(h.r),classification};
     vi.mocked(h.deps.send).mockResolvedValue({rateLimited:classification==='quota',terminalFailure});
