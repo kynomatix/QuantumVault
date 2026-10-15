@@ -28,7 +28,8 @@ export function planGridRebalance(input:{direction:'long'|'short';levels:GridReb
     }
   }
   // A filled entry is not recreated merely because its order disappeared. A new cycle needs explicit settled backing.
-  for(const level of candidates)if(!allocations.has(level.id)&&!level.reduceOnly&&['pending','cancelled'].includes(level.status))desired.push(level);
+  for(const level of candidates)if(!allocations.has(level.id)&&!level.reduceOnly&&['pending','cancelled'].includes(level.status)
+    &&(level.side==='buy'?new D(level.price).lt(input.bookPrice):new D(level.price).gt(input.bookPrice)))desired.push(level);
   const chunks=gridWindow({...input,levels:desired});
   return {chunks,allocations:Object.fromEntries(allocations)};
 }

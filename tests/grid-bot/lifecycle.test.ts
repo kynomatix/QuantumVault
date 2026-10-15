@@ -107,6 +107,25 @@ describe('Grid lifecycle boundary and failure drills',()=>{
   it('unexplained residual cannot be swept',async()=>{const f=fixture();f.observation.position!.size='0';f.proof.balance='2';f.proof.withdrawable='1';expect(await f.service.tick(f.claim,signal())).toBe('unexplained_unsweepable_residual');expect(f.deps.send).not.toHaveBeenCalled();});
   it('lost sweep response stays unresolved despite a later zero balance',async()=>{const f=fixture();f.observation.position!.size='0';f.proof.balance=f.proof.withdrawable='2';await f.service.tick(f.claim,signal());f.proof.balance=f.proof.withdrawable='0';expect(await f.service.tick(f.claim,signal())).toBe('venue_operation_unresolved');expect(f.deps.send).toHaveBeenCalledOnce();expect(f.deps.recycle).not.toHaveBeenCalled();});
   it('only full fresh zero proof reaches the atomic recycler',async()=>{const f=fixture();f.observation.position!.size='0';expect(await f.service.tick(f.claim,signal())).toBe('stopped');expect(f.deps.recycle).toHaveBeenCalledWith(f.claim,f.life.active_request,f.proof);expect(f.deps.send).not.toHaveBeenCalled();});
+  it('C6 Stop cancels, closes, sweeps and releases only after each exact operation settles',async()=>{
+    const f=fixture();f.own();
+    f.deps.send.mockImplementation(async(_claim,r)=>({rateLimited:false,...(r.kind==='sweep'?{terminalTransferDigest:requestDigest(r)}:{})}));
+    const service=new GridLifecycleService({...f.deps,recover:async(_claim:unknown,op:{exact_request:ExactGridRequest;exact_request_digest:string})=>{
+      return reconcileGridReduction(op.exact_request,f.observation.orders);
+    }} as unknown as GridLifecycleDeps);
+    expect(await service.tick(f.claim,signal())).toBe('pending');expect(f.deps.send.mock.calls.at(-1)?.[1].kind).toBe('cancel');
+    f.order.status='cancelled';f.order.cancelledAmount='1';
+    expect(await service.tick(f.claim,signal())).toBe('recovered_reobserve_required');
+    expect(await service.tick(f.claim,signal())).toBe('pending');const close=f.operations.find(op=>op.exact_request.kind==='close').exact_request;
+    expect(close.data).toMatchObject({reduce_only:true,amount:'1'});expect(f.deps.recycle).not.toHaveBeenCalled();
+    f.observation.orders.push({...f.order,orderId:'11',clientOrderId:String(close.data.client_order_id),side:'short',reduceOnly:true,orderType:'market',status:'filled',filledAmount:'1',cancelledAmount:'0',createdAt:close.timestamp,updatedAt:close.timestamp});
+    f.observation.position!.size='0';f.proof.balance=f.proof.withdrawable='100';
+    expect(await service.tick(f.claim,signal())).toBe('recovered_reobserve_required');
+    expect(await service.tick(f.claim,signal())).toBe('confirmed');expect(f.deps.send.mock.calls.at(-1)?.[1]).toMatchObject({kind:'sweep',data:{amount:'100'}});
+    expect(f.deps.recycle).not.toHaveBeenCalled();
+    f.proof.balance=f.proof.withdrawable='0';expect(await service.tick(f.claim,signal())).toBe('stopped');
+    expect(f.deps.send.mock.calls.map(call=>call[1].kind)).toEqual(['cancel','close','sweep']);expect(f.deps.recycle).toHaveBeenCalledOnce();
+  });
   it.each(['pending_balance','pending_interest','total_margin_used','spot_collateral','spot_market_value','positions_count','orders_count','stop_orders_count','updated_at'])('terminal proof rejects %s uncertainty',field=>{const f=fixture();f.observation.position!.size='0';const data:any={balance:'0',available_to_withdraw:'0',account_equity:'0',pending_balance:'0',pending_interest:'0',total_margin_used:'0',spot_collateral:'0',spot_market_value:'0',positions_count:0,orders_count:0,stop_orders_count:0,updated_at:Date.now(),spot_balances:[]};expect(gridTerminalFact({success:true,data},f.claim,f.observation,0,recycler(),Date.now())).not.toBeNull();data[field]=field==='updated_at'?Date.now()-5001:field.endsWith('_count')?1:'1';expect(gridTerminalFact({success:true,data},f.claim,f.observation,0,recycler(),Date.now())).toBeNull();});
 });
 

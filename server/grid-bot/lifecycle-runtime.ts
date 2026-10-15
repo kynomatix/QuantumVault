@@ -29,7 +29,7 @@ export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObserv
   return {account:claim.account,masterAccount:claim.masterAccount,balance:d.balance as string,withdrawable:d.available_to_withdraw as string,
     observedAt:d.updated_at as number,settlementComplete:true,source:'pacifica:/account+retained-operation-ledger+'+o.history.source,recycler};
 }
-export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonitorReads,json:GridLaunchReads,authorities:Partial<Pick<GridLifecycleDeps,'resume'|'settlement'|'sol'>>={}){
+export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonitorReads,json:GridLaunchReads,authorities:Partial<Pick<GridLifecycleDeps,'resume'|'settlement'|'sol'|'recover'>>={}){
   const custody=new GridCustody(storage.launch),sender=new GridPacificaSender(pacificaTransportAuthority(),fetch,new GridFirstPlacementAuthority(storage.launch,json),storage.launch),lifecycle=new GridLifecycleStorage(storage);
   const observe=async(claim:GridMonitorClaim,signal:AbortSignal)=>{
     const {bot}=await storage.snapshot(claim),symbol=bot.market.replace(/-PERP$/,''),from=new Date(bot.created_at).getTime();
@@ -45,12 +45,12 @@ export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonito
     sol:authorities.sol??((claim,signal)=>sharedGridSol(claim.masterAccount,signal)),
     resume:authorities.resume??gridProductionResume(storage,productionGridLaunchAuthority(json,storage.launch)),
     send:(claim,r)=>withKey(claim,(identity,umk)=>custody.withSecret(identity,umk,secret=>sender.send(r,secret,undefined,claim.leaseToken))),
-    recover:async(claim,op,signal)=>{const o=await observe(claim,signal);if(!o.inventoryComplete)return {state:'unknown'};
+    recover:authorities.recover??(async(claim,op,signal)=>{const o=await observe(claim,signal);if(!o.inventoryComplete)return {state:'unknown'};
       const r=op.exact_request;if(r.kind==='limit')return reconcileGridLimit(r,o.orders);
       if(r.kind==='cancel'||r.kind==='close')return reconcileGridReduction(r,o.orders);
       if(r.kind==='seed')return reconcileGridLaunch(r,{kind:'seed',account:claim.account,complete:true,orders:o.orders,observedAt:o.observedAt},Date.now());
       // Lost sweep/fund responses have no documented identity-bound lookup; retain uncertainty.
-      return {state:'unknown'};},
+      return {state:'unknown'};}),
     settlement:authorities.settlement??(async(claim,signal)=>{const {bot}=await storage.snapshot(claim),o=await observe(claim,signal);
       const raw=await json.json(claim.masterAccount,'/account',{account:claim.account},signal);
       return gridTerminalFact(raw,claim,o,new Date(bot.created_at).getTime(),{reuse:process.env.REUSE_ON_CREATE,recycle:process.env.RECYCLE_ON_DELETE,

@@ -36,6 +36,10 @@ describe('Grid reconciliation facts and entry barriers',()=>{
   it('does not round a sub-output-precision position into a match',()=>{const o=observation();o.trades[0].size='0.0000000000000000001';o.orders[0].filledAmount=o.trades[0].size;o.position!.size='0';expect(reconcile(o).reasons).toContain('position_mismatch_or_unavailable');});
 });
 describe('Grid actual-fill pairing and local diff',()=>{
+  it.each([{direction:'long' as const,side:'buy' as const,price:'101'},{direction:'short' as const,side:'sell' as const,price:'99'}])('holds crossed $side entries for a fresh maker opportunity',({direction,side,price})=>{
+    const result=planGridRebalance({direction,levels:[{id:'EXAMPLE_CROSSED',ordinal:1,price,size:'1',side,reduceOnly:false,attempt:0,status:'pending'}],fills:[],reserved:[],owned:[],positionSize:'0',bookPrice:'100',lot:'0.01',minimumQuote:'1',freeSlots:24,inventoryComplete:true,entriesAllowed:true,canaryRemaining:'250'});
+    expect(result.chunks.flat()).toEqual([]);
+  });
   it('reserves only remaining actual lots, including fractional residuals',()=>{expect(pairGridFills([fill({size:'0.98'})],[{tradeId:'1',size:'0.50'}],'1','0.1','1')).toEqual([{tradeId:'1',size:'0.4'}]);});
   it('caps exits by venue position and refuses double allocations',()=>{expect(pairGridFills([fill()],[],'2','0.1','0.4')).toEqual([{tradeId:'1',size:'0.4'}]);expect(()=>pairGridFills([fill()],[{tradeId:'1',size:'2'}],'1','0.1','1')).toThrow();});
   it('places the adjacent profit leg from fills while preserving the partial entry',()=>{

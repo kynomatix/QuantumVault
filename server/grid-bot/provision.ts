@@ -21,7 +21,7 @@ export const GRID_FUND_IDENTITY_LEVEL = 102;
 export const GRID_SEED_IDENTITY_LEVEL = 103;
 
 export interface LaunchFacts {
-  market?:string; margin?:GridMarginReading; agentGeneration?:{wallet:string;masterAccount:string;umkVersion:number};
+  market:string; margin:GridMarginReading; agentGeneration:{wallet:string;masterAccount:string;umkVersion:number};
   observedAt:number;expiresAt:number;masterAccount:string;account:string|null;bookPrice:string;bookSource:string;
   tick:string;lot:string;minimumQuote:string;maximumQuote:string;minimumPrice:string;maximumPrice:string;maxLeverage:string;restrictions:'unrestricted'|'unknown'|'restricted';
   maker:GridFeeQuote;profit:GridFeeQuote;taker:GridFeeQuote|null;
@@ -36,9 +36,11 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
     if(!verifyGridPolicyHmac(policy,umk,policyHmac).ok)return deny('Grid policy signature or version changed.');
     if(!Number.isSafeInteger(f.observedAt)||!Number.isSafeInteger(f.expiresAt)||f.observedAt>now||f.expiresAt<=now||f.expiresAt-f.observedAt>5000)return deny('Launch observations are stale or unknown.');
     if(!f.masterAccount||!f.transportReady||!f.inventoryComplete)return deny('Grid transport or account inventory is unavailable.');
-    if(f.market!==undefined&&f.market!==policy.market||f.agentGeneration&&(f.agentGeneration.masterAccount!==f.masterAccount||!f.agentGeneration.wallet||!Number.isSafeInteger(f.agentGeneration.umkVersion)||f.agentGeneration.umkVersion<1))return deny('Grid launch identity or agent generation changed.');
-    if(f.margin&&(f.margin.account!==(f.account??f.masterAccount)||f.margin.symbol!==policy.market.replace(/-PERP$/,'')
-      ||![f.margin.observedAt,f.margin.accountUpdatedAt].every(t=>Number.isSafeInteger(t)&&t<=now&&now-t<5000)))return deny('Strict Grid account margin is stale or identity changed.');
+    if(f.market!==policy.market||!f.agentGeneration||f.agentGeneration.masterAccount!==f.masterAccount||!f.agentGeneration.wallet||!Number.isSafeInteger(f.agentGeneration.umkVersion)||f.agentGeneration.umkVersion<1)return deny('Grid launch identity or agent generation changed.');
+    if(!f.margin||f.margin.account!==(f.account??f.masterAccount)||f.margin.symbol!==policy.market.replace(/-PERP$/,'')
+      ||![f.margin.observedAt,f.margin.accountUpdatedAt].every(t=>Number.isSafeInteger(t)&&t<=now&&now-t<5000)
+      ||![f.margin.available,f.margin.feeRate].every(v=>new Decimal(v).isFinite()&&new Decimal(v).gte(0))
+      ||!new Decimal(f.margin.leverage).isInteger()||!new Decimal(f.margin.leverage).gte(1))return deny('Strict Grid account margin is stale or identity changed.');
     if(!gridRecyclerGate(f.recycler,now))return deny('Subaccount reuse and recycling must both be enabled for this deployment.');
     if(!gridWalletEntryGate(f.sol).entryAllowed)return deny('Wallet SOL reserve is below the entry minimum or unknown.');
     if(!Number.isSafeInteger(f.availableSlots)||f.availableSlots<GRID_MINIMUM_LAUNCH_SLOTS||!Number.isSafeInteger(f.subaccountCount)||f.subaccountCount<0||f.subaccountCount>(f.account||f.reusableAccountAvailable===true?10:9))return deny('Subaccount or order slot capacity is unavailable.');
@@ -85,16 +87,19 @@ export interface GridProvisionDeps {
   execution:Pick<GridExecution,'run'>;
   existing(key:string,botId:string):Promise<DurableGridOperation|null>;
   markCanary(account:GridAccount):Promise<void>;
+  beforeStep?(account:GridAccount,kind:ExactGridRequest['kind']):Promise<Record<string,unknown>>;
   prepareFirstEntry?(input:{account:GridAccount;policy:GridPolicy;policyHmac:string;admission:Extract<LaunchAdmission,{ok:true}>;facts:LaunchFacts;now:number}):Promise<{request:ExactGridRequest;claim:GridClaim}>;
 }
-/** Unit 5 will supervise retries. Each invocation advances only from authoritative confirmed steps. */
+/** The durable worker resumes this state machine only from authoritative confirmed steps. */
 export class GridProvision {
   constructor(private deps:GridProvisionDeps){}
   async start(input:{wallet:string;policy:GridPolicy;policyHmac:string;account?:GridAccount}):Promise<{state:'denied'|'pending'|'canary';reason?:string;account?:GridAccount}>{
     const security=await (this.deps.durableUmk??durableGridUmk)(input.wallet);if(!security)return {state:'denied',reason:'Durable execution security is unavailable.'};
     const observe=async(account:GridAccount|null)=>{
-      if(this.deps.observe)return this.deps.observe(input.policy,account);
-      try{return await (await defaultGridLaunchAuthority()).observe(input.wallet,input.policy,account,security.umk);}
+      try{const facts=this.deps.observe?await this.deps.observe(input.policy,account)
+        :await (await defaultGridLaunchAuthority()).observe(input.wallet,input.policy,account,security.umk);
+        if(facts.agentGeneration?.wallet!==input.wallet)throw new GridLaunchAuthorityUnavailable('Grid execution wallet generation changed.');
+        return facts;}
       catch(error){if(error instanceof GridLaunchAuthorityUnavailable||error instanceof GridLaunchTransientError)throw error;throw new GridLaunchAuthorityUnavailable('Production Grid launch authority unavailable.');}
     };
     let retainedAccount=input.account;
@@ -135,6 +140,7 @@ export class GridProvision {
       for(const step of steps){
         const key=`grid:${input.policy.id}:launch:${step.kind}`,old=await this.deps.existing(key,input.policy.id);
         if(old?.state==='confirmed'){if(step.kind==='create')await this.deps.custody.confirmCreated(account);continue;}
+        const authority=await this.deps.beforeStep?.(account,step.kind)??{};
         const current=await observe(step.kind==='create'?null:account),timestamp=this.deps.now();
         const funded=await this.deps.existing(`grid:${input.policy.id}:launch:fund`,input.policy.id);
         const latest=preflightGridLaunch(input.policy,input.policyHmac,security.umk,current,timestamp,funded?.state==='confirmed');
@@ -145,13 +151,13 @@ export class GridProvision {
           if(empty.state!=='empty'||!validGridEmptyProof(account,empty,this.deps.now()))return {state:'denied',reason:'Funding requires the exact confirmed empty subaccount.',account};
         }
         if(step.kind==='seed'){
-          if(current.margin&&current.margin.leverage!==String(input.policy.leverage))return {state:'denied',reason:'Actual subaccount leverage does not match the confirmed policy.',account};
+          if(current.margin.leverage!==String(input.policy.leverage))return {state:'denied',reason:'Actual subaccount leverage does not match the confirmed policy.',account};
           if(!current.taker)return {state:'denied',reason:'Fresh subaccount taker fee unavailable.',account};
           delete step.data.builder_code;
           if(current.taker.builder)step.data.builder_code=current.taker.builder.code;
         }
         const request:ExactGridRequest=old?.exact_request??{...step,botId:input.policy.id,account:account.account,masterAccount:account.masterAccount,timestamp,expiryMs:5000,
-          authority:{policyHmac:input.policyHmac,policy:input.policy,admission:latest,facts:current,seedWorstPrice:latest.stop.state==='available'?latest.stop.projection.seedWorstPrice:null}};
+          authority:{...authority,policyHmac:input.policyHmac,policy:input.policy,admission:latest,facts:current,seedWorstPrice:latest.stop.state==='available'?latest.stop.projection.seedWorstPrice:null}};
         const claim:GridClaim={credits:'10',slots:0,canaryIncrement:step.kind==='seed'?latest.seedNotional:'0',observedCredits:current.observedCredits,
           availableSlots:current.availableSlots,observedAt:current.observedAt,expiresAt:current.expiresAt};
         const result=await this.deps.execution.run(key,request,claim,account.leaseToken);
@@ -160,11 +166,12 @@ export class GridProvision {
       }
       const entryKey=`grid:${input.policy.id}:launch:entry`,oldEntry=await this.deps.existing(entryKey,input.policy.id);
       if(oldEntry?.state!=='confirmed'){
+        await this.deps.beforeStep?.(account,'limit');
         const current=await observe(account),timestamp=this.deps.now();
         const latest=preflightGridLaunch(input.policy,input.policyHmac,security.umk,current,timestamp,true);
         if(!latest.ok)return {state:latest.transient?'pending':'denied',reason:latest.reason,account};
         if(current.account!==account.account||current.masterAccount!==account.masterAccount)return {state:'denied',reason:'First entry account authority changed.',account};
-        if(current.margin&&current.margin.leverage!==String(input.policy.leverage))return {state:'denied',reason:'Actual subaccount leverage does not match the confirmed policy.',account};
+        if(current.margin.leverage!==String(input.policy.leverage))return {state:'denied',reason:'Actual subaccount leverage does not match the confirmed policy.',account};
         const prepared=await this.deps.prepareFirstEntry({account,policy:input.policy,policyHmac:input.policyHmac,admission:latest,facts:current,now:timestamp});
         const request=oldEntry?.exact_request??prepared.request,claim=prepared.claim;
         const line=input.policy.levels.find(l=>l.ordinal===latest.firstEntryOrdinal);

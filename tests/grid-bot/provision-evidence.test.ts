@@ -1,0 +1,21 @@
+import {describe,it,expect} from 'vitest';
+import {gridProvisionEmpty,gridProvisionRecoveryEvidence,gridSignedInventory} from '../../server/grid-bot/provision-evidence';
+import {reconcileGridLaunch} from '../../server/grid-bot/launch-reconciliation';
+import type {ExactGridRequest} from '../../server/grid-bot/launch-storage';
+const now=1800000000000,account={botId:'EXAMPLE_BOT',wallet:'EXAMPLE_OWNER',account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',leaseToken:'EXAMPLE_LEASE',reused:false};
+const wrap=(data:unknown)=>({success:true,error:null,data});
+const inventory=(present=true)=>wrap({account:account.masterAccount,subaccounts:present?[{address:account.account}]:[]});
+const zero=():Record<string,unknown>=>({account:account.account,updated_at:now,balance:'0',available_to_withdraw:'0',account_equity:'0',available_to_spend:'0',pending_balance:'0',pending_interest:'0',spot_collateral:'0',spot_market_value:'0',total_margin_used:'0',positions_count:0,orders_count:0,stop_orders_count:0,spot_balances:[]});
+const request=(kind:ExactGridRequest['kind']):ExactGridRequest=>({kind,botId:account.botId,account:account.account,masterAccount:account.masterAccount,path:'/account/leverage',operationType:'update_leverage',timestamp:now-1,expiryMs:5000,data:{symbol:'BTC',leverage:2},authority:{}});
+describe('C6 provisioning recovery evidence',()=>{
+  it('signed complete absence grants create only for a never reused address',()=>{expect(gridProvisionEmpty(account,inventory(false),null,now,now).state).toBe('absent');expect(gridProvisionEmpty({...account,reused:true},inventory(false),null,now,now).state).toBe('unknown');});
+  it('requires every explicit zero before funding an existing address',()=>{expect(gridProvisionEmpty(account,inventory(),wrap(zero()),now,now).state).toBe('empty');});
+  it.each(Object.keys(zero()).filter(k=>k!=='account'))('missing %s is unknown, never a zero',field=>{const d=zero();delete d[field];expect(gridProvisionEmpty(account,inventory(),wrap(d),now,now).state).toBe('unknown');});
+  it.each(['balance','pending_balance','spot_market_value','total_margin_used'])('nonzero %s prevents funding',field=>{const d=zero();d[field]='1';expect(gridProvisionEmpty(account,inventory(),wrap(d),now,now).state).toBe('unknown');});
+  it.each([{partial:true},{complete:false},{has_more:true},{next_cursor:'EXAMPLE_CURSOR'}])('partial signed inventory never proves absence: %j',patch=>{expect(gridSignedInventory({...inventory(false),...patch},account.masterAccount)).toBeNull();expect(gridSignedInventory(wrap({account:account.masterAccount,subaccounts:[],...patch}),account.masterAccount)).toBeNull();});
+  it('rejects wrong, duplicate or malformed signed account inventory',()=>{for(const raw of [wrap({account:'EXAMPLE_OTHER',subaccounts:[]}),wrap({subaccounts:[{address:account.account},{address:account.account}]}),wrap({subaccounts:[{}]})])expect(gridSignedInventory(raw,account.masterAccount)).toBeNull();});
+  it.each([now-5000,now+1])('stale or future empty proof stays unknown (%s)',started=>expect(gridProvisionEmpty(account,inventory(false),null,started,now).state).toBe('unknown'));
+  it('confirms exact create and leverage from documented identity-bound reads',()=>{for(const kind of ['create','leverage'] as const){const r=request(kind),raw=kind==='create'?inventory():wrap({account:account.account,margin_settings:[{symbol:'BTC',isolated:false,leverage:2}]});expect(reconcileGridLaunch(r,gridProvisionRecoveryEvidence(r,raw,now,now),now).state).toBe('confirmed');}});
+  it.each([[],[{symbol:'ETH',isolated:false,leverage:2}],[{symbol:'BTC',isolated:true,leverage:2}],[{symbol:'BTC',isolated:false,leverage:3}]].map(settings=>({settings})))('does not invent leverage confirmation from %j',({settings})=>{const r=request('leverage'),e=gridProvisionRecoveryEvidence(r,wrap({margin_settings:settings}),now,now);expect(reconcileGridLaunch(r,e,now).state).toBe('unknown');});
+  it.each(['fund','sweep'] as const)('C4 keeps a lost %s unknown even with a complete zero balance',kind=>{const r=request(kind);expect(gridProvisionRecoveryEvidence(r,wrap(zero()),now,now)).toBeNull();expect(reconcileGridLaunch(r,null,now)).toEqual({state:'unknown'});});
+});

@@ -10,6 +10,7 @@ import { PlannerRangeFacts } from '../grid-planner/range-facts';
 import { gridHistoryRequest } from '../../shared/grid-lookback';
 import { marketSnapshot } from '../grid-planner/market-snapshot';
 import type {GridLifecycleStorage} from './lifecycle-storage';
+import {GRID_START_ROUTE_ENABLED} from './service';
 
 const uuid=z.string().uuid();
 const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),lookback:z.enum(['100','200'])}).strict();
@@ -17,7 +18,14 @@ const advisoryQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timefr
   lookback:z.enum(['100','200']).optional(),period:z.enum(['day','week','month']).optional()}).strict();
 export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean;lifecycle?:Pick<GridLifecycleStorage,'request'>}) {
   // Unit 4 is buildable and reviewable, but no production money route is enabled.
-  app.post('/api/grid-bots/:id/start',requireWallet,(_req,res)=>{res.status(503).json({error:'Grid live launch requires the owner’s separate launch authorization.'});});
+  app.post('/api/grid-bots/:id/start',requireWallet,async(req,res)=>{
+    if(!GRID_START_ROUTE_ENABLED){res.status(503).json({error:'Grid live launch requires the owner’s separate launch authorization.'});return;}
+    const id=uuid.safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid Grid id'});return;}
+    try{const {productionGridExecutor}=await import('./executor-runtime'),runtime=await productionGridExecutor();
+      const result=await runtime.start(wallet(req),id.data,AbortSignal.timeout(60000));
+      res.status(result.state==='denied'?422:result.state==='canary'?200:202).json({state:result.state,...(result.reason?{reason:result.reason}:{})});
+    }catch{res.status(503).json({error:'Grid launch authority unavailable; retained work will be reconciled.'});}
+  });
   const enabled=provided?.enabled??(()=>process.env.GRID_BOT_ENABLED==='true');
   let initialized:Promise<{deps:GridDraftDeps;storage:GridStorage}>|null=null;
   const runtime=()=>provided?Promise.resolve(provided):initialized??(initialized=Promise.all([import('../db'),import('./storage'),import('./draft-default-deps')]).then(([{pool},{GridStorage},{defaultGridDraftDeps}])=>{const storage=new GridStorage(pool);return {storage,deps:defaultGridDraftDeps(storage)};}));

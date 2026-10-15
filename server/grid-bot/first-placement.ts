@@ -40,7 +40,6 @@ export class GridFirstPlacementAuthority implements GridFirstPlacementBoundary {
     const readStartedAt=this.now();
     if(![context.confirmedAt,context.fundedAt,readStartedAt].every(Number.isSafeInteger)
       ||context.confirmedAt>readStartedAt||context.fundedAt>readStartedAt)return null;
-    if(context.alreadyPlaced)return {requestDigest:requestDigest(r),context,bookPrice:null,observedAt:null,readStartedAt};
     const symbol=context.policy.market.replace(/-PERP$/,'');
     const raw=await this.reads.json(r.masterAccount,'/book',{symbol}) as {success?:unknown;error?:unknown;data?:{s?:unknown;t?:unknown;l?:unknown}};
     const d=raw?.data;
@@ -67,9 +66,12 @@ export class GridFirstPlacementAuthority implements GridFirstPlacementBoundary {
       if(proof.requestDigest!==requestDigest(r)||p.id!==r.botId||p.market.replace(/-PERP$/,'')!==r.data.symbol
         ||![now,c.confirmedAt,c.fundedAt,proof.readStartedAt].every(Number.isSafeInteger)
         ||proof.readStartedAt<c.confirmedAt||proof.readStartedAt<c.fundedAt||now<proof.readStartedAt)return false;
-      if(c.alreadyPlaced)return true;
       if(proof.observedAt===null||proof.bookPrice===null||proof.observedAt<c.confirmedAt||proof.observedAt<c.fundedAt)return false;
+      if(proof.observedAt>now||now-proof.observedAt>5000||now-proof.readStartedAt>5000)return false;
       const book=new Decimal(proof.bookPrice),start=new Decimal(p.startPrice);
+      if(book.lt(p.lowerPrice)||book.gt(p.upperPrice))return false;
+      if(r.kind==='limit'&&(r.data.side==='bid'?new Decimal(String(r.data.price)).gte(book):new Decimal(String(r.data.price)).lte(book)))return false;
+      if(c.alreadyPlaced)return true;
       const spacing=Decimal.min(...p.levels.slice(1).map((l,i)=>new Decimal(l.price).minus(p.levels[i].price))).toFixed();
       return gridFirstPlacementGate({confirmedPrice:p.startPrice,bookPrice:proof.bookPrice,smallestSpacingPrice:spacing,
         observedAt:proof.observedAt,source:'/book',identityValid:true,

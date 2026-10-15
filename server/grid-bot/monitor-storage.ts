@@ -2,6 +2,7 @@ import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
 import {GridLaunchStorage,canonicalRequest} from './launch-storage';
 import {reconcileGridObservation,type GridObservation,type ReconciliationOperation} from './reconciliation';
+import {validGridEmptyProof,type GridAccount,type GridEmptyProof} from './custody';
 import type {GridEconomicFill} from './pnl';
 import Decimal from 'decimal.js';
 import {advanceGridCanary,gridCanaryPolicyCurrent,type GridCanaryClock} from './canary-clock';
@@ -53,6 +54,16 @@ export class GridMonitorStorage {
   async snapshot(claim:GridMonitorClaim){return this.launch.transaction(async c=>{const bot=await this.assertLease(c,claim);
     const operations=(await c.query('SELECT * FROM grid_operations WHERE bot_id=$1 ORDER BY created_at,id',[claim.id])).rows as ReconciliationOperation[];
     return {bot,operations,levels:(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[claim.id])).rows};
+  });}
+  /** Only untouched custody can use absence to authorize setup. This never grants a monitor boot for exposure. */
+  async authorizeProvisioning(claim:GridMonitorClaim,account:GridAccount,proof:GridEmptyProof){return this.launch.transaction(async c=>{
+    const bot=await this.assertLease(c,claim),now=new Date(bot.db_now).getTime();
+    if(!await gridWorkerFence(c,claim.id))throw Error('Grid sender still active');
+    if(bot.status!=='provisioning'||account.botId!==claim.id||account.leaseToken!==claim.leaseToken||account.wallet!==bot.wallet_address
+      ||account.account!==claim.account||account.masterAccount!==claim.masterAccount||account.reused||proof.state!=='absent'||!validGridEmptyProof(account,proof,now))throw Error('Provisioning ownership proof unavailable');
+    if((await c.query('SELECT id FROM grid_operations WHERE bot_id=$1 LIMIT 1',[claim.id])).rowCount
+      ||(await c.query('SELECT bot_id FROM grid_lifecycle WHERE bot_id=$1',[claim.id])).rowCount)throw Error('Untouched provisioning required');
+    await recordGridWorker(c,claim.id,claim.leaseToken,false);
   });}
   async block(claim:GridMonitorClaim,reason:string){await this.launch.transaction(async c=>{await this.assertLease(c,claim);
     await c.query(`INSERT INTO grid_monitor_state(bot_id,blocked_reasons) VALUES($1,$2) ON CONFLICT(bot_id)

@@ -10,6 +10,10 @@ import {GridStorage,type DraftRecord} from '../../server/grid-bot/storage';
 import {GridLaunchStorage,requestDigest,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import {GridMonitorStorage,type GridMonitorClaim} from '../../server/grid-bot/monitor-storage';
 import {GridMonitorService} from '../../server/grid-bot/monitor-service';
+import {GridExecution,reconcileGridLimit} from '../../server/grid-bot/execution';
+import {gridOwnedLive} from '../../server/grid-bot/lifecycle-policy';
+import type {WindowOrder} from '../../server/grid-bot/window';
+import Decimal from 'decimal.js';
 import {GridCustody} from '../../server/grid-bot/custody';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 import {gridDraftRevision} from '../../client/src/lib/grid-draft-view';
@@ -48,6 +52,76 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     return {bot,claim,level,op,request,observe};
   }
   async function landed(){const f=await fixture();expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false,orderId:'10'});return f;}
+  it('C6 authorizes only an untouched signed-absent reservation without inventing monitor authority',async()=>{
+    const f=await reservation(),account=await new GridCustody(launch).recover(f.bot.id,wallet,f.claim.leaseToken);
+    await pool.query("UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{reconciliationRequired}','true'::jsonb) WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id]);
+    const proof={state:'absent' as const,account:account.account,masterAccount:account.masterAccount,observedAt:Date.now(),expiresAt:Date.now()+5000};
+    await storage.authorizeProvisioning(f.claim,account,proof);
+    expect((await pool.query("SELECT evidence->>'reconciliationRequired' AS required FROM grid_risk_events WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id])).rows[0].required).toBe('false');
+    expect((await pool.query('SELECT boot_id FROM grid_monitor_state WHERE bot_id=$1',[f.bot.id])).rows[0]?.boot_id??null).toBeNull();
+    await expect(storage.authorizeProvisioning(f.claim,{...account,reused:true},proof)).rejects.toThrow();
+    await new GridLifecycleStorage(storage).request(wallet,f.bot.id,randomUUID(),'stop');
+    await expect(storage.authorizeProvisioning(f.claim,account,{...proof,observedAt:Date.now()})).rejects.toThrow();
+  });
+  it('C6 cannot clear takeover recovery after any retained send',async()=>{
+    const f=await landed(),account=await new GridCustody(launch).recover(f.bot.id,wallet,f.claim.leaseToken);
+    await expect(storage.authorizeProvisioning(f.claim,account,{state:'absent',account:account.account,masterAccount:account.masterAccount,
+      observedAt:Date.now(),expiresAt:Date.now()+5000})).rejects.toThrow('Untouched provisioning required');
+  });
+  it.each(['0.98','1'])('C6 executes an actual %s entry fill through backed exits and one recycled entry',async initial=>{
+    const f=await landed(),o=f.observe(),signal=new AbortController().signal;
+    await pool.query("UPDATE grid_bots SET status='canary',sol_balance='0.1',sol_balance_observed_at=clock_timestamp() WHERE id=$1",[f.bot.id]);
+    o.orders[0].filledAmount=initial;o.orders[0].status=initial==='1'?'filled':'partially_filled';o.trades[0].size=initial;o.position!.size=initial;
+    const monitor=new GridMonitorService({storage,observe:async()=>{o.observedAt=Date.now();o.history!.through=Date.now();return o;}});
+    const reconcile=async()=>{expect((await monitor.tick(f.claim,signal)).entriesAllowed).toBe(true);};
+    const plan=async()=>{
+      const {operations}=await storage.snapshot(f.claim);
+      const owned:WindowOrder[]=gridOwnedLive(operations,o).map(({order,operation})=>{
+        if(!operation?.level_id||!order.clientOrderId)throw Error('EXAMPLE missing owned order');
+        return {levelId:operation.level_id,orderId:order.orderId,clientOrderId:order.clientOrderId,reduceOnly:order.reduceOnly,
+          remaining:new Decimal(order.amount).minus(order.filledAmount).minus(order.cancelledAmount??'0').toFixed()};
+      });
+      return monitor.plan(f.claim,{owned,bookPrice:'100',lot:'0.01',minimumQuote:'1',freeSlots:100,canaryRemaining:'160'});
+    };
+    let venueId=20;
+    const placeExit=async(expected:string)=>{
+      const p=await plan(),action=p.chunks.flat()[0];
+      if(!action||action.kind!=='place'||!action.level.reduceOnly)throw Error('EXAMPLE expected backed profit');
+      expect(action.level.size).toBe(expected);expect(p.chunks.flat()).toHaveLength(1);
+      const now=Date.now(),orderId=String(venueId++),cloid=randomUUID(),l=action.level;
+      const request:ExactGridRequest={...f.request,timestamp:now,data:{symbol:'BTC',side:'ask',reduce_only:true,tif:'ALO',price:l.price,amount:l.size,client_order_id:cloid},
+        authority:{...p.authority,levelId:l.id,levelAttempt:l.attempt,fillAllocations:p.allocations[l.id]}};
+      let sends=0;
+      const execution=new GridExecution({storage:launch,preflight:async()=>true,send:async()=>{sends++;
+        o.orders.push({orderId,clientOrderId:cloid,symbol:'BTC',side:'short',price:l.price,amount:l.size,filledAmount:'0',cancelledAmount:'0',reduceOnly:true,orderType:'limit',status:'open',createdAt:now,updatedAt:now});
+        return {rateLimited:false};},reconcile:async op=>reconcileGridLimit(op.exact_request,o.orders)});
+      const key=`grid:${f.bot.id}:level:${l.ordinal}:${l.attempt}:profit`,claim={credits:'10',slots:1 as const,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000};
+      expect(await execution.run(key,request,claim,f.claim.leaseToken)).toBe('confirmed');
+      expect(await execution.run(key,request,claim,f.claim.leaseToken)).toBe('confirmed');expect(sends).toBe(1);
+      await reconcile();expect((await plan()).chunks.flat()).toEqual([]);
+      return o.orders.find(order=>order.orderId===orderId)!;
+    };
+    const fillExit=async(order:GridObservation['orders'][number],tradeId:string)=>{
+      const now=Date.now();order.status='filled';order.filledAmount=order.amount;order.updatedAt=now;
+      o.trades.push({tradeId,orderId:order.orderId,clientOrderId:order.clientOrderId,symbol:'BTC',side:'close_long',time:now,size:order.amount,price:order.price,fee:'0'});
+      o.position!.size=new Decimal(o.position!.size).minus(order.amount).toFixed();await reconcile();
+    };
+    await reconcile();const firstExit=await placeExit(initial);
+    if(initial!=='1'){
+      const now=Date.now();o.orders[0].filledAmount='1';o.orders[0].status='filled';o.orders[0].updatedAt=now;o.position!.size='1';
+      o.trades.push({...o.trades[0],tradeId:'2',time:now,size:'0.02'});await reconcile();
+    }
+    await fillExit(firstExit,'3');
+    if(initial!=='1'){
+      expect((await pool.query('SELECT status FROM grid_levels WHERE id=$1',[f.level.id])).rows[0].status).toBe('filled');
+      await fillExit(await placeExit('0.02'),'4');
+    }
+    await reconcile();const next=await plan(),entry=next.chunks.flat()[0];
+    expect(next.chunks.flat()).toHaveLength(1);expect(entry).toMatchObject({kind:'place',level:{id:f.level.id,attempt:1,reduceOnly:false}});
+    if(entry.kind!=='place')throw Error('EXAMPLE expected recycled entry');expect(new Decimal(entry.level.size).eq(1)).toBe(true);
+    expect((await pool.query('SELECT count(*) AS n FROM grid_exact_fills WHERE bot_id=$1',[f.bot.id])).rows[0].n).toBe(initial==='1'?'2':'4');
+    expect((await pool.query('SELECT count(*) AS n FROM grid_operations WHERE bot_id=$1',[f.bot.id])).rows[0].n).toBe(initial==='1'?'2':'3');
+  });
   it('C2 blocks mark-driven excess while stop close and terminal recovery remain usable',async()=>{
     const f=await landed(),boot=randomUUID(),o=f.observe();o.mark={price:'300',observedAt:Date.now()};
     const result=await storage.reconcile(f.claim,boot,o);expect(result.entriesAllowed).toBe(false);expect(result.reconciliationComplete).toBe(true);expect(result.reasons).toContain('pilot_exposure_limit_exceeded');

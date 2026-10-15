@@ -25,6 +25,13 @@ function harness(ctx:GridFirstPlacementContext|null=context(),raw:unknown=book()
 }
 
 describe('post-funding first-placement book authority',()=>{
+  it('rolling entries consume a fresh book without repeating the original preview deviation rule',async()=>{const h=harness({...context(),alreadyPlaced:true},book('101.5')),r=request();
+    expect(await h.authority.observe(r)).not.toBeNull();expect(h.reads.json).toHaveBeenCalledOnce();
+  });
+  it.each(['missing','stale','crossed','out of range'] as const)('rolling entry cannot bypass a %s book',async defect=>{const raw=book(),r=request();
+    if(defect==='stale')raw.data.t=0;if(defect==='missing')raw.data.l=[];if(defect==='crossed')r.data.price='100.5';if(defect==='out of range')raw.data.l=[[{p:'102.01',a:'1'}],[{p:'102.03',a:'1'}]];
+    expect(await harness({...context(),alreadyPlaced:true},raw,defect==='stale'?6000:1000).authority.observe(r)).toBeNull();
+  });
   it.each(['seed','limit'] as const)('reads the exact symbol only after confirmed funding for %s',async kind=>{
     const h=harness(),r=request(kind),p=await h.authority.observe(r);expect(p).not.toBeNull();
     expect(h.reads.json).toHaveBeenCalledWith(r.masterAccount,'/book',{symbol:'BTC'});

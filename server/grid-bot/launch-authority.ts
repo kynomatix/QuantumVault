@@ -206,7 +206,8 @@ const requireGridAdapter=()=>getAdapter('pacifica') as ReturnType<typeof getAdap
 let defaultAuthority:Promise<GridLaunchAuthority>|undefined;
 export function defaultGridLaunchAuthority(){
   return defaultAuthority??=Promise.all([import('../db'),import('./launch-storage'),import('./launch-reads'),import('../protocol/pacifica/pacifica-transport')])
-    .then(([{pool},{GridLaunchStorage},{GridLaunchReads},{pacificaTransportAuthority}])=>{const ledger=new GridLaunchStorage(pool);return productionGridLaunchAuthority(new GridLaunchReads(pacificaTransportAuthority(),ledger,'0.5'),ledger);});
+    .then(([{pool},{GridLaunchStorage},{GridLaunchReads},{pacificaTransportAuthority}])=>{const ledger=new GridLaunchStorage(pool);return productionGridLaunchAuthority(new GridLaunchReads(pacificaTransportAuthority(),ledger,'0.5'),ledger);})
+    .catch(error=>{defaultAuthority=undefined;throw error;});
 }
 
 export function retainedGridPolicy(bot:Record<string,any>,levels:Record<string,any>[]):GridPolicy{
