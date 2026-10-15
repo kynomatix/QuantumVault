@@ -66,7 +66,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [marketClock, setMarketClock] = useState({ serverNow: 0, startedAt: 0 });
   const [expandedSettingsPanel, setExpandedSettingsPanel] = useState<string | null>('direction-size'), [marketLoading, setMarketLoading] = useState(false);
   const [width, setWidth] = useState(10), [rangeShortcut, setRangeShortcut] = useState<number | null>(null);
-  const [rangeSource, setRangeSource] = useState<'manual' | 'auto'>(initialIntent?.rangeSource ?? 'manual');
+  const [rangeSource, setRangeSource] = useState<'manual' | 'auto'>(initialIntent?.rangeSource ?? 'auto');
   const [timeRangeApplied, setTimeRangeApplied] = useState(false);
   const manual = useRef({ lower: form.lower, upper: form.upper, stop: form.stop });
   const rangePercent = useRef<number | null>(null);
@@ -75,9 +75,9 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [draftBusy, setDraftBusy] = useState(false), [draftPreview, setDraftPreview] = useState<GridDraftPreview | null>(null);
   const [rangeFacts, setRangeFacts] = useState<RangeFacts | null>(null), [rangeExpiry, setRangeExpiry] = useState(0);
   const [rangeBusy, setRangeBusy] = useState(false), [rangeError, setRangeError] = useState('');
-  const [autoApplying, setAutoApplying] = useState(false);
+  const [autoApplying, setAutoApplying] = useState(!initialIntent);
   const [rangeRefresh, setRangeRefresh] = useState(0);
-  const applyAutoAfterRefresh = useRef(false);
+  const applyAutoAfterRefresh = useRef(!initialIntent);
   const generation = useRef({ range: new PlannerRequestGeneration(), markets: new PlannerRequestGeneration(), chart: new PlannerRequestGeneration(), preview: new PlannerRequestGeneration() });
   const priceRefresh = useRef<PlannerPriceRefresh | null>(null);
   const selected = markets.find(m => m.market === form.market);
@@ -92,6 +92,17 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const effectiveStop = form.stop || suggestedStop || '';
   const historyWindow = gridHistoryWindow(form.timeframe, form.rangeWindow)!;
   const invalidate = useCallback(() => { generation.current.preview.invalidate(); setPreview(null); setError(''); }, []);
+  useEffect(() => {
+    if (open) return;
+    // A retained sheet gets one new automatic suggestion on its next open.
+    applyAutoAfterRefresh.current = !initialIntent; setAutoApplying(!initialIntent);
+    if (initialIntent) return;
+    defaultMarketPendingRef.current = true; setDefaultMarketPending(true);
+    manual.current = { lower: '', upper: '', stop: '' };
+    rangePercent.current = null; pendingPercent.current = null;
+    setRangeSource('auto'); setTimeRangeApplied(false); setRangeShortcut(null); setRangeNote('');
+    setForm(gridSetupForm(undefined, gridStoredMarket(identity)));
+  }, [open, identity, initialIntent]);
   const edit = (key: keyof typeof INITIAL, value: string | boolean) => {
     if (draftBusy) return;
     if (key === 'market') {
@@ -106,11 +117,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       applyAutoAfterRefresh.current = change.mode === 'auto' && !!value; setAutoApplying(applyAutoAfterRefresh.current);
       setRangeShortcut(null); setRangeNote(change.note); setForm(change.form); return;
     }
-    applyAutoAfterRefresh.current = false;
-    setAutoApplying(false);
     priceRefresh.current?.cancelShortcut();
     invalidate();
     if (['lower', 'upper', 'stop'].includes(key)) {
+      applyAutoAfterRefresh.current = false; setAutoApplying(false);
       setRangeSource('manual'); manual.current = { lower: form.lower, upper: form.upper, stop: form.stop, [key]: value } as typeof manual.current;
     }
     if (['lower', 'upper'].includes(key)) { rangePercent.current = null; pendingPercent.current = null; setRangeNote(''); }
@@ -240,15 +250,17 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         if (facts.range.state === 'available' && ![facts.range.lowerPrice, facts.range.upperPrice, facts.range.longStop, facts.range.shortStop]
           .every(v => typeof v === 'string' && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v) && Number(v) > 0 && Number.isFinite(Number(v)))) throw Error('Invalid suggested prices');
         setRangeFacts(facts); setRangeExpiry(startedAt + facts.validForMs); setNow(Date.now());
-        if (applyAutoAfterRefresh.current && Date.now() < startedAt + facts.validForMs) {
-          applyAutoAfterRefresh.current = false;
-          if (facts.range.state === 'unavailable') setRangeError(facts.range.reason);
+        const apply = applyAutoAfterRefresh.current;
+        applyAutoAfterRefresh.current = false;
+        if (apply) {
+          if (Date.now() >= startedAt + facts.validForMs) setRangeError('Range observation expired; refresh chart');
+          else if (facts.range.state === 'unavailable') setRangeError(facts.range.reason);
           else {
             const r = facts.range; invalidate(); setRangeSource('auto'); setTimeRangeApplied(true); setRangeShortcut(null); setRangeNote('');
             setForm(previous => ({ ...previous, lower: r.lowerPrice, upper: r.upperPrice, stop: previous.side === 'long' ? r.longStop : r.shortStop }));
           }
         }
-      }).catch(e => { if (request.current()) setRangeError(e.message); })
+      }).catch(e => { if (request.current()) { applyAutoAfterRefresh.current = false; setRangeError(e.message); } })
       .finally(() => { if (request.current()) { setRangeBusy(false); setAutoApplying(false); } });
     return () => generation.current.range.invalidate();
   }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, rangeRefresh, plannerEnabled, defaultMarketPending]);
