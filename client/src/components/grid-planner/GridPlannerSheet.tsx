@@ -20,7 +20,8 @@ import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
 import { GridDirectionSignals } from './GridDirectionSignals';
 import { PlannerPriceRefresh, watchPlannerPrice, PRICE_BUSY_MESSAGE } from '@/lib/planner-price-refresh';
 
-import { GRID_SETUP_INITIAL as INITIAL, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange } from '@/lib/grid-setup-view';
+import { GRID_SETUP_INITIAL as INITIAL, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange,
+  gridStoredMarket, gridRememberMarket, gridAvailableMarket } from '@/lib/grid-setup-view';
 import { gridHistoryWindow } from '../../../../shared/grid-lookback';
 import { gridDraftRevision, gridWidth, type GridDraftPreview } from '@/lib/grid-draft-view';
 import { GridDraftActions, type GridDraftContent } from '../grid-bot/GridDraftActions';
@@ -54,7 +55,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   liveEnabled = false, initialIntent, onSaved = () => {} }: { open: boolean; onOpenChange: (open: boolean) => void;
     identity: string; plannerEnabled?: boolean; createEnabled?: boolean; liveEnabled?: boolean; initialIntent?: GridIntent;
     onSaved?: (bot: Record<string, unknown>) => void }) {
-  const [form, setForm] = useState(() => gridSetupForm(initialIntent)), [markets, setMarkets] = useState<PlannerMarket[]>([]);
+  const [form, setForm] = useState(() => gridSetupForm(initialIntent, gridStoredMarket(identity))), [markets, setMarkets] = useState<PlannerMarket[]>([]);
+  const [defaultMarketPending, setDefaultMarketPending] = useState(!initialIntent);
   const [preview, setPreview] = useState<PlannerPreview | null>(null), [chart, setChart] = useState<PlannerChart | null>(null);
   const [error, setError] = useState(''), [marketError, setMarketError] = useState(''), [chartError, setChartError] = useState('');
   const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [now, setNow] = useState(Date.now());
@@ -92,6 +94,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const edit = (key: keyof typeof INITIAL, value: string | boolean) => {
     if (draftBusy) return;
     if (key === 'market') {
+      setDefaultMarketPending(false);
       const change = gridMarketChange(form, String(value), rangeSource, rangePercent.current);
       priceRefresh.current?.dispose();
       Object.values(generation.current).forEach(g => g.invalidate());
@@ -120,6 +123,16 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       ...(key === 'side' && rangeSource === 'auto' && rangeFacts?.range.state === 'available'
         ? { stop: value === 'long' ? rangeFacts.range.longStop : rangeFacts.range.shortStop } : {}) }));
   };
+  useEffect(() => {
+    if (open) gridRememberMarket(identity, form.market);
+  }, [open, identity, form.market]);
+  useEffect(() => {
+    if (!open || !defaultMarketPending || !markets.length) return;
+    const market = gridAvailableMarket(form.market, markets);
+    setDefaultMarketPending(false);
+    // Use the existing ticker-change handler so any edits made while the list loaded are reset normally.
+    if (market !== form.market) edit('market', market);
+  }, [open, identity, defaultMarketPending, markets, form.market]);
   const refreshObservations = () => {
     if (draftBusy) return;
     setRangeFacts(null);
@@ -141,7 +154,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   useEffect(() => {
     if (!open) return;
     const controller = new PlannerPriceRefresh(form.market,
-      signal => readPlanner(form.market ? `markets?${new URLSearchParams({ market: form.market })}` : 'markets', signal, plannerEnabled),
+      // Discover the complete list first: a delisted remembered market would make a targeted read return 404.
+      signal => readPlanner(!defaultMarketPending && form.market ? `markets?${new URLSearchParams({ market: form.market })}` : 'markets', signal, plannerEnabled),
       observation => {
         setMarketClock(observation); setMarkets(observation.markets); setNow(Date.now());
         const pending = pendingPercent.current, market = observation.markets.find(m => m.market === form.market);
@@ -157,7 +171,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     priceRefresh.current = controller;
     const stop = watchPlannerPrice(controller);
     return () => { stop(); if (priceRefresh.current === controller) priceRefresh.current = null; };
-  }, [open, identity, form.market, refresh, plannerEnabled]);
+  }, [open, identity, form.market, refresh, plannerEnabled, defaultMarketPending]);
   useEffect(() => { setMarkets([]); setMarketError(''); setNow(Date.now()); }, [open, identity]);
   useEffect(() => {
     if (!open || !form.market) return;

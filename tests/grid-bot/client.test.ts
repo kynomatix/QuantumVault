@@ -3,7 +3,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { GridRegimeHint } from '../../client/src/components/grid-planner/GridRegimeHint';
-import { gridSetupAccess, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange } from '../../client/src/lib/grid-setup-view';
+import { gridSetupAccess, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange,
+  gridStoredMarket, gridRememberMarket, gridAvailableMarket } from '../../client/src/lib/grid-setup-view';
 import { gridHistoryWindow, gridHistoryRequest } from '../../shared/grid-lookback';
 import { GridDraftCard } from '../../client/src/components/grid-bot/GridDraftCard';
 import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraftActions';
@@ -80,6 +81,69 @@ describe('Grid screenshot panel polish', () => {
     expect(stale).not.toContain('123'); expect(stale).toContain('out of date');
   });
 });
+describe('Grid setup default market', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const markets = [{ market: 'ETH-PERP' }, { market: 'BTC-PERP' }];
+  const browserStorage = () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: vi.fn((key: string) => values.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => { values.set(key, value); }) };
+    vi.stubGlobal('localStorage', storage);
+    return storage;
+  };
+  it('starts with Bitcoin when nothing is remembered, ready for chart, price and signals reads', () => {
+    browserStorage();
+    const form = gridSetupForm(undefined, gridStoredMarket('EXAMPLE-WALLET-A'));
+    expect(form.market).toBe('BTC-PERP');
+    expect(gridAvailableMarket(form.market, markets)).toBe('BTC-PERP');
+    expect(form).toMatchObject({ lower: '', upper: '', stop: '', investment: '', rangeWindow: 'week' });
+  });
+  it('remembers market changes for the next popup and keeps wallet preferences separate', () => {
+    const storage = browserStorage();
+    gridRememberMarket('EXAMPLE-WALLET-A', 'ETH-PERP');
+    gridRememberMarket('EXAMPLE-WALLET-B', 'SOL-PERP');
+    expect(gridSetupForm(undefined, gridStoredMarket('EXAMPLE-WALLET-A')).market).toBe('ETH-PERP');
+    expect(gridSetupForm(undefined, gridStoredMarket('EXAMPLE-WALLET-B')).market).toBe('SOL-PERP');
+    expect(gridStoredMarket('EXAMPLE-WALLET-C')).toBe('BTC-PERP');
+    expect(storage.setItem.mock.calls[0][0]).not.toBe(storage.setItem.mock.calls[1][0]);
+    gridRememberMarket('EXAMPLE-WALLET-A', '');
+    expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('BTC-PERP');
+    expect(gridStoredMarket('EXAMPLE-WALLET-B')).toBe('SOL-PERP');
+  });
+  it('uses the first live market when the remembered market or Bitcoin has disappeared', () => {
+    browserStorage();
+    gridRememberMarket('EXAMPLE-WALLET-A', 'OLD-PERP');
+    const next = gridAvailableMarket(gridStoredMarket('EXAMPLE-WALLET-A'), markets);
+    expect(next).toBe('ETH-PERP');
+    gridRememberMarket('EXAMPLE-WALLET-A', next);
+    expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('ETH-PERP');
+    expect(gridAvailableMarket('BTC-PERP', [{ market: 'SOL-PERP' }, { market: 'ETH-PERP' }])).toBe('SOL-PERP');
+    expect(gridAvailableMarket('BTC-PERP', [])).toBe('');
+  });
+  it('keeps Adjust Range intent authoritative even when its market is no longer listed', () => {
+    browserStorage(); gridRememberMarket('EXAMPLE-WALLET-A', 'BTC-PERP');
+    const form = { ...gridSetupForm(), market: 'OLD-PERP', side: 'short', lower: '90', upper: '110', stop: '115',
+      intervals: '17', investment: '234.56', leverage: '3', seed: false, entryScale: 'ascending', profitScale: 'descending' };
+    const intent = gridSetupIntent(form, form.stop, 'manual');
+    expect(gridSetupForm(intent, gridStoredMarket('EXAMPLE-WALLET-A'))).toEqual(form);
+  });
+  it('handles unavailable storage and rejected storage reads and writes', () => {
+    vi.stubGlobal('localStorage', undefined);
+    expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('BTC-PERP');
+    expect(() => gridRememberMarket('EXAMPLE-WALLET-A', 'ETH-PERP')).not.toThrow();
+    vi.stubGlobal('localStorage', { getItem: () => { throw Error('Storage blocked'); },
+      setItem: () => { throw Error('Storage full'); } });
+    expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('BTC-PERP');
+    expect(() => gridRememberMarket('EXAMPLE-WALLET-A', 'ETH-PERP')).not.toThrow();
+  });
+  it('handles browsers that reject access to the localStorage property itself', () => {
+    vi.stubGlobal('localStorage', undefined);
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, get: () => { throw Error('Storage denied'); } });
+    expect(gridStoredMarket('EXAMPLE-WALLET-A')).toBe('BTC-PERP');
+    expect(() => gridRememberMarket('EXAMPLE-WALLET-A', 'ETH-PERP')).not.toThrow();
+  });
+});
+
 describe('Market range ownership and time windows', () => {
   it.each([['manual', null, 'manual'], ['manual', 10, 'percent'], ['auto', null, 'auto']] as const)
     ('clears every old-market price before resolving a %s range', (source, percent, mode) => {
