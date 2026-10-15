@@ -115,7 +115,9 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
     },send:r=>withAgent(account.wallet,account.masterAccount,async agent=>{
       signal.throwIfAborted();const f=r.authority.facts as LaunchFacts;
       if(agent.umkVersion!==f.agentGeneration.umkVersion)throw Error('Grid signing generation changed');
-      return custody.withSecret(account,umk,secret=>sender.send(r,secret,['create','fund'].includes(r.kind)?agent.signingKey:undefined,account.leaseToken));
+      // Share the agent's bytes so cleanup also wipes the sender's view.
+      const masterSecret=['create','fund'].includes(r.kind)?Buffer.from(agent.signingKey.buffer,agent.signingKey.byteOffset,agent.signingKey.byteLength):undefined;
+      return custody.withSecret(account,umk,secret=>sender.send(r,secret,masterSecret,account.leaseToken));
     }),reconcile:op=>recover(claim,op,signal)});
   }
   async function beforeStep(account:GridAccount,kind:ExactGridRequest['kind'],signal:AbortSignal){const claim=claimFor(account);

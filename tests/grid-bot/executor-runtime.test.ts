@@ -31,7 +31,7 @@ async function fixture(){
   const facts=await source.authority.observe(account.wallet,source.policy,account,umk());
   const bot={...retained.bot,status:'canary',created_at:new Date(clock-10000)},levels=retained.levels.map(l=>({...l,id:'EXAMPLE_LEVEL_'+l.ordinal,
     size:l.size,exact_size:l.size,placement_attempt:0,status:'pending',venue_order_id:null as string|null}));
-  const operations:ReconciliationOperation[]=[],journal:string[]=[],keys:{cleanup:ReturnType<typeof vi.fn>}[]=[],agents:{cleanup:ReturnType<typeof vi.fn>;current:ReturnType<typeof vi.fn>;signingKey:Buffer}[]=[];
+  const operations:ReconciliationOperation[]=[],journal:string[]=[],keys:{cleanup:ReturnType<typeof vi.fn>}[]=[],agents:{cleanup:ReturnType<typeof vi.fn>;current:ReturnType<typeof vi.fn>;signingKey:Uint8Array}[]=[];
   const observation:GridObservation={account:account.account,symbol:'BTC',observedAt:clock,orders:[],trades:[],position:{direction:'long',size:'0'},inventoryComplete:true,
     history:{from:clock-10000,through:clock,publicationLagMs:0,inclusive:true,source:'EXAMPLE_HISTORY'},mark:{price:'100',observedAt:clock}};
   const risk:GridResumeRisk={account:account.account,symbol:'BTC',positionSize:'0',liquidationPrice:null,observedAt:clock,source:'EXAMPLE_RISK'};
@@ -66,8 +66,9 @@ async function fixture(){
   hooks.observe.mockImplementation(async(_wallet:string,_policy:unknown,a:typeof account|null)=>source.authority.observe(account.wallet,source.policy,a,umk()));
   hooks.recover.mockResolvedValue(account);hooks.reserve.mockResolvedValue(account);
   hooks.durable.mockImplementation(async()=>{const key={umk:umk(),cleanup:vi.fn()};keys.push(key);return key;});
-  hooks.unlock.mockImplementation(async()=>{let calls=0;const agent={masterAccount:account.masterAccount,umkVersion:state.agentVersion,signingKey:Buffer.alloc(64,7),
-    current:vi.fn(async()=>++calls===1?state.agentCurrent:state.afterAgent),cleanup:vi.fn()};agents.push(agent);return agent;});
+  hooks.unlock.mockImplementation(async()=>{let calls=0;const signingKey=new Uint8Array(80).fill(7).subarray(8,72);
+    const agent={masterAccount:account.masterAccount,umkVersion:state.agentVersion,signingKey,
+      current:vi.fn(async()=>++calls===1?state.agentCurrent:state.afterAgent),cleanup:vi.fn(()=>{signingKey.fill(0);})};agents.push(agent);return agent;});
   const subSecret=Buffer.alloc(64,8);
   hooks.secret.mockImplementation(async(_a:unknown,_umk:Buffer,work:(material:Buffer)=>Promise<unknown>)=>work(subSecret));
   const order=(r:ExactGridRequest,status:GridVenueOrder['status']='open'):GridVenueOrder=>({orderId:'EXAMPLE_ORDER',clientOrderId:String(r.data.client_order_id),symbol:'BTC',
@@ -151,7 +152,7 @@ describe('C6 runtime signing and provisioning',()=>{
     expect(hooks.send.mock.calls.map(call=>(call[0] as ExactGridRequest).kind)).toEqual(['create','fund','leverage','limit']);
     for(const [r,sub,master,lease] of hooks.send.mock.calls as [ExactGridRequest,Buffer,Uint8Array|undefined,string][]){
       expect(sub).toBe(f.subSecret);expect(lease).toBe(f.account.leaseToken);
-      if(['create','fund'].includes(r.kind))expect(master).toBeInstanceOf(Uint8Array);else expect(master).toBeUndefined();
+      if(['create','fund'].includes(r.kind))expect(Buffer.isBuffer(master)).toBe(true);else expect(master).toBeUndefined();
     }
     expect(f.agents.every(a=>a.current.mock.calls.length===2&&a.cleanup.mock.calls.length===1)).toBe(true);
     expect(f.keys.every(k=>k.cleanup.mock.calls.length===1)).toBe(true);
@@ -163,6 +164,25 @@ describe('C6 runtime signing and provisioning',()=>{
     await f.provision();const entry=hooks.send.mock.calls.map(call=>call[0] as ExactGridRequest).find(r=>r.kind==='limit');
     expect(entry?.authority.levelAttempt).toBe(1);expect(f.bot.status).toBe('canary');expect(f.ledger.markCanary).toHaveBeenCalledOnce();
   });
+  it.each([['create','success'],['create','failure'],['fund','success'],['fund','failure']] as const)(
+    'zeroes the shared %s signing bytes after send %s',async(kind,outcome)=>{
+      const f=await fixture();f.state.created=false;const originalSend=hooks.send.getMockImplementation()!;
+      const sent:{key:Buffer|undefined;agent:Fixture['agents'][number];live:boolean;cleanups:number}[]=[];
+      hooks.send.mockImplementation(async(r:ExactGridRequest,_sub:Buffer,master:Buffer|undefined):Promise<GridSendResult>=>{
+        if(r.kind===kind){const agent=f.agents[f.agents.length-1];
+          sent.push({key:master,agent,live:master?.every((byte)=>byte===7)??false,cleanups:agent.cleanup.mock.calls.length});
+          if(outcome==='failure')throw Error('EXAMPLE transport lost');
+        }
+        return originalSend(r);
+      });
+      await f.provision();expect(sent).toHaveLength(1);const {key,agent,live,cleanups}=sent[0];
+      expect(Buffer.isBuffer(key)).toBe(true);expect(agent.signingKey.byteOffset).toBe(8);
+      expect(key!.buffer).toBe(agent.signingKey.buffer);expect(key!.byteOffset).toBe(agent.signingKey.byteOffset);
+      expect(key!.byteLength).toBe(agent.signingKey.byteLength);expect(live).toBe(true);expect(cleanups).toBe(0);
+      expect(agent.cleanup).toHaveBeenCalledOnce();expect(agent.signingKey.every((byte)=>byte===0)).toBe(true);
+      expect(key!.every((byte)=>byte===0)).toBe(true);
+      expect(f.operations.find(op=>op.exact_request.kind===kind)?.state).toBe(outcome==='success'?'confirmed':'unconfirmed');
+    });
   it.each(['version','before','after','master','unlock throws','send throws'] as const)('cleans signing scope on %s generation failure',async defect=>{
     const f=await fixture();if(defect==='version')f.state.agentVersion=2;if(defect==='before')f.state.agentCurrent=false;if(defect==='after')f.state.afterAgent=false;
     const wrongMasterCleanup=vi.fn();
