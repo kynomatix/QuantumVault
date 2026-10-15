@@ -181,7 +181,42 @@ describe('Grid setup automatic opening range', () => {
     else expect(chart.props.lines[0]).toHaveProperty('quantity');
     edit('investment', ''); await vi.advanceTimersByTimeAsync(250); await settle();
     expect(find(node => node.type === GridPlannerChart).props.lines).toHaveLength(5);
+    const previewRequests = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/preview?'));
+    const beforeExpiry = previewRequests().length;
+    // The scheduler is mocked: no fresh preview can renew these lines. Defer rendering across
+    // both the earlier market/range deadline and the later geometry deadline.
     await vi.advanceTimersByTimeAsync(60_001); await settle();
+    expect(previewRequests()).toHaveLength(beforeExpiry);
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+  });
+  it.each([false, true])('renews price-only levels only with a fresh preview with createEnabled=%s', async createEnabled => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    await open({ createEnabled }); await resolve(requests[0]);
+    edit('intervals', '4'); await vi.advanceTimersByTimeAsync(250); await settle();
+    const initialLines = find(node => node.type === GridPlannerChart).props.lines;
+    expect(initialLines).toHaveLength(5);
+    const initialDeadline = Date.now() + 60_000;
+    await vi.advanceTimersByTimeAsync(20_000); await settle();
+
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    let finish!: () => void, renewedPreview!: ReturnType<typeof previewGrid>;
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      const response = await original(url, init);
+      if (!String(url).includes('/preview?')) return response;
+      renewedPreview = await response.json();
+      return new Promise<Response>(resolve => { finish = () => resolve({ ...response, json: async () => renewedPreview } as Response); });
+    });
+    await hooks.controllers.at(-1)!.refresh(); await settle();
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(isPlannerPreview(renewedPreview)).toBe(true);
+    expect(renewedPreview.retrievedAt).toBeGreaterThan(initialDeadline - 60_000);
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+    finish(); await settle();
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual(initialLines);
+
+    await vi.advanceTimersByTimeAsync(initialDeadline - Date.now() + 1); await settle();
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual(initialLines);
+    await vi.advanceTimersByTimeAsync(renewedPreview.retrievedAt + renewedPreview.validForMs - Date.now() + 1); await settle();
     expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
   });
   it('ignores a superseded geometry response after editing the range', async () => {

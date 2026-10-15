@@ -60,7 +60,9 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [defaultMarketPending, setDefaultMarketPending] = useState(defaultMarketPendingRef.current);
   const [preview, setPreview] = useState<PlannerPreview | null>(null), [chart, setChart] = useState<PlannerChart | null>(null);
   const [error, setError] = useState(''), [marketError, setMarketError] = useState(''), [chartError, setChartError] = useState('');
-  const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [now, setNow] = useState(Date.now());
+  const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [clock, setNow] = useState(Date.now());
+  // Rendering can lag a timer callback past another deadline; never draw using its older clock sample.
+  const now = Math.max(clock, Date.now());
   const [chartRefresh, setChartRefresh] = useState(0);
   const [previewExpiry, setPreviewExpiry] = useState(0), [chartExpiry, setChartExpiry] = useState(0);
   const [marketClock, setMarketClock] = useState({ serverNow: 0, startedAt: 0 });
