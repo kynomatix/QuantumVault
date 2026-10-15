@@ -56,7 +56,7 @@ export class GridMonitorReads {
     }catch{signal.throwIfAborted();}}
     const observedAt=Date.now(),lastId=gridStableHistoryCut(before,[open,positions],symbol);
     // Full bounded replay + an unchanged per-symbol LI cut is the inferred authority.
-    // The 120-second publication allowance requires confirmation in the two-bot $250 canary.
+    // The 120-second publication allowance requires confirmation during canary monitoring.
     const safeThrough=Math.min(through,observedAt-GRID_HISTORY_PUBLICATION_LAG_MS);
     const safe=this.safeWindow?await this.safeWindow({account,from,through,observedAt}):
       lastId!==null&&safeThrough>=from?{from,through:safeThrough,inclusive:true as const,publicationLagMs:GRID_HISTORY_PUBLICATION_LAG_MS,source:'pacifica_full_replay_stable_last_id',lastId,lastIds:{orders:gridLastId(open.last_order_id,symbol)!,positions:gridLastId(positions.last_order_id,symbol)!}}:null;

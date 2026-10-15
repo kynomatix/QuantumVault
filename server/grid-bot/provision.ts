@@ -4,7 +4,7 @@ import type {GridPlan} from './engine-types';
 import {calculateGrid} from './engine';
 import {verifyGridPolicyHmac,type GridPolicy} from './policy-hmac';
 import {validateGridFeeQuote,type GridFeeQuote} from './fee-authority';
-import {gridCanaryBudget,gridFirstPlacementGate,gridRecyclerGate,gridWalletEntryGate} from './runtime-policy';
+import {gridExposureLimit,gridFirstPlacementGate,gridRecyclerGate,gridWalletEntryGate} from './runtime-policy';
 import {projectGridStop,GRID_SEED_MAX_SLIPPAGE_PERCENT} from './stop-clearance';
 import {gridClientOrderId} from './order-identity';
 import {validGridEmptyProof,type GridCustody,type GridAccount,type GridEmptyProof} from './custody';
@@ -28,7 +28,7 @@ export interface LaunchFacts {
   masterWithdrawable:string;sol:string|null;availableSlots:number;subaccountCount:number;observedCredits:string;availableGridCredits:string;reusableAccountAvailable?:boolean;
   transportReady:boolean;inventoryComplete:boolean;recycler:{reuse:unknown;recycle:unknown;deployment:string;expectedDeployment:string;checkedAt:number};
 }
-export type LaunchAdmission={ok:false;reason:string;transient?:boolean}|{ok:true;plan:GridPlan;canaryLimit:string;seedNotional:string;firstEntryOrdinal:number;stop:ReturnType<typeof projectGridStop>};
+export type LaunchAdmission={ok:false;reason:string;transient?:boolean}|{ok:true;plan:GridPlan;exposureLimit:string;seedNotional:string;firstEntryOrdinal:number;stop:ReturnType<typeof projectGridStop>};
 /** Every pre-reservation check is read-only. No custody, funding, enrollment or leverage mutation occurs here. */
 export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buffer,f:LaunchFacts,now:number,alreadyFunded=false):LaunchAdmission{
   const deny=(reason:string):LaunchAdmission=>({ok:false,reason});
@@ -66,14 +66,14 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
     if(!policy.stopLossPrice)return deny('A mandatory stop is required.');
     const stop=projectGridStop({plan,funding:policy.totalInvestment,stop:policy.stopLossPrice,tick:f.tick,maxLeverage:f.maxLeverage,makerRate:maker.toFixed(),takerRate:taker.toFixed(),observedAt:f.observedAt,expiresAt:f.expiresAt},now);
     if(stop.state!=='available')return deny(stop.reason);
-    const canaryLimit=gridCanaryBudget(plan.allocatedNotional);if(!canaryLimit)return deny('Canary capacity is unknown.');
+    const exposureLimit=gridExposureLimit(policy.totalInvestment,policy.leverage);if(!exposureLimit)return deny('Configured exposure capacity is unknown.');
     const seedNotional=new Decimal(plan.seedQuantity).mul(stop.projection.seedWorstPrice);
     if(new Decimal(plan.seedQuantity).gt(0)&&(seedNotional.lt(f.minimumQuote)||seedNotional.gt(f.maximumQuote)
       ||new Decimal(stop.projection.seedWorstPrice).lt(f.minimumPrice)||new Decimal(stop.projection.seedWorstPrice).gt(f.maximumPrice)))return deny('The unchanged aggregate seed exceeds current market bounds.');
     const entries=plan.lines.filter(l=>l.role==='entry'&&new Decimal(l.quantity).gt(0)).sort((a,b)=>new Decimal(a.price).minus(plan.start).abs().cmp(new Decimal(b.price).minus(plan.start).abs()));
-    const first=entries.find(l=>seedNotional.plus(l.notional).lte(canaryLimit));
-    if(!first)return deny('The unchanged seed and one valid entry exceed the pilot exposure budget (at most $250 per bot); reduce the footprint or disable the seed.');
-    return {ok:true,plan,canaryLimit,seedNotional:seedNotional.toFixed(),firstEntryOrdinal:first.ordinal+1,stop};
+    const first=entries.find(l=>seedNotional.plus(l.notional).lte(exposureLimit));
+    if(!first)return deny('The unchanged seed and one valid entry exceed the configured investment × leverage; reduce the footprint or disable the seed.');
+    return {ok:true,plan,exposureLimit,seedNotional:seedNotional.toFixed(),firstEntryOrdinal:first.ordinal+1,stop};
   }catch{return deny('A required launch input is unknown or invalid.');}
 }
 
@@ -121,7 +121,7 @@ export class GridProvision {
       if(!admission.ok)return {state:admission.transient?'pending':'denied',reason:admission.reason,account:retainedAccount};
       if(!this.deps.prepareFirstEntry)return {state:'pending',reason:'First resting entry preparation authority is unavailable.',account:retainedAccount};
       const account=input.account??await this.deps.custody.reserve({botId:input.policy.id,wallet:input.wallet,masterAccount:facts.masterAccount,
-        policyHmac:input.policyHmac,canaryLimit:admission.canaryLimit,share:this.deps.quotaShare},security.umk);
+        policyHmac:input.policyHmac,share:this.deps.quotaShare},security.umk);
       retainedAccount=account;
       if(account.wallet!==input.wallet||account.botId!==input.policy.id||account.masterAccount!==facts.masterAccount)throw Error('Grid provision identity conflict');
       if(funding?.state!=='confirmed'){

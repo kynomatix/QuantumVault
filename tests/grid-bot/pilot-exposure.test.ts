@@ -52,9 +52,9 @@ describe('C2 exact pilot notional and durable uncertainty',()=>{
     const op=operation(),o=observation(op);if(mode==='missing')o.mark=null;else o.mark!.observedAt=mode==='stale'?now-5001:now+1;
     expect(evaluate([op],[fill()],o)).toEqual({exposureUsd:null,reason:'pilot_exposure_mark_unavailable'});
   });
-  it('keeps decimal boundary precision instead of accepting a rounded $250 exposure',()=>{
-    const op=operation('EXAMPLE_PRECISE','seed','1','250.000000000000000001','prepared');op.canary_increment='250.000000000000000001';
-    expect(evaluate([op],[],null,false).exposureUsd).toBe('250.000000000000000001');
+  it('keeps decimal boundary precision above a configured exposure ceiling',()=>{
+    const op=operation('EXAMPLE_PRECISE','seed','1','1000.000000000000000001','prepared');op.canary_increment='1000.000000000000000001';
+    expect(evaluate([op],[],null,false).exposureUsd).toBe('1000.000000000000000001');
   });
   it('releases the unused reservation only after a complete terminal cancellation',()=>{
     const op=operation(),o=observation(op,'0','0');o.orders[0].status='cancelled';o.orders[0].cancelledAmount='1';

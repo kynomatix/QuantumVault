@@ -584,8 +584,14 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         {details ?? feesPanel()}
       </div>
       <DialogFooter className="pt-2 border-t border-border/40 gap-2 sm:gap-0 sm:flex-wrap sm:gap-y-2">
+        {!createEnabled && <p id="grid-create-launch-hint" className="text-xs text-muted-foreground sm:order-last sm:basis-full sm:text-right">
+          Opens when Grid trading launches
+        </p>}
         <Button variant="outline" disabled={draftBusy} onClick={() => handleOpenChange(false)}>Cancel</Button>
         {actions}
+        {!createEnabled && <Button type="button" className="bg-gradient-to-r from-primary to-accent" disabled aria-describedby="grid-create-launch-hint">
+          Create bot
+        </Button>}
       </DialogFooter>
       {depositDialog}
     </DialogContent>;

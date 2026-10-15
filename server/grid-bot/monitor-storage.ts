@@ -148,7 +148,7 @@ export class GridMonitorStorage {
     const reconciliationComplete=result.entriesAllowed;
     if(exposure.exposureUsd===null||exposure.limitUsd===null||new D(exposure.exposureUsd).gt(exposure.limitUsd)){
       result.reasons.push(exposure.reason??'pilot_exposure_limit_exceeded');result.entriesAllowed=false;
-    }else if(result.entriesAllowed)await c.query('UPDATE grid_launch_accounts SET canary_committed=$2 WHERE bot_id=$1',[claim.id,exposure.exposureUsd]);
+    }else if(result.entriesAllowed)await c.query('UPDATE grid_launch_accounts SET canary_limit=$2,canary_committed=$3 WHERE bot_id=$1',[claim.id,exposure.limitUsd,exposure.exposureUsd]);
     const safe=reconciliationComplete?observation.history!.through:null;
     const economicUnknown=result.reasons.some(r=>['unowned_trade','history_safe_through_unavailable','order_trade_mismatch','vanished_order_unresolved','position_mismatch_or_unavailable'].includes(r));
     await c.query(`INSERT INTO grid_monitor_state(bot_id,boot_id,generation,safe_through,observation,pnl,blocked_reasons,reconciled_at)

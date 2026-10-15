@@ -20,8 +20,8 @@ export const GRID_RUNTIME_POLICY = Object.freeze({
     spacingFractionMultiplier: '0.5', sideFlipOrInvalidRangeAborts: true, equalityAllowed: true, geometryImmutable: true }), // 16–17
   fees: Object.freeze({ liveFallback: false, retainedQuoteRequired: true }), // 18
   recycler: Object.freeze({ reuseOnCreate: true, recycleOnDelete: true, justInTimeEveryCreate: true, deploymentBound: true }), // 19–20
-  pilot: Object.freeze({ maximumExposureUsd: '250', maximumUnreleasedBots: 2, promotionRaisesLimit: false }), // C2, owner ruling 2026-10-15
-  canary: Object.freeze({ targetFraction: '0.25', maximumUsd: '250', unchangedQuantizedSubset: true,
+  exposure: Object.freeze({ ceiling: 'configured_investment_times_leverage' }), // Owner ruling 2026-10-15
+  canary: Object.freeze({ unchangedQuantizedSubset: true,
     includeSeedOpenRiskAndCommitments: true, reduceOnlyExitDoubleCount: false, shrinkOrders: false,
     durationMs: 30 * 60_000, startsOnVenueConfirmation: true, fullReconcileAtOrAfterBoundary: true, cleanTicks: 2,
     qualifyingWindowRequires: Object.freeze(['zero_unresolved', 'zero_429', 'zero_qualifying_breaker_failures',
@@ -42,23 +42,14 @@ export const GRID_RUNTIME_POLICY = Object.freeze({
 });
 export const GRID_RUNTIME_POLICY_DIGEST = createHash('sha256').update(JSON.stringify(GRID_RUNTIME_POLICY)).digest('hex');
 const decimal = (x: string) => /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(x) && x.length <= 80 ? new D(x) : null;
-/** Promotion never raises either the retained reduced-notional allocation or the pilot ceiling. */
-export function gridPilotLimit(retainedLimit: string): string | null {
-  const d = decimal(retainedLimit);
-  return d && d.gt(0) ? D.min(d, GRID_RUNTIME_POLICY.pilot.maximumExposureUsd).toFixed() : null;
+/** The confirmed bot configuration owns its notional ceiling, at every lifecycle stage. */
+export function gridExposureLimit(investment: string, leverage: number): string | null {
+  const d = decimal(investment);
+  return d && d.gt(0) && Number.isSafeInteger(leverage) && leverage > 0 ? d.mul(leverage).toFixed() : null;
 }
 export function gridWalletEntryGate(sol: string | null) {
   const d = sol === null ? null : decimal(sol);
   return { entryAllowed: !!d && d.gte('.05'), warning: !!d && d.lt('.10'), reason: !d ? 'wallet_balance_unknown' : d.lt('.05') ? 'wallet_entry_reserve' : null };
-}
-export function gridCanaryBudget(targetRestingUsd: string): string | null {
-  const d = decimal(targetRestingUsd); return d && d.gt(0) ? D.min(d.mul('.25'), 250).toFixed() : null;
-}
-export function gridCanaryAdmission(target: string, seedOpenAndCommitments: string, unchangedNewOrderNotionals: string[], minimumFootprint: string): boolean {
-  const budget = gridCanaryBudget(target), used = decimal(seedOpenAndCommitments), min = decimal(minimumFootprint);
-  const orders = unchangedNewOrderNotionals.map(decimal);
-  return budget !== null && !!used && !!min && min.gt(0) && min.lte(budget) && orders.every(o => !!o && o.gt(0))
-    && orders.reduce<Decimal>((sum, o) => sum.plus(o!), used).lte(budget);
 }
 export const GRID_RECYCLER_MAX_AGE_MS = 5000;
 export function gridRecyclerGate(input: { reuse: unknown; recycle: unknown; deployment: string; expectedDeployment: string; checkedAt: number }, now: number): boolean {

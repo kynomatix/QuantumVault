@@ -10,12 +10,13 @@ export interface GridPilotOperation {
 /** These deny new risk, never the economic replay or its reduce-only exit authority. */
 export const isGridPilotExposureBlockReason=(reason:string)=>['pilot_exposure_limit_exceeded','pilot_exposure_mark_unavailable','pilot_exposure_unknown','pilot_exposure_reservation_unavailable'].includes(reason);
 const quantity=(s:unknown)=>{
-  if(typeof s!=='string'||s.length>80||!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(s))throw Error('Unknown pilot exposure');
+  if(typeof s!=='string'||s.length>80||!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(s))throw Error('Unknown Grid exposure');
   return new D(s);
 };
 /** Not collateral: no leverage division. Unknown sends retain their FULL signed reservation.
  * Only a complete reconciled inventory can release filled/cancelled/closed risk. Reduce-only
- * exits are excluded, since the position they protect is already counted. */
+ * exits are excluded, since the position they protect is already counted. Storage compares
+ * this exposure with configured investment × leverage; the canary clock never changes it. */
 export function gridPilotExposure(input:{operations:GridPilotOperation[];fills:GridEconomicFill[];
   observation:GridObservation|null;authoritative:boolean;retainedUsd:string;now:number}):{exposureUsd:string|null;reason:string|null}{
   try{
