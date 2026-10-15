@@ -429,7 +429,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     const close=(await pool.query("SELECT * FROM grid_operations WHERE bot_id=$1 AND type='close_position'",[f.bot.id])).rows[0];
     await launch.settle(close,{state:'confirmed',reason:null,releaseSlot:true},next.leaseToken);
     deps.observe=async()=>({...observation(),position:{direction:'long',size:'0'}});
-    expect(await new GridLifecycleService(deps).tick(next,new AbortController().signal)).toBe('transfer_recovery_requires_C4');
+    expect(await new GridLifecycleService(deps).tick(next,new AbortController().signal)).toBe('transfer_outcome_unknown');
     expect(posts).toBe(1);expect(settlements).toBe(0);expect(recycles).toBe(0);expect((await launch.read(f.bot.id,'EXAMPLE_UNKNOWN_TRANSFER'))!.state).toBe('submitted');
   },15000);
   it('claims a released generation once across workers',async()=>{const f=await landed();await storage.release(f.claim);await pool.query('UPDATE grid_bots SET last_tick_at=NULL');const result=await Promise.all([storage.claim(),storage.claim()]);expect(result.filter(Boolean)).toHaveLength(1);});

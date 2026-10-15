@@ -14,7 +14,11 @@ function fixture(seed=false,reused=false){
   const f=launchAuthorityFixture(seed),account={...f.account,reused},operations=new Map<string,DurableGridOperation>(),sent:ExactGridRequest[]=[],steps:string[]=[];
   const execution=new GridExecution({now:()=>clock,storage:{read:async(_bot,key)=>operations.get(key)??null,
     prepare:async(key,r)=>{const op={id:key,state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null,submitted_at:null};operations.set(key,op);return op;},
-    submit:async op=>{op.state='submitted';op.submitted_at=new Date(clock);return true;},settle:async(op,outcome)=>{op.state=outcome.state;},
+    submit:async op=>{op.state='submitted';op.submitted_at=new Date(clock);return true;},settle:async(op,outcome)=>{
+      // Recovery can settle a copy; persist against the durable identity like the real ledger.
+      const retained=operations.get(op.id);if(!retained)throw Error('EXAMPLE settlement record missing');
+      retained.state=outcome.state;retained.failure_classification=outcome.reason;
+      if(outcome.transferProof)retained.transfer_recovery=outcome.transferProof;},
     expirePrepared:async op=>{if(op.state!=='prepared'||op.submitted_at!==null||op.exact_request.timestamp+op.exact_request.expiryMs>clock)return false;
       op.state='failed';op.failure_classification='policy';return true;}},
     preflight:async()=>true,send:async r=>{sent.push(r);return {rateLimited:false,...(r.kind==='fund'?{terminalTransferDigest:requestDigest(r)}:{})};},
@@ -39,13 +43,14 @@ describe('C6 provisioning with the real C5 raw-read authority',()=>{
     const base=`grid:${f.policy.id}:launch:fund`,op=f.operations.get(base),created=f.operations.get(`grid:${f.policy.id}:launch:create`);
     if(!op||!created)throw Error('EXAMPLE launch records missing');
     const oldTransferKey=op.exact_request.data.idempotency_key;
+    expect(created.state).toBe('confirmed');expect(op.exact_request.expiryMs).toBe(5000);
     created.exact_request.timestamp=clock-20000;created.exact_request_digest=requestDigest(created.exact_request);
     op.exact_request.timestamp=clock-10000;op.exact_request_digest=requestDigest(op.exact_request);op.state='unconfirmed';op.failure_classification='unknown';
     for(const [key,row] of f.operations)if(row!==op&&row!==created)f.operations.delete(key);
     const result=reconcileGridTransfer(op.exact_request,{account:f.account.account,masterAccount:f.account.masterAccount,complete:true,
       startedAt:clock-1000,observedAt:clock-1000,balanceAt:clock-1000,balance:'0',ownedAccounts:[f.account.account],subaccountHistory:[],mainHistory:[]},
       {reused:false,operations:[created,op]},clock);
-    if(result.state!=='not_landed')throw Error('EXAMPLE expiry proof failed');
+    expect(result.state).toBe('not_landed');if(result.state!=='not_landed')throw Error('EXAMPLE expiry proof failed');
     const terminal=gridReconciliationOutcome(result);Object.assign(op,{state:terminal.state,failure_classification:terminal.reason,transfer_recovery:terminal.transferProof});
     f.sent.length=0;
     const restart=()=>new GridProvision(f.deps).start({wallet:f.account.wallet,policy:f.policy,policyHmac:f.policyHash,account:f.account});

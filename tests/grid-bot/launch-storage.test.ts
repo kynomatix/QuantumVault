@@ -187,8 +187,11 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     await expect(storage.prepare('EXAMPLE_DENIED',v.request,v.claim,account.leaseToken)).rejects.toThrow('ownership');
     expect((await pool.query('SELECT pause_reason FROM grid_bots WHERE id=$1',[account.botId])).rows[0].pause_reason).toBe('circuit_breaker');
   });
-  it('rejects unbound failure evidence and excludes unknown sends and expected ALO from counting or resetting',async()=>{
-    const {account}=await reserve(),v=input(account),op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);
+  it('rejects unbound failure evidence and excludes unknown sends and expected rejections from counting or resetting',async()=>{
+    const {account}=await reserve(),v=input(account);
+    // Isolate breaker accounting from the C4 transfer absence-proof requirement.
+    v.request={...v.request,kind:'leverage',path:'/account/leverage',operationType:'update_leverage',data:{symbol:'BTC',leverage:1}};
+    const op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);
     await storage.submit(op,account.leaseToken);await pool.query('UPDATE grid_bots SET consecutive_failures=2 WHERE id=$1',[account.botId]);
     await expect(storage.settle(op,{state:'failed',reason:'authentication',releaseSlot:true})).rejects.toThrow('authority');
     await expect(storage.settle(op,{state:'failed',reason:'authentication',releaseSlot:true,terminalFailure:{classification:'authentication',requestDigest:'EXAMPLE'}})).rejects.toThrow('authority');
@@ -199,6 +202,13 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const next=input(account),success=await storage.prepare('EXAMPLE_SUCCESS',next.request,next.claim,account.leaseToken);
     await storage.submit(success,account.leaseToken);await storage.settle(success,{state:'confirmed',reason:null,releaseSlot:true});
     expect((await pool.query('SELECT consecutive_failures FROM grid_bots WHERE id=$1',[account.botId])).rows[0].consecutive_failures).toBe(2);
+  });
+  it('C4 rejects a transfer expected rejection without an absence proof and retains the send',async()=>{
+    const {account}=await reserve(),v=input(account),op=await storage.prepare('EXAMPLE_C4_MISSING_PROOF',v.request,v.claim,account.leaseToken);
+    expect(await storage.submit(op,account.leaseToken)).toBe(true);
+    await expect(storage.settle(op,{state:'failed',reason:'expected_rejection',releaseSlot:true},account.leaseToken)).rejects.toThrow('Grid transfer absence proof unavailable');
+    expect(await storage.read(account.botId,'EXAMPLE_C4_MISSING_PROOF')).toMatchObject({state:'submitted',failure_classification:null,exact_request:v.request,transfer_recovery:null});
+    expect((await pool.query('SELECT settled_at,slot_released FROM grid_execution_claims WHERE operation_id=$1',[op.id])).rows[0]).toEqual({settled_at:null,slot_released:false});
   });
   it('migration repeats without table DDL and enforces exact-request pairs',async()=>{
     const c=await pool.connect();await c.query('BEGIN');await c.query('LOCK TABLE grid_operations IN ACCESS SHARE MODE');

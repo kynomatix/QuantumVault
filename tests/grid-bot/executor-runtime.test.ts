@@ -54,9 +54,10 @@ async function fixture(){
     transaction:vi.fn(async<T>(work:(c:{query:(sql:string)=>Promise<{rows:typeof bot[];rowCount:number}>})=>Promise<T>)=>work({query:async()=>({rows:[bot],rowCount:1})})),
     pilotExposure:vi.fn(async()=>({limitUsd:'250',exposureUsd:'0'})),markCanary:vi.fn(async()=>{bot.status='canary';})};
   const storage={launch:ledger,snapshot:vi.fn(async()=>({bot,levels,operations})),assertLease:vi.fn(async()=>({...bot,db_now:new Date(clock)})),
+    transferUnknown:vi.fn(async()=>{}),
     block:vi.fn(async()=>{}),reconcile:vi.fn(async()=>({entriesAllowed:state.entries,reconciliationComplete:state.complete,reasons:state.entries?[]:['sol_entry_gate']})),
     planningState:vi.fn(async()=>{const result={...planning,entriesAllowed:state.planningEntries,authority:{...planning.authority,monitorGeneration:state.generation}};state.afterPlan?.();return result;}),
-    authorizeProvisioning:vi.fn(async()=>{}),provisioningDenied:vi.fn(async()=>{}),release:vi.fn(async()=>{})};
+    authorizeProvisioning:vi.fn(async()=>{}),provisioningDenied:vi.fn(async()=>{}),release:vi.fn(async()=>{})} satisfies Pick<GridMonitorStorage,'transferUnknown'> & Record<string,unknown>;
   const reads={observe:vi.fn(async()=>observation)};
   const emptyAccount={account:account.account,updated_at:clock,balance:'0',available_to_withdraw:'0',account_equity:'0',available_to_spend:'0',pending_balance:'0',pending_interest:'0',
     spot_collateral:'0',spot_market_value:'0',total_margin_used:'0',positions_count:0,orders_count:0,stop_orders_count:0,spot_balances:[]};
@@ -214,12 +215,14 @@ describe('C6 runtime recovery and rolling',()=>{
     f.observation.orders=[f.order(limit.exact_request,'filled')];
     const create:ExactGridRequest={...limit.exact_request,kind:'create',path:'/account/subaccount/create',operationType:'subaccount_confirm',timestamp:clock-6000,data:{}};
     const expired:ReconciliationOperation={...limit,id:'EXAMPLE_EXPIRED',state:'prepared',submitted_at:null,exact_request:create,exact_request_digest:requestDigest(create)};
-    const fund:ExactGridRequest={...create,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:f.account.account,amount:'100'}};
+    const fund:ExactGridRequest={...create,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:f.account.account,amount:'100',idempotency_key:'EXAMPLE_UNKNOWN_FUND_KEY'}};
     const pending:ReconciliationOperation={...expired,id:'EXAMPLE_FUND',state:'unconfirmed',submitted_at:new Date(clock-6000),exact_request:fund,exact_request_digest:requestDigest(fund)};
     f.operations.splice(0,f.operations.length,expired,limit,pending);f.journal.length=0;f.ledger.settle.mockClear();hooks.send.mockClear();
     hooks.lifecycleTick.mockImplementation(async()=>{f.journal.push('lifecycle');return 'stopped';});await f.tick();
     expect(f.journal).toEqual(['expire:create','settle:limit','lifecycle']);expect(hooks.send).not.toHaveBeenCalled();
     expect(f.ledger.settle).toHaveBeenCalledWith(limit,expect.objectContaining({state:'confirmed',releaseSlot:false}),f.account.leaseToken);
+    expect(f.storage.transferUnknown).toHaveBeenCalledOnce();expect(f.storage.transferUnknown).toHaveBeenCalledWith(f.claim,pending);
+    expect(f.ledger.settle).not.toHaveBeenCalledWith(pending,expect.anything(),f.account.leaseToken);
     expect(pending.state).toBe('unconfirmed');
   });
   it('rejects a corrupt prepared digest before expiry or lifecycle work',async()=>{
