@@ -115,25 +115,29 @@ describe('Grid launch preflight and hard production gates',()=>{
     expect(requests[3].data.client_order_id).toBe(gridClientOrderId({botId:f.policy.id,level:103,attempt:0,leg:'entry'}));
     expect(requests[3].data.client_order_id).not.toBe(requests[1].data.idempotency_key);
   },15000);
-  it('admits unchanged seed-off geometry with a funded stop and valid canary entry',()=>{const f=launchFixture();expect(preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock)).toMatchObject({ok:true});});
+  it('admits unchanged seed-off geometry with a funded stop and valid entry',()=>{const f=launchFixture();expect(preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock)).toMatchObject({ok:true});});
   it.each([false,true])('C2 fits the unchanged minimum entry and optional seed at $25 collateral and 10x (seed=%s)',seed=>{
     const f=launchFixture(seed,'109','25',10);f.facts.bookPrice='109';
     const before=JSON.stringify(f.policy.levels),admission=preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock);
     expect(admission.ok).toBe(true);if(!admission.ok)throw Error(admission.reason);
     const first=f.policy.levels.find(l=>l.ordinal===admission.firstEntryOrdinal)!;
-    expect(new Decimal(admission.seedNotional).plus(new Decimal(first.price).mul(first.size)).lte(admission.canaryLimit)).toBe(true);
-    expect(new Decimal(admission.canaryLimit).lte('250')).toBe(true);expect(new Decimal(admission.canaryLimit).lte(new Decimal(f.plan.allocatedNotional).mul('0.25'))).toBe(true);
+    expect(new Decimal(admission.seedNotional).plus(new Decimal(first.price).mul(first.size)).lte(admission.exposureLimit)).toBe(true);
+    expect(admission.exposureLimit).toBe(new Decimal(f.policy.totalInvestment).mul(f.policy.leverage).toFixed());
     expect(JSON.stringify(f.policy.levels)).toBe(before);
   });
-  it('C2 plainly refuses an oversized unchanged seed plus entry before custody or execution',async()=>{
-    const f=launchFixture(true),reserve=vi.fn(),run=vi.fn();
-    const provision=new GridProvision({now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup:vi.fn()}),observe:async()=>f.facts,custody:{reserve,confirmCreated:vi.fn(),confirmReused:vi.fn()},verifyEmpty:vi.fn(),execution:{run},existing:vi.fn(),markCanary:vi.fn()});
-    const result=await provision.start({wallet:'EXAMPLE',policy:f.policy,policyHmac:f.policyHash});
-    expect(result).toMatchObject({state:'denied'});expect(result.reason).toContain('unchanged seed and one valid entry');expect(result.reason).toContain('$250 per bot');
-    expect(reserve).not.toHaveBeenCalled();expect(run).not.toHaveBeenCalled();
+  it('admits an unchanged seed plus entry above the former reduced canary budget',()=>{
+    const f=launchFixture(true),admission=preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock);
+    expect(admission.ok).toBe(true);if(!admission.ok)throw Error(admission.reason);
+    expect(admission.exposureLimit).toBe('200');
+    expect(new Decimal(admission.seedNotional).gt(new Decimal(f.plan.allocatedNotional).mul('0.25'))).toBe(true);
   });
-  it.each(['policy','fees','price','constraints','quota','recycler','slots','stop','canary','sol','transport','balance','durable security'])('failed %s preflight reserves and sends nothing',async defect=>{
-    const f=launchFixture(defect==='canary');
+  it.each([false,true])('admits configured exposure above the former pilot ceiling (seed=%s)',seed=>{
+    const f=launchFixture(seed,'109','100',10),admission=preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock);
+    expect(admission.ok).toBe(true);if(!admission.ok)throw Error(admission.reason);
+    expect(admission.exposureLimit).toBe('1000');
+  });
+  it.each(['policy','fees','price','constraints','quota','recycler','slots','stop','sol','transport','balance','durable security'])('failed %s preflight reserves and sends nothing',async defect=>{
+    const f=launchFixture();
     if(defect==='policy')f.policy.upperPrice='111.00000000';if(defect==='fees')f.facts.maker={...f.facts.maker,expiresAt:clock};
     if(defect==='price')f.facts.bookPrice='101';if(defect==='constraints')f.facts.maxLeverage='1';if(defect==='quota')f.facts.observedCredits='0';
     if(defect==='recycler')f.facts.recycler.reuse=false;if(defect==='slots')f.facts.availableSlots=5;

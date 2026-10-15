@@ -6,7 +6,7 @@ import {deriveSubkey,encryptToBase64,decryptFromBase64,buildPooledSubaccountAAD,
 import {GridLaunchStorage} from './launch-storage';
 import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../storage';
 import type {GridSettlementFact} from './lifecycle-service';
-import {gridRecyclerGate,gridPilotLimit,GRID_RUNTIME_POLICY} from './runtime-policy';
+import {gridRecyclerGate,gridExposureLimit} from './runtime-policy';
 import {freshGridFact} from './lifecycle-policy';
 import {recordGridWorker} from './worker-ownership';
 
@@ -22,15 +22,13 @@ export function validGridEmptyProof(a:GridAccount,p:GridEmptyProof,now:number){r
 /** Grid ownership never occupies protocol_subaccounts.bot_id (that FK belongs to Signal/AI). */
 export class GridCustody {
   constructor(private storage:GridLaunchStorage){}
-  async reserve(input:{botId:string;wallet:string;masterAccount:string;policyHmac:string;canaryLimit:string;share?:string},umk:Buffer):Promise<GridAccount>{
-    const limit=gridPilotLimit(input.canaryLimit);
-    if(umk.length!==32 || limit===null || !new Decimal(limit).eq(input.canaryLimit))throw Error('Grid pilot exposure limit must be positive and at most $250.');
+  async reserve(input:{botId:string;wallet:string;masterAccount:string;policyHmac:string;share?:string},umk:Buffer):Promise<GridAccount>{
+    if(umk.length!==32)throw Error('Invalid Grid custody key');
     const share=new Decimal(input.share??'0.5');if(!share.gt(0)||share.gt(1))throw Error('Invalid Grid quota share');
     const keypair=nacl.sign.keyPair(),secret: Buffer = Buffer.from(keypair.secretKey),account=bs58.encode(keypair.publicKey),subkey=deriveSubkey(umk,purpose),leaseToken=randomUUID();
     try {
       const encrypted=encryptToBase64(secret,subkey,buildPooledSubaccountAAD('grid:pacifica',input.wallet,account));
       return await this.storage.transaction(async c=>{
-        await c.query("SELECT pg_advisory_xact_lock(hashtext('grid:pilot:admission'))");
         // Same wallet-generation lock namespace as storage.ts's legacy pool/reset path.
         await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,input.wallet]);
         const owner=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1 FOR UPDATE',[input.wallet])).rows[0];
@@ -40,9 +38,8 @@ export class GridCustody {
         if(!new Decimal(quota.share).eq(share))throw Error('Grid quota configuration differs across workers');
         const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[input.botId,input.wallet])).rows[0];
         if(!bot || bot.status!=='draft' || bot.policy_hmac!==input.policyHmac || bot.protocol_subaccount_id!==null)throw Error('Grid draft changed or already reserved');
-        // Global admission lock serializes launches across wallets and masters. Only a proved
-        // custody release frees a slot; status changes and worker recovery cannot free one.
-        if(((await c.query('SELECT bot_id FROM grid_launch_accounts WHERE released_at IS NULL')).rowCount??0)>=GRID_RUNTIME_POLICY.pilot.maximumUnreleasedBots)throw Error('Grid pilot admission exhausted');
+        const limit=gridExposureLimit(bot.total_investment,bot.leverage);
+        if(limit===null)throw Error('Grid configured exposure is unknown');
         // Claim an eligible random-key spare directly; never call the trading_bots finalizer.
         // A failed claim/decryption is terminal for this transaction, never a fresh-create fallback.
         const spare=(await c.query(`SELECT p.* FROM protocol_subaccounts p WHERE wallet_address=$1 AND protocol='pacifica'
@@ -60,7 +57,8 @@ export class GridCustody {
         }
         const row=spare?(await c.query(`UPDATE protocol_subaccounts SET status='grid_reserved',claim_token=$2,claimed_at=clock_timestamp(),subaccount_key_encrypted_v3=$3 WHERE id=$1 RETURNING id`,[spare.id,leaseToken,chosenEncrypted])).rows[0]:(await c.query(`INSERT INTO protocol_subaccounts(wallet_address,protocol,protocol_subaccount_id,status,agent_public_key,subaccount_key_encrypted_v3,aad_version,claim_token,claimed_at)
           VALUES($1,'pacifica',$2,'grid_reserved',$3,$4,1,$5,clock_timestamp()) RETURNING id`,[input.wallet,account,input.masterAccount,encrypted,leaseToken])).rows[0];
-        await c.query('INSERT INTO grid_launch_accounts(bot_id,protocol_subaccount_id,master_account,account,canary_limit,reused) VALUES($1,$2,$3,$4,$5,$6)',[input.botId,row.id,input.masterAccount,chosenAccount,input.canaryLimit,!!spare]);
+        // Keep the existing storage columns; callers cannot supply an independent ceiling.
+        await c.query('INSERT INTO grid_launch_accounts(bot_id,protocol_subaccount_id,master_account,account,canary_limit,reused) VALUES($1,$2,$3,$4,$5,$6)',[input.botId,row.id,input.masterAccount,chosenAccount,limit,!!spare]);
         await c.query("UPDATE grid_bots SET protocol_subaccount_id=$2,status='provisioning',lease_token=$3,lease_expires_at=clock_timestamp()+$4*interval '1 millisecond',updated_at=clock_timestamp() WHERE id=$1",[input.botId,row.id,leaseToken,GRID_LAUNCH_LEASE_MS]);
         await recordGridWorker(c,input.botId,leaseToken,false);
         return {botId:input.botId,wallet:input.wallet,masterAccount:input.masterAccount,account:chosenAccount,leaseToken,reused:!!spare};

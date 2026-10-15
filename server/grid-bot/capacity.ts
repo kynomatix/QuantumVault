@@ -26,7 +26,7 @@ export function gridCapacitySnapshot(input: CapacityInput) {
     && Number.isSafeInteger(input.activeBots) && input.activeBots >= 0;
   const guaranteedAvailable = valid ? Math.max(0, GRID_CAPS.restingCapacityProof.provenFloor - input.orders.length - pending) : 0;
   const ordinaryAvailable = valid ? gridPlacementBudget(0, guaranteedAvailable) : 0;
-  const canAdmitWindow = ordinaryAvailable > 0 && input.activeBots < GRID_CAPS.pilotBotsPerQuotaDomain;
+  const canAdmitWindow = ordinaryAvailable > 0;
   return { owner: input.owner, account: input.account, subaccountId: input.subaccountId, domain: input.domain,
     observedUse: { availability: valid ? 'available' as const : 'unknown' as const,
       totalResting: valid ? input.orders.length : null, byCategory: valid ? counts : null,
@@ -35,5 +35,5 @@ export function gridCapacitySnapshot(input: CapacityInput) {
     policyWindow: { ordinaryLimit: GRID_CAPS.ordinaryRestingPerBot, sharedReserved: GRID_CAPS.sharedProtectionReserve,
       requiredAvailable: GRID_CAPS.requiredAvailableSlots, admittedOrdinaryLimit: canAdmitWindow ? ordinaryAvailable : 0 },
     batchActionLimit: GRID_CAPS.transportBatchActions,
-    reason: !valid ? 'inventory_unknown_or_stale' : input.activeBots >= GRID_CAPS.pilotBotsPerQuotaDomain ? 'pilot_bot_limit' : !canAdmitWindow ? 'insufficient_shared_slots' : null };
+    reason: !valid ? 'inventory_unknown_or_stale' : !canAdmitWindow ? 'insufficient_shared_slots' : null };
 }

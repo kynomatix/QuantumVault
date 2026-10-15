@@ -1,14 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { GRID_RUNTIME_POLICY as P, GRID_RECYCLER_MAX_AGE_MS, gridWalletEntryGate, gridCanaryBudget, gridCanaryAdmission, gridPilotLimit, gridRecyclerGate, gridStopReachable, gridFirstPlacementGate, gridAdxLabel } from '../../server/grid-bot/runtime-policy.js';
+import { GRID_RUNTIME_POLICY as P, GRID_RECYCLER_MAX_AGE_MS, gridWalletEntryGate, gridExposureLimit, gridRecyclerGate, gridStopReachable, gridFirstPlacementGate, gridAdxLabel } from '../../server/grid-bot/runtime-policy.js';
 describe('approved policy boundaries', () => {
-  it('C2 retains the reduced allocation and the per-bot pilot ceiling through promotion',()=>{
-    expect(P.pilot).toEqual({maximumExposureUsd:'250',maximumUnreleasedBots:2,promotionRaisesLimit:false});
-    expect(Object.isFrozen(P.pilot)).toBe(true);
-    expect(gridPilotLimit('250')).toBe('250');expect(gridPilotLimit('25')).toBe('25');expect(gridPilotLimit('1000')).toBe('250');
-    for(const limit of ['0','-1','NaN','Infinity',''])expect(gridPilotLimit(limit)).toBeNull();
+  it('C2 uses the full configured investment times leverage, including ceilings above the old pilot',()=>{
+    expect(P.exposure).toEqual({ceiling:'configured_investment_times_leverage'});
+    expect(Object.isFrozen(P.exposure)).toBe(true);
+    expect(gridExposureLimit('25',10)).toBe('250');expect(gridExposureLimit('100',10)).toBe('1000');
+    expect(gridExposureLimit('1000',20)).toBe('20000');expect(gridExposureLimit('0.01',1)).toBe('0.01');
+    expect(gridExposureLimit('123.45',3)).toBe('370.35');
+    for(const investment of ['0','-1','NaN','Infinity',''])expect(gridExposureLimit(investment,10)).toBeNull();
+    for(const leverage of [0,-1,1.5,NaN,Infinity])expect(gridExposureLimit('100',leverage)).toBeNull();
   });
-  it('pins versioned pilot, mandatory stops, geometry, cadence and final-bar range rules', () => {
-    expect(P.version).toBe('1.0.0'); expect(P.caps).toMatchObject({ ordinaryRestingPerBot: 100, sharedProtectionReserve: 5, intervals: 100, lines: 101, pilotBotsPerQuotaDomain: 2 });
+  it('pins mandatory stops, geometry, cadence and final-bar range rules', () => {
+    expect(P.version).toBe('1.0.0'); expect(P.caps).toMatchObject({ ordinaryRestingPerBot: 100, sharedProtectionReserve: 5, intervals: 100, lines: 101 });
     expect(P.monitor).toMatchObject({ intervalMs: 15_000, globalStartSpacingMs: 1000, globalConcurrency: 1, perBotExclusion: true, catchUp: false, skipPriceMaxAgeMs: 5000, accountPositionsEveryMs: 60_000 });
     expect(P.range.timeframes).toEqual(['15m', '1h', '4h']); expect(P.range.selectableBars).toEqual([100, 200]);
     expect(P.range).toMatchObject({ walkbackMaximumBars: 400, partialFallback: false, intrabarEscapeStrictlyAboveAtr: 3, driftEscapeStrictlyAboveAtr: 6 });
@@ -24,13 +27,8 @@ describe('approved policy boundaries', () => {
     expect(gridWalletEntryGate('0.10')).toMatchObject({ entryAllowed: true, warning: false });
     expect(P.wallet.exitsKeepIndependentAuthority).toBe(true);
   });
-  it('canary uses both hard caps, includes seed/commitments and never rounds minimums upward', () => {
-    expect(gridCanaryBudget('100')).toBe('25'); expect(gridCanaryBudget('2000')).toBe('250');
-    expect(gridCanaryAdmission('100', '15', ['10'], '25')).toBe(true);
-    expect(gridCanaryAdmission('100', '15', ['10.000001'], '25')).toBe(false);
-    expect(gridCanaryAdmission('100', '0', ['25'], '25.01')).toBe(false);
-    expect(gridCanaryAdmission('2000', '251', [], '1')).toBe(false);
-    expect(gridCanaryAdmission('0', '0', [], '0')).toBe(false);
+  it('keeps canary qualification evidence without a reduced size budget', () => {
+    expect(P.canary).not.toHaveProperty('targetFraction');expect(P.canary).not.toHaveProperty('maximumUsd');
     expect(P.canary.shrinkOrders).toBe(false); expect(P.canary.reduceOnlyExitDoubleCount).toBe(false);
   });
   it('recycler proof must be current, true, and deployment-bound for each create', () => {

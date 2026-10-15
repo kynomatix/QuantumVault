@@ -6,7 +6,7 @@ import type {Pool,PoolClient} from 'pg';
 import {requireSchemaCapabilityReady} from '../schema-readiness';
 import {gridEntrySafety,freshGridFact,gridUnresolvedStopReduction} from './lifecycle-policy';
 import {gridWorkerFence,gridWorkerEntryBlocked} from './worker-ownership';
-import {gridRecyclerGate,gridPilotLimit} from './runtime-policy';
+import {gridRecyclerGate,gridExposureLimit} from './runtime-policy';
 import {gridPilotExposure} from './pilot-exposure';
 import type {GridObservation} from './reconciliation';
 import type {GridEconomicFill} from './pnl';
@@ -101,8 +101,9 @@ export class GridLaunchStorage {
   /** Caller holds the bot lock. Durable claims, exact fills and the monitor snapshot are
    * read together; neither promotion nor a replacement worker supplies fresh capacity. */
   async pilotExposure(c:PoolClient,botId:string,now:number,snapshot?:{observation:GridObservation;fills:GridEconomicFill[];authoritative:boolean},candidate?:{request:ExactGridRequest;increment:string}){
-    const account=(await c.query('SELECT canary_limit,canary_committed FROM grid_launch_accounts WHERE bot_id=$1 AND released_at IS NULL',[botId])).rows[0];
-    const limitUsd=account?gridPilotLimit(account.canary_limit):null;
+    const account=(await c.query<{total_investment:string;leverage:number;canary_committed:string}>(`SELECT b.total_investment,b.leverage,a.canary_committed
+      FROM grid_launch_accounts a JOIN grid_bots b ON b.id=a.bot_id WHERE a.bot_id=$1 AND a.released_at IS NULL`,[botId])).rows[0];
+    const limitUsd=account?gridExposureLimit(account.total_investment,account.leverage):null;
     if(!limitUsd)return {limitUsd:null,exposureUsd:null,reason:'pilot_exposure_reservation_unavailable',validUntil:null};
     const operations=(await c.query(`SELECT o.id,o.state,o.venue_order_id,o.exact_request,c.canary_increment FROM grid_operations o
       LEFT JOIN grid_execution_claims c ON c.operation_id=o.id WHERE o.bot_id=$1`,[botId])).rows;
@@ -133,8 +134,8 @@ export class GridLaunchStorage {
   }
   private async pilotGate(c:PoolClient,botId:string,now:number,candidate?:{request:ExactGridRequest;increment:string}){
     const exposure=await this.pilotExposure(c,botId,now,undefined,candidate);
-    if(exposure.exposureUsd===null||exposure.limitUsd===null)throw new GridLaunchTransientError('Grid pilot exposure is unknown; reconcile before adding risk.');
-    if(new Decimal(exposure.exposureUsd).gt(exposure.limitUsd))throw new GridLaunchTransientError('Grid pilot exposure limit exceeded (at most $250 per bot).');
+    if(exposure.exposureUsd===null||exposure.limitUsd===null)throw new GridLaunchTransientError('Grid configured exposure is unknown; reconcile before adding risk.');
+    if(new Decimal(exposure.exposureUsd).gt(exposure.limitUsd))throw new GridLaunchTransientError('Grid configured exposure limit exceeded (investment × leverage).');
     return {...exposure,exposureUsd:exposure.exposureUsd};
   }
   private async capacityBlocked(c:PoolClient,r:ExactGridRequest){
@@ -189,7 +190,7 @@ export class GridLaunchStorage {
   }
   /** Final transport boundary, after book observation and before POST. No optional entry bypass. */
   async finalMargin(r:ExactGridRequest,leaseToken:string):Promise<void>{
-    // Reductions bypass every entry-only check below, including status and the pilot cap.
+    // Reductions bypass every entry-only check below, including status and the exposure ceiling.
     // sendOwned still fences their submitted operation, lease and stopping authority.
     if(!gridAddsExposure(r))return;
     const reading=await this.freshMargin(r);
@@ -301,7 +302,7 @@ export class GridLaunchStorage {
     const minimumRisk=request.kind==='limit'&&request.data.reduce_only===false?new Decimal(String(request.data.price)).mul(String(request.data.amount))
       :request.kind==='seed'?new Decimal(String(request.authority.seedWorstPrice)).mul(String(request.data.amount)):new Decimal(0);
     if(new Decimal(claim.canaryIncrement).lt(minimumRisk))throw Error('Understated canary commitment');
-    if(!gridAddsExposure(request)&&!new Decimal(claim.canaryIncrement).isZero())throw Error('Only entries reserve pilot exposure');
+    if(!gridAddsExposure(request)&&!new Decimal(claim.canaryIncrement).isZero())throw Error('Only entries reserve exposure');
     const prepared=await this.transaction(async c=>{
       const master=(await c.query('SELECT *,clock_timestamp() AS clock FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[request.masterAccount])).rows[0];
       if(!master)throw Error('Master quota unavailable');const now=new Date(master.clock).getTime();
@@ -345,7 +346,7 @@ export class GridLaunchStorage {
       const ceiling=Decimal.min(300,claim.observedCredits).mul(master.share).floor();
       if(!ceiling.gt(0) || new Decimal(quota.used).plus(claim.credits).gt(ceiling))throw new GridLaunchTransientError('Grid fixed quota share exhausted');
       if(claim.slots && await this.slotBudget(c,request,monitor,claim.availableSlots)<claim.slots)throw Error('Grid subaccount slots unavailable');
-      const committed=gridAddsExposure(request)?(await this.pilotGate(c,request.botId,now,{request,increment:claim.canaryIncrement})).exposureUsd:null;
+      const exposure=gridAddsExposure(request)?await this.pilotGate(c,request.botId,now,{request,increment:claim.canaryIncrement}):null;
       const id=randomUUID();
       const levelId=request.authority.levelId??null;
       if(request.kind==='cancel'){
@@ -390,7 +391,8 @@ export class GridLaunchStorage {
         if(backing==null||new Decimal(outstanding).gt(backing))throw Error('Exit position backing unavailable');
       }
       await c.query('INSERT INTO grid_execution_claims(operation_id,bot_id,master_account,account,credits,slots,canary_increment) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,request.botId,request.masterAccount,request.account,claim.credits,claim.slots,claim.canaryIncrement]);
-      if(committed!==null)await c.query('UPDATE grid_launch_accounts SET canary_committed=$2 WHERE bot_id=$1',[request.botId,committed]);
+      // Refresh legacy allocations atomically with their commitment, including pre-ruling bots.
+      if(exposure!==null)await c.query('UPDATE grid_launch_accounts SET canary_limit=$2,canary_committed=$3 WHERE bot_id=$1',[request.botId,exposure.limitUsd,exposure.exposureUsd]);
       return result.rows[0];
     });
     if(!prepared)throw new GridLaunchTransientError('Durable Grid margin pause');return prepared;
