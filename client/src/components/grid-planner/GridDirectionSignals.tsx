@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
+import * as ScrollAreaPrimitive from '@radix-ui/react-scroll-area';
 import { Activity, ArrowDown, ArrowRight, ArrowUp, ChartNoAxesCombined, Globe2, Percent } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { ScrollBar } from '@/components/ui/scroll-area';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { gridSignalViews, isGridSignals, type GridSignalView } from '@/lib/grid-signals-view';
 import { useGridDirectionSuggestion } from './GridDirectionBadge';
@@ -16,19 +18,29 @@ export function GridSignalButton({ signal }: { signal: GridSignalView }) {
   const leave = () => { timer.current = setTimeout(() => { if (hovering.current) setOpen(false); }, 150); };
   const Icon = { Macro: Globe2, 'Weekly structure': ChartNoAxesCombined, Trend: Activity, Funding: Percent }[signal.name];
   const Arrow = signal.direction === 'long' ? ArrowUp : signal.direction === 'short' ? ArrowDown : ArrowRight;
+  const planner = trigger.current?.closest<HTMLElement>('[data-testid="sheet-grid-planner"]') ?? undefined;
   return <Popover open={open} onOpenChange={value => { hovering.current = false; clearTimeout(timer.current); setOpen(value); }}>
     <PopoverTrigger asChild><button ref={trigger} type="button" aria-label={`${signal.name}: ${signal.brief ?? signal.summary}. Advisory only. Show details and basis.`}
       onPointerEnter={event => { if (event.pointerType === 'mouse') enter(); }} onPointerLeave={leave}
       className="inline-flex h-11 w-11 shrink-0 items-center justify-center gap-0.5 rounded-md border border-border/60 bg-card/40 text-muted-foreground hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
       <Icon className="h-3.5 w-3.5" aria-hidden="true"/><Arrow aria-hidden="true" className={`h-3 w-3 ${signal.unavailable || signal.direction === 'neutral' ? 'text-muted-foreground' : signal.direction === 'long' ? 'text-teal-500' : 'text-red-500'}`}/>
     </button></PopoverTrigger>
-    <PopoverContent side="top" align="start" collisionBoundary={trigger.current?.closest('[data-testid="sheet-grid-planner"]') ?? undefined} collisionPadding={12}
-      className="w-80 max-w-[min(calc(100vw-2rem),var(--radix-popover-content-available-width))] max-h-[var(--radix-popover-content-available-height)] overflow-y-auto space-y-2 text-xs" aria-label={`${signal.name} signal details`}
+    <PopoverContent side="top" align="start" collisionBoundary={planner} collisionPadding={12} portalContainer={planner}
+      className="w-80 max-w-[min(calc(100vw-2rem),var(--radix-popover-content-available-width))] max-h-[var(--radix-popover-content-available-height)] overflow-hidden p-0 text-xs" aria-label={`${signal.name} signal details`}
       onOpenAutoFocus={event => event.preventDefault()} onPointerEnter={() => clearTimeout(timer.current)} onPointerLeave={leave}>
-      <p className="font-medium text-sm">{signal.name} · {signal.brief ?? signal.summary}</p>
-      <p className="leading-relaxed">{signal.detail}</p>
-      <p className="text-muted-foreground leading-relaxed">{signal.basis}</p>
-      <p className="text-muted-foreground">Advisory only. Choose either direction.</p>
+      {/* Keep scrolling inside the planner's modal scroll lock; padding belongs to the scrollable body. */}
+      <ScrollAreaPrimitive.Root type="auto" className="relative overflow-hidden rounded-[inherit]">
+        <ScrollAreaPrimitive.Viewport tabIndex={0} aria-label={`${signal.name} signal explanation`}
+          className="max-h-[calc(var(--radix-popover-content-available-height)-2px)] w-full overscroll-contain rounded-[inherit] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+          <div className="space-y-2 p-4 pb-6 pr-6">
+            <p className="font-medium text-sm">{signal.name} · {signal.brief ?? signal.summary}</p>
+            <p className="leading-relaxed">{signal.detail}</p>
+            <p className="text-muted-foreground leading-relaxed">{signal.basis}</p>
+            <p className="text-muted-foreground">Advisory only. Choose either direction.</p>
+          </div>
+        </ScrollAreaPrimitive.Viewport>
+        <ScrollBar className="[&>div]:bg-muted-foreground/60" />
+      </ScrollAreaPrimitive.Root>
     </PopoverContent>
   </Popover>;
 }
