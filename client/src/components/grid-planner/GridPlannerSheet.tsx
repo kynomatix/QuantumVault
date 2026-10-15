@@ -129,13 +129,13 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     if (open) gridRememberMarket(identity, form.market);
   }, [open, identity, form.market]);
   useEffect(() => {
-    if (!open || !defaultMarketPending || !markets.length) return;
+    if (!open || !defaultMarketPending || !markets.length || draftBusy) return;
     const market = gridAvailableMarket(form.market, markets);
+    // Use the existing ticker-change handler so any edits made while the list loaded are reset normally.
+    if (market !== form.market) { edit('market', market); return; }
     defaultMarketPendingRef.current = false;
     setDefaultMarketPending(false);
-    // Use the existing ticker-change handler so any edits made while the list loaded are reset normally.
-    if (market !== form.market) edit('market', market);
-  }, [open, identity, defaultMarketPending, markets, form.market]);
+  }, [open, identity, defaultMarketPending, markets, form.market, draftBusy]);
   const refreshObservations = () => {
     if (draftBusy) return;
     setRangeFacts(null);

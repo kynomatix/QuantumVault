@@ -74,7 +74,7 @@ describe('display-only direction badge', () => {
   it('keeps the unified integration independent of direction editing and draft admission', () => {
     const planner = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const create = readFileSync('client/src/components/grid-bot/GridDraftActions.tsx', 'utf8');
-    expect(planner).toContain('<GridDirectionSignals active={open} identity={identity} market={form.market}');
+    expect(planner).toContain("<GridDirectionSignals active={open} identity={identity} market={defaultMarketPending ? '' : form.market}");
     expect(planner).toContain("onClick={() => edit('side', side)}");
     expect(create).not.toContain('GridDirectionBadge');
     const parent = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
