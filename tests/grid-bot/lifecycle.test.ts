@@ -6,7 +6,9 @@ import {gridEntrySafety,gridRiskTrigger,reconcileGridReduction,gridOwnedLive} fr
 import {GridLifecycleService,gridResumeClearance,type GridLifecycleDeps,type GridSettlementFact} from '../../server/grid-bot/lifecycle-service';
 import {gridTerminalFact} from '../../server/grid-bot/lifecycle-runtime';
 import {reconcileGridLimit} from '../../server/grid-bot/execution';
-import {requestDigest,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
+import {requestDigest,type ExactGridRequest,type DurableGridOperation} from '../../server/grid-bot/launch-storage';
+import {reconcileGridTransfer} from '../../server/grid-bot/launch-reconciliation';
+import type {GridTransferEvidence} from '../../server/grid-bot/transfer-evidence';
 import type {GridObservation} from '../../server/grid-bot/reconciliation';
 import type {GridVenueOrder} from '../../server/grid-bot/order-identity';
 const signal=()=>new AbortController().signal;
@@ -77,14 +79,14 @@ describe('Grid lifecycle boundary and failure drills',()=>{
     expect(f.deps.send.mock.calls.filter(c=>c[1].kind==='cancel')).toHaveLength(1);expect(cancel.state).toBe('unconfirmed');expect(f.deps.recycle).not.toHaveBeenCalled();
   });
 
-  it.each(['fund','sweep'] as const)('expired unknown %s keeps Stop protection but blocks transfer replay and recycling pending C4',async kind=>{
+  it.each(['fund','sweep'] as const)('expired unknown %s keeps Stop protection but blocks transfer replay and recycling',async kind=>{
     const f=fixture();f.own(true);f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});
     const r:ExactGridRequest={...f.request,kind,path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:Date.now()-6000,expiryMs:5000,data:{to_account:kind==='fund'?f.claim.account:f.claim.masterAccount,amount:'1'},authority:{}};
     const transfer={id:randomUUID(),state:'unconfirmed',exact_request:r,exact_request_digest:requestDigest(r)};f.operations.push(transfer);
     await f.service.tick(f.claim,signal());expect(f.deps.send).toHaveBeenCalledWith(f.claim,expect.objectContaining({kind:'close',data:expect.objectContaining({reduce_only:true,amount:'1'})}));
     const close=f.operations.find(op=>op.exact_request.kind==='close');f.deps.recover.mockImplementation(async(_claim:any,op:any)=>op.id===close.id?{state:'confirmed',requestDigest:op.exact_request_digest,releaseSlot:true} as never:{state:'unknown'});
     f.observation.position!.size='0';await f.service.tick(f.claim,signal());f.observation.orders=[];
-    expect(await f.service.tick(f.claim,signal())).toBe('transfer_recovery_requires_C4');expect(f.deps.send).toHaveBeenCalledOnce();expect(transfer.state).toBe('unconfirmed');expect(f.deps.settlement).not.toHaveBeenCalled();expect(f.deps.recycle).not.toHaveBeenCalled();
+    expect(await f.service.tick(f.claim,signal())).toBe('transfer_outcome_unknown');expect(f.deps.send).toHaveBeenCalledOnce();expect(transfer.state).toBe('unconfirmed');expect(f.deps.settlement).not.toHaveBeenCalled();expect(f.deps.recycle).not.toHaveBeenCalled();
   });
   it('unknown expired transfer permits only retained entry cancellation before Stop close',async()=>{
     const f=fixture();f.own();const r:ExactGridRequest={...f.request,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:Date.now()-6000,data:{to_account:f.claim.account,amount:'1'},authority:{}};
@@ -127,6 +129,38 @@ describe('Grid lifecycle boundary and failure drills',()=>{
     expect(f.deps.send.mock.calls.map(call=>call[1].kind)).toEqual(['cancel','close','sweep']);expect(f.deps.recycle).toHaveBeenCalledOnce();
   });
   it.each(['pending_balance','pending_interest','total_margin_used','spot_collateral','spot_market_value','positions_count','orders_count','stop_orders_count','updated_at'])('terminal proof rejects %s uncertainty',field=>{const f=fixture();f.observation.position!.size='0';const data:any={balance:'0',available_to_withdraw:'0',account_equity:'0',pending_balance:'0',pending_interest:'0',total_margin_used:'0',spot_collateral:'0',spot_market_value:'0',positions_count:0,orders_count:0,stop_orders_count:0,updated_at:Date.now(),spot_balances:[]};expect(gridTerminalFact({success:true,data},f.claim,f.observation,0,recycler(),Date.now())).not.toBeNull();data[field]=field==='updated_at'?Date.now()-5001:field.endsWith('_count')?1:'1';expect(gridTerminalFact({success:true,data},f.claim,f.observation,0,recycler(),Date.now())).toBeNull();});
+});
+
+describe('C4 lifecycle sweep recovery',()=>{
+  it.each(['landed','not_landed'] as const)('recovers %s without resending the old sweep',async outcome=>{
+    const f=fixture(),now=Date.now();f.observation.position!.size='0';
+    const r:ExactGridRequest={kind:'sweep',botId:f.claim.id,account:f.claim.account,masterAccount:f.claim.masterAccount,
+      path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now-6000,expiryMs:5000,
+      data:{amount:'100',to_account:f.claim.masterAccount,idempotency_key:'EXAMPLE_OLD_SWEEP_KEY'},
+      authority:{settlementComplete:true,settlement:{...f.proof,balance:'100',withdrawable:'100',observedAt:now-6100}}};
+    const op:DurableGridOperation={id:randomUUID(),state:'unconfirmed',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:'unknown'};
+    f.operations.push(op);
+    const evidence:GridTransferEvidence={account:r.account,masterAccount:r.masterAccount,complete:true,startedAt:now,observedAt:now,balanceAt:now,
+      balance:outcome==='landed'?'0':'100',ownedAccounts:null,
+      subaccountHistory:outcome==='landed'?[{amount:'-100',eventType:'subaccount_transfer',createdAt:r.timestamp+1}]:[],
+      mainHistory:outcome==='landed'?[{amount:'100',eventType:'subaccount_transfer',createdAt:r.timestamp+1}]:[]};
+    const result=reconcileGridTransfer(r,evidence,{reused:false,operations:[op]},now);
+    expect(result.state).toBe(outcome==='landed'?'confirmed':'not_landed');
+    const send=vi.fn(async(_claim:unknown,request:ExactGridRequest)=>({rateLimited:false,terminalTransferDigest:requestDigest(request)}));
+    const service=new GridLifecycleService({...f.deps,recover:async()=>result,send} as unknown as GridLifecycleDeps);
+    expect(await service.tick(f.claim,signal())).toBe('recovered_reobserve_required');
+    expect(send).not.toHaveBeenCalled();expect(op.state).toBe(outcome==='landed'?'confirmed':'failed');
+    if(outcome==='landed'){
+      expect(await service.tick(f.claim,signal())).toBe('stopped');expect(f.deps.recycle).toHaveBeenCalledOnce();
+    }else{
+      f.proof.balance='100';f.proof.withdrawable='100';
+      await service.tick(f.claim,signal());expect(send).toHaveBeenCalledOnce();
+      const replacement=send.mock.calls[0][1];expect(replacement.kind).toBe('sweep');
+      expect(replacement.data.idempotency_key).not.toBe(r.data.idempotency_key);
+      expect(replacement.data.idempotency_key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    }
+    expect(r.data.idempotency_key).toBe('EXAMPLE_OLD_SWEEP_KEY');
+  });
 });
 
 describe('resume authority and close rejection',()=>{

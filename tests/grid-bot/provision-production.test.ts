@@ -2,6 +2,8 @@ import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import Decimal from 'decimal.js';
 import {GridProvision,type GridProvisionDeps} from '../../server/grid-bot/provision';
 import {GridExecution} from '../../server/grid-bot/execution';
+import {reconcileGridTransfer} from '../../server/grid-bot/launch-reconciliation';
+import {gridReconciliationOutcome} from '../../server/grid-bot/execution';
 import {gridLevelRequest} from '../../server/grid-bot/placement';
 import {requestDigest,GridLaunchTransientError,gridProvisionAttempt,gridOperationCouldHaveLanded,type DurableGridOperation,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import {observePacificaConstraints} from '../../server/protocol/market-constraints';
@@ -32,6 +34,26 @@ function fixture(seed=false,reused=false){
   return {...f,authorityDeps:f.deps,account,operations,sent,steps,deps,start:()=>new GridProvision(deps).start({wallet:account.wallet,policy:f.policy,policyHmac:f.policyHash})};
 }
 describe('C6 provisioning with the real C5 raw-read authority',()=>{
+  it('C4 replaces a proven expired fund with a new UUID and follows the confirmed replacement on restart',async()=>{
+    const f=fixture();expect((await f.start()).state).toBe('canary');
+    const base=`grid:${f.policy.id}:launch:fund`,op=f.operations.get(base),created=f.operations.get(`grid:${f.policy.id}:launch:create`);
+    if(!op||!created)throw Error('EXAMPLE launch records missing');
+    const oldTransferKey=op.exact_request.data.idempotency_key;
+    created.exact_request.timestamp=clock-20000;created.exact_request_digest=requestDigest(created.exact_request);
+    op.exact_request.timestamp=clock-10000;op.exact_request_digest=requestDigest(op.exact_request);op.state='unconfirmed';op.failure_classification='unknown';
+    for(const [key,row] of f.operations)if(row!==op&&row!==created)f.operations.delete(key);
+    const result=reconcileGridTransfer(op.exact_request,{account:f.account.account,masterAccount:f.account.masterAccount,complete:true,
+      startedAt:clock-1000,observedAt:clock-1000,balanceAt:clock-1000,balance:'0',ownedAccounts:[f.account.account],subaccountHistory:[],mainHistory:[]},
+      {reused:false,operations:[created,op]},clock);
+    if(result.state!=='not_landed')throw Error('EXAMPLE expiry proof failed');
+    const terminal=gridReconciliationOutcome(result);Object.assign(op,{state:terminal.state,failure_classification:terminal.reason,transfer_recovery:terminal.transferProof});
+    f.sent.length=0;
+    const restart=()=>new GridProvision(f.deps).start({wallet:f.account.wallet,policy:f.policy,policyHmac:f.policyHash,account:f.account});
+    expect((await restart()).state).toBe('canary');expect((await restart()).state).toBe('canary');
+    const transfers=f.sent.filter(r=>r.kind==='fund');expect(transfers).toHaveLength(1);expect(transfers[0].data.idempotency_key).not.toBe(oldTransferKey);
+    expect(transfers[0].data.idempotency_key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    const replacement=await gridProvisionAttempt(f.deps.existing,f.policy.id,'fund',clock);expect(replacement.key).toContain(':retry:');expect(replacement.op?.state).toBe('confirmed');
+  });
   it.each(['submitted','unconfirmed','confirmed','failed'] as const)('never replaces a %s funding attempt with send history',async state=>{
     const f=fixture();await f.start();const key=`grid:${f.policy.id}:launch:fund`,op=f.operations.get(key);if(!op)throw Error('EXAMPLE funding absent');
     op.state=state;op.failure_classification='policy';op.exact_request.timestamp=clock-6000;op.exact_request_digest=requestDigest(op.exact_request);

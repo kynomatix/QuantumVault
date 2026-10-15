@@ -77,12 +77,13 @@ export class GridPacificaSender {
     });
   }
 }
-export type GridReconciliation={state:'unknown'}|{state:'confirmed'|'rejected'|'expected_alo_cross';requestDigest:string;releaseSlot:boolean;orderId?:string;orderStatus?:GridVenueOrder['status'];failureClass?:GridTerminalFailureClass};
+export type GridReconciliation={state:'unknown'}|{state:'confirmed'|'not_landed'|'rejected'|'expected_alo_cross';requestDigest:string;releaseSlot:boolean;orderId?:string;orderStatus?:GridVenueOrder['status'];failureClass?:GridTerminalFailureClass;transferProof?:import('./transfer-evidence').GridTransferProof};
 /** All recovery callers preserve the same exact-request terminal classification. */
 export function gridReconciliationOutcome(result:Exclude<GridReconciliation,{state:'unknown'}>):GridSettlementOutcome {
   const terminalFailure=result.state==='rejected'&&result.failureClass?{requestDigest:result.requestDigest,classification:result.failureClass}:undefined;
-  return {state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'?'expected_rejection':terminalFailure?.classification??'venue_rejection',
-    releaseSlot:terminalFailure?true:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus,...(terminalFailure?{terminalFailure,rateLimited:terminalFailure.classification==='quota'}:{})};
+  if(result.state==='not_landed'&&result.transferProof?.state!=='not_landed')throw Error('Grid transfer absence proof unavailable');
+  return {state:result.state==='confirmed'?'confirmed':'failed',reason:result.state==='confirmed'?null:result.state==='expected_alo_cross'||result.state==='not_landed'?'expected_rejection':terminalFailure?.classification??'venue_rejection',
+    releaseSlot:terminalFailure?true:result.releaseSlot,orderId:result.orderId,orderStatus:result.orderStatus,...(result.transferProof?{transferProof:result.transferProof}:{}),...(terminalFailure?{terminalFailure,rateLimited:terminalFailure.classification==='quota'}:{})};
 }
 export interface GridExecutionDeps {
   storage:Pick<GridLaunchStorage,'read'|'prepare'|'submit'|'settle'> & Partial<Pick<GridLaunchStorage,'expirePrepared'>>;

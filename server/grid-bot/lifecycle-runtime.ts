@@ -14,7 +14,8 @@ import {durableGridUmk} from './service';
 import {pacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
 import Decimal from 'decimal.js';
 import {GridFirstPlacementAuthority} from './first-placement';
-import {productionGridLaunchAuthority,gridProductionResume} from './launch-authority';
+import {productionGridLaunchAuthority,gridProductionResume,unlockGridLaunchAgent} from './launch-authority';
+import {recoverGridTransfer} from './transfer-recovery';
 
 /** Full-account facts, never a single balance interpreted as transfer or settlement evidence. */
 export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObservation,start:number,recycler:GridSettlementFact['recycler'],now:number):GridSettlementFact|null{
@@ -45,11 +46,20 @@ export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonito
     sol:authorities.sol??((claim,signal)=>sharedGridSol(claim.masterAccount,signal)),
     resume:authorities.resume??gridProductionResume(storage,productionGridLaunchAuthority(json,storage.launch)),
     send:(claim,r)=>withKey(claim,(identity,umk)=>custody.withSecret(identity,umk,secret=>sender.send(r,secret,undefined,claim.leaseToken))),
-    recover:authorities.recover??(async(claim,op,signal)=>{const o=await observe(claim,signal);if(!o.inventoryComplete)return {state:'unknown'};
-      const r=op.exact_request;if(r.kind==='limit')return reconcileGridLimit(r,o.orders);
+    recover:authorities.recover??(async(claim,op,signal)=>{
+      const r=op.exact_request;
+      if(r.kind==='fund'||r.kind==='sweep')return recoverGridTransfer(storage,json,claim,op,()=>withKey(claim,async(identity,umk)=>{
+        const agent=await unlockGridLaunchAgent(identity.wallet,umk);
+        try{
+          if(!agent||agent.masterAccount!==claim.masterAccount||!await agent.current())throw Error('Grid master signing authority unavailable');
+          const raw=await json.subaccounts(claim.masterAccount,agent.signingKey,signal);
+          if(!await agent.current())throw Error('Grid master generation changed');return raw;
+        }finally{agent?.cleanup();}
+      }),signal);
+      const o=await observe(claim,signal);if(!o.inventoryComplete)return {state:'unknown'};
+      if(r.kind==='limit')return reconcileGridLimit(r,o.orders);
       if(r.kind==='cancel'||r.kind==='close')return reconcileGridReduction(r,o.orders);
       if(r.kind==='seed')return reconcileGridLaunch(r,{kind:'seed',account:claim.account,complete:true,orders:o.orders,observedAt:o.observedAt},Date.now());
-      // Lost sweep/fund responses have no documented identity-bound lookup; retain uncertainty.
       return {state:'unknown'};}),
     settlement:authorities.settlement??(async(claim,signal)=>{const {bot}=await storage.snapshot(claim),o=await observe(claim,signal);
       const raw=await json.json(claim.masterAccount,'/account',{account:claim.account},signal);

@@ -132,7 +132,7 @@ export class GridLifecycleService {
     // Flat now is not terminal: the retained entry may still fill on a later tick.
     if(unresolvedEntryCancel)return block('venue_operation_unresolved');
     const exit=owned.find(x=>x.operation);if(exit)return cancel(exit);
-    if(unresolvedTransfer)return block('transfer_recovery_requires_C4');
+    if(unresolvedTransfer)return block('transfer_outcome_unknown');
     if(!(reconciled.reconciliationComplete??reconciled.entriesAllowed))return block('terminal_history_unavailable');
     const settlement=await this.deps.settlement(claim,signal);
     if(!settlement||settlement.account!==claim.account||settlement.masterAccount!==claim.masterAccount||!settlement.settlementComplete||!settlement.source

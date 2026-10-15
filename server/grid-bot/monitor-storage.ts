@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
-import {GridLaunchStorage,canonicalRequest,requestDigest} from './launch-storage';
+import {GridLaunchStorage,canonicalRequest,requestDigest,gridOperationProjection,type DurableGridOperation} from './launch-storage';
 import {reconcileGridObservation,type GridObservation,type ReconciliationOperation} from './reconciliation';
 import {validGridEmptyProof,type GridAccount,type GridEmptyProof} from './custody';
 import type {GridEconomicFill} from './pnl';
@@ -52,8 +52,21 @@ export class GridMonitorStorage {
   async release(claim:GridMonitorClaim){await this.launch.transaction(async c=>{if(!await gridWorkerFence(c,claim.id))throw Error('Grid sender still active');await c.query(`UPDATE grid_bots SET lease_token=NULL,lease_expires_at=NULL,last_tick_at=clock_timestamp()
     WHERE id=$1 AND lease_token=$2`,[claim.id,claim.leaseToken]);});}
   async snapshot(claim:GridMonitorClaim){return this.launch.transaction(async c=>{const bot=await this.assertLease(c,claim);
-    const operations=(await c.query('SELECT * FROM grid_operations WHERE bot_id=$1 ORDER BY created_at,id',[claim.id])).rows as ReconciliationOperation[];
+    const operations=(await c.query(`SELECT ${gridOperationProjection} FROM grid_operations o WHERE bot_id=$1 ORDER BY created_at,id`,[claim.id])).rows as ReconciliationOperation[];
     return {bot,operations,levels:(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[claim.id])).rows};
+  });}
+  /** Durable, deduplicated owner notification. Uncertainty cannot disable a Stop already in progress. */
+  async transferUnknown(claim:GridMonitorClaim,op:DurableGridOperation){return this.launch.transaction(async c=>{
+    const bot=await this.assertLease(c,claim),r=op.exact_request;
+    if(!['fund','sweep'].includes(r.kind)||r.botId!==claim.id||r.account!==claim.account||r.masterAccount!==claim.masterAccount
+      ||requestDigest(r)!==op.exact_request_digest)throw Error('Grid transfer uncertainty identity changed');
+    if(!(await c.query("SELECT 1 FROM grid_operations WHERE id=$1 AND bot_id=$2 AND exact_request_digest=$3 AND state IN ('submitted','unconfirmed')",
+      [op.id,claim.id,op.exact_request_digest])).rowCount)return;
+    await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,'transfer_unknown',$3) ON CONFLICT DO NOTHING`,
+      [claim.id,'transfer-unknown:'+op.id,{operationId:op.id,requestDigest:op.exact_request_digest,kind:r.kind,reason:'transfer_unknown',previousStatus:bot.status}]);
+    await c.query(`UPDATE grid_bots SET status=CASE WHEN status='stopping' THEN status ELSE 'paused' END,
+      pause_reason=CASE WHEN status IN ('paused','pausing','stopping') AND pause_reason IS DISTINCT FROM 'transfer_unknown'
+        THEN pause_reason ELSE 'transfer_unknown' END,updated_at=clock_timestamp() WHERE id=$1`,[claim.id]);
   });}
   /** Only untouched custody can use absence to authorize setup. This never grants a monitor boot for exposure. */
   async authorizeProvisioning(claim:GridMonitorClaim,account:GridAccount,proof:GridEmptyProof){return this.launch.transaction(async c=>{

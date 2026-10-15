@@ -7,7 +7,8 @@ import {randomUUID} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import bs58 from 'bs58';
 import {GridStorage,type DraftRecord} from '../../server/grid-bot/storage';
-import {GridLaunchStorage,requestDigest,gridProvisionAttempt,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
+import {GridLaunchStorage,requestDigest,gridProvisionAttempt,type ExactGridRequest,type DurableGridOperation} from '../../server/grid-bot/launch-storage';
+import type {GridTransferProof} from '../../server/grid-bot/transfer-evidence';
 import {GridMonitorStorage,type GridMonitorClaim} from '../../server/grid-bot/monitor-storage';
 import {GridMonitorService} from '../../server/grid-bot/monitor-service';
 import {GridExecution,reconcileGridLimit} from '../../server/grid-bot/execution';
@@ -58,6 +59,46 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
       VALUES($1,$2,$3,$4,$5,$6,$4,'prepared') RETURNING *`,[randomUUID(),request.botId,key,digest,
       request.kind==='create'?'provision_subaccount':'fund_subaccount',request])).rows[0];
   }
+  async function unknownFund(){
+    const f=await reservation(),now=Date.now(),base=`grid:${f.bot.id}:launch:fund`;
+    const r:ExactGridRequest={kind:'fund',botId:f.bot.id,account:f.claim.account,masterAccount:f.claim.masterAccount,
+      path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now-6000,expiryMs:5000,
+      data:{amount:'100',to_account:f.claim.account,idempotency_key:'EXAMPLE_LOST_FUND_KEY'},authority:{}};
+    const prepared=await crashPrepared(base,r);
+    await pool.query("UPDATE grid_operations SET state='unconfirmed',failure_classification='unknown',submitted_at=clock_timestamp() WHERE id=$1",[prepared.id]);
+    const op=await launch.read(f.bot.id,base);if(!op)throw Error('EXAMPLE retained transfer missing');
+    const proof:GridTransferProof={version:1,requestDigest:op.exact_request_digest,state:'not_landed',evidence:{account:r.account,masterAccount:r.masterAccount,complete:true,
+      startedAt:now-100,observedAt:now-1,balanceAt:now-1,balance:'0',ownedAccounts:[r.account],subaccountHistory:[],mainHistory:[]}};
+    return {...f,op,proof,base,r};
+  }
+  it('C4 persists one UNKNOWN notice and an immutable absence proof before permitting a replacement',async()=>{
+    const f=await unknownFund();await storage.transferUnknown(f.claim,f.op);await storage.transferUnknown(f.claim,f.op);
+    expect((await storage.snapshot(f.claim)).bot.status).toBe('paused');
+    expect((await pool.query("SELECT count(*) AS n FROM grid_risk_events WHERE kind='transfer_unknown' AND bot_id=$1",[f.bot.id])).rows[0].n).toBe('1');
+    await launch.settle(f.op,{state:'failed',reason:'expected_rejection',releaseSlot:true,transferProof:f.proof},f.claim.leaseToken);
+    const old=await launch.read(f.bot.id,f.base);expect(old).toMatchObject({state:'failed',failure_classification:'expected_rejection',exact_request:f.r,transfer_recovery:f.proof});
+    expect((await storage.snapshot(f.claim)).bot.status).toBe('provisioning');
+    expect(await gridProvisionAttempt((key,id)=>launch.read(id,key),f.bot.id,'fund',Date.now())).toEqual({key:f.base+':retry:'+f.op.id,op:null});
+    expect((await storage.snapshot(f.claim)).operations.find((o:DurableGridOperation)=>o.id===f.op.id)?.transfer_recovery).toEqual(f.proof);
+  });
+  it('C4 preserves an owner Pause and Stop while repeatedly notifying UNKNOWN',async()=>{
+    const f=await unknownFund();await storage.transferUnknown(f.claim,f.op);
+    await pool.query("UPDATE grid_bots SET status='stopping',pause_reason='stop' WHERE id=$1",[f.bot.id]);
+    await storage.transferUnknown(f.claim,f.op);expect((await storage.snapshot(f.claim)).bot).toMatchObject({status:'stopping',pause_reason:'stop'});
+    await pool.query("UPDATE grid_bots SET status='pausing',pause_reason='pause' WHERE id=$1",[f.bot.id]);
+    await storage.transferUnknown(f.claim,f.op);
+    await launch.settle(f.op,{state:'failed',reason:'expected_rejection',releaseSlot:true,transferProof:f.proof},f.claim.leaseToken);
+    expect((await storage.snapshot(f.claim)).bot).toMatchObject({status:'paused',pause_reason:'pause'});
+    await pool.query("UPDATE grid_bots SET status='stopping',pause_reason='stop' WHERE id=$1",[f.bot.id]);
+    await storage.transferUnknown(f.claim,f.op);expect((await storage.snapshot(f.claim)).bot).toMatchObject({status:'stopping',pause_reason:'stop'});
+  });
+  it('C4 rejects missing or stale absence authority without terminalizing the transfer',async()=>{
+    const f=await unknownFund();
+    await expect(launch.settle(f.op,{state:'failed',reason:'expected_rejection',releaseSlot:true},f.claim.leaseToken)).rejects.toThrow('absence proof');
+    f.proof.evidence.startedAt=f.r.timestamp+f.r.expiryMs;
+    await expect(launch.settle(f.op,{state:'failed',reason:'expected_rejection',releaseSlot:true,transferProof:f.proof},f.claim.leaseToken)).rejects.toThrow('proof authority');
+    expect((await launch.read(f.bot.id,f.base))?.state).toBe('unconfirmed');
+  });
   it('C6 authorizes only an untouched signed-absent reservation without inventing monitor authority',async()=>{
     const f=await reservation(),account=await new GridCustody(launch).recover(f.bot.id,wallet,f.claim.leaseToken);
     await pool.query("UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{reconciliationRequired}','true'::jsonb) WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id]);

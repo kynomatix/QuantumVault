@@ -1,3 +1,5 @@
+import type {GridTransferProof} from './transfer-evidence';
+
 /** A terminal denial of the retained POST, never a failed read or an uncertain send. */
 export type GridTerminalFailureClass='authentication'|'quota'|'transport';
 export interface GridTerminalFailure {requestDigest:string;classification:GridTerminalFailureClass}
@@ -8,6 +10,7 @@ export interface GridSendResult {
 export interface GridSettlementOutcome {
   state:'confirmed'|'failed'|'unconfirmed';reason:string|null;releaseSlot:boolean;
   terminalFailure?:GridTerminalFailure;rateLimited?:boolean;capacityRejected?:boolean;orderId?:string;orderStatus?:string;
+  transferProof?:GridTransferProof;
 }
 /** Pacifica's documented REST denials. Engine/gateway errors do not prove non-execution. */
 export function gridTerminalHttpFailure(status:number,body:unknown,requestDigest:string):GridTerminalFailure|undefined {

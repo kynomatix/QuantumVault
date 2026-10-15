@@ -1,4 +1,5 @@
 import Decimal from 'decimal.js';
+import {randomUUID} from 'node:crypto';
 import {GRID_MINIMUM_LAUNCH_SLOTS} from '../../shared/grid-capacity';
 import type {GridPlan} from './engine-types';
 import {calculateGrid} from './engine';
@@ -133,7 +134,7 @@ export class GridProvision {
       const steps:Array<{kind:ExactGridRequest['kind'];path:string;operationType:string;data:Record<string,unknown>}>=[];
       if(!account.reused)steps.push({kind:'create',path:'/account/subaccount/create',operationType:'subaccount_confirm',data:{}});
       steps.push({kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:account.account,amount:input.policy.totalInvestment,
-        idempotency_key:gridClientOrderId({botId:input.policy.id,level:GRID_FUND_IDENTITY_LEVEL,attempt:0,leg:'profit'})}},
+        idempotency_key:randomUUID()}},
         {kind:'leverage',path:'/account/leverage',operationType:'update_leverage',data:{symbol,leverage:input.policy.leverage}});
       if(input.policy.seedAtCreation&&new Decimal(admission.plan.seedQuantity).gt(0))steps.push({kind:'seed',path:'/orders/create_market',operationType:'create_market_order',
         data:{symbol,amount:admission.plan.seedQuantity,side:input.policy.direction==='long'?'bid':'ask',reduce_only:false,slippage_percent:GRID_SEED_MAX_SLIPPAGE_PERCENT,

@@ -3,6 +3,7 @@ export interface GridNotificationEvent {bot_id:string;event_key:string;kind:stri
 export function gridNotificationText(event:GridNotificationEvent){
   const labels:Record<string,string>={stop:'Stop requested; closing and settlement are not yet confirmed',band:'Range exhausted; holding the position',
     pause:'Pause requested',resume:'Resume requested',resync:'Re-sync requested',paused:'Paused; position may remain open',range_exhausted:'Range exhausted; position held',
+    transfer_unknown:'Transfer outcome UNKNOWN; new entries paused; review the retained fund or sweep request',
     canary:'Resumed in canary mode',stopped:'Stopped; terminal settlement confirmed',sol_warning:'Execution wallet SOL is low',sol_entry_blocked:'Execution wallet SOL blocks new entries',sol_unknown:'Execution wallet SOL is UNKNOWN'};
   const reason=event.kind==='provisioning_denied'?`Provisioning denied: ${String(event.evidence.reason??'Launch authority unavailable')}; custody remains retained`:
     event.kind==='venue_capacity'?'Venue order capacity reached; new placements paused':event.evidence.reason==='circuit_breaker'?'Circuit breaker paused entries':labels[event.kind]??'Lifecycle event requires attention';

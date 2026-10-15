@@ -29,16 +29,23 @@ export interface GridClaim {
 export const GRID_ACTION_CREDITS='10';
 /** Recovery has no admission budget and can never prepare or submit a request. */
 export type GridRecoveryClaim={recoveryOnly:true};
-export interface DurableGridOperation {id:string;state:string;exact_request:ExactGridRequest;exact_request_digest:string;failure_classification:string|null;submitted_at?:Date|string|null}
+export interface DurableGridOperation {id:string;state:string;exact_request:ExactGridRequest;exact_request_digest:string;failure_classification:string|null;submitted_at?:Date|string|null;transfer_recovery?:import('./transfer-evidence').GridTransferProof|null}
+export const gridOperationProjection="o.*,(SELECT e.evidence FROM grid_risk_events e WHERE e.bot_id=o.bot_id AND e.event_key='transfer-proof:'||o.id::text) AS transfer_recovery";
 export const gridOperationCouldHaveLanded=(op:DurableGridOperation|null)=>!!op&&(['submitted','unconfirmed','confirmed'].includes(op.state)||op.submitted_at!=null);
-/** Keep every expired attempt immutable. Only the submit CAS's explicit NULL permits a fresh key. */
+/** Keep every expired attempt immutable. Submitted funding additionally needs the persisted C4 proof. */
 export async function gridProvisionAttempt(read:(key:string,botId:string)=>Promise<DurableGridOperation|null>,botId:string,kind:string,now:number){
   const base=`grid:${botId}:launch:${kind}`,seen=new Set<string>();let key=base;
   for(;;){
     const op=await read(key,botId);
-    if(!op||op.state!=='failed'||op.failure_classification!=='policy'||op.submitted_at!==null
+    const unsent=op?.failure_classification==='policy'&&op.submitted_at===null;
+    const absent=kind==='fund'&&op?.failure_classification==='expected_rejection'&&op.transfer_recovery?.version===1
+      &&op.transfer_recovery.state==='not_landed'&&op.transfer_recovery.requestDigest===op.exact_request_digest
+      &&op.transfer_recovery.evidence?.complete===true&&op.transfer_recovery.evidence.account===op.exact_request.account
+      &&op.transfer_recovery.evidence.masterAccount===op.exact_request.masterAccount
+      &&op.transfer_recovery.evidence.startedAt>op.exact_request.timestamp+op.exact_request.expiryMs;
+    if(!op||op.state!=='failed'||(!unsent&&!absent)
       ||!Number.isSafeInteger(op.exact_request.timestamp)||!Number.isSafeInteger(op.exact_request.expiryMs)||op.exact_request.expiryMs<=0
-      ||op.exact_request.timestamp+op.exact_request.expiryMs>now)return {key,op};
+      ||op.exact_request.timestamp+op.exact_request.expiryMs>now||absent&&op.exact_request.timestamp+op.exact_request.expiryMs===now)return {key,op};
     if(seen.has(op.id)||op.exact_request.botId!==botId||op.exact_request.kind!==(kind==='entry'?'limit':kind)
       ||requestDigest(op.exact_request)!==op.exact_request_digest)throw Error('Grid expired attempt identity changed');
     seen.add(op.id);key=`${base}:retry:${op.id}`;
@@ -214,7 +221,7 @@ export class GridLaunchStorage {
     catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
   }
   async read(botId:string,key:string):Promise<DurableGridOperation|null>{
-    await this.ready();return (await this.pool.query('SELECT * FROM grid_operations WHERE bot_id=$1 AND idempotency_key=$2',[botId,key])).rows[0]??null;
+    await this.ready();return (await this.pool.query(`SELECT ${gridOperationProjection} FROM grid_operations o WHERE bot_id=$1 AND idempotency_key=$2`,[botId,key])).rows[0]??null;
   }
   /** Existing persisted owner confirmation and exact terminal funding; no balance inference or new schema. */
   async firstPlacementContext(r:ExactGridRequest):Promise<GridFirstPlacementContext|null>{
@@ -230,7 +237,7 @@ export class GridLaunchStorage {
         stopLossPercent:b.stop_loss_percent,stopLossPrice:b.stop_loss_price,seedAtCreation:b.seed_at_creation,
         levels:levels.map(l=>({ordinal:l.ordinal,price:l.price,size:l.size,side:l.side,reduceOnly:l.reduce_only}))};
       if(!canonicalGridPolicy(policy)||canonicalGridPolicy(policy)!==canonicalGridPolicy(r.authority.policy as GridPolicy))return null;
-      const ops=(await c.query('SELECT id,state,exact_request,exact_request_digest,terminal_at,idempotency_key,failure_classification,submitted_at FROM grid_operations WHERE bot_id=$1',[r.botId])).rows;
+      const ops=(await c.query(`SELECT ${gridOperationProjection} FROM grid_operations o WHERE bot_id=$1`,[r.botId])).rows;
       const {op}=await gridProvisionAttempt(async key=>ops.find(o=>o.idempotency_key===key)??null,r.botId,'fund',Date.now());
       const fund=op as (DurableGridOperation&{terminal_at:Date|string|null})|null,f=fund?.exact_request;
       if(!fund||fund.state!=='confirmed'||!fund.terminal_at||!f||requestDigest(f)!==fund.exact_request_digest||f.kind!=='fund'
@@ -432,11 +439,31 @@ export class GridLaunchStorage {
     });
   }
   async settle(op:DurableGridOperation,outcome:GridSettlementOutcome,leaseToken?:string){
+    if(['fund','sweep'].includes(op.exact_request.kind)&&outcome.reason==='expected_rejection'&&!outcome.transferProof)
+      throw Error('Grid transfer absence proof unavailable');
     const qualifying=outcome.state==='failed'&&['authentication','quota','transport'].includes(outcome.reason??'');
     if(qualifying&&(!outcome.terminalFailure||outcome.terminalFailure.requestDigest!==op.exact_request_digest||outcome.terminalFailure.classification!==outcome.reason))throw Error('Grid terminal failure authority unavailable');
     return this.transaction(async c=>{
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount]);
       if(leaseToken&&!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE',[op.exact_request.botId,leaseToken])).rowCount)throw Error('Grid recovery ownership lost');
+      if(outcome.transferProof){
+        const proof=outcome.transferProof,request=op.exact_request;
+        const now=Number((await c.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS now')).rows[0].now);
+        if(!leaseToken||proof.version!==1||proof.requestDigest!==op.exact_request_digest||requestDigest(request)!==proof.requestDigest
+          ||!['fund','sweep'].includes(request.kind)||now<=request.timestamp+request.expiryMs
+          ||proof.evidence.complete!==true||proof.evidence.account!==request.account||proof.evidence.masterAccount!==request.masterAccount
+          ||![proof.evidence.startedAt,proof.evidence.observedAt,proof.evidence.balanceAt].every(t=>Number.isSafeInteger(t)&&t>request.timestamp+request.expiryMs&&t<=now&&now-t<5000)
+          ||proof.evidence.observedAt<proof.evidence.startedAt||!['confirmed','not_landed'].includes(proof.state)
+          ||(proof.state==='confirmed'?(outcome.state!=='confirmed'||outcome.reason!==null):(outcome.state!=='failed'||outcome.reason!=='expected_rejection')))
+          throw Error('Grid transfer proof authority unavailable');
+        await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at)
+          VALUES($1,$2,'internal_transfer_proof',$3,clock_timestamp())`,[request.botId,'transfer-proof:'+op.id,proof]);
+        // A pending launch resumes only after its exact transfer has become conclusive. Stop is never undone.
+        await c.query(`UPDATE grid_bots b SET status='provisioning',pause_reason=NULL WHERE b.id=$1 AND b.status='paused'
+          AND b.pause_reason='transfer_unknown' AND EXISTS(SELECT 1 FROM grid_risk_events e WHERE e.bot_id=b.id
+          AND e.event_key=$2 AND e.evidence->>'previousStatus'='provisioning')
+          AND NOT EXISTS(SELECT 1 FROM grid_control_requests q WHERE q.bot_id=b.id AND q.state='pending')`,[request.botId,'transfer-unknown:'+op.id]);
+      }
       const r=await c.query(`UPDATE grid_operations SET state=$2,failure_classification=$3,terminal_at=CASE WHEN $2='unconfirmed' THEN NULL ELSE clock_timestamp() END,
         updated_at=clock_timestamp() WHERE id=$1 AND state IN ('submitted','unconfirmed') AND exact_request_digest=$4 RETURNING id`,[op.id,outcome.state,outcome.reason,op.exact_request_digest]);
       if(!r.rowCount)throw Error('Settlement CAS conflict');

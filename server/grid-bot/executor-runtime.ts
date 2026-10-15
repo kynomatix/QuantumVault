@@ -6,6 +6,7 @@ import {GridFirstPlacementAuthority} from './first-placement';
 import {productionGridLaunchAuthority,retainedGridPolicy,unlockGridLaunchAgent,gridProductionResume,type GridLaunchSecurity} from './launch-authority';
 import type {GridLaunchReads} from './launch-reads';
 import {reconcileGridLaunch} from './launch-reconciliation';
+import {recoverGridTransfer} from './transfer-recovery';
 import {GridLaunchTransientError,requestDigest,GRID_ACTION_CREDITS,gridProvisionAttempt,gridOperationCouldHaveLanded,type ExactGridRequest,type DurableGridOperation,type GridClaim} from './launch-storage';
 import {gridOwnedLive,reconcileGridReduction} from './lifecycle-policy';
 import {gridLifecycleRuntime} from './lifecycle-runtime';
@@ -46,8 +47,10 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
   async function recover(claim:GridMonitorClaim,op:DurableGridOperation,signal:AbortSignal):Promise<GridReconciliation>{
     const r=op.exact_request;
     if(requestDigest(r)!==op.exact_request_digest||r.botId!==claim.id||r.account!==claim.account||r.masterAccount!==claim.masterAccount)throw Error('Grid recovery identity changed');
-    // C4 is deliberately absent: balances and transfer idempotency keys cannot settle a lost response.
-    if(r.kind==='fund'||r.kind==='sweep')return {state:'unknown'};
+    if(r.kind==='fund'||r.kind==='sweep')return recoverGridTransfer(storage,json,claim,op,async()=>{
+      const {bot}=await storage.snapshot(claim);
+      return withAgent(bot.wallet_address,claim.masterAccount,a=>json.subaccounts(claim.masterAccount,a.signingKey,signal));
+    },signal);
     if(r.kind==='create'||r.kind==='leverage'){
       const {bot}=await storage.snapshot(claim),started=Date.now();
       const raw=r.kind==='create'?await withAgent(bot.wallet_address,claim.masterAccount,a=>json.subaccounts(claim.masterAccount,a.signingKey,signal))
