@@ -66,7 +66,7 @@ export function fundingInstructions(intent: FundingIntent, pin: PhoenixFundingPi
     new TransactionInstruction({ programId: pk(addresses.program), data: data('deposit_funds', amount),
       keys: [...common, meta(collateral.toBase58(), true), meta(trader, true), meta(pin.globalVault, true), meta(token), ...arenas] })];
   if (t.leg === 'withdraw') return [create(a, addresses.collateralMint),
-    new TransactionInstruction({ programId: pk(addresses.program), data: data('withdraw_funds', amount), keys: [...common,
+    new TransactionInstruction({ programId: pk(addresses.program), data: data(t.withdrawWithFee || units(intent.feeBaseUnits) > 0n ? 'withdraw_funds_with_fee' : 'withdraw_funds', intent.amountBaseUnits), keys: [...common,
       meta(trader, true), meta(pin.perpAssetMap, true), meta(pin.globalVault, true), meta(collateral.toBase58(), true), meta(token), ...arenas, meta(pin.withdrawQueue, true)] })];
   return [create(a, addresses.usdcMint), new TransactionInstruction({ programId: TOKEN_PROGRAM_ID,
     data: tokenData(4, amount), keys: [meta(collateral.toBase58(), true), meta(pin.emberState), meta(a, false, true)] }),

@@ -10,6 +10,8 @@ import { createPhoenixRegistrationIO } from './registration-io';
 import { readPhoenixReferralConfig } from './referral-config';
 import { PHOENIX_REFERRAL_DEPLOYMENT } from './referral-activation';
 import { phoenixCanaryAllows, phoenixFeatureEnabled, readPhoenixCanaryPolicy } from './rollout';
+import { createPhoenixFundingProduction, type FundingProductionDependencies } from './funding-production';
+import type { PhoenixFundingPin } from './funding-builder';
 
 const phoenix = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih';
 const ember = 'EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy';
@@ -71,6 +73,7 @@ type SigningBot = Parameters<typeof withPhoenixBotSigner>[0];
 export interface PhoenixProductionDependencies {
   pool: Pick<Pool, 'connect' | 'query'>;
   getBot(id: string): Promise<SigningBot | undefined>;
+  getWallet?: FundingProductionDependencies['getWallet'];
   rpc?: Connection;
 }
 export class PhoenixOnboardingError extends Error {
@@ -148,7 +151,17 @@ export function createPhoenixProduction(deps: PhoenixProductionDependencies) {
     if (operation.intent.ownerWallet !== owner || operation.intent.registration?.consumer) throw denied();
     return operation;
   };
+  const fundingPin: PhoenixFundingPin = {
+    logAuthority: 'GdxfTLSsdSY37G6fZoYtdGDSfgFnbT2EmRpuePZxWShS',
+    globalConfiguration: '2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ', globalVault: 'csZXgw2G58hbiWc9ndxaxrQVYVvqdXgQzYLuznEzHJu',
+    perpAssetMap: '2nHGAaEw3D5dd4hVueaUNoygkQFmoeKqRQWnSPqSMFUC', withdrawQueue: '3c3NTwpg7yW91FxijkHBXwVH1xUifun3Z8TC5eW5Si3K',
+    emberState: '6ur7v6AXNpnHeEb6xuk7PyezvZ1i5GrgYyWZkNCpzbRz', emberVault: 'FKcEb4TdPDTRuMnQDpSEPQBcrm15S73xiUD6Qf8ZLUkq',
+    globalTraderIndex: [...PHOENIX_PRODUCTION_DEPLOYMENT.registration.globalTraderIndex], activeTraderBuffer: [...PHOENIX_PRODUCTION_DEPLOYMENT.registration.activeTraderBuffer],
+  };
+  const funding = createPhoenixFundingProduction({ rpc, pin: fundingPin, verify: () => verifyPhoenixProductionDeployment(rpc),
+    getBot: deps.getBot, getWallet: deps.getWallet, retained, operations });
   return {
+    funding,
     async preflight(owner: string) {
       let bound: ReturnType<typeof binding>;
       let operation: StoredPhoenixOperation | null = null;
@@ -209,14 +222,15 @@ export function createPhoenixProduction(deps: PhoenixProductionDependencies) {
       const operation = await retained(botId, owner);
       // Check the finalized trust root for observation too; never attest a wrong network's receipt.
       await verifyPhoenixProductionDeployment(rpc);
-      return present(await makeProvisioner(() => {
+      const result = await makeProvisioner(() => {
         try {
           const { request, botId: currentBotId } = binding(owner);
           const registration = operation.intent.registration;
           return currentBotId === botId && operation.request_key === request.requestId
             && registration?.market === request.market && registration.maxPositions === 128;
         } catch { return false; }
-      }).resume(operation));
+      }).resume(operation);
+      return { ...present(result), ...(result.status === 'completed' ? await funding.onboarding(botId, owner) : {}) };
     },
   };
 }
@@ -226,6 +240,6 @@ export function getPhoenixProduction(): PhoenixProduction | null { return produc
 export async function installPhoenixProduction(): Promise<void> {
   try {
     const [{ pool }, { storage }] = await Promise.all([import('../../db'), import('../../storage')]);
-    production = createPhoenixProduction({ pool, getBot: id => storage.getTradingBotById(id) });
+    production = createPhoenixProduction({ pool, getBot: id => storage.getTradingBotById(id), getWallet: owner => storage.getWallet(owner) });
   } catch { production = null; console.warn('[Phoenix] Registration holder unavailable'); }
 }

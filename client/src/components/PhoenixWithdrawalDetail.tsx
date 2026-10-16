@@ -74,6 +74,8 @@ export function PhoenixWithdrawalDetail({ activeProtocol, visible, botId, wallet
       <p className="text-muted-foreground">Requested {localTime(op.requestedAt)}{op.queuedAt ? ` · Queued ${localTime(op.queuedAt)}` : ''}</p>
       {op.completedAt && <p className="text-muted-foreground">Completed {localTime(op.completedAt)}</p>}
       {op.droppedAt && <p className="text-muted-foreground">Dropped {localTime(op.droppedAt)}</p>}
+      {op.queueObservation && <p>Queued at Phoenix: position {op.queueObservation.position ?? 'unknown'}, state {op.queueObservation.state}, reason {op.queueObservation.reason ?? 'unknown'}. Payout remains pending.</p>}
+      {op.feeUnexpected && <p>Phoenix charged a different fee from the preview. This request remains pending.</p>}
       <p>{op.walletCashConfirmed ? 'Wallet cash confirmed for this operation.' : 'Wallet cash has not been confirmed for this operation.'}</p>
       <p className="text-muted-foreground break-all">Request {op.id}{op.queueRequestId ? ` · Queue ${op.queueRequestId}` : ''}</p>
     </div>

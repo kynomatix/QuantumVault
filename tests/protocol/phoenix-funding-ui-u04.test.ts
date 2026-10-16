@@ -41,7 +41,7 @@ it('requires wallet authentication for history and disabled action routes, and s
   await fundingGet[2](req, res); expect(res.status).toHaveBeenCalledWith(503);
   const fundingPosts = app.post.mock.calls.filter(call => call[0].startsWith('/api/phoenix/bots/:botId/funding/'));
   expect(fundingPosts.map(call => call[0].split('/').pop())).toEqual(['preview', 'deposit', 'withdraw', 'resume']);
-  for (const call of fundingPosts) { expect(call[1]).toBe(auth); call[2](req, res); expect(res.json).toHaveBeenLastCalledWith(PHOENIX_FUNDING_DISABLED); }
+  for (const call of fundingPosts) { expect(call[1]).toBe(auth); await call[2](req, res); expect(res.json).toHaveBeenLastCalledWith(PHOENIX_FUNDING_DISABLED); }
 });
 it('gates Phoenix before incumbent decryption, independent-trader shortcut and exchange adapter dispatch', () => {
   const routes = readFileSync('server/routes.ts', 'utf8');

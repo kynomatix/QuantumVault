@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { safeResponseJson } from '@/lib/safe-fetch';
+import { PhoenixFundingPanel } from './PhoenixFundingPanel';
 
 export interface PhoenixRegistrationPreflight {
   authorized: true; registrationAvailable: boolean; requestId: string; botId: string; market: string;
@@ -60,7 +61,7 @@ export function PhoenixRegistrationPanel({ preflight, walletAddress, onBotCreate
     <p className="text-sm">{preflight.market} · {state}</p>
     <p className="text-sm">{preflight.protectionAccount}</p>
     {preflight.registrationReason && <p className="text-sm text-muted-foreground">{preflight.registrationReason}</p>}
-    <p className="text-sm text-muted-foreground">Funding, start, signals and safety actions remain unavailable.</p>
+    <p className="text-sm text-muted-foreground">Start, signals and safety actions remain unavailable. Funding requires a separate owner canary consent.</p>
     <Label htmlFor="phoenix-registration-name">Bot name</Label>
     <Input id="phoenix-registration-name" value={name} maxLength={100} disabled={attempted || busy} onChange={event => setName(event.target.value)} />
     {authority && <div className="text-sm break-all"><p>Bot authority (manual SOL funding only):</p><p>{authority}</p></div>}
@@ -76,5 +77,6 @@ export function PhoenixRegistrationPanel({ preflight, walletAddress, onBotCreate
     <Button onClick={submit} disabled={busy || registered || !name.trim() || (!attempted && !preflight.registrationAvailable)}>
       {busy ? 'Checking registration…' : registered ? 'Registered' : attempted ? 'Resume same registration' : 'Register Phoenix Signal'}
     </Button>
+    {registered && <PhoenixFundingPanel botId={preflight.botId} walletAddress={walletAddress} />}
   </div>;
 }

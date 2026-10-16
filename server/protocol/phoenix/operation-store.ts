@@ -74,6 +74,28 @@ export class PhoenixOwnershipError extends Error {}
 export class PhoenixOperationStore {
   constructor(private readonly pool: Pick<Pool, 'connect'>) {}
 
+  /** Fresh explicit consent may refresh an UNSENT/expired preparation, never its economics.
+   * The operation lock excludes the signer's revision CAS. Prior attempts remain auditable. */
+  async refreshFundingQuote(intent: PhoenixIntent, revision: number) {
+    validateFundingIntent(intent);
+    return this.transaction(async client => {
+      const { rows: [row] } = await client.query('SELECT id FROM phoenix_operations WHERE bot_id=$1 AND request_key=$2', [intent.botId, intent.requestKey]);
+      if (!row) throw new Error('Phoenix preparation missing');
+      const op = await this.lockOperation(client, intent.botId, intent.ownerWallet, row.id);
+      validateFundingIntent(op.intent);
+      const economic = (i: PhoenixIntent) => {
+        const copy = structuredClone(i);
+        const { quoteSource, quoteReference, quoteExpiresAt, maxGasLamports, ...terms } = copy.funding!;
+        return { ...copy, funding: terms };
+      };
+      if (op.state !== 'prepared' || op.revision !== revision || canonical(economic(op.intent)) !== canonical(economic(intent))) throw new Error('Phoenix stale funding consent');
+      if (['deposit', 'wallet_funding'].includes(intent.funding.leg)) await assertPhoenixNewRisk(client, intent.botId);
+      const result = await client.query('UPDATE phoenix_operations SET intent=$2,intent_hash=$3,revision=revision+1,updated_at=now() WHERE id=$1 RETURNING *',
+        [op.id, intent, phoenixIntentHash(intent)]);
+      return result.rows[0] as StoredPhoenixOperation;
+    });
+  }
+
   async findProtection(request: ProtectionRequest): Promise<StoredPhoenixOperation | null> {
     return this.transaction(async client => {
       await this.lockBot(client, request.botId, request.ownerWallet);

@@ -12,6 +12,8 @@ export function phoenixFundingDetail(history: StoredPhoenixOperation[]): Phoenix
     return { id: op.id, leg: op.intent.funding!.leg, state: op.state,
       requestedAt: h?.requestedAt ?? NaN, queuedAt: h?.queuedAt,
       completedAt: h?.completedAt, droppedAt: h?.droppedAt, queueRequestId: h?.queueRequestId,
+      amountBaseUnits: op.intent.amountBaseUnits, parentOperationId: op.intent.funding!.parentOperationId,
+      queueObservation: h?.receipt?.queueObservation, feeUnexpected: h?.receipt?.feeUnexpected,
       walletCashConfirmed: op.state === 'completed' && ['unwrap', 'wallet_return'].includes(op.intent.funding!.leg) };
   });
   const samples = operations.filter(op => op.leg === 'withdraw' && op.state === 'completed'

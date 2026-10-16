@@ -1,6 +1,7 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { SignalTradeHistoryChart } from './SignalTradeHistoryChart';
 import { PhoenixEquityDetail } from './PhoenixEquityDetail';
+import { PhoenixFundingPanel } from './PhoenixFundingPanel';
 import { PhoenixUnavailableNotice } from './PhoenixUnavailableNotice';
 import { getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
 import { resolveBotTradeDisplayPnl } from '@/lib/equity-display';
@@ -2530,7 +2531,8 @@ export function BotManagementDrawer({
             </div>
 
 
-            </>) : (displayBot ? <PhoenixEquityDetail key={displayBot.id + ':' + walletAddress} botId={displayBot.id} walletAddress={walletAddress} visible={isOpen && activeTab === 'equity'} /> : null)}
+            </>) : (displayBot ? <><PhoenixEquityDetail key={displayBot.id + ':' + walletAddress} botId={displayBot.id} walletAddress={walletAddress} visible={isOpen && activeTab === 'equity'} />
+              {isOpen && activeTab === 'equity' && <PhoenixFundingPanel key={'funding:' + displayBot.id + ':' + walletAddress} botId={displayBot.id} walletAddress={walletAddress} />}</> : null)}
           </TabsContent>
 
           <TabsContent value="webhook" className="space-y-4 mt-4">

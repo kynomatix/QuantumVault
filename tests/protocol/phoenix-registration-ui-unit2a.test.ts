@@ -17,7 +17,8 @@ describe('Unit 2A owner registration UI', () => {
     expect(html).toContain('Ready to register'); expect(html).toContain('27879040');
     expect(html).toContain('Authority eligibility has not been checked');
     expect(html).toContain('not set up yet (needed before trading)');
-    expect(html).toContain('Funding, start, signals and safety actions remain unavailable');
+    expect(html).toContain('Start, signals and safety actions remain unavailable');
+    expect(html).toContain('Funding requires a separate owner canary consent');
     expect(html).not.toContain('Deposit USDC');
   });
   it('shows finalized registration without implying protection or trading readiness', () => {
@@ -25,6 +26,7 @@ describe('Unit 2A owner registration UI', () => {
     expect(html).toContain('Registered (finalized and activated)');
     expect(html).toContain('EXAMPLE-authority'); expect(html).toContain('disabled');
     expect(html).toContain('not set up yet');
+    expect(html).toContain('phoenix-funding-panel');
   });
   it('keeps resume available with new registration off', () => {
     const html = render({ registrationAvailable: false, registrationState: 'submission_pending' });

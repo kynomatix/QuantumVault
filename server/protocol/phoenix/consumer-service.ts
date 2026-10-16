@@ -27,6 +27,11 @@ export class PhoenixConsumerService {
     validatePhoenixConsumer(request.consumer);
     if (!this.enabled() || !phoenixCanaryAllows('create', {ownerWallet:request.ownerWallet,botId:phoenixCreationId(request.ownerWallet,request.requestId),registrationLamports:request.maxCostLamports})) return phoenixConsumerDisabled(request.requestId);
     const registration = await this.provisioning.create(request);
+    return this.resume(registration, request);
+  }
+
+  async resume(registration: ProvisioningResult, request: PhoenixCreationRequest & { consumer: PhoenixConsumerContext }) {
+    validatePhoenixConsumer(request.consumer);
     const handoff = { ...registration, id: registration.botId, activeProtocol: 'phoenix' as const,
       fundingManagedBy: 'phoenix' as const, funded: false };
     if (registration.status !== 'completed') return { ...handoff, fundingWarning: registration.message };

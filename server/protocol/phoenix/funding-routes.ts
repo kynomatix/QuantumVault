@@ -6,7 +6,7 @@ import type { PhoenixOperationStore } from './operation-store';
 import { PhoenixOwnershipError } from './operation-store';
 
 export const PHOENIX_FUNDING_DISABLED = Object.freeze({ code: 'PHOENIX_FUNDING_DISABLED',
-  error: 'Phoenix funding is disabled. Queue outcome verification and live fee quotes are not yet enabled.' });
+  error: 'Phoenix funding is disabled by the current owner canary policy.' });
 
 export function registerPhoenixFundingRoutes(app: Express, requireWallet: RequestHandler,
   dependencies: { history(botId: string, owner: string): ReturnType<PhoenixOperationStore['fundingHistory']> }) {
@@ -46,8 +46,21 @@ export function registerPhoenixFundingRoutes(app: Express, requireWallet: Reques
   });
   // No body-supplied quote, receipt, signer, pin or runtime can enable production funding.
   for (const action of ['preview', 'deposit', 'withdraw', 'resume']) {
-    app.post(`/api/phoenix/bots/:botId/funding/${action}`, requireWallet, (_req, res) => {
-      res.status(503).json(PHOENIX_FUNDING_DISABLED);
+    app.post(`/api/phoenix/bots/:botId/funding/${action}`, requireWallet, async (req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      try {
+        const { getPhoenixProduction } = await import('./production');
+        const runtime = getPhoenixProduction()?.funding;
+        if (!runtime) { res.status(503).json(PHOENIX_FUNDING_DISABLED); return; }
+        if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) { res.status(400).json({ error: 'PHOENIX_INVALID_REQUEST' }); return; }
+        const args = [req.params.botId, req.walletAddress!, req.body] as const;
+        const result = action === 'preview' ? await runtime.preview(...args) : action === 'resume' ? await runtime.resume(...args)
+          : await runtime.execute(req.params.botId, req.walletAddress!, action as 'deposit' | 'withdraw', req.body);
+        res.json(result);
+      } catch (error) {
+        const code = error instanceof Error && /^PHOENIX_[A-Z_]+$/.test(error.message) ? error.message : 'PHOENIX_FUNDING_UNAVAILABLE';
+        res.status(error instanceof PhoenixOwnershipError ? 404 : 409).json({ code, error: code });
+      }
     });
   }
 }

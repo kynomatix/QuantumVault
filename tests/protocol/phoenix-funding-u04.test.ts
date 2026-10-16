@@ -89,6 +89,19 @@ beforeEach(async () => {
 });
 
 describe('U04 atomic funding builders', () => {
+  it('refreshes only an unsubmitted quote under revision lock and preserves economic terms', async () => {
+    const i = intent('wallet_funding');
+    const { operation } = await operations.prepare(i);
+    const fresh = structuredClone(i); fresh.funding.quoteReference = 'EXAMPLE-fresh'; fresh.funding.quoteExpiresAt += 1000;
+    const refreshed = await operations.refreshFundingQuote(fresh, operation.revision);
+    expect(refreshed.request_key).toBe(operation.request_key); expect(refreshed.revision).toBe(operation.revision + 1);
+    await expect(operations.refreshFundingQuote(fresh, operation.revision)).rejects.toThrow('stale');
+    const changed = structuredClone(fresh); changed.amountBaseUnits = '2'; changed.funding.grossBaseUnits = '2';
+    await expect(operations.refreshFundingQuote(changed, refreshed.revision)).rejects.toThrow('stale');
+    const signed = signFundingTransaction(prepareFundingTransaction(fresh, pin, lifetime), fresh, pin, key(50).secretKey);
+    await operations.recordAttempt(botId, owner, operation.id, refreshed.revision, signed);
+    await expect(operations.refreshFundingQuote(fresh, refreshed.revision + 1)).rejects.toThrow('stale');
+  });
   it('matches official SPL bytes, account order and signer/writable flags for ATA, transfer and approve', () => {
     const mint = new PublicKey(addresses.usdcMint), a = authority.publicKey, source = key(50).publicKey;
     const destAta = getAssociatedTokenAddressSync(mint, a);
@@ -221,7 +234,7 @@ describe('U04 durable recovery on isolated PostgreSQL', () => {
   it('uses verified quote values for minimum, fee, net and gas, without an app fee constant', async () => {
     fee = '37'; const i = intent('withdraw'); const quote = await service().preview(i);
     expect(quote).toMatchObject({ feeBaseUnits: '37', netBaseUnits: '1000000', grossBaseUnits: '1000037', gasLamports: '5000', rentLamports: '1000' });
-    expect(fundingInstructions(i, pin)[1].data.readBigUInt64LE(8)).toBe(1000037n);
+    expect(fundingInstructions(i, pin)[1].data.readBigUInt64LE(8)).toBe(1000000n);
     io.quote.mockResolvedValueOnce({ ...quote, feeBaseUnits: '500000' }); await expect(service().create(i)).rejects.toThrow('changed');
     expect(io.withSigner).not.toHaveBeenCalled();
     expect(await operations.fundingHistory(botId,owner)).toHaveLength(0);

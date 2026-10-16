@@ -14,6 +14,7 @@ export interface FundingTerms {
   quoteSource: string;
   quoteReference: string;
   quoteExpiresAt: number;
+  withdrawWithFee?: boolean;
 }
 export type FundingIntent = PhoenixIntent & { funding: FundingTerms };
 export function units(value: string): bigint {
@@ -63,9 +64,14 @@ export interface FundingReceipt {
   source: string; reference: string; intentHash: string; signature: string;
   outcome: 'settled' | 'queued' | 'dropped'; finalized: true; slot: string;
   observedAt: number; queueRequestId?: string;
+  observedFeeBaseUnits?: string;
+  feeUnexpected?: boolean;
   balances: { sourceWalletUsdc: string; destinationWalletUsdc: string | null; botWalletUsdc: string; botWalletCollateral: string;
     venueCollateral: string; withdrawable: string; queued: string };
   creditedBaseUnits: string;
+  queueAnchor?: { signature: string; instructionPath: string; eventPosition: string; trader: string; wallet: string;
+    amount: string; enqueueSlot: string; nodeIndex: number; transitionCount: number };
+  queueObservation?: { position: number | null; state: string; reason: number | null; observedSlot: string };
 }
 export interface FundingHistory {
   events?: { state: string; observedAt: number; source: string; reference: string; receipt: FundingReceipt }[];
