@@ -21,7 +21,12 @@ export function protectionInstruction(t: ProtectionTarget, pin: PhoenixOrderPin,
   distinct.forEach(pk);
   let keys: ReturnType<typeof meta>[], data: Buffer;
   const arena = [pin.perpAssetMap, ...pin.globalTraderIndex, ...pin.activeTraderBuffer, pin.orderbook, pin.splineCollection].map(s => meta(s, true));
-  if (c.kind === 'cancel-book') {
+  if (c.kind === 'ensure_account') {
+    if (c.capacity !== 8 || c.bytes !== 992) throw new Error('Unreviewed conditional allocation');
+    keys = [meta(p), meta(pin.logAuthority), meta(pin.globalConfiguration), meta(wallet, true, true), meta(wallet),
+      meta(trader), meta(conditionalAccount, true), meta(SystemProgram.programId.toBase58())];
+    data = Buffer.concat([discriminator('create_conditional_orders_account'), Buffer.from([8])]);
+  } else if (c.kind === 'cancel-book') {
     keys = [meta(p), meta(pin.logAuthority), meta(pin.globalConfiguration, true), meta(wallet, false, true), meta(trader, true), ...arena];
     data = discriminator('cancel_all');
   } else if (c.kind === 'cancel-conditional') {

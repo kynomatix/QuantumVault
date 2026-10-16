@@ -17,7 +17,7 @@ export function intent(patch: Partial<PhoenixOrderIntent> = {}): PhoenixOrderInt
 }
 export function authority(): PhoenixOrderAuthority {
   return { venue: 'phoenix', trader: identity.traderAccountAddress, market: 'SOL', assetId: 3,
-    collateralMint: PHOENIX_PUBLIC_ADDRESSES.usdcMint, source: 'EXAMPLE-chain', reference: 'EXAMPLE-snapshot',
+    collateralMint: PHOENIX_PUBLIC_ADDRESSES.collateralMint, source: 'EXAMPLE-chain', reference: 'EXAMPLE-snapshot',
     observedAt: now, refreshFailed: false, status: 'active', isolatedOnly: false, tickSize: '100', baseLotsDecimals: 2,
     price: { usd: '150', observedAt: now, source: 'phoenix-execution', reference: 'EXAMPLE-book' }, slot: '100',
     entry: { observedAt: now, minimumNotionalMicros: '1000000', maxNotionalMicros: '10000000000',

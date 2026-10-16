@@ -9496,8 +9496,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
-        return res.status(503).json(phoenixSafetyUnavailable('close'));
+        const { phoenixSafetyDispatch } = await import('./protocol/phoenix/safety-routes');
+        const result = await phoenixSafetyDispatch(req.walletAddress!, bot.id, bot.market, 'close', req.body);
+        return res.status(result.status).json(result.body);
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
@@ -9937,8 +9938,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
-        return res.status(503).json(phoenixSafetyUnavailable('replace'));
+        const { phoenixSafetyDispatch } = await import('./protocol/phoenix/safety-routes');
+        const result = await phoenixSafetyDispatch(req.walletAddress!, bot.id, bot.market, 'replace', req.body);
+        return res.status(result.status).json(result.body);
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
@@ -10065,8 +10067,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== req.walletAddress) return res.status(403).json({ error: "Forbidden" });
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
-        return res.status(503).json(phoenixSafetyUnavailable('cancel'));
+        const { phoenixSafetyDispatch } = await import('./protocol/phoenix/safety-routes');
+        const result = await phoenixSafetyDispatch(req.walletAddress!, bot.id, bot.market, 'cancel', req.body);
+        return res.status(result.status).json(result.body);
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);
@@ -10167,8 +10170,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
-        return res.status(503).json(phoenixSafetyUnavailable('close'));
+        const { phoenixSafetyDispatch } = await import('./protocol/phoenix/safety-routes');
+        const result = await phoenixSafetyDispatch(req.walletAddress!, bot.id, market, 'close', req.body);
+        return res.status(result.status).json(result.body);
       }
 
       const wallet = await storage.getWallet(bot.walletAddress);

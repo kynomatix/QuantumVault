@@ -12,6 +12,7 @@ import { PHOENIX_REFERRAL_DEPLOYMENT } from './referral-activation';
 import { phoenixCanaryAllows, phoenixFeatureEnabled, readPhoenixCanaryPolicy } from './rollout';
 import { createPhoenixFundingProduction, type FundingProductionDependencies } from './funding-production';
 import type { PhoenixFundingPin } from './funding-builder';
+import { createPhoenixExecutionProduction } from './execution-production';
 
 const phoenix = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih';
 const ember = 'EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy';
@@ -160,7 +161,10 @@ export function createPhoenixProduction(deps: PhoenixProductionDependencies) {
   };
   const funding = createPhoenixFundingProduction({ rpc, pin: fundingPin, verify: () => verifyPhoenixProductionDeployment(rpc),
     getBot: deps.getBot, getWallet: deps.getWallet, retained, operations });
+  const execution = createPhoenixExecutionProduction({ rpc, pool: deps.pool, pin: fundingPin,
+    verify: () => verifyPhoenixProductionDeployment(rpc), getBot: deps.getBot, retained });
   return {
+    execution,
     funding,
     async preflight(owner: string) {
       let bound: ReturnType<typeof binding>;

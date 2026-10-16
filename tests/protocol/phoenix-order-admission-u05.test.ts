@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { PHOENIX_PUBLIC_ADDRESSES } from '../../server/protocol/phoenix/sdk-boundary';
 import { Transaction } from '@solana/web3.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -11,6 +12,11 @@ const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order
 };
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
+  it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {
+    expect(admitPhoenixOrder(intent(), authority(), now).authority.collateralMint).toBe(PHOENIX_PUBLIC_ADDRESSES.collateralMint);
+    const wrong = authority(); wrong.collateralMint = PHOENIX_PUBLIC_ADDRESSES.usdcMint;
+    expect(() => admitPhoenixOrder(intent(), wrong, now)).toThrow('authority unavailable');
+  });
   it('sizes exact lots, ticks, maximum slippage notional and account-tier fees', () => {
     const a = admitPhoenixOrder(intent(), authority(), now);
     expect(a.packet).toMatchObject({ numBaseLots: '200', priceInTicks: '15150', minBaseLotsToFill: '0',

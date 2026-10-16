@@ -74,9 +74,9 @@ export function admitPhoenixOrder(input: PhoenixOrderIntent, snapshot: PhoenixOr
   if (now >= i.expiresAt || i.expiresAt - now > 60_000 || units(i.lastValidSlot) <= units(a.slot)
     || units(i.lastValidSlot) - units(a.slot) > 150n) throw new Error('Order expired or lifetime too wide');
   if (a.venue !== 'phoenix' || a.trader !== i.identity.traderAccountAddress || a.market !== i.market
-    || a.collateralMint !== PHOENIX_PUBLIC_ADDRESSES.usdcMint || !a.source || !a.reference || a.refreshFailed
+    || a.collateralMint !== PHOENIX_PUBLIC_ADDRESSES.collateralMint || !a.source || !a.reference || a.refreshFailed
     || !Number.isInteger(a.assetId) || a.assetId < 0 || !['active', 'reduce_only'].includes(a.status)
-    || a.isolatedOnly !== false) throw new Error('Phoenix market authority unavailable');
+    || i.action === 'entry' && a.isolatedOnly !== false) throw new Error('Phoenix market authority unavailable');
   fresh(a.observedAt, now); fresh(a.price.observedAt, now); fresh(a.position.observedAt, now);
   if (a.price.source !== 'phoenix-execution' || !a.price.reference || !a.position.epoch) throw new Error('Phoenix price/position unknown');
   const lots = phoenixBaseUnitsToLots(i.baseUnits, a.baseLotsDecimals);

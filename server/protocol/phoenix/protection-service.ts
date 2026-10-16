@@ -16,13 +16,16 @@ export interface ProtectionIO {
   snapshot(request: ProtectionRequest, minimumSlot: string): Promise<ProtectionSnapshot>;
   lifetime(): Promise<{ blockhash: string; lastValidBlockHeight: number }>;
   blockHeight(): Promise<number>;
+  /** Required for allocation: real rent + fee quote and retained bot SOL, before custody. */
+  quoteAccount?(request: ProtectionRequest, command: Extract<ProtectionCommand, { kind: 'ensure_account' }>, lifetime: { blockhash: string; lastValidBlockHeight: number }): Promise<void>;
   withSigner<T>(request: ProtectionRequest, sign: (secret: Uint8Array) => T): Promise<T>;
+  assertSend?(request: ProtectionRequest): void;
   submit(transaction: string): Promise<string>;
   receipt(operation: StoredPhoenixOperation, attempt: PhoenixAttemptInput): Promise<ProtectionReceipt | null>;
 }
 
 /** No entry/enable gate here: disabled entries must not prevent native safety work.
- * IO is injected; production installs no signer or sender until later review. */
+ * Allocation uses the same durable claim/attempt/reconcile path as cancellation. */
 export class PhoenixProtectionService {
   private readonly pin: PhoenixOrderPin;
   constructor(private readonly store: ProtectionRepository, private readonly io: ProtectionIO,
@@ -68,6 +71,10 @@ export class PhoenixProtectionService {
         before = latest;
         if (command.kind === 'place') this.assertPlacement(op, latest);
         else if (this.alreadyAbsent(command, latest)) continue;
+        if (command.kind === 'ensure_account') {
+          if (!this.io.quoteAccount) throw new Error('Conditional allocation cost unavailable');
+          await this.io.quoteAccount(request, command, lifetime);
+        }
         const signed = await this.io.withSigner(request, secret => {
           assertProtectionSnapshot(latest, request, this.now(), before.slot);
           if (command.kind === 'place') this.assertPlacement(op!, latest);
@@ -80,6 +87,7 @@ export class PhoenixProtectionService {
         const height = await this.io.blockHeight();
         assertProtectionSnapshot(latest, request, this.now(), before.slot);
         if (!Number.isSafeInteger(height) || height < 0 || height > lifetime.lastValidBlockHeight) throw new Error('Protection lifetime expired');
+        this.io.assertSend?.(request);
         if (await this.io.submit(transaction) !== attempt.signature) throw new Error('Protection signature mismatch');
         op = (await this.store.read(request.botId, request.ownerWallet, op.id)).operation;
         const next = await this.reconcile(op);
@@ -106,6 +114,7 @@ export class PhoenixProtectionService {
     desiredProtection(request.prices!, s.position.side as 'long' | 'short', s.position.baseLots, s.markTicks);
   }
   private alreadyAbsent(c: ProtectionCommand, s: ProtectionSnapshot) {
+    if (c.kind === 'ensure_account') return s.conditionalExists;
     if (c.kind === 'place') return false;
     if (c.kind === 'cancel-book') return s.orderbookOrderIds.length === 0;
     const legs = s.legs.filter(l => l.assetId === s.assetId && (c.kind === 'cancel-conditional'
@@ -125,7 +134,7 @@ export class PhoenixProtectionService {
     const replacing = ['replace', 'breakeven'].includes(request.action);
     const cancelled = after.legs.filter(l => l.assetId === request.assetId).length === 0
       && (request.action !== 'pause' || after.orderbookOrderIds.length === 0);
-    const done = !inFlight && (replacing ? progress.protected : cancelled);
+    const done = !inFlight && (request.action === 'ensure_account' ? after.conditionalExists : replacing ? progress.protected : cancelled);
     progress.allOrdersCancelled = done && !replacing && protectionStatus(after).allOrdersCancelled;
     if (!done) progress.reason = 'Incomplete authoritative result or another transaction can still land';
     return this.store.observe(request.botId, request.ownerWallet, op.id, op.revision, done ? 'completed' : 'failed',

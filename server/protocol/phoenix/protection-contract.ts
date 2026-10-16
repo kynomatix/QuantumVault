@@ -31,9 +31,9 @@ export interface ProtectionSnapshot {
 export interface ProtectionTarget { identity: PhoenixTraderIdentity; market: string; assetId: number }
 export interface ProtectionRequest extends ProtectionTarget {
   botId: string; ownerWallet: string; requestKey: string;
-  action: 'replace' | 'breakeven' | 'cancel' | 'pause'; prices?: ProtectionPrices;
+  action: 'replace' | 'breakeven' | 'cancel' | 'pause' | 'ensure_account'; prices?: ProtectionPrices;
 }
-export type ProtectionCommand = { kind: 'cancel-book' }
+export type ProtectionCommand = { kind: 'ensure_account'; capacity: 8; bytes: 992 } | { kind: 'cancel-book' }
   | { kind: 'cancel-conditional'; index: number; sequence: string }
   | { kind: 'cancel-standalone'; direction: 'greater' | 'less'; sequence: string; funder: string }
   | { kind: 'place'; role: ProtectionRole; side: 'buy' | 'sell'; direction: 'greater' | 'less'; triggerTicks: string; executionTicks: string; baseLots: string };
@@ -118,8 +118,12 @@ export function protectionStatus(s: ProtectionSnapshot, prices?: ProtectionPrice
 }
 export function planProtection(request: ProtectionRequest, before: ProtectionSnapshot, now: number): ProtectionTerms {
   assertProtectionSnapshot(before, request, now);
-  if (!['replace', 'breakeven', 'cancel', 'pause'].includes(request.action)) throw new Error('Invalid protection action');
+  if (!['replace', 'breakeven', 'cancel', 'pause', 'ensure_account'].includes(request.action)) throw new Error('Invalid protection action');
   const commands: ProtectionCommand[] = [];
+  if (request.action === 'ensure_account') {
+    if (!before.conditionalExists) commands.push({ kind: 'ensure_account', capacity: 8, bytes: 992 });
+    return structuredClone({ request, before, commands });
+  }
   // Cancel the book first: cancelling parents can change child state. Every next step re-reads it.
   if (request.action === 'pause') commands.push({ kind: 'cancel-book' });
   const indices = new Map<number, string>();

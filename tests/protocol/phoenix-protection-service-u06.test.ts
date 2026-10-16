@@ -56,6 +56,7 @@ function fixture() {
       const c = store.op!.intent.protection!.commands[progress.step];
       receiptOutcome = failTp && c.kind === 'place' && c.role === 'tp' ? 'failed' : 'confirmed';
       if (receiptOutcome === 'confirmed') {
+        if (c.kind === 'ensure_account') s.conditionalExists = true;
         if (c.kind === 'cancel-book') s.orderbookOrderIds = [];
         if (c.kind === 'cancel-conditional') s.legs = s.legs.filter(l => l.surface !== 'conditional' || l.index !== c.index);
         if (c.kind === 'cancel-standalone') s.legs = s.legs.filter(l => l.surface !== 'standalone' || l.direction !== c.direction);
@@ -77,6 +78,35 @@ function fixture() {
 const progress = (op: StoredPhoenixOperation) => op.observation!.protection as ProtectionProgress;
 
 describe('U06 durable replacement, cancellation and safety recovery', () => {
+  it('allocates capacity eight using a rent quote before custody and finalized account proof', async () => {
+    const f = fixture(); f.state().conditionalExists = false;
+    let quoted = false;
+    f.io.quoteAccount = async (_r, c) => { expect(f.signs()).toBe(0); expect(c).toEqual({ kind: 'ensure_account', capacity: 8, bytes: 992 }); quoted = true; };
+    const op = await f.service().execute(request({ action: 'ensure_account', prices: undefined }));
+    expect(quoted).toBe(true); expect(op.kind).toBe('protection'); expect(op.state).toBe('completed');
+    expect(progress(op).before.conditionalExists).toBe(false); expect(progress(op).after.conditionalExists).toBe(true); expect(f.sends()).toBe(1);
+  });
+  it('refuses allocation without a rent quote and preserves an unresolved attempt without resending', async () => {
+    const f = fixture(); f.state().conditionalExists = false;
+    const r = request({ action: 'ensure_account', prices: undefined });
+    const refused = await f.service().execute(r); expect(refused.state).toBe('failed'); expect(f.signs()).toBe(0);
+    const g = fixture(); g.state().conditionalExists = false; g.io.quoteAccount = async () => {}; g.timeout();
+    expect((await g.service().execute(r)).state).toBe('submission_pending');
+    await g.service().execute(r); expect(g.sends()).toBe(1);
+    g.timeout(false); expect((await g.service().execute(r)).state).toBe('prepared');
+    expect((await g.service().execute(r)).state).toBe('completed'); expect(g.sends()).toBe(1);
+  });
+  it('retains a claimed allocation without sending after its gate is revoked', async () => {
+    const f = fixture(); f.state().conditionalExists = false; f.io.quoteAccount = async () => {}; f.timeout();
+    f.io.assertSend = () => { throw new Error('revoked'); };
+    const op = await f.service().execute(request({ action: 'ensure_account', prices: undefined }));
+    expect(op.state).toBe('submission_pending'); expect(f.signs()).toBe(1); expect(f.sends()).toBe(0);
+  });
+  it('keeps existing protection untouched when its allocation is already present', async () => {
+    const f = fixture(); f.state().legs = [leg()];
+    const op = await f.service().execute(request({ action: 'ensure_account', prices: undefined }));
+    expect(op.state).toBe('completed'); expect(f.sends()).toBe(0); expect(progress(op).remainingLegs).toHaveLength(1);
+  });
   it('replaces and proves both intended legs with before/after authoritative state', async () => {
     const f = fixture(); f.state().legs = [leg()];
     const op = await f.service().execute(request());
@@ -208,8 +238,8 @@ describe('U06 durable replacement, cancellation and safety recovery', () => {
     const routes = readFileSync(new URL('../../server/routes.ts', import.meta.url), 'utf8');
     for (const route of ['close-position', 'close-market-position', 'set-tpsl', 'cancel-tpsl']) {
       const part = routes.slice(routes.indexOf(`app.post("/api/trading-bots/:id/${route}"`));
-      expect(part.indexOf('phoenixSafetyUnavailable')).toBeLessThan(part.indexOf('storage.getWallet'));
-      expect(part.indexOf('bot.walletAddress !== req.walletAddress')).toBeLessThan(part.indexOf('phoenixSafetyUnavailable'));
+      expect(part.indexOf('phoenixSafetyDispatch')).toBeLessThan(part.indexOf('storage.getWallet'));
+      expect(part.indexOf('bot.walletAddress !== req.walletAddress')).toBeLessThan(part.indexOf('phoenixSafetyDispatch'));
     }
     const pause = routes.slice(routes.indexOf('app.patch("/api/trading-bots/:id"'));
     expect(pause.indexOf("phoenixSafetyUnavailable('pause')")).toBeLessThan(pause.indexOf('// PAUSE BOT = CLOSE POSITION'));
