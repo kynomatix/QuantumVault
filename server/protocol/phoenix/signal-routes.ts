@@ -1,12 +1,13 @@
 import type { Express, RequestHandler, Response } from 'express';
 import type { TradingBot } from '../../../shared/schema';
 import { getPhoenixProduction } from './production';
+import { LAB_PROVENANCE_MESSAGES } from '../../../shared/lab-provenance';
 
 function refused(res:Response,error:unknown) {
   const message=error instanceof Error?error.message:'';
-  const code=/^(PHOENIX_[A-Z_]+|lab_provenance_required)$/.test(message)?message:'PHOENIX_RUNTIME_AUTHORITY_UNAVAILABLE';
-  return res.status(409).json({code,status:'rejected',error:code==='lab_provenance_required'
-    ?'Needs a Lab link before it can start (coming)':'Phoenix request refused; retained attempts remain available for recovery.'});
+  const code=/^(PHOENIX_[A-Z_]+|LAB_UNLINKED|LAB_SNAPSHOT_INVALID|LAB_DEPLOYMENT_MISMATCH)$/.test(message)?message:'PHOENIX_RUNTIME_AUTHORITY_UNAVAILABLE';
+  return res.status(409).json({code,status:'rejected',error:LAB_PROVENANCE_MESSAGES[code as keyof typeof LAB_PROVENANCE_MESSAGES]
+    ?? 'Phoenix request refused; retained attempts remain available for recovery.'});
 }
 export async function handlePhoenixSignalPatch(owner:string,botId:string,input:Record<string,unknown>,res:Response) {
   res.setHeader('Cache-Control','no-store');

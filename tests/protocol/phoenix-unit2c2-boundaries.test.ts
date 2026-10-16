@@ -6,7 +6,7 @@ import { PhoenixSignalPanel } from '../../client/src/components/PhoenixSignalPan
 
 it('shows disabled Lab Start, unknown signal, position and protection on first render',()=>{
   const html=renderToStaticMarkup(createElement(PhoenixSignalPanel,{botId:'EXAMPLE-bot'}));
-  expect(html).toContain('Needs a Lab link before it can start (coming)');expect(html).toMatch(/disabled=""[^>]*title="Needs a Lab link/);
+  expect(html).toContain('Check the Lab source in this bot’s Settings.');expect(html).toMatch(/disabled=""[^>]*title="Lab source is unknown/);
   expect(html).toContain('Signal: unknown');expect(html).toContain('Position: unknown');expect(html).toContain('TP/SL: unknown');
 });
 it('keeps both incumbent webhook secret checks ahead of their Phoenix early returns',()=>{

@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { type AnyPgColumn, foreignKey, pgTable, text, varchar, uuid, integer, smallint, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+import type { LabDeploySnapshot, LabLinkState } from './lab-provenance';
 
 // Express session table (managed by connect-pg-simple, defined here to prevent deletion)
 export const userSessions = pgTable("user_sessions", {
@@ -195,6 +196,12 @@ export const tradingBots = pgTable("trading_bots", {
     lastTradeAt?: string;
   }>().default({ totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 }),
   sourcePublishedBotId: varchar("source_published_bot_id"),
+  labStrategyId: integer("lab_strategy_id"),
+  labRunId: integer("lab_run_id"),
+  labResultId: integer("lab_result_id"),
+  labDeploySnapshot: jsonb("lab_deploy_snapshot").$type<LabDeploySnapshot>(),
+  labLinkState: text("lab_link_state").$type<LabLinkState>().default("unlinked"),
+  labLinkedAt: timestamp("lab_linked_at", { withTimezone: true }),
   
   // Security v3: Execution authorization per bot
   executionActive: boolean("execution_active").default(false).notNull(), // Whether execution is currently enabled
@@ -290,6 +297,10 @@ export const tradingBots = pgTable("trading_bots", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ([
+  foreignKey({ name: "trading_bots_lab_strategy_id_fkey", columns: [table.labStrategyId], foreignColumns: [labStrategies.id] }).onDelete("set null"),
+  foreignKey({ name: "trading_bots_lab_run_id_fkey", columns: [table.labRunId], foreignColumns: [labOptimizationRuns.id] }).onDelete("set null"),
+  foreignKey({ name: "trading_bots_lab_result_id_fkey", columns: [table.labResultId], foreignColumns: [labOptimizationResults.id] }).onDelete("set null"),
+  check("trading_bots_lab_link_state_check", sql`lab_link_state IN ('linked','owner_confirmed','unlinked')`),
   check("trading_bots_phoenix_identity_check", sql`(active_protocol <> 'phoenix' AND phoenix_authority_wallet IS NULL AND phoenix_trader_account IS NULL AND phoenix_network IS NULL AND phoenix_program_address IS NULL AND phoenix_portfolio_index IS NULL AND phoenix_subaccount_index IS NULL)
           OR (active_protocol = 'phoenix' AND phoenix_authority_wallet IS NOT NULL AND phoenix_trader_account IS NOT NULL
             AND phoenix_network IS NOT NULL AND phoenix_program_address IS NOT NULL AND phoenix_portfolio_index IS NOT NULL AND phoenix_subaccount_index IS NOT NULL
@@ -338,6 +349,12 @@ export const insertTradingBotSchema = createInsertSchema(tradingBots).omit({
   agentPublicKey: true,
   agentPrivateKeyEncrypted: true,
   autoParkDueAt: true, // server-managed debounce deadline, never client-set
+  labStrategyId: true,
+  labRunId: true,
+  labResultId: true,
+  labDeploySnapshot: true,
+  labLinkState: true,
+  labLinkedAt: true,
 });
 export type InsertTradingBot = z.infer<typeof insertTradingBotSchema>;
 export type TradingBot = typeof tradingBots.$inferSelect;

@@ -1,3 +1,4 @@
+import { createLabLinkedBot } from './lab/provenance';
 import { getTableColumns, eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
@@ -756,7 +757,7 @@ export interface IStorage {
   // §8. Record a successful verify-empty check (advisory freshness for the next reuse).
   markSubaccountVerifiedEmpty(protocol: string, protocolSubaccountId: string): Promise<void>;
   getProtocolSubaccountsByWallet(walletAddress: string): Promise<ProtocolSubaccount[]>;
-  createTradingBot(bot: InsertTradingBot): Promise<TradingBot>;
+  createTradingBot(bot: InsertTradingBot, labResultId?: number): Promise<TradingBot>;
   createAgentAuthorityTradingBot(params: {
     walletAddress: string;
     observedAgentPublicKey: string;
@@ -2237,7 +2238,8 @@ export class DatabaseStorage implements IStorage {
       ));
   }
 
-  async createTradingBot(bot: InsertTradingBot): Promise<TradingBot> {
+  async createTradingBot(bot: InsertTradingBot, labResultId?: number): Promise<TradingBot> {
+    if (labResultId !== undefined) return createLabLinkedBot(bot, labResultId);
     const result = await db.insert(tradingBots).values(bot as any).returning();
     return result[0];
   }

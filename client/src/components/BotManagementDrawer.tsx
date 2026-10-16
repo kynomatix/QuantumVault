@@ -1,5 +1,6 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
 import { SignalTradeHistoryChart } from './SignalTradeHistoryChart';
+import { LabSourcePanel } from './LabSourcePanel';
 import { PhoenixEquityDetail } from './PhoenixEquityDetail';
 import { PhoenixFundingPanel } from './PhoenixFundingPanel';
 import { PhoenixUnavailableNotice } from './PhoenixUnavailableNotice';
@@ -2921,6 +2922,9 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="settings" className="space-y-3 mt-4">
+            {localBot.botType === 'signal' && <DrawerSettingsPanel id="lab-source" expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} icon={BarChart3} title="Lab source" testId="button-toggle-settings-lab-source">
+              <LabSourcePanel key={localBot.id} botId={localBot.id} walletAddress={walletAddress} onLinked={onBotUpdated} />
+            </DrawerSettingsPanel>}
             {moneyControls ? (<>
             <DrawerSettingsPanel
               id="general"

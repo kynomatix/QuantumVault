@@ -46,7 +46,7 @@ export async function configurePhoenixSignal(pool: Pick<Pool,'connect'>, io: Pho
     const webhookSecret = randomBytes(32).toString('base64url');
     if (input.isActive === true) {
       const lab = phoenixLabProvenanceSatisfied(bot);
-      if (!lab.satisfied) throw new Error(lab.reason);
+      if (!lab.satisfied) throw new Error(lab.reason!);
     }
     await c.query(`UPDATE trading_bots SET name=$2,side=$3,leverage=$4,max_position_size=$5,total_investment=$6,
       risk_config=$7,policy_hmac=$8,webhook_secret=$9,is_active=$10,execution_active=$10,subaccount_status='active',updated_at=now() WHERE id=$1`,

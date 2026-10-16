@@ -186,11 +186,11 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 198 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 199 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(198);
-    expect(metadata).toHaveLength(198);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(198);
+    expect(sqlEntries).toHaveLength(199);
+    expect(metadata).toHaveLength(199);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(199);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // Append-only repair: preserve every SQL statement and metadata entry from 000 through 196.
     const preservedManifestDigest = createHash("sha256").update(JSON.stringify(
@@ -212,6 +212,10 @@ describe("schema readiness", () => {
       const fileSql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
       expect(sqlEntries[192 + offset].trim()).toBe(fileSql.replaceAll('\r\n', '\n').trim());
     }
+    expect(metadata[198]).toMatchObject({ id: '198-lab-signal-provenance', capabilities: ['signal_bot', 'lab', 'phoenix'], operation: 'ddl' });
+    expect(sqlEntries[198].trim()).toBe(readFileSync(new URL('../../migrations/0010_lab_signal_provenance.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n').trim());
+    expect(sqlEntries[198]).toContain("CHECK (lab_link_state IN ('linked','owner_confirmed','unlinked'))");
+    expect(sqlEntries[198]).not.toMatch(/UPDATE\s+trading_bots|CASE/i);
     // Entries 028 and 076 preserve later superset constraints on every boot.
     // Pin the other pre-existing SQL bytes, including entry 185.
     const preExistingUnchanged = sqlEntries.slice(0, 186).filter((_, index) => index !== 28 && index !== 76);
@@ -689,7 +693,7 @@ describe("schema readiness", () => {
   });
 
   it("matches migration 197's cast-stripped catalog rendering and supersedes only the 196 close postcondition", async () => {
-    const migrations = readDbSchemaMigrationManifest().manifest.slice(196);
+    const migrations = readDbSchemaMigrationManifest().manifest.slice(196, 198);
     const definition = "CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text AND close !~ '^0{1,12}(\\.0{1,18})?$'::text)";
     const snapshot = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(definition), migrations);
     expect(snapshot.unavailableCapabilities).toEqual([]);
@@ -706,7 +710,7 @@ describe("schema readiness", () => {
     ["zero rejection", "CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text)"],
     ["conjunction", "CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text OR close !~ '^0{1,12}(\\.0{1,18})?$'::text)"],
   ])("rejects migration 197 when the close CHECK loses %s", async (_missing, definition) => {
-    const migrations = readDbSchemaMigrationManifest().manifest.slice(196);
+    const migrations = readDbSchemaMigrationManifest().manifest.slice(196, 198);
     const snapshot = await probeSchemaMigrationManifest(plannerWeeklyCatalogQuery(definition), migrations);
     expect(snapshot.unavailableCapabilities).toEqual(["grid_bot"]);
     expect(snapshot.evidence).toEqual([{

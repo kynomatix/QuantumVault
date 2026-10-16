@@ -677,6 +677,7 @@ export default function QuantumLab() {
   // the agent's chosen result + recommended leverage. null = closed. RAW (1x) numbers;
   // BotSetupAdvisor re-applies leverage internally.
   const [agentDeployTarget, setAgentDeployTarget] = useState<{
+    resultId: number;
     leverage: number;
     drawdownPercent: number;
     streakDrawdownPercent: number;
@@ -717,6 +718,7 @@ export default function QuantumLab() {
       const res = await apiRequest("GET", `/api/lab/strategies/${target.strategyId}`);
       const strategy = await res.json();
       setAgentDeployTarget({
+        resultId: target.resultId,
         leverage: target.leverage,
         drawdownPercent: target.drawdownPercent,
         streakDrawdownPercent: target.streakDrawdownPercent,
@@ -1461,6 +1463,7 @@ export default function QuantumLab() {
         <BotSetupAdvisor
           open={true}
           onOpenChange={(o) => { if (!o) setAgentDeployTarget(null); }}
+          resultId={agentDeployTarget.resultId}
           leverage={agentDeployTarget.leverage}
           drawdownPercent={agentDeployTarget.drawdownPercent}
           streakDrawdownPercent={agentDeployTarget.streakDrawdownPercent}
@@ -3881,7 +3884,7 @@ const HistoryResultsPanel = memo(function HistoryResultsPanel({ runId, onBack, t
           </TabsContent>
 
           <TabsContent value="risk">
-            {riskAnalysis && <RiskManagementPanel analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} strategyName={strategy?.name} pineScript={strategy?.pineScript} params={selectedResult.params as Record<string, any>} />}
+            {riskAnalysis && <RiskManagementPanel resultId={selectedResult.id} analysis={riskAnalysis} ticker={selectedResult.ticker} timeframe={selectedResult.timeframe} backtestProfit={selectedResult.netProfitPercent} backtestDrawdown={selectedResult.maxDrawdownPercent} strategyName={strategy?.name} pineScript={strategy?.pineScript} params={selectedResult.params as Record<string, any>} />}
           </TabsContent>
 
           <TabsContent value="robustness">
@@ -4049,7 +4052,7 @@ function HistStatCard({ label, value, color, icon, sublabel }: { label: string; 
 }
 
 
-function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, backtestDrawdown, strategyName, pineScript, params }: { analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
+function RiskManagementPanel({ resultId, analysis, ticker, timeframe, backtestProfit, backtestDrawdown, strategyName, pineScript, params }: { resultId?: number; analysis: LabRiskAnalysis; ticker?: string; timeframe?: string; backtestProfit: number; backtestDrawdown: number; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
   const [showLeverageView, setShowLeverageView] = useState(false);
   const { getMaxLeverage } = useLeverageLimits();
   const ratingColors: Record<LabRiskAnalysis["riskRating"], { text: string; bg: string; border: string }> = {
@@ -4102,7 +4105,7 @@ function RiskManagementPanel({ analysis, ticker, timeframe, backtestProfit, back
               const adjProfit = backtestProfit * l.lev;
               const adjDrawdown = backtestDrawdown * l.lev;
               return (
-                <BotSetupAdvisor key={l.label} leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params}>
+                <BotSetupAdvisor resultId={resultId} key={l.label} leverage={l.lev} drawdownPercent={backtestDrawdown} streakDrawdownPercent={analysis.streakDrawdownPercent} profitPercent={backtestProfit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params}>
                   <button
                     type="button"
                     className={cn(
@@ -4898,7 +4901,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
             </div>
           )}
 
-          {activeConfig && <HeatmapRiskSummary config={activeConfig} idx={selectedTopIdx} ticker={selectedCell?.ticker} timeframe={selectedCell?.timeframe} strategyName={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.name : undefined} pineScript={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.pineScript : undefined} params={activeConfig.params as Record<string, any>} />}
+          {activeConfig && <HeatmapRiskSummary resultId={activeConfig.id} config={activeConfig} idx={selectedTopIdx} ticker={selectedCell?.ticker} timeframe={selectedCell?.timeframe} strategyName={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.name : undefined} pineScript={activeConfig.strategyId ? strategyMap.get(activeConfig.strategyId)?.pineScript : undefined} params={activeConfig.params as Record<string, any>} />}
 
           {activeConfig?.params && (
             <Collapsible>
@@ -4924,7 +4927,7 @@ function HeatmapPanel({ onViewRun, onRefine }: { onViewRun?: (runId: number, tic
   );
 }
 
-function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName, pineScript, params, children, open: controlledOpen, onOpenChange }: { leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any>; children?: React.ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void }) {
+function BotSetupAdvisor({ resultId, leverage, drawdownPercent, streakDrawdownPercent, profitPercent, isRecommended, ticker, timeframe, strategyName, pineScript, params, children, open: controlledOpen, onOpenChange }: { resultId?: number; leverage: number; drawdownPercent: number; streakDrawdownPercent?: number; profitPercent: number; isRecommended?: boolean; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any>; children?: React.ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void }) {
   const [capital, setCapital] = useState("1000");
   const capitalNum = parseFloat(capital) || 0;
   const { toast } = useToast();
@@ -5196,6 +5199,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
 
   const handleCreateBot = async () => {
     if (!walletAddress || !ticker) return;
+    if (!resultId) { setCreateError('Select a saved Lab result before deploying.'); return; }
     setCreateError(null);
     setWebhookUrl(null);
     setWebhookSecret(null);
@@ -5235,6 +5239,8 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
         totalInvestment: String(effectiveTradeSize),
         initialFundingAmount: String(totalDepositForRequest),
         activeProtocol: deployProtocol,
+        labResultId: resultId,
+        botType: 'signal',
       };
 
       const res = await fetch('/api/trading-bots', {
@@ -5777,7 +5783,7 @@ function BotSetupAdvisor({ leverage, drawdownPercent, streakDrawdownPercent, pro
   );
 }
 
-function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pineScript, params }: { config: any; idx: number; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
+function HeatmapRiskSummary({ resultId, config, idx, ticker, timeframe, strategyName, pineScript, params }: { resultId?: number; config: any; idx: number; ticker?: string; timeframe?: string; strategyName?: string; pineScript?: string; params?: Record<string, any> }) {
   const [showProjection, setShowProjection] = useState(true);
   const { getMaxLeverage } = useLeverageLimits();
   const dd = config.maxDrawdownPercent || 0;
@@ -5863,7 +5869,7 @@ function HeatmapRiskSummary({ config, idx, ticker, timeframe, strategyName, pine
       {showProjection && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           {leverageLevels.map((l) => (
-            <BotSetupAdvisor key={l.label} leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params}>
+            <BotSetupAdvisor resultId={resultId} key={l.label} leverage={l.lev} drawdownPercent={dd} profitPercent={profit} isRecommended={l.isRecommended} ticker={ticker} timeframe={timeframe} strategyName={strategyName} pineScript={pineScript} params={params}>
               <button
                 type="button"
                 className={cn(

@@ -45,7 +45,8 @@ export async function dispatchPhoenixSignal(bot: TradingBot, payload: unknown, d
   }
   if (bot.activeProtocol !== 'phoenix' || !bot.isActive || !bot.executionActive || bot.webhookSecret.startsWith('disabled-phoenix:')) throw new Error('PHOENIX_ACTIVE_AUTHORIZED_BOT_REQUIRED');
   await d.authorize(bot);
-  if (!phoenixLabProvenanceSatisfied(bot).satisfied) throw new Error('lab_provenance_required');
+  const lab = phoenixLabProvenanceSatisfied(bot);
+  if (!lab.satisfied) throw new Error(lab.reason!);
   if (now - signal.time > 300_000 || signal.time > now + 30_000) throw new Error('PHOENIX_SIGNAL_TIME_OUTSIDE_WINDOW');
   if (signal.close) {
     const safety = await d.close(bot, signal.requestKey, signal.sequence) as {order?:PhoenixOrderRecord;alreadyFlat?:boolean};

@@ -6,6 +6,7 @@ import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 
 interface Detail {
+  start:{satisfied:boolean;reason:string|null;message:string};
   isActive:boolean; configured:boolean;
   config:{maxPositionSize:string|null;totalInvestment:string;leverage:number;riskConfig:{stopLossPercent?:number;takeProfitPercent?:number}|null};
   signal:{status:string;reason?:string|null};
@@ -31,8 +32,8 @@ export function PhoenixSignalPanel({botId,walletAddress}:{botId:string;walletAdd
   }catch(e){setMessage(e instanceof Error?e.message:'Runtime request unavailable');}finally{setBusy(false);}}
   return <section className="space-y-3 rounded-lg border p-3" data-testid="phoenix-signal-panel">
     <p className="font-medium">Phoenix Signal · {detail?.isActive?'Active':'Stopped'}</p>
-    <p className="text-sm">Needs a Lab link before it can start (coming)</p>
-    <div className="flex gap-2"><Button disabled title="Needs a Lab link before it can start (coming)">Start</Button>
+    <p className="text-sm">{detail?.start?.message ?? 'Check the Lab source in this bot’s Settings.'}</p>
+    <div className="flex gap-2"><Button disabled title={detail?.start?.satisfied ? 'Start is controlled by the Phoenix rollout.' : detail?.start?.message ?? 'Lab source is unknown.'}>Start</Button>
       <Button variant="outline" disabled={busy} onClick={()=>void patch({isActive:false})}>Pause and attempt safety</Button>
       <Button variant="outline" disabled={busy} onClick={()=>void refresh().catch(()=>setMessage('Runtime observations unavailable.'))}>Refresh</Button></div>
     <div className="grid grid-cols-2 gap-2">

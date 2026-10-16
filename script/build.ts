@@ -114,6 +114,12 @@ async function buildAll() {
     logLevel: "info",
   });
 
+  console.log("building Lab provenance worker...");
+  await esbuild({
+    entryPoints: ["server/lab/provenance-worker.ts"], platform: "node", bundle: true, format: "cjs",
+    outfile: "dist/provenance-worker.cjs", target: "node20", minify: true, external: externals, logLevel: "info",
+  });
+
   console.log("building optimizer worker...");
   await esbuild({
     entryPoints: ["server/lab/optimizer-worker.ts"],

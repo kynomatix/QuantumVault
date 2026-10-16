@@ -2513,6 +2513,18 @@ BEGIN
     ADD CONSTRAINT planner_btc_weekly_close_check
     CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' AND close !~ '^0{1,12}(\\.0{1,18})?$');
 END $$;
+`,
+`ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_strategy_id integer REFERENCES lab_strategies(id) ON DELETE SET NULL;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_run_id integer REFERENCES lab_optimization_runs(id) ON DELETE SET NULL;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_result_id integer REFERENCES lab_optimization_results(id) ON DELETE SET NULL;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_deploy_snapshot jsonb;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_link_state text DEFAULT 'unlinked';
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_linked_at timestamptz;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass AND conname = 'trading_bots_lab_link_state_check') THEN
+    ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_lab_link_state_check CHECK (lab_link_state IN ('linked','owner_confirmed','unlinked'));
+  END IF;
+END $$;
 `
 ] as const;
 
@@ -7304,6 +7316,88 @@ const schemaMigrationMetadata = [
       "constraint": "planner_btc_weekly_close_check",
       "definitionIncludes": [
         "close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' AND close !~ '^0{1,12}(\\.0{1,18})?$'"
+      ]
+    }
+  ]
+},
+{
+  "id": "198-lab-signal-provenance",
+  "capabilities": [
+    "signal_bot",
+    "lab",
+    "phoenix"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_strategy_id"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_run_id"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_result_id"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_deploy_snapshot"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_link_state"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_linked_at"
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_link_state_check",
+      "definitionIncludes": [
+        "lab_link_state",
+        "linked",
+        "owner_confirmed",
+        "unlinked"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_strategy_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (lab_strategy_id)",
+        "REFERENCES lab_strategies(id)",
+        "ON DELETE SET NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_run_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (lab_run_id)",
+        "REFERENCES lab_optimization_runs(id)",
+        "ON DELETE SET NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_result_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (lab_result_id)",
+        "REFERENCES lab_optimization_results(id)",
+        "ON DELETE SET NULL"
       ]
     }
   ]

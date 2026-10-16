@@ -43,8 +43,11 @@ export function createPhoenixExecutionProduction(d: ExecutionDependencies) {
     const { bot } = await owned(i.botId, i.ownerWallet, i.identity); await d.verify();
     const newRisk = 'action' in i && (i.action === 'entry' || i.action === 'ensure_account');
     if (newRisk && !entryAllowed(i)) throw new Error('PHOENIX_ENTRY_DISABLED');
-    if (i.action === 'entry' && (!(bot as TradingBot).isActive || !(bot as TradingBot).executionActive
-      || !phoenixLabProvenanceSatisfied(bot).satisfied)) throw new Error('lab_provenance_required');
+    if (i.action === 'entry') {
+      const lab = phoenixLabProvenanceSatisfied(bot);
+      if (!lab.satisfied) throw new Error(lab.reason!);
+      if (!(bot as TradingBot).isActive || !(bot as TradingBot).executionActive) throw new Error('PHOENIX_ACTIVE_AUTHORIZED_BOT_REQUIRED');
+    }
     return withPhoenixBotSigner(bot, secret => { if (newRisk && !entryAllowed(i)) throw new Error('PHOENIX_ENTRY_REVOKED'); return sign(secret); });
   }
   const lifetime = () => d.rpc.getLatestBlockhash('finalized'), blockHeight = () => d.rpc.getBlockHeight('finalized');

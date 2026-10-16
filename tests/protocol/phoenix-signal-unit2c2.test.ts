@@ -30,10 +30,10 @@ function runtime() {
 beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(now);vi.stubEnv('PHOENIX_CANARY_MARKET','SOL');flags.allowed=true;});
 afterEach(()=>{vi.restoreAllMocks();vi.useRealTimers();vi.unstubAllEnvs();});
 describe('Phoenix fixed Signal boundary',()=>{
-  it('keeps the single Lab predicate false with every possible environment override',async()=>{
+  it('keeps unlinked bots blocked despite an environment override',async()=>{
     vi.stubEnv('PHOENIX_LAB_PROVENANCE_ENABLED','true');
-    expect(lab.phoenixLabProvenanceSatisfied(bot())).toMatchObject({satisfied:false,reason:'lab_provenance_required',message:'Needs a Lab link before it can start (coming)'});
-    const {d}=runtime();await expect(dispatchPhoenixSignal(bot(),payload(),d,now)).rejects.toThrow('lab_provenance_required');
+    expect(lab.phoenixLabProvenanceSatisfied(bot())).toMatchObject({satisfied:false,reason:'LAB_UNLINKED',message:'Find and confirm a Lab source in Settings before starting.'});
+    const {d}=runtime();await expect(dispatchPhoenixSignal(bot(),payload(),d,now)).rejects.toThrow('LAB_UNLINKED');
     expect(d.authorize).toHaveBeenCalledOnce();expect(d.snapshot).not.toHaveBeenCalled();expect(d.execute).not.toHaveBeenCalled();
   });
   it('uses parsed bar time/action, normalizes equivalent times and refuses missing or invalid dates',()=>{
@@ -56,14 +56,14 @@ describe('Phoenix fixed Signal boundary',()=>{
     await expect(dispatchPhoenixSignal(bot(),{action:'buy'},d,now)).rejects.toThrow('RELIABLE_SIGNAL_ID_REQUIRED');expect(d.execute).not.toHaveBeenCalled();
   });
   it('uses stored sizing/risk and native quote instead of hostile webhook amounts and prices',async()=>{
-    vi.spyOn(lab,'phoenixLabProvenanceSatisfied').mockReturnValue({satisfied:true,reason:'lab_provenance_required',message:''});
+    vi.spyOn(lab,'phoenixLabProvenanceSatisfied').mockReturnValue({satisfied:true,reason:null,message:''});
     const {d,events}=runtime();await dispatchPhoenixSignal(bot(),{...payload(),price:1,quantity:999999,leverage:100,stopLoss:0,takeProfit:0},d,now);
     const i=d.execute.mock.calls[0][0];expect(i).toMatchObject({action:'entry',side:'buy',leverage:'2',maxNotionalMicros:'10000000',baseUnits:'0.06',sequence:String(BigInt(now)*4n),lastValidSlot:'120',protection:{tp:{triggerTicks:'16500'},sl:{triggerTicks:'14250'}}});
     expect(events).toEqual(['authorize','snapshot','durable-service']);
   });
   it('refuses disabled, stale, side-mismatched and over-cap entries',async()=>{
     const {d}=runtime();await expect(dispatchPhoenixSignal(bot({isActive:false}),payload(),d,now)).rejects.toThrow('ACTIVE_AUTHORIZED');
-    vi.spyOn(lab,'phoenixLabProvenanceSatisfied').mockReturnValue({satisfied:true,reason:'lab_provenance_required',message:''});
+    vi.spyOn(lab,'phoenixLabProvenanceSatisfied').mockReturnValue({satisfied:true,reason:null,message:''});
     await expect(dispatchPhoenixSignal(bot(),payload(),d,now+300001)).rejects.toThrow('TIME_OUTSIDE');
     await expect(dispatchPhoenixSignal(bot({side:'short'}),payload(),d,now)).rejects.toThrow('SIDE_REFUSED');
     flags.allowed=false;expect(()=>validatePhoenixSignalPolicy(bot())).toThrow('ENTRY_DISABLED');
@@ -71,7 +71,7 @@ describe('Phoenix fixed Signal boundary',()=>{
     expect(d.execute).not.toHaveBeenCalled();
   });
   it('passes the same durable identity to reduce-only close, never sizing it as an entry',async()=>{
-    vi.spyOn(lab,'phoenixLabProvenanceSatisfied').mockReturnValue({satisfied:true,reason:'lab_provenance_required',message:''});
+    vi.spyOn(lab,'phoenixLabProvenanceSatisfied').mockReturnValue({satisfied:true,reason:null,message:''});
     const {d}=runtime(),p={...payload(),position_size:0};await dispatchPhoenixSignal(bot(),p,d,now);
     const s=phoenixSignalIdentity(p);expect(d.close).toHaveBeenCalledWith(expect.anything(),s.requestKey,s.sequence);expect(d.snapshot).not.toHaveBeenCalled();expect(d.execute).not.toHaveBeenCalled();
   });
@@ -102,11 +102,11 @@ describe('atomic owned configure/start',()=>{
     const c=control(),first=await configurePhoenixSignal(c.pool,c.io,'EXAMPLE-owner','EXAMPLE-bot',{name:'EXAMPLE-renamed'});
     const second=await configurePhoenixSignal(c.pool,c.io,'EXAMPLE-owner','EXAMPLE-bot',{name:'EXAMPLE-renamed'});
     expect(first.isActive).toBe(false);expect(first.webhookSecret).toHaveLength(43);expect(second.webhookSecret).not.toBe(first.webhookSecret);
-    expect(first.start.reason).toBe('lab_provenance_required');expect(c.sql.at(-1)).toBe('COMMIT');expect(c.updates[0][9]).toBe(false);
+    expect(first.start.reason).toBe('LAB_UNLINKED');expect(c.sql.at(-1)).toBe('COMMIT');expect(c.updates[0][9]).toBe(false);
     expect(c.sql[1]).toContain('wallet_address=$2 FOR UPDATE');expect(c.io.policyHmac).toHaveBeenCalledWith(expect.objectContaining({name:'EXAMPLE-renamed'}));
   });
   it('reaches the Lab gate after all readiness checks and rolls back activation atomically',async()=>{
-    const c=control();await expect(configurePhoenixSignal(c.pool,c.io,'EXAMPLE-owner','EXAMPLE-bot',{isActive:true})).rejects.toThrow('lab_provenance_required');
+    const c=control();await expect(configurePhoenixSignal(c.pool,c.io,'EXAMPLE-owner','EXAMPLE-bot',{isActive:true})).rejects.toThrow('LAB_UNLINKED');
     expect(c.io.snapshot).toHaveBeenCalledTimes(2);expect(c.io.policyHmac).toHaveBeenCalledOnce();expect(c.updates).toEqual([]);expect(c.sql.at(-1)).toBe('ROLLBACK');expect(c.client.release).toHaveBeenCalledOnce();
   });
   it.each([{funded:false},{conditional:false},{owned:false}])('refuses missing prerequisite %j without a partial config write',async option=>{
