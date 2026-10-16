@@ -6521,6 +6521,8 @@ export async function registerRoutes(
 
   const { registerPhoenixFundingRoutes } = await import('./protocol/phoenix/funding-routes');
   registerPhoenixOnboardingRoutes(app, requireWallet);
+  const { registerPhoenixSignalRoutes } = await import('./protocol/phoenix/signal-routes');
+  registerPhoenixSignalRoutes(app, requireWallet);
   registerPhoenixFundingRoutes(app, requireWallet, { history: async (botId, owner) => {
     const { pool } = await import('./db');
     const { PhoenixOperationStore } = await import('./protocol/phoenix/operation-store');
@@ -17104,6 +17106,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
 
+      if (bot.activeProtocol === 'phoenix') {
+        const { handlePhoenixSignalPatch } = await import('./protocol/phoenix/signal-routes');
+        return handlePhoenixSignalPatch(req.walletAddress!, bot.id, req.body, res);
+      }
+
       const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset, vaultAllOut, autoCollateralTopUp, autoRepayEnabled } = req.body;
       
       // Per-bot park DESTINATION. Only meaningful on Flash (isolated per-bot wallet);
@@ -17128,20 +17135,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
       }
       
-      if (bot.activeProtocol === 'phoenix' && isActive !== undefined) {
-        const { phoenixSafetyUnavailable } = await import('./protocol/phoenix/safety-routes');
-        if (isActive === true) {
-          const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
-          return res.status(503).json(phoenixOrderDisabled());
-        }
-        if (isActive !== false) return res.status(400).json({ error: 'isActive must be a boolean' });
-        if (Object.keys(req.body).some(key => key !== 'isActive')) {
-          return res.status(400).json({ error: 'Phoenix pause must be sent separately from configuration changes' });
-        }
-        const paused = await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'pause');
-        return res.json({ ...paused, safety: phoenixSafetyUnavailable('pause') });
-      }
-
       // PAUSE BOT = CLOSE POSITION: If bot is being paused (isActive changing to false)
       // close any open position on Drift first
       let positionClosed = false;
@@ -19139,8 +19132,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
-        return res.status(503).json(phoenixOrderDisabled());
+        const { handlePhoenixTradingView } = await import('./protocol/phoenix/signal-routes');
+        return handlePhoenixTradingView(bot, req.body, res);
       }
 
       try {
@@ -20698,8 +20691,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       if (bot.activeProtocol === 'phoenix') {
-        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');
-        return res.status(503).json(phoenixOrderDisabled());
+        const { handlePhoenixTradingView } = await import('./protocol/phoenix/signal-routes');
+        return handlePhoenixTradingView(bot, req.body, res);
       }
 
       try {

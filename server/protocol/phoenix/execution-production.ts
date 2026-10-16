@@ -17,6 +17,8 @@ import type { ProtectionRequest, ProtectionPrices } from './protection-contract'
 import { phoenixMarket } from './markets';
 import { orderIntentHash, type PhoenixOrderIntent } from './order-contract';
 import { phoenixPriceUsdToTicks } from './sdk-boundary';
+import { phoenixLabProvenanceSatisfied } from './lab-provenance';
+import type { TradingBot } from '../../../shared/schema';
 
 interface ExecutionDependencies {
   rpc: Connection; pool: Pick<Pool, 'connect' | 'query'>; pin: PhoenixReaderPin; verify(): Promise<void>;
@@ -41,6 +43,8 @@ export function createPhoenixExecutionProduction(d: ExecutionDependencies) {
     const { bot } = await owned(i.botId, i.ownerWallet, i.identity); await d.verify();
     const newRisk = 'action' in i && (i.action === 'entry' || i.action === 'ensure_account');
     if (newRisk && !entryAllowed(i)) throw new Error('PHOENIX_ENTRY_DISABLED');
+    if (i.action === 'entry' && (!(bot as TradingBot).isActive || !(bot as TradingBot).executionActive
+      || !phoenixLabProvenanceSatisfied(bot).satisfied)) throw new Error('lab_provenance_required');
     return withPhoenixBotSigner(bot, secret => { if (newRisk && !entryAllowed(i)) throw new Error('PHOENIX_ENTRY_REVOKED'); return sign(secret); });
   }
   const lifetime = () => d.rpc.getLatestBlockhash('finalized'), blockHeight = () => d.rpc.getBlockHeight('finalized');
@@ -116,6 +120,24 @@ export function createPhoenixExecutionProduction(d: ExecutionDependencies) {
     const value = { orders, protection, safety }; services.set(market, value); return value;
   }
   return { forMarket,
+    snapshot: reader.snapshot,
+    async observe(owner: string, botId: string, market: string) {
+      const { identity } = await owned(botId, owner);
+      return reader.read(identity,market,'sell','0',true,false);
+    },
+    async reconcileOrder(record: PhoenixOrderRecord) { return forMarket(record.intent.market).orders.reconcile(record.intent,record.id); },
+    async reconcileProtection(operation: StoredPhoenixOperation) {
+      const request = operation.intent.protection?.request;
+      if (!request) throw new Error('PHOENIX_PROTECTION_REQUEST_REQUIRED');
+      const service=forMarket(request.market).protection;
+      const observed=await service.reconcile(operation);
+      const step=(observed.observation?.protection as {step?:number}|undefined)?.step;
+      // Resume only a previously observed command chain. ensure_account may
+      // finish its final proof, but can never allocate another account here.
+      if(observed.state==='prepared' && typeof step==='number' && step>0
+        && (request.action!=='ensure_account' || step>=observed.intent.protection!.commands.length)) return service.execute(request);
+      return observed;
+    },
     async ensureAccount(owner: string, botId: string, requestKey: string) {
       const { identity } = await owned(botId, owner), market = process.env.PHOENIX_CANARY_MARKET;
       if (!market) throw new Error('PHOENIX_CANARY_MARKET_REQUIRED'); const m = phoenixMarket(market);
@@ -158,7 +180,8 @@ export function createPhoenixExecutionProduction(d: ExecutionDependencies) {
         const r = prior.rows[0] as PhoenixOrderRecord; const order = await service.orders.reconcile(r.intent, r.id);
         return { order, positionClosed: false, reason: 'Retained close reconciled; use a new request key for a proven partial residual.' };
       }
-      const sequence = (await d.pool.query('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM phoenix_order_intents WHERE bot_id=$1', [botId])).rows[0].next;
+      if(input.sequence!==undefined && (typeof input.sequence!=='string' || !/^[1-9][0-9]{0,24}$/.test(input.sequence))) throw new Error('PHOENIX_INVALID_SEQUENCE');
+      const sequence = input.sequence ?? (await d.pool.query('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM phoenix_order_intents WHERE bot_id=$1', [botId])).rows[0].next;
       const lots = observed.authority.position.baseLots.padStart(Math.max(0, m.baseLotsDecimals) + 1, '0');
       const baseUnits = m.baseLotsDecimals > 0 ? `${lots.slice(0, -m.baseLotsDecimals)}.${lots.slice(-m.baseLotsDecimals)}` : (BigInt(lots) * 10n ** BigInt(-m.baseLotsDecimals)).toString();
       const notional = BigInt(observed.authority.position.baseLots) * BigInt(m.tickSize) * observed.metadata.mark * 2n;

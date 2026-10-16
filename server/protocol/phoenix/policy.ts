@@ -3,6 +3,8 @@ import { phoenixIdentityFromBot } from './identity';
 
 export type BotPolicyInput = PhoenixBotIdentityColumns & {
   market: string; leverage: number; maxPositionSize: string | null;
+  totalInvestment?: string; side?: string; signalConfig?: unknown;
+  riskConfig?: { stopLossPercent?: number; takeProfitPercent?: number } | null;
   aiTraderPolicy?: { policyVersion: 'phoenix-ai-v1'; ownerWallet: string; paperMode: boolean;
     aiBotId: string | null; bindingHash: string; sizingMode: string; riskMinPct: string; riskMaxPct: string };
 };
@@ -28,5 +30,8 @@ export function botPolicyRecord(bot: BotPolicyInput): Record<string, unknown> {
   }
   const identity = phoenixIdentityFromBot(bot);
   return { ...legacy, policyVersion: 'phoenix-v1', botId: bot.id, ownerWallet: bot.walletAddress,
-    derivationIndex: bot.derivationIndex, ...identity };
+    derivationIndex: bot.derivationIndex, ...identity,
+    ...(bot.riskConfig ? { signalPolicyVersion: 'phoenix-fixed-signal-v1', totalInvestment: bot.totalInvestment,
+      side: bot.side, signalConfig: JSON.stringify(bot.signalConfig ?? null),
+      stopLossPercent: bot.riskConfig.stopLossPercent, takeProfitPercent: bot.riskConfig.takeProfitPercent } : {}) };
 }

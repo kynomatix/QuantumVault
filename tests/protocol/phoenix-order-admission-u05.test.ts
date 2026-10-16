@@ -93,6 +93,7 @@ describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('preserves incumbent order routes byte for byte outside the reviewed Phoenix boundaries', () => {
     const current = readFileSync('server/routes.ts', 'utf8').replaceAll('\r\n', '\n');
     const branch = "      if (bot.activeProtocol === 'phoenix') {\n        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');\n        return res.status(503).json(phoenixOrderDisabled());\n      }\n\n";
+    const signalBranch = "      if (bot.activeProtocol === 'phoenix') {\n        const { handlePhoenixTradingView } = await import('./protocol/phoenix/signal-routes');\n        return handlePhoenixTradingView(bot, req.body, res);\n      }\n\n";
     for (const [key, expectedSha256] of Object.entries(incumbentBaseline.routeSha256)) {
       const colon = key.indexOf(':'), method = key.slice(0, colon), path = key.slice(colon + 1);
       const start = current.indexOf(`  app.${method}("${path}"`);
@@ -101,21 +102,21 @@ describe('Phoenix U05 exact admission and explicit wire policy', () => {
       const body = current.slice(start, end < 0 ? undefined : end);
       let incumbent: string;
       if (method === 'patch') {
-        const phoenix = /      if \(bot.activeProtocol === 'phoenix' && isActive !== undefined\) \{[\s\S]*?\n      \}\n\n/;
+        const phoenix = /      if \(bot.activeProtocol === 'phoenix'\) \{[\s\S]*?\n      \}\n\n/;
         expect(body).toMatch(phoenix);
         const guarded = body.match(phoenix)![0];
-        expect(guarded).toContain('isActive === true');
-        expect(guarded).toContain('phoenixOrderDisabled()');
-        expect(guarded).toContain(".stop(bot.id, req.walletAddress!, 'pause')");
+        expect(guarded).toContain('return handlePhoenixSignalPatch(req.walletAddress!, bot.id, req.body, res)');
+        expect(body.indexOf(guarded)).toBeLessThan(body.indexOf('const { name, market, side'));
         expect(body.indexOf(guarded)).toBeLessThan(body.indexOf('decryptAgentKeyStrict'));
         const switchRefusal = "          if (bot.activeProtocol === 'phoenix' || requestedProtocol === 'phoenix') return res.status(409).json({ error: 'Phoenix requires a new bot; recovery identities cannot be retargeted.' });\n";
         expect(body).toContain(switchRefusal);
         expect(body.indexOf(switchRefusal)).toBeLessThan(body.indexOf('assertNoOpenPositionBeforeProtocolSwitch'));
         incumbent = body.replace(phoenix, '').replace(switchRefusal, '');
       } else {
-        expect(body.split(branch)).toHaveLength(2);
-        expect(body.indexOf(branch)).toBeLessThan(body.indexOf('getUmkForWebhook'));
-        incumbent = body.replace(branch, '');
+        const phoenix = path.includes('/webhook/') ? signalBranch : branch;
+        expect(body.split(phoenix)).toHaveLength(2);
+        expect(body.indexOf(phoenix)).toBeLessThan(body.indexOf('getUmkForWebhook'));
+        incumbent = body.replace(phoenix, '');
       }
       // U03 supplies the complete policy object. These exact replacements pin
       // the reviewed call while retaining the main digest for all incumbent bytes.

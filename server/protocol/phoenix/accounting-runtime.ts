@@ -5,8 +5,8 @@ import { phoenixEquity } from './accounting-equity';
 import { signed } from './accounting-contract';
 import type { AccountingRepository, PhoenixAccountingService } from './accounting-service';
 
-// No production history provider is installed until native history completeness,
-// funding semantics and account-tier evidence are verified for live enablement.
+// The installed native provider refuses completeness until history origin,
+// finality and funding-settlement semantics are proven.
 let reconciler: PhoenixAccountingService | null = null;
 export function installPhoenixAccountingReconciler(service: PhoenixAccountingService | null) { reconciler = service; }
 export function phoenixAccountingTarget(bot: TradingBot) {

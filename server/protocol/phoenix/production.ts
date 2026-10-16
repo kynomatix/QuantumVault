@@ -13,6 +13,15 @@ import { phoenixCanaryAllows, phoenixFeatureEnabled, readPhoenixCanaryPolicy } f
 import { createPhoenixFundingProduction, type FundingProductionDependencies } from './funding-production';
 import type { PhoenixFundingPin } from './funding-builder';
 import { createPhoenixExecutionProduction } from './execution-production';
+import type { TradingBot } from '../../../shared/schema';
+import { createPhoenixSignalProduction } from './signal-production';
+import { createPhoenixProductionReader } from './production-reader';
+import { createPhoenixNativeAccountingIO } from './accounting-production';
+import { PhoenixAccountingService } from './accounting-service';
+import { PhoenixAccountingStore } from './accounting-store';
+import { installPhoenixAccountingReconciler } from './accounting-runtime';
+import { PhoenixRecoveryWorker } from './recovery-worker';
+import { phoenixIdentityFromBot } from './identity';
 
 const phoenix = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih';
 const ember = 'EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy';
@@ -74,7 +83,7 @@ type SigningBot = Parameters<typeof withPhoenixBotSigner>[0];
 export interface PhoenixProductionDependencies {
   pool: Pick<Pool, 'connect' | 'query'>;
   getBot(id: string): Promise<SigningBot | undefined>;
-  getWallet?: FundingProductionDependencies['getWallet'];
+  getWallet?: (owner:string) => Promise<({executionEnabled?:boolean} & NonNullable<Awaited<ReturnType<NonNullable<FundingProductionDependencies['getWallet']>>>>) | undefined>;
   rpc?: Connection;
 }
 export class PhoenixOnboardingError extends Error {
@@ -82,7 +91,7 @@ export class PhoenixOnboardingError extends Error {
 }
 const denied = () => new PhoenixOnboardingError(404, 'PHOENIX_CANARY_UNAVAILABLE');
 
-/** No timers, network probes or shared transport changes at construction/startup. */
+/** Construction does no I/O. Installation starts the retained recovery observer. */
 export function createPhoenixProduction(deps: PhoenixProductionDependencies) {
   const rpc = deps.rpc ?? createSolanaRpcConnection('finalized', {
     primaryTimeoutMs: 8000, totalTimeoutMs: 12000, maxResponseBytes: 8 * 1024 * 1024,
@@ -163,9 +172,34 @@ export function createPhoenixProduction(deps: PhoenixProductionDependencies) {
     getBot: deps.getBot, getWallet: deps.getWallet, retained, operations });
   const execution = createPhoenixExecutionProduction({ rpc, pool: deps.pool, pin: fundingPin,
     verify: () => verifyPhoenixProductionDeployment(rpc), getBot: deps.getBot, retained });
+  const signals=createPhoenixSignalProduction({pool:deps.pool,execution,retained,getWallet:deps.getWallet,
+    getBot:async id=>await deps.getBot(id) as TradingBot|undefined});
+  const reader=createPhoenixProductionReader(rpc,fundingPin,()=>verifyPhoenixProductionDeployment(rpc));
+  const accounting=new PhoenixAccountingService(new PhoenixAccountingStore(deps.pool),createPhoenixNativeAccountingIO(reader,async target=>{
+    const bot=await deps.getBot(target.botId);
+    if(!bot || bot.walletAddress!==target.ownerWallet || createHash('sha256').update(JSON.stringify(phoenixIdentityFromBot(bot))).digest('hex')
+      !==createHash('sha256').update(JSON.stringify(target.identity)).digest('hex')) throw new Error('PHOENIX_ACCOUNTING_IDENTITY_CHANGED');
+    return bot.market;
+  }));
+  const recovery=new PhoenixRecoveryWorker(deps.pool,{
+    async operation(bot,op) {
+      if(op.kind==='register') {
+        if(op.state==='prepared') return;
+        await verifyPhoenixProductionDeployment(rpc);
+        return makeProvisioner(()=>false).resume(op);
+      }
+      if(op.kind==='protection') return execution.reconcileProtection(op);
+      return funding.resume(bot.id,bot.walletAddress,{operationId:op.id});
+    },order:record=>execution.reconcileOrder(record),
+    accounting:bot=>accounting.reconcile({botId:bot.id,ownerWallet:bot.walletAddress,identity:phoenixIdentityFromBot(bot)}),
+    // Native queue drop history, complete debt/park inventory and cohort custody
+    // attestation are unproven. Partial RPC/DB reads cannot turn health green.
+    async health(){return null;},
+  });
   return {
     execution,
     funding,
+    signals, accounting, recovery,
     async preflight(owner: string) {
       let bound: ReturnType<typeof binding>;
       let operation: StoredPhoenixOperation | null = null;
@@ -245,5 +279,7 @@ export async function installPhoenixProduction(): Promise<void> {
   try {
     const [{ pool }, { storage }] = await Promise.all([import('../../db'), import('../../storage')]);
     production = createPhoenixProduction({ pool, getBot: id => storage.getTradingBotById(id), getWallet: owner => storage.getWallet(owner) });
-  } catch { production = null; console.warn('[Phoenix] Registration holder unavailable'); }
+    installPhoenixAccountingReconciler(production.accounting);
+    production.recovery.start(); // Recovery observes retained bots with ALL new-risk flags off.
+  } catch { production = null; console.warn('[Phoenix] Runtime holder unavailable'); }
 }

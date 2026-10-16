@@ -68,13 +68,15 @@ describe('Unit 2A authenticated routes', () => {
     await handlePhoenixRegistrationCreate('EXAMPLE-owner', {}, res as any, () => ({ create: vi.fn().mockRejectedValue(new Error('EXAMPLE-private')) }) as any);
     expect(JSON.stringify(res.json.mock.calls)).not.toContain('EXAMPLE-private');
   });
-  it('preserves Pacifica create and refusal boundaries for funding, start, signals and safety', () => {
+  it('preserves Pacifica create and routes Phoenix signal and safety work to owned facades', () => {
     const source = readFileSync('server/routes.ts', 'utf8');
     const start = source.indexOf('app.post("/api/trading-bots", requireWallet');
     const create = source.slice(start, start + 1100);
     expect(create).toMatch(/if \(String\(req.body.activeProtocol\).toLowerCase\(\) === "phoenix"\) \{\s+return handlePhoenixRegistrationCreate/);
     expect(create).toContain('const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig }');
-    expect(source).toContain("return res.status(503).json(phoenixSafetyUnavailable('close'))");
+    expect(source).toContain("return handlePhoenixSignalPatch(req.walletAddress!, bot.id, req.body, res)");
+    expect(source).toContain('return handlePhoenixTradingView(bot, req.body, res)');
+    expect(source).toContain("await phoenixSafetyDispatch(req.walletAddress!, bot.id, bot.market, 'close', req.body)");
     expect(source).toContain('return res.status(503).json(phoenixOrderDisabled())');
     const funding = readFileSync('server/protocol/phoenix/funding-routes.ts', 'utf8');
     expect(funding).toContain('503');

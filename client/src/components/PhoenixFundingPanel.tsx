@@ -6,6 +6,7 @@ import { walletAuthHeaders } from '@/lib/queryClient';
 import { safeResponseJson } from '@/lib/safe-fetch';
 import type { PhoenixFundingDetail } from '@shared/phoenix-funding-contract';
 import { phoenixMeasuredDelayText } from '@shared/phoenix-funding-contract';
+import { PhoenixSignalPanel } from './PhoenixSignalPanel';
 
 const cash = (value?: string) => value && /^(0|[1-9][0-9]*)$/.test(value)
   ? `${BigInt(value) / 1000000n}.${(BigInt(value) % 1000000n).toString().padStart(6, '0')} USDC` : 'unknown';
@@ -52,6 +53,7 @@ export function PhoenixFundingPanel({ botId, walletAddress }: { botId: string; w
   });
   const operations = history?.operations ?? [];
   return <div className="space-y-3 rounded-lg border p-3" data-testid="phoenix-funding-panel">
+    <PhoenixSignalPanel botId={botId} walletAddress={walletAddress}/>
     <p className="font-medium">Phoenix owner funding canary</p>
     <p className="text-xs text-muted-foreground">Each wallet transfer, deposit, withdrawal, unwrap and return requires its own preview and consent. The bot authority needs SOL for its network costs.</p>
     <p className="text-xs">{phoenixMeasuredDelayText(history?.measured ?? null) ?? 'Withdrawal delay unknown until measured.'}</p>

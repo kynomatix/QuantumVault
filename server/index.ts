@@ -563,10 +563,10 @@ registerRequestTrace(app);
   await checkUmkStorageSecretHealth();
   await logSecurityConfigSummary();
 
-  // Local composition only; Phoenix startup failures cannot delay routes or Pacifica.
+  // Detached Phoenix composition installs observation/recovery independently of new-risk flags.
   void import('./protocol/phoenix/production')
     .then(({ installPhoenixProduction }) => installPhoenixProduction())
-    .catch(() => console.warn('[Phoenix] Registration startup unavailable'));
+    .catch(() => console.warn('[Phoenix] Runtime startup unavailable'));
 
   try {
     const { db: appDb } = await import("./db");
