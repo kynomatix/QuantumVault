@@ -73,12 +73,25 @@ describe('Phoenix persisted identity and policy', () => {
       const start = routes.indexOf(`app.post("${endpoint}"`);
       expect(start).toBeGreaterThan(-1);
       const handler = routes.slice(start, routes.indexOf('\n  app.', start + 1));
-      const refusal = handler.indexOf("if (bot.activeProtocol === 'phoenix')");
+      const phoenix = handler.indexOf("if (bot.activeProtocol === 'phoenix')");
       const authorization = handler.indexOf('if (bot.policyHmac)');
-      expect(refusal).toBeGreaterThan(-1);
-      expect(authorization).toBeGreaterThan(refusal);
-      expect(handler.slice(refusal, authorization))
-        .toContain('return res.status(503).json(phoenixOrderDisabled());');
+      const secretCheck = handler.indexOf(endpoint.includes(':botId')
+        ? 'if (!secureTokenMatches(suppliedSecret, bot.webhookSecret))'
+        : 'if (!secureTokenMatches(suppliedSecret, wallet.userWebhookSecret))');
+      const secretRejection = handler.indexOf('return res.status(401).json({ error: "Invalid secret" });');
+      expect(secretCheck).toBeGreaterThan(-1);
+      expect(secretRejection).toBeGreaterThan(secretCheck);
+      expect(phoenix).toBeGreaterThan(secretRejection);
+      if (endpoint.includes(':walletAddress')) {
+        const ownershipCheck = handler.indexOf('if (bot.walletAddress !== walletAddress)');
+        const ownershipRejection = handler.indexOf('return res.status(403).json({ error: "Bot does not belong to this wallet" });');
+        expect(ownershipCheck).toBeGreaterThan(-1);
+        expect(ownershipRejection).toBeGreaterThan(ownershipCheck);
+        expect(secretCheck).toBeGreaterThan(ownershipRejection);
+      }
+      expect(authorization).toBeGreaterThan(phoenix);
+      expect(handler.slice(phoenix, authorization))
+        .toMatch(/^if \(bot\.activeProtocol === 'phoenix'\)\s*\{\s*const \{ handlePhoenixTradingView \} = await import\('\.\/protocol\/phoenix\/signal-routes'\);\s*return handlePhoenixTradingView\(bot, req\.body, res\);\s*\}/);
     }
   });
 });
