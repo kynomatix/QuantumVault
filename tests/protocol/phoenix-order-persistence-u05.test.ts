@@ -51,6 +51,20 @@ beforeEach(async () => {
 });
 
 describe('Phoenix order durable authority in isolated PostgreSQL', () => {
+  it.each(['submission_pending', 'accepted', 'unknown'] as const)('releases finalized failure from %s while retaining the old request identity', async state => {
+    const first = await orders.prepare(intent(), admission());
+    const signing = await orders.change(first.record, 'signing');
+    const { transaction: _transaction, ...attempt } = signOrderTransaction(intent(), admission(), pin, lifetime, key.secretKey, now);
+    let pending = await orders.change(signing, 'submission_pending', { attempt });
+    if (state !== 'submission_pending') pending = await orders.change(pending, state);
+    const rejected = await orders.change(pending, 'rejected', { outcome: 'failed', fills: [], reason: 'Finalized order transaction failed' });
+    orders = new PhoenixOrderStore(pool);
+    expect((await orders.find(intent()))!.data.attempt).toEqual(attempt);
+    expect((await orders.prepare(intent(), admission())).record.state).toBe('rejected');
+    await expect(orders.change(rejected, 'signing')).rejects.toThrow('Stale');
+    const next = intent({ requestKey: 'EXAMPLE-retry', sequence: '2' });
+    expect((await orders.prepare(next, admitPhoenixOrder(next, authority(), now))).created).toBe(true);
+  });
   it('reserves unresolved entry capacity across markets until the journal settles', async () => {
     const first = await orders.prepare(intent(), admission());
     const next = intent({requestKey:'EXAMPLE-next-market',sequence:'2',market:'ETH'});

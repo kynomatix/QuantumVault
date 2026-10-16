@@ -56,10 +56,18 @@ export function createPhoenixExecutionProduction(d: ExecutionDependencies) {
     if (!signature) return null;
     await owned(r.intent.botId, r.intent.ownerWallet, r.intent.identity); await d.verify();
     const observed = await finalized(signature);
-    if (!observed || observed.status.err || !observed.transaction || observed.transaction.meta?.err) return null;
+    if (!observed) return null;
+    if (orderIntentHash(r.intent) !== r.intent_hash) throw new Error('Unbound finalized transaction');
+    if (observed.status.err) {
+      return { venue: 'phoenix' as const, trader: r.intent.identity.traderAccountAddress, market: r.intent.market, intentId: r.id,
+        signature, orderId: `${signature}:failed`, positionEpoch: r.data.admission.authority.position.epoch,
+        source: 'solana-finalized-signature', reference: `finalized:${observed.status.slot}:${signature}`,
+        landed: true, complete: true, outcome: 'failed' as const, fills: [] };
+    }
+    if (!observed.transaction || observed.transaction.meta?.err) return null;
     // The persisted signature binds the signed message; also verify the returned message digest.
     const message = observed.transaction.transaction.message;
-    if (orderIntentHash(r.intent) !== r.intent_hash || !message || !r.data.attempt
+    if (observed.transaction.transaction.signatures[0] !== signature || !message || !r.data.attempt
       || createHash('sha256').update(message.serialize()).digest('hex') !== r.data.attempt.transactionHash) throw new Error('Unbound finalized transaction');
     const actual = actualPhoenixTrade(observed.transaction, r.intent.identity.traderAccountAddress, r.intent.market, phoenixMarket(r.intent.market).assetId, r.intent.side);
     const orderId = `${signature}:${actual.sequence}`;
@@ -93,6 +101,7 @@ export function createPhoenixExecutionProduction(d: ExecutionDependencies) {
           return null;
         }
         if (!observed.status.err && (!observed.transaction || observed.transaction.meta?.err
+          || observed.transaction.transaction.signatures[0] !== attempt.signature
           || createHash('sha256').update(observed.transaction.transaction.message.serialize()).digest('hex') !== attempt.transactionHash)) return null;
         return { venue: 'phoenix', trader: r.identity.traderAccountAddress, operationId: op.id, intentHash: phoenixIntentHash(op.intent), signature: attempt.signature,
           finalized: true, slot: String(observed.status.slot), outcome: observed.status.err ? 'failed' : 'confirmed', source: 'solana-finalized-signature', reference: attempt.signature };

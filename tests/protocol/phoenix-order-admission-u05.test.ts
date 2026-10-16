@@ -13,6 +13,7 @@ const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {
+    expect(PHOENIX_PUBLIC_ADDRESSES.collateralMint).toBe('PhUsd11YkbjSaWjFncfAAmatntsjx3MgDR9B6g1ks3A');
     expect(admitPhoenixOrder(intent(), authority(), now).authority.collateralMint).toBe(PHOENIX_PUBLIC_ADDRESSES.collateralMint);
     const wrong = authority(); wrong.collateralMint = PHOENIX_PUBLIC_ADDRESSES.usdcMint;
     expect(() => admitPhoenixOrder(intent(), wrong, now)).toThrow('authority unavailable');

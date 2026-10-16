@@ -155,4 +155,36 @@ describe('Phoenix authoritative execution, synthetic signer and mocked IO only',
     const off = harness(false); await expect(off.service.execute(intent())).rejects.toThrow('disabled');
     expect(off.io.snapshot).not.toHaveBeenCalled();
   });
+  it('terminates a finalized failed attempt without resubmitting the same request key', async () => {
+    const h = harness(); await h.service.execute(intent());
+    h.setReceipt({ outcome: 'failed' });
+    const r = await h.service.execute(intent());
+    expect(r.state).toBe('rejected');
+    expect(r.data).toMatchObject({ outcome: 'failed', fills: [], remainingLots: '200', remainingPositionLots: '0',
+      reason: 'Finalized order transaction failed', outcomeReference: 'EXAMPLE-receipt' });
+    expect((await h.service.execute(intent())).state).toBe('rejected');
+    expect(h.io.submit).toHaveBeenCalledTimes(1);
+  });
+  it.each(['signature', 'trader', 'market', 'intentId', 'positionEpoch'] as const)('keeps a failed receipt with wrong %s unresolved', async field => {
+    const h = harness(); await h.service.execute(intent());
+    h.setReceipt({ outcome: 'failed', [field]: 'EXAMPLE-wrong' });
+    expect((await h.service.execute(intent())).state).toBe('accepted');
+  });
+  it('refuses failed receipts with fills, incomplete evidence or previously landed fills', async () => {
+    const h = harness(); await h.service.execute(intent());
+    h.setReceipt({ outcome: 'failed', fills: [fill()] });
+    expect((await h.service.execute(intent())).state).toBe('accepted');
+    h.setReceipt({ outcome: 'failed', complete: false });
+    expect((await h.service.execute(intent())).state).toBe('accepted');
+    h.setReceipt({ complete: false, fills: [fill()] });
+    expect((await h.service.execute(intent())).state).toBe('landed');
+    h.setReceipt({ outcome: 'failed' });
+    expect((await h.service.execute(intent())).state).toBe('landed');
+  });
+  it('preserves the full remaining position after a failed reduce-only close', async () => {
+    const h = harness(false), i = intent({ action: 'close', side: 'sell' });
+    h.snapshot.position = { ...h.snapshot.position, side: 'long', baseLots: '300' };
+    await h.service.execute(i); h.setReceipt({ outcome: 'failed' });
+    expect((await h.service.execute(i)).data).toMatchObject({ outcome: 'failed', remainingLots: '200', remainingPositionLots: '300' });
+  });
 });

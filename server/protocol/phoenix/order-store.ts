@@ -11,7 +11,7 @@ export interface PhoenixFill { fillId: string; orderId: string; baseLots: string
 export interface PhoenixOrderRecord {
   id: string; intent: PhoenixOrderIntent; intent_hash: string; state: OrderState; revision: number;
   data: { admission: PhoenixAdmission; attempt?: PhoenixAttemptInput; orderId?: string; fills?: PhoenixFill[];
-    remainingLots?: string; remainingPositionLots?: string; positionEpoch?: string; outcomeSource?: string; outcomeReference?: string; reason?: string };
+    remainingLots?: string; remainingPositionLots?: string; positionEpoch?: string; outcomeSource?: string; outcomeReference?: string; reason?: string; outcome?: 'failed' };
 }
 export interface OrderRepository {
   prepare(intent: PhoenixOrderIntent, admission: PhoenixAdmission): Promise<{ record: PhoenixOrderRecord; created: boolean }>;
@@ -85,8 +85,8 @@ export class PhoenixOrderStore implements OrderRepository {
       const current = this.verify((await c.query('SELECT * FROM phoenix_order_intents WHERE id=$1 FOR UPDATE', [record.id])).rows[0], record.intent);
       const transitions: Record<OrderState, OrderState[]> = {
         admitted: ['funding', 'signing', 'rejected'], funding: ['signing', 'unknown'], signing: ['submission_pending', 'unknown', 'rejected'],
-        submission_pending: ['accepted', 'unknown', 'landed', 'settled'], accepted: ['unknown', 'landed', 'settled'],
-        landed: ['landed', 'settled'], unknown: ['landed', 'settled'], settled: [], rejected: [],
+        submission_pending: ['accepted', 'unknown', 'landed', 'settled', 'rejected'], accepted: ['unknown', 'landed', 'settled', 'rejected'],
+        landed: ['landed', 'settled'], unknown: ['landed', 'settled', 'rejected'], settled: [], rejected: [],
       };
       if (current.revision !== record.revision || !transitions[current.state].includes(state)) throw new Error('Stale Phoenix order transition');
       if (state === 'signing') {

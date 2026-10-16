@@ -7,7 +7,7 @@ import { units } from './funding-contract';
 export interface PhoenixOrderReceipt {
   venue: 'phoenix'; trader: string; market: string; intentId: string; signature: string;
   orderId: string; positionEpoch: string; source: string; reference: string;
-  landed: boolean; complete: boolean; fills: PhoenixFill[];
+  landed: boolean; complete: boolean; fills: PhoenixFill[]; outcome?: 'failed';
 }
 export interface PhoenixOrderIO {
   /** Fresh authoritative metadata/account-tier fees/free margin and execution quote, never display data. */
@@ -112,6 +112,13 @@ export class PhoenixOrderService {
         || r.signature !== record.data.attempt.signature || !r.orderId || !r.source || !r.reference || !r.landed
         || r.positionEpoch !== record.data.admission.authority.position.epoch || !Array.isArray(r.fills)) throw new Error('Unbound Phoenix receipt');
       if (record.data.orderId && record.data.orderId !== r.orderId) throw new Error('Order identity changed');
+      if (r.outcome === 'failed') {
+        if (!r.complete || r.fills.length || record.data.fills?.length || record.data.orderId) throw new Error('Contradictory failed receipt');
+        return await this.store.change(record, 'rejected', { outcome: 'failed', reason: 'Finalized order transaction failed', fills: [],
+          remainingLots: record.data.admission.packet.numBaseLots,
+          remainingPositionLots: i.action === 'close' ? record.data.admission.authority.position.baseLots : '0',
+          positionEpoch: r.positionEpoch, outcomeSource: r.source, outcomeReference: r.reference });
+      }
       const fills = new Map<string, PhoenixFill>();
       let filled = 0n;
       for (const f of [...(record.data.fills || []), ...r.fills]) {

@@ -3,8 +3,8 @@ import ts from 'typescript';
 import { resolve } from 'node:path';
 
 it('type checks the changed Phoenix production and contract modules', () => {
-  const names = ['execution-production', 'markets', 'native-events', 'production-reader', 'production', 'order-contract', 'protection-builder', 'protection-contract', 'protection-service', 'safety-routes'];
-  const files = names.map(n => resolve(`server/protocol/phoenix/${n}.ts`));
+  const names = ['execution-production', 'markets', 'native-events', 'production-reader', 'production', 'order-contract', 'order-service', 'order-store', 'protection-builder', 'protection-contract', 'protection-service', 'safety-routes'];
+  const files = [...names.map(n => resolve(`server/protocol/phoenix/${n}.ts`)), resolve('tests/protocol/phoenix-receipt-shape-unit2c1.test.ts')];
   const config = ts.readConfigFile('tsconfig.json', ts.sys.readFile);
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, '.');
   const program = ts.createProgram(files, { ...parsed.options, incremental: false, noEmit: true });
