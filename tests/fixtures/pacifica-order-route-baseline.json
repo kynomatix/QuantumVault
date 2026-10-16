@@ -4,6 +4,6 @@
     "post:/api/trading-bots/:id/manual-trade": "sha256:a7bdaa111a5b4dd5e1227d0517c572feb442ed9452a9805575319476ca1226d5",
     "post:/api/webhook/tradingview/:botId": "sha256:5653f2c825369ff0bbb559200e0e7b3e88986396288bd6a0f86dc63d764473dc",
     "post:/api/webhook/user/:walletAddress": "sha256:5a833bdfc90925986c6d27d58104b24c8774f7bc8753d1525d8f65882efe3ed2",
-    "patch:/api/trading-bots/:id": "sha256:dcaf70f0fd32a4008420b1060cb08febff6e302cde29b9df808b90aa1e633785"
+    "patch:/api/trading-bots/:id": "sha256:0ec69e35f6e393129773720e53e2ea8dc300a38d157f7d1298ae8f6cff799489"
   }
 }

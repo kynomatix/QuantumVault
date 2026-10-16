@@ -66,7 +66,10 @@ describe('shared drawer settings panels', () => {
     for (const source of [drawer, grid]) expect(source).toContain("from '@/components/ui/settings-panel'");
     expect(drawer).not.toContain('function DrawerSettingsPanel');
     expect(drawer).toContain("useState<string | null>('general')");
-    expect(drawer.match(/<DrawerSettingsPanel\b/g)).toHaveLength(5);
+    expect(drawer.match(/<DrawerSettingsPanel\b/g)).toHaveLength(6);
+    for (const id of ["lab-source", "general", "growth", "cash", "subaccount", "danger"]) {
+      expect(drawer).toMatch(new RegExp('id="' + id + '"'));
+    }
     expect(drawer).not.toContain('keepMounted');
     const panel = readFileSync('client/src/components/ui/settings-panel.tsx', 'utf8');
     expect(panel).toContain('<AnimatePresence initial={false}>');

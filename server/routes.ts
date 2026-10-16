@@ -15865,19 +15865,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   });
 
   app.post("/api/trading-bots", requireWallet, async (req, res) => {
-    let labResultId: number | undefined;
-    try {
-      labResultId = labSelection(req.body ?? {});
-      if (labResultId !== undefined) {
-        if ((req.body.botType ?? 'signal') !== 'signal') throw new Error('LAB_SIGNAL_BOT_REQUIRED');
-        if (String(req.body.activeProtocol).toLowerCase() === 'phoenix') throw new Error('LAB_DEPLOY_UNAVAILABLE');
-        if (typeof req.body.market !== 'string') throw new Error('LAB_MARKET_REQUIRED');
-        await validateLabSelection(req.walletAddress!, req.body.market, labResultId);
-      }
-    } catch (error) {
-      return res.status(400).json({ error: error instanceof Error && /^LAB_[A-Z_]+$/.test(error.message)
-        ? error.message : 'LAB_PROVENANCE_UNAVAILABLE' });
-    }
     if (String(req.body.activeProtocol).toLowerCase() === "phoenix") {
       return handlePhoenixRegistrationCreate(req.walletAddress!, req.body, res);
     }
@@ -15971,6 +15958,22 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const createCaps = createAdapter.getCapabilities();
       const subaccountAuthMode: 'external_key' | 'main_plus_id' =
         createCaps.requiresExternalSubaccountKey ? 'external_key' : 'main_plus_id';
+
+      let labResultId: number | undefined;
+      if (Object.keys(req.body ?? {}).some(key => /^lab(?:[A-Z_]|$)/.test(key))) {
+        try {
+          labResultId = labSelection(req.body ?? {});
+          if (labResultId !== undefined) {
+            if ((req.body.botType ?? 'signal') !== 'signal') throw new Error('LAB_SIGNAL_BOT_REQUIRED');
+            if (String(req.body.activeProtocol).toLowerCase() === 'phoenix') throw new Error('LAB_DEPLOY_UNAVAILABLE');
+            if (typeof req.body.market !== 'string') throw new Error('LAB_MARKET_REQUIRED');
+            await validateLabSelection(req.walletAddress!, req.body.market, labResultId);
+          }
+        } catch (error) {
+          return res.status(400).json({ error: error instanceof Error && /^LAB_[A-Z_]+$/.test(error.message)
+            ? error.message : 'LAB_PROVENANCE_UNAVAILABLE' });
+        }
+      }
 
       if (wallet.agentPublicKey && wallet.agentPrivateKeyEncryptedV3) {
         const { Keypair } = await import('@solana/web3.js');
@@ -17086,11 +17089,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   app.patch("/api/trading-bots/:id", requireWallet, async (req, res) => {
     try {
-      try {
-        if (labSelection(req.body ?? {}) !== undefined) throw new Error('LAB_CLIENT_EVIDENCE_REJECTED');
-      } catch {
-        return res.status(400).json({ error: 'Lab evidence is server-managed and cannot be edited.' });
-      }
       const bot = await storage.getTradingBotById(req.params.id);
       if (!bot) {
         return res.status(404).json({ error: "Bot not found" });
@@ -17131,6 +17129,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.activeProtocol === 'phoenix') {
         const { handlePhoenixSignalPatch } = await import('./protocol/phoenix/signal-routes');
         return handlePhoenixSignalPatch(req.walletAddress!, bot.id, req.body, res);
+      }
+
+      if (Object.keys(req.body ?? {}).some(key => /^lab(?:[A-Z_]|$)/.test(key))) {
+        try {
+          if (labSelection(req.body ?? {}) !== undefined) throw new Error('LAB_CLIENT_EVIDENCE_REJECTED');
+        } catch {
+          return res.status(400).json({ error: 'Lab evidence is server-managed and cannot be edited.' });
+        }
       }
 
       const { name, market, side, leverage, maxPositionSize, totalInvestment, signalConfig, riskConfig, isActive, profitReinvest, autoWithdrawThreshold, autoTopUp, autoParkIdle, parkDestinationAsset, vaultAllOut, autoCollateralTopUp, autoRepayEnabled } = req.body;
