@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PublicKey, SystemProgram, Transaction, type Connection } from '@solana/web3.js';
+import { AddressLookupTableAccount, PublicKey, SystemProgram, Transaction, TransactionMessage, type Connection } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import bs58 from 'bs58';
 import { createHash } from 'node:crypto';
@@ -199,17 +199,28 @@ describe('Unit 2B finalized funding IO', () => {
     f.rpc.getSignatureStatuses.mockResolvedValue({ value: [{ confirmationStatus: 'confirmed', err: { EXAMPLE: true } }] });
     expect(await f.native.io.signature(attempt)).toBe('unknown');
   });
-  it('requires the saved message hash and exact finalized token movements to settle', async () => {
+  it.each(['legacy', 'v0'] as const)('requires the saved message hash and exact finalized token movements to settle for %s', async version => {
     const f = fixture(), signed = signFundingTransaction(prepareFundingTransaction(f.i, pin, lifetime), f.i, pin, key(11).secretKey);
-    const tx = Transaction.from(Buffer.from(signed.transaction, 'base64')), message = tx.compileMessage();
-    const keys = message.accountKeys.map(k => k.toBase58());
+    const tx = Transaction.from(Buffer.from(signed.transaction, 'base64'));
+    const lookupAddresses = [new PublicKey(pin.globalVault), new PublicKey(fundingAta(identity.authorityWalletAddress, addresses.collateralMint))];
+    const table = new AddressLookupTableAccount({ key: key(60).publicKey, state: {
+      deactivationSlot: 0xffffffffffffffffn, lastExtendedSlot: 0, lastExtendedSlotStartIndex: 0, addresses: lookupAddresses,
+    } });
+    const message = version === 'legacy' ? tx.compileMessage() : new TransactionMessage({
+      payerKey: tx.feePayer!, recentBlockhash: tx.recentBlockhash!, instructions: tx.instructions,
+    }).compileToV0Message([table]);
+    const loadedAddresses = message.version === 0 ? message.resolveAddressTableLookups([table]) : undefined;
+    const keys = (message.version === 0 ? [ ...message.staticAccountKeys, ...loadedAddresses!.writable, ...loadedAddresses!.readonly ]
+      : message.accountKeys).map(k => k.toBase58());
+    if (version === 'v0') expect(new Set(loadedAddresses!.writable.map(k => k.toBase58())))
+      .toEqual(new Set(lookupAddresses.map(k => k.toBase58())));
     const tokenBalances = (after: boolean) => [pin.globalVault, fundingAta(identity.authorityWalletAddress, addresses.collateralMint)].map((k, n) => ({
       accountIndex: keys.indexOf(k), mint: addresses.collateralMint, owner: n ? identity.authorityWalletAddress : pin.globalVault,
       programId: TOKEN_PROGRAM_ID.toBase58(), uiTokenAmount: { amount: String(n ? after ? 1000000 : 0 : after ? 99000000 : 100000000), decimals: 6 } }));
-    f.rpc.getTransaction.mockResolvedValue({ slot: 100, transaction: { signatures: [signed.signature], message }, meta: { err: null,
+    f.rpc.getTransaction.mockResolvedValue({ slot: 100, transaction: { signatures: [signed.signature], message }, meta: { err: null, loadedAddresses,
       preTokenBalances: tokenBalances(false), postTokenBalances: tokenBalances(true), innerInstructions: [{ index: 1, instructions: events().map(ix => ({
         programIdIndex: keys.indexOf(ix.program), accounts: ix.accounts.map(k => keys.indexOf(k)), data: bs58.encode(ix.data), stackHeight: ix.depth })) }] } });
-    f.operations.read.mockResolvedValue({ attempt: signed });
+    f.operations.read.mockResolvedValue({ attempt: { ...signed, transactionHash: createHash('sha256').update(message.serialize()).digest('hex') } });
     const op = { id: 'EXAMPLE', bot_id: f.i.botId, intent: f.i, intent_hash: 'EXAMPLE', observation: {} } as any;
     expect(await f.native.io.receipt(op, signed.signature)).toMatchObject({ outcome: 'settled', creditedBaseUnits: '1000000' });
     f.operations.read.mockResolvedValue({ attempt: { ...signed, transactionHash: createHash('sha256').update('EXAMPLE-altered').digest('hex') } });

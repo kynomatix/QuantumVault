@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { PublicKey, SystemProgram, Transaction, VersionedTransaction, type AccountInfo, type Connection } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
-import bs58 from 'bs58';
+import bs58 from 'bs58'; // Existing transitive dependency, as used by server/agent-wallet.ts and server/crypto-v3.ts.
 import { PHOENIX_PUBLIC_ADDRESSES as addresses } from './sdk-boundary';
 import { fundingInstructions, type PhoenixFundingPin } from './funding-builder';
 import { decodeFundingQueue, fundingAta, observeFundingQueue, verifyFundingWithdrawal } from './funding-chain';
@@ -62,7 +62,7 @@ export function createPhoenixFundingIO(rpc: Connection, pin: PhoenixFundingPin, 
   async function snapshot(i: FundingIntent, minContextSlot?: number) {
     const list = keys(i), result = await rpc.getMultipleAccountsInfoAndContext(list.map(pk), { commitment: 'finalized', minContextSlot });
     if (result.value.length !== list.length) throw new Error('PHOENIX_SNAPSHOT_INCOMPLETE');
-    const map = new Map(list.map((key, n) => [key, result.value[n]]));
+    const map = new Map(list.map((key, n): [string, Account] => [key, result.value[n]]));
     return { slot: result.context.slot, map, ...balances(i, map) };
   }
   function expectedDeltas(i: FundingIntent, outcome: 'settled' | 'queued' = 'settled') {
@@ -110,7 +110,7 @@ export function createPhoenixFundingIO(rpc: Connection, pin: PhoenixFundingPin, 
         accounts: { encoding: 'base64', addresses: list },
       });
       if (simulated.value.err || !simulated.value.accounts || simulated.value.accounts.length !== list.length) throw new Error('PHOENIX_FUNDING_SIMULATION_FAILED');
-      const after = new Map<string, Account>(list.map((key, n) => {
+      const after = new Map<string, Account>(list.map((key, n): [string, Account] => {
         const a = simulated.value.accounts![n];
         return [key, a ? { ...a, owner: pk(a.owner), data: Buffer.from(a.data[0], 'base64') } : null];
       }));
@@ -143,8 +143,12 @@ export function createPhoenixFundingIO(rpc: Connection, pin: PhoenixFundingPin, 
       const { attempt } = await operations.read(operation.bot_id, i.ownerWallet, operation.id);
       const message = transaction.transaction.message;
       if (!attempt || attempt.signature !== signature || createHash('sha256').update(message.serialize()).digest('hex') !== attempt.transactionHash) throw new Error('PHOENIX_RECEIPT_MESSAGE_HASH');
-      const accountKeys = message.getAccountKeys({ accountKeysFromLookups: transaction.meta.loadedAddresses });
-      const instructions = message.compiledInstructions;
+      const accountKeys = message.version === 0
+        ? message.getAccountKeys({ accountKeysFromLookups: transaction.meta.loadedAddresses })
+        : { get: (index: number) => message.accountKeys[index] };
+      const instructions = message.version === 0 ? message.compiledInstructions : message.instructions.map(ix => ({
+        programIdIndex: ix.programIdIndex, accountKeyIndexes: ix.accounts, data: bs58.decode(ix.data),
+      }));
       const expected = fundingInstructions(i, pin);
       if (instructions.length !== expected.length) throw new Error('PHOENIX_RECEIPT_INSTRUCTIONS');
       instructions.forEach((ix, n) => {
