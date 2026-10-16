@@ -1,3 +1,4 @@
+import { phoenixConsumerDisabled } from './protocol/phoenix/consumer-service';
 import { handlePhoenixRegistrationCreate, registerPhoenixOnboardingRoutes } from './protocol/phoenix/onboarding-routes';
 import { dispatchPhoenixDefense } from './protocol/phoenix/auto-defense-runtime';
 import { PhoenixLifecycleStore } from './protocol/phoenix/lifecycle';
