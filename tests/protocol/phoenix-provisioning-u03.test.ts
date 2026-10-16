@@ -350,12 +350,12 @@ describe('U03 durable allocation and recovery on isolated PostgreSQL', () => {
     expect((await provisioner().create(request())).code).toBe('completed'); expect(io.submit).toHaveBeenCalledTimes(1);
     persist.mockRestore();
   });
-  it('keeps public creation disabled ahead of existing money/key paths and leaves Pacifica routing intact', async () => {
+  it('keeps default-off provisioning and returns the owned Phoenix branch before existing money/key paths', async () => {
     enabled = false; expect(phoenixProvisioningEnabled({})).toBe(false);
     expect((await provisioner().create(request())).code).toBe('disabled'); expect(derive).not.toHaveBeenCalled();
     const routes = readFileSync(new URL('../../server/routes.ts', import.meta.url), 'utf8');
     const start = routes.indexOf('app.post("/api/trading-bots"');
-    const phoenix = routes.indexOf('return res.status(503).json(phoenixConsumerDisabled', start);
+    const phoenix = routes.indexOf('return handlePhoenixRegistrationCreate(req.walletAddress!, req.body, res)', start);
     expect(phoenix).toBeGreaterThan(start);
     expect(phoenix).toBeLessThan(routes.indexOf('storage.getOrCreateWallet', start));
   });

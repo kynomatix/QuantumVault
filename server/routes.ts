@@ -1,4 +1,4 @@
-import { phoenixConsumerDisabled } from './protocol/phoenix/consumer-service';
+import { handlePhoenixRegistrationCreate, registerPhoenixOnboardingRoutes } from './protocol/phoenix/onboarding-routes';
 import { dispatchPhoenixDefense } from './protocol/phoenix/auto-defense-runtime';
 import { PhoenixLifecycleStore } from './protocol/phoenix/lifecycle';
 import { FLASH_RETIRED_MESSAGE, assertProtocolRuntimeAvailable } from './protocol/flash-retirement.js';
@@ -6519,6 +6519,7 @@ export async function registerRoutes(
   };
 
   const { registerPhoenixFundingRoutes } = await import('./protocol/phoenix/funding-routes');
+  registerPhoenixOnboardingRoutes(app, requireWallet);
   registerPhoenixFundingRoutes(app, requireWallet, { history: async (botId, owner) => {
     const { pool } = await import('./db');
     const { PhoenixOperationStore } = await import('./protocol/phoenix/operation-store');
@@ -15854,7 +15855,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
   app.post("/api/trading-bots", requireWallet, async (req, res) => {
     if (String(req.body.activeProtocol).toLowerCase() === "phoenix") {
-      return res.status(503).json(phoenixConsumerDisabled(req.body.requestId));
+      return handlePhoenixRegistrationCreate(req.walletAddress!, req.body, res);
     }
     if (String(req.body.activeProtocol).toLowerCase() === "flash") return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
     try {

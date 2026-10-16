@@ -563,6 +563,11 @@ registerRequestTrace(app);
   await checkUmkStorageSecretHealth();
   await logSecurityConfigSummary();
 
+  // Local composition only; Phoenix startup failures cannot delay routes or Pacifica.
+  void import('./protocol/phoenix/production')
+    .then(({ installPhoenixProduction }) => installPhoenixProduction())
+    .catch(() => console.warn('[Phoenix] Registration startup unavailable'));
+
   try {
     const { db: appDb } = await import("./db");
     const { pendingProfitShares } = await import("@shared/schema");

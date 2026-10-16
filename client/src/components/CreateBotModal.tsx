@@ -1,4 +1,5 @@
 import { safeResponseJson } from "@/lib/safe-fetch";
+import { PhoenixRegistrationPanel, type PhoenixRegistrationPreflight } from './PhoenixRegistrationPanel';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useExecutionAuthorization } from '@/hooks/useExecutionAuthorization';
@@ -104,6 +105,20 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   const { executionEnabled, executionLoading, enableExecution, refetchStatus } = useExecutionAuthorization();
   const { getMaxLeverage: getMaxLeverageFromCache } = useLeverageLimits();
   const [isCreating, setIsCreating] = useState(false);
+  const [phoenixPreflight, setPhoenixPreflight] = useState<PhoenixRegistrationPreflight | null>(null);
+  useEffect(() => {
+    setPhoenixPreflight(null);
+    if (!isOpen || !walletAddress) return;
+    const controller = new AbortController();
+    void fetch('/api/phoenix/canary/preflight', { credentials: 'include', cache: 'no-store',
+      headers: { 'x-wallet-address': walletAddress }, signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) return;
+        const data = await safeResponseJson(response);
+        if (!controller.signal.aborted && data.authorized === true) setPhoenixPreflight(data);
+      }).catch(() => {});
+    return () => controller.abort();
+  }, [isOpen, walletAddress]);
   const [isDepositingSol, setIsDepositingSol] = useState(false);
   const [isDepositingUsdc, setIsDepositingUsdc] = useState(false);
   const [step, setStep] = useState<'create' | 'success' | 'enable_execution'>('create');
@@ -133,7 +148,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
     market: 'SOL-PERP',
     leverage: defaultLeverage,
     investmentAmount: '',
-    activeProtocol: 'pacifica' as ProtocolId,
+    activeProtocol: 'pacifica' as ProtocolId | 'phoenix',
   });
   
   // Fetch markets for the selected exchange. Pacifica (default) uses the global
@@ -142,6 +157,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   // toggles the exchange — a stale in-flight fetch must never overwrite the markets
   // for the now-selected protocol.
   useEffect(() => {
+    if (newBot.activeProtocol === 'phoenix') return;
     const controller = new AbortController();
     const fetchMarkets = async () => {
       setIsLoadingMarkets(true);
@@ -248,6 +264,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   // requirement (~0.025), re-opening the gating gap. Only the latest request applies.
   const balanceRequestId = useRef(0);
   const refreshAgentBalance = useCallback(async () => {
+    if (newBot.activeProtocol === 'phoenix') return;
     if (!walletAddress) return;
     const reqId = ++balanceRequestId.current;
     setIsLoadingBalance(true);
@@ -409,6 +426,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   };
 
   const createBot = async () => {
+    if (newBot.activeProtocol === 'phoenix') return;
     if (!walletAddress || !newBot.name) {
       toast({ title: 'Please enter a bot name', variant: 'destructive' });
       return;
@@ -646,7 +664,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
         
         <div className="space-y-2">
           <Label>Exchange</Label>
-          <Select value={newBot.activeProtocol} onValueChange={(v) => setNewBot({ ...newBot, activeProtocol: v as ProtocolId })}>
+          <Select value={newBot.activeProtocol} onValueChange={(v) => setNewBot({ ...newBot, activeProtocol: v as ProtocolId | 'phoenix' })}>
             <SelectTrigger data-testid="select-protocol">
               <SelectValue placeholder="Select exchange" />
             </SelectTrigger>
@@ -659,6 +677,7 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
                   </div>
                 </SelectItem>
               ))}
+              {phoenixPreflight && <SelectItem value="phoenix" data-testid="option-protocol-phoenix">Phoenix Signal (owner registration)</SelectItem>}
             </SelectContent>
           </Select>
         </div>
@@ -1278,7 +1297,12 @@ export function CreateBotModal({ isOpen, onClose, walletAddress, onBotCreated, d
   return (
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogContent className={`max-h-[85vh] overflow-y-auto ${step === 'success' ? "sm:max-w-[600px]" : "sm:max-w-[450px]"}`}>
-        {step === 'create' && renderCreateStep()}
+        {step === 'create' && (newBot.activeProtocol === 'phoenix' ? <>
+          <DialogHeader><DialogTitle>Phoenix Signal registration</DialogTitle><DialogDescription>Register the authorized owner canary. Trading remains disabled.</DialogDescription></DialogHeader>
+          {phoenixPreflight ? <PhoenixRegistrationPanel key={walletAddress} preflight={phoenixPreflight} walletAddress={walletAddress} onBotCreated={onBotCreated} />
+            : <p>Phoenix canary capability is unavailable.</p>}
+          <Button variant="outline" onClick={() => setNewBot(previous => ({ ...previous, activeProtocol: 'pacifica' }))}>Back to exchange selection</Button>
+        </> : renderCreateStep())}
         {step === 'success' && renderSuccessStep()}
         {step === 'enable_execution' && renderEnableExecutionStep()}
       </DialogContent>
