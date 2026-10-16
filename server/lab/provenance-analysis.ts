@@ -5,9 +5,10 @@ export interface SignalComparison {
   matched: number; signals: number; percent: number | null;
   range: { start: string; end: string }; toleranceSeconds: number;
 }
+const UNIT_MS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
 export function timeframeMs(timeframe: string): number {
   const match = /^(\d+)(m|h|d|w)$/.exec(timeframe);
-  return match ? Number(match[1]) * ({ m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[match[2]] ?? 0) : 0;
+  return match ? Number(match[1]) * (UNIT_MS[match[2]] ?? 0) : 0;
 }
 export function webhookSignals(rows: { payload: unknown; receivedAt: Date }[]): LabSignal[] {
   return rows.flatMap(row => {

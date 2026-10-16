@@ -5,7 +5,7 @@ import { tradingBots, labStrategies, labOptimizationRuns, labOptimizationResults
   type InsertTradingBot, type TradingBot } from '../../shared/schema';
 import { labMarket, type LabDeploySnapshot } from '../../shared/lab-provenance';
 import { captureLabSnapshot, snapshotDigest, validLabSnapshot } from './provenance-snapshot';
-import { compareLabSignals, liveTradeSummary, webhookSignals } from './provenance-analysis';
+import { compareLabSignals, liveTradeSummary, webhookSignals, type SignalComparison } from './provenance-analysis';
 import { rerunLabWindow } from './provenance-rerun';
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -152,7 +152,8 @@ export async function triageLabBot(owner: string, id: string) {
     .orderBy(desc(botTrades.executedAt)).limit(1000));
   const from = Math.max(start, Date.parse(snapshot.window.start)), to = Math.min(end, Date.parse(snapshot.window.end));
   const stored = snapshot.tradesRecorded && from < to && signals.some(s => s.time >= from && s.time <= to);
-  let entries = null, comparisonTrades = snapshot.trades, basis = 'Stored backtest trades';
+  let entries: SignalComparison | null = null;
+  let comparisonTrades = snapshot.trades, basis = 'Stored backtest trades';
   try {
     if (!stored) { comparisonTrades = await rerunLabWindow(snapshot, start, end, Date.now() + LAB_MATCH_LIMITS.budgetMs); basis = 'Current-engine re-run over live window'; }
     entries = compareLabSignals(signals, comparisonTrades, snapshot.timeframe, stored ? from : start, stored ? to : end);
