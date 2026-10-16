@@ -179,6 +179,7 @@ interface CarryAdvisorResponse {
 
 interface TradingBot {
   id: string;
+  botType?: string;
   name: string;
   market: string;
   webhookSecret: string;
@@ -2922,7 +2923,7 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="settings" className="space-y-3 mt-4">
-            {localBot.botType === 'signal' && <DrawerSettingsPanel id="lab-source" expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} icon={BarChart3} title="Lab source" testId="button-toggle-settings-lab-source">
+            {localBot?.botType === 'signal' && <DrawerSettingsPanel id="lab-source" expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} icon={BarChart3} title="Lab source" testId="button-toggle-settings-lab-source">
               <LabSourcePanel key={localBot.id} botId={localBot.id} walletAddress={walletAddress} onLinked={onBotUpdated} />
             </DrawerSettingsPanel>}
             {moneyControls ? (<>

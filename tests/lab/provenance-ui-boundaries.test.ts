@@ -15,5 +15,5 @@ it('carries saved result identity through agent, history and heatmap deploys and
   const drawer = readFileSync('client/src/components/BotManagementDrawer.tsx', 'utf8');
   const settings = drawer.slice(drawer.indexOf('<TabsContent value="settings"'));
   expect(settings.indexOf('title="Lab source"')).toBeLessThan(settings.indexOf('{moneyControls'));
-  expect(settings).toContain("localBot.botType === 'signal'");
+  expect(settings).toContain("localBot?.botType === 'signal'");
 });

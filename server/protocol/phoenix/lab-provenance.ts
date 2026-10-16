@@ -3,7 +3,8 @@ import { labMarket, LAB_PROVENANCE_MESSAGES } from '../../../shared/lab-provenan
 import { validLabSnapshot } from '../../lab/provenance-snapshot';
 
 /** Owned by product/lab-provenance-live-bots. Flags cannot supply a Lab link. */
-export function phoenixLabProvenanceSatisfied(bot: Pick<TradingBot, 'id'> & Partial<TradingBot>): {
+export function phoenixLabProvenanceSatisfied(bot: Pick<TradingBot, 'id'> & Partial<Pick<TradingBot,
+  'labLinkState' | 'labDeploySnapshot' | 'market' | 'walletAddress'>>): {
   satisfied: boolean; reason: keyof typeof LAB_PROVENANCE_MESSAGES | null; message: string;
 } {
   const denied = (reason: keyof typeof LAB_PROVENANCE_MESSAGES) => ({ satisfied: false, reason, message: LAB_PROVENANCE_MESSAGES[reason] });
