@@ -20,6 +20,9 @@ jobs:
           cache: npm
       - name: Install (npm 10 has an "Exit handler never called" bug on this tree)
         run: |
+          # Some lockfile entries resolve through Replit's package firewall, which is
+          # unreachable here; point them at the public registry (integrity hashes unchanged).
+          sed -i 's|http://package-firewall.replit.local/npm/|https://registry.npmjs.org/|g' package-lock.json
           npm install -g npm@11 --no-audit --no-fund
           for attempt in 1 2 3; do
             if npm ci --no-audit --no-fund --ignore-scripts; then break; fi
