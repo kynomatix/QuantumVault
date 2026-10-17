@@ -74,6 +74,8 @@ export function MarketStatsView({ data, now }: { data: MarketStats; now: number 
         <p className="text-xs leading-relaxed text-muted-foreground">Commitment of Traders: a weekly report of who holds futures.</p>
         <Index label="Smart" detail="Commercial hedgers" value={cot.value.smartIndex} />
         <Index label="Retail / speculators" detail="Large + small traders; not pure retail" value={cot.value.speculatorIndex} purple />
+        {cot.value.smartIndex < cot.value.speculatorIndex && <p className="mt-3 text-xs leading-relaxed text-amber-400/80">
+          Smart money is below speculators: not a bullish sign short term.</p>}
         <div className="mt-5 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
           <p className="font-medium">Latest flip in stored history</p><p className="mt-1.5 text-muted-foreground">{cot.value.latestFlip
             ? <>Smart crossed {cot.value.latestFlip.state === 'bullish_flip' ? 'above' : 'below'} speculators · {cot.value.latestFlip.reportDate}</>

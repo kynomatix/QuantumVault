@@ -9,14 +9,15 @@ import type { MarketStats } from '../../shared/market-stats';
 import { NOW, weeks, days } from './fixtures';
 vi.mock('../../client/src/lib/queryClient', () => ({ walletAuthHeaders: () => ({}), getActiveWalletAddress: () => null }));
 
-function snapshot(): MarketStats {
+function snapshot(smartIndex = 55, speculatorIndex = 45): MarketStats {
   return { serverNow: NOW, expiresAt: NOW + 3_600_000,
     cycle: cycleStats(computeBtcDirection(weeks(), NOW), NOW), dow: dowStats(days(), NOW, NOW),
-    cot: cotStats({ reportDate: '2026-10-13', commIndex: 55, dumbIndex: 45, weeksInWindow: 120,
+    cot: cotStats({ reportDate: '2026-10-13', commIndex: smartIndex, dumbIndex: speculatorIndex, weeksInWindow: 120,
       fetchedAt: NOW, retryAt: NOW + 86_400_000, latestFlip: null }, NOW),
     funding: fundingStats({ fundingRate: 0, openInterest: 0, fetchedAt: NOW }, NOW) };
 }
 describe('Market Stats presentation', () => {
+  const cotNote = 'Smart money is below speculators: not a bullish sign short term.';
   it('renders four plain-language cards, honest index labels and zero funding/OI', () => {
     const html = renderToStaticMarkup(createElement(MarketStatsView, { data: snapshot(), now: NOW }));
     expect(html.match(/<article /g)).toHaveLength(4);
@@ -25,6 +26,22 @@ describe('Market Stats presentation', () => {
     expect(html).toContain('Estimated daily funding cost: rate × 24, if the rate stays the same');
     expect(html).toContain('No funding payment at this rate.'); expect(html).toContain('0.000%');
     expect(html).toContain('UTC'); expect(html).toContain('role="meter"');
+  });
+  it.each([
+    { smartIndex: 45, speculatorIndex: 55, visible: true },
+    { smartIndex: 55, speculatorIndex: 55, visible: false },
+    { smartIndex: 65, speculatorIndex: 55, visible: false },
+  ])('shows the COT note only when smart money is below speculators ($smartIndex vs $speculatorIndex)', ({ smartIndex, speculatorIndex, visible }) => {
+    const html = renderToStaticMarkup(createElement(MarketStatsView, { data: snapshot(smartIndex, speculatorIndex), now: NOW }));
+    expect(html.includes(cotNote)).toBe(visible);
+  });
+  it.each(['unavailable', 'expired'] as const)('hides the COT note when the card is %s', status => {
+    const data = snapshot(45, 55);
+    if (status === 'unavailable') data.cot = { ...data.cot, status: 'unavailable', value: null, reason: 'No verified COT report.' };
+    const now = status === 'expired' ? data.cot.expiresAt : NOW;
+    const html = renderToStaticMarkup(createElement(MarketStatsView, { data, now }));
+    expect(html).toContain('Unavailable');
+    expect(html).not.toContain(cotNote);
   });
   it('expires individual cards without hiding valid cards or presenting stale funding as current', () => {
     const data = snapshot(), now = NOW + 3_600_000;
