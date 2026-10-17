@@ -1714,6 +1714,7 @@ import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { registerAiTraderRoutes } from "./ai-trader/routes";
 import { registerGridBotRoutes } from "./grid-bot/draft-routes";
 import { registerGridPlannerRoutes } from "./grid-planner/routes";
+import { registerMarketStatsRoutes } from "./market-stats/routes";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptMnemonicForStorage, encryptAgentKeyV3, encryptBotSubaccountKeyV3, encryptPooledSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
 import { queueTradeRetry, isRateLimitError, isTransientError, isCollateralRetryError, getQueueStatus, registerRoutingCallback, cancelRetryJobsForBot } from "./trade-retry-service";
 import { startAnalyticsIndexer, getMetrics } from "./analytics-indexer";
@@ -6532,6 +6533,7 @@ export async function registerRoutes(
     return new PhoenixOperationStore(pool).fundingHistory(botId, owner);
   } });
   registerGridPlannerRoutes(app, requireWallet);
+  registerMarketStatsRoutes(app, requireWallet);
   registerGridBotRoutes(app, requireWallet);
 
   // Helper to generate a unique referral code

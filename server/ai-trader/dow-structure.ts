@@ -146,7 +146,11 @@ function applyZigZag(rawPivots: SwingPivot[]): SwingPivot[] {
 export function detectPivots(bars: Bar[], n: number = FRACTAL_N): SwingPivot[] {
   // Strip the forming bar (bars[length-1]) — it can neither mint nor unmake a pivot.
   const closed = bars.slice(0, -1);
+  return detectClosedPivots(closed, n);
+}
 
+/** Finalized-only feeds: retain the last closed bar as a confirming neighbor. */
+export function detectClosedPivots(closed: Bar[], n: number = FRACTAL_N): SwingPivot[] {
   if (closed.length < 2 * n + 1) {
     // Not enough closed bars for any pivot to have N neighbors on each side.
     return [];

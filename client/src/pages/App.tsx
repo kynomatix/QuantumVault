@@ -167,8 +167,9 @@ import { SolanaMobileWalletAdapterWalletName } from '@solana-mobile/wallet-adapt
 import { Transaction } from '@solana/web3.js';
 import { Buffer } from 'buffer';
 import { confirmTransactionWithFallback } from '@/lib/solana-utils';
+import MarketStatsPage from '@/components/market-stats/MarketStatsPage';
 
-type NavItem = 'dashboard' | 'bots' | 'portfolio' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet' | 'vault';
+type NavItem = 'dashboard' | 'bots' | 'portfolio' | 'market-stats' | 'marketplace' | 'leaderboard' | 'settings' | 'wallet' | 'vault';
 type MarketplaceSortBy = 'pnl7d' | 'pnl30d' | 'pnl90d' | 'pnlAllTime' | 'subscribers';
 
 interface ReferralOverviewResponse {
@@ -2276,6 +2277,7 @@ export default function AppPage() {
               { id: 'wallet' as NavItem, icon: Wallet, label: 'Wallet' },
               { id: 'vault' as NavItem, icon: VaultIcon, label: 'Vaults' },
               { id: 'portfolio' as NavItem, icon: BarChart3, label: 'Portfolio' },
+              { id: 'market-stats' as NavItem, icon: Activity, label: 'Market Stats' },
               { id: 'leaderboard' as NavItem, icon: Users, label: 'Leaderboard' },
               { id: 'settings' as NavItem, icon: Settings, label: 'Settings' },
             ].map((item) => (
@@ -2292,6 +2294,7 @@ export default function AppPage() {
                     : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
                 }`}
                 data-testid={`nav-${item.id}`}
+                aria-current={activeNav === item.id ? 'page' : undefined}
                 title={sidebarCollapsed ? item.label : undefined}
               >
                 <item.icon className="w-5 h-5 flex-shrink-0" />
@@ -2736,6 +2739,11 @@ export default function AppPage() {
             </div>
           ) : null}
           <AnimatePresence mode="wait">
+            {activeNav === 'market-stats' && (
+              <motion.div key="market-stats" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}>
+                <MarketStatsPage active={activeNav === 'market-stats'} />
+              </motion.div>
+            )}
             {activeNav === 'vault' && (
               <motion.div
                 key="vault"

@@ -186,6 +186,21 @@ function parseFiniteNumber(raw: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Display-only raw observation. Never appends participation history or renews its capture time. */
+export async function fetchHlDisplaySnapshot(internalSymbol: string): Promise<{
+  fundingRate: number; openInterest: number; fetchedAt: number;
+} | null> {
+  const symbol = mapToHlSymbol(internalSymbol);
+  if (!symbol) return null;
+  const universe = await fetchWholeUniverse();
+  if (!universe || cachedUniverse?.byCoin !== universe) return null;
+  const raw = universe.get(symbol);
+  const parse = (value: unknown) => typeof value === 'string' && value.trim() !== '' ? parseFiniteNumber(value) : null;
+  const fundingRate = parse(raw?.funding), openInterest = parse(raw?.openInterest);
+  if (fundingRate === null || openInterest === null || openInterest < 0) return null;
+  return { fundingRate, openInterest, fetchedAt: cachedUniverse.fetchedAt };
+}
+
 /**
  * Raw current-cycle Hyperliquid snapshot for one internal market symbol (e.g.
  * "SOL-PERP"). Unknown symbols, network errors, timeouts, and malformed/

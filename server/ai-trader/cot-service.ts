@@ -20,6 +20,8 @@
 import { db } from '../db.js';
 import { cotSnapshots } from '../../shared/schema.js';
 import { desc, sql } from 'drizzle-orm';
+import type { CotDisplay } from '../market-stats/sources';
+import type { WeeklyPool } from '../grid-planner/weekly-store';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -322,6 +324,73 @@ async function fullSync(limit = BACKFILL_LIMIT): Promise<void> {
 // ─── In-flight deduplication ──────────────────────────────────────────────────
 
 let _syncInFlight: Promise<void> | null = null;
+
+// Display attempts are request-driven and per instance. AI Trader's legacy cadence stays unchanged.
+let displayRetryAt = 0;
+let displayReadInFlight: Promise<CotDisplay | null> | null = null;
+
+async function displaySync(database: WeeklyPool): Promise<void> {
+  const rows = await fetchCftcRows(BACKFILL_LIMIT), computed = computeRollingIndices(rows);
+  if (!computed.length) throw new Error('CFTC returned no reports');
+  const capturedAt = new Date().toISOString();
+  const values = computed.map((row, i) => ({ ...row, fetchedAt: capturedAt,
+    state: classifyState(row, i ? computed[i - 1] : null) }));
+  // One bounded batch instead of 135 sequential bootstrap writes; only the existing cache table.
+  await database.query(`INSERT INTO cot_snapshots
+    (report_date, commercial_net, noncomm_net, nonrept_net, dumb_net, comm_index, noncomm_index,
+     nonrept_index, dumb_index, state, weeks_in_window, fetched_at)
+    SELECT "reportDate", "commercialNet", "noncommNet", "nonreptNet", "dumbNet",
+      round("commIndex"::numeric, 2), round("noncommIndex"::numeric, 2), round("nonreptIndex"::numeric, 2),
+      round("dumbIndex"::numeric, 2), state, "weeksInWindow", "fetchedAt"
+    FROM jsonb_to_recordset($1::jsonb) AS r("reportDate" date, "commercialNet" integer, "noncommNet" integer,
+      "nonreptNet" integer, "dumbNet" integer, "commIndex" double precision, "noncommIndex" double precision,
+      "nonreptIndex" double precision, "dumbIndex" double precision, state text, "weeksInWindow" integer, "fetchedAt" timestamptz)
+    ON CONFLICT (report_date) DO UPDATE SET commercial_net = EXCLUDED.commercial_net,
+      noncomm_net = EXCLUDED.noncomm_net, nonrept_net = EXCLUDED.nonrept_net, dumb_net = EXCLUDED.dumb_net,
+      comm_index = EXCLUDED.comm_index, noncomm_index = EXCLUDED.noncomm_index,
+      nonrept_index = EXCLUDED.nonrept_index, dumb_index = EXCLUDED.dumb_index,
+      state = EXCLUDED.state, weeks_in_window = EXCLUDED.weeks_in_window, fetched_at = EXCLUDED.fetched_at`, [JSON.stringify(values)]);
+}
+
+/** Awaited display refresh, using the existing CFTC math and shared sync owner. No background work. */
+export function getCotDisplaySnapshot(database: WeeklyPool, now: number): Promise<CotDisplay | null> {
+  if (displayReadInFlight) return displayReadInFlight;
+  displayReadInFlight = (async () => {
+    const readStored = async (): Promise<CotDisplay | null> => {
+      const result = await database.query(`SELECT
+        (SELECT row_to_json(s) FROM (SELECT report_date, comm_index, dumb_index, weeks_in_window, fetched_at
+          FROM cot_snapshots ORDER BY report_date DESC LIMIT 1) s) AS latest,
+        (SELECT row_to_json(f) FROM (SELECT report_date, state FROM cot_snapshots
+          WHERE state IN ('bullish_flip', 'bearish_flip') ORDER BY report_date DESC LIMIT 1) f) AS flip`);
+      const { latest, flip } = result.rows[0] ?? {};
+      if (!latest) return null;
+      return { reportDate: latest.report_date, commIndex: latest.comm_index === null ? null : Number(latest.comm_index),
+        dumbIndex: latest.dumb_index === null ? null : Number(latest.dumb_index), weeksInWindow: latest.weeks_in_window,
+        fetchedAt: new Date(latest.fetched_at).getTime(), retryAt: displayRetryAt,
+        latestFlip: flip ? { reportDate: flip.report_date, state: flip.state } : null };
+    };
+    if (displayRetryAt === 0) {
+      const stored = await readStored();
+      if (stored && stored.fetchedAt <= now && now - stored.fetchedAt < 86_400_000) displayRetryAt = stored.fetchedAt + 86_400_000;
+    }
+    if (now >= displayRetryAt) {
+      displayRetryAt = now + 86_400_000;
+      try {
+        if (!_syncInFlight) {
+          const sync = displaySync(database);
+          _syncInFlight = sync;
+          // Ownership must survive until the bounded batch has settled.
+          try { await sync; } finally { if (_syncInFlight === sync) _syncInFlight = null; }
+        } else {
+          // Another caller owns this sync; a stalled legacy DB write cannot hold the display open.
+          await settleByCotDeadline(_syncInFlight, now + 23_000, 'response body');
+        }
+      } catch { displayRetryAt = now + 300_000; }
+    }
+    return readStored();
+  })().finally(() => { displayReadInFlight = null; });
+  return displayReadInFlight;
+}
 
 function triggerSyncIfIdle(limit?: number): void {
   if (_syncInFlight) return;
