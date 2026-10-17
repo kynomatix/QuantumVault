@@ -2345,7 +2345,7 @@ async function fetchDirectPerpCandles(
       }
       return null;
     };
-    if (!paperRead) {
+    if (!paperRead && (!onlyProvider || onlyProvider === "hyperliquid")) {
       const result = await readHyperliquid();
       if (result) return result;
     }
