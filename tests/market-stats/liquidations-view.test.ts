@@ -9,7 +9,7 @@ vi.mock('../../client/src/lib/queryClient', () => ({ walletAuthHeaders: () => ({
 
 function card(): LiquidationStatsResponse {
   return { status: 'available', value: modelLiquidations([hour(0, 100), hour(1, 120)], END).value,
-    serverNow: END + 7200000, source: 'OKX BTC-USDT-SWAP', basis: 'oi-leverage-v1', asOf: END,
+    serverNow: END + 7200000, source: 'OKX BTC-USDT-SWAP', basis: 'oi-leverage-v2', asOf: END,
     fetchedAt: END + 3600000, expiresAt: END + 26 * 3600000, gaps: [] };
 }
 describe('modelled monthly liquidation display', () => {
@@ -17,7 +17,8 @@ describe('modelled monthly liquidation display', () => {
     const html = renderToStaticMarkup(createElement(LiquidationHeatmapView, { card: card(), now: END }));
     for (const text of ['Estimated liquidation zones', 'updated daily', 'Largest estimated cluster above price',
       'Largest estimated cluster below price', 'Price often moves towards these pools', 'What this covers',
-      '50/50', '5x 10%', '100x 10%', 'not real positions', 'not a forecast', 'oi-leverage-v1', '4-hour sample',
+      '50/50', '5x 10%', '100x 10%', 'not real positions', 'not a forecast', 'oi-leverage-v2', 'new OI / previous OI',
+      'closes are spread across all open positions', 'unknown starting book', '4-hour sample',
       'Outside range', 'Long', 'Short', 'UTC', 'overflow-x-auto', 'min-w-[900px]', 'Heatmap covers the last 30 days', '180 days']) expect(html).toContain(text);
     expect(html).not.toContain('90 days'); expect(html).not.toContain('Weekly');
   });

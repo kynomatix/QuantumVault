@@ -7,7 +7,7 @@ import type { LiquidationStats } from '../../shared/market-stats';
 const NEGATIVE_WINDOW = 15 * 60_000;
 const FRESHNESS = 26 * HOUR;
 const SOURCE = 'OKX BTC-USDT-SWAP';
-const BASIS = 'oi-leverage-v1; hourly BTC OI changes, assumed 50/50 long/short and fixed leverage; USD-equivalent notional';
+const BASIS = 'oi-leverage-v2; hourly BTC OI changes, closes spread across venue OI, assumed 50/50 long/short and fixed leverage; USD-equivalent notional';
 export class LiquidationStatsCache {
   good?: Extract<LiquidationStatsCard, { status: 'available' }>;
   successfulDay?: number;
