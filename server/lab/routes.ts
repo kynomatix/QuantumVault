@@ -166,16 +166,16 @@ export function registerLabRoutes(app: Express): void {
     } catch (e) {}
   })();
 
-  const requireLabAuth = async (req: any, res: any, next: any) => {
+  const authenticateLab = async (req: any, next: any, deny: (status: number, error: string) => any) => {
     const labSecret = process.env.LAB_AUTH_SECRET;
     if (labSecret) {
       const inboundSecret = req.headers["x-lab-auth"];
       if (inboundSecret !== labSecret) {
-        return res.status(403).json({ error: "Forbidden" });
+        return deny(403, "Forbidden");
       }
       const walletAddress = req.headers["x-lab-wallet"] as string | undefined;
       if (!walletAddress) {
-        return res.status(401).json({ error: "Wallet not connected" });
+        return deny(401, "Wallet not connected");
       }
       req.walletAddress = walletAddress;
       return next();
@@ -201,7 +201,7 @@ export function registerLabRoutes(app: Express): void {
           const b = Buffer.from(candidateHash.padEnd(tokenHash.length, "0").slice(0, tokenHash.length), "hex");
           const equal = a.length === b.length && timingSafeEqual(a, b);
           if (!row || !equal) {
-            return res.status(401).json({ error: "Invalid API token" });
+            return deny(401, "Invalid API token");
           }
           // Update lastUsedAt asynchronously (don't block the request).
           db.update(userApiTokens).set({ lastUsedAt: new Date() }).where(eq(userApiTokens.id, row.id)).catch(() => {});
@@ -210,18 +210,21 @@ export function registerLabRoutes(app: Express): void {
           return next();
         } catch (err: any) {
           console.log(`[QuantumLab] Bearer auth error: ${err.message}`);
-          return res.status(500).json({ error: "Auth lookup failed" });
+          return deny(500, "Auth lookup failed");
         }
       }
     }
 
     const walletAddress = req.session?.walletAddress;
     if (!walletAddress) {
-      return res.status(401).json({ error: "Wallet not connected" });
+      return deny(401, "Wallet not connected");
     }
     req.walletAddress = walletAddress;
     next();
   };
+
+  const requireLabAuth = (req: any, res: any, next: any) =>
+    authenticateLab(req, next, (status, error) => res.status(status).json({ error }));
 
   app.get("/api/lab/tickers", (_req: Request, res: Response) => {
     res.json(LAB_AVAILABLE_TICKERS);
@@ -636,6 +639,7 @@ export function registerLabRoutes(app: Express): void {
   }
 
   let activeWorker: WorkerPool | null = null;
+  let activeJobId: string | null = null;
   let lastWorkerOOM = false;
   let workerStarting = false;
   let lastWorkerMessageTime = 0;
@@ -724,8 +728,10 @@ export function registerLabRoutes(app: Express): void {
     }
   }
 
-  function clearActiveWorker() {
+  function clearActiveWorker(expectedJobId?: string) {
+    if (expectedJobId !== undefined && activeJobId !== expectedJobId) return;
     activeWorker = null;
+    activeJobId = null;
     workerStarting = false;
     lastWorkerMessageTime = 0;
     stopKeepAlive();
@@ -820,6 +826,7 @@ export function registerLabRoutes(app: Express): void {
     processOrdersOnClose?: boolean,
   ) {
     workerStarting = true;
+    activeJobId = job.id;
     lastRunStartedAt = Date.now();
     startStartupWatchdog(job.id, runId);
     const completedCombos: string[] = resumeCheckpoint?.completedCombos ? [...resumeCheckpoint.completedCombos] : [];
@@ -840,6 +847,7 @@ export function registerLabRoutes(app: Express): void {
         } catch {}
       }
 
+      if (job.abortSignal.aborted) return;
       let candlesByCombo: Record<string, OHLCV[]>;
       if (prefetchedCandles) {
         candlesByCombo = prefetchedCandles;
@@ -850,6 +858,7 @@ export function registerLabRoutes(app: Express): void {
           current: 0, total: 0, percent: 0, elapsed: 0,
         });
         candlesByCombo = await fetchAllCandles(config, (msg) => {
+          if (job.abortSignal.aborted) return;
           labStorage.updateProgress(job.id, {
             jobId: job.id, status: "fetching", stage: msg,
             current: 0, total: 0, percent: 0, elapsed: Date.now() - fetchStart,
@@ -857,6 +866,8 @@ export function registerLabRoutes(app: Express): void {
         });
       }
 
+      // A force stop during candle fetching must not spawn a worker afterwards.
+      if (job.abortSignal.aborted || activeJobId !== job.id) return;
       const worker = createWorkerPool({
         jobId: job.id,
         config: {
@@ -1018,10 +1029,10 @@ export function registerLabRoutes(app: Express): void {
                       stage: `Persist failed for ${msg.combo}: ${saveErr.message}`,
                       current: 0, total: 0, percent: 0, elapsed: 0, error: saveErr.message,
                     });
-                    if (activeWorker) {
-                      try { activeWorker.postMessage({ type: "abort" }); } catch {}
-                      try { activeWorker.terminate(); } catch {}
-                      clearActiveWorker();
+                    if (activeWorker === worker) {
+                      try { worker.postMessage({ type: "abort" }); } catch {}
+                      try { worker.terminate(); } catch {}
+                      clearActiveWorker(job.id);
                     }
                     return;
                   }
@@ -1052,7 +1063,7 @@ export function registerLabRoutes(app: Express): void {
           case "done": {
             doneReceived = true;
             pendingCheckpoint = null;
-            clearActiveWorker();
+            clearActiveWorker(job.id);
             await checkpointWriteChain.catch(() => {});
             const results = msg.results as LabBacktestResult[];
             if (job.abortSignal.aborted) {
@@ -1074,7 +1085,7 @@ export function registerLabRoutes(app: Express): void {
                     jobId: job.id, status: "error", stage: invMsg,
                     current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
                   });
-                  clearActiveWorker();
+                  clearActiveWorker(job.id);
                   setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
@@ -1100,7 +1111,7 @@ export function registerLabRoutes(app: Express): void {
                       jobId: job.id, status: "error", stage: invMsg,
                       current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
                     });
-                    clearActiveWorker();
+                    clearActiveWorker(job.id);
                     setTimeout(() => pumpQueue(), 1000);
                     break;
                   }
@@ -1153,7 +1164,7 @@ export function registerLabRoutes(app: Express): void {
                       jobId: job.id, status: "error", stage: invMsg,
                       current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
                     });
-                    clearActiveWorker();
+                    clearActiveWorker(job.id);
                     setTimeout(() => pumpQueue(), 1000);
                     break;
                   }
@@ -1170,7 +1181,7 @@ export function registerLabRoutes(app: Express): void {
                     jobId: job.id, status: "error", stage: invMsg,
                     current: 0, total: 0, percent: 0, elapsed: 0, error: invMsg,
                   });
-                  clearActiveWorker();
+                  clearActiveWorker(job.id);
                   setTimeout(() => pumpQueue(), 1000);
                   break;
                 }
@@ -1224,13 +1235,13 @@ export function registerLabRoutes(app: Express): void {
                 current: 0, total: 0, percent: 100, elapsed: 0,
               });
             }
-            clearActiveWorker();
+            clearActiveWorker(job.id);
             setTimeout(() => pumpQueue(), 1000);
             break;
           }
 
           case "error": {
-            clearActiveWorker();
+            clearActiveWorker(job.id);
             await checkpointWriteChain.catch(() => {});
             const isResource = msg.isResourceError || isOOMError(msg.message || "");
             const errorLabel = isResource ? "Resource limit exceeded" : "Error";
@@ -1261,7 +1272,7 @@ export function registerLabRoutes(app: Express): void {
       });
 
       worker.on("error", async (err: Error) => {
-        clearActiveWorker();
+        clearActiveWorker(job.id);
         await checkpointWriteChain.catch(() => {});
         const oom = isOOMError(err);
         if (oom) lastWorkerOOM = true;
@@ -1291,7 +1302,7 @@ export function registerLabRoutes(app: Express): void {
 
       worker.on("exit", async (code: number) => {
         if (code !== 0 && activeWorker === worker) {
-          clearActiveWorker();
+          clearActiveWorker(job.id);
           await checkpointWriteChain.catch(() => {});
           const exitMsg = `Worker exited with code ${code}`;
           const oom = lastWorkerOOM;
@@ -1327,12 +1338,13 @@ export function registerLabRoutes(app: Express): void {
     };
 
     doStart().catch(async (err: any) => {
+      if (job.abortSignal.aborted) return;
       console.log(`[QuantumLab] Failed to start optimization: ${err.message}`);
       labStorage.updateProgress(job.id, {
         jobId: job.id, status: "error", stage: `Error: ${err.message}`,
         current: 0, total: 0, percent: 0, elapsed: 0, error: err.message,
       });
-      clearActiveWorker();
+      clearActiveWorker(job.id);
       if (runId) {
         try {
           await labStorage.pauseRun(runId);
@@ -2782,14 +2794,74 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.post("/api/lab/queue/kick", requireLabAuth, async (req: Request, res: Response) => {
+  const requireQueueKickAuth = (req: Request, res: Response, next: () => void) => {
+    if (req.body?.force !== true) return requireLabAuth(req, res, next);
+
+    // Global recovery uses the platform admin Bearer convention from server/routes.ts.
+    const adminPassword = process.env.ADMIN_PASSWORD?.trim();
+    const match = typeof req.headers.authorization === "string"
+      ? /^Bearer\s+(.+)$/.exec(req.headers.authorization)
+      : null;
+    const providedToken = match?.[1]?.trim();
+    if (adminPassword && providedToken && timingSafeEqual(
+      createHash("sha256").update(providedToken).digest(),
+      createHash("sha256").update(adminPassword).digest(),
+    )) {
+      res.locals.labForceKickAdmin = true;
+      console.log("[QuantumLab] Platform admin force queue kick authorized");
+      return next();
+    }
+    // Preserve the existing Lab identity sources, with a force-specific 403 on failure.
+    return authenticateLab(req, next, () => {
+      console.warn("[QuantumLab] Refused force queue kick: Lab authentication required");
+      return res.status(403).json({ error: "Force stop requires an authenticated Lab user or platform admin" });
+    });
+  };
+
+  app.post("/api/lab/queue/kick", requireQueueKickAuth, async (req: Request, res: Response) => {
     const force = req.body?.force === true;
     console.log(`[QuantumLab] Manual queue kick requested (pumpRunning=${pumpQueueRunning}, force=${force}, activeWorker=${!!activeWorker})`);
 
     const allJobs = (labStorage as any).jobs as Map<string, any> | undefined;
+    const scopedJob = force && !res.locals.labForceKickAdmin
+      ? (activeJobId ? labStorage.getJob(activeJobId) : undefined)
+      : undefined;
+    // Reject before entering the mutating try/finally, using only server-owned state.
+    if (force && !res.locals.labForceKickAdmin) {
+      const ownsActive = !!scopedJob?.walletAddress && scopedJob.walletAddress === (req as any).walletAddress;
+      const lastProgress = scopedJob?.lastUpdated;
+      // Same four-minute threshold as the UI's heartbeat branch. Unknown time fails closed.
+      const stale = typeof lastProgress === "number" && Number.isFinite(lastProgress) && lastProgress > 0
+        && Date.now() - lastProgress >= 240_000;
+      if (!scopedJob?.runId || (!activeWorker && !workerStarting)
+        || scopedJob.progress.status === "complete" || scopedJob.progress.status === "error"
+        || (!ownsActive && !stale)) {
+        console.warn("[QuantumLab] Refused force queue kick: active run is not owned by caller or server-stale");
+        return res.status(403).json({ error: "Force stop is allowed only for your active run or a stale active run" });
+      }
+      console.log(`[QuantumLab] User force queue kick authorized (run=${scopedJob.runId}, reason=${ownsActive ? "owner" : "server-stale"})`);
+    }
 
     try {
-      if (force) {
+      if (force && scopedJob) {
+        // Cancel exactly the worker's job; never evict a wallet's other jobs or the whole queue.
+        scopedJob.abortSignal.aborted = true;
+        labStorage.updateProgress(scopedJob.id, {
+          ...scopedJob.progress, status: "error", stage: "Force-stopped; run paused and resumable",
+        });
+        const workerRef = activeWorker;
+        if (workerRef) {
+          try { workerRef.postMessage({ type: "abort" }); } catch {}
+          await Promise.race([
+            new Promise<void>(resolve => { workerRef.once("exit", () => resolve()); }),
+            new Promise<void>(resolve => setTimeout(resolve, 2000)),
+          ]);
+          try { workerRef.terminate(); } catch {}
+        }
+        clearActiveWorker(scopedJob.id);
+        await labStorage.pauseRun(scopedJob.runId!);
+        console.log(`[QuantumLab] Kick(force): paused only active run ${scopedJob.runId}`);
+      } else if (force) {
         const pausedRunIds: number[] = [];
         if (allJobs) {
           for (const [, job] of Array.from(allJobs.entries())) {
