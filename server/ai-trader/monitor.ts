@@ -3570,7 +3570,8 @@ export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycle
   const _obs = cycleObs;
   let bot = await storage.getAiTraderBot(botId);
   if (!bot) { reportOrphanCycle(botId); return; }
-  audit = safeCycleAudit(botId, () => cycleAudit ?? new CycleAudit(bot, new Date()));
+  const auditBot = bot;
+  audit = safeCycleAudit(botId, () => cycleAudit ?? new CycleAudit(auditBot, new Date()));
   if (!cycleAudit) void audit.begin();
   audit.phase = "preflight";
   if (bot.protocol === "flash") { audit.set("venue_retired"); return; }
