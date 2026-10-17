@@ -1,0 +1,1104 @@
+{
+  "baseCommitHash": "0282fcbe995f3b7ec80bee9320a29f53102edb72",
+  "sourceSha256": "d88d1b03ef61edf4bc321de219228ff44083c00b172be25b9419901c324302de",
+  "cases": [
+    {
+      "name": "manual scanner paper",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "manual",
+          "paperMode": true,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "SCANNER_DYNAMIC",
+          "timeframe": "15m",
+          "mode": "manual",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": {
+          "timeframe": "15m",
+          "marketSource": "scanner",
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        },
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:299642EC165CF67FEE40F7411EE97D0C1D972B033CEE7977F33DCA483F4B1929"
+    },
+    {
+      "name": "manual scanner live",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "manual",
+          "paperMode": false,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "SCANNER_DYNAMIC",
+          "timeframe": "15m",
+          "mode": "manual",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": {
+          "timeframe": "15m",
+          "marketSource": "scanner",
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        },
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:299642EC165CF67FEE40F7411EE97D0C1D972B033CEE7977F33DCA483F4B1929"
+    },
+    {
+      "name": "manual fixed paper",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "manual",
+          "paperMode": true,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "BTC-PERP",
+          "timeframe": "15m",
+          "mode": "manual",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": null,
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:376E85C2823F831D77A95283375E36B70A6E3539ADB44149E62C32D4D823F881"
+    },
+    {
+      "name": "manual fixed live",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "manual",
+          "paperMode": false,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "BTC-PERP",
+          "timeframe": "15m",
+          "mode": "manual",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": null,
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:376E85C2823F831D77A95283375E36B70A6E3539ADB44149E62C32D4D823F881"
+    },
+    {
+      "name": "suggest scanner paper",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "paperMode": true,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "SCANNER_DYNAMIC",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": {
+          "timeframe": "15m",
+          "marketSource": "scanner",
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        },
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:8A0234AA90BDC6F46E3C4B94485BB44119E3A6C7AF5040501EDB96BCDF770BE1"
+    },
+    {
+      "name": "suggest scanner live",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "paperMode": false,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "SCANNER_DYNAMIC",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": {
+          "timeframe": "15m",
+          "marketSource": "scanner",
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        },
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:8A0234AA90BDC6F46E3C4B94485BB44119E3A6C7AF5040501EDB96BCDF770BE1"
+    },
+    {
+      "name": "suggest fixed paper",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "paperMode": true,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "BTC-PERP",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": null,
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:40AA09FEF4C31C28C2A636FB748FAB2A7C6AC239499F313ACD81C32DDF0A7CB6"
+    },
+    {
+      "name": "suggest fixed live",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "paperMode": false,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "BTC-PERP",
+          "timeframe": "15m",
+          "mode": "suggest",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": null,
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:40AA09FEF4C31C28C2A636FB748FAB2A7C6AC239499F313ACD81C32DDF0A7CB6"
+    },
+    {
+      "name": "auto scanner paper",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "auto",
+          "paperMode": true,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "SCANNER_DYNAMIC",
+          "timeframe": "15m",
+          "mode": "auto",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": {
+          "timeframe": "15m",
+          "marketSource": "scanner",
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        },
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:3820859488472661EA81AA0AF690DBDED8F18D9D23A6553C0DE914851AD187FC"
+    },
+    {
+      "name": "auto scanner live",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "auto",
+          "paperMode": false,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "scanner",
+          "market": "SCANNER_DYNAMIC",
+          "timeframe": "15m",
+          "mode": "auto",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": {
+          "timeframe": "15m",
+          "marketSource": "scanner",
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        },
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:3820859488472661EA81AA0AF690DBDED8F18D9D23A6553C0DE914851AD187FC"
+    },
+    {
+      "name": "auto fixed paper",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "auto",
+          "paperMode": true,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "BTC-PERP",
+          "timeframe": "15m",
+          "mode": "auto",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": null,
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:64894C83287A1051F349AEC7C4C92A8039FA4E3DF8A3F5E8ED3BF80EA24ADD0A"
+    },
+    {
+      "name": "auto fixed live",
+      "input": {
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "btc-perp",
+          "timeframe": "15m",
+          "mode": "auto",
+          "paperMode": false,
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.50",
+          "riskMaxPct": "1.50",
+          "allocatedUsdc": "00100.00",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "contextDigest": {
+          "candleProvenance": {
+            "selected": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            },
+            "parent": {
+              "source": "okx",
+              "venue": "okx",
+              "basis": "perp",
+              "proxy": "direct",
+              "finality": "finalized"
+            }
+          }
+        }
+      },
+      "identity": {
+        "schemaVersion": 1,
+        "components": {
+          "scanner_capability_policy": 3,
+          "accepted_candle_provenance": 1,
+          "prompt_context_schema": 3,
+          "session_policy": 1,
+          "guardrail_risk_policy": 4,
+          "paper_execution_simulator": 3
+        },
+        "bot": {
+          "protocol": "pacifica",
+          "marketSource": "fixed",
+          "market": "BTC-PERP",
+          "timeframe": "15m",
+          "mode": "auto",
+          "riskProfile": "guarded",
+          "model": "anthropic/claude-opus-4.8",
+          "sizingMode": "risk_based",
+          "riskMinPct": "0.5",
+          "riskMaxPct": "1.5",
+          "allocatedUsdc": "100",
+          "maxLeverage": 3,
+          "stopPolicy": "static"
+        },
+        "scannerPick": null,
+        "candleProvenance": {
+          "selected": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          },
+          "parent": {
+            "source": "okx",
+            "venue": "okx",
+            "basis": "perp",
+            "proxy": "direct",
+            "finalityClass": "forming_or_finalized"
+          }
+        }
+      },
+      "identityHash": "sha256:64894C83287A1051F349AEC7C4C92A8039FA4E3DF8A3F5E8ED3BF80EA24ADD0A"
+    }
+  ]
+}

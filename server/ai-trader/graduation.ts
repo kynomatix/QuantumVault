@@ -22,6 +22,7 @@
 
 import { createHash } from "node:crypto";
 import type { AiTraderBot } from "@shared/schema";
+import { usesFixedPaperDecisionV2 } from "@shared/ai-trader-flat-reasons";
 
 export type QualificationEraComponent =
   | "scanner_capability_policy"
@@ -29,7 +30,8 @@ export type QualificationEraComponent =
   | "prompt_context_schema"
   | "session_policy"
   | "guardrail_risk_policy"
-  | "paper_execution_simulator";
+  | "paper_execution_simulator"
+  | "fixed_paper_decision_tool";
 
 export type QualificationEraDecision = "bump" | "no_bump";
 
@@ -43,9 +45,11 @@ export interface QualificationEraRegistryEntry {
 export type QualificationEraRegistry = Record<QualificationEraComponent, QualificationEraRegistryEntry>;
 
 // Cycle visibility is observational: scanner policy, risk and simulator versions stay fixed.
-// Accepted provenance keeps primary/finality requirements (no_bump); parent omission is
-// a paper context change. The v2 paper tool/context changes prompt materialVersion to 4.
-// This shared identity also resets scanner qualification evidence; scanner strategy is unchanged.
+// Accepted provenance keeps primary/finality requirements (no_bump). Scanner and live
+// model prompts, tool schemas and rendered context remain byte-identical to main;
+// passive contextQuality metadata does not change those decision inputs.
+// Declare the batch without resetting existing Pacifica scanner paper trials:
+// only fixed-ticker PAPER identities include the v2 tool/parent-omission component.
 // QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN
 export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
@@ -61,10 +65,16 @@ export const QUALIFICATION_ERA_REGISTRY = {
     "ownerPaths": ["server/lab/datafeed.ts", "server/lab/candle-store.ts", "server/ai-trader/context-builder.ts"]
   },
   "prompt_context_schema": {
-    "materialVersion": 4,
+    "materialVersion": 3,
     "decisionGeneration": 6,
-    "decision": "bump",
+    "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts"]
+  },
+  "fixed_paper_decision_tool": {
+    "materialVersion": 1,
+    "decisionGeneration": 1,
+    "decision": "bump",
+    "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts", "shared/ai-trader-flat-reasons.ts"]
   },
   "session_policy": {
     "materialVersion": 1,
@@ -104,6 +114,7 @@ export interface QualificationEraInput {
     | "market"
     | "timeframe"
     | "mode"
+    | "paperMode"
     | "riskProfile"
     | "model"
     | "sizingMode"
@@ -118,7 +129,8 @@ export interface QualificationEraInput {
 
 export interface QualificationEraObject {
   schemaVersion: 1;
-  components: Record<QualificationEraComponent, number>;
+  components: Record<Exclude<QualificationEraComponent, "fixed_paper_decision_tool">, number> &
+    Partial<Record<"fixed_paper_decision_tool", number>>;
   bot: Record<string, string | number>;
   scannerPick: Record<string, string | Record<string, string> | null> | null;
   candleProvenance: {
@@ -176,11 +188,15 @@ export function buildQualificationEraObject(input: QualificationEraInput): Quali
       : {};
   const selected = canonicalProvenance(provenance.selected);
   const parent = canonicalProvenance(provenance.parent);
-  const components = {} as Record<QualificationEraComponent, number>;
+  const components = {} as QualificationEraObject["components"];
   for (const component of QUALIFICATION_ERA_COMPONENTS) {
     components[component] = QUALIFICATION_ERA_REGISTRY[component].materialVersion;
   }
   const bot = input.bot;
+  // Omit the key entirely for legacy consumers to preserve their canonical bytes/hash.
+  if (usesFixedPaperDecisionV2(bot)) {
+    components.fixed_paper_decision_tool = QUALIFICATION_ERA_REGISTRY.fixed_paper_decision_tool.materialVersion;
+  }
   const marketSource = canonicalIdentifier(bot.marketSource, "lower");
   const selectedMarket = canonicalIdentifier(bot.market, "upper");
   const market = marketSource === "scanner" ? "SCANNER_DYNAMIC" : selectedMarket;
@@ -290,12 +306,17 @@ export function qualificationEraDecisionPatch(
 }
 
 export function validateQualificationEraDeclarationChanges(input: {
-  base: QualificationEraRegistry | null;
+  base: Partial<QualificationEraRegistry> | null;
   current: QualificationEraRegistry;
   changedPaths: readonly string[];
 }): string[] {
   const errors: string[] = [];
-  for (const component of QUALIFICATION_ERA_COMPONENTS) {
+  const components = new Set<QualificationEraComponent>([
+    ...QUALIFICATION_ERA_COMPONENTS,
+    ...Object.keys(input.base ?? {}) as QualificationEraComponent[],
+    ...Object.keys(input.current) as QualificationEraComponent[],
+  ]);
+  for (const component of components) {
     const current = input.current[component];
     if (!current || !Number.isInteger(current.materialVersion) || current.materialVersion < 1 ||
         !Number.isInteger(current.decisionGeneration) || current.decisionGeneration < 1 ||
@@ -311,7 +332,9 @@ export function validateQualificationEraDeclarationChanges(input: {
       continue;
     }
     if (!base) {
-      errors.push(`${component}: missing base registry entry`);
+      if (current.materialVersion !== 1 || current.decisionGeneration !== 1 || current.decision !== "bump") {
+        errors.push(`${component}: new component must start at version/generation 1 with bump`);
+      }
       continue;
     }
     const affected = current.ownerPaths.some((path) => input.changedPaths.includes(path));

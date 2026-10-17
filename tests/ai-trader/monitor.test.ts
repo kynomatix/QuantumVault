@@ -279,6 +279,7 @@ const PAPER_TAKER_FEE_RATE = 0.00015;
 const ERA_CONTEXT = { candleProvenance: { selected: null, parent: null } };
 const ERA_BOT_INPUT = {
   protocol: "pacifica",
+  paperMode: true,
   marketSource: "fixed",
   market: "SOL-PERP",
   timeframe: "15m",

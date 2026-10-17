@@ -23,6 +23,8 @@ import {
   validateQualificationEraDeclarationChanges,
   type QualificationEraComponent,
   type QualificationEraRegistry,
+  type QualificationEraInput,
+  type QualificationEraObject,
   type GraduationTradeRecord,
 } from "../../server/ai-trader/graduation";
 import type { AiTraderBot } from "@shared/schema";
@@ -31,6 +33,11 @@ const qualificationBaseline = JSON.parse(readFileSync('tests/fixtures/qualificat
   baseCommitHash: string; registry: QualificationEraRegistry; ownerSha256: Record<string, string>;
 };
 const cycleBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-cycles-baseline.json', 'utf8')) as typeof qualificationBaseline;
+const consumerBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-consumer-main-baseline.json', 'utf8')) as {
+  baseCommitHash: string;
+  sourceSha256: string;
+  cases: { name: string; input: QualificationEraInput; identity: QualificationEraObject; identityHash: string }[];
+};
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z
 const DAY = 86_400_000;
@@ -312,6 +319,7 @@ const ERA_BOT = {
   market: "btc-perp",
   timeframe: "15m",
   mode: "auto",
+  paperMode: true,
   riskProfile: "guarded",
   model: "anthropic/claude-opus-4.8",
   sizingMode: "risk_based",
@@ -362,7 +370,7 @@ describe("qualification era identity", () => {
       components: {
         scanner_capability_policy: 3,
         accepted_candle_provenance: 1,
-        prompt_context_schema: 4,
+        prompt_context_schema: 3,
         session_policy: 1,
         guardrail_risk_policy: 4,
         paper_execution_simulator: 3,
@@ -494,6 +502,7 @@ function cloneReviewedMainRegistry(): QualificationEraRegistry {
 
 describe("qualification era forgotten-declaration gate", () => {
   const components = Object.keys(QUALIFICATION_ERA_REGISTRY) as QualificationEraComponent[];
+  const historicalComponents = Object.keys(qualificationBaseline.registry) as QualificationEraComponent[];
 
   it("declares Flash venue retirement as a reviewed no-bump", () => {
     const historical = cloneReviewedMainRegistry();
@@ -536,7 +545,7 @@ describe("qualification era forgotten-declaration gate", () => {
     })).toEqual([]);
   });
 
-  it("declares monitor observation without changing any material qualification component", () => {
+  it("declares monitor observation without changing shared material qualification versions", () => {
     const base = cloneReviewedMainRegistry();
     base.scanner_capability_policy.decisionGeneration = 45;
     base.paper_execution_simulator.decisionGeneration = 15;
@@ -546,8 +555,9 @@ describe("qualification era forgotten-declaration gate", () => {
     expect(Object.fromEntries(components.map(component =>
       [component, QUALIFICATION_ERA_REGISTRY[component].materialVersion]))).toEqual({
       scanner_capability_policy: 3, accepted_candle_provenance: 1,
-      prompt_context_schema: 4, session_policy: 1,
+      prompt_context_schema: 3, session_policy: 1,
       guardrail_risk_policy: 4, paper_execution_simulator: 3,
+      fixed_paper_decision_tool: 1,
     });
   });
 
@@ -562,9 +572,9 @@ describe("qualification era forgotten-declaration gate", () => {
         "server/ai-trader/routes.ts", "server/ai-trader/scanner.ts",
       ],
     })).toEqual([]);
-    expect(Object.fromEntries(components.map(component =>
+    expect(Object.fromEntries(historicalComponents.map(component =>
       [component, cloneReviewedMainRegistry()[component].materialVersion]))).toEqual(
-      Object.fromEntries(components.map(component => [component, base[component].materialVersion])));
+      Object.fromEntries(historicalComponents.map(component => [component, base[component].materialVersion])));
   });
   for (const component of components) {
     const changedPath = QUALIFICATION_ERA_REGISTRY[component].ownerPaths[0];
@@ -624,8 +634,8 @@ describe("qualification era forgotten-declaration gate", () => {
       "scanner_capability_policy: changed owner requires decisionGeneration + 1",
       "guardrail_risk_policy: changed owner requires decisionGeneration + 1",
     ]);
-    expect(Object.fromEntries(components.map(component => [component, current[component].materialVersion])))
-      .toEqual(Object.fromEntries(components.map(component => [component, base[component].materialVersion])));
+    expect(Object.fromEntries(historicalComponents.map(component => [component, current[component].materialVersion])))
+      .toEqual(Object.fromEntries(historicalComponents.map(component => [component, base[component].materialVersion])));
   });
 
   it("pagination declaration generations preserve the era digest and an existing trial", () => {
@@ -671,5 +681,75 @@ describe("qualification era forgotten-declaration gate", () => {
     expect(currentSource).toContain(beginMarker);
     expect(currentSource).toContain(endMarker);
     expect(validateQualificationEraDeclarationChanges({ base, current: QUALIFICATION_ERA_REGISTRY, changedPaths })).toEqual([]);
+  });
+
+  it("bootstraps a new consumer component with an explicit first material bump", () => {
+    const base = cloneRegistry();
+    const legacyBase: Partial<QualificationEraRegistry> = { ...base };
+    delete legacyBase.fixed_paper_decision_tool;
+    expect(validateQualificationEraDeclarationChanges({ base: legacyBase, current: base, changedPaths: [] })).toEqual([]);
+    for (const patch of [
+      { materialVersion: 2 }, { decisionGeneration: 2 }, { decision: "no_bump" as const },
+    ]) {
+      const current = cloneRegistry();
+      Object.assign(current.fixed_paper_decision_tool, patch);
+      expect(validateQualificationEraDeclarationChanges({ base: legacyBase, current, changedPaths: [] }))
+        .toContain("fixed_paper_decision_tool: new component must start at version/generation 1 with bump");
+    }
+    const removed = cloneRegistry();
+    delete (removed as Partial<QualificationEraRegistry>).fixed_paper_decision_tool;
+    expect(validateQualificationEraDeclarationChanges({ base, current: removed, changedPaths: [] }))
+      .toContain("fixed_paper_decision_tool: malformed registry entry");
+  });
+});
+
+describe("qualification consumer identities against main fixtures", () => {
+  for (const fixture of consumerBaseline.cases) {
+    it(`${fixture.name}: preserves legacy identities and scopes new material to fixed paper`, () => {
+      const identity = buildQualificationEraObject(fixture.input);
+      const identityHash = computeQualificationEraDigest(fixture.input);
+      const fixedPaper = fixture.input.bot.paperMode && fixture.input.bot.marketSource === "fixed";
+      const baselineHash = fixture.identityHash.replace(/^sha256:/, "");
+      // The pinned bytes and hash were evaluated from origin/main's actual module.
+      expect(createHash("sha256").update(JSON.stringify(fixture.identity)).digest("hex").toUpperCase())
+        .toBe(baselineHash);
+      const trialStartedAt = new Date(NOW - 2 * DAY);
+      const existing = { ...fixture.input.bot, currentQualificationEraDigest: baselineHash,
+        trialStartedAt, graduationState: "in_trial" } as AiTraderBot;
+      if (fixedPaper) {
+        expect(identity).toEqual({ ...fixture.identity, components: {
+          ...fixture.identity.components, fixed_paper_decision_tool: 1,
+        } });
+        expect(identityHash).not.toBe(baselineHash);
+        expect(qualificationEraDecisionPatch(existing, identityHash))
+          .toMatchObject({ qualificationEraInvalidationReason: "qualification_era_changed" });
+      } else {
+        expect(identity).toEqual(fixture.identity);
+        expect(JSON.stringify(identity)).toBe(JSON.stringify(fixture.identity));
+        expect(identityHash).toBe(baselineHash);
+        expect(identity.components).not.toHaveProperty("fixed_paper_decision_tool");
+        expect(qualificationEraDecisionPatch(existing, identityHash)).toBeNull();
+        expect(existing.trialStartedAt).toBe(trialStartedAt);
+      }
+    });
+  }
+
+  it("keeps scoped component bumps out of scanner and live identities", () => {
+    const registry = QUALIFICATION_ERA_REGISTRY as unknown as QualificationEraRegistry;
+    const version = registry.fixed_paper_decision_tool.materialVersion;
+    const before = consumerBaseline.cases.map(fixture => computeQualificationEraDigest(fixture.input));
+    try {
+      registry.fixed_paper_decision_tool.materialVersion += 1;
+      for (const [index, fixture] of consumerBaseline.cases.entries()) {
+        const after = computeQualificationEraDigest(fixture.input);
+        if (fixture.input.bot.paperMode && fixture.input.bot.marketSource === "fixed") {
+          expect(after).not.toBe(before[index]);
+        } else {
+          expect(after).toBe(before[index]);
+        }
+      }
+    } finally {
+      registry.fixed_paper_decision_tool.materialVersion = version;
+    }
   });
 });

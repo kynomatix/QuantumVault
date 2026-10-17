@@ -178,6 +178,7 @@ const WALLET = "WALLET_OWNER_XYZ";
 const ERA_CONTEXT = { candleProvenance: { selected: null, parent: null } };
 const ERA_BOT_INPUT = {
   protocol: "pacifica",
+  paperMode: true,
   marketSource: "fixed",
   market: "SOL-PERP",
   timeframe: "1h",
