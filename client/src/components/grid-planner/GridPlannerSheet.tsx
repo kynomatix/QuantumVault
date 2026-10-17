@@ -10,11 +10,14 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { DrawerSettingsPanel } from '@/components/ui/settings-panel';
 import { walletAuthHeaders } from '@/lib/queryClient';
+import { plannerFeeDefault, type PlannerFee } from '../../../../shared/planner-fee';
+import { readPlannerFee, plannerFeePercent, plannerFeeLabel, PACIFICA_FEE_SOURCE } from '@/lib/planner-fee-view';
 import { ASSUMPTION_LABEL, plannerPreviewQuery, plannerGridCountHint, plannerOrderSizeSummary, plannerOpeningMinimumSummary, PlannerRequestGeneration, isPlannerChart, plannerIssue, plannerMinimumRows,
-  isPlannerPreview, plannerOverlays, plannerLevelMessage, plannerVenueChecks, readableDecimal, readableTime, clientObservationDeadline,
+  isPlannerPreview, plannerOverlays, plannerLevelMessage, plannerVenueChecks, plannerStatus, readableDecimal, readableTime, clientObservationDeadline,
   RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange, plannerRangeAround,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
+import { GridPlannerLevels } from './GridPlannerLevels';
 import { GridPlanIssues } from './GridPlanIssues';
 import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
 import { GridDirectionSignals } from './GridDirectionSignals';
@@ -57,6 +60,24 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     identity: string; plannerEnabled?: boolean; createEnabled?: boolean; liveEnabled?: boolean; initialIntent?: GridIntent;
     onSaved?: (bot: Record<string, unknown>) => void }) {
   const [form, setForm] = useState(() => gridSetupForm(initialIntent, gridStoredMarket(identity))), [markets, setMarkets] = useState<PlannerMarket[]>([]);
+  const [feeDefault, setFeeDefault] = useState<PlannerFee>(null);
+  const feeEdited = useRef(false);
+  const [feeWasEdited, setFeeWasEdited] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    feeEdited.current = false; setFeeWasEdited(false); setFeeDefault(null);
+    setForm(current => ({ ...current, feePercent: '' }));
+    const apply = (fee: PlannerFee) => {
+      if (controller.signal.aborted) return;
+      setFeeDefault(fee);
+      if (!feeEdited.current) setForm(current => ({ ...current, feePercent: plannerFeePercent(fee) }));
+    };
+    fetch('/api/exchange/planner-fee', { credentials: 'include', headers: walletAuthHeaders(), signal: controller.signal })
+      .then(async response => { if (!response.ok) throw Error('Fee unavailable'); return response.json(); })
+      .then(value => apply(readPlannerFee(value))).catch(() => apply(plannerFeeDefault(null)));
+    return () => controller.abort();
+  }, [open, identity, initialIntent]);
   const defaultMarketPendingRef = useRef(!initialIntent);
   const [defaultMarketPending, setDefaultMarketPending] = useState(defaultMarketPendingRef.current);
   const observationKey = JSON.stringify([open, identity, form.market, form.timeframe, form.rangeWindow, plannerEnabled]);
@@ -117,6 +138,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   }, [open, identity, initialIntent]);
   const edit = (key: keyof typeof INITIAL, value: string | boolean) => {
     if (draftBusy) return;
+    if (key === 'feePercent') { feeEdited.current = true; setFeeWasEdited(true); }
     if (key === 'market') {
       defaultMarketPendingRef.current = false;
       setDefaultMarketPending(false);
@@ -365,8 +387,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     <DrawerSettingsPanel id="fees" title="Fees & data" icon={Receipt} keepMounted
       expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-advanced-toggle">
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {numberField('feePercent', 'Assumed maker + builder fee per side (%)')}
+        {numberField('feePercent', 'Maker fee per side (%)')}
       </div>
+      <p className="text-xs text-muted-foreground">{feeWasEdited ? 'Your edited maker fee assumption' : plannerFeeLabel(feeDefault)}.
+        {feeDefault?.source === 'published' && <> <a href={PACIFICA_FEE_SOURCE} target="_blank" rel="noreferrer" className="underline">Pacifica fee schedule</a></>}
+        {' '}You can edit this fee. Builder fees are not included.</p>
       <p className="text-xs text-muted-foreground">Sizes are in USDC; coin amounts are rounded to the exchange's minimum step.</p>
       <p className="text-xs text-muted-foreground">The suggested range covers the highs and lows of this period, with a small buffer.</p>
       <p className="text-xs text-muted-foreground">{ASSUMPTION_LABEL}. Blank = unknown; 0 = your explicit zero-cost assumption.</p>
@@ -451,7 +476,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
                 : "The suggested stop is 3% beyond the loss side of your range, rounded outwards to the exchange's observed price step. Change it in Stop loss settings."}</p>
               <p>{preview?.fee.state === 'unknown' || form.feePercent === '' ? 'No fee assumed — fee checks have not been evaluated.' : ASSUMPTION_LABEL} Taker fees for a starting position, slippage, exchange fee rounding and funding are unavailable. {preview?.stop.reason}</p>
               {preview?.fee.state === 'unknown' && <p>Minimum with your fee assumption: {preview.assumedMinimum.state === 'available' ? `${readableDecimal(preview.assumedMinimum.value)} USDC` : preview.assumedMinimum.reason}</p>}
-              <p>No profit or fill forecasts. Minimum investment uses a 0.01 USDC display step and no modeled transfer floor; it does not establish funding, liquidation safety, live capacity or executable partial fills. This hypothetical plan does not establish live capacity or balances; draft funds are checked separately below.</p>
+              <p>No profit or fill forecasts. Minimum investment uses a 0.01 USDC display step. Funding, liquidation safety, available order slots, account balances and partial fills are not checked here; draft funds are checked separately below.</p>
                   {liveEnabled && <p>Create bot asks you to confirm isolated funding and trading, then saves and starts this setup. Save draft keeps it for later.</p>}
             </>}
             error={chartError} onRetry={retryChart} loading={!!form.market && !chart && !chartError} />
@@ -554,11 +579,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         {plannerEnabled && <section aria-labelledby="grid-plan-heading" className="rounded-xl border border-primary/20 bg-card/40 p-4 sm:p-5 space-y-4">
           <h3 id="grid-plan-heading" className="text-sm font-semibold">Your plan</h3>
           <GridPlanIssues reasons={issues} onReview={showIssue} />
-          {loading && !preview ? <p role="status" className="text-sm">Calculating hypothetical geometry…</p>
-            : preview ? <p role="status" className="text-sm font-medium">{stale ? 'Observation expired — refresh before using this preview'
-              : preview.state === 'rejected' ? 'Requested plan rejected' : preview.state === 'unavailable' ? 'Preview unavailable'
-              : preview.geometry?.state === 'available' ? 'Enter an investment to see order sizes'
-              : preview.state === 'diagnostic' ? 'Diagnostic geometry — some checks unavailable' : 'Hypothetical checks passed'}</p>
+          {loading && !preview ? <p role="status" className="text-sm">Checking your plan…</p>
+            : preview ? <p role="status" className="text-sm font-medium">{plannerStatus(preview, stale)}</p>
             : <p className="text-sm text-muted-foreground">Choose a market, range and investment to see your plan.{!effectiveStop && ' A proposed stop needs observed sizing, or enter one in Stop loss settings.'}</p>}
           <dl className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
             <div><dt className="text-xs text-muted-foreground">Grids</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length - 1} grids` : preview?.geometry?.state === 'available' ? `${preview.geometry.value.length - 1} grids` : 'Awaiting preview'}</dd></div>
@@ -572,15 +594,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
 
           {displayPlan && <details className="border-t border-border/60 pt-3">
             <summary className="cursor-pointer text-sm font-medium">View all grid levels and quantities</summary>
-            <p className="text-xs text-muted-foreground mt-3">{stale && 'Expired observation. '}{preview?.minimumPlan ? 'Diagnostic quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Starting position quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p>
-            <div className="overflow-x-auto max-h-72 mt-2"><table className="w-full text-xs text-left">
-              <caption className="text-left py-2">Hypothetical levels ({displayPlan.lines.length} price lines)</caption>
-              <thead><tr><th className="p-2">Level</th><th className="p-2">Price</th><th className="p-2">Base quantity</th><th className="p-2">Role</th></tr></thead>
-              <tbody>{displayPlan.lines.map(line => <tr key={line.ordinal} className="border-t border-border/60">
-                <td className="p-2">{line.ordinal + 1}</td><td className="p-2 tabular-nums">{readableDecimal(line.price)}</td><td className="p-2 tabular-nums">{readableDecimal(line.quantity)}</td>
-                <td className="p-2">{line.role === 'entry' ? 'Entry' : line.role === 'seed_exit' ? 'Take-profit (starting position)' : 'Virtual line'}</td>
-              </tr>)}</tbody>
-            </table></div>
+            <p className="text-xs text-muted-foreground mt-3">{stale && 'Expired market data. '}{preview?.minimumPlan ? 'Quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Starting position quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p>
+            <GridPlannerLevels plan={displayPlan} baseSymbol={form.market.replace(/-PERP$/, '')} />
           </details>}
           {!!preview?.feeRows.length && <details className="border-t border-border/60 pt-3">
             <summary className="cursor-pointer text-sm font-medium">View fee assumption checks</summary>

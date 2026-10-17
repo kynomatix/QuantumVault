@@ -119,7 +119,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
     return () => { observer.disconnect(); cancelAnimationFrame(frame); canvas.unsubscribeCrosshairMove(showLevel); canvas.unsubscribeClick(showLevel); priceLines.forEach(line => series.removePriceLine(line)); primitives.forEach(primitive => series.detachPrimitive(primitive)); };
   }, [chart, lines, range, period, tick]);
   useEffect(() => () => { retained.current?.canvas.remove(); retained.current = null; }, []);
-  return <div className="relative h-full w-full"><div ref={container} className="h-full w-full" aria-label="Direct perpetual candle chart with measured range period, dimmed context candles, proposed range band, stop and hypothetical grid levels" />
+  return <div className="relative h-full w-full"><div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with range period, dimmed surrounding candles, proposed range, stop and planned grid levels" />
     {hovered && <div role="status" className="pointer-events-none absolute rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow" style={{ left: hovered.left, top: hovered.top }}>Grid price {hovered.price}</div>}
   </div>;
 }

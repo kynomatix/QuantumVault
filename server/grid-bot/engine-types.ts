@@ -24,7 +24,7 @@ export interface GridPlan {
   side: 'long' | 'short'; start: string; investment: string; leverage: string;
   lines: GridLine[]; seedQuantity: string; allocatedNotional: string; unallocatedNotional: string;
   feeGate: 'not_evaluated' | 'evaluated'; feeRows: PairFee[];
-  openingOrderLift?: { count: number; minimumQuote: string };
+  openingOrderLift?: { count: number; minimumQuote: string; ordinals?: number[] };
 }
 export type GridResult = { ok: true; plan: GridPlan } | { ok: false; issues: GridIssue[] };
 export type MinimumResult = { ok: true; investment: string; plan: GridPlan; evaluations: number }

@@ -99,7 +99,8 @@ describe('shared exact grid geometry', () => {
     const result = calculateGrid(input); expect(result.ok).toBe(true); if (!result.ok) return;
     const plan = result.plan, entries = plan.lines.filter(l => l.role === 'entry')
       .sort((a, b) => Math.abs(Number(a.price) - 100000) - Math.abs(Number(b.price) - 100000));
-    expect(plan.openingOrderLift).toEqual({ count: 3, minimumQuote: '17' });
+    const liftedOrdinals = entries.slice(0, 3).reverse().map(line => line.ordinal);
+    expect(plan.openingOrderLift).toEqual({ count: 3, minimumQuote: '17', ordinals: liftedOrdinals });
     for (const [index, line] of entries.entries()) {
       const price = new Decimal(line.price), notional = new Decimal(line.notional);
       expect(notional.gte(17)).toBe(true); expect(new Decimal(line.quantity).mod(input.lot).isZero()).toBe(true);

@@ -45,7 +45,7 @@ describe('Pacifica authority and honest planner verdicts', () => {
   it('keeps unpublished order-time limits neutral and enforces published limits', () => {
     const market = marketSnapshot(row(), deps());
     expect(previewGrid({ ...query, fee: '0' }, market, now).reasons).toEqual([]);
-    expect(plannerVenueChecks(market).slice(0, 3).map(row => row.value)).toEqual(Array(3).fill('Checked by Pacifica when each order is placed'));
+    expect(plannerVenueChecks(market).slice(0, 3).map(row => row.value)).toEqual(Array(3).fill('Not checked — refresh market data'));
     if (market.constraints.state !== 'available') throw Error('EXAMPLE');
     const c = market.constraints.value;
     for (const change of [{ maximumQuote: { state: 'available' as const, value: '20' } },
