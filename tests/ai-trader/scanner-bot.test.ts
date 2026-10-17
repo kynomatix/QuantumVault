@@ -47,8 +47,12 @@ const getLlmCiphertextMock = vi.fn();
 const claimAnalysisMock = vi.fn();
 const claimScannerCandidateMock = vi.fn();
 const transitionStateMock = vi.fn();
+const startCycleMock = vi.fn();
+const finishCycleMock = vi.fn();
 vi.mock("../../server/storage", () => ({
   storage: {
+    startAiTraderCycle: (...a: unknown[]) => startCycleMock(...a),
+    finishAiTraderCycle: (...a: unknown[]) => finishCycleMock(...a),
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
     getOpenAiTraderDecisions: (...a: unknown[]) => getOpenDecisionsMock(...a),
@@ -256,6 +260,8 @@ const botUpdates = () => updateBotMock.mock.calls.map((c) => c[1]);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  startCycleMock.mockResolvedValue(undefined);
+  finishCycleMock.mockResolvedValue(undefined);
   schemaCapabilityReadyMock.mockReturnValue(true);
   isMarketAdmittedMock.mockReturnValue(true);
   scannerCapabilitiesMock.producerEnabled = true;
@@ -485,6 +491,37 @@ describe("scanner bot: per-candidate G6 filtering", () => {
 });
 
 describe("scanner bot: 2-call LLM cap and candidate retry", () => {
+  it.each(["odd-shaped result", "throwing recorder", "slow recorder"])("preserves trading updates and cadence with %s", async failure => {
+    const bot = armScannerBot();
+    getScannerShortlistMock.mockReturnValue([makeCandidate()]);
+    buildContextMock.mockResolvedValue({ system: "EXAMPLE", user: "EXAMPLE", contextDigest: { price: 150 } });
+    // Main trades from clamped; passive observation must tolerate absent raw decision metadata.
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "EXAMPLE", clamped: { action: "flat" }, rejected: false, violations: [] });
+    const { runAutoCycle, stopAiTraderMonitor } = await importMonitor();
+    const noAudit = new Proxy({} as any, { get: () => () => undefined, set: () => true });
+    await runAutoCycle(bot.id, noAudit);
+    const expectedUpdates = structuredClone(botUpdates());
+    const expectedCalls = runDecisionMock.mock.calls.length;
+    const expectedTimers = vi.getTimerCount();
+    vi.clearAllMocks();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let recorder;
+    if (failure === "throwing recorder") recorder = new Proxy({} as any, {
+      get: () => () => { throw new Error("EXAMPLE"); }, set: () => { throw new Error("EXAMPLE"); },
+    });
+    if (failure === "slow recorder") {
+      startCycleMock.mockReturnValueOnce(gate);
+      finishCycleMock.mockReturnValueOnce(gate);
+    }
+    await runAutoCycle(bot.id, recorder);
+    expect(botUpdates()).toEqual(expectedUpdates);
+    expect(runDecisionMock).toHaveBeenCalledTimes(expectedCalls);
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(expectedTimers);
+    release(); await gate; await vi.advanceTimersByTimeAsync(0);
+    stopAiTraderMonitor();
+  });
   it("no-trade on candidate #1 retries candidate #2 when score>=70 and cap allows", async () => {
     armScannerBot();
     const c1 = makeCandidate({ market: "BTC-PERP", score: 120, timeframe: "15m" });

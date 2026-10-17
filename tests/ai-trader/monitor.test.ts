@@ -4340,16 +4340,32 @@ describe("monitor liveness heartbeat", () => {
 describe("scanner boundary lane scheduling", () => {
   const laneLines = () => appendTelemetryMock.mock.calls.map((call) => String(call[0]));
 
-  it("marks unavailable history and preserves cadence on an initial audit snapshot read failure", async () => {
+  it("marks unavailable history without aborting trading on an audit-only snapshot read failure", async () => {
     const { scheduleAutoNext } = await importMonitor();
     const { cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
-    getBotMock.mockRejectedValue(new Error("EXAMPLE database failure"));
+    getBotMock.mockRejectedValueOnce(new Error("EXAMPLE database failure"))
+      .mockResolvedValue(makeBot({ status: "open", mode: "auto", autoNext: true }));
     scheduleAutoNext("bot-snapshot-failure", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
     expect(cycleAuditUnavailable("bot-snapshot-failure")).toBe(true);
-    expect(vi.getTimerCount()).toBe(1);
+    expect(getBotMock).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0); // The fresh trading row is open: main arms no new entry timer.
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(laneLines().join(" ")).not.toContain("EXAMPLE database failure");
+  });
+
+  it("finishes the scheduled trading callback while the passive snapshot read is unresolved", async () => {
+    const snapshot = deferred<AiTraderBot>();
+    const { scheduleAutoNext } = await importMonitor();
+    getBotMock.mockReturnValueOnce(snapshot.promise)
+      .mockResolvedValue(makeBot({ status: "open", mode: "auto", autoNext: true }));
+    scheduleAutoNext("bot-snapshot-slow", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
+    expect(getBotMock).toHaveBeenCalledTimes(2);
+    expect(laneLines().some(line => line.includes("cycle_end"))).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    snapshot.resolve(makeBot({ status: "open", mode: "auto", autoNext: true }));
+    await vi.advanceTimersByTimeAsync(0);
   });
 
   it("keeps the scanner's +2s priority and starts no trading work until the active sweep releases", async () => {

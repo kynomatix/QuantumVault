@@ -18,6 +18,85 @@ beforeEach(() => {
 });
 
 describe("closure-owned cycle receipts", () => {
+  it.each([undefined, null, {}, { ok: true }, { ok: true, decision: { action: "EXAMPLE" } },
+    { ok: true, decision: { action: "flat" }, violations: {} },
+    { ok: true, get decision() { throw new Error("EXAMPLE"); } },
+  ])("records an unexpected decision shape as an audit coverage gap (%#)", async result => {
+    const { CycleAudit, cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    const sameBot = bot(); const audit = new CycleAudit(sameBot, new Date());
+    await audit.begin();
+    expect(() => audit.decision(result)).not.toThrow();
+    audit.set("proposal_created");
+    await audit.finish(null);
+    expect(mocks.finish.mock.calls[0][3]).toMatchObject({ reasonCode: "internal_error", outcome: "failed",
+      details: { auditStatus: "unavailable" } });
+    expect(cycleAuditUnavailable(sameBot.id)).toBe(true);
+  });
+  it("contains malformed and unserializable context, execution and reason metadata", async () => {
+    const { CycleAudit, cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    const sameBot = bot(); const audit = new CycleAudit(sameBot, new Date());
+    const circular: Record<string, unknown> = {}; circular.self = circular;
+    await audit.begin();
+    expect(() => { audit.context(undefined); audit.context({ system: "EXAMPLE", contextDigest: circular });
+      audit.execution({} as any, true); audit.set("EXAMPLE" as any); }).not.toThrow();
+    await audit.finish(null);
+    expect(cycleAuditUnavailable(sameBot.id)).toBe(true);
+    expect(mocks.finish.mock.calls[0][3].reasonCode).toBe("internal_error");
+  });
+  it("contains a recorder that throws from construction, methods, properties and asynchronous writes", async () => {
+    const { CycleAudit, safeCycleAudit, cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    const sameBot = bot();
+    const broken = new Proxy({} as any, {
+      get: (_target, key) => key === "begin" || key === "finish"
+        ? () => Promise.reject(new Error("EXAMPLE")) : () => { throw new Error("EXAMPLE"); },
+      set: () => { throw new Error("EXAMPLE"); },
+    });
+    const audit = safeCycleAudit(sameBot.id, () => broken);
+    expect(() => { audit.phase = "model"; audit.set("model_flat"); audit.candidate(); audit.gatewayCall();
+      audit.context(null); audit.decision(null); audit.execution(null, true); }).not.toThrow();
+    await expect(audit.begin()).resolves.toBeUndefined();
+    await expect(audit.finish(null)).resolves.toBeUndefined();
+    const missing = safeCycleAudit(sameBot.id, () => { throw new Error("EXAMPLE"); });
+    expect(() => { missing.begin(); missing.set("paused"); missing.finish(null); }).not.toThrow();
+    const frozen = safeCycleAudit(sameBot.id, () => Object.freeze(new CycleAudit(sameBot, new Date())));
+    expect(() => { frozen.phase = "model"; frozen.candidate(); }).not.toThrow();
+    expect(cycleAuditUnavailable(sameBot.id)).toBe(true);
+  });
+  it("orders background start and finish writes without holding the caller on a slow start", async () => {
+    const { CycleAudit, safeCycleAudit, cycleIsActive } = await import("../../server/ai-trader/cycle-audit");
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    mocks.start.mockReturnValue(gate);
+    const sameBot = bot(); const audit = safeCycleAudit(sameBot.id, () => new CycleAudit(sameBot, new Date()));
+    const begin = audit.begin(); audit.set("model_flat"); const finish = audit.finish(null);
+    expect(cycleIsActive(audit.id)).toBe(false);
+    expect(mocks.finish).not.toHaveBeenCalled();
+    release(); await begin; await finish;
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    expect(mocks.finish).toHaveBeenCalledTimes(1);
+  });
+  it("buffers a whole cycle while the passive snapshot is unresolved and preserves its receipt", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-17T00:00:00Z"));
+    try {
+    const { CycleAudit, deferredCycleAudit } = await import("../../server/ai-trader/cycle-audit");
+    let release!: (value: InstanceType<typeof CycleAudit>) => void;
+    const snapshot = new Promise<InstanceType<typeof CycleAudit>>(resolve => { release = resolve; });
+    let saved!: () => void;
+    const savedReceipt = new Promise<void>(resolve => { saved = resolve; });
+    mocks.finish.mockImplementation(async () => { saved(); });
+    const sameBot = bot(); const audit = deferredCycleAudit(sameBot.id, () => snapshot);
+    audit.set("feed_cache_degraded", "context");
+    expect(audit.reason).toBe("feed_cache_degraded"); expect(audit.phase).toBe("context");
+    audit.begin(); audit.phase = "model"; audit.candidate(); audit.gatewayCall();
+    audit.decision({ ok: true, decision: { action: "flat" } }); audit.finish(null);
+    expect(mocks.start).not.toHaveBeenCalled(); expect(mocks.finish).not.toHaveBeenCalled();
+    vi.setSystemTime(new Date("2026-10-17T00:10:00Z"));
+    release(new CycleAudit(sameBot, new Date())); await savedReceipt;
+    expect(mocks.finish.mock.calls[0][3]).toMatchObject({ reasonCode: "model_flat", candidateCount: 1, modelCallCount: 1,
+      finishedAt: new Date("2026-10-17T00:00:00Z") });
+    } finally { vi.useRealTimers(); }
+  });
   it("isolates overlapping cycles and counts every provider request and ordered decision", async () => {
     const { CycleAudit, cycleIsActive } = await import("../../server/ai-trader/cycle-audit");
     const sameBot = bot(); const a = new CycleAudit(sameBot, new Date()); const b = new CycleAudit(sameBot, new Date());

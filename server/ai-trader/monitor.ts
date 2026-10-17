@@ -1,4 +1,4 @@
-import { CycleAudit, reportOrphanCycle } from "./cycle-audit";
+import { CycleAudit, deferredCycleAudit, reportOrphanCycle, safeCycleAudit } from "./cycle-audit";
 // AI Trader — position monitor + lifecycle loop (WO-6, docs/AGENTIC_TRADER_PLAN.md §6).
 //
 // Responsibilities (plan WO-6 items 1–6):
@@ -3452,12 +3452,14 @@ async function runScheduledAutoCycle(
   timeframe: string,
   ownedTimer: NodeJS.Timeout,
 ): Promise<void> {
-  let snapshot: AiTraderBot | undefined;
-  try { snapshot = await storage.getAiTraderBot(botId); }
-  catch (err) { reportOrphanCycle(botId); throw err; }
-  if (!snapshot) { reportOrphanCycle(botId); return; }
-  const audit = new CycleAudit(snapshot, autoTimerBoundaries.get(ownedTimer) ?? new Date());
-  await audit.begin();
+  const startedAt = new Date();
+  const plannedBoundary = autoTimerBoundaries.get(ownedTimer) ?? startedAt;
+  const audit = deferredCycleAudit(botId, async () => {
+    const snapshot = await storage.getAiTraderBot(botId);
+    if (!snapshot) throw new Error("audit_snapshot_unavailable");
+    return new CycleAudit(snapshot, plannedBoundary, startedAt);
+  });
+  void audit.begin();
   try {
     audit.phase = "boundary_lane";
     let laneResult: Awaited<ReturnType<typeof waitForScannerBoundaryLaneRelease>>;
@@ -3524,7 +3526,7 @@ async function runScheduledAutoCycle(
     // resets the bot to idle (or recovers a real position) and re-arms the cadence.
     pendingReconciliation.add(botId);
   });
-  } finally { await audit.finish(nextAuditBoundary(botId)); }
+  } finally { void audit.finish(nextAuditBoundary(botId)); }
 }
 
 /** Schedule the next decision cycle at the next candle boundary (+10s settle). */
@@ -3560,7 +3562,7 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
  * session UMK (unrestorable ⇒ pause 'reauth_required' + Telegram nudge).
  */
 export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycleObs?: CycleObs): Promise<void> {
-  let audit = cycleAudit;
+  let audit: CycleAudit | undefined;
   const releasePoolLoadOwner = claimPoolLoadOwner(activeCycles);
   try {
   // AIT-CYCLE-OBSERVABILITY-01: if invoked by the scheduled-timer wrapper the
@@ -3568,7 +3570,8 @@ export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycle
   const _obs = cycleObs;
   let bot = await storage.getAiTraderBot(botId);
   if (!bot) { reportOrphanCycle(botId); return; }
-  if (!audit) { audit = new CycleAudit(bot, new Date()); await audit.begin(); }
+  audit = safeCycleAudit(botId, () => cycleAudit ?? new CycleAudit(bot, new Date()));
+  if (!cycleAudit) void audit.begin();
   audit.phase = "preflight";
   if (bot.protocol === "flash") { audit.set("venue_retired"); return; }
   if (bot.protocol === "phoenix" && !bot.paperMode && !phoenixAiLiveAvailable()) { audit.set("venue_unavailable"); return; }
@@ -4102,7 +4105,7 @@ export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycle
     throw err;
   } finally {
     releasePoolLoadOwner();
-    if (!cycleAudit) await audit?.finish(nextAuditBoundary(botId));
+    if (!cycleAudit) void audit?.finish(nextAuditBoundary(botId));
   }
 }
 
