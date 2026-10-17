@@ -1,0 +1,78 @@
+client/src/components/CreateBotModal.tsx: error TS2339: Property 'maxLeverage' does not exist on type 'MarketInfo'.
+client/src/components/CreateBotModal.tsx: error TS2339: Property 'maxLeverage' does not exist on type 'MarketInfo'.
+client/src/components/CreateBotModal.tsx: error TS2339: Property 'maxLeverage' does not exist on type 'MarketInfo'.
+client/src/components/ui/drawer.tsx: error TS2307: Cannot find module 'vaul' or its corresponding type declarations.
+client/src/components/ui/sonner.tsx: error TS2307: Cannot find module 'next-themes' or its corresponding type declarations.
+client/src/pages/App.tsx: error TS2345: Argument of type 'string' is not assignable to parameter of type 'ConfirmOptions'.
+client/src/pages/App.tsx: error TS7006: Parameter 'bot' implicitly has an 'any' type.
+client/src/pages/App.tsx: error TS7006: Parameter 'bot' implicitly has an 'any' type.
+server/lab/engine-ar38.ts: error TS7022: 'isLong' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer.
+server/lab/pine/bench-flux.ts: error TS2339: Property 'config' does not exist on type 'PinePlan'.
+server/lab/pine/bench-flux.ts: error TS2339: Property 'config' does not exist on type 'PinePlan'.
+server/lab/pine/bench-flux.ts: error TS2339: Property 'inputs' does not exist on type 'PinePlan'.
+server/lab/pine/bench-flux.ts: error TS2339: Property 'inputs' does not exist on type 'PinePlan'.
+server/lab/pine/bench-flux.ts: error TS2339: Property 'inputs' does not exist on type 'PinePlan'.
+server/lab/pine/bench-flux.ts: error TS2345: Argument of type 'string' is not assignable to parameter of type 'PineEngineConfig'.
+server/lab/pine/bench-flux.ts: error TS2345: Argument of type 'string' is not assignable to parameter of type 'PineEngineConfig'.
+server/lab/pine/compiler.ts: error TS2339: Property 'e' does not exist on type 'Stmt'.
+server/lab/pine/compiler.ts: error TS2339: Property 'e' does not exist on type 'Stmt'.
+server/lab/pine/compiler.ts: error TS2339: Property 'e' does not exist on type 'Stmt'.
+server/lab/pine/parity-diff.ts: error TS2339: Property 'entryTime' does not exist on type 'TvTradeRow'.
+server/lab/pine/test-debug-strat5.ts: error TS2339: Property 'parameterRanges' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-debug-strat5.ts: error TS2339: Property 'parameterRanges' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-debug-strat6.ts: error TS2339: Property 'parameterRanges' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-debug-strat6.ts: error TS2339: Property 'parameterRanges' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-debug-strat6c.ts: error TS2339: Property 'parameterRanges' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-debug-strat6c.ts: error TS2339: Property 'parameterRanges' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-dump-compiled.ts: error TS2305: Module '"./parser"' has no exported member 'parsePine'.
+server/lab/pine/test-parity.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-parity.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-parity.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/pine/test-parity.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'config' is possibly 'undefined'.
+server/lab/routes.ts: error TS18048: 'strat' is possibly 'undefined'.
+server/lab/routes.ts: error TS2322: Type 'string | undefined' is not assignable to type 'number'.
+server/lab/routes.ts: error TS2322: Type 'string | undefined' is not assignable to type 'string'.
+server/lab/routes.ts: error TS2339: Property 'autoResumeAttempts' does not exist on type 'LabCheckpoint'.
+server/lab/routes.ts: error TS2339: Property 'autoResumeAttempts' does not exist on type 'LabCheckpoint'.
+server/lab/routes.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/routes.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/routes.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/routes.ts: error TS2339: Property 'config' does not exist on type '{ id: number; name: string; description: string | null; createdAt: Date; userId: string | null; pineScript: string; parsedInputs: unknown; groups: unknown; strategySettings: unknown; }'.
+server/lab/routes.ts: error TS2790: The operand of a 'delete' operator must be optional.
+server/lab/routes.ts: error TS2790: The operand of a 'delete' operator must be optional.
+server/lab/routes.ts: error TS2790: The operand of a 'delete' operator must be optional.
+server/lab/routes.ts: error TS2790: The operand of a 'delete' operator must be optional.
+server/lab/routes.ts: error TS2790: The operand of a 'delete' operator must be optional.
+server/protocol/flash/flash-adapter.ts: error TS2305: Module '"@solana/spl-token"' has no exported member 'createAssociatedTokenAccountInstruction'.
+server/protocol/flash/flash-adapter.ts: error TS2305: Module '"@solana/spl-token"' has no exported member 'createCloseAccountInstruction'.
+server/protocol/flash/flash-adapter.ts: error TS2305: Module '"@solana/spl-token"' has no exported member 'createTransferInstruction'.
+server/protocol/flash/flash-adapter.ts: error TS2305: Module '"@solana/spl-token"' has no exported member 'getAccount'.
+server/protocol/flash/flash-adapter.ts: error TS2305: Module '"@solana/spl-token"' has no exported member 'getAssociatedTokenAddressSync'.
+server/protocol/flash/flash-markets.ts: error TS2304: Cannot find name '__ESBUILD_CJS_BUNDLE__'.
+server/protocol/flash/flash-markets.ts: error TS2304: Cannot find name '__ESBUILD_CJS_BUNDLE__'.
+server/protocol/pacifica/pacifica-adapter.ts: error TS2322: Type '"open"' is not assignable to type 'OrderStatus'.
+server/protocol/pacifica/pacifica-adapter.ts: error TS2322: Type 'number | null' is not assignable to type 'number'.
+server/protocol/pacifica/pacifica-adapter.ts: error TS2322: Type 'undefined' is not assignable to type 'number'.
+server/protocol/pacifica/pacifica-adapter.ts: error TS2322: Type 'undefined' is not assignable to type 'number'.
+server/routes.ts: error TS2339: Property 'balance' does not exist on type 'BalanceInfo'.
+server/routes.ts: error TS2339: Property 'freeCollateral' does not exist on type 'AccountInfo'.
+server/routes.ts: error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+server/routes.ts: error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+server/routes.ts: error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'string'.
+vite.config.ts: error TS2307: Cannot find module './vite-plugin-meta-images' or its corresponding type declarations.
