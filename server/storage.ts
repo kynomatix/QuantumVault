@@ -1,3 +1,6 @@
+import type { CycleStart, CycleFinish } from "@shared/ai-trader-cycle";
+import { assertCycleFinish } from "@shared/ai-trader-cycle";
+import { aiTraderCycles, type AiTraderCycle } from "@shared/schema";
 import { createLabLinkedBot } from './lab/provenance';
 import { getTableColumns, eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
 import { createHash, randomBytes, randomUUID } from "crypto";
@@ -1262,6 +1265,9 @@ export interface IStorage {
   ): Promise<{ rows: AiTraderDecision[]; nextCursor: { before: string; beforeId: string } | null }>;
   // WO-7 additions.
   getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined>;
+  startAiTraderCycle(value: CycleStart): Promise<void>;
+  finishAiTraderCycle(id: string, botId: string, ownerBootId: string, value: CycleFinish): Promise<void>;
+  getLatestAiTraderCycle(botId: string): Promise<AiTraderCycle | undefined>;
   deleteAiTraderBot(id: string): Promise<void>;
   /** Batch-fetch open (outcome='executed', closedAt IS NULL) decisions for multiple bots at once. Used by the PnL list endpoint to avoid N+1 price fetches. Returns at most one row per bot. */
   getAiTraderOpenDecisionsByBotIds(botIds: string[]): Promise<AiTraderDecision[]>;
@@ -8105,8 +8111,10 @@ export class DatabaseStorage implements IStorage {
         guardrail_violations = NULL,
         raw_decision = jsonb_build_object(
           'compressed', true,
-          'action', COALESCE(clamped_decision->>'action', raw_decision->>'action'),
-          'rationaleExcerpt', left(COALESCE(clamped_decision->>'rationale', ''), 120)
+          'action', raw_decision->>'action',
+          'flatReasonsVersion', raw_decision->'flatReasonsVersion',
+          'flatReasons', raw_decision->'flatReasons',
+          'rationaleExcerpt', left(COALESCE(raw_decision->>'rationale', raw_decision->>'rationaleExcerpt', ''), 120)
         ),
         clamped_decision = NULL
       WHERE id IN (
@@ -8170,6 +8178,53 @@ export class DatabaseStorage implements IStorage {
   async getAiTraderDecision(id: string): Promise<AiTraderDecision | undefined> {
     const result = await db.select().from(aiTraderDecisions).where(eq(aiTraderDecisions.id, id));
     return result[0];
+  }
+
+  // Cycle ledger only: never acquires a bot lifecycle lock or mutates trading state.
+  async startAiTraderCycle(value: CycleStart): Promise<void> {
+    if (Buffer.byteLength(JSON.stringify(value.details), "utf8") > 6000) throw new Error("cycle_details_too_large");
+    await db.transaction(async tx => {
+      await tx.execute(sql`SELECT set_config('statement_timeout', '1500ms', true), set_config('lock_timeout', '500ms', true)`);
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`ai-cycles:${value.botId}`}, 0))`);
+      const [existing] = await tx.select({ botId: aiTraderCycles.botId, ownerBootId: aiTraderCycles.ownerBootId }).from(aiTraderCycles).where(eq(aiTraderCycles.id, value.id));
+      if (existing) {
+        if (existing.botId !== value.botId || existing.ownerBootId !== value.ownerBootId) throw new Error("cycle_receipt_owner_mismatch");
+        return; // Same owner and UUID retry, including a finalized receipt.
+      }
+      // Retain the newest evidence even when it is older than 30 days.
+      await tx.execute(sql`DELETE FROM ai_trader_cycles WHERE bot_id = ${value.botId} AND outcome <> 'running' AND started_at < clock_timestamp() - interval '30 days' AND id <> (SELECT id FROM ai_trader_cycles WHERE bot_id = ${value.botId} ORDER BY started_at DESC, id DESC LIMIT 1)`);
+      // Running rows count toward the cap but are never evicted. This lock serializes concurrent admissions.
+      await tx.execute(sql`DELETE FROM ai_trader_cycles WHERE id IN (SELECT id FROM ai_trader_cycles WHERE bot_id = ${value.botId} AND outcome <> 'running' ORDER BY started_at, id LIMIT GREATEST(0, (SELECT count(*) FROM ai_trader_cycles WHERE bot_id = ${value.botId}) - 1023))`);
+      const [countRow] = await tx.select({ count: sql<number>`count(*)::int` }).from(aiTraderCycles).where(eq(aiTraderCycles.botId, value.botId));
+      if (countRow.count >= 1024) throw new Error("cycle_ledger_all_running");
+      await tx.insert(aiTraderCycles).values(value).onConflictDoNothing({ target: aiTraderCycles.id });
+    });
+  }
+
+  async finishAiTraderCycle(id: string, botId: string, ownerBootId: string, value: CycleFinish): Promise<void> {
+    assertCycleFinish(value);
+    if (Buffer.byteLength(JSON.stringify(value.details), "utf8") > 6000) throw new Error("cycle_details_too_large");
+    await db.transaction(async tx => {
+      await tx.execute(sql`SELECT set_config('statement_timeout', '1500ms', true), set_config('lock_timeout', '500ms', true)`);
+      // Decision links must belong to this bot; raw/clamped decisions themselves are never modified here.
+      if (value.decisionIds.length) {
+        const rows = await tx.select({ id: aiTraderDecisions.id }).from(aiTraderDecisions)
+          .where(and(eq(aiTraderDecisions.botId, botId), inArray(aiTraderDecisions.id, value.decisionIds)));
+        if (rows.length !== value.decisionIds.length) throw new Error("cycle_decision_owner_mismatch");
+      }
+      const rows = await tx.update(aiTraderCycles).set(value).where(and(eq(aiTraderCycles.id, id),
+        eq(aiTraderCycles.botId, botId), eq(aiTraderCycles.ownerBootId, ownerBootId), eq(aiTraderCycles.outcome, "running"))).returning({ id: aiTraderCycles.id });
+      if (!rows.length) {
+        const [existing] = await tx.select().from(aiTraderCycles).where(and(eq(aiTraderCycles.id, id), eq(aiTraderCycles.botId, botId), eq(aiTraderCycles.ownerBootId, ownerBootId)));
+        if (!existing || existing.outcome === "running") throw new Error("cycle_receipt_missing");
+      }
+    });
+  }
+
+  async getLatestAiTraderCycle(botId: string): Promise<AiTraderCycle | undefined> {
+    const [row] = await db.select().from(aiTraderCycles).where(eq(aiTraderCycles.botId, botId))
+      .orderBy(desc(aiTraderCycles.startedAt), desc(aiTraderCycles.id)).limit(1);
+    return row;
   }
 
   async deleteAiTraderBot(id: string): Promise<void> {

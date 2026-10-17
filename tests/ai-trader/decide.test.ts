@@ -916,3 +916,45 @@ describe("r2j absent market audit", () => {
       guardrailViolations: [expect.objectContaining({ code: "constraint_unavailable" })] }));
   });
 });
+
+describe("fixed-paper decision-v2 flat explanations", () => {
+  const flat = { action: "flat", confidence: 5, invalidation: "n/a", rationale: "No confirmed setup", flatReasonsVersion: 1, flatReasons: ["structure_conflict", "context_insufficient"] };
+  it("enforces version, unique bounds and conditional provider requirements", async () => {
+    const { paperTradeDecisionSchema, PAPER_DECISION_JSON_SCHEMA } = await importDecide();
+    expect(paperTradeDecisionSchema.parse(flat).flatReasons).toEqual(flat.flatReasons);
+    for (const reasons of [[], ["UNKNOWN"], ["no_setup", "no_setup"], ["no_setup", "thin_liquidity", "other", "session_risk"]])
+      expect(paperTradeDecisionSchema.safeParse({ ...flat, flatReasons: reasons }).success).toBe(false);
+    expect(paperTradeDecisionSchema.safeParse({ ...flat, flatReasonsVersion: 2 }).success).toBe(false);
+    expect(paperTradeDecisionSchema.safeParse({ ...flat, flatReasons: undefined }).success).toBe(false);
+    expect(paperTradeDecisionSchema.safeParse({ ...flat, flatReasons: ["other"], rationale: " " }).success).toBe(false);
+    expect(paperTradeDecisionSchema.safeParse({ ...VALID_LONG_ARGS, flatReasons: ["no_setup"] }).success).toBe(false);
+    const branches = PAPER_DECISION_JSON_SCHEMA.oneOf as any[];
+    expect(branches).toHaveLength(4);
+    const flatBranch = branches.find(b => b.properties.action.const === "flat");
+    expect(flatBranch.required).toEqual(expect.arrayContaining(["flatReasonsVersion", "flatReasons"]));
+    expect(flatBranch.properties.flatReasons).toMatchObject({ minItems: 1, maxItems: 3, uniqueItems: true });
+    expect(branches.filter(b => b !== flatBranch).every(b => b.additionalProperties === false && !b.properties.flatReasons)).toBe(true);
+  });
+  it("counts temperature retry plus one correction and retains raw reasons", async () => {
+    const { runDecision } = await importDecide(); const onGatewayCall = vi.fn();
+    callMock.mockRejectedValueOnce(new LlmGatewayError("EXAMPLE", 400, { temperatureUnsupported: true }))
+      .mockResolvedValueOnce(toolResponse({ ...flat, flatReasons: undefined })).mockResolvedValueOnce(toolResponse(flat));
+    const result = await runDecision({ bot: makeBot({ paperMode: true, marketSource: "fixed" }), apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter(), onGatewayCall });
+    expect(result.ok).toBe(true); expect(onGatewayCall).toHaveBeenCalledTimes(3);
+    expect(insertMock.mock.calls[0][0].rawDecision.flatReasons).toEqual(flat.flatReasons);
+  });
+  it("caps correction at two attempts and returns the malformed decision identity", async () => {
+    const { runDecision } = await importDecide(); const onGatewayCall = vi.fn();
+    callMock.mockResolvedValue(toolResponse({ ...flat, flatReasons: undefined }));
+    const result = await runDecision({ bot: makeBot({ paperMode: true, marketSource: "fixed" }), apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter(), onGatewayCall });
+    expect(result).toMatchObject({ ok: false, reason: "malformed", decisionId: "dec-1" });
+    expect(onGatewayCall).toHaveBeenCalledTimes(2); expect(insertMock).toHaveBeenCalledTimes(1);
+  });
+  it.each([{ paperMode: false, marketSource: "fixed" }, { paperMode: true, marketSource: "scanner" }])("keeps legacy tool calls for %j", async (scope) => {
+    const { runDecision, DECISION_JSON_SCHEMA } = await importDecide();
+    const { flatReasons, flatReasonsVersion, ...legacy } = flat; callMock.mockResolvedValueOnce(toolResponse(legacy));
+    expect((await runDecision({ bot: makeBot(scope as any), apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter() })).ok).toBe(true);
+    expect((capturedCalls[0].opts.tools as any[])[0].function.parameters).toEqual(DECISION_JSON_SCHEMA);
+    expect(callMock).toHaveBeenCalledTimes(1);
+  });
+});

@@ -30,6 +30,7 @@ import type { AiTraderBot } from "@shared/schema";
 const qualificationBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-main-baseline.json', 'utf8')) as {
   baseCommitHash: string; registry: QualificationEraRegistry; ownerSha256: Record<string, string>;
 };
+const cycleBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-cycles-baseline.json', 'utf8')) as typeof qualificationBaseline;
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z
 const DAY = 86_400_000;
@@ -361,7 +362,7 @@ describe("qualification era identity", () => {
       components: {
         scanner_capability_policy: 3,
         accepted_candle_provenance: 1,
-        prompt_context_schema: 3,
+        prompt_context_schema: 4,
         session_policy: 1,
         guardrail_risk_policy: 4,
         paper_execution_simulator: 3,
@@ -545,7 +546,7 @@ describe("qualification era forgotten-declaration gate", () => {
     expect(Object.fromEntries(components.map(component =>
       [component, QUALIFICATION_ERA_REGISTRY[component].materialVersion]))).toEqual({
       scanner_capability_policy: 3, accepted_candle_provenance: 1,
-      prompt_context_schema: 3, session_policy: 1,
+      prompt_context_schema: 4, session_policy: 1,
       guardrail_risk_policy: 4, paper_execution_simulator: 3,
     });
   });
@@ -562,7 +563,7 @@ describe("qualification era forgotten-declaration gate", () => {
       ],
     })).toEqual([]);
     expect(Object.fromEntries(components.map(component =>
-      [component, QUALIFICATION_ERA_REGISTRY[component].materialVersion]))).toEqual(
+      [component, cloneReviewedMainRegistry()[component].materialVersion]))).toEqual(
       Object.fromEntries(components.map(component => [component, base[component].materialVersion])));
   });
   for (const component of components) {
@@ -654,15 +655,15 @@ describe("qualification era forgotten-declaration gate", () => {
   });
 
   it("binds every real owner source to the pinned main registry without requiring Git history", () => {
-    // This tracked baseline was captured from main d8701cef. Hash every owner,
+    // This tracked cycle baseline captures the dispatched base. Hash every owner,
     // including any newly declared path; sealed FRACTAL payloads cannot read Git alternates.
-    const base = cloneReviewedMainRegistry();
-    const paths = new Set([...Object.keys(qualificationBaseline.ownerSha256),
+    const base = structuredClone(cycleBaseline.registry);
+    const paths = new Set([...Object.keys(cycleBaseline.ownerSha256),
       ...Object.values(QUALIFICATION_ERA_REGISTRY).flatMap(entry => [...entry.ownerPaths])]);
     const changedPaths = [...paths].filter(path => {
       const source = readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
       const sha256 = createHash('sha256').update(source).digest('hex');
-      return sha256 !== qualificationBaseline.ownerSha256[path]?.replace(/^sha256:/, '');
+      return sha256 !== cycleBaseline.ownerSha256[path]?.replace(/^sha256:/, '');
     });
     const beginMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN";
     const endMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END";

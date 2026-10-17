@@ -13,6 +13,7 @@
 // - Timeout (G12, 60s) / gateway errors → abort with NO decision row (nothing was
 //   decided; the monitor simply retries at the next candle close).
 import { z } from "zod";
+import { FLAT_REASON_CODES, usesFixedPaperDecisionV2 } from "@shared/ai-trader-flat-reasons";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { fromZodError } from "zod-validation-error";
 import {
@@ -99,7 +100,23 @@ export const tradeDecisionSchema = z
     }
   });
 
-export type TradeDecision = z.infer<typeof tradeDecisionSchema>;
+const legacyShape = tradeDecisionSchema.innerType().shape;
+const nonFlatShape = { ...legacyShape, flatReasonsVersion: z.never().optional(), flatReasons: z.never().optional() };
+export const paperTradeDecisionSchema = z.discriminatedUnion("action", [
+  z.object({ ...legacyShape, action: z.literal("flat"), flatReasonsVersion: z.literal(1),
+    flatReasons: z.array(z.enum(FLAT_REASON_CODES)).min(1).max(3)
+      .refine(reasons => new Set(reasons).size === reasons.length, "flat reasons must be unique, primary first") }),
+  z.object({ ...nonFlatShape, action: z.literal("long") }),
+  z.object({ ...nonFlatShape, action: z.literal("short") }),
+  z.object({ ...nonFlatShape, action: z.literal("close") }),
+]).superRefine((value, ctx) => {
+  if (value.action === "flat" && value.flatReasons.includes("other") && !value.rationale.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["rationale"], message: "Explain other in rationale" });
+  const legacy = tradeDecisionSchema.safeParse(value);
+  if (!legacy.success) for (const issue of legacy.error.issues) ctx.addIssue(issue);
+});
+export type TradeDecision = z.infer<typeof tradeDecisionSchema> & {
+  flatReasonsVersion?: 1; flatReasons?: (typeof FLAT_REASON_CODES)[number][];
+};
 
 // JSON Schema for the native tool definition — generated from the SAME zod schema
 // (single source; zod-to-json-schema per WO-4 step 1). $refStrategy:'none' inlines
@@ -111,6 +128,24 @@ const generated = zodToJsonSchema(tradeDecisionSchema, {
 }) as Record<string, unknown>;
 delete generated.$schema;
 export const DECISION_JSON_SCHEMA: Record<string, unknown> = generated;
+
+// Explicit action branches enforce the conditional contract in the provider schema too.
+export const PAPER_DECISION_JSON_SCHEMA: Record<string, unknown> = {
+  oneOf: (["flat", "long", "short", "close"] as const).map(action => ({
+    type: "object", additionalProperties: false,
+    properties: { ...(generated.properties as object), action: { const: action },
+      ...(action === "flat" ? { flatReasonsVersion: { const: 1 }, flatReasons: {
+        type: "array", minItems: 1, maxItems: 3, uniqueItems: true,
+        items: { type: "string", enum: FLAT_REASON_CODES },
+      } } : {}),
+    },
+    required: ["action", "confidence", "invalidation", "rationale",
+      ...(action === "flat" ? ["flatReasonsVersion", "flatReasons"] : []),
+      ...(action === "long" || action === "short"
+        ? ["entryType", "leverage", "sizePct", "stopLossPrice", "takeProfitPrice"] : []),
+    ],
+  })),
+};
 
 const DECIDE_TOOL = {
   type: "function",
@@ -135,6 +170,8 @@ export interface RunDecisionInput {
    * signature sketch, which omitted where those two inputs come from.)
    */
   adapter: ProtocolAdapter;
+  /** Passive counter: one invocation for each actual provider request. */
+  onGatewayCall?: () => void;
 }
 
 export type RunDecisionResult =
@@ -152,7 +189,7 @@ export type RunDecisionResult =
       usage?: LlmUsage;
       latencyMs: number;
     }
-  | { ok: false; reason: "malformed" | "timeout" | "gateway"; detail: string };
+  | { ok: false; reason: "malformed" | "timeout" | "gateway"; detail: string; decisionId?: string };
 
 type ParsedAttempt =
   | { ok: true; decision: TradeDecision; raw: string }
@@ -161,7 +198,7 @@ type ParsedAttempt =
 function parseDecisionResponse(res: {
   content: string;
   toolCalls?: { name: string; arguments: string }[];
-}): ParsedAttempt {
+}, fixedPaperV2: boolean): ParsedAttempt {
   const call = res.toolCalls?.[0];
   if (!call) {
     return {
@@ -187,7 +224,7 @@ function parseDecisionResponse(res: {
       raw: call.arguments.slice(0, 4000),
     };
   }
-  const result = tradeDecisionSchema.safeParse(args);
+  const result = (fixedPaperV2 ? paperTradeDecisionSchema : tradeDecisionSchema).safeParse(args);
   if (!result.success) {
     return {
       ok: false,
@@ -214,6 +251,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     if (!updated) throw new Error("qualification era synchronization lost the bot row");
   }
 
+  const fixedPaperV2 = usesFixedPaperDecisionV2(bot);
   const messages: LlmMessage[] = [
     { role: "system", content: context.system },
     { role: "user", content: context.user },
@@ -260,12 +298,13 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
       messages,
       temperature: 0.2,
       timeoutMs: 60_000,
-      tools: [DECIDE_TOOL],
+      tools: [fixedPaperV2 ? { ...DECIDE_TOOL, function: { ...DECIDE_TOOL.function, description: DECIDE_TOOL.function.description + " For flat, provide 1-3 unique flatReasons, primary reason first, with flatReasonsVersion 1. Explain other in the concise rationale. Nonflat actions must omit flat reason fields.", parameters: PAPER_DECISION_JSON_SCHEMA } } : DECIDE_TOOL],
       toolChoice: "required" as const,
       requireParameters: true,
       ...(omitTemperature ? { omitTemperature: true } : {}),
     };
     try {
+      input.onGatewayCall?.();
       return await callOpenRouterWithUsage(opts);
     } catch (err) {
       if (
@@ -275,6 +314,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
         !omitTemperature
       ) {
         omitTemperature = true;
+        input.onGatewayCall?.();
         return await callOpenRouterWithUsage({ ...opts, omitTemperature: true });
       }
       throw err;
@@ -302,7 +342,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     }
     addUsage(res.usage);
 
-    const parsed = parseDecisionResponse(res);
+    const parsed = parseDecisionResponse(res, fixedPaperV2);
     if (parsed.ok) {
       return finalizeDecision({
         bot,
@@ -337,7 +377,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
   // Second failure → abort the cycle with a full audit row (§4: never a degraded
   // guess on the money path; auto mode stays flat and retries next candle close).
   const latencyMs = Date.now() - started;
-  await storage.insertAiTraderDecision({
+  const malformedRow = await storage.insertAiTraderDecision({
     botId: bot.id,
     contextDigest: context.contextDigest,
     rawDecision: { malformed: true, raw: lastRaw, validationError: lastDetail.slice(0, 2000) },
@@ -348,7 +388,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     llmCostUsd: await computeCostUsd(),
     llmLatencyMs: latencyMs,
   });
-  return { ok: false, reason: "malformed", detail: lastDetail };
+  return { ok: false, reason: "malformed", detail: lastDetail, decisionId: malformedRow.id };
 }
 
 // --- Guardrails + audit record (WO-4 steps 4-5) ------------------------------------

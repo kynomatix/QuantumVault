@@ -186,11 +186,11 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 199 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 200 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(199);
-    expect(metadata).toHaveLength(199);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(199);
+    expect(sqlEntries).toHaveLength(200);
+    expect(metadata).toHaveLength(200);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(200);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // Append-only repair: preserve every SQL statement and metadata entry from 000 through 196.
     const preservedManifestDigest = createHash("sha256").update(JSON.stringify(
@@ -1056,5 +1056,33 @@ describe("schema readiness", () => {
       .toEqual(new Set(SCHEMA_FAILURE_CLASSES.map((failureClass) =>
         `schema-readiness:lab_scanner:${failureClass}`,
       )));
+  });
+});
+
+describe("append-only automatic cycle ledger schema", () => {
+  it("appends exactly one isolated table migration with single-line CHECKs", () => {
+    const { manifest, sqlEntries } = readDbSchemaMigrationManifest();
+    const migration = manifest[199]; const ddl = sqlEntries[199];
+    expect(migration.id).toBe("199-ai-trader-cycles");
+    expect(migration.capabilities).toEqual(["ai_trader_cycles"]);
+    expect(ddl).toContain("CREATE TABLE IF NOT EXISTS ai_trader_cycles");
+    expect(ddl).not.toMatch(/ALTER TABLE|CASE/i);
+    expect(ddl.match(/CREATE INDEX IF NOT EXISTS/g)).toHaveLength(2);
+    const checks = ddl.split("\n").filter(line => line.includes(" CHECK "));
+    expect(checks.length).toBeGreaterThan(10);
+    expect(checks.every(line => /CHECK \(.*\)/.test(line))).toBe(true);
+    expect(migration.requirements.filter(r => r.kind === "constraint").every(r => (r.definitionIncludes?.length ?? 0) > 0)).toBe(true);
+  });
+  it("readiness refuses a narrowed outcome/reason contract", async () => {
+    const migration = readDbSchemaMigrationManifest().manifest[199];
+    const checks = migration.requirements.filter(r => r.kind === "constraint");
+    const subset = { ...migration, requirements: checks };
+    const catalog = (narrow: boolean): CatalogQuery => async (_text, values) => {
+      const requirement = checks.find(r => r.constraint === values?.[1])!;
+      const definition = (requirement.definitionIncludes ?? []).join(" ");
+      return { rows: [{ definition: narrow && requirement.constraint === "ai_cycles_reason_ck" ? definition.replace("'model_flat',", "") : definition }] };
+    };
+    expect((await probeSchemaMigrationManifest(catalog(false), [subset])).unavailableCapabilities).toEqual([]);
+    expect((await probeSchemaMigrationManifest(catalog(true), [subset])).unavailableCapabilities).toEqual(["ai_trader_cycles"]);
   });
 });

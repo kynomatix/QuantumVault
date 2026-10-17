@@ -1,3 +1,4 @@
+import { readLatestCycle } from "./cycle-display";
 import { FLASH_RETIRED_MESSAGE } from '../protocol/flash-retirement.js';
 // HTTP layer for the AI Trader (Agentic Trader plan, WO-7).
 //
@@ -1014,6 +1015,7 @@ export function registerAiTraderRoutes(app: Express): void {
         bot: toBotDto(bot),
         openPosition,
         recentDecisions: decisions,
+        latestCycle: await readLatestCycle(bot.id),
         markPrice,
         pnl,
         lifetimeStats,

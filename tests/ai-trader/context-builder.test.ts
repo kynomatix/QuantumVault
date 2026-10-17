@@ -23,6 +23,7 @@ vi.mock("../../server/lab/datafeed", () => ({
   isNonCryptoSymbol: (symbol: string) => NON_CRYPTO_BASES.has(symbol.split("/")[0]),
   isCacheDegradedError: (err: unknown) =>
     (err as { name?: string } | null)?.name === "CacheDegradedError",
+  isCandleBasisUnavailableError: (err: unknown) => (err as { name?: string } | null)?.name === "CandleBasisUnavailableError",
   AI_CONTEXT_CANDLE_POLICY: {
     consumer: "ai_context",
     acceptedBasis: ["perp"],
@@ -469,8 +470,9 @@ describe("buildMarketContext (WO-3)", () => {
 
     expect(result.system).toMatchSnapshot("system-prompt");
     expect(result.user).toMatchSnapshot("user-prompt");
-    const { candleProvenance, ...legacyDigest } = result.contextDigest as any;
+    const { candleProvenance, contextQuality, ...legacyDigest } = result.contextDigest as any;
     expect(legacyDigest).toMatchSnapshot("context-digest");
+    expect(contextQuality).toMatchObject({ selectedRequested: 400, parentRequested: 400, parentUnavailable: null });
     expect(candleProvenance).toEqual({
       selected: {
         source: "okx", venue: "okx", basis: "perp", proxy: "direct",
@@ -1992,5 +1994,35 @@ describe("buildMarketContext — SL-PLACE Phase A: active-range enrichment", () 
     const rangeIdx  = result.user.indexOf("Active range (");
     expect(htfIdx).toBeGreaterThanOrEqual(0);
     expect(rangeIdx).toBeGreaterThan(htfIdx); // Active range line comes AFTER HTF line
+  });
+});
+
+describe("fixed-paper parent-only unavailable fallback", () => {
+  it.each([
+    [true, "fixed", "no_acceptable_source", true],
+    [false, "fixed", "no_acceptable_source", false],
+    [true, "scanner", "no_acceptable_source", false],
+    [true, "fixed", "nonfinalized_only", false],
+  ])("paper=%s source=%s parent=%s allowed=%s", async (paperMode, marketSource, code, allowed) => {
+    const error = Object.assign(new Error("EXAMPLE unavailable"), { name: "CandleBasisUnavailableError", reason: code });
+    fetchOHLCVMock.mockImplementation((_symbol: string, timeframe: string) => timeframe === "15m" ? Promise.resolve(SELECTED_CANDLES_15M) : Promise.reject(error));
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    const promise = buildMarketContext({ market: "SOL-PERP", timeframe: "15m", adapter: makeAdapter(),
+      bot: makeBot({ paperMode, marketSource } as any), preClaimBotStatus: "idle", recentClosedDecisions: [], paperPositionRows: [], agentPublicKey: AGENT_PUBKEY });
+    if (!allowed) { await expect(promise).rejects.toBe(error); return; }
+    const result = await promise;
+    expect("stale" in result).toBe(false); if ("stale" in result) return;
+    expect(result.user).toContain("Parent context unavailable");
+    expect(result.user).not.toContain("## Candles — 1h parent");
+    expect(result.contextDigest).toMatchObject({ contextQuality: { parentActual: 0, parentUnavailable: "no_acceptable_source" } });
+  });
+  it("never swallows missing selected data or generic parent errors", async () => {
+    const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+    for (const selected of [true, false]) {
+      const error = Object.assign(new Error("EXAMPLE"), selected ? { name: "CandleBasisUnavailableError", reason: "no_acceptable_source" } : {});
+      fetchOHLCVMock.mockImplementation((_symbol: string, timeframe: string) => selected || timeframe !== "15m" ? Promise.reject(error) : Promise.resolve(SELECTED_CANDLES_15M));
+      await expect(buildMarketContext({ market: "SOL-PERP", timeframe: "15m", adapter: makeAdapter(), bot: makeBot(),
+        preClaimBotStatus: "idle", recentClosedDecisions: [], paperPositionRows: [], agentPublicKey: AGENT_PUBKEY })).rejects.toBe(error);
+    }
   });
 });

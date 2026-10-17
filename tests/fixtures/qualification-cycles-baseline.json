@@ -1,0 +1,82 @@
+{
+  "baseCommitHash": "a27f321fdec95652b4b9520e7912c0f6d095cd1e",
+  "registry": {
+    "scanner_capability_policy": {
+      "materialVersion": 3,
+      "decisionGeneration": 47,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/scanner.ts",
+        "server/ai-trader/scanner-capabilities.ts",
+        "server/ai-trader/market-admission.ts",
+        "server/ai-trader/multiplier-market-quarantine.ts",
+        "server/ai-trader/monitor.ts",
+        "server/ai-trader/routes.ts",
+        "server/ai-trader/graduation.ts"
+      ]
+    },
+    "accepted_candle_provenance": {
+      "materialVersion": 1,
+      "decisionGeneration": 21,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/lab/datafeed.ts",
+        "server/lab/candle-store.ts",
+        "server/ai-trader/context-builder.ts"
+      ]
+    },
+    "prompt_context_schema": {
+      "materialVersion": 3,
+      "decisionGeneration": 5,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/context-builder.ts",
+        "server/ai-trader/decide.ts"
+      ]
+    },
+    "session_policy": {
+      "materialVersion": 1,
+      "decisionGeneration": 1,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/session-context.ts"
+      ]
+    },
+    "guardrail_risk_policy": {
+      "materialVersion": 4,
+      "decisionGeneration": 19,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/guardrails.ts",
+        "server/ai-trader/executor.ts",
+        "server/ai-trader/routes.ts"
+      ]
+    },
+    "paper_execution_simulator": {
+      "materialVersion": 3,
+      "decisionGeneration": 17,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/paper-math.ts",
+        "server/ai-trader/monitor.ts"
+      ]
+    }
+  },
+  "ownerSha256": {
+    "server/ai-trader/context-builder.ts": "sha256:666c1e32eb11d22c39a3a016b025664f1438b037192f4acc784f0f845d5961bc",
+    "server/ai-trader/decide.ts": "sha256:72cffcf399864fad7b050e186d2117e6f22b6b89ce8d03c83aaaf2902fb5dd95",
+    "server/ai-trader/executor.ts": "sha256:44709c083aac10e9ca9e0f5a089a398977d6ed5a8be2092c52b22f10fc07b64d",
+    "server/ai-trader/graduation.ts": "sha256:d88d1b03ef61edf4bc321de219228ff44083c00b172be25b9419901c324302de",
+    "server/ai-trader/guardrails.ts": "sha256:02953b34b93a43d535ca66269984c303df1e64906f4e496cdd027da2cc728dab",
+    "server/ai-trader/market-admission.ts": "sha256:b71e1eae76b5e7104daf7dfbf0c68721a96f054454bc30212be1ef63bc588aab",
+    "server/ai-trader/monitor.ts": "sha256:ceb41950dc4999022c3944191e44b57fca27fc0d10fa78d912582d85eb04d01a",
+    "server/ai-trader/multiplier-market-quarantine.ts": "sha256:c49ee636893c9998d2299ad887b4473b59a0bf22805a8ed60899e5af6f9a548b",
+    "server/ai-trader/paper-math.ts": "sha256:107fa30113fa6dc69fed3beb650fa8c51b3d7f059c92407fae7a6223990c4517",
+    "server/ai-trader/routes.ts": "sha256:e810066401eea16ea68d09ac05027fdf1dd1f3149b722899057a87878ff00cd2",
+    "server/ai-trader/scanner-capabilities.ts": "sha256:eb0792c5a2e8e6beb0afca6a8d8438ff1c31a8adf17875be66cf4bd1fda56dcb",
+    "server/ai-trader/scanner.ts": "sha256:ec3ff862a02ed4e8da90c1e318f7a5c1287351faa98ac2a15f714791eb901ea2",
+    "server/ai-trader/session-context.ts": "sha256:934c178d699e09a242264f75b95c61e1322277c9514a720ce5fd8ab21ee24c0b",
+    "server/lab/candle-store.ts": "sha256:41d4f51bb3518b70b815e1e0dc2f6a70cf256f35da606a6b2574691d2ea250cf",
+    "server/lab/datafeed.ts": "sha256:b2682c65b1ad5b8cc75e5c587e5f1252a916fd2401137e00e17247cf21c16ed8"
+  }
+}

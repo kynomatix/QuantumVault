@@ -2525,6 +2525,54 @@ DO $$ BEGIN
     ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_lab_link_state_check CHECK (lab_link_state IN ('linked','owner_confirmed','unlinked'));
   END IF;
 END $$;
+`,
+`CREATE TABLE IF NOT EXISTS ai_trader_cycles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  bot_id varchar NOT NULL REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
+  schema_version smallint NOT NULL DEFAULT 1,
+  reason_version smallint NOT NULL DEFAULT 1,
+  trigger text NOT NULL DEFAULT 'auto',
+  planned_boundary timestamptz,
+  started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  finished_at timestamptz,
+  phase text NOT NULL DEFAULT 'initial',
+  outcome text NOT NULL DEFAULT 'running',
+  reason_code text,
+  rearmed boolean,
+  next_planned_boundary timestamptz,
+  candidate_count integer NOT NULL DEFAULT 0,
+  model_call_count integer NOT NULL DEFAULT 0,
+  decision_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  bot_updated_at timestamp,
+  protocol text NOT NULL,
+  market text NOT NULL,
+  timeframe text NOT NULL,
+  market_source text NOT NULL,
+  paper_mode boolean NOT NULL,
+  model text NOT NULL,
+  prompt_version_hash text,
+  context_version_hash text,
+  owner_boot_id uuid NOT NULL,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
+  CONSTRAINT ai_cycles_schema_ck CHECK (schema_version = 1 AND reason_version = 1),
+  CONSTRAINT ai_cycles_trigger_ck CHECK (trigger IN ('auto','manual')),
+  CONSTRAINT ai_cycles_boundary_ck CHECK (trigger <> 'auto' OR planned_boundary IS NOT NULL),
+  CONSTRAINT ai_cycles_phase_ck CHECK (phase IN ('initial','boundary_lane','preflight','claim','context','model','execution','position','settlement')),
+  CONSTRAINT ai_cycles_outcome_ck CHECK (outcome IN ('running','skipped','failed','model_decided','proposed','executed','position_managed')),
+  CONSTRAINT ai_cycles_reason_ck CHECK (reason_code IS NULL OR reason_code IN ('paused','position_open','auto_next_off','mode_suggest','venue_retired','venue_unavailable','schema_not_ready','cooldown','daily_cap','model_key_missing','reauth_required','model_unsupported','state_unresolved','claim_lost','scanner_disabled','shortlist_empty','shortlist_stale','feed_basis_unavailable','feed_stale','feed_cache_degraded','gateway_timeout','gateway_error','model_malformed','audit_write_failed','model_flat','model_entry','model_close','guardrail_rejected','close_without_position','proposal_created','entry_executed','execution_rejected','position_management','scanner_boundary_lane_timeout','scanner_boundary_lane_wait_failed','cycle_interrupted','internal_error','wallet_agent_missing','malfunction_ceiling')),
+  CONSTRAINT ai_cycles_terminal_ck CHECK ((outcome = 'running' AND finished_at IS NULL AND reason_code IS NULL AND rearmed IS NULL) OR (outcome <> 'running' AND finished_at IS NOT NULL AND reason_code IS NOT NULL AND rearmed IS NOT NULL)),
+  CONSTRAINT ai_cycles_time_ck CHECK (finished_at IS NULL OR finished_at >= started_at),
+  CONSTRAINT ai_cycles_count_ck CHECK (candidate_count >= 0 AND model_call_count >= 0),
+  CONSTRAINT ai_cycles_decisions_type_ck CHECK (jsonb_typeof(decision_ids) = 'array'),
+  CONSTRAINT ai_cycles_decisions_count_ck CHECK (jsonb_array_length(decision_ids) <= 2),
+  CONSTRAINT ai_cycles_details_type_ck CHECK (jsonb_typeof(details) = 'object'),
+  CONSTRAINT ai_cycles_details_size_ck CHECK (octet_length(details::text) <= 8192),
+  CONSTRAINT ai_cycles_decisions_size_ck CHECK (octet_length(decision_ids::text) <= 512),
+  CONSTRAINT ai_cycles_prompt_hash_ck CHECK (prompt_version_hash IS NULL OR prompt_version_hash ~ '^[0-9A-Fa-f]{64}$'),
+  CONSTRAINT ai_cycles_context_hash_ck CHECK (context_version_hash IS NULL OR context_version_hash ~ '^[0-9A-Fa-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS ai_trader_cycles_bot_latest_idx ON ai_trader_cycles (bot_id, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ai_trader_cycles_running_idx ON ai_trader_cycles (started_at) WHERE outcome = 'running';
 `
 ] as const;
 
@@ -7401,8 +7449,205 @@ const schemaMigrationMetadata = [
       ]
     }
   ]
-}
-] as const;
+},
+{
+  "id": "199-ai-trader-cycles",
+  "capabilities": [
+    "ai_trader_cycles"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "ai_trader_cycles",
+      "columns": [
+        "id",
+        "bot_id",
+        "schema_version",
+        "reason_version",
+        "trigger",
+        "planned_boundary",
+        "started_at",
+        "finished_at",
+        "phase",
+        "outcome",
+        "reason_code",
+        "rearmed",
+        "next_planned_boundary",
+        "candidate_count",
+        "model_call_count",
+        "decision_ids",
+        "bot_updated_at",
+        "protocol",
+        "market",
+        "timeframe",
+        "market_source",
+        "paper_mode",
+        "model",
+        "prompt_version_hash",
+        "context_version_hash",
+        "owner_boot_id",
+        "details"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "FOREIGN KEY (bot_id)",
+        "ON DELETE CASCADE"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_schema_ck",
+      "definitionIncludes": [
+        "schema_version = 1 AND reason_version = 1"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_trigger_ck",
+      "definitionIncludes": [
+        "trigger IN ('auto','manual')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_boundary_ck",
+      "definitionIncludes": [
+        "trigger <> 'auto' OR planned_boundary IS NOT NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_phase_ck",
+      "definitionIncludes": [
+        "phase IN ('initial','boundary_lane','preflight','claim','context','model','execution','position','settlement')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_outcome_ck",
+      "definitionIncludes": [
+        "outcome IN ('running','skipped','failed','model_decided','proposed','executed','position_managed')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_reason_ck",
+      "definitionIncludes": [
+        "reason_code IS NULL OR reason_code IN ('paused','position_open','auto_next_off','mode_suggest','venue_retired','venue_unavailable','schema_not_ready','cooldown','daily_cap','model_key_missing','reauth_required','model_unsupported','state_unresolved','claim_lost','scanner_disabled','shortlist_empty','shortlist_stale','feed_basis_unavailable','feed_stale','feed_cache_degraded','gateway_timeout','gateway_error','model_malformed','audit_write_failed','model_flat','model_entry','model_close','guardrail_rejected','close_without_position','proposal_created','entry_executed','execution_rejected','position_management','scanner_boundary_lane_timeout','scanner_boundary_lane_wait_failed','cycle_interrupted','internal_error','wallet_agent_missing','malfunction_ceiling')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_terminal_ck",
+      "definitionIncludes": [
+        "(outcome = 'running' AND finished_at IS NULL AND reason_code IS NULL AND rearmed IS NULL) OR (outcome <> 'running' AND finished_at IS NOT NULL AND reason_code IS NOT NULL AND rearmed IS NOT NULL)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_time_ck",
+      "definitionIncludes": [
+        "finished_at IS NULL OR finished_at >= started_at"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_count_ck",
+      "definitionIncludes": [
+        "candidate_count >= 0 AND model_call_count >= 0"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_decisions_type_ck",
+      "definitionIncludes": [
+        "jsonb_typeof(decision_ids) = 'array'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_decisions_count_ck",
+      "definitionIncludes": [
+        "jsonb_array_length(decision_ids) <= 2"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_details_type_ck",
+      "definitionIncludes": [
+        "jsonb_typeof(details) = 'object'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_details_size_ck",
+      "definitionIncludes": [
+        "octet_length(details::text) <= 8192"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_decisions_size_ck",
+      "definitionIncludes": [
+        "octet_length(decision_ids::text) <= 512"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_prompt_hash_ck",
+      "definitionIncludes": [
+        "prompt_version_hash IS NULL OR prompt_version_hash ~ '^[0-9A-Fa-f]{64}$'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_context_hash_ck",
+      "definitionIncludes": [
+        "context_version_hash IS NULL OR context_version_hash ~ '^[0-9A-Fa-f]{64}$'"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "ai_trader_cycles",
+      "index": "ai_trader_cycles_bot_latest_idx",
+      "columns": [
+        "bot_id",
+        "started_at",
+        "id"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "ai_trader_cycles",
+      "index": "ai_trader_cycles_running_idx",
+      "columns": [
+        "started_at"
+      ],
+      "unique": false,
+      "predicateIncludes": [
+        "outcome = 'running'"
+      ]
+    }
+  ]
+}] as const;
 
 export const SCHEMA_MIGRATION_MANIFEST: readonly SchemaMigrationDefinition[] =
   schemaMigrationSql.map((sql, index) => {

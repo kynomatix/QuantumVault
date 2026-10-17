@@ -12,6 +12,7 @@ export const SCHEMA_CAPABILITIES = [
   "sol_loop",
   "oracle",
   "ai_trader",
+  "ai_trader_cycles",
   "grid_bot",
 ] as const;
 

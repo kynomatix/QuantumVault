@@ -1,3 +1,5 @@
+import type { LatestCycle } from "@shared/ai-trader-cycle";
+import { cycleDisplay, currentScheduleLabel } from "@/lib/ai-trader-cycle-display";
 import { ExchangeBadge } from './ExchangeBadge';
 import { getExchangeLabel, getExchangeUiCapabilities } from '@/lib/exchange-capabilities';
 import { PhoenixUnavailableNotice } from './PhoenixUnavailableNotice';
@@ -318,6 +320,7 @@ function parseBreakevenInfo(raw: unknown): BreakevenInfo | null {
 }
 
 interface BotDetailResponse {
+  latestCycle: LatestCycle;
   bot: AiTraderBot;
   openPosition: OpenPositionView | null;
   recentDecisions: AiDecisionRow[];
@@ -1409,6 +1412,21 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
               </div>
             </SheetHeader>
 
+            <div className="mt-3 rounded-md border border-border p-3 text-xs space-y-1" data-testid="ai-trader-latest-cycle">
+              <div className="font-medium">Latest automatic check</div>
+              <div className="text-muted-foreground">{currentScheduleLabel(bot)}</div>
+              {(() => {
+                const view = cycleDisplay(detail?.latestCycle);
+                return <>
+                  {view.time && <div className="text-muted-foreground">{new Date(view.time).toLocaleString()}</div>}
+                  <div>{view.outcome}</div>
+                  {detail?.latestCycle?.cycle?.reasonCode === "guardrail_rejected" && <div>{violationChipLabels(detail.latestCycle.cycle.detailCodes.map(code => ({ code }))).join(" · ")}</div>}
+                  {view.flatLabels.length > 0 && <div>{view.flatLabels.join(" · ")}</div>}
+                  {view.rationale && <div className="text-muted-foreground whitespace-pre-wrap">{view.rationale}</div>}
+                  {view.schedule && <div className="text-muted-foreground">{view.schedule}</div>}
+                </>;
+              })()}
+            </div>
             {!moneyControls && <PhoenixUnavailableNotice />}
             {moneyControls && bot.paperMode && (
               <TrialStrip
@@ -1658,7 +1676,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                       : (clamped?.action ?? raw?.action ?? 'flat');
                     const resolvedRationale: string | null = isCompressed
                       ? (raw.rationaleExcerpt ?? null)
-                      : (clamped?.rationale ?? null);
+                      : (raw?.rationale ?? clamped?.rationale ?? null);
                     const violations = violationChipLabels(d.guardrailViolations);
                     const rowDigestMarket = (d.contextDigest as any)?.market as string | undefined;
                     const rowMarketLabel = rowDigestMarket ? rowDigestMarket.replace(/-PERP$/i, '') : null;

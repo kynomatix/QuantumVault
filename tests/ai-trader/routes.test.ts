@@ -18,6 +18,7 @@ const getRecentClosedMock = vi.fn();
 const getQualificationRecordMock = vi.fn();
 const getOpenDecisionsMock = vi.fn();
 const getUnresolvedDecisionsMock = vi.fn();
+const getLatestCycleMock = vi.fn();
 const claimAnalysisMock = vi.fn();
 const claimScannerCandidateMock = vi.fn();
 const incrementFreeCallsMock = vi.fn();
@@ -29,6 +30,7 @@ vi.mock("../../server/storage", () => ({
   storage: {
     getAiTraderDecisionsPaged: (...a: unknown[]) => getPagedHistoryMock(...a),
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
+    getLatestAiTraderCycle: (...a: unknown[]) => getLatestCycleMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getAiTraderDecisionsMock(...a),
     getExactAiTraderGraduationDecisions: (...a: unknown[]) => getExactAiTraderGraduationDecisionsMock(...a),
     getAiTraderBotLifetimeStats: (...a: unknown[]) => getAiTraderBotLifetimeStatsMock(...a),
@@ -993,6 +995,7 @@ describe("AI Trader consecutive-loss owner resume", () => {
     vi.clearAllMocks();
     getBotMock.mockResolvedValue(pausedBot());
     getAiTraderDecisionsMock.mockResolvedValue([]);
+    getLatestCycleMock.mockResolvedValue(undefined);
     getUnresolvedDecisionsMock.mockResolvedValue([]);
     parseOpenDecisionMock.mockReturnValue(null);
     transitionStateMock.mockImplementation(async ({ nextStatus, nextPauseReason, botUpdates }: {
@@ -1221,6 +1224,7 @@ describe("AI Trader detail request subspan attribution", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getAiTraderDecisionsMock.mockResolvedValue([]);
+    getLatestCycleMock.mockResolvedValue(undefined);
     getAiTraderBotLifetimeStatsMock.mockResolvedValue(new Map([
       ["scanner-bot-route", { totalRealized: 0, totalFees: 0, totalLlmCost: 0 }],
     ]));
@@ -1243,6 +1247,7 @@ describe("AI Trader detail request subspan attribution", () => {
     const trace = __createRequestTraceCollectorForTests();
     const response = await trace.run(() => invoke(built.routes, "GET /api/ai-trader/:id", requestFor("WALLET_ROUTE")));
     expect(response.statusCode).toBe(404);
+    expect(getLatestCycleMock).not.toHaveBeenCalled();
     expect(Object.keys(trace.snapshot())).toEqual(["botOwnedLoadMs"]);
   });
 
@@ -1253,6 +1258,8 @@ describe("AI Trader detail request subspan attribution", () => {
     const trace = __createRequestTraceCollectorForTests();
     const response = await trace.run(() => invoke(built.routes, "GET /api/ai-trader/:id", requestFor("WALLET_ROUTE")));
     expect(response.statusCode).toBe(200);
+    expect(response.body.latestCycle).toEqual({ status: "available", cycle: null });
+    expect(getLatestCycleMock).toHaveBeenCalledWith("scanner-bot-route");
     expect(Object.keys(trace.snapshot())).toEqual([
       "botOwnedLoadMs", "botDecisionReadMs", "botLifetimeStatsMs",
     ]);
@@ -1277,6 +1284,7 @@ describe("AI Trader exact qualification progress projection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getAiTraderDecisionsMock.mockResolvedValue([]);
+    getLatestCycleMock.mockResolvedValue(undefined);
     getAiTraderBotLifetimeStatsMock.mockResolvedValue(new Map());
     parseOpenDecisionMock.mockReturnValue(null);
   });

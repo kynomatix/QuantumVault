@@ -45,6 +45,8 @@ vi.mock("../../server/boot-id", () => ({
   SERVER_BOOT_STARTED_AT: "2026-07-08T12:00:00.000Z",
 }));
 
+const startCycleMock = vi.fn();
+const finishCycleMock = vi.fn();
 const getWalletMock = vi.fn();
 const getRecentClosedMock = vi.fn();
 const getExactGraduationMock = vi.fn();
@@ -66,6 +68,8 @@ const commitRecoveryMock = vi.fn();
 let closeBotState: Partial<AiTraderBot> = {};
 vi.mock("../../server/storage", () => ({
   storage: {
+    startAiTraderCycle: (...a: unknown[]) => startCycleMock(...a),
+    finishAiTraderCycle: (...a: unknown[]) => finishCycleMock(...a),
     getWallet: (...a: unknown[]) => getWalletMock(...a),
     getRecentClosedDecisions: (...a: unknown[]) => getRecentClosedMock(...a),
     getExactAiTraderGraduationDecisions: (...a: unknown[]) => getExactGraduationMock(...a),
@@ -605,6 +609,8 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  startCycleMock.mockReset().mockResolvedValue(undefined);
+  finishCycleMock.mockReset().mockResolvedValue(undefined);
   vi.resetModules();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
@@ -2595,7 +2601,7 @@ describe("runAutoCycle", () => {
       evaluatedAt: NOW,
     }]);
     buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
-    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "scanner-era", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "scanner-era", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
 
     await runAutoCycle(bot.id);
 
@@ -2806,7 +2812,7 @@ describe("runAutoCycle", () => {
     getLlmCiphertextMock.mockResolvedValue("safe-envelope");
     decryptLlmKeyMock.mockImplementation(() => Buffer.from("sk"));
     buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
-    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-flat", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-flat", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
 
     await runAutoCycle(bot.id);
     await runAutoCycle(bot.id);
@@ -2957,7 +2963,7 @@ describe("runAutoCycle", () => {
     getLlmCiphertextMock.mockResolvedValue("ct");
     decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
     buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
-    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "dec-live", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "dec-live", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
 
     await runAutoCycle("bot-1111-2222");
 
@@ -2975,7 +2981,7 @@ describe("runAutoCycle", () => {
     getLlmCiphertextMock.mockResolvedValue("ct");
     decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
     buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
-    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "dec-9", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "dec-9", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
 
     await runAutoCycle("bot-1111-2222");
 
@@ -4333,7 +4339,19 @@ describe("monitor liveness heartbeat", () => {
 describe("scanner boundary lane scheduling", () => {
   const laneLines = () => appendTelemetryMock.mock.calls.map((call) => String(call[0]));
 
-  it("keeps the scanner's +2s priority and starts no cycle work until the active sweep releases", async () => {
+  it("marks unavailable history and preserves cadence on an initial audit snapshot read failure", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    const { cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    getBotMock.mockRejectedValue(new Error("EXAMPLE database failure"));
+    scheduleAutoNext("bot-snapshot-failure", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
+    expect(cycleAuditUnavailable("bot-snapshot-failure")).toBe(true);
+    expect(vi.getTimerCount()).toBe(1);
+    expect(runDecisionMock).not.toHaveBeenCalled();
+    expect(laneLines().join(" ")).not.toContain("EXAMPLE database failure");
+  });
+
+  it("keeps the scanner's +2s priority and starts no trading work until the active sweep releases", async () => {
     const lane = deferred<"released">();
     waitForScannerBoundaryLaneReleaseMock.mockReturnValueOnce(lane.promise);
     getBotMock.mockResolvedValue(makeBot({ status: "open", mode: "auto", autoNext: true }));
@@ -4348,25 +4366,26 @@ describe("scanner boundary lane scheduling", () => {
 
     await vi.advanceTimersByTimeAsync(AUTO_CYCLE_SETTLE_MS - 2_000);
     expect(waitForScannerBoundaryLaneReleaseMock).toHaveBeenCalledTimes(1);
-    expect(getBotMock).not.toHaveBeenCalled();
+    expect(getBotMock).toHaveBeenCalledTimes(1);
     expect(laneLines().some((line) => line.includes("cycle_start"))).toBe(false);
 
     lane.resolve("released");
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(getBotMock).toHaveBeenCalledTimes(1);
+    expect(getBotMock).toHaveBeenCalledTimes(2);
     expect(laneLines().filter((line) => line.includes("cycle_start"))).toHaveLength(1);
     expect(laneLines().filter((line) => line.includes("cycle_end"))).toHaveLength(1);
   });
 
   it("defers to the next native boundary when the scanner-lane wait reaches its wedge bound", async () => {
     waitForScannerBoundaryLaneReleaseMock.mockResolvedValueOnce("timed_out");
+    getBotMock.mockResolvedValue(makeBot({ status: "idle" }));
     const { scheduleAutoNext } = await importMonitor();
 
     scheduleAutoNext("bot-lane-timeout", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
 
-    expect(getBotMock).not.toHaveBeenCalled();
+    expect(getBotMock).toHaveBeenCalledTimes(1);
     expect(buildContextMock).not.toHaveBeenCalled();
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(executeDecisionMock).not.toHaveBeenCalled();
@@ -4379,6 +4398,7 @@ describe("scanner boundary lane scheduling", () => {
   it("does not start stale work when a waiting timer is superseded by a reschedule", async () => {
     const lane = deferred<"released">();
     waitForScannerBoundaryLaneReleaseMock.mockReturnValueOnce(lane.promise);
+    getBotMock.mockResolvedValue(makeBot({ status: "idle" }));
     const { scheduleAutoNext } = await importMonitor();
 
     scheduleAutoNext("bot-lane-rearm", "15m");
@@ -4387,7 +4407,7 @@ describe("scanner boundary lane scheduling", () => {
     lane.resolve("released");
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(getBotMock).not.toHaveBeenCalled();
+    expect(getBotMock).toHaveBeenCalledTimes(1);
     expect(laneLines().some((line) => line.includes("cycle_start"))).toBe(false);
     expect(vi.getTimerCount()).toBe(1);
   });
@@ -4395,6 +4415,7 @@ describe("scanner boundary lane scheduling", () => {
   it("does not start stale work when the monitor stops during the lane wait", async () => {
     const lane = deferred<"released">();
     waitForScannerBoundaryLaneReleaseMock.mockReturnValueOnce(lane.promise);
+    getBotMock.mockResolvedValue(makeBot({ status: "idle" }));
     const { scheduleAutoNext, stopAiTraderMonitor } = await importMonitor();
 
     scheduleAutoNext("bot-lane-stop", "15m");
@@ -4403,7 +4424,7 @@ describe("scanner boundary lane scheduling", () => {
     lane.resolve("released");
     await vi.advanceTimersByTimeAsync(0);
 
-    expect(getBotMock).not.toHaveBeenCalled();
+    expect(getBotMock).toHaveBeenCalledTimes(1);
     expect(laneLines().some((line) => line.includes("cycle_start"))).toBe(false);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -4465,7 +4486,7 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
     // runAutoCycle's fresh-row gate sees 'open' → exits without rescheduling.
     getBotMock.mockResolvedValue(idleAutoBot({ status: "open" }));
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
-    expect(getBotMock).toHaveBeenCalledTimes(1);
+    expect(getBotMock).toHaveBeenCalledTimes(2); // audit snapshot and fresh trading gate
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -4573,9 +4594,10 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
     expect(vi.getTimerCount()).toBe(1);
 
     // Freeze runAutoCycle in-flight: the timer callback has already deleted
-    // the map entry, but the cycle's first read never settles.
+    // the map entry, but the fresh trading read after the audit snapshot never settles.
     let releaseCycle!: (v: unknown) => void;
-    getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
+    getBotMock.mockResolvedValueOnce(makeBot({ status: "idle", mode: "auto", autoNext: true }))
+      .mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
     // The auto-next timer was consumed; the AIT-CYCLE-OBSERVABILITY-01 watchdog
     // is now live (unref'd, but still counted by vi.getTimerCount).
@@ -4584,7 +4606,7 @@ describe("AIT-CADENCE-SELF-HEAL-01: idle-bot cadence audit", () => {
     // Audit repairs with a future boundary timer — it never calls runAutoCycle.
     await runMonitorTickOnce();
     expect(vi.getTimerCount()).toBe(2); // watchdog + audit-armed auto-next timer
-    expect(getBotMock).toHaveBeenCalledTimes(1); // still only the in-flight cycle's read
+    expect(getBotMock).toHaveBeenCalledTimes(2); // snapshot plus in-flight fresh trading read
 
     // Release the hung cycle as non-idle → it exits at the fresh-row gate
     // without touching the audit's timer; settle() clears the watchdog.
@@ -4618,7 +4640,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getLlmCiphertextMock.mockResolvedValue("ct");
     decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
     buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
-    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-obs", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d-obs", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
     return bot;
   }
 
@@ -4681,7 +4703,8 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
   it("never-settling cycle: emits exactly one slow line at 60 s; no terminal until released", async () => {
     const { scheduleAutoNext } = await importMonitor();
     let releaseCycle!: (v: unknown) => void;
-    getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
+    getBotMock.mockResolvedValueOnce(makeBot({ status: "idle", mode: "auto", autoNext: true }))
+      .mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
 
     scheduleAutoNext("bot-obs-slow", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS); // timer fires; cycle hangs at bot read
@@ -4716,7 +4739,8 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
   it("releasing a hung cycle: clears watchdog; emits exactly one terminal; total obs = 3 lines", async () => {
     const { scheduleAutoNext } = await importMonitor();
     let releaseCycle!: (v: unknown) => void;
-    getBotMock.mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
+    getBotMock.mockResolvedValueOnce(makeBot({ status: "idle", mode: "auto", autoNext: true }))
+      .mockImplementation(() => new Promise((res) => { releaseCycle = res; }));
 
     scheduleAutoNext("bot-obs-rel", "15m");
     // Advance past both the timer fire and the 60 s watchdog in one step
@@ -4736,7 +4760,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
   it("thrown cycle: terminal has exit=thrown; no raw error text in telemetry; console.error called; pendingReconciliation wired", async () => {
     const { scheduleAutoNext } = await importMonitor();
     const rawMsg = "simulated-db-crash: very secret details at line 999";
-    getBotMock.mockRejectedValue(new Error(rawMsg));
+    getBotMock.mockResolvedValueOnce(makeBot({ status: "idle", mode: "auto", autoNext: true })).mockRejectedValue(new Error(rawMsg));
 
     scheduleAutoNext("bot-obs-throw", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
@@ -4823,7 +4847,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     expect(endLines()[0]).toContain("phase=execution");
   });
 
-  it("instrumentation adds zero lines before timer fires and no extra storage/network calls beyond runAutoCycle itself", async () => {
+  it("instrumentation stays silent before firing and adds only bounded cycle storage calls", async () => {
     const { scheduleAutoNext } = await importMonitor();
     armFlatCycle();
 
@@ -4840,7 +4864,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     expect(obsTelLines()).toHaveLength(3);
     // The wrapper still adds only start/terminal; runAutoCycle adds the one-time fingerprint
     // (storage reads, mock calls) is unaffected
-    expect(getBotMock).toHaveBeenCalledTimes(1);
+    expect(getBotMock).toHaveBeenCalledTimes(2);
     expect(buildContextMock).toHaveBeenCalledTimes(1);
     expect(runDecisionMock).toHaveBeenCalledTimes(1);
     expect(executeDecisionMock).not.toHaveBeenCalled(); // flat → no execute
@@ -4901,6 +4925,15 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     expect(endLines()[0]).toContain("exit=llm_malformed");
     expect(endLines()[0]).not.toContain("exit=flat");
     expect(endLines()[0]).toContain("phase=llm");
+    expect(finishCycleMock.mock.calls.at(-1)?.[3]).toMatchObject({ reasonCode: "model_malformed", rearmed: true });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "fresh-decision", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    await vi.advanceTimersByTimeAsync(TF_15M);
+    expect(runDecisionMock).toHaveBeenCalledTimes(2);
+    expect(claimAnalysisMock).toHaveBeenCalledTimes(2);
+    expect(startCycleMock).toHaveBeenCalledTimes(2);
+    expect(new Set(startCycleMock.mock.calls.map(([value]) => value.id)).size).toBe(2);
+    expect(finishCycleMock.mock.calls.at(-1)?.[3]).toMatchObject({ reasonCode: "model_flat", rearmed: true });
+
   });
 
   it("guardrail rejection → exit=guardrail_rejected (never flat)", async () => {
@@ -4976,7 +5009,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
 
   it("thrown path emits rearmed=false (pendingReconciliation instead of timer)", async () => {
     const { scheduleAutoNext } = await importMonitor();
-    getBotMock.mockRejectedValue(new Error("venue-outage"));
+    getBotMock.mockResolvedValueOnce(makeBot({ status: "idle", mode: "auto", autoNext: true })).mockRejectedValue(new Error("venue-outage"));
 
     scheduleAutoNext("bot-obs-thrown-rearmed", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
@@ -4993,7 +5026,8 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
 
     // Cycle 1: timer fires, cycle hangs indefinitely at bot read
     let releaseCycle1!: (v: unknown) => void;
-    getBotMock.mockImplementationOnce(() => new Promise((res) => { releaseCycle1 = res; }));
+    getBotMock.mockResolvedValueOnce(makeBot({ id: "bot-obs-overlap", status: "idle", mode: "auto", autoNext: true }))
+      .mockImplementationOnce(() => new Promise((res) => { releaseCycle1 = res; }));
 
     scheduleAutoNext("bot-obs-overlap", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
@@ -5014,7 +5048,7 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     getLlmCiphertextMock.mockResolvedValue("ct");
     decryptLlmKeyMock.mockReturnValue(Buffer.from("sk"));
     buildContextMock.mockResolvedValue({ system: "s", user: "u", contextDigest: { price: 100 } });
-    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d2", decision: {}, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
+    runDecisionMock.mockResolvedValue({ ok: true, decisionId: "d2", decision: { action: "flat" }, clamped: { action: "flat" }, rejected: false, violations: [], latencyMs: 5 });
 
     await runMonitorTickOnce(); // arms cycle 2 boundary timer
     // Advance to fire cycle 2's timer — cycle 1 is still hanging
@@ -5049,7 +5083,8 @@ describe("AIT-CYCLE-OBSERVABILITY-01: scheduled cycle observability", () => {
     const { scheduleAutoNext, stopAiTraderMonitor } = await importMonitor();
 
     // Hang the cycle so the watchdog is armed but has not fired yet
-    getBotMock.mockImplementation(() => new Promise(() => {})); // never resolves
+    getBotMock.mockResolvedValueOnce(makeBot({ status: "idle", mode: "auto", autoNext: true }))
+      .mockImplementation(() => new Promise(() => {})); // fresh trading read never resolves
 
     scheduleAutoNext("bot-obs-stop", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS); // timer fires; watchdog armed; cycle hangs

@@ -1,3 +1,4 @@
+import { CycleAudit, reportOrphanCycle } from "./cycle-audit";
 // AI Trader — position monitor + lifecycle loop (WO-6, docs/AGENTIC_TRADER_PLAN.md §6).
 //
 // Responsibilities (plan WO-6 items 1–6):
@@ -713,6 +714,11 @@ function recordProtectiveReadObservation(
 }
 /** Per-bot auto-next timers (cleared on re-schedule / pause / stop). */
 const autoNextTimers = new Map<string, NodeJS.Timeout>();
+const autoTimerBoundaries = new WeakMap<NodeJS.Timeout, Date>();
+function nextAuditBoundary(botId: string): Date | null {
+  const timer = autoNextTimers.get(botId);
+  return timer ? autoTimerBoundaries.get(timer) ?? null : null;
+}
 
 // AIT-CYCLE-OBSERVABILITY-01: per-bot in-flight cycle observability state.
 // A fired autoNextTimers entry remains authoritative while it waits for the
@@ -3446,19 +3452,32 @@ async function runScheduledAutoCycle(
   timeframe: string,
   ownedTimer: NodeJS.Timeout,
 ): Promise<void> {
-  const laneResult = await waitForScannerBoundaryLaneRelease();
-  // A reschedule or shutdown superseded this already-fired timer while it waited.
-  if (autoNextTimers.get(botId) !== ownedTimer) return;
-
-  if (laneResult === "timed_out") {
-    autoNextTimers.delete(botId);
-    appendTelemetry(
-      `[AIT-OBS] cycle_deferred bot=${botId.slice(0, 8)} tf=${timeframe} reason=scanner_boundary_lane_timeout boot=${MONITOR_BOOT_TAG}`
-    );
-    scheduleAutoNext(botId, timeframe);
-    return;
-  }
-
+  let snapshot: AiTraderBot | undefined;
+  try { snapshot = await storage.getAiTraderBot(botId); }
+  catch (err) { reportOrphanCycle(botId); throw err; }
+  if (!snapshot) { reportOrphanCycle(botId); return; }
+  const audit = new CycleAudit(snapshot, autoTimerBoundaries.get(ownedTimer) ?? new Date());
+  await audit.begin();
+  try {
+    audit.phase = "boundary_lane";
+    let laneResult: Awaited<ReturnType<typeof waitForScannerBoundaryLaneRelease>>;
+    try { laneResult = await waitForScannerBoundaryLaneRelease(); }
+    catch {
+      audit.set("scanner_boundary_lane_wait_failed");
+      if (autoNextTimers.get(botId) === ownedTimer) {
+        autoNextTimers.delete(botId);
+        scheduleAutoNext(botId, timeframe);
+      }
+      return;
+    }
+    if (autoNextTimers.get(botId) !== ownedTimer) { audit.set("claim_lost"); return; }
+    if (laneResult === "timed_out") {
+      audit.set("scanner_boundary_lane_timeout");
+      autoNextTimers.delete(botId);
+      appendTelemetry(`[AIT-OBS] cycle_deferred bot=${botId.slice(0, 8)} tf=${timeframe} reason=scanner_boundary_lane_timeout boot=${MONITOR_BOOT_TAG}`);
+      scheduleAutoNext(botId, timeframe);
+      return;
+    }
   autoNextTimers.delete(botId);
   // AIT-CYCLE-OBSERVABILITY-01: per-cycle observability closure. Each timer
   // callback owns its obs entry; direct runAutoCycle calls are unobserved.
@@ -3492,7 +3511,7 @@ async function runScheduledAutoCycle(
       `[AIT-OBS] cycle_end cid=${cycleId} elapsed_ms=${Date.now() - cycleStart} phase=${obs.phase} exit=${exitOverride ?? obs.exitReason} rearmed=${rearmed} boot=${MONITOR_BOOT_TAG}`
     );
   };
-  runAutoCycle(botId).then(() => {
+  await runAutoCycle(botId, audit, obs).then(() => {
     settle();
   }).catch((err) => {
     settle("thrown");
@@ -3505,6 +3524,7 @@ async function runScheduledAutoCycle(
     // resets the bot to idle (or recovers a real position) and re-arms the cadence.
     pendingReconciliation.add(botId);
   });
+  } finally { await audit.finish(nextAuditBoundary(botId)); }
 }
 
 /** Schedule the next decision cycle at the next candle boundary (+10s settle). */
@@ -3528,6 +3548,7 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
   }, delay);
   // Don't hold the process open for a bot timer.
   if (typeof timer.unref === "function") timer.unref();
+  autoTimerBoundaries.set(timer, new Date((Math.floor(now / tfMs) + 1) * tfMs));
   autoNextTimers.set(botId, timer);
   console.log(`[AiTraderMonitor] auto-next scheduled for bot ${botId.slice(0, 8)} in ${Math.round(delay / 1000)}s`);
 }
@@ -3538,19 +3559,25 @@ export function scheduleAutoNext(botId: string, timeframe: string): void {
  * BEFORE any LLM spend, and resolves the user's BYO LLM key from the restored
  * session UMK (unrestorable ⇒ pause 'reauth_required' + Telegram nudge).
  */
-export async function runAutoCycle(botId: string): Promise<void> {
+export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycleObs?: CycleObs): Promise<void> {
+  let audit = cycleAudit;
   const releasePoolLoadOwner = claimPoolLoadOwner(activeCycles);
   try {
   // AIT-CYCLE-OBSERVABILITY-01: if invoked by the scheduled-timer wrapper the
   // obs entry is present; direct/manual callers leave it undefined (no-ops below).
-  const _obs = _cycleObs.get(botId);
+  const _obs = cycleObs;
   let bot = await storage.getAiTraderBot(botId);
-  if (bot?.protocol === "flash") return; // old queued cycle: no reschedule or venue work
-  if (!bot) return; // exitReason stays "status_gate" (default)
-  if (bot.protocol === "phoenix" && !bot.paperMode && !phoenixAiLiveAvailable()) return;
-  if (bot.status !== "idle" || bot.mode !== "auto" || !bot.autoNext) return;
+  if (!bot) { reportOrphanCycle(botId); return; }
+  if (!audit) { audit = new CycleAudit(bot, new Date()); await audit.begin(); }
+  audit.phase = "preflight";
+  if (bot.protocol === "flash") { audit.set("venue_retired"); return; }
+  if (bot.protocol === "phoenix" && !bot.paperMode && !phoenixAiLiveAvailable()) { audit.set("venue_unavailable"); return; }
+  if (bot.status !== "idle") { audit.set(bot.status === "paused" ? "paused" : bot.status === "open" ? "position_open" : "state_unresolved"); return; }
+  if (bot.mode !== "auto") { audit.set("mode_suggest"); return; }
+  if (!bot.autoNext) { audit.set("auto_next_off"); return; }
 
   if (bot.marketSource === "scanner" && !SCANNER_CAPABILITIES.consumersEnabled) {
+    audit.set("scanner_disabled");
     if (_obs) _obs.exitReason = "gate_skip";
     console.log(`[AiTraderMonitor] scanner consumers disabled - skipping bot ${bot.id.slice(0, 8)}`);
     scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
@@ -3558,6 +3585,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   }
 
   if (!isSchemaCapabilityReady("lab_scanner")) {
+    audit.set("schema_not_ready");
     if (_obs) _obs.exitReason = "gate_skip";
     console.warn(`[AiTraderMonitor] schema capability unavailable capability=lab_scanner - skipping decision cycle for bot ${bot.id.slice(0, 8)}`);
     scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
@@ -3568,6 +3596,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   try {
     adapter = getAiTraderAdapter(bot);
   } catch (err) {
+    audit.set("venue_unavailable");
     if (_obs) _obs.exitReason = "adapter_missing";
     console.error(`[AiTraderMonitor] auto cycle: no adapter for '${bot.protocol}' — skipping`);
     return;
@@ -3582,6 +3611,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   if (bot.marketSource !== "scanner") {
     const g6 = checkCooldownAndCaps(bot.timeframe, recentClosed, Date.now());
     if (!g6.ok) {
+      audit.set(g6.reason === "daily_cap_reached" ? "daily_cap" : "cooldown");
       if (_obs) _obs.exitReason = "gate_skip";
       // Log the skip — a silent reschedule here made cadence gaps undiagnosable.
       console.log(`[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} skipped (${g6.reason}): ${g6.detail}`);
@@ -3592,6 +3622,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   const dayStart = utcDayStartMs(Date.now());
   const closedToday = recentClosed.filter((d) => d.closedAt && new Date(d.closedAt).getTime() >= dayStart);
   if (closedToday.length >= MALFUNCTION_TRADES_PER_DAY) {
+    audit.set("malfunction_ceiling");
     if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "malfunction_ceiling", `closed ${closedToday.length} trades today (ceiling ${MALFUNCTION_TRADES_PER_DAY}) — pausing before next cycle`);
     return;
@@ -3599,6 +3630,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
   const wallet = await storage.getWallet(bot.walletAddress);
   if (!wallet?.agentPublicKey) {
+    audit.set("wallet_agent_missing");
     if (_obs) _obs.exitReason = "gate_skip";
     console.error(`[AiTraderMonitor] auto cycle: wallet has no agentPublicKey for bot ${bot.id.slice(0, 8)} — skipping`);
     scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
@@ -3620,6 +3652,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
     }
 
     if (restoreStatus === "transient_read_failed") {
+      audit.set("state_unresolved");
       if (_obs) _obs.exitReason = "gate_skip";
       console.warn(
         `[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} security restore classified transient_read_failed; `
@@ -3634,7 +3667,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
       console.warn(
         `[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} security restore classified reauth_required; pausing`,
       );
-      await pauseBot(bot, "reauth_required", "session locked — reconnect your wallet in the app so the bot can keep trading hands-off");
+      audit.set("reauth_required");
+    await pauseBot(bot, "reauth_required", "session locked — reconnect your wallet in the app so the bot can keep trading hands-off");
       return;
     }
   }
@@ -3644,11 +3678,13 @@ export async function runAutoCycle(botId: string): Promise<void> {
     console.warn(
       `[AiTraderMonitor] auto cycle: bot ${bot.id.slice(0, 8)} restored outcome produced no usable session; classified reauth_required`,
     );
+    audit.set("reauth_required");
     await pauseBot(bot, "reauth_required", "session locked — reconnect your wallet in the app so the bot can keep trading hands-off");
     return;
   }
   const ciphertext = await storage.getWalletLlmApiKeyCiphertext(bot.walletAddress);
   if (!ciphertext) {
+    audit.set("model_key_missing");
     if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "no_api_key", "no LLM API key on file — add an OpenRouter key in the app to resume");
     return;
@@ -3657,6 +3693,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   // hand-inserted sentinel like 'manual/canary') to OpenRouter — it 400s every
   // candle. Pause with an honest reason instead of burning cycles.
   if (!isSelectableModel(bot.model)) {
+    audit.set("model_unsupported");
     if (_obs) _obs.exitReason = "paused";
     await pauseBot(bot, "unsupported_model", `model '${bot.model}' isn't available for AI analysis — recreate the bot with a supported model`);
     return;
@@ -3668,6 +3705,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
   } catch (err) {
     if (_obs) _obs.exitReason = "paused";
     recordLlmKeyDecryptFailure(bot, umk, ciphertext, err);
+    audit.set("reauth_required");
     await pauseBot(bot, "reauth_required", "stored LLM API key could not be decrypted — reconnect your wallet and re-save the key");
     return;
   }
@@ -3683,6 +3721,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
     if (bot.marketSource === "scanner") {
       const shortlistRead = getScannerShortlistResult(bot.protocol);
       if (shortlistRead.authority !== "tradable") {
+        audit.set("shortlist_stale");
         if (_obs) _obs.exitReason = "gate_skip";
         console.warn(`[AiTraderMonitor] scanner: ${shortlistRead.authority} generation for ${bot.protocol} — fail-closed before bot mutation or LLM`);
         scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
@@ -3690,6 +3729,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       }
       const shortlist = shortlistRead.candidates;
       if (shortlist.length === 0) {
+        audit.set("shortlist_empty");
         if (_obs) _obs.exitReason = "gate_skip";
         console.log(`[AiTraderMonitor] scanner: no candidates for ${bot.protocol} at this boundary — skipping bot ${bot.id.slice(0, 8)}`);
         scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
@@ -3719,6 +3759,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
         return checkCooldownAndCaps(c.timeframe, recentClosed, Date.now()).ok;
       });
       if (eligible.length === 0) {
+        audit.set(shortlist.every(c => Date.now() - c.evaluatedAt > SCANNER_CANDIDATE_MAX_AGE_MS) ? "shortlist_stale" : "shortlist_empty");
         if (_obs) _obs.exitReason = "gate_skip";
         console.log(`[AiTraderMonitor] scanner: all candidates G6-capped or stale for bot ${bot.id.slice(0, 8)} — rescheduling`);
         scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
@@ -3735,6 +3776,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
         const candidate = eligible[ci];
         if (advancingAfterClaimLoss && candidate.score < 90) {
+          audit.set("claim_lost", "claim");
           if (_obs) _obs.exitReason = "no_qualifying_alternative";
           console.log(
             `[AiTraderMonitor] scanner_candidate_below_floor bot=${bot.id.slice(0, 8)} market=${candidate.market} score=${Math.round(candidate.score)} floor=90 boundary=${claimBoundary.boundaryStart.toISOString()}`,
@@ -3760,7 +3802,9 @@ export async function runAutoCycle(botId: string): Promise<void> {
           qualificationEraMutationPatch(bot, pickUpdates, "scanner_market_selection_changed") ?? {},
         );
         const preClaimBotStatus = bot.status;
+        audit.phase = "claim";
         if (!await internalAnalysisClaimAllowed(bot)) {
+          audit.set("state_unresolved");
           if (_obs) _obs.exitReason = "gate_skip";
           console.warn(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} lost idle-to-analyzing claim`);
           return;
@@ -3777,6 +3821,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           updates: pickUpdates,
         });
         if (claimResult.outcome === "candidate_claimed") {
+          audit.set("claim_lost");
           if (_obs) _obs.exitReason = "candidate_claimed";
           console.log(
             `[AiTraderMonitor] scanner_candidate_claim_loss bot=${bot.id.slice(0, 8)} market=${candidate.market} boundary=${claimBoundary.boundaryStart.toISOString()}`,
@@ -3785,6 +3830,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           continue;
         }
         if (claimResult.outcome === "schema_unavailable" || claimResult.outcome === "database_error") {
+          audit.set(claimResult.outcome === "schema_unavailable" ? "schema_not_ready" : "state_unresolved");
           if (_obs) _obs.exitReason = "gate_skip";
           console.warn(
             `[AiTraderMonitor] scanner candidate reservation unavailable outcome=${claimResult.outcome} bot=${bot.id.slice(0, 8)}`,
@@ -3793,6 +3839,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           return;
         }
         if (claimResult.outcome === "bot_busy") {
+          audit.set("claim_lost");
           if (_obs) _obs.exitReason = "gate_skip";
           console.warn(`[AiTraderMonitor] scanner: bot ${bot.id.slice(0, 8)} lost idle-to-analyzing claim`);
           return;
@@ -3807,6 +3854,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
         if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
         let context: Awaited<ReturnType<typeof buildMarketContext>>;
         try {
+          audit.candidate();
+          audit.phase = "context";
           context = await buildMarketContext({
             market: bot.market,
             timeframe: bot.timeframe as AiTraderTimeframe,
@@ -3819,10 +3868,12 @@ export async function runAutoCycle(botId: string): Promise<void> {
             scannerNote,
           });
         } catch (err) {
+          if (isCacheDegradedError(err)) audit.set("feed_cache_degraded", "context");
           if (!isCandleBasisUnavailableError(err)) {
             await releaseInternalAnalysis(bot.id);
             throw err;
           }
+          audit.set("feed_basis_unavailable", "context");
           if (_obs) _obs.exitReason = "candle_basis_unavailable";
           console.warn(`[AiTraderMonitor] scanner: candle_basis_unavailable for bot ${bot.id.slice(0, 8)}`);
           await releaseInternalAnalysis(bot.id);
@@ -3830,6 +3881,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
           return;
         }
         if ("stale" in context) {
+          audit.set(context.reason.startsWith("Candle cache degraded") ? "feed_cache_degraded" : "feed_stale", "context");
           // exitReason already "stale_data"
           console.warn(`[AiTraderMonitor] scanner: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
           await releaseInternalAnalysis(bot.id);
@@ -3841,7 +3893,10 @@ export async function runAutoCycle(botId: string): Promise<void> {
         llmCalls++;
         let decision: Awaited<ReturnType<typeof runDecision>>;
         try {
-          decision = await runDecision({ bot, apiKey, context, adapter });
+          audit.context(context);
+          audit.phase = "model";
+          decision = await runDecision({ bot, apiKey, context, adapter, onGatewayCall: audit.gatewayCall });
+          audit.decision(decision);
         } catch (err) {
           await releaseInternalAnalysis(bot.id);
           throw err;
@@ -3853,6 +3908,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
         if (decision.ok && clamped && (clamped.action === "long" || clamped.action === "short")) {
           if (_obs) { _obs.phase = "execution"; _obs.exitReason = "exec_rejected"; }
           const markPrice = num(context.contextDigest.price);
+          audit.phase = "execution";
           const exec = await executeDecision({
             bot: { ...bot, status: "analyzing" },
             decisionId: decision.decisionId,
@@ -3861,6 +3917,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
             markPrice: markPrice ?? NaN,
             authoritySource: "internal_cycle",
           });
+          audit.execution(exec.ok ? null : exec.reason, exec.ok);
           if (!exec.ok) {
             // exitReason stays "exec_rejected"
             recordEntryRejection(typedExecutionRejectionReason(exec));
@@ -3919,8 +3976,10 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
     // Fixed-ticker bot path (scanner bots have already returned above).
     const preClaimBotStatus = bot.status;
+    audit.phase = "claim";
     const claimed = await claimInternalAnalysis(bot);
     if (!claimed) {
+      audit.set("claim_lost");
       if (_obs) _obs.exitReason = "gate_skip";
       return;
     }
@@ -3929,6 +3988,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
     if (_obs) { _obs.phase = "context"; _obs.exitReason = "stale_data"; }
     let context: Awaited<ReturnType<typeof buildMarketContext>>;
     try {
+      audit.candidate();
+      audit.phase = "context";
       context = await buildMarketContext({
         market: bot.market,
         timeframe: bot.timeframe as AiTraderTimeframe,
@@ -3940,10 +4001,12 @@ export async function runAutoCycle(botId: string): Promise<void> {
         agentPublicKey: wallet.agentPublicKey,
       });
     } catch (err) {
+      if (isCacheDegradedError(err)) audit.set("feed_cache_degraded", "context");
       if (!isCandleBasisUnavailableError(err)) {
         await releaseInternalAnalysis(bot.id);
         throw err;
       }
+      audit.set("feed_basis_unavailable", "context");
       if (_obs) _obs.exitReason = "candle_basis_unavailable";
       console.warn(`[AiTraderMonitor] auto cycle: candle_basis_unavailable for bot ${bot.id.slice(0, 8)}`);
       await releaseInternalAnalysis(bot.id);
@@ -3951,6 +4014,7 @@ export async function runAutoCycle(botId: string): Promise<void> {
       return;
     }
     if ("stale" in context) {
+      audit.set(context.reason.startsWith("Candle cache degraded") ? "feed_cache_degraded" : "feed_stale", "context");
       // G9 — never decide on stale data; retry at the next boundary.
       // exitReason already "stale_data"
       console.warn(`[AiTraderMonitor] auto cycle: stale context for bot ${bot.id.slice(0, 8)} (${context.reason})`);
@@ -3962,7 +4026,10 @@ export async function runAutoCycle(botId: string): Promise<void> {
     if (_obs) { _obs.phase = "llm"; _obs.exitReason = "unclassified"; }
     let decision: Awaited<ReturnType<typeof runDecision>>;
     try {
-      decision = await runDecision({ bot, apiKey, context, adapter });
+      audit.context(context);
+      audit.phase = "model";
+      decision = await runDecision({ bot, apiKey, context, adapter, onGatewayCall: audit.gatewayCall });
+      audit.decision(decision);
     } catch (err) {
       await releaseInternalAnalysis(bot.id);
       throw err;
@@ -3998,7 +4065,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
 
     if (_obs) { _obs.phase = "execution"; _obs.exitReason = "exec_rejected"; }
     const markPrice = num(context.contextDigest.price);
-    const exec = await executeDecision({
+    audit.phase = "execution";
+      const exec = await executeDecision({
       bot: { ...bot, status: "analyzing" },
       decisionId: decision.decisionId,
       clamped: decision.clamped,
@@ -4006,7 +4074,8 @@ export async function runAutoCycle(botId: string): Promise<void> {
       markPrice: markPrice ?? NaN,
       authoritySource: "internal_cycle",
     });
-    if (!exec.ok) {
+    audit.execution(exec.ok ? null : exec.reason, exec.ok);
+      if (!exec.ok) {
       // The executor writes terminal statuses (idle/paused) on its abort paths;
       // for result-only rejections make sure the bot isn't stranded in 'analyzing'.
       recordEntryRejection(typedExecutionRejectionReason(exec));
@@ -4028,8 +4097,12 @@ export async function runAutoCycle(botId: string): Promise<void> {
   } finally {
     keyBuf.fill(0);
   }
+  } catch (err) {
+    if (audit && audit.reason !== "feed_cache_degraded") audit.set("internal_error");
+    throw err;
   } finally {
     releasePoolLoadOwner();
+    if (!cycleAudit) await audit?.finish(nextAuditBoundary(botId));
   }
 }
 

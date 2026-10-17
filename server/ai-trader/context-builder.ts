@@ -26,6 +26,8 @@ import { detectHTFLevels, type HtfLevel } from "./htf-levels";
 import { detectWM, type WMFormation } from "./wm-detector";
 import { detectActiveRange, type ActiveRange } from "./active-range";
 import { SWEEP_BUFFER_ATR } from "./guardrails";
+import { usesFixedPaperDecisionV2 } from "@shared/ai-trader-flat-reasons";
+import { isCandleBasisUnavailableError } from "../lab/datafeed";
 import { computeUnrealizedPnl, resolvePaperPositionState } from "./paper-position-authority";
 
 export type AiTraderTimeframe = "15m" | "1h" | "4h" | "1d";
@@ -500,6 +502,7 @@ export async function buildMarketContext(
   let parentIndicatorCandles: OHLCV[] = [];
   let parentCandles: OHLCV[] = [];
   let parentCandleProvenance: CandleProvenance | null = null;
+  let parentUnavailable: "feed_cache_degraded" | "no_acceptable_source" | null = null;
   if (parentTf) {
     const parentTfMs = TIMEFRAME_MS[parentTf];
     // Brick 2+4: fetch PARENT_INDICATOR_BARS for pivot computation.
@@ -518,8 +521,11 @@ export async function buildMarketContext(
       // Parent TF is an enrichment: on a degraded cache read proceed without
       // it (Dow/HTF lines simply omit parent context) rather than failing
       // the whole decision cycle. Other errors still propagate.
-      if (!isCacheDegradedError(err)) throw err;
-      console.warn(`[ContextBuilder] Parent ${parentTf} candle cache degraded for ${market} — proceeding without parent context`);
+      const paperParentMissing = usesFixedPaperDecisionV2(bot)
+        && isCandleBasisUnavailableError(err) && err.reason === "no_acceptable_source";
+      if (!isCacheDegradedError(err) && !paperParentMissing) throw err;
+      parentUnavailable = paperParentMissing ? "no_acceptable_source" : "feed_cache_degraded";
+      console.warn(`[ContextBuilder] Parent ${parentTf} context unavailable (${parentUnavailable}) for ${market} — proceeding without parent context`);
     }
   }
 
@@ -996,6 +1002,9 @@ export async function buildMarketContext(
   if (parentCsv) {
     userSections.push(`## Candles — ${parentTf} parent timeframe (oldest -> newest, CSV)`, parentCsv);
   }
+  if (usesFixedPaperDecisionV2(bot) && parentUnavailable) {
+    userSections.push("Parent context unavailable. No parent confirmation or alignment is asserted.");
+  }
   // WO-B: scanner bots inject a selection-rationale note so the model knows
   // this market was chosen by the scanner sweep rather than a user pick.
   if (scannerNote) {
@@ -1063,6 +1072,13 @@ export async function buildMarketContext(
     activeRange: activeRangeDigest,
     // WO-B: present only for scanner bots; undefined/absent for fixed-ticker bots.
     scannerNote: scannerNote ?? null,
+    contextQuality: {
+      selectedRequested: INDICATOR_BARS, selectedActual: indicatorCandles.length,
+      parentRequested: parentTf ? PARENT_INDICATOR_BARS : 0, parentActual: parentIndicatorCandles.length,
+      selectedNewestAgeMs: ageMs,
+      selectedCoverage: indicatorCandles.length / INDICATOR_BARS,
+      parentUnavailable,
+    },
     candleProvenance: {
       selected: selectedRaw[selectedRaw.length - 1]?.provenance ?? null,
       parent: parentCandleProvenance,
