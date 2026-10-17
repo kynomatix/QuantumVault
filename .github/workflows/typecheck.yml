@@ -1,0 +1,45 @@
+# Pre-merge TypeScript gate (conductor, 2026-10-17). Free on this public repo, so
+# Replit is only needed for sync and publish. It fails when `npm run check` reports
+# any error not in .github/typecheck-baseline.txt (errors normalised: line/col stripped).
+name: typecheck
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tsc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: npm run check
+        run: npm run check > tsc.out 2>&1 || true
+      - name: Compare with baseline
+        run: |
+          grep -E 'error TS[0-9]+:' tsc.out | sed -E 's/\([0-9]+,[0-9]+\)//' | sort > current.txt || true
+          echo "TypeScript errors: $(wc -l < current.txt)"
+          if [ ! -f .github/typecheck-baseline.txt ]; then
+            echo "No baseline committed yet; printing the multiset for capture."
+            cat current.txt
+            exit 0
+          fi
+          sort .github/typecheck-baseline.txt > baseline.txt
+          comm -23 current.txt baseline.txt > new.txt
+          comm -13 current.txt baseline.txt > fixed.txt
+          echo "New errors: $(wc -l < new.txt)   Fixed: $(wc -l < fixed.txt)"
+          head -20 new.txt | sed 's/^/NEW /'
+          test ! -s new.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tsc-${{ github.sha }}
+          path: |
+            tsc.out
+            current.txt
+          retention-days: 14
