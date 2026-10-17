@@ -520,10 +520,10 @@ describe("runDecision — gateway failures (no decision row)", () => {
 });
 
 describe("runDecision — temperature-quirk retry", () => {
-  it("retries exactly once without the temperature field when a 400 is flagged temperatureUnsupported", async () => {
+  it.each([400, 404])("retries exactly once without the temperature field when a %s is flagged temperatureUnsupported", async (status) => {
     const { runDecision } = await importDecide();
     callMock
-      .mockRejectedValueOnce(new LlmGatewayError("Bad request.", 400, { temperatureUnsupported: true }))
+      .mockRejectedValueOnce(new LlmGatewayError("Bad request.", status, { temperatureUnsupported: true }))
       .mockResolvedValueOnce(toolResponse(VALID_LONG_ARGS));
 
     const result = await runDecision({
@@ -539,9 +539,9 @@ describe("runDecision — temperature-quirk retry", () => {
     expect((capturedCalls[1].opts as any).omitTemperature).toBe(true);
   });
 
-  it("does not loop: a second temperature-flagged 400 after omission aborts as gateway", async () => {
+  it.each([400, 404])("does not loop: a second temperature-flagged %s after omission aborts as gateway", async (status) => {
     const { runDecision } = await importDecide();
-    callMock.mockRejectedValue(new LlmGatewayError("Bad request.", 400, { temperatureUnsupported: true }));
+    callMock.mockRejectedValue(new LlmGatewayError("Bad request.", status, { temperatureUnsupported: true }));
 
     const result = await runDecision({
       bot: makeBot(),
@@ -549,8 +549,82 @@ describe("runDecision — temperature-quirk retry", () => {
       context: makeContext(),
       adapter: makeAdapter(),
     });
-    expect(result).toMatchObject({ ok: false, reason: "gateway" });
+    expect(result).toMatchObject({ ok: false, reason: "gateway", gatewayFailure: { httpStatus: status, attemptCount: 2 } });
     expect(callMock).toHaveBeenCalledTimes(2); // initial + the single omit retry
+  });
+
+  it.each([400, 404])("retries an actual HTTP %s once with only temperature removed", async (status) => {
+    const actual = await vi.importActual<typeof import("../../server/ai-assistant/router")>("../../server/ai-assistant/router");
+    callMock.mockImplementation(actual.callOpenRouterWithUsage);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status, text: async () => JSON.stringify({ error: {
+        code: status, message: status === 400 ? "Unsupported temperature" : "No endpoints found that can handle the requested parameters",
+      } }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ choices: [{ message: {
+        tool_calls: [{ function: { name: "decide", arguments: JSON.stringify(VALID_LONG_ARGS) } }],
+      } }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const { runDecision } = await importDecide();
+    const onGatewayCall = vi.fn();
+    const result = await runDecision({ bot: makeBot({ model: "anthropic/claude-opus-4.8", paperMode: true }),
+      apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter(), onGatewayCall });
+    expect(result.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onGatewayCall).toHaveBeenCalledTimes(2);
+    const { temperature, ...withoutTemperature } = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(temperature).toBe(0.2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual(withoutTemperature);
+    expect(withoutTemperature.provider).toEqual({ require_parameters: true });
+  });
+
+  it("reports two attempts after a second actual HTTP 404 without retaining the body", async () => {
+    const actual = await vi.importActual<typeof import("../../server/ai-assistant/router")>("../../server/ai-assistant/router");
+    callMock.mockImplementation(actual.callOpenRouterWithUsage);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => JSON.stringify({ error: {
+      code: 404, message: "No endpoints found that can handle the requested parameters; EXAMPLE private prompt",
+    } }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const { runDecision } = await importDecide();
+    const onGatewayCall = vi.fn();
+    const result = await runDecision({ bot: makeBot({ paperMode: true }), apiKey: "EXAMPLE",
+      context: makeContext(), adapter: makeAdapter(), onGatewayCall });
+    expect(result).toMatchObject({ ok: false, reason: "gateway", gatewayFailure: {
+      failureClass: "http", httpStatus: 404, providerCode: "404", attemptCount: 2,
+    } });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onGatewayCall).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).not.toHaveProperty("temperature");
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(insertMock).not.toHaveBeenCalled();
+  });
+
+  it("does not retry an unflagged 404", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockRejectedValueOnce(new LlmGatewayError("EXAMPLE", 404));
+    expect(await runDecision({ bot: makeBot(), apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter() }))
+      .toMatchObject({ ok: false, reason: "gateway", gatewayFailure: { httpStatus: 404, attemptCount: 1 } });
+    expect(callMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the scanner Qwen HTTP request unchanged and makes only one call on success", async () => {
+    const actual = await vi.importActual<typeof import("../../server/ai-assistant/router")>("../../server/ai-assistant/router");
+    callMock.mockImplementation(actual.callOpenRouterWithUsage);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ choices: [{ message: {
+      tool_calls: [{ function: { name: "decide", arguments: JSON.stringify(VALID_LONG_ARGS) } }],
+    } }] }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const { runDecision, DECISION_JSON_SCHEMA } = await importDecide();
+    const context = makeContext();
+    expect((await runDecision({ bot: makeBot({ model: "qwen/qwen3.7-max", marketSource: "scanner", paperMode: true }),
+      apiKey: "EXAMPLE", context, adapter: makeAdapter() })).ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ model: "qwen/qwen3.7-max",
+      messages: [{ role: "system", content: context.system }, { role: "user", content: context.user }],
+      max_tokens: 8192, temperature: 0.2, reasoning: { enabled: false }, tools: [{ type: "function", function: {
+        name: "decide", description: "Submit your trading decision for this cycle. You MUST call this tool exactly once with your decision.",
+        parameters: DECISION_JSON_SCHEMA,
+      } }],
+      tool_choice: "required", provider: { require_parameters: true } });
   });
 });
 
@@ -931,12 +1005,13 @@ describe("fixed-paper decision-v2 flat explanations", () => {
     expect(paperTradeDecisionSchema.safeParse({ ...VALID_LONG_ARGS, flatReasons: ["no_setup"] }).success).toBe(false);
     expect(PAPER_DECISION_JSON_SCHEMA).toMatchObject({ type: "object", additionalProperties: false });
   });
-  it("counts temperature retry plus one correction and retains raw reasons", async () => {
+  it.each([400, 404])("counts a %s temperature retry plus one correction and retains raw reasons", async (status) => {
     const { runDecision } = await importDecide(); const onGatewayCall = vi.fn();
-    callMock.mockRejectedValueOnce(new LlmGatewayError("EXAMPLE", 400, { temperatureUnsupported: true }))
+    callMock.mockRejectedValueOnce(new LlmGatewayError("EXAMPLE", status, { temperatureUnsupported: true }))
       .mockResolvedValueOnce(toolResponse({ ...flat, flatReasons: undefined })).mockResolvedValueOnce(toolResponse(flat));
     const result = await runDecision({ bot: makeBot({ paperMode: true, marketSource: "fixed" }), apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter(), onGatewayCall });
     expect(result.ok).toBe(true); expect(onGatewayCall).toHaveBeenCalledTimes(3);
+    expect(capturedCalls.slice(1).every((call) => call.opts.omitTemperature === true)).toBe(true);
     expect(insertMock.mock.calls[0][0].rawDecision.flatReasons).toEqual(flat.flatReasons);
   });
   it("caps correction at two attempts and returns the malformed decision identity", async () => {
@@ -964,6 +1039,7 @@ describe("fixed-paper decision-v2 flat explanations", () => {
     const context = makeContext();
     const result = await runDecision({ bot: makeBot({ model, paperMode: true }), apiKey: "EXAMPLE", context, adapter: makeAdapter() });
     expect(result.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     const schema = body.tools[0].function.parameters;
     expect(body).toEqual({ model, messages: [{ role: "system", content: context.system }, { role: "user", content: context.user }],

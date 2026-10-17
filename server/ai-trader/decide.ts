@@ -287,7 +287,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
 
   // One gateway call with the forced `decide` tool (WO-4 step 1: toolChoice
   // 'required', requireParameters, 60s G12 timeout, temperature 0.2). Handles the
-  // provider temperature quirk inline: a 400 flagged temperatureUnsupported gets
+  // provider temperature quirk inline: a 400/404 flagged temperatureUnsupported gets
   // exactly one retry with the field omitted; the flag is sticky for later calls
   // in the same cycle.
   const callGateway = async () => {
@@ -308,7 +308,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     } catch (err) {
       if (
         err instanceof LlmGatewayError &&
-        err.status === 400 &&
+        (err.status === 400 || err.status === 404) &&
         err.temperatureUnsupported &&
         !omitTemperature
       ) {

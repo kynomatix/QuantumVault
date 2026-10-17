@@ -55,9 +55,9 @@ export class LlmGatewayError extends Error {
   status?: number;
   readonly failure: GatewayFailure;
   /**
-   * WO-4: true when a 400 response body mentioned "temperature" — some providers
-   * reject any explicit temperature value. Derived server-side from the (never
-   * surfaced) raw body so callers can retry once with `omitTemperature:true`.
+   * True for a 400 body mentioning "temperature", or a 404 when temperature was
+   * sent with require_parameters. Exposes no raw body; callers can retry once
+   * with `omitTemperature:true` to allow the provider default.
    */
   temperatureUnsupported?: boolean;
   constructor(message: string, status?: number, opts?: { temperatureUnsupported?: boolean; failure?: GatewayFailure }) {
@@ -156,8 +156,8 @@ export async function callOpenRouterWithUsage(opts: {
   requireParameters?: boolean;
   /**
    * WO-4: when true, the `temperature` field is omitted from the request body entirely.
-   * Used for the one-shot retry after a 400 whose body mentioned temperature
-   * (some providers reject any explicit value; their default then applies).
+   * Used for the one-shot retry after a temperature rejection (400) or a strict
+   * provider-routing miss (404); the provider default then applies.
    */
   omitTemperature?: boolean;
 }): Promise<{ content: string; usage?: LlmUsage; toolCalls?: { name: string; arguments: string }[] }> {
@@ -220,10 +220,10 @@ export async function callOpenRouterWithUsage(opts: {
 
     if (!res.ok) {
       // Drain the body so the socket frees, but DO NOT log or surface it. WO-4: sniff a
-      // 400 body for the temperature quirk (some providers reject any explicit value) and
-      // expose ONLY the boolean flag — never the raw body — so callers can retry once
-      // with `omitTemperature:true`.
-      let temperatureUnsupported = false;
+      // 400 body for the temperature quirk. A 404 with strict parameter routing can
+      // mean no endpoint supports temperature; use the request conditions even if
+      // the body is unavailable. Expose ONLY the boolean flag for a one-shot retry.
+      let temperatureUnsupported = res.status === 404 && !opts.omitTemperature && opts.requireParameters === true;
       let providerError: unknown;
       try {
         const bodyText = await res.text();

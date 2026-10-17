@@ -3,12 +3,38 @@ import { callOpenRouterWithUsage, LlmGatewayError } from "../../server/ai-assist
 import { sanitizeGatewayFailure } from "@shared/ai-gateway-failure";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
-const call = () => callOpenRouterWithUsage({ apiKey: "EXAMPLE", model: "EXAMPLE", messages: [], timeoutMs: 60_000 });
-async function failedCall() {
-  try { await call(); } catch (err) { expect(err).toBeInstanceOf(LlmGatewayError); return err as LlmGatewayError; }
+const call = (opts: Partial<Parameters<typeof callOpenRouterWithUsage>[0]> = {}) =>
+  callOpenRouterWithUsage({ apiKey: "EXAMPLE", model: "EXAMPLE", messages: [], timeoutMs: 60_000, ...opts });
+async function failedCall(opts: Partial<Parameters<typeof callOpenRouterWithUsage>[0]> = {}) {
+  try { await call(opts); } catch (err) { expect(err).toBeInstanceOf(LlmGatewayError); return err as LlmGatewayError; }
   throw new Error("Expected gateway failure");
 }
 describe("safe gateway diagnostics", () => {
+  it.each([
+    { omitTemperature: false, requireParameters: true, flagged: true },
+    { omitTemperature: true, requireParameters: true, flagged: false },
+    { omitTemperature: false, requireParameters: false, flagged: false },
+    { omitTemperature: false, requireParameters: undefined, flagged: false },
+  ])("flags a 404 only with temperature and strict routing: %j", async ({ flagged, ...opts }) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404,
+      text: async () => JSON.stringify({ error: { code: 404, message: "EXAMPLE private prompt" } }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const err = await failedCall(opts);
+    expect(Boolean(err.temperatureUnsupported)).toBe(flagged);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(Object.prototype.hasOwnProperty.call(body, "temperature")).toBe(!opts.omitTemperature);
+    expect(body.provider?.require_parameters === true).toBe(opts.requireParameters === true);
+    expect(JSON.stringify(err)).not.toContain("private");
+  });
+
+  it("flags a strict-routing 404 even when its body is unavailable", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 404,
+      text: async () => { throw new Error("EXAMPLE private"); } }));
+    await expect(callOpenRouterWithUsage({ apiKey: "EXAMPLE", model: "EXAMPLE", messages: [], requireParameters: true }))
+      .rejects.toMatchObject({ status: 404, temperatureUnsupported: true, failure: { attemptCount: 1 } });
+  });
+
   it.each([400, 401, 402, 403, 404, 408, 429, 500, 502, 503])("projects HTTP %s without retaining body/message/metadata", async status => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status, text: async () => JSON.stringify({ error: {
       code: "invalid_json_schema", type: "invalid_request_error", message: "EXAMPLE private prompt", metadata: { raw: "EXAMPLE private headers" },
