@@ -28,6 +28,20 @@ function memory() {
 const setup=()=>{const storage=memory(),a=authority(),deps:GridDraftDeps={storage:storage as never,observe:async()=>a,now:()=>clock,umk:async()=>umk()};return{storage,a,deps};};
 const request=async(deps:GridDraftDeps)=>{const draftRevision=gridDraftRevision(intent),preview=await authoritativeGridPreview('EXAMPLE',intent,draftRevision,deps);expect(preview.state).toBe('ready');return{schemaVersion:1 as const,clientRequestId:randomUUID(),draftRevision,intent,serverIntentDigest:preview.serverIntentDigest!};};
 describe('server authoritative Grid drafts',()=>{
+  it('saves a draft with unpublished optional limits while retaining every published limit check',async()=>{
+    const {a,deps}=setup();if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
+    const c=a.market.constraints.value;
+    c.maximumQuote={state:'unavailable',reason:'EXAMPLE'};c.priceBounds={state:'unavailable',reason:'EXAMPLE'};c.restrictions={state:'unavailable',reason:'EXAMPLE'};
+    const saved=await createGridDraft('EXAMPLE',await request(deps),deps);expect(saved.result).toBe('created');
+    c.priceBounds={state:'available',value:{minimum:'96',maximum:'104'}};
+    expect((await authoritativeGridPreview('EXAMPLE',intent,gridDraftRevision(intent),deps)).reasons).toContain('Pacifica accepts prices from $96 to $104. Move the range inside those limits.');
+    c.priceBounds={state:'available',value:{minimum:'0',maximum:'1000000'}};
+    expect((await authoritativeGridPreview('EXAMPLE',intent,gridDraftRevision(intent),deps)).state).toBe('ready');
+    c.maximumQuote={state:'available',value:'1'};
+    expect((await authoritativeGridPreview('EXAMPLE',intent,gridDraftRevision(intent),deps)).reasons.some(reason=>/above Pacifica's \$1.00 maximum/.test(reason))).toBe(true);
+    c.maximumQuote={state:'unavailable',reason:'EXAMPLE'};c.restrictions={state:'available',value:'isolated_only'};
+    expect((await authoritativeGridPreview('EXAMPLE',intent,gridDraftRevision(intent),deps)).reasons).toContain('This market requires isolated margin, which Grid does not support. Choose another market.');
+  });
   it('saves one draft on exact retries, signs all levels, and isolates wallets',async()=>{const {storage,deps}=setup(),r=await request(deps);const first=await createGridDraft('EXAMPLE',r,deps),retry=await createGridDraft('EXAMPLE',r,deps);expect(first.bot.id).toBe(retry.bot.id);expect(retry.result).toBe('existing_request');expect(storage.bots.size).toBe(1);expect(storage.levels.get(first.bot.id)).toHaveLength(intent.gridCount+1);expect(first.bot.policyHmac).toMatch(/^[0-9a-f]{64}$/);await createGridDraft('REDACTED',r,deps);expect(storage.bots.size).toBe(2);});
   it.each([true,false])('keeps required capital within the submitted budget and distinguishes seed capital (%s)',async(seedAtCreation)=>{
     const {deps}=setup(),i={...intent,seedAtCreation},p=await authoritativeGridPreview('EXAMPLE',i,gridDraftRevision(i),deps);

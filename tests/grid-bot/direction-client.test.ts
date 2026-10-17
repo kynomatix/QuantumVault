@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
-import { GridDirectionBadge, GridDirectionHint } from '../../client/src/components/grid-planner/GridDirectionBadge';
+import { GridDirectionBadge, GridDirectionHint, useGridDirectionSuggestion } from '../../client/src/components/grid-planner/GridDirectionBadge';
 import { gridDirectionText, isGridDirectionSuggestion } from '../../client/src/lib/grid-direction-view';
 import { BTC_TREND_PUBLICATION_GRACE_MS as GRACE, BTC_TREND_WEEK_MS as WEEK, type GridDirectionSuggestion } from '../../shared/grid-direction';
 
@@ -12,15 +12,32 @@ const above: GridDirectionSuggestion = { regime: 'above', source: 'okx-index', s
 const below: GridDirectionSuggestion = { ...above, regime: 'below', lastClose: 98 };
 
 // Exercise the real badge effect without adding a DOM runtime or renderer dependency.
-const hooks = vi.hoisted(() => ({ value: null as unknown, writes: [] as unknown[], effect: undefined as (() => void | (() => void)) | undefined, dependencies: [] as unknown[] }));
+const hooks = vi.hoisted(() => ({ ref: null as {current: any}|null, value: null as unknown, writes: [] as unknown[], effect: undefined as (() => void | (() => void)) | undefined, dependencies: [] as unknown[] }));
 vi.mock('react', async importOriginal => ({ ...await importOriginal<typeof import('react')>(),
+  useRef: (initial: unknown) => hooks.ref ?? (hooks.ref={current:initial}),
   useState: () => [hooks.value, (value: unknown) => { hooks.value = value; hooks.writes.push(value); }],
   useEffect: (effect: () => void | (() => void), dependencies: unknown[]) => { hooks.effect = effect; hooks.dependencies = dependencies; },
 }));
 vi.mock('../../client/src/lib/queryClient', () => ({ walletAuthHeaders: () => ({ 'x-wallet-address': 'EXAMPLE' }) }));
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); hooks.value = null; hooks.writes = []; hooks.effect = undefined; });
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); hooks.ref=null; hooks.value = null; hooks.writes = []; hooks.effect = undefined; });
 
 describe('display-only direction badge', () => {
+  it('retains the last suggestion through refresh without extending its expiry', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const fetcher = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => above })
+      .mockImplementationOnce(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetcher);
+    GridDirectionBadge({ active: true, identity: 'EXAMPLE' });
+    const cleanup = hooks.effect?.(); await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.value).toEqual(above);
+    if (typeof cleanup === 'function') cleanup();
+    useGridDirectionSuggestion({ active: true, identity: 'EXAMPLE', refresh: 1 });
+    const refreshedCleanup = hooks.effect?.();
+    expect(hooks.value).toEqual(above);
+    await vi.advanceTimersByTimeAsync(expiresAt - now);
+    expect(hooks.value).toBeNull();
+    if (typeof refreshedCleanup === 'function') refreshedCleanup();
+  });
   it('states the suggestion and its BTC weekly, SMA, venue and UTC basis', () => {
     expect(gridDirectionText(above).label).toBe('Trend: BTC above its 50-week average — long grids favoured');
     expect(gridDirectionText(below).label).toContain('short grids favoured');

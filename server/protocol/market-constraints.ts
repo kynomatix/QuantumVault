@@ -11,6 +11,9 @@ export interface MarketConstraintObservation {
   tick: DecimalConstraint | null;
   lot: DecimalConstraint | null;
   openingMinimum: DecimalConstraint | null;
+  /** Optional public /info facts for planning; entry admission remains unchanged. */
+  planning?: { maximumQuote: unknown; minimumPrice: unknown; maximumPrice: unknown;
+    isolatedOnly: unknown; instrumentType: unknown; executionModes: unknown };
 }
 
 export interface DecimalConstraint {
@@ -57,6 +60,8 @@ export function observePacificaConstraints(raw: {
   tick_size?: unknown;
   lot_size?: unknown;
   min_order_size?: unknown;
+  max_order_size?: unknown; min_tick?: unknown; max_tick?: unknown;
+  isolated_only?: unknown; instrument_type?: unknown; execution_modes?: unknown;
 }, market: string, observedAt: number): MarketConstraintObservation {
   return {
     venue: 'pacifica', market, source: '/info', observedAt,
@@ -64,6 +69,8 @@ export function observePacificaConstraints(raw: {
     tick: parseVenueDecimal(raw.tick_size, 'price'),
     lot: parseVenueDecimal(raw.lot_size, 'base'),
     openingMinimum: parseVenueDecimal(raw.min_order_size, 'USD'),
+    planning: { maximumQuote: raw.max_order_size, minimumPrice: raw.min_tick, maximumPrice: raw.max_tick,
+      isolatedOnly: raw.isolated_only, instrumentType: raw.instrument_type, executionModes: raw.execution_modes },
   };
 }
 

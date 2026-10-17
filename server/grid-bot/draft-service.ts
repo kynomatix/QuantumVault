@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import Decimal from 'decimal.js';
+import { dollars, explainPlannerIssue } from '../grid-planner/order-explanation';
 import { GRID_CREATE_POLICY, GRID_CAPACITY_UNKNOWN, gridIntentSchema, gridRevisionSchema, gridCreateRequestSchema, type GridIntent, type GridCreateRequest } from '../../shared/grid-draft';
 import { calculateGrid, minimumInvestment } from './engine';
 import type { GridGeometryInput, GridPlan } from './engine-types';
@@ -46,11 +47,8 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
     expiresAt=Math.min(cv.expiresAt,r.expiresAt);
     if (!fresh(cv.observedAt,cv.expiresAt,now) || !fresh(r.observedAt,r.expiresAt,now)) reject('Market observations expired or future-dated');
     if (cv.maxLeverage.state!=='available') reject('Venue leverage maximum unavailable');
-    else if (new D(intent.leverage).gt(cv.maxLeverage.value)) reject('Leverage exceeds the Pacifica maximum');
-    if (cv.maximumQuote.state!=='available') reject('Maximum order notional unavailable');
-    if (cv.priceBounds.state!=='available') reject('Submitted-price bounds unavailable');
-    if (cv.restrictions.state!=='available') reject('Execution restrictions unavailable');
-    // These facts may remain diagnostic until the shared authority observes them.
+    else if (new D(intent.leverage).gt(cv.maxLeverage.value)) reject(`Pacifica allows up to ${cv.maxLeverage.value}× leverage for this market. Lower the leverage.`);
+    // Optional public limits are checked below when supplied; launch checks remain independent.
     const lower=new D(intent.lowerPrice),upper=new D(intent.upperPrice),stop=new D(intent.stopPrice),tick=new D(cv.tick);
     if (!lower.lt(upper) || !stop.mod(tick).isZero() || (intent.direction==='long'?!stop.lt(lower):!stop.gt(upper))) reject('Stop must align to the tick and lie beyond the loss side of the range');
     if (intent.rangeSource==='auto') {
@@ -74,19 +72,22 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
     const min=minimumInvestment(input);
     if (min.ok) minimum=new D(min.investment).mul(reserveFactor).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2);
     else reject(...[min.issues.map(i=>i.reason).join('; ')]);
-    const calculation=calculateGrid({...input,investment:new D(intent.totalInvestment).div(reserveFactor).toDecimalPlaces(2,D.ROUND_FLOOR).toFixed(2)});
-    if (!calculation.ok) calculation.issues.forEach(i=>reject(i.reason));
+    const calculationInput={...input,investment:new D(intent.totalInvestment).div(reserveFactor).toDecimalPlaces(2,D.ROUND_FLOOR).toFixed(2)};
+    const calculation=calculateGrid(calculationInput);
+    if (!calculation.ok) calculation.issues.forEach(i=>reject(explainPlannerIssue(i,calculationInput)));
     else {
       plan=calculation.plan;
       if(new D(plan.start).minus(intent.stopPrice).abs().div(plan.start).mul(100).toDecimalPlaces(4).eq(0)) reject('Stop distance is below durable policy precision');
       if (makerValid && plan.feeGate!=='evaluated') reject('Maker fee clearance unavailable');
       seedTakerCost=intent.seedAtCreation && seedValid?new D(plan.seedQuantity).mul(plan.start).mul(takerRate).toFixed():intent.seedAtCreation?null:'0';
-      if (cv.maximumQuote.state==='available') {const maximum=cv.maximumQuote.value;if(plan.lines.some(l=>new D(l.notional).gt(maximum))) reject('Order exceeds venue maximum');}
+      if (cv.maximumQuote.state==='available') {const maximum=cv.maximumQuote.value,line=plan.lines.find(l=>new D(l.notional).gt(maximum));if(line) reject(`A grid order would be $${dollars(line.notional)}, above Pacifica's $${dollars(maximum)} maximum. Lower the investment or leverage, or use more grids.`);}
       if (cv.priceBounds.state==='available') {
         const bounds=cv.priceBounds.value as {minimum?:string;maximum?:string};
-        if (!bounds.minimum || !bounds.maximum || plan.lines.some(l=>new D(l.price).lt(bounds.minimum!) || new D(l.price).gt(bounds.maximum!))) reject('Order is outside observed submitted-price bounds');
+        if (!bounds.minimum || !bounds.maximum || plan.lines.some(l=>new D(l.price).lt(bounds.minimum!) || new D(l.price).gt(bounds.maximum!))) reject(`Pacifica accepts prices from $${bounds.minimum} to $${bounds.maximum}. Move the range inside those limits.`);
       }
-      if (cv.restrictions.state==='available' && cv.restrictions.value!== 'unrestricted') reject('Observed market restrictions deny draft creation');
+      if (cv.restrictions.state==='available' && cv.restrictions.value!== 'unrestricted') reject(cv.restrictions.value==='isolated_only'
+        ? 'This market requires isolated margin, which Grid does not support. Choose another market.'
+        : 'This market does not support the perpetual order-book orders Grid needs. Choose another market.');
       const s=deps.projectedStop && cv.maxLeverage.state==='available' && makerValid && seedValid
         ? projectGridStop({plan,funding:intent.totalInvestment,stop:intent.stopPrice,tick:cv.tick,maxLeverage:cv.maxLeverage.value,
           makerRate:makerRate!,takerRate:takerRate.toFixed(),observedAt:Math.max(cv.observedAt,r.observedAt),expiresAt,},now)

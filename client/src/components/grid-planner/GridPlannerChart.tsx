@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { LineStyle, type CandlestickData, type ISeriesPrimitive, type Logical, type UTCTimestamp } from 'lightweight-charts';
+import { LineStyle, type CandlestickData, type ISeriesPrimitive, type Logical, type IPriceLine, type UTCTimestamp } from 'lightweight-charts';
 import { Info, Maximize2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -13,11 +13,14 @@ type ChartLevel = Pick<GridLine, 'ordinal' | 'price'> & Partial<Pick<GridLine, '
 
 export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: ChartLevel[]; range: PlannerRange | null; period?: string; tick?: string | null }) {
   const container = useRef<HTMLDivElement>(null);
+  const retained = useRef<{ canvas: ReturnType<typeof createSharedTradePriceChart>; series: ReturnType<ReturnType<typeof createSharedTradePriceChart>['addCandlestickSeries']>; resource: string } | null>(null);
   const [hovered, setHovered] = useState<{ price: string; left: number; top: number } | null>(null);
   useEffect(() => {
     if (!container.current) return;
-    setHovered(null);
-    const canvas = createSharedTradePriceChart(container.current);
+    const resource = chart.market + ':' + chart.timeframe;
+    const first = !retained.current || retained.current.resource !== resource;
+    const canvas = retained.current?.canvas ?? createSharedTradePriceChart(container.current);
+    const priceLines: IPriceLine[] = [], primitives: ISeriesPrimitive[] = [];
     const styles = getComputedStyle(container.current);
     // lightweight-charts 4 expects RGB/hex; resolve the app's HSL tokens in the browser.
     const swatch = document.createElement('span'); swatch.style.display = 'none'; container.current.appendChild(swatch);
@@ -30,7 +33,10 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
     canvas.applyOptions({ layout: { textColor: color('muted-foreground') },
       grid: { vertLines: { color: color('border', 0.3) }, horzLines: { color: color('border', 0.3) } },
       timeScale: { borderColor: color('border') }, rightPriceScale: { borderColor: color('border') } });
-    const series = canvas.addCandlestickSeries({ upColor: up, downColor: down, borderVisible: false, wickUpColor: up, wickDownColor: down });
+    const series = retained.current?.series ?? canvas.addCandlestickSeries({ upColor: up, downColor: down, borderVisible: false, wickUpColor: up, wickDownColor: down });
+    retained.current = { canvas, series, resource };
+    const addLine = (options: Parameters<typeof series.createPriceLine>[0]) => { priceLines.push(series.createPriceLine(options)); };
+    const attach = (primitive: ISeriesPrimitive) => { primitives.push(primitive); series.attachPrimitive(primitive); };
     const finalized = chart.candles.filter(c => c.provenance.finality === 'finalized');
     const measuredStart = period && finalized.length ? gridMeasuredStart(chart.timeframe, period, finalized.at(-1)!.time) : null;
     const candles = chart.candles.map(c => {
@@ -56,13 +62,13 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
           ctx.fillText('Range period', Math.max(6, start + 6), 16); ctx.restore();
         });
       } }) }] };
-      series.attachPrimitive(measuredPeriod);
+      attach(measuredPeriod);
     }
     const priceFormat = plannerPriceFormat(tick, [...chart.candles.map(c => c.close), ...lines.map(l => l.price),
       ...[range?.lower, range?.upper, range?.stop].filter((p): p is string => !!p)]);
     canvas.applyOptions({ localization: { priceFormatter: (price: number) => price.toFixed(priceFormat.precision) } });
     series.applyOptions({ title: 'Current price', priceFormat: { type: 'price', ...priceFormat } });
-    for (const line of lines) series.createPriceLine({ price: Number(line.price), color: !line.role || line.role === 'entry' ? color('primary', 0.85) : color('chart-2', 0.85),
+    for (const line of lines) addLine({ price: Number(line.price), color: !line.role || line.role === 'entry' ? color('primary', 0.85) : color('chart-2', 0.85),
       lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
     const showLevel: Parameters<typeof canvas.subscribeCrosshairMove>[0] = event => {
       const point = event.point;
@@ -79,7 +85,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
     };
     canvas.subscribeCrosshairMove(showLevel);
     canvas.subscribeClick(showLevel);
-    if (lines.length) series.attachPrimitive({
+    if (lines.length) attach({
       autoscaleInfo: () => ({ priceRange: { minValue: Number(lines[0].price), maxValue: Number(lines[lines.length - 1].price) } }),
     });
     if (range) {
@@ -96,13 +102,13 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
         } }) }],
         autoscaleInfo: () => ({ priceRange: { minValue: Math.min(lower, stop ?? lower), maxValue: Math.max(upper, stop ?? upper) } }),
       };
-      series.attachPrimitive(band);
+      attach(band);
       for (const [price, title] of [[lower, 'Lower'], [upper, 'Upper']] as const)
-        series.createPriceLine({ price, title, color: primary, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
-      if (stop !== null) series.createPriceLine({ price: stop, title: 'Stop', color: down, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
+        addLine({ price, title, color: primary, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
+      if (stop !== null) addLine({ price: stop, title: 'Stop', color: down, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
     }
     swatch.remove();
-    canvas.timeScale().fitContent();
+    if (first) canvas.timeScale().fitContent();
     let frame = 0;
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(frame); frame = requestAnimationFrame(() => {
@@ -110,8 +116,9 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       });
     });
     observer.observe(container.current);
-    return () => { observer.disconnect(); cancelAnimationFrame(frame); canvas.unsubscribeCrosshairMove(showLevel); canvas.unsubscribeClick(showLevel); canvas.remove(); };
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); canvas.unsubscribeCrosshairMove(showLevel); canvas.unsubscribeClick(showLevel); priceLines.forEach(line => series.removePriceLine(line)); primitives.forEach(primitive => series.detachPrimitive(primitive)); };
   }, [chart, lines, range, period, tick]);
+  useEffect(() => () => { retained.current?.canvas.remove(); retained.current = null; }, []);
   return <div className="relative h-full w-full"><div ref={container} className="h-full w-full" aria-label="Direct perpetual candle chart with measured range period, dimmed context candles, proposed range band, stop and hypothetical grid levels" />
     {hovered && <div role="status" className="pointer-events-none absolute rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow" style={{ left: hovered.left, top: hovered.top }}>Grid price {hovered.price}</div>}
   </div>;
@@ -140,14 +147,15 @@ export function GridPlannerChart({ chart, lines, range = null, period, stale, lo
   const label = `${provenance.venue.toUpperCase()} direct perpetual candles · ${chart.timeframe} · ${chart.actualBars}/${chart.requestedBars} bars${chart.partial ? ' · partial coverage' : ''}`;
   const note = `Retrieved ${readableTime(chart.retrievedAt)}. Candle times are opening times; forming candles are unfinished. ${stale ? 'Chart cache expired; refresh for a new observation.' : `These are ${provenance.venue.toUpperCase()} trade candle prices, separate from the Pacifica book reference.`}`;
   return <div className="space-y-2">
+    {error && <p role="status" className="text-xs text-muted-foreground">Chart refresh failed. Showing the last candles; retry to get a new observation.</p>}
     <div className="flex items-center justify-between gap-2"><GridChartSourceInfo venue={provenance.venue.toUpperCase()} timeframe={chart.timeframe}><p>{label}</p><p>{note}</p></GridChartSourceInfo><Button type="button" size="sm" variant="outline" onClick={() => setExpanded(true)} aria-label="Expand Planner chart"><Maximize2 className="h-4 w-4" /></Button></div>
-    <div className="h-[170px] sm:h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><GridPlannerPriceCanvas chart={chart} lines={lines} range={stale ? null : range} period={period} tick={tick} /></div>
+    <div className="h-[170px] sm:h-[300px] rounded-xl border border-border bg-card/40 overflow-hidden"><GridPlannerPriceCanvas chart={chart} lines={lines} range={range} period={period} tick={tick} /></div>
     {stale && <p role="status" className="text-xs text-amber-500">Chart cache expired; refresh for a new observation.</p>}
     <PreviewNotes><p>{note}</p>
       {period && <p>Range period: {period === 'day' ? '24 hours' : period === 'week' ? '7 days' : '30 days'}, ending at the latest finalized candle close. Earlier context candles are dimmed and still feed ATR/ADX.</p>}
       <p>Shaded band and solid edges: your proposed range. Dashed lines: grid levels from the preview. Hover or tap a line for its price, or open the full table in Your plan. Red line: proposed stop, not certified liquidation protection.</p>
       {levelMessage && <p>{levelMessage}</p>}{previewDetails}
     </PreviewNotes>
-    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>Direct perpetual candles with your proposed range, stop and grid levels.</DialogDescription></DialogHeader><GridChartSourceInfo venue={provenance.venue.toUpperCase()} timeframe={chart.timeframe}><p>{label}</p><p>{note}</p></GridChartSourceInfo><div className="h-[65vh]"><GridPlannerPriceCanvas chart={chart} lines={lines} range={stale ? null : range} period={period} tick={tick} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
+    <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>Direct perpetual candles with your proposed range, stop and grid levels.</DialogDescription></DialogHeader><GridChartSourceInfo venue={provenance.venue.toUpperCase()} timeframe={chart.timeframe}><p>{label}</p><p>{note}</p></GridChartSourceInfo><div className="h-[65vh]"><GridPlannerPriceCanvas chart={chart} lines={lines} range={range} period={period} tick={tick} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>
   </div>;
 }

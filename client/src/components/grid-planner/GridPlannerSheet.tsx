@@ -11,7 +11,7 @@ import { Switch } from '@/components/ui/switch';
 import { DrawerSettingsPanel } from '@/components/ui/settings-panel';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart, plannerIssue, plannerMinimumRows,
-  isPlannerPreview, plannerOverlays, plannerLevelMessage, readableDecimal, readableTime, clientObservationDeadline,
+  isPlannerPreview, plannerOverlays, plannerLevelMessage, plannerVenueChecks, readableDecimal, readableTime, clientObservationDeadline,
   RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange, plannerRangeAround,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
@@ -152,10 +152,9 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   }, [open, identity, defaultMarketPending, markets, form.market, draftBusy]);
   const refreshObservations = () => {
     if (draftBusy) return;
-    setRangeFacts(null);
     priceRefresh.current?.dispose();
     Object.values(generation.current).forEach(g => g.invalidate());
-    setPreview(null); setChart(null); setMarkets([]); setError(''); setChartError(''); setNow(Date.now());
+    setError(''); setChartError(''); setNow(Date.now());
     setRefresh(r => r + 1);
   };
   const query = useMemo(() => {
@@ -199,10 +198,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     const stop = watchPlannerPrice(controller);
     return () => { stop(); if (priceRefresh.current === controller) priceRefresh.current = null; };
   }, [open, identity, form.market, refresh, plannerEnabled]);
-  useEffect(() => { setMarkets([]); setMarketError(''); setNow(Date.now()); }, [open, identity]);
+  useEffect(() => { setMarkets([]); setPreview(null); setDraftPreview(null); setChart(null); setRangeFacts(null); setMarketError(''); setNow(Date.now()); }, [open, identity]);
   useEffect(() => {
     if (!open || defaultMarketPending || !form.market) return;
-    const request = generation.current.chart.start(); setChart(null); setChartError('');
+    const request = generation.current.chart.start(); setChartError('');
     const startedAt = Date.now();
     readPlanner(`chart?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, period: form.rangeWindow })}`, request.signal, plannerEnabled).then(value => {
       if (!request.current()) return;
@@ -212,12 +211,15 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         if (value.timeframe !== form.timeframe) throw new Error('Invalid chart response');
         if (value.requestedBars !== historyWindow.chartBars) throw new Error('Invalid chart response');
       }
-      setChart(value); setChartExpiry(value.state === 'available' ? startedAt + value.validForMs : 0); setNow(Date.now());
+      if (value.state === 'available') { setChart(value); setChartExpiry(startedAt + value.validForMs); }
+      else { setChart(current => current?.state === 'available' ? current : value); setChartError(value.reason); }
+      setNow(Date.now());
     }).catch(e => { if (request.current()) setChartError(e.message); });
     return () => generation.current.chart.invalidate();
   }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, chartRefresh, plannerEnabled, defaultMarketPending]);
+  useEffect(() => { setPreview(null); }, [query.value, query.error]);
   useEffect(() => {
-    generation.current.preview.invalidate(); setPreview(null); setLoading(false);
+    generation.current.preview.invalidate(); setLoading(false);
     if (!open || defaultMarketPending || !plannerEnabled || !form.market || query.error) return;
     if (!form.lower || !form.upper || (form.investment && !effectiveStop)) return;
     const request = generation.current.preview.start(); setLoading(true); setError('');
@@ -245,7 +247,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     if (draftBusy) { priceRefresh.current?.cancelShortcut(); applyAutoAfterRefresh.current = false; }
   }, [draftBusy]);
   useEffect(() => {
-    setRangeFacts(null); setRangeError(''); setRangeBusy(false);
+    setRangeError(''); setRangeBusy(false);
     if (!open || defaultMarketPending || !form.market) return;
     const request = generation.current.range.start(), startedAt = Date.now(); setRangeBusy(true);
     readPlanner(`range?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, period: form.rangeWindow })}`, request.signal, plannerEnabled)
@@ -315,9 +317,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const draftIntent = useMemo(() => gridSetupIntent(form, effectiveStop, rangeSource, timeRangeApplied), [form, effectiveStop, rangeSource, timeRangeApplied]);
   const usingPlannerGeometry = !form.investment && plannerEnabled;
   const lines = useMemo(() => createEnabled && !usingPlannerGeometry
-    ? draftPreview?.state === 'ready' && now < draftPreview.expiresAt && draftPreview.draftRevision === gridDraftRevision(draftIntent)
+    ? draftPreview?.state === 'ready' && draftPreview.draftRevision === gridDraftRevision(draftIntent)
       ? draftPreview.plan?.lines ?? [] : []
-    : plannerEnabled ? plannerOverlays(preview, previewExpiry, now) : [], [createEnabled, usingPlannerGeometry, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
+    // Held levels are display only. Expiry still governs shortcuts and draft actions.
+    : plannerEnabled ? plannerOverlays(preview, Infinity, now) : [], [createEnabled, usingPlannerGeometry, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
   const regime = rangeFacts && now < rangeExpiry ? rangeFacts.regime : { state: 'unavailable' as const,
     reason: rangeError || (rangeBusy ? 'Loading finalized candles' : !form.market ? 'Choose a market' : 'Observation expired or unavailable; refresh chart') };
   const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
@@ -340,7 +343,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       placeholder={placeholder} onChange={e => edit(key, e.target.value)} />
   </div>;
   const retryChart = () => {
-    generation.current.chart.invalidate(); setChart(null); setChartError(''); setChartExpiry(0);
+    generation.current.chart.invalidate(); setChartError('');
     setChartRefresh(previous => previous + 1);
   };
   const choice = (key: keyof typeof INITIAL, label: string, options: readonly { value: string; label: string }[]) => <div className="space-y-1.5">
@@ -367,6 +370,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           {selected.constraints.state === 'available' ? <p>Tick {readableDecimal(selected.constraints.value.tick)} · lot {readableDecimal(selected.constraints.value.lot)} base units · opening minimum {readableDecimal(selected.constraints.value.minimumQuote)} USD · observed {readableTime(selected.constraints.value.observedAt)}{now >= constraintExpiry ? ' — observation expired' : ''}. Smallest positive base quantity is derived from the lot lattice.</p>
             : <p>Sizing unavailable: {selected.constraints.reason}</p>}
         </> : <p>Choose a market and refresh its price to see the exchange's price and quantity steps.</p>}
+        {selected && plannerVenueChecks(selected).map(row => <p key={row.label}>{row.label}: {row.value}</p>)}
         {preview && <p>Policy model: up to {preview.policy.ordinaryWindow} ordinary resting orders. A full window needs {preview.policy.requiredAvailableSlots} available slots including {preview.policy.reserveSlots} reserved; observed capacity can require a smaller window. Up to {preview.policy.maximumIntervals} grids; transport batches up to {preview.policy.transportBatch}. Live available slots and venue resting maximum: unknown. Source: {preview.policy.source}.</p>}
       </div>
       {draftDetails}
@@ -540,7 +544,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         {plannerEnabled && <section aria-labelledby="grid-plan-heading" className="rounded-xl border border-primary/20 bg-card/40 p-4 sm:p-5 space-y-4">
           <h3 id="grid-plan-heading" className="text-sm font-semibold">Your plan</h3>
           <GridPlanIssues reasons={issues} onReview={showIssue} />
-          {loading ? <p role="status" className="text-sm">Calculating hypothetical geometry…</p>
+          {loading && !preview ? <p role="status" className="text-sm">Calculating hypothetical geometry…</p>
             : preview ? <p role="status" className="text-sm font-medium">{stale ? 'Observation expired — refresh before using this preview'
               : preview.state === 'rejected' ? 'Requested plan rejected' : preview.state === 'unavailable' ? 'Preview unavailable'
               : preview.geometry?.state === 'available' ? 'Enter an investment to see order sizes'
@@ -596,7 +600,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       {depositDialog}
     </DialogContent>;
   return <Dialog open={open} onOpenChange={handleOpenChange}>
-    {createEnabled ? <GridDraftActions open={open} intent={draftIntent} onSaved={onSaved} onBusyChange={setDraftBusy}
+    {createEnabled ? <GridDraftActions key={identity} open={open} intent={draftIntent} onSaved={onSaved} onBusyChange={setDraftBusy}
       onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} onIssue={showIssue} renderDetails={feesPanel} renderLayout={renderSetup} />
       : renderSetup()}
   </Dialog>;

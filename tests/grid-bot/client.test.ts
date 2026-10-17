@@ -48,15 +48,18 @@ describe('Grid screenshot panel polish', () => {
     expect(plannerMinimumRows({ ...base, fee: { state: 'unknown' } })).toEqual([{ label: 'Minimum investment', value: '10 USDC' }]);
     expect(plannerMinimumRows(null)).toEqual([{ label: 'Minimum investment', value: 'Awaiting preview' }]);
   });
-  it('shows real rejection causes and settings links, keeping original details reachable', () => {
+  it('shows plain rejection causes and working settings links', () => {
     const reasons = ['Stop must align to the venue tick', 'Investment is below the minimum capital', 'Fee assumption must be nonnegative plain decimal'];
     const html = renderToStaticMarkup(createElement(GridPlanIssues, { reasons, onReview: vi.fn() }));
     expect(html).toContain('This plan can&#x27;t run yet:');
-    for (const reason of reasons) expect(html).toContain(reason);
-    for (const setting of ['Stop loss', 'Investment', 'Fees &amp; data', 'Source details']) expect(html).toContain(setting);
+    expect(html).toContain('Place the stop loss below the range');
+    expect(html).toContain('Investment is below the minimum investment');
+    expect(html).toContain('Enter a fee assumption of 0 or more');
+    for (const setting of ['Stop loss', 'Investment', 'Fees &amp; data']) expect(html).toContain(setting);
+    expect(html).not.toContain('Source details');
     expect(plannerIssue(reasons[0])).toMatchObject({ field: 'grid-stop', panel: 'stop' });
     expect(plannerIssue(reasons[1])).toMatchObject({ field: 'grid-investment', panel: 'direction-size' });
-    expect(plannerIssue(reasons[2]).message).toBe(reasons[2]);
+    expect(plannerIssue(reasons[2]).message).toContain('Enter a fee assumption of 0 or more');
     expect(plannerIssue('Leverage exceeds the observed Pacifica maximum')).toMatchObject({ field: 'grid-leverage' });
     expect(renderToStaticMarkup(createElement(GridPlanIssues, { reasons: [] }))).toBe('');
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');

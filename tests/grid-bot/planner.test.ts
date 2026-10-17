@@ -9,7 +9,9 @@ import type { ProtocolMarket } from '../../server/protocol/protocol-types';
 import type { PlannerDeps, PlannerQuery } from '../../server/grid-planner/types';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { previewGrid } from '../../server/grid-planner/preview';
-import { proposedPlannerStop, plannerRangeAround, plannerOverlays, plannerLevelMessage } from '../../client/src/lib/grid-planner-view';
+import { proposedPlannerStop, plannerRangeAround, plannerOverlays, plannerLevelMessage, plannerIssue, plannerVenueChecks, isPlannerMarket } from '../../client/src/lib/grid-planner-view';
+import { calculateGrid } from '../../server/grid-bot/engine';
+import { explainPlannerIssue, dollars } from '../../server/grid-planner/order-explanation';
 const now = 1_800_000_000_000;
 export const row = (): ProtocolMarket => ({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC', fullName: 'Bitcoin', maxLeverage: 50, maxLeverageSource: 'venue',
   constraintObservation: observePacificaConstraints({ tick_size: '0.1', lot_size: '0.01', min_order_size: '10' }, 'BTC-PERP', now),
@@ -20,6 +22,58 @@ export const deps = (): PlannerDeps => ({ now: () => now, getMarkets: vi.fn(asyn
 const query: PlannerQuery = { market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat',
   seed: true, investment: '1000', leverage: '1', stop: '70', fee: null };
 describe('Pacifica authority and honest planner verdicts', () => {
+  it('carries published USD maximum, zero-inclusive price bounds and execution facts with original source and clock', () => {
+    const r = row();
+    r.constraintObservation = observePacificaConstraints({ tick_size: '0.1', lot_size: '0.01', min_order_size: '10',
+      max_order_size: '5000000', min_tick: '0', max_tick: '1000000', isolated_only: false, instrument_type: 'perpetual', execution_modes: ['orderbook'] }, r.internalSymbol, now);
+    const market = marketSnapshot(r, deps());
+    expect(market.constraints).toMatchObject({ state: 'available', value: { observedAt: now, expiresAt: now + 300_000, source: '/info',
+      maximumQuote: { state: 'available', value: '5000000' }, priceBounds: { state: 'available', value: { minimum: '0', maximum: '1000000' } }, restrictions: { state: 'available', value: 'unrestricted' } } });
+    expect(isPlannerMarket(market)).toBe(true);
+    expect(previewGrid({ ...query, fee: '0' }, market, now)).toMatchObject({ state: 'hypothetical_checks_passed', reasons: [] });
+    r.constraintObservation.planning!.maximumQuote = ' 5000000'; r.constraintObservation.planning!.minimumPrice = '-1';
+    r.constraintObservation.planning!.executionModes = [];
+    const invalid = marketSnapshot(r, deps());
+    expect(invalid.constraints).toMatchObject({ value: { maximumQuote: { state: 'unavailable' }, priceBounds: { state: 'unavailable' }, restrictions: { state: 'unavailable' } } });
+    for (const maximum of ['1e999999999', '1e-999999999']) {
+      r.constraintObservation.planning!.maximumQuote = maximum;
+      expect(marketSnapshot(r, deps()).constraints).toMatchObject({ value: { maximumQuote: { state: 'unavailable' } } });
+    }
+    r.constraintObservation.planning!.maximumQuote = '5e6';
+    expect(marketSnapshot(r, deps()).constraints).toMatchObject({ value: { maximumQuote: { state: 'available', value: '5000000' } } });
+  });
+  it('keeps unpublished order-time limits neutral and enforces published limits', () => {
+    const market = marketSnapshot(row(), deps());
+    expect(previewGrid({ ...query, fee: '0' }, market, now).reasons).toEqual([]);
+    expect(plannerVenueChecks(market).slice(0, 3).map(row => row.value)).toEqual(Array(3).fill('Checked by Pacifica when each order is placed'));
+    if (market.constraints.state !== 'available') throw Error('EXAMPLE');
+    const c = market.constraints.value;
+    for (const change of [{ maximumQuote: { state: 'available' as const, value: '20' } },
+      { priceBounds: { state: 'available' as const, value: { minimum: '85', maximum: '115' } } },
+      { restrictions: { state: 'available' as const, value: 'isolated_only' } }]) {
+      const result = previewGrid(query, { ...market, constraints: { state: 'available', value: { ...c, ...change } } }, now);
+      expect(result.state).toBe('rejected'); expect(result.reasons).toHaveLength(1);
+      expect(result.reasons[0]).not.toMatch(/observed|shared authority|lot-rounded/i);
+    }
+  });
+  it('shows the real rounded per-order dollar value with the Investment action', () => {
+    const result = previewGrid({ ...query, investment: '10' }, marketSnapshot(row(), deps()), now);
+    expect(result.reasons).toEqual(["Each grid order would be about $2.40, below Pacifica's $10 minimum order. Raise the investment, use fewer grids, or use more leverage."]);
+    expect(plannerIssue(result.reasons[0])).toMatchObject({ setting: 'Investment', field: 'grid-investment' });
+  });
+  it.each(['long', 'short'] as const)('display-only rejected-line values match engine quantities for %s and every scale', side => {
+    for (const seed of [false, true]) for (const scale of ['flat', 'ascending', 'descending'] as const) {
+      const input = { side, seed, lower: '80', upper: '120', start: '100', intervals: 4, entryScale: scale, profitScale: scale,
+        investment: '1000', leverage: '3', tick: '0.1', lot: '0.01', minimumQuote: '10', investmentStep: '0.01', transferFloor: '0' };
+      const actual = calculateGrid(input); if (!actual.ok) throw Error('EXAMPLE');
+      for (const line of actual.plan.lines.filter(line => line.role !== 'virtual')) {
+        const explanation = explainPlannerIssue({ code: 'underfunded', reason: 'Lot-rounded line is below the opening minimum', ordinal: line.ordinal }, input);
+        expect(explanation).toContain(`about $${dollars(line.notional)},`);
+        if (line.pairedExitOrdinal !== null) expect(explainPlannerIssue({ code: 'underfunded', reason: 'Full entry quantity is below the minimum at its paired exit', ordinal: line.ordinal }, input))
+          .toContain(`about $${dollars(String(Number(line.quantity) * Number(actual.plan.lines[line.pairedExitOrdinal].price)))},`);
+      }
+    }
+  });
   it('returns engine prices before investment without calculating sizes, minimums, fees or stop clearance', () => {
     const m = marketSnapshot(row(), deps()), input = { ...query, investment: '' };
     const geometry = previewGrid(input, m, now), sized = previewGrid(query, m, now);

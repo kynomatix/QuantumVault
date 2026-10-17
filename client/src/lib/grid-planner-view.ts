@@ -88,7 +88,7 @@ export function isPlannerMarket(v: unknown): v is PlannerMarket {
     && fact(v.constraints, c => record(c) && c.venue === 'pacifica' && c.source === '/info' && positive(c.tick) && positive(c.lot)
       && positive(c.minimumQuote) && clock(c.observedAt) && c.expiresAt === c.observedAt + 300_000
       && fact(c.maxLeverage, positive) && fact(c.maximumQuote, positive)
-      && fact(c.priceBounds, b => record(b) && positive(b.minimum) && positive(b.maximum)) && fact(c.restrictions, r => typeof r === 'string'));
+      && fact(c.priceBounds, b => record(b) && decimal(b.minimum) && positive(b.maximum) && new D(b.minimum).lt(b.maximum)) && fact(c.restrictions, r => typeof r === 'string'));
 }
 export function isPlannerChart(v: unknown): v is PlannerChart {
   if (!record(v)) return false;
@@ -146,7 +146,7 @@ export function plannerLevelMessage(preview: PlannerPreview | null, expiresAt: n
     !!inputs.investment && !inputs.stop && 'a stop price (or fresh market details for a suggested stop)'].filter(Boolean);
   if (missing.length) return `To show grid levels, enter ${missing.join(', ')}.`;
   if (error) return `Grid levels are unavailable: ${error}`;
-  if (loading) return 'Calculating grid levels from your inputs…';
+  if (loading && !preview) return 'Calculating grid levels from your inputs…';
   if (!preview) return 'Waiting for a grid preview. Refresh chart if it does not appear.';
   if (now >= expiresAt && preview.validForMs > 0) return 'Grid levels have expired. Refresh chart to get a fresh price and market details.';
   if (!plannerOverlays(preview, expiresAt, now).length) return `Grid levels are unavailable: ${preview.reasons.join('; ') || 'a fresh price and usable market details are required.'}`;
@@ -165,13 +165,44 @@ export function plannerPriceFormat(tick: string | null | undefined, prices: (str
   return { precision, minMove: 10 ** -precision };
 }
 export type PlannerIssue = { message: string; panel: string; field?: string; setting: string; original: string };
+export function plannerVenueChecks(market: PlannerMarket): { label: string; value: string }[] {
+  if (market.constraints.state !== 'available') return [];
+  const c = market.constraints.value, fallback = 'Checked by Pacifica when each order is placed';
+  return [
+    { label: 'Maximum order value', value: c.maximumQuote.state === 'available' ? `$${readableDecimal(c.maximumQuote.value)}` : fallback },
+    { label: 'Accepted order prices', value: c.priceBounds.state === 'available' ? `$${readableDecimal(c.priceBounds.value.minimum)} to $${readableDecimal(c.priceBounds.value.maximum)}` : fallback },
+    { label: 'Market requirements', value: c.restrictions.state !== 'available' ? fallback : c.restrictions.value === 'unrestricted'
+      ? 'Perpetual order-book trading; cross margin supported' : c.restrictions.value === 'isolated_only' ? 'Isolated margin required' : 'Unsupported market or order type; choose another market' },
+    { label: 'Market limits source', value: `Pacifica /info · checked ${readableTime(c.observedAt)}` },
+  ];
+}
 export function plannerIssue(reason: string): PlannerIssue {
   const issue = (message: string, panel: string, setting: string, field?: string): PlannerIssue => ({ message, panel, setting, field, original: reason });
-  const message = reason.replace(/quantized levels/gi, 'grid levels').replace(/quantized/gi, 'rounded')
+  let message = reason.replace(/quantized levels/gi, 'grid levels').replace(/quantized/gi, 'rounded')
     .replace(/venue tick/gi, "the exchange's price step").replace(/observed Pacifica maximum/gi, 'exchange maximum')
-    .replace(/intervals/gi, 'grids').replace(/minimum capital/gi, 'minimum investment');
+    .replace(/intervals/gi, 'grids').replace(/minimum capital/gi, 'minimum investment')
+    .replace(/\bobserved\b/gi, 'current').replace(/\bvenue\b/gi, 'exchange');
+  if (/Lot-rounded line|Full entry quantity/i.test(reason)) message = 'A grid order is below Pacifica’s minimum order value. Raise the investment, use fewer grids, or use more leverage.';
+  else if (/Fee assumption.*plain decimal/i.test(reason)) message = 'Enter a fee assumption of 0 or more, using only numbers and a decimal point.';
+  else if (/interval count/i.test(reason)) message = 'Use between 1 and 100 grids.';
+  else if (/precision exceeds/i.test(reason)) message = 'This market needs smaller price or quantity steps than Grid supports. Choose another market.';
+  else if (/durable policy precision/i.test(reason)) message = 'Your stop loss is too close to the entry price. Move it farther away.';
+  else if (/liquidation|validated.*clearance/i.test(reason)) message = 'The stop loss could not be confirmed before liquidation. Move it closer to the entry price or lower leverage, then refresh the preview.';
+  else if (/seed taker fee/i.test(reason)) message = 'The fee for opening your starting position is unavailable. Refresh the preview or turn off the starting position.';
+  else if (/maker.*builder.*unavailable|Maker fee clearance unavailable/i.test(reason)) message = 'Your current trading fees are unavailable. Refresh the preview to check them.';
+  else if (/Auto range changed/i.test(reason)) message = 'The suggested range changed or its price history is unavailable. Suggest the range again or enter a range yourself.';
+  else if (/Market identity mismatch/i.test(reason)) message = 'The market data does not match your selected market. Refresh price and try again.';
+  else if (/Stop must align/i.test(reason)) message = 'Place the stop loss below the range for Long or above it for Short, using Pacifica’s price step shown in Fees & data.';
+  else if (/constraint|observation|future-dated|shared authority|sources exhausted/i.test(reason)) message = 'Current market data is unavailable or expired. Refresh price and try again.';
+  else if (/reference price|range boundary/i.test(reason)) message = 'The current price must sit inside your range. Refresh price, then widen or move the range.';
+  else if (/collaps|duplicate/i.test(reason)) message = 'Some grid prices round to the same price. Widen the range or use fewer grids.';
+  else if (/round-trip cost|Assumed fee check failed/i.test(reason)) message = 'Your fee assumption uses up the profit between grid prices. Widen the range, use fewer grids, or review the fee assumption.';
+  else if (/maximum order|Order exceeds venue maximum/i.test(reason)) message = 'A grid order exceeds Pacifica’s maximum order value. Lower the investment or leverage, or use more grids.';
+  else if (/submitted-price bounds/i.test(reason)) message = 'A grid price is outside Pacifica’s accepted prices. Move the range inside the limits in Fees & data.';
+  else if (/restrictions/i.test(reason)) message = 'This market does not support the order type or margin mode Grid needs. Choose another market.';
   // Keep the actual failure: malformed fees, missing data and inadequate spreads are different problems.
   if (/stop/i.test(reason)) return issue(message, 'stop', 'Stop loss', 'grid-stop');
+  if (/below.*minimum|underfund/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');
   if (/leverage/i.test(reason)) return issue(message, 'direction-size', 'Leverage', 'grid-leverage');
   if (/fee|round-trip cost/i.test(reason)) return issue(message, 'fees', 'Fees & data', 'grid-feePercent');
   if (/investment|below.*minimum|underfund|transfer floor/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');

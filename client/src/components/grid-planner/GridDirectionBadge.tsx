@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { walletAuthHeaders } from '@/lib/queryClient';
 import { gridDirectionText, isGridDirectionSuggestion } from '@/lib/grid-direction-view';
 import type { GridDirectionSuggestion } from '../../../../shared/grid-direction';
@@ -16,11 +16,13 @@ export function GridDirectionHint({ suggestion }: { suggestion: GridDirectionSug
 // No direction value or editing callback is accepted. This GET can only update the advisory display.
 export function useGridDirectionSuggestion({ active, identity, refresh = 0 }: { active: boolean; identity?: string; refresh?: number }) {
   const [suggestion, setSuggestion] = useState<GridDirectionSuggestion | null>(null);
+  const retained = useRef<{ key: string; expiry?: ReturnType<typeof setTimeout> }>({ key: '' });
+  useEffect(() => () => clearTimeout(retained.current.expiry), []);
   useEffect(() => {
-    setSuggestion(null);
+    const key = String(active) + ':' + identity;
+    if (retained.current.key !== key) { clearTimeout(retained.current.expiry); retained.current.key = key; setSuggestion(null); }
     if (!active) return;
     const controller = new AbortController(), startedAt = Date.now();
-    let expiry: ReturnType<typeof setTimeout> | undefined;
     void fetch('/api/grid-planner/direction', { method: 'GET', credentials: 'include', headers: walletAuthHeaders(),
       signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]) })
       .then(async response => { if (!response.ok) throw new Error('Trend suggestion unavailable'); return response.json(); })
@@ -31,9 +33,10 @@ export function useGridDirectionSuggestion({ active, identity, refresh = 0 }: { 
         if (remaining <= 0) return;
         setSuggestion(value);
         // Expiry only clears the display; it never starts another fetch.
-        expiry = setTimeout(() => setSuggestion(null), remaining);
+        clearTimeout(retained.current.expiry);
+        retained.current.expiry = setTimeout(() => setSuggestion(null), remaining);
       }).catch(() => { if (!controller.signal.aborted) setSuggestion(null); });
-    return () => { controller.abort(); clearTimeout(expiry); };
+    return () => { controller.abort(); };
   }, [active, identity, refresh]);
   return suggestion;
 }

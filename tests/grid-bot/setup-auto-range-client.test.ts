@@ -223,9 +223,10 @@ describe('Grid setup automatic opening range', () => {
     // both the earlier market/range deadline and the later geometry deadline.
     await vi.advanceTimersByTimeAsync(60_001); await settle();
     expect(previewRequests()).toHaveLength(beforeExpiry);
-    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+    expect(find(node => node.type === GridPlannerChart).props.lines).toHaveLength(5);
+    expect(find(node => node.type === GridPlannerChart).props.levelMessage).toContain('expired');
   });
-  it.each([false, true])('renews price-only levels only with a fresh preview with createEnabled=%s', async createEnabled => {
+  it.each([false, true])('holds price-only levels during refresh and labels expiry with createEnabled=%s', async createEnabled => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await open({ createEnabled }); await resolve(requests[0]);
     edit('intervals', '4'); await vi.advanceTimersByTimeAsync(250); await settle();
@@ -246,14 +247,15 @@ describe('Grid setup automatic opening range', () => {
     await vi.advanceTimersByTimeAsync(250); await settle();
     expect(isPlannerPreview(renewedPreview)).toBe(true);
     expect(renewedPreview.retrievedAt).toBeGreaterThan(initialDeadline - 60_000);
-    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual(initialLines);
     finish(); await settle();
     expect(find(node => node.type === GridPlannerChart).props.lines).toEqual(initialLines);
 
     await vi.advanceTimersByTimeAsync(initialDeadline - Date.now() + 1); await settle();
     expect(find(node => node.type === GridPlannerChart).props.lines).toEqual(initialLines);
     await vi.advanceTimersByTimeAsync(renewedPreview.retrievedAt + renewedPreview.validForMs - Date.now() + 1); await settle();
-    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual([]);
+    expect(find(node => node.type === GridPlannerChart).props.lines).toEqual(initialLines);
+    expect(find(node => node.type === GridPlannerChart).props.levelMessage).toContain('expired');
   });
   it('ignores a superseded geometry response after editing the range', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });

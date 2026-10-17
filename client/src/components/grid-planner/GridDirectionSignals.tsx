@@ -51,11 +51,14 @@ export function GridDirectionSignals({ active, identity, market, timeframe, regi
 }) {
   const macro = useGridDirectionSuggestion({ active, identity, refresh });
   const [signals, setSignals] = useState<GridSignals | null>(null);
+  const retained = useRef<{ key: string; timers: ReturnType<typeof setTimeout>[] }>({ key: '', timers: [] });
+  useEffect(() => () => retained.current.timers.forEach(clearTimeout), []);
   useEffect(() => {
-    setSignals(null);
+    const key = String(active) + ':' + identity + ':' + market;
+    if (retained.current.key !== key) { retained.current.timers.forEach(clearTimeout); retained.current = { key, timers: [] }; setSignals(null); }
     if (!active || !market) return;
     const controller = new AbortController(), startedAt = Date.now();
-    const timers: ReturnType<typeof setTimeout>[] = [];
+
     const missing = { state: 'unavailable' as const, reason: 'Signal request failed or returned invalid data.' };
     void fetch(`/api/grid-planner/signals?${new URLSearchParams({ market })}`, {
       method: 'GET', credentials: 'include', headers: walletAuthHeaders(),
@@ -64,18 +67,19 @@ export function GridDirectionSignals({ active, identity, market, timeframe, regi
       .then(value => {
         if (controller.signal.aborted) return;
         if (!isGridSignals(value, market)) throw new Error('Invalid signals');
+        retained.current.timers.forEach(clearTimeout); retained.current.timers = [];
         const result: GridSignals = { ...value };
         for (const key of ['weekly', 'funding'] as const) {
           const signal = value[key]; if (signal.state !== 'available') continue;
           const remaining = signal.expiresAt - value.serverNow - (Date.now() - startedAt);
           if (remaining <= 0) result[key] = { state: 'unavailable', reason: 'Observation expired; refresh for fresh data.' };
-          else timers.push(setTimeout(() => setSignals(current => current ? {
+          else retained.current.timers.push(setTimeout(() => setSignals(current => current ? {
             ...current, [key]: { state: 'unavailable', reason: 'Observation expired; refresh for fresh data.' },
           } : null), remaining));
         }
         setSignals(result);
       }).catch(() => { if (!controller.signal.aborted) setSignals({ market, serverNow: Date.now(), weekly: missing, funding: missing }); });
-    return () => { controller.abort(); timers.forEach(clearTimeout); };
+    return () => { controller.abort(); };
   }, [active, identity, market, refresh]);
   return <div role="group" aria-label="Independent direction signals" className="flex flex-wrap items-center gap-2">
     <span className="text-xs text-muted-foreground">Signals</span><div className="flex gap-1">{gridSignalViews(macro, signals, market, timeframe, regime).map(signal =>

@@ -9,6 +9,5 @@ export function GridPlanIssues({ reasons, onReview }: { reasons: string[]; onRev
       const issue = plannerIssue(reason);
       return <li key={reason}>{issue.message}{onReview && <> <button type="button" className="underline underline-offset-2" onClick={() => onReview(reason)}>Review {issue.setting}</button></>}</li>;
     })}</ul>
-    <details className="mt-2 text-xs text-muted-foreground"><summary className="cursor-pointer">Source details</summary>{issues.map(reason => <p key={reason} className="mt-1 break-words">{reason}</p>)}</details>
   </div>;
 }

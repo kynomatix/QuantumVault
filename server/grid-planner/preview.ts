@@ -3,6 +3,7 @@ import { calculateGrid, calculateGridPrices, minimumInvestment, assumedPairFees,
 import type { GridGeometryInput } from '../grid-bot/engine-types';
 import { PLANNER_POLICY, type PlannerMarket, type PlannerPreview, type PlannerQuery } from './types';
 import { unknown } from './market-snapshot';
+import { dollars, explainPlannerIssue } from './order-explanation';
 const D = Decimal.clone({ precision: 120 });
 
 export function validatePreviewQuery(q: PlannerQuery): string | null {
@@ -47,7 +48,7 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number)
   const c = market.constraints.value, r = market.reference.value;
   if (now < c.observedAt || now > c.expiresAt || now < r.observedAt || now > r.expiresAt) return { ...result, reasons: ['Market observations expired or are future-dated'] };
   result.validForMs = Math.max(0, Math.min(c.expiresAt, r.expiresAt) - now);
-  if (c.maxLeverage.state === 'available' && new D(q.leverage).gt(c.maxLeverage.value)) return { ...result, state: 'rejected', reasons: ['Leverage exceeds the observed Pacifica maximum'] };
+  if (c.maxLeverage.state === 'available' && new D(q.leverage).gt(c.maxLeverage.value)) return { ...result, state: 'rejected', reasons: [`Pacifica allows up to ${c.maxLeverage.value}× leverage for this market. Lower the leverage.`] };
   if (new D(q.leverage).lt(1)) return { ...result, state: 'rejected', reasons: ['Leverage must be at least 1'] };
   const stop = new D(q.stop), tick = new D(c.tick);
   if (!stop.mod(tick).isZero() || (q.side === 'long' ? !stop.lt(q.lower) : !stop.gt(q.upper)))
@@ -62,7 +63,26 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number)
   result.minimum = minimum.ok ? { state: 'available', value: minimum.investment } : unknown(minimum.issues.map(i => i.reason).join('; '));
   result.requestedPlan = requested.ok ? requested.plan : null;
   result.minimumPlan = !requested.ok && minimum.ok ? minimum.plan : null;
-  if (!requested.ok) result.reasons.push(...requested.issues.map(i => i.reason));
+  if (!requested.ok) result.reasons.push(...requested.issues.map(i => explainPlannerIssue(i, { ...input, investment: q.investment })));
+  let venueRejected = false;
+  if (requested.ok) {
+    const lines = requested.plan.lines.filter(line => line.role !== 'virtual');
+    if (c.maximumQuote.state === 'available') {
+      const maximum = c.maximumQuote.value, tooLarge = lines.find(line => new D(line.notional).gt(maximum));
+      if (tooLarge) { venueRejected = true; result.reasons.push(`A grid order would be $${dollars(tooLarge.notional)}, above Pacifica's $${dollars(maximum)} maximum. Lower the investment or leverage, or use more grids.`); }
+    }
+    if (c.priceBounds.state === 'available') {
+      const { minimum, maximum } = c.priceBounds.value;
+      if ([...lines.map(line => line.price), q.stop].some(price => new D(price).lt(minimum) || new D(price).gt(maximum))) {
+        venueRejected = true; result.reasons.push(`Pacifica accepts prices from $${minimum} to $${maximum}. Move the range and stop loss inside those limits.`);
+      }
+    }
+    if (c.restrictions.state === 'available' && c.restrictions.value !== 'unrestricted') {
+      venueRejected = true; result.reasons.push(c.restrictions.value === 'isolated_only'
+        ? 'This market requires isolated margin, which Grid does not support. Choose another market.'
+        : 'This market does not support the perpetual order-book orders Grid needs. Choose another market.');
+    }
+  }
   const diagnostic = result.requestedPlan ?? result.minimumPlan;
   let feePassed = false;
   if (q.fee !== null && diagnostic) {
@@ -73,8 +93,8 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number)
     if (!feePassed) result.reasons.push('Assumed fee check failed; diagnostic rows remain visible');
   }
   const missing = [c.maxLeverage, c.maximumQuote, c.priceBounds, c.restrictions].filter(fact => fact.state === 'unavailable');
-  for (const fact of missing) if (fact.state === 'unavailable') result.reasons.push(fact.reason);
-  result.state = !requested.ok || q.fee !== null && !feePassed ? 'rejected'
+  if (c.maxLeverage.state === 'unavailable') result.reasons.push('Pacifica’s leverage limit is unavailable. Refresh market data before choosing leverage.');
+  result.state = !requested.ok || venueRejected || q.fee !== null && !feePassed ? 'rejected'
     : q.fee === null || missing.length ? 'diagnostic' : 'hypothetical_checks_passed';
   return result;
 }

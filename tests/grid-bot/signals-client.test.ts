@@ -9,13 +9,14 @@ import { computeWeeklyStructure } from '../../server/grid-planner/weekly-structu
 import { btcUtcWeekStart, BTC_TREND_WEEK_MS as WEEK } from '../../shared/grid-direction';
 import type { GridSignals } from '../../shared/grid-signals';
 import type { PlannerCandle } from '../../server/grid-planner/types';
-const hooks = vi.hoisted(() => ({ value: null as unknown, writes: [] as unknown[],
+const hooks = vi.hoisted(() => ({ ref: null as {current: any}|null, value: null as unknown, writes: [] as unknown[],
   effect: undefined as (() => void | (() => void)) | undefined, dependencies: [] as unknown[] }));
 vi.mock('react', async () => ({ ...await vi.importActual<typeof import('react')>('react'),
   useState: () => [hooks.value, (update: unknown) => {
     hooks.value = typeof update === 'function' ? update(hooks.value) : update; hooks.writes.push(hooks.value);
   }],
-  useRef: (value: unknown) => ({ current: value }),
+  useRef: (value: unknown) => value && typeof value === 'object' && 'timers' in value
+    ? hooks.ref ?? (hooks.ref={ current: value }) : { current: value },
   useEffect: (effect: () => void | (() => void), dependencies: unknown[]) => { hooks.effect = effect; hooks.dependencies = dependencies; },
 }));
 vi.mock('../../client/src/lib/queryClient', () => ({ walletAuthHeaders: () => ({ 'x-wallet-address': 'EXAMPLE' }) }));
@@ -28,9 +29,23 @@ const candles: PlannerCandle[] = [70, 72, 90, 74, 76, 78, 80, 100, 82, 84, 83, 8
 const response = (): GridSignals => ({ market: 'BTC-PERP', serverNow: now, weekly: computeWeeklyStructure('BTC-PERP', candles, now),
   funding: { state: 'available', market: 'BTC-PERP', hourlyRate: 0.0001, basis: 'next-hour estimate', observedAt: now, expiresAt: now + 300_000 } });
 const props = { active: true, identity: 'EXAMPLE', market: 'BTC-PERP', timeframe: '1h', regime: { state: 'unavailable' as const, reason: 'EXAMPLE' }, refresh: 0 };
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); hooks.value = null; hooks.writes = []; hooks.effect = undefined; });
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); hooks.ref=null; hooks.value = null; hooks.writes = []; hooks.effect = undefined; });
 
 describe('signal row never edits direction', () => {
+  it('retains signals during refresh while the original funding deadline still expires', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const fetcher = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => response() })
+      .mockImplementationOnce(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetcher);
+    GridDirectionSignals(props); const cleanup = hooks.effect?.();
+    await vi.advanceTimersByTimeAsync(0); expect(hooks.value).toEqual(response());
+    if (typeof cleanup === 'function') cleanup();
+    GridDirectionSignals({ ...props, refresh: 1 }); const refreshedCleanup = hooks.effect?.();
+    expect(hooks.value).toEqual(response());
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(hooks.value).toMatchObject({ funding: { state: 'unavailable' }, weekly: { state: 'available' } });
+    if (typeof refreshedCleanup === 'function') refreshedCleanup();
+  });
   it.each(['long', 'short'] as const)('fetches opposing and unavailable observations without changing chosen %s or fetching on expiry', async direction => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const intent = Object.freeze({ direction }), fetcher = vi.fn(async () => ({ ok: true, json: async () => response() }));
