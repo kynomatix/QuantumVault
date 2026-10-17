@@ -24,7 +24,7 @@ describe('Market Stats route boundary', () => {
   }
   it('places the supplied wallet session guard before the read, with no planner feature gate', async () => {
     const { registrations, auth, load, res } = setup();
-    expect([...registrations.keys()]).toEqual(['/api/market-stats']);
+    expect([...registrations.keys()]).toEqual(['/api/market-stats', '/api/market-stats/liquidations']);
     const [guard, read] = registrations.get('/api/market-stats')!;
     expect(guard).toBe(auth); expect(load).not.toHaveBeenCalled();
     await read({ query: {} }, res);
