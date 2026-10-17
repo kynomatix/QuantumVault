@@ -1,6 +1,7 @@
 # Pre-merge TypeScript gate (conductor, 2026-10-17). Free on this public repo, so
-# Replit is only needed for sync and publish. It fails when `npm run check` reports
-# any error not in .github/typecheck-baseline.txt (errors normalised: line/col stripped).
+# Replit is only needed for sync and publish. It fails when the repo's own TypeScript
+# (node_modules, the lockfile version) reports any error not in
+# .github/typecheck-baseline.txt (errors normalised: line/col stripped).
 name: typecheck
 on:
   push:
@@ -10,16 +11,25 @@ permissions:
 jobs:
   tsc:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm ci --no-audit --no-fund --ignore-scripts
-      - name: npm run check
-        run: npm run check > tsc.out 2>&1 || true
+      - name: Install (npm 10 has an "Exit handler never called" bug on this tree)
+        run: |
+          npm install -g npm@11 --no-audit --no-fund
+          for attempt in 1 2 3; do
+            if npm ci --no-audit --no-fund --ignore-scripts; then break; fi
+            echo "npm ci attempt $attempt failed"; rm -rf node_modules
+            [ "$attempt" = 3 ] && exit 1
+          done
+          test -x node_modules/.bin/tsc || { echo "node_modules/.bin/tsc missing: install incomplete"; exit 1; }
+          echo "TypeScript $(node_modules/.bin/tsc --version)"
+      - name: tsc --noEmit (repo's own TypeScript)
+        run: node_modules/.bin/tsc --noEmit > tsc.out 2>&1 || true
       - name: Compare with baseline
         run: |
           grep -E 'error TS[0-9]+:' tsc.out | sed -E 's/\([0-9]+,[0-9]+\)//' | sort > current.txt || true
