@@ -42,7 +42,7 @@ describe('planner maker fee defaults', () => {
     const source = readFileSync('server/routes.ts', 'utf8');
     const start = source.indexOf("  app.get('/api/exchange/planner-fee'");
     const route = source.slice(start, source.indexOf('\n  });', start) + 7).replace('req.walletAddress!', 'req.walletAddress');
-    let handler: (req: unknown, res: unknown) => Promise<void>;
+    let handler!: (req: unknown, res: unknown) => Promise<void>;
     const app = { get: (_path: string, _auth: unknown, callback: typeof handler) => { handler = callback; } };
     const readFee = vi.fn(async () => { throw Error('EXAMPLE private provider detail'); });
     new Function('app', 'requireWallet', 'readPlannerAccountFee', 'storage', 'getAdapter', route)(

@@ -1,4 +1,3 @@
-import React from 'react';
 import type { GridPlan } from '../../../../server/grid-bot/engine-types';
 import { readableDecimal } from '@/lib/grid-planner-view';
 import { Badge } from '@/components/ui/badge';
