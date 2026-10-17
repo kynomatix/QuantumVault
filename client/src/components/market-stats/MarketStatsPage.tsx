@@ -1,9 +1,11 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Activity, TrendingUp, Users, BarChart3, Shield, Bitcoin } from 'lucide-react';
 import type { MarketStats, StatsCard, DowStats } from '@shared/market-stats';
 import { walletAuthHeaders, getActiveWalletAddress } from '@/lib/queryClient';
 import { currentCard, signedPercent, usd, utcTime } from './format';
+
+const LiquidationHeatmap = lazy(() => import('./LiquidationHeatmap'));
 
 function Frame({ title, period, icon, children, footer }: {
   title: string; period: string; icon: ReactNode; children: ReactNode; footer?: ReactNode;
@@ -126,7 +128,7 @@ export default function MarketStatsPage({ active }: { active: boolean }) {
     const timer = setTimeout(() => setClock(Date.now()), Math.min(...future) - serverClock + 1);
     return () => clearTimeout(timer);
   }, [active, query.data, serverClock]);
-  return <section aria-label="Market Stats" className="max-w-6xl space-y-6">
+  return <section aria-label="Market Stats" className="min-w-0 max-w-6xl space-y-6">
     <div className="flex flex-wrap items-start justify-between gap-4"><div>
       <h1 className="font-display text-2xl font-bold sm:text-3xl">Market Stats</h1><p className="mt-2 text-sm text-muted-foreground">Bitcoin’s bigger picture, in plain words.</p></div>
       <div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-2 text-xs text-muted-foreground"><Bitcoin className="h-4 w-4 text-amber-400" />Bitcoin<span className="mx-1 text-border">/</span>Daily & weekly</div>
@@ -135,6 +137,7 @@ export default function MarketStatsPage({ active }: { active: boolean }) {
     {query.data ? <MarketStatsView data={query.data} now={serverClock} /> : query.isPending ? <div role="status" aria-label="Loading Market Stats" className="grid gap-5 xl:grid-cols-2">
       {[0, 1, 2, 3].map(i => <div key={i} className="h-72 animate-pulse rounded-2xl border border-border bg-card" />)}<span className="sr-only">Loading Market Stats</span>
     </div> : <Missing reason="No verified market observations are available." />}
+    {active && <Suspense fallback={<p role="status" className="text-sm text-muted-foreground">Loading estimated liquidation zones…</p>}><LiquidationHeatmap /></Suspense>}
     <p className="flex items-start gap-2 text-xs leading-relaxed text-muted-foreground"><Shield className="h-4 w-4 shrink-0" />Context for your decisions. This page never changes your bots or trading.</p>
   </section>;
 }
