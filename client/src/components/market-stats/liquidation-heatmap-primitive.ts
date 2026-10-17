@@ -1,9 +1,10 @@
 import type { IChartApi, ISeriesApi, ISeriesPrimitive, ISeriesPrimitivePaneRenderer, ITimeScaleApi, Time, UTCTimestamp } from 'lightweight-charts';
 import type { LiquidationColumn, LiquidationStats } from '@shared/market-stats';
+import { HEAT_COLOR_TIERS } from './liquidation-heatmap-display';
 
 export function heatColor(amount: number, max: number) {
   const t = max > 0 ? Math.sqrt(amount / max) : 0;
-  return t > 0.75 ? '#eed38a' : t > 0.45 ? '#54b3a0' : t > 0.2 ? '#385a72' : '#27203e';
+  return t > HEAT_COLOR_TIERS[2] ? '#eed38a' : t > HEAT_COLOR_TIERS[1] ? '#54b3a0' : t > HEAT_COLOR_TIERS[0] ? '#385a72' : '#27203e';
 }
 
 /** Coordinates are CSS/media pixels, just like timeToCoordinate and priceToCoordinate. */
@@ -16,7 +17,9 @@ export function mapHeatmapColumns(columns: LiquidationColumn[], timeScale: Pick<
   });
 }
 
-export function createLiquidationHeatmapPrimitive(data: LiquidationStats, chart: IChartApi, series: ISeriesApi<'Candlestick'>): ISeriesPrimitive {
+export function createLiquidationHeatmapPrimitive(data: LiquidationStats, chart: IChartApi, series: ISeriesApi<'Candlestick'>,
+  minUsd: { current: number } = { current: 0 }): ISeriesPrimitive & { requestRedraw: () => void } {
+  let requestRedraw: (() => void) | undefined;
   let columns: ReturnType<typeof mapHeatmapColumns> = [];
   let bands: { top: number; height: number }[] = [];
   const renderer: ISeriesPrimitivePaneRenderer = { draw(target) {
@@ -26,7 +29,7 @@ export function createLiquidationHeatmapPrimitive(data: LiquidationStats, chart:
         if (left + width < 0 || left > mediaSize.width) continue;
         column.bins.forEach(([long, short], band) => {
           const amount = long + short, geometry = bands[band];
-          if (!amount || !geometry) return;
+          if (!amount || amount < minUsd.current || !geometry) return;
           ctx.fillStyle = heatColor(amount, data.scaleMaxUsd);
           ctx.fillRect(left, geometry.top, width, geometry.height);
         });
@@ -37,7 +40,9 @@ export function createLiquidationHeatmapPrimitive(data: LiquidationStats, chart:
   // Keep both the view and its array stable, as required by the primitive API's caches.
   const views = [{ zOrder: () => 'bottom' as const, renderer: () => renderer }];
   return {
-    attached: ({ requestUpdate }) => requestUpdate(),
+    attached: ({ requestUpdate }) => { requestRedraw = requestUpdate; requestUpdate(); },
+    detached: () => { requestRedraw = undefined; },
+    requestRedraw: () => requestRedraw?.(),
     autoscaleInfo: () => {
       const visible = chart.timeScale().getVisibleRange();
       if (visible && (Number(visible.to) * 1000 < data.columns[0].time
