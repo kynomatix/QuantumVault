@@ -101,7 +101,10 @@ describe('current grid planner inputs', () => {
       stop: side === 'long' ? '85000' : '115000' }, market, now);
     expect(preview.reasons).toEqual([]); expect(isPlannerPreview(preview)).toBe(true);
     const plan = preview.requestedPlan!; expect(plan).not.toBeNull();
-    expect(plan.openingOrderLift).toEqual({ count: 2, minimumQuote: '10' });
+    const liftedOrdinals = plan.lines.filter(line => line.role === 'entry')
+      .sort((a, b) => Math.abs(Number(a.price) - Number(plan.start)) - Math.abs(Number(b.price) - Number(plan.start)))
+      .slice(0, 2).reverse().map(line => line.ordinal);
+    expect(plan.openingOrderLift).toEqual({ count: 2, minimumQuote: '10', ordinals: liftedOrdinals });
     expect(plannerOpeningMinimumSummary(plan)).toBe('2 grid orders raised to the $10 minimum');
     expect(plan.lines.filter(line => line.role === 'entry').every(line => new Decimal(line.notional).gte(10))).toBe(true);
     expect(plan.lines.filter(line => line.role === 'seed_exit').some(line => new Decimal(line.notional).lt(10))).toBe(true);
