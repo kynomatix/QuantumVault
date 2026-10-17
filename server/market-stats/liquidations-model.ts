@@ -49,8 +49,9 @@ export function alignLiquidationInputs(inputs: LiquidationInputs, start: number,
 }
 
 /**
- * oi-leverage-v1: start empty (the initial book is unknown). On each subsequent
- * hour, retire negative OI proportionally OR add positive OI, split 50/50.
+ * oi-leverage-v2: start empty (the initial book is unknown). On each subsequent
+ * hour, scale cohorts by the venue's remaining OI fraction on a drop, assuming
+ * closes are spread across all open positions, OR add positive OI, split 50/50.
  * Then sweep against that hour's high/low, including new cohorts. Within-hour
  * entry ordering is unknown; this explicit convention is conservative.
  */
@@ -74,8 +75,8 @@ export function modelLiquidations(hours: ModelHour[], displayStart: number) {
         }
       } else if (delta < 0) {
         const total = cohorts.reduce((sum, c) => sum + c.btc, 0);
-        const retired = Math.min(-delta, total), ratio = total ? 1 - retired / total : 0;
-        retiredBtc += retired;
+        const ratio = Math.max(0, Math.min(1, hour.oiBtc / hours[i - 1].oiBtc));
+        retiredBtc += total * (1 - ratio);
         for (const c of cohorts) c.btc *= ratio;
       }
       cohorts = cohorts.filter(c => {
@@ -117,7 +118,7 @@ export function modelLiquidations(hours: ModelHour[], displayStart: number) {
     const side = (cluster.lower + cluster.upper) / 2 > last.close ? 'above' : 'below';
     if (!summary[side] || notionalUsd > summary[side]!.notionalUsd) summary[side] = cluster;
   }
-  const value: LiquidationStats = { methodologyVersion: 'oi-leverage-v1', asset: 'BTC', instrument: 'BTC-USDT-SWAP',
+  const value: LiquidationStats = { methodologyVersion: 'oi-leverage-v2', asset: 'BTC', instrument: 'BTC-USDT-SWAP',
     currentPrice: last.close, priceRange: { lower, upper }, bandWidth, columns,
     scaleMaxUsd: Math.max(0, ...columns.flatMap(c => c.bins.map(b => b[0] + b[1]))),
     excludedUsd: latest.excludedUsd, summary, modelStartedAt: hours[0].time, displayStartedAt: displayStart, initialOiBtc: hours[0].oiBtc };

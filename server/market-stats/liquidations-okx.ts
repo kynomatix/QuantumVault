@@ -1,14 +1,16 @@
 import { HOUR, MODEL_DAYS, LIQUIDATION_DAY, LiquidationInputError, type LiquidationInputs } from './liquidations-model';
 
 type Fetch = typeof fetch;
+export const CANDLE_HISTORY_DAYS = 180;
+const FOUR_HOURS = 4 * HOUR;
 const BASE = 'https://www.okx.com';
 const MAX_BODY = 256_000;
 
-async function page(url: URL, fetcher: Fetch, signal: AbortSignal): Promise<string[][]> {
+async function page(url: URL, fetcher: Fetch, signal: AbortSignal, label = 'hourly history'): Promise<string[][]> {
   const response = await fetcher(url, { signal });
-  if (!response.ok) throw new LiquidationInputError(`OKX hourly history returned HTTP ${response.status}.`);
+  if (!response.ok) throw new LiquidationInputError(`OKX ${label} returned HTTP ${response.status}.`);
   const reader = response.body?.getReader();
-  if (!reader) throw new LiquidationInputError('OKX hourly history has no response body.');
+  if (!reader) throw new LiquidationInputError(`OKX ${label} has no response body.`);
   let size = 0;
   const chunks: Uint8Array[] = [];
   try {
@@ -16,7 +18,7 @@ async function page(url: URL, fetcher: Fetch, signal: AbortSignal): Promise<stri
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY) throw new LiquidationInputError('OKX hourly history exceeded the response budget.');
+      if (size > MAX_BODY) throw new LiquidationInputError(`OKX ${label} exceeded the response budget.`);
       chunks.push(value);
     }
   } finally { await reader.cancel().catch(() => {}); }
@@ -27,8 +29,43 @@ async function page(url: URL, fetcher: Fetch, signal: AbortSignal): Promise<stri
   const json = JSON.parse(new TextDecoder().decode(bytes));
   if (json.code !== '0' || !Array.isArray(json.data) || json.data.length > 100
     || !json.data.every((row: unknown) => Array.isArray(row) && row.every(v => typeof v === 'string' && v.trim() !== '')))
-    throw new LiquidationInputError('OKX hourly history returned an invalid payload.');
+    throw new LiquidationInputError(`OKX ${label} returned an invalid payload.`);
   return json.data;
+}
+
+/** Display-only 180-day history, independently of the unchanged hourly OI model. */
+export async function loadOkxLiquidationHistory(now: number, fetcher: Fetch = fetch) {
+  const end = Math.floor(now / LIQUIDATION_DAY) * LIQUIDATION_DAY;
+  const start = end - CANDLE_HISTORY_DAYS * LIQUIDATION_DAY;
+  const deadline = AbortSignal.timeout(22_000);
+  const candles = new Map<number, LiquidationInputs['candles'][number]>();
+  let cursor = end;
+  for (let n = 0; n < Math.ceil(CANDLE_HISTORY_DAYS * 6 / 100); n++) {
+    const url = new URL('/api/v5/market/history-candles', BASE);
+    url.searchParams.set('instId', 'BTC-USDT-SWAP'); url.searchParams.set('bar', '4H');
+    url.searchParams.set('limit', '100'); url.searchParams.set('after', String(cursor));
+    const rows = await page(url, fetcher, AbortSignal.any([deadline, AbortSignal.timeout(6_000)]), '4H candle history');
+    if (!rows.length) break;
+    const times = rows.map(r => Number(r[0]));
+    if (rows.some((r, i) => r.length < 9 || !Number.isSafeInteger(times[i]) || times[i] % FOUR_HOURS
+      || times[i] >= cursor || (r[8] !== '0' && r[8] !== '1')))
+      throw new LiquidationInputError('OKX 4H candle history has malformed or non-advancing rows.');
+    for (const r of rows) {
+      const [time, open, high, low, close] = r.slice(0, 5).map(Number);
+      if (![open, high, low, close].every(v => Number.isFinite(v) && v > 0)
+        || low > Math.min(open, close) || high < Math.max(open, close) || low > high)
+        throw new LiquidationInputError('OKX 4H candle history has invalid prices.');
+      if (time < start || time >= end || r[8] !== '1') continue;
+      if (candles.has(time)) throw new LiquidationInputError('OKX 4H candle history has duplicate candles.');
+      candles.set(time, { time, open, high, low, close });
+    }
+    cursor = Math.min(...times);
+    if (cursor <= start) break;
+  }
+  for (let time = start; time < end; time += FOUR_HOURS) {
+    if (!candles.has(time)) throw new LiquidationInputError('OKX 4H candle history is incomplete; no gaps are interpolated.');
+  }
+  return [...candles.values()].sort((a, b) => a.time - b.time);
 }
 
 /** Display-only adapter; never changes the trading datafeed mapper. */

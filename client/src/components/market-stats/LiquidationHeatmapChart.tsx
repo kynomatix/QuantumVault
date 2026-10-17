@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { LineStyle, type ISeriesPrimitive, type Logical, type UTCTimestamp } from 'lightweight-charts';
+import { LineStyle, type UTCTimestamp } from 'lightweight-charts';
 import type { LiquidationStats } from '@shared/market-stats';
 import { createSharedTradePriceChart } from '../SharedTradePriceChart';
+import { createLiquidationHeatmapPrimitive } from './liquidation-heatmap-primitive';
+export { heatColor } from './liquidation-heatmap-primitive';
 
 const money = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
 const compact = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(n);
-export function heatColor(amount: number, max: number) {
-  const t = max > 0 ? Math.sqrt(amount / max) : 0;
-  return t > 0.75 ? '#eed38a' : t > 0.45 ? '#54b3a0' : t > 0.2 ? '#385a72' : '#27203e';
-}
 export default function LiquidationHeatmapChart({ data }: { data: LiquidationStats }) {
   const container = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState({ column: data.columns.length - 1, band: 60 });
@@ -18,43 +16,29 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
     const chart = createSharedTradePriceChart(container.current);
     const series = chart.addCandlestickSeries({ upColor: '#75ddc1', downColor: '#f099ad', borderVisible: false,
       wickUpColor: '#a2e9d7', wickDownColor: '#f3b2c0', priceLineVisible: false, lastValueVisible: false });
-    series.setData(data.columns.map(c => ({ time: c.time / 1000 as UTCTimestamp, ...c.candle })));
+    // Model candles remain authoritative within the 30-day window.
+    const candles = new Map((data.candles ?? []).map(c => [c.time, c]));
+    for (const c of data.columns) candles.set(c.time, { time: c.time, ...c.candle });
+    series.setData([...candles.values()].sort((a, b) => a.time - b.time).map(c => ({ ...c, time: c.time / 1000 as UTCTimestamp })));
+    chart.timeScale().applyOptions({ fixLeftEdge: true, fixRightEdge: true });
     series.createPriceLine({ price: data.currentPrice, color: '#e6dfed', lineWidth: 1,
       lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Last close' });
-    const primitive: ISeriesPrimitive = {
-      autoscaleInfo: () => ({ priceRange: { minValue: data.priceRange.lower, maxValue: data.priceRange.upper } }),
-      paneViews: () => [{ zOrder: () => 'bottom', renderer: () => ({ draw(target) {
-        target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
-          ctx.save(); ctx.beginPath(); ctx.rect(0, 0, mediaSize.width, mediaSize.height); ctx.clip();
-          data.columns.forEach((column, index) => {
-            const left = chart.timeScale().logicalToCoordinate(index - 0.5 as Logical);
-            const right = chart.timeScale().logicalToCoordinate(index + 0.5 as Logical);
-            if (left === null || right === null || right < 0 || left > mediaSize.width) return;
-            column.bins.forEach(([long, short], band) => {
-              const amount = long + short;
-              if (!amount) return;
-              const bottom = series.priceToCoordinate(data.priceRange.lower + band * data.bandWidth);
-              const top = series.priceToCoordinate(data.priceRange.lower + (band + 1) * data.bandWidth);
-              if (top === null || bottom === null) return;
-              ctx.fillStyle = heatColor(amount, data.scaleMaxUsd);
-              ctx.fillRect(left, top, Math.max(1, right - left), Math.max(1, bottom - top));
-            });
-          });
-          ctx.restore();
-        });
-      } }) }],
-    };
+    const primitive = createLiquidationHeatmapPrimitive(data, chart, series);
     series.attachPrimitive(primitive);
     const show: Parameters<typeof chart.subscribeCrosshairMove>[0] = event => {
-      if (!event.point || event.logical === undefined || event.logical === null) { setPointer(null); return; }
+      if (!event.point || typeof event.time !== 'number') { setPointer(null); return; }
+      const column = data.columns.findIndex(c => c.time === Number(event.time) * 1000);
+      if (column < 0) { setPointer(null); return; }
       const price = series.coordinateToPrice(event.point.y);
       if (price === null) return;
-      setSelected({ column: Math.max(0, Math.min(data.columns.length - 1, Math.round(event.logical))),
+      setSelected({ column,
         band: Math.max(0, Math.min(data.columns[0].bins.length - 1, Math.floor((price - data.priceRange.lower) / data.bandWidth))) });
       setPointer({ x: Math.max(8, Math.min(event.point.x + 12, (container.current?.clientWidth ?? 900) - 280)),
         y: Math.max(8, event.point.y - 80) });
     };
-    chart.subscribeCrosshairMove(show); chart.subscribeClick(show); chart.timeScale().fitContent();
+    chart.subscribeCrosshairMove(show); chart.subscribeClick(show);
+    chart.timeScale().setVisibleRange({ from: data.columns[0].time / 1000 as UTCTimestamp,
+      to: data.columns[data.columns.length - 1].time / 1000 as UTCTimestamp });
     const resize = new ResizeObserver(() => {
       if (container.current) chart.applyOptions({ width: container.current.clientWidth, height: container.current.clientHeight });
     });
@@ -69,6 +53,7 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground">
       <span>30 days · 4-hour candles and end-of-block exposure · UTC</span><span>Current reference: {money(data.currentPrice)} (last completed close)</span>
     </div>
+    <p className="mb-2 text-[10px] text-muted-foreground">Heatmap covers the last 30 days · Scroll or zoom left for older candles (180 days).</p>
     <div className="max-w-full overflow-x-auto overscroll-x-contain rounded-xl border border-border bg-[#0c0c16]" role="region" aria-label="Scrollable monthly Bitcoin liquidation chart" tabIndex={0}>
       <div className="relative min-w-[900px]">
         <div ref={container} className="h-[360px]" role="img" aria-label="Modelled liquidation bands beneath Bitcoin candles. Brighter bands represent larger USD-equivalent exposure. Use the time and price controls below for values." />

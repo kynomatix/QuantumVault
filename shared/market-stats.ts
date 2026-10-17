@@ -32,9 +32,11 @@ export type LiquidationColumn = {
   excludedUsd: number;
 };
 export type LiquidationStats = {
-  methodologyVersion: 'oi-leverage-v1'; asset: 'BTC'; instrument: 'BTC-USDT-SWAP';
+  methodologyVersion: 'oi-leverage-v2'; asset: 'BTC'; instrument: 'BTC-USDT-SWAP';
   currentPrice: number; priceRange: { lower: number; upper: number }; bandWidth: number;
   columns: LiquidationColumn[]; scaleMaxUsd: number; excludedUsd: number;
+  /** Confirmed 4H UTC history for scrolling; older candles have no modelled bands. */
+  candles?: { time: number; open: number; high: number; low: number; close: number }[];
   summary: { above: LiquidationCluster | null; below: LiquidationCluster | null };
   modelStartedAt: number; displayStartedAt: number; initialOiBtc: number;
 };
