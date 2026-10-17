@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { Client } from "pg";
 import { readFileSync } from "node:fs";
 import { readDbSchemaMigrationManifest } from "../helpers/schema-migration-manifest";
 import {
@@ -1085,4 +1086,96 @@ describe("append-only automatic cycle ledger schema", () => {
     expect((await probeSchemaMigrationManifest(catalog(false), [subset])).unavailableCapabilities).toEqual([]);
     expect((await probeSchemaMigrationManifest(catalog(true), [subset])).unavailableCapabilities).toEqual(["ai_trader_cycles"]);
   });
+});
+
+
+describe.skipIf(!process.env.DATABASE_URL)("automatic cycle readiness on PostgreSQL", () => {
+  it("reports migration 199 available on a fresh schema and verifies its complete catalog", async () => {
+    const migration = readDbSchemaMigrationManifest().manifest.find(entry => entry.id === "199-ai-trader-cycles")!;
+    const client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000,
+      query_timeout: 5000, statement_timeout: 5000 });
+    const schema = "cycle_readiness_" + randomUUID().replaceAll("-", "");
+    await client.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET LOCAL search_path TO ${schema}`);
+      await client.query("CREATE TABLE ai_trader_bots (id varchar PRIMARY KEY)");
+      await client.query(migration.sql);
+      // Redirect both namespace literals and bound relation names used by the real verifier.
+      const catalogQuery: CatalogQuery = (text, values) => client.query(
+        text.replaceAll("'public'", `'${schema}'`),
+        values?.map(value => typeof value === "string" ? value.replace(/^public\./, schema + ".") : value),
+      );
+      const readiness = await probeSchemaMigrationManifest(catalogQuery, [migration]);
+      expect(readiness.capabilities).toContain("ai_trader_cycles");
+      expect(readiness.unavailableCapabilities).toEqual([]);
+      expect(readiness.evidence).toEqual([]);
+
+      const columns = await client.query(`SELECT column_name, data_type, is_nullable, column_default
+        FROM information_schema.columns WHERE table_schema=$1 AND table_name='ai_trader_cycles'
+        ORDER BY ordinal_position`, [schema]);
+      const expectedColumns = [
+        ["id", "uuid", "NO", "gen_random_uuid()"],
+        ["bot_id", "character varying", "NO", null],
+        ["schema_version", "smallint", "NO", "1"],
+        ["reason_version", "smallint", "NO", "1"],
+        ["trigger", "text", "NO", "'auto'::text"],
+        ["planned_boundary", "timestamp with time zone", "YES", null],
+        ["started_at", "timestamp with time zone", "NO", "clock_timestamp()"],
+        ["finished_at", "timestamp with time zone", "YES", null],
+        ["phase", "text", "NO", "'initial'::text"],
+        ["outcome", "text", "NO", "'running'::text"],
+        ["reason_code", "text", "YES", null],
+        ["rearmed", "boolean", "YES", null],
+        ["next_planned_boundary", "timestamp with time zone", "YES", null],
+        ["candidate_count", "integer", "NO", "0"],
+        ["model_call_count", "integer", "NO", "0"],
+        ["decision_ids", "jsonb", "NO", "'[]'::jsonb"],
+        ["bot_updated_at", "timestamp without time zone", "YES", null],
+        ["protocol", "text", "NO", null],
+        ["market", "text", "NO", null],
+        ["timeframe", "text", "NO", null],
+        ["market_source", "text", "NO", null],
+        ["paper_mode", "boolean", "NO", null],
+        ["model", "text", "NO", null],
+        ["prompt_version_hash", "text", "YES", null],
+        ["context_version_hash", "text", "YES", null],
+        ["owner_boot_id", "uuid", "NO", null],
+        ["details", "jsonb", "NO", "'{}'::jsonb"],
+      ];
+      expect(columns.rows.map(row => [row.column_name, row.data_type, row.is_nullable, row.column_default]))
+        .toEqual(expectedColumns);
+      const tableRequirement = migration.requirements.find(r => r.kind === "table")!;
+      expect(tableRequirement.columns).toEqual(expectedColumns.map(row => row[0]));
+
+      const checks = await client.query(`SELECT c.conname FROM pg_constraint c
+        WHERE c.conrelid=$1::regclass AND c.contype='c' ORDER BY c.conname`, [schema + ".ai_trader_cycles"]);
+      const checkRequirements = migration.requirements.filter(r => r.kind === "constraint");
+      expect(checks.rows).toHaveLength(16);
+      expect(checks.rows.map(row => row.conname)).toEqual(checkRequirements.map(r => r.constraint).sort());
+      // All sixteen definitions are checked against pg_get_constraintdef by the readiness probe above.
+      const indexes = await client.query(`SELECT indexname, indexdef FROM pg_indexes
+        WHERE schemaname=$1 AND tablename='ai_trader_cycles' ORDER BY indexname`, [schema]);
+      expect(indexes.rows.map(row => row.indexname)).toEqual([
+        "ai_trader_cycles_bot_latest_idx", "ai_trader_cycles_pkey", "ai_trader_cycles_running_idx",
+      ]);
+      expect(indexes.rows[0].indexdef).toContain("USING btree (bot_id, started_at DESC, id DESC)");
+      expect(indexes.rows[1].indexdef).toContain("CREATE UNIQUE INDEX");
+      expect(indexes.rows[1].indexdef).toContain("USING btree (id)");
+      expect(indexes.rows[2].indexdef).toContain("USING btree (started_at) WHERE (outcome = 'running'::text)");
+
+      // Reproduce the incident: the original ascending expectations must fail against this same DDL.
+      const stale = { ...migration, requirements: migration.requirements.map(requirement =>
+        requirement.kind === "index" && requirement.index === "ai_trader_cycles_bot_latest_idx"
+          ? { ...requirement, columns: ["bot_id", "started_at", "id"] } : requirement) };
+      const unavailable = await probeSchemaMigrationManifest(catalogQuery, [stale]);
+      expect(unavailable.unavailableCapabilities).toEqual(["ai_trader_cycles"]);
+      expect(unavailable.evidence).toEqual([expect.objectContaining({
+        capability: "ai_trader_cycles", failureClass: "index_missing",
+      })]);
+    } finally {
+      try { await client.query("ROLLBACK"); } finally { await client.end(); }
+    }
+  }, 30000);
 });

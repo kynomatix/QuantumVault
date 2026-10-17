@@ -7629,8 +7629,8 @@ const schemaMigrationMetadata = [
       "index": "ai_trader_cycles_bot_latest_idx",
       "columns": [
         "bot_id",
-        "started_at",
-        "id"
+        "started_at DESC",
+        "id DESC"
       ],
       "unique": false
     },
