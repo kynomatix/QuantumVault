@@ -1,4 +1,5 @@
 import type { CycleReason, LatestCycle } from "@shared/ai-trader-cycle";
+import { sanitizeGatewayFailure } from "@shared/ai-gateway-failure";
 import { FLAT_REASON_LABELS } from "@shared/ai-trader-flat-reasons";
 
 const REASON_LABELS: Record<CycleReason, string> = {
@@ -33,11 +34,15 @@ export function currentScheduleLabel(bot: { status: string; mode: string; autoNe
 
 export function cycleDisplay(latest?: LatestCycle) {
   const cycle = latest?.cycle;
-  const base = { time: cycle?.startedAt ?? null, flatLabels: [] as string[], rationale: null as string | null, schedule: null as string | null };
+  const base = { time: cycle?.startedAt ?? null, flatLabels: [] as string[], rationale: null as string | null, schedule: null as string | null, gatewayDetail: null as string | null };
   if (!latest || latest.status === "unavailable") return { ...base, outcome: "Cycle history unavailable" };
   if (!cycle) return { ...base, outcome: "No automatic cycle recorded yet" };
   if (cycle.outcome === "running") return { ...base, outcome: cycle.completionUnknown ? "Incomplete check: completion unknown" : "Check running" };
+  const failure = cycle.reasonCode === "gateway_error" || cycle.reasonCode === "gateway_timeout"
+    ? sanitizeGatewayFailure(cycle.gatewayFailure) : null;
   return { ...base, outcome: cycle.reasonCode ? REASON_LABELS[cycle.reasonCode] : "Check completed",
+    gatewayDetail: failure ? [failure.failureClass, failure.httpStatus ? `HTTP ${failure.httpStatus}` : null,
+      failure.providerCode, failure.providerType, `${failure.elapsedMs} ms`, `${failure.attemptCount} attempt(s)`].filter(Boolean).join(" · ") : null,
     flatLabels: cycle.reasonCode === "model_flat" ? cycle.flatReasons?.map(reason => `Model reason: ${FLAT_REASON_LABELS[reason]}`) ?? ["Model reason not recorded"] : [], rationale: cycle.rationale,
     schedule: cycle.rearmed && cycle.nextPlannedBoundary
       ? `Next check was scheduled for ${new Date(cycle.nextPlannedBoundary).toLocaleString()}`

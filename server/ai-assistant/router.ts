@@ -7,6 +7,8 @@
 // (OpenRouter error payloads can echo parts of the request). All failures surface a
 // sanitized, status-mapped message via LlmGatewayError.
 
+import { sanitizeGatewayFailure, type GatewayFailure } from '@shared/ai-gateway-failure';
+
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const SITE_URL = 'https://myquantumvault.com';
 const SITE_NAME = 'QuantumVault';
@@ -51,16 +53,20 @@ const opLog = new Map<string, number[]>();
 
 export class LlmGatewayError extends Error {
   status?: number;
+  readonly failure: GatewayFailure;
   /**
    * WO-4: true when a 400 response body mentioned "temperature" — some providers
    * reject any explicit temperature value. Derived server-side from the (never
    * surfaced) raw body so callers can retry once with `omitTemperature:true`.
    */
   temperatureUnsupported?: boolean;
-  constructor(message: string, status?: number, opts?: { temperatureUnsupported?: boolean }) {
+  constructor(message: string, status?: number, opts?: { temperatureUnsupported?: boolean; failure?: GatewayFailure }) {
     super(message);
     this.name = 'LlmGatewayError';
     this.status = status;
+    this.failure = sanitizeGatewayFailure(opts?.failure ?? {
+      failureClass: status === 408 ? 'timeout' : status ? 'http' : 'other', httpStatus: status,
+    })!;
     if (opts?.temperatureUnsupported) this.temperatureUnsupported = true;
   }
 }
@@ -166,6 +172,12 @@ export async function callOpenRouterWithUsage(opts: {
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const started = Date.now();
+  let httpStatus: number | null = null;
+  let stage: GatewayFailure['failureClass'] = 'network';
+  const failure = (failureClass: GatewayFailure['failureClass'], providerError?: any): GatewayFailure =>
+    sanitizeGatewayFailure({ failureClass, httpStatus, providerCode: providerError?.code,
+      providerType: providerError?.type, elapsedMs: Date.now() - started, attemptCount: 1 })!;
 
   let res: any;
   try {
@@ -203,78 +215,91 @@ export async function callOpenRouterWithUsage(opts: {
       }),
       signal: controller.signal,
     });
-  } catch (err: any) {
-    // NB: never surface `err` — it can include the request (and thus the key).
-    if (err?.name === 'AbortError') {
-      throw new LlmGatewayError('The model took too long to respond. Try again.', 408);
+    httpStatus = res.status;
+    stage = 'envelope_parse';
+
+    if (!res.ok) {
+      // Drain the body so the socket frees, but DO NOT log or surface it. WO-4: sniff a
+      // 400 body for the temperature quirk (some providers reject any explicit value) and
+      // expose ONLY the boolean flag — never the raw body — so callers can retry once
+      // with `omitTemperature:true`.
+      let temperatureUnsupported = false;
+      let providerError: unknown;
+      try {
+        const bodyText = await res.text();
+        if (res.status === 400 && !opts.omitTemperature && /temperature/i.test(bodyText)) {
+          temperatureUnsupported = true;
+        }
+        try { providerError = JSON.parse(bodyText)?.error; } catch { /* no raw error text retained */ }
+      } catch (err) {
+        if (controller.signal.aborted || (err as any)?.name === 'AbortError') throw err;
+      }
+      throw new LlmGatewayError(mapStatusToMessage(res.status), res.status, { temperatureUnsupported, failure: failure('http', providerError) });
     }
-    throw new LlmGatewayError('Could not reach the model provider. Check your connection and try again.');
+
+    let data: any;
+    try {
+      data = await res.json();
+    } catch (err) {
+      if (controller.signal.aborted || (err as any)?.name === 'AbortError') throw err;
+      throw new LlmGatewayError('The model returned an unreadable response. Try again.', undefined, { failure: failure('envelope_parse') });
+    }
+
+    // OpenRouter can report an error after response headers have already been sent.
+    if (data?.error) throw new LlmGatewayError('The model provider returned an error. Try again.', undefined, { failure: failure('http', data.error) });
+
+    const choice: any = data?.choices?.[0];
+    const content: unknown = choice?.message?.content;
+
+    // WO-2: when caller sent `tools`, a valid response may carry tool_calls instead of
+    // (or in addition to) content. Parse the first call and return early so the empty-
+    // content check below never fires on a legitimate tool-call response.
+    if (opts.tools) {
+      const toolCallsArr: any[] | undefined = Array.isArray(choice?.message?.tool_calls)
+        ? choice.message.tool_calls
+        : undefined;
+      if (toolCallsArr && toolCallsArr.length > 0) {
+        const first = toolCallsArr[0];
+        const name: string = typeof first?.function?.name === 'string' ? first.function.name : '';
+        const args: string =
+          typeof first?.function?.arguments === 'string'
+            ? first.function.arguments
+            : JSON.stringify(first?.function?.arguments ?? {});
+        const contentStr = typeof content === 'string' ? content.trim() : '';
+        return {
+          content: contentStr,
+          toolCalls: [{ name, arguments: args }],
+          usage: parseUsage(data?.usage),
+        };
+      }
+      // Provider answered in content instead of tool_calls — fall through to normal handling.
+    }
+
+    if (typeof content !== 'string' || content.trim().length === 0) {
+      // finish_reason "length" => the model ran out of output budget before answering.
+      if (choice?.finish_reason === 'length') {
+        throw new LlmGatewayError('The model hit its output limit before returning a strategy. Try a simpler idea or pick a different model.', 502, { failure: failure('envelope_parse') });
+      }
+      throw new LlmGatewayError('The model returned an empty response. Try again.', undefined, { failure: failure('envelope_parse') });
+    }
+    const trimmed = content.length > LLM_LIMITS.MAX_OUTPUT_CHARS
+      ? content.slice(0, LLM_LIMITS.MAX_OUTPUT_CHARS)
+      : content;
+    return { content: trimmed, usage: parseUsage(data?.usage) };
+  } catch (err: any) {
+    if (err instanceof LlmGatewayError) throw err;
+    // Never retain the exception message: fetch errors can contain credentials.
+    const failureClass = controller.signal.aborted ? 'timeout' : err?.name === 'AbortError' ? 'abort' : stage;
+    throw new LlmGatewayError(failureClass === 'timeout' || failureClass === 'abort'
+      ? 'The model took too long to respond. Try again.'
+      : stage === 'network' ? 'Could not reach the model provider. Check your connection and try again.'
+      : 'The model returned an unreadable response. Try again.',
+      failureClass === 'timeout' || failureClass === 'abort' ? 408 : undefined,
+      { failure: failure(failureClass) });
   } finally {
+    // Cover body consumption as well as headers; otherwise a stalled body escapes G12.
     clearTimeout(timer);
   }
-
-  if (!res.ok) {
-    // Drain the body so the socket frees, but DO NOT log or surface it. WO-4: sniff a
-    // 400 body for the temperature quirk (some providers reject any explicit value) and
-    // expose ONLY the boolean flag — never the raw body — so callers can retry once
-    // with `omitTemperature:true`.
-    let temperatureUnsupported = false;
-    try {
-      const bodyText = await res.text();
-      if (res.status === 400 && !opts.omitTemperature && /temperature/i.test(bodyText)) {
-        temperatureUnsupported = true;
-      }
-    } catch {
-      /* ignore */
-    }
-    throw new LlmGatewayError(mapStatusToMessage(res.status), res.status, { temperatureUnsupported });
-  }
-
-  let data: any;
-  try {
-    data = await res.json();
-  } catch {
-    throw new LlmGatewayError('The model returned an unreadable response. Try again.');
-  }
-
-  const choice: any = data?.choices?.[0];
-  const content: unknown = choice?.message?.content;
-
-  // WO-2: when caller sent `tools`, a valid response may carry tool_calls instead of
-  // (or in addition to) content. Parse the first call and return early so the empty-
-  // content check below never fires on a legitimate tool-call response.
-  if (opts.tools) {
-    const toolCallsArr: any[] | undefined = Array.isArray(choice?.message?.tool_calls)
-      ? choice.message.tool_calls
-      : undefined;
-    if (toolCallsArr && toolCallsArr.length > 0) {
-      const first = toolCallsArr[0];
-      const name: string = typeof first?.function?.name === 'string' ? first.function.name : '';
-      const args: string =
-        typeof first?.function?.arguments === 'string'
-          ? first.function.arguments
-          : JSON.stringify(first?.function?.arguments ?? {});
-      const contentStr = typeof content === 'string' ? content.trim() : '';
-      return {
-        content: contentStr,
-        toolCalls: [{ name, arguments: args }],
-        usage: parseUsage(data?.usage),
-      };
-    }
-    // Provider answered in content instead of tool_calls — fall through to normal handling.
-  }
-
-  if (typeof content !== 'string' || content.trim().length === 0) {
-    // finish_reason "length" => the model ran out of output budget before answering.
-    if (choice?.finish_reason === 'length') {
-      throw new LlmGatewayError('The model hit its output limit before returning a strategy. Try a simpler idea or pick a different model.', 502);
-    }
-    throw new LlmGatewayError('The model returned an empty response. Try again.');
-  }
-  const trimmed = content.length > LLM_LIMITS.MAX_OUTPUT_CHARS
-    ? content.slice(0, LLM_LIMITS.MAX_OUTPUT_CHARS)
-    : content;
-  return { content: trimmed, usage: parseUsage(data?.usage) };
 }
 
 // Back-compat wrapper: returns just the answer text (draft/improve callers).

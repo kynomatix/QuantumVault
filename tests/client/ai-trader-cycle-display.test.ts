@@ -27,4 +27,14 @@ describe("latest automatic check display", () => {
     expect(cycleDisplay({ status: "available", cycle: base }).schedule).toContain("No next check");
     expect(cycleDisplay({ status: "available", cycle: { ...base, rearmed: true, nextPlannedBoundary: new Date(2).toISOString() } }).schedule).toContain("was scheduled");
   });
+  it("shows safe failure diagnostics and leaves older cycles readable", () => {
+    const failed = { ...base, outcome: "failed" as const, reasonCode: "gateway_error" as const };
+    expect(cycleDisplay({ status: "available", cycle: failed }).gatewayDetail).toBeNull();
+    expect(cycleDisplay({ status: "available", cycle: { ...failed, gatewayFailure: {
+      failureClass: "http", httpStatus: 400, providerCode: "invalid_json_schema", providerType: "invalid_request_error", elapsedMs: 1200, attemptCount: 2,
+    } } }).gatewayDetail).toBe("http · HTTP 400 · invalid_json_schema · invalid_request_error · 1200 ms · 2 attempt(s)");
+    expect(cycleDisplay({ status: "available", cycle: { ...base, gatewayFailure: {
+      failureClass: "network", httpStatus: null, providerCode: null, providerType: null, elapsedMs: 1, attemptCount: 1,
+    } } }).gatewayDetail).toBeNull();
+  });
 });

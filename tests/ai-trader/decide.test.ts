@@ -6,7 +6,7 @@ import { observePacificaConstraints } from "../../server/protocol/market-constra
 // zod↔JSON-schema single-source parity, malformed→corrective-retry→success,
 // malformed×2 abort, prose-instead-of-tool-call, timeout/gateway aborts (no row),
 // the temperature-400 retry, flat decisions, and guardrail rejection rows.
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { AiTraderBot } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import { LlmGatewayError, type LlmMessage } from "../../server/ai-assistant/router";
@@ -169,6 +169,7 @@ beforeEach(() => {
   costMock.mockResolvedValue(0.012345);
   pnlMapMock.mockResolvedValue(new Map());
 });
+afterEach(() => vi.unstubAllGlobals());
 
 // --- Schema single-source parity -------------------------------------------------
 
@@ -919,7 +920,7 @@ describe("r2j absent market audit", () => {
 
 describe("fixed-paper decision-v2 flat explanations", () => {
   const flat = { action: "flat", confidence: 5, invalidation: "n/a", rationale: "No confirmed setup", flatReasonsVersion: 1, flatReasons: ["structure_conflict", "context_insufficient"] };
-  it("enforces version, unique bounds and conditional provider requirements", async () => {
+  it("enforces version, unique bounds and conditional requirements in Zod", async () => {
     const { paperTradeDecisionSchema, PAPER_DECISION_JSON_SCHEMA } = await importDecide();
     expect(paperTradeDecisionSchema.parse(flat).flatReasons).toEqual(flat.flatReasons);
     for (const reasons of [[], ["UNKNOWN"], ["no_setup", "no_setup"], ["no_setup", "thin_liquidity", "other", "session_risk"]])
@@ -928,12 +929,7 @@ describe("fixed-paper decision-v2 flat explanations", () => {
     expect(paperTradeDecisionSchema.safeParse({ ...flat, flatReasons: undefined }).success).toBe(false);
     expect(paperTradeDecisionSchema.safeParse({ ...flat, flatReasons: ["other"], rationale: " " }).success).toBe(false);
     expect(paperTradeDecisionSchema.safeParse({ ...VALID_LONG_ARGS, flatReasons: ["no_setup"] }).success).toBe(false);
-    const branches = PAPER_DECISION_JSON_SCHEMA.oneOf as any[];
-    expect(branches).toHaveLength(4);
-    const flatBranch = branches.find(b => b.properties.action.const === "flat");
-    expect(flatBranch.required).toEqual(expect.arrayContaining(["flatReasonsVersion", "flatReasons"]));
-    expect(flatBranch.properties.flatReasons).toMatchObject({ minItems: 1, maxItems: 3, uniqueItems: true });
-    expect(branches.filter(b => b !== flatBranch).every(b => b.additionalProperties === false && !b.properties.flatReasons)).toBe(true);
+    expect(PAPER_DECISION_JSON_SCHEMA).toMatchObject({ type: "object", additionalProperties: false });
   });
   it("counts temperature retry plus one correction and retains raw reasons", async () => {
     const { runDecision } = await importDecide(); const onGatewayCall = vi.fn();
@@ -956,5 +952,56 @@ describe("fixed-paper decision-v2 flat explanations", () => {
     expect((await runDecision({ bot: makeBot(scope as any), apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter() })).ok).toBe(true);
     expect((capturedCalls[0].opts.tools as any[])[0].function.parameters).toEqual(DECISION_JSON_SCHEMA);
     expect(callMock).toHaveBeenCalledTimes(1);
+  });
+  it.each(["qwen/qwen3.7-max", "anthropic/claude-opus-4.8"])("sends a compatible exact HTTP request for fixed PAPER with %s", async model => {
+    const actual = await vi.importActual<typeof import("../../server/ai-assistant/router")>("../../server/ai-assistant/router");
+    callMock.mockImplementation(actual.callOpenRouterWithUsage);
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({
+      choices: [{ message: { tool_calls: [{ function: { name: "decide", arguments: JSON.stringify(flat) } }] } }],
+    }) });
+    vi.stubGlobal("fetch", fetchMock);
+    const { runDecision, DECISION_JSON_SCHEMA } = await importDecide();
+    const context = makeContext();
+    const result = await runDecision({ bot: makeBot({ model, paperMode: true }), apiKey: "EXAMPLE", context, adapter: makeAdapter() });
+    expect(result.ok).toBe(true);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const schema = body.tools[0].function.parameters;
+    expect(body).toEqual({ model, messages: [{ role: "system", content: context.system }, { role: "user", content: context.user }],
+      max_tokens: 8192, temperature: 0.2, reasoning: { enabled: false }, tools: body.tools,
+      tool_choice: "required", provider: { require_parameters: true } });
+    expect(body.tools).toHaveLength(1);
+    expect(body.tools[0].function).not.toHaveProperty("strict");
+    expect(schema.type).toBe("object");
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.required).toEqual(DECISION_JSON_SCHEMA.required);
+    const { flatReasons, flatReasonsVersion, ...legacyProperties } = schema.properties;
+    expect(legacyProperties).toEqual(DECISION_JSON_SCHEMA.properties);
+    expect(flatReasonsVersion).toEqual({ type: "integer", enum: [1] });
+    expect(flatReasons).toMatchObject({ type: "array", items: { type: "string" } });
+    // Optional fields use the working legacy non-strict dialect. No unions,
+    // array cardinality/uniqueness keywords, constants or extra object levels.
+    const visit = (node: any, depth = 0) => {
+      expect(depth).toBeLessThanOrEqual(4);
+      if (!node || typeof node !== "object") return;
+      for (const [key, value] of Object.entries(node)) {
+        expect(["oneOf", "anyOf", "allOf", "minItems", "maxItems", "uniqueItems", "pattern", "$ref", "const", "strict"]).not.toContain(key);
+        if (value && typeof value === "object" && !Array.isArray(value)) visit(value, depth + 1);
+      }
+    };
+    visit(schema);
+    expect(JSON.stringify(schema).length).toBeLessThan(4000);
+    expect(insertMock.mock.calls[0][0].rawDecision.flatReasons).toEqual(flat.flatReasons);
+  });
+  it("retains safe metadata and counts every temperature/correction attempt on failure", async () => {
+    const { runDecision } = await importDecide();
+    callMock.mockRejectedValueOnce(new LlmGatewayError("EXAMPLE", 400, { temperatureUnsupported: true }))
+      .mockResolvedValueOnce(toolResponse({ ...flat, flatReasons: undefined }))
+      .mockRejectedValueOnce(new LlmGatewayError("EXAMPLE", 503));
+    const onGatewayCall = vi.fn(() => { throw new Error("EXAMPLE audit failure"); });
+    const result = await runDecision({ bot: makeBot({ paperMode: true }), apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter(), onGatewayCall });
+    expect(result).toMatchObject({ ok: false, reason: "gateway", gatewayFailure: {
+      failureClass: "http", httpStatus: 503, attemptCount: 3, elapsedMs: expect.any(Number),
+    } });
+    expect(insertMock).not.toHaveBeenCalled();
   });
 });

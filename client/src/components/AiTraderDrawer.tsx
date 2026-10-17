@@ -1420,6 +1420,7 @@ export function AiTraderDrawer({ isOpen, onClose, botId, walletAddress, onBotUpd
                 return <>
                   {view.time && <div className="text-muted-foreground">{new Date(view.time).toLocaleString()}</div>}
                   <div>{view.outcome}</div>
+                  {view.gatewayDetail && <div className="text-muted-foreground">{view.gatewayDetail}</div>}
                   {detail?.latestCycle?.cycle?.reasonCode === "guardrail_rejected" && <div>{violationChipLabels(detail.latestCycle.cycle.detailCodes.map(code => ({ code }))).join(" · ")}</div>}
                   {view.flatLabels.length > 0 && <div>{view.flatLabels.join(" · ")}</div>}
                   {view.rationale && <div className="text-muted-foreground whitespace-pre-wrap">{view.rationale}</div>}
