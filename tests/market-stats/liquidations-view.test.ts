@@ -18,7 +18,7 @@ describe('modelled monthly liquidation display', () => {
     for (const text of ['Estimated liquidation zones', 'updated daily', 'Largest estimated cluster above price',
       'Largest estimated cluster below price', 'Price often moves towards these pools', 'What this covers',
       '50/50', '5x 10%', '100x 10%', 'not real positions', 'not a forecast', 'oi-leverage-v1', '4-hour sample',
-      'Outside range', 'Long', 'Short', 'UTC', 'overflow-x-auto', 'min-w-[900px]']) expect(html).toContain(text);
+      'Outside range', 'Long', 'Short', 'UTC', 'overflow-x-auto', 'min-w-[900px]', 'Heatmap covers the last 30 days', '180 days']) expect(html).toContain(text);
     expect(html).not.toContain('90 days'); expect(html).not.toContain('Weekly');
   });
   it('hides expired charts and explains the 26-hour freshness ceiling', () => {
