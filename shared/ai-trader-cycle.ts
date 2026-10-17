@@ -1,5 +1,10 @@
 import type { FlatReason } from "./ai-trader-flat-reasons";
 
+// Owner history rule supersedes B-PLAN's 30-day / 1,024-row limits.
+// The hard cap takes precedence for high-frequency bots; running rows are never evicted.
+export const AI_TRADER_CYCLE_RETENTION_DAYS = 365;
+export const AI_TRADER_CYCLE_MAX_ROWS = 20_000;
+
 export const CYCLE_REASONS = [
   "paused", "position_open", "auto_next_off", "mode_suggest", "venue_retired",
   "venue_unavailable", "schema_not_ready", "cooldown", "daily_cap", "model_key_missing",

@@ -115,6 +115,20 @@ afterEach(async () => {
 });
 
 describe("AI Trader pool-load attribution", () => {
+  it("never schedules decision compression at startup or in the daily sweep", async () => {
+    getActiveBotsMock.mockResolvedValue([]);
+    const intervals = vi.spyOn(globalThis, "setInterval");
+    const { monitor } = await loadModules();
+    monitor.startAiTraderMonitor();
+    await vi.advanceTimersByTimeAsync(15_000);
+    const daily = intervals.mock.calls.find(([, delay]) => delay === 6 * 60 * 60 * 1000);
+    expect(daily).toBeDefined();
+    (daily![0] as () => void)();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getActiveBotsMock).toHaveBeenCalled();
+    expect(compressDecisionsMock).not.toHaveBeenCalled();
+  });
+
   it("manifest publication preserves scanner pool-attribution reporting", async () => {
     const { formatPoolLoadTags } = await loadModules();
     expect(formatPoolLoadTags()).toBe("");

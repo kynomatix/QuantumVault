@@ -5007,6 +5007,7 @@ async function tick(): Promise<void> {
 
 // --- Decision compression sweep ------------------------------------------------------
 
+// Legacy helper only: intentionally unscheduled under the owner history rule.
 export async function runDecisionCompressionSweep(): Promise<void> {
   const releasePoolLoadOwner = claimPoolLoadOwner(activeCompression);
   try {
@@ -5042,13 +5043,7 @@ export function startAiTraderMonitor(): void {
       runGraduationSweep().catch((err) =>
         console.error(`[AiTraderMonitor] boot graduation sweep crashed: ${err instanceof Error ? err.message : err}`)
       );
-      // Compression sweep deferred by one tick so it never competes with both
-      // reconcileOnStartup AND the first tick simultaneously at boot.
-      setTimeout(() => {
-        runDecisionCompressionSweep().catch((err) =>
-          console.error(`[AiTraderMonitor] boot compression sweep crashed: ${err instanceof Error ? err.message : err}`)
-        );
-      }, MONITOR_TICK_MS);
+      // Preserve full decision diagnostics for historical trading analysis.
     });
   tickTimer = setInterval(() => {
     tick().catch((err) => console.error(`[AiTraderMonitor] tick crashed: ${err instanceof Error ? err.message : err}`));
@@ -5056,9 +5051,6 @@ export function startAiTraderMonitor(): void {
   sweepTimer = setInterval(() => {
     runGraduationSweep().catch((err) =>
       console.error(`[AiTraderMonitor] graduation sweep crashed: ${err instanceof Error ? err.message : err}`)
-    );
-    runDecisionCompressionSweep().catch((err) =>
-      console.error(`[AiTraderMonitor] compression sweep crashed: ${err instanceof Error ? err.message : err}`)
     );
   }, DAILY_SWEEP_MS);
   tickTimer.unref?.();

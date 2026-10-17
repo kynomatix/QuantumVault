@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import type { CycleFinish, CycleStart } from "@shared/ai-trader-cycle";
+import { AI_TRADER_CYCLE_MAX_ROWS, AI_TRADER_CYCLE_RETENTION_DAYS, type CycleFinish, type CycleStart } from "@shared/ai-trader-cycle";
 
 // bundle-v1 uses the shared database: create and delete only this suite's bots.
 describe.skipIf(!process.env.DATABASE_URL)("durable cycle admission and retention", () => {
@@ -30,6 +30,15 @@ describe.skipIf(!process.env.DATABASE_URL)("durable cycle admission and retentio
     return { id: randomUUID(), botId, plannedBoundary: startedAt, startedAt, botUpdatedAt: null, protocol: "pacifica",
       market: "SOL-PERP", timeframe: "4h", marketSource: "fixed", paperMode: true, model: "EXAMPLE", ownerBootId, details: {} };
   }
+  async function seed(rows: any[]) {
+    for (let offset = 0; offset < rows.length; offset += 500)
+      await db.insert(schema.aiTraderCycles).values(rows.slice(offset, offset + 500));
+  }
+  it("keeps at least one year with a bounded capacity of at least 20,000", () => {
+    expect(AI_TRADER_CYCLE_RETENTION_DAYS).toBeGreaterThanOrEqual(365);
+    expect(AI_TRADER_CYCLE_MAX_ROWS).toBeGreaterThanOrEqual(20_000);
+    expect(Number.isSafeInteger(AI_TRADER_CYCLE_MAX_ROWS)).toBe(true);
+  });
   it("starts and finalizes idempotently, enforces owners, and cascades bot deletion", async () => {
     const botId = await newBot(); const value = start(botId);
     await storage.startAiTraderCycle(value); await storage.startAiTraderCycle(value);
@@ -43,27 +52,41 @@ describe.skipIf(!process.env.DATABASE_URL)("durable cycle admission and retentio
     await db.delete(schema.aiTraderBots).where(eq(schema.aiTraderBots.id, botId));
     expect(await storage.getLatestAiTraderCycle(botId)).toBeUndefined();
   });
-  it("serializes concurrent admission at 1024 and never deletes running rows", async () => {
+  it("serializes concurrent admission at the hard cap and never deletes running rows", async () => {
     const botId = await newBot(); const running = start(botId, new Date(Date.now() - 1000));
-    await db.insert(schema.aiTraderCycles).values([running, ...Array.from({ length: 1023 }, () => ({ ...start(botId, new Date(Date.now() - 5000)), ...terminal, finishedAt: new Date() }))]);
+    const oldest = [start(botId, new Date(Date.now() - 10_000)), start(botId, new Date(Date.now() - 9_000))];
+    await seed([running, ...oldest.map(value => ({ ...value, ...terminal })), ...Array.from({ length: AI_TRADER_CYCLE_MAX_ROWS - 3 }, () => ({ ...start(botId, new Date(Date.now() - 5000)), ...terminal, finishedAt: new Date() }))]);
     const entrants = [start(botId), start(botId)];
     await Promise.all(entrants.map(value => storage.startAiTraderCycle(value)));
     const rows = await db.select().from(schema.aiTraderCycles).where(eq(schema.aiTraderCycles.botId, botId));
-    expect(rows).toHaveLength(1024); expect(rows.filter(row => row.outcome === "running")).toHaveLength(3);
+    expect(rows).toHaveLength(AI_TRADER_CYCLE_MAX_ROWS); expect(rows.filter(row => row.outcome === "running")).toHaveLength(3);
     expect(rows.some(row => row.id === running.id)).toBe(true);
-  });
+    expect(rows.some(row => oldest.some(value => value.id === row.id))).toBe(false);
+  }, 120_000);
   it("refuses an all-running ledger and retains sole old evidence without age-only recovery", async () => {
-    const botId = await newBot(); const old = start(botId, new Date(Date.now() - 40 * 86_400_000));
+    const botId = await newBot(); const old = start(botId, new Date(Date.now() - (AI_TRADER_CYCLE_RETENTION_DAYS + 1) * 86_400_000));
     await db.insert(schema.aiTraderCycles).values({ ...old, ...terminal });
     const latest = start(botId); await storage.startAiTraderCycle(latest);
     expect((await db.select().from(schema.aiTraderCycles).where(eq(schema.aiTraderCycles.botId, botId))).some(row => row.id === old.id)).toBe(true);
     await storage.startAiTraderCycle(start(botId));
     expect((await db.select().from(schema.aiTraderCycles).where(eq(schema.aiTraderCycles.botId, botId))).some(row => row.id === old.id)).toBe(false);
-    const fullBot = await newBot(); const starts = Array.from({ length: 1024 }, () => start(fullBot, old.startedAt));
-    await db.insert(schema.aiTraderCycles).values(starts);
+    const fullBot = await newBot(); const starts = Array.from({ length: AI_TRADER_CYCLE_MAX_ROWS }, () => start(fullBot, old.startedAt));
+    await seed(starts);
     await expect(storage.startAiTraderCycle(start(fullBot))).rejects.toThrow("cycle_ledger_all_running");
     const [{ count }] = await db.select({ count: sql<number>`count(*)::int` }).from(schema.aiTraderCycles).where(eq(schema.aiTraderCycles.botId, fullBot));
-    expect(count).toBe(1024);
+    expect(count).toBe(AI_TRADER_CYCLE_MAX_ROWS);
+  }, 120_000);
+  it("retains terminal history inside the year and evicts the oldest terminal rows first", async () => {
+    const botId = await newBot();
+    const retained = start(botId, new Date(Date.now() - 364 * 86_400_000));
+    const oldest = start(botId, new Date(Date.now() - 366 * 86_400_000));
+    const running = start(botId, new Date(Date.now() - 400 * 86_400_000));
+    await seed([{ ...oldest, ...terminal }, { ...retained, ...terminal }, running]);
+    await storage.startAiTraderCycle(start(botId));
+    const rows = await db.select().from(schema.aiTraderCycles).where(eq(schema.aiTraderCycles.botId, botId));
+    expect(rows.some(row => row.id === oldest.id)).toBe(false);
+    expect(rows.some(row => row.id === retained.id)).toBe(true);
+    expect(rows.some(row => row.id === running.id)).toBe(true);
   });
   it("rejects cross-bot decision links and malformed/oversized receipt shapes", async () => {
     const botId = await newBot(); const value = start(botId); await storage.startAiTraderCycle(value);

@@ -1,5 +1,5 @@
 import type { CycleStart, CycleFinish } from "@shared/ai-trader-cycle";
-import { assertCycleFinish } from "@shared/ai-trader-cycle";
+import { assertCycleFinish, AI_TRADER_CYCLE_RETENTION_DAYS, AI_TRADER_CYCLE_MAX_ROWS } from "@shared/ai-trader-cycle";
 import { aiTraderCycles, type AiTraderCycle } from "@shared/schema";
 import { createLabLinkedBot } from './lab/provenance';
 import { getTableColumns, eq, ne, desc, asc, sql, and, or, ilike, gte, lte, lt, inArray, notInArray, isNotNull, isNull } from "drizzle-orm";
@@ -8191,12 +8191,12 @@ export class DatabaseStorage implements IStorage {
         if (existing.botId !== value.botId || existing.ownerBootId !== value.ownerBootId) throw new Error("cycle_receipt_owner_mismatch");
         return; // Same owner and UUID retry, including a finalized receipt.
       }
-      // Retain the newest evidence even when it is older than 30 days.
-      await tx.execute(sql`DELETE FROM ai_trader_cycles WHERE bot_id = ${value.botId} AND outcome <> 'running' AND started_at < clock_timestamp() - interval '30 days' AND id <> (SELECT id FROM ai_trader_cycles WHERE bot_id = ${value.botId} ORDER BY started_at DESC, id DESC LIMIT 1)`);
+      // Retain the newest evidence even when it is older than the retention window.
+      await tx.execute(sql`DELETE FROM ai_trader_cycles WHERE bot_id = ${value.botId} AND outcome <> 'running' AND started_at < clock_timestamp() - (${AI_TRADER_CYCLE_RETENTION_DAYS} * interval '1 day') AND id <> (SELECT id FROM ai_trader_cycles WHERE bot_id = ${value.botId} ORDER BY started_at DESC, id DESC LIMIT 1)`);
       // Running rows count toward the cap but are never evicted. This lock serializes concurrent admissions.
-      await tx.execute(sql`DELETE FROM ai_trader_cycles WHERE id IN (SELECT id FROM ai_trader_cycles WHERE bot_id = ${value.botId} AND outcome <> 'running' ORDER BY started_at, id LIMIT GREATEST(0, (SELECT count(*) FROM ai_trader_cycles WHERE bot_id = ${value.botId}) - 1023))`);
+      await tx.execute(sql`DELETE FROM ai_trader_cycles WHERE id IN (SELECT id FROM ai_trader_cycles WHERE bot_id = ${value.botId} AND outcome <> 'running' ORDER BY started_at, id LIMIT GREATEST(0, (SELECT count(*) FROM ai_trader_cycles WHERE bot_id = ${value.botId}) - ${AI_TRADER_CYCLE_MAX_ROWS - 1}))`);
       const [countRow] = await tx.select({ count: sql<number>`count(*)::int` }).from(aiTraderCycles).where(eq(aiTraderCycles.botId, value.botId));
-      if (countRow.count >= 1024) throw new Error("cycle_ledger_all_running");
+      if (countRow.count >= AI_TRADER_CYCLE_MAX_ROWS) throw new Error("cycle_ledger_all_running");
       await tx.insert(aiTraderCycles).values(value).onConflictDoNothing({ target: aiTraderCycles.id });
     });
   }
