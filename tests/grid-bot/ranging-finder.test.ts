@@ -5,6 +5,7 @@ vi.mock('../../server/grid-planner/pacifica-candles', async original => ({
   ...await original<typeof import('../../server/grid-planner/pacifica-candles')>(), pacificaPlannerCandles: transports.pacifica,
 }));
 import { RangingMarketFinder, qualifyRangingMarket } from '../../server/grid-planner/scanner';
+import { createFinderCandleReader } from '../../server/grid-planner/finder-candle-cache';
 import { plannerPoolCandles } from '../../server/grid-planner/candle-pool';
 import type { PlannerCandle, PlannerDeps } from '../../server/grid-planner/types';
 import type { ProtocolMarket } from '../../server/protocol/protocol-types';
@@ -23,7 +24,7 @@ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); 
 describe('on-demand ranging finder bounds', () => {
   it('checks deterministic pages of 20 with only two in flight, caches measurements and sorts by ADX then symbol', async () => {
     let active = 0, peak = 0;
-    const read = vi.fn(async () => { peak = Math.max(peak, ++active); await new Promise<void>(done => setImmediate(done)); active--; return candles(); });
+    const read = vi.fn(async (_market: string, _tf: string, _bars: number, _signal: AbortSignal) => { peak = Math.max(peak, ++active); await new Promise<void>(done => setImmediate(done)); active--; return candles(); });
     const finder = new RangingMarketFinder(deps(read)), universe = [...rows(45), row('INACTIVE', false), row('M00')];
     const first = await finder.read(universe, '1h', 0, signal());
     expect(read).toHaveBeenCalledTimes(20); expect(peak).toBe(2);
@@ -37,7 +38,7 @@ describe('on-demand ranging finder bounds', () => {
   it('deduplicates simultaneous clicks and cancellation of one caller preserves the other', async () => {
     let release!: () => void;
     const hold = new Promise<void>(done => { release = done; });
-    const read = vi.fn(async () => { await hold; return candles(); });
+    const read = vi.fn(async (_market: string, _tf: string, _bars: number, _signal: AbortSignal) => { await hold; return candles(); });
     const finder = new RangingMarketFinder(deps(read)), owner = new AbortController(), universe = rows(2);
     const cancelled = finder.read(universe, '1h', 0, owner.signal).catch(e => e.message);
     const joined = finder.read(universe, '1h', 0, signal());
@@ -119,23 +120,61 @@ describe('ranging qualification uses both existing facts', () => {
   });
 });
 
-describe('shared finalized planner pool cache', () => {
-  it('reuses planner history for finder-sized reads and rolls the cache at a new finalized cut', async () => {
+describe('finder-only finalized candle cache', () => {
+  it('isolates caches, retries partial reads and keeps planner calls uncached', async () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     transports.read.mockImplementation(async (_source, _market, _tf, start, end) => candles(end, (end - start) / step));
-    expect(await plannerPoolCandles('CACHE-PERP', '1h', 168, signal())).toHaveLength(168);
-    expect(await plannerPoolCandles('CACHE-PERP', '1h', 100, signal())).toHaveLength(100);
+    const first = createFinderCandleReader(plannerPoolCandles), second = createFinderCandleReader(plannerPoolCandles);
+    await first('ISOLATED-PERP', '1h', 100, signal());
+    await first('ISOLATED-PERP', '1h', 100, signal());
+    await second('ISOLATED-PERP', '1h', 100, signal());
+    await plannerPoolCandles('ISOLATED-PERP', '1h', 100, signal());
+    await plannerPoolCandles('ISOLATED-PERP', '1h', 100, signal());
+    expect(transports.read).toHaveBeenCalledTimes(4);
+    const partial = vi.fn(async () => candles(cut, 99));
+    const read = createFinderCandleReader(partial, () => now);
+    await read('PARTIAL-PERP', '1h', 100, signal());
+    await read('PARTIAL-PERP', '1h', 100, signal());
+    expect(partial).toHaveBeenCalledTimes(2);
+  });
+  it('bounds cached complete reads to 64 entries and separates markets and bar counts', async () => {
+    const source = vi.fn(async (_market: string, _tf: string, bars: number) => candles(cut, bars));
+    const read = createFinderCandleReader(source, () => now);
+    for (let i = 0; i < 65; i++) await read(`M${i}-PERP`, '1h', 100, signal());
+    await read('M1-PERP', '1h', 100, signal());
+    expect(source).toHaveBeenCalledTimes(65);
+    await read('M0-PERP', '1h', 100, signal());
+    await read('M0-PERP', '1h', 168, signal());
+    expect(source).toHaveBeenCalledTimes(67);
+  });
+  it('rejects an aborted cache miss and cancels its underlying read', async () => {
+    const source = vi.fn((_m: string, _tf: string, _bars: number, abort: AbortSignal) =>
+      new Promise<PlannerCandle[]>((_resolve, reject) => abort.addEventListener('abort', () => reject(abort.reason), { once: true })));
+    const read = createFinderCandleReader(source, () => now), owner = new AbortController();
+    const pending = read('ABORT-PERP', '1h', 100, owner.signal);
+    const rejection = expect(pending).rejects.toThrow('EXAMPLE cancelled');
+    owner.abort(Error('EXAMPLE cancelled'));
+    await rejection;
+    expect(source.mock.calls[0][3].aborted).toBe(true);
+  });
+  it('reuses opt-in history for finder-sized reads and rolls the cache at a new finalized cut', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const read = createFinderCandleReader(plannerPoolCandles);
+    transports.read.mockImplementation(async (_source, _market, _tf, start, end) => candles(end, (end - start) / step));
+    expect(await read('CACHE-PERP', '1h', 168, signal())).toHaveLength(168);
+    expect(await read('CACHE-PERP', '1h', 100, signal())).toHaveLength(100);
     expect(transports.read).toHaveBeenCalledTimes(1);
     vi.setSystemTime(now + step);
-    await plannerPoolCandles('CACHE-PERP', '1h', 100, signal()); expect(transports.read).toHaveBeenCalledTimes(2);
+    await read('CACHE-PERP', '1h', 100, signal()); expect(transports.read).toHaveBeenCalledTimes(2);
   });
   it('deduplicates simultaneous pool reads and keeps a surviving caller alive', async () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
+    const read = createFinderCandleReader(plannerPoolCandles);
     let release!: (value: PlannerCandle[]) => void;
     transports.read.mockReturnValue(new Promise<PlannerCandle[]>(done => { release = done; }));
     const owner = new AbortController();
-    const first = plannerPoolCandles('JOIN-PERP', '1h', 100, owner.signal).catch(() => []);
-    const second = plannerPoolCandles('JOIN-PERP', '1h', 100, signal()); owner.abort();
+    const first = read('JOIN-PERP', '1h', 100, owner.signal).catch(() => []);
+    const second = read('JOIN-PERP', '1h', 100, signal()); owner.abort();
     expect(await first).toEqual([]); expect(transports.read).toHaveBeenCalledTimes(1);
     expect((transports.read.mock.calls[0][5] as AbortSignal).aborted).toBe(false);
     release(candles()); expect(await second).toHaveLength(100);

@@ -1,3 +1,4 @@
+import { createFinderCandleReader } from './finder-candle-cache';
 import { suggestGridRange, gridTimeframeMs } from '../grid-bot/range';
 import { plannerRegime } from './regime';
 import type { PlannerCandle, PlannerDeps } from './types';
@@ -27,7 +28,7 @@ export function qualifyRangingMarket(market: string, symbol: string, timeframe: 
 export class RangingMarketFinder {
   private cache = new Map<string, Measurement>();
   private job?: { key: string; controller: AbortController; promise: Promise<GridFinderPage>; users: number };
-  constructor(private deps: PlannerDeps) {}
+  constructor(private deps: PlannerDeps, private readCandles = createFinderCandleReader(deps.candles, deps.now)) {}
 
   async read(rows: ProtocolMarket[], timeframe: GridFinderTimeframe, cursor: number, signal: AbortSignal): Promise<GridFinderPage> {
     const duration = gridTimeframeMs(timeframe);
@@ -76,7 +77,7 @@ export class RangingMarketFinder {
         let result = this.cache.get(key);
         if (!result) {
           try {
-            const candles = await this.deps.candles(row.internalSymbol, timeframe, GRID_FINDER_LIMITS.bars, signal);
+            const candles = await this.readCandles(row.internalSymbol, timeframe, GRID_FINDER_LIMITS.bars, signal);
             signal.throwIfAborted();
             result = qualifyRangingMarket(row.internalSymbol, row.protocolSymbol, timeframe, candles, this.deps.now(), historyCut);
             // Missing data may recover on a later click; successful measurements belong to this finalized cut.

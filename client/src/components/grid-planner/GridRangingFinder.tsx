@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Search, ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { walletAuthHeaders } from '@/lib/queryClient';
