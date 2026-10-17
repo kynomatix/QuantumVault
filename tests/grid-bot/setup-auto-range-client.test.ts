@@ -3,6 +3,7 @@ import { Children, createElement, isValidElement, type ReactElement, type ReactN
 import { Button } from '../../client/src/components/ui/button';
 import { DialogFooter } from '../../client/src/components/ui/dialog';
 import { GridPlannerSheet } from '../../client/src/components/grid-planner/GridPlannerSheet';
+import { GridRangingFinder } from '../../client/src/components/grid-planner/GridRangingFinder';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridRegimeHint } from '../../client/src/components/grid-planner/GridRegimeHint';
 import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraftActions';
@@ -173,6 +174,19 @@ afterEach(() => {
 });
 
 describe('Grid setup automatic opening range', () => {
+  it('finder selection uses the ordinary market change and never applies a candidate band', async () => {
+    holdCharts = true; await open(); await resolve(requests[0]);
+    chartRequests[0].resolve(chartFacts(chartRequests[0])); await settle();
+    edit('investment', '300');
+    const finder = () => find(node => node.type === GridRangingFinder);
+    const heldChart = chart();
+    finder().props.onSelect('BTC-PERP'); render(); await settle();
+    expect(chart()).toBe(heldChart);
+    finder().props.onSelect('ETH-PERP'); render(); await settle();
+    expect(prices()).toEqual({ lower: '', upper: '', stop: '' }); expect(chart()).toBeNull();
+    expect(field('investment').props.value).toBe('300');
+    expect(requests.at(-1)!.market).toBe('ETH-PERP'); expect(chartRequests.at(-1)!.market).toBe('ETH-PERP');
+  });
   it('retains the chart and range advisory while the same market refreshes, including a failed refresh', async () => {
     holdCharts = true; await open(); await resolve(requests[0]);
     chartRequests[0].resolve(chartFacts(chartRequests[0])); await settle();

@@ -8,6 +8,8 @@ import { PlannerRangeFacts } from './range-facts';
 import { marketSnapshot } from './market-snapshot';
 import { previewGrid, validatePreviewQuery } from './preview';
 import { gridHistoryRequest } from '../../shared/grid-lookback';
+import { RangingMarketFinder } from './scanner';
+import type { GridFinderTimeframe } from '../../shared/grid-finder';
 
 export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHandler,
   loadDeps: () => Promise<PlannerDeps> = async () => (await import('./default-deps')).defaultPlannerDeps,
@@ -16,6 +18,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   let depsPromise: Promise<PlannerDeps> | undefined, charts: PlannerCharts | undefined;
   let direction: PlannerDirection | undefined;
   let weekly: PlannerWeeklyStructure | undefined;
+  let finder: RangingMarketFinder | undefined;
   const ranges = new PlannerRangeFacts();
   let metadata: { rows: ProtocolMarket[]; observedAt: number } | undefined;
   let metadataJob: Promise<ProtocolMarket[]> | undefined, lastAttempt = -Infinity;
@@ -30,7 +33,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     if (now - lastAttempt < 300_000) return Promise.reject(new Error('Market metadata unavailable; refresh later'));
     lastAttempt = now;
     metadataJob = Promise.resolve().then(() => deps.getMarkets()).then(rows => {
-      metadata = { rows: rows.slice(0, 512), observedAt: deps.now() }; return metadata.rows;
+      metadata = { rows, observedAt: deps.now() }; return metadata.rows;
     }).catch(() => { metadata = undefined; throw new Error('Pacifica market metadata unavailable'); })
       .finally(() => { metadataJob = undefined; });
     return metadataJob;
@@ -76,6 +79,20 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
     direction ??= new PlannerDirection(deps);
     const result = await direction.read();
     if (!res.destroyed) res.json(result);
+  }));
+  app.get('/api/grid-planner/finder', requireWallet, route(['timeframe', 'cursor'], async (req, res, deps) => {
+    const { timeframe, cursor = '0' } = req.query;
+    if (!['15m', '1h', '4h'].includes(String(timeframe)) || typeof cursor !== 'string' || !/^(0|[1-9]\d{0,5})$/.test(cursor)) {
+      res.status(400).json({ state: 'unavailable', reason: 'Choose 15m, 1h or 4h and a valid finder cursor' }); return;
+    }
+    const controller = new AbortController(), onClose = () => controller.abort();
+    res.on('close', onClose);
+    try {
+      const rows = await boundedMetadata(deps);
+      finder ??= new RangingMarketFinder(deps);
+      const result = await finder.read(rows, timeframe as GridFinderTimeframe, Number(cursor), controller.signal);
+      if (!res.destroyed) res.json(result);
+    } finally { res.off('close', onClose); }
   }));
   app.get('/api/grid-planner/signals', requireWallet, route(['market'], async (req, res, deps) => {
     const market = req.query.market;

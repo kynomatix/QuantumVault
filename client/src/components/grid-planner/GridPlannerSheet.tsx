@@ -26,6 +26,7 @@ import { gridHistoryWindow } from '../../../../shared/grid-lookback';
 import { gridDraftRevision, gridWidth, type GridDraftPreview } from '@/lib/grid-draft-view';
 import { GridDraftActions, type GridDraftContent } from '../grid-bot/GridDraftActions';
 import { GridRegimeHint } from './GridRegimeHint';
+import { GridRangingFinder } from './GridRangingFinder';
 import type { GridIntent } from '../../../../shared/grid-draft';
 import type { PlannerRangeFacts } from '../../../../server/grid-planner/range-facts';
 type RangeFacts = Awaited<ReturnType<PlannerRangeFacts['read']>>;
@@ -422,6 +423,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
               <RefreshCw className="h-3.5 w-3.5 mr-2" />Refresh price
             </Button>
           </div>
+          <GridRangingFinder enabled={open && plannerEnabled} identity={identity} timeframe={form.timeframe} disabled={draftBusy}
+            onSelect={market => { if (market !== form.market) edit('market', market); }} />
           {(marketError || selected?.reference.state === 'unavailable') && <p role={marketError === PRICE_BUSY_MESSAGE ? 'status' : 'alert'}
             className={`col-span-2 text-sm ${marketError === PRICE_BUSY_MESSAGE ? 'text-muted-foreground' : 'text-destructive'}`}>
             {marketError || (selected?.reference.state === 'unavailable' ? selected.reference.reason : '')}</p>}
