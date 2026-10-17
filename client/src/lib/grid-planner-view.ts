@@ -2,6 +2,8 @@ import Decimal from 'decimal.js';
 import { GRID_HISTORY_MAX_BARS } from '../../../shared/grid-lookback';
 import {PER_BOT_ORDINARY_MAX,GRID_FULL_WINDOW_SLOTS,GRID_PROTECTION_RESERVE} from '../../../shared/grid-capacity';
 import type { PlannerChart, PlannerMarket, PlannerPreview } from '../../../server/grid-planner/types';
+import type { GridPlan } from '../../../server/grid-bot/engine-types';
+import type { GridSetupForm } from './grid-setup-view';
 export type { PlannerChart, PlannerMarket, PlannerPreview };
 export const PLANNING_BANNER = 'Planning only — no orders are placed';
 export const ASSUMPTION_LABEL = 'Your assumption — not a venue quote';
@@ -64,15 +66,49 @@ export function feePercentToRate(percent: string): string | null {
   return integer + (decimal ? '.' + decimal : '');
 }
 
+/** The request identity includes every editable preview input, including the proposed stop. */
+export function plannerPreviewQuery(form: GridSetupForm, stop: string) {
+  try {
+    const fee = form.investment ? feePercentToRate(form.feePercent) : null;
+    const q = new URLSearchParams({ market: form.market, side: form.side, lower: form.lower, upper: form.upper,
+      intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
+      leverage: form.leverage, investment: form.investment, stop });
+    if (fee !== null) q.set('fee', fee);
+    return { value: q.toString(), error: '' };
+  } catch (e) { return { value: '', error: (e as Error).message }; }
+}
+
+export function plannerGridCountHint(intervals: string): string {
+  if (!/^[1-9]\d{0,2}$/.test(intervals) || Number(intervals) > 100) return 'Enter 1–100 grids to see the price-line count.';
+  const count = Number(intervals);
+  return `${count} ${count === 1 ? 'grid makes' : 'grids make'} ${count + 1} price lines.`;
+}
+
+/** Use only the requested plan, never the diagnostic plan sized at minimum investment. */
+export function plannerOrderSizeSummary(plan: GridPlan | null | undefined, entryScale: string): string | null {
+  const entries = plan?.lines.filter(line => line.role === 'entry') ?? [];
+  if (!entries.length) return null;
+  const values = entries.map(line => new D(line.notional));
+  const dollars = (value: Decimal) => readableDecimal(value.toDecimalPlaces(value.gte(10) ? 0 : 2, Decimal.ROUND_HALF_UP).toFixed());
+  if (entryScale === 'flat') {
+    // Equal quote allocations precede lot rounding; seed exits share the budget when present.
+    const activeCount = plan!.lines.filter(line => line.role !== 'virtual').length;
+    const allocation = new D(plan!.investment).times(plan!.leverage).div(activeCount);
+    return `About $${dollars(allocation)} per grid order (equal sizes)`;
+  }
+  return `About $${dollars(D.min(...values))} to $${dollars(D.max(...values))} per grid order (scaled sizes)`;
+}
+
 /** Generation changes even for A→B→A and identical-query refreshes. */
 export class PlannerRequestGeneration {
   private generation = 0;
   private controller: AbortController | null = null;
   invalidate() { this.generation++; this.controller?.abort(); this.controller = null; }
-  start() {
+  start(inputKey?: string) {
     this.invalidate();
     const generation = this.generation, controller = new AbortController(); this.controller = controller;
-    return { signal: controller.signal, current: () => this.generation === generation && !controller.signal.aborted };
+    return { signal: controller.signal, current: (currentInputKey = inputKey) => currentInputKey === inputKey
+      && this.generation === generation && !controller.signal.aborted };
   }
 }
 const record = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);

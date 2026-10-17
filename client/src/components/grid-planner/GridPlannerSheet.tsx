@@ -10,7 +10,7 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { DrawerSettingsPanel } from '@/components/ui/settings-panel';
 import { walletAuthHeaders } from '@/lib/queryClient';
-import { ASSUMPTION_LABEL, feePercentToRate, PlannerRequestGeneration, isPlannerChart, plannerIssue, plannerMinimumRows,
+import { ASSUMPTION_LABEL, plannerPreviewQuery, plannerGridCountHint, plannerOrderSizeSummary, PlannerRequestGeneration, isPlannerChart, plannerIssue, plannerMinimumRows,
   isPlannerPreview, plannerOverlays, plannerLevelMessage, plannerVenueChecks, readableDecimal, readableTime, clientObservationDeadline,
   RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange, plannerRangeAround,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
@@ -58,7 +58,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [form, setForm] = useState(() => gridSetupForm(initialIntent, gridStoredMarket(identity))), [markets, setMarkets] = useState<PlannerMarket[]>([]);
   const defaultMarketPendingRef = useRef(!initialIntent);
   const [defaultMarketPending, setDefaultMarketPending] = useState(defaultMarketPendingRef.current);
-  const [preview, setPreview] = useState<PlannerPreview | null>(null), [chart, setChart] = useState<PlannerChart | null>(null);
+  const [previewResult, setPreview] = useState<{ inputKey: string; value: PlannerPreview } | null>(null), [chart, setChart] = useState<PlannerChart | null>(null);
+  const previewInputKey = useRef('');
   const [error, setError] = useState(''), [marketError, setMarketError] = useState(''), [chartError, setChartError] = useState('');
   const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [clock, setNow] = useState(Date.now());
   // Rendering can lag a timer callback past another deadline; never draw using its older clock sample.
@@ -157,16 +158,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     setError(''); setChartError(''); setNow(Date.now());
     setRefresh(r => r + 1);
   };
-  const query = useMemo(() => {
-    try {
-      const fee = form.investment ? feePercentToRate(form.feePercent) : null;
-      const q = new URLSearchParams({ market: form.market, side: form.side, lower: form.lower, upper: form.upper,
-        intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
-        leverage: form.leverage, investment: form.investment, stop: effectiveStop });
-      if (fee !== null) q.set('fee', fee);
-      return { value: q.toString(), error: '' };
-    } catch (e) { return { value: '', error: (e as Error).message }; }
-  }, [form, effectiveStop]);
+  const query = useMemo(() => plannerPreviewQuery(form, effectiveStop), [form, effectiveStop]);
+  previewInputKey.current = query.value;
+  // Hide mismatched results in this render, before effect cleanup can abort the previous request.
+  const preview = !query.error && previewResult?.inputKey === query.value ? previewResult.value : null;
   useEffect(() => {
     if (!open) return;
     let obsoleteDefault = false, marketReadSucceeded = false;
@@ -217,20 +212,21 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     }).catch(e => { if (request.current()) setChartError(e.message); });
     return () => generation.current.chart.invalidate();
   }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, chartRefresh, plannerEnabled, defaultMarketPending]);
-  useEffect(() => { setPreview(null); }, [query.value, query.error]);
   useEffect(() => {
     generation.current.preview.invalidate(); setLoading(false);
     if (!open || defaultMarketPending || !plannerEnabled || !form.market || query.error) return;
     if (!form.lower || !form.upper || (form.investment && !effectiveStop)) return;
-    const request = generation.current.preview.start(); setLoading(true); setError('');
+    const request = generation.current.preview.start(query.value);
+    const current = () => request.current(previewInputKey.current);
+    setLoading(true); setError('');
     const timer = setTimeout(() => {
       const startedAt = Date.now();
       readPlanner(`preview?${query.value}`, request.signal).then(value => {
-        if (!request.current()) return;
+        if (!current()) return;
         if (!isPlannerPreview(value) || value.market.market !== form.market) throw new Error('Invalid preview response');
         // Subtract the whole transit time; client/server wall-clock skew cannot renew authority.
-        setPreviewExpiry(startedAt + value.validForMs); setPreview(value); setNow(Date.now());
-      }).catch(e => { if (request.current()) setError(e.message); }).finally(() => { if (request.current()) setLoading(false); });
+        setPreviewExpiry(startedAt + value.validForMs); setPreview({ inputKey: query.value, value }); setNow(Date.now());
+      }).catch(e => { if (current()) setError(e.message); }).finally(() => { if (current()) setLoading(false); });
     }, 250);
     return () => { clearTimeout(timer); generation.current.preview.invalidate(); };
   }, [open, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry, plannerEnabled, defaultMarketPending]);
@@ -514,7 +510,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         </section>
 
           {numberField('intervals', 'Number of grids (1–100)')}
-          <p className="text-xs text-muted-foreground">10 grids make 11 price lines.</p>
+          <p className="text-xs text-muted-foreground">{plannerGridCountHint(form.intervals)}</p>
         </DrawerSettingsPanel>
 
         <DrawerSettingsPanel id="stop" title="Stop loss" icon={Shield} keepMounted
@@ -554,7 +550,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             <div><dt className="text-xs text-muted-foreground">Grids</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length - 1} grids` : preview?.geometry?.state === 'available' ? `${preview.geometry.value.length - 1} grids` : 'Awaiting preview'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Range you chose</dt><dd className="font-medium mt-1 break-words">{range ? `${readableDecimal(range.lower)} – ${readableDecimal(range.upper)}` : 'Enter lower and upper prices'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Proposed stop</dt><dd className="font-medium mt-1 break-words">{effectiveStop ? `${readableDecimal(effectiveStop)}${form.stop ? ' · custom' : ' · suggested'}` : 'Unavailable'}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Grid order sizes</dt><dd className="font-medium mt-1">{ORDER_SIZES.find(o => o.value === form.entryScale)?.label}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Grid order sizes</dt><dd className="font-medium mt-1">{plannerOrderSizeSummary(preview?.requestedPlan, form.entryScale) ?? 'Awaiting a preview at your investment'}</dd></div>
             {plannerMinimumRows(preview).map(row => <div key={row.label}><dt className="text-xs text-muted-foreground">{row.label}</dt><dd className="font-medium mt-1">{row.value}</dd></div>)}
           </dl>
           {(preview?.fee.state === 'unknown' || form.feePercent === '') && <p className="text-xs text-muted-foreground">Fee assumption not set — fees haven't been checked.</p>}

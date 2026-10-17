@@ -26,5 +26,8 @@ export function explainPlannerIssue(issue: GridIssue, input: GridInput): string 
     .div(line.price).div(input.lot).floor().mul(input.lot);
   const paired = /paired exit/.test(issue.reason) && isEntry;
   const price = paired ? geometry.lines[issue.ordinal + (input.side === 'long' ? 1 : -1)].price : line.price;
-  return `${paired ? 'A closing grid order' : 'Each grid order'} would be about $${dollars(quantity.mul(price).toFixed())}, below Pacifica's $${new D(input.minimumQuote).toFixed()} minimum order. Raise the investment, use fewer grids, or use more leverage.`;
+  const closing = paired || !isEntry;
+  const order = closing ? `The take-profit order at $${new D(price).toFixed()}` : 'Each grid order';
+  if (quantity.lt(input.lot)) return `${order} rounds below Pacifica's smallest quantity step (${input.lot} base units). Raise the investment, use fewer grids, or use more leverage.`;
+  return `${order} would be about $${dollars(quantity.mul(price).toFixed())}, below Pacifica's $${new D(input.minimumQuote).toFixed()} minimum${closing ? '' : ' order'}. Raise the investment, use fewer grids, or use more leverage.`;
 }

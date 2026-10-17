@@ -65,7 +65,7 @@ describe('Grid screenshot panel polish', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const plan = sheet.slice(sheet.indexOf('<h3 id="grid-plan-heading"'));
     expect(plan.indexOf('<GridPlanIssues')).toBeLessThan(plan.indexOf('<dl'));
-    expect(sheet).toContain('10 grids make 11 price lines.');
+    expect(sheet).toContain('plannerGridCountHint(form.intervals)');
     expect(sheet).toContain('Choose a market to see its price');
     expect(sheet).toContain('{form.market || undefined}</SelectValue>');
   });
