@@ -92,10 +92,13 @@ export function calculateGrid(input: GridInput): GridResult {
   if (investment.lt(input.transferFloor)) return failure('underfunded', 'Investment is below the supplied application transfer floor');
   for (const line of lines.filter(l => l.role !== 'virtual')) {
     const q = new D(line.quantity);
-    if (q.lt(lot) || new D(line.notional).lt(input.minimumQuote)) return failure('underfunded', 'Lot-rounded line is below the opening minimum', line.ordinal);
-    if (line.pairedExitOrdinal !== null && q.times(prices[line.pairedExitOrdinal]).lt(input.minimumQuote))
-      return failure('underfunded', 'Full entry quantity is below the minimum at its paired exit', line.ordinal);
+    if (q.lt(lot)) return failure('underfunded', 'Lot-rounded line is below one lot', line.ordinal);
+    if (line.role === 'entry' && new D(line.notional).lt(input.minimumQuote))
+      return failure('underfunded', 'Lot-rounded entry is below the opening minimum', line.ordinal);
   }
+  // The seed is one opening order; its reduce-only take-profits have only a lot floor.
+  if (input.seed && new D(plan.seedQuantity).gt(0) && new D(plan.seedQuantity).times(start).lt(input.minimumQuote))
+    return failure('underfunded', 'Starting-position order is below the opening minimum');
   return { ok: true, plan };
 }
 

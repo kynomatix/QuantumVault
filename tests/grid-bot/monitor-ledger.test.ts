@@ -36,6 +36,12 @@ describe('Grid reconciliation facts and entry barriers',()=>{
   it('does not round a sub-output-precision position into a match',()=>{const o=observation();o.trades[0].size='0.0000000000000000001';o.orders[0].filledAmount=o.trades[0].size;o.position!.size='0';expect(reconcile(o).reasons).toContain('position_mismatch_or_unavailable');});
 });
 describe('Grid actual-fill pairing and local diff',()=>{
+  it.each(['0.01','0.009'])('pairs sub-$10 exits only when at least one lot is backed: %s',size=>{
+    const entry={id:'EXAMPLE_LEVEL',ordinal:1,price:'100',size:'1',side:'buy' as const,reduceOnly:false,attempt:0,status:'filled'};
+    const result=planGridRebalance({direction:'long',levels:[entry,{...entry,id:'EXAMPLE_EXIT',ordinal:2,price:'110',size:'0',reduceOnly:true,status:'pending'}],fills:[fill({size})],reserved:[],owned:[],positionSize:size,bookPrice:'105',lot:'0.01',minimumQuote:'10',freeSlots:24,inventoryComplete:true,entriesAllowed:false,canaryRemaining:'0'});
+    expect(result.allocations.EXAMPLE_EXIT).toEqual(size==='0.01'?[{tradeId:'1',size:'0.01'}]:undefined);
+    expect(result.chunks.flat().some(action=>action.kind==='place')).toBe(size==='0.01');
+  });
   it.each([{direction:'long' as const,side:'buy' as const,price:'101'},{direction:'short' as const,side:'sell' as const,price:'99'}])('holds crossed $side entries for a fresh maker opportunity',({direction,side,price})=>{
     const result=planGridRebalance({direction,levels:[{id:'EXAMPLE_CROSSED',ordinal:1,price,size:'1',side,reduceOnly:false,attempt:0,status:'pending'}],fills:[],reserved:[],owned:[],positionSize:'0',bookPrice:'100',lot:'0.01',minimumQuote:'1',freeSlots:24,inventoryComplete:true,entriesAllowed:true,canaryRemaining:'250'});
     expect(result.chunks.flat()).toEqual([]);

@@ -7,7 +7,10 @@ export const dollars = (value: string) => new D(value).toDecimalPlaces(2, Decima
 
 /** Display-only reconstruction of the rejected line. Never used to size or admit an order. */
 export function explainPlannerIssue(issue: GridIssue, input: GridInput): string {
-  if (issue.code !== 'underfunded' || issue.ordinal === undefined) return issue.reason;
+  if (issue.code !== 'underfunded') return issue.reason;
+  if (issue.reason === 'Starting-position order is below the opening minimum')
+    return `The starting-position order is below Pacifica's $${new D(input.minimumQuote).toFixed()} minimum order. Raise the investment, use fewer grids, or use more leverage.`;
+  if (issue.ordinal === undefined) return issue.reason;
   const geometry = calculateGridPrices(input);
   if (!geometry.ok) return issue.reason;
   const start = new D(input.start).div(input.tick).floor().mul(input.tick);
@@ -24,10 +27,9 @@ export function explainPlannerIssue(issue: GridIssue, input: GridInput): string 
   const allocation = isEntry ? total.minus(seed) : seed;
   const quantity = allocation.mul(weights[set.indexOf(line)]).div(weights.reduce((a, b) => a + b, 0))
     .div(line.price).div(input.lot).floor().mul(input.lot);
-  const paired = /paired exit/.test(issue.reason) && isEntry;
-  const price = paired ? geometry.lines[issue.ordinal + (input.side === 'long' ? 1 : -1)].price : line.price;
-  const closing = paired || !isEntry;
-  const order = closing ? `The take-profit order at $${new D(price).toFixed()}` : 'Each grid order';
+  const price = line.price;
+  const order = !isEntry ? `The take-profit order at $${new D(price).toFixed()}` : 'Each grid order';
   if (quantity.lt(input.lot)) return `${order} rounds below Pacifica's smallest quantity step (${input.lot} base units). Raise the investment, use fewer grids, or use more leverage.`;
-  return `${order} would be about $${dollars(quantity.mul(price).toFixed())}, below Pacifica's $${new D(input.minimumQuote).toFixed()} minimum${closing ? '' : ' order'}. Raise the investment, use fewer grids, or use more leverage.`;
+  if (!isEntry) return issue.reason;
+  return `${order} would be about $${dollars(quantity.mul(price).toFixed())}, below Pacifica's $${new D(input.minimumQuote).toFixed()} minimum order. Raise the investment, use fewer grids, or use more leverage.`;
 }

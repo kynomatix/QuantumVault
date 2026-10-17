@@ -98,22 +98,26 @@ describe('current grid planner inputs', () => {
   });
 });
 
-describe('conservative take-profit minimum explanations', () => {
+describe('opening minimum and reduce-only lot floor', () => {
   const input = { side: 'short' as const, lower: '10', upper: '30', start: '20', intervals: 2, entryScale: 'flat' as const, profitScale: 'flat' as const,
     seed: false, leverage: '1', tick: '0.1', lot: '0.1', minimumQuote: '10', investmentStep: '0.01', transferFloor: '0', investment: '12' };
-  it('retains the paired-exit minimum and names its actual price and value', () => {
+  it('accepts a paired exit under $10 while rejecting an entry under $10', () => {
     const result = calculateGrid(input);
-    expect(result.ok).toBe(false); if (result.ok) return;
-    expect(explainPlannerIssue(result.issues[0], input)).toContain("The take-profit order at $20 would be about $8.00, below Pacifica's $10 minimum.");
+    expect(result.ok).toBe(true); if (!result.ok) return;
+    expect(result.plan.lines[2].quantity).toBe('0.4');
+    const small = { ...input, investment: '9' }, rejected = calculateGrid(small);
+    expect(rejected.ok).toBe(false); if (rejected.ok) return;
+    expect(explainPlannerIssue(rejected.issues[0], small)).toContain("below Pacifica's $10 minimum order");
   });
-  it('identifies a seed take-profit below the minimum and preserves the one-lot floor', () => {
-    const seeded = { ...input, side: 'long' as const, seed: true, investment: '20' };
+  it('accepts a seed take-profit under $10 and rejects one below a lot', () => {
+    const seeded = { ...input, side: 'long' as const, upper: '40', intervals: 3, seed: true, profitScale: 'descending' as const, investment: '36' };
     const result = calculateGrid(seeded);
-    expect(result.ok).toBe(false); if (result.ok) return;
-    expect(explainPlannerIssue(result.issues[0], seeded)).toContain("The take-profit order at $30 would be about $9.00, below Pacifica's $10 minimum.");
-    const tiny = { ...seeded, lot: '0.3', investment: '1' };
+    expect(result.ok).toBe(true); if (!result.ok) return;
+    expect(result.plan.lines[3]).toMatchObject({ role: 'seed_exit', quantity: '0.2', notional: '8' });
+    const tiny = { ...seeded, lot: '0.3' };
     const zero = calculateGrid(tiny);
     expect(zero.ok).toBe(false); if (zero.ok) return;
+    expect(zero.issues[0]).toMatchObject({ ordinal: 3, reason: 'Lot-rounded line is below one lot' });
     expect(explainPlannerIssue(zero.issues[0], tiny)).toContain("smallest quantity step (0.3 base units)");
   });
 });

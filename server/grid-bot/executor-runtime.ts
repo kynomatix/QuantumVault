@@ -114,7 +114,7 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
         if(!validGridLevelAuthority(r,{account:account.account,subaccountId:null,signerPublicKey:account.account,signerGeneration:generation(account,f),
           deployment:f.recycler.deployment,endpoint:'https://api.pacifica.fi/api/v1/orders/create',constraint:constraintFor(f)},now))return false;
         const price=new Decimal(String(r.data.price)),notional=price.mul(String(r.data.amount));
-        if(price.lt(f.minimumPrice)||price.gt(f.maximumPrice)||notional.lt(f.minimumQuote)||notional.gt(f.maximumQuote))return false;
+        if(price.lt(f.minimumPrice)||price.gt(f.maximumPrice)||(r.data.reduce_only!==true&&notional.lt(f.minimumQuote))||notional.gt(f.maximumQuote))return false;
       }
       return !gridAddsExposure(r)||f.margin.leverage===String(policy.leverage);
     },send:r=>withAgent(account.wallet,account.masterAccount,async agent=>{

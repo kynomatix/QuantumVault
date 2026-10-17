@@ -62,14 +62,18 @@ describe('shared exact grid geometry', () => {
     expect(validGridDecimal('0')).toBe(false); expect(validGridDecimal('0', true)).toBe(true);
     expect(calculateGrid({ ...base, investment: '1000.001' })).toMatchObject({ ok: false, issues: [{ code: 'invalid_investment' }] });
   });
-  it('short paired exit minimum determines the true minimum and preceding cent fails', () => {
+  it('short opening minimum determines the true minimum while its paired exit may be under $10', () => {
     const input = { ...base, side: 'short' as const, lower: '10', upper: '30', start: '20', intervals: 2, seed: false, minimumQuote: '10', lot: '0.1' };
     const minimum = minimumInvestment(input);
-    expect(minimum).toMatchObject({ ok: true, investment: '15' });
+    expect(minimum).toMatchObject({ ok: true, investment: '12' });
     if (minimum.ok) {
-      expect(calculateGrid({ ...input, investment: '14.99' })).toMatchObject({ ok: false, issues: [{ code: 'underfunded' }] });
-      expect(minimum.plan.lines[2].quantity).toBe('0.5'); expect(minimum.evaluations).toBeLessThanOrEqual(260);
+      expect(calculateGrid({ ...input, investment: '11.99' })).toMatchObject({ ok: false, issues: [{ code: 'underfunded' }] });
+      expect(minimum.plan.lines[2].quantity).toBe('0.4'); expect(minimum.evaluations).toBeLessThanOrEqual(260);
     }
+  });
+  it('retains the aggregate starting-position opening minimum even when its exit clears one lot', () => {
+    const input = { ...base, lower: '10', upper: '30', start: '20', intervals: 2, lot: '0.1', investment: '20' };
+    expect(calculateGrid(input)).toMatchObject({ ok: false, issues: [{ reason: 'Starting-position order is below the opening minimum' }] });
   });
   it('unknown fee is unevaluated; explicit zero is evaluated; exact equality fails', () => {
     const input = { ...base, lower: '99.5', upper: '100.5', start: '100', intervals: 1, tick: '0.1', seed: false };

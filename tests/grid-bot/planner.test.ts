@@ -66,11 +66,9 @@ describe('Pacifica authority and honest planner verdicts', () => {
       const input = { side, seed, lower: '80', upper: '120', start: '100', intervals: 4, entryScale: scale, profitScale: scale,
         investment: '1000', leverage: '3', tick: '0.1', lot: '0.01', minimumQuote: '10', investmentStep: '0.01', transferFloor: '0' };
       const actual = calculateGrid(input); if (!actual.ok) throw Error('EXAMPLE');
-      for (const line of actual.plan.lines.filter(line => line.role !== 'virtual')) {
+      for (const line of actual.plan.lines.filter(line => line.role === 'entry')) {
         const explanation = explainPlannerIssue({ code: 'underfunded', reason: 'Lot-rounded line is below the opening minimum', ordinal: line.ordinal }, input);
         expect(explanation).toContain(`about $${dollars(line.notional)},`);
-        if (line.pairedExitOrdinal !== null) expect(explainPlannerIssue({ code: 'underfunded', reason: 'Full entry quantity is below the minimum at its paired exit', ordinal: line.ordinal }, input))
-          .toContain(`about $${dollars(String(Number(line.quantity) * Number(actual.plan.lines[line.pairedExitOrdinal].price)))},`);
       }
     }
   });

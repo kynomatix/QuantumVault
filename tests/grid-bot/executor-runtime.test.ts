@@ -91,6 +91,18 @@ async function fixture(){
 type Fixture=Awaited<ReturnType<typeof fixture>>;
 
 describe('C6 production runtime final send authority',()=>{
+  it('submits a backed reduce-only exit below $10 without reserving opening exposure',async()=>{
+    const f=await fixture(),source=f.levels.find(l=>!l.reduce_only)!;
+    source.status='filled';f.state.entries=false;f.facts.minimumQuote='10';
+    f.observation.position!.size='0.01';f.risk.positionSize='0.01';f.risk.liquidationPrice='1';
+    f.planning.fills.push({tradeId:'EXAMPLE_TRADE',operationId:'EXAMPLE_ENTRY',orderId:'EXAMPLE_ORDER',levelId:source.id,time:clock-1000,leg:'entry',size:'0.01',price:source.price,fee:'0'});
+    await f.tick();
+    expect(hooks.send).toHaveBeenCalledOnce();
+    const request=hooks.send.mock.calls[0][0] as ExactGridRequest;
+    expect(request).toMatchObject({kind:'limit',data:{reduce_only:true,amount:'0.01'}});
+    expect(Number(request.data.price)*Number(request.data.amount)).toBeLessThan(10);
+    expect(f.ledger.prepare.mock.calls[0][2].canaryIncrement).toBe('0');
+  });
   it.each(['active','canary','provisioning'])('allows the %s status at the final gate',async status=>{
     const f=await fixture();f.state.afterPrepare=()=>{f.bot.status=status;};await f.tick();expect(hooks.send).toHaveBeenCalledOnce();
     expect(f.journal).toContain('submit:limit');expect(f.journal.indexOf('prepare:limit')).toBeLessThan(f.journal.indexOf('submit:limit'));

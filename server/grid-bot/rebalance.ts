@@ -22,7 +22,7 @@ export function planGridRebalance(input:{direction:'long'|'short';levels:GridReb
     const available=eligible.reduce((q,f)=>q.plus(f.size),new D(0));
     const paired=pairGridFills(eligible,reserved.filter(a=>ids.has(a.tradeId)),available.toFixed(),input.lot,backing.toFixed());
     const size=paired.reduce((q,a)=>q.plus(a.size),new D(0));
-    if(size.gt(0)&&size.mul(level.price).gte(input.minimumQuote)){
+    if(size.gte(input.lot)){
       desired.push({...level,size:size.toFixed(),reduceOnly:true,side:input.direction==='long'?'sell':'buy'});
       allocations.set(level.id,paired);reserved.push(...paired);backing=backing.minus(size);
     }
