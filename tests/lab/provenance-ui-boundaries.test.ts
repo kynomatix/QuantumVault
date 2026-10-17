@@ -14,6 +14,10 @@ it('carries saved result identity through agent, history and heatmap deploys and
   expect(body).not.toMatch(/labDeploySnapshot|labLinkState|labStrategyId/);
   const drawer = readFileSync('client/src/components/BotManagementDrawer.tsx', 'utf8');
   const settings = drawer.slice(drawer.indexOf('<TabsContent value="settings"'));
-  expect(settings.indexOf('title="Lab source"')).toBeLessThan(settings.indexOf('{moneyControls'));
+  const labSource = settings.indexOf('title="Lab source"');
+  expect(labSource).toBeGreaterThan(settings.indexOf('title="Trading Subaccount"'));
+  expect(labSource).toBeLessThan(settings.indexOf('title="Danger Zone"'));
+  expect(settings.slice(settings.indexOf('<PhoenixUnavailableNotice'), labSource)).toContain('</div>)}');
+  expect(settings.indexOf('{moneyControls && (<>', labSource)).toBeGreaterThan(labSource);
   expect(settings).toContain("localBot?.botType === 'signal'");
 });

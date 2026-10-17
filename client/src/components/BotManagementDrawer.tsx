@@ -2923,9 +2923,6 @@ export function BotManagementDrawer({
           </TabsContent>
 
           <TabsContent value="settings" className="space-y-3 mt-4">
-            {localBot?.botType === 'signal' && <DrawerSettingsPanel id="lab-source" expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} icon={BarChart3} title="Lab source" testId="button-toggle-settings-lab-source">
-              <LabSourcePanel key={localBot.id} botId={localBot.id} walletAddress={walletAddress} onLinked={onBotUpdated} />
-            </DrawerSettingsPanel>}
             {moneyControls ? (<>
             <DrawerSettingsPanel
               id="general"
@@ -3313,6 +3310,11 @@ export function BotManagementDrawer({
               </DrawerSettingsPanel>
             )}
 
+            </>) : (<div className="space-y-3"><PhoenixUnavailableNotice /><div className="rounded-xl border p-3 space-y-1"><p className="text-sm font-medium">Phoenix trader account</p><p className="text-xs font-mono break-all">{displayBot?.botSubaccountIdentifier || 'Unknown'}</p><p className="text-xs text-muted-foreground">Keep this account and its records while withdrawals or debt remain outstanding.</p></div><Button variant="outline" onClick={() => setActiveTab('equity')}>View balances and withdrawals</Button></div>)}
+            {localBot?.botType === 'signal' && <DrawerSettingsPanel id="lab-source" expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} icon={BarChart3} title="Lab source" testId="button-toggle-settings-lab-source">
+              <LabSourcePanel key={localBot.id} botId={localBot.id} walletAddress={walletAddress} onLinked={onBotUpdated} />
+            </DrawerSettingsPanel>}
+            {moneyControls && (<>
             <DrawerSettingsPanel
               id="danger"
               expandedPanel={expandedSettingsPanel}
@@ -3394,7 +3396,7 @@ export function BotManagementDrawer({
               </div>
             )}
 
-            </>) : (<div className="space-y-3"><PhoenixUnavailableNotice /><div className="rounded-xl border p-3 space-y-1"><p className="text-sm font-medium">Phoenix trader account</p><p className="text-xs font-mono break-all">{displayBot?.botSubaccountIdentifier || 'Unknown'}</p><p className="text-xs text-muted-foreground">Keep this account and its records while withdrawals or debt remain outstanding.</p></div><Button variant="outline" onClick={() => setActiveTab('equity')}>View balances and withdrawals</Button></div>)}
+            </>)}
           </TabsContent>
         </Tabs>
         </>
