@@ -4340,18 +4340,45 @@ describe("monitor liveness heartbeat", () => {
 describe("scanner boundary lane scheduling", () => {
   const laneLines = () => appendTelemetryMock.mock.calls.map((call) => String(call[0]));
 
-  it("marks unavailable history without aborting trading on an audit-only snapshot read failure", async () => {
+  it("recovers history after a snapshot rejection while trading finishes before the retry", async () => {
     const { scheduleAutoNext } = await importMonitor();
     const { cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
     getBotMock.mockRejectedValueOnce(new Error("EXAMPLE database failure"))
       .mockResolvedValue(makeBot({ status: "open", mode: "auto", autoNext: true }));
     scheduleAutoNext("bot-snapshot-failure", "15m");
     await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
-    expect(cycleAuditUnavailable("bot-snapshot-failure")).toBe(true);
+    expect(cycleAuditUnavailable("bot-snapshot-failure")).toBe(false);
     expect(getBotMock).toHaveBeenCalledTimes(2);
+    expect(laneLines().some(line => line.includes("cycle_end"))).toBe(true);
+    expect(vi.getTimerCount()).toBe(1); // Only the audit retry remains; trading already returned.
+    expect(startCycleMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(getBotMock).toHaveBeenCalledTimes(3);
+    expect(startCycleMock).toHaveBeenCalledTimes(1); expect(finishCycleMock).toHaveBeenCalledTimes(1);
+    expect(cycleAuditUnavailable("bot-snapshot-failure")).toBe(false);
     expect(vi.getTimerCount()).toBe(0); // The fresh trading row is open: main arms no new entry timer.
     expect(runDecisionMock).not.toHaveBeenCalled();
     expect(laneLines().join(" ")).not.toContain("EXAMPLE database failure");
+  });
+
+  it("discards after two audit read failures without replaying trading", async () => {
+    const { scheduleAutoNext } = await importMonitor();
+    const { cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    getBotMock.mockRejectedValueOnce(new Error("EXAMPLE first read"))
+      .mockResolvedValueOnce(makeBot({ status: "open", mode: "auto", autoNext: true }))
+      .mockRejectedValueOnce({ cause: { code: "57014" }, message: "EXAMPLE private SQL" });
+    scheduleAutoNext("bot-snapshot-twice", "15m");
+    await vi.advanceTimersByTimeAsync(TF_15M + AUTO_CYCLE_SETTLE_MS);
+    expect(getBotMock).toHaveBeenCalledTimes(2);
+    expect(laneLines().filter(line => line.includes("cycle_end"))).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(getBotMock).toHaveBeenCalledTimes(3);
+    expect(cycleAuditUnavailable("bot-snapshot-twice")).toBe(true);
+    expect(startCycleMock).not.toHaveBeenCalled(); expect(finishCycleMock).not.toHaveBeenCalled();
+    expect(runDecisionMock).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+    const diagnostic = laneLines().find(line => line.includes("[AIT-CYCLE]"));
+    expect(diagnostic).toContain("stage=snapshot_read error_class=unknown error_code=57014 elapsed_ms=1500 attempts=2");
+    expect(diagnostic).not.toContain("EXAMPLE");
   });
 
   it("finishes the scheduled trading callback while the passive snapshot read is unresolved", async () => {

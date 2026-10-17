@@ -665,7 +665,7 @@ describe("qualification era forgotten-declaration gate", () => {
   });
 
   it("binds every real owner source to the pinned main registry without requiring Git history", () => {
-    // This tracked cycle baseline captures the dispatched base. Hash every owner,
+    // This tracked cycle baseline captures the snapshot-retry dispatch base. Hash every owner,
     // including any newly declared path; sealed FRACTAL payloads cannot read Git alternates.
     const base = structuredClone(cycleBaseline.registry);
     const paths = new Set([...Object.keys(cycleBaseline.ownerSha256),
@@ -681,6 +681,18 @@ describe("qualification era forgotten-declaration gate", () => {
     expect(currentSource).toContain(beginMarker);
     expect(currentSource).toContain(endMarker);
     expect(validateQualificationEraDeclarationChanges({ base, current: QUALIFICATION_ERA_REGISTRY, changedPaths })).toEqual([]);
+  });
+
+  it("declares snapshot recovery without changing material versions or prompt_context_schema", () => {
+    const base = cycleBaseline.registry;
+    for (const component of components) {
+      expect(QUALIFICATION_ERA_REGISTRY[component].materialVersion).toBe(base[component].materialVersion);
+    }
+    expect(QUALIFICATION_ERA_REGISTRY.prompt_context_schema).toEqual(base.prompt_context_schema);
+    for (const component of ["scanner_capability_policy", "paper_execution_simulator"] as const) {
+      expect(QUALIFICATION_ERA_REGISTRY[component]).toMatchObject({ decision: "no_bump",
+        decisionGeneration: base[component].decisionGeneration + 1 });
+    }
   });
 
   it("bootstraps a new consumer component with an explicit first material bump", () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { AiTraderBot } from "@shared/schema";
 import { assertCycleFinish, outcomeForCycleReason } from "@shared/ai-trader-cycle";
@@ -107,19 +107,19 @@ describe("closure-owned cycle receipts", () => {
     vi.setSystemTime(new Date("2026-10-17T00:00:00Z"));
     try {
     const { CycleAudit, deferredCycleAudit } = await import("../../server/ai-trader/cycle-audit");
-    let release!: (value: InstanceType<typeof CycleAudit>) => void;
-    const snapshot = new Promise<InstanceType<typeof CycleAudit>>(resolve => { release = resolve; });
+    let release!: (value: AiTraderBot) => void;
+    const snapshot = new Promise<AiTraderBot>(resolve => { release = resolve; });
     let saved!: () => void;
     const savedReceipt = new Promise<void>(resolve => { saved = resolve; });
     mocks.finish.mockImplementation(async () => { saved(); });
-    const sameBot = bot(); const audit = deferredCycleAudit(sameBot.id, () => snapshot);
+    const sameBot = bot(); const audit = deferredCycleAudit(sameBot.id, () => snapshot, new Date());
     audit.set("feed_cache_degraded", "context");
     expect(audit.reason).toBe("feed_cache_degraded"); expect(audit.phase).toBe("context");
     audit.begin(); audit.phase = "model"; audit.candidate(); audit.gatewayCall();
     audit.decision({ ok: true, decision: { action: "flat" } }); audit.finish(null);
     expect(mocks.start).not.toHaveBeenCalled(); expect(mocks.finish).not.toHaveBeenCalled();
     vi.setSystemTime(new Date("2026-10-17T00:10:00Z"));
-    release(new CycleAudit(sameBot, new Date())); await savedReceipt;
+    release(sameBot); await savedReceipt;
     expect(mocks.finish.mock.calls[0][3]).toMatchObject({ reasonCode: "model_flat", candidateCount: 1, modelCallCount: 1,
       finishedAt: new Date("2026-10-17T00:00:00Z") });
     } finally { vi.useRealTimers(); }
@@ -159,6 +159,120 @@ describe("closure-owned cycle receipts", () => {
     expect(() => assertCycleFinish({ ...value, decisionIds: [...value.decisionIds], outcome: "executed" })).toThrow();
     expect(() => assertCycleFinish({ ...value, decisionIds: [value.decisionIds[0], value.decisionIds[0]] })).toThrow();
     expect(() => assertCycleFinish({ ...value, decisionIds: [], details: { text: "x".repeat(8193) } })).toThrow();
+  });
+});
+
+describe("deferred snapshot recovery and safe diagnostics", () => {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-18T00:00:00Z")); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("retries only the snapshot once and writes queued observations with original timestamps", async () => {
+    const { deferredCycleAudit, cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    const sameBot = bot(); const startedAt = new Date(); const boundary = new Date(startedAt.getTime() - 10_000);
+    const read = vi.fn().mockRejectedValueOnce({ code: "ECONNRESET", message: "EXAMPLE private SQL" }).mockResolvedValue(sameBot);
+    const audit = deferredCycleAudit(sameBot.id, read, boundary, startedAt);
+    audit.begin(); audit.candidate(); audit.gatewayCall(); audit.set("model_flat", "model");
+    vi.setSystemTime(new Date(startedAt.getTime() + 100)); audit.finish(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(read).toHaveBeenCalledTimes(1); expect(mocks.start).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1499);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(mocks.start).toHaveBeenCalledTimes(1); expect(mocks.finish).toHaveBeenCalledTimes(1);
+    expect(mocks.start.mock.calls[0][0]).toMatchObject({ startedAt, plannedBoundary: boundary });
+    expect(mocks.finish.mock.calls[0][3]).toMatchObject({ finishedAt: new Date(startedAt.getTime() + 100),
+      candidateCount: 1, modelCallCount: 1, reasonCode: "model_flat" });
+    expect(cycleAuditUnavailable(sameBot.id)).toBe(false); expect(mocks.telemetry).not.toHaveBeenCalled();
+  });
+
+  it("discards only after two read rejections with bounded telemetry and no raw error data", async () => {
+    const { deferredCycleAudit, cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    const sameBot = bot();
+    const read = vi.fn().mockRejectedValue({ message: "EXAMPLE SQL params URL credentials", stack: "EXAMPLE stack",
+      details: { private: "EXAMPLE" }, cause: { code: "55P03", message: "EXAMPLE inner" } });
+    const audit = deferredCycleAudit(sameBot.id, read, new Date()); audit.begin(); audit.set("paused"); audit.finish(null);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(read).toHaveBeenCalledTimes(2); expect(mocks.start).not.toHaveBeenCalled(); expect(mocks.finish).not.toHaveBeenCalled();
+    expect(cycleAuditUnavailable(sameBot.id)).toBe(true);
+    expect(mocks.telemetry.mock.calls).toEqual([[`[AIT-CYCLE] audit_internal_error bot=${sameBot.id.slice(0, 8)} stage=snapshot_read error_class=unknown error_code=55P03 elapsed_ms=1500 attempts=2 coverage=unavailable`]]);
+    read.mockResolvedValue(sameBot); audit.candidate(); audit.begin(); audit.finish(null);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(read).toHaveBeenCalledTimes(2); expect(mocks.start).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["connection code", { cause: { code: "ECONNRESET" } }, "connection", "connection"],
+    ["connection SQLSTATE", { cause: { code: "08006" } }, "connection", "connection"],
+    ["connection class", { name: "ConnectionError" }, "connection", "connection"],
+    ...["57014", "55P03", "40001", "23514"].map(code => [code, { code: "EXAMPLE", cause: { code } }, "unknown", code]),
+    ["unknown", { code: "EXAMPLE", name: "EXAMPLE", message: "EXAMPLE private" }, "unknown", "unknown"],
+    ["primitive", "EXAMPLE private", "unknown", "unknown"],
+    ["throwing code and name", { get code() { throw new Error("EXAMPLE"); }, get name() { throw new Error("EXAMPLE"); }, cause: { code: "23514" } }, "unknown", "23514"],
+    ["throwing cause", { get cause() { throw new Error("EXAMPLE"); } }, "unknown", "unknown"],
+    ["unread message", { code: "57014", get message() { throw new Error("EXAMPLE"); }, get stack() { throw new Error("EXAMPLE"); } }, "unknown", "57014"],
+  ])("classifies %s through the guarded cause chain", async (_label, error, errorClass, errorCode) => {
+    const { deferredCycleAudit } = await import("../../server/ai-trader/cycle-audit");
+    deferredCycleAudit(bot().id, vi.fn().mockRejectedValue(error), new Date()).begin();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mocks.telemetry).toHaveBeenCalledTimes(1);
+    expect(mocks.telemetry.mock.calls[0][0]).toContain(`error_class=${errorClass} error_code=${errorCode}`);
+    expect(mocks.telemetry.mock.calls[0][0]).not.toContain("EXAMPLE");
+  });
+
+  it("bounds cyclic, deep and revoked-proxy causes without throwing", async () => {
+    const { deferredCycleAudit } = await import("../../server/ai-trader/cycle-audit");
+    const cyclic: Record<string, unknown> = {}; cyclic.cause = cyclic;
+    let deep: unknown = { code: "23514" };
+    for (let depth = 0; depth < 8; depth++) deep = { cause: deep };
+    const hostile = Proxy.revocable({}, {}); hostile.revoke();
+    for (const error of [cyclic, deep, hostile.proxy]) deferredCycleAudit(bot().id, vi.fn().mockRejectedValue(error), new Date()).begin();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(mocks.telemetry).toHaveBeenCalledTimes(3);
+    for (const [line] of mocks.telemetry.mock.calls) expect(line).toContain("error_class=unknown error_code=unknown");
+  });
+
+  it("does not retry a missing snapshot or construction failure", async () => {
+    const { deferredCycleAudit } = await import("../../server/ai-trader/cycle-audit");
+    const missing = vi.fn().mockResolvedValue(undefined);
+    const broken = vi.fn().mockResolvedValue({ get mode() { throw { cause: { code: "40001" } }; } });
+    deferredCycleAudit(bot().id, missing, new Date()).begin();
+    deferredCycleAudit(bot().id, broken, new Date()).begin();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(missing).toHaveBeenCalledTimes(1); expect(broken).toHaveBeenCalledTimes(1);
+    expect(mocks.telemetry.mock.calls[0][0]).toContain("stage=snapshot_missing error_class=unknown error_code=unknown");
+    expect(mocks.telemetry.mock.calls[1][0]).toContain("stage=construct error_class=unknown error_code=40001");
+    expect(mocks.start).not.toHaveBeenCalled();
+  });
+
+  it("keeps the 256-observation bound during backoff and skips recovery after overflow", async () => {
+    const { deferredCycleAudit } = await import("../../server/ai-trader/cycle-audit");
+    const read = vi.fn().mockRejectedValueOnce({ code: "ECONNRESET" }).mockResolvedValue(bot());
+    const audit = deferredCycleAudit(bot().id, read, new Date());
+    await vi.advanceTimersByTimeAsync(0);
+    for (let count = 0; count < 257; count++) audit.candidate();
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(read).toHaveBeenCalledTimes(1); expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.telemetry.mock.calls[0][0]).toContain("audit_receipt_lost");
+  });
+
+  it("contains throwing telemetry after retry failure and tags persistence and replay errors", async () => {
+    const { CycleAudit, deferredCycleAudit, safeCycleAudit, cycleAuditUnavailable } = await import("../../server/ai-trader/cycle-audit");
+    const sameBot = bot(); mocks.telemetry.mockImplementation(() => { throw new Error("EXAMPLE"); });
+    const deferred = deferredCycleAudit(sameBot.id, vi.fn().mockRejectedValue({ code: "57014" }), new Date());
+    expect(() => { deferred.begin(); deferred.finish(null); }).not.toThrow();
+    await vi.advanceTimersByTimeAsync(1500); expect(cycleAuditUnavailable(sameBot.id)).toBe(true);
+    mocks.telemetry.mockReset();
+    mocks.start.mockRejectedValue({ cause: { code: "23514" } });
+    const audit = new CycleAudit(bot(), new Date()); await expect(audit.begin()).resolves.toBeUndefined();
+    expect(mocks.telemetry.mock.lastCall?.[0]).toContain("stage=begin_insert error_class=unknown error_code=23514");
+    mocks.start.mockResolvedValue(undefined); mocks.finish.mockRejectedValue({ code: "55P03" });
+    await expect(audit.finish(null)).resolves.toBeUndefined();
+    expect(mocks.telemetry.mock.lastCall?.[0]).toContain("stage=finalize error_class=unknown error_code=55P03");
+    expect(mocks.telemetry.mock.lastCall?.[0]).toContain("attempts=2");
+    const guarded = safeCycleAudit(bot().id, () => new CycleAudit(bot(), new Date()));
+    expect(() => guarded.context({ system: "EXAMPLE", get contextDigest() { throw { code: "40001" }; } })).not.toThrow();
+    expect(mocks.telemetry.mock.lastCall?.[0]).toContain("stage=replay error_class=unknown error_code=40001");
   });
 });
 

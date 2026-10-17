@@ -3454,11 +3454,7 @@ async function runScheduledAutoCycle(
 ): Promise<void> {
   const startedAt = new Date();
   const plannedBoundary = autoTimerBoundaries.get(ownedTimer) ?? startedAt;
-  const audit = deferredCycleAudit(botId, async () => {
-    const snapshot = await storage.getAiTraderBot(botId);
-    if (!snapshot) throw new Error("audit_snapshot_unavailable");
-    return new CycleAudit(snapshot, plannedBoundary, startedAt);
-  });
+  const audit = deferredCycleAudit(botId, () => storage.getAiTraderBot(botId), plannedBoundary, startedAt);
   void audit.begin();
   try {
     audit.phase = "boundary_lane";

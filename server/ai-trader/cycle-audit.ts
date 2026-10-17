@@ -13,27 +13,61 @@ const pending = new Map<string, { start: CycleStart; finish: CycleFinish }>();
 const unavailable = new Map<string, true>();
 const active = new Set<string>();
 const MAX_PENDING = 128;
-function coverageGap(botId: string, code = "audit_write_failed"): void {
+type AuditStage = "snapshot_read" | "snapshot_missing" | "construct" | "replay" | "begin_insert" | "finalize";
+type AuditDiagnostic = { stage: AuditStage; error?: unknown; attempts: number; startedMs: number };
+
+function classifyAuditError(error: unknown): { errorClass: "connection" | "unknown"; errorCode: string } {
+  let connection = false;
+  try {
+    const seen = new Set<unknown>();
+    for (let depth = 0; depth < 8 && error && (typeof error === "object" || typeof error === "function"); depth++) {
+      if (seen.has(error)) break;
+      seen.add(error);
+      // Treat every property as hostile, including wrapper causes and accessors.
+      const read = (key: string): unknown => { try { return Reflect.get(error as object, key); } catch { return undefined; } };
+      const code = read("code");
+      if (code === "57014" || code === "55P03" || code === "40001" || code === "23514") {
+        return { errorClass: "unknown", errorCode: code };
+      }
+      if (typeof code === "string" && ["ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "EPIPE", "ETIMEDOUT",
+        "ENETUNREACH", "EHOSTUNREACH", "ENOTFOUND", "EAI_AGAIN", "08000", "08001", "08003", "08004",
+        "08006", "08007", "08P01", "57P01", "57P02", "57P03"].includes(code)) connection = true;
+      if (read("name") === "ConnectionError") connection = true;
+      error = read("cause");
+    }
+  } catch { /* Classification cannot become a second audit failure. */ }
+  return { errorClass: connection ? "connection" : "unknown", errorCode: connection ? "connection" : "unknown" };
+}
+
+function coverageGap(botId: string, code = "audit_write_failed", diagnostic?: AuditDiagnostic): void {
   try {
   unavailable.delete(botId);
   unavailable.set(botId, true);
   if (unavailable.size > 1024) unavailable.delete(unavailable.keys().next().value!);
-  try { appendTelemetry(`[AIT-CYCLE] ${code} bot=${botId.slice(0, 8)} coverage=unavailable`); } catch { /* observational only */ }
+  const { errorClass, errorCode } = classifyAuditError(diagnostic?.error);
+  const elapsedMs = diagnostic ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Date.now() - diagnostic.startedMs)) : 0;
+  const prefix = botId.slice(0, 8).replace(/[^a-zA-Z0-9_-]/g, "_");
+  appendTelemetry(`[AIT-CYCLE] ${code} bot=${prefix} stage=${diagnostic?.stage ?? "replay"} error_class=${errorClass} error_code=${errorCode} elapsed_ms=${elapsedMs} attempts=${diagnostic?.attempts ?? 1} coverage=unavailable`);
   } catch { /* Even coverage reporting must never affect trading. */ }
 }
 export function cycleIsActive(id: string): boolean { return active.has(id); }
 export function cycleAuditUnavailable(botId: string): boolean { return unavailable.has(botId); }
 
-async function twice(operation: () => Promise<unknown>): Promise<boolean> {
+async function twice(botId: string, stage: AuditStage, operation: (diagnostic: AuditDiagnostic) => Promise<unknown>): Promise<boolean> {
+  const startedMs = Date.now();
   for (let attempt = 0; attempt < 2; attempt++) {
-    try { await operation(); return true; } catch { /* one bounded recorder retry */ }
+    const diagnostic = { stage, attempts: attempt + 1, startedMs };
+    try { await operation(diagnostic); return true; } catch (error) {
+      if (attempt === 1) coverageGap(botId, "audit_write_failed", { ...diagnostic, error });
+    }
   }
   return false;
 }
 async function retryPending(): Promise<void> {
   for (const [id, receipt] of [...pending].slice(0, 1)) {
-    if (await twice(async () => {
+    if (await twice(receipt.start.botId, "begin_insert", async diagnostic => {
       await storage.startAiTraderCycle(receipt.start);
+      diagnostic.stage = "finalize";
       await storage.finishAiTraderCycle(id, receipt.start.botId, SERVER_BOOT_ID, receipt.finish);
     })) {
       pending.delete(id);
@@ -58,13 +92,13 @@ export class CycleAudit {
   private contextVersionHash: string | null = null;
   readonly start: CycleStart;
 
-  markUnavailable(): void {
+  markUnavailable(error?: unknown, stage: AuditStage = "replay", attempts = 1, startedMs = Date.now()): void {
     this.incomplete = true;
     this.reason = "internal_error";
-    coverageGap(this.start.botId, "audit_internal_error");
+    coverageGap(this.start.botId, "audit_internal_error", { stage, error, attempts, startedMs });
   }
   private observe(operation: () => void): void {
-    try { operation(); } catch { this.markUnavailable(); }
+    try { operation(); } catch (error) { this.markUnavailable(error); }
   }
 
   constructor(bot: AiTraderBot, plannedBoundary: Date, startedAt = new Date()) {
@@ -79,11 +113,11 @@ export class CycleAudit {
   begin(): Promise<void> {
     if (this.beginTask) return this.beginTask;
     active.add(this.id);
+    const startedMs = Date.now();
     this.beginTask = (async () => {
       await retryPending();
-      this.started = await twice(() => storage.startAiTraderCycle(this.start));
-      if (!this.started) coverageGap(this.start.botId);
-    })().catch(() => { this.observe(() => { throw new Error("audit_begin_failed"); }); });
+      this.started = await twice(this.start.botId, "begin_insert", () => storage.startAiTraderCycle(this.start));
+    })().catch(error => { this.markUnavailable(error, "begin_insert", 1, startedMs); });
     return this.beginTask;
   }
   set(reason: CycleReason, phase?: CyclePhase): void {
@@ -153,6 +187,7 @@ export class CycleAudit {
     });
   }
   async finish(nextBoundary: Date | null, finishedAt = new Date()): Promise<void> {
+    const startedMs = Date.now();
     try {
     if (this.finished) return;
     this.finished = true;
@@ -164,12 +199,12 @@ export class CycleAudit {
       details: { ...this.details, auditStatus: this.incomplete ? "unavailable" : "complete" } };
     // Persistence stays ordered even though monitor/scanner callers never await it.
     await this.beginTask;
-    const saved = await twice(async () => {
+    const saved = await twice(this.start.botId, "begin_insert", async diagnostic => {
       if (!this.started) { await storage.startAiTraderCycle(this.start); this.started = true; }
+      diagnostic.stage = "finalize";
       await storage.finishAiTraderCycle(this.id, this.start.botId, SERVER_BOOT_ID, finish);
     });
     if (!saved) {
-      coverageGap(this.start.botId);
       if (pending.size >= MAX_PENDING) {
         const oldest = pending.keys().next().value!;
         coverageGap(pending.get(oldest)!.start.botId, "audit_receipt_lost");
@@ -177,18 +212,19 @@ export class CycleAudit {
       }
       pending.set(this.id, { start: this.start, finish });
     } else if (!this.incomplete && ![...pending.values()].some(value => value.start.botId === this.start.botId)) unavailable.delete(this.start.botId);
-    } catch { this.observe(() => { throw new Error("audit_finish_failed"); }); }
+    } catch (error) { this.markUnavailable(error, "finalize", 1, startedMs); }
   }
 }
 
 /** A second boundary protects trading even if a recorder implementation throws. */
 export function safeCycleAudit(botId: string, create: () => CycleAudit): CycleAudit {
   let audit: CycleAudit | undefined;
-  const failed = () => {
-    try { audit?.markUnavailable(); } catch { /* A broken recorder cannot report itself. */ }
-    coverageGap(botId, "audit_internal_error");
+  const startedMs = Date.now();
+  const failed = (error?: unknown, stage: AuditStage = "replay") => {
+    try { audit?.markUnavailable(error, stage, 1, startedMs); } catch { /* A broken recorder cannot report itself. */ }
+    coverageGap(botId, "audit_internal_error", { stage, error, attempts: 1, startedMs });
   };
-  try { audit = create(); } catch { failed(); return new Proxy({} as CycleAudit, {
+  try { audit = create(); } catch (error) { failed(error, "construct"); return new Proxy({} as CycleAudit, {
     get: (_target, key) => key === "reason" ? "internal_error" : key === "phase" ? "initial" : () => undefined,
     set: () => true,
   }); }
@@ -200,24 +236,27 @@ export function safeCycleAudit(botId: string, create: () => CycleAudit): CycleAu
         const value = Reflect.get(target, key);
         if (typeof value !== "function") return value;
         return (...args: unknown[]) => {
+          const stage = key === "begin" ? "begin_insert" : key === "finish" ? "finalize" : "replay";
           try {
             const result = Reflect.apply(value, target, args);
-            return result instanceof Promise ? result.catch(failed) : result;
-          } catch { failed(); }
+            return result instanceof Promise ? result.catch(error => failed(error, stage)) : result;
+          } catch (error) { failed(error, stage); }
         };
-      } catch { failed(); return () => undefined; }
+      } catch (error) { failed(error); return () => undefined; }
     },
     set(_target, key, value) {
-      try { if (!Reflect.set(audit!, key, value)) failed(); } catch { failed(); }
+      try { if (!Reflect.set(audit!, key, value)) failed(); } catch (error) { failed(error); }
       return true;
     },
   });
 }
 
 /** Buffer passive observations while the audit-only snapshot loads off the trading path. */
-export function deferredCycleAudit(botId: string, create: () => Promise<CycleAudit>): CycleAudit {
+export function deferredCycleAudit(botId: string, readSnapshot: () => Promise<AiTraderBot | undefined>,
+  plannedBoundary: Date, startedAt = new Date()): CycleAudit {
   let audit: CycleAudit | undefined;
   let failed = false;
+  const diagnostic: AuditDiagnostic = { stage: "snapshot_read", attempts: 0, startedMs: Date.now() };
   const queued: ((recorder: CycleAudit) => void)[] = [];
   const state = { phase: "initial" as CyclePhase, reason: "internal_error" as CycleReason };
   const enqueue = (operation: (recorder: CycleAudit) => void): void => {
@@ -226,19 +265,35 @@ export function deferredCycleAudit(botId: string, create: () => Promise<CycleAud
     if (queued.length >= 256) {
       failed = true;
       queued.length = 0;
-      coverageGap(botId, "audit_receipt_lost");
+      coverageGap(botId, "audit_receipt_lost", { ...diagnostic, stage: "replay" });
       return;
     }
     queued.push(operation);
   };
-  void Promise.resolve().then(create).then(value => {
+  void Promise.resolve().then(async () => {
+    let snapshot: AiTraderBot | undefined;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      if (failed) return;
+      diagnostic.attempts = attempt;
+      try { snapshot = await readSnapshot(); break; } catch (error) {
+        if (failed) return;
+        if (attempt === 2) throw error;
+        // Audit-only delay: observations remain bounded and trading never awaits it.
+        await new Promise<void>(resolve => setTimeout(resolve, 1500));
+      }
+    }
     if (failed) return;
+    diagnostic.stage = "snapshot_missing";
+    if (!snapshot) throw new Error("audit_snapshot_unavailable");
+    diagnostic.stage = "construct";
+    const value = new CycleAudit(snapshot, plannedBoundary, startedAt);
+    diagnostic.stage = "replay";
     audit = safeCycleAudit(botId, () => value);
     for (const operation of queued.splice(0)) operation(audit);
-  }).catch(() => {
+  }).catch(error => {
     failed = true;
     queued.length = 0;
-    coverageGap(botId, "audit_internal_error");
+    coverageGap(botId, "audit_internal_error", { ...diagnostic, error });
   });
   return new Proxy({} as CycleAudit, {
     get(_target, key) {
