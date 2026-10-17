@@ -79,17 +79,52 @@ export function calculateGrid(input: GridInput): GridResult {
   };
   allocate(entries, total.minus(seedNotional), input.entryScale);
   if (input.seed) allocate(profits, seedNotional, input.profitScale);
+  const lifted = entries.filter(({ i }) => new D(lines[i].notional).lt(input.minimumQuote));
+  let openingUnderfunded: Extract<GridResult, { ok: false }> | null = null;
+  if (lifted.length) {
+    // Preserve the seed allocation and its rounding exactly; redistribute only the entry budget.
+    let budget = total.minus(seedNotional);
+    const opening = entries.map(({ p, i }, k) => {
+      const minimumQuantity = new D(input.minimumQuote).div(p).div(lot).ceil().times(lot);
+      return { p, i, weight: weight(k, entries.length, input.entryScale), minimumQuantity, minimum: minimumQuantity.times(p) };
+    });
+    if (opening.reduce((sum, order) => sum.plus(order.minimum), new D(0)).gt(budget))
+      openingUnderfunded = failure('underfunded', `The investment cannot cover ${entries.length === 1 ? 'the grid order' : `all ${entries.length} grid orders`} at the $${text(new D(input.minimumQuote))} minimum after quantity rounding. Raise the investment, use fewer grids, or use more leverage.`);
+    // Proportionally reduce the larger allocations, pinning each small order at its lot-rounded minimum.
+    // Quote weights remain monotone; prices on different lot lattices can differ by one quote lot.
+    // At least one order leaves the active set on each pass, so this takes at most entries.length passes.
+    let active = openingUnderfunded ? [] : opening;
+    while (active.length) {
+      const sum = active.reduce((sum, order) => sum + order.weight, 0);
+      const pinned = active.filter(order => budget.times(order.weight).div(sum).lt(order.minimum));
+      if (!pinned.length) {
+        for (const order of active) {
+          const quantity = D.max(order.minimumQuantity, floor(budget.times(order.weight).div(sum).div(order.p), lot));
+          lines[order.i].quantity = text(quantity); lines[order.i].notional = text(quantity.times(order.p));
+        }
+        break;
+      }
+      for (const order of pinned) {
+        lines[order.i].quantity = text(order.minimumQuantity); lines[order.i].notional = text(order.minimum);
+        budget = budget.minus(order.minimum);
+      }
+      active = active.filter(order => !pinned.includes(order));
+    }
+  }
   const allocated = lines.reduce((a, l) => a.plus(l.notional), new D(0));
   const plan: GridPlan = { side: input.side, start: text(start), investment: text(investment), leverage: input.leverage, lines,
     seedQuantity: text(lines.filter(l => l.role === 'seed_exit').reduce((a, l) => a.plus(l.quantity), new D(0))),
     allocatedNotional: text(allocated), unallocatedNotional: text(total.minus(allocated)),
-    feeGate: input.effectiveMakerCostRate == null ? 'not_evaluated' : 'evaluated', feeRows: [] };
+    feeGate: input.effectiveMakerCostRate == null ? 'not_evaluated' : 'evaluated', feeRows: [],
+    ...(lifted.length ? { openingOrderLift: { count: lifted.length, minimumQuote: text(new D(input.minimumQuote)) } } : {}) };
   if (input.effectiveMakerCostRate != null) {
     plan.feeRows = assumedPairFees(plan, input.effectiveMakerCostRate);
     const failed = plan.feeRows.find(row => !row.clears);
     if (failed) return failure('fee_clearance', 'Assumed round-trip cost is at least the adjacent spread', failed.ordinal);
   }
   if (investment.lt(input.transferFloor)) return failure('underfunded', 'Investment is below the supplied application transfer floor');
+  // A price-only fee failure must stop minimum search before an underfunding result can advance it.
+  if (openingUnderfunded) return openingUnderfunded;
   for (const line of lines.filter(l => l.role !== 'virtual')) {
     const q = new D(line.quantity);
     if (q.lt(lot)) return failure('underfunded', 'Lot-rounded line is below one lot', line.ordinal);

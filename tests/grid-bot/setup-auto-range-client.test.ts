@@ -4,6 +4,7 @@ import { Button } from '../../client/src/components/ui/button';
 import { DialogFooter } from '../../client/src/components/ui/dialog';
 import { GridPlannerSheet } from '../../client/src/components/grid-planner/GridPlannerSheet';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
+import { GridRegimeHint } from '../../client/src/components/grid-planner/GridRegimeHint';
 import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraftActions';
 import { previewGrid } from '../../server/grid-planner/preview';
 import type { PlannerMarket, PlannerQuery } from '../../server/grid-planner/types';
@@ -59,6 +60,7 @@ type Element = ReactElement<Record<string, any>>;
 type RangeRequest = { market: string; timeframe: string; period: string; signal: AbortSignal;
   resolve: (value: unknown) => void; reject: (error: Error) => void };
 let props: Props, tree: ReactNode, requests: RangeRequest[], listed: string[], constraintsAvailable: boolean;
+let holdCharts: boolean, chartRequests: RangeRequest[];
 
 function fixtureMarket(market: string, observedAt = Date.now()): PlannerMarket {
   // Venue constraints last five minutes; reference prices and geometry previews last one.
@@ -72,10 +74,11 @@ function fixtureMarket(market: string, observedAt = Date.now()): PlannerMarket {
       label: 'Cached Pacifica book reference price' } } };
 }
 
-function render(next: Partial<Props> = {}) {
+function render(next: Partial<Props> = {}, commit = true) {
   props = { ...props, ...next };
   hooks.stateIndex = 0; hooks.refIndex = 0; hooks.effectIndex = 0; hooks.pending = []; hooks.dirty = false;
   tree = GridPlannerSheet(props);
+  if (!commit) return;
   // React cleans up old effects before setting up the next commit's effects.
   for (const effect of hooks.pending) hooks.effects[effect.index]?.cleanup?.();
   for (const effect of hooks.pending) {
@@ -123,6 +126,15 @@ function facts(request: RangeRequest, overrides: Record<string, unknown> = {}) {
     range: { state: 'available', lowerPrice: '90', upperPrice: '110', longStop: '85', shortStop: '115', includedBars: 168 },
     ...overrides };
 }
+function chartFacts(request: RangeRequest) {
+  const retrievedAt = Date.now(), requestedBars = gridHistoryWindow(request.timeframe, request.period)!.chartBars;
+  return { state: 'available', market: request.market, timeframe: request.timeframe, requestedBars,
+    actualBars: 1, partial: requestedBars > 1, retrievedAt, cacheInsertedAt: retrievedAt, validForMs: 60_000,
+    candles: [{ time: retrievedAt - 3_600_000, open: 100, high: 110, low: 90, close: 100, volume: 1,
+      provenance: { source: 'pacifica', venue: 'pacifica', basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } }] };
+}
+function chart() { return find(node => node.type === GridPlannerChart).props.chart; }
+function regime() { return find(node => node.type === GridRegimeHint).props.regime; }
 async function open(next: Partial<Props> = {}) { render(next); await settle(); }
 async function resolve(request: RangeRequest, value = facts(request)) { request.resolve(value); await settle(); }
 
@@ -130,6 +142,7 @@ beforeEach(() => {
   hooks.states = []; hooks.refs = []; hooks.effects = []; hooks.pending = []; hooks.controllers = []; hooks.dirty = false;
   props = { open: true, onOpenChange: vi.fn(), identity: 'EXAMPLE_WALLET' };
   requests = []; listed = ['BTC-PERP', 'ETH-PERP']; constraintsAvailable = true;
+  holdCharts = false; chartRequests = [];
   vi.stubGlobal('window', new EventTarget()); vi.stubGlobal('document', new EventTarget());
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
   vi.stubGlobal('fetch', vi.fn((url: string, init: RequestInit) => {
@@ -141,8 +154,8 @@ beforeEach(() => {
         seed: path.searchParams.get('seed') === 'true', fee: path.searchParams.get('fee') } as unknown as PlannerQuery;
       return Promise.resolve({ ok: true, json: async () => previewGrid(query, fixture, observedAt) });
     }
-    if (path.pathname.endsWith('/range')) return new Promise((complete, reject) => {
-      requests.push({ market: path.searchParams.get('market')!, timeframe: path.searchParams.get('timeframe')!,
+    if (path.pathname.endsWith('/range') || holdCharts && path.pathname.endsWith('/chart')) return new Promise((complete, reject) => {
+      (path.pathname.endsWith('/range') ? requests : chartRequests).push({ market: path.searchParams.get('market')!, timeframe: path.searchParams.get('timeframe')!,
         period: path.searchParams.get('period')!, signal: init.signal as AbortSignal,
         resolve: value => complete({ ok: true, json: async () => value }), reject });
     });
@@ -160,6 +173,55 @@ afterEach(() => {
 });
 
 describe('Grid setup automatic opening range', () => {
+  it('retains the chart and range advisory while the same market refreshes, including a failed refresh', async () => {
+    holdCharts = true; await open(); await resolve(requests[0]);
+    chartRequests[0].resolve(chartFacts(chartRequests[0])); await settle();
+    const heldChart = chart(), heldRegime = regime();
+    expect(heldChart?.state).toBe('available');
+    button('Refresh chart').props.onClick(); render(); await settle();
+    expect(chart()).toBe(heldChart); expect(regime()).toBe(heldRegime);
+    requests.at(-1)!.reject(Error('EXAMPLE range refresh failed'));
+    chartRequests.at(-1)!.reject(Error('EXAMPLE chart refresh failed')); await settle();
+    expect(chart()).toBe(heldChart); expect(regime()).toBe(heldRegime);
+    edit('lower', '88'); button('Suggest auto-range').props.onClick(); render(); await settle();
+    expect(prices().lower).toBe('90');
+  });
+  it.each(['market', 'timeframe', 'period', 'identity'] as const)('clears held chart and range facts on a %s change, even if the replacement fails', async changed => {
+    holdCharts = true; await open(); await resolve(requests[0]);
+    chartRequests[0].resolve(chartFacts(chartRequests[0])); await settle();
+    const oldRegime = regime(); expect(chart()?.state).toBe('available');
+    if (changed === 'market') market('ETH-PERP');
+    else if (changed === 'timeframe') { button('4h').props.onClick(); render(); }
+    else if (changed === 'period') { button('Day').props.onClick(); render(); }
+    else render({ identity: 'EXAMPLE_OTHER_WALLET' }, false);
+    // The identity assertion precedes effect cleanup: a stored observation must be keyed at render time.
+    expect(chart()).toBeNull(); expect(regime()).not.toBe(oldRegime);
+    render(); await settle();
+    requests.at(-1)!.reject(Error('EXAMPLE replacement range failed'));
+    chartRequests.at(-1)!.reject(Error('EXAMPLE replacement chart failed')); await settle();
+    expect(chart()).toBeNull(); expect(regime()).not.toBe(oldRegime);
+    edit('lower', '88'); button('Suggest auto-range').props.onClick(); render(); await settle();
+    expect(prices().lower).toBe('88');
+    expect(requests.at(-1)!.market).toBe(changed === 'market' ? 'ETH-PERP' : 'BTC-PERP');
+  });
+  it('rejects late old-identity observations before the new effects have committed', async () => {
+    holdCharts = true; await open(); const oldRange = requests[0], oldChart = chartRequests[0];
+    render({ identity: 'EXAMPLE_OTHER_WALLET' }, false);
+    oldRange.resolve(facts(oldRange)); oldChart.resolve(chartFacts(oldChart)); await settle();
+    expect(chart()).toBeNull(); expect(prices().lower).toBe('');
+    render(); await settle();
+    expect(chart()).toBeNull(); expect(prices().lower).toBe('');
+  });
+  it('keeps Equal defaults and shows the opening-order minimum lift in the sheet', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    await open(); await resolve(requests[0]);
+    expect(field('entryScale').props.value).toBe('flat'); expect(field('profitScale').props.value).toBe('flat');
+    edit('investment', '300'); edit('leverage', '10'); edit('intervals', '50');
+    field('entryScale').props.onChange('ascending'); render();
+    field('profitScale').props.onChange('ascending'); render();
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(elements().some(node => node.props.role === 'status' && text(node) === '2 grid orders raised to the $10 minimum')).toBe(true);
+  });
   it('shows a disabled Create bot with a visible accessible launch reason and working Cancel in planning mode', async () => {
     await open();
     const footer = find(node => node.type === DialogFooter);

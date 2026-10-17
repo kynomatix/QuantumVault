@@ -99,6 +99,11 @@ export function plannerOrderSizeSummary(plan: GridPlan | null | undefined, entry
   return `About $${dollars(D.min(...values))} to $${dollars(D.max(...values))} per grid order (scaled sizes)`;
 }
 
+export function plannerOpeningMinimumSummary(plan: GridPlan | null | undefined): string | null {
+  const lift = plan?.openingOrderLift;
+  return lift ? `${lift.count} ${lift.count === 1 ? 'grid order raised' : 'grid orders raised'} to the $${readableDecimal(lift.minimumQuote)} minimum` : null;
+}
+
 /** Generation changes even for A→B→A and identical-query refreshes. */
 export class PlannerRequestGeneration {
   private generation = 0;
@@ -144,6 +149,8 @@ export function isPlannerChart(v: unknown): v is PlannerChart {
 function isPlan(p: any): boolean {
   return record(p) && ['long', 'short'].includes(p.side) && positive(p.start) && positive(p.investment) && positive(p.leverage)
     && decimal(p.seedQuantity) && decimal(p.allocatedNotional) && decimal(p.unallocatedNotional)
+    && (p.openingOrderLift === undefined || record(p.openingOrderLift) && Number.isInteger(p.openingOrderLift.count)
+      && p.openingOrderLift.count > 0 && p.openingOrderLift.count <= 100 && positive(p.openingOrderLift.minimumQuote))
     && ['evaluated', 'not_evaluated'].includes(p.feeGate) && Array.isArray(p.feeRows)
     && Array.isArray(p.lines) && p.lines.length >= 2 && p.lines.length <= 101
     && p.lines.every((l: any, i: number) => record(l) && l.ordinal === i && positive(l.price) && decimal(l.quantity) && decimal(l.notional)
@@ -238,7 +245,8 @@ export function plannerIssue(reason: string): PlannerIssue {
   else if (/restrictions/i.test(reason)) message = 'This market does not support the order type or margin mode Grid needs. Choose another market.';
   // Keep the actual failure: malformed fees, missing data and inadequate spreads are different problems.
   if (/stop/i.test(reason)) return issue(message, 'stop', 'Stop loss', 'grid-stop');
-  if (/below.*minimum|underfund/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');
+  if (/below.*minimum|underfund|cannot cover (?:all|the grid order)/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');
+  if (/maximum order|Order exceeds venue maximum|above.*maximum/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');
   if (/leverage/i.test(reason)) return issue(message, 'direction-size', 'Leverage', 'grid-leverage');
   if (/fee|round-trip cost/i.test(reason)) return issue(message, 'fees', 'Fees & data', 'grid-feePercent');
   if (/investment|below.*minimum|underfund|transfer floor/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');

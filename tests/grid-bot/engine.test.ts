@@ -93,4 +93,46 @@ describe('shared exact grid geometry', () => {
     const result = minimumInvestment({ ...base, minimumQuote: '999999999999999999', investmentStep: '0.000000000000000001' });
     expect(result.ok).toBe(false); expect(result.evaluations).toBeLessThanOrEqual(260);
   });
+  it.each(['long', 'short'] as const)('uses the venue minimum and preserves seed exits and weighted donors for %s', side => {
+    const input = { ...base, side, lower: '90000', upper: '110000', start: '100000', tick: '1', lot: '0.00001',
+      intervals: 50, entryScale: 'ascending' as const, profitScale: 'ascending' as const, investment: '300', leverage: '10', minimumQuote: '17' };
+    const result = calculateGrid(input); expect(result.ok).toBe(true); if (!result.ok) return;
+    const plan = result.plan, entries = plan.lines.filter(l => l.role === 'entry')
+      .sort((a, b) => Math.abs(Number(a.price) - 100000) - Math.abs(Number(b.price) - 100000));
+    expect(plan.openingOrderLift).toEqual({ count: 3, minimumQuote: '17' });
+    for (const [index, line] of entries.entries()) {
+      const price = new Decimal(line.price), notional = new Decimal(line.notional);
+      expect(notional.gte(17)).toBe(true); expect(new Decimal(line.quantity).mod(input.lot).isZero()).toBe(true);
+      // Underlying quote weights stay ordered, allowing only the unavoidable one-lot price difference.
+      if (index) expect(notional.plus(price.mul(input.lot)).gte(entries[index - 1].notional)).toBe(true);
+    }
+    const donor = entries.at(-1)!, next = entries.at(-2)!;
+    expect(new Decimal(donor.notional).lt(new Decimal(1500).mul(25).div(325))).toBe(true);
+    expect(new Decimal(donor.notional).div(25).minus(new Decimal(next.notional).div(24)).abs().lt(1)).toBe(true);
+    const unchanged = calculateGrid({ ...input, minimumQuote: '0.01' }); expect(unchanged.ok).toBe(true);
+    if (unchanged.ok) {
+      expect(plan.lines.filter(l => l.role === 'seed_exit')).toEqual(unchanged.plan.lines.filter(l => l.role === 'seed_exit'));
+      expect(plan.seedQuantity).toBe(unchanged.plan.seedQuantity);
+    }
+    expect(new Decimal(plan.allocatedNotional).plus(plan.unallocatedNotional).eq(3000)).toBe(true);
+    expect(new Decimal(plan.unallocatedNotional).gte(0)).toBe(true);
+  });
+  it('keeps adequate Equal allocations unchanged and lifts a rounding-only shortfall when affordable', () => {
+    const equal = calculateGrid(base); expect(equal.ok).toBe(true); if (!equal.ok) return;
+    expect(equal.plan.openingOrderLift).toBeUndefined();
+    expect(equal.plan.lines.map(l => l.quantity)).toEqual(['3.12', '2.77', '0', '2.27', '2.08']);
+    const rounding = { ...base, seed: false, lower: '3', upper: '7', start: '6', intervals: 2, tick: '1', lot: '1', investment: '22' };
+    const rounded = calculateGrid(rounding);
+    expect(rounded).toMatchObject({ ok: true, plan: { openingOrderLift: { count: 1, minimumQuote: '10' } } });
+    if (rounded.ok) expect(rounded.plan.lines.slice(0, 2).map(l => l.notional)).toEqual(['12', '10']);
+  });
+  it('rejects only an aggregate opening budget that cannot cover the lot-rounded minimums', () => {
+    const input = { ...base, seed: false, lower: '3', upper: '9', start: '7', intervals: 2, tick: '1', lot: '1',
+      entryScale: 'ascending' as const, investment: '24' };
+    const result = calculateGrid(input); expect(result.ok).toBe(true); if (!result.ok) return;
+    expect(result.plan.lines.slice(0, 2).map(l => l.notional)).toEqual(['12', '12']);
+    expect(calculateGrid({ ...input, investment: '23.99' })).toMatchObject({ ok: false, issues: [{ code: 'underfunded' }] });
+    const minimum = minimumInvestment(input); expect(minimum).toMatchObject({ ok: true, investment: '24' });
+    expect(calculateGrid({ ...input, investment: '100' }).ok).toBe(true);
+  });
 });

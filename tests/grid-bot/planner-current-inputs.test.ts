@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import Decimal from 'decimal.js';
 import { GRID_SETUP_INITIAL } from '../../client/src/lib/grid-setup-view';
-import { plannerGridCountHint, plannerOrderSizeSummary, plannerPreviewQuery, PlannerRequestGeneration } from '../../client/src/lib/grid-planner-view';
+import { plannerGridCountHint, plannerOrderSizeSummary, plannerOpeningMinimumSummary, plannerPreviewQuery, PlannerRequestGeneration, isPlannerPreview } from '../../client/src/lib/grid-planner-view';
 import { previewGrid } from '../../server/grid-planner/preview';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
@@ -96,6 +96,19 @@ describe('current grid planner inputs', () => {
     const scaled = previewGrid({ ...query, entryScale: 'ascending', investment: '1000' }, market, now);
     expect(plannerOrderSizeSummary(scaled.requestedPlan, 'ascending')).toContain('(scaled sizes)');
   });
+  it.each(['long', 'short'] as const)('lifts the nearest BTC entries at $300 / 10x / 50 grids for %s and explains the count', side => {
+    const preview = previewGrid({ ...query, side, entryScale: 'ascending', profitScale: 'ascending', fee: '0',
+      stop: side === 'long' ? '85000' : '115000' }, market, now);
+    expect(preview.reasons).toEqual([]); expect(isPlannerPreview(preview)).toBe(true);
+    const plan = preview.requestedPlan!; expect(plan).not.toBeNull();
+    expect(plan.openingOrderLift).toEqual({ count: 2, minimumQuote: '10' });
+    expect(plannerOpeningMinimumSummary(plan)).toBe('2 grid orders raised to the $10 minimum');
+    expect(plan.lines.filter(line => line.role === 'entry').every(line => new Decimal(line.notional).gte(10))).toBe(true);
+    expect(plan.lines.filter(line => line.role === 'seed_exit').some(line => new Decimal(line.notional).lt(10))).toBe(true);
+    expect(new Decimal(plan.allocatedNotional).lte(3000)).toBe(true);
+    const malformed = { ...preview, requestedPlan: { ...plan, openingOrderLift: { count: -1, minimumQuote: '10' } } };
+    expect(isPlannerPreview(malformed)).toBe(false);
+  });
 });
 
 describe('opening minimum and reduce-only lot floor', () => {
@@ -107,7 +120,7 @@ describe('opening minimum and reduce-only lot floor', () => {
     expect(result.plan.lines[2].quantity).toBe('0.4');
     const small = { ...input, investment: '9' }, rejected = calculateGrid(small);
     expect(rejected.ok).toBe(false); if (rejected.ok) return;
-    expect(explainPlannerIssue(rejected.issues[0], small)).toContain("below Pacifica's $10 minimum order");
+    expect(explainPlannerIssue(rejected.issues[0], small)).toContain('cannot cover the grid order at the $10 minimum');
   });
   it('accepts a seed take-profit under $10 and rejects one below a lot', () => {
     const seeded = { ...input, side: 'long' as const, upper: '40', intervals: 3, seed: true, profitScale: 'descending' as const, investment: '36' };

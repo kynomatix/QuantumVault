@@ -4,6 +4,7 @@ import Decimal from 'decimal.js';
 import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { authoritativeGridPreview,createGridDraft } from '../../server/grid-bot/draft-service';
+import { calculateGrid } from '../../server/grid-bot/engine';
 import { GridStorageError,type GridStorage,type StoredBot,type StoredLevel,type DraftRecord } from '../../server/grid-bot/storage';
 import { gridIntentSchema,gridCreateRequestSchema } from '../../shared/grid-draft';
 import { gridDraftRevision } from '../../client/src/lib/grid-draft-view';
@@ -28,6 +29,22 @@ function memory() {
 const setup=()=>{const storage=memory(),a=authority(),deps:GridDraftDeps={storage:storage as never,observe:async()=>a,now:()=>clock,umk:async()=>umk()};return{storage,a,deps};};
 const request=async(deps:GridDraftDeps)=>{const draftRevision=gridDraftRevision(intent),preview=await authoritativeGridPreview('EXAMPLE',intent,draftRevision,deps);expect(preview.state).toBe('ready');return{schemaVersion:1 as const,clientRequestId:randomUUID(),draftRevision,intent,serverIntentDigest:preview.serverIntentDigest!};};
 describe('server authoritative Grid drafts',()=>{
+  it('signs and persists the lifted quantities from the fee-reserved sizing plan',async()=>{
+    const {a,deps,storage}=setup();if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
+    a.market.constraints.value.minimumQuote='10';
+    const i={...intent,gridCount:50,totalInvestment:'300',leverage:'10',entryScaleType:'ascending' as const,profitScaleType:'ascending' as const};
+    const draftRevision=gridDraftRevision(i),preview=await authoritativeGridPreview('EXAMPLE',i,draftRevision,deps);
+    expect(preview.state).toBe('ready');
+    const investment=new Decimal(i.totalInvestment).div(new Decimal(1).plus(new Decimal(i.leverage).mul(a.seedFee!.effectiveRate)))
+      .toDecimalPlaces(2,Decimal.ROUND_FLOOR).toFixed(2);
+    const expected=calculateGrid({side:'long',lower:'90',upper:'110',start:'100',intervals:50,seed:true,entryScale:'ascending',profitScale:'ascending',
+      investment,leverage:'10',tick:'0.01',lot:'0.001',minimumQuote:'10',investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:a.entryFee!.effectiveRate});
+    expect(expected.ok).toBe(true);if(!expected.ok)return;
+    expect(expected.plan.openingOrderLift?.count).toBe(2);
+    expect(preview.levels!.map(l=>l.size)).toEqual(expected.plan.lines.map(l=>new Decimal(l.quantity).toFixed(8)));
+    const saved=await createGridDraft('EXAMPLE',{schemaVersion:1,clientRequestId:randomUUID(),draftRevision,intent:i,serverIntentDigest:preview.serverIntentDigest!},deps);
+    expect(storage.levels.get(saved.bot.id)!.map(l=>l.size)).toEqual(preview.levels!.map(l=>l.size));
+  });
   it('saves a draft with unpublished optional limits while retaining every published limit check',async()=>{
     const {a,deps}=setup();if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
     const c=a.market.constraints.value;

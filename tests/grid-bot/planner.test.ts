@@ -56,10 +56,19 @@ describe('Pacifica authority and honest planner verdicts', () => {
       expect(result.reasons[0]).not.toMatch(/observed|shared authority|lot-rounded/i);
     }
   });
-  it('shows the real rounded per-order dollar value with the Investment action', () => {
+  it('explains an insufficient opening budget with the Investment action', () => {
     const result = previewGrid({ ...query, investment: '10' }, marketSnapshot(row(), deps()), now);
-    expect(result.reasons).toEqual(["Each grid order would be about $2.40, below Pacifica's $10 minimum order. Raise the investment, use fewer grids, or use more leverage."]);
+    expect(result.reasons).toEqual(['The investment cannot cover all 2 grid orders at the $10 minimum after quantity rounding. Raise the investment, use fewer grids, or use more leverage.']);
     expect(plannerIssue(result.reasons[0])).toMatchObject({ setting: 'Investment', field: 'grid-investment' });
+  });
+  it('routes the maximum-order message to Investment even when it mentions leverage', () => {
+    const market = marketSnapshot(row(), deps());
+    if (market.constraints.state !== 'available') throw Error('EXAMPLE');
+    market.constraints.value.maximumQuote = { state: 'available', value: '20' };
+    const result = previewGrid(query, market, now);
+    expect(result.reasons[0]).toContain('maximum. Lower the investment or leverage');
+    expect(plannerIssue(result.reasons[0])).toMatchObject({ setting: 'Investment', field: 'grid-investment' });
+    expect(plannerIssue('Leverage must be at least 1')).toMatchObject({ setting: 'Leverage', field: 'grid-leverage' });
   });
   it.each(['long', 'short'] as const)('display-only rejected-line values match engine quantities for %s and every scale', side => {
     for (const seed of [false, true]) for (const scale of ['flat', 'ascending', 'descending'] as const) {

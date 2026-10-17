@@ -10,7 +10,7 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { DrawerSettingsPanel } from '@/components/ui/settings-panel';
 import { walletAuthHeaders } from '@/lib/queryClient';
-import { ASSUMPTION_LABEL, plannerPreviewQuery, plannerGridCountHint, plannerOrderSizeSummary, PlannerRequestGeneration, isPlannerChart, plannerIssue, plannerMinimumRows,
+import { ASSUMPTION_LABEL, plannerPreviewQuery, plannerGridCountHint, plannerOrderSizeSummary, plannerOpeningMinimumSummary, PlannerRequestGeneration, isPlannerChart, plannerIssue, plannerMinimumRows,
   isPlannerPreview, plannerOverlays, plannerLevelMessage, plannerVenueChecks, readableDecimal, readableTime, clientObservationDeadline,
   RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange, plannerRangeAround,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
@@ -58,7 +58,12 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const [form, setForm] = useState(() => gridSetupForm(initialIntent, gridStoredMarket(identity))), [markets, setMarkets] = useState<PlannerMarket[]>([]);
   const defaultMarketPendingRef = useRef(!initialIntent);
   const [defaultMarketPending, setDefaultMarketPending] = useState(defaultMarketPendingRef.current);
-  const [previewResult, setPreview] = useState<{ inputKey: string; value: PlannerPreview } | null>(null), [chart, setChart] = useState<PlannerChart | null>(null);
+  const observationKey = JSON.stringify([open, identity, form.market, form.timeframe, form.rangeWindow, plannerEnabled]);
+  const observationInputKey = useRef(observationKey);
+  observationInputKey.current = observationKey;
+  const [previewResult, setPreview] = useState<{ inputKey: string; value: PlannerPreview } | null>(null);
+  const [chartResult, setChart] = useState<{ inputKey: string; value: PlannerChart } | null>(null);
+  const chart = chartResult?.inputKey === observationKey ? chartResult.value : null;
   const previewInputKey = useRef('');
   const [error, setError] = useState(''), [marketError, setMarketError] = useState(''), [chartError, setChartError] = useState('');
   const [refresh, setRefresh] = useState(0), [loading, setLoading] = useState(false), [clock, setNow] = useState(Date.now());
@@ -77,7 +82,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const pendingPercent = useRef<{ market: string; percent: number } | null>(null);
   const [rangeNote, setRangeNote] = useState('');
   const [draftBusy, setDraftBusy] = useState(false), [draftPreview, setDraftPreview] = useState<GridDraftPreview | null>(null);
-  const [rangeFacts, setRangeFacts] = useState<RangeFacts | null>(null), [rangeExpiry, setRangeExpiry] = useState(0);
+  const [rangeResult, setRangeFacts] = useState<{ inputKey: string; value: RangeFacts } | null>(null), [rangeExpiry, setRangeExpiry] = useState(0);
+  const rangeFacts = rangeResult?.inputKey === observationKey ? rangeResult.value : null;
   const [rangeBusy, setRangeBusy] = useState(false), [rangeError, setRangeError] = useState('');
   const [autoApplying, setAutoApplying] = useState(!initialIntent);
   const [rangeRefresh, setRangeRefresh] = useState(0);
@@ -195,21 +201,25 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   }, [open, identity, form.market, refresh, plannerEnabled]);
   useEffect(() => { setMarkets([]); setPreview(null); setDraftPreview(null); setChart(null); setRangeFacts(null); setMarketError(''); setNow(Date.now()); }, [open, identity]);
   useEffect(() => {
+    setChart(current => current?.inputKey === observationKey ? current : null);
+    setRangeFacts(current => current?.inputKey === observationKey ? current : null);
+  }, [observationKey]);
+  useEffect(() => {
     if (!open || defaultMarketPending || !form.market) return;
-    const request = generation.current.chart.start(); setChartError('');
+    const request = generation.current.chart.start(observationKey); setChartError('');
     const startedAt = Date.now();
     readPlanner(`chart?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, period: form.rangeWindow })}`, request.signal, plannerEnabled).then(value => {
-      if (!request.current()) return;
+      if (!request.current(observationInputKey.current)) return;
       if (!isPlannerChart(value)) throw new Error('Invalid chart response');
       if (value.state === 'available') {
         if (value.market !== form.market) throw new Error('Invalid chart response');
         if (value.timeframe !== form.timeframe) throw new Error('Invalid chart response');
         if (value.requestedBars !== historyWindow.chartBars) throw new Error('Invalid chart response');
       }
-      if (value.state === 'available') { setChart(value); setChartExpiry(startedAt + value.validForMs); }
-      else { setChart(current => current?.state === 'available' ? current : value); setChartError(value.reason); }
+      if (value.state === 'available') { setChart({ inputKey: observationKey, value }); setChartExpiry(startedAt + value.validForMs); }
+      else { setChart(current => current?.inputKey === observationKey && current.value.state === 'available' ? current : { inputKey: observationKey, value }); setChartError(value.reason); }
       setNow(Date.now());
-    }).catch(e => { if (request.current()) setChartError(e.message); });
+    }).catch(e => { if (request.current(observationInputKey.current)) setChartError(e.message); });
     return () => generation.current.chart.invalidate();
   }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, chartRefresh, plannerEnabled, defaultMarketPending]);
   useEffect(() => {
@@ -245,10 +255,11 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   useEffect(() => {
     setRangeError(''); setRangeBusy(false);
     if (!open || defaultMarketPending || !form.market) return;
-    const request = generation.current.range.start(), startedAt = Date.now(); setRangeBusy(true);
+    const request = generation.current.range.start(observationKey), startedAt = Date.now(); setRangeBusy(true);
+    const current = () => request.current(observationInputKey.current);
     readPlanner(`range?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, period: form.rangeWindow })}`, request.signal, plannerEnabled)
       .then(value => {
-        if (!request.current()) return;
+        if (!current()) return;
         const facts = value as RangeFacts;
         if (!facts || facts.state !== 'available' || facts.market !== form.market || facts.timeframe !== form.timeframe
           || facts.requestedBars !== historyWindow.rangeBars || !Number.isFinite(facts.validForMs) || facts.validForMs <= 0 || facts.validForMs > 60_000
@@ -256,7 +267,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           || !['available', 'unavailable'].includes(facts.range.state)) throw Error('Invalid range advisory response');
         if (facts.range.state === 'available' && ![facts.range.lowerPrice, facts.range.upperPrice, facts.range.longStop, facts.range.shortStop]
           .every(v => typeof v === 'string' && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v) && Number(v) > 0 && Number.isFinite(Number(v)))) throw Error('Invalid suggested prices');
-        setRangeFacts(facts); setRangeExpiry(startedAt + facts.validForMs); setNow(Date.now());
+        setRangeFacts({ inputKey: observationKey, value: facts }); setRangeExpiry(startedAt + facts.validForMs); setNow(Date.now());
         const apply = applyAutoAfterRefresh.current;
         applyAutoAfterRefresh.current = false;
         if (apply) {
@@ -267,8 +278,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             setForm(previous => ({ ...previous, lower: r.lowerPrice, upper: r.upperPrice, stop: previous.side === 'long' ? r.longStop : r.shortStop }));
           }
         }
-      }).catch(e => { if (request.current()) { applyAutoAfterRefresh.current = false; setRangeError(e.message); } })
-      .finally(() => { if (request.current()) { setRangeBusy(false); setAutoApplying(false); } });
+      }).catch(e => { if (current()) { applyAutoAfterRefresh.current = false; setRangeError(e.message); } })
+      .finally(() => { if (current()) { setRangeBusy(false); setAutoApplying(false); } });
     return () => generation.current.range.invalidate();
   }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, rangeRefresh, plannerEnabled, defaultMarketPending]);
   const autoRange = () => {
@@ -553,6 +564,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             <div><dt className="text-xs text-muted-foreground">Grid order sizes</dt><dd className="font-medium mt-1">{plannerOrderSizeSummary(preview?.requestedPlan, form.entryScale) ?? 'Awaiting a preview at your investment'}</dd></div>
             {plannerMinimumRows(preview).map(row => <div key={row.label}><dt className="text-xs text-muted-foreground">{row.label}</dt><dd className="font-medium mt-1">{row.value}</dd></div>)}
           </dl>
+          {plannerOpeningMinimumSummary(preview?.requestedPlan) && <p role="status" className="text-sm">{plannerOpeningMinimumSummary(preview?.requestedPlan)}</p>}
           {(preview?.fee.state === 'unknown' || form.feePercent === '') && <p className="text-xs text-muted-foreground">Fee assumption not set — fees haven't been checked.</p>}
 
           {displayPlan && <details className="border-t border-border/60 pt-3">
