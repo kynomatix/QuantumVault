@@ -19191,11 +19191,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           signalHash,
         });
       } catch (dbError: any) {
-        if (dbError?.code === '23505') {
+        if ((dbError?.code ?? dbError?.cause?.code) === '23505') {
           console.log(`[Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
           return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
         }
-        if (dbError?.code === '23503') {
+        if ((dbError?.code ?? dbError?.cause?.code) === '23503') {
           console.log(`[Webhook] Bot ${botId} not found (deleted) - ignoring signal`);
           return res.status(404).json({ error: "Bot not found - it may have been deleted. Please remove this alert from TradingView." });
         }
@@ -20571,7 +20571,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       try {
         await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
       } catch (dbError: any) {
-        if (dbError?.code === '23505') {
+        if ((dbError?.code ?? dbError?.cause?.code) === '23505') {
           console.log(`[Webhook] Concurrent duplicate detected at DB level, signal already executed: hash=${signalHash}`);
           return res.status(200).json(signalBotFlipHttpPayload(
             flipDisposition ? markSignalBotFlipOpenExecuted(flipDisposition, orderResult.txSignature || orderResult.signature || null) : null,
@@ -20750,11 +20750,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           signalHash,
         });
       } catch (dbError: any) {
-        if (dbError?.code === '23505') {
+        if ((dbError?.code ?? dbError?.cause?.code) === '23505') {
           console.log(`[User Webhook] Duplicate signal blocked at creation: hash=${signalHash}`);
           return res.status(200).json({ status: "skipped", reason: "duplicate signal" });
         }
-        if (dbError?.code === '23503') {
+        if ((dbError?.code ?? dbError?.cause?.code) === '23503') {
           console.log(`[User Webhook] Bot no longer exists: ${botId}`);
           return res.status(404).json({ error: "Bot not found - it may have been deleted" });
         }
@@ -22046,7 +22046,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: true });
       } catch (dbError: any) {
         // Unique constraint violation means another request already executed this signal
-        if (dbError?.code === '23505') {
+        if ((dbError?.code ?? dbError?.cause?.code) === '23505') {
           console.log(`[User Webhook] Concurrent duplicate detected at DB level, signal already executed: hash=${signalHash}`);
           return res.status(200).json(signalBotFlipHttpPayload(
             uwFlipDisposition ? markSignalBotFlipOpenExecuted(uwFlipDisposition, orderResult.txSignature || orderResult.signature || null) : null,
