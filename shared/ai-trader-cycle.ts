@@ -74,6 +74,7 @@ export interface LatestCycle {
     flatReasons: FlatReason[] | null;
     rationale: string | null;
     detailCodes: string[];
+    gatewayFailure?: import("./ai-gateway-failure").GatewayFailure | null;
   };
 }
 

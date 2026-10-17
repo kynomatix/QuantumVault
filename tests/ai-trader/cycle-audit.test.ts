@@ -18,6 +18,33 @@ beforeEach(() => {
 });
 
 describe("closure-owned cycle receipts", () => {
+  it("persists bounded gateway diagnostics without raw detail and projects them for the drawer", async () => {
+    const { CycleAudit } = await import("../../server/ai-trader/cycle-audit");
+    const { readLatestCycle } = await import("../../server/ai-trader/cycle-display");
+    const sameBot = bot(); const audit = new CycleAudit(sameBot, new Date());
+    await audit.begin(); audit.gatewayCall(); audit.gatewayCall();
+    audit.decision({ ok: false, reason: "gateway", detail: "EXAMPLE private prompt and headers",
+      gatewayFailure: { failureClass: "http", httpStatus: 400, providerCode: "invalid_json_schema",
+        providerType: "invalid_request_error", elapsedMs: 900, attemptCount: 2, raw: "EXAMPLE private" } });
+    await audit.finish(null);
+    const receipt = mocks.finish.mock.calls[0][3];
+    expect(receipt).toMatchObject({ reasonCode: "gateway_error", modelCallCount: 2,
+      details: { gatewayFailure: { failureClass: "http", httpStatus: 400, providerCode: "invalid_json_schema", providerType: "invalid_request_error", elapsedMs: 900, attemptCount: 2 } } });
+    expect(JSON.stringify(receipt)).not.toContain("private");
+    mocks.latest.mockResolvedValue({ ...receipt, id: audit.id, startedAt: new Date(), decisionIds: [] });
+    expect((await readLatestCycle(sameBot.id)).cycle?.gatewayFailure).toEqual(receipt.details.gatewayFailure);
+    expect(mocks.decision).not.toHaveBeenCalled();
+  });
+  it("contains hostile failure metadata without throwing or altering the gateway reason", async () => {
+    const { CycleAudit } = await import("../../server/ai-trader/cycle-audit");
+    const sameBot = bot(); const audit = new CycleAudit(sameBot, new Date());
+    await audit.begin();
+    expect(() => audit.decision({ ok: false, reason: "timeout", gatewayFailure: {
+      get failureClass() { throw new Error("EXAMPLE"); },
+    } })).not.toThrow();
+    await audit.finish(null);
+    expect(mocks.finish.mock.calls[0][3]).toMatchObject({ reasonCode: "gateway_timeout" });
+  });
   it.each([undefined, null, {}, { ok: true }, { ok: true, decision: { action: "EXAMPLE" } },
     { ok: true, decision: { action: "flat" }, violations: {} },
     { ok: true, get decision() { throw new Error("EXAMPLE"); } },

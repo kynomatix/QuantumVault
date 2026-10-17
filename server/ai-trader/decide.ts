@@ -14,6 +14,7 @@
 //   decided; the monitor simply retries at the next candle close).
 import { z } from "zod";
 import { FLAT_REASON_CODES, usesFixedPaperDecisionV2 } from "@shared/ai-trader-flat-reasons";
+import { sanitizeGatewayFailure, type GatewayFailure } from "@shared/ai-gateway-failure";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { fromZodError } from "zod-validation-error";
 import {
@@ -129,22 +130,15 @@ const generated = zodToJsonSchema(tradeDecisionSchema, {
 delete generated.$schema;
 export const DECISION_JSON_SCHEMA: Record<string, unknown> = generated;
 
-// Explicit action branches enforce the conditional contract in the provider schema too.
+// Keep the proven single-object, non-strict tool shape on the wire. Provider
+// schema dialects differ; conditional fields, bounds and uniqueness stay in Zod
+// above (including the existing one-correction limit).
 export const PAPER_DECISION_JSON_SCHEMA: Record<string, unknown> = {
-  oneOf: (["flat", "long", "short", "close"] as const).map(action => ({
-    type: "object", additionalProperties: false,
-    properties: { ...(generated.properties as object), action: { const: action },
-      ...(action === "flat" ? { flatReasonsVersion: { const: 1 }, flatReasons: {
-        type: "array", minItems: 1, maxItems: 3, uniqueItems: true,
-        items: { type: "string", enum: FLAT_REASON_CODES },
-      } } : {}),
-    },
-    required: ["action", "confidence", "invalidation", "rationale",
-      ...(action === "flat" ? ["flatReasonsVersion", "flatReasons"] : []),
-      ...(action === "long" || action === "short"
-        ? ["entryType", "leverage", "sizePct", "stopLossPrice", "takeProfitPrice"] : []),
-    ],
-  })),
+  ...generated,
+  properties: { ...(generated.properties as object),
+    flatReasonsVersion: { type: "integer", enum: [1] },
+    flatReasons: { type: "array", items: { type: "string", enum: FLAT_REASON_CODES } },
+  },
 };
 
 const DECIDE_TOOL = {
@@ -189,7 +183,7 @@ export type RunDecisionResult =
       usage?: LlmUsage;
       latencyMs: number;
     }
-  | { ok: false; reason: "malformed" | "timeout" | "gateway"; detail: string; decisionId?: string };
+  | { ok: false; reason: "malformed" | "timeout" | "gateway"; detail: string; decisionId?: string; gatewayFailure?: GatewayFailure };
 
 type ParsedAttempt =
   | { ok: true; decision: TradeDecision; raw: string }
@@ -261,6 +255,11 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
   const usageTotal: LlmUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   let sawUsage = false;
   let omitTemperature = false;
+  let gatewayAttempts = 0;
+  const gatewayCall = () => {
+    gatewayAttempts++;
+    try { input.onGatewayCall?.(); } catch { /* passive audit must not affect a call */ }
+  };
 
   // Sum spend across ALL calls in the cycle (initial + temperature retry +
   // corrective retry) — the user pays for every one of them.
@@ -304,7 +303,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
       ...(omitTemperature ? { omitTemperature: true } : {}),
     };
     try {
-      input.onGatewayCall?.();
+      gatewayCall();
       return await callOpenRouterWithUsage(opts);
     } catch (err) {
       if (
@@ -314,7 +313,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
         !omitTemperature
       ) {
         omitTemperature = true;
-        input.onGatewayCall?.();
+        gatewayCall();
         return await callOpenRouterWithUsage({ ...opts, omitTemperature: true });
       }
       throw err;
@@ -329,6 +328,10 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     try {
       res = await callGateway();
     } catch (err) {
+      const gatewayFailure = sanitizeGatewayFailure({
+        ...(err instanceof LlmGatewayError ? err.failure : { failureClass: "other" }),
+        elapsedMs: Date.now() - started, attemptCount: gatewayAttempts,
+      })!;
       // Nothing was decided — no audit row (there is no outcome enum for a call
       // that never produced output); the monitor retries at the next candle close.
       if (err instanceof LlmGatewayError) {
@@ -336,9 +339,10 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
           ok: false,
           reason: err.status === 408 ? "timeout" : "gateway",
           detail: err.message,
+          gatewayFailure,
         };
       }
-      return { ok: false, reason: "gateway", detail: "Unexpected error calling the model provider." };
+      return { ok: false, reason: "gateway", detail: "Unexpected error calling the model provider.", gatewayFailure };
     }
     addUsage(res.usage);
 

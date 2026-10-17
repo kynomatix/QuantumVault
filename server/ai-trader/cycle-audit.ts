@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { sanitizeGatewayFailure } from "@shared/ai-gateway-failure";
 import type { AiTraderBot } from "@shared/schema";
 import { CYCLE_REASONS, outcomeForCycleReason, type CycleFinish, type CyclePhase, type CycleReason, type CycleStart } from "@shared/ai-trader-cycle";
 import { usesFixedPaperDecisionV2 } from "@shared/ai-trader-flat-reasons";
@@ -138,6 +139,10 @@ export class CycleAudit {
     const candidates = (this.details.candidates as unknown[] | undefined) ?? [];
     this.details.candidates = [...candidates, { reasonCode: this.reason, decisionId: this.decisionIds.includes(value.decisionId) ? value.decisionId : null, codes }].slice(0, 2);
     this.details.detailCodes = codes;
+    if (!value.ok && (value.reason === "gateway" || value.reason === "timeout")) {
+      const gatewayFailure = sanitizeGatewayFailure(value.gatewayFailure);
+      if (gatewayFailure) this.details.gatewayFailure = gatewayFailure;
+    }
     });
   }
   execution(code: string | null, ok: boolean): void {

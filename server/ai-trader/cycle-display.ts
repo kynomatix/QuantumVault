@@ -1,4 +1,5 @@
 import type { LatestCycle } from "@shared/ai-trader-cycle";
+import { sanitizeGatewayFailure } from "@shared/ai-gateway-failure";
 import { readFlatReasons } from "@shared/ai-trader-flat-reasons";
 import { storage } from "../storage";
 import { cycleAuditUnavailable, cycleIsActive } from "./cycle-audit";
@@ -33,6 +34,8 @@ export async function readLatestCycle(botId: string): Promise<LatestCycle> {
       rearmed: row.rearmed, nextPlannedBoundary: row.nextPlannedBoundary?.toISOString() ?? null,
       completionUnknown: row.outcome === "running" && !(row.ownerBootId === SERVER_BOOT_ID && cycleIsActive(row.id)),
       flatReasons, rationale,
+      gatewayFailure: row.reasonCode === "gateway_error" || row.reasonCode === "gateway_timeout"
+        ? sanitizeGatewayFailure(details?.gatewayFailure) : null,
       detailCodes: Array.isArray(details?.detailCodes) ? details.detailCodes.filter((value): value is string => typeof value === "string" && /^[a-z0-9_]{1,80}$/i.test(value)).slice(0, 4) : [],
     } };
   } catch { return { status: "unavailable", cycle: null }; }
