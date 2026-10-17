@@ -7,6 +7,25 @@ import type { GridSetupForm } from './grid-setup-view';
 export type { PlannerChart, PlannerMarket, PlannerPreview };
 export const PLANNING_BANNER = 'Planning only — no orders are placed';
 export const ASSUMPTION_LABEL = 'Your assumption — not a venue quote';
+export function plannerStatus(preview: PlannerPreview, stale = false): string {
+  if (stale) return 'Preview expired — refresh market data';
+  if (preview.state === 'rejected') return 'Plan needs changes — see the checks below';
+  if (preview.state === 'unavailable') return 'Plan unavailable — refresh market data';
+  if (preview.geometry?.state === 'available') return 'Prices ready — enter an investment to check order sizes and fees';
+  const missing: string[] = [];
+  if (preview.fee.state === 'unknown') missing.push('fees not checked (enter your maker fee)');
+  if (preview.market.constraints.state === 'available') {
+    const c = preview.market.constraints.value;
+    for (const [key, label] of [['maxLeverage', 'leverage limit'], ['maximumQuote', 'maximum order value'],
+      ['priceBounds', 'accepted price range'], ['restrictions', 'market requirements']] as const) {
+      if (c[key].state === 'unavailable') missing.push(`Pacifica’s ${label} couldn’t be loaded; refresh market data`);
+    }
+  } else missing.push('market limits not checked; refresh market data');
+  if (missing.length) return `Plan ready — ${missing.join('; ')}`;
+  return preview.state === 'hypothetical_checks_passed'
+    ? 'Plan ready — price, size, maker fee and market checks passed'
+    : 'Plan ready — checks incomplete; refresh market data';
+}
 export const clientObservationDeadline = (expiresAt: number, serverNow: number, requestStartedAt: number) =>
   requestStartedAt + Math.max(0, expiresAt - serverNow);
 
@@ -197,7 +216,7 @@ export function plannerLevelMessage(preview: PlannerPreview | null, expiresAt: n
   const basis = preview.requestedPlan ? 'your investment' : 'the minimum investment, not your entered investment';
   const warning = preview.state === 'rejected' ? ' Checks did not pass; see Your plan.'
     : preview.state === 'diagnostic' ? ' Some checks are unavailable.' : '';
-  return `Dashed grid levels are hypothetical geometry at ${basis}.${warning}`;
+  return `Dashed grid levels show planned prices and sizes at ${basis}.${warning}`;
 }
 /** Display precision comes from the exchange step, never padded engine decimals. */
 export function plannerPriceFormat(tick: string | null | undefined, prices: (string | number)[]) {
@@ -210,7 +229,7 @@ export function plannerPriceFormat(tick: string | null | undefined, prices: (str
 export type PlannerIssue = { message: string; panel: string; field?: string; setting: string; original: string };
 export function plannerVenueChecks(market: PlannerMarket): { label: string; value: string }[] {
   if (market.constraints.state !== 'available') return [];
-  const c = market.constraints.value, fallback = 'Checked by Pacifica when each order is placed';
+  const c = market.constraints.value, fallback = 'Not checked — refresh market data';
   return [
     { label: 'Maximum order value', value: c.maximumQuote.state === 'available' ? `$${readableDecimal(c.maximumQuote.value)}` : fallback },
     { label: 'Accepted order prices', value: c.priceBounds.state === 'available' ? `$${readableDecimal(c.priceBounds.value.minimum)} to $${readableDecimal(c.priceBounds.value.maximum)}` : fallback },

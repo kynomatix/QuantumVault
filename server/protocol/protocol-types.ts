@@ -442,6 +442,8 @@ export interface AccountInfo {
    */
   maintenanceMarginRequired?: number;
   feeTier?: string;
+  /** Display-only account maker rate; not execution fee authority. */
+  makerFeeRate?: string;
   subaccountId?: string;
   exists?: boolean;
 }

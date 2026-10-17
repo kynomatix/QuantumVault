@@ -37,6 +37,7 @@ import { db, pool, isConnectionClassError } from "./db";
 import { desc, eq, sql, asc, and, or, lt, gte, lte, inArray } from "drizzle-orm";
 import { ZodError } from "zod";
 import { getDefaultAdapter, getAdapterForBot, getAdapter } from './protocol/adapter-registry';
+import { readPlannerAccountFee } from './grid-planner/account-fee';
 import { normalizeMarket } from './protocol/symbol-registry';
 import {
   placeMarketOrderWithFeeAuthority,
@@ -9239,6 +9240,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     }
   };
   app.post("/api/exchange/withdraw", requireWallet, withdrawFromExchange);
+
+  // Uses the authenticated owner's agent and the existing per-account Pacifica read cache.
+  // No caller-supplied account, balance mapping or execution fee quote is involved.
+  app.get('/api/exchange/planner-fee', requireWallet, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const fee = await readPlannerAccountFee(req.walletAddress!, owner => storage.getWallet(owner),
+      account => getAdapter('pacifica').getAccountInfo(account));
+    res.json({ fee });
+  });
 
   app.get("/api/exchange/balance", requireWallet, async (req, res) => {
     try {

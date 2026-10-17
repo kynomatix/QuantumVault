@@ -1318,6 +1318,8 @@ export class PacificaAdapter implements ProtocolAdapter {
       maintenanceMargin,
       maintenanceMarginRequired: Number.isFinite(crossMmr) ? crossMmr : undefined,
       feeTier: String(response.fee_level),
+      makerFeeRate: typeof response.maker_fee === 'string' && /^(0|[1-9]\d*)(\.\d{1,18})?$/.test(response.maker_fee)
+        ? response.maker_fee : undefined,
       subaccountId: response.subaccount_id,
       exists: true,
     };
