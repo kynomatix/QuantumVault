@@ -9244,10 +9244,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   // Uses the authenticated owner's agent and the existing per-account Pacifica read cache.
   // No caller-supplied account, balance mapping or execution fee quote is involved.
   app.get('/api/exchange/planner-fee', requireWallet, async (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    const fee = await readPlannerAccountFee(req.walletAddress!, owner => storage.getWallet(owner),
-      account => getAdapter('pacifica').getAccountInfo(account));
-    res.json({ fee });
+    try {
+      res.set('Cache-Control', 'no-store');
+      const fee = await readPlannerAccountFee(req.walletAddress!, owner => storage.getWallet(owner),
+        account => getAdapter('pacifica').getAccountInfo(account));
+      res.json({ fee });
+    } catch {
+      // Keep provider errors and account details out of responses and logs.
+      res.json({ fee: { state: 'unavailable', reason: 'Planner fee could not be loaded' } });
+    }
   });
 
   app.get("/api/exchange/balance", requireWallet, async (req, res) => {

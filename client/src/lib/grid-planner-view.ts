@@ -172,6 +172,11 @@ function isPlan(p: any): boolean {
       && p.openingOrderLift.count > 0 && p.openingOrderLift.count <= 100 && positive(p.openingOrderLift.minimumQuote))
     && ['evaluated', 'not_evaluated'].includes(p.feeGate) && Array.isArray(p.feeRows)
     && Array.isArray(p.lines) && p.lines.length >= 2 && p.lines.length <= 101
+    && (p.openingOrderLift?.ordinals === undefined || Array.isArray(p.openingOrderLift.ordinals)
+      && p.openingOrderLift.ordinals.length === p.openingOrderLift.count
+      && new Set(p.openingOrderLift.ordinals).size === p.openingOrderLift.count
+      && p.openingOrderLift.ordinals.every((i: unknown) => typeof i === 'number' && Number.isInteger(i)
+        && i >= 0 && i < p.lines.length && p.lines[i].role === 'entry'))
     && p.lines.every((l: any, i: number) => record(l) && l.ordinal === i && positive(l.price) && decimal(l.quantity) && decimal(l.notional)
       && (!i || Number(l.price) > Number(p.lines[i - 1].price)) && ['entry', 'seed_exit', 'virtual'].includes(l.role)
       && (l.pairedExitOrdinal === null || Number.isInteger(l.pairedExitOrdinal) && l.pairedExitOrdinal >= 0 && l.pairedExitOrdinal < p.lines.length));

@@ -17,6 +17,7 @@ import { ASSUMPTION_LABEL, plannerPreviewQuery, plannerGridCountHint, plannerOrd
   RANGE_PRESETS, ORDER_SIZES, plannerShortcutReason, proposedPlannerStop, plannerChartRange, plannerRangeAround,
   type PlannerChart, type PlannerMarket, type PlannerPreview } from '@/lib/grid-planner-view';
 import { GridPlannerChart } from './GridPlannerChart';
+import { GridPlannerLevels } from './GridPlannerLevels';
 import { GridPlanIssues } from './GridPlanIssues';
 import { GridPlannerSizeSelect } from './GridPlannerSizeSelect';
 import { GridDirectionSignals } from './GridDirectionSignals';
@@ -594,14 +595,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           {displayPlan && <details className="border-t border-border/60 pt-3">
             <summary className="cursor-pointer text-sm font-medium">View all grid levels and quantities</summary>
             <p className="text-xs text-muted-foreground mt-3">{stale && 'Expired market data. '}{preview?.minimumPlan ? 'Quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Starting position quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p>
-            <div className="overflow-x-auto max-h-72 mt-2"><table className="w-full text-xs text-left">
-              <caption className="text-left py-2">Planned levels ({displayPlan.lines.length} price lines)</caption>
-              <thead><tr><th className="p-2">Level</th><th className="p-2">Price</th><th className="p-2">Base quantity</th><th className="p-2">Role</th></tr></thead>
-              <tbody>{displayPlan.lines.map(line => <tr key={line.ordinal} className="border-t border-border/60">
-                <td className="p-2">{line.ordinal + 1}</td><td className="p-2 tabular-nums">{readableDecimal(line.price)}</td><td className="p-2 tabular-nums">{readableDecimal(line.quantity)}</td>
-                <td className="p-2">{line.role === 'entry' ? 'Entry' : line.role === 'seed_exit' ? 'Take-profit (starting position)' : 'Virtual line'}</td>
-              </tr>)}</tbody>
-            </table></div>
+            <GridPlannerLevels plan={displayPlan} baseSymbol={form.market.replace(/-PERP$/, '')} />
           </details>}
           {!!preview?.feeRows.length && <details className="border-t border-border/60 pt-3">
             <summary className="cursor-pointer text-sm font-medium">View fee assumption checks</summary>

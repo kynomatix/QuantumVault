@@ -116,7 +116,8 @@ export function calculateGrid(input: GridInput): GridResult {
     seedQuantity: text(lines.filter(l => l.role === 'seed_exit').reduce((a, l) => a.plus(l.quantity), new D(0))),
     allocatedNotional: text(allocated), unallocatedNotional: text(total.minus(allocated)),
     feeGate: input.effectiveMakerCostRate == null ? 'not_evaluated' : 'evaluated', feeRows: [],
-    ...(lifted.length ? { openingOrderLift: { count: lifted.length, minimumQuote: text(new D(input.minimumQuote)) } } : {}) };
+    ...(lifted.length ? { openingOrderLift: { count: lifted.length, minimumQuote: text(new D(input.minimumQuote)),
+      ordinals: lifted.map(({ i }) => i) } } : {}) };
   if (input.effectiveMakerCostRate != null) {
     plan.feeRows = assumedPairFees(plan, input.effectiveMakerCostRate);
     const failed = plan.feeRows.find(row => !row.clears);

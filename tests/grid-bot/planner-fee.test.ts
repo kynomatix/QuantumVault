@@ -11,6 +11,10 @@ import { observePacificaConstraints } from '../../server/protocol/market-constra
 import type { ProtocolMarket } from '../../server/protocol/protocol-types';
 import type { PlannerPreview, PlannerQuery } from '../../server/grid-planner/types';
 import { readPlannerAccountFee } from '../../server/grid-planner/account-fee';
+import { readFileSync } from 'node:fs';
+import { GridPlannerLevels } from '../../client/src/components/grid-planner/GridPlannerLevels';
+import { calculateGrid } from '../../server/grid-bot/engine';
+import type { GridPlan } from '../../server/grid-bot/engine-types';
 
 vi.mock('../../client/src/components/ui/dialog', () => {
   const container = ({ children }: { children: ReactNode }) => createElement('div', null, children);
@@ -34,6 +38,30 @@ const query: PlannerQuery = { market: 'BTC-PERP', side: 'long', lower: '80', upp
 const preview = () => previewGrid(query, market, now);
 
 describe('planner maker fee defaults', () => {
+  it('returns a sanitized unavailable response when the route fee reader rejects', async () => {
+    const source = readFileSync('server/routes.ts', 'utf8');
+    const start = source.indexOf("  app.get('/api/exchange/planner-fee'");
+    const route = source.slice(start, source.indexOf('\n  });', start) + 7).replace('req.walletAddress!', 'req.walletAddress');
+    let handler: (req: unknown, res: unknown) => Promise<void>;
+    const app = { get: (_path: string, _auth: unknown, callback: typeof handler) => { handler = callback; } };
+    const readFee = vi.fn(async () => { throw Error('EXAMPLE private provider detail'); });
+    new Function('app', 'requireWallet', 'readPlannerAccountFee', 'storage', 'getAdapter', route)(
+      app, vi.fn(), readFee, { getWallet: vi.fn() }, vi.fn());
+    const res = { set: vi.fn(), json: vi.fn() };
+    await handler!({ walletAddress: 'EXAMPLE' }, res);
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+    expect(res.json).toHaveBeenCalledExactlyOnceWith({ fee: { state: 'unavailable', reason: 'Planner fee could not be loaded' } });
+  });
+  it.each(['wallet', 'account'])('does not log private %s lookup errors', async failure => {
+    const spies = [vi.spyOn(console, 'error').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}), vi.spyOn(console, 'log').mockImplementation(() => {})];
+    try {
+      const getWallet = async () => { if (failure === 'wallet') throw Error('EXAMPLE private detail'); return { agentPublicKey: 'EXAMPLE' }; };
+      const getAccount = async (): Promise<never> => { throw Error('EXAMPLE private detail'); };
+      expect(await readPlannerAccountFee('EXAMPLE', getWallet, getAccount)).toEqual(plannerFeeDefault(null));
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally { for (const spy of spies) spy.mockRestore(); }
+  });
   it.each([['0.00012', '0.012'], ['0', '0']])('prefills the account rate %s as percent %s and retains the tier', (rate, percent) => {
     const fee = readPlannerFee({ fee: plannerFeeDefault({ makerFeeRate: rate, feeTier: '2', exists: true }) });
     expect(plannerFeePercent(fee)).toBe(percent);
@@ -75,6 +103,36 @@ describe('planner maker fee defaults', () => {
     expect(account).not.toHaveBeenCalled();
     expect(await readPlannerAccountFee('EXAMPLE', async () => ({ agentPublicKey: 'EXAMPLE' }), account)).toEqual(plannerFeeDefault(null));
     expect(account).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('planner level USD values', () => {
+  it('renders supplied notionals, the supplied total, virtual dashes and only identified lift tags', () => {
+    const plan: GridPlan = { side: 'long', start: '100', investment: '2000', leverage: '1', seedQuantity: '0.1',
+      allocatedNotional: '1234.56', unallocatedNotional: '765.44', feeGate: 'not_evaluated', feeRows: [],
+      openingOrderLift: { count: 1, minimumQuote: '10', ordinals: [0] }, lines: [
+        { ordinal: 0, price: '80', quantity: '0.00074', notional: '60.3700', role: 'entry', pairedExitOrdinal: 1 },
+        { ordinal: 1, price: '100', quantity: '0', notional: '0', role: 'virtual', pairedExitOrdinal: null },
+        { ordinal: 2, price: '120', quantity: '0.1', notional: '12', role: 'seed_exit', pairedExitOrdinal: null },
+      ] };
+    const html = renderToStaticMarkup(createElement(GridPlannerLevels, { plan, baseSymbol: 'BTC' }));
+    expect(html).toContain('0.00074 BTC · $60.37');
+    expect(html).toContain('0.1 BTC · $12');
+    expect(html).toContain('Total in orders: $1,234.56');
+    expect(html).toContain('>—</td>');
+    expect(html.match(/raised to min/g)).toHaveLength(1);
+    expect(renderToStaticMarkup(createElement(GridPlannerLevels, { plan: { ...plan, openingOrderLift: undefined }, baseSymbol: 'BTC' })))
+      .not.toContain('raised to min');
+  });
+  it.each(['long', 'short'] as const)('identifies the actual lifted %s entry without changing sizing', side => {
+    const result = calculateGrid({ side, seed: false, lower: '80', upper: '120', start: '100', intervals: 4,
+      entryScale: 'descending', profitScale: 'flat', investment: '30', leverage: '1', tick: '0.1', lot: '0.01',
+      minimumQuote: '10', investmentStep: '0.01', transferFloor: '0' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw Error('EXAMPLE unexpected rejection');
+    expect(result.plan.openingOrderLift).toEqual({ count: 1, minimumQuote: '10', ordinals: [side === 'long' ? 0 : 4] });
+    expect(result.plan.lines.filter(line => line.role === 'entry').map(line => line.notional))
+      .toEqual(side === 'long' ? ['10.4', '18.9'] : ['18.7', '10.8']);
   });
 });
 
