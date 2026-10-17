@@ -67,13 +67,13 @@ export function GridRangingFinder({ enabled, identity, timeframe, disabled, onSe
   const pages = current?.results?.pages ?? [], last = pages.at(-1);
   const candidates: GridFinderCandidate[] = pages.flatMap(page => page.candidates)
     .sort((a, b) => a.adx - b.adx || (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0));
-  return <div className="col-span-2 space-y-2">
-    <Button type="button" size="sm" variant="ghost" disabled={disabled} aria-expanded={current?.expanded ?? false}
+  return <div className="contents">
+    <Button type="button" size="sm" variant="ghost" className="col-span-2 w-full justify-self-start sm:col-span-1 sm:col-start-1 sm:row-start-2 sm:w-auto" disabled={disabled} aria-expanded={current?.expanded ?? false}
       aria-controls="grid-ranging-markets" onClick={() => {
         if (!current) { void scan(0); return; }
         setSession({ ...current, expanded: !current.expanded });
       }}><Search className="h-3.5 w-3.5 mr-2" />Find ranging markets<ChevronDown className="h-3.5 w-3.5 ml-2" /></Button>
-    {current?.expanded && <section id="grid-ranging-markets" aria-label="Ranging market results" className="rounded-lg border p-3 space-y-3">
+    {current?.expanded && <section id="grid-ranging-markets" aria-label="Ranging market results" className="col-span-2 row-start-4 rounded-lg border p-3 space-y-3 sm:row-start-3">
       <p className="text-xs text-muted-foreground">{timeframe} · 100 finalized candles · weakest measured trend</p>
       <p role="status" className="text-xs text-muted-foreground">{last ? finderCoverage(pages) : 'No markets checked yet.'}
         {current.busy && ' Checking up to 20 markets…'}{last?.truncated && ' Scan truncated; more markets remain.'}
