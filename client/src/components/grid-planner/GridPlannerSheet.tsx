@@ -419,12 +419,12 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             <p className="text-xs text-muted-foreground">{lastPrice ? <PriceAge observedAt={lastPrice.observedAt} clock={marketClock} />
               : marketError === PRICE_BUSY_MESSAGE ? 'Waiting for a fresh observation.'
               : marketLoading ? 'Refreshing price…' : !form.market ? 'Choose a market to see its price' : null}</p>
-            <Button type="button" size="sm" variant="outline" disabled={marketLoading} onClick={refreshObservations}>
-              <RefreshCw className="h-3.5 w-3.5 mr-2" />Refresh price
-            </Button>
           </div>
           <GridRangingFinder enabled={open && plannerEnabled} identity={identity} timeframe={form.timeframe} disabled={draftBusy}
             onSelect={market => { if (market !== form.market) edit('market', market); }} />
+          <Button type="button" size="sm" variant="outline" className="col-span-2 w-full justify-self-end sm:col-span-1 sm:col-start-2 sm:row-start-2 sm:w-auto" disabled={marketLoading} onClick={refreshObservations}>
+            <RefreshCw className="h-3.5 w-3.5 mr-2" />Refresh price
+          </Button>
           {(marketError || selected?.reference.state === 'unavailable') && <p role={marketError === PRICE_BUSY_MESSAGE ? 'status' : 'alert'}
             className={`col-span-2 text-sm ${marketError === PRICE_BUSY_MESSAGE ? 'text-muted-foreground' : 'text-destructive'}`}>
             {marketError || (selected?.reference.state === 'unavailable' ? selected.reference.reason : '')}</p>}
