@@ -89,7 +89,8 @@ vi.mock("../../server/ai-trader/context-builder", () => ({
   marketToDatafeedTicker: vi.fn(),
 }));
 const fetchOHLCVMock = vi.hoisted(() => vi.fn());
-vi.mock("../../server/trading/chart-candles", () => ({
+vi.mock("../../server/trading/chart-candles", async importOriginal => ({
+  ...await importOriginal<typeof import("../../server/trading/chart-candles")>(),
   fetchChartCandles: (...args: unknown[]) => fetchOHLCVMock(...args),
 }));
 vi.mock("../../server/lab/datafeed", () => ({
@@ -694,6 +695,20 @@ describe("AI Trader chart unavailable response", () => {
 
   afterEach(() => {
     warnSpy.mockRestore();
+  });
+
+  it("returns the pool failure reason after a degraded chart cache", async () => {
+    const { ChartCandlesUnavailableError } = await import("../../server/trading/chart-candles");
+    fetchOHLCVMock.mockRejectedValueOnce(new ChartCandlesUnavailableError("cache_read_failed_pool_empty"));
+    const built = buildApp();
+    registerAiTraderRoutes(built.app);
+    const result = await invoke(built.routes, "GET /api/ai-trader/:id/chart", {
+      params: { id: "paper-route" }, session: { walletAddress: "WALLET_ROUTE" },
+      body: {}, query: { span: "trade", decisionId: "chart-decision" }, headers: {},
+    });
+    expect(result).toEqual({ statusCode: 503, body: {
+      error: "Chart data temporarily unavailable", code: "chart_candles_unavailable", reason: "cache_read_failed_pool_empty",
+    } });
   });
 
   it.each(["trade", "deep", "tail"] as const)(

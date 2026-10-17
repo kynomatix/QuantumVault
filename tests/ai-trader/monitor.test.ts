@@ -1006,6 +1006,59 @@ describe("close-time price-path observation wiring", () => {
 });
 
 describe("paper close detection", () => {
+  it("closes PAXG from a Gate forming-bar TP touch and records no gap in a contiguous history", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ market: "PAXG-PERP" })]);
+    fetchOHLCVMock.mockResolvedValue([{
+      ...candle(ENTRY_CANDLE_OPEN + TF_15M, 151, 161, 150, 155),
+      provenance: { source: "gate", venue: "gate", basis: "perp", proxy: "direct", finality: "forming", timeSemantic: "open_time" },
+    }]);
+    await monitorBotOnce(makeBot({ market: "PAXG-PERP" }));
+    expect(commitCloseMock).toHaveBeenCalledWith(expect.objectContaining({ close: expect.objectContaining({
+      exitReason: "tp", closedAt: new Date(ENTRY_CANDLE_OPEN + TF_15M), paperExitContext: { gap: false },
+    }) }));
+  });
+
+  it("replays oldest first across a missing bar and dates the close at the observed SL bar", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    const entry = ENTRY_CANDLE_OPEN - 3 * TF_15M;
+    getDecisionsMock.mockResolvedValue([makeOpenDecision({ decidedAt: new Date(entry) })]);
+    fetchOHLCVMock.mockResolvedValue([
+      candle(entry + 4 * TF_15M, 155, 162, 150, 160), // later TP must not win
+      candle(entry + 3 * TF_15M, 150, 151, 144, 146), // observed SL after gap
+      candle(entry + TF_15M, 150, 152, 148, 151),
+    ]);
+    await monitorBotOnce(makeBot());
+    expect(commitCloseMock).toHaveBeenCalledWith(expect.objectContaining({ close: expect.objectContaining({
+      exitReason: "sl", closedAt: new Date(entry + 3 * TF_15M), paperExitContext: { gap: true },
+    }) }));
+  });
+
+  it("retries a degraded cache once with network-only reads under the original paper deadline", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockImplementationOnce(async () => {
+      vi.setSystemTime(NOW + 5_000);
+      throw Object.assign(new Error('DB unavailable'), { name: 'CacheDegradedError' });
+    }).mockResolvedValueOnce([candle(ENTRY_CANDLE_OPEN + TF_15M, 151, 161, 150, 155)]);
+    await monitorBotOnce(makeBot());
+    expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
+    const initial = fetchOHLCVMock.mock.calls[0][5];
+    const retry = fetchOHLCVMock.mock.calls[1][5];
+    expect(retry).toMatchObject({ bypassCache: true, cacheWritePolicy: 'skip', deadlineMs: 25_000, callerClass: 'paper_monitor' });
+    expect(retry.signal).toBe(initial.signal);
+    expect(commitCloseMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after one unsuccessful paper cache-degradation retry", async () => {
+    const { monitorBotOnce } = await importMonitor();
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    fetchOHLCVMock.mockRejectedValue(Object.assign(new Error('DB unavailable'), { name: 'CacheDegradedError' }));
+    await monitorBotOnce(makeBot());
+    expect(fetchOHLCVMock).toHaveBeenCalledTimes(2);
+    expect(commitCloseMock).not.toHaveBeenCalled();
+  });
+
   it("closes on a TP hit in a later candle with the paper fill convention", async () => {
     const { monitorBotOnce } = await importMonitor();
     const bot = makeBot();

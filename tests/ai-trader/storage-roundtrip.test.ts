@@ -617,6 +617,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       const decision = await storage.insertAiTraderDecision({
         botId: closeBot.id, rawDecision: { action: "long" }, clampedDecision: { action: "long" },
         outcome: "executed", entryPrice: "150.00000000", decidedAt: new Date("2026-08-19T01:00:00.000Z"),
+        contextDigest: { price: 150, source: 'EXAMPLE' },
       } as any);
       const closedAt = new Date("2026-08-19T02:00:00.000Z");
       expect(decision.priceExcursion).toBeNull(); // legacy/new open rows have no invented observation
@@ -634,7 +635,7 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       await storage.updateAiTraderDecision(decision.id, { clampedDecision: ratcheted } as any);
       const attemptId = journal.newMutationAttemptId("close", decision.id);
       const base = journal.journalBase(closeBot, decision.id);
-      const close = { exitPrice: 145, exitReason: "sl", realizedPnl: -10, feesPaid: 0.2, closedAt };
+      const close = { exitPrice: 145, exitReason: "sl", realizedPnl: -10, feesPaid: 0.2, closedAt, paperExitContext: { gap: true } };
       const journalEvents = [
         { ...base, attemptId, action: "close", cause: "paper", eventType: "attempt_claimed", side: "long", observedAt: closedAt },
         { ...base, attemptId, action: "close", cause: "paper", eventType: "fill_observed", side: "long",
@@ -653,16 +654,18 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
 
       const applied = await storage.commitAiTraderConfirmedCloseTransition(params);
       expect(applied).toMatchObject({
-        status: "applied", decision: { closedAt, realizedPnl: "-10.00", feesPaid: "0.200000", priceExcursion, clampedDecision: ratcheted },
+        status: "applied", decision: { closedAt, realizedPnl: "-10.00", feesPaid: "0.200000", priceExcursion, clampedDecision: ratcheted,
+          contextDigest: { price: 150, source: 'EXAMPLE', exitContext: { gap: true } } },
         bot: { status: "paused", pauseReason: "consecutive_losses", consecutiveLosses: 3, dailyRealizedPnl: "-10.00" },
         closedTodayCount: 1, knownDailyRealizedPnl: -10, dailyRealizedComplete: true,
         journal: { status: "appended", failureCode: null },
       });
       const replayed = await storage.commitAiTraderConfirmedCloseTransition({ ...params,
         priceExcursion: { version: 1, status: "unavailable", bootId: "later-boot", reason: "empty_window" },
+        close: { ...close, paperExitContext: { gap: false } },
       });
       expect(replayed).toMatchObject({
-        status: "replayed", decision: { priceExcursion, clampedDecision: ratcheted },
+        status: "replayed", decision: { priceExcursion, clampedDecision: ratcheted, contextDigest: { exitContext: { gap: true } } },
         bot: { consecutiveLosses: 3, dailyRealizedPnl: "-10.00" },
         journal: { status: "replayed", failureCode: null },
       });
@@ -680,6 +683,41 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
         ...params, close: { ...close, exitPrice: 144 },
       })).toEqual({ status: "conflict", reason: "close_state_conflict" });
       expect((await storage.getAiTraderBot(closeBot.id))?.consecutiveLosses).toBe(3);
+    } finally {
+      await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, closeBot.id));
+      await db.delete(aiTraderBots).where(eq(aiTraderBots.id, closeBot.id));
+    }
+  });
+
+  it("does not write paper exit context for a live confirmed close", async () => {
+    const closeBot = await storage.createAiTraderBot({
+      walletAddress: `${WALLET}-live-no-paper-gap`, protocol: "pacifica", market: "SOL-PERP", timeframe: "15m",
+      paperMode: false, allocatedUsdc: "100.00", policyHmac: "EXAMPLE",
+      graduationCriteria: { periodDays: 30, minTrades: 10, minNetPnl: 0, maxDrawdownPct: 30 },
+    } as any);
+    try {
+      await storage.updateAiTraderBot(closeBot.id, { status: "open" as any });
+      const decision = await storage.insertAiTraderDecision({
+        botId: closeBot.id, rawDecision: { action: "long" }, clampedDecision: { action: "long" },
+        outcome: "executed", entryPrice: "150.00000000", decidedAt: new Date("2026-08-19T01:00:00.000Z"),
+        contextDigest: { price: 150 },
+      } as any);
+      const closedAt = new Date("2026-08-19T02:00:00.000Z");
+      const base = journal.journalBase(closeBot, decision.id);
+      const attemptId = journal.newMutationAttemptId("close", decision.id);
+      const journalEvents = [
+        { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "attempt_claimed", side: "long", observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "fill_observed", side: "long", price: 151, sizeBase: 1, fee: 0.1, realizedPnl: 0.9, observedAt: closedAt },
+        { ...base, attemptId, action: "close", cause: "venue_detected", eventType: "close_terminal_confirmed", side: "long", price: 151, sizeBase: 1, fee: 0.1, realizedPnl: 0.9, observedAt: closedAt },
+      ] as const;
+      const result = await storage.commitAiTraderConfirmedCloseTransition({
+        botId: closeBot.id, decisionId: decision.id, expectedBotStatus: "open", expectedPauseReason: null,
+        side: "long", sizeBase: 1, close: { exitPrice: 151, exitReason: "tp", realizedPnl: 0.9, feesPaid: 0.1, closedAt, paperExitContext: { gap: true } },
+        isStopLossLoss: false, forcedPauseReason: null, dayStart: new Date("2026-08-19T00:00:00.000Z"),
+        policy: { recentClosedLimit: 60, malfunctionTradesPerDay: 20, consecutiveSlLimit: 3, dailyLossBreakerPct: 15 }, journalEvents,
+      });
+      expect(result).toMatchObject({ status: "applied", decision: { contextDigest: { price: 150 } } });
+      expect((await storage.getAiTraderDecision(decision.id))?.contextDigest).toEqual({ price: 150 });
     } finally {
       await db.delete(aiTraderDecisions).where(eq(aiTraderDecisions.botId, closeBot.id));
       await db.delete(aiTraderBots).where(eq(aiTraderBots.id, closeBot.id));

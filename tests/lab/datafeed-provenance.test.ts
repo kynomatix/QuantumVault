@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
+import { evaluatePaperBracket } from "../../server/ai-trader/paper-math";
 
 const { mockGetCached, mockSave } = vi.hoisted(() => ({
   mockGetCached: vi.fn<(...args: any[]) => Promise<any[] | null>>(),
@@ -376,7 +377,7 @@ describe("fetchOHLCV provenance admission", () => {
     expect(rows.map((r) => r.provenance.finality).sort()).toEqual(["finalized", "forming"]);
   });
 
-  it("admits cross-venue direct finalized perp only for scanner/context money consumers", () => {
+  it("admits cross-venue direct finalized perp for scanner, context and paper consumers", () => {
     const candle: ProvenancedOHLCV = {
       time: Date.now(), open: 100, high: 101, low: 99, close: 100, volume: 1,
       provenance: {
@@ -387,7 +388,7 @@ describe("fetchOHLCV provenance admission", () => {
     expect(candleMatchesBasisPolicy(candle, MONEY_CANDLE_POLICY)).toBe(true);
     expect(candleMatchesBasisPolicy(candle, AI_CONTEXT_CANDLE_POLICY)).toBe(true);
     expect(candleMatchesBasisPolicy(candle, CHART_CANDLE_POLICY)).toBe(false);
-    expect(candleMatchesBasisPolicy(candle, PAPER_MONITOR_CANDLE_POLICY)).toBe(false);
+    expect(candleMatchesBasisPolicy(candle, PAPER_MONITOR_CANDLE_POLICY)).toBe(true);
     expect(candleMatchesBasisPolicy(candle, LIVE_MONITOR_CANDLE_POLICY)).toBe(false);
 
     const inadmissible = [
@@ -406,6 +407,9 @@ describe("fetchOHLCV provenance admission", () => {
       } as ProvenancedOHLCV;
       expect(candleMatchesBasisPolicy(changed, MONEY_CANDLE_POLICY), JSON.stringify(override)).toBe(false);
       expect(candleMatchesBasisPolicy(changed, AI_CONTEXT_CANDLE_POLICY), JSON.stringify(override)).toBe(false);
+      if (!("finality" in override) || override.finality !== "forming") {
+        expect(candleMatchesBasisPolicy(changed, PAPER_MONITOR_CANDLE_POLICY), JSON.stringify(override)).toBe(false);
+      }
     }
   });
 
@@ -420,5 +424,61 @@ describe("fetchOHLCV provenance admission", () => {
     expect(candleMatchesBasisPolicy(candle, PAPER_MONITOR_CANDLE_POLICY)).toBe(true);
     expect(candleMatchesBasisPolicy(candle, LIVE_MONITOR_CANDLE_POLICY)).toBe(true);
     expect(candleMatchesBasisPolicy(candle, MONEY_CANDLE_POLICY)).toBe(false);
+  });
+
+  it("replays a PAXG TP from direct Gate candles when OKX has no market, including the forming bar", async () => {
+    const now = Math.floor(Date.now() / TF_MS) * TF_MS;
+    const fetchSpy = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes('okx.com')) return { ok: true, status: 200, json: async () => ({ code: '51001', msg: 'Instrument does not exist' }) };
+      expect(url).toContain('/futures/usdt/candlesticks');
+      expect(url).toContain('PAXG_USDT');
+      return { ok: true, status: 200, json: async () => [
+        { t: now / 1000, o: '100', h: '103', l: '99', c: '100', v: '2' },
+      ] };
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    const rows = await fetchPolicy('PAXG/USDT:USDT', PAPER_MONITOR_CANDLE_POLICY);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].provenance).toMatchObject({ source: 'gate', venue: 'gate', finality: 'forming', basis: 'perp', proxy: 'direct' });
+    expect(evaluatePaperBracket(rows, 'long', 95, 102)).toMatchObject({ leg: 'tp', candleTime: now });
+    expect(fetchSpy.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual(['openapi.okx.com', 'api.gateio.ws']);
+  });
+
+  it("keeps OKX first for paper even when Hyperliquid has an exact catalog hit", async () => {
+    __testSetHyperliquidCatalog(['SOL']);
+    const spy = installOkxRows([okxRow(Date.now() - TF_MS, '1')]);
+    const rows = await fetchPolicy('SOL/USDT:USDT', PAPER_MONITOR_CANDLE_POLICY);
+    expect(rows[0].provenance.source).toBe('okx');
+    expect(spy.mock.calls.every(([url]) => String(url).includes('okx.com'))).toBe(true);
+  });
+
+  it("admits a forming Hyperliquid paper bar after OKX and Gate are empty", async () => {
+    __testSetHyperliquidCatalog(['SOL']);
+    const now = Math.floor(Date.now() / TF_MS) * TF_MS;
+    const spy = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.includes('okx.com')) return { ok: true, status: 200, json: async () => ({ code: '0', data: [] }) };
+      return { ok: true, status: 200, json: async () => url.includes('hyperliquid.xyz')
+        ? [{ t: now, T: now + TF_MS - 1, s: 'SOL', i: '15m', o: '100', h: '102', l: '99', c: '101', v: '2' }] : [] };
+    });
+    vi.stubGlobal('fetch', spy);
+    const rows = await fetchPolicy('SOL/USDT:USDT', PAPER_MONITOR_CANDLE_POLICY);
+    expect(rows[0].provenance).toMatchObject({ source: 'hyperliquid', venue: 'hyperliquid', finality: 'forming' });
+    expect(new URL(String(spy.mock.calls[0][0])).hostname).toBe('openapi.okx.com');
+    expect(new URL(String(spy.mock.calls.at(-1)![0])).hostname).toBe('api.hyperliquid.xyz');
+  });
+
+  it("refuses mixed cached venue histories rather than deduplicating them into one paper path", async () => {
+    const now = Math.floor(Date.now() / TF_MS) * TF_MS;
+    mockGetCached.mockResolvedValue(['okx', 'gate', 'okx', 'gate'].map((source, i) => ({
+      time: now - i * TF_MS, open: 100, high: 110, low: 90, close: 100, volume: 2,
+      provenance: { source, venue: source, basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' },
+    })).reverse());
+    const fetchSpy = vi.fn(); vi.stubGlobal('fetch', fetchSpy);
+    expect(await fetchOHLCV('PAXG/USDT:USDT', '15m', now - 4 * TF_MS, now, undefined, {
+      basisPolicy: PAPER_MONITOR_CANDLE_POLICY, deadlineMs: 30_000,
+    })).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

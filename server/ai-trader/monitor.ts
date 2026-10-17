@@ -995,6 +995,7 @@ interface CloseRecord {
   realizedPnl: number | null;
   feesPaid: number | null;
   closedAt: Date;
+  paperExitContext?: { gap: boolean };
 }
 
 function retainedFeeUnavailable(reason: FeeRateQuoteUnavailableReason): FeeRateQuoteResult {
@@ -1958,9 +1959,9 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
   const now = Date.now();
   const entryCandleOpen = Math.floor(view.decidedAtMs / tfMs) * tfMs;
 
-  let candles;
-  try {
-    candles = await fetchOHLCV(
+  // One deadline covers both the cache read and the single network-only retry.
+  const signal = AbortSignal.timeout(30_000);
+  const readCandles = (bypassCache = false) => fetchOHLCV(
       marketToDatafeedTicker(bot.market),
       bot.timeframe,
       new Date(entryCandleOpen).toISOString(),
@@ -1968,17 +1969,22 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       undefined,
       {
         basisPolicy: PAPER_MONITOR_CANDLE_POLICY,
-        deadlineMs: 30_000,
+        deadlineMs: Math.max(1, 30_000 - (Date.now() - now)),
         callerClass: "paper_monitor",
+        signal,
+        ...(bypassCache ? { bypassCache: true, cacheWritePolicy: "skip" as const } : {}),
       }
     );
-  } catch (err) {
-    // CacheDegradedError included by design: fail fast, NO network fallback
-    // and NO bypassCache retry — the next tick re-attempts on its own clock.
-    if (isCacheDegradedError(err)) {
-      console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: candle cache degraded (DB pressure) — retrying next tick`);
-      return;
+  let candles;
+  try {
+    try {
+      candles = await readCandles();
+    } catch (err) {
+      if (!isCacheDegradedError(err) || signal.aborted) throw err;
+      console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: candle cache degraded; using network-only paper fallback`);
+      candles = await readCandles(true);
     }
+  } catch (err) {
     console.warn(`[AiTraderMonitor] Bot ${bot.id.slice(0, 8)}: candle fetch failed (${err instanceof Error ? err.message : err}) — retrying next tick`);
     return;
   }
@@ -1986,7 +1992,8 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
   // fill (or contain it ambiguously), so it can never trigger the bracket.
   // The currently-forming candle IS included — a live stop would already have
   // triggered on an intra-candle touch.
-  const post = candles.filter((c) => c.time > entryCandleOpen);
+  const post = candles.filter((c) => c.time > entryCandleOpen && c.time <= now)
+    .sort((a, b) => a.time - b.time);
 
   // Breakeven protect: once the ratchet has fired, the bracket must be
   // evaluated SEGMENTED across the move — candles up to and including the
@@ -2006,6 +2013,13 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
     : evaluatePaperBracket(post, view.side, view.stopLossPrice, view.takeProfitPrice);
   priceObservations.paper(view.decision.id, candles, view.decidedAtMs, tfMs, now, hit?.candleTime ?? null);
   if (hit) {
+    let previousTime = entryCandleOpen;
+    let gap = false;
+    for (const candle of post) {
+      if (candle.time > hit.candleTime) break;
+      if (candle.time - previousTime > tfMs) gap = true;
+      previousTime = candle.time;
+    }
     const accounting = paperCloseAccounting(bot, view, hit.exitPrice);
     const close: CloseRecord = {
       exitPrice: hit.exitPrice,
@@ -2013,6 +2027,7 @@ async function monitorPaperBot(bot: AiTraderBot, view: OpenDecisionView): Promis
       realizedPnl: accounting.realizedPnl,
       feesPaid: accounting.feesPaid,
       closedAt: new Date(hit.candleTime),
+      paperExitContext: { gap },
     };
     const paperCloseAttemptId = newMutationAttemptId("close", view.decision.id);
     const committed = await commitConfirmedClose({

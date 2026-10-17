@@ -915,7 +915,9 @@ async function getCachedCandlesInner(
   const policy = opts.basisPolicy;
   const requireDirectOkxIdentity = policy.consumer !== "lab"
     && policy.consumer !== "scanner"
-    && policy.consumer !== "ai_context";
+    && policy.consumer !== "ai_context"
+    && policy.consumer !== "paper_monitor";
+  const paperRead = policy.consumer === "paper_monitor";
   let rows: CandleCacheRow[];
   const queryTimeoutMs = opts.queryTimeoutMs;
   if (queryTimeoutMs && Number.isFinite(queryTimeoutMs) && queryTimeoutMs > 0) {
@@ -933,11 +935,13 @@ async function getCachedCandlesInner(
           "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) " +
           "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
           "AND (NOT $8::boolean OR (source = 'okx' AND venue = 'okx' AND time_semantic = 'open_time')) " +
+          "AND (NOT $9::boolean OR (source IN ('okx','gate','hyperliquid') AND venue = source AND time_semantic = 'open_time')) " +
           "ORDER BY time",
         values: [
           symbol, timeframe, String(startMs), String(endMs),
           [...policy.acceptedBasis], [...policy.acceptedFinality], [...policy.acceptedProxy],
           requireDirectOkxIdentity,
+          paperRead,
         ],
         query_timeout: Math.max(1, Math.floor(queryTimeoutMs)),
       } as any);
@@ -971,6 +975,7 @@ async function getCachedCandlesInner(
           requireDirectOkxIdentity ? eq(labCandleCacheV2.source, "okx") : ne(labCandleCacheV2.source, "unknown"),
           requireDirectOkxIdentity ? eq(labCandleCacheV2.venue, "okx") : ne(labCandleCacheV2.venue, "unknown"),
           requireDirectOkxIdentity ? eq(labCandleCacheV2.timeSemantic, "open_time") : ne(labCandleCacheV2.timeSemantic, "unknown"),
+          paperRead ? sql`${labCandleCacheV2.source} IN ('okx','gate','hyperliquid') AND ${labCandleCacheV2.venue} = ${labCandleCacheV2.source} AND ${labCandleCacheV2.timeSemantic} = 'open_time'` : undefined,
         )
       )
       .orderBy(labCandleCacheV2.time) as unknown as CandleCacheRow[];
@@ -979,7 +984,13 @@ async function getCachedCandlesInner(
 
   const processStart = Date.now();
   try {
-    return await processCandleRows(symbol, timeframe, startMs, endMs, rows, phases);
+    if (paperRead) {
+      // Select a complete venue identity BEFORE deduplicating timestamps.
+      // A missing interval stays missing; another venue must never patch it.
+      const source = ["okx", "gate", "hyperliquid"].find(source => rows.some(row => row.source === source));
+      rows = rows.filter(row => row.source === source);
+    }
+    return await processCandleRows(symbol, timeframe, startMs, endMs, rows, phases, false, paperRead);
   } finally {
     phases.resultProcessingMs = Date.now() - processStart;
   }
@@ -994,6 +1005,7 @@ async function processCandleRows(
   rows: CandleCacheRow[],
   phases: CandleReadPhases,
   allowStaleTailPrefix = false,
+  allowPartialPaper = false,
 ): Promise<ProvenancedOHLCV[] | null> {
   // Finality is part of immutable cache identity, so the same bar can be
   // observed first as forming and later as finalized. OHLCV consumers require
@@ -1024,17 +1036,17 @@ async function processCandleRows(
   // refetch on every monitor tick for young positions. Coverage-ratio and
   // tail-gap checks below still guard correctness for short ranges.
   const minRows = Math.min(50, Math.max(1, expectedCandles - 1));
-  if (rows.length < minRows) return null;
+  if (!rows.length || (!allowPartialPaper && rows.length < minRows)) return null;
   const coverageRatio = rows.length / Math.max(expectedCandles, 1);
 
-  if (coverageRatio < 0.7) {
+  if (!allowPartialPaper && coverageRatio < 0.7) {
     console.log(`[CandleCache] Partial hit for ${symbol} ${timeframe}: ${rows.length}/${expectedCandles} candles (${(coverageRatio * 100).toFixed(0)}% coverage) — refetching`);
     return null;
   }
 
   const lastCachedTime = Number(rows[rows.length - 1].time);
   const tailGapCandles = Math.floor((endMs - lastCachedTime) / tfMs);
-  if (tailGapCandles > 3 && !allowStaleTailPrefix) {
+  if (tailGapCandles > 3 && !allowStaleTailPrefix && !allowPartialPaper) {
     console.log(`[CandleCache] Tail gap: ${tailGapCandles} candles behind for ${symbol} ${timeframe} (last cached: ${new Date(lastCachedTime).toISOString()}, requested end: ${new Date(endMs).toISOString()}) — refetching to append tail`);
     return null;
   }

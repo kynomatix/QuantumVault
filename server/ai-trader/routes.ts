@@ -52,7 +52,7 @@ import type { ProtocolMarket } from "../protocol/protocol-types";
 import { isSelectableModel } from "../ai-assistant/models-catalog";
 import { buildMarketContext, marketToDatafeedTicker } from "./context-builder";
 import { isCandleBasisUnavailableError } from "../lab/datafeed";
-import { fetchChartCandles } from "../trading/chart-candles";
+import { fetchChartCandles, ChartCandlesUnavailableError } from "../trading/chart-candles";
 import type { PlannerCandle } from "../grid-planner/types";
 import { runDecision } from "./decide";
 import { executeDecision, aiTraderPolicyObject } from "./executor";
@@ -377,13 +377,13 @@ export function summarizeCandleProvenance(
 
 function chartCandlesUnavailable(
   res: Response,
-  context: { span: "trade" | "deep" | "tail"; market: string; timeframe: string },
+  context: { span: "trade" | "deep" | "tail"; market?: string; timeframe?: string; reason?: string },
 ) {
   console.warn("[AiTrader] chart candles unavailable", context);
   return res.status(503).json({
     error: "Chart data temporarily unavailable",
     code: "chart_candles_unavailable",
-    reason: "no_admissible_candles",
+    reason: context.reason ?? "no_admissible_candles",
   });
 }
 
@@ -2606,9 +2606,8 @@ export function registerAiTraderRoutes(app: Express): void {
       endMs = Math.min(endMs, now);
 
       const datafeedTicker = marketToDatafeedTicker(chartMarket);
-      // AI Trader only trades perpetual-swap markets; Gate.io spot candles
-      // misrepresent the market (lower volume, different price action) and must
-      // never substitute for OKX SWAP candles on this chart.
+      // Display a single direct-perpetual venue series from the chart pool
+      // (OKX, Gate futures, Hyperliquid or Pacifica), preserving provenance.
       const rawCandles = await fetchChartCandles(
         datafeedTicker,
         chartTf,
@@ -2640,6 +2639,12 @@ export function registerAiTraderRoutes(app: Express): void {
       });
     } catch (err) {
       console.error("[AiTrader] chart error:", err);
+      if (err instanceof ChartCandlesUnavailableError) {
+        return chartCandlesUnavailable(res, {
+          span: req.query.span === "tail" ? "tail" : req.query.span === "trade" ? "trade" : "deep",
+          reason: err.reason,
+        });
+      }
       res.status(500).json({ error: "Internal server error" });
     }
   });

@@ -9,6 +9,12 @@ type ChartCacheEntry = { candles: PlannerCandle[]; observedAt: number };
 // fallback history here also leaves scanner/Lab cache admission unchanged.
 const chartCache = new Map<string, ChartCacheEntry>();
 const MAX_SERIES = 32, MAX_BARS = 16_000, MAX_TOTAL_BARS = 100_000;
+export class ChartCandlesUnavailableError extends Error {
+  constructor(public readonly reason: 'cache_read_failed_pool_empty' | 'cache_read_failed_pool_unavailable' | 'candle_pool_unavailable') {
+    super(`Chart candles unavailable: ${reason}`);
+    this.name = 'ChartCandlesUnavailableError';
+  }
+}
 function remember(key: string, timeframe: string, candles: PlannerCandle[]) {
   const prior = chartCache.get(key);
   if (prior && Date.now() - prior.observedAt <= 600_000 && prior.candles[0]?.provenance.source === candles[0]?.provenance.source) {
@@ -39,12 +45,20 @@ export async function fetchChartCandles(symbol: string, timeframe: string, start
   signal.throwIfAborted();
   const key = `${symbol}:${timeframe}`, now = Date.now();
   let entry = options?.bypassCache ? undefined : chartCache.get(key);
+  let cacheDegraded = false;
   if (entry && now - entry.observedAt > 600_000) { chartCache.delete(key); entry = undefined; }
   if (!entry && !options?.bypassCache) {
-    const cached = await getCachedCandles(symbol, timeframe, start, end, {
-      basisPolicy: CHART_CANDLE_POLICY, callerClass: 'grid-bot', queryTimeoutMs: 5_000,
-      signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
-    });
+    let cached;
+    try {
+      cached = await getCachedCandles(symbol, timeframe, start, end, {
+        basisPolicy: CHART_CANDLE_POLICY, callerClass: 'grid-bot', queryTimeoutMs: 5_000,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
+      });
+    } catch {
+      signal.throwIfAborted();
+      cacheDegraded = true;
+      console.warn('[TradeChartCandles] cache read degraded; using display candle pool');
+    }
     signal.throwIfAborted();
     if (cached && validPerpChartSeries(cached, timeframe)) entry = { candles: cached, observedAt: 0 };
   }
@@ -67,11 +81,19 @@ export async function fetchChartCandles(symbol: string, timeframe: string, start
     }
   }
   // A failed same-source tail must restart the full window through the pool.
-  if (!candles.length) candles = await chartPoolCandles(symbol, timeframe, start, end, signal);
+  if (!candles.length) {
+    try {
+      candles = await chartPoolCandles(symbol, timeframe, start, end, signal);
+    } catch {
+      signal.throwIfAborted();
+      throw new ChartCandlesUnavailableError(cacheDegraded ? 'cache_read_failed_pool_unavailable' : 'candle_pool_unavailable');
+    }
+  }
   signal.throwIfAborted();
+  if (!candles.length && cacheDegraded) throw new ChartCandlesUnavailableError('cache_read_failed_pool_empty');
   if (candles.length) {
     remember(key, timeframe, candles);
-    if (options?.cacheWritePolicy !== 'skip' && candles[0].provenance.source === 'okx') {
+    if (!cacheDegraded && options?.cacheWritePolicy !== 'skip' && candles[0].provenance.source === 'okx') {
       void saveCandlesToDb(symbol, timeframe, candles as ProvenancedOHLCV[])
         .catch(error => console.warn('[TradeChartCandles] cache write failed', error));
     }

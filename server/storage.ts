@@ -288,6 +288,7 @@ export interface AiTraderConfirmedCloseTransitionParams {
     realizedPnl: number | null;
     feesPaid: number | null;
     closedAt: Date;
+    paperExitContext?: { gap: boolean };
   };
   isStopLossLoss: boolean;
   forcedPauseReason: string | null;
@@ -7459,6 +7460,13 @@ export class DatabaseStorage implements IStorage {
             realizedPnl: expectedClose.realizedPnl,
             feesPaid: expectedClose.feesPaid,
             closedAt: params.close.closedAt,
+            ...(lockedBot.paperMode && typeof params.close.paperExitContext?.gap === "boolean" ? {
+              contextDigest: {
+                ...(decision.contextDigest && typeof decision.contextDigest === "object" && !Array.isArray(decision.contextDigest)
+                  ? decision.contextDigest : {}),
+                exitContext: { gap: params.close.paperExitContext.gap },
+              },
+            } : {}),
             priceExcursion: readPriceExcursion(params.priceExcursion, {
               decisionStartedAtMs: decision.decidedAt ? new Date(decision.decidedAt).getTime() : NaN,
               closedAtMs: params.close.closedAt.getTime(),

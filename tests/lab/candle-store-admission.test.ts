@@ -216,6 +216,39 @@ async function waitForLoad(predicate: (load: ReturnType<typeof getCandleStoreLoa
   throw new Error(`candle-write load did not converge: ${JSON.stringify(getCandleStoreLoad())}`);
 }
 
+describe("paper cache venue selection", () => {
+  it.each(['gate', 'hyperliquid'] as const)('admits sparse %s history without filling its gaps from another venue', async source => {
+    const row = (venue: string, time: number) => ({
+      time: String(time), open: '100', high: '110', low: '90', close: '101', volume: '2',
+      source: venue, venue, basis: 'perp', proxy: 'direct', finality: 'forming', timeSemantic: 'open_time',
+    });
+    const query = vi.fn().mockResolvedValueOnce({ rows: [row(source, 0), ...(source === 'gate' ? [row('hyperliquid', 3_600_000)] : [])] });
+    fakePool.connect.mockResolvedValueOnce({ release: vi.fn(), query });
+    const result = await getCachedCandles('PAXG-PERP', '1h', 0, 20 * 3_600_000, {
+      basisPolicy: { consumer: 'paper_monitor', acceptedBasis: ['perp'], acceptedProxy: ['direct'], acceptedFinality: ['finalized', 'forming'] },
+      callerClass: 'paper_monitor', queryTimeoutMs: 500,
+    });
+    expect(result).toHaveLength(1);
+    expect(result![0].provenance).toMatchObject({ source, venue: source, finality: 'forming' });
+    expect(query.mock.calls[0][0].text).toContain("source IN ('okx','gate','hyperliquid') AND venue = source");
+    expect(query.mock.calls[0][0].values.slice(-2)).toEqual([false, true]);
+  });
+
+  it('selects OKX before timestamp deduplication and never patches its missing bars with Gate', async () => {
+    const rows = [
+      { ...candle(0, 100), source: 'gate', venue: 'gate' },
+      { ...candle(0, 101), source: 'okx', venue: 'okx' },
+      { ...candle(3_600_000, 102), source: 'gate', venue: 'gate' },
+    ].map(({ provenance, ...row }) => ({ ...row, basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' }));
+    fakePool.connect.mockResolvedValueOnce({ release: vi.fn(), query: vi.fn().mockResolvedValueOnce({ rows }) });
+    const result = await getCachedCandles('SOL-PERP', '1h', 0, 3_600_000, {
+      basisPolicy: { consumer: 'paper_monitor', acceptedBasis: ['perp'], acceptedProxy: ['direct'], acceptedFinality: ['finalized', 'forming'] },
+      queryTimeoutMs: 500,
+    });
+    expect(result?.map(c => [c.time, c.close, c.provenance.source])).toEqual([[0, 101, 'okx']]);
+  });
+});
+
 describe("candle write queue convergence", () => {
   beforeEach(async () => {
     await waitForLoad((load) => load.activeWrites === 0 && load.queuedWrites === 0);

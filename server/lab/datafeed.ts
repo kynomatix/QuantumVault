@@ -929,8 +929,12 @@ export function candleMatchesBasisPolicy(
   const p = candle.provenance;
   const requireDirectOkxIdentity = policy.consumer !== "lab"
     && policy.consumer !== "scanner"
-    && policy.consumer !== "ai_context";
+    && policy.consumer !== "ai_context"
+    && policy.consumer !== "paper_monitor";
   return hasCompleteKnownProvenance(candle)
+    && (policy.consumer !== "paper_monitor"
+      || (["okx", "gate", "hyperliquid"].includes(p.source)
+        && p.source === p.venue && p.timeSemantic === "open_time"))
     && (!requireDirectOkxIdentity
       || (p.source === "okx" && p.venue === "okx" && p.timeSemantic === "open_time"))
     && policy.acceptedBasis.includes(p.basis)
@@ -2248,6 +2252,7 @@ async function fetchDirectPerpCandles(
   signal?: AbortSignal,
   onlyProvider?: DirectPerpProvider,
   chartRead = false,
+  paperRead = false,
 ): Promise<DirectPerpFetchResult> {
   const instId = symbolToOkxInstId(symbol);
   const contract = symbolToGateFuturesContract(symbol);
@@ -2266,6 +2271,8 @@ async function fetchDirectPerpCandles(
     { provider: "gate", ...GATE_FUTURES_ENDPOINTS[1] },
   ];
   const endpoints = allEndpoints.filter((endpoint) => !onlyProvider || endpoint.provider === onlyProvider);
+  // Paper exits retain OKX priority; scanner/chart provider order is unchanged.
+  if (paperRead) endpoints.sort((a, b) => Number(a.provider !== "okx") - Number(b.provider !== "okx"));
   const providerReachable = new Set<DirectPerpProvider>();
   const providerTransportFailed = new Set<DirectPerpProvider>();
   const providerLastFailure = new Map<DirectPerpProvider, OkxRequestDiagnosticContext>();
@@ -2306,7 +2313,8 @@ async function fetchDirectPerpCandles(
   };
 
   try {
-    if (!onlyProvider || onlyProvider === "hyperliquid") {
+    const readHyperliquid = async (): Promise<DirectPerpFetchResult | null> => {
+      if (onlyProvider && onlyProvider !== "hyperliquid") return null;
       const hyperliquid = await tryHyperliquidCandles(
         symbol,
         timeframe,
@@ -2335,6 +2343,11 @@ async function fetchDirectPerpCandles(
           trace,
         };
       }
+      return null;
+    };
+    if (!paperRead) {
+      const result = await readHyperliquid();
+      if (result) return result;
     }
   for (let endpointIndex = 0; endpointIndex < endpoints.length; endpointIndex++) {
     throwIfAborted(signal);
@@ -2346,7 +2359,7 @@ async function fetchDirectPerpCandles(
       trace.push(`${endpoint.provider}:${endpoint.id}=notfound-skip`);
       continue;
     }
-    const opportunitiesRemaining = endpoints.length - endpointIndex;
+    const opportunitiesRemaining = endpoints.length - endpointIndex + (paperRead ? 1 : 0);
     const requestBudget = directPerpRequestBudget(deadlineAt, opportunitiesRemaining);
     if (requestBudget === null) {
       deadlineSkipped = true;
@@ -2540,6 +2553,10 @@ async function fetchDirectPerpCandles(
     }
   }
 
+  if (paperRead) {
+    const result = await readHyperliquid();
+    if (result) { finalizeProviderHealth(); return result; }
+  }
   finalizeProviderHealth();
   const everyOtherwiseAdmissibleProviderCircuitBlocked = providerOtherwiseAdmissible.size > 0
     && [...providerOtherwiseAdmissible].every((provider) => providerCircuitBlocked.has(provider));
@@ -2955,6 +2972,15 @@ export async function fetchOHLCV(
     && basisPolicy.acceptedProxy[0] === "direct";
   const finishWithPolicy = (candles: ProvenancedOHLCV[]): ProvenancedOHLCV[] => {
     const admitted = candles.filter((c) => candleMatchesBasisPolicy(c, basisPolicy));
+    if (basisPolicy.consumer === "paper_monitor") {
+      const sources = new Set(admitted.map(c => c.provenance.source));
+      // Reject a mixed history rather than letting per-timestamp deduplication
+      // splice prices from different venues into one bracket evaluation.
+      if (sources.size > 1) return [];
+      const line = `[PaperCandleSource] ${symbol} ${timeframe} source=${admitted[0]?.provenance.source ?? "unavailable"} bars=${admitted.length}`;
+      console.log(line);
+      appendTelemetry(line);
+    }
     if (basisPolicy.consumer === "lab") {
       const identities = [...new Set(admitted.map(({ provenance: p }) =>
         `${p.source}/${p.venue}/${p.basis}/${p.proxy}/${p.finality}/${p.timeSemantic}`,
@@ -3176,8 +3202,8 @@ export async function fetchOHLCV(
   };
 
   const directPerpFailoverConsumer = exactDirectPerpPolicy
-    && (basisPolicy.consumer === "scanner" || basisPolicy.consumer === "ai_context")
-    && !nonCrypto;
+    && (basisPolicy.consumer === "scanner" || basisPolicy.consumer === "ai_context" || basisPolicy.consumer === "paper_monitor")
+    && (!nonCrypto || basisPolicy.consumer === "paper_monitor");
   if (directPerpFailoverConsumer) {
     onProgress?.(`Fetching ${symbol} ${timeframe} from direct perpetual providers...`);
     const result = await fetchDirectPerpCandles(
@@ -3188,11 +3214,16 @@ export async function fetchOHLCV(
       deadlineAt,
       options?.callerClass ?? (basisPolicy.consumer === "ai_context" ? "context" : "scanner"),
       signal,
+      undefined,
+      basisPolicy.consumer === "paper_monitor",
+      basisPolicy.consumer === "paper_monitor",
     );
     trace.push(...result.trace);
     sawMalformedProvenance ||= result.sawMalformedProvenance;
     directPerpSourceUnavailableReason = result.unavailableReason;
-    const deduped = deduplicateCandles(finishWithPolicy(result.candles));
+    const deduped = deduplicateCandles(finishWithPolicy(
+      basisPolicy.consumer === "paper_monitor" && !result.candles.length ? cached ?? [] : result.candles,
+    ));
     emitTrace(deduped.length);
     if (deduped.length > 0) {
       onProgress?.(`Fetched ${deduped.length} candles for ${symbol} ${timeframe}`);

@@ -9,11 +9,38 @@ import { fetchChartCandles, __testResetChartCache } from '../../server/trading/c
 import type { PlannerCandle } from '../../server/grid-planner/types';
 const hour = 3_600_000;
 const end = Math.floor(Date.now() / hour) * hour;
-const bars = (source: 'okx' | 'gate' | 'pacifica', start: number, count: number): PlannerCandle[] =>
+const bars = (source: 'okx' | 'gate' | 'hyperliquid' | 'pacifica', start: number, count: number): PlannerCandle[] =>
   Array.from({ length: count }, (_, i) => ({ time: start + i * hour, open: 100, high: 110, low: 90, close: 101, volume: 2,
     provenance: { source, venue: source, basis: 'perp', proxy: 'direct', timeSemantic: 'open_time', finality: 'finalized' } } as PlannerCandle));
 beforeEach(() => { __testResetChartCache(); vi.clearAllMocks(); mocks.read.mockResolvedValue(null); mocks.save.mockResolvedValue(undefined); });
 describe('chart source-pure cache and append', () => {
+  it.each(['okx', 'gate', 'hyperliquid', 'pacifica'] as const)('serves %s after a DB read failure without writing back to the degraded cache', async source => {
+    const start = end - 10 * hour;
+    mocks.read.mockRejectedValueOnce(new Error('DB unavailable'));
+    mocks.pool.mockResolvedValueOnce(bars(source, start, 10));
+    const result = await fetchChartCandles('PAXG/USDT', '1h', start, end);
+    expect(result.map(c => c.provenance.source)).toEqual(Array(10).fill(source));
+    expect(mocks.pool).toHaveBeenCalledTimes(1);
+    expect(mocks.save).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['empty', 'cache_read_failed_pool_empty'],
+    ['throw', 'cache_read_failed_pool_unavailable'],
+  ])('reports a specific degraded-cache reason when the pool is %s', async (mode, reason) => {
+    mocks.read.mockRejectedValueOnce(new Error('DB unavailable'));
+    if (mode === 'empty') mocks.pool.mockResolvedValueOnce([]);
+    else mocks.pool.mockRejectedValueOnce(new Error('pool unavailable'));
+    await expect(fetchChartCandles('PAXG/USDT', '1h', end - 10 * hour, end))
+      .rejects.toMatchObject({ name: 'ChartCandlesUnavailableError', reason });
+    expect(mocks.save).not.toHaveBeenCalled();
+  });
+  it('preserves caller cancellation after a cache read failure without starting the pool', async () => {
+    const controller = new AbortController();
+    mocks.read.mockImplementationOnce(async () => { controller.abort(); throw new Error('DB unavailable'); });
+    await expect(fetchChartCandles('BTC/USDT', '1h', end - 10 * hour, end, undefined, { signal: controller.signal }))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(mocks.pool).not.toHaveBeenCalled();
+  });
   it('refetches the full window when the cached OKX tail fails, never splicing Gate onto it', async () => {
     const start = end - 10 * hour;
     mocks.read.mockResolvedValue(bars('okx', start, 6));
