@@ -1,0 +1,58 @@
+# Pre-merge TypeScript gate (conductor, 2026-10-17). Free on this public repo, so
+# Replit is only needed for sync and publish. It fails when the repo's own TypeScript
+# (node_modules, the lockfile version) reports any error not in
+# .github/typecheck-baseline.txt (errors normalised: line/col stripped).
+name: typecheck
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tsc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install (npm 10 has an "Exit handler never called" bug on this tree)
+        run: |
+          # Some lockfile entries resolve through Replit's package firewall, which is
+          # unreachable here; point them at the public registry (integrity hashes unchanged).
+          sed -i 's|http://package-firewall.replit.local/npm/|https://registry.npmjs.org/|g' package-lock.json
+          npm install -g npm@11 --no-audit --no-fund
+          for attempt in 1 2 3; do
+            if npm ci --no-audit --no-fund --ignore-scripts; then break; fi
+            echo "npm ci attempt $attempt failed"; rm -rf node_modules
+            [ "$attempt" = 3 ] && exit 1
+          done
+          test -x node_modules/.bin/tsc || { echo "node_modules/.bin/tsc missing: install incomplete"; exit 1; }
+          echo "TypeScript $(node_modules/.bin/tsc --version)"
+      - name: tsc --noEmit (repo's own TypeScript)
+        run: node_modules/.bin/tsc --noEmit > tsc.out 2>&1 || true
+      - name: Compare with baseline
+        run: |
+          grep -E 'error TS[0-9]+:' tsc.out | sed -E 's/\([0-9]+,[0-9]+\)//' | sort > current.txt || true
+          echo "TypeScript errors: $(wc -l < current.txt)"
+          if [ ! -f .github/typecheck-baseline.txt ]; then
+            echo "No baseline committed yet; printing the multiset for capture."
+            cat current.txt
+            exit 0
+          fi
+          sort .github/typecheck-baseline.txt > baseline.txt
+          comm -23 current.txt baseline.txt > new.txt
+          comm -13 current.txt baseline.txt > fixed.txt
+          echo "New errors: $(wc -l < new.txt)   Fixed: $(wc -l < fixed.txt)"
+          head -20 new.txt | sed 's/^/NEW /'
+          test ! -s new.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: tsc-${{ github.sha }}
+          path: |
+            tsc.out
+            current.txt
+          retention-days: 14
