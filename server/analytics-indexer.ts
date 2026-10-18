@@ -64,7 +64,8 @@ export async function calculateAndStoreMetrics(): Promise<PlatformMetricsSnapsho
       cumulativeStats = await storage.getCumulativeStats();
     } catch (cumulativeError: unknown) {
       const errObj = cumulativeError instanceof Error ? cumulativeError : null;
-      const pgCode = (cumulativeError as Record<string, unknown>)?.code;
+      const pgError = cumulativeError as { code?: string; cause?: { code?: string } } | null;
+      const pgCode = pgError?.code ?? pgError?.cause?.code;
       const isTableMissing = pgCode === '42P01' ||
         (errObj?.message && /relation.*does not exist/i.test(errObj.message));
       if (isTableMissing) {

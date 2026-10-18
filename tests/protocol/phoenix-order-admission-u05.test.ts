@@ -10,6 +10,11 @@ import { authority, intent, now, key, pin, lifetime } from '../helpers/phoenix-o
 const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order-route-baseline.json', 'utf8')) as {
   baseCommitHash: string; routeSha256: Record<string, string>;
 };
+// drizzle-orm 0.45 error wrapping: r1's reviewed cause-code fallback changes these route pins.
+incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
+  'sha256:01adbe3c90b07ecbaed57ef2b58349bceab1a24beb2c64464a6e6b7b42438783';
+incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
+  'sha256:a95a0e4d5ee0752801360154b5703213d144d17ab753082a2d99a4915b510bb7';
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {

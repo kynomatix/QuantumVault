@@ -80,9 +80,30 @@ describe.each([1, 8])("transaction lease (pool max %i)", (poolMax) => {
     expect(lease.release).toHaveBeenCalledWith(discard);
   }
 
+  async function expectQueryFailure(query: Promise<unknown>, driverError: Error & { code: string }) {
+    await expect(query).rejects.toMatchObject({
+      message: driverError.message,
+      code: driverError.code,
+      cause: expect.any(Error),
+    });
+    let current: unknown = await query.catch((error: unknown) => error);
+    const seen = new Set<unknown>();
+    while (current !== undefined) {
+      expect(current).toBeInstanceOf(Error);
+      expect(seen.has(current)).toBe(false);
+      seen.add(current);
+      const error = current as Error & { code?: string; cause?: unknown };
+      // Exact driver text excludes appended SQL/params at every cause depth.
+      expect(error.message).toBe(driverError.message);
+      expect(error.message).not.toMatch(/Failed query:|params:/i);
+      expect(error.code).toBe(driverError.code);
+      current = error.cause;
+    }
+  }
+
   it("failed BEGIN releases exactly once and unblocks a queued checkout without calling the body", async () => {
     const holders = await Promise.all(Array.from({ length: poolMax - 1 }, () => database.pool.connect()));
-    const error = new Error("EXAMPLE failed BEGIN");
+    const error = Object.assign(new Error("EXAMPLE failed BEGIN"), { code: "08006" });
     let queued: Promise<PoolClient> | undefined;
     failQuery = (statement) => {
       if (statement !== "begin") return;
@@ -92,7 +113,7 @@ describe.each([1, 8])("transaction lease (pool max %i)", (poolMax) => {
       return error;
     };
     const callback = vi.fn(async () => "unreachable");
-    await expect(database.db.transaction(callback)).rejects.toBe(error);
+    await expectQueryFailure(database.db.transaction(callback), error);
     const failedLease = leases[poolMax - 1];
     expectReleased(failedLease, true);
     expect(failedLease.statements).toEqual(["begin"]);
@@ -119,10 +140,10 @@ describe.each([1, 8])("transaction lease (pool max %i)", (poolMax) => {
   });
 
   it("COMMIT failure rolls back and releases once without replaying the body", async () => {
-    const error = new Error("EXAMPLE failed COMMIT");
+    const error = Object.assign(new Error("EXAMPLE failed COMMIT"), { code: "40001" });
     failQuery = (statement) => statement === "commit" ? error : undefined;
     const callback = vi.fn(async () => 42);
-    await expect(database.db.transaction(callback)).rejects.toBe(error);
+    await expectQueryFailure(database.db.transaction(callback), error);
     expect(callback).toHaveBeenCalledTimes(1);
     expect(leases).toHaveLength(1);
     expect(leases[0].statements).toEqual(["begin", "commit", "rollback"]);
@@ -131,9 +152,9 @@ describe.each([1, 8])("transaction lease (pool max %i)", (poolMax) => {
 
   it("ROLLBACK failure preserves Drizzle's error precedence and releases once", async () => {
     const callbackError = new Error("EXAMPLE callback failure");
-    const rollbackError = new Error("EXAMPLE failed ROLLBACK");
+    const rollbackError = Object.assign(new Error("EXAMPLE failed ROLLBACK"), { code: "XX000" });
     failQuery = (statement) => statement === "rollback" ? rollbackError : undefined;
-    await expect(database.db.transaction(async () => { throw callbackError; })).rejects.toBe(rollbackError);
+    await expectQueryFailure(database.db.transaction(async () => { throw callbackError; }), rollbackError);
     expect(leases[0].statements).toEqual(["begin", "rollback"]);
     expectReleased(leases[0], true);
   });
@@ -226,15 +247,15 @@ describe.each([1, 8])("transaction lease (pool max %i)", (poolMax) => {
     await expect(database.db.transaction(callback, config)).resolves.toBe(11);
     expect(leases[1].statements).toEqual(originalStatements);
     expectReleased(leases[1], false);
-    const error = new Error("EXAMPLE rollback precedence");
+    const error = Object.assign(new Error("EXAMPLE rollback precedence"), { code: "XX000" });
     failQuery = (statement) => statement === "rollback" ? error : undefined;
     const throwBody = async () => { throw new Error("EXAMPLE body failure"); };
-    await expect(original.transaction(throwBody)).rejects.toBe(error);
+    await expectQueryFailure(original.transaction(throwBody), error);
     const originalFailureStatements = [...leases[2].statements];
     failQuery = undefined;
     await database.pool.query("ROLLBACK"); // Clean the original driver's returned session.
     failQuery = (statement) => statement === "rollback" ? error : undefined;
-    await expect(database.db.transaction(throwBody)).rejects.toBe(error);
+    await expectQueryFailure(database.db.transaction(throwBody), error);
     expect(leases[3].statements).toEqual(originalFailureStatements);
     expectReleased(leases[3], true);
   });

@@ -1,3 +1,4 @@
+import "./db-error-sanitize";
 import { recordDatabaseCheck, recordDatabaseConnectionError } from "./database-readiness";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pkg from "pg";
