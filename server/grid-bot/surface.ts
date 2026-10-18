@@ -18,7 +18,7 @@ export function gridBotSummary(bot:StoredBot):GridBotSummary{
   return {id:bot.id,name:bot.name,market:bot.market,direction:bot.direction,status:bot.status,lowerPrice:bot.lowerPrice,
     upperPrice:bot.upperPrice,totalInvestment:bot.totalInvestment,stopLossPrice:bot.stopLossPrice,gridCount:bot.gridCount,
     chartTimeframe:bot.chartTimeframe,updatedAt:bot.updatedAt.toISOString(),createIntent:bot.createIntent as GridBotSummary['createIntent'],
-    seedAtCreation:bot.seedAtCreation,leverage:bot.leverage};
+    seedAtCreation:bot.seedAtCreation,leverage:bot.leverage,...(bot.policyVersion==='2.0.0'?{policyVersion:bot.policyVersion}:{})};
 }
 /** Presentation only. A stale ledger snapshot never becomes a current financial fact. */
 export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:number;uncertain:number},now=Date.now()):GridBotSurface{
@@ -45,7 +45,11 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
   if(!gates.workerRunning)reasons.push('Grid worker is off or unavailable.');
   const a=snapshot.autoPreference;
   // Missing preference means ON; only a persisted completed-band arm can resume.
-  return {autoResume:{enabled:a?.enabled??true,generation:String(a?.generation??'0'),cycle:String(a?.cycle??'0'),attempts:a?.attempts??0,armed:!!a?.armed_cycle,heldReason:a?.held_reason??null,heldSince:a?.updated_at?new Date(a.updated_at).toISOString():null,band:null,available:false},bot:gridBotSummary(snapshot.bot),levels:snapshot.levels,operations:snapshot.operations.map((x:any)=>({id:x.id,type:x.type,state:x.state})),
+  const projection=snapshot.cycleProjection;
+  const cycleProjection=fresh&&projection&&String(projection.generation)===String(monitor?.generation)&&projection.observedAt===o.observedAt
+    &&Array.isArray(projection.orders)?{observedAt:new Date(projection.observedAt).toISOString(),orders:projection.orders.map((order:any)=>
+      order.leg==='opening'&&!['provisioning','canary','active'].includes(snapshot.bot.status)&&!['working','pending confirmation'].includes(order.state)?{...order,state:'paused'}:order)}:null;
+  return {...(snapshot.bot.policyVersion==='2.0.0'?{cycleProjection}:{}),autoResume:{enabled:a?.enabled??true,generation:String(a?.generation??'0'),cycle:String(a?.cycle??'0'),attempts:a?.attempts??0,armed:!!a?.armed_cycle,heldReason:a?.held_reason??null,heldSince:a?.updated_at?new Date(a.updated_at).toISOString():null,band:null,available:false},bot:gridBotSummary(snapshot.bot),levels:snapshot.levels,operations:snapshot.operations.map((x:any)=>({id:x.id,type:x.type,state:x.state})),
     lifecycle:{action:life?.action??null,state:life?.state??null,blocker:life?.blocker??null},
     pnl:{realised:decimal(pnl?.realised),unrealised:fresh?decimal(pnl?.unrealised):null,total:fresh?decimal(pnl?.total):null,fees:decimal(pnl?.fees),averageEntry:fresh?decimal(pnl?.averageEntry):null,breakeven:fresh?decimal(pnl?.breakeven):null,
       botBreakeven:fresh?decimal(pnl?.botBreakeven):null,profitCoversPosition:fresh&&pnl?.profitCoversPosition===true},

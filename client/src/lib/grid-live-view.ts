@@ -111,3 +111,12 @@ export function gridStopProtected(surface: GridBotSurface, now: number): boolean
   const roundingGuard = new D('0.000000000000000001');
   return stopLocksProfit(side, (side === 'long' ? netStop.minus(roundingGuard) : netStop.plus(roundingGuard)).toFixed(), breakeven ?? null);
 }
+
+/** V2 geometry is immutable; only the certified projection describes current order legs. */
+export function gridCycleDisplayLevels(surface:GridBotSurface,now:number):GridBotSurface['levels']{
+  if(surface.bot.policyVersion!=='2.0.0')return surface.levels;
+  const p=surface.cycleProjection,at=p?Date.parse(p.observedAt):NaN;
+  if(!p||!Number.isFinite(at)||at>now||now-at>15000)return [];
+  return p.orders.map(o=>({id:`cycle:${o.ownerOrdinal}:${o.leg}`,ordinal:o.ownerOrdinal+1,price:o.price,size:o.size,
+    side:o.side,reduceOnly:o.leg==='closing',status:o.state,cumulativeFilledSize:'0'}));
+}

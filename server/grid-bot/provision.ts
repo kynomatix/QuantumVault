@@ -1,9 +1,11 @@
+import {planCycleWindow} from './cycle-planner';
+import {replayGridCycles,type CycleReplayInput} from './cycle-replay';
 import Decimal from 'decimal.js';
 import {randomUUID} from 'node:crypto';
 import {GRID_MINIMUM_LAUNCH_SLOTS} from '../../shared/grid-capacity';
 import type {GridPlan} from './engine-types';
 import {calculateGrid} from './engine';
-import {verifyGridPolicyHmac,type GridPolicy} from './policy-hmac';
+import {canonicalGridPolicy,verifyGridPolicyHmac,type GridPolicy} from './policy-hmac';
 import {validateGridFeeQuote,type GridFeeQuote} from './fee-authority';
 import {gridExposureLimit,gridFirstPlacementGate,gridRecyclerGate,gridWalletEntryGate} from './runtime-policy';
 import {projectGridStop,GRID_SEED_MAX_SLIPPAGE_PERCENT} from './stop-clearance';
@@ -95,14 +97,14 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
   }catch{return deny('A required launch input is unknown or invalid.');}
 }
 
-export function preflightGridResume(policy:GridPolicy,policyHash:string,umk:Buffer,f:LaunchFacts,now:number,input:Parameters<typeof planGridRebalance>[0]){
+export function preflightGridResume(policy:GridPolicy,policyHash:string,umk:Buffer,f:LaunchFacts,now:number,input:Parameters<typeof planGridRebalance>[0]&{cycleReplay?:CycleReplayInput}){
   const deny=(reason:string)=>({ok:false as const,reason});
   try {
     const current=gridCurrentAuthority(policy,policyHash,umk,f,now,true,true);if(!current.ok)return current;
     if(policy.policyVersion==='2.0.0'){
       const verified=validateRetainedGridCycles(policy,{...f,openingFeeRate:current.maker.toFixed(),closingFeeRate:current.maker.toFixed()});
       if(!verified.ok)return verified;
-      return deny('Grid cycle Resume requires Stage B replay and lifecycle integration.');
+      if(!input.cycleReplay||canonicalGridPolicy(input.cycleReplay.policy)!==canonicalGridPolicy(policy))return deny('Grid cycle Resume requires complete retained replay.');
     }
     if(!f.account||f.margin.leverage!==String(policy.leverage)||!policy.stopLossPrice||!input.inventoryComplete||!input.entriesAllowed)return deny('Current Resume inventory or margin is unavailable.');
     if(![f.tick,f.lot,f.bookPrice,f.minimumPrice,f.maximumPrice,f.maximumQuote].every(v=>new Decimal(v).isFinite()&&new Decimal(v).gt(0)))return deny('Current market limits are unavailable.');
@@ -113,9 +115,11 @@ export function preflightGridResume(policy:GridPolicy,policyHash:string,umk:Buff
     for(const l of input.levels){const signed=policy.levels[l.ordinal-1];if(!signed||!new Decimal(l.price).eq(signed.price)||!new Decimal(l.size).eq(signed.size)||l.side!==signed.side||l.reduceOnly!==signed.reduceOnly)return deny('Retained levels differ from signed geometry.');}
     const prices=policy.levels.map(l=>new Decimal(l.price)).sort((a,b)=>a.cmp(b));
     for(let i=1;i<prices.length;i++)if(!prices[i].minus(prices[i-1]).gt(Decimal.max(prices[i],prices[i-1]).mul(Decimal.max(0,f.maker.effectiveRate).plus(Decimal.max(0,f.profit.effectiveRate)))))return deny('Current fees consume the retained grid spread.');
-    const plan=planGridRebalance({...input,bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots});
+    const replay=policy.policyVersion==='2.0.0'?replayGridCycles(input.cycleReplay!):null;
+    if(replay&&!replay.ok)return deny(replay.reason);
+    const plan=replay?.ok?planCycleWindow({...input,cycles:replay.cycles,bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots}):planGridRebalance({...input,bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots});
     const safe=plan.chunks.flat().filter(a=>a.kind==='place');
-    if(!safe.length)return deny('No safe resting order is currently available.');
+    if(!safe.length&&policy.policyVersion!=='2.0.0')return deny('No safe resting order is currently available.');
     let required=new Decimal(0);
     for(const a of safe){const l=a.level,notional=new Decimal(l.price).mul(l.size);if(notional.gt(f.maximumQuote))return deny('Current order bounds deny Resume.');if(!l.reduceOnly)required=required.plus(notional.div(f.margin.leverage).plus(notional.mul(f.margin.feeRate)));}
     if(required.gt(f.margin.available))return deny('Current margin cannot back the remaining Resume orders.');
@@ -124,6 +128,9 @@ export function preflightGridResume(policy:GridPolicy,policyHash:string,umk:Buff
 }
 
 export interface GridProvisionDeps {
+  /** Explicit production composition; isolated/incomplete callers remain denied. */
+  cycleExecutionReady?:boolean;
+  cycleFirstWindow?(account:GridAccount):Promise<boolean>;
   quotaShare?:string;
   now():number;
   durableUmk?(wallet:string):Promise<{umk:Buffer;cleanup():void}|null>;
@@ -152,7 +159,7 @@ export class GridProvision {
     const attempt=(kind:string)=>gridProvisionAttempt(this.deps.existing,input.policy.id,kind,this.deps.now());
     try {
       if(!verifyGridPolicyHmac(input.policy,security.umk,input.policyHmac).ok)return {state:'denied',reason:'Grid policy signature changed.'};
-      if(input.policy.policyVersion==='2.0.0')return {state:'denied',reason:'Grid cycle provisioning requires Stage B execution integration.'};
+      if(input.policy.policyVersion==='2.0.0'&&(!this.deps.cycleExecutionReady||!this.deps.cycleFirstWindow))return {state:'denied',reason:'Grid cycle provisioning requires complete execution integration.'};
       // Recovery precedes new market/fee reads. A disappeared response cannot grant a new send.
       for(const kind of ['create','fund','leverage','seed','entry']){
         const {key,op:old}=await attempt(kind);
@@ -166,7 +173,7 @@ export class GridProvision {
       const facts=await observe(input.account??null),now=this.deps.now();
       const admission=preflightGridLaunch(input.policy,input.policyHmac,security.umk,facts,now,funding?.state==='confirmed');
       if(!admission.ok)return {state:admission.transient?'pending':'denied',reason:admission.reason,account:retainedAccount};
-      if(!this.deps.prepareFirstEntry)return {state:'pending',reason:'First resting entry preparation authority is unavailable.',account:retainedAccount};
+      if(input.policy.policyVersion!=='2.0.0'&&!this.deps.prepareFirstEntry)return {state:'pending',reason:'First resting entry preparation authority is unavailable.',account:retainedAccount};
       const account=input.account??await this.deps.custody.reserve({botId:input.policy.id,wallet:input.wallet,masterAccount:facts.masterAccount,
         policyHmac:input.policyHmac,share:this.deps.quotaShare},security.umk);
       retainedAccount=account;
@@ -199,6 +206,7 @@ export class GridProvision {
           if(empty.state!=='empty'||!validGridEmptyProof(account,empty,this.deps.now()))return {state:'denied',reason:'Funding requires the exact confirmed empty subaccount.',account};
         }
         if(step.kind==='seed'){
+          if(input.policy.policyVersion==='2.0.0')step.data.client_order_id=gridClientOrderId({botId:input.policy.id+':'+key,level:GRID_SEED_IDENTITY_LEVEL,attempt:0,leg:'entry'});
           if(current.margin.leverage!==String(input.policy.leverage))return {state:'denied',reason:'Actual subaccount leverage does not match the confirmed policy.',account};
           if(!current.taker)return {state:'denied',reason:'Fresh subaccount taker fee unavailable.',account};
           delete step.data.builder_code;
@@ -212,6 +220,11 @@ export class GridProvision {
         if(result!=='confirmed')return {state:result==='failed'?'denied':'pending',reason:result==='failed'?'A launch operation was rejected; custody remains retained.':undefined,account};
         if(step.kind==='create')await this.deps.custody.confirmCreated(account);
       }
+      if(input.policy.policyVersion==='2.0.0'){
+        await this.deps.beforeStep?.(account,'limit');
+        if(!await this.deps.cycleFirstWindow!(account))return {state:'pending',reason:'Cycle launch is reconciling or placing backed closing orders.',account};
+        await this.deps.markCanary(account);return {state:'canary',account};
+      }
       const {key:entryKey,op:oldEntry}=await attempt('entry');
       if(oldEntry?.state!=='confirmed'){
         await this.deps.beforeStep?.(account,'limit');
@@ -220,7 +233,7 @@ export class GridProvision {
         if(!latest.ok)return {state:latest.transient?'pending':'denied',reason:latest.reason,account};
         if(current.account!==account.account||current.masterAccount!==account.masterAccount)return {state:'denied',reason:'First entry account authority changed.',account};
         if(current.margin.leverage!==String(input.policy.leverage))return {state:'denied',reason:'Actual subaccount leverage does not match the confirmed policy.',account};
-        const prepared=await this.deps.prepareFirstEntry({account,policy:input.policy,policyHmac:input.policyHmac,admission:latest,facts:current,now:timestamp});
+        const prepared=await this.deps.prepareFirstEntry!({account,policy:input.policy,policyHmac:input.policyHmac,admission:latest,facts:current,now:timestamp});
         const request=oldEntry?.exact_request??prepared.request,claim=prepared.claim;
         const line=input.policy.levels.find(l=>l.ordinal===latest.firstEntryOrdinal);
         if(!line||line.reduceOnly||request.kind!=='limit'||request.botId!==input.policy.id||request.account!==account.account

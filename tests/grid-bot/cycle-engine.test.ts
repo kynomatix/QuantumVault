@@ -5,6 +5,11 @@ import type { GridInput } from '../../server/grid-bot/engine-types';
 import { gridSeedPriceBounds } from '../../server/grid-bot/cycle-engine';
 import { projectGridStop } from '../../server/grid-bot/stop-clearance';
 
+it('uses one seed band for raw preview and signed tick-cell reference',()=>{
+  expect(gridSeedPriceBounds('99.999','0.01')).toEqual(gridSeedPriceBounds('99.99000000','0.01'));
+  expect(gridSeedPriceBounds('99.999','0.01')).toEqual({low:'99.49',high:'100.5'});
+});
+
 const base:GridInput={policyVersion:'2.0.0',side:'long',lower:'80',upper:'120',start:'95',intervals:4,
   investment:'600',leverage:'1',seed:true,entryScale:'flat',profitScale:'flat',tick:'0.01',lot:'0.001',
   minimumQuote:'10',investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:'0.0001'};

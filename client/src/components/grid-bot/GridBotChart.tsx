@@ -7,7 +7,7 @@ import {createSharedTradePriceChart} from '../SharedTradePriceChart';
 import {chartStyle,resolveChartStyle} from '../chartStyle';
 import type {PlannerChart} from '@/lib/grid-planner-view';
 import type {GridBotSurface} from '../../../../shared/grid-surface';
-import {gridFactsFresh,gridBreakevenView,gridProfitCoversPosition} from '@/lib/grid-live-view';
+import {gridCycleDisplayLevels,gridFactsFresh,gridBreakevenView,gridProfitCoversPosition} from '@/lib/grid-live-view';
 import {gridJson} from './GridDraftCard';
 import {GridChartSourceInfo} from '../grid-planner/GridChartSourceInfo';
 function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPriceLine>,key:string,price:string|null,title:string,color:string,kind:'level'|'boundary'|'live'='live'){
@@ -17,6 +17,7 @@ function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPric
   if(line)line.applyOptions(options);else lines.set(key,series.createPriceLine(options));
 }
 function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'available'}>;surface:GridBotSurface;fresh:boolean;now:number}){
+  const cycleProjectionVisible=surface.bot.policyVersion==='2.0.0'&&gridCycleDisplayLevels(surface,now).length>0;
   const container=useRef<HTMLDivElement>(null);
   const [hovered,setHovered]=useState<{price:string;detail:string;left:number;top:number}|null>(null);
   const liveLines=useRef<{canvas:IChartApi;series:ISeriesApi<'Candlestick'>;style:ReturnType<typeof resolveChartStyle>;range:{lower:number;upper:number}|null;levels:Map<string,IPriceLine>;live:Map<string,IPriceLine>;fitted:boolean;times:UTCTimestamp[];hoverLevels:GridBotSurface['levels'];precision:number;prices:number[];breakevenPrice:number|null}|null>(null);
@@ -46,7 +47,7 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
   useEffect(()=>{const live=liveLines.current;if(!live)return;const {canvas,series,levels}=live;
     const lower=Number(surface.bot.lowerPrice),upper=Number(surface.bot.upperPrice);
     live.range=Number.isFinite(lower)&&lower>0&&Number.isFinite(upper)&&upper>lower?{lower,upper}:null;
-    setHovered(null);live.hoverLevels=surface.levels.filter(level=>Number.isFinite(Number(level.price))&&Number(level.price)>0);
+    setHovered(null);live.hoverLevels=gridCycleDisplayLevels(surface,now).filter(level=>Number.isFinite(Number(level.price))&&Number(level.price)>0);
     live.prices=[...live.hoverLevels.map(level=>Number(level.price)),...([surface.bot.lowerPrice,surface.bot.upperPrice,surface.bot.stopLossPrice].filter((price):price is string=>price!==null).map(Number))].filter(price=>Number.isFinite(price)&&price>0);
     const candles=chart.candles.map(c=>({time:Math.floor(c.time/1000) as UTCTimestamp,open:c.open,high:c.high,low:c.low,close:c.close}));
     const timeScale=canvas.timeScale(),viewport=live.fitted?timeScale.getVisibleLogicalRange():null,previousTimes=live.times;
@@ -57,7 +58,7 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
     series.applyOptions({priceFormat:{type:'custom',minMove:10**-precision,formatter:(price:number)=>'$'+price.toLocaleString('en-US',{minimumFractionDigits:precision,maximumFractionDigits:precision})}});
     const retained=new Set<string>();
     const line=(key:string,price:string|null,title:string,color:string,kind:'level'|'boundary')=>{retained.add(key);updatePriceLine(series,levels,key,price,title,color,kind);};
-    for(const l of surface.levels)line('level:'+l.id,l.price,'',l.reduceOnly?live.style.exit:live.style.entry,'level');
+    for(const l of live.hoverLevels.filter(l=>surface.bot.policyVersion!=='2.0.0'||Number(l.size)>0))line('level:'+l.id,l.price,'',l.reduceOnly?live.style.exit:live.style.entry,'level');
     line('lower',surface.bot.lowerPrice,'Lower range',live.style.range,'boundary');line('upper',surface.bot.upperPrice,'Upper range',live.style.range,'boundary');line('stop',surface.bot.stopLossPrice,'Stop',live.style.stop,'boundary');
     for(const [key,priceLine] of levels)if(!retained.has(key)){series.removePriceLine(priceLine);levels.delete(key);}
     const period=chart.timeframe==='15m'?900:chart.timeframe==='4h'?14400:3600;
@@ -68,7 +69,7 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
       const shift=anchor<0?0:indices.get(previousTimes[anchor])!-anchor;
       timeScale.setVisibleLogicalRange({from:viewport.from+shift,to:viewport.to+shift});
     }
-  },[chart,surface]);
+  },[chart,surface,cycleProjectionVisible]);
   useEffect(()=>{const live=liveLines.current;if(!live)return;
     const update=(key:string,price:string|null,title:string,color:string)=>updatePriceLine(live.series,live.live,key,price,title,color);
     const b=fresh?gridBreakevenView(surface,now):null;

@@ -564,20 +564,21 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-orders-toggle">
             <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
               <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position</Label>
-                <p className="text-xs text-muted-foreground">When the bot starts, it opens a position at the entry price and takes profit on it bit by bit as price moves your way. Off: the bot only places grid orders.</p>
+                <p className="text-xs text-muted-foreground">{displayPlan?.policyVersion==='2.0.0'?(form.side==='long'?'Start with a position: place backed sells above price immediately. Without it, those levels wait for a buy first.':'Start with a position: place backed buys below price immediately. Without it, those levels wait for a sell first.'):'When the bot starts, it opens a position at the entry price and takes profit on it bit by bit as price moves your way. Off: the bot only places grid orders.'}</p>
                 <p className="text-xs text-muted-foreground">The taker fee for opening it isn't included.</p></div>
               <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
             </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <GridPlannerSizeSelect id="grid-entryScale" label="Grid order sizes" value={form.entryScale} side={form.side} onChange={value => edit('entryScale', value)} />
               <GridPlannerSizeSelect id="grid-profitScale" label="Take-profit sizes" value={form.profitScale} side={form.side}
-                startingPosition enabled={form.seed} onChange={value => edit('profitScale', value)} />
+                startingPosition enabled={form.seed||displayPlan?.policyVersion==='2.0.0'} onChange={value => edit('profitScale', value)} />
           </div>
         </DrawerSettingsPanel>
 
         {status}
         {plannerEnabled && <section aria-labelledby="grid-plan-heading" className="rounded-xl border border-primary/20 bg-card/40 p-4 sm:p-5 space-y-4">
           <h3 id="grid-plan-heading" className="text-sm font-semibold">Your plan</h3>
+          {displayPlan?.policyVersion==='2.0.0'&&<p className="text-sm">{form.side==='long'?'Buys below price, sells above; each fill flips to the other side, one grid step away.':'Sells above price, buys below; each fill flips to the other side, one grid step away.'} Investment is reserved across the whole range. Quantities stay fixed; profits remain in the bot.</p>}
           <GridPlanIssues reasons={issues} onReview={showIssue} />
           {loading && !preview ? <p role="status" className="text-sm">Checking your plan…</p>
             : preview ? <p role="status" className="text-sm font-medium">{plannerStatus(preview, stale)}</p>

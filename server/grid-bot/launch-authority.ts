@@ -1,3 +1,4 @@
+import {retainedGridPolicy as decodeRetainedGridPolicy} from './retained-policy';
 import DecimalBase from 'decimal.js';
 import bs58 from 'bs58';
 import nacl from 'tweetnacl';
@@ -25,6 +26,9 @@ export class GridLaunchAuthorityUnavailable extends Error {
   constructor(reason:string){super(reason);this.name='GridLaunchAuthorityUnavailable';}
 }
 const deny=(reason:string):never=>{throw new GridLaunchAuthorityUnavailable(reason);};
+export function retainedGridPolicy(bot:Record<string,any>,levels:Record<string,any>[]){
+  try{return decodeRetainedGridPolicy(bot,levels);}catch{return deny('Grid retained policy unavailable.');}
+}
 const object=(v:unknown):Row=>v!==null&&typeof v==='object'&&!Array.isArray(v)?v as Row:deny('Grid observation shape unavailable.');
 function envelope(raw:unknown,account?:string):unknown{
   const r=object(raw);
@@ -210,13 +214,6 @@ export function defaultGridLaunchAuthority(){
     .catch(error=>{defaultAuthority=undefined;throw error;});
 }
 
-export function retainedGridPolicy(bot:Record<string,any>,levels:Record<string,any>[]):GridPolicy{
-  const policy:GridPolicy={id:bot.id,protocol:bot.protocol,market:bot.market,direction:bot.direction,upperPrice:bot.upper_price,lowerPrice:bot.lower_price,startPrice:bot.start_price,
-    gridCount:bot.grid_count,totalInvestment:bot.total_investment,leverage:bot.leverage,entryScaleType:bot.entry_scale_type,profitScaleType:bot.profit_scale_type,
-    policyVersion:bot.policy_version,feePolicyVersion:bot.fee_policy_version,runtimePolicyVersion:bot.runtime_policy_version,stopLossPercent:bot.stop_loss_percent,stopLossPrice:bot.stop_loss_price,
-    seedAtCreation:bot.seed_at_creation,levels:levels.map(l=>({ordinal:l.ordinal,price:l.price,size:l.size,side:l.side,reduceOnly:l.reduce_only}))};
-  if(!canonicalGridPolicy(policy))deny('Grid retained policy unavailable.');return policy;
-}
 /** UMK ownership transfers only on success; lifecycle cleans it after the resume checks. */
 export function gridProductionResume(storage:Pick<GridMonitorStorage,'snapshot'>,authority:GridLaunchAuthority,security=durableGridUmk):GridLifecycleDeps['resume']{
   return async(claim,signal)=>{

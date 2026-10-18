@@ -1,3 +1,4 @@
+import {planCycleWindow} from './cycle-planner';
 import {randomUUID} from 'node:crypto';
 import type {GridMonitorStorage,GridMonitorClaim} from './monitor-storage';
 import type {GridObservation,ReconciliationOperation} from './reconciliation';
@@ -45,7 +46,7 @@ export class GridMonitorService {
   }
   async plan(claim:GridMonitorClaim,input:Omit<Parameters<typeof planGridRebalance>[0],'direction'|'levels'|'fills'|'reserved'|'positionSize'|'inventoryComplete'|'entriesAllowed'>){
     const state=await this.deps.storage.planningState(claim,this.bootId),snapshot=await this.deps.storage.snapshot(claim);
-    const plan=planGridRebalance({...input,direction:snapshot.bot.direction,levels:state.levels.map(l=>({id:l.id,ordinal:l.ordinal,price:l.price,size:l.exact_size,side:l.side,reduceOnly:l.reduce_only,attempt:l.placement_attempt,status:l.status})),fills:state.fills,reserved:state.reserved,
+    const plan=state.cycle?planCycleWindow({...input,cycles:state.cycle.cycles,direction:snapshot.bot.direction,levels:state.levels.map(l=>({id:l.id,ordinal:l.ordinal,attempt:l.placement_attempt})),positionSize:state.observation.position?.size??null,inventoryComplete:state.observation.inventoryComplete,entriesAllowed:state.entriesAllowed&&['provisioning','active','canary'].includes(snapshot.bot.status)}):planGridRebalance({...input,direction:snapshot.bot.direction,levels:state.levels.map(l=>({id:l.id,ordinal:l.ordinal,price:l.price,size:l.exact_size,side:l.side,reduceOnly:l.reduce_only,attempt:l.placement_attempt,status:l.status})),fills:state.fills,reserved:state.reserved,
       positionSize:state.observation.position?.size??null,inventoryComplete:state.observation.inventoryComplete,entriesAllowed:state.entriesAllowed&&['active','canary'].includes(snapshot.bot.status)});
     return {...plan,authority:state.authority};
   }

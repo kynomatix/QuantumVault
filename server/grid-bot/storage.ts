@@ -92,7 +92,8 @@ export class GridStorage {
       })):null;
       const returnedFunds=(await c.query("SELECT exact_request->'data'->>'amount' AS amount,terminal_at FROM grid_operations WHERE bot_id=$1 AND type='sweep_subaccount' AND state='confirmed' ORDER BY terminal_at DESC,id DESC LIMIT 1",[id])).rows[0];
       const autoPreference=(await c.query('SELECT enabled,generation,cycle,attempts,armed_cycle,held_reason,updated_at FROM grid_auto_resume WHERE bot_id=$1',[id])).rows[0];
-      return {...snapshot,surface:gridSurface({...snapshot,fills,runFills,returnedFunds,autoPreference},monitor,life,events)};
+      const cycleProjection=bot.policyVersion==='2.0.0'?(await c.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='cycle-projection'",[id])).rows[0]?.evidence:null;
+      return {...snapshot,surface:gridSurface({...snapshot,fills,runFills,returnedFunds,autoPreference,cycleProjection},monitor,life,events)};
     });
   }
   async listFills(wallet: string, id: string, limit: number, cursor: { time: string; trade: string } | null) {
@@ -108,8 +109,9 @@ export class GridStorage {
     const immutable={levelId:null,parentOperationId:null,attempt:1,clientOrderUuid:null,venueOrderId:null,transactionSignature:null,amountUsdc:null,triggerPrice:null,triggerPnl:null,triggerObservedAt:null,notificationType:null,notificationPayload:null,...input};
     return this.transaction(async c => {
       // Bot lock serializes preparation against fill accounting and parent/level validation.
-      const owner = await c.query('SELECT id,status FROM grid_bots WHERE id=$1 FOR UPDATE',[input.botId]);
+      const owner = await c.query('SELECT id,status,policy_version FROM grid_bots WHERE id=$1 FOR UPDATE',[input.botId]);
       if(!owner.rowCount || owner.rows[0].status==='draft' && ['provision_subaccount','set_leverage','fund_subaccount','seed_position','place_level_order'].includes(input.type)) throw new GridStorageError('invariant');
+      if(owner.rows[0].policy_version==='2.0.0'&&['seed_position','place_level_order','close_position'].includes(input.type))throw new GridStorageError('invariant','Cycle trading requires immutable launch authority');
       if (input.levelId) {
         const level = await c.query('SELECT id FROM grid_levels WHERE id=$1 AND bot_id=$2',[input.levelId,input.botId]);
         if (!level.rowCount) throw new GridStorageError('invariant');
@@ -148,7 +150,8 @@ export class GridStorage {
   }
   async recordFillAndLevelState(fill: { botId: string; levelId: string; venueTradeId: string; venueOrderId: string | null; clientOrderUuid: string | null; side: string; price: string; size: string; fee: string; feeAsset: string; partial: boolean; venueFillTime: Date }, operationId: string | null) {
     return this.transaction(async c => {
-      const b = await c.query('SELECT id FROM grid_bots WHERE id=$1 FOR UPDATE',[fill.botId]);
+      const b = await c.query('SELECT id,policy_version FROM grid_bots WHERE id=$1 FOR UPDATE',[fill.botId]);
+      if(b.rows[0]?.policy_version==='2.0.0')throw new GridStorageError('invariant');
       const l = await c.query('SELECT * FROM grid_levels WHERE id=$1 AND bot_id=$2 FOR UPDATE',[fill.levelId,fill.botId]);
       if (!b.rowCount || !l.rowCount || l.rows[0].side !== fill.side || !decimal(fill.size) || !decimal(fill.fee)) throw new GridStorageError('invariant');
       if(operationId){

@@ -1,3 +1,5 @@
+import {readCycleState,recordCycleReplay} from './cycle-storage';
+import {retainedGridPolicy} from './retained-policy';
 import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
 import {GridLaunchStorage,canonicalRequest,requestDigest,gridOperationProjection,type DurableGridOperation} from './launch-storage';
@@ -103,7 +105,7 @@ export class GridMonitorStorage {
       &&BigInt(observation.history.lastIds[stream])<BigInt(previousFull.lastIds[stream]))observation={...observation,history:null};}catch{observation={...observation,history:null};}
     if(observation.history?.lastId&&previousFull?.lastId&&BigInt(observation.history.lastId)<BigInt(previousFull.lastId))observation={...observation,history:null};
     const result=reconcileGridObservation({account:claim.account,symbol:bot.market.replace(/-PERP$/,''),direction:bot.direction,
-      start:new Date(bot.created_at).getTime(),now,operations,prior,observation});
+      start:new Date(bot.created_at).getTime(),now,operations,prior,observation,...(bot.policy_version==='2.0.0'?{cyclePolicy:retainedGridPolicy(bot,(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[claim.id])).rows)}:{})});
     const exposure=await this.launch.pilotExposure(c,claim.id,now,{observation,fills:result.fills,authoritative:result.entriesAllowed});
     const lastFailure=(await c.query("SELECT max(terminal_at) AS at FROM grid_operations WHERE bot_id=$1 AND state='failed' AND failure_classification IN ('authentication','quota','transport')",[claim.id])).rows[0]?.at;
     let authoritativeRecovery=false;
@@ -122,7 +124,7 @@ export class GridMonitorStorage {
         if(order.status==='filled'&&!actual.eq(order.amount))throw Error('False terminal fill');
         if(['filled','cancelled'].includes(order.status)&&lastFailure&&order.updatedAt>new Date(lastFailure).getTime())authoritativeRecovery=true;
         await c.query('UPDATE grid_execution_claims SET slot_released=true WHERE operation_id=$1',[op.id]);
-        if(op.level_id)await c.query(`UPDATE grid_levels SET status=$3,placement_attempt=placement_attempt+1,updated_at=clock_timestamp()
+        if(bot.policy_version!=='2.0.0'&&op.level_id)await c.query(`UPDATE grid_levels SET status=$3,placement_attempt=placement_attempt+1,updated_at=clock_timestamp()
           WHERE id=$1 AND bot_id=$2 AND venue_order_id=$4 AND status IN ('active','partially_filled','cancelling')`,[op.level_id,claim.id,order.status==='filled'?'filled':'cancelled',order.orderId]);
         // A proved terminal cancellation frees only the never-filled part of its allocations.
         if(result.entriesAllowed&&observation.history!.through>=order.updatedAt&&op.exact_request.kind==='limit'&&op.exact_request.data.reduce_only===true){
@@ -144,7 +146,7 @@ export class GridMonitorStorage {
         if(row.bot_id!==claim.id||canonicalRequest(fillsFromRows([row])[0])!==canonicalRequest(f))throw Error('Conflicting stored trade');}
     }
     // Re-arm an entry only after its full operation is filled and every source lot has a settled exit.
-    if(result.entriesAllowed)for(const op of operations.filter(o=>o.exact_request?.kind==='limit'&&o.exact_request.data.reduce_only===false&&o.level_id)){
+    if(bot.policy_version!=='2.0.0'&&result.entriesAllowed)for(const op of operations.filter(o=>o.exact_request?.kind==='limit'&&o.exact_request.data.reduce_only===false&&o.level_id)){
       const progress=(await c.query('SELECT status,remaining FROM grid_monitor_orders WHERE operation_id=$1',[op.id])).rows[0];
       if(progress?.status!=='filled')continue;
       const unclosed=(await c.query(`SELECT f.trade_id FROM grid_exact_fills f WHERE f.operation_id=$1 AND f.size>
@@ -153,7 +155,7 @@ export class GridMonitorStorage {
       if(!unclosed)await c.query(`UPDATE grid_levels SET status='pending',venue_order_id=NULL,client_order_uuid=NULL WHERE id=$1 AND bot_id=$2 AND status='filled' AND venue_order_id=$3`,[op.level_id,claim.id,op.venue_order_id]);
     }
     // Observe actual residuals; never convert the 98% threshold into a synthetic fill.
-    for(const owned of result.owned){if(owned.levelId)await c.query(`UPDATE grid_levels SET status=CASE WHEN $3::numeric>0 THEN 'partially_filled' ELSE 'active' END
+    for(const owned of result.owned){if(bot.policy_version!=='2.0.0'&&owned.levelId)await c.query(`UPDATE grid_levels SET status=CASE WHEN $3::numeric>0 THEN 'partially_filled' ELSE 'active' END
       WHERE id=$1 AND bot_id=$2 AND venue_order_id=$4 AND status IN ('active','partially_filled')`,[owned.levelId,claim.id,owned.order.filledAmount,owned.order.orderId]);}
     // Settle/reconcile reductions above even when marked exposure exceeds the entry cap.
     // The existing <=limit column cannot store a mark-driven overshoot; the immutable
@@ -197,10 +199,14 @@ export class GridMonitorStorage {
     if(bot.status==='canary')await c.query(`UPDATE grid_bots SET canary_clean_since=$2,canary_clean_ticks=$3,
       status=CASE WHEN $4 THEN 'active' ELSE status END,canary_promoted_at=CASE WHEN $4 THEN clock_timestamp() ELSE canary_promoted_at END WHERE id=$1`,
       [claim.id,clock?.cleanSince===null||!clock?null:new Date(clock.cleanSince),clock?.cleanTicks??0,clock?.promoted??false]);
+    if(bot.policy_version==='2.0.0'&&reconciliationComplete){
+      const replayNow=Math.floor(Number((await c.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS now')).rows[0].now));
+      await recordCycleReplay(c,bot,claim.account,replayNow);
+    }
     return {...result,reconciliationComplete};
   });}
   async planningState(claim:GridMonitorClaim,bootId:string){return this.launch.transaction(async c=>{
-    await this.assertLease(c,claim);const state=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0];
+    const bot=await this.assertLease(c,claim);const state=(await c.query('SELECT *,reconciled_at>clock_timestamp()-interval \'5 seconds\' AS fresh FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0];
     if(!state?.fresh||state.boot_id!==bootId||state.blocked_reasons.some((reason:string)=>!isGridPilotExposureBlockReason(reason)))throw Error('Startup reconciliation unavailable');
     const fills=fillsFromRows((await c.query('SELECT * FROM grid_exact_fills WHERE bot_id=$1',[claim.id])).rows);
     const reserved=(await c.query(`SELECT a.trade_id AS "tradeId",(a.size-a.released_size)::text AS size FROM grid_profit_allocations a JOIN grid_operations o ON o.id=a.operation_id
@@ -210,7 +216,8 @@ export class GridMonitorStorage {
         WHERE o.level_id=l.id AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1) p ON true WHERE l.bot_id=$1 ORDER BY l.ordinal`,[claim.id])).rows;
     const life=(await c.query('SELECT epoch FROM grid_lifecycle WHERE bot_id=$1',[claim.id])).rows[0];
     const auto=(await c.query('SELECT generation FROM grid_auto_resume WHERE bot_id=$1',[claim.id])).rows[0];
-    return {fills,reserved,levels,entriesAllowed:state.blocked_reasons.length===0,authority:{autoResumeGeneration:String(auto?.generation??'0'),monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
+    const cycle=bot.policy_version==='2.0.0'?await readCycleState(c,bot,claim.account,Date.now()):undefined;
+    return {fills,reserved,levels,...(cycle?{cycle}:{}),entriesAllowed:state.blocked_reasons.length===0,authority:{autoResumeGeneration:String(auto?.generation??'0'),monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
   });}
   async pnl(wallet:string,id:string){return this.launch.transaction(async c=>{
     if(!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rowCount)return null;

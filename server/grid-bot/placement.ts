@@ -10,13 +10,13 @@ import {GRID_TRANSPORT_BATCH_ACTIONS} from '../../shared/grid-capacity';
 export function gridLevelRequest(input:{account:GridAccount;level:WindowLevel;market:string;protocolSymbol:string;signerGeneration:string;deployment:string;
   fee:GridFeeQuote;constraint:MarketConstraintObservation;now:number;authority:Record<string,unknown>}):ExactGridRequest{
   const {account:a,level:l}=input;
-  const intent:GridOrderIntent={account:a.account,subaccountId:null,market:input.market,protocolSymbol:input.protocolSymbol,
+  const intent:GridOrderIntent={...(l.cycle?{runtimePolicyVersion:'2.0.0'}:{}),account:a.account,subaccountId:null,market:input.market,protocolSymbol:input.protocolSymbol,
     signerPublicKey:a.account,signerGeneration:input.signerGeneration,deployment:input.deployment,endpoint:'https://api.pacifica.fi/api/v1/orders/create',
     clientOrderId:gridClientOrderId({botId:a.botId,level:l.ordinal,attempt:l.attempt,leg:l.reduceOnly?'profit':'entry'}),
     side:l.side==='buy'?'long':'short',price:l.price,amount:l.size,reduceOnly:l.reduceOnly,signingTimestamp:input.now,signingExpiryMs:5000};
   const prepared=prepareGridOrder(intent,input.fee,input.constraint,input.now),{account:_account,subaccount_id:_sub,...data}=prepared.unsigned;
   return {kind:'limit',botId:a.botId,account:a.account,masterAccount:a.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:input.now,expiryMs:5000,data,
-    authority:{...input.authority,prepared,levelId:l.id,levelAttempt:l.attempt}};
+    authority:{...input.authority,prepared,levelId:l.id,levelAttempt:l.attempt,...(l.cycle?{cycle:l.cycle,...(!l.reduceOnly?{initialCredit:l.initialCredit,recycleAllocations:l.recycleAllocations}:{})}:{})}};
 }
 export function validGridLevelAuthority(r:ExactGridRequest,current:Parameters<typeof validatePreparedGridOrder>[1],now:number):boolean{
   const p=r.authority.prepared as PreparedGridOrder|undefined;if(!p || r.kind!=='limit')return false;

@@ -105,6 +105,10 @@ export function plannerGridCountHint(intervals: string): string {
 
 /** Use only the requested plan, never the diagnostic plan sized at minimum investment. */
 export function plannerOrderSizeSummary(plan: GridPlan | null | undefined, entryScale: string): string | null {
+  if(plan?.policyVersion==='2.0.0'&&plan.cycles?.length){
+    const quantities=plan.cycles.map(c=>new D(c.quantity)),min=readableDecimal(D.min(...quantities).toFixed()),max=readableDecimal(D.max(...quantities).toFixed());
+    return `${min===max?min:`${min}–${max}`} units per cycle; quantities stay fixed as prices change`;
+  }
   const entries = plan?.lines.filter(line => line.role === 'entry') ?? [];
   if (!entries.length) return null;
   const values = entries.map(line => new D(line.notional));

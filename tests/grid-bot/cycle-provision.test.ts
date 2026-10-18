@@ -4,7 +4,7 @@ import { calculateGrid } from '../../server/grid-bot/engine';
 import { computeGridPolicyHmac } from '../../server/grid-bot/policy-hmac';
 import { GridProvision, preflightGridLaunch, preflightGridResume } from '../../server/grid-bot/provision';
 import { launchAuthorityFixture, clock, umk } from './launch-authority-fixtures';
-import { cyclePolicy } from './cycle-fixtures';
+import { cyclePolicy,history } from './cycle-fixtures';
 
 function fixture() {
   const f=launchAuthorityFixture(),p=f.policy;
@@ -18,7 +18,7 @@ function fixture() {
   return f;
 }
 afterEach(()=>vi.restoreAllMocks());
-describe('v2 launch/resume validation before Stage B',()=>{
+describe('v2 launch/resume execution readiness',()=>{
   it('recomputes signed future capacity at launch and holds changed minimums and endpoints',async()=>{
     vi.spyOn(Date,'now').mockReturnValue(clock);const f=fixture();
     const {facts}=await f.authority.collect(f.account.wallet,f.policy,f.account,umk(),new AbortController().signal);
@@ -35,7 +35,7 @@ describe('v2 launch/resume validation before Stage B',()=>{
     const {facts}=await f.authority.collect(f.account.wallet,f.policy,f.account,umk(),new AbortController().signal);
     const input={} as Parameters<typeof preflightGridResume>[5];
     const result=preflightGridResume(f.policy,f.policyHash,umk(),facts,clock,input);
-    expect(result).toEqual({ok:false,reason:'Grid cycle Resume requires Stage B replay and lifecycle integration.'});
+    expect(result).toEqual({ok:false,reason:'Grid cycle Resume requires complete retained replay.'});
     const changed=preflightGridResume(f.policy,f.policyHash,umk(),{...facts,lot:'0.3'},clock,input);
     expect(changed.ok).toBe(false);if(!changed.ok)expect(changed.reason).toContain('lot or quote');
   });
@@ -44,7 +44,25 @@ describe('v2 launch/resume validation before Stage B',()=>{
     const forbidden=vi.fn(async()=>{throw Error('EXAMPLE unexpected Stage A execution');}),cleanup=vi.fn();
     const provision=new GridProvision({now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup}),observe:forbidden,
       custody:{reserve:forbidden,confirmCreated:forbidden,confirmReused:forbidden},verifyEmpty:forbidden,execution:{run:forbidden},existing:forbidden,markCanary:forbidden});
-    expect(await provision.start({wallet:'EXAMPLE',policy,policyHmac:signature.digest})).toEqual({state:'denied',reason:'Grid cycle provisioning requires Stage B execution integration.'});
+    expect(await provision.start({wallet:'EXAMPLE',policy,policyHmac:signature.digest})).toEqual({state:'denied',reason:'Grid cycle provisioning requires complete execution integration.'});
     expect(forbidden).not.toHaveBeenCalled();expect(cleanup).toHaveBeenCalledOnce();
+  });
+  it('keeps the integration hold when a caller supplies only the readiness flag',async()=>{
+    const policy=cyclePolicy(),signature=computeGridPolicyHmac(policy,umk());if(!signature.ok)throw Error('EXAMPLE');
+    const forbidden=vi.fn(async()=>{throw Error('EXAMPLE unexpected call');});
+    const provision=new GridProvision({cycleExecutionReady:true,now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup:()=>{}}),
+      custody:{reserve:forbidden,confirmCreated:forbidden,confirmReused:forbidden},verifyEmpty:forbidden,execution:{run:forbidden},existing:forbidden,markCanary:forbidden});
+    expect((await provision.start({wallet:'EXAMPLE',policy,policyHmac:signature.digest})).state).toBe('denied');
+    expect(forbidden).not.toHaveBeenCalled();
+  });
+  it('resumes complete retained v2 credit without seed or legacy row rearming',async()=>{
+    vi.spyOn(Date,'now').mockReturnValue(clock);const f=fixture();
+    const {facts}=await f.authority.collect(f.account.wallet,f.policy,f.account,umk(),new AbortController().signal);
+    const replay=history(f.policy);replay.account=f.account.account;
+    const input={cycleReplay:replay,direction:f.policy.direction,levels:f.policy.levels.map(l=>({...l,id:`EXAMPLE_LEVEL_${l.ordinal}`,attempt:0,status:'filled'})),
+      fills:[],reserved:[],owned:[],positionSize:'0',bookPrice:facts.bookPrice,lot:facts.lot,minimumQuote:facts.minimumQuote,freeSlots:facts.availableSlots,
+      inventoryComplete:true,entriesAllowed:true,canaryRemaining:'1000'};
+    const result=preflightGridResume(f.policy,f.policyHash,umk(),facts,clock,input);
+    expect(result.ok).toBe(true);if(result.ok)expect(result.plan.chunks.flat().some(a=>a.kind==='place'&&a.level.cycle?.leg==='opening')).toBe(true);
   });
 });

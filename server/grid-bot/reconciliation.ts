@@ -1,3 +1,5 @@
+import {validateCycleFillPrices} from './cycle-history';
+import type {GridPolicy} from './policy-hmac';
 import Decimal from 'decimal.js';
 import {canonicalRequest,type DurableGridOperation} from './launch-storage';
 import {orderedGridFills,gridPnl,GridNumber,exactGridPosition,type GridEconomicFill} from './pnl';
@@ -19,7 +21,7 @@ export function validGridHistory(h:GridHistoryWindow|null,start:number,now:numbe
     &&h.through<=now-h.publicationLagMs&&now-h.through<=5000+h.publicationLagMs;
 }
 /** Opaque CLOIDs are owned only through retained operations, never through a prefix. */
-export function reconcileGridObservation(input:{account:string;symbol:string;direction:'long'|'short';start:number;now:number;operations:ReconciliationOperation[];prior:GridEconomicFill[];observation:GridObservation}){
+export function reconcileGridObservation(input:{account:string;symbol:string;direction:'long'|'short';start:number;now:number;operations:ReconciliationOperation[];prior:GridEconomicFill[];observation:GridObservation;cyclePolicy?:GridPolicy}){
   const {observation:o,operations}=input;
   if(o.account!==input.account||o.symbol!==input.symbol||o.observedAt>input.now||input.now-o.observedAt>5000||!o.inventoryComplete)throw Error('Grid inventory authority unavailable');
   const owner=(orderId:string,cloid:string|null)=>{
@@ -37,6 +39,7 @@ export function reconcileGridObservation(input:{account:string;symbol:string;dir
     fills.push({tradeId:t.tradeId,operationId:op.id,orderId:t.orderId,levelId:op.level_id,time:t.time,leg,size:t.size,price:t.price,fee:t.fee});
   }
   const mark=o.mark&&o.mark.observedAt<=input.now&&input.now-o.mark.observedAt<=5000?o.mark:null;
+  if(input.cyclePolicy)validateCycleFillPrices(input.cyclePolicy,operations,[...input.prior,...fills]);
   const ledger=orderedGridFills([...input.prior,...fills]),pnl=gridPnl(input.direction,ledger,mark);
   const orders=new Map<string,GridVenueOrder>();
   for(const order of o.orders){const prior=orders.get(order.orderId);if(prior&&canonicalRequest(prior)!==canonicalRequest(order))throw Error('Conflicting order pages');orders.set(order.orderId,order);}

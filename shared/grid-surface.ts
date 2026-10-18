@@ -5,9 +5,14 @@ export interface GridBotSummary {
   id:string;name:string;market:string;direction:string;status:string;lowerPrice:string;upperPrice:string;
   totalInvestment:string;stopLossPrice:string|null;gridCount:number;chartTimeframe:string;updatedAt:string;
   createIntent?:GridIntent;
-  seedAtCreation?:boolean;leverage?:number;
+  seedAtCreation?:boolean;leverage?:number;policyVersion?:string;
+}
+export interface GridCycleOrderView {
+  ownerOrdinal:number;leg:'opening'|'closing';price:string;side:'buy'|'sell';size:string;
+  state:'working'|'pending confirmation'|'queued'|'waiting for fills'|'waiting for minimum'|'waiting for price'|'paused';
 }
 export interface GridBotSurface {
+  cycleProjection?:{observedAt:string;orders:GridCycleOrderView[]}|null;
   autoResume?:{enabled:boolean;generation:string;cycle:string;attempts:number;armed:boolean;heldReason:string|null;heldSince?:string|null;band:{lower:string;upper:string;tick:string}|null;available:boolean;unavailableReason?:'range_unavailable'|'market_data_unavailable'|'control_unavailable'};
   bot:GridBotSummary;
   levels:{id:string;ordinal:number;price:string;size:string;side:string;reduceOnly:boolean;status:string;cumulativeFilledSize:string}[];

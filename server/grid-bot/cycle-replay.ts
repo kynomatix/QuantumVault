@@ -80,7 +80,14 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
       const op=ops.get(f.operationId);
       if (!identity(f.tradeId) || f.account!==input.account || !op || !timestamp(f.time) || f.time<op.preparedAt
         || f.leg!==(op.reduceOnly?'exit':'entry')) throw Error('Fill does not belong to its immutable operation');
-      const q=number(f.size,true); number(f.price,true);
+      const q=number(f.size,true), price=number(f.price,true);
+      const cycle=op.cycleOrdinal===null?null:cycles.get(op.cycleOrdinal);
+      if(op.kind==='limit'){
+        if(!cycle)throw Error('Fill has no signed cycle endpoint');
+        const endpoint=new D(op.reduceOnly?cycle.closingPrice:cycle.openingPrice);
+        if(!number(op.price,true).eq(endpoint) || (op.side==='buy'?price.gt(endpoint):price.lt(endpoint)))
+          throw Error('Fill violates its signed limit endpoint');
+      }
       filled.set(op.id,(filled.get(op.id)??new D(0)).plus(q));
     }
     const states = new Map<string,OperationState>();

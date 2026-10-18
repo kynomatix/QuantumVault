@@ -1,5 +1,5 @@
 import Decimal from 'decimal.js';
-import { calculateGridPrices, validGridDecimal } from './engine';
+import { calculateGridPrices, validGridDecimal } from './grid-geometry';
 import type { GridCycle, GridInput, GridLine, GridResult, Scale } from './engine-types';
 import { GRID_SEED_MAX_SLIPPAGE_PERCENT } from './stop-clearance';
 
@@ -8,9 +8,10 @@ const fail = (code: Extract<GridResult, { ok: false }>['issues'][number]['code']
 const floor = (v: Decimal, step: Decimal) => v.div(step).floor().mul(step);
 const weight = (i: number, n: number, scale: Scale) => scale === 'flat' ? 1 : scale === 'ascending' ? n - i : i + 1;
 export function gridSeedPriceBounds(start: string, tick: string) {
-  const step = new D(tick), fraction = new D(GRID_SEED_MAX_SLIPPAGE_PERCENT).div(100);
-  return { low: floor(new D(start).mul(new D(1).minus(fraction)), step).toFixed(),
-    high: new D(start).mul(new D(1).plus(fraction)).div(step).ceil().mul(step).toFixed() };
+  // The signed start identifies a tick cell. Use that same conservative cell at every gate.
+  const step = new D(tick), anchor = floor(new D(start), step), fraction = new D(GRID_SEED_MAX_SLIPPAGE_PERCENT).div(100);
+  return { low: floor(anchor.mul(new D(1).minus(fraction)), step).toFixed(),
+    high: anchor.plus(step).mul(new D(1).plus(fraction)).div(step).ceil().mul(step).toFixed() };
 }
 
 /** Fixed capacity across every reachable cycle; initial seed allocation never compounds. */

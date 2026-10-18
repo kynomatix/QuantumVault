@@ -23,7 +23,7 @@ export interface PairFee {
 }
 export interface GridPlan {
   policyVersion?: '2.0.0'; cycles?: GridCycle[]; capacityPrice?: string; capacityNotional?: string;
-  /** v2 execution band around the raw reference, before the retained start is tick-floored. */
+  /** v2 execution band covering the signed reference tick cell. */
   seedPriceBounds?: { low: string; high: string };
   side: 'long' | 'short'; start: string; investment: string; leverage: string;
   lines: GridLine[]; seedQuantity: string; allocatedNotional: string;
