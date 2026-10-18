@@ -1,3 +1,4 @@
+import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import { createHash } from 'node:crypto';
 import { canonicalRequest, requestDigest as canonicalDigest } from './request-digest.js';
 import Decimal from 'decimal.js';
@@ -76,13 +77,13 @@ export interface PreparedGridOrder {
   unsigned: { account: string; subaccount_id?: string; symbol: string; price: string; amount: string;
     side: 'bid' | 'ask'; tif: 'ALO'; reduce_only: boolean; client_order_id: string; builder_code?: string };
 }
-const digest = (value: unknown, runtimeVersion?: string) => runtimeVersion === '2.0.0'
+const digest = (value: unknown, runtimeVersion?: string) => isGridCyclePolicyVersion(runtimeVersion)
   ? canonicalDigest(value) : createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const feeIdentity = (intent: GridOrderIntent, quote: GridFeeQuote) => ({ account: intent.account, subaccountId: intent.subaccountId,
   market: intent.market, liquidityRole: 'maker' as const, builderCode: quote.builderCode, intent: intent.reduceOnly ? 'profit' as const : 'entry' as const });
 export function prepareGridOrder(intent: GridOrderIntent, quote: GridFeeQuote, constraint: MarketConstraintObservation, now: number): PreparedGridOrder {
   const runtime = gridRuntimePolicy(intent.runtimePolicyVersion ?? '1.0.0');
-  if(intent.runtimePolicyVersion === '2.0.0')quote = restoreGridFeeQuoteOrder(quote);
+  if(isGridCyclePolicyVersion(intent.runtimePolicyVersion))quote = restoreGridFeeQuoteOrder(quote);
   if (!runtime) throw new Error('Unknown Grid runtime policy');
   if (!intent.account || !intent.signerPublicKey || !intent.signerGeneration || !intent.deployment || intent.endpoint !== 'https://api.pacifica.fi/api/v1/orders/create' || !intent.protocolSymbol || intent.market !== `${intent.protocolSymbol}-PERP`
     || !isGridClientOrderId(intent.clientOrderId) || !['long', 'short'].includes(intent.side) || typeof intent.reduceOnly !== 'boolean'
@@ -114,7 +115,7 @@ export function validatePreparedGridOrder(prepared: PreparedGridOrder, current: 
       || now < prepared.intent.signingTimestamp || now >= prepared.intent.signingTimestamp + prepared.intent.signingExpiryMs) return false;
     const rebuilt = prepareGridOrder({ ...prepared.intent, signingTimestamp: now }, prepared.feeQuote, current.constraint, now);
     // JSONB and exact-request persistence may reorder every object key. V1 bytes stay unchanged.
-    return current.runtimePolicyVersion === '2.0.0'
+    return isGridCyclePolicyVersion(current.runtimePolicyVersion)
       ? canonicalRequest(rebuilt.unsigned) === canonicalRequest(prepared.unsigned)
       : JSON.stringify(rebuilt.unsigned) === JSON.stringify(prepared.unsigned);
   } catch { return false; }

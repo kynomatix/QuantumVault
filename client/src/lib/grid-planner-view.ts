@@ -1,3 +1,5 @@
+import { gridModePlanValid, gridModeLines } from './grid-behaviour-view';
+import { isGridCyclePolicyVersion } from '../../../shared/grid-behaviour';
 import Decimal from 'decimal.js';
 import { GRID_HISTORY_MAX_BARS } from '../../../shared/grid-lookback';
 import {PER_BOT_ORDINARY_MAX,GRID_FULL_WINDOW_SLOTS,GRID_PROTECTION_RESERVE} from '../../../shared/grid-capacity';
@@ -90,7 +92,7 @@ export function plannerPreviewQuery(form: GridSetupForm, stop: string) {
   try {
     const fee = form.investment ? feePercentToRate(form.feePercent) : null;
     const q = new URLSearchParams({ market: form.market, side: form.side, lower: form.lower, upper: form.upper,
-      intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
+      behaviourMode: form.behaviourMode, intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
       leverage: form.leverage, investment: form.investment, stop });
     if (fee !== null) q.set('fee', fee);
     return { value: q.toString(), error: '' };
@@ -105,8 +107,8 @@ export function plannerGridCountHint(intervals: string): string {
 
 /** Use only the requested plan, never the diagnostic plan sized at minimum investment. */
 export function plannerOrderSizeSummary(plan: GridPlan | null | undefined, entryScale: string): string | null {
-  if(plan?.policyVersion==='2.0.0'&&plan.cycles?.length){
-    const quantities=plan.cycles.map(c=>new D(c.quantity)),min=readableDecimal(D.min(...quantities).toFixed()),max=readableDecimal(D.max(...quantities).toFixed());
+  if(isGridCyclePolicyVersion(plan?.policyVersion)&&plan.cycles?.length){
+    const quantities=plan.cycles.filter(c=>c.enabled!==false).map(c=>new D(c.quantity)),min=readableDecimal(D.min(...quantities).toFixed()),max=readableDecimal(D.max(...quantities).toFixed());
     return `${min===max?min:`${min}–${max}`} units per cycle; quantities stay fixed as prices change`;
   }
   const entries = plan?.lines.filter(line => line.role === 'entry') ?? [];
@@ -170,7 +172,7 @@ export function isPlannerChart(v: unknown): v is PlannerChart {
       && c.provenance.proxy === 'direct' && c.provenance.timeSemantic === 'open_time' && ['finalized', 'forming'].includes(c.provenance.finality));
 }
 function isPlan(p: any): boolean {
-  return record(p) && ['long', 'short'].includes(p.side) && positive(p.start) && positive(p.investment) && positive(p.leverage)
+  return record(p) && gridModePlanValid(p as GridPlan) && ['long', 'short'].includes(p.side) && positive(p.start) && positive(p.investment) && positive(p.leverage)
     && decimal(p.seedQuantity) && decimal(p.allocatedNotional) && decimal(p.unallocatedNotional)
     && (p.openingOrderLift === undefined || record(p.openingOrderLift) && Number.isInteger(p.openingOrderLift.count)
       && p.openingOrderLift.count > 0 && p.openingOrderLift.count <= 100 && positive(p.openingOrderLift.minimumQuote))
@@ -181,7 +183,7 @@ function isPlan(p: any): boolean {
       && new Set(p.openingOrderLift.ordinals).size === p.openingOrderLift.count
       && p.openingOrderLift.ordinals.every((i: unknown) => typeof i === 'number' && Number.isInteger(i)
         && i >= 0 && i < p.lines.length && (p.lines[i].role === 'entry'
-          || p.policyVersion === '2.0.0' && p.lines[i].role === 'seed_exit' && Array.isArray(p.cycles)
+          || isGridCyclePolicyVersion(p.policyVersion) && p.lines[i].role === 'seed_exit' && Array.isArray(p.cycles)
             && p.cycles.some((c: any) => record(c) && c.ownerOrdinal === i && c.anchor === 'closing'))))
     && p.lines.every((l: any, i: number) => record(l) && l.ordinal === i && positive(l.price) && decimal(l.quantity) && decimal(l.notional)
       && (!i || Number(l.price) > Number(p.lines[i - 1].price)) && ['entry', 'seed_exit', 'virtual'].includes(l.role)
@@ -210,7 +212,7 @@ export function isPlannerPreview(v: unknown): v is PlannerPreview {
 export function plannerOverlays(preview: PlannerPreview | null, expiresAt: number, now: number) {
   if (!preview || now >= expiresAt || preview.state === 'unavailable') return [];
   // Rejected funding/fee checks can retain valid server-calculated diagnostic geometry.
-  return preview.geometry?.state === 'available' ? preview.geometry.value : (preview.requestedPlan ?? preview.minimumPlan)?.lines ?? [];
+  return preview.geometry?.state === 'available' ? preview.geometry.value : gridModeLines(preview.requestedPlan ?? preview.minimumPlan);
 }
 export function plannerLevelMessage(preview: PlannerPreview | null, expiresAt: number, now: number,
   inputs: { market: string; lower: string; upper: string; investment: string; stop: string }, loading: boolean, error: string) {

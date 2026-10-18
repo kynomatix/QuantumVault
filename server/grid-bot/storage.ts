@@ -1,3 +1,5 @@
+import { retainedGridBehaviour } from './behaviour-policy';
+import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import { randomUUID } from 'node:crypto';
 import Decimal from 'decimal.js';
 import type { Pool, PoolClient } from 'pg';
@@ -32,7 +34,7 @@ function botRow(r: Record<string, unknown>): StoredBot {
     if (!decimal(r[key])) throw new GridStorageError('invariant');
   for (const key of ['stop_loss_percent','stop_loss_price','sol_balance','residual_usdc'])
     if (!decimal(r[key], true)) throw new GridStorageError('invariant');
-  return {...row<StoredBot>(r),...retainedGridSizing(r.authority_snapshot)};
+  return {...row<StoredBot>(r),...retainedGridSizing(r.authority_snapshot),...retainedGridBehaviour(r.authority_snapshot,String(r.policy_version))};
 }
 const equal = (a: unknown, b: unknown): boolean => {
   if (a instanceof Date || b instanceof Date) return new Date(a as string).getTime() === new Date(b as string).getTime();
@@ -52,8 +54,9 @@ export class GridStorage {
     if (levels.length !== bot.gridCount + 1 || !levels.every((l, i) => l.ordinal === i + 1)
       || !/^[0-9A-F]{64}$/.test(bot.serverIntentDigest)) throw new GridStorageError('invariant');
     return this.transaction(async c => {
-      const {sizingVersion,safetyEnvelopePrice,...record}=bot;
+      const {sizingVersion,safetyEnvelopePrice,gridPolicyExtension,...record}=bot;
       if(sizingVersion) record.authoritySnapshot={...(bot.authoritySnapshot as object),gridSizing:{sizingVersion,safetyEnvelopePrice}};
+      if(gridPolicyExtension) record.authoritySnapshot={...(record.authoritySnapshot as object),gridPolicyExtension};
       const keys = Object.keys(record), values = keys.map(k => record[k as keyof typeof record]);
       const created = await c.query(`INSERT INTO grid_bots (${keys.map(snake).join(',')}) VALUES (${keys.map((_, i) => '$'+(i+1)).join(',')}) ON CONFLICT (wallet_address,client_request_id) DO NOTHING RETURNING *`, values);
       if (!created.rowCount) {
@@ -95,7 +98,7 @@ export class GridStorage {
       })):null;
       const returnedFunds=(await c.query("SELECT exact_request->'data'->>'amount' AS amount,terminal_at FROM grid_operations WHERE bot_id=$1 AND type='sweep_subaccount' AND state='confirmed' ORDER BY terminal_at DESC,id DESC LIMIT 1",[id])).rows[0];
       const autoPreference=(await c.query('SELECT enabled,generation,cycle,attempts,armed_cycle,held_reason,updated_at FROM grid_auto_resume WHERE bot_id=$1',[id])).rows[0];
-      const cycleProjection=bot.policyVersion==='2.0.0'?(await c.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='cycle-projection'",[id])).rows[0]?.evidence:null;
+      const cycleProjection=isGridCyclePolicyVersion(bot.policyVersion)?(await c.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key='cycle-projection'",[id])).rows[0]?.evidence:null;
       return {...snapshot,surface:gridSurface({...snapshot,fills,runFills,returnedFunds,autoPreference,cycleProjection},monitor,life,events)};
     });
   }
@@ -114,7 +117,7 @@ export class GridStorage {
       // Bot lock serializes preparation against fill accounting and parent/level validation.
       const owner = await c.query('SELECT id,status,policy_version FROM grid_bots WHERE id=$1 FOR UPDATE',[input.botId]);
       if(!owner.rowCount || owner.rows[0].status==='draft' && ['provision_subaccount','set_leverage','fund_subaccount','seed_position','place_level_order'].includes(input.type)) throw new GridStorageError('invariant');
-      if(owner.rows[0].policy_version==='2.0.0'&&['seed_position','place_level_order','close_position'].includes(input.type))throw new GridStorageError('invariant','Cycle trading requires immutable launch authority');
+      if(isGridCyclePolicyVersion(owner.rows[0].policy_version)&&['seed_position','place_level_order','close_position'].includes(input.type))throw new GridStorageError('invariant','Cycle trading requires immutable launch authority');
       if (input.levelId) {
         const level = await c.query('SELECT id FROM grid_levels WHERE id=$1 AND bot_id=$2',[input.levelId,input.botId]);
         if (!level.rowCount) throw new GridStorageError('invariant');
@@ -154,7 +157,7 @@ export class GridStorage {
   async recordFillAndLevelState(fill: { botId: string; levelId: string; venueTradeId: string; venueOrderId: string | null; clientOrderUuid: string | null; side: string; price: string; size: string; fee: string; feeAsset: string; partial: boolean; venueFillTime: Date }, operationId: string | null) {
     return this.transaction(async c => {
       const b = await c.query('SELECT id,policy_version FROM grid_bots WHERE id=$1 FOR UPDATE',[fill.botId]);
-      if(b.rows[0]?.policy_version==='2.0.0')throw new GridStorageError('invariant');
+      if(isGridCyclePolicyVersion(b.rows[0]?.policy_version))throw new GridStorageError('invariant');
       const l = await c.query('SELECT * FROM grid_levels WHERE id=$1 AND bot_id=$2 FOR UPDATE',[fill.levelId,fill.botId]);
       if (!b.rowCount || !l.rowCount || l.rows[0].side !== fill.side || !decimal(fill.size) || !decimal(fill.fee)) throw new GridStorageError('invariant');
       if(operationId){

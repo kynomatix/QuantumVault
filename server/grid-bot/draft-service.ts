@@ -1,3 +1,4 @@
+import { GRID_MODES_CREATION, GRID_MODES_POLICY_VERSION } from '../../shared/grid-behaviour';
 import { createHash, randomUUID } from 'node:crypto';
 import Decimal from 'decimal.js';
 import { dollars, explainPlannerIssue } from '../grid-planner/order-explanation';
@@ -25,6 +26,7 @@ export interface GridDraftDeps {
   /** Server/test injection only. HTTP bodies cannot select a policy version. */
   cycleV2Creation?: boolean;
   leanSizingCreation?: boolean;
+  modesCreation?: boolean;
   projectedStop?: boolean;
   now():number; observe(wallet:string,intent:GridIntent):Promise<GridDraftAuthority>; umk(wallet:string):Promise<Buffer|null>;
   storage: Pick<GridStorage,'createDraftWithLevels'|'findByClientRequest'|'getBotSnapshot'>;
@@ -42,7 +44,10 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
   const authority=await deps.observe(wallet,intent), now=deps.now(), reasons:string[]=[];
   const cyclic=deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION;
   const lean=cyclic && (deps.leanSizingCreation ?? GRID_LEAN_SIZING_CREATION);
-  const createPolicy=cyclic?{...GRID_CREATE_POLICY,policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}:GRID_CREATE_POLICY;
+  const modes=intent.behaviourMode!==undefined;
+  if(modes && (!(deps.modesCreation ?? GRID_MODES_CREATION) || !lean)) throw new GridDraftError('invalid_intent',['Behaviour modes are unavailable']);
+  const cycleVersion=modes?GRID_MODES_POLICY_VERSION:'2.0.0';
+  const createPolicy=cyclic?{...GRID_CREATE_POLICY,policyVersion:cycleVersion,runtimePolicyVersion:cycleVersion}:GRID_CREATE_POLICY;
   // A v2 preview must earn projected stop authority even when other observations prevent sizing.
   if(cyclic) authority.stop={state:'unavailable',reason:'Stop projection inputs unavailable'};
   const c=authority.market.constraints, reference=authority.market.reference;
@@ -85,7 +90,7 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
     const input:GridGeometryInput={side:intent.direction,lower:intent.lowerPrice,upper:intent.upperPrice,start:r.price,
       intervals:intent.gridCount,entryScale:intent.entryScaleType,profitScale:intent.profitScaleType,seed:intent.seedAtCreation,
       leverage:intent.leverage,tick:cv.tick,lot:cv.lot,minimumQuote:cv.minimumQuote,investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:makerRate,
-      ...(cyclic?{policyVersion:'2.0.0' as const,...(cv.maximumQuote.state==='available'?{maximumQuote:cv.maximumQuote.value}:{})}:{}),
+      ...(cyclic?{policyVersion:cycleVersion,...(modes?{behaviourMode:intent.behaviourMode}:{}),...(cv.maximumQuote.state==='available'?{maximumQuote:cv.maximumQuote.value}:{})}:{}),
       ...(lean?{sizingVersion:'lean-1' as const,safetyEnvelopePrice:D.max(intent.upperPrice,intent.seedAtCreation?gridSeedPriceBounds(r.price,cv.tick).high:'0',intent.direction==='short'?intent.stopPrice:'0').toFixed()}: {})};
     const min=minimumInvestment(input);
     if (min.ok) minimum=new D(min.investment).mul(reserveFactor).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2);
@@ -154,6 +159,7 @@ export async function createGridDraft(wallet:string,request:GridCreateRequest,de
   const previous=await deps.storage.findByClientRequest(wallet,request.clientRequestId);
   const id=previous?.id??randomUUID(), p=preview.plan;
   const policy:GridPolicy={id,protocol:'pacifica',market:request.intent.market,direction:request.intent.direction,
+    ...(p.gridPolicyExtension?{gridPolicyExtension:p.gridPolicyExtension}:{}),
     ...(p.sizingVersion?{sizingVersion:p.sizingVersion,safetyEnvelopePrice:new D(p.safetyEnvelopePrice!).toFixed(8)}:{}),
     upperPrice:new D(p.lines.at(-1)!.price).toFixed(8),lowerPrice:new D(p.lines[0].price).toFixed(8),startPrice:new D(p.start).toFixed(8),
     gridCount:request.intent.gridCount,totalInvestment:new D(request.intent.totalInvestment).toFixed(2),leverage:Number(request.intent.leverage),

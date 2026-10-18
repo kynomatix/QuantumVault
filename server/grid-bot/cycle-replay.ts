@@ -98,7 +98,7 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
         || op.reduceOnly!==(op.leg==='closing') || op.side!==(input.policy.direction==='long'?(op.reduceOnly?'sell':'buy'):(op.reduceOnly?'buy':'sell'))
         || actual.gt(q)) throw Error('Invalid cycle operation identity or quantity');
       if (op.kind==='limit') {
-        if (!cycle || !number(op.price,true).eq(op.leg==='opening'?cycle.openingPrice:cycle.closingPrice) || q.gt(cycle.quantity)) throw Error('Operation changed its signed endpoint or quota');
+        if (!cycle || cycle.enabled === false || op.leg === 'opening' && cycle.recycles === false || !number(op.price,true).eq(op.leg==='opening'?cycle.openingPrice:cycle.closingPrice) || q.gt(cycle.quantity)) throw Error('Operation changed its signed endpoint or quota');
       } else if (op.cycleOrdinal!==null || op.kind==='seed' && (op.leg!=='opening' || !input.policy.seedAtCreation)
         || op.kind==='close' && op.leg!=='closing') throw Error('Invalid seed or noncyclic reduction');
       if (op.kind!=='limit' || op.leg!=='opening') {
@@ -138,23 +138,23 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
           if(part.gt(0)){addSource(inventory,c.ownerOrdinal,f,part);seedAssigned.set(c.ownerOrdinal,used.plus(part));remaining=remaining.minus(part);}
         }
         if(!remaining.eq(0))throw Error('Actual seed exceeds signed quotas');
-      } else if(op.kind==='limit') addSource(op.leg==='opening'?inventory:recycle,op.cycleOrdinal!,f,number(f.size,true));
+      } else if(op.kind==='limit' && (op.leg==='opening' || cycles.get(op.cycleOrdinal!)?.recycles !== false)) addSource(op.leg==='opening'?inventory:recycle,op.cycleOrdinal!,f,number(f.size,true));
       // A stop/manual/sweep close can consume inventory but never issues recycle credit.
     }
     const seedStates=[...states.values()].filter(s=>s.op.kind==='seed');
     const seedQuota=seedCycles.reduce((s,c)=>s.plus(c.quantity),new D(0));
     if(seedStates.reduce((s,o)=>s.plus(o.retained),new D(0)).gt(seedQuota))throw Error('Seed requests exceed signed capacity');
-    let releaseUnused=false, unusedAvailableAt=0;
+    let releaseUnused=false, unusedProven=false, unusedAvailableAt=0;
     if(input.unusedSeedProof){const proof=input.unusedSeedProof;
       if(input.policy.seedAtCreation && proof.operationIds.length===0)throw Error('Unused seed requires a proven terminal seed operation');
       if(!timestamp(proof.historyThrough) || new Set(proof.operationIds).size!==proof.operationIds.length
         || stable([...proof.operationIds].sort())!==stable(seedStates.map(s=>s.op.id).sort())
         || seedStates.some(s=>!s.terminal || progress.get(s.op.id)!.historyThrough!>proof.historyThrough))throw Error('Unused seed lacks complete terminal proof');
-      releaseUnused=proof.entriesAllowed===true;
+      releaseUnused=proof.entriesAllowed===true; unusedProven=true;
       unusedAvailableAt=Math.max(proof.historyThrough,...seedStates.map(s=>progress.get(s.op.id)!.observedAt));
     }
     const initial=new Map(descriptors.map(c=>[c.ownerOrdinal,{
-      issued:new D(c.initialOpeningCredit).plus(releaseUnused?new D(c.initialInventory).minus(seedAssigned.get(c.ownerOrdinal)??0):0),retained:new D(0)
+      issued:new D(c.initialOpeningCredit).plus(releaseUnused && c.recycles !== false ?new D(c.initialInventory).minus(seedAssigned.get(c.ownerOrdinal)??0):0),retained:new D(0)
     }]));
     const dependencies=new Map(operations.map(o=>[o.id,new Set<string>()]));
     const reserve = (s:Source,op:CycleOperation,retained:Decimal,consumed:Decimal) => {
@@ -205,7 +205,7 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
       const held=sources.reduce((sum,s)=>sum.plus(s.size).minus(s.consumed),new D(0));
       const openingCommitments=opening.reduce((sum,s)=>sum.plus(s.retained).minus(s.filled),new D(0));
       const closingCommitments=sources.reduce((sum,s)=>sum.plus(s.retained).minus(s.consumed),new D(0));
-      const pendingSeed=releaseUnused?new D(0):new D(c.initialInventory).minus(seedAssigned.get(c.ownerOrdinal)??0);
+      const pendingSeed=releaseUnused || unusedProven && c.recycles===false ?new D(0):new D(c.initialInventory).minus(seedAssigned.get(c.ownerOrdinal)??0);
       if(held.lt(0) || held.plus(openingCommitments).plus(pendingSeed).gt(c.quantity) || closingCommitments.gt(held))throw Error('Cycle circulating capacity exceeded');
       const initialCredit=initial.get(c.ownerOrdinal)!.issued.minus(initial.get(c.ownerOrdinal)!.retained);
       const portions=(sources:Source[])=>sources.filter(s=>s.size.gt(s.retained)).sort((a,b)=>a.time-b.time || compareId(a.tradeId,b.tradeId)).map(s=>({tradeId:s.tradeId,size:s.size.minus(s.retained).toFixed()}));
@@ -230,6 +230,7 @@ export function validateCycleSourceCredit(input: CycleReplayInput, candidate: Cy
 
 /** Dust remains credited. Only openings have a quote minimum; never top up a partial fill. */
 export function executableCycleQuantity(state: ReplayedGridCycle, leg: 'opening'|'closing', lot: string, minimumQuote: string): string {
+  if (state.cycle.enabled === false || leg === 'opening' && state.cycle.recycles === false) return '0';
   const step=number(lot,true), minimum=number(minimumQuote,true);
   if((leg==='opening'?state.liveOpening:state.liveClosing).length)return '0';
   const available=leg==='opening'?number(state.openingCredit):state.availableEntryLots.reduce((s,p)=>s.plus(p.size),new D(0));

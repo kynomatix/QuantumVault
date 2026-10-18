@@ -1,3 +1,4 @@
+import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import { MAX, calculateGridPrices, validGridDecimal } from './grid-geometry';
 export { calculateGridPrices, validGridDecimal } from './grid-geometry';
 import Decimal from 'decimal.js';
@@ -27,7 +28,7 @@ export function assumedPairFees(plan: GridPlan, rate: string): PairFee[] {
 
 /** Hypothetical full-size geometry only. No fill, liquidation or execution authority. */
 export function calculateGrid(input: GridInput): GridResult {
-  if (input.policyVersion === '2.0.0') return calculateCycleGrid(input);
+  if (isGridCyclePolicyVersion(input.policyVersion)) return calculateCycleGrid(input);
   if (input.policyVersion !== undefined && input.policyVersion !== '1.0.0') return failure('invalid_geometry', 'Unknown grid policy version');
   const positive = ['lower', 'upper', 'start', 'leverage', 'tick', 'lot', 'minimumQuote', 'investmentStep', 'investment'] as const;
   for (const key of positive) if (!validGridDecimal(input[key])) return failure('invalid_decimal', `${key}: use a positive plain decimal with at most 18 decimal places`);
@@ -133,7 +134,7 @@ export function minimumInvestment(input: GridGeometryInput): MinimumResult {
   const evaluate = (units: Decimal): GridResult => {
     evaluations++;
     const amount = text(units.times(step));
-    return validGridDecimal(amount) ? calculateGrid({ ...input, ...(input.policyVersion === '2.0.0' ? { maximumQuote: undefined } : {}), investment: amount }) : failure('invalid_decimal', 'Minimum investment exceeds the bounded decimal envelope');
+    return validGridDecimal(amount) ? calculateGrid({ ...input, ...(isGridCyclePolicyVersion(input.policyVersion) ? { maximumQuote: undefined } : {}), investment: amount }) : failure('invalid_decimal', 'Minimum investment exceeds the bounded decimal envelope');
   };
   let low = new D(0), high = D.max(1, new D(input.transferFloor).div(step).ceil()), result: GridResult;
   for (let i = 0; ; i++) {
@@ -160,7 +161,7 @@ export function minimumInvestment(input: GridGeometryInput): MinimumResult {
     const previous = evaluate(high.minus(1));
     if (previous.ok || previous.issues.some(issue => issue.code !== 'underfunded')) return fail('Minimum failed preceding-quantum verification');
   }
-  if (input.policyVersion === '2.0.0' && input.maximumQuote) {
+  if (isGridCyclePolicyVersion(input.policyVersion) && input.maximumQuote) {
     evaluations++;
     result = calculateGrid({ ...input, investment: text(high.times(step)) });
     if (!result.ok) return { ...result, evaluations };

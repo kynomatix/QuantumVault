@@ -35,7 +35,7 @@ export interface PlannerDeps {
 }
 export interface PlannerQuery {
   market: string; side: 'long' | 'short'; lower: string; upper: string; intervals: number;
-  entryScale: GridGeometryInput['entryScale']; profitScale: GridGeometryInput['profitScale']; seed: boolean;
+  behaviourMode?: GridGeometryInput['behaviourMode']; entryScale: GridGeometryInput['entryScale']; profitScale: GridGeometryInput['profitScale']; seed: boolean;
   leverage: string; investment: string; stop: string; fee: string | null;
 }
 export interface PlannerPreview {

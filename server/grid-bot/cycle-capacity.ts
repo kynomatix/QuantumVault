@@ -19,7 +19,7 @@ export function cycleCapacity(input: CycleReplayInput, mark: string, candidate?:
     const progress = input.progress.find(p => p.operationId === op.id);
     let amount = new D(op.size); // Unknown, submitted and uncertain terminal requests retain their FULL amount.
     // Even a live partial cancellation needs a reconciled terminal proof to release money.
-    if (progress?.state === 'live') amount = amount.minus(progress.filledSize!);
+    if (progress?.state === 'live') amount = D.max(0, amount.minus(progress.filledSize!));
     else if (progress?.state === 'terminal'
       && Number.isSafeInteger(progress.terminalAt) && Number.isSafeInteger(progress.historyThrough)
       && progress.terminalAt! >= op.preparedAt && progress.historyThrough! >= progress.terminalAt!

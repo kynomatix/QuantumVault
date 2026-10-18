@@ -1,3 +1,7 @@
+import { GridBehaviourSelect } from './GridBehaviourSelect';
+import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
+import { gridModeLines, gridModeBoundary } from '@/lib/grid-behaviour-view';
+import { isGridCyclePolicyVersion } from '../../../../shared/grid-behaviour';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BarChart3, RefreshCw, SlidersHorizontal, ArrowUpDown, Shield, Layers, Receipt } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
@@ -348,12 +352,15 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   const usingPlannerGeometry = !form.investment && plannerEnabled;
   const lines = useMemo(() => createEnabled && !usingPlannerGeometry
     ? draftPreview?.state === 'ready' && draftPreview.draftRevision === gridDraftRevision(draftIntent)
-      ? draftPreview.plan?.lines ?? [] : []
+      ? gridModeLines(draftPreview.plan) : []
     // Held levels are display only. Expiry still governs shortcuts and draft actions.
     : plannerEnabled ? plannerOverlays(preview, Infinity, now) : [], [createEnabled, usingPlannerGeometry, plannerEnabled, preview, previewExpiry, now, draftPreview, draftIntent]);
   const regime = rangeFacts && now < rangeExpiry ? rangeFacts.regime : { state: 'unavailable' as const,
     reason: rangeError || (rangeBusy ? 'Loading finalized candles' : !form.market ? 'Choose a market' : 'Observation expired or unavailable; refresh chart') };
-  const displayPlan = preview?.requestedPlan ?? preview?.minimumPlan;
+  const authoritativePlan = createEnabled && draftPreview?.state === 'ready' && draftPreview.draftRevision === gridDraftRevision(draftIntent)
+    ? draftPreview.plan : undefined;
+  const requestedPlan = authoritativePlan ?? preview?.requestedPlan;
+  const displayPlan = requestedPlan ?? preview?.minimumPlan;
   const stale = preview !== null && preview.validForMs > 0 && now >= previewExpiry;
   const showIssue = (reason: string) => {
     const issue = plannerIssue(reason);
@@ -455,6 +462,23 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             {marketError || (selected?.reference.state === 'unavailable' ? selected.reference.reason : '')}</p>}
         </section>
 
+        <section aria-label="Direction and behaviour" className="space-y-3">
+          <div className="space-y-2"><Label id="grid-side-label">Direction</Label>
+            <GridDirectionSignals active={open} identity={identity} market={defaultMarketPending ? '' : form.market} timeframe={form.timeframe} regime={regime} refresh={refresh}/>
+            <div role="group" aria-labelledby="grid-side-label" className="flex gap-2 rounded-lg border border-border/60 bg-card/40 p-1">
+              {['long', 'short'].map(side => <Button key={side} type="button" className="flex-1" variant={form.side === side ? 'default' : 'ghost'}
+                aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}
+            </div>
+          </div>
+          <GridBehaviourSelect value={form.behaviourMode} side={form.side} seed={form.seed} onChange={mode => edit('behaviourMode',mode)} />
+            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
+              <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position</Label>
+                <p className="text-xs text-muted-foreground">{gridBehaviourCopy(form.behaviourMode,form.side,form.seed).hint}</p>
+                <p className="text-xs text-muted-foreground">Opening a starting position incurs a taker fee.</p></div>
+              <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
+            </div>
+        </section>
+
         <section aria-labelledby="grid-range-heading" className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h3 id="grid-range-heading" className="text-sm font-semibold">Your range</h3>
@@ -528,14 +552,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
 
         <DrawerSettingsPanel id="direction-size" title="Order" icon={ArrowUpDown} keepMounted
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-direction-size-toggle">
-        <section aria-label="Direction and investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="space-y-2"><Label id="grid-side-label">Direction</Label>
-            <GridDirectionSignals active={open} identity={identity} market={defaultMarketPending ? '' : form.market} timeframe={form.timeframe} regime={regime} refresh={refresh}/>
-            <div role="group" aria-labelledby="grid-side-label" className="flex gap-2 rounded-lg border border-border/60 bg-card/40 p-1">
-              {['long', 'short'].map(side => <Button key={side} type="button" className="flex-1" variant={form.side === side ? 'default' : 'ghost'}
-                aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}
-            </div>
-          </div>
+        <section aria-label="Investment" className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div className="space-y-1.5">{numberField('investment', 'Investment (USDC)', '100.00')}
             <p className="text-xs text-muted-foreground">Use 0.01 USDC increments.</p></div>
         </section>
@@ -562,23 +579,18 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
 
         <DrawerSettingsPanel id="orders" title="Sizing" icon={Layers} keepMounted
           expandedPanel={expandedSettingsPanel} setExpandedPanel={setExpandedSettingsPanel} testId="grid-panel-orders-toggle">
-            <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
-              <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position</Label>
-                <p className="text-xs text-muted-foreground">{displayPlan?.policyVersion==='2.0.0'?(form.side==='long'?'Start with a position — place backed sells above price immediately. Without it, those levels wait for a buy first.':'Start with a position — place backed buys below price immediately. Without it, those levels wait for a sell first.'):'When the bot starts, it opens a position at the entry price and takes profit on it bit by bit as price moves your way. Off: the bot only places grid orders.'}</p>
-                <p className="text-xs text-muted-foreground">The taker fee for opening it isn't included.</p></div>
-              <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
-            </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <GridPlannerSizeSelect id="grid-entryScale" label="Grid order sizes" value={form.entryScale} side={form.side} onChange={value => edit('entryScale', value)} />
               <GridPlannerSizeSelect id="grid-profitScale" label="Take-profit sizes" value={form.profitScale} side={form.side}
-                startingPosition enabled={form.seed||displayPlan?.policyVersion==='2.0.0'} onChange={value => edit('profitScale', value)} />
+                startingPosition enabled={form.seed||isGridCyclePolicyVersion(displayPlan?.policyVersion)} onChange={value => edit('profitScale', value)} />
           </div>
         </DrawerSettingsPanel>
 
         {status}
         {plannerEnabled && <section aria-labelledby="grid-plan-heading" className="rounded-xl border border-primary/20 bg-card/40 p-4 sm:p-5 space-y-4">
           <h3 id="grid-plan-heading" className="text-sm font-semibold">Your plan</h3>
-          {displayPlan?.policyVersion==='2.0.0'&&<p className="text-sm">{form.side==='long'?'Buys below price, sells above; each fill flips to the other side, one grid step away.':'Sells above price, buys below; each fill flips to the other side, one grid step away.'} Capital is reserved across the whole range. Each cycle reuses its allocated amount; profits stay in the bot.</p>}
+          {displayPlan?.behaviourMode && <p className="text-sm">{gridBehaviourCopy(displayPlan.behaviourMode,form.side,form.seed).hint} {gridModeBoundary(displayPlan.gridPolicyExtension?.boundaryPrices ?? [],form.side)} Quantities stay fixed; profits stay in the bot.</p>}
+          {!displayPlan?.behaviourMode && isGridCyclePolicyVersion(displayPlan?.policyVersion)&&<p className="text-sm">{form.side==='long'?'Buys below price, sells above; each fill flips to the other side, one grid step away.':'Sells above price, buys below; each fill flips to the other side, one grid step away.'} Capital is reserved across the whole range. Each cycle reuses its allocated amount; profits stay in the bot.</p>}
           <GridPlanIssues reasons={issues} onReview={showIssue} />
           {loading && !preview ? <p role="status" className="text-sm">Checking your plan…</p>
             : preview ? <p role="status" className="text-sm font-medium">{plannerStatus(preview, stale)}</p>
@@ -587,15 +599,15 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
             <div><dt className="text-xs text-muted-foreground">Grids</dt><dd className="font-medium mt-1">{displayPlan ? `${displayPlan.lines.length - 1} grids` : preview?.geometry?.state === 'available' ? `${preview.geometry.value.length - 1} grids` : 'Awaiting preview'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Range you chose</dt><dd className="font-medium mt-1 break-words">{range ? `${readableDecimal(range.lower)} – ${readableDecimal(range.upper)}` : 'Enter lower and upper prices'}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Proposed stop</dt><dd className="font-medium mt-1 break-words">{effectiveStop ? `${readableDecimal(effectiveStop)}${form.stop ? ' · custom' : ' · suggested'}` : 'Unavailable'}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Grid order sizes</dt><dd className="font-medium mt-1">{plannerOrderSizeSummary(preview?.requestedPlan, form.entryScale) ?? 'Awaiting a preview at your investment'}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Grid order sizes</dt><dd className="font-medium mt-1">{plannerOrderSizeSummary(requestedPlan, form.entryScale) ?? 'Awaiting a preview at your investment'}</dd></div>
             {plannerMinimumRows(preview).map(row => <div key={row.label}><dt className="text-xs text-muted-foreground">{row.label}</dt><dd className="font-medium mt-1">{row.value}</dd></div>)}
           </dl>
-          {plannerOpeningMinimumSummary(preview?.requestedPlan) && <p role="status" className="text-sm">{plannerOpeningMinimumSummary(preview?.requestedPlan)}</p>}
+          {plannerOpeningMinimumSummary(requestedPlan) && <p role="status" className="text-sm">{plannerOpeningMinimumSummary(requestedPlan)}</p>}
           {(preview?.fee.state === 'unknown' || form.feePercent === '') && <p className="text-xs text-muted-foreground">Fee assumption not set — fees haven't been checked.</p>}
 
           {displayPlan && <details className="border-t border-border/60 pt-3">
             <summary className="cursor-pointer text-sm font-medium">View all grid levels and quantities</summary>
-            <p className="text-xs text-muted-foreground mt-3">{stale && 'Expired market data. '}{preview?.minimumPlan ? 'Quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Starting position quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p>
+            <p className="text-xs text-muted-foreground mt-3">{stale && 'Expired market data. '}{!requestedPlan ? 'Quantities at the minimum investment; not sized at your requested investment.' : 'Quantities sized at your requested investment.'} Starting position quantity: {readableDecimal(displayPlan.seedQuantity)} base units.</p>
             <GridPlannerLevels plan={displayPlan} baseSymbol={form.market.replace(/-PERP$/, '')} />
           </details>}
           {!!preview?.feeRows.length && <details className="border-t border-border/60 pt-3">

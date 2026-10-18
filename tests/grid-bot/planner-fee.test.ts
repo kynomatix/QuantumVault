@@ -19,7 +19,7 @@ import type { GridPlan } from '../../server/grid-bot/engine-types';
 vi.mock('../../client/src/components/ui/dialog', () => {
   const container = ({ children }: { children: ReactNode }) => createElement('div', null, children);
   return { Dialog: container, DialogContent: container, DialogHeader: container, DialogTitle: container,
-    DialogDescription: container, DialogFooter: container };
+    DialogDescription: container, DialogFooter: container, DialogTrigger: container, DialogClose: container };
 });
 vi.mock('../../client/src/components/ui/settings-panel', () => ({
   DrawerSettingsPanel: ({ children }: { children: ReactNode }) => createElement('div', null, children),

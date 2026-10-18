@@ -1,3 +1,4 @@
+import { GRID_MODES_CREATION, GRID_MODES_POLICY_VERSION, isGridBehaviourMode } from '../../shared/grid-behaviour';
 import Decimal from 'decimal.js';
 import { GRID_CYCLE_V2_CREATION } from '../grid-bot/cycle-policy';
 import { GRID_LEAN_SIZING_CREATION } from '../grid-bot/lean-sizing';
@@ -13,6 +14,7 @@ export function validatePreviewQuery(q: PlannerQuery): string | null {
   for (const field of ['lower', 'upper'] as const)
     if (!validGridDecimal(q[field])) return `${field}: enter a positive plain decimal (up to 18 decimal places)`;
   if (!Number.isInteger(q.intervals) || q.intervals < 1 || q.intervals > 100) return 'Invalid interval count';
+  if(q.behaviourMode!==undefined && !isGridBehaviourMode(q.behaviourMode)) return 'Invalid grid behaviour';
   if (q.investment === '') return null;
   for (const field of ['leverage', 'investment', 'stop'] as const)
     if (!validGridDecimal(q[field])) return `${field}: enter a positive plain decimal (up to 18 decimal places)`;
@@ -24,7 +26,7 @@ export function validatePreviewQuery(q: PlannerQuery): string | null {
 }
 
 export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number,
-  deps: { cycleV2Creation?: boolean; leanSizingCreation?: boolean } = {}): PlannerPreview {
+  deps: { cycleV2Creation?: boolean; leanSizingCreation?: boolean; modesCreation?: boolean } = {}): PlannerPreview {
   const result: PlannerPreview = { state: 'unavailable', reasons: [], market, retrievedAt: now, validForMs: 0,
     geometry: unknown('Geometry not evaluated'),
     requestedPlan: null, minimumPlan: null, minimum: unknown('Geometry not evaluated'), assumedMinimum: unknown('Assumed fee not evaluated'), feeRows: [],
@@ -32,6 +34,8 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number,
     stop: { state: 'unavailable', reason: 'Liquidation clearance is unknown; no account or position is read. This stop is not certified reachable.' }, policy: PLANNER_POLICY };
   const invalid = validatePreviewQuery(q);
   if (invalid) return { ...result, state: 'rejected', reasons: [invalid] };
+  const modes=q.behaviourMode!==undefined;
+  if(modes && (!(deps.modesCreation ?? GRID_MODES_CREATION) || !(deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION) || !(deps.leanSizingCreation ?? GRID_LEAN_SIZING_CREATION))) return {...result,state:'rejected',reasons:['Behaviour modes are unavailable']};
   if (q.investment === '') {
     const needsInvestment = unknown<string>('Enter an investment to see order sizes');
     result.minimum = needsInvestment; result.assumedMinimum = needsInvestment;
@@ -59,7 +63,7 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number,
     return { ...result, state: 'rejected', reasons: ['Stop must align to the venue tick and lie beyond the loss side of the range'] };
   const cyclic=deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION, lean=cyclic && (deps.leanSizingCreation ?? GRID_LEAN_SIZING_CREATION);
   const reserveFactor=lean?new D(1).plus(new D(q.leverage).mul(q.fee??'0')):new D(1);
-  const input: GridGeometryInput = { policyVersion: cyclic ? '2.0.0' : '1.0.0', side: q.side, lower: q.lower, upper: q.upper, start: r.price,
+  const input: GridGeometryInput = { policyVersion: cyclic ? (modes?GRID_MODES_POLICY_VERSION:'2.0.0') : '1.0.0', ...(modes?{behaviourMode:q.behaviourMode}:{}), side: q.side, lower: q.lower, upper: q.upper, start: r.price,
     ...(lean?{sizingVersion:'lean-1' as const,safetyEnvelopePrice:D.max(q.upper,q.seed?gridSeedPriceBounds(r.price,c.tick).high:'0',q.side==='short'?q.stop:'0').toFixed()}:{}),
     intervals: q.intervals, entryScale: q.entryScale, profitScale: q.profitScale, seed: q.seed, leverage: q.leverage,
     tick: c.tick, lot: c.lot, minimumQuote: c.minimumQuote, investmentStep: '0.01',

@@ -1,3 +1,4 @@
+import type { GridBehaviourMode } from './grid-behaviour';
 import type {GridIntent} from './grid-draft';
 import type {GridStartRequest} from './grid-start';
 export type GridOwnerAction='pause'|'resume'|'resync'|'stop';
@@ -5,17 +6,18 @@ export interface GridBotSummary {
   id:string;name:string;market:string;direction:string;status:string;lowerPrice:string;upperPrice:string;
   totalInvestment:string;stopLossPrice:string|null;gridCount:number;chartTimeframe:string;updatedAt:string;
   createIntent?:GridIntent;
-  seedAtCreation?:boolean;leverage?:number;policyVersion?:string;
+  behaviourMode?:GridBehaviourMode;onceOnlyPrices?:string[];seedAtCreation?:boolean;leverage?:number;policyVersion?:string;
 }
 export interface GridCycleOrderView {
   ownerOrdinal:number;leg:'opening'|'closing';price:string;side:'buy'|'sell';size:string;
-  state:'working'|'pending confirmation'|'queued'|'waiting for fills'|'waiting for minimum'|'waiting for price'|'Waiting for room'|'paused'|'stopped';
+  recycles?:boolean;enabled?:boolean;
+  state:'Finished here'|'Unused — no starting position'|'once only'|'working'|'pending confirmation'|'queued'|'waiting for fills'|'waiting for minimum'|'waiting for price'|'Waiting for room'|'paused'|'stopped';
 }
 export interface GridBotSurface {
   cycleProjection?:{observedAt:string;orders:GridCycleOrderView[]}|null;
   autoResume?:{enabled:boolean;generation:string;cycle:string;attempts:number;armed:boolean;heldReason:string|null;heldSince?:string|null;band:{lower:string;upper:string;tick:string}|null;available:boolean;unavailableReason?:'range_unavailable'|'market_data_unavailable'|'control_unavailable'};
   bot:GridBotSummary;
-  levels:{id:string;ordinal:number;price:string;size:string;side:string;reduceOnly:boolean;status:string;cumulativeFilledSize:string}[];
+  levels:{recycles?:boolean;enabled?:boolean;id:string;ordinal:number;price:string;size:string;side:string;reduceOnly:boolean;status:string;cumulativeFilledSize:string}[];
   operations:{id:string;type:string;state:string}[];
   lifecycle:{action:string|null;state:string|null;blocker:string|null};
   pnl:{realised:string|null;unrealised:string|null;total:string|null;fees:string|null;averageEntry:string|null;breakeven:string|null;

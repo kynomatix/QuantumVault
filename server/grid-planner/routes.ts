@@ -141,7 +141,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
       if (!res.destroyed) res.status(result.state === 'available' ? 200 : 503).json(result);
     } finally { res.off('close', onClose); }
   }));
-  app.get('/api/grid-planner/preview', requireWallet, route(['market', 'side', 'lower', 'upper', 'intervals', 'entryScale', 'profitScale', 'seed', 'leverage', 'investment', 'stop', 'fee'], async (req, res, deps) => {
+  app.get('/api/grid-planner/preview', requireWallet, route(['market', 'side', 'lower', 'upper', 'intervals', 'entryScale', 'profitScale', 'seed', 'leverage', 'investment', 'stop', 'fee', 'behaviourMode'], async (req, res, deps) => {
     const raw = req.query;
     const geometryOnly = raw.investment === undefined || raw.investment === '';
     if (((!geometryOnly || raw.seed !== undefined) && !['true', 'false'].includes(String(raw.seed))) || !/^(?:[1-9]\d?|100)$/.test(String(raw.intervals)) || typeof raw.market !== 'string') {

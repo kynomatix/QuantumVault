@@ -1,3 +1,4 @@
+import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import {windowLevelKey} from './window';
 import type {GridResumeRisk} from './resume-clearance';
 import Decimal from 'decimal.js';
@@ -114,7 +115,7 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
         ||f.observedAt>now||f.expiresAt<=now||now-f.observedAt>=5000)return false;
       if(r.kind==='limit'){
         if(!validGridLevelAuthority(r,{account:account.account,subaccountId:null,signerPublicKey:account.account,signerGeneration:generation(account,f),
-          deployment:f.recycler.deployment,endpoint:'https://api.pacifica.fi/api/v1/orders/create',...(policy.policyVersion==='2.0.0'?{runtimePolicyVersion:'2.0.0'}:{}),constraint:constraintFor(f)},now))return false;
+          deployment:f.recycler.deployment,endpoint:'https://api.pacifica.fi/api/v1/orders/create',...(isGridCyclePolicyVersion(policy.policyVersion)?{runtimePolicyVersion:policy.runtimePolicyVersion}:{}),constraint:constraintFor(f)},now))return false;
         const price=new Decimal(String(r.data.price)),notional=price.mul(String(r.data.amount));
         if(price.lt(f.minimumPrice)||price.gt(f.maximumPrice)||(r.data.reduce_only!==true&&notional.lt(f.minimumQuote))||notional.gt(f.maximumQuote))return false;
       }
@@ -183,7 +184,7 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
       const owned:WindowOrder[]=gridOwnedLive(operations,state.observation).map(({order,operation})=>{
         if(!operation?.level_id||!order.clientOrderId)throw Error('Grid live order ownership unavailable');
         return {levelId:operation.level_id,orderId:order.orderId,clientOrderId:order.clientOrderId,reduceOnly:order.reduceOnly,
-          ...(policy.policyVersion==='2.0.0'?{cycleLeg:order.reduceOnly?'closing' as const:'opening' as const}:{}),
+          ...(isGridCyclePolicyVersion(policy.policyVersion)?{cycleLeg:order.reduceOnly?'closing' as const:'opening' as const}:{}),
           remaining:new Decimal(order.amount).minus(order.filledAmount).minus(order.cancelledAmount??'0').toFixed()};
       });
       const plan=await monitor.plan(claim,{owned,bookPrice:facts.bookPrice,lot:facts.lot,minimumQuote:facts.minimumQuote,freeSlots:facts.availableSlots,
@@ -193,7 +194,7 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
       return executeGridWindow([[action]],execution(account,policy,bot.policy_hmac,key.umk,signal),async current=>{
         signal.throwIfAborted();const latest=await storage.planningState(claim,monitor.bootId);
         if(requestDigest(latest.authority)!==requestDigest(plan.authority))throw new GridLaunchTransientError('Grid plan generation changed');
-        const base={...plan.authority,policy,policyHmac:bot.policy_hmac,facts,...(policy.policyVersion==='2.0.0'?{cycleRisk:risk}:{})},now=Date.now();
+        const base={...plan.authority,policy,policyHmac:bot.policy_hmac,facts,...(isGridCyclePolicyVersion(policy.policyVersion)?{cycleRisk:risk}:{})},now=Date.now();
         if(current.kind==='cancel'){
           const original=operations.find(op=>op.level_id===current.order.levelId&&op.venue_order_id===current.order.orderId&&op.exact_request.kind==='limit');
           if(!original)throw Error('Grid cancel source unavailable');

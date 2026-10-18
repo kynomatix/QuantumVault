@@ -1,3 +1,4 @@
+import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
 import React,{useEffect,useRef,useState} from 'react';
 import {BarChart3} from 'lucide-react';
 import {Button} from '@/components/ui/button';
@@ -102,7 +103,7 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
             </div>
             <div className="grid grid-cols-3 gap-3 text-center">
               <div className="p-2.5 rounded-lg bg-muted/30"><p className="text-sm font-bold">{readableDecimal(bot.lowerPrice)} – {readableDecimal(bot.upperPrice)}</p><p className="text-xs text-muted-foreground">Range</p></div>
-              <div className="p-2.5 rounded-lg bg-muted/30"><p className="text-lg font-bold">{bot.gridCount}</p><p className="text-xs text-muted-foreground">Grids</p></div>
+              <div className="p-2.5 rounded-lg bg-muted/30">{bot.behaviourMode && <p className="text-xs">{gridBehaviourCopy(bot.behaviourMode,bot.direction).label}</p>}<p className="text-lg font-bold">{bot.gridCount}</p><p className="text-xs text-muted-foreground">Grids</p></div>
               <div className="min-w-0 p-2.5 rounded-lg bg-muted/30"><p className="text-lg font-bold text-muted-foreground" title="P&L unavailable" aria-label="P&L unavailable">—</p><p className="text-xs text-muted-foreground">P&amp;L</p></div>
             </div>
             <span className="mt-4 block text-sm font-medium text-primary">View bot</span>

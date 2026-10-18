@@ -1,3 +1,4 @@
+import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import type {PoolClient} from 'pg';
 import Decimal from 'decimal.js';
 import {canonicalGridPolicy,verifyGridPolicyHmac} from './policy-hmac';
@@ -14,7 +15,7 @@ import {cycleCapacity,requireCycleCapacity} from './cycle-capacity';
 const D=Decimal.clone({precision:200});
 /** Caller holds the bot lock (master -> bot -> levels for admission). No partial-history API. */
 export async function readCycleState(c:PoolClient,bot:Record<string,any>,account:string,now:number){
-  if(bot.policy_version!=='2.0.0')throw Error('Cycle adapter requires retained v2 policy');
+  if(!isGridCyclePolicyVersion(bot.policy_version))throw Error('Cycle adapter requires retained v2 policy');
   const levels=(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[bot.id])).rows;
   const policy=retainedGridPolicy(bot,levels);
   const state=(await c.query('SELECT * FROM grid_monitor_state WHERE bot_id=$1',[bot.id])).rows[0];
@@ -45,7 +46,7 @@ export async function readCycleState(c:PoolClient,bot:Record<string,any>,account
 
 /** All three admission boundaries call this with retained database version selection. */
 export async function validateLockedCycleRequest(c:PoolClient,bot:Record<string,any>,r:ExactGridRequest,now:number,candidateId?:string){
-  if(bot.policy_version!=='2.0.0'||!['limit','seed','close'].includes(r.kind))return null;
+  if(!isGridCyclePolicyVersion(bot.policy_version)||!['limit','seed','close'].includes(r.kind))return null;
   const history=await readCycleState(c,bot,r.account,now);
   const deadlines=[history.completeUntil,history.state.observation.observedAt+5000,new Date(history.state.reconciled_at).getTime()+5000];
   if(r.kind!=='close'){
@@ -61,7 +62,7 @@ export async function validateLockedCycleRequest(c:PoolClient,bot:Record<string,
       const amount=new D(String(r.data.amount));
       if(!amount.gt(0)||!amount.mod(facts.lot).isZero()||!r.data.reduce_only&&amount.mul(String(r.data.price)).lt(facts.minimumQuote))throw Error('Cycle order violates current limits');
     }
-    if(r.data.reduce_only===false){
+    if(r.data.reduce_only!==true){
       if(!['provisioning','canary','active'].includes(bot.status)||history.state.blocked_reasons.length
         ||history.state.boot_id!==r.authority.monitorBootId||String(history.state.generation)!==String(r.authority.monitorGeneration))throw Error('Cycle entries are latched off');
       if(r.kind==='limit')deadlines.push(Number((r.authority.cycleRisk as any)?.observedAt)+5000);
@@ -69,12 +70,12 @@ export async function validateLockedCycleRequest(c:PoolClient,bot:Record<string,
     }
   }
   const candidate=candidateId?cycleOperation(history.policy,r.account,history.levels,candidateId,r):undefined;
-  if(r.data.reduce_only===false && history.policy.sizingVersion) {
+  if(r.data.reduce_only!==true && history.policy.sizingVersion) {
     const capacity=cycleCapacity(history.input,history.state.observation.mark?.price,candidate);
     requireCycleCapacity(capacity);
   }
   if(candidateId){
-    const op=cycleOperation(history.policy,r.account,history.levels,candidateId,r);
+    const op=candidate!;
     const result=validateCycleSourceCredit(history.input,op,cycleRequestAllocations(op,r));
     if(!result.ok)throw Error(result.reason);
   }else if(!history.operationRows.some(op=>op.exact_request_digest===cycleRequestDigest(r)&&['prepared','submitted','unconfirmed','confirmed'].includes(op.state)))throw Error('Cycle send lacks durable reservation');

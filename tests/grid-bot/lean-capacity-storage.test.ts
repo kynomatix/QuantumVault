@@ -14,11 +14,15 @@ import {cycleCapacity} from '../../server/grid-bot/cycle-capacity';
 import {recordGridWorker} from '../../server/grid-bot/worker-ownership';
 import type {GridObservation} from '../../server/grid-bot/reconciliation';
 import {cyclePolicy} from './cycle-fixtures';
+import {withBehaviour} from './behaviour-fixtures';
+import type {GridBehaviourMode} from '../../shared/grid-behaviour';
+import {retainedGridCycles} from '../../server/grid-bot/cycle-policy';
+import {replayGridCycles} from '../../server/grid-bot/cycle-replay';
 import {intent,umk} from './draft-fixtures';
 import {marginTestReading} from './margin-fixture';
 vi.mock('../../server/grid-bot/service',()=>({durableGridUmk:async()=>({umk:Buffer.alloc(32,7),cleanup:()=>{}})}));
 
-describe('lean capacity under PostgreSQL admission and send locks',()=>{
+describe.each(['legacy','repeat_all'] as const)('lean capacity under PostgreSQL admission and send locks: %s',(mode)=>{
   let admin:Pool,pool:Pool;
   const schema='grid_lean_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(3)).publicKey);
   const store=(p=pool)=>new GridLaunchStorage(p,async()=>{},async r=>marginTestReading(r));
@@ -31,8 +35,9 @@ describe('lean capacity under PostgreSQL admission and send locks',()=>{
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_bots,protocol_subaccounts,wallets,grid_master_quota CASCADE');await pool.query('INSERT INTO wallets VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
-  async function fixture(){
-    const policy={...cyclePolicy('long',false),id:randomUUID(),totalInvestment:'300.00',sizingVersion:'lean-1' as const,safetyEnvelopePrice:'120.00000000'};
+  async function fixture(behaviour:GridBehaviourMode|'legacy'=mode){
+    const base={...cyclePolicy('long',false),id:randomUUID(),totalInvestment:'300.00',sizingVersion:'lean-1' as const,safetyEnvelopePrice:'120.00000000'};
+    const policy=behaviour==='legacy'?base:withBehaviour(base,behaviour);
     const signed=computeGridPolicyHmac(policy,umk());if(!signed.ok)throw Error('EXAMPLE signature');const {levels,...snapshot}=policy;
     const bot:DraftRecord={...snapshot,walletAddress:wallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:'EXAMPLE_REVISION',createIntent:intent,
       authoritySnapshot:{state:'EXAMPLE'},policyHmac:signed.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};
@@ -47,7 +52,7 @@ describe('lean capacity under PostgreSQL admission and send locks',()=>{
     await store().transaction(c=>recordGridWorker(c,bot.id,account.leaseToken,false));
     const rows=(await pool.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[bot.id])).rows;
     const request=(owner:number)=>{
-      const price=owner===0?'80':'90';
+      const price=String(Number(retainedGridCycles(policy)!.find(c=>c.ownerOrdinal===owner)!.openingPrice));
       const r:ExactGridRequest={kind:'limit',botId:bot.id,account:account.account,masterAccount:account.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:now,expiryMs:5000,
         data:{symbol:'BTC',amount:'1',price,side:'bid',reduce_only:false,tif:'ALO',client_order_id:gridClientOrderId({botId:bot.id,level:owner+1,attempt:0,leg:'entry'})},
         authority:{policy,policyHmac:signed.digest,levelId:rows[owner].id,levelAttempt:0,cycle:{ownerOrdinal:owner,leg:'opening'},initialCredit:'1',recycleAllocations:[],monitorBootId:boot,monitorGeneration:'1',
@@ -111,5 +116,16 @@ describe('lean capacity under PostgreSQL admission and send locks',()=>{
     await setMark('95');expect(await store().submit(op,f.account.leaseToken)).toBe(true);
     const post=vi.fn(async()=>true);await setMark('121');await expect(store().sendOwned(v.r,f.account.leaseToken,post)).rejects.toThrow('Waiting for room');expect(post).not.toHaveBeenCalled();
     await setMark('95');expect(await store().sendOwned(v.r,f.account.leaseToken,post)).toBe(true);expect(post).toHaveBeenCalledOnce();
+  });
+  it.each(['step_back','step_back_edge'] as const)('retains %s and denies disabled openings after restart',async behaviour=>{
+    const f=await fixture(behaviour),owner=retainedGridCycles(f.policy)!.find(c=>c.enabled===false)!,v=f.request(owner.ownerOrdinal);
+    await store().transaction(async c=>{
+      const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 FOR UPDATE',[f.bot.id])).rows[0];
+      const restored=await readCycleState(c,bot,f.account.account,Date.now());
+      expect(restored.policy.gridPolicyExtension).toEqual(f.policy.gridPolicyExtension);
+      expect(replayGridCycles(restored.input).ok).toBe(true);
+    });
+    await expect(store().prepare('EXAMPLE_DISABLED',v.r,v.claim,f.account.leaseToken)).rejects.toThrow();
+    expect((await pool.query('SELECT count(*) FROM grid_operations')).rows[0].count).toBe('0');
   });
 });

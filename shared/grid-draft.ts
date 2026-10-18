@@ -1,3 +1,4 @@
+import { GRID_BEHAVIOUR_MODES } from './grid-behaviour';
 import { z } from 'zod';
 import {PER_BOT_ORDINARY_MAX, GRID_PROTECTION_RESERVE, GRID_FULL_WINDOW_SLOTS, GRID_TRANSPORT_BATCH_ACTIONS} from './grid-capacity';
 const price = z.string().max(31).regex(/^(?:0|[1-9]\d{0,21})(?:\.\d{1,8})?$/).refine(v => /[1-9]/.test(v));
@@ -6,7 +7,7 @@ export const gridIntentSchema = z.object({
   schemaVersion: z.literal(1), protocol: z.literal('pacifica'), market: z.string().max(40).regex(/^[A-Z0-9]+-PERP$/),
   timeframe: z.enum(['15m','1h','4h']), lookback: z.union([z.literal(100),z.literal(200)]), rangeSource: z.enum(['manual','auto']),
   lowerPrice: price, upperPrice: price, stopPrice: price, gridCount: z.number().int().min(1).max(100),
-  direction: z.enum(['long','short']), entryScaleType: z.enum(['flat','ascending','descending']),
+  behaviourMode: z.enum(GRID_BEHAVIOUR_MODES).optional(), direction: z.enum(['long','short']), entryScaleType: z.enum(['flat','ascending','descending']),
   profitScaleType: z.enum(['flat','ascending','descending']), totalInvestment: money,
   leverage: z.string().max(6).regex(/^[1-9]\d*$/), seedAtCreation: z.boolean(),
 }).strict();

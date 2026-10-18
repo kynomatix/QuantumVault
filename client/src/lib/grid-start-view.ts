@@ -1,3 +1,4 @@
+import { gridBehaviourCopy, type GridBehaviourMode } from '../../../shared/grid-behaviour';
 import {gridStartRequestSchema,type GridStartRequest,type GridStartResult} from '../../../shared/grid-start';
 
 export function gridDraftStartIdentity(bot:Record<string,unknown>):{id:string;expected:GridStartRequest}|null {
@@ -17,6 +18,6 @@ export async function submitGridStart(id:string,expected:GridStartRequest,send:(
     throw error;
   }
 }
-export function gridStartConfirmation(investment:string,seed:boolean){
-  return `Start transfers the full $${investment} investment from your master Pacifica account into an isolated account. ${seed?'It may open the signed starting position, then place the first grid order.':'No starting position is requested; it places the first grid order.'} Fresh security, funds, fees, margin, capacity and stop checks must pass. A deposit alone does not start trading.`;
+export function gridStartConfirmation(investment:string,seed:boolean,mode?:GridBehaviourMode,side='long'){
+  return `${mode?gridBehaviourCopy(mode,side,seed).label+'. '+gridBehaviourCopy(mode,side,seed).hint+' ':''}Start transfers the full $${investment} investment from your master Pacifica account into an isolated account. ${seed?'It may open the signed starting position, then place the first grid order.':'No starting position is requested; it places the first grid order.'} Fresh security, funds, fees, margin, capacity and stop checks must pass. A deposit alone does not start trading.`;
 }

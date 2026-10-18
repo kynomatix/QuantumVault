@@ -1,6 +1,7 @@
+import { isGridCyclePolicyVersion } from '../../../../shared/grid-behaviour';
 import React,{useEffect,useRef,useState} from 'react';
 import {createPortal} from 'react-dom';
-import {type CandlestickData,type UTCTimestamp,type ISeriesApi,type IPriceLine,type IChartApi} from 'lightweight-charts';
+import {LineStyle,type CandlestickData,type UTCTimestamp,type ISeriesApi,type IPriceLine,type IChartApi} from 'lightweight-charts';
 import {Dialog,DialogContent,DialogHeader,DialogTitle,DialogDescription} from '@/components/ui/dialog';
 import {Button} from '@/components/ui/button';
 import {createSharedTradePriceChart} from '../SharedTradePriceChart';
@@ -10,14 +11,14 @@ import type {GridBotSurface} from '../../../../shared/grid-surface';
 import {gridCycleDisplayLevels,gridFactsFresh,gridBreakevenView,gridProfitCoversPosition} from '@/lib/grid-live-view';
 import {gridJson} from './GridDraftCard';
 import {GridChartSourceInfo} from '../grid-planner/GridChartSourceInfo';
-function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPriceLine>,key:string,price:string|null,title:string,color:string,kind:'level'|'boundary'|'live'='live'){
+function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPriceLine>,key:string,price:string|null,title:string,color:string,kind:'level'|'boundary'|'live'='live',modeStyle?:LineStyle){
   const line=lines.get(key);
   if(price===null||!Number.isFinite(Number(price))||Number(price)<=0){if(line)series.removePriceLine(line);lines.delete(key);return;}
-  const options={price:Number(price),title:kind==='level'?'':title,color,lineWidth:key==='breakeven'?chartStyle.widths.breakeven:chartStyle.widths.line,lineStyle:kind==='level'?chartStyle.level.lineStyle:chartStyle.range.lineStyle,axisLabelVisible:kind!=='level',...(key==='breakeven'?{axisLabelColor:color,axisLabelTextColor:chartStyle.labels.breakevenText}:key==='stop'?{axisLabelColor:color,axisLabelTextColor:chartStyle.labels.stopText}:{})};
+  const options={price:Number(price),title:kind==='level'?'':title,color,lineWidth:key==='breakeven'?chartStyle.widths.breakeven:chartStyle.widths.line,lineStyle:modeStyle??(kind==='level'?chartStyle.level.lineStyle:chartStyle.range.lineStyle),axisLabelVisible:kind!=='level',...(key==='breakeven'?{axisLabelColor:color,axisLabelTextColor:chartStyle.labels.breakevenText}:key==='stop'?{axisLabelColor:color,axisLabelTextColor:chartStyle.labels.stopText}:{})};
   if(line)line.applyOptions(options);else lines.set(key,series.createPriceLine(options));
 }
 function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'available'}>;surface:GridBotSurface;fresh:boolean;now:number}){
-  const cycleProjectionVisible=surface.bot.policyVersion==='2.0.0'&&gridCycleDisplayLevels(surface,now).length>0;
+  const cycleProjectionVisible=isGridCyclePolicyVersion(surface.bot.policyVersion)&&gridCycleDisplayLevels(surface,now).length>0;
   const container=useRef<HTMLDivElement>(null);
   const [hovered,setHovered]=useState<{price:string;detail:string;left:number;top:number}|null>(null);
   const liveLines=useRef<{canvas:IChartApi;series:ISeriesApi<'Candlestick'>;style:ReturnType<typeof resolveChartStyle>;range:{lower:number;upper:number}|null;levels:Map<string,IPriceLine>;live:Map<string,IPriceLine>;fitted:boolean;times:UTCTimestamp[];hoverLevels:GridBotSurface['levels'];precision:number;prices:number[];breakevenPrice:number|null}|null>(null);
@@ -57,8 +58,11 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
     live.precision=precision;
     series.applyOptions({priceFormat:{type:'custom',minMove:10**-precision,formatter:(price:number)=>'$'+price.toLocaleString('en-US',{minimumFractionDigits:precision,maximumFractionDigits:precision})}});
     const retained=new Set<string>();
-    const line=(key:string,price:string|null,title:string,color:string,kind:'level'|'boundary')=>{retained.add(key);updatePriceLine(series,levels,key,price,title,color,kind);};
-    for(const l of live.hoverLevels.filter(l=>surface.bot.policyVersion!=='2.0.0'||Number(l.size)>0))line('level:'+l.id,l.price,'',l.reduceOnly?live.style.exit:live.style.entry,'level');
+    const line=(key:string,price:string|null,title:string,color:string,kind:'level'|'boundary',modeStyle?:LineStyle)=>{retained.add(key);updatePriceLine(series,levels,key,price,title,color,kind,modeStyle);};
+    for(const l of live.hoverLevels.filter(l=>l.recycles!==undefined||!isGridCyclePolicyVersion(surface.bot.policyVersion)||Number(l.size)>0)){
+      const inactive=l.enabled===false||l.status==='Finished here';
+      line('level:'+l.id,l.price,'',inactive?'#94a3b8':l.recycles===false?'#f59e0b':l.recycles===true?'#14b8a6':l.reduceOnly?live.style.exit:live.style.entry,'level',inactive?LineStyle.Dotted:l.recycles===false?LineStyle.Dashed:l.recycles===true?LineStyle.Solid:undefined);
+    }
     line('lower',surface.bot.lowerPrice,'Lower range',live.style.range,'boundary');line('upper',surface.bot.upperPrice,'Upper range',live.style.range,'boundary');line('stop',surface.bot.stopLossPrice,'Stop',live.style.stop,'boundary');
     for(const [key,priceLine] of levels)if(!retained.has(key)){series.removePriceLine(priceLine);levels.delete(key);}
     const period=chart.timeframe==='15m'?900:chart.timeframe==='4h'?14400:3600;

@@ -533,19 +533,22 @@ describe('Planner client authority boundaries', () => {
     expect(body).toContain(': renderSetup()');
     expect(sheet).toContain('const feesPanel = (draftDetails?: React.ReactNode) => <fieldset disabled={draftBusy}>');
   });
-  it('puts grid count with direction, investment and leverage and keeps every editable field', () => {
+  it('puts direction and behaviour below Market and keeps every editable field', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const panel = (id: string) => sheet.slice(sheet.indexOf(`<DrawerSettingsPanel id="${id}"`)).split('</DrawerSettingsPanel>')[0];
     const direction = panel('direction-size');
-    for (const control of ['<GridDirectionSignals', "edit('side'", "numberField('investment'", 'id="grid-leverage"', "numberField('intervals', 'Number of grids (1–100)'"])
+    for (const control of ["numberField('investment'", 'id="grid-leverage"', "numberField('intervals', 'Number of grids (1–100)'"])
       expect(direction).toContain(control);
+    const primary = sheet.slice(sheet.indexOf('<section aria-label="Direction and behaviour"'), sheet.indexOf('<GridPlannerChart'));
+    for (const control of ['<GridDirectionSignals', "edit('side'", '<GridBehaviourSelect', 'id="grid-seed"']) expect(primary).toContain(control);
+    expect(primary.indexOf('<GridBehaviourSelect')).toBeGreaterThan(primary.indexOf("edit('side'"));
     for (const field of ['lower', 'upper', 'investment', 'intervals', 'stop', 'feePercent'])
       expect(sheet.match(new RegExp(`numberField\\('${field}'`, 'g'))).toHaveLength(1);
     expect(panel('range')).toContain('<GridRegimeHint'); expect(panel('range')).toContain('id="grid-width"');
     expect(panel('stop')).toContain("numberField('stop'"); expect(panel('stop')).toContain('Suggested stop:');
     const stopHint = 'A blank custom stop uses the suggested price.';
     expect(sheet.split(stopHint)).toHaveLength(2); expect(panel('stop')).toContain(stopHint);
-    for (const control of ['id="grid-seed"', 'id="grid-entryScale"', 'id="grid-profitScale"', "startingPosition enabled={form.seed||displayPlan?.policyVersion==='2.0.0'}"])
+    for (const control of ['id="grid-entryScale"', 'id="grid-profitScale"', "startingPosition enabled={form.seed||isGridCyclePolicyVersion(displayPlan?.policyVersion)}"])
       expect(panel('orders')).toContain(control);
     expect(panel('range')).toContain('id="grid-period-label"');
     expect(panel('range')).toContain('Suggest auto-range');

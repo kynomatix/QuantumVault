@@ -1,3 +1,4 @@
+import { isGridCyclePolicyVersion } from '../../../shared/grid-behaviour';
 import {gridActionAllowed,type GridBotSurface,type GridOwnerAction} from '../../../shared/grid-surface';
 import Decimal from 'decimal.js';
 import {stopLocksProfit} from '../../../shared/grid-breakeven';
@@ -114,9 +115,9 @@ export function gridStopProtected(surface: GridBotSurface, now: number): boolean
 
 /** V2 geometry is immutable; only the certified projection describes current order legs. */
 export function gridCycleDisplayLevels(surface:GridBotSurface,now:number):GridBotSurface['levels']{
-  if(surface.bot.policyVersion!=='2.0.0')return surface.levels;
+  if(!isGridCyclePolicyVersion(surface.bot.policyVersion))return surface.levels;
   const p=surface.cycleProjection,at=p?Date.parse(p.observedAt):NaN;
   if(!p||!Number.isFinite(at)||at>now||now-at>15000)return [];
   return p.orders.map(o=>({id:`cycle:${o.ownerOrdinal}:${o.leg}`,ordinal:o.ownerOrdinal+1,price:o.price,size:o.size,
-    side:o.side,reduceOnly:o.leg==='closing',status:o.state==='stopped'?'Stopped':o.state,cumulativeFilledSize:'0'}));
+    ...(o.recycles!==undefined?{recycles:o.recycles,enabled:o.enabled}:{}),side:o.side,reduceOnly:o.leg==='closing',status:o.state==='stopped'?'Stopped':o.state,cumulativeFilledSize:'0'}));
 }

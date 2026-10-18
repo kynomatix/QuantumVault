@@ -1,3 +1,4 @@
+import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import Decimal from 'decimal.js';
 import { calculateGridPrices } from '../grid-bot/engine';
 import type { GridInput, GridIssue } from '../grid-bot/engine-types';
@@ -8,7 +9,7 @@ export const dollars = (value: string) => new D(value).toDecimalPlaces(2, Decima
 /** Display-only reconstruction of the rejected line. Never used to size or admit an order. */
 export function explainPlannerIssue(issue: GridIssue, input: GridInput): string {
   if (issue.code !== 'underfunded') return issue.reason;
-  if (input.policyVersion === '2.0.0')
+  if (isGridCyclePolicyVersion(input.policyVersion))
     return 'The investment cannot cover all cycling orders across the range. Raise the investment, use fewer grids, or use more leverage.';
   if (issue.reason === 'Starting-position order is below the opening minimum')
     return `The starting-position order is below Pacifica's $${new D(input.minimumQuote).toFixed()} minimum order. Raise the investment, use fewer grids, or use more leverage.`;

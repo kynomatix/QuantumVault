@@ -1,3 +1,4 @@
+import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import {gridResumeClearance,type GridResumeRisk} from './resume-clearance';
 export {gridResumeClearance,type GridResumeRisk} from './resume-clearance';
 import {cycleCloseAllocations} from './cycle-storage';
@@ -94,7 +95,7 @@ export class GridLifecycleService {
     const owned=gridOwnedLive(snapshot.operations,observation),orphan=owned.some(x=>!x.operation);
     const entry=owned.find(x=>x.operation&&!x.order.reduceOnly);
     const act=async(kind:'cancel'|'close'|'sweep',data:Record<string,unknown>,authority:Record<string,unknown>)=>{
-      const cycleClose=bot.policy_version==='2.0.0'&&kind==='close'?(await monitor.planningState(claim,bootId)).cycle:undefined;
+      const cycleClose=isGridCyclePolicyVersion(bot.policy_version)&&kind==='close'?(await monitor.planningState(claim,bootId)).cycle:undefined;
       const now=Date.now(),r:ExactGridRequest={kind,botId:claim.id,account:claim.account,masterAccount:claim.masterAccount,
         path:kind==='cancel'?'/orders/cancel':kind==='close'?'/orders/create_market':'/account/subaccount/transfer',
         operationType:kind==='cancel'?'cancel_order':kind==='close'?'create_market_order':'transfer_funds',timestamp:now,expiryMs:5000,data,
@@ -148,7 +149,7 @@ export class GridLifecycleService {
         const planning=await monitor.planningState(claim,bootId);
         const exposure=await launch.transaction(async c=>{await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[claim.masterAccount]);await monitor.assertLease(c,claim);return launch.pilotExposure(c,claim.id,Date.now());});
         const remaining=exposure.limitUsd!==null&&exposure.exposureUsd!==null?D.max(0,new D(exposure.limitUsd).minus(exposure.exposureUsd)).toFixed():'0';
-        const ownedOrders:WindowOrder[]=owned.map(({order,operation})=>{if(!operation?.level_id||!order.clientOrderId)throw Error('Resume ownership unavailable');return {levelId:operation.level_id,orderId:order.orderId,clientOrderId:order.clientOrderId,reduceOnly:order.reduceOnly,...(bot.policy_version==='2.0.0'?{cycleLeg:order.reduceOnly?'closing' as const:'opening' as const}:{}),remaining:new D(order.amount).minus(order.filledAmount).minus(order.cancelledAmount??'0').toFixed()};});
+        const ownedOrders:WindowOrder[]=owned.map(({order,operation})=>{if(!operation?.level_id||!order.clientOrderId)throw Error('Resume ownership unavailable');return {levelId:operation.level_id,orderId:order.orderId,clientOrderId:order.clientOrderId,reduceOnly:order.reduceOnly,...(isGridCyclePolicyVersion(bot.policy_version)?{cycleLeg:order.reduceOnly?'closing' as const:'opening' as const}:{}),remaining:new D(order.amount).minus(order.filledAmount).minus(order.cancelledAmount??'0').toFixed()};});
         const gate=preflightGridResume(authority.policy,authority.policyHmac,authority.umk,authority.facts,Date.now(),{
           ...(planning.cycle?{cycleReplay:planning.cycle.input}:{}),direction:authority.policy.direction,levels:planning.levels.map(l=>({id:l.id,ordinal:l.ordinal,price:l.price,size:l.exact_size,side:l.side,reduceOnly:l.reduce_only,attempt:l.placement_attempt,status:l.status})),fills:planning.fills,reserved:planning.reserved,owned:ownedOrders,
           positionSize:planning.observation.position?.size??null,bookPrice:authority.facts.bookPrice,lot:authority.facts.lot,minimumQuote:authority.facts.minimumQuote,freeSlots:authority.facts.availableSlots,inventoryComplete:planning.observation.inventoryComplete,entriesAllowed:planning.entriesAllowed,canaryRemaining:remaining});
@@ -158,7 +159,7 @@ export class GridLifecycleService {
       }finally{authority.cleanup();}
     }
     if(life.action!=='stop')return block('unknown_control');
-    if(bot.policy_version==='2.0.0'){const exit=owned.find(x=>x.operation);if(exit)return cancel(exit);}
+    if(isGridCyclePolicyVersion(bot.policy_version)){const exit=owned.find(x=>x.operation);if(exit)return cancel(exit);}
     if(!observation.position)return block('position_unavailable');
     if(new D(observation.position.size).gt(0)){
       if(observation.position.direction!==bot.direction)return block('position_direction_changed');

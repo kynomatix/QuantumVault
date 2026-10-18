@@ -1,3 +1,4 @@
+import type { GridPolicy } from './policy-hmac';
 import {gridClientOrderId,prepareGridOrder,validatePreparedGridOrder,type GridOrderIntent,type PreparedGridOrder} from './order-identity';
 import type {MarketConstraintObservation} from '../protocol/market-constraints';
 import type {GridFeeQuote} from './fee-authority';
@@ -10,7 +11,7 @@ import {GRID_TRANSPORT_BATCH_ACTIONS} from '../../shared/grid-capacity';
 export function gridLevelRequest(input:{account:GridAccount;level:WindowLevel;market:string;protocolSymbol:string;signerGeneration:string;deployment:string;
   fee:GridFeeQuote;constraint:MarketConstraintObservation;now:number;authority:Record<string,unknown>}):ExactGridRequest{
   const {account:a,level:l}=input;
-  const intent:GridOrderIntent={...(l.cycle?{runtimePolicyVersion:'2.0.0'}:{}),account:a.account,subaccountId:null,market:input.market,protocolSymbol:input.protocolSymbol,
+  const intent:GridOrderIntent={...(l.cycle?{runtimePolicyVersion:(input.authority.policy as GridPolicy | undefined)?.runtimePolicyVersion ?? '2.0.0'}:{}),account:a.account,subaccountId:null,market:input.market,protocolSymbol:input.protocolSymbol,
     signerPublicKey:a.account,signerGeneration:input.signerGeneration,deployment:input.deployment,endpoint:'https://api.pacifica.fi/api/v1/orders/create',
     clientOrderId:gridClientOrderId({botId:a.botId,level:l.ordinal,attempt:l.attempt,leg:l.reduceOnly?'profit':'entry'}),
     side:l.side==='buy'?'long':'short',price:l.price,amount:l.size,reduceOnly:l.reduceOnly,signingTimestamp:input.now,signingExpiryMs:5000};

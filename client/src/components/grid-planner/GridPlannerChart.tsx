@@ -10,12 +10,12 @@ import type { GridLine } from '../../../../server/grid-bot/engine-types';
 import { gridMeasuredStart } from '../../../../shared/grid-lookback';
 import { GridChartSourceInfo } from './GridChartSourceInfo';
 
-type ChartLevel = Pick<GridLine, 'ordinal' | 'price'> & Partial<Pick<GridLine, 'role'>>;
+type ChartLevel = Pick<GridLine, 'ordinal' | 'price'> & Partial<Pick<GridLine, 'role' | 'quantity'>> & { recycles?: boolean; enabled?: boolean };
 
 export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: ChartLevel[]; range: PlannerRange | null; period?: string; tick?: string | null }) {
   const container = useRef<HTMLDivElement>(null);
   const retained = useRef<{ canvas: ReturnType<typeof createSharedTradePriceChart>; series: ReturnType<ReturnType<typeof createSharedTradePriceChart>['addCandlestickSeries']>; resource: string } | null>(null);
-  const [hovered, setHovered] = useState<{ price: string; left: number; top: number } | null>(null);
+  const [hovered, setHovered] = useState<{ price: string; detail: string; left: number; top: number } | null>(null);
   useEffect(() => {
     if (!container.current) return;
     const resource = chart.market + ':' + chart.timeframe;
@@ -69,8 +69,8 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       ...[range?.lower, range?.upper, range?.stop].filter((p): p is string => !!p)]);
     canvas.applyOptions({ localization: { priceFormatter: (price: number) => price.toFixed(priceFormat.precision) } });
     series.applyOptions({ title: 'Current price', priceFormat: { type: 'price', ...priceFormat } });
-    for (const line of lines) addLine({ price: Number(line.price), color: !line.role || line.role === 'entry' ? color('primary', 0.85) : color('chart-2', 0.85),
-      lineWidth: 2, lineStyle: LineStyle.Dashed, axisLabelVisible: false, title: '' });
+    for (const line of lines) addLine({ price: Number(line.price), color: line.enabled === false ? '#94a3b8' : line.recycles === false ? '#f59e0b' : line.recycles === true ? '#14b8a6' : !line.role || line.role === 'entry' ? color('primary', 0.85) : color('chart-2', 0.85),
+      lineWidth: 2, lineStyle: line.enabled === false ? LineStyle.Dotted : line.recycles === true ? LineStyle.Solid : LineStyle.Dashed, axisLabelVisible: false, title: '' });
     const showLevel: Parameters<typeof canvas.subscribeCrosshairMove>[0] = event => {
       const point = event.point;
       if (!point || !container.current) { setHovered(null); return; }
@@ -80,6 +80,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       }).sort((a, b) => a.distance - b.distance)[0];
       setHovered(nearby && nearby.distance <= 8 ? {
         price: Number(nearby.line.price).toFixed(priceFormat.precision),
+        ...(nearby.line.recycles === undefined ? {} : { detail: `${nearby.line.quantity ?? '—'} units · ${nearby.line.enabled === false ? 'Unused — no starting position' : nearby.line.recycles === false ? 'Once only' : nearby.line.recycles === true ? 'Keeps trading' : 'Grid level'}` }),
         left: Math.max(4, Math.min(point.x + 8, container.current.clientWidth - 140)),
         top: Math.max(4, Math.min(point.y - 30, container.current.clientHeight - 28)),
       } : null);
@@ -122,7 +123,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
   }, [chart, lines, range, period, tick]);
   useEffect(() => () => { retained.current?.canvas.remove(); retained.current = null; }, []);
   return <div className="relative h-full w-full"><div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with range period, dimmed surrounding candles, proposed range, stop and planned grid levels" />
-    {hovered && <div role="status" className="pointer-events-none absolute rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow" style={{ left: hovered.left, top: hovered.top }}>Grid price {hovered.price}</div>}
+    {hovered && <div role="status" className="pointer-events-none absolute rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow" style={{ left: hovered.left, top: hovered.top }}>Grid price {hovered.price}<br />{hovered.detail}</div>}
   </div>;
 }
 function PreviewNotes({ children }: { children: React.ReactNode }) {
@@ -155,7 +156,7 @@ export function GridPlannerChart({ chart, lines, range = null, period, stale, lo
     {stale && <p role="status" className="text-xs text-amber-500">Chart cache expired; refresh for a new observation.</p>}
     <PreviewNotes><p>{note}</p>
       {period && <p>Range period: {period === 'day' ? '24 hours' : period === 'week' ? '7 days' : '30 days'}, ending at the latest finalized candle close. Earlier context candles are dimmed and still feed ATR/ADX.</p>}
-      <p>Shaded band and solid edges: your proposed range. Dashed lines: grid levels from the preview. Hover or tap a line for its price, or open the full table in Your plan. Red line: proposed stop, not certified liquidation protection.</p>
+      <p>Shaded band and solid edges: your proposed range. Grid lines: teal solid keeps trading; amber dashed closes once; grey dotted is unused. Older previews use dashed lines. Hover or tap a line for its price, or open the full table in Your plan. Red line: proposed stop, not certified liquidation protection.</p>
       {levelMessage && <p>{levelMessage}</p>}{previewDetails}
     </PreviewNotes>
     <Dialog open={expanded} onOpenChange={setExpanded}><DialogContent className="max-w-[95vw] w-[1200px] max-h-[95dvh] overflow-y-auto"><DialogHeader><DialogTitle className="text-xl">Grid Planner chart</DialogTitle><DialogDescription>Direct perpetual candles with your proposed range, stop and grid levels.</DialogDescription></DialogHeader><GridChartSourceInfo venue={provenance.venue.toUpperCase()} timeframe={chart.timeframe}><p>{label}</p><p>{note}</p></GridChartSourceInfo><div className="h-[65vh]"><GridPlannerPriceCanvas chart={chart} lines={lines} range={range} period={period} tick={tick} /></div>{levelMessage && <p role="status" className="text-xs text-muted-foreground">{levelMessage}</p>}<p className="text-xs text-muted-foreground">{note}</p></DialogContent></Dialog>

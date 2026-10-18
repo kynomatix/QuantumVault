@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { Button } from '../../client/src/components/ui/button';
 import { DialogFooter } from '../../client/src/components/ui/dialog';
+import { GridPlanIssues } from '../../client/src/components/grid-planner/GridPlanIssues';
+import { GridBehaviourSelect } from '../../client/src/components/grid-planner/GridBehaviourSelect';
 import { GridPlannerSheet } from '../../client/src/components/grid-planner/GridPlannerSheet';
 import { GridRangingFinder } from '../../client/src/components/grid-planner/GridRangingFinder';
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
@@ -228,8 +230,7 @@ describe('Grid setup automatic opening range', () => {
     render(); await settle();
     expect(chart()).toBeNull(); expect(prices().lower).toBe('');
   });
-  it.each([false,true])('keeps Equal defaults and shows the opening-order minimum lift in the sheet (v2 %s)', async v2 => {
-    if(!v2)cycleV2Creation=false;
+  it('keeps Equal defaults and shows the opening-order minimum lift for behaviour modes', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await open(); await resolve(requests[0]);
     expect(field('entryScale').props.value).toBe('flat'); expect(field('profitScale').props.value).toBe('flat');
@@ -237,22 +238,31 @@ describe('Grid setup automatic opening range', () => {
     field('entryScale').props.onChange('ascending'); render();
     field('profitScale').props.onChange('ascending'); render();
     await vi.advanceTimersByTimeAsync(250); await settle();
-    expect(elements().some(node => node.props.role === 'status' && text(node) === `${v2?4:2} grid orders raised to the $10 minimum`)).toBe(true);
+    expect(elements().some(node => node.props.role === 'status' && text(node) === '4 grid orders raised to the $10 minimum')).toBe(true);
   });
-  it.each(['Long','Short'])('shows the default v2 %s cycling, starting-position and funding copy', async side => {
+  it('rejects a behaviour-mode preview while cycle creation is disabled', async () => {
+    cycleV2Creation=false;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    await open(); await resolve(requests[0]); edit('investment','1000');
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(find(node=>node.type===GridPlanIssues).props.reasons).toContain('Behaviour modes are unavailable');
+  });
+  it.each(['Long','Short'])('shows the default %s behaviour selector and fixed-quantity copy', async side => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await open(); await resolve(requests[0]);
     if(side==='Short'){button('Short').props.onClick();render();}
     edit('investment','1000');edit('intervals','4');
     await vi.advanceTimersByTimeAsync(250);await settle();
+    const selector=find(node=>node.type===GridBehaviourSelect);
+    expect(selector.props.value).toBe('repeat_all');
+    expect(selector.props.side).toBe(side.toLowerCase());
     const copy=elements().map(node=>text(node)).join('\n');
     expect(copy).toContain(side==='Long'
-      ?'Buys below price, sells above; each fill flips to the other side, one grid step away.'
-      :'Sells above price, buys below; each fill flips to the other side, one grid step away.');
-    expect(copy).toContain(side==='Long'
-      ?'Start with a position — place backed sells above price immediately. Without it, those levels wait for a buy first.'
-      :'Start with a position — place backed buys below price immediately. Without it, those levels wait for a sell first.');
-    expect(copy).toContain('Capital is reserved across the whole range. Each cycle reuses its allocated amount; profits stay in the bot.');
+      ?'Sell as price rises, buy back as it falls, and keep going.'
+      :'Close as price falls, reopen as it rises, and keep going.');
+    expect(copy).toContain('Quantities stay fixed; profits stay in the bot.');
+    selector.props.onChange('step_back'); render();
+    expect(find(node=>node.type===GridBehaviourSelect).props.value).toBe('step_back');
   });
   it('shows a disabled Create bot with a visible accessible launch reason and working Cancel in planning mode', async () => {
     await open();

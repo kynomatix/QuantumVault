@@ -47,9 +47,13 @@ export const GRID_CYCLE_RUNTIME_POLICY = Object.freeze({ ...GRID_RUNTIME_POLICY,
     funding: 'worst_price_times_all_cycle_quantities', credit: 'exact_cycle_closing_limit_fills',
     initialSeed: 'ordinal_fifo_actual_fills', orderIdentity: 'cycle_leg_attempt', unknownReservesFullSource: true }) });
 export const GRID_CYCLE_RUNTIME_POLICY_DIGEST = createHash('sha256').update(JSON.stringify(GRID_CYCLE_RUNTIME_POLICY)).digest('hex');
+export const GRID_MODES_RUNTIME_POLICY = Object.freeze({ ...GRID_CYCLE_RUNTIME_POLICY, version: '2.2.0',
+  behaviour: Object.freeze({ authority: 'signed_owner_descriptors', reservation: 'lean-1', boundary: 'profit-owner-quarter-v1', credit: 'repeating_owner_closing_fills_only', disabled: 'no_inventory_or_opening_credit' }) });
+export const GRID_MODES_RUNTIME_POLICY_DIGEST = createHash('sha256').update(JSON.stringify(GRID_MODES_RUNTIME_POLICY)).digest('hex');
 export function gridRuntimePolicy(version: string) {
   return version === '1.0.0' ? { descriptor: GRID_RUNTIME_POLICY, digest: GRID_RUNTIME_POLICY_DIGEST }
-    : version === '2.0.0' ? { descriptor: GRID_CYCLE_RUNTIME_POLICY, digest: GRID_CYCLE_RUNTIME_POLICY_DIGEST } : null;
+    : version === '2.0.0' ? { descriptor: GRID_CYCLE_RUNTIME_POLICY, digest: GRID_CYCLE_RUNTIME_POLICY_DIGEST }
+    : version === '2.2.0' ? { descriptor: GRID_MODES_RUNTIME_POLICY, digest: GRID_MODES_RUNTIME_POLICY_DIGEST } : null;
 }
 const decimal = (x: string) => /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(x) && x.length <= 80 ? new D(x) : null;
 /** The confirmed bot configuration owns its notional ceiling, at every lifecycle stage. */
