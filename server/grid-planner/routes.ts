@@ -21,20 +21,22 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   let finder: RangingMarketFinder | undefined;
   const ranges = new PlannerRangeFacts();
   let metadata: { rows: ProtocolMarket[]; observedAt: number } | undefined;
-  let metadataJob: Promise<ProtocolMarket[]> | undefined, lastAttempt = -Infinity;
+  let metadataJob: Promise<ProtocolMarket[]> | undefined, lastFailure = -Infinity;
   let previewStarts: number[] = [];
   let activeRequests = 0;
   // Forget a failed load so a transient import error does not disable the Planner until restart.
   const dependencies = () => depsPromise ??= loadDeps().catch(error => { depsPromise = undefined; throw error; });
   const membership = (deps: PlannerDeps): Promise<ProtocolMarket[]> => {
     const now = deps.now();
-    if (metadata && now >= metadata.observedAt && now - metadata.observedAt < 300_000) return Promise.resolve(metadata.rows);
+    // The adapter may have observed these rows before the Planner first received them.
+    if (metadata && now >= metadata.observedAt && now - metadata.observedAt < 300_000
+      && metadata.rows.every(row => !row.constraintObservation || now < row.constraintObservation.expiresAt)) return Promise.resolve(metadata.rows);
     if (metadataJob) return metadataJob;
-    if (now - lastAttempt < 300_000) return Promise.reject(new Error('Market metadata unavailable; refresh later'));
-    lastAttempt = now;
+    if (now - lastFailure < 300_000) return Promise.reject(new Error('Market metadata unavailable; refresh later'));
     metadataJob = Promise.resolve().then(() => deps.getMarkets()).then(rows => {
+      lastFailure = -Infinity;
       metadata = { rows, observedAt: deps.now() }; return metadata.rows;
-    }).catch(() => { metadata = undefined; throw new Error('Pacifica market metadata unavailable'); })
+    }).catch(() => { metadata = undefined; lastFailure = deps.now(); throw new Error('Pacifica market metadata unavailable'); })
       .finally(() => { metadataJob = undefined; });
     return metadataJob;
   };

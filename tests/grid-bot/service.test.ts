@@ -93,10 +93,44 @@ describe('bounded read-only Planner HTTP surface', () => {
     expect(await (await s.get(`preview?${q}`)).json()).toMatchObject({ state: 'diagnostic', fee: { state: 'assumption' } });
     expect(d.candles).toHaveBeenCalledTimes(1); expect(d.getMarkets).toHaveBeenCalledTimes(1);
   });
-  it('metadata failures are single-flight and cannot retry within five minutes', async () => {
-    const d = makeDeps(); d.getMarkets = vi.fn(async () => { throw Error('EXAMPLE'); }); const s = await serve(true, d);
-    expect((await s.get('markets')).status).toBe(503); expect((await s.get('markets')).status).toBe(503);
+  it('refetches warm adapter rows at observation expiry without backing off after success', async () => {
+    const d = makeDeps(), warmRows = await d.getMarkets();
+    let now = clock + 240_000;
+    d.now = () => now;
+    d.cachedReference = vi.fn(() => ({ price: 100, observedAt: now }));
+    d.getMarkets = vi.fn(async () => warmRows);
+    const s = await serve(true, d);
+    const path = 'preview?market=BTC-PERP&lower=80&upper=120&intervals=4&side=long&seed=true&entryScale=flat&profitScale=flat&leverage=1&investment=1000&stop=70&fee=0';
+    const first = await (await s.get(path)).json();
+    expect(first).toMatchObject({ state: 'diagnostic', market: { constraints: { state: 'available', value: { observedAt: clock } } } });
+    now = clock + 299_999;
+    expect((await (await s.get('markets')).json()).markets[0].constraints.state).toBe('available');
     expect(d.getMarkets).toHaveBeenCalledTimes(1);
+    now = clock + 301_000;
+    const freshRows = warmRows.map(row => ({ ...row, constraintObservation: observePacificaConstraints(
+      { tick_size: '0.1', lot_size: '0.01', min_order_size: '10' }, row.internalSymbol, now) }));
+    vi.mocked(d.getMarkets).mockResolvedValue(freshRows);
+    const response = await s.get(path), fresh = await response.json();
+    expect(response.status).toBe(200);
+    expect(fresh).toMatchObject({ state: 'diagnostic', reasons: [], market: { constraints: { state: 'available', value: { observedAt: now } } } });
+    expect(d.getMarkets).toHaveBeenCalledTimes(2);
+    expect((await (await s.get('markets')).json()).markets[0].constraints).toMatchObject({ state: 'available', value: { observedAt: now } });
+    expect(d.getMarkets).toHaveBeenCalledTimes(2);
+  });
+  it('metadata failures cannot retry within five minutes and are forgotten after recovery', async () => {
+    const d = makeDeps(), rows = await d.getMarkets(); let now = clock;
+    d.now = () => now;
+    d.getMarkets = vi.fn(async () => { throw Error('EXAMPLE'); }); const s = await serve(true, d);
+    expect((await s.get('markets')).status).toBe(503); expect((await s.get('markets')).status).toBe(503);
+    now = clock + 299_999;
+    expect((await s.get('markets')).status).toBe(503);
+    expect(d.getMarkets).toHaveBeenCalledTimes(1);
+    now = clock + 300_000;
+    vi.mocked(d.getMarkets).mockResolvedValue(rows.map(row => ({ ...row, constraintObservation: observePacificaConstraints(
+      { tick_size: '0.1', lot_size: '0.01', min_order_size: '10' }, row.internalSymbol, now) })));
+    expect((await s.get('markets')).status).toBe(200);
+    expect((await s.get('markets')).status).toBe(200);
+    expect(d.getMarkets).toHaveBeenCalledTimes(2);
   });
 });
 describe('chart work/cache bounds and provenance', () => {

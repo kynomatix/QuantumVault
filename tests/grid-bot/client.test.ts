@@ -48,6 +48,19 @@ describe('Grid screenshot panel polish', () => {
     expect(plannerMinimumRows({ ...base, fee: { state: 'unknown' } })).toEqual([{ label: 'Minimum investment', value: '10 USDC' }]);
     expect(plannerMinimumRows(null)).toEqual([{ label: 'Minimum investment', value: 'Awaiting preview' }]);
   });
+  it('distinguishes stale market data from an out-of-range reference price', () => {
+    for (const reason of ['Cached Pacifica book reference price is missing, invalid or older than 60 seconds',
+      'BTC-PERP: Pacifica /info observation expired', 'Market observations expired or are future-dated']) {
+      expect(plannerIssue(reason)).toMatchObject({
+        message: 'Current market data is unavailable or expired. Refresh price and try again.', panel: 'fees', setting: 'Fees & data',
+      });
+    }
+    for (const reason of ['Reference price must be strictly inside the range', 'Tick-rounded reference price is on the range boundary']) {
+      expect(plannerIssue(reason)).toMatchObject({
+        message: 'The current price must sit inside your range. Refresh price, then widen or move the range.', panel: 'range',
+      });
+    }
+  });
   it('shows plain rejection causes and working settings links', () => {
     const reasons = ['Stop must align to the venue tick', 'Investment is below the minimum capital', 'Fee assumption must be nonnegative plain decimal'];
     const html = renderToStaticMarkup(createElement(GridPlanIssues, { reasons, onReview: vi.fn() }));

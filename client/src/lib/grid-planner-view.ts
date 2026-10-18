@@ -245,6 +245,7 @@ export function plannerVenueChecks(market: PlannerMarket): { label: string; valu
 }
 export function plannerIssue(reason: string): PlannerIssue {
   const issue = (message: string, panel: string, setting: string, field?: string): PlannerIssue => ({ message, panel, setting, field, original: reason });
+  const staleData = /constraint|observation|future-dated|shared authority|sources exhausted|Cached Pacifica book reference price.*(?:missing|invalid|older than)/i.test(reason);
   let message = reason.replace(/quantized levels/gi, 'grid levels').replace(/quantized/gi, 'rounded')
     .replace(/venue tick/gi, "the exchange's price step").replace(/observed Pacifica maximum/gi, 'exchange maximum')
     .replace(/intervals/gi, 'grids').replace(/minimum capital/gi, 'minimum investment')
@@ -260,7 +261,7 @@ export function plannerIssue(reason: string): PlannerIssue {
   else if (/Auto range changed/i.test(reason)) message = 'The suggested range changed or its price history is unavailable. Suggest the range again or enter a range yourself.';
   else if (/Market identity mismatch/i.test(reason)) message = 'The market data does not match your selected market. Refresh price and try again.';
   else if (/Stop must align/i.test(reason)) message = 'Place the stop loss below the range for Long or above it for Short, using Pacifica’s price step shown in Fees & data.';
-  else if (/constraint|observation|future-dated|shared authority|sources exhausted/i.test(reason)) message = 'Current market data is unavailable or expired. Refresh price and try again.';
+  else if (staleData) message = 'Current market data is unavailable or expired. Refresh price and try again.';
   else if (/reference price|range boundary/i.test(reason)) message = 'The current price must sit inside your range. Refresh price, then widen or move the range.';
   else if (/collaps|duplicate/i.test(reason)) message = 'Some grid prices round to the same price. Widen the range or use fewer grids.';
   else if (/round-trip cost|Assumed fee check failed/i.test(reason)) message = 'Your fee assumption uses up the profit between grid prices. Widen the range, use fewer grids, or review the fee assumption.';
@@ -275,6 +276,7 @@ export function plannerIssue(reason: string): PlannerIssue {
   if (/fee|round-trip cost/i.test(reason)) return issue(message, 'fees', 'Fees & data', 'grid-feePercent');
   if (/investment|below.*minimum|underfund|transfer floor/i.test(reason)) return issue(message, 'direction-size', 'Investment', 'grid-investment');
   if (/collaps|duplicate|interval|geometry/i.test(reason)) return issue(message, 'direction-size', 'Number of grids', 'grid-intervals');
+  if (staleData) return issue(message, 'fees', 'Fees & data');
   if (/reference price|range boundary|lower|upper/i.test(reason)) return issue(message, 'range', 'Range', 'grid-lower');
   if (/size scale|entryScale|profitScale/i.test(reason)) return issue(message, 'orders', 'Sizing', 'grid-entryScale');
   return issue(message, 'fees', 'Fees & data');
