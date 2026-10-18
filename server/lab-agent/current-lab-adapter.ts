@@ -1211,7 +1211,7 @@ export class CurrentLabAdapter implements LabAgentAdapter {
       this.onRunQueued?.(run.id);
       return { run, idempotent: false, correlationId };
     } catch (e) {
-      if ((e as any)?.code === "23505") {
+      if (((e as any)?.code ?? (e as any)?.cause?.code) === "23505") {
         const raced = await this.storage.getAgentRun(ctx.walletAddress, taskId, idempotencyKey);
         if (raced) {
           return { run: raced, idempotent: true, correlationId: raced.agentCorrelationId ?? correlationId };

@@ -29,9 +29,14 @@ export function orderedGridFills(fills:GridEconomicFill[]):GridEconomicFill[]{
 export function exactGridPosition(fills:GridEconomicFill[]){return orderedGridFills(fills).reduce((q,f)=>f.leg==='entry'?q.plus(GridNumber.read(f.size)):q.minus(GridNumber.read(f.size)),zero());}
 export function gridPnl(direction:'long'|'short',fills:GridEconomicFill[],mark:{price:string;observedAt:number}|null){
   if(!['long','short'].includes(direction))throw Error('Invalid direction');
-  let quantity=zero(),basis=zero(),realised=zero(),fees=zero(),cycles=0;
+  let quantity=zero(),basis=zero(),realised=zero(),fees=zero(),cycles=0,lifetimeNetQuote=zero();
   const ordered=orderedGridFills(fills);
   for(const f of ordered){const q=GridNumber.read(f.size),p=GridNumber.read(f.price),fee=GridNumber.read(f.fee),value=q.mul(p);fees=fees.plus(fee);
+    // Convention B is bot-lifetime cash flow, independent of average-cost inventory.
+    // Replay every fill for the bot, including prior flat cycles and future geometry epochs.
+    const netQuote=direction==='long'?(f.leg==='entry'?value.plus(fee):value.minus(fee))
+      :(f.leg==='entry'?value.minus(fee):value.plus(fee));
+    lifetimeNetQuote=f.leg==='entry'?lifetimeNetQuote.plus(netQuote):lifetimeNetQuote.minus(netQuote);
     if(f.leg==='entry'){quantity=quantity.plus(q);basis=basis.plus(direction==='long'?value.plus(fee):value.minus(fee));}
     else {if(q.cmp(quantity)>0)throw Error('Grid ledger overclose');const cost=basis.mul(q).div(quantity);
       realised=realised.plus(direction==='long'?value.minus(fee).minus(cost):cost.minus(value).minus(fee));
@@ -42,6 +47,9 @@ export function gridPnl(direction:'long'|'short',fills:GridEconomicFill[],mark:{
     const value=quantity.mul(GridNumber.read(mark.price));unrealised=direction==='long'?value.minus(basis):basis.minus(value);}
   return {quantity:quantity.dto(),costBasis:basis.dto(),realised:realised.dto(),fees:fees.dto(),
     averageEntry:quantity.n===0n?null:basis.div(quantity).dto(),breakeven:quantity.n===0n?null:basis.div(quantity).dto(),
+    botBreakeven:quantity.n===0n?null:lifetimeNetQuote.div(quantity).dto(),
+    // A short always retains unbounded buyback risk; only longs can be fully covered.
+    profitCoversPosition:direction==='long'&&quantity.n>0n&&lifetimeNetQuote.n<=0n,
     unrealised:unrealised?.dto()??null,total:unrealised?realised.plus(unrealised).dto():null,cycles,
     markObservedAt:mark?.observedAt??null,lastFillAt:ordered.at(-1)?.time??null,mathVersion:'grid-rational-v1',
     includesFunding:false,includesFutureCloseFee:false,label:'PnL excludes funding'};

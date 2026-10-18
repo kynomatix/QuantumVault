@@ -47,4 +47,12 @@ describe('simplified auto-resume drawer',()=>{
     s.autoResume!.heldReason='execution_revoked';expect(markup(GridBotOverview,{surface:s,now:1000,onReview:vi.fn()})).toContain('Review</button>');
   });
   it('renders normal Paused after manual or risk pause',()=>{const s=surface();s.bot.status='paused';s.lifecycle.action='pause';const html=markup(GridBotOverview,{surface:s,now:1000});expect(html).toContain('Paused');expect(html).not.toMatch(/Waiting for price to return|Resuming —|Needs your attention/);});
+  it('shows user details with local dates and dollar amounts while keeping diagnostic evidence in history',()=>{
+    const s=surface();s.bot.totalInvestment='500';s.bot.leverage=2;s.pnl.fees='1.26';s.pnl.averageEntry='93752';
+    s.qualification.firstConfirmedAt='2026-10-17T03:00:00.000Z';
+    const html=markup(GridBotDetails,{surface:s,now:1000});
+    for(const label of ['Investment','Leverage','Grids','Started','Fees','Average entry','$500','$1.26','$93,752'])expect(html).toContain(label);
+    expect(html).not.toMatch(/Configured switches|return to master|clean-history|First trading exposure|2026-10-17T|operation_pending|Capacity and launch/);
+    s.qualification.firstConfirmedAt='invalid';expect(markup(GridBotDetails,{surface:s,now:1000})).not.toContain('Invalid Date');
+  });
 });

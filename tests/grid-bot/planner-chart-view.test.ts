@@ -38,6 +38,8 @@ describe('planner chart prices and interactive grid lines', () => {
       range: { lower: '90', upper: '110', stop: '80' }, tick: '0.1' });
     let updateCleanup = fixture.effects[0](); const unmount=fixture.effects[1]();
     fixture.cleanup=()=>{ if(typeof updateCleanup==='function')updateCleanup(); if(typeof unmount==='function')unmount(); };
+    expect(fixture.canvas.addCandlestickSeries).toHaveBeenCalledWith({upColor:'#38bdf8',downColor:'#7854d4',wickUpColor:'#38bdf8',wickDownColor:'#7854d4',borderVisible:false});
+    expect(fixture.series.setData).toHaveBeenCalledWith([expect.objectContaining({color:'#38bdf8',wickColor:'#38bdf8'})]);
     expect(fixture.series.applyOptions).toHaveBeenCalledWith({ title: 'Current price', priceFormat: { type: 'price', precision: 1, minMove: 0.1 } });
     const options = fixture.canvas.applyOptions.mock.calls.map(call => call[0]) as { localization?: { priceFormatter: (price: number) => string } }[];
     expect(options.find(option => option.localization)?.localization?.priceFormatter(100)).toBe('100.0');

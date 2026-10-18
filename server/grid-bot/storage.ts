@@ -87,9 +87,12 @@ export class GridStorage {
       const events=(await c.query(`SELECT count(*) FILTER (WHERE delivered_at IS NULL AND evidence->'notificationDelivery' IS NULL)::int AS pending,
         count(*) FILTER (WHERE delivered_at IS NULL AND evidence->'notificationDelivery' IS NOT NULL)::int AS uncertain FROM grid_risk_events WHERE bot_id=$1`,[id])).rows[0];
       const fills=(await c.query('SELECT trade_id,venue_time,leg,size::text,price::text FROM grid_exact_fills WHERE bot_id=$1 ORDER BY venue_time DESC,trade_id DESC LIMIT 100',[id])).rows;
+      const runFills=bot.status==='stopped'?(await c.query('SELECT trade_id,operation_id,order_id,level_id,venue_time,leg,size::text,price::text,fee::text FROM grid_exact_fills WHERE bot_id=$1 ORDER BY venue_time,trade_id',[id])).rows.map(f=>({
+        tradeId:f.trade_id,operationId:f.operation_id,orderId:f.order_id,levelId:f.level_id,time:Number(f.venue_time),leg:f.leg,size:f.size,price:f.price,fee:f.fee,
+      })):null;
       const returnedFunds=(await c.query("SELECT exact_request->'data'->>'amount' AS amount,terminal_at FROM grid_operations WHERE bot_id=$1 AND type='sweep_subaccount' AND state='confirmed' ORDER BY terminal_at DESC,id DESC LIMIT 1",[id])).rows[0];
       const autoPreference=(await c.query('SELECT enabled,generation,cycle,attempts,armed_cycle,held_reason,updated_at FROM grid_auto_resume WHERE bot_id=$1',[id])).rows[0];
-      return {...snapshot,surface:gridSurface({...snapshot,fills,returnedFunds,autoPreference},monitor,life,events)};
+      return {...snapshot,surface:gridSurface({...snapshot,fills,runFills,returnedFunds,autoPreference},monitor,life,events)};
     });
   }
   async listFills(wallet: string, id: string, limit: number, cursor: { time: string; trade: string } | null) {

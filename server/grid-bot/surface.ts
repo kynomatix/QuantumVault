@@ -4,6 +4,16 @@ import {GRID_CAPS} from './grid-caps';
 import {gridRuntimeGates} from './service';
 import {gridStartRequestSchema} from '../../shared/grid-start';
 import {GRID_HISTORY_PUBLICATION_LAG_MS} from './history-safety';
+import {gridPnl,orderedGridFills,type GridEconomicFill} from './pnl';
+/** Reconstruct terminal display facts from the complete ledger, never the 100 chart markers. */
+export function gridEndedRun(direction:'long'|'short',fills:GridEconomicFill[]){
+  try {
+    const ordered=orderedGridFills(fills),final=gridPnl(direction,ordered,null);
+    if(!ordered.length||final.quantity!=='0')return null;
+    const lastOpen=gridPnl(direction,ordered.slice(0,-1),null);
+    return {realised:final.realised,finalBreakeven:lastOpen.botBreakeven};
+  } catch { return null; }
+}
 export function gridBotSummary(bot:StoredBot):GridBotSummary{
   return {id:bot.id,name:bot.name,market:bot.market,direction:bot.direction,status:bot.status,lowerPrice:bot.lowerPrice,
     upperPrice:bot.upperPrice,totalInvestment:bot.totalInvestment,stopLossPrice:bot.stopLossPrice,gridCount:bot.gridCount,
@@ -22,6 +32,8 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
   const retained=gridStartRequestSchema.safeParse({draftRevision:snapshot.bot.draftRevision,serverIntentDigest:snapshot.bot.serverIntentDigest});
   const timestamp=(value:unknown)=>{const at=value instanceof Date?value.getTime():typeof value==='string'?Date.parse(value):NaN;return Number.isFinite(at)&&at<=now?new Date(at).toISOString():null;};
   const returnedAt=timestamp(snapshot.returnedFunds?.terminal_at);
+  const fee=o?.qualification,feeRate=decimal(fee?.feeRate);
+  const feeFresh=fresh&&Number.isSafeInteger(fee?.observedAt)&&fee.observedAt<=now&&now-fee.observedAt<=5000;
   const h=o?.history;
   const inferred=fresh&&now-o.observedAt<=5000&&h?.source==='pacifica_full_replay_stable_last_id'&&h.inclusive===true
     &&typeof h.lastId==='string'&&h.publicationLagMs===GRID_HISTORY_PUBLICATION_LAG_MS
@@ -35,7 +47,8 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
   // Missing preference means ON; only a persisted completed-band arm can resume.
   return {autoResume:{enabled:a?.enabled??true,generation:String(a?.generation??'0'),cycle:String(a?.cycle??'0'),attempts:a?.attempts??0,armed:!!a?.armed_cycle,heldReason:a?.held_reason??null,heldSince:a?.updated_at?new Date(a.updated_at).toISOString():null,band:null,available:false},bot:gridBotSummary(snapshot.bot),levels:snapshot.levels,operations:snapshot.operations.map((x:any)=>({id:x.id,type:x.type,state:x.state})),
     lifecycle:{action:life?.action??null,state:life?.state??null,blocker:life?.blocker??null},
-    pnl:{realised:decimal(pnl?.realised),unrealised:fresh?decimal(pnl?.unrealised):null,total:fresh?decimal(pnl?.total):null,fees:decimal(pnl?.fees),averageEntry:fresh?decimal(pnl?.averageEntry):null,breakeven:fresh?decimal(pnl?.breakeven):null},
+    pnl:{realised:decimal(pnl?.realised),unrealised:fresh?decimal(pnl?.unrealised):null,total:fresh?decimal(pnl?.total):null,fees:decimal(pnl?.fees),averageEntry:fresh?decimal(pnl?.averageEntry):null,breakeven:fresh?decimal(pnl?.breakeven):null,
+      botBreakeven:fresh?decimal(pnl?.botBreakeven):null,profitCoversPosition:fresh&&pnl?.profitCoversPosition===true},
     fills:(snapshot.fills??[]).map((f:any)=>({tradeId:f.trade_id,time:Number(f.venue_time),leg:f.leg,size:f.size,price:f.price})).reverse(),
     cycles:Number.isSafeInteger(pnl?.cycles)&&pnl.cycles>=0?pnl.cycles:null,
     qualification:{firstConfirmedAt:timestamp(snapshot.bot.canaryStartedAt),cleanSince:timestamp(snapshot.bot.canaryCleanSince),
@@ -43,6 +56,8 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
     position:fresh&&o.position&&decimal(o.position.size)!==null?o.position:null,
     mark:fresh&&o.mark&&o.mark.observedAt<=now&&now-o.mark.observedAt<=15000?decimal(o.mark.price):null,
     observedAt:fresh?new Date(o.observedAt).toISOString():null,residual:residualFresh?decimal(snapshot.bot.residualUsdc):null,
+    stopFee:feeFresh&&feeRate!==null&&!feeRate.startsWith('-')&&Number(feeRate)<1?{rate:feeRate,observedAt:new Date(fee.observedAt).toISOString()}:null,
+    endedRun:snapshot.bot.status==='stopped'&&snapshot.runFills?gridEndedRun(snapshot.bot.direction,snapshot.runFills):null,
     sweep:snapshot.bot.status==='stopped'?'Confirmed terminal':snapshot.operations.some((x:any)=>x.type==='sweep_subaccount')?'Sweep unconfirmed':snapshot.bot.status==='stopping'?'Awaiting venue settlement':'Not terminal',
     returnedFunds:{amount:returnedAt?decimal(snapshot.returnedFunds?.amount):null,confirmedAt:returnedAt},
     capacity:{ordinaryWindow:GRID_CAPS.ordinaryRestingPerBot,reservedSlots:GRID_CAPS.sharedProtectionReserve,liveOrders:fresh?o.orders.filter((x:any)=>['open','partially_filled'].includes(x.status)).length:null,venueMaximum:null},

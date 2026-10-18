@@ -18,7 +18,7 @@ describe('C7 owner Start and controls',()=>{
   it('hides controls without a worker, permits safety controls without new Starts, and gives Stop priority',()=>{
     const s=surface();s.workerRunning=false;expect(gridVisibleActions(s)).toEqual([]);expect(gridCanAdjust(s)).toBe(false);
     s.workerRunning=true;s.authorities.resume=true;s.startEnabled=false;expect(gridVisibleActions(s)).toEqual(['pause','stop']);expect(gridCanAdjust(s)).toBe(false);
-    s.bot.status='paused';expect(gridVisibleActions(s)).toEqual(['resume','resync','stop']);s.authorities.resume=false;expect(gridVisibleActions(s)).toEqual(['resync','stop']);
+    s.bot.status='paused';for(const enabled of [false,true]){s.autoResume!.enabled=enabled;expect(gridVisibleActions(s)).toEqual(['resume','resync','stop']);}expect(gridVisibleActions(s)).toEqual(['resume','resync','stop']);s.authorities.resume=false;expect(gridVisibleActions(s)).toEqual(['resync','stop']);
     s.bot.status='stopping';expect(gridVisibleActions(s)).toEqual(['stop']);expect(gridLaunchState(s)).toContain('Stop pending');
     s.startEnabled=true;s.bot.status='active';expect(gridCanAdjust(s)).toBe(true);
   });

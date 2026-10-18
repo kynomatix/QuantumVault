@@ -11,7 +11,7 @@ import { GridDraftActions } from '../../client/src/components/grid-bot/GridDraft
 import { GridPlannerChart } from '../../client/src/components/grid-planner/GridPlannerChart';
 import { GridPlannerSizeSelect } from '../../client/src/components/grid-planner/GridPlannerSizeSelect';
 import { GridPlanIssues } from '../../client/src/components/grid-planner/GridPlanIssues';
-import { GridBotOverview, GridBotDetails } from '../../client/src/components/grid-bot/GridBotDrawer';
+import { GridBotOverview, GridBotDetails, GridBotHistory } from '../../client/src/components/grid-bot/GridBotDrawer';
 import { gridSurface } from '../../server/grid-bot/surface';
 import { plannerPriceFormat, plannerIssue, plannerMinimumRows } from '../../client/src/lib/grid-planner-view';
 import { feePercentToRate, PlannerRequestGeneration, plannerOverlays, plannerLevelMessage, isPlannerMarket, isPlannerChart, isPlannerPreview,
@@ -76,8 +76,11 @@ describe('Grid screenshot panel polish', () => {
     expect(overview).not.toContain('UNKNOWN'); expect(overview).not.toContain('Capacity and launch authorities');
     surface.sweep = 'Confirmed terminal';
     const details = renderToStaticMarkup(createElement(GridBotDetails, { surface, now }));
-    for (const text of ['<details', 'Settlement complete', 'Mark price', 'USDC left', 'Last updated', 'No pending action', 'Capacity and launch authorities', 'Resume: Worker unavailable', 'Grid levels']) expect(details).toContain(text);
-    expect(details).not.toContain('No pending action ·');
+    for (const text of ['<details', 'Investment', 'Leverage', 'Grids', 'Started', 'Fees', 'Average entry', 'Mark price', 'USDC left']) expect(details).toContain(text);
+    expect(details).not.toMatch(/Settlement complete|Capacity and launch authorities|Resume: Worker unavailable|Grid levels/);
+    const history = renderToStaticMarkup(createElement(GridBotHistory, { surface, now }));
+    for (const text of ['History and logs', 'Settlement complete', 'Last observation', 'No pending action', 'Capacity and launch authorities', 'Resume: Worker unavailable', 'Grid levels']) expect(history).toContain(text);
+    expect(history).not.toContain('No pending action ·');
     expect(surface.sweep).toBe('Confirmed terminal');
     surface.observedAt = new Date(now - 15_001).toISOString(); surface.pnl.total = '123';
     const stale = renderToStaticMarkup(createElement(GridBotOverview, { surface, now }));
