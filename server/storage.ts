@@ -2755,7 +2755,7 @@ export class DatabaseStorage implements IStorage {
             const inserted = await tx.insert(botTrades).values(opts.insert).returning();
             trade = inserted[0];
           } catch (err: any) {
-            if (err?.code === '23505' && opts.insert.protocolFillId) {
+            if ((err?.code ?? err?.cause?.code) === '23505' && opts.insert.protocolFillId) {
               const winner = await tx.select().from(botTrades).where(eq(botTrades.protocolFillId, opts.insert.protocolFillId)).limit(1);
               if (winner[0]) {
                 trade = winner[0];
@@ -2830,7 +2830,7 @@ export class DatabaseStorage implements IStorage {
         try {
           await tx.update(botTrades).set(opts.update.fields).where(eq(botTrades.id, opts.update.tradeId));
         } catch (err: any) {
-          if (err?.code === '23505' && wantedFillId) {
+          if ((err?.code ?? err?.cause?.code) === '23505' && wantedFillId) {
             updateFailedDueToConflict = true;
           } else {
             throw err;
@@ -3231,7 +3231,7 @@ export class DatabaseStorage implements IStorage {
         return { trade: inserted, isNew: true };
       } catch (err: any) {
         // 23505 = unique_violation — racing path beat us; fetch the winner.
-        if (err?.code === '23505' || /duplicate key|unique constraint/i.test(err?.message ?? '')) {
+        if ((err?.code ?? err?.cause?.code) === '23505' || /duplicate key|unique constraint/i.test(err?.message ?? '')) {
           const winner = await db
             .select()
             .from(botTrades)

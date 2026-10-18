@@ -578,7 +578,7 @@ async function recordLoopEquityEvent(p: {
 }
 
 function isUniqueViolation(e: unknown): boolean {
-  const code = (e as any)?.code;
+  const code = (e as any)?.code ?? (e as any)?.cause?.code;
   const msg = e instanceof Error ? e.message : String(e);
   return code === "23505" || /duplicate key|unique constraint/i.test(msg);
 }
