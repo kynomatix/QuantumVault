@@ -55,17 +55,22 @@ export function gridBreakevenView(surface: GridBotSurface, now: number) {
     tone: percent === null || percent.isZero() ? 'neutral' : percent.gt(0) ? 'profit' : 'loss' };
 }
 
-/** One primary explanation; owner controls take precedence over waiting copy. */
-export function gridAutoResumeView(surface:GridBotSurface,now:number){
+export interface GridAutoResumeView {state:'waiting'|'checking'|'attention';title:string;detail?:string;action?:'resume'|'review'}
+export const GRID_AUTO_RESUME_ATTENTION_MS=10*60*1000;
+/** Internal reasons collapse into two held states; owner/risk pauses use the normal view. */
+export function gridAutoResumeView(surface:GridBotSurface,now:number):GridAutoResumeView|null{
   const a=surface.autoResume;
-  if(!a)return null;
-  if(!a.enabled&&surface.bot.status==='paused'&&surface.lifecycle.action==='pause')return {title:'Paused by you',detail:'Your Pause wins. Resume manually when ready.',badge:'Auto-resume off'};
-  if(!a.available&&a.unavailableReason!=='market_data_unavailable'&&a.unavailableReason!=='control_unavailable')return {title:'Auto-resume unavailable for this range',detail:'This range leaves no inner band after the 2% buffer. You can still Resume manually when safe, or Stop.',badge:''};
-  if(!a.enabled||['active','canary'].includes(surface.bot.status))return null;
+  if(!a?.enabled||!['range_exhausted','resuming'].includes(surface.bot.status)||['pause','stop'].includes(surface.lifecycle.action??''))return null;
+  if(a.unavailableReason==='range_unavailable')return null;
   const reason=a.heldReason;
-  if(reason==='reconciliation_required')return {title:'Checking exchange state',detail:'Price is back inside. Waiting for orders and fills to reconcile.',badge:''};
-  if(reason==='operation_pending')return {title:'Waiting for an operation to settle',detail:'An order or transfer is unconfirmed. No new request yet.',badge:''};
-  if(['retry_limit','execution_revoked','policy_changed'].includes(reason??''))return {title:'Auto-resume held',detail:'Retry limit reached or execution access changed. Review, then Resume.',badge:''};
-  if(!a.available||!surface.workerRunning||!surface.startEnabled||!gridFactsFresh(surface,now)||!a.armed||reason&&reason!=='waiting_for_inner_band')return {title:'Safety check needs attention',detail:'Stop clearance, margin or current data is unavailable. Entries stay paused.',badge:''};
-  return {title:'Waiting to auto-resume',detail:'Entries paused; position held.',badge:surface.mark&&new Decimal(surface.mark).gt(surface.bot.upperPrice)?'Above range':surface.mark&&new Decimal(surface.mark).lt(surface.bot.lowerPrice)?'Below range':''};
+  if(reason==='preference_off'||!a.armed&&(!reason||reason==='waiting_for_inner_band'))return null;
+  const attention=['retry_limit','execution_revoked','policy_changed','risk_pause'].includes(reason??'');
+  const checking=reason!=='waiting_for_inner_band'||!a.available||!a.band||!surface.workerRunning||!surface.startEnabled||!gridFactsFresh(surface,now);
+  const heldAt=Date.parse(a.heldSince??'');
+  if(attention||checking&&heldAt<=now&&now-heldAt>=GRID_AUTO_RESUME_ATTENTION_MS){
+    const action=!['execution_revoked','policy_changed','risk_pause'].includes(reason??'')&&gridVisibleActions(surface).includes('resume')?'resume':'review';
+    return {state:'attention',title:'Needs your attention',detail:action==='resume'?'Your bot needs a fresh safety check before it can resume.':'Review your bot settings before resuming.',action};
+  }
+  if(checking)return {state:'checking',title:'Resuming — checking safety'};
+  return {state:'waiting',title:'Waiting for price to return'};
 }

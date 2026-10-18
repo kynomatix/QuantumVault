@@ -216,6 +216,9 @@ describe("schema readiness", () => {
     expect(metadata[200]).toMatchObject({id:'200-grid-auto-resume',capabilities:['grid_bot'],operation:'ddl'});
     const autoSql=readFileSync(new URL('../../migrations/0011_grid_auto_resume.sql',import.meta.url),'utf8').replaceAll('\r\n','\n').trim();
     expect(sqlEntries[200].trim()).toBe(autoSql);
+    expect(autoSql).toContain('enabled boolean NOT NULL DEFAULT true');
+    expect(autoSql).toContain('ALTER TABLE grid_auto_resume ALTER COLUMN enabled SET DEFAULT true');
+    expect(metadata[200].requirements).toContainEqual({kind:'data',identity:'grid_auto_resume.enabled.default',checkSql:"SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='grid_auto_resume' AND column_name='enabled' AND column_default='true' AND is_nullable='NO') AS ok"});
     expect(autoSql).not.toMatch(/CASE/i);
     expect(autoSql.split('\n').filter(line=>line.includes('CHECK'))).toHaveLength(5);
     for(const line of autoSql.split('\n').filter(line=>line.includes('CHECK')))expect(line).toMatch(/CHECK \(.*\)[,;]?$/);

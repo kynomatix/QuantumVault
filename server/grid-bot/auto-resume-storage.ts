@@ -34,7 +34,7 @@ export class GridAutoResumeStorage {
       const superseded=await c.query("UPDATE grid_control_requests SET state='superseded',completed_at=clock_timestamp() WHERE id=$1 AND state='pending' RETURNING id",[old.resume_request_id]);
       if(superseded.rowCount)await c.query("UPDATE grid_bots SET status='range_exhausted',pause_reason=$2 WHERE id=$1 AND status='resuming'",[botId,reason]);
     }
-    await c.query(`INSERT INTO grid_auto_resume(bot_id,enabled,generation,held_reason) VALUES($1,false,1,$2) ON CONFLICT(bot_id) DO UPDATE SET enabled=CASE WHEN $3 THEN false ELSE grid_auto_resume.enabled END,generation=grid_auto_resume.generation+1,${clearGridAutoResumeArm},held_reason=$2,updated_at=clock_timestamp()`,[botId,reason,off]);
+    await c.query(`INSERT INTO grid_auto_resume(bot_id,enabled,generation,held_reason) VALUES($1,NOT $3,1,$2) ON CONFLICT(bot_id) DO UPDATE SET enabled=CASE WHEN $3 THEN false ELSE grid_auto_resume.enabled END,generation=grid_auto_resume.generation+1,${clearGridAutoResumeArm},held_reason=$2,updated_at=clock_timestamp()`,[botId,reason,off]);
     await c.query('UPDATE grid_lifecycle SET epoch=epoch+1 WHERE bot_id=$1',[botId]);
     await c.query(`UPDATE grid_monitor_state SET boot_id=${preserveBoot?'boot_id':'NULL'},generation=generation+1 WHERE bot_id=$1`,[botId]);
   }
@@ -43,7 +43,8 @@ export class GridAutoResumeStorage {
       const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[id,wallet])).rows[0];if(!bot)throw new GridStorageError('not_found');
       const row=(await c.query('SELECT * FROM grid_auto_resume WHERE bot_id=$1 FOR UPDATE',[id])).rows[0];
       if(String(row?.generation??'0')!==expectedGeneration)throw new GridStorageError('conflict');
-      if((row?.enabled??false)===enabled)return row??{enabled:false,generation:'0',cycle:'0',held_reason:'preference_off'};
+      // Absence is the default ON preference, never an automatic-resume arm.
+      if((row?.enabled??true)===enabled)return row??{enabled:true,generation:'0',cycle:'0',held_reason:null};
       if(enabled&&(!tick||!gridAutoResumeBand(bot.lower_price,bot.upper_price,tick)||['draft','failed','stopping','stopped'].includes(bot.status)))throw new GridStorageError('conflict');
       await this.revoke(c,id,!enabled,enabled?'waiting_for_inner_band':'preference_off',enabled);
       const updated=(await c.query('UPDATE grid_auto_resume SET enabled=$2 WHERE bot_id=$1 RETURNING *',[id,enabled])).rows[0];
@@ -61,6 +62,10 @@ export class GridAutoResumeStorage {
     });
   }
   async arm(c:PoolClient,bot:any,life:any,identity:GridResumeIdentity|null){
+    // Materialize the default only for a completed band exit. Owner/risk pauses
+    // cannot manufacture an arm, even when no preference has ever been saved.
+    if(life.action!=='band'||life.source!=='risk'||life.state!=='complete')return;
+    await c.query('INSERT INTO grid_auto_resume(bot_id) VALUES($1) ON CONFLICT(bot_id) DO NOTHING',[bot.id]);
     const row=(await c.query('SELECT * FROM grid_auto_resume WHERE bot_id=$1 FOR UPDATE',[bot.id])).rows[0];
     if(!row?.enabled)return;
     const m=(await c.query('SELECT * FROM grid_monitor_state WHERE bot_id=$1',[bot.id])).rows[0],now=new Date(bot.db_now??Date.now()).getTime();
@@ -85,8 +90,8 @@ export class GridAutoResumeStorage {
       await c.query('UPDATE grid_lifecycle SET epoch=epoch+1,blocker=$2 WHERE bot_id=$1',[claim.id,reason]);
       await c.query('UPDATE grid_monitor_state SET boot_id=NULL,generation=generation+1 WHERE bot_id=$1',[claim.id]);
     }
-    await c.query(`UPDATE grid_auto_resume SET ${clear?clearGridAutoResumeArm+',':''}held_reason=$2,updated_at=clock_timestamp() WHERE bot_id=$1`,[claim.id,reason]);
-    if(clear)await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[claim.id,'auto-held:'+randomUUID(),'auto_resume_held',{reason,cycle:String(a.cycle),generation:String(a.generation),attempts:a.attempts,controlRequestId:a.resume_request_id}]);
+    await c.query(`UPDATE grid_auto_resume SET ${clear?clearGridAutoResumeArm+',':''}held_reason=$2,updated_at=CASE WHEN held_reason IS DISTINCT FROM $2 AND (held_reason IS NULL OR held_reason='waiting_for_inner_band' OR $2='waiting_for_inner_band') THEN clock_timestamp() ELSE updated_at END WHERE bot_id=$1`,[claim.id,reason]);
+    if(clear||a.held_reason!==reason)await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[claim.id,'auto-held:'+randomUUID(),'auto_resume_held',{reason,cycle:String(a.cycle),generation:String(a.generation),attempts:a.attempts,controlRequestId:a.resume_request_id}]);
   });}
   async reserve(claim:GridMonitorClaim,tick:string,mark:{price:string;observedAt:number}|null):Promise<GridAutoResumeToken|null>{
     return this.monitor.launch.transaction(async c=>{
@@ -94,7 +99,11 @@ export class GridAutoResumeStorage {
       const a=(await c.query('SELECT * FROM grid_auto_resume WHERE bot_id=$1 FOR UPDATE',[claim.id])).rows[0];
       if(!a?.enabled||!a.armed_cycle)return null;
       const fence={generation:String(a.generation),cycle:String(a.cycle),requestId:a.resume_request_id,epoch:String(a.armed_lifecycle_epoch),policyHash:a.armed_policy_hmac,umkVersion:a.armed_umk_version};
-      const reason=async(r:GridAutoResumeReason)=>{await c.query('UPDATE grid_auto_resume SET held_reason=$2 WHERE bot_id=$1',[claim.id,r]);return null;};
+      const reason=async(r:GridAutoResumeReason)=>{
+        await c.query(`UPDATE grid_auto_resume SET held_reason=$2,updated_at=CASE WHEN held_reason IS DISTINCT FROM $2 AND (held_reason IS NULL OR held_reason='waiting_for_inner_band' OR $2='waiting_for_inner_band') THEN clock_timestamp() ELSE updated_at END WHERE bot_id=$1`,[claim.id,r]);
+        if(a.held_reason!==r)await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[claim.id,'auto-held:'+randomUUID(),'auto_resume_held',{reason:r,cycle:String(a.cycle),generation:String(a.generation),attempts:a.attempts,controlRequestId:a.resume_request_id}]);
+        return null;
+      };
       if(!this.gates().startEnabled)return reason('resume_authority_unavailable');
       const life=(await c.query('SELECT l.*,r.action,r.source,r.state FROM grid_lifecycle l JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[claim.id])).rows[0];
       if(!['range_exhausted','resuming'].includes(bot.status)||!life||String(life.epoch)!==String(a.armed_lifecycle_epoch)||String(a.generation)!==String(a.armed_generation))return {...fence,clearReason:'risk_pause'} as GridAutoResumeToken;

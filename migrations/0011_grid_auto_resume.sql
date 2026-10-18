@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS grid_auto_resume (
   bot_id uuid PRIMARY KEY REFERENCES grid_bots(id),
-  enabled boolean NOT NULL DEFAULT false,
+  enabled boolean NOT NULL DEFAULT true,
   generation bigint NOT NULL DEFAULT 0,
   cycle bigint NOT NULL DEFAULT 0,
   armed_cycle bigint,
@@ -20,5 +20,6 @@ CREATE TABLE IF NOT EXISTS grid_auto_resume (
   CONSTRAINT grid_auto_resume_retry CHECK ((attempts=0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (attempts>0 AND first_attempt_at IS NOT NULL AND (next_attempt_at IS NULL OR next_attempt_at>=first_attempt_at))),
   CONSTRAINT grid_auto_resume_reason CHECK (held_reason IS NULL OR held_reason IN ('waiting_for_inner_band','range_unavailable','reconciliation_required','operation_pending','market_data_unavailable','resume_authority_unavailable','risk_pause','stop_clearance_unavailable','policy_changed','execution_revoked','retry_limit','preference_off'))
 );
+ALTER TABLE grid_auto_resume ALTER COLUMN enabled SET DEFAULT true;
 ALTER TABLE grid_control_requests DROP CONSTRAINT IF EXISTS grid_control_action;
 ALTER TABLE grid_control_requests ADD CONSTRAINT grid_control_action CHECK (action IN ('pause','resume','resync','stop','band') AND source IN ('owner','risk','auto') AND state IN ('pending','complete','superseded') AND (source<>'auto' OR action='resume'));

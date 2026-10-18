@@ -4,6 +4,7 @@ import {gridActionAllowed} from '../../shared/grid-surface';
 import {gridSurface} from '../../server/grid-bot/surface';
 const snapshot=()=>({bot:{id:'EXAMPLE',name:'Grid',market:'BTC-PERP',direction:'long',status:'stopping',lowerPrice:'90',upperPrice:'110',gridCount:20,updatedAt:new Date(),createIntent:{lowerPrice:'90'},residualUsdc:'0',residualObservedAt:new Date()},levels:[],operations:[]});
 describe('Grid owner surface request and settlement guards',()=>{
+  it('projects an absent preference as on but unarmed and retains explicit off',()=>{const s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0});expect(s.autoResume).toMatchObject({enabled:true,generation:'0',armed:false,heldReason:null});const off=gridSurface({...snapshot(),autoPreference:{enabled:false,generation:'2',held_reason:'preference_off'}},null,null,{pending:0,uncertain:0});expect(off.autoResume).toMatchObject({enabled:false,generation:'2',armed:false});});
   it('rejects delayed detail reads after a newer read, action or identity change',()=>{const reads=new GridReadOrder(),old=reads.next(),newer=reads.next();expect(reads.accepts(old)).toBe(false);expect(reads.accepts(newer)).toBe(true);reads.next();expect(reads.accepts(newer)).toBe(false);});
   it('retains lost-response action identity without triggering a replay',()=>{const keys=new GridActionKeys();let calls=0;const uuid=()=>`EXAMPLE_${++calls}`;expect(keys.key('EXAMPLE','stop',uuid)).toBe(keys.key('EXAMPLE','stop',uuid));expect(calls).toBe(1);keys.accepted('EXAMPLE','stop');keys.key('EXAMPLE','stop',uuid);expect(calls).toBe(2);});
   it('does not fabricate financial zero or terminal state from an empty or stale read',()=>{const s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0});expect(s.pnl.total).toBeNull();expect(s.position).toBeNull();expect(s.capacity.liveOrders).toBeNull();expect(gridAdjustReady(s)).toBe(false);expect(s.sweep).toBe('Awaiting venue settlement');expect(s.authorities).toMatchObject({safeWindow:false,safeWindowState:'unavailable',resume:false,lostSweepLookup:false,breaker:'retained_terminal_failures'});expect(s.startEnabled).toBe(false);expect(s.workerEnabled).toBe(false);expect(s.qualification).toEqual({firstConfirmedAt:null,cleanSince:null,cleanTicks:null,promotedAt:null});});
@@ -35,7 +36,7 @@ describe('Grid owner surface request and settlement guards',()=>{
   it('offers only applicable requests and never offers unavailable resume authority',()=>{
     const s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0});
     expect(gridVisibleActions(s)).toEqual([]);s.workerRunning=true;
-    for(const [status,actions] of [['draft',[]],['failed',[]],['stopped',[]],['stopping',['stop']],['active',['pause','stop']],['paused',['resync','stop']],['range_exhausted',['resync','stop']]] as const){
+    for(const [status,actions] of [['draft',[]],['failed',[]],['stopped',[]],['stopping',['stop']],['active',['pause','stop']],['paused',['pause','resync','stop']],['range_exhausted',['pause','resync','stop']]] as const){
       s.bot.status=status;expect(gridVisibleActions(s)).toEqual(actions);
       for(const action of gridVisibleActions(s))expect(gridActionAllowed(s.bot,action)).toBe(true);
     }
