@@ -17,7 +17,7 @@ const price=(x:string|null|undefined)=>x&&x!=='UNKNOWN'?(x.startsWith('-')?'-$'+
 export function GridBotOverview({surface,now,chart,busy=false,onResume,onReview}:{surface:GridBotSurface;now:number;chart?:React.ReactNode;busy?:boolean;onResume?:()=>void;onReview?:()=>void}){
   const fresh=gridFactsFresh(surface,now),distance=gridBreakevenSentence(surface,now),protectedAtStop=gridStopProtected(surface,now);
   const auto=gridAutoResumeView(surface,now),band=surface.autoResume?.band;
-  const status=auto?.state==='waiting'&&band?auto.title+' — resumes between '+price(band.lower)+' and '+price(band.upper):auto?.title??gridLaunchState(surface);
+  const status=auto?.state==='waiting'&&band?auto.title+' · resumes between '+price(band.lower)+' and '+price(band.upper):auto?.title??gridLaunchState(surface);
   return <div className="space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-2"><div><p role="status" className="text-lg font-semibold">{status}</p><p className="text-sm">{surface.bot.direction} · {surface.bot.gridCount} grids</p></div><span className="rounded-full border px-2.5 py-1 text-xs font-medium">{gridRangeState(surface,now)}</span></div>
     {auto?.state==='attention'?<div className="space-y-2"><p className="text-sm">{auto.detail}</p><Button variant="outline" disabled={busy} onClick={auto.action==='resume'?onResume:onReview}>{auto.action==='resume'?'Resume':'Review'}</Button></div>:null}
@@ -55,7 +55,7 @@ export function GridBotDetails({surface,now,busy=false,onAutoResumeChange}:{surf
   </div></details>;
 }
 /** Retained diagnostic facts stay in history, outside the user-facing Details. */
-export function GridBotHistory({surface,now,historyRef}:{surface:GridBotSurface;now:number;historyRef?:React.RefObject<HTMLDetailsElement>}){
+export function GridBotHistory({surface,now,historyRef}:{surface:GridBotSurface;now:number;historyRef?:React.RefObject<HTMLDetailsElement|null>}){
   const fresh=gridFactsFresh(surface,now);
   return <details ref={historyRef} className="rounded-lg border p-4 text-sm"><summary className="cursor-pointer font-medium">History and logs</summary><div className="mt-4 space-y-3">
     <p>Draft creation: {surface.draftEnabled?'on':'off'} · New starts: {surface.startConfigured?'on':'off'} · Worker: {surface.workerRunning?'running':'unavailable'}</p>

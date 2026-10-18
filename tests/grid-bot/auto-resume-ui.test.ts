@@ -16,7 +16,7 @@ const markup=(component:React.ElementType,props:Record<string,unknown>)=>renderT
 describe('simplified auto-resume drawer',()=>{
   it('renders one waiting line with formatted inner prices and no main-view switch or machinery',()=>{
     const html=markup(GridBotOverview,{surface:surface(),now:1000});
-    expect(html).toContain('Waiting for price to return — resumes between $91,800 and $98,000');
+    expect(html).toContain('Waiting for price to return · resumes between $91,800 and $98,000');
     expect(html.match(/Waiting for price to return/g)).toHaveLength(1);
     expect(html).not.toMatch(/role="switch"|2%|tick|rounding|popover|waiting_for_inner_band/);
   });
