@@ -187,6 +187,7 @@ export const tradingBots = pgTable("trading_bots", {
     takeProfitPercent?: number;
     cooldownMinutes?: number;
   }>(),
+  // Match PostgreSQL jsonb's stored key order so Kit sees the existing default.
   stats: jsonb("stats").$type<{
     totalTrades: number;
     winningTrades: number;
@@ -194,7 +195,7 @@ export const tradingBots = pgTable("trading_bots", {
     totalPnl: number;
     totalVolume: number;
     lastTradeAt?: string;
-  }>().default({ totalTrades: 0, winningTrades: 0, losingTrades: 0, totalPnl: 0, totalVolume: 0 }),
+  }>().default({ totalPnl: 0, totalTrades: 0, totalVolume: 0, losingTrades: 0, winningTrades: 0 }),
   sourcePublishedBotId: varchar("source_published_bot_id"),
   labStrategyId: integer("lab_strategy_id"),
   labRunId: integer("lab_run_id"),
@@ -462,7 +463,7 @@ export const equityEvents = pgTable("equity_events", {
 }, (table) => ([
   // WO-15A: supports batch financial-enrichment per-bot GROUP BY queries.
   // Rollback: DROP INDEX IF EXISTS idx_equity_events_bot_created
-  index("idx_equity_events_bot_created").on(table.tradingBotId, table.createdAt.desc()),
+  index("idx_equity_events_bot_created").on(table.tradingBotId, table.createdAt.desc().nullsFirst()),
 ]));
 
 export const insertEquityEventSchema = createInsertSchema(equityEvents).omit({
@@ -494,6 +495,7 @@ export const vaultPositions = pgTable("vault_positions", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
+  walletIdx: index("idx_vault_positions_wallet").on(table.walletAddress),
   // Account-scope rows (trading_bot_id IS NULL): one row per (wallet, asset).
   // This partial index reproduces the old blanket unique for existing rows.
   uniqueAccountAsset: uniqueIndex("vault_positions_account_unique")
@@ -1050,7 +1052,7 @@ export const scannerIncidentHolds = pgTable("scanner_incident_holds", {
 
 export const scannerIncidentOccurrences = pgTable("scanner_incident_occurrences", {
   eventId: varchar("event_id").primaryKey(),
-  holdId: text("hold_id").notNull().references(() => scannerIncidentHolds.id, { onDelete: "cascade" }),
+  holdId: text("hold_id").notNull(),
   window: text("window").$type<"baseline" | "canary">().notNull(),
   fingerprint: text("fingerprint").notNull(),
   observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
@@ -1059,6 +1061,8 @@ export const scannerIncidentOccurrences = pgTable("scanner_incident_occurrences"
   summary: text("summary").notNull(),
   context: jsonb("context").notNull().default(sql`'{}'::jsonb`),
 }, (table) => [
+  // Preserve the existing PostgreSQL-truncated legacy name.
+  foreignKey({ name: "scanner_incident_occurrences_hold_id_scanner_incident_holds_id_", columns: [table.holdId], foreignColumns: [scannerIncidentHolds.id] }).onDelete("cascade").onUpdate("no action"),
   index("scanner_incident_occurrences_hold_order_idx").on(table.holdId, table.observedAt, table.eventId),
   index("scanner_incident_occurrences_hold_fingerprint_idx").on(table.holdId, table.fingerprint),
   check("scanner_incident_occurrences_window_check", sql`${table.window} IN ('baseline', 'canary')`),
@@ -1161,12 +1165,14 @@ export type PnlSnapshot = typeof pnlSnapshots.$inferSelect;
 // Marketplace: Public equity snapshots for published bots (decoupled from private trading bot data)
 export const marketplaceEquitySnapshots = pgTable("marketplace_equity_snapshots", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  publishedBotId: varchar("published_bot_id").notNull().references(() => publishedBots.id, { onDelete: "cascade" }),
+  publishedBotId: varchar("published_bot_id").notNull(),
   snapshotDate: timestamp("snapshot_date").notNull(),
   equity: decimal("equity", { precision: 20, scale: 6 }).notNull(),
   pnlPercent: decimal("pnl_percent", { precision: 10, scale: 4 }).notNull().default("0"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => ({
+  // Preserve the existing PostgreSQL-truncated legacy name.
+  publishedBotFk: foreignKey({ name: "marketplace_equity_snapshots_published_bot_id_published_bots_id", columns: [table.publishedBotId], foreignColumns: [publishedBots.id] }).onDelete("cascade").onUpdate("no action"),
   uniqueBotDate: unique("marketplace_equity_snapshots_bot_date_unique").on(table.publishedBotId, table.snapshotDate),
 }));
 
@@ -1385,6 +1391,7 @@ export const referralRewardEvents = pgTable("referral_reward_events", {
   index("idx_referral_reward_events_earner").on(table.earnerWallet),
   index("idx_referral_reward_events_status_created").on(table.status, table.createdAt),
   check("referral_reward_events_level_range", sql`${table.level} BETWEEN 1 AND 3`),
+  check("referral_reward_events_status_valid", sql`status IN ('pending','confirmed','paid','failed','processing','voided','awaiting_creator')`),
   check(
     "referral_reward_events_processing_claimed_from_status_valid",
     sql`${table.processingClaimedFromStatus} IS NULL OR ${table.processingClaimedFromStatus} IN ('pending', 'failed')`,
@@ -1490,6 +1497,8 @@ export const protocolSubaccounts = pgTable("protocol_subaccounts", {
   unique("uq_protocol_subaccount").on(table.protocol, table.protocolSubaccountId),
   index("idx_protocol_subaccounts_wallet_protocol").on(table.walletAddress, table.protocol),
   index("idx_protocol_subaccounts_status").on(table.status),
+  check("protocol_subaccounts_derivation_index_positive", sql`derivation_index IS NULL OR derivation_index >= 1`),
+  check("protocol_subaccounts_derivation_dual_model", sql`(derivation_index IS NULL AND derivation_path_version IS NULL) OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL)`),
   // Reuse hot path (§5): claim the oldest spare for a given (wallet, protocol, agent).
   index("idx_protocol_subaccounts_reuse").on(table.walletAddress, table.protocol, table.agentPublicKey, table.status, table.releasedAt),
 ]));
@@ -1661,7 +1670,11 @@ export const labOptimizationRuns = pgTable("lab_optimization_runs", {
   agentOwned: boolean("agent_owned").notNull().default(false),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   completedAt: timestamp("completed_at"),
-});
+}, (table) => [
+  index("idx_lab_opt_runs_user_status").on(table.userId, table.status, table.id),
+  index("idx_lab_opt_runs_agent_task").on(table.agentTaskId).where(sql`agent_task_id IS NOT NULL`),
+  uniqueIndex("uq_lab_opt_runs_agent_idem").on(table.userId, table.agentTaskId, table.agentIdempotencyKey).where(sql`agent_idempotency_key IS NOT NULL`),
+]);
 
 export const labCandleCache = pgTable("lab_candle_cache", {
   id: serial("id").primaryKey(),
@@ -1698,7 +1711,7 @@ export const labCandleCacheV2 = pgTable("lab_candle_cache_v2", {
   finality: text("finality").notNull(),
   timeSemantic: text("time_semantic").notNull(),
 }, (table) => [
-  unique("lab_candle_cache_v2_identity_unique").on(
+  uniqueIndex("lab_candle_cache_v2_identity_unique").on(
     table.symbol, table.timeframe, table.time, table.source, table.venue,
     table.basis, table.proxy, table.finality, table.timeSemantic,
   ),
@@ -1759,7 +1772,9 @@ export const labOptimizationResults = pgTable("lab_optimization_results", {
   // on oosMetrics' window). See LabWindowMetrics / LabOosMetrics.
   isMetrics: jsonb("is_metrics").$type<LabWindowMetrics>(),
   oosMetrics: jsonb("oos_metrics").$type<LabOosMetrics>(),
-});
+}, (table) => [
+  index("idx_lab_opt_results_run_id").on(table.runId),
+]);
 
 export const labInsightsReports = pgTable("lab_insights_reports", {
   id: serial("id").primaryKey(),
@@ -2281,6 +2296,8 @@ export const aiTraderBots = pgTable("ai_trader_bots", {
 }, (table) => [
   index("idx_ai_trader_bots_wallet").on(table.walletAddress),
   index("idx_ai_trader_bots_status").on(table.status),
+  uniqueIndex("ai_trader_phoenix_custody_unique").on(table.phoenixExecutionBotId).where(sql`phoenix_execution_bot_id IS NOT NULL`),
+  check("ai_trader_phoenix_binding_check", sql`((phoenix_execution_bot_id IS NULL AND phoenix_binding IS NULL AND (protocol <> 'phoenix' OR paper_mode)) OR (protocol='phoenix' AND phoenix_execution_bot_id IS NOT NULL AND phoenix_binding IS NOT NULL AND jsonb_typeof(phoenix_binding)='object' AND phoenix_binding->>'version'='1' AND phoenix_binding->>'aiBotId'=id AND phoenix_binding->>'executionBotId'=phoenix_execution_bot_id AND phoenix_binding->'identity'->>'traderAccountAddress'=protocol_subaccount_id)) IS TRUE`),
 ]);
 
 // Cross-instance scanner candidate arbitration. The unique key deliberately
@@ -2304,7 +2321,7 @@ export const aiTraderScannerCandidateClaims = pgTable("ai_trader_scanner_candida
 
 export const aiTraderCycles = pgTable("ai_trader_cycles", {
   id: uuid("id").primaryKey().defaultRandom(),
-  botId: varchar("bot_id").notNull().references(() => aiTraderBots.id, { onDelete: "cascade" }),
+  botId: varchar("bot_id").notNull(),
   schemaVersion: smallint("schema_version").notNull().default(1),
   reasonVersion: smallint("reason_version").notNull().default(1),
   trigger: text("trigger").notNull().default("auto"),
@@ -2331,7 +2348,8 @@ export const aiTraderCycles = pgTable("ai_trader_cycles", {
   ownerBootId: uuid("owner_boot_id").notNull(),
   details: jsonb("details").notNull().default(sql`'{}'::jsonb`),
 }, (table) => [
-  index("ai_trader_cycles_bot_latest_idx").on(table.botId, table.startedAt.desc(), table.id.desc()),
+  foreignKey({ name: "ai_trader_cycles_bot_id_fkey", columns: [table.botId], foreignColumns: [aiTraderBots.id] }).onDelete("cascade").onUpdate("no action"),
+  index("ai_trader_cycles_bot_latest_idx").on(table.botId, table.startedAt.desc().nullsFirst(), table.id.desc().nullsFirst()),
   index("ai_trader_cycles_running_idx").on(table.startedAt).where(sql`outcome = 'running'`),
   check("ai_cycles_schema_ck", sql`schema_version = 1 AND reason_version = 1`),
   check("ai_cycles_trigger_ck", sql`trigger IN ('auto','manual')`),
@@ -2377,7 +2395,8 @@ export const aiTraderDecisions = pgTable("ai_trader_decisions", {
   decidedAt: timestamp("decided_at").defaultNow(),
   closedAt: timestamp("closed_at"),
 }, (table) => [
-  index("idx_ai_trader_decisions_bot_decided").on(table.botId, table.decidedAt.desc()),
+  index("idx_ai_trader_decisions_bot_decided").on(table.botId, table.decidedAt.desc().nullsFirst()),
+  index("idx_ai_trader_decisions_executed").on(table.botId, table.decidedAt.desc().nullsFirst()).where(sql`outcome = 'executed'`),
 ]);
 
 // Immutable qualification evidence. Application code never updates these rows;
@@ -2404,10 +2423,10 @@ export const aiTraderQualificationRecords = pgTable("ai_trader_qualification_rec
   evidenceSourceDigest: text("evidence_source_digest").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 }, (table) => [
-  uniqueIndex("ai_trader_qualification_records_bot_era_unique")
+  unique("ai_trader_qualification_records_bot_era_unique")
     .on(table.botId, table.qualificationEraDigest),
   index("idx_ai_trader_qualification_records_bot_evaluated")
-    .on(table.botId, table.evaluatedAt.desc()),
+    .on(table.botId, table.evaluatedAt.desc().nullsFirst()),
 ]);
 
 // Append-only execution evidence. Bot/decision identifiers are snapshots rather
@@ -2445,7 +2464,7 @@ export const aiTraderExecutionEvents = pgTable("ai_trader_execution_events", {
   recordedAt: timestamp("recorded_at").notNull().defaultNow(),
 }, (table) => [
   index("idx_ai_trader_execution_attempt").on(table.attemptId, table.phase, table.observedAt, table.id),
-  index("idx_ai_trader_execution_bot").on(table.botId, table.recordedAt.desc(), table.id.desc()),
+  index("idx_ai_trader_execution_bot").on(table.botId, table.recordedAt.desc().nullsFirst(), table.id.desc().nullsFirst()),
   index("idx_ai_trader_execution_decision").on(table.decisionId, table.recordedAt, table.id),
   check("ai_trader_execution_events_action_check", sql`${table.action} IN ('entry','close','cancel','protective')`),
   check("ai_trader_execution_events_cause_check", sql`${table.cause} IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')`),
@@ -2597,7 +2616,7 @@ export const labOptimizationConfigSchema = z.object({
 // Phoenix U02: public durable intents and signed-attempt identities, never secret keys.
 export const phoenixOperations = pgTable("phoenix_operations", {
   id: uuid("id").primaryKey().defaultRandom(),
-  botId: varchar("bot_id").notNull().references(() => tradingBots.id),
+  botId: varchar("bot_id").notNull(),
   requestKey: text("request_key").notNull(),
   kind: text("kind").$type<'register' | 'deposit' | 'withdraw' | 'transfer'>().notNull(),
   intent: jsonb("intent").notNull(),
@@ -2608,16 +2627,18 @@ export const phoenixOperations = pgTable("phoenix_operations", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, table => [
+  foreignKey({ name: "phoenix_operations_bot_id_fkey", columns: [table.botId], foreignColumns: [tradingBots.id] }).onDelete("no action").onUpdate("no action"),
   unique("phoenix_operations_replay_unique").on(table.botId, table.requestKey),
-  uniqueIndex("phoenix_operations_active_unique").on(table.botId).where(sql`state NOT IN ('completed','failed','dropped')`),
+  uniqueIndex("phoenix_operations_active_unique").on(table.botId).where(sql`state NOT IN ('completed','failed','dropped') AND kind <> 'protection'`),
   uniqueIndex("phoenix_operations_registration_unique").on(table.botId).where(sql`kind = 'register'`),
-  check("phoenix_operations_kind_check", sql`kind IN ('register','deposit','withdraw','transfer')`),
+  uniqueIndex("phoenix_protection_replace_unique").on(table.botId).where(sql`kind='protection' AND state NOT IN ('completed','failed','dropped') AND intent->'protection'->'request'->>'action' IN ('replace','breakeven')`),
+  check("phoenix_operations_kind_check", sql`kind IN ('register','deposit','withdraw','transfer','protection')`),
   check("phoenix_operations_state_check", sql`state IN ('prepared','submission_pending','queued','unknown','completed','failed','dropped')`),
   check("phoenix_operations_values_check", sql`revision >= 0 AND length(request_key) BETWEEN 1 AND 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object'`),
 ]);
 export const phoenixOperationAttempts = pgTable("phoenix_operation_attempts", {
   id: uuid("id").primaryKey().defaultRandom(),
-  operationId: uuid("operation_id").notNull().references(() => phoenixOperations.id),
+  operationId: uuid("operation_id").notNull(),
   attemptNumber: integer("attempt_number").notNull(),
   signature: text("signature").notNull(),
   blockhash: text("blockhash").notNull(),
@@ -2626,11 +2647,12 @@ export const phoenixOperationAttempts = pgTable("phoenix_operation_attempts", {
   state: text("state").$type<'submission_pending' | 'confirmed' | 'failed' | 'expired'>().notNull().default('submission_pending'),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, table => [
+  foreignKey({ name: "phoenix_operation_attempts_operation_id_fkey", columns: [table.operationId], foreignColumns: [phoenixOperations.id] }).onDelete("no action").onUpdate("no action"),
   unique("phoenix_attempt_number_unique").on(table.operationId, table.attemptNumber),
   unique("phoenix_attempt_signature_unique").on(table.signature),
   uniqueIndex("phoenix_attempt_pending_unique").on(table.operationId).where(sql`state = 'submission_pending'`),
   check("phoenix_attempt_state_check", sql`state IN ('submission_pending','confirmed','failed','expired')`),
-  check("phoenix_attempt_values_check", sql`attempt_number BETWEEN 1 AND 5 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$'`),
+  check("phoenix_attempt_values_check", sql`attempt_number BETWEEN 1 AND 256 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$'`),
 ]);
 export type PhoenixOperation = typeof phoenixOperations.$inferSelect;
 export type PhoenixOperationAttempt = typeof phoenixOperationAttempts.$inferSelect;
