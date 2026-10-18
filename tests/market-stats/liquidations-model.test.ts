@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { performance } from 'node:perf_hooks';
-import { alignLiquidationInputs, modelLiquidations, HOUR, LIQUIDATION_DAY, LEVERAGE_TIERS, MMR,
+import { alignLiquidationInputs, modelLiquidations, modelMultiVenueLiquidations, HOUR, LIQUIDATION_DAY, LEVERAGE_TIERS, MMR,
   LiquidationInputError } from '../../server/market-stats/liquidations-model';
 import { END, hour, fullInputs } from './liquidations-fixtures';
 const sum = (bins: [number, number][]) => bins.reduce((s, b) => s + b[0] + b[1], 0);
+const oi = (rows: ReturnType<typeof hour>[]) => rows.map(h => ({ time: h.time, btc: h.oiBtc }));
+function multi(hours: ReturnType<typeof hour>[], optional: Parameters<typeof modelMultiVenueLiquidations>[2]) {
+  const result = modelMultiVenueLiquidations(hours, END, optional);
+  if (!('venueAccounting' in result)) throw new Error('Expected v3 books');
+  return result;
+}
 describe('oi-leverage-v2 model', () => {
   it('conserves entries, matches the fixed tier formulas and assumes a 50/50 split', () => {
     const result = modelLiquidations([hour(0, 100), hour(1, 120)], END);
@@ -126,5 +132,78 @@ describe('UTC alignment and completeness', () => {
     if (kind === 'duplicate') input.oi.push(input.oi[0]);
     if (kind === 'invalid') input.candles[0].close = NaN;
     expect(() => alignLiquidationInputs(input, END - 38 * LIQUIDATION_DAY, END)).toThrow(LiquidationInputError);
+  });
+});
+
+describe('venue-owned v3 model', () => {
+  it.each([1, 80, 130])('preserves the complete v2 fixture and error path without optional venues (drop %s)', drop => {
+    const hours = [hour(0, 100), hour(1, 120), hour(2, drop), hour(3, drop + 20), { ...hour(4, drop), low: 99.5 }];
+    expect(modelMultiVenueLiquidations(hours, END, [])).toEqual(modelLiquidations(hours, END));
+    expect(() => modelMultiVenueLiquidations([], END, [])).toThrow('Insufficient or oversized model history.');
+    expect(() => modelMultiVenueLiquidations(hours, END + 100 * HOUR, [])).toThrow('No hourly states in the display window.');
+  });
+  it('does not seed a staggered baseline or net opposing venue deltas', () => {
+    const hours = [hour(0, 100), hour(1, 120), hour(2, 110), hour(3, 110)];
+    const result = multi(hours, [{ venue: 'binance', rows: oi([hour(1, 1000), hour(2, 1010), hour(3, 1010)]) }]);
+    expect(result.accounting.enteredBtc).toBe(30);
+    expect(result.venueAccounting.find(b => b.venue === 'binance')).toMatchObject({ enteredBtc: 10, retiredBtc: 0, liveBtc: 10 });
+    expect(result.venueAccounting.find(b => b.venue === 'okx')!.retiredBtc).toBeCloseTo(20 * 10 / 120);
+    expect(result.value.initialOiBtc).toBe(100); expect(result.value.methodologyVersion).toBe('oi-leverage-v3');
+  });
+  it('retires only the venue whose OI falls', () => {
+    const result = multi([hour(0, 100), hour(1, 120), hour(2, 120)], [
+      { venue: 'binance', rows: oi([hour(0, 100), hour(1, 120), hour(2, 60)]) },
+    ]);
+    expect(result.venueAccounting.map(b => b.liveBtc)).toEqual([20, 10]);
+    expect(result.venueAccounting.map(b => b.retiredBtc)).toEqual([0, 10]);
+  });
+  it('discards gaps separately and resumes with an empty baseline, without cross-gap differencing', () => {
+    const hours = Array.from({ length: 6 }, (_, i) => hour(i, 100));
+    const result = multi(hours, [{ venue: 'binance', rows: oi([hour(0, 100), hour(1, 120), hour(3, 140), hour(4, 150)]) }]);
+    expect(result.accounting).toMatchObject({ enteredBtc: 30, retiredBtc: 0, sweptBtc: 0, discardedForGapBtc: 20, liveBtc: 10 });
+  });
+  it('sweeps terminal-lag cohorts with the shared OKX prices, including threshold equality', () => {
+    const hours = [hour(0, 100), hour(1, 100), { ...hour(2, 100), low: 99.5 }];
+    const result = multi(hours, [{ venue: 'bybit', rows: oi([hour(0, 100), hour(1, 120)]) }]);
+    expect(result.accounting.enteredBtc).toBe(20); expect(result.accounting.sweptBtc).toBeCloseTo(1);
+    expect(result.accounting.liveBtc).toBeCloseTo(19);
+    const added = multi([hour(0, 100), { ...hour(1, 100), high: 103, low: 97 }], [
+      { venue: 'bybit', rows: oi([hour(0, 100), hour(1, 120)]) },
+    ]);
+    expect(added.cohorts[0].price).toBeCloseTo(80.5); expect(added.accounting.sweptBtc).toBeCloseTo(6);
+  });
+  it('handles zero observations without a division or phantom entries', () => {
+    const result = multi(Array.from({ length: 4 }, (_, i) => hour(i, 100)), [
+      { venue: 'hyperliquid', rows: oi([hour(0, 0), hour(1, 0), hour(2, 10), hour(3, 0)]) },
+    ]);
+    expect(result.accounting).toMatchObject({ enteredBtc: 10, retiredBtc: 10, liveBtc: 0 });
+  });
+  it('orders venues deterministically and rounds after summing unrounded books', () => {
+    const hours = [hour(0, 0), hour(1, 0.03)];
+    const optional = (['hyperliquid', 'bybit', 'binance'] as const).map(venue => ({ venue, rows: oi(hours) }));
+    const result = multi(hours, optional);
+    expect(result).toEqual(multi(hours, [...optional].reverse()));
+    expect(result.venueAccounting.map(b => b.venue)).toEqual(['okx', 'binance', 'bybit', 'hyperliquid']);
+    expect(sum(result.value.columns[0].bins)).toBeGreaterThan(4 * sum(modelLiquidations(hours, END).value.columns[0].bins));
+    expect(result.accounting.enteredBtc).toBeCloseTo(0.12);
+  });
+  it('conserves all four books through closes, sweeps and coverage resets', () => {
+    const hours = [hour(0, 100), hour(1, 120), hour(2, 60), { ...hour(3, 80), low: 99.5 }, hour(4, 40)];
+    const result = multi(hours, [
+      { venue: 'binance', rows: oi(hours) }, { venue: 'bybit', rows: oi(hours.filter((_, i) => i !== 2)) },
+      { venue: 'hyperliquid', rows: oi(hours.slice(0, 3)) },
+    ]);
+    for (const b of [...result.venueAccounting, result.accounting])
+      expect(b.enteredBtc).toBeCloseTo(b.retiredBtc + b.sweptBtc + b.discardedForGapBtc + b.liveBtc);
+  });
+  it('bounds four accumulating books to 36440 cohorts and the unchanged response geometry', () => {
+    const hours = alignLiquidationInputs(fullInputs(), END - 38 * LIQUIDATION_DAY, END);
+    const before = performance.now(), heapBefore = process.memoryUsage().heapUsed;
+    const result = modelMultiVenueLiquidations(hours, END - 30 * LIQUIDATION_DAY,
+      (['binance', 'bybit', 'hyperliquid'] as const).map(venue => ({ venue, rows: oi(hours) })));
+    console.info(`Four-venue model: ${(performance.now() - before).toFixed(2)} ms; heap delta ${process.memoryUsage().heapUsed - heapBefore} bytes; ${result.cohorts.length} cohorts`);
+    expect(result.cohorts).toHaveLength(36440); expect(result.value.columns).toHaveLength(180);
+    expect(result.value.columns.every(c => c.bins.length === 120)).toBe(true);
+    expect(result.accounting.enteredBtc).toBeCloseTo(result.accounting.liveBtc);
   });
 });

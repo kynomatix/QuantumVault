@@ -33,4 +33,23 @@ describe('modelled monthly liquidation display', () => {
     expect(html).toContain('Incomplete OKX hourly inputs'); expect(html).toContain('candles at 2026-10-17T00:00 UTC');
     expect(html).not.toContain('No modelled exposure');
   });
+  it('defaults older cards to OKX and uses a simple headline source line', () => {
+    const html = renderToStaticMarkup(createElement(LiquidationHeatmapView, { card: card(), now: END }));
+    expect(html).toContain('Sources: OKX'); expect(html).not.toContain('One venue:');
+    expect(html).not.toContain('relay'); expect(html).not.toContain('scheduler');
+  });
+  it.each([{ venues: ['binance'] }, { venues: ['bybit', 'hyperliquid'] }, { venues: ['binance', 'bybit', 'hyperliquid'] }])(
+    'renders actual source subsets and coverage details ($venues)', ({ venues }) => {
+      const data = card(), included = venues as ('binance' | 'bybit' | 'hyperliquid')[];
+      data.value!.methodologyVersion = 'oi-leverage-v3';
+      data.coverage = { venuesUsed: ['okx', ...included], priceVenue: 'okx', venues: included.map(venue => ({ venue,
+        status: 'included', firstObservation: END - 14400000, lastObservation: END - 7200000,
+        lastFetchedAt: END, gaps: [{ start: END - 10800000, end: END - 10800000 }], gapHours: 1, terminalLagHours: 1 })) };
+      const html = renderToStaticMarkup(createElement(LiquidationHeatmapView, { card: data, now: END }));
+      const names = { binance: 'Binance', bybit: 'Bybit', hyperliquid: 'Hyperliquid' };
+      expect(html).toContain(`Sources: OKX + ${included.map(v => names[v]).join(' + ')}`);
+      for (const text of ['oi-leverage-v3', 'observations from', '1 missing hour', 'new baseline', 'not a continuous four-venue history',
+        'All entries, price sweeps and notionals use OKX', 'without new open-interest changes']) expect(html).toContain(text);
+      expect(html).not.toContain('relay'); expect(html).not.toContain('scheduler');
+    });
 });

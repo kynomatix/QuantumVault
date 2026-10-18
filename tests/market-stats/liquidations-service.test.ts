@@ -3,6 +3,8 @@ import { getLiquidationStats, LiquidationStatsCache } from '../../server/market-
 import { loadOkxLiquidationInputs } from '../../server/market-stats/liquidations-okx';
 import { LIQUIDATION_DAY, HOUR, type LiquidationInputs } from '../../server/market-stats/liquidations-model';
 import { END, fullInputs } from './liquidations-fixtures';
+import { createDataRelayClient, omittedRelay, parseRelayRead } from '../../server/market-stats/liquidations-relay';
+import { relayEnvelope } from './liquidations-relay-fixtures';
 
 function setup() {
   let now = END + HOUR;
@@ -90,5 +92,102 @@ describe('narrow public OKX adapter', () => {
     }) as typeof fetch;
     const result = await loadOkxLiquidationInputs(END + HOUR, wrapped);
     expect(result.candles.length).toBe(902);
+  });
+});
+
+describe('optional multi-venue daily enrichment', () => {
+  function relay(end = END) {
+    const fixture = relayEnvelope(end - 38 * LIQUIDATION_DAY, end - HOUR);
+    fixture.generatedAt = new Date(end + HOUR).toISOString();
+    for (const venue of Object.values(fixture.venues)) for (const row of venue.rows) row.fetchedAt = fixture.generatedAt;
+    return parseRelayRead(fixture, end - 38 * LIQUIDATION_DAY, end - HOUR, end + HOUR);
+  }
+  it('uses all four sources and the unchanged snapshot/expiry with complete coverage', async () => {
+    const { deps } = setup(), loadRelay = vi.fn(async () => relay());
+    const configured = { ...deps, loadRelay };
+    const cards = await Promise.all(Array.from({ length: 8 }, () => getLiquidationStats(configured, deps.now())));
+    expect(loadRelay).toHaveBeenCalledOnce(); expect(deps.loadInputs).toHaveBeenCalledOnce();
+    expect(cards.every(c => c === cards[0])).toBe(true);
+    expect(cards[0]).toMatchObject({ status: 'available', asOf: END, expiresAt: END + 26 * HOUR,
+      source: 'OKX + Binance + Bybit + Hyperliquid', coverage: { venuesUsed: ['okx', 'binance', 'bybit', 'hyperliquid'] } });
+    expect(cards[0].value?.methodologyVersion).toBe('oi-leverage-v3');
+  });
+  it('keeps the exact OKX-only value and metadata when all optional data is unavailable', async () => {
+    const a = setup(), b = setup();
+    const original = await getLiquidationStats(a.deps, a.deps.now());
+    const fallback = await getLiquidationStats({ ...b.deps, loadRelay: async () => omittedRelay('deadline') }, b.deps.now());
+    expect(fallback.value).toEqual(original.value);
+    for (const key of ['source', 'basis', 'asOf', 'fetchedAt', 'expiresAt', 'gaps'] as const) expect(fallback[key]).toEqual(original[key]);
+    expect(fallback.coverage?.venuesUsed).toEqual(['okx']);
+  });
+  it('includes a valid subset, resets interior gaps, and accepts three hours of terminal lag', async () => {
+    const { deps } = setup(), fixture = relayEnvelope(END - 38 * LIQUIDATION_DAY, END - HOUR);
+    fixture.venues.binance.rows.splice(100, 2); fixture.venues.binance.rows.splice(-3);
+    fixture.venues.bybit.rows.splice(-4); fixture.venues.hyperliquid.rows.splice(0, 911);
+    const loadRelay = async () => parseRelayRead(fixture, END - 38 * LIQUIDATION_DAY, END - HOUR, deps.now());
+    const card = await getLiquidationStats({ ...deps, loadRelay }, deps.now());
+    expect(card.status).toBe('available'); expect(card.coverage?.venuesUsed).toEqual(['okx', 'binance']);
+    expect(card.coverage?.venues[0]).toMatchObject({ gapHours: 2, terminalLagHours: 3, lastObservation: END - 4 * HOUR });
+    expect(card.coverage?.venues[1].reason).toBe('stale'); expect(card.coverage?.venues[2].reason).toBe('baseline-only');
+  });
+  it('recovers a degraded day at most hourly in the same single flight without reloading OKX or rejuvenating times', async () => {
+    const { deps, advance } = setup(), loadRelay = vi.fn(async () => omittedRelay('http'));
+    const configured = { ...deps, loadRelay };
+    const original = await getLiquidationStats(configured, deps.now());
+    advance(HOUR - 1); expect(await getLiquidationStats(configured, deps.now())).toBe(original);
+    expect(loadRelay).toHaveBeenCalledOnce();
+    advance(1); loadRelay.mockResolvedValue(relay());
+    const recovered = await Promise.all(Array.from({ length: 8 }, () => getLiquidationStats(configured, deps.now())));
+    expect(loadRelay).toHaveBeenCalledTimes(2); expect(deps.loadInputs).toHaveBeenCalledOnce();
+    expect(recovered.every(c => c === recovered[0])).toBe(true);
+    expect(recovered[0].value?.methodologyVersion).toBe('oi-leverage-v3');
+    expect(recovered[0].asOf).toBe(original.asOf); expect(recovered[0].fetchedAt).toBe(original.fetchedAt);
+    expect(recovered[0].expiresAt).toBe(original.expiresAt);
+    advance(10 * HOUR); await getLiquidationStats(configured, deps.now()); expect(loadRelay).toHaveBeenCalledTimes(2);
+  });
+  it('throttles repeated failed enrichment and does not retain unbounded history', async () => {
+    const { deps, advance } = setup(), loadRelay = vi.fn(async () => omittedRelay('deadline'));
+    const configured = { ...deps, loadRelay };
+    await getLiquidationStats(configured, deps.now()); advance(HOUR);
+    await getLiquidationStats(configured, deps.now()); advance(HOUR - 1);
+    await getLiquidationStats(configured, deps.now());
+    expect(loadRelay).toHaveBeenCalledTimes(2); expect(deps.loadInputs).toHaveBeenCalledOnce();
+    expect(deps.cache.recovery?.hours).toHaveLength(912);
+  });
+  it('starts relay work alongside OKX and contains optional exceptions', async () => {
+    const { deps } = setup(), started: string[] = []; let finish!: (input: LiquidationInputs) => void;
+    deps.loadInputs.mockImplementation(() => { started.push('okx'); return new Promise(resolve => { finish = resolve; }); });
+    const loadRelay = vi.fn(async () => { started.push('relay'); throw new Error('EXAMPLE'); });
+    const pending = getLiquidationStats({ ...deps, loadRelay }, deps.now());
+    expect(started).toEqual(['relay', 'okx']); finish(fullInputs());
+    const card = await pending; expect(card.status).toBe('available'); expect(JSON.stringify(card)).not.toContain('EXAMPLE');
+  });
+  it('a stuck relay cannot add a serial budget after OKX', async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps } = setup();
+      const fetcher = vi.fn(() => new Promise<Response>(() => {}));
+      const client = createDataRelayClient({ url: 'https://relay.example', token: 'EXAMPLE', fetch: fetcher as typeof fetch, now: deps.now });
+      const pending = getLiquidationStats({ ...deps, loadRelay: client.read }, deps.now());
+      expect(fetcher).toHaveBeenCalledOnce(); expect(deps.loadInputs).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(4_000);
+      const card = await pending; expect(card.status).toBe('available'); expect(card.coverage?.venues[0].reason).toBe('deadline');
+    } finally { vi.useRealTimers(); }
+  });
+  it('builds a new-day OKX result rather than relabelling yesterday’s enriched model', async () => {
+    const { deps, advance } = setup(), loadRelay = vi.fn(async () => relay());
+    const configured = { ...deps, loadRelay }, original = await getLiquidationStats(configured, deps.now());
+    advance(24 * HOUR); loadRelay.mockResolvedValue(omittedRelay('deadline'));
+    const next = await getLiquidationStats(configured, deps.now());
+    expect(next.asOf).toBe(END + LIQUIDATION_DAY); expect(next.value?.methodologyVersion).toBe('oi-leverage-v2');
+    expect(next.source).toBe('OKX BTC-USDT-SWAP'); expect(original.source).toBe('OKX + Binance + Bybit + Hyperliquid');
+    expect(deps.cache.recovery?.day).toBe(END + LIQUIDATION_DAY);
+  });
+  it('retains original last-good sources on OKX failure only until the original ceiling', async () => {
+    const { deps, advance } = setup(), configured = { ...deps, loadRelay: async () => relay() };
+    const original = await getLiquidationStats(configured, deps.now());
+    advance(23 * HOUR); deps.loadInputs.mockRejectedValue(new Error('offline'));
+    expect(await getLiquidationStats(configured, deps.now())).toBe(original);
+    advance(2 * HOUR); expect((await getLiquidationStats(configured, deps.now())).status).toBe('unavailable');
   });
 });

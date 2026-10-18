@@ -32,13 +32,26 @@ export type LiquidationColumn = {
   excludedUsd: number;
 };
 export type LiquidationStats = {
-  methodologyVersion: 'oi-leverage-v2'; asset: 'BTC'; instrument: 'BTC-USDT-SWAP';
+  methodologyVersion: 'oi-leverage-v2' | 'oi-leverage-v3'; asset: 'BTC'; instrument: 'BTC-USDT-SWAP';
   currentPrice: number; priceRange: { lower: number; upper: number }; bandWidth: number;
   columns: LiquidationColumn[]; scaleMaxUsd: number; excludedUsd: number;
   /** Confirmed 4H UTC history for scrolling; older candles have no modelled bands. */
   candles?: { time: number; open: number; high: number; low: number; close: number }[];
   summary: { above: LiquidationCluster | null; below: LiquidationCluster | null };
+  /** initialOiBtc remains the first OKX observation, never a changing venue sum. */
   modelStartedAt: number; displayStartedAt: number; initialOiBtc: number;
 };
-export type LiquidationStatsCard = StatsCard<LiquidationStats> & { gaps: LiquidationGap[] };
+export type LiquidationVenue = 'okx' | 'binance' | 'bybit' | 'hyperliquid';
+export type LiquidationCoverageReason = 'disabled' | 'deadline' | 'http' | 'malformed' | 'empty' | 'stale' | 'baseline-only';
+export type LiquidationVenueCoverage = {
+  venue: Exclude<LiquidationVenue, 'okx'>;
+  status: 'included' | 'omitted'; reason?: LiquidationCoverageReason;
+  firstObservation: number | null; lastObservation: number | null; lastFetchedAt: number | null;
+  /** Inclusive ranges of missing hours between the first and last observations. */
+  gaps: { start: number; end: number }[]; gapHours: number; terminalLagHours: number;
+};
+export type LiquidationCoverage = {
+  venuesUsed: LiquidationVenue[]; priceVenue: 'okx'; venues: LiquidationVenueCoverage[];
+};
+export type LiquidationStatsCard = StatsCard<LiquidationStats> & { gaps: LiquidationGap[]; coverage?: LiquidationCoverage };
 export type LiquidationStatsResponse = LiquidationStatsCard & { serverNow: number };

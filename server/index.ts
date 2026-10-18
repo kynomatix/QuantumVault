@@ -679,6 +679,14 @@ registerRequestTrace(app);
   // dev-workspace history — these [Boot] env= markers let any reader segment
   // process generations and tell workspace lines from live deployment lines.
   const ownsProductionBackgroundJobs = process.env.REPLIT_DEPLOYMENT === "1";
+  if (ownsProductionBackgroundJobs) {
+    // Register after the startup burst; the first POST waits for UTC minute 3.
+    setTimeout(() => {
+      void import('./data-relay-collect-job').then(({ startDefaultDataRelayCollectJob }) => {
+        startDefaultDataRelayCollectJob();
+      }).catch(() => console.info('[DataRelay collect] status=unavailable'));
+    }, 60_000).unref();
+  }
   const bootEnv = ownsProductionBackgroundJobs ? "production" : "workspace";
   const bootTag = SERVER_BOOT_ID.slice(0, 8).toLowerCase();
   appendTelemetry(`[Boot] pid=${process.pid} boot=${bootTag} env=${bootEnv} node=${process.version}`);

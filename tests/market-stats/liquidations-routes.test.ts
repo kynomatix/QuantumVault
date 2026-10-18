@@ -3,6 +3,7 @@ import type { Express, RequestHandler } from 'express';
 import { registerMarketStatsRoutes } from '../../server/market-stats/routes';
 import { LiquidationStatsCache } from '../../server/market-stats/liquidations-service';
 import { END, fullInputs } from './liquidations-fixtures';
+import { readFileSync } from 'node:fs';
 
 describe('liquidation authenticated sibling route', () => {
   function setup(authorized = true) {
@@ -36,5 +37,12 @@ describe('liquidation authenticated sibling route', () => {
     const { handlers, load, res } = setup(); load.mockRejectedValueOnce(new Error('loader failed'));
     await handlers[1]({ query: {} }, res); expect(res.status).toHaveBeenCalledWith(503);
     await handlers[1]({ query: {} }, res); expect(load).toHaveBeenCalledTimes(2);
+  });
+  it('keeps the liquidation dependency closure free of DB and collection-timer imports', () => {
+    for (const path of ['server/market-stats/liquidations-service.ts', 'server/market-stats/liquidations-relay.ts',
+      'server/market-stats/liquidations-model.ts', 'server/market-stats/liquidations-okx.ts', 'server/data-relay-client.ts']) {
+      const source = readFileSync(path, 'utf8');
+      expect(source).not.toMatch(/(?:from|import\s*\()\s*['"][^'"]*(?:data-relay-collect-job|\/db|schema|server\/index)/);
+    }
   });
 });
