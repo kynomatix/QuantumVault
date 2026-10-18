@@ -1,4 +1,5 @@
 import { gridModePlanValid } from './grid-behaviour-view';
+import { GRID_MODES_POLICY_VERSION } from '../../../shared/grid-behaviour';
 import Decimal from 'decimal.js';
 import type { GridIntent,GridCreateRequest } from '../../../shared/grid-draft';
 import type { authoritativeGridPreview } from '../../../server/grid-bot/draft-service';
@@ -43,7 +44,7 @@ export class GridDraftSession {
   accept(value:unknown,id:number,revision:string,now:number):value is GridDraftPreview {
     const p=value as GridDraftPreview;
     if(!this.open || id!==this.sequence || revision!==this.revision || !p || p.schemaVersion!==1 || p.requestId!==id
-      || p.draftRevision!==revision || !['1.0.0','2.0.0','2.2.0'].includes(p.policy?.policyVersion) || p.policy.feePolicyVersion!=='1.0.0' || p.policy.runtimePolicyVersion!==p.policy.policyVersion
+      || p.draftRevision!==revision || !['1.0.0','2.0.0',GRID_MODES_POLICY_VERSION].includes(p.policy?.policyVersion) || p.policy.feePolicyVersion!=='1.0.0' || p.policy.runtimePolicyVersion!==p.policy.policyVersion
       || !['ready','unavailable'].includes(p.state) || !Array.isArray(p.reasons) || !p.reasons.every(r=>typeof r==='string')
       || p.state==='ready' && (!Number.isSafeInteger(p.expiresAt) || p.expiresAt<=now || !/^[0-9A-F]{64}$/.test(p.serverIntentDigest??'')
         || !p.plan || !Array.isArray(p.plan.lines) || !gridModePlanValid(p.plan) || !Array.isArray(p.levels) || p.levels.length!==p.plan.lines.length

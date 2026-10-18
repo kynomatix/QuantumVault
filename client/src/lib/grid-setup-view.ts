@@ -1,4 +1,4 @@
-import type { GridBehaviourMode } from '../../../shared/grid-behaviour';
+import { GRID_MODES_CREATION, type GridBehaviourMode } from '../../../shared/grid-behaviour';
 import type { GridIntent } from '../../../shared/grid-draft';
 import type { GridRegime } from '../../../shared/grid-regime';
 
@@ -28,11 +28,11 @@ export function gridSetupForm(intent: GridIntent | undefined, defaultMarket: str
     behaviourMode: intent.behaviourMode ?? 'repeat_all', intervals: String(intent.gridCount), entryScale: intent.entryScaleType, profitScale: intent.profitScaleType, seed: intent.seedAtCreation,
     leverage: intent.leverage, investment: intent.totalInvestment, stop: intent.stopPrice, timeframe: intent.timeframe, bars: String(intent.lookback) } : { ...GRID_SETUP_INITIAL, market: defaultMarket };
 }
-export function gridSetupIntent(form: GridSetupForm, stop: string, rangeSource: 'manual' | 'auto', timeRangeApplied = false): GridIntent {
+export function gridSetupIntent(form: GridSetupForm, stop: string, rangeSource: 'manual' | 'auto', timeRangeApplied = false, modesCreation = GRID_MODES_CREATION): GridIntent {
   return { schemaVersion: 1, protocol: 'pacifica', market: form.market, direction: form.side as GridIntent['direction'],
     lowerPrice: form.lower, upperPrice: form.upper, stopPrice: stop, gridCount: Number(form.intervals),
     entryScaleType: form.entryScale as GridIntent['entryScaleType'], profitScaleType: form.profitScale as GridIntent['profitScaleType'],
-    behaviourMode: form.behaviourMode, seedAtCreation: form.seed, totalInvestment: form.investment, leverage: form.leverage, timeframe: form.timeframe as GridIntent['timeframe'],
+    ...(modesCreation ? { behaviourMode: form.behaviourMode } : {}), seedAtCreation: form.seed, totalInvestment: form.investment, leverage: form.leverage, timeframe: form.timeframe as GridIntent['timeframe'],
     lookback: Number(form.bars) as GridIntent['lookback'], rangeSource: timeRangeApplied ? 'manual' : rangeSource };
 }
 export function gridSetupAccess(planner: boolean, drafts: boolean, start: boolean, worker: boolean) {

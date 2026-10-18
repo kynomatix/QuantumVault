@@ -1,5 +1,5 @@
 import { GridBehaviourSelect } from './GridBehaviourSelect';
-import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
+import { GRID_MODES_CREATION, gridBehaviourCopy } from '../../../../shared/grid-behaviour';
 import { gridModeLines, gridModeBoundary } from '@/lib/grid-behaviour-view';
 import { isGridCyclePolicyVersion } from '../../../../shared/grid-behaviour';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -470,10 +470,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
                 aria-pressed={form.side === side} onClick={() => edit('side', side)}>{side === 'long' ? 'Long' : 'Short'}</Button>)}
             </div>
           </div>
-          <GridBehaviourSelect value={form.behaviourMode} side={form.side} seed={form.seed} onChange={mode => edit('behaviourMode',mode)} />
+          {GRID_MODES_CREATION && <GridBehaviourSelect value={form.behaviourMode} side={form.side} seed={form.seed} onChange={mode => edit('behaviourMode',mode)} />}
             <div className="flex items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
               <div className="space-y-1"><Label htmlFor="grid-seed">Start with a position</Label>
-                <p className="text-xs text-muted-foreground">{gridBehaviourCopy(form.behaviourMode,form.side,form.seed).hint}</p>
+                <p className="text-xs text-muted-foreground">{form.side === 'long' ? 'Place backed sells above price immediately. Without it, those levels wait for a buy first.' : 'Place backed buys below price immediately. Without it, those levels wait for a sell first.'}</p>
                 <p className="text-xs text-muted-foreground">Opening a starting position incurs a taker fee.</p></div>
               <Switch id="grid-seed" checked={form.seed} onCheckedChange={v => edit('seed', v)} />
             </div>

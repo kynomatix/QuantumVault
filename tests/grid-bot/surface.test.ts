@@ -11,11 +11,11 @@ describe('Grid owner surface request and settlement guards',()=>{
     const project=(status:string)=>gridSurface({...base,bot:{...base.bot,policyVersion:'2.0.0',status}},monitor,null,{pending:0,uncertain:0},now).cycleProjection!.orders.map(o=>o.state);
     expect(project('stopped')).toEqual(['stopped','stopped']);expect(project('paused')).toEqual(['paused','waiting for fills']);
   });
-  it('labels both stopped cycle legs Stopped for the drawer and chart',()=>{
+  it('keeps both stopped cycle leg statuses lowercase for the drawer and chart',()=>{
     const now=Date.now(),orders=[{ownerOrdinal:0,leg:'opening',price:'90',side:'buy',size:'1',state:'queued'},{ownerOrdinal:0,leg:'closing',price:'100',side:'sell',size:'1',state:'waiting for fills'}];
     const monitor={generation:'1',reconciled_at:new Date(now),observation:{observedAt:now,inventoryComplete:true,orders:[]}};
     const surface=gridSurface({...snapshot(),bot:{...snapshot().bot,policyVersion:'2.0.0',status:'stopped'},cycleProjection:{generation:'1',observedAt:now,orders}},monitor,null,{pending:0,uncertain:0},now);
-    expect(gridCycleDisplayLevels(surface,now).map(o=>o.status)).toEqual(['Stopped','Stopped']);
+    expect(gridCycleDisplayLevels(surface,now).map(o=>o.status)).toEqual(['stopped','stopped']);
     expect(surface.cycleProjection!.orders.map(o=>o.state)).toEqual(['stopped','stopped']);
   });
   it('rejects delayed detail reads after a newer read, action or identity change',()=>{const reads=new GridReadOrder(),old=reads.next(),newer=reads.next();expect(reads.accepts(old)).toBe(false);expect(reads.accepts(newer)).toBe(true);reads.next();expect(reads.accepts(newer)).toBe(false);});

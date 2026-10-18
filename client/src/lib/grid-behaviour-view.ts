@@ -1,4 +1,4 @@
-import { GRID_MODES_POLICY_VERSION, isGridBehaviourMode, gridOneShotOwners } from '../../../shared/grid-behaviour';
+import { GRID_BOUNDARY_RULE, GRID_MODES_POLICY_VERSION, isGridBehaviourMode, gridOneShotOwners } from '../../../shared/grid-behaviour';
 import type { GridPlan } from '../../../server/grid-bot/engine-types';
 
 export function gridModePlanValid(plan: GridPlan): boolean {
@@ -7,7 +7,7 @@ export function gridModePlanValid(plan: GridPlan): boolean {
   if (plan.policyVersion !== GRID_MODES_POLICY_VERSION) return plan.behaviourMode === undefined && plan.gridPolicyExtension === undefined;
   const e = plan.gridPolicyExtension;
   if (!isGridBehaviourMode(plan.behaviourMode) || !e || e.mode !== plan.behaviourMode || e.reservationAlgorithm !== 'lean-1'
-    || e.boundaryRule !== 'profit-owner-quarter-v1' || !Array.isArray(plan.cycles) || !plan.cycles.every(c => c && typeof c === 'object') || !Array.isArray(e.owners) || !Array.isArray(e.selectedOwnerOrdinals) || !Array.isArray(e.boundaryPrices)) return false;
+    || e.boundaryRule !== GRID_BOUNDARY_RULE || !Array.isArray(plan.cycles) || !plan.cycles.every(c => c && typeof c === 'object') || !Array.isArray(e.owners) || !Array.isArray(e.selectedOwnerOrdinals) || !Array.isArray(e.boundaryPrices)) return false;
   const expected = gridOneShotOwners(e.mode, plan.cycles.filter(c => c.anchor === 'closing').map(c => c.ownerOrdinal), plan.lines.length - 1, plan.side === 'long');
   return JSON.stringify(expected) === JSON.stringify(e.selectedOwnerOrdinals) && e.owners.length === plan.cycles.length
     && plan.cycles.every(c => c.recycles === !expected.includes(c.ownerOrdinal) && c.enabled === (c.recycles || e.seed)

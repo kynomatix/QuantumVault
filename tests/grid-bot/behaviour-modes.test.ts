@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import Decimal from 'decimal.js';
-import { GRID_BEHAVIOUR_MODES, gridBehaviourCopy, gridOneShotOwners } from '../../shared/grid-behaviour';
+import { GRID_BEHAVIOUR_MODES, GRID_BOUNDARY_RULE, gridBehaviourCopy, gridOneShotOwners } from '../../shared/grid-behaviour';
 import { calculateGrid, minimumInvestment } from '../../server/grid-bot/engine';
 import type { GridInput } from '../../server/grid-bot/engine-types';
 import { canonicalGridPolicy, computeGridPolicyHmac, verifyGridPolicyHmac } from '../../server/grid-bot/policy-hmac';
@@ -34,6 +34,8 @@ describe('signed behaviour modes', () => {
     })));
   });
   it('pins the exact quarter boundary after quantization, including off-node starts and small grids', () => {
+    expect(GRID_BOUNDARY_RULE).toBe('interval-quarter-profit-edge-v1');
+    expect(plan({ behaviourMode: 'step_back_edge' }).gridPolicyExtension?.boundaryRule).toBe(GRID_BOUNDARY_RULE);
     expect(plan({ behaviourMode: 'step_back_edge' }).gridPolicyExtension?.boundaryPrices.map(Number)).toEqual([106,107,108,109,110]);
     expect(plan({ behaviourMode: 'step_back_edge', side: 'short', safetyEnvelopePrice: '120' }).gridPolicyExtension?.boundaryPrices.map(Number)).toEqual([90,91,92,93,94]);
     expect(plan({ behaviourMode: 'step_back_edge', start: '100.457' }).gridPolicyExtension?.selectedOwnerOrdinals).toEqual([16,17,18,19,20]);
@@ -59,6 +61,47 @@ describe('signed behaviour modes', () => {
         }
       });
     }
+  it.each(['step_back', 'step_back_edge'] as const)('funds short seed and entry exposure together at the envelope for %s, including the minimum and runtime release', behaviourMode => {
+    const request = { ...input, behaviourMode, side: 'short' as const, safetyEnvelopePrice: '120' };
+    const minimum = minimumInvestment(request);
+    expect(minimum.ok).toBe(true); if (!minimum.ok) throw Error('Minimum unavailable');
+    for (const [p, investment] of [[plan(request), request.investment], [minimum.plan, minimum.investment]] as const) {
+      const envelope = new Decimal(request.safetyEnvelopePrice);
+      const entryExposure = p.cycles!.filter(c => c.anchor === 'opening').reduce((sum, c) => sum.plus(new Decimal(c.quantity).mul(envelope)), new Decimal(0));
+      const seedExposure = p.cycles!.reduce((sum, c) => sum.plus(new Decimal(c.initialInventory).mul(envelope)), new Decimal(0));
+      const launchExposure = entryExposure.plus(seedExposure);
+      expect(new Decimal(p.capacityNotional!).gte(launchExposure)).toBe(true);
+      expect(launchExposure.lte(new Decimal(investment).mul(request.leverage))).toBe(true);
+      expect(p.gridPolicyExtension!.owners.every(c => new Decimal(c.openingValuationBound).eq(envelope))).toBe(true);
+      const policy: ReturnType<typeof behaviourPolicy> = { ...behaviourPolicy(behaviourMode, 'short'), lowerPrice: new Decimal(request.lower).toFixed(8), upperPrice: new Decimal(request.upper).toFixed(8), startPrice: new Decimal(request.start).toFixed(8),
+        gridCount: request.intervals, totalInvestment: new Decimal(investment).toFixed(2), safetyEnvelopePrice: new Decimal(request.safetyEnvelopePrice).toFixed(8), stopLossPrice: '120.00000000',
+        gridPolicyExtension: p.gridPolicyExtension,
+        levels: p.lines.map(l => ({ ordinal: l.ordinal + 1, price: new Decimal(l.price).toFixed(8), size: new Decimal(l.quantity).toFixed(8),
+          reduceOnly: l.role === 'seed_exit', side: l.role === 'seed_exit' ? 'buy' : 'sell' })) };
+      expect(canonicalGridPolicy(policy)).not.toBeNull();
+      const h = history(policy), seedQuantity = p.seedQuantity;
+      const seed = operation(policy, 'EXAMPLE_SEED', null, 'opening', seedQuantity, 1, 'seed');
+      h.operations.push(seed); h.fills.push({ ...fill(seed, 'EXAMPLE_SEED_FILL', seedQuantity, 2), price: request.start });
+      h.progress.push(terminal(seed, seedQuantity, 3));
+      for (const c of p.cycles!.filter(c => c.anchor === 'opening')) {
+        h.operations.push({ ...operation(policy, `EXAMPLE_ENTRY_${c.ownerOrdinal}`, c.ownerOrdinal, 'opening', c.quantity, 4), initialCredit: c.quantity });
+      }
+      const before = cycleCapacity(h, request.start)!;
+      expect(new Decimal(before.used).eq(launchExposure)).toBe(true);
+      expect(new Decimal(before.used).lte(before.ceiling)).toBe(true);
+      const owner = p.cycles!.find(c => c.recycles === false)!;
+      const close = operation(policy, 'EXAMPLE_CLOSE', owner.ownerOrdinal, 'closing', owner.quantity, 5);
+      h.operations.push(close); h.allocations.push({ operationId: close.id, cycleOrdinal: owner.ownerOrdinal, tradeId: 'EXAMPLE_SEED_FILL', size: owner.quantity });
+      h.fills.push(fill(close, 'EXAMPLE_CLOSE_FILL', owner.quantity, 6)); h.progress.push(terminal(close, owner.quantity, 7));
+      const after = cycleCapacity(h, request.start)!;
+      const released = new Decimal(owner.quantity).mul(envelope);
+      expect(new Decimal(before.used).minus(after.used).eq(released)).toBe(true);
+      expect(new Decimal(after.remaining).minus(before.remaining).eq(released)).toBe(true);
+      const replay = replayGridCycles(h); expect(replay.ok).toBe(true);
+      if (replay.ok) expect(replay.cycles.map(c => new Decimal(c.cycle.quantity).toFixed(8))).toEqual(p.cycles!.map(c => new Decimal(c.quantity).toFixed(8)));
+    }
+    expect(calculateGrid({ ...request, investment: new Decimal(minimum.investment).minus(request.investmentStep).toFixed(2) }).ok).toBe(false);
+  });
   it('retires seed-off targets without shrinking the initial entry sizes or inventing upper orders', () => {
     const plans = GRID_BEHAVIOUR_MODES.map(behaviourMode => plan({ behaviourMode, seed: false }));
     expect(plans.map(p => p.lines.filter(l => l.role === 'entry').map(l => l.quantity))).toEqual(Array(3).fill(plans[0].lines.filter(l => l.role === 'entry').map(l => l.quantity)));
@@ -110,7 +153,7 @@ describe('signed behaviour modes', () => {
         expect(validateCycleSourceCredit(h, { ...reopen, recycleAllocations: [{ tradeId: `EXAMPLE_EXIT_${n}`, size: amount }] }).ok).toBe(false);
       }
       const result = replayGridCycles(h); if (!result.ok) throw Error(result.reason);
-      expect(projectCycleOrders(result.cycles, h.progress, side, '0.001','1','95',true).find(o=>o.ownerOrdinal===owner.ownerOrdinal)?.state).toBe('Finished here');
+      expect(projectCycleOrders(result.cycles, h.progress, side, '0.001','1','95',true).find(o=>o.ownerOrdinal===owner.ownerOrdinal)?.state).toBe('done');
       expect(result.cycles.every(c => c.cycle.quantity === '1.00000000')).toBe(true);
     });
     it(`retires only proven unused ${mode} ${side} seed targets, even when entries are paused`, () => {
@@ -139,6 +182,24 @@ describe('signed behaviour modes', () => {
       await expect(authoritativeGridPreview('EXAMPLE',requested,'EXAMPLE_REVISION',{...deps,modesCreation:false})).rejects.toThrow();
       const form = gridSetupForm(requested,requested.market); expect(gridSetupIntent(form,q.stop,'manual').behaviourMode).toBe(behaviourMode);
       expect(new URLSearchParams(plannerPreviewQuery(form,q.stop).value).get('behaviourMode')).toBe(behaviourMode);
+      const fallbackIntent = gridSetupIntent(form, q.stop, 'manual', false, false);
+      expect(fallbackIntent).not.toHaveProperty('behaviourMode');
+      expect(new URLSearchParams(plannerPreviewQuery(form, q.stop, false).value).has('behaviourMode')).toBe(false);
+      const { behaviourMode: omitted, ...fallbackQuery } = q;
+      const fallbackPreview = previewGrid(fallbackQuery, a.market, clock, { modesCreation: false });
+      const fallbackDraft = await authoritativeGridPreview('EXAMPLE', fallbackIntent, 'EXAMPLE_REVISION', { ...deps, modesCreation: false });
+      expect(fallbackDraft.state).toBe('ready');
+      expect(fallbackDraft.plan?.policyVersion).toBe('2.0.0');
+      expect(fallbackDraft.plan?.behaviourMode).toBeUndefined();
+      expect(fallbackPreview.requestedPlan?.lines).toEqual(fallbackDraft.plan?.lines);
+      expect(fallbackPreview.requestedPlan).toEqual(previewGrid(fallbackQuery, a.market, clock).requestedPlan);
+      for (const flags of [{ leanSizingCreation: false }, { cycleV2Creation: false }]) {
+        expect(previewGrid(q, a.market, clock, flags).state).toBe('rejected');
+        await expect(authoritativeGridPreview('EXAMPLE', requested, 'EXAMPLE_REVISION', { ...deps, ...flags })).rejects.toThrow();
+        expect(previewGrid(fallbackQuery, a.market, clock, { ...flags, modesCreation: false })).toEqual(previewGrid(fallbackQuery, a.market, clock, flags));
+        expect(await authoritativeGridPreview('EXAMPLE', fallbackIntent, 'EXAMPLE_REVISION', { ...deps, ...flags, modesCreation: false }))
+          .toEqual(await authoritativeGridPreview('EXAMPLE', fallbackIntent, 'EXAMPLE_REVISION', { ...deps, ...flags }));
+      }
       expect(gridBehaviourCopy(behaviourMode,side,seed).hint).toBeTruthy();
     });
   }

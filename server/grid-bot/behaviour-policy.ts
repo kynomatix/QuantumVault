@@ -19,7 +19,7 @@ export function gridPolicyExtension(cycles: GridCycle[], mode: GridBehaviourMode
     owners: cycles.map(c => ({ ownerOrdinal: c.ownerOrdinal, recycles: c.recycles !== false, enabled: c.enabled !== false,
       quantity: fixed(c.quantity), openingOrdinal: c.openingOrdinal, closingOrdinal: c.closingOrdinal,
       initialInventory: fixed(c.initialInventory), initialOpeningCredit: fixed(c.initialOpeningCredit),
-      openingValuationBound: fixed(c.enabled === false ? '0' : c.recycles === false ? bounds.high : !long ? envelope
+      openingValuationBound: fixed(c.enabled === false ? '0' : !long ? envelope : c.recycles === false ? bounds.high
         : Decimal.max(c.openingPrice, new Decimal(c.initialInventory).gt(0) ? bounds.high : '0').toFixed()) })) };
 }
 export const stableGridExtension = (value: unknown): string => JSON.stringify(value, (_, v) =>

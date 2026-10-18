@@ -2,13 +2,14 @@ export const GRID_BEHAVIOUR_MODES = ['repeat_all', 'step_back', 'step_back_edge'
 export type GridBehaviourMode = typeof GRID_BEHAVIOUR_MODES[number];
 export const GRID_MODES_POLICY_VERSION = '2.2.0' as const;
 export const GRID_MODES_CREATION = true;
-export const GRID_BOUNDARY_RULE = 'profit-owner-quarter-v1' as const;
+export const GRID_BOUNDARY_RULE = 'interval-quarter-profit-edge-v1' as const;
 export const isGridBehaviourMode = (mode: unknown): mode is GridBehaviourMode =>
   GRID_BEHAVIOUR_MODES.includes(mode as GridBehaviourMode);
 /** Explicit capabilities: unknown versions never acquire cycle authority. */
 export const isGridCyclePolicyVersion = (version: unknown): version is '2.0.0' | '2.2.0' =>
   version === '2.0.0' || version === GRID_MODES_POLICY_VERSION;
 export function gridOneShotOwners(mode: GridBehaviourMode, profitOrdinals: number[], intervals: number, long: boolean) {
+  // A quarter of all signed intervals, capped to profit-side owners, from the profit edge.
   const ranked = [...profitOrdinals].sort((a, b) => long ? b - a : a - b);
   return (mode === 'repeat_all' ? [] : mode === 'step_back' ? ranked
     : ranked.slice(0, Math.min(ranked.length, Math.max(1, Math.ceil(intervals / 4))))).sort((a, b) => a - b);

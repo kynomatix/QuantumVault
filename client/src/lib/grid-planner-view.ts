@@ -1,5 +1,5 @@
 import { gridModePlanValid, gridModeLines } from './grid-behaviour-view';
-import { isGridCyclePolicyVersion } from '../../../shared/grid-behaviour';
+import { GRID_MODES_CREATION, isGridCyclePolicyVersion } from '../../../shared/grid-behaviour';
 import Decimal from 'decimal.js';
 import { GRID_HISTORY_MAX_BARS } from '../../../shared/grid-lookback';
 import {PER_BOT_ORDINARY_MAX,GRID_FULL_WINDOW_SLOTS,GRID_PROTECTION_RESERVE} from '../../../shared/grid-capacity';
@@ -88,12 +88,13 @@ export function feePercentToRate(percent: string): string | null {
 }
 
 /** The request identity includes every editable preview input, including the proposed stop. */
-export function plannerPreviewQuery(form: GridSetupForm, stop: string) {
+export function plannerPreviewQuery(form: GridSetupForm, stop: string, modesCreation = GRID_MODES_CREATION) {
   try {
     const fee = form.investment ? feePercentToRate(form.feePercent) : null;
     const q = new URLSearchParams({ market: form.market, side: form.side, lower: form.lower, upper: form.upper,
-      behaviourMode: form.behaviourMode, intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
+      intervals: form.intervals, entryScale: form.entryScale, profitScale: form.profitScale, seed: String(form.seed),
       leverage: form.leverage, investment: form.investment, stop });
+    if (modesCreation) q.set('behaviourMode', form.behaviourMode);
     if (fee !== null) q.set('fee', fee);
     return { value: q.toString(), error: '' };
   } catch (e) { return { value: '', error: (e as Error).message }; }

@@ -1,3 +1,4 @@
+import { LineStyle } from 'lightweight-charts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isValidElement, type ReactElement } from 'react';
 import type { GridBotSurface } from '../../shared/grid-surface';
@@ -149,6 +150,13 @@ describe('Grid chart clock and viewport', () => {
     render({chart:{...chart,timeframe:'4h'},surface:{...polled,bot:{...polled.bot,id:'EXAMPLE-OTHER',status:'stopped'}},fresh:true,now:now+6000});
     expect(series.removePriceLine).toHaveBeenCalledWith(lastLine);
     expect(series.attachPrimitive.mock.calls.at(-1)![0].autoscaleInfo()).toEqual({priceRange:{minValue:80,maxValue:110}});
+    const modes: GridBotSurface = {...polled,bot:{...polled.bot,id:'EXAMPLE-OTHER',policyVersion:'2.2.0'},cycleProjection:{observedAt:new Date(now).toISOString(),orders:[
+      {ownerOrdinal:1,leg:'closing',price:'98',side:'sell',size:'0',recycles:false,enabled:true,state:'done'},
+      {ownerOrdinal:2,leg:'closing',price:'99',side:'sell',size:'0',recycles:false,enabled:false,state:'unused — no starting position'},
+    ]}};
+    render({chart:{...chart,timeframe:'4h'},surface:modes,fresh:true,now:now+7000});
+    expect(priceLines.filter(line=>line.price===98).at(-1)).toEqual(expect.objectContaining({lineStyle:LineStyle.Solid,color:'#94a3b8'}));
+    expect(priceLines.filter(line=>line.price===99).at(-1)).toEqual(expect.objectContaining({lineStyle:LineStyle.Dotted,color:'#94a3b8'}));
     effects.forEach(effect => effect.cleanup?.()); expect(remove).toHaveBeenCalledTimes(3); expect(disconnect).toHaveBeenCalledTimes(3);
     expect(unsubscribeCrosshairMove).toHaveBeenCalledWith(hover); expect(unsubscribeClick).toHaveBeenCalledWith(tap);
   });

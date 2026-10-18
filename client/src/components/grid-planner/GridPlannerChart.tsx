@@ -15,7 +15,7 @@ type ChartLevel = Pick<GridLine, 'ordinal' | 'price'> & Partial<Pick<GridLine, '
 export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { chart: Extract<PlannerChart, { state: 'available' }>; lines: ChartLevel[]; range: PlannerRange | null; period?: string; tick?: string | null }) {
   const container = useRef<HTMLDivElement>(null);
   const retained = useRef<{ canvas: ReturnType<typeof createSharedTradePriceChart>; series: ReturnType<ReturnType<typeof createSharedTradePriceChart>['addCandlestickSeries']>; resource: string } | null>(null);
-  const [hovered, setHovered] = useState<{ price: string; detail: string; left: number; top: number } | null>(null);
+  const [hovered, setHovered] = useState<{ price: string; detail?: string; left: number; top: number } | null>(null);
   useEffect(() => {
     if (!container.current) return;
     const resource = chart.market + ':' + chart.timeframe;

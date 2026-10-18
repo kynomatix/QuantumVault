@@ -80,7 +80,7 @@ export function calculateCycleGrid(input: GridInput): GridResult {
     let planned = new D(0), entries = new D(0), seed = new D(0), individual = new D(0);
     cycles.forEach((c, i) => {
       const q = qs[i], seeded = input.seed && c.anchor === 'closing';
-      const price = c.recycles === false ? new D(bounds.high) : long ? D.max(c.openingPrice, seeded ? bounds.high : '0') : envelope;
+      const price = c.recycles === false ? (long ? new D(bounds.high) : envelope) : long ? D.max(c.openingPrice, seeded ? bounds.high : '0') : envelope;
       if (input.seed || c.anchor === 'opening') planned = planned.plus(q.mul(price));
       if (c.anchor === 'opening') entries = entries.plus(q);
       if (seeded) seed = seed.plus(q);

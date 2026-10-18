@@ -19,10 +19,14 @@ import { isPlannerPreview, RANGE_PRESETS } from '../../client/src/lib/grid-plann
 // Only rendering hooks and the periodic price scheduler are replaced.
 const hooks = vi.hoisted(() => ({
   states: [] as unknown[], refs: [] as { current: unknown }[], dirty: false,
-  stateIndex: 0, refIndex: 0, effectIndex: 0,
+  stateIndex: 0, refIndex: 0, effectIndex: 0, modesCreation: true,
   effects: [] as { dependencies?: readonly unknown[]; cleanup?: () => void }[],
   pending: [] as { index: number; run: () => void | (() => void); dependencies?: readonly unknown[] }[],
   controllers: [] as import('../../client/src/lib/planner-price-refresh').PlannerPriceRefresh[],
+}));
+vi.mock('../../shared/grid-behaviour', async importOriginal => ({
+  ...await importOriginal<typeof import('../../shared/grid-behaviour')>(),
+  get GRID_MODES_CREATION() { return hooks.modesCreation; },
 }));
 vi.mock('react', async importOriginal => ({
   ...await importOriginal<typeof import('react')>(),
@@ -148,6 +152,7 @@ beforeEach(() => {
   requests = []; listed = ['BTC-PERP', 'ETH-PERP']; constraintsAvailable = true;
   holdCharts = false; chartRequests = [];
   cycleV2Creation = undefined;
+  hooks.modesCreation = true;
   vi.stubGlobal('window', new EventTarget()); vi.stubGlobal('document', new EventTarget());
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
   vi.stubGlobal('fetch', vi.fn((url: string, init: RequestInit) => {
@@ -157,7 +162,7 @@ beforeEach(() => {
       const fixture = fixtureMarket(market, observedAt);
       const query = { ...Object.fromEntries(path.searchParams), intervals: Number(path.searchParams.get('intervals')),
         seed: path.searchParams.get('seed') === 'true', fee: path.searchParams.get('fee') } as unknown as PlannerQuery;
-      return Promise.resolve({ ok: true, json: async () => previewGrid(query, fixture, observedAt, {cycleV2Creation}) });
+      return Promise.resolve({ ok: true, json: async () => previewGrid(query, fixture, observedAt, {cycleV2Creation,modesCreation:hooks.modesCreation}) });
     }
     if (path.pathname.endsWith('/range') || holdCharts && path.pathname.endsWith('/chart')) return new Promise((complete, reject) => {
       (path.pathname.endsWith('/range') ? requests : chartRequests).push({ market: path.searchParams.get('market')!, timeframe: path.searchParams.get('timeframe')!,
@@ -240,6 +245,18 @@ describe('Grid setup automatic opening range', () => {
     await vi.advanceTimersByTimeAsync(250); await settle();
     expect(elements().some(node => node.props.role === 'status' && text(node) === '4 grid orders raised to the $10 minimum')).toBe(true);
   });
+  it('hides mode choice and sends mode-free preview and draft requests while modes creation is disabled', async () => {
+    hooks.modesCreation = false;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    await open({createEnabled:true}); await resolve(requests[0]); edit('investment','1000');
+    await vi.advanceTimersByTimeAsync(250); await settle();
+    expect(elements().some(node => node.type === GridBehaviourSelect)).toBe(false);
+    expect(find(node => node.type === GridDraftActions).props.intent).not.toHaveProperty('behaviourMode');
+    const previewCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/preview?'));
+    expect(previewCalls.length).toBeGreaterThan(0);
+    for (const [url] of previewCalls) expect(new URL(String(url),'https://example.test').searchParams.has('behaviourMode')).toBe(false);
+    expect(elements().filter(node=>node.type===GridPlanIssues).flatMap(node=>node.props.reasons)).not.toContain('Behaviour modes are unavailable');
+  });
   it('rejects a behaviour-mode preview while cycle creation is disabled', async () => {
     cycleV2Creation=false;
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
@@ -261,6 +278,9 @@ describe('Grid setup automatic opening range', () => {
       ?'Sell as price rises, buy back as it falls, and keep going.'
       :'Close as price falls, reopen as it rises, and keep going.');
     expect(copy).toContain('Quantities stay fixed; profits stay in the bot.');
+    expect(copy).toContain(side==='Long'
+      ?'Place backed sells above price immediately. Without it, those levels wait for a buy first.'
+      :'Place backed buys below price immediately. Without it, those levels wait for a sell first.');
     selector.props.onChange('step_back'); render();
     expect(find(node=>node.type===GridBehaviourSelect).props.value).toBe('step_back');
   });

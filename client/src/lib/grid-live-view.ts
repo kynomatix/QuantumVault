@@ -119,5 +119,5 @@ export function gridCycleDisplayLevels(surface:GridBotSurface,now:number):GridBo
   const p=surface.cycleProjection,at=p?Date.parse(p.observedAt):NaN;
   if(!p||!Number.isFinite(at)||at>now||now-at>15000)return [];
   return p.orders.map(o=>({id:`cycle:${o.ownerOrdinal}:${o.leg}`,ordinal:o.ownerOrdinal+1,price:o.price,size:o.size,
-    ...(o.recycles!==undefined?{recycles:o.recycles,enabled:o.enabled}:{}),side:o.side,reduceOnly:o.leg==='closing',status:o.state==='stopped'?'Stopped':o.state,cumulativeFilledSize:'0'}));
+    ...(o.recycles!==undefined?{recycles:o.recycles,enabled:o.enabled}:{}),side:o.side,reduceOnly:o.leg==='closing',status:o.state,cumulativeFilledSize:'0'}));
 }

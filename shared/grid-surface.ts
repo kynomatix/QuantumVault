@@ -11,7 +11,7 @@ export interface GridBotSummary {
 export interface GridCycleOrderView {
   ownerOrdinal:number;leg:'opening'|'closing';price:string;side:'buy'|'sell';size:string;
   recycles?:boolean;enabled?:boolean;
-  state:'Finished here'|'Unused — no starting position'|'once only'|'working'|'pending confirmation'|'queued'|'waiting for fills'|'waiting for minimum'|'waiting for price'|'Waiting for room'|'paused'|'stopped';
+  state:'done'|'unused — no starting position'|'working'|'pending confirmation'|'queued'|'waiting for fills'|'waiting for minimum'|'waiting for price'|'waiting for room'|'paused'|'stopped';
 }
 export interface GridBotSurface {
   cycleProjection?:{observedAt:string;orders:GridCycleOrderView[]}|null;

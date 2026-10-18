@@ -42,7 +42,7 @@ describe('durable shared capital pool',()=>{
     const replay=replayGridCycles(full);if(!replay.ok)throw Error(replay.reason);
     const pool=cycleCapacity(full,'95')!;
     const views=projectCycleOrders(replay.cycles,full.progress,'long','0.001','1','95',true,pool);
-    expect(views.find(v=>v.ownerOrdinal===1&&v.leg==='opening')).toMatchObject({state:'Waiting for room',size:'1'});
+    expect(views.find(v=>v.ownerOrdinal===1&&v.leg==='opening')).toMatchObject({state:'waiting for room',size:'1'});
     const plan=planCycleWindow({cycles:replay.cycles,direction:'long',levels:full.policy.levels.map(l=>({id:'EXAMPLE_LEVEL_'+l.ordinal,ordinal:l.ordinal,attempt:0})),
       owned:[],positionSize:'1',bookPrice:'95',lot:'0.001',minimumQuote:'1',freeSlots:100,inventoryComplete:true,entriesAllowed:true,canaryRemaining:'1000',pool});
     expect(plan.chunks.flat().some(a=>a.kind==='place'&&!a.level.reduceOnly)).toBe(false);

@@ -14,9 +14,9 @@ export function projectCycleOrders(cycles:ReplayedGridCycle[],progress:CycleProg
     const executable=executableCycleQuantity(c,leg,lot,minimumQuote);
     const size=live.length?(closing?c.closingCommitments:c.openingCommitments):executable;
     const state:GridCycleOrderView['state']=live.length?(live.every(id=>progress.some(p=>p.operationId===id&&p.state==='live'))?'working':'pending confirmation')
-      :c.cycle.enabled===false?'Unused — no starting position':c.cycle.recycles===false && new D(c.held).isZero() && new D(c.pendingSeed).isZero()?'Finished here':!closing&&c.cycle.recycles===false?'once only':!closing&&!entriesAllowed?'paused':new D(available).isZero()?'waiting for fills':new D(executable).isZero()?'waiting for minimum'
+      :c.cycle.enabled===false?'unused — no starting position':c.cycle.recycles===false && new D(c.held).isZero() && new D(c.pendingSeed).isZero()?'done':!closing&&!entriesAllowed?'paused':new D(available).isZero()?'waiting for fills':new D(executable).isZero()?'waiting for minimum'
       :(side==='buy'?new D(price).gte(mark):new D(price).lte(mark))?'waiting for price'
-      :!closing&&pool&&(pool.breached||new D(executable).mul(pool.envelope).gt(pool.remaining))?'Waiting for room':'queued';
+      :!closing&&pool&&(pool.breached||new D(executable).mul(pool.envelope).gt(pool.remaining))?'waiting for room':'queued';
     return {ownerOrdinal:c.cycle.ownerOrdinal,leg,price,side,size,state,...(c.cycle.recycles===undefined?{}:{recycles:c.cycle.recycles,enabled:c.cycle.enabled})};
   }));
 }
