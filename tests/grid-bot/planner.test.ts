@@ -56,12 +56,12 @@ describe('Pacifica authority and honest planner verdicts', () => {
       expect(result.reasons[0]).not.toMatch(/observed|shared authority|lot-rounded/i);
     }
   });
-  it.each(['long','short'] as const)('previews default v2 %s cycles and displays their higher reserved minimum', side => {
+  it.each(['long','short'] as const)('preserves unmarked v2 %s previews and their reserved minimum', side => {
     const market=marketSnapshot(row(),deps());
     if(market.constraints.state!=='available')throw Error('EXAMPLE');
     const c=market.constraints.value;
     for(const seed of [false,true]){
-      const result=previewGrid({...query,side,seed,stop:side==='long'?'70':'130'},market,now);
+      const result=previewGrid({...query,side,seed,stop:side==='long'?'70':'130'},market,now,{leanSizingCreation:false});
       expect(result.requestedPlan?.policyVersion).toBe('2.0.0');expect(result.requestedPlan?.cycles).toHaveLength(4);
       const input={side,seed,lower:query.lower,upper:query.upper,start:'100',intervals:query.intervals,entryScale:query.entryScale,profitScale:query.profitScale,
         leverage:query.leverage,tick:c.tick,lot:c.lot,minimumQuote:c.minimumQuote,investmentStep:'0.01',transferFloor:'0',effectiveMakerCostRate:null};
@@ -70,7 +70,7 @@ describe('Pacifica authority and honest planner verdicts', () => {
       expect(result.minimum).toEqual({state:'available',value:expected.investment});
       expect(Number(expected.investment)).toBeGreaterThan(Number(legacy.investment));
       expect(plannerMinimumRows(result)).toEqual([{label:'Minimum investment',value:`${Number(expected.investment)} USDC`}]);
-      const underfunded=previewGrid({...query,side,seed,stop:side==='long'?'70':'130',investment:'0.01'},market,now);
+      const underfunded=previewGrid({...query,side,seed,stop:side==='long'?'70':'130',investment:'0.01'},market,now,{leanSizingCreation:false});
       expect(underfunded.minimumPlan?.policyVersion).toBe('2.0.0');
       expect(plannerMinimumRows(underfunded)).toEqual(plannerMinimumRows(result));
     }

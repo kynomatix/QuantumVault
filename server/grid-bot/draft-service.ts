@@ -12,6 +12,7 @@ import type { PlannerMarket } from '../grid-planner/types';
 import { projectGridStop } from './stop-clearance';
 import { GRID_CYCLE_V2_CREATION } from './cycle-policy';
 import { gridSeedPriceBounds } from './cycle-engine';
+import { GRID_LEAN_SIZING_CREATION } from './lean-sizing';
 
 const D = Decimal.clone({ precision:100, toExpNeg:-100, toExpPos:100 });
 export class GridDraftError extends Error { constructor(public code: 'authority_unavailable'|'preview_drift'|'idempotency_conflict'|'secret_unavailable'|'invalid_intent', public reasons: string[] = []) { super(code); } }
@@ -23,6 +24,7 @@ export interface GridDraftAuthority {
 export interface GridDraftDeps {
   /** Server/test injection only. HTTP bodies cannot select a policy version. */
   cycleV2Creation?: boolean;
+  leanSizingCreation?: boolean;
   projectedStop?: boolean;
   now():number; observe(wallet:string,intent:GridIntent):Promise<GridDraftAuthority>; umk(wallet:string):Promise<Buffer|null>;
   storage: Pick<GridStorage,'createDraftWithLevels'|'findByClientRequest'|'getBotSnapshot'>;
@@ -39,6 +41,7 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
   if (!wallet || !gridIntentSchema.safeParse(intent).success || !gridRevisionSchema.safeParse(draftRevision).success) throw new GridDraftError('invalid_intent');
   const authority=await deps.observe(wallet,intent), now=deps.now(), reasons:string[]=[];
   const cyclic=deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION;
+  const lean=cyclic && (deps.leanSizingCreation ?? GRID_LEAN_SIZING_CREATION);
   const createPolicy=cyclic?{...GRID_CREATE_POLICY,policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}:GRID_CREATE_POLICY;
   // A v2 preview must earn projected stop authority even when other observations prevent sizing.
   if(cyclic) authority.stop={state:'unavailable',reason:'Stop projection inputs unavailable'};
@@ -82,7 +85,8 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
     const input:GridGeometryInput={side:intent.direction,lower:intent.lowerPrice,upper:intent.upperPrice,start:r.price,
       intervals:intent.gridCount,entryScale:intent.entryScaleType,profitScale:intent.profitScaleType,seed:intent.seedAtCreation,
       leverage:intent.leverage,tick:cv.tick,lot:cv.lot,minimumQuote:cv.minimumQuote,investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:makerRate,
-      ...(cyclic?{policyVersion:'2.0.0' as const,...(cv.maximumQuote.state==='available'?{maximumQuote:cv.maximumQuote.value}:{})}:{})};
+      ...(cyclic?{policyVersion:'2.0.0' as const,...(cv.maximumQuote.state==='available'?{maximumQuote:cv.maximumQuote.value}:{})}:{}),
+      ...(lean?{sizingVersion:'lean-1' as const,safetyEnvelopePrice:D.max(intent.upperPrice,intent.seedAtCreation?gridSeedPriceBounds(r.price,cv.tick).high:'0',intent.direction==='short'?intent.stopPrice:'0').toFixed()}: {})};
     const min=minimumInvestment(input);
     if (min.ok) minimum=new D(min.investment).mul(reserveFactor).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2);
     else reject(...[min.issues.map(i=>i.reason).join('; ')]);
@@ -150,6 +154,7 @@ export async function createGridDraft(wallet:string,request:GridCreateRequest,de
   const previous=await deps.storage.findByClientRequest(wallet,request.clientRequestId);
   const id=previous?.id??randomUUID(), p=preview.plan;
   const policy:GridPolicy={id,protocol:'pacifica',market:request.intent.market,direction:request.intent.direction,
+    ...(p.sizingVersion?{sizingVersion:p.sizingVersion,safetyEnvelopePrice:new D(p.safetyEnvelopePrice!).toFixed(8)}:{}),
     upperPrice:new D(p.lines.at(-1)!.price).toFixed(8),lowerPrice:new D(p.lines[0].price).toFixed(8),startPrice:new D(p.start).toFixed(8),
     gridCount:request.intent.gridCount,totalInvestment:new D(request.intent.totalInvestment).toFixed(2),leverage:Number(request.intent.leverage),
     entryScaleType:request.intent.entryScaleType,profitScaleType:request.intent.profitScaleType,policyVersion:preview.policy.policyVersion,feePolicyVersion:'1.0.0',runtimePolicyVersion:preview.policy.runtimePolicyVersion,

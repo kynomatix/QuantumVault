@@ -14,7 +14,7 @@ export function gridSeedPriceBounds(start: string, tick: string) {
     high: anchor.plus(step).mul(new D(1).plus(fraction)).div(step).ceil().mul(step).toFixed() };
 }
 
-/** Fixed capacity across every reachable cycle; initial seed allocation never compounds. */
+/** Immutable cycle quotas; marked drafts plan against their signed shared pool bound. */
 export function calculateCycleGrid(input: GridInput): GridResult {
   for (const k of ['lower', 'upper', 'start', 'leverage', 'tick', 'lot', 'minimumQuote', 'investmentStep', 'investment'] as const)
     if (!validGridDecimal(input[k])) return fail('invalid_decimal', `Invalid ${k}`);
@@ -32,6 +32,10 @@ export function calculateCycleGrid(input: GridInput): GridResult {
   const bounds = gridSeedPriceBounds(input.start, input.tick);
   if (input.seed && !new D(bounds.low).gt(0)) return fail('invalid_geometry', 'Seed execution bound is not positive');
   const worst = D.max(prices.at(-1)!, input.seed ? bounds.high : '0');
+  const lean = input.sizingVersion === 'lean-1';
+  if (input.sizingVersion !== undefined && !lean || lean && (!validGridDecimal(input.safetyEnvelopePrice) || new D(input.safetyEnvelopePrice!).lt(worst)))
+    return fail('invalid_geometry', 'Safety envelope is unavailable or below the execution bound');
+  const envelope = lean ? new D(input.safetyEnvelopePrice!) : worst;
   const opening = (p: Decimal) => long ? p.lt(start) : p.gt(start);
   const entries = geometry.lines.filter(l => opening(new D(l.price))).sort((a, b) => long ? a.ordinal - b.ordinal : b.ordinal - a.ordinal);
   const profits = geometry.lines.filter(l => !opening(new D(l.price)) && !new D(l.price).eq(start)).sort((a, b) => long ? b.ordinal - a.ordinal : a.ordinal - b.ordinal);
@@ -63,11 +67,30 @@ export function calculateCycleGrid(input: GridInput): GridResult {
       spread: spread.toFixed(), requiredSpread: required.toFixed(), assumedRoundTripFee: '0', clears: spread.gt(required) };
   });
   if (input.effectiveMakerCostRate != null && feeRows.some(r => !r.clears)) return fail('fee_clearance', 'Assumed round-trip cost is at least a cycle spread');
-  if (investment.lt(input.transferFloor) || [...minimums.values()].reduce((s, q) => s.plus(q.mul(worst)), new D(0)).gt(total))
-    return fail('underfunded', 'Investment cannot fund every future opening endpoint at its lot-rounded minimum');
   const quantities = (units: Decimal) => cycles.map(c => D.max(minimums.get(c.ownerOrdinal)!, floor(units.mul(quantum).mul(coefficients.get(c.ownerOrdinal)!), lot)));
-  const capacity = (qs: Decimal[]) => qs.reduce((s, q) => s.plus(q), new D(0)).mul(worst);
+  const capacity = (qs: Decimal[]) => {
+    if (!lean) return qs.reduce((s, q) => s.plus(q), new D(0)).mul(worst);
+    let planned = new D(0), entries = new D(0), seed = new D(0), individual = new D(0);
+    cycles.forEach((c, i) => {
+      const q = qs[i], seeded = input.seed && c.anchor === 'closing';
+      const price = long ? D.max(c.openingPrice, seeded ? bounds.high : '0') : envelope;
+      if (input.seed || c.anchor === 'opening') planned = planned.plus(q.mul(price));
+      if (c.anchor === 'opening') entries = entries.plus(q);
+      if (seeded) seed = seed.plus(q);
+      individual = D.max(individual, q.mul(envelope));
+    });
+    return D.max(planned, individual, seed.mul(envelope), input.seed ? '0' : entries.mul(envelope));
+  };
+  if (investment.lt(input.transferFloor) || capacity(quantities(new D(0))).gt(total))
+    return fail('underfunded', 'Investment cannot fund the lot-rounded cycle minima within the safety envelope');
   let low = new D(0), high = total.div(quantum).floor();
+  if (lean) {
+    // The anchor schedule can exceed C when only entry owners need startup funding.
+    for (let n = 0; capacity(quantities(high)).lte(total); n++) {
+      if (n >= 256) return fail('search_limit', 'Cycle allocation reached its finite bound');
+      high = high.plus(1).mul(2);
+    }
+  }
   for (let iteration = 0; low.lt(high); iteration++) {
     if (iteration >= 256) return fail('search_limit', 'Cycle allocation reached its finite bound');
     const mid = low.plus(high).plus(1).div(2).floor();
@@ -88,6 +111,7 @@ export function calculateCycleGrid(input: GridInput): GridResult {
     || seedQuantity.mul(bounds.high).gt(input.maximumQuote))) return fail('invalid_geometry', 'Cycle endpoint or aggregate seed exceeds maximum quote');
   const reserved = capacity(qs), allocated = lines.reduce((s, l) => s.plus(l.notional), new D(0));
   return { ok: true, plan: { policyVersion: '2.0.0', side: input.side, start: start.toFixed(), investment: investment.toFixed(), leverage: input.leverage,
+    ...(lean ? { sizingVersion: 'lean-1' as const, safetyEnvelopePrice: envelope.toFixed() } : {}),
     lines, cycles, capacityPrice: worst.toFixed(), capacityNotional: reserved.toFixed(), seedPriceBounds: bounds, seedQuantity: seedQuantity.toFixed(),
     allocatedNotional: allocated.toFixed(), unallocatedNotional: total.minus(reserved).toFixed(),
     feeGate: input.effectiveMakerCostRate == null ? 'not_evaluated' : 'evaluated', feeRows: input.effectiveMakerCostRate == null ? [] : feeRows,

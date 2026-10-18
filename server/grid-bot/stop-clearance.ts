@@ -45,15 +45,21 @@ export function projectGridStop(input: GridProjectionInput, now: number) {
       if (new D(p.seedQuantity).gt(0)) candidates.push(seedPrice);
       const basis = long ? D.max(...candidates) : D.min(...candidates);
       size = p.cycles.reduce((sum,c)=>sum.plus(c.quantity),new D(0));
+      if (p.sizingVersion === 'lean-1') {
+        if (!p.safetyEnvelopePrice || !numeric(p.safetyEnvelopePrice) || new D(p.safetyEnvelopePrice).lt(p.capacityPrice)
+          || !long && new D(p.safetyEnvelopePrice).lt(stop)) return deny('Safety envelope is unavailable.');
+        // ROUND_UP prevents finite decimal division understating the reachable quantity.
+        size = D.min(size, funding.mul(p.leverage).div(p.safetyEnvelopePrice).toSignificantDigits(90, D.ROUND_UP));
+      }
       notional = size.mul(basis);
-      fees = size.mul(p.capacityPrice).mul(D.max(0,input.makerRate,input.takerRate));
+      fees = size.mul(p.sizingVersion === 'lean-1' ? p.safetyEnvelopePrice! : p.capacityPrice).mul(D.max(0,input.makerRate,input.takerRate));
     }
     if (!size.gt(0) || !funding.gt(fees) || !seedPrice.gt(0)) return deny('Projected exposure or funded margin is unavailable.');
     const entry=notional.div(size), margin=funding.minus(fees);
     // Pacifica: (price - side*position_margin/size)/(1-side/(2*market_max_leverage)).
     // At weighted entry there is no unrealized PnL; margin is NEW subaccount funding minus entry fees.
     let projected=entry.minus(margin.div(size).mul(sign)).div(new D(1).minus(new D(sign).div(max.mul(2))));
-    if (p.policyVersion === '2.0.0' && new D(startup.size).gt(0)) {
+    if (p.policyVersion === '2.0.0' && !p.sizingVersion && new D(startup.size).gt(0)) {
       if (!funding.gt(startup.fees)) return deny('Startup funded margin is unavailable.');
       const initial = new D(startup.notional).div(startup.size).minus(funding.minus(startup.fees).div(startup.size).mul(sign))
         .div(new D(1).minus(new D(sign).div(max.mul(2))));
@@ -69,6 +75,6 @@ export function projectGridStop(input: GridProjectionInput, now: number) {
       source:'pacifica:documented-liquidation-formula:new-subaccount:owner-2026-10-12',
       projection:{funding:funding.toFixed(),fees:fees.toFixed(),size:size.toFixed(),weightedEntry:entry.toFixed(),
         maintenanceRate:new D(1).div(max.mul(2)).toFixed(),maxLeverage:max.toFixed(),seedWorstPrice:seedPrice.toFixed(),
-        ...(p.policyVersion === '2.0.0' ? { scenario: 'all_reachable_cycle_inventory', startup } : {})}};
+        ...(p.policyVersion === '2.0.0' ? { scenario: p.sizingVersion ? 'shared_capacity_inventory' : 'all_reachable_cycle_inventory', ...(p.sizingVersion ? { safetyEnvelopePrice: p.safetyEnvelopePrice } : { startup }) } : {})}};
   } catch { return deny('Projection inputs are unknown or invalid.'); }
 }

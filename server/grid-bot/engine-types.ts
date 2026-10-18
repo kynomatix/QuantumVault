@@ -1,5 +1,6 @@
 export type Scale = 'flat' | 'ascending' | 'descending';
 export interface GridGeometryInput {
+  sizingVersion?: 'lean-1'; safetyEnvelopePrice?: string;
   policyVersion?: '1.0.0' | '2.0.0'; maximumQuote?: string;
   side: 'long' | 'short'; lower: string; upper: string; start: string;
   intervals: number; entryScale: Scale; profitScale: Scale; seed: boolean;
@@ -22,6 +23,7 @@ export interface PairFee {
   spread: string; requiredSpread: string; assumedRoundTripFee: string; clears: boolean;
 }
 export interface GridPlan {
+  sizingVersion?: 'lean-1'; safetyEnvelopePrice?: string;
   policyVersion?: '2.0.0'; cycles?: GridCycle[]; capacityPrice?: string; capacityNotional?: string;
   /** v2 execution band covering the signed reference tick cell. */
   seedPriceBounds?: { low: string; high: string };

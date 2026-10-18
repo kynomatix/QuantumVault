@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 import {executableCycleQuantity,type CyclePortion,type ReplayedGridCycle} from './cycle-replay';
 import {gridWindow,type WindowLevel,type WindowOrder,windowLevelKey} from './window';
+import type {CycleCapacity} from './cycle-capacity';
 const D=Decimal.clone({precision:200});
 export function cyclePortions(lots:CyclePortion[],amount:string):CyclePortion[]{
   let remaining=new D(amount);const result:CyclePortion[]=[];
@@ -14,7 +15,7 @@ export function cycleOpeningSources(c:ReplayedGridCycle,amount:string){
 /** Both legs have separate working identities, even when endpoints overlap another owner's cycle. */
 export function planCycleWindow(input:{cycles:ReplayedGridCycle[];direction:'long'|'short';levels:{id:string;ordinal:number;attempt:number}[];
   owned:WindowOrder[];positionSize:string|null;bookPrice:string;lot:string;minimumQuote:string;freeSlots:number;
-  inventoryComplete:boolean;entriesAllowed:boolean;canaryRemaining:string}){
+  inventoryComplete:boolean;entriesAllowed:boolean;canaryRemaining:string;pool?:CycleCapacity}){
   const levels:WindowLevel[]=[],allocations:Record<string,CyclePortion[]>={};
   for(const c of input.cycles){const row=input.levels.find(l=>l.ordinal===c.cycle.ownerOrdinal+1);if(!row)throw Error('Cycle owner missing');
     for(const leg of ['closing','opening'] as const){

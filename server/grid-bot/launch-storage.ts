@@ -1,4 +1,5 @@
 import {validateLockedCycleRequest} from './cycle-storage';
+import {retainedGridSizing} from './lean-sizing';
 import type {GridSettlementOutcome} from './execution-failure';
 import {randomUUID} from 'node:crypto';
 import DecimalBase from 'decimal.js';
@@ -239,7 +240,7 @@ export class GridLaunchStorage {
       if(!b||b.released_at||!b.created_at||b.account!==r.account||b.master_account!==r.masterAccount||!b.client_request_id||!b.server_intent_digest
         ||!b.policy_hmac||b.policy_hmac!==r.authority.policyHmac||!['provisioning','canary','active'].includes(b.status))return null;
       const levels=(await c.query('SELECT ordinal,price,size,side,reduce_only FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[r.botId])).rows;
-      const policy:GridPolicy={id:b.id,protocol:b.protocol,market:b.market,direction:b.direction,upperPrice:b.upper_price,lowerPrice:b.lower_price,
+      const policy:GridPolicy={...retainedGridSizing(b.authority_snapshot),id:b.id,protocol:b.protocol,market:b.market,direction:b.direction,upperPrice:b.upper_price,lowerPrice:b.lower_price,
         startPrice:b.start_price,gridCount:b.grid_count,totalInvestment:b.total_investment,leverage:b.leverage,entryScaleType:b.entry_scale_type,
         profitScaleType:b.profit_scale_type,policyVersion:b.policy_version,feePolicyVersion:b.fee_policy_version,runtimePolicyVersion:b.runtime_policy_version,
         stopLossPercent:b.stop_loss_percent,stopLossPrice:b.stop_loss_price,seedAtCreation:b.seed_at_creation,

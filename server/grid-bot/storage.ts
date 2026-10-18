@@ -5,6 +5,7 @@ import { requireSchemaCapabilityReady } from '../schema-readiness';
 import type { GridPolicy, SignedGridLevel } from './policy-hmac';
 import {gridSurface} from './surface';
 import type {GridBotSurface} from '../../shared/grid-surface';
+import {retainedGridSizing} from './lean-sizing';
 
 /** Trusted reconciliation must supply operation-specific terminal facts; a fill alone is never terminal proof. */
 export interface GridOperationConfirmation {
@@ -31,7 +32,7 @@ function botRow(r: Record<string, unknown>): StoredBot {
     if (!decimal(r[key])) throw new GridStorageError('invariant');
   for (const key of ['stop_loss_percent','stop_loss_price','sol_balance','residual_usdc'])
     if (!decimal(r[key], true)) throw new GridStorageError('invariant');
-  return row<StoredBot>(r);
+  return {...row<StoredBot>(r),...retainedGridSizing(r.authority_snapshot)};
 }
 const equal = (a: unknown, b: unknown): boolean => {
   if (a instanceof Date || b instanceof Date) return new Date(a as string).getTime() === new Date(b as string).getTime();
@@ -51,7 +52,9 @@ export class GridStorage {
     if (levels.length !== bot.gridCount + 1 || !levels.every((l, i) => l.ordinal === i + 1)
       || !/^[0-9A-F]{64}$/.test(bot.serverIntentDigest)) throw new GridStorageError('invariant');
     return this.transaction(async c => {
-      const keys = Object.keys(bot), values = keys.map(k => bot[k as keyof DraftRecord]);
+      const {sizingVersion,safetyEnvelopePrice,...record}=bot;
+      if(sizingVersion) record.authoritySnapshot={...(bot.authoritySnapshot as object),gridSizing:{sizingVersion,safetyEnvelopePrice}};
+      const keys = Object.keys(record), values = keys.map(k => record[k as keyof typeof record]);
       const created = await c.query(`INSERT INTO grid_bots (${keys.map(snake).join(',')}) VALUES (${keys.map((_, i) => '$'+(i+1)).join(',')}) ON CONFLICT (wallet_address,client_request_id) DO NOTHING RETURNING *`, values);
       if (!created.rowCount) {
         const existing = await c.query('SELECT * FROM grid_bots WHERE wallet_address=$1 AND client_request_id=$2', [bot.walletAddress,bot.clientRequestId]);

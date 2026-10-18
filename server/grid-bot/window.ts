@@ -8,7 +8,7 @@ export const windowLevelKey=(l:Pick<WindowLevel,'id'|'cycle'>)=>l.cycle?`${l.id}
 const orderKey=(o:WindowOrder)=>o.cycleLeg?`${o.levelId}:${o.cycleLeg}`:o.levelId;
 export type WindowAction={kind:'cancel';order:WindowOrder}|{kind:'place';level:WindowLevel};
 /** Pure planning. Unknown inventory/position denies; only exact bot-owned orders can be cancelled. */
-export function gridWindow(input:{levels:WindowLevel[];owned:WindowOrder[];positionSize:string|null;bookPrice:string;freeSlots:number;inventoryComplete:boolean;entriesAllowed:boolean;canaryRemaining:string}):WindowAction[][]{
+export function gridWindow(input:{levels:WindowLevel[];owned:WindowOrder[];positionSize:string|null;bookPrice:string;freeSlots:number;inventoryComplete:boolean;entriesAllowed:boolean;canaryRemaining:string;pool?:{envelope:string;remaining:string;breached:boolean}}):WindowAction[][]{
   if(!input.inventoryComplete || input.positionSize===null || !Number.isSafeInteger(input.freeSlots) || input.freeSlots<0)throw Error('Grid inventory unavailable');
   const price=new Decimal(input.bookPrice),position=new Decimal(input.positionSize),budget=new Decimal(input.canaryRemaining);
   if(!price.gt(0)||!position.gte(0)||!budget.gte(0))throw Error('Grid window authority unavailable');
@@ -24,10 +24,12 @@ export function gridWindow(input:{levels:WindowLevel[];owned:WindowOrder[];posit
   }
   if(desired.length>GRID_CAPS.ordinaryRestingPerBot)throw Error('Backed exits exceed ordinary Grid slot cap');
   let remaining=budget;
+  let poolRemaining=new Decimal(input.pool?.remaining??'0');
   if(input.entriesAllowed)for(const l of entries){if(desired.length>=GRID_CAPS.ordinaryRestingPerBot)break;
     const already=input.owned.some(o=>orderKey(o)===windowLevelKey(l)),notional=new Decimal(l.price).mul(l.size);
-    if(!already && notional.gt(remaining))continue;
-    desired.push(l);if(!already)remaining=remaining.minus(notional);
+    const reservation=new Decimal(input.pool?.envelope??l.price).mul(l.size);
+    if(!already && (notional.gt(remaining) || input.pool && (input.pool.breached || reservation.gt(poolRemaining))))continue;
+    desired.push(l);if(!already){remaining=remaining.minus(notional);if(input.pool)poolRemaining=poolRemaining.minus(reservation);}
   }
   const keep=new Set(desired.map(windowLevelKey));
   // Cancels must settle on venue before this plan can be recalculated for placements.

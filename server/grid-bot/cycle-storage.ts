@@ -9,6 +9,7 @@ import type {ExactGridRequest} from './launch-storage';
 import {validateRetainedGridCycles} from './cycle-validation';
 import {projectCycleOrders} from './cycle-projection';
 import {gridResumeClearance} from './resume-clearance';
+import {cycleCapacity,requireCycleCapacity} from './cycle-capacity';
 
 const D=Decimal.clone({precision:200});
 /** Caller holds the bot lock (master -> bot -> levels for admission). No partial-history API. */
@@ -67,6 +68,11 @@ export async function validateLockedCycleRequest(c:PoolClient,bot:Record<string,
       if(r.kind==='limit'&&!gridResumeClearance(r.authority.cycleRisk as any,history.state.observation,history.policy,facts.tick,now))throw Error('Cycle opening requires current liquidation clearance');
     }
   }
+  const candidate=candidateId?cycleOperation(history.policy,r.account,history.levels,candidateId,r):undefined;
+  if(r.data.reduce_only===false && history.policy.sizingVersion) {
+    const capacity=cycleCapacity(history.input,history.state.observation.mark?.price,candidate);
+    requireCycleCapacity(capacity);
+  }
   if(candidateId){
     const op=cycleOperation(history.policy,r.account,history.levels,candidateId,r);
     const result=validateCycleSourceCredit(history.input,op,cycleRequestAllocations(op,r));
@@ -104,7 +110,7 @@ export async function recordCycleReplay(c:PoolClient,bot:Record<string,any>,acco
   if(observation.qualification&&observation.mark)try{
     projectedOrders=projectCycleOrders(history.cycles,history.input.progress,history.policy.direction,
       observation.qualification.lotSize,observation.qualification.minOrderSize,observation.mark.price,
-      !history.state.blocked_reasons.length&&['provisioning','canary','active'].includes(bot.status));
+      !history.state.blocked_reasons.length&&['provisioning','canary','active'].includes(bot.status),cycleCapacity(history.input,observation.mark.price));
   }catch{/* Display unavailable; the economic replay remains authoritative. */}
   await c.query("INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at) VALUES($1,'cycle-projection','internal_cycle_projection',$2,clock_timestamp()) ON CONFLICT(bot_id,event_key) DO UPDATE SET evidence=EXCLUDED.evidence,delivered_at=EXCLUDED.delivered_at",
     [bot.id,{generation:String(history.state.generation),observedAt:history.state.observation.observedAt,orders:projectedOrders}]);

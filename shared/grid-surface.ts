@@ -9,7 +9,7 @@ export interface GridBotSummary {
 }
 export interface GridCycleOrderView {
   ownerOrdinal:number;leg:'opening'|'closing';price:string;side:'buy'|'sell';size:string;
-  state:'working'|'pending confirmation'|'queued'|'waiting for fills'|'waiting for minimum'|'waiting for price'|'paused'|'stopped';
+  state:'working'|'pending confirmation'|'queued'|'waiting for fills'|'waiting for minimum'|'waiting for price'|'Waiting for room'|'paused'|'stopped';
 }
 export interface GridBotSurface {
   cycleProjection?:{observedAt:string;orders:GridCycleOrderView[]}|null;

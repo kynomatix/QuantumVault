@@ -1,4 +1,5 @@
 import {planCycleWindow} from './cycle-planner';
+import {cycleCapacity} from './cycle-capacity';
 import {replayGridCycles,type CycleReplayInput} from './cycle-replay';
 import Decimal from 'decimal.js';
 import {randomUUID} from 'node:crypto';
@@ -71,6 +72,7 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
       entryScale:policy.entryScaleType,profitScale:policy.profitScaleType,seed:policy.seedAtCreation,leverage:String(policy.leverage),
       tick:f.tick,lot:f.lot,minimumQuote:f.minimumQuote,investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:maker.toFixed(),
       ...(cyclic?{policyVersion:'2.0.0' as const,maximumQuote:f.maximumQuote}:{}),
+      ...(policy.sizingVersion?{sizingVersion:policy.sizingVersion,safetyEnvelopePrice:policy.safetyEnvelopePrice}:{}),
       investment:new Decimal(policy.totalInvestment).div(new Decimal(1).plus((cyclic?Decimal.max(0,maker,taker):taker).mul(policy.leverage))).toDecimalPlaces(2,Decimal.ROUND_FLOOR).toFixed(2)});
     if(!calc.ok)return deny(calc.issues.map(i=>i.reason).join('; '));const plan=calc.plan;
     if(policy.levels.length!==plan.lines.length||plan.lines.some((l,i)=>{const signed=policy.levels[i];return !signed||!new Decimal(l.price).eq(signed.price)||!new Decimal(l.quantity).eq(signed.size)
@@ -91,7 +93,7 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
     if(new Decimal(plan.seedQuantity).gt(0)&&(seedNotional.lt(f.minimumQuote)||seedNotional.gt(f.maximumQuote)
       ||new Decimal(stop.projection.seedWorstPrice).lt(f.minimumPrice)||new Decimal(stop.projection.seedWorstPrice).gt(f.maximumPrice)))return deny('The unchanged aggregate seed exceeds current market bounds.');
     const entries=plan.lines.filter(l=>l.role==='entry'&&new Decimal(l.quantity).gt(0)).sort((a,b)=>new Decimal(a.price).minus(plan.start).abs().cmp(new Decimal(b.price).minus(plan.start).abs()));
-    const first=entries.find(l=>seedNotional.plus(l.notional).lte(exposureLimit));
+    const first=policy.sizingVersion?entries[0]:entries.find(l=>seedNotional.plus(l.notional).lte(exposureLimit));
     if(!first)return deny('The unchanged seed and one valid entry exceed the configured investment × leverage; reduce the footprint or disable the seed.');
     return {ok:true,plan,exposureLimit,seedNotional:seedNotional.toFixed(),firstEntryOrdinal:first.ordinal+1,stop};
   }catch{return deny('A required launch input is unknown or invalid.');}
@@ -117,7 +119,7 @@ export function preflightGridResume(policy:GridPolicy,policyHash:string,umk:Buff
     for(let i=1;i<prices.length;i++)if(!prices[i].minus(prices[i-1]).gt(Decimal.max(prices[i],prices[i-1]).mul(Decimal.max(0,f.maker.effectiveRate).plus(Decimal.max(0,f.profit.effectiveRate)))))return deny('Current fees consume the retained grid spread.');
     const replay=policy.policyVersion==='2.0.0'?replayGridCycles(input.cycleReplay!):null;
     if(replay&&!replay.ok)return deny(replay.reason);
-    const plan=replay?.ok?planCycleWindow({...input,cycles:replay.cycles,bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots}):planGridRebalance({...input,bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots});
+    const plan=replay?.ok?planCycleWindow({...input,cycles:replay.cycles,pool:cycleCapacity(input.cycleReplay!,f.bookPrice),bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots}):planGridRebalance({...input,bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots});
     const safe=plan.chunks.flat().filter(a=>a.kind==='place');
     if(!safe.length&&policy.policyVersion!=='2.0.0')return deny('No safe resting order is currently available.');
     let required=new Decimal(0);

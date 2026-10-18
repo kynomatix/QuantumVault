@@ -2,11 +2,12 @@ import Decimal from 'decimal.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { deriveSubkey, zeroizeBuffer } from '../crypto-v3';
 import { GRID_CYCLE_POLICY_VERSION, retainedGridCycles } from './cycle-policy';
+import type { GridSizing } from './lean-sizing';
 
 export const GRID_POLICY_HMAC_SUBKEY_PURPOSE = 'grid_policy_hmac';
 export const GRID_POLICY_VERSION = '1.0.0';
 export interface SignedGridLevel { ordinal: number; price: string; size: string; side: 'buy' | 'sell'; reduceOnly: boolean }
-export interface GridPolicy {
+export interface GridPolicy extends GridSizing {
   id: string; protocol: 'pacifica'; market: string; direction: 'long' | 'short';
   upperPrice: string; lowerPrice: string; startPrice: string; gridCount: number;
   totalInvestment: string; leverage: number; entryScaleType: 'flat' | 'ascending' | 'descending';
@@ -37,12 +38,18 @@ export function canonicalGridPolicy(p: GridPolicy): string | null {
     || p.levels.some((l,i) => i > 0 && !new Decimal(l.price).gt(p.levels[i-1].price))) return null;
   const cycles = p.policyVersion === GRID_CYCLE_POLICY_VERSION ? retainedGridCycles(p) : null;
   if (p.policyVersion === GRID_CYCLE_POLICY_VERSION && (!cycles || !p.stopLossPrice)) return null;
+  if (p.sizingVersion !== undefined || p.safetyEnvelopePrice !== undefined) {
+    if (p.policyVersion !== GRID_CYCLE_POLICY_VERSION || p.sizingVersion !== 'lean-1' || !fixed(p.safetyEnvelopePrice, 8)
+      || new Decimal(p.safetyEnvelopePrice!).lt(p.upperPrice)
+      || p.direction === 'short' && new Decimal(p.safetyEnvelopePrice!).lt(p.stopLossPrice!)) return null;
+  }
   return JSON.stringify([p.policyVersion === GRID_CYCLE_POLICY_VERSION ? 'grid-policy-hmac-v2' : 'grid-policy-hmac-v1', p.id, p.protocol, p.market, p.direction, p.upperPrice, p.lowerPrice,
     p.startPrice, p.gridCount, p.totalInvestment, p.leverage, p.entryScaleType, p.profitScaleType,
     p.policyVersion, p.feePolicyVersion, p.runtimePolicyVersion, p.stopLossPercent, p.stopLossPrice, p.seedAtCreation,
     p.levels.map(l => [l.ordinal, l.price, l.size, l.side, l.reduceOnly]),
     ...(cycles ? [cycles.map(c => [c.ownerOrdinal, c.anchor, c.openingOrdinal, c.closingOrdinal,
-      c.openingPrice, c.closingPrice, c.quantity, c.initialInventory, c.initialOpeningCredit])] : [])]);
+      c.openingPrice, c.closingPrice, c.quantity, c.initialInventory, c.initialOpeningCredit])] : []),
+    ...(p.sizingVersion ? [[p.sizingVersion, p.safetyEnvelopePrice]] : [])]);
 }
 export function computeGridPolicyHmac(p: GridPolicy, umk: Buffer | null): Result {
   if (!umk) return { ok: false, reason: 'missing_secret' };

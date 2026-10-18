@@ -1,5 +1,7 @@
 import Decimal from 'decimal.js';
 import { GRID_CYCLE_V2_CREATION } from '../grid-bot/cycle-policy';
+import { GRID_LEAN_SIZING_CREATION } from '../grid-bot/lean-sizing';
+import { gridSeedPriceBounds } from '../grid-bot/cycle-engine';
 import { calculateGrid, calculateGridPrices, minimumInvestment, assumedPairFees, validGridDecimal } from '../grid-bot/engine';
 import type { GridGeometryInput } from '../grid-bot/engine-types';
 import { PLANNER_POLICY, type PlannerMarket, type PlannerPreview, type PlannerQuery } from './types';
@@ -22,7 +24,7 @@ export function validatePreviewQuery(q: PlannerQuery): string | null {
 }
 
 export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number,
-  deps: { cycleV2Creation?: boolean } = {}): PlannerPreview {
+  deps: { cycleV2Creation?: boolean; leanSizingCreation?: boolean } = {}): PlannerPreview {
   const result: PlannerPreview = { state: 'unavailable', reasons: [], market, retrievedAt: now, validForMs: 0,
     geometry: unknown('Geometry not evaluated'),
     requestedPlan: null, minimumPlan: null, minimum: unknown('Geometry not evaluated'), assumedMinimum: unknown('Assumed fee not evaluated'), feeRows: [],
@@ -55,14 +57,17 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number,
   const stop = new D(q.stop), tick = new D(c.tick);
   if (!stop.mod(tick).isZero() || (q.side === 'long' ? !stop.lt(q.lower) : !stop.gt(q.upper)))
     return { ...result, state: 'rejected', reasons: ['Stop must align to the venue tick and lie beyond the loss side of the range'] };
-  const input: GridGeometryInput = { policyVersion: (deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION) ? '2.0.0' : '1.0.0', side: q.side, lower: q.lower, upper: q.upper, start: r.price,
+  const cyclic=deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION, lean=cyclic && (deps.leanSizingCreation ?? GRID_LEAN_SIZING_CREATION);
+  const reserveFactor=lean?new D(1).plus(new D(q.leverage).mul(q.fee??'0')):new D(1);
+  const input: GridGeometryInput = { policyVersion: cyclic ? '2.0.0' : '1.0.0', side: q.side, lower: q.lower, upper: q.upper, start: r.price,
+    ...(lean?{sizingVersion:'lean-1' as const,safetyEnvelopePrice:D.max(q.upper,q.seed?gridSeedPriceBounds(r.price,c.tick).high:'0',q.side==='short'?q.stop:'0').toFixed()}:{}),
     intervals: q.intervals, entryScale: q.entryScale, profitScale: q.profitScale, seed: q.seed, leverage: q.leverage,
     tick: c.tick, lot: c.lot, minimumQuote: c.minimumQuote, investmentStep: '0.01',
     // Geometry-only capital model. No account transfer is proposed or inferred.
     transferFloor: '0', effectiveMakerCostRate: null };
   const minimum = minimumInvestment(input);
-  const requested = calculateGrid({ ...input, investment: q.investment });
-  result.minimum = minimum.ok ? { state: 'available', value: minimum.investment } : unknown(minimum.issues.map(i => i.reason).join('; '));
+  const requested = calculateGrid({ ...input, investment: lean ? new D(q.investment).div(reserveFactor).toDecimalPlaces(2,D.ROUND_FLOOR).toFixed(2) : q.investment });
+  result.minimum = minimum.ok ? { state: 'available', value: lean ? new D(minimum.investment).mul(reserveFactor).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2) : minimum.investment } : unknown(minimum.issues.map(i => i.reason).join('; '));
   result.requestedPlan = requested.ok ? requested.plan : null;
   result.minimumPlan = !requested.ok && minimum.ok ? minimum.plan : null;
   if (!requested.ok) result.reasons.push(...requested.issues.map(i => explainPlannerIssue(i, { ...input, investment: q.investment })));
@@ -90,7 +95,7 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number,
   if (q.fee !== null && diagnostic) {
     result.feeRows = assumedPairFees(diagnostic, q.fee);
     const assumed = minimumInvestment({ ...input, effectiveMakerCostRate: q.fee });
-    result.assumedMinimum = assumed.ok ? { state: 'available', value: assumed.investment } : unknown(assumed.issues.map(i => i.reason).join('; '));
+    result.assumedMinimum = assumed.ok ? { state: 'available', value: lean ? new D(assumed.investment).mul(reserveFactor).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2) : assumed.investment } : unknown(assumed.issues.map(i => i.reason).join('; '));
     feePassed = assumed.ok && result.feeRows.every(row => row.clears);
     if (!feePassed) result.reasons.push('Assumed fee check failed; diagnostic rows remain visible');
   }

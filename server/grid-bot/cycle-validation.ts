@@ -25,7 +25,12 @@ export function validateRetainedGridCycles(policy: GridPolicy, limits: GridCycle
     }
     const bound=gridSeedPriceBounds(policy.startPrice,limits.tick);
     const worst=D.max(policy.upperPrice,policy.seedAtCreation?bound.high:'0');
-    if(cycles.reduce((s,c)=>s.plus(c.quantity),new D(0)).mul(worst).gt(new D(policy.totalInvestment).mul(policy.leverage))) return deny('Retained cycles exceed configured capacity.');
+    const ceiling=new D(policy.totalInvestment).mul(policy.leverage);
+    if(policy.sizingVersion==='lean-1') {
+      const envelope=new D(policy.safetyEnvelopePrice!);
+      if(envelope.lt(worst) || cycles.some(c=>new D(c.quantity).mul(envelope).gt(ceiling))
+        || cycles.reduce((s,c)=>s.plus(c.initialInventory),new D(0)).mul(envelope).gt(ceiling)) return deny('Retained cycles exceed the safety envelope.');
+    } else if(cycles.reduce((s,c)=>s.plus(c.quantity),new D(0)).mul(worst).gt(ceiling)) return deny('Retained cycles exceed configured capacity.');
     return { ok: true as const, cycles };
   } catch { return deny('Current cycle authority is invalid.'); }
 }
