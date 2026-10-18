@@ -12,7 +12,7 @@ vi.mock('react', async original => {
 vi.mock('../../client/src/components/SharedTradePriceChart', () => ({ createSharedTradePriceChart: chartFactory }));
 vi.mock('../../client/src/components/chartStyle', async original => ({
   ...await original<typeof import('../../client/src/components/chartStyle')>(),
-  resolveChartStyle: () => ({range:'#38bdf8',rangeFill:'rgba(56,189,248,0.1)',entry:'#38bdf8',exit:'#7854d4',stop:'#ef4444',muted:'#94a3b8'}),
+  resolveChartStyle: () => ({range:'#38bdf8',rangeFill:'rgba(56,189,248,0.1)',entry:'#38bdf8',exit:'#7854d4',breakevenProfit:'#26a69a',breakevenLoss:'#ef5350',stop:'#b91c1c',muted:'#94a3b8'}),
 }));
 vi.mock('../../client/src/components/grid-bot/GridDraftCard', () => ({ gridJson: vi.fn() }));
 vi.mock('../../client/src/components/ui/dialog', () => ({ Dialog: 'div', DialogContent: 'div', DialogHeader: 'div', DialogTitle: 'div', DialogDescription: 'div' }));
@@ -108,7 +108,7 @@ describe('Grid chart clock and viewport', () => {
     hover({}); expect(setHovered).toHaveBeenLastCalledWith(null);
     expect(breakeven.title).toBe('Breakeven');
     render({ chart, surface, fresh: true, now: now + 1000 });
-    expect(breakeven.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 100, title: 'Breakeven', color: '#38bdf8' }));
+    expect(breakeven.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 100, title: 'Breakeven', color: '#26a69a', axisLabelColor: '#26a69a', axisLabelTextColor: '#0a0a10' }));
     render({ chart, surface, fresh: false, now: now + 15_001 });
     expect(series.removePriceLine).toHaveBeenCalledWith(breakeven);
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();

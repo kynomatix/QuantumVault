@@ -4,7 +4,7 @@ import { Info, Maximize2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { createSharedTradePriceChart } from '../SharedTradePriceChart';
-import { chartStyle, chartCandleColor } from '../chartStyle';
+import { chartStyle, chartCandleColor, resolveChartStyle } from '../chartStyle';
 import { plannerPriceFormat, readableTime, type PlannerChart, type PlannerRange } from '@/lib/grid-planner-view';
 import type { GridLine } from '../../../../server/grid-bot/engine-types';
 import { gridMeasuredStart } from '../../../../shared/grid-lookback';
@@ -29,7 +29,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       swatch.style.color = `hsl(${styles.getPropertyValue(`--${token}`).trim()} / ${alpha})`;
       return getComputedStyle(swatch).color;
     };
-    const primary = color('primary'), down = color('destructive');
+    const primary = color('primary'), sharedStyle = resolveChartStyle(container.current);
     const bandColor = color('primary', 0.1);
     canvas.applyOptions({ layout: { textColor: color('muted-foreground') },
       grid: { vertLines: { color: color('border', 0.3) }, horzLines: { color: color('border', 0.3) } },
@@ -106,7 +106,8 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       attach(band);
       for (const [price, title] of [[lower, 'Lower'], [upper, 'Upper']] as const)
         addLine({ price, title, color: primary, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
-      if (stop !== null) addLine({ price: stop, title: 'Stop', color: down, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
+      if (stop !== null) addLine({ price: stop, title: 'Stop', color: sharedStyle.stop, axisLabelColor: sharedStyle.stop,
+        axisLabelTextColor: chartStyle.labels.stopText, lineWidth: 3, lineStyle: LineStyle.Solid, axisLabelVisible: true });
     }
     swatch.remove();
     if (first) canvas.timeScale().fitContent();

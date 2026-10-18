@@ -13,7 +13,7 @@ import {GridChartSourceInfo} from '../grid-planner/GridChartSourceInfo';
 function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPriceLine>,key:string,price:string|null,title:string,color:string,kind:'level'|'boundary'|'live'='live'){
   const line=lines.get(key);
   if(price===null||!Number.isFinite(Number(price))||Number(price)<=0){if(line)series.removePriceLine(line);lines.delete(key);return;}
-  const options={price:Number(price),title:kind==='level'?'':title,color,lineWidth:key==='breakeven'?chartStyle.widths.breakeven:chartStyle.widths.line,lineStyle:kind==='level'?chartStyle.level.lineStyle:chartStyle.range.lineStyle,axisLabelVisible:kind!=='level'};
+  const options={price:Number(price),title:kind==='level'?'':title,color,lineWidth:key==='breakeven'?chartStyle.widths.breakeven:chartStyle.widths.line,lineStyle:kind==='level'?chartStyle.level.lineStyle:chartStyle.range.lineStyle,axisLabelVisible:kind!=='level',...(key==='breakeven'?{axisLabelColor:color,axisLabelTextColor:chartStyle.labels.breakevenText}:key==='stop'?{axisLabelColor:color,axisLabelTextColor:chartStyle.labels.stopText}:{})};
   if(line)line.applyOptions(options);else lines.set(key,series.createPriceLine(options));
 }
 function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'available'}>;surface:GridBotSurface;fresh:boolean;now:number}){
@@ -73,7 +73,7 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
     const update=(key:string,price:string|null,title:string,color:string)=>updatePriceLine(live.series,live.live,key,price,title,color);
     const b=fresh?gridBreakevenView(surface,now):null;
     live.breakevenPrice=b?Number(b.price):null;
-    update('breakeven',b?.price??null,'Breakeven',b?.tone==='profit'?chartStyle.candles.upColor:b?.tone==='loss'?chartStyle.candles.downColor:live.style.muted);
+    update('breakeven',b?.price??null,'Breakeven',b?.tone==='profit'?live.style.breakevenProfit:b?.tone==='loss'?live.style.breakevenLoss:live.style.muted);
   },[chart,surface,fresh,now]);
   return <div className="relative h-full w-full"><div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with persisted Grid range, mandatory stop and breakeven"/>
     {hovered&&<div role="status" className="pointer-events-none absolute max-w-[min(212px,calc(100%-0.5rem))] break-words rounded border bg-popover px-2 py-1 text-xs text-popover-foreground shadow" style={{left:hovered.left,top:hovered.top}}>Grid price ${hovered.price}<span className="block text-muted-foreground">{hovered.detail}</span></div>}

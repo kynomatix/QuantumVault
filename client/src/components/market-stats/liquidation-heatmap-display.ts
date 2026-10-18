@@ -1,4 +1,7 @@
 export const HEAT_COLOR_TIERS = [0.2, 0.45, 0.75] as const;
+export const HEAT_COLORS = ['rgba(88,78,218,0.24)', 'rgba(52,125,244,0.34)',
+  'rgba(111,90,246,0.58)', 'rgba(206,199,252,0.95)'] as const;
+export const HEAT_LEGEND = `linear-gradient(90deg,${HEAT_COLORS.join(',')})`;
 
 /** Invert heatColor's square-root scale; this changes visibility only. */
 export function heatmapMinUsd(proportion: number, scaleMaxUsd: number) {

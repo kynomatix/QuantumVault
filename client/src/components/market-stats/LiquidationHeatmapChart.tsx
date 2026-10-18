@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { LineStyle, type UTCTimestamp } from 'lightweight-charts';
 import type { LiquidationStats } from '@shared/market-stats';
 import { createSharedTradePriceChart } from '../SharedTradePriceChart';
-import { createLiquidationHeatmapPrimitive } from './liquidation-heatmap-primitive';
-import { HEAT_COLOR_TIERS, heatmapMinUsd, placeHeatmapTooltip } from './liquidation-heatmap-display';
+import { chartStyle } from '../chartStyle';
+import { createLiquidationHeatmapPrimitive, createLiquidationCandleHalo } from './liquidation-heatmap-primitive';
+import { HEAT_COLOR_TIERS, HEAT_COLORS, HEAT_LEGEND, heatmapMinUsd, placeHeatmapTooltip } from './liquidation-heatmap-display';
 export { heatColor } from './liquidation-heatmap-primitive';
 
 const money = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
@@ -21,8 +22,7 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
   useEffect(() => {
     if (!container.current) return;
     const chart = createSharedTradePriceChart(container.current);
-    const series = chart.addCandlestickSeries({ upColor: '#75ddc1', downColor: '#f099ad', borderVisible: false,
-      wickUpColor: '#a2e9d7', wickDownColor: '#f3b2c0', priceLineVisible: false, lastValueVisible: false });
+    const series = chart.addCandlestickSeries({ ...chartStyle.candles, priceLineVisible: false, lastValueVisible: false });
     // Model candles remain authoritative within the 30-day window.
     const candles = new Map((data.candles ?? []).map(c => [c.time, c]));
     for (const c of data.columns) candles.set(c.time, { time: c.time, ...c.candle });
@@ -33,6 +33,8 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
     const primitive = createLiquidationHeatmapPrimitive(data, chart, series, minUsd);
     primitiveRef.current = primitive;
     series.attachPrimitive(primitive);
+    const halo = createLiquidationCandleHalo([...candles.values()], chart, series);
+    series.attachPrimitive(halo);
     const show: Parameters<typeof chart.subscribeCrosshairMove>[0] = event => {
       if (!event.point || typeof event.time !== 'number') { setPointer(null); return; }
       const column = data.columns.findIndex(c => c.time === Number(event.time) * 1000);
@@ -52,7 +54,7 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
       if (container.current) chart.applyOptions({ width: container.current.clientWidth, height: container.current.clientHeight });
     });
     resize.observe(container.current);
-    return () => { primitiveRef.current = null; resize.disconnect(); chart.unsubscribeCrosshairMove(show); chart.unsubscribeClick(show); series.detachPrimitive(primitive); chart.remove(); };
+    return () => { primitiveRef.current = null; resize.disconnect(); chart.unsubscribeCrosshairMove(show); chart.unsubscribeClick(show); series.detachPrimitive(halo); series.detachPrimitive(primitive); chart.remove(); };
   }, [data]);
   const columnIndex = Math.min(selected.column, data.columns.length - 1), bandIndex = Math.min(selected.band, data.columns[0].bins.length - 1);
   const column = data.columns[columnIndex], bins = column.bins[bandIndex];
@@ -73,10 +75,10 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
       </div>
     </div>
     <div className="mt-3 flex flex-wrap items-center justify-end gap-2 text-[10px] text-muted-foreground">
-      <span>Modelled USD</span><span>$0</span><span className="h-2 w-28 rounded-sm" style={{ background: 'linear-gradient(90deg,#27203e,#385a72,#54b3a0,#eed38a)' }} /><span>{compact(data.scaleMaxUsd)}</span>
+      <span>Modelled USD</span><span>$0</span><span className="h-2 w-28 rounded-sm" style={{ background: HEAT_LEGEND }} /><span>{compact(data.scaleMaxUsd)}</span>
       <label className="ml-2 flex items-center gap-2">Hide below {compact(minUsd.current)}
         <span className="relative inline-flex w-28 pb-2">
-          <input type="range" min="0" max="1" step="0.01" value={threshold} className="w-full accent-[#eed38a]"
+          <input type="range" min="0" max="1" step="0.01" value={threshold} className="w-full" style={{ accentColor: HEAT_COLORS[3] }}
             aria-valuetext={`Hide below ${compact(minUsd.current)}`} onChange={e => {
               const next = Number(e.target.value);
               minUsd.current = heatmapMinUsd(next, data.scaleMaxUsd);

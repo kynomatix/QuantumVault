@@ -4,6 +4,7 @@ import {LineStyle} from 'lightweight-charts';
 export const chartStyle = {
   candles: {upColor:'#38bdf8',downColor:'#7854d4',wickUpColor:'#38bdf8',wickDownColor:'#7854d4',borderVisible:false},
   widths: {line:1,breakeven:2},
+  labels: {breakevenText:'#0a0a10',stopText:'#ffffff'},
   range: {opacity:0.1,lineStyle:LineStyle.Solid},
   level: {lineStyle:LineStyle.Dashed,opacity:0.85},
 } as const;
@@ -23,6 +24,7 @@ export function resolveChartStyle(container:HTMLElement){
   };
   try{return {range:color('primary'),rangeFill:color('primary',chartStyle.range.opacity),
     entry:color('primary',chartStyle.level.opacity),exit:color('chart-2',chartStyle.level.opacity),
-    stop:color('destructive'),muted:color('muted-foreground')};}
+    breakevenProfit:color('teal'),breakevenLoss:color('chart-breakeven-loss'),
+    stop:color('chart-stop'),muted:color('muted-foreground')};}
   finally{swatch.remove();}
 }

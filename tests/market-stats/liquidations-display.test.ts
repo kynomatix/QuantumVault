@@ -39,8 +39,8 @@ describe('heatmap display threshold', () => {
     expect(heatmapMinUsd(1, 1600)).toBe(1600);
     expect(HEAT_COLOR_TIERS).toEqual([0.2, 0.45, 0.75]);
     HEAT_COLOR_TIERS.forEach((tier, i) => {
-      expect(heatColor(heatmapMinUsd(tier, 1600), 1600)).toBe(['#27203e', '#385a72', '#54b3a0'][i]);
-      expect(heatColor(heatmapMinUsd(tier + 0.01, 1600), 1600)).toBe(['#385a72', '#54b3a0', '#eed38a'][i]);
+      expect(heatColor(heatmapMinUsd(tier, 1600), 1600)).toBe(['rgba(88,78,218,0.24)', 'rgba(52,125,244,0.34)', 'rgba(111,90,246,0.58)'][i]);
+      expect(heatColor(heatmapMinUsd(tier + 0.01, 1600), 1600)).toBe(['rgba(52,125,244,0.34)', 'rgba(111,90,246,0.58)', 'rgba(206,199,252,0.95)'][i]);
     });
   });
 
