@@ -18,7 +18,8 @@ export class GridExecutor {
     if(status==='provisioning')return this.deps.provision(claim,signal);
     const reconciled=await this.deps.reconcile(claim,signal);signal.throwIfAborted();
     if(!(reconciled.reconciliationComplete??reconciled.entriesAllowed))return;
-    // Pause/Stop own their orders. Range exhaustion preserves exits through lifecycle.
-    if(['active','canary'].includes(await this.deps.status(claim)))return this.deps.roll(claim,signal,reconciled.entriesAllowed);
+    const current=await this.deps.status(claim);
+    // Retained exits stay supervised while waiting; the planner receives no entry authority.
+    if(['active','canary','paused','range_exhausted','resuming'].includes(current))return this.deps.roll(claim,signal,['active','canary'].includes(current)&&reconciled.entriesAllowed);
   }
 }

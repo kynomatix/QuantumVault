@@ -209,7 +209,8 @@ export class GridMonitorStorage {
       FROM grid_levels l LEFT JOIN LATERAL (SELECT p.* FROM grid_monitor_orders p JOIN grid_operations o ON o.id=p.operation_id
         WHERE o.level_id=l.id AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1) p ON true WHERE l.bot_id=$1 ORDER BY l.ordinal`,[claim.id])).rows;
     const life=(await c.query('SELECT epoch FROM grid_lifecycle WHERE bot_id=$1',[claim.id])).rows[0];
-    return {fills,reserved,levels,entriesAllowed:state.blocked_reasons.length===0,authority:{monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
+    const auto=(await c.query('SELECT generation FROM grid_auto_resume WHERE bot_id=$1',[claim.id])).rows[0];
+    return {fills,reserved,levels,entriesAllowed:state.blocked_reasons.length===0,authority:{autoResumeGeneration:String(auto?.generation??'0'),monitorBootId:bootId,monitorGeneration:String(state.generation),...(life?{lifecycleEpoch:String(life.epoch)}:{})},observation:state.observation as GridObservation};
   });}
   async pnl(wallet:string,id:string){return this.launch.transaction(async c=>{
     if(!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rowCount)return null;

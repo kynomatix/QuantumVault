@@ -234,6 +234,6 @@ export function gridProductionResume(storage:Pick<GridMonitorStorage,'snapshot'>
         ||latest.bot.status!==bot.status||canonicalGridPolicy(retainedGridPolicy(latest.bot,latest.levels))!==canonicalGridPolicy(policy))return null;
       fresh(facts.observedAt,Date.now());signal.throwIfAborted();const retained=key;key=null;
       return {policy,policyHmac:bot.policy_hmac,umk:retained.umk,facts,risk,cleanup:retained.cleanup};
-    }catch{signal.throwIfAborted();return null;}finally{key?.cleanup();}
+    }catch(error){signal.throwIfAborted();if(error instanceof GridLaunchTransientError)throw error;return null;}finally{key?.cleanup();}
   };
 }

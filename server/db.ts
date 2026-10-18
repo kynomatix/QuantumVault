@@ -2573,6 +2573,31 @@ END $$;
 );
 CREATE INDEX IF NOT EXISTS ai_trader_cycles_bot_latest_idx ON ai_trader_cycles (bot_id, started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS ai_trader_cycles_running_idx ON ai_trader_cycles (started_at) WHERE outcome = 'running';
+`,
+`CREATE TABLE IF NOT EXISTS grid_auto_resume (
+  bot_id uuid PRIMARY KEY REFERENCES grid_bots(id),
+  enabled boolean NOT NULL DEFAULT false,
+  generation bigint NOT NULL DEFAULT 0,
+  cycle bigint NOT NULL DEFAULT 0,
+  armed_cycle bigint,
+  armed_generation bigint,
+  armed_lifecycle_epoch bigint,
+  armed_band_request uuid REFERENCES grid_control_requests(id),
+  armed_policy_hmac text,
+  armed_umk_version integer,
+  resume_request_id uuid REFERENCES grid_control_requests(id),
+  attempts smallint NOT NULL DEFAULT 0,
+  first_attempt_at timestamptz,
+  next_attempt_at timestamptz,
+  held_reason text,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT grid_auto_resume_counts CHECK (generation>=0 AND cycle>=0 AND attempts>=0 AND attempts<=3),
+  CONSTRAINT grid_auto_resume_arm CHECK ((armed_cycle IS NULL AND armed_generation IS NULL AND armed_lifecycle_epoch IS NULL AND armed_band_request IS NULL AND armed_policy_hmac IS NULL AND armed_umk_version IS NULL AND resume_request_id IS NULL AND attempts=0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (enabled AND armed_cycle IS NOT NULL AND armed_cycle=cycle AND armed_cycle>0 AND armed_generation IS NOT NULL AND armed_generation=generation AND armed_lifecycle_epoch IS NOT NULL AND armed_lifecycle_epoch>=0 AND armed_band_request IS NOT NULL AND armed_policy_hmac IS NOT NULL AND armed_policy_hmac ~ '^[0-9a-f]{64}$' AND armed_umk_version IS NOT NULL AND armed_umk_version>0)),
+  CONSTRAINT grid_auto_resume_retry CHECK ((attempts=0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (attempts>0 AND first_attempt_at IS NOT NULL AND (next_attempt_at IS NULL OR next_attempt_at>=first_attempt_at))),
+  CONSTRAINT grid_auto_resume_reason CHECK (held_reason IS NULL OR held_reason IN ('waiting_for_inner_band','range_unavailable','reconciliation_required','operation_pending','market_data_unavailable','resume_authority_unavailable','risk_pause','stop_clearance_unavailable','policy_changed','execution_revoked','retry_limit','preference_off'))
+);
+ALTER TABLE grid_control_requests DROP CONSTRAINT IF EXISTS grid_control_action;
+ALTER TABLE grid_control_requests ADD CONSTRAINT grid_control_action CHECK (action IN ('pause','resume','resync','stop','band') AND source IN ('owner','risk','auto') AND state IN ('pending','complete','superseded') AND (source<>'auto' OR action='resume'));
 `
 ] as const;
 
@@ -7644,6 +7669,104 @@ const schemaMigrationMetadata = [
       "unique": false,
       "predicateIncludes": [
         "outcome = 'running'"
+      ]
+    }
+  ]
+},
+{
+  "id": "200-grid-auto-resume",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "grid_auto_resume",
+      "columns": [
+        "bot_id",
+        "enabled",
+        "generation",
+        "cycle",
+        "armed_cycle",
+        "armed_generation",
+        "armed_lifecycle_epoch",
+        "armed_band_request",
+        "armed_policy_hmac",
+        "armed_umk_version",
+        "resume_request_id",
+        "attempts",
+        "first_attempt_at",
+        "next_attempt_at",
+        "held_reason",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (bot_id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_counts",
+      "definitionIncludes": [
+        "(generation >= 0 AND cycle >= 0 AND attempts >= 0 AND attempts <= 3)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_arm",
+      "definitionIncludes": [
+        "((armed_cycle IS NULL AND armed_generation IS NULL AND armed_lifecycle_epoch IS NULL AND armed_band_request IS NULL AND armed_policy_hmac IS NULL AND armed_umk_version IS NULL AND resume_request_id IS NULL AND attempts = 0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (enabled AND armed_cycle IS NOT NULL AND armed_cycle = cycle AND armed_cycle > 0 AND armed_generation IS NOT NULL AND armed_generation = generation AND armed_lifecycle_epoch IS NOT NULL AND armed_lifecycle_epoch >= 0 AND armed_band_request IS NOT NULL AND armed_policy_hmac IS NOT NULL AND armed_policy_hmac ~ '^[0-9a-f]{64}$' AND armed_umk_version IS NOT NULL AND armed_umk_version > 0))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_retry",
+      "definitionIncludes": [
+        "((attempts = 0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (attempts > 0 AND first_attempt_at IS NOT NULL AND (next_attempt_at IS NULL OR next_attempt_at >= first_attempt_at)))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_reason",
+      "definitionIncludes": [
+        "(held_reason IS NULL OR held_reason IN ('waiting_for_inner_band','range_unavailable','reconciliation_required','operation_pending','market_data_unavailable','resume_authority_unavailable','risk_pause','stop_clearance_unavailable','policy_changed','execution_revoked','retry_limit','preference_off'))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_control_requests",
+      "constraint": "grid_control_action",
+      "definitionIncludes": [
+        "(action IN ('pause','resume','resync','stop','band') AND source IN ('owner','risk','auto') AND state IN ('pending','complete','superseded') AND (source <> 'auto' OR action = 'resume'))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_bot_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id) REFERENCES grid_bots(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_armed_band_request_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (armed_band_request) REFERENCES grid_control_requests(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_resume_request_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (resume_request_id) REFERENCES grid_control_requests(id)"
       ]
     }
   ]

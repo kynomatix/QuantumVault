@@ -22,6 +22,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     await pool.query(readFileSync(new URL('../../migrations/0004_grid_bot_drafts.sql',import.meta.url),'utf8'));await pool.query(migration);
     await pool.query(readFileSync(new URL('../../migrations/0006_grid_monitor.sql',import.meta.url),'utf8'));
     await pool.query(readFileSync(new URL('../../migrations/0007_grid_lifecycle.sql',import.meta.url),'utf8'));
+    await pool.query(readFileSync(new URL('../../migrations/0011_grid_auto_resume.sql',import.meta.url),'utf8'));
     storage=new GridLaunchStorage(pool,async()=>{});custody=new GridCustody(storage);
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);

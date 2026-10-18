@@ -16,6 +16,7 @@ import Decimal from 'decimal.js';
 import {GridFirstPlacementAuthority} from './first-placement';
 import {productionGridLaunchAuthority,gridProductionResume,unlockGridLaunchAgent} from './launch-authority';
 import {recoverGridTransfer} from './transfer-recovery';
+import {observePacificaConstraints,checkEntryConstraints} from '../protocol/market-constraints';
 
 /** Full-account facts, never a single balance interpreted as transfer or settlement evidence. */
 export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObservation,start:number,recycler:GridSettlementFact['recycler'],now:number):GridSettlementFact|null{
@@ -43,6 +44,13 @@ export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonito
     try{return await work(await custody.recover(claim.id,bot.wallet_address,claim.leaseToken),security.umk);}finally{security.cleanup();}
   };
   const service=new GridLifecycleService({storage:lifecycle,observe,
+    marketTick:async(claim,signal)=>{
+      const {bot}=await storage.snapshot(claim),started=Date.now(),raw=await json.json(claim.masterAccount,'/info',{},signal) as {success?:boolean;data?:Record<string,unknown>[]};
+      signal.throwIfAborted();
+      const rows=raw?.success===true&&Array.isArray(raw.data)?raw.data.filter(x=>x.symbol===bot.market.replace(/-PERP$/,'')):[];
+      if(rows.length!==1||!checkEntryConstraints(observePacificaConstraints(rows[0],bot.market,started),bot.market,Date.now()).ok)return null;
+      return typeof rows[0].tick_size==='string'?rows[0].tick_size:null;
+    },
     sol:authorities.sol??((claim,signal)=>sharedGridSol(claim.masterAccount,signal)),
     resume:authorities.resume??gridProductionResume(storage,productionGridLaunchAuthority(json,storage.launch)),
     send:(claim,r)=>withKey(claim,(identity,umk)=>custody.withSecret(identity,umk,secret=>sender.send(r,secret,undefined,claim.leaseToken))),

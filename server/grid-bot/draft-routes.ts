@@ -10,6 +10,8 @@ import { PlannerRangeFacts } from '../grid-planner/range-facts';
 import { gridHistoryRequest } from '../../shared/grid-lookback';
 import { marketSnapshot } from '../grid-planner/market-snapshot';
 import type {GridLifecycleStorage} from './lifecycle-storage';
+import type {GridAutoResumeStorage} from './auto-resume-storage';
+import {gridAutoResumeBand} from './auto-resume-policy';
 import {gridRuntimeGates,type GridRuntimeGates} from './service';
 import {gridStartRequestSchema,type GridStartRequest,type GridStartResult} from '../../shared/grid-start';
 
@@ -17,7 +19,7 @@ const uuid=z.string().uuid();
 const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),lookback:z.enum(['100','200'])}).strict();
 const advisoryQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),
   lookback:z.enum(['100','200']).optional(),period:z.enum(['day','week','month']).optional()}).strict();
-export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean;lifecycle?:Pick<GridLifecycleStorage,'request'>;
+export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean;lifecycle?:Pick<GridLifecycleStorage,'request'>;autoResume?:Pick<GridAutoResumeStorage,'set'|'identity'>;tick?:(market:string)=>Promise<string|null>;
   gates?:()=>GridRuntimeGates;start?:(wallet:string,id:string,expected:GridStartRequest,signal:AbortSignal)=>Promise<GridStartResult>}) {
   const gates=provided?.gates??gridRuntimeGates;
   app.post('/api/grid-bots/:id/start',requireWallet,async(req,res)=>{
@@ -52,6 +54,24 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
       else res.status(503).json({error:'Grid authority or storage unavailable'});
     } finally {if(bounded)inFlight--;}
   };
+  const currentTick=provided?.tick??(async(market:string)=>{
+    try{const rows=await defaultPlannerDeps.getMarkets(),row=rows.find(m=>m.internalSymbol===market);if(!row)return null;
+      const constraints=marketSnapshot(row,defaultPlannerDeps).constraints;
+      return constraints.state==='available'&&constraints.value.expiresAt>Date.now()?constraints.value.tick:null;
+    }catch{return null;}
+  });
+  app.post('/api/grid-bots/:id/auto-resume',requireWallet,work(async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    const id=uuid.safeParse(req.params.id),body=z.object({enabled:z.boolean(),expectedGeneration:z.string().regex(/^(?:0|[1-9]\d*)$/).max(19).refine(v=>/^(?:0|[1-9]\d*)$/.test(v)&&BigInt(v)<=9223372036854775807n)}).strict().safeParse(req.body);
+    if(!id.success||!body.success){res.status(400).json({error:'Invalid auto-resume preference'});return;}
+    const {storage}=await runtime(),snapshot=await storage.getBotSnapshot(wallet(req),id.data);
+    let auto=provided?.autoResume;
+    if(!auto){const [{pool},{GridLaunchStorage},{GridMonitorStorage},{GridAutoResumeStorage}]=await Promise.all([import('../db'),import('./launch-storage'),import('./monitor-storage'),import('./auto-resume-storage')]);auto=new GridAutoResumeStorage(new GridMonitorStorage(new GridLaunchStorage(pool)));}
+    const tick=body.data.enabled?await currentTick(snapshot.bot.market):null;
+    const identity=body.data.enabled?await auto.identity(wallet(req),id.data):null;
+    const preference=await auto.set(wallet(req),id.data,body.data.enabled,body.data.expectedGeneration,tick,identity);
+    res.json({enabled:preference.enabled,generation:String(preference.generation)});
+  }));
   // Safety controls remain available under draft/entry denial. Owner identity comes only from auth middleware.
   for(const action of ['pause','resume','resync','stop'] as const)app.post('/api/grid-bots/:id/'+action,requireWallet,work(async(req,res)=>{
     const body=z.object({requestId:uuid}).strict().safeParse(req.body),id=uuid.safeParse(req.params.id);
@@ -123,7 +143,10 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
   }));
   app.get('/api/grid-bots/:id/surface',requireWallet,work(async(req,res)=>{
     if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}
-    const {storage}=await runtime(),snapshot=await storage.getBotSnapshot(wallet(req),req.params.id,true);res.set('Cache-Control','no-store');res.json(snapshot.surface);
+    const {storage}=await runtime(),snapshot=await storage.getBotSnapshot(wallet(req),req.params.id,true);res.set('Cache-Control','no-store');
+    if(snapshot.surface?.autoResume){const tick=await currentTick(snapshot.bot.market),band=tick?gridAutoResumeBand(snapshot.bot.lowerPrice,snapshot.bot.upperPrice,tick):null;
+      snapshot.surface.autoResume={...snapshot.surface.autoResume,band,unavailableReason:!tick?'market_data_unavailable':!band?'range_unavailable':'control_unavailable',available:!!band&&!['draft','failed','stopping','stopped'].includes(snapshot.bot.status)};}
+    res.json(snapshot.surface);
   }));
   app.get('/api/grid-bots/:id/chart',requireWallet,work(async(req,res)=>{
     if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}

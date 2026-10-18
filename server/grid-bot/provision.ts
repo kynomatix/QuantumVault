@@ -16,6 +16,7 @@ import {executeGridWindow} from './placement';
 import {defaultGridLaunchAuthority,GridLaunchAuthorityUnavailable} from './launch-authority';
 import {durableGridUmk} from './service';
 import type {GridMarginReading} from './margin';
+import {planGridRebalance} from './rebalance';
 
 // Grid levels occupy 1..101. Funding and seed must each have their own reserved identity.
 export const GRID_FUND_IDENTITY_LEVEL = 102;
@@ -30,9 +31,9 @@ export interface LaunchFacts {
   transportReady:boolean;inventoryComplete:boolean;recycler:{reuse:unknown;recycle:unknown;deployment:string;expectedDeployment:string;checkedAt:number};
 }
 export type LaunchAdmission={ok:false;reason:string;transient?:boolean}|{ok:true;plan:GridPlan;exposureLimit:string;seedNotional:string;firstEntryOrdinal:number;stop:ReturnType<typeof projectGridStop>};
-/** Every pre-reservation check is read-only. No custody, funding, enrollment or leverage mutation occurs here. */
-export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buffer,f:LaunchFacts,now:number,alreadyFunded=false):LaunchAdmission{
-  const deny=(reason:string):LaunchAdmission=>({ok:false,reason});
+/** Shared immutable policy and current account/market authority; Resume never funds or seeds. */
+function gridCurrentAuthority(policy:GridPolicy,policyHmac:string,umk:Buffer,f:LaunchFacts,now:number,alreadyFunded:boolean,resume:boolean){
+  const deny=(reason:string)=>({ok:false as const,reason});
   try {
     if(!verifyGridPolicyHmac(policy,umk,policyHmac).ok)return deny('Grid policy signature or version changed.');
     if(!Number.isSafeInteger(f.observedAt)||!Number.isSafeInteger(f.expiresAt)||f.observedAt>now||f.expiresAt<=now||f.expiresAt-f.observedAt>5000)return deny('Launch observations are stale or unknown.');
@@ -44,14 +45,23 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
       ||!new Decimal(f.margin.leverage).isInteger()||!new Decimal(f.margin.leverage).gte(1))return deny('Strict Grid account margin is stale or identity changed.');
     if(!gridRecyclerGate(f.recycler,now))return deny('Subaccount reuse and recycling must both be enabled for this deployment.');
     if(!gridWalletEntryGate(f.sol).entryAllowed)return deny('Wallet SOL reserve is below the entry minimum or unknown.');
-    if(!Number.isSafeInteger(f.availableSlots)||f.availableSlots<GRID_MINIMUM_LAUNCH_SLOTS||!Number.isSafeInteger(f.subaccountCount)||f.subaccountCount<0||f.subaccountCount>(f.account||f.reusableAccountAvailable===true?10:9))return deny('Subaccount or order slot capacity is unavailable.');
-    if(f.restrictions!=='unrestricted'||!new Decimal(f.maxLeverage).gte(policy.leverage)||!alreadyFunded&&!new Decimal(f.masterWithdrawable).gte(policy.totalInvestment)
+    if(!Number.isSafeInteger(f.availableSlots)||f.availableSlots<(resume?1:GRID_MINIMUM_LAUNCH_SLOTS)||!Number.isSafeInteger(f.subaccountCount)||f.subaccountCount<0||f.subaccountCount>(f.account||f.reusableAccountAvailable===true?10:9))return deny('Subaccount or order slot capacity is unavailable.');
+    if(f.restrictions!=='unrestricted'||!new Decimal(f.maxLeverage).gte(policy.leverage)||!resume&&!alreadyFunded&&!new Decimal(f.masterWithdrawable).gte(policy.totalInvestment)
       || !new Decimal(f.observedCredits).gt(0))return deny('Funding, leverage, quota or market restrictions deny launch.');
-    if(!new Decimal(f.availableGridCredits).gte(alreadyFunded?10:policy.seedAtCreation?50:40))return {ok:false,transient:true,reason:'Grid quota is temporarily unavailable.'};
+    if(!new Decimal(f.availableGridCredits).gte(resume||alreadyFunded?10:policy.seedAtCreation?50:40))return {ok:false as const,transient:true,reason:'Grid quota is temporarily unavailable.'};
     const account=f.account??f.masterAccount;
     const fee=(quote:GridFeeQuote|null,role:'maker'|'taker',intent:'entry'|'profit')=>quote&&validateGridFeeQuote(quote,{account,subaccountId:null,market:policy.market,liquidityRole:role,builderCode:'CARRY',intent},now);
-    if(!fee(f.maker,'maker','entry')||!fee(f.profit,'maker','profit')||policy.seedAtCreation&&!fee(f.taker,'taker','entry'))return deny('Current account fees and builder approval are unavailable.');
-    const maker=Decimal.max(0,f.maker.effectiveRate,f.profit.effectiveRate),taker=policy.seedAtCreation?new Decimal(f.taker!.effectiveRate):new Decimal(0);
+    if(!fee(f.maker,'maker','entry')||!fee(f.profit,'maker','profit')||!resume&&policy.seedAtCreation&&!fee(f.taker,'taker','entry'))return deny('Current account fees and builder approval are unavailable.');
+    const maker=Decimal.max(0,f.maker.effectiveRate,f.profit.effectiveRate),taker=!resume&&policy.seedAtCreation?new Decimal(f.taker!.effectiveRate):new Decimal(0);
+    return {ok:true as const,maker,taker};
+  }catch{return deny('A required current authority input is unknown or invalid.');}
+}
+/** Every pre-reservation check is read-only. No custody, funding, enrollment or leverage mutation occurs here. */
+export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buffer,f:LaunchFacts,now:number,alreadyFunded=false):LaunchAdmission{
+  const deny=(reason:string):LaunchAdmission=>({ok:false,reason});
+  try {
+    const current=gridCurrentAuthority(policy,policyHmac,umk,f,now,alreadyFunded,false);if(!current.ok)return current;
+    const {maker,taker}=current;
     const calc=calculateGrid({side:policy.direction,lower:policy.lowerPrice,upper:policy.upperPrice,start:policy.startPrice,intervals:policy.gridCount,
       entryScale:policy.entryScaleType,profitScale:policy.profitScaleType,seed:policy.seedAtCreation,leverage:String(policy.leverage),
       tick:f.tick,lot:f.lot,minimumQuote:f.minimumQuote,investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:maker.toFixed(),
@@ -76,6 +86,29 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
     if(!first)return deny('The unchanged seed and one valid entry exceed the configured investment × leverage; reduce the footprint or disable the seed.');
     return {ok:true,plan,exposureLimit,seedNotional:seedNotional.toFixed(),firstEntryOrdinal:first.ordinal+1,stop};
   }catch{return deny('A required launch input is unknown or invalid.');}
+}
+
+export function preflightGridResume(policy:GridPolicy,policyHash:string,umk:Buffer,f:LaunchFacts,now:number,input:Parameters<typeof planGridRebalance>[0]){
+  const deny=(reason:string)=>({ok:false as const,reason});
+  try {
+    const current=gridCurrentAuthority(policy,policyHash,umk,f,now,true,true);if(!current.ok)return current;
+    if(!f.account||f.margin.leverage!==String(policy.leverage)||!policy.stopLossPrice||!input.inventoryComplete||!input.entriesAllowed)return deny('Current Resume inventory or margin is unavailable.');
+    if(![f.tick,f.lot,f.bookPrice,f.minimumPrice,f.maximumPrice,f.maximumQuote].every(v=>new Decimal(v).isFinite()&&new Decimal(v).gt(0)))return deny('Current market limits are unavailable.');
+    if(!new Decimal(f.bookPrice).gte(policy.lowerPrice)||!new Decimal(f.bookPrice).lte(policy.upperPrice))return deny('Current book is outside the retained range.');
+    for(const l of policy.levels){
+      if(!new Decimal(l.price).mod(f.tick).isZero()||!new Decimal(l.size).mod(f.lot).isZero()||new Decimal(l.price).lt(f.minimumPrice)||new Decimal(l.price).gt(f.maximumPrice))return deny('Signed geometry is incompatible with current market limits.');
+    }
+    for(const l of input.levels){const signed=policy.levels[l.ordinal-1];if(!signed||!new Decimal(l.price).eq(signed.price)||!new Decimal(l.size).eq(signed.size)||l.side!==signed.side||l.reduceOnly!==signed.reduceOnly)return deny('Retained levels differ from signed geometry.');}
+    const prices=policy.levels.map(l=>new Decimal(l.price)).sort((a,b)=>a.cmp(b));
+    for(let i=1;i<prices.length;i++)if(!prices[i].minus(prices[i-1]).gt(Decimal.max(prices[i],prices[i-1]).mul(Decimal.max(0,f.maker.effectiveRate).plus(Decimal.max(0,f.profit.effectiveRate)))))return deny('Current fees consume the retained grid spread.');
+    const plan=planGridRebalance({...input,bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots});
+    const safe=plan.chunks.flat().filter(a=>a.kind==='place');
+    if(!safe.length)return deny('No safe resting order is currently available.');
+    let required=new Decimal(0);
+    for(const a of safe){const l=a.level,notional=new Decimal(l.price).mul(l.size);if(notional.gt(f.maximumQuote))return deny('Current order bounds deny Resume.');if(!l.reduceOnly)required=required.plus(notional.div(f.margin.leverage).plus(notional.mul(f.margin.feeRate)));}
+    if(required.gt(f.margin.available))return deny('Current margin cannot back the remaining Resume orders.');
+    return {ok:true as const,plan};
+  }catch{return deny('Current Resume planning authority is unavailable.');}
 }
 
 export interface GridProvisionDeps {

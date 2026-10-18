@@ -23,8 +23,8 @@ function fixture(action:string|null='stop'){
   let life:any=action?{action,epoch:'1',active_request:randomUUID(),state:'pending',previous_status:'active'}:null;
   const observation:GridObservation={account:claim.account,symbol:'BTC',observedAt:now,inventoryComplete:true,position:{direction:'long',size:'1'},orders:[],trades:[],history:{from:0,through:now,inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED'},mark:{price:'100',observedAt:now}};
   const operations:any[]=[];
-  const launch={read:vi.fn(async()=>null),prepare:vi.fn(async(_key:string,r:ExactGridRequest)=>{const op={id:randomUUID(),exact_request:structuredClone(r),exact_request_digest:requestDigest(r),state:'prepared',failure_classification:null};operations.push(op);return op;}),submit:vi.fn(async()=>true),settle:vi.fn(async(op:any,outcome:any)=>{op.state=outcome.state;}),expirePrepared:vi.fn(async()=>false)};
-  const monitor={launch,snapshot:vi.fn(async()=>({bot,operations})),reconcile:vi.fn(async()=>({entriesAllowed:true}))};
+  const launch={transaction:vi.fn(async(fn:any)=>fn({query:vi.fn(async()=>({rows:[]}))})),pilotExposure:vi.fn(async()=>({limitUsd:'100',exposureUsd:'0'})),read:vi.fn(async()=>null),prepare:vi.fn(async(_key:string,r:ExactGridRequest)=>{const op={id:randomUUID(),exact_request:structuredClone(r),exact_request_digest:requestDigest(r),state:'prepared',failure_classification:null};operations.push(op);return op;}),submit:vi.fn(async()=>true),settle:vi.fn(async(op:any,outcome:any)=>{op.state=outcome.state;}),expirePrepared:vi.fn(async()=>false)};
+  const monitor={launch,assertLease:vi.fn(async()=>bot),planningState:vi.fn(async()=>({levels:[],fills:[],reserved:[],observation,entriesAllowed:true})),snapshot:vi.fn(async()=>({bot,operations})),reconcile:vi.fn(async()=>({entriesAllowed:true}))};
   const storage={monitor,state:vi.fn(async()=>({bot,life})),request:vi.fn(async(_wallet:string,_id:string,_key:string,act:string,evidence:any)=>{life={action:act,epoch:'2',active_request:randomUUID(),state:'pending',evidence};bot.status=act==='stop'?'stopping':'pausing';return life;}),blocked:vi.fn(async()=>{}),sol:vi.fn(async()=>{}),safetyObservation:vi.fn(async()=>{}),complete:vi.fn(async()=>{})};
   const proof:GridSettlementFact={account:claim.account,masterAccount:claim.masterAccount,observedAt:now,balance:'0',withdrawable:'0',settlementComplete:true,source:'EXAMPLE_REVIEWED',recycler:recycler()};
   const deps={storage,observe:vi.fn(async()=>observation),send:vi.fn(async(_claim:unknown,_request:ExactGridRequest)=>({rateLimited:false})),recover:vi.fn(async(_claim:unknown,_op:any)=>({state:'unknown' as const})),sol:vi.fn(async()=>({balance:'0.1',observedAt:now})),resume:vi.fn(async()=>null),settlement:vi.fn(async()=>proof),recycle:vi.fn(async()=>{})};
@@ -164,11 +164,20 @@ describe('C4 lifecycle sweep recovery',()=>{
 });
 
 describe('resume authority and close rejection',()=>{
+  it.each(['Pause','Stop','off'])('%s during awaited automatic authority cannot complete Resume',async()=>{
+    const f=fixture('resume');Object.assign(f.bot,{policy_hmac:'EXAMPLE_HASH',status:'range_exhausted'});Object.assign(f.life,{source:'risk',action:'band',state:'complete'});
+    const token={generation:'1',cycle:'1',requestId:randomUUID(),epoch:'2',policyHash:'EXAMPLE_HASH',umkVersion:1};let current=true,release!:(value:any)=>void;
+    const auto={armed:vi.fn(async()=>true),reserve:vi.fn(async()=>{Object.assign(f.life,{source:'auto',action:'resume',state:'pending',active_request:token.requestId,epoch:'2'});f.bot.status='resuming';return token;}),current:vi.fn(async()=>current),hold:vi.fn(async()=>{})};
+    (f.storage as any).auto=auto;(f.deps as any).marketTick=async()=> '0.01';
+    const cleanup=vi.fn(),authority={policy:{id:f.claim.id,direction:'long',stopLossPrice:'80'},policyHmac:'EXAMPLE_HASH',umk:Buffer.alloc(32,7),facts:{agentGeneration:{umkVersion:1},account:f.claim.account,masterAccount:f.claim.masterAccount,tick:'0.01'},cleanup};
+    let entered!:()=>void;const enteredAuthority=new Promise<void>(resolve=>entered=resolve);f.deps.resume.mockImplementation(async()=>{entered();return new Promise(resolve=>release=resolve);});
+    const running=f.service.tick(f.claim,signal());await enteredAuthority;current=false;release(authority);expect(await running).toBe('auto_resume_superseded');expect(f.storage.complete).not.toHaveBeenCalled();expect(f.deps.send).not.toHaveBeenCalled();expect(cleanup).toHaveBeenCalledOnce();
+  });
   it('resumes only after fresh reconciliation and matching bot/account authority, then clears secrets',async()=>{
     const f=fixture('resume'),cleanup=vi.fn();Object.assign(f.bot,{policy_hmac:'EXAMPLE_HASH'});
-    const authority={policy:{id:f.claim.id,direction:'long',stopLossPrice:'80'},policyHmac:'EXAMPLE_HASH',umk:Buffer.alloc(32,7),facts:{account:f.claim.account,masterAccount:f.claim.masterAccount,tick:'0.01'},risk:{account:f.claim.account,symbol:'BTC',positionSize:'1',liquidationPrice:'50',observedAt:Date.now(),source:'EXAMPLE'},cleanup};
-    const gate=vi.spyOn(provision,'preflightGridLaunch').mockReturnValue({ok:true} as never);
-    try{f.deps.resume.mockResolvedValue(authority as never);expect(await f.service.tick(f.claim,signal())).toBe('resumed');expect(f.monitor.reconcile).toHaveBeenCalledOnce();expect(f.storage.complete).toHaveBeenCalledWith(f.claim,f.life.active_request,'canary');expect(cleanup).toHaveBeenCalledOnce();
+    const authority={policy:{id:f.claim.id,direction:'long',stopLossPrice:'80'},policyHmac:'EXAMPLE_HASH',umk:Buffer.alloc(32,7),facts:{agentGeneration:{umkVersion:1},account:f.claim.account,masterAccount:f.claim.masterAccount,tick:'0.01'},risk:{account:f.claim.account,symbol:'BTC',positionSize:'1',liquidationPrice:'50',observedAt:Date.now(),source:'EXAMPLE'},cleanup};
+    const gate=vi.spyOn(provision,'preflightGridResume').mockReturnValue({ok:true} as never);
+    try{f.deps.resume.mockResolvedValue(authority as never);expect(await f.service.tick(f.claim,signal())).toBe('resumed');expect(f.monitor.reconcile).toHaveBeenCalledOnce();expect(f.storage.complete).toHaveBeenCalledWith(f.claim,f.life.active_request,'canary',expect.objectContaining({identity:{policyHash:'EXAMPLE_HASH',umkVersion:1}}));expect(cleanup).toHaveBeenCalledOnce();
       authority.facts.account='EXAMPLE_FOREIGN';expect(await f.service.tick(f.claim,signal())).toBe('resume_identity_changed');expect(f.storage.complete).toHaveBeenCalledOnce();expect(cleanup).toHaveBeenCalledTimes(2);
     }finally{gate.mockRestore();}
   });

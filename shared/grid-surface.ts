@@ -8,6 +8,7 @@ export interface GridBotSummary {
   seedAtCreation?:boolean;leverage?:number;
 }
 export interface GridBotSurface {
+  autoResume?:{enabled:boolean;generation:string;cycle:string;attempts:number;armed:boolean;heldReason:string|null;band:{lower:string;upper:string;tick:string}|null;available:boolean;unavailableReason?:'range_unavailable'|'market_data_unavailable'|'control_unavailable'};
   bot:GridBotSummary;
   levels:{id:string;ordinal:number;price:string;size:string;side:string;reduceOnly:boolean;status:string;cumulativeFilledSize:string}[];
   operations:{id:string;type:string;state:string}[];
@@ -31,6 +32,6 @@ export function gridActionAllowed(bot:GridBotSummary,action:GridOwnerAction){
   if(['draft','failed','stopped'].includes(bot.status))return false;
   if(bot.status==='stopping')return action==='stop';
   if(action==='stop')return true;
-  if(action==='pause')return ['active','canary','provisioning','resuming','reconciling','pausing'].includes(bot.status);
+  if(action==='pause')return ['active','canary','provisioning','resuming','reconciling','pausing','paused','range_exhausted'].includes(bot.status);
   return ['paused','range_exhausted'].includes(bot.status);
 }

@@ -31,7 +31,8 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
   if(!fresh)reasons.push('Current exchange authority is unavailable or out of date.');
   if(!inferred)reasons.push('Current safe history window is unavailable.');
   if(!gates.workerRunning)reasons.push('Grid worker is off or unavailable.');
-  return {bot:gridBotSummary(snapshot.bot),levels:snapshot.levels,operations:snapshot.operations.map((x:any)=>({id:x.id,type:x.type,state:x.state})),
+  const a=snapshot.autoPreference;
+  return {autoResume:{enabled:a?.enabled??false,generation:String(a?.generation??'0'),cycle:String(a?.cycle??'0'),attempts:a?.attempts??0,armed:!!a?.armed_cycle,heldReason:a?.held_reason??'preference_off',band:null,available:false},bot:gridBotSummary(snapshot.bot),levels:snapshot.levels,operations:snapshot.operations.map((x:any)=>({id:x.id,type:x.type,state:x.state})),
     lifecycle:{action:life?.action??null,state:life?.state??null,blocker:life?.blocker??null},
     pnl:{realised:decimal(pnl?.realised),unrealised:fresh?decimal(pnl?.unrealised):null,total:fresh?decimal(pnl?.total):null,fees:decimal(pnl?.fees),averageEntry:fresh?decimal(pnl?.averageEntry):null,breakeven:fresh?decimal(pnl?.breakeven):null},
     fills:(snapshot.fills??[]).map((f:any)=>({tradeId:f.trade_id,time:Number(f.venue_time),leg:f.leg,size:f.size,price:f.price})).reverse(),

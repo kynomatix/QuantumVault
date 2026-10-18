@@ -18,6 +18,7 @@ export function gridFactsFresh(surface:GridBotSurface,now:number){const at=Date.
 export function gridVisibleActions(surface:GridBotSurface):GridOwnerAction[]{
   if(!surface.workerRunning)return [];
   return (['pause','resume','resync','stop'] as const).filter(action=>gridActionAllowed(surface.bot,action)
+    &&(action!=='pause'||!['paused','range_exhausted'].includes(surface.bot.status)||surface.autoResume?.enabled===true)
     &&(action!=='resume'||surface.authorities.resume));
 }
 export function gridCanAdjust(surface:GridBotSurface){return surface.startEnabled&&surface.workerRunning&&!!surface.bot.createIntent
@@ -52,4 +53,19 @@ export function gridBreakevenView(surface: GridBotSurface, now: number) {
   const percent = mark ? mark.minus(price).div(price).mul(direction === 'long' ? 100 : -100) : null;
   return { price: price.toFixed(), percent: percent?.toDecimalPlaces(2).toFixed(2) ?? null,
     tone: percent === null || percent.isZero() ? 'neutral' : percent.gt(0) ? 'profit' : 'loss' };
+}
+
+/** One primary explanation; owner controls take precedence over waiting copy. */
+export function gridAutoResumeView(surface:GridBotSurface,now:number){
+  const a=surface.autoResume;
+  if(!a)return null;
+  if(!a.enabled&&surface.bot.status==='paused'&&surface.lifecycle.action==='pause')return {title:'Paused by you',detail:'Your Pause wins. Resume manually when ready.',badge:'Auto-resume off'};
+  if(!a.available&&a.unavailableReason!=='market_data_unavailable'&&a.unavailableReason!=='control_unavailable')return {title:'Auto-resume unavailable for this range',detail:'This range leaves no inner band after the 2% buffer. You can still Resume manually when safe, or Stop.',badge:''};
+  if(!a.enabled||['active','canary'].includes(surface.bot.status))return null;
+  const reason=a.heldReason;
+  if(reason==='reconciliation_required')return {title:'Checking exchange state',detail:'Price is back inside. Waiting for orders and fills to reconcile.',badge:''};
+  if(reason==='operation_pending')return {title:'Waiting for an operation to settle',detail:'An order or transfer is unconfirmed. No new request yet.',badge:''};
+  if(['retry_limit','execution_revoked','policy_changed'].includes(reason??''))return {title:'Auto-resume held',detail:'Retry limit reached or execution access changed. Review, then Resume.',badge:''};
+  if(!a.available||!surface.workerRunning||!surface.startEnabled||!gridFactsFresh(surface,now)||!a.armed||reason&&reason!=='waiting_for_inner_band')return {title:'Safety check needs attention',detail:'Stop clearance, margin or current data is unavailable. Entries stay paused.',badge:''};
+  return {title:'Waiting to auto-resume',detail:'Entries paused; position held.',badge:surface.mark&&new Decimal(surface.mark).gt(surface.bot.upperPrice)?'Above range':surface.mark&&new Decimal(surface.mark).lt(surface.bot.lowerPrice)?'Below range':''};
 }

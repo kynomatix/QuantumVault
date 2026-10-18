@@ -74,13 +74,18 @@ export class GridLaunchStorage {
   constructor(private pool:Pool,private ready=()=>requireSchemaCapabilityReady('grid_bot',async(q,v)=>pool.query(q,v?[...v]:undefined)),
     private marginRead?:(r:ExactGridRequest)=>Promise<GridMarginReading|null>){}
   /** All POST kinds share the takeover fence through completion. No async gap after final authority. */
+  private async autoResumeFence(c:PoolClient,r:ExactGridRequest){
+    if(!gridAddsExposure(r))return true;
+    const a=(await c.query('SELECT generation FROM grid_auto_resume WHERE bot_id=$1',[r.botId])).rows[0];
+    return String(a?.generation??'0')===String(r.authority.autoResumeGeneration??'0');
+  }
   async sendOwned<T>(r:ExactGridRequest,leaseToken:string,post:()=>Promise<T>):Promise<T>{
     return this.transaction(async c=>{
       if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       let pilotUntil:number|null=null;
       if(gridAddsExposure(r)){
         const bot=(await c.query('SELECT id,clock_timestamp() AS now FROM grid_bots WHERE id=$1 FOR UPDATE',[r.botId])).rows[0];
-        if(!bot)throw new GridLaunchTransientError('Grid send ownership unavailable');
+        if(!bot||!await this.autoResumeFence(c,r))throw new GridLaunchTransientError('Grid send ownership unavailable');
         pilotUntil=(await this.pilotGate(c,r.botId,new Date(bot.now).getTime())).validUntil;
       }
       if(!reduction(r)&&await gridWorkerEntryBlocked(c,r.botId))throw new GridLaunchTransientError('Grid send ownership unavailable');
@@ -319,6 +324,7 @@ export class GridLaunchStorage {
       if(!reduction(request)&&await gridWorkerEntryBlocked(c,request.botId))throw new GridLaunchTransientError('Grid ownership recovery requires reconciliation');
       const lifecycle=(await c.query('SELECT * FROM grid_lifecycle WHERE bot_id=$1',[request.botId])).rows[0];
       if(lifecycle&&String(lifecycle.epoch)!==String(request.authority.lifecycleEpoch))throw Error('Grid lifecycle changed');
+      if(!await this.autoResumeFence(c,request))throw new GridLaunchTransientError('Grid preference generation changed');
       if(['close','sweep'].includes(request.kind)&&bot.status!=='stopping')throw Error('Stop intent required');
       const old=(await c.query('SELECT * FROM grid_operations WHERE idempotency_key=$1',[key])).rows[0];
       if(old){if(old.bot_id!==request.botId || old.exact_request_digest!==digest || canonicalRequest(old.exact_request)!==canonicalRequest(exact))throw Error('Exact request conflict');return old;}
@@ -425,6 +431,7 @@ export class GridLaunchStorage {
       const lifecycle=(await c.query('SELECT * FROM grid_lifecycle WHERE bot_id=$1',[op.exact_request.botId])).rows[0];
       if(lifecycle&&String(lifecycle.epoch)!==String(op.exact_request.authority.lifecycleEpoch))return false;
       if(!reduction(op.exact_request)&&!['provisioning','canary','active'].includes(bot.status))return false;
+      if(!await this.autoResumeFence(c,op.exact_request))return false;
       if(['close','sweep'].includes(op.exact_request.kind)&&bot.status!=='stopping')return false;
       if(!reductionAuthority(op.exact_request,monitor,new Date(bot.now).getTime()))return false;
       if(gridAddsExposure(op.exact_request))await this.pilotGate(c,op.exact_request.botId,new Date(bot.now).getTime());

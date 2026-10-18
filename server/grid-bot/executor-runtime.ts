@@ -103,7 +103,7 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
         ||r.authority.policyHmac!==policyHmac||r.account!==account.account||r.masterAccount!==account.masterAccount)return false;
       const life=await lifecycle.lifecycle.state(claim);
       if(life.life&&String(life.life.epoch)!==String(r.authority.lifecycleEpoch))return false;
-      if(!['provisioning','active','canary'].includes(bot.status))return false;
+      if(!(gridAddsExposure(r)?['provisioning','active','canary']:['provisioning','active','canary','paused','range_exhausted','resuming']).includes(bot.status))return false;
       const f=r.authority.facts as LaunchFacts|undefined;
       if(!f||f.market!==policy.market||f.masterAccount!==account.masterAccount||!f.agentGeneration||f.agentGeneration.wallet!==account.wallet
         ||f.agentGeneration.masterAccount!==account.masterAccount||!Number.isSafeInteger(f.agentGeneration.umkVersion)||f.agentGeneration.umkVersion<1

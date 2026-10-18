@@ -187,11 +187,11 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 200 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 201 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(200);
-    expect(metadata).toHaveLength(200);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(200);
+    expect(sqlEntries).toHaveLength(201);
+    expect(metadata).toHaveLength(201);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(201);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // Append-only repair: preserve every SQL statement and metadata entry from 000 through 196.
     const preservedManifestDigest = createHash("sha256").update(JSON.stringify(
@@ -213,6 +213,13 @@ describe("schema readiness", () => {
       const fileSql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
       expect(sqlEntries[192 + offset].trim()).toBe(fileSql.replaceAll('\r\n', '\n').trim());
     }
+    expect(metadata[200]).toMatchObject({id:'200-grid-auto-resume',capabilities:['grid_bot'],operation:'ddl'});
+    const autoSql=readFileSync(new URL('../../migrations/0011_grid_auto_resume.sql',import.meta.url),'utf8').replaceAll('\r\n','\n').trim();
+    expect(sqlEntries[200].trim()).toBe(autoSql);
+    expect(autoSql).not.toMatch(/CASE/i);
+    expect(autoSql.split('\n').filter(line=>line.includes('CHECK'))).toHaveLength(5);
+    for(const line of autoSql.split('\n').filter(line=>line.includes('CHECK')))expect(line).toMatch(/CHECK \(.*\)[,;]?$/);
+    expect(metadata[200].requirements.filter(r=>r.kind==='constraint')).toHaveLength(8);
     expect(metadata[198]).toMatchObject({ id: '198-lab-signal-provenance', capabilities: ['signal_bot', 'lab', 'phoenix'], operation: 'ddl' });
     expect(sqlEntries[198].trim()).toBe(readFileSync(new URL('../../migrations/0010_lab_signal_provenance.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n').trim());
     expect(sqlEntries[198]).toContain("CHECK (lab_link_state IN ('linked','owner_confirmed','unlinked'))");

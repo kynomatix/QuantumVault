@@ -6,18 +6,22 @@ import {canonicalRequest} from './launch-storage';
 import {gridWalletEntryGate} from './runtime-policy';
 import {freshGridFact,gridEntrySafety,type GridControlAction} from './lifecycle-policy';
 import type {GridObservation} from './reconciliation';
+import {GridAutoResumeStorage,clearGridAutoResumeArm,type GridResumeIdentity,type GridAutoResumeToken} from './auto-resume-storage';
 export interface GridControl {id:string;bot_id:string;action:GridControlAction;state:string;previous_status:string;evidence:Record<string,unknown>}
 export class GridLifecycleStorage {
-  constructor(readonly monitor:GridMonitorStorage){}
+  readonly auto:GridAutoResumeStorage;
+  constructor(readonly monitor:GridMonitorStorage){this.auto=new GridAutoResumeStorage(monitor);}
   /** Owner scope, request deduplication and the entry fence commit in one transaction. */
   async request(wallet:string,botId:string,key:string,action:GridControlAction,evidence:Record<string,unknown>={},source:'owner'|'risk'='owner',claim?:GridMonitorClaim):Promise<GridControl>{
-    if(!key||key.length>200||!['pause','resume','resync','stop','band'].includes(action)||source==='owner'&&action==='band')throw new GridStorageError('invariant');
+    if(!['owner','risk'].includes(source)||!key||key.length>200||!['pause','resume','resync','stop','band'].includes(action)||source==='owner'&&action==='band')throw new GridStorageError('invariant');
     return this.monitor.launch.transaction(async c=>{
       const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[botId,wallet])).rows[0];
       if(!bot)throw new GridStorageError('not_found');
       if(source==='risk'){if(!claim||claim.id!==botId)throw new GridStorageError('lost_lease');await this.monitor.assertLease(c,claim);}
       const prior=(await c.query('SELECT r.*,k.evidence AS requested_evidence FROM grid_control_keys k JOIN grid_control_requests r ON r.id=k.control_id WHERE k.bot_id=$1 AND k.request_key=$2',[botId,key])).rows[0];
       if(prior){if(prior.action!==action||canonicalRequest(prior.requested_evidence)!==canonicalRequest(evidence))throw new GridStorageError('conflict');return prior;}
+      if(source==='owner'&&['pause','stop','resume'].includes(action))await this.auto.revoke(c,botId,action!=='resume',action==='resume'?'waiting_for_inner_band':'preference_off');
+      if(source==='risk'&&['pause','stop'].includes(action))await this.auto.revoke(c,botId,false,'risk_pause');
       const bind=async(control:GridControl)=>{await c.query('INSERT INTO grid_control_keys(bot_id,request_key,control_id,evidence) VALUES($1,$2,$3,$4)',[botId,key,control.id,evidence]);return control;};
       const current=(await c.query('SELECT r.* FROM grid_lifecycle l JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[botId])).rows[0];
       if(current?.state==='pending'&&current.action===action)return bind(current);
@@ -40,7 +44,7 @@ export class GridLifecycleStorage {
     });
   }
   async state(claim:GridMonitorClaim){return this.monitor.launch.transaction(async c=>{const bot=await this.monitor.assertLease(c,claim);
-    const life=(await c.query('SELECT l.*,r.action,r.state,r.previous_status,r.evidence FROM grid_lifecycle l LEFT JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[claim.id])).rows[0];return {bot,life};});}
+    const life=(await c.query('SELECT l.*,r.action,r.source,r.state,r.previous_status,r.evidence FROM grid_lifecycle l LEFT JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[claim.id])).rows[0];return {bot,life};});}
   async blocked(claim:GridMonitorClaim,reason:string){await this.monitor.launch.transaction(async c=>{await this.monitor.assertLease(c,claim);
     await c.query('UPDATE grid_lifecycle SET blocker=$2 WHERE bot_id=$1',[claim.id,reason]);});}
   async safetyObservation(claim:GridMonitorClaim,observation:GridObservation){await this.monitor.launch.transaction(async c=>{
@@ -63,12 +67,14 @@ export class GridLifecycleStorage {
       if(state!=='healthy'&&prior?.guard_state!==state&&!(await c.query('SELECT 1 FROM grid_risk_events WHERE event_key=$1',[incident+':'+state])).rowCount)await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[claim.id,incident+':'+state,'sol_'+state,{executionWallet:claim.masterAccount,balance:valid?fact.balance:null,observedAt:valid?fact.observedAt:null,policyVersion:'1.0.0'}]);
     });
   }
-  async complete(claim:GridMonitorClaim,requestId:string,status:'paused'|'range_exhausted'|'active'|'canary'){
+  async complete(claim:GridMonitorClaim,requestId:string,status:'paused'|'range_exhausted'|'active'|'canary',proof?:{identity?:GridResumeIdentity|null;token?:GridAutoResumeToken;tick?:string;epoch?:string}){
     await this.monitor.launch.transaction(async c=>{const bot=await this.monitor.assertLease(c,claim);
-      const l=(await c.query('SELECT l.*,r.action,r.state FROM grid_lifecycle l JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1 FOR UPDATE OF l',[claim.id])).rows[0];
-      if(l?.active_request!==requestId||l.state!=='pending')throw new GridStorageError('conflict');
+      const l=(await c.query('SELECT l.*,r.action,r.source,r.state FROM grid_lifecycle l JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1 FOR UPDATE OF l',[claim.id])).rows[0];
+      if(l?.active_request!==requestId||l.state!=='pending'||proof?.epoch!==undefined&&String(l.epoch)!==proof.epoch)throw new GridStorageError('conflict');
       if(l.action==='stop')throw new GridStorageError('invariant');
       if(['active','canary'].includes(status)){
+        if(l.source==='auto'&&(!proof?.token||!proof.tick||!await this.auto.valid(c,bot,proof.token,proof.tick)))throw new GridStorageError('conflict');
+        if(proof?.identity&&!await this.auto.security(c,bot,proof.identity))throw new GridStorageError('conflict');
         const m=(await c.query('SELECT * FROM grid_monitor_state WHERE bot_id=$1',[claim.id])).rows[0],now=new Date(bot.db_now).getTime();
         if(l.action!=='resume'||!m?.boot_id||m.blocked_reasons.length||!freshGridFact(new Date(m.reconciled_at).getTime(),now)
           ||!gridEntrySafety({sol:bot.sol_balance,solObservedAt:bot.sol_balance_observed_at?new Date(bot.sol_balance_observed_at).getTime():null,failures:bot.consecutive_failures,mark:m.observation?.mark??null},now).allowed)throw new GridStorageError('invariant');
@@ -78,6 +84,8 @@ export class GridLifecycleStorage {
       await c.query('UPDATE grid_bots SET status=$2,updated_at=clock_timestamp() WHERE id=$1',[claim.id,status]);
       await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[claim.id,requestId+':complete',status,{controlRequestId:requestId}]);
       await c.query('UPDATE grid_lifecycle SET blocker=NULL WHERE bot_id=$1',[claim.id]);
+      if(status==='range_exhausted'&&l.action==='band')await this.auto.arm(c,bot,{...l,state:'complete'},proof?.identity??null);
+      if(['active','canary'].includes(status))await c.query(`UPDATE grid_auto_resume SET ${clearGridAutoResumeArm},held_reason=NULL,updated_at=clock_timestamp() WHERE bot_id=$1`,[claim.id]);
     });
   }
 }

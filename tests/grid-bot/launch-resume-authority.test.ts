@@ -1,6 +1,8 @@
 import {describe,it,expect,vi,beforeEach,afterEach} from 'vitest';
+import Decimal from 'decimal.js';
 import {gridProductionResume,GridLaunchAuthority} from '../../server/grid-bot/launch-authority';
 import {gridResumeClearance} from '../../server/grid-bot/lifecycle-service';
+import {preflightGridResume,preflightGridLaunch} from '../../server/grid-bot/provision';
 import {launchAuthorityFixture,retainedFixture,clock,umk} from './launch-authority-fixtures';
 beforeEach(()=>vi.spyOn(Date,'now').mockReturnValue(clock));
 afterEach(()=>vi.restoreAllMocks());
@@ -57,5 +59,34 @@ describe('C5 retained production resume',()=>{
     const f=fixture(),controller=new AbortController();f.current.mockImplementationOnce(async()=>{controller.abort();return true;});
     await expect(gridProductionResume(f.storage,new GridLaunchAuthority(f.deps),f.security)(f.claim,controller.signal)).rejects.toThrow();
     expect(f.keyCleanup).toHaveBeenCalledOnce();expect(f.cleanup).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Resume admission uses current rolling inventory rather than original Start',()=>{
+  async function current(book:string,investment='100'){
+    const f=launchAuthorityFixture(false,investment);f.raw.book={s:'BTC',t:clock,l:[[{p:new Decimal(book).minus('0.01').toFixed(2),a:'1'}],[{p:new Decimal(book).plus('0.01').toFixed(2),a:'1'}]]};
+    const result=await f.authority.collect(f.account.wallet,f.policy,f.account,umk(),new AbortController().signal);
+    const input={direction:f.policy.direction,levels:f.policy.levels.map(l=>({...l,id:'EXAMPLE_LEVEL_'+l.ordinal,attempt:0,status:'pending'})),fills:[],reserved:[],owned:[],positionSize:'0',bookPrice:book,lot:result.facts.lot,minimumQuote:result.facts.minimumQuote,freeSlots:result.facts.availableSlots,inventoryComplete:true,entriesAllowed:true,canaryRemaining:String(Number(investment)*2)};
+    return {...f,...result,input};
+  }
+  it.each(['91.8','107.8'])('admits retained orders at inner edge %s far from the original Start without flipping entry roles',async book=>{
+    const f=await current(book),before=structuredClone(f.policy);
+    expect(preflightGridLaunch(f.policy,f.policyHash,umk(),f.facts,clock,true).ok).toBe(false);
+    const gate=preflightGridResume(f.policy,f.policyHash,umk(),f.facts,clock,f.input);expect(gate.ok).toBe(true);
+    if(gate.ok)for(const action of gate.plan.chunks.flat())if(action.kind==='place'&&!action.level.reduceOnly){expect(action.level.side).toBe('buy');expect(Number(action.level.price)).toBeLessThan(Number(book));}
+    expect(f.policy).toEqual(before);
+  });
+  it('keeps actual reserved exits backed and refuses unknown or overallocated position',async()=>{
+    const f=await current('107.8'),entry=f.input.levels[0],exit=f.input.levels[1];
+    const input={...f.input,positionSize:'1',fills:[{tradeId:'EXAMPLE_TRADE',orderId:'EXAMPLE_ORDER',operationId:'EXAMPLE_OPERATION',levelId:entry.id,leg:'entry' as const,side:'buy' as const,size:'1',price:entry.price,fee:'0',time:clock}],reserved:[{tradeId:'EXAMPLE_TRADE',size:'1'}],owned:[{levelId:exit.id,orderId:'EXAMPLE_EXIT',clientOrderId:'EXAMPLE_CLIENT',remaining:'1',reduceOnly:true}]};
+    const gate=preflightGridResume(f.policy,f.policyHash,umk(),f.facts,clock,input);expect(gate.ok).toBe(true);
+    expect(preflightGridResume(f.policy,f.policyHash,umk(),f.facts,clock,{...input,positionSize:'0.9'}).ok).toBe(false);
+    expect(preflightGridResume(f.policy,f.policyHash,umk(),f.facts,clock,{...input,positionSize:null,inventoryComplete:false}).ok).toBe(false);
+  });
+  it('does not add a $250 or active-bot cap, require new funding/seed, or expand exposure',async()=>{
+    const f=await current('107.8','1000');f.facts.masterWithdrawable='0';f.facts.taker=null;
+    expect(preflightGridResume(f.policy,f.policyHash,umk(),f.facts,clock,f.input).ok).toBe(true);
+    expect(preflightGridResume(f.policy,f.policyHash,umk(),f.facts,clock,{...f.input,canaryRemaining:'0'}).ok).toBe(false);
+    f.facts.margin.available='0';expect(preflightGridResume(f.policy,f.policyHash,umk(),f.facts,clock,f.input).ok).toBe(false);
   });
 });

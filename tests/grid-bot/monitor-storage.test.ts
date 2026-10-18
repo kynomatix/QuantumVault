@@ -22,7 +22,7 @@ import {policy,umk,intent} from './draft-fixtures';
 import {marginTestReading} from './margin-fixture';
 import type {GridObservation} from '../../server/grid-bot/reconciliation';
 import {gridRuntimeGates} from '../../server/grid-bot/service';
-const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql'].map(p=>readFileSync(new URL('../../migrations/'+p,import.meta.url),'utf8'));
+const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql','0011_grid_auto_resume.sql'].map(p=>readFileSync(new URL('../../migrations/'+p,import.meta.url),'utf8'));
 describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   let admin:Pool,pool:Pool,launch:GridLaunchStorage,storage:GridMonitorStorage;
   const schema='grid_u5_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(Buffer.alloc(32,3));
@@ -520,7 +520,8 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   it('stop supersedes pause durably and cannot be resumed out of stopping',async()=>{
     const f=await landed(),control=new GridLifecycleStorage(storage),pause=await control.request(wallet,f.bot.id,randomUUID(),'pause');
     const stop=await control.request(wallet,f.bot.id,randomUUID(),'stop',{price:'80'},'risk',f.claim);
-    expect((await control.state(f.claim)).life).toMatchObject({epoch:'2',active_request:stop.id});
+    // Safety revocation fences any automatic authority before the Stop request advances its epoch.
+    expect((await control.state(f.claim)).life).toMatchObject({epoch:'3',active_request:stop.id});
     expect((await pool.query('SELECT state FROM grid_control_requests WHERE id=$1',[pause.id])).rows[0].state).toBe('superseded');
     expect((await pool.query('SELECT evidence FROM grid_risk_events WHERE event_key=$1',[stop.id])).rows[0].evidence).toEqual({price:'80'});
     await expect(control.request(wallet,f.bot.id,randomUUID(),'resume')).rejects.toThrow('conflict');

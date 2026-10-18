@@ -3,13 +3,15 @@ import Decimal from 'decimal.js';
 import type {GridMonitorClaim} from './monitor-storage';
 import {GridLifecycleStorage} from './lifecycle-storage';
 import {GridExecution,gridReconciliationOutcome,type GridReconciliation} from './execution';
-import {GRID_ACTION_CREDITS,requestDigest,type ExactGridRequest,type DurableGridOperation} from './launch-storage';
+import {GridLaunchTransientError,GRID_ACTION_CREDITS,requestDigest,type ExactGridRequest,type DurableGridOperation} from './launch-storage';
 import type {GridSendResult} from './execution-failure';
 import type {GridObservation} from './reconciliation';
 import {gridOwnedLive,gridRiskTrigger,freshGridFact,gridEntrySafety,gridUnresolvedEntryCancel,gridUnresolvedTransfer} from './lifecycle-policy';
-import {preflightGridLaunch,type LaunchFacts} from './provision';
+import {preflightGridResume,type LaunchFacts} from './provision';
 import type {GridPolicy} from './policy-hmac';
 import {gridRecyclerGate} from './runtime-policy';
+import type {GridAutoResumeToken} from './auto-resume-storage';
+import type {WindowOrder} from './window';
 const D=Decimal.clone({precision:200});
 export interface GridSettlementFact {
   account:string;masterAccount:string;observedAt:number;balance:string;withdrawable:string;
@@ -31,6 +33,7 @@ export function gridResumeClearance(risk:GridResumeRisk|undefined,o:GridObservat
 }
 export interface GridLifecycleDeps {
   storage:GridLifecycleStorage;
+  marketTick?:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<string|null>;
   observe:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<GridObservation>;
   send:(claim:GridMonitorClaim,r:ExactGridRequest)=>Promise<GridSendResult>;
   recover:(claim:GridMonitorClaim,op:DurableGridOperation,signal:AbortSignal)=>Promise<GridReconciliation>;
@@ -44,7 +47,14 @@ export class GridLifecycleService {
   constructor(private deps:GridLifecycleDeps){}
   async tick(claim:GridMonitorClaim,signal:AbortSignal){
     const s=this.deps.storage,monitor=s.monitor,launch=monitor.launch;
-    const block=async(reason:string)=>{await s.blocked(claim,reason);return reason;};
+    let autoPermit:GridAutoResumeToken|undefined;
+    const block=async(reason:string)=>{
+      if(s.auto){
+        const held=reason.includes('stop_clearance')?'stop_clearance_unavailable':reason.includes('operation')?'operation_pending':reason.includes('inventory')||reason.includes('reconciliation')?'reconciliation_required':reason.includes('risk')?'risk_pause':reason.includes('identity')||reason.includes('policy')?'policy_changed':'resume_authority_unavailable';
+        await s.auto.hold(claim,held,!!autoPermit&&reason!=='resume_retry_waiting',autoPermit);
+      }
+      await s.blocked(claim,reason);return reason;
+    };
     let {bot,life}=await s.state(claim);
     const observation=await this.deps.observe(claim,signal);signal.throwIfAborted();
     if(observation.account!==claim.account||observation.symbol!==bot.market.replace(/-PERP$/,''))return block('inventory_identity_unavailable');
@@ -78,6 +88,19 @@ export class GridLifecycleService {
       await launch.settle(op,gridReconciliationOutcome(result),claim.leaseToken);
       return block('recovered_reobserve_required');
     }
+    let resumeBoot:string|undefined;
+    if(s.auto&&(bot.status==='range_exhausted'||life?.source==='auto'&&life.state==='pending')&&await s.auto.armed(claim)){
+      if(!gridEntrySafety({sol:bot.sol_balance,solObservedAt:bot.sol_balance_observed_at?new Date(bot.sol_balance_observed_at).getTime():null,failures:bot.consecutive_failures,mark:observation.mark},Date.now()).allowed){await s.auto.hold(claim,'risk_pause',true);return block('resume_risk_denied');}
+      await s.safetyObservation(claim,observation);resumeBoot=randomUUID();
+      const reconciliation=await monitor.reconcile(claim,resumeBoot,observation);
+      if(!reconciliation.entriesAllowed){await s.auto.hold(claim,'reconciliation_required');return block('reconciliation_required');}
+      let tick:string|null=null;try{tick=await this.deps.marketTick?.(claim,signal)??null;}catch{signal.throwIfAborted();}
+      if(!tick){await s.auto.hold(claim,'market_data_unavailable');return 'market_data_unavailable';}
+      autoPermit=await s.auto.reserve(claim,tick,observation.mark)??undefined;
+      if(!autoPermit)return 'auto_resume_waiting';
+      ({bot,life}=await s.state(claim));
+      if(!await s.auto.current(claim,autoPermit,tick))return 'auto_resume_superseded';
+    }
     if(!life||life.state!=='pending')return trigger.kind==='unavailable'?trigger.reason:'idle';
     const owned=gridOwnedLive(snapshot.operations,observation),orphan=owned.some(x=>!x.operation);
     const entry=owned.find(x=>x.operation&&!x.order.reduceOnly);
@@ -97,11 +120,19 @@ export class GridLifecycleService {
     // Preserve all backed reduce-only exits while pausing. Orphans require owner investigation.
     if(orphan)return block('unrelated_order_requires_review');
     if(life.action==='pause'||life.action==='band'){
-      await s.complete(claim,life.active_request,life.action==='band'?'range_exhausted':'paused');return 'paused';
+      if(life.action==='band'){
+        await s.safetyObservation(claim,observation);
+        const reconciled=await monitor.reconcile(claim,randomUUID(),observation);
+        if(!(reconciled.reconciliationComplete??reconciled.entriesAllowed))return block('reconciliation_required');
+        if(s.auto){const identity=await s.auto.identity(bot.wallet_address,claim.id);await s.complete(claim,life.active_request,'range_exhausted',{identity});}
+        else await s.complete(claim,life.active_request,'range_exhausted');
+      }else await s.complete(claim,life.active_request,'paused');
+      return 'paused';
     }
-    await s.safetyObservation(claim,observation);
+    if(!resumeBoot)await s.safetyObservation(claim,observation);
+    const bootId=resumeBoot??randomUUID();
     let reconciled:{entriesAllowed:boolean;reconciliationComplete?:boolean}={entriesAllowed:false};
-    try{reconciled=await monitor.reconcile(claim,randomUUID(),observation);}catch(error){
+    try{reconciled=resumeBoot?{entriesAllowed:true}:await monitor.reconcile(claim,bootId,observation);}catch(error){
       if(life.action!=='stop')throw error; // Economic uncertainty must not disable a retained reduce-only stop.
     }
     if(life.action==='resume'||life.action==='resync'){
@@ -112,14 +143,28 @@ export class GridLifecycleService {
         await s.complete(claim,life.active_request,target);return target;
       }
       if(!gridEntrySafety({sol:bot.sol_balance,solObservedAt:bot.sol_balance_observed_at?new Date(bot.sol_balance_observed_at).getTime():null,failures:bot.consecutive_failures,mark:observation.mark},Date.now()).allowed)return block('resume_risk_denied');
-      const authority=await this.deps.resume(claim,signal);if(!authority)return block('resume_authority_unavailable');
+      let authority:Awaited<ReturnType<GridLifecycleDeps['resume']>>;
+      try{authority=await this.deps.resume(claim,signal);}catch(error){
+        signal.throwIfAborted();
+        if(autoPermit&&error instanceof GridLaunchTransientError){await s.auto.transient(claim,autoPermit);return 'resume_retry_waiting';}
+        return block('resume_authority_unavailable');
+      }
+      if(!authority)return block('resume_authority_unavailable');
       try {
+        if(autoPermit&&!await s.auto.current(claim,autoPermit,authority.facts.tick))return 'auto_resume_superseded';
         if(authority.policy.id!==claim.id||authority.policyHmac!==bot.policy_hmac||authority.facts.account!==claim.account
           ||authority.facts.masterAccount!==claim.masterAccount)return block('resume_identity_changed');
         if(!gridResumeClearance(authority.risk,observation,authority.policy,authority.facts.tick,Date.now()))return block('resume_current_stop_clearance_unavailable');
-        const gate=preflightGridLaunch(authority.policy,authority.policyHmac,authority.umk,authority.facts,Date.now(),true);
-        if(!gate.ok)return block('resume_policy_or_current_authority_denied');
-        await s.complete(claim,life.active_request,'canary');return 'resumed';
+        const planning=await monitor.planningState(claim,bootId);
+        const exposure=await launch.transaction(async c=>{await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[claim.masterAccount]);await monitor.assertLease(c,claim);return launch.pilotExposure(c,claim.id,Date.now());});
+        const remaining=exposure.limitUsd!==null&&exposure.exposureUsd!==null?D.max(0,new D(exposure.limitUsd).minus(exposure.exposureUsd)).toFixed():'0';
+        const ownedOrders:WindowOrder[]=owned.map(({order,operation})=>{if(!operation?.level_id||!order.clientOrderId)throw Error('Resume ownership unavailable');return {levelId:operation.level_id,orderId:order.orderId,clientOrderId:order.clientOrderId,reduceOnly:order.reduceOnly,remaining:new D(order.amount).minus(order.filledAmount).minus(order.cancelledAmount??'0').toFixed()};});
+        const gate=preflightGridResume(authority.policy,authority.policyHmac,authority.umk,authority.facts,Date.now(),{
+          direction:authority.policy.direction,levels:planning.levels.map(l=>({id:l.id,ordinal:l.ordinal,price:l.price,size:l.exact_size,side:l.side,reduceOnly:l.reduce_only,attempt:l.placement_attempt,status:l.status})),fills:planning.fills,reserved:planning.reserved,owned:ownedOrders,
+          positionSize:planning.observation.position?.size??null,bookPrice:authority.facts.bookPrice,lot:authority.facts.lot,minimumQuote:authority.facts.minimumQuote,freeSlots:authority.facts.availableSlots,inventoryComplete:planning.observation.inventoryComplete,entriesAllowed:planning.entriesAllowed,canaryRemaining:remaining});
+        if(!gate.ok){if(autoPermit&&'transient' in gate&&gate.transient){await s.auto.transient(claim,autoPermit);return 'resume_retry_waiting';}return block('resume_policy_or_current_authority_denied');}
+        if(autoPermit&&!await s.auto.current(claim,autoPermit,authority.facts.tick))return 'auto_resume_superseded';
+        await s.complete(claim,life.active_request,'canary',{epoch:String(life.epoch),token:autoPermit,tick:authority.facts.tick,identity:{policyHash:authority.policyHmac,umkVersion:authority.facts.agentGeneration.umkVersion}});return 'resumed';
       }finally{authority.cleanup();}
     }
     if(life.action!=='stop')return block('unknown_control');

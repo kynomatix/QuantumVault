@@ -1,10 +1,12 @@
 import React,{useEffect,useRef,useState} from 'react';
-import {RefreshCw,X} from 'lucide-react';
+import {RefreshCw,X,Info} from 'lucide-react';
 import {VENUE_OPEN_ORDER_CAPACITY,GRID_PROTECTION_RESERVE} from '../../../../shared/grid-capacity';
 import {Sheet,SheetContent,SheetHeader,SheetTitle,SheetDescription} from '@/components/ui/sheet';
 import {Button} from '@/components/ui/button';
+import {Switch} from '@/components/ui/switch';
+import {Popover,PopoverTrigger,PopoverContent} from '@/components/ui/popover';
 import {AlertDialog,AlertDialogContent,AlertDialogHeader,AlertDialogTitle,AlertDialogDescription,AlertDialogFooter,AlertDialogCancel,AlertDialogAction} from '@/components/ui/alert-dialog';
-import {GridReadOrder,GridActionKeys,gridAdjustReady,gridFactsFresh,gridRangeState,gridBreakevenView,gridVisibleActions,gridCanAdjust,gridLaunchState} from '@/lib/grid-live-view';
+import {GridReadOrder,GridActionKeys,gridAdjustReady,gridFactsFresh,gridRangeState,gridBreakevenView,gridVisibleActions,gridCanAdjust,gridLaunchState,gridAutoResumeView} from '@/lib/grid-live-view';
 import {gridStartConfirmation,submitGridStart} from '@/lib/grid-start-view';
 import {readableDecimal} from '@/lib/grid-planner-view';
 import type {GridBotSurface,GridOwnerAction} from '../../../../shared/grid-surface';
@@ -35,6 +37,16 @@ export function GridBotDetails({surface,now}:{surface:GridBotSurface;now:number}
     <div><h3 className="font-medium">Grid levels</h3><p className="text-xs text-muted-foreground">Persisted ledger states; current exchange data may be unavailable.</p><div className="mt-2 overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr><th className="pr-3">Level</th><th className="pr-3">Price</th><th className="pr-3">Size</th><th className="pr-3">Side</th><th>State / filled</th></tr></thead><tbody>{surface.levels.map(l=><tr key={l.id} className="border-t"><td className="py-2">{l.ordinal}</td><td className="pr-3">{price(l.price)}</td><td className="pr-3">{l.size}</td><td className="pr-3">{l.side}{l.reduceOnly?' exit':''}</td><td>{l.status} / {value(l.cumulativeFilledSize)}</td></tr>)}</tbody></table></div></div>
   </div></details>;
 }
+export function GridAutoResumeControl({surface,now,busy,onChange}:{surface:GridBotSurface;now:number;busy:boolean;onChange:(enabled:boolean)=>void}){
+  const a=surface.autoResume,view=gridAutoResumeView(surface,now);
+  if(!a||['draft','failed','stopped'].includes(surface.bot.status))return null;
+  const band=a.band,range=band?price(band.lower)+' ? '+price(band.upper):'Unavailable';
+  return <section className="space-y-3 rounded-xl border p-4" aria-label="Auto-resume">
+    <div className="flex items-center justify-between gap-4"><div><label htmlFor="grid-auto-resume" className="font-medium">Auto-resume after range exit</label><p id="grid-auto-resume-help" className="text-sm text-muted-foreground">Resume only after price is safely back inside.</p></div><Switch id="grid-auto-resume" aria-describedby="grid-auto-resume-help" checked={a.enabled} disabled={busy||!a.available&&!a.enabled||surface.bot.status==='stopping'} onCheckedChange={onChange}/></div>
+    <Popover><PopoverTrigger asChild><Button variant="ghost" size="sm" className="px-0"><Info className="mr-2 h-4 w-4"/>When will my bot resume?</Button></PopoverTrigger><PopoverContent className="space-y-3 text-sm" align="start"><p>Price must return to <strong>{range}</strong>.</p><p>That is 2% inside each edge of your range. The bot checks current safety before resuming.</p><p>Your position is held while waiting. Stop protection stays active. Pause or Stop turns this off.</p><p className="text-xs text-muted-foreground">2% of each boundary price · rounded inward.{band?' Current tick: '+band.tick+'.':''}</p></PopoverContent></Popover>
+    {view?<div role="status" className="space-y-1 rounded-lg bg-muted p-3"><div className="flex items-center justify-between gap-3"><h3 className="font-medium">{view.title}</h3>{view.badge?<span className="rounded-full border px-2 py-1 text-xs">{view.badge}</span>:null}</div><p className="text-sm">{view.title==='Waiting to auto-resume'&&surface.mark?surface.bot.market.replace(/-PERP$/,'')+' '+price(surface.mark)+' · ':''}{view.detail}</p>{view.title==='Waiting to auto-resume'&&band?<p className="text-sm">Resumes between {price(band.lower)} and {price(band.upper)}, after safety checks. Stop stays active.</p>:null}</div>:null}
+  </section>;
+}
 export function GridBotDrawer({id,createEnabled,onClose,onAdjust}:{id:string;createEnabled:boolean;onClose:()=>void;onAdjust:(intent:GridIntent)=>void}){
   const [surface,setSurface]=useState<GridBotSurface|null>(null),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[chart,setChart]=useState(false),[adjust,setAdjust]=useState(false),[now,setNow]=useState(Date.now());
   const [confirm,setConfirm]=useState<'start'|'stop'|'adjust'|null>(null);
@@ -53,6 +65,13 @@ export function GridBotDrawer({id,createEnabled,onClose,onAdjust}:{id:string;cre
     catch(e){if(alive.current)setMessage((e as Error).message+'. Refresh state; a manual retry uses the same request identity.');}
     finally{writing.current=false;if(alive.current){setBusy(false);void load();}}
   };
+  const setAutoResume=async(enabled:boolean)=>{
+    if(writing.current||!surface?.autoResume)return;
+    writing.current=true;reads.current.next();reader.current?.abort();setBusy(true);setMessage('Saving auto-resume preference…');
+    try{await gridJson('/'+id+'/auto-resume',{method:'POST',body:JSON.stringify({enabled,expectedGeneration:surface.autoResume.generation})});if(alive.current)setMessage(enabled?'Auto-resume enabled. Current safety checks still apply.':'Auto-resume off.');}
+    catch(error){if(alive.current)setMessage((error as Error).message+'. Refresh state before changing this preference again.');}
+    finally{writing.current=false;if(alive.current){setBusy(false);void load();}}
+  };
   const start=async()=>{
     if(writing.current||!surface?.startEnabled||surface.bot.status!=='draft'||!surface.startDraft)return;
     writing.current=true;reads.current.next();reader.current?.abort();setBusy(true);setMessage('Checking launch authority…');
@@ -65,7 +84,7 @@ export function GridBotDrawer({id,createEnabled,onClose,onAdjust}:{id:string;cre
     <SheetHeader className="border-b px-6 py-4 text-left"><div className="flex items-center justify-between gap-3"><SheetTitle>{surface?.bot.market??'Pacifica'} Grid Bot</SheetTitle><div className="flex shrink-0 gap-1"><Button variant="ghost" size="icon" disabled={busy} aria-label="Refresh state" title="Refresh state" onClick={()=>void load()}><RefreshCw className="h-4 w-4"/></Button><Button variant="ghost" size="icon" aria-label="Close bot details" title="Close bot details" onClick={onClose}><X className="h-4 w-4"/></Button></div></div><SheetDescription>{!surface?'Loading worker state…':surface.workerRunning?(surface.startEnabled?'Grid worker running; new Starts enabled.':'Grid worker running; new Starts off.'):'Grid worker off or unavailable.'}</SheetDescription></SheetHeader>
     <div className="flex-1 space-y-5 overflow-y-auto px-6 py-4">
       <p role="status" aria-live="polite" className="text-sm">{message||(!surface?'Loading current bot state…':'')}</p>
-      {surface?<><GridBotOverview surface={surface} now={now}/><Button variant="outline" onClick={()=>setChart(true)}>Open trade chart</Button><GridBotDetails surface={surface} now={now}/></>:null}
+      {surface?<><GridBotOverview surface={surface} now={now}/><GridAutoResumeControl surface={surface} now={now} busy={busy} onChange={enabled=>void setAutoResume(enabled)}/><Button variant="outline" onClick={()=>setChart(true)}>Open trade chart</Button><GridBotDetails surface={surface} now={now}/></>:null}
     </div>
     <div className="space-y-2 border-t bg-background p-4"><div className="flex flex-wrap gap-2">{surface?.startEnabled&&surface.bot.status==='draft'&&surface.startDraft?<Button disabled={busy} onClick={()=>setConfirm('start')}>Start bot</Button>:null}{surface&&gridVisibleActions(surface).map(action=><Button key={action} variant={action==='stop'?'destructive':'outline'} disabled={busy} onClick={()=>action==='stop'?setConfirm('stop'):void act(action)}>{action==='resync'?'Re-sync':action[0].toUpperCase()+action.slice(1)}</Button>)}</div>
       {canAdjust&&<Button variant="outline" disabled={busy||adjust} onClick={()=>{if(!surface?.bot.createIntent)return;if(gridAdjustReady(surface))onAdjust({...surface.bot.createIntent,rangeSource:'manual'});else setConfirm('adjust');}}>Adjust Range</Button>}
