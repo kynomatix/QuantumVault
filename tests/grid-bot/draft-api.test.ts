@@ -29,6 +29,28 @@ function memory() {
 const setup=()=>{const storage=memory(),a=authority(),deps:GridDraftDeps={storage:storage as never,observe:async()=>a,now:()=>clock,umk:async()=>umk()};return{storage,a,deps};};
 const request=async(deps:GridDraftDeps)=>{const draftRevision=gridDraftRevision(intent),preview=await authoritativeGridPreview('EXAMPLE',intent,draftRevision,deps);expect(preview.state).toBe('ready');return{schemaVersion:1 as const,clientRequestId:randomUUID(),draftRevision,intent,serverIntentDigest:preview.serverIntentDigest!};};
 describe('server authoritative Grid drafts',()=>{
+  it('keeps v1 creation by default and signs v2 only through the server test injection',async()=>{
+    const {deps,storage}=setup();
+    const old=await createGridDraft('EXAMPLE',await request(deps),deps);
+    expect(old.bot.policyVersion).toBe('1.0.0');expect(old.bot.runtimePolicyVersion).toBe('1.0.0');
+    deps.cycleV2Creation=true;deps.projectedStop=false;
+    const i={...intent,seedAtCreation:false},revision=gridDraftRevision(i),preview=await authoritativeGridPreview('EXAMPLE',i,revision,deps);
+    expect(preview.state).toBe('ready');expect(preview.policy.policyVersion).toBe('2.0.0');
+    expect(preview.plan?.cycles?.length).toBe(4);expect(preview.plan?.seedQuantity).toBe('0');
+    expect(new Decimal(preview.geometrySummary!.totalRequiredCapital!).lte(i.totalInvestment)).toBe(true);
+    const saved=await createGridDraft('EXAMPLE',{schemaVersion:1,clientRequestId:randomUUID(),draftRevision:revision,intent:i,serverIntentDigest:preview.serverIntentDigest!},deps);
+    expect(saved.bot.policyVersion).toBe('2.0.0');expect(saved.bot.runtimePolicyVersion).toBe('2.0.0');
+    expect(storage.levels.get(saved.bot.id)!.filter(l=>l.reduceOnly).every(l=>new Decimal(l.size).gt(0))).toBe(true);
+    expect(old.bot.policyVersion).toBe('1.0.0');
+  });
+  it('rejects v2 authority that would round when persisted at eight decimal places',async()=>{
+    const {a,deps}=setup();deps.cycleV2Creation=true;
+    if(a.market.constraints.state!=='available'||a.market.reference.state!=='available')throw Error('EXAMPLE');
+    a.market.constraints.value.tick='0.000000001';
+    a.market.reference.value.price='100.000000009';
+    const preview=await authoritativeGridPreview('EXAMPLE',intent,gridDraftRevision(intent),deps);
+    expect(preview.state).not.toBe('ready');expect(preview.reasons).toContain('Cycle geometry exceeds durable policy precision');
+  });
   it('signs and persists the lifted quantities from the fee-reserved sizing plan',async()=>{
     const {a,deps,storage}=setup();if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
     a.market.constraints.value.minimumQuote='10';
@@ -80,6 +102,20 @@ describe('server authoritative Grid drafts',()=>{
 const servers:Server[]=[];afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>new Promise<void>(resolve=>{s.close(()=>resolve());s.closeAllConnections();})));});
 async function api(enabled=true) {const {storage,deps}=setup(),app=express();app.use(express.json());registerGridBotRoutes(app,(req,res,next)=>{const wallet=req.headers['x-wallet'];if(!wallet){res.sendStatus(401);return;}(req as typeof req & {walletAddress:string}).walletAddress=String(wallet);next();},{deps,storage:storage as unknown as GridStorage,enabled:()=>enabled});const server=await new Promise<Server>(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});servers.push(server);const address=server.address();if(!address||typeof address==='string')throw Error();return{...{storage,deps},url:'http://127.0.0.1:'+address.port};}
 describe('Grid owner-only routes',()=>{
+  it('keeps production-route drafts on v1 and accepts v2 only through injected server dependencies',async()=>{
+    const {url,deps}=await api(),headers={'x-wallet':'EXAMPLE','content-type':'application/json'};
+    const body={schemaVersion:1,requestId:1,draftRevision:gridDraftRevision(intent),intent};
+    const preview=()=>fetch(url+'/api/grid-bots/preview',{method:'POST',headers,body:JSON.stringify(body)});
+    expect(await (await preview()).json()).toMatchObject({state:'ready',policy:{policyVersion:'1.0.0',runtimePolicyVersion:'1.0.0'}});
+    for(const field of ['cycleV2Creation','policyVersion','runtimePolicyVersion']){
+      const response=await fetch(url+'/api/grid-bots/preview',{method:'POST',headers,body:JSON.stringify({...body,intent:{...intent,[field]:field==='cycleV2Creation'?true:'2.0.0'}})});
+      expect(response.status).toBe(400);
+    }
+    deps.cycleV2Creation=true;
+    const v2=await (await preview()).json();expect(v2).toMatchObject({state:'ready',policy:{policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}});
+    const saved=await fetch(url+'/api/grid-bots',{method:'POST',headers,body:JSON.stringify({schemaVersion:1,clientRequestId:randomUUID(),draftRevision:body.draftRevision,intent,serverIntentDigest:v2.serverIntentDigest})});
+    expect(saved.status).toBe(201);expect(await saved.json()).toMatchObject({bot:{policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}});
+  });
   it.each(['grid-bots', 'grid-planner'])('maps time periods on %s read-only routes and shares chart context with range facts', async namespace => {
     const now = defaultPlannerDeps.now(), duration = 3_600_000, end = Math.floor(now / duration) * duration;
     const market = { internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC', fullName: 'Bitcoin', maxLeverage: 50, maxLeverageSource: 'venue',

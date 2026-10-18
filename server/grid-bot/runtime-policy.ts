@@ -41,6 +41,16 @@ export const GRID_RUNTIME_POLICY = Object.freeze({
     persistentDedupe: 'bot+policy+candle', unknownBreaksRun: true, executionAuthority: false }), // 31–37
 });
 export const GRID_RUNTIME_POLICY_DIGEST = createHash('sha256').update(JSON.stringify(GRID_RUNTIME_POLICY)).digest('hex');
+// Keep the complete v1 descriptor and digest above byte-identical.
+export const GRID_CYCLE_RUNTIME_POLICY = Object.freeze({ ...GRID_RUNTIME_POLICY, version: '2.0.0',
+  cycling: Object.freeze({ owner: 'signed_anchor', legs: 'opening_closing', capacity: 'fixed_non_compounding',
+    funding: 'worst_price_times_all_cycle_quantities', credit: 'exact_cycle_closing_limit_fills',
+    initialSeed: 'ordinal_fifo_actual_fills', orderIdentity: 'cycle_leg_attempt', unknownReservesFullSource: true }) });
+export const GRID_CYCLE_RUNTIME_POLICY_DIGEST = createHash('sha256').update(JSON.stringify(GRID_CYCLE_RUNTIME_POLICY)).digest('hex');
+export function gridRuntimePolicy(version: string) {
+  return version === '1.0.0' ? { descriptor: GRID_RUNTIME_POLICY, digest: GRID_RUNTIME_POLICY_DIGEST }
+    : version === '2.0.0' ? { descriptor: GRID_CYCLE_RUNTIME_POLICY, digest: GRID_CYCLE_RUNTIME_POLICY_DIGEST } : null;
+}
 const decimal = (x: string) => /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(x) && x.length <= 80 ? new D(x) : null;
 /** The confirmed bot configuration owns its notional ceiling, at every lifecycle stage. */
 export function gridExposureLimit(investment: string, leverage: number): string | null {

@@ -1,5 +1,6 @@
 export type Scale = 'flat' | 'ascending' | 'descending';
 export interface GridGeometryInput {
+  policyVersion?: '1.0.0' | '2.0.0'; maximumQuote?: string;
   side: 'long' | 'short'; lower: string; upper: string; start: string;
   intervals: number; entryScale: Scale; profitScale: Scale; seed: boolean;
   leverage: string; tick: string; lot: string; minimumQuote: string;
@@ -21,10 +22,17 @@ export interface PairFee {
   spread: string; requiredSpread: string; assumedRoundTripFee: string; clears: boolean;
 }
 export interface GridPlan {
+  policyVersion?: '2.0.0'; cycles?: GridCycle[]; capacityPrice?: string; capacityNotional?: string;
   side: 'long' | 'short'; start: string; investment: string; leverage: string;
   lines: GridLine[]; seedQuantity: string; allocatedNotional: string; unallocatedNotional: string;
   feeGate: 'not_evaluated' | 'evaluated'; feeRows: PairFee[];
   openingOrderLift?: { count: number; minimumQuote: string; ordinals?: number[] };
+}
+/** All ordinals here are zero-based, including reconstructed persisted cycle owners. */
+export interface GridCycle {
+  ownerOrdinal: number; anchor: 'opening' | 'closing';
+  openingOrdinal: number; closingOrdinal: number; openingPrice: string; closingPrice: string;
+  quantity: string; initialInventory: string; initialOpeningCredit: string;
 }
 export type GridResult = { ok: true; plan: GridPlan } | { ok: false; issues: GridIssue[] };
 export type MinimumResult = { ok: true; investment: string; plan: GridPlan; evaluations: number }

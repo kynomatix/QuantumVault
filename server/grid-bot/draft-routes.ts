@@ -14,6 +14,7 @@ import type {GridAutoResumeStorage} from './auto-resume-storage';
 import {gridAutoResumeBand} from './auto-resume-policy';
 import {gridRuntimeGates,type GridRuntimeGates} from './service';
 import {gridStartRequestSchema,type GridStartRequest,type GridStartResult} from '../../shared/grid-start';
+import {GRID_CYCLE_V2_CREATION} from './cycle-policy';
 
 const uuid=z.string().uuid();
 const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),lookback:z.enum(['100','200'])}).strict();
@@ -40,6 +41,7 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
   let initialized:Promise<{deps:GridDraftDeps;storage:GridStorage}>|null=null;
   const runtime=()=>provided?Promise.resolve(provided):initialized??(initialized=Promise.all([import('../db'),import('./storage'),import('./draft-default-deps')]).then(([{pool},{GridStorage},{defaultGridDraftDeps}])=>{const storage=new GridStorage(pool);return {storage,deps:defaultGridDraftDeps(storage)};}));
   const wallet=(req:Request)=>(req as Request & {walletAddress:string}).walletAddress;
+  const draftDeps=(deps:GridDraftDeps):GridDraftDeps=>({...deps,cycleV2Creation:provided?.deps.cycleV2Creation??GRID_CYCLE_V2_CREATION});
   const charts=new PlannerCharts(defaultPlannerDeps);
   const rangeFacts=new PlannerRangeFacts();
   let inFlight=0;const starts=new Map<string,number[]>();
@@ -126,12 +128,12 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
   },true));
   app.post('/api/grid-bots/preview',requireWallet,gate,work(async(req,res)=>{
     const p=gridPreviewRequestSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid preview request'});return;}
-    const {deps}=await runtime();const preview=await authoritativeGridPreview(wallet(req),p.data.intent,p.data.draftRevision,deps);
+    const {deps}=await runtime();const preview=await authoritativeGridPreview(wallet(req),p.data.intent,p.data.draftRevision,draftDeps(deps));
     res.json({...preview,requestId:p.data.requestId,draftRevision:p.data.draftRevision});
   },true));
   app.post('/api/grid-bots',requireWallet,gate,work(async(req,res)=>{
     const p=gridCreateRequestSchema.safeParse(req.body);if(!p.success){res.status(400).json({error:'Invalid create request'});return;}
-    const {deps}=await runtime();const result=await createGridDraft(wallet(req),p.data,deps);res.status(result.result==='created'?201:200).json(result);
+    const {deps}=await runtime();const result=await createGridDraft(wallet(req),p.data,draftDeps(deps));res.status(result.result==='created'?201:200).json(result);
   },true));
   app.get('/api/grid-bots/by-client-request/:clientRequestId',requireWallet,gate,work(async(req,res)=>{
     const id=uuid.safeParse(req.params.clientRequestId);if(!id.success){res.status(400).json({error:'Invalid request identity'});return;}

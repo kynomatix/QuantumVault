@@ -31,11 +31,28 @@ export function projectGridStop(input: GridProjectionInput, now: number) {
       size=size.plus(level.quantity); notional=notional.plus(new D(level.quantity).mul(level.price));
       fees=fees.plus(new D(level.quantity).mul(level.price).mul(D.max(0,input.makerRate)));
     }
+    const startup = { size: size.toFixed(), notional: notional.toFixed(), fees: fees.toFixed() };
+    if (p.policyVersion === '2.0.0') {
+      if (!p.cycles?.length || !p.capacityPrice || p.cycles.some(c => ![c.quantity,c.openingPrice,c.closingPrice].every(s=>numeric(s)&&new D(s).gt(0))))
+        return deny('Reachable cycle inventory is unknown.');
+      const candidates = p.cycles.map(c=>new D(c.openingPrice));
+      if (new D(p.seedQuantity).gt(0)) candidates.push(seedPrice);
+      const basis = long ? D.max(...candidates) : D.min(...candidates);
+      size = p.cycles.reduce((sum,c)=>sum.plus(c.quantity),new D(0));
+      notional = size.mul(basis);
+      fees = size.mul(p.capacityPrice).mul(D.max(0,input.makerRate,input.takerRate));
+    }
     if (!size.gt(0) || !funding.gt(fees) || !seedPrice.gt(0)) return deny('Projected exposure or funded margin is unavailable.');
     const entry=notional.div(size), margin=funding.minus(fees);
     // Pacifica: (price - side*position_margin/size)/(1-side/(2*market_max_leverage)).
     // At weighted entry there is no unrealized PnL; margin is NEW subaccount funding minus entry fees.
-    const projected=entry.minus(margin.div(size).mul(sign)).div(new D(1).minus(new D(sign).div(max.mul(2))));
+    let projected=entry.minus(margin.div(size).mul(sign)).div(new D(1).minus(new D(sign).div(max.mul(2))));
+    if (p.policyVersion === '2.0.0' && new D(startup.size).gt(0)) {
+      if (!funding.gt(startup.fees)) return deny('Startup funded margin is unavailable.');
+      const initial = new D(startup.notional).div(startup.size).minus(funding.minus(startup.fees).div(startup.size).mul(sign))
+        .div(new D(1).minus(new D(sign).div(max.mul(2))));
+      projected = long ? D.max(projected,initial) : D.min(projected,initial);
+    }
     // A nonpositive long liquidation boundary is conservatively represented by one tick.
     const liquidation=D.max(tick,projected).div(tick).toDecimalPlaces(0,long?D.ROUND_CEIL:D.ROUND_FLOOR).mul(tick);
     const clearance=D.max(tick,liquidation.mul(GRID_STOP_EXECUTION_CUSHION).div(tick).ceil().mul(tick));
@@ -45,6 +62,7 @@ export function projectGridStop(input: GridProjectionInput, now: number) {
       boundedAdverseExitPrice:stop.toFixed(),observedAt:input.observedAt,expiresAt:input.expiresAt,
       source:'pacifica:documented-liquidation-formula:new-subaccount:owner-2026-10-12',
       projection:{funding:funding.toFixed(),fees:fees.toFixed(),size:size.toFixed(),weightedEntry:entry.toFixed(),
-        maintenanceRate:new D(1).div(max.mul(2)).toFixed(),maxLeverage:max.toFixed(),seedWorstPrice:seedPrice.toFixed()}};
+        maintenanceRate:new D(1).div(max.mul(2)).toFixed(),maxLeverage:max.toFixed(),seedWorstPrice:seedPrice.toFixed(),
+        ...(p.policyVersion === '2.0.0' ? { scenario: 'all_reachable_cycle_inventory', startup } : {})}};
   } catch { return deny('Projection inputs are unknown or invalid.'); }
 }

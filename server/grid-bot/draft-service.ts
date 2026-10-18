@@ -10,6 +10,8 @@ import { gridStopReachable } from './runtime-policy';
 import { type GridStorage, type DraftRecord } from './storage';
 import type { PlannerMarket } from '../grid-planner/types';
 import { projectGridStop } from './stop-clearance';
+import { GRID_CYCLE_V2_CREATION } from './cycle-policy';
+import { gridSeedPriceBounds } from './cycle-engine';
 
 const D = Decimal.clone({ precision:100, toExpNeg:-100, toExpPos:100 });
 export class GridDraftError extends Error { constructor(public code: 'authority_unavailable'|'preview_drift'|'idempotency_conflict'|'secret_unavailable'|'invalid_intent', public reasons: string[] = []) { super(code); } }
@@ -19,6 +21,8 @@ export interface GridDraftAuthority {
   autoRange: { lowerPrice:string; upperPrice:string; stopPrice:string; latestFinalizedTime:number } | null;
 }
 export interface GridDraftDeps {
+  /** Server/test injection only. HTTP bodies cannot select a policy version. */
+  cycleV2Creation?: boolean;
   projectedStop?: boolean;
   now():number; observe(wallet:string,intent:GridIntent):Promise<GridDraftAuthority>; umk(wallet:string):Promise<Buffer|null>;
   storage: Pick<GridStorage,'createDraftWithLevels'|'findByClientRequest'|'getBotSnapshot'>;
@@ -34,6 +38,8 @@ function signedLevels(plan:GridPlan):SignedGridLevel[] {
 export async function authoritativeGridPreview(wallet:string,intent:GridIntent,draftRevision:string,deps:GridDraftDeps) {
   if (!wallet || !gridIntentSchema.safeParse(intent).success || !gridRevisionSchema.safeParse(draftRevision).success) throw new GridDraftError('invalid_intent');
   const authority=await deps.observe(wallet,intent), now=deps.now(), reasons:string[]=[];
+  const cyclic=deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION;
+  const createPolicy=cyclic?{...GRID_CREATE_POLICY,policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}:GRID_CREATE_POLICY;
   const c=authority.market.constraints, reference=authority.market.reference;
   let plan:GridPlan|null=null, minimum:string|null=null, seedTakerCost:string|null=null;
   const reject=(reason:string)=>{ reasons.push(reason); };
@@ -65,10 +71,12 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
     if (!seedValid) reject('Current seed taker fee unavailable');
     const makerRate=makerValid?D.max(0,entry!.effectiveRate,profit!.effectiveRate).toFixed():null;
     const takerRate=intent.seedAtCreation && seedValid?new D(seed!.effectiveRate):new D(0);
-    const reserveFactor=new D(1).plus(new D(intent.leverage).mul(takerRate));
+    const reserveRate=cyclic?D.max(0,makerRate??'0',takerRate):takerRate;
+    const reserveFactor=new D(1).plus(new D(intent.leverage).mul(reserveRate));
     const input:GridGeometryInput={side:intent.direction,lower:intent.lowerPrice,upper:intent.upperPrice,start:r.price,
       intervals:intent.gridCount,entryScale:intent.entryScaleType,profitScale:intent.profitScaleType,seed:intent.seedAtCreation,
-      leverage:intent.leverage,tick:cv.tick,lot:cv.lot,minimumQuote:cv.minimumQuote,investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:makerRate};
+      leverage:intent.leverage,tick:cv.tick,lot:cv.lot,minimumQuote:cv.minimumQuote,investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:makerRate,
+      ...(cyclic?{policyVersion:'2.0.0' as const,...(cv.maximumQuote.state==='available'?{maximumQuote:cv.maximumQuote.value}:{})}:{})};
     const min=minimumInvestment(input);
     if (min.ok) minimum=new D(min.investment).mul(reserveFactor).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2);
     else reject(...[min.issues.map(i=>i.reason).join('; ')]);
@@ -77,18 +85,22 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
     if (!calculation.ok) calculation.issues.forEach(i=>reject(explainPlannerIssue(i,calculationInput)));
     else {
       plan=calculation.plan;
+      if(cyclic && [plan.start,intent.stopPrice,...plan.lines.flatMap(l=>[l.price,l.quantity])].some(v=>!new D(v).eq(new D(v).toFixed(8))))
+        reject('Cycle geometry exceeds durable policy precision');
       if(new D(plan.start).minus(intent.stopPrice).abs().div(plan.start).mul(100).toDecimalPlaces(4).eq(0)) reject('Stop distance is below durable policy precision');
       if (makerValid && plan.feeGate!=='evaluated') reject('Maker fee clearance unavailable');
       seedTakerCost=intent.seedAtCreation && seedValid?new D(plan.seedQuantity).mul(plan.start).mul(takerRate).toFixed():intent.seedAtCreation?null:'0';
+      if(cyclic && intent.seedAtCreation && seedValid) seedTakerCost=new D(plan.seedQuantity).mul(gridSeedPriceBounds(plan.start,cv.tick).high).mul(D.max(0,takerRate)).toFixed();
       if (cv.maximumQuote.state==='available') {const maximum=cv.maximumQuote.value,line=plan.lines.find(l=>new D(l.notional).gt(maximum));if(line) reject(`A grid order would be $${dollars(line.notional)}, above Pacifica's $${dollars(maximum)} maximum. Lower the investment or leverage, or use more grids.`);}
       if (cv.priceBounds.state==='available') {
         const bounds=cv.priceBounds.value as {minimum?:string;maximum?:string};
         if (!bounds.minimum || !bounds.maximum || plan.lines.some(l=>new D(l.price).lt(bounds.minimum!) || new D(l.price).gt(bounds.maximum!))) reject(`Pacifica accepts prices from $${bounds.minimum} to $${bounds.maximum}. Move the range inside those limits.`);
+        if(cyclic && intent.seedAtCreation){const seedBounds=gridSeedPriceBounds(plan.start,cv.tick);if(!bounds.minimum||!bounds.maximum||new D(seedBounds.low).lt(bounds.minimum)||new D(seedBounds.high).gt(bounds.maximum))reject('Bounded seed execution exceeds current price limits');}
       }
       if (cv.restrictions.state==='available' && cv.restrictions.value!== 'unrestricted') reject(cv.restrictions.value==='isolated_only'
         ? 'This market requires isolated margin, which Grid does not support. Choose another market.'
         : 'This market does not support the perpetual order-book orders Grid needs. Choose another market.');
-      const s=deps.projectedStop && cv.maxLeverage.state==='available' && makerValid && seedValid
+      const s=(deps.projectedStop || cyclic) && cv.maxLeverage.state==='available' && makerValid && seedValid
         ? projectGridStop({plan,funding:intent.totalInvestment,stop:intent.stopPrice,tick:cv.tick,maxLeverage:cv.maxLeverage.value,
           makerRate:makerRate!,takerRate:takerRate.toFixed(),observedAt:Math.max(cv.observedAt,r.observedAt),expiresAt,},now)
         : authority.stop;
@@ -112,11 +124,13 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
     const restingEntryMargin=summaryPlan.lines.filter(line=>line.role==='entry').reduce((sum,line)=>sum.plus(line.notional),new D(0)).div(intent.leverage);
     return {minimumSpacing:D.min(...spacing).toFixed(),maximumSpacing:D.max(...spacing).toFixed(),minimumOrderNotional:observedConstraints.minimumQuote,
       seedNotional:seedNotional.toFixed(),restingEntryMargin:restingEntryMargin.toFixed(),
-      totalRequiredCapital:seedTakerCost===null?null:restingEntryMargin.plus(seedNotional.div(intent.leverage)).plus(seedTakerCost).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2),
+      totalRequiredCapital:seedTakerCost===null?null:(summaryPlan.capacityNotional
+        ?new D(summaryPlan.capacityNotional).div(intent.leverage).plus(new D(summaryPlan.capacityNotional).mul(D.max(0,authority.entryFee?.effectiveRate??'0',authority.profitFee?.effectiveRate??'0',intent.seedAtCreation?authority.seedFee?.effectiveRate??'0':'0')))
+        :restingEntryMargin.plus(seedNotional.div(intent.leverage)).plus(seedTakerCost)).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2),
       feeClearance:summaryPlan.feeGate==='evaluated' && summaryPlan.feeRows.every(row=>row.clears)?'clears' as const:'unknown' as const};
   })():null;
-  const bound={schemaVersion:1,draftRevision,intent,authority,plan,minimum,seedTakerCost,geometrySummary,policy:GRID_CREATE_POLICY};
-  return { schemaVersion:1 as const,state:ready?'ready' as const:'unavailable' as const, reasons,policy:GRID_CREATE_POLICY,
+  const bound={schemaVersion:1,draftRevision,intent,authority,plan,minimum,seedTakerCost,geometrySummary,policy:createPolicy};
+  return { schemaVersion:1 as const,state:ready?'ready' as const:'unavailable' as const, reasons,policy:createPolicy,
     plan,levels:plan?signedLevels(plan):[],minimum,seedTakerCost,geometrySummary,authority,capacity:GRID_CAPACITY_UNKNOWN,
     serverIntentDigest:ready?digest(bound):null,expiresAt,receivedAt:now,pnlLabel:'Excludes funding' as const };
 }
@@ -132,7 +146,7 @@ export async function createGridDraft(wallet:string,request:GridCreateRequest,de
   const policy:GridPolicy={id,protocol:'pacifica',market:request.intent.market,direction:request.intent.direction,
     upperPrice:new D(p.lines.at(-1)!.price).toFixed(8),lowerPrice:new D(p.lines[0].price).toFixed(8),startPrice:new D(p.start).toFixed(8),
     gridCount:request.intent.gridCount,totalInvestment:new D(request.intent.totalInvestment).toFixed(2),leverage:Number(request.intent.leverage),
-    entryScaleType:request.intent.entryScaleType,profitScaleType:request.intent.profitScaleType,policyVersion:'1.0.0',feePolicyVersion:'1.0.0',runtimePolicyVersion:'1.0.0',
+    entryScaleType:request.intent.entryScaleType,profitScaleType:request.intent.profitScaleType,policyVersion:preview.policy.policyVersion,feePolicyVersion:'1.0.0',runtimePolicyVersion:preview.policy.runtimePolicyVersion,
     stopLossPercent:new D(p.start).minus(request.intent.stopPrice).abs().div(p.start).mul(100).toFixed(4),stopLossPrice:new D(request.intent.stopPrice).toFixed(8),seedAtCreation:request.intent.seedAtCreation,levels:preview.levels};
   const hmac=computeGridPolicyHmac(policy,umk);
   if (!hmac.ok) throw new GridDraftError('secret_unavailable',[hmac.reason]);

@@ -17,6 +17,8 @@ import {defaultGridLaunchAuthority,GridLaunchAuthorityUnavailable} from './launc
 import {durableGridUmk} from './service';
 import type {GridMarginReading} from './margin';
 import {planGridRebalance} from './rebalance';
+import {validateRetainedGridCycles} from './cycle-validation';
+import {gridSeedPriceBounds} from './cycle-engine';
 
 // Grid levels occupy 1..101. Funding and seed must each have their own reserved identity.
 export const GRID_FUND_IDENTITY_LEVEL = 102;
@@ -62,14 +64,19 @@ export function preflightGridLaunch(policy:GridPolicy,policyHmac:string,umk:Buff
   try {
     const current=gridCurrentAuthority(policy,policyHmac,umk,f,now,alreadyFunded,false);if(!current.ok)return current;
     const {maker,taker}=current;
+    const cyclic=policy.policyVersion==='2.0.0';
     const calc=calculateGrid({side:policy.direction,lower:policy.lowerPrice,upper:policy.upperPrice,start:policy.startPrice,intervals:policy.gridCount,
       entryScale:policy.entryScaleType,profitScale:policy.profitScaleType,seed:policy.seedAtCreation,leverage:String(policy.leverage),
       tick:f.tick,lot:f.lot,minimumQuote:f.minimumQuote,investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:maker.toFixed(),
-      investment:new Decimal(policy.totalInvestment).div(new Decimal(1).plus(taker.mul(policy.leverage))).toDecimalPlaces(2,Decimal.ROUND_FLOOR).toFixed(2)});
+      ...(cyclic?{policyVersion:'2.0.0' as const,maximumQuote:f.maximumQuote}:{}),
+      investment:new Decimal(policy.totalInvestment).div(new Decimal(1).plus((cyclic?Decimal.max(0,maker,taker):taker).mul(policy.leverage))).toDecimalPlaces(2,Decimal.ROUND_FLOOR).toFixed(2)});
     if(!calc.ok)return deny(calc.issues.map(i=>i.reason).join('; '));const plan=calc.plan;
     if(policy.levels.length!==plan.lines.length||plan.lines.some((l,i)=>{const signed=policy.levels[i];return !signed||!new Decimal(l.price).eq(signed.price)||!new Decimal(l.quantity).eq(signed.size)
       || signed.reduceOnly!==(l.role==='seed_exit')||signed.side!==(policy.direction==='long'?(l.role==='seed_exit'?'sell':'buy'):(l.role==='seed_exit'?'buy':'sell'));}))return deny('Current minimums or fees would change the signed grid geometry.');
+    if(cyclic){const verified=validateRetainedGridCycles(policy,{...f,openingFeeRate:maker.toFixed(),closingFeeRate:maker.toFixed()});if(!verified.ok)return deny(verified.reason);}
     if(plan.lines.some(l=>new Decimal(l.notional).gt(f.maximumQuote)||new Decimal(l.price).lt(f.minimumPrice)||new Decimal(l.price).gt(f.maximumPrice)))return deny('Signed levels exceed current market bounds.');
+    if(cyclic && policy.seedAtCreation){const bounds=gridSeedPriceBounds(plan.start,f.tick);
+      if(new Decimal(bounds.low).lt(f.minimumPrice)||new Decimal(bounds.high).gt(f.maximumPrice))return deny('Bounded seed execution exceeds current price limits.');}
     const spacing=Decimal.min(...plan.lines.slice(1).map((l,i)=>new Decimal(l.price).minus(plan.lines[i].price).div(policy.startPrice))).toFixed();
     if(!gridFirstPlacementGate({confirmedPrice:policy.startPrice,bookPrice:f.bookPrice,smallestSpacingFraction:spacing,observedAt:f.observedAt,source:f.bookSource,
       identityValid:true,sideFlip:plan.lines.some(l=>(new Decimal(l.price).lt(policy.startPrice)!==new Decimal(l.price).lt(f.bookPrice))|| (new Decimal(l.price).gt(policy.startPrice)!==new Decimal(l.price).gt(f.bookPrice))),
@@ -92,6 +99,11 @@ export function preflightGridResume(policy:GridPolicy,policyHash:string,umk:Buff
   const deny=(reason:string)=>({ok:false as const,reason});
   try {
     const current=gridCurrentAuthority(policy,policyHash,umk,f,now,true,true);if(!current.ok)return current;
+    if(policy.policyVersion==='2.0.0'){
+      const verified=validateRetainedGridCycles(policy,{...f,openingFeeRate:current.maker.toFixed(),closingFeeRate:current.maker.toFixed()});
+      if(!verified.ok)return verified;
+      return deny('Grid cycle Resume requires Stage B replay and lifecycle integration.');
+    }
     if(!f.account||f.margin.leverage!==String(policy.leverage)||!policy.stopLossPrice||!input.inventoryComplete||!input.entriesAllowed)return deny('Current Resume inventory or margin is unavailable.');
     if(![f.tick,f.lot,f.bookPrice,f.minimumPrice,f.maximumPrice,f.maximumQuote].every(v=>new Decimal(v).isFinite()&&new Decimal(v).gt(0)))return deny('Current market limits are unavailable.');
     if(!new Decimal(f.bookPrice).gte(policy.lowerPrice)||!new Decimal(f.bookPrice).lte(policy.upperPrice))return deny('Current book is outside the retained range.');
@@ -140,6 +152,7 @@ export class GridProvision {
     const attempt=(kind:string)=>gridProvisionAttempt(this.deps.existing,input.policy.id,kind,this.deps.now());
     try {
       if(!verifyGridPolicyHmac(input.policy,security.umk,input.policyHmac).ok)return {state:'denied',reason:'Grid policy signature changed.'};
+      if(input.policy.policyVersion==='2.0.0')return {state:'denied',reason:'Grid cycle provisioning requires Stage B execution integration.'};
       // Recovery precedes new market/fee reads. A disappeared response cannot grant a new send.
       for(const kind of ['create','fund','leverage','seed','entry']){
         const {key,op:old}=await attempt(kind);

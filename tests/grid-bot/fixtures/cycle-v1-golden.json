@@ -1,0 +1,44 @@
+{
+  "baseCommitHash": "3b911b1aa0d1affb0878c48e90c6a30471185ab3",
+  "description": "Fixed v1 bytes from the pre-change source; independent Python HKDF/HMAC fixture, no application or tests executed.",
+  "policy": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "protocol": "pacifica",
+    "market": "BTC-PERP",
+    "direction": "long",
+    "upperPrice": "110.00000000",
+    "lowerPrice": "90.00000000",
+    "startPrice": "100.00000000",
+    "gridCount": 1,
+    "totalInvestment": "100.00",
+    "leverage": 1,
+    "entryScaleType": "flat",
+    "profitScaleType": "flat",
+    "policyVersion": "1.0.0",
+    "feePolicyVersion": "1.0.0",
+    "runtimePolicyVersion": "1.0.0",
+    "stopLossPercent": "20.0000",
+    "stopLossPrice": "80.00000000",
+    "seedAtCreation": false,
+    "levels": [
+      {
+        "ordinal": 1,
+        "price": "90.00000000",
+        "size": "1.00000000",
+        "side": "buy",
+        "reduceOnly": false
+      },
+      {
+        "ordinal": 2,
+        "price": "110.00000000",
+        "size": "0.00000000",
+        "side": "buy",
+        "reduceOnly": false
+      }
+    ]
+  },
+  "canonical": "[\"grid-policy-hmac-v1\",\"00000000-0000-4000-8000-000000000001\",\"pacifica\",\"BTC-PERP\",\"long\",\"110.00000000\",\"90.00000000\",\"100.00000000\",1,\"100.00\",1,\"flat\",\"flat\",\"1.0.0\",\"1.0.0\",\"1.0.0\",\"20.0000\",\"80.00000000\",false,[[1,\"90.00000000\",\"1.00000000\",\"buy\",false],[2,\"110.00000000\",\"0.00000000\",\"buy\",false]]]",
+  "policyDigest": "79148c9a6456256421bdda696906ba6dc30ad9341236139174a915ad13a254c6",
+  "runtimeCanonical": "{\"version\":\"1.0.0\",\"approvedOn\":\"2026-09-09\",\"capacityRuling\":\"H.5/2026-09-28\",\"caps\":{\"ordinaryRestingPerBot\":100,\"sharedProtectionReserve\":5,\"requiredAvailableSlots\":105,\"intervals\":100,\"lines\":101,\"transportBatchActions\":10,\"subaccountsPerAgent\":10,\"restingCapacityProof\":{\"ruling\":\"H.5/2026-09-28\",\"provenFloor\":100,\"venueMaximum\":null,\"newSlotProofRequired\":false}},\"quota\":{\"observedSameDeploymentRequired\":false,\"planningCredits\":300,\"windowSeconds\":60,\"fixedShare\":\"0.5\",\"ledgerScope\":\"pacifica_master_postgresql\",\"uncertainClaimsRetained\":true,\"durable429Backoff\":true,\"sharedNonGridDemandRequired\":false},\"monitor\":{\"intervalMs\":15000,\"conditionalOnMeasuredWorkload\":true,\"globalStartSpacingMs\":1000,\"globalConcurrency\":1,\"perBotExclusion\":true,\"catchUp\":false,\"optionalHeavyMovementFraction\":\"0.001\",\"skipPriceMaxAgeMs\":5000,\"mandatoryReconciliationNeverSkipped\":true,\"riskEveryMs\":15000,\"accountPositionsEveryMs\":60000,\"accountPositionsOnAnomaly\":true},\"breaker\":{\"qualifyingFailures\":5,\"expectedAloCrossCounts\":false,\"resetRequiresAuthoritativeHealth\":true,\"persistAcrossRestart\":true,\"pauseEntriesAndNotify\":true},\"wallet\":{\"warningSol\":\"0.10\",\"entryMinimumSol\":\"0.05\",\"unknownDeniesEntry\":true,\"exitsKeepIndependentAuthority\":true},\"fill\":{\"lifecycleThreshold\":\"0.98\",\"retainActualResidual\":true,\"profitFromActualQuantizedFill\":true},\"firstPlacement\":{\"source\":\"/book\",\"maxAgeMs\":5000,\"maxDeviationFraction\":\"0.001\",\"spacingFractionMultiplier\":\"0.5\",\"sideFlipOrInvalidRangeAborts\":true,\"equalityAllowed\":true,\"geometryImmutable\":true},\"fees\":{\"liveFallback\":false,\"retainedQuoteRequired\":true},\"recycler\":{\"reuseOnCreate\":true,\"recycleOnDelete\":true,\"justInTimeEveryCreate\":true,\"deploymentBound\":true},\"exposure\":{\"ceiling\":\"configured_investment_times_leverage\"},\"canary\":{\"unchangedQuantizedSubset\":true,\"includeSeedOpenRiskAndCommitments\":true,\"reduceOnlyExitDoubleCount\":false,\"shrinkOrders\":false,\"durationMs\":1800000,\"startsOnVenueConfirmation\":true,\"fullReconcileAtOrAfterBoundary\":true,\"cleanTicks\":2,\"qualifyingWindowRequires\":[\"zero_unresolved\",\"zero_429\",\"zero_qualifying_breaker_failures\",\"order_position_ledger_parity\",\"current_fees_minimums_leverage\",\"current_recycler\"],\"notificationRequired\":false,\"unresolvedRestartsCleanWindow\":true,\"retainHistoricalIncidents\":true},\"range\":{\"timeframes\":[\"15m\",\"1h\",\"4h\"],\"defaultBars\":100,\"selectableBars\":[100,200],\"finalizedDirectPerpetualRequired\":true,\"partialFallback\":false,\"walkbackMaximumBars\":400,\"boundedBySuppliedHistory\":true,\"atrPeriod\":14,\"intrabarEscapeStrictlyAboveAtr\":3,\"driftEscapeStrictlyAboveAtr\":6},\"stop\":{\"atrBuffers\":{\"15m\":\"0.90\",\"1h\":\"0.75\",\"4h\":\"0.75\"},\"daily\":\"UNKNOWN\",\"long\":\"structuralLow-buffer\",\"short\":\"structuralHigh+buffer\",\"mandatory\":true,\"reduceOnly\":true,\"canDisable\":false,\"positiveTickAwareLiquidationClearance\":true,\"unknownExecutionInputsDeny\":true,\"triggerLatchesEntriesOff\":true,\"terminalRequiresConfirmedStopCancelCloseSweep\":true,\"bandExit\":\"pause_hold\"},\"adx\":{\"sameSelectedFinalizedDirectPerpetualTimeframe\":true,\"period\":14,\"minimumBars\":28,\"rangingBelow\":20,\"transitionalThrough\":25,\"unknownExplicit\":true,\"creationAdvisoryOnly\":true,\"oncePerNewFinalCandleAndStartup\":true,\"consecutiveDistinctCandles\":2,\"reverseOrReturnCandles\":2,\"persistentDedupe\":\"bot+policy+candle\",\"unknownBreaksRun\":true,\"executionAuthority\":false}}",
+  "runtimeDigest": "3fca510cb124a30a9768ef37dbc609f3a12efb387282703a55a3d5daf95ef2c2"
+}

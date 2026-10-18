@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { deriveSubkey, zeroizeBuffer } from '../crypto-v3';
+import { GRID_CYCLE_POLICY_VERSION, retainedGridCycles } from './cycle-policy';
 
 export const GRID_POLICY_HMAC_SUBKEY_PURPOSE = 'grid_policy_hmac';
 export const GRID_POLICY_VERSION = '1.0.0';
@@ -19,7 +20,7 @@ const fixed = (raw: unknown, scale: number, positive = true) => typeof raw === '
   && new RegExp(`^(?:0|[1-9]\\d*)\\.\\d{${scale}}$`).test(raw) && raw.length <= 80
   && (!positive || /[1-9]/.test(raw));
 export function canonicalGridPolicy(p: GridPolicy): string | null {
-  if (!p || p.policyVersion !== GRID_POLICY_VERSION || p.feePolicyVersion !== '1.0.0' || p.runtimePolicyVersion !== '1.0.0'
+  if (!p || ![GRID_POLICY_VERSION, GRID_CYCLE_POLICY_VERSION].includes(p.policyVersion) || p.feePolicyVersion !== '1.0.0' || p.runtimePolicyVersion !== p.policyVersion
     || typeof p.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(p.id) || p.protocol !== 'pacifica'
     || !/^[A-Z0-9]+-PERP$/.test(p.market) || !['long', 'short'].includes(p.direction)
     || ![p.upperPrice, p.lowerPrice, p.startPrice].every(v => fixed(v, 8)) || !fixed(p.totalInvestment, 2)
@@ -34,15 +35,19 @@ export function canonicalGridPolicy(p: GridPolicy): string | null {
   if (!new Decimal(p.lowerPrice).lt(p.upperPrice) || new Decimal(p.startPrice).lt(p.lowerPrice) || new Decimal(p.startPrice).gt(p.upperPrice)
     || p.levels[0].price !== p.lowerPrice || p.levels.at(-1)!.price !== p.upperPrice
     || p.levels.some((l,i) => i > 0 && !new Decimal(l.price).gt(p.levels[i-1].price))) return null;
-  return JSON.stringify(['grid-policy-hmac-v1', p.id, p.protocol, p.market, p.direction, p.upperPrice, p.lowerPrice,
+  const cycles = p.policyVersion === GRID_CYCLE_POLICY_VERSION ? retainedGridCycles(p) : null;
+  if (p.policyVersion === GRID_CYCLE_POLICY_VERSION && (!cycles || !p.stopLossPrice)) return null;
+  return JSON.stringify([p.policyVersion === GRID_CYCLE_POLICY_VERSION ? 'grid-policy-hmac-v2' : 'grid-policy-hmac-v1', p.id, p.protocol, p.market, p.direction, p.upperPrice, p.lowerPrice,
     p.startPrice, p.gridCount, p.totalInvestment, p.leverage, p.entryScaleType, p.profitScaleType,
     p.policyVersion, p.feePolicyVersion, p.runtimePolicyVersion, p.stopLossPercent, p.stopLossPrice, p.seedAtCreation,
-    p.levels.map(l => [l.ordinal, l.price, l.size, l.side, l.reduceOnly])]);
+    p.levels.map(l => [l.ordinal, l.price, l.size, l.side, l.reduceOnly]),
+    ...(cycles ? [cycles.map(c => [c.ownerOrdinal, c.anchor, c.openingOrdinal, c.closingOrdinal,
+      c.openingPrice, c.closingPrice, c.quantity, c.initialInventory, c.initialOpeningCredit])] : [])]);
 }
 export function computeGridPolicyHmac(p: GridPolicy, umk: Buffer | null): Result {
   if (!umk) return { ok: false, reason: 'missing_secret' };
   if (!Buffer.isBuffer(umk) || umk.length !== 32) return { ok: false, reason: 'invalid_secret' };
-  if (p?.policyVersion !== GRID_POLICY_VERSION) return { ok: false, reason: 'unknown_version' };
+  if (![GRID_POLICY_VERSION, GRID_CYCLE_POLICY_VERSION].includes(p?.policyVersion)) return { ok: false, reason: 'unknown_version' };
   const canonical = canonicalGridPolicy(p);
   if (!canonical) return { ok: false, reason: 'invalid_policy' };
   const subkey = deriveSubkey(umk, GRID_POLICY_HMAC_SUBKEY_PURPOSE);
