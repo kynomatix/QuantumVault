@@ -62,6 +62,7 @@ type RangeRequest = { market: string; timeframe: string; period: string; signal:
   resolve: (value: unknown) => void; reject: (error: Error) => void };
 let props: Props, tree: ReactNode, requests: RangeRequest[], listed: string[], constraintsAvailable: boolean;
 let holdCharts: boolean, chartRequests: RangeRequest[];
+let cycleV2Creation: boolean | undefined;
 
 function fixtureMarket(market: string, observedAt = Date.now()): PlannerMarket {
   // Venue constraints last five minutes; reference prices and geometry previews last one.
@@ -144,6 +145,7 @@ beforeEach(() => {
   props = { open: true, onOpenChange: vi.fn(), identity: 'EXAMPLE_WALLET' };
   requests = []; listed = ['BTC-PERP', 'ETH-PERP']; constraintsAvailable = true;
   holdCharts = false; chartRequests = [];
+  cycleV2Creation = undefined;
   vi.stubGlobal('window', new EventTarget()); vi.stubGlobal('document', new EventTarget());
   vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
   vi.stubGlobal('fetch', vi.fn((url: string, init: RequestInit) => {
@@ -153,7 +155,7 @@ beforeEach(() => {
       const fixture = fixtureMarket(market, observedAt);
       const query = { ...Object.fromEntries(path.searchParams), intervals: Number(path.searchParams.get('intervals')),
         seed: path.searchParams.get('seed') === 'true', fee: path.searchParams.get('fee') } as unknown as PlannerQuery;
-      return Promise.resolve({ ok: true, json: async () => previewGrid(query, fixture, observedAt) });
+      return Promise.resolve({ ok: true, json: async () => previewGrid(query, fixture, observedAt, {cycleV2Creation}) });
     }
     if (path.pathname.endsWith('/range') || holdCharts && path.pathname.endsWith('/chart')) return new Promise((complete, reject) => {
       (path.pathname.endsWith('/range') ? requests : chartRequests).push({ market: path.searchParams.get('market')!, timeframe: path.searchParams.get('timeframe')!,
@@ -226,7 +228,8 @@ describe('Grid setup automatic opening range', () => {
     render(); await settle();
     expect(chart()).toBeNull(); expect(prices().lower).toBe('');
   });
-  it('keeps Equal defaults and shows the opening-order minimum lift in the sheet', async () => {
+  it.each([false,true])('keeps Equal defaults and shows the opening-order minimum lift in the sheet (v2 %s)', async v2 => {
+    if(!v2)cycleV2Creation=false;
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await open(); await resolve(requests[0]);
     expect(field('entryScale').props.value).toBe('flat'); expect(field('profitScale').props.value).toBe('flat');
@@ -234,7 +237,22 @@ describe('Grid setup automatic opening range', () => {
     field('entryScale').props.onChange('ascending'); render();
     field('profitScale').props.onChange('ascending'); render();
     await vi.advanceTimersByTimeAsync(250); await settle();
-    expect(elements().some(node => node.props.role === 'status' && text(node) === '2 grid orders raised to the $10 minimum')).toBe(true);
+    expect(elements().some(node => node.props.role === 'status' && text(node) === `${v2?4:2} grid orders raised to the $10 minimum`)).toBe(true);
+  });
+  it.each(['Long','Short'])('shows the default v2 %s cycling, starting-position and funding copy', async side => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    await open(); await resolve(requests[0]);
+    if(side==='Short'){button('Short').props.onClick();render();}
+    edit('investment','1000');edit('intervals','4');
+    await vi.advanceTimersByTimeAsync(250);await settle();
+    const copy=elements().map(node=>text(node)).join('\n');
+    expect(copy).toContain(side==='Long'
+      ?'Buys below price, sells above; each fill flips to the other side, one grid step away.'
+      :'Sells above price, buys below; each fill flips to the other side, one grid step away.');
+    expect(copy).toContain(side==='Long'
+      ?'Start with a position — place backed sells above price immediately. Without it, those levels wait for a buy first.'
+      :'Start with a position — place backed buys below price immediately. Without it, those levels wait for a sell first.');
+    expect(copy).toContain('Capital is reserved across the whole range. Each cycle reuses its allocated amount; profits stay in the bot.');
   });
   it('shows a disabled Create bot with a visible accessible launch reason and working Cancel in planning mode', async () => {
     await open();

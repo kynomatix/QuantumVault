@@ -180,7 +180,9 @@ function isPlan(p: any): boolean {
       && p.openingOrderLift.ordinals.length === p.openingOrderLift.count
       && new Set(p.openingOrderLift.ordinals).size === p.openingOrderLift.count
       && p.openingOrderLift.ordinals.every((i: unknown) => typeof i === 'number' && Number.isInteger(i)
-        && i >= 0 && i < p.lines.length && p.lines[i].role === 'entry'))
+        && i >= 0 && i < p.lines.length && (p.lines[i].role === 'entry'
+          || p.policyVersion === '2.0.0' && p.lines[i].role === 'seed_exit' && Array.isArray(p.cycles)
+            && p.cycles.some((c: any) => record(c) && c.ownerOrdinal === i && c.anchor === 'closing'))))
     && p.lines.every((l: any, i: number) => record(l) && l.ordinal === i && positive(l.price) && decimal(l.quantity) && decimal(l.notional)
       && (!i || Number(l.price) > Number(p.lines[i - 1].price)) && ['entry', 'seed_exit', 'virtual'].includes(l.role)
       && (l.pairedExitOrdinal === null || Number.isInteger(l.pairedExitOrdinal) && l.pairedExitOrdinal >= 0 && l.pairedExitOrdinal < p.lines.length));

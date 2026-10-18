@@ -9,8 +9,8 @@ import type { ProtocolMarket } from '../../server/protocol/protocol-types';
 import type { PlannerDeps, PlannerQuery } from '../../server/grid-planner/types';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
 import { previewGrid } from '../../server/grid-planner/preview';
-import { proposedPlannerStop, plannerRangeAround, plannerOverlays, plannerLevelMessage, plannerIssue, plannerVenueChecks, isPlannerMarket } from '../../client/src/lib/grid-planner-view';
-import { calculateGrid } from '../../server/grid-bot/engine';
+import { proposedPlannerStop, plannerRangeAround, plannerOverlays, plannerLevelMessage, plannerIssue, plannerVenueChecks, isPlannerMarket, plannerMinimumRows } from '../../client/src/lib/grid-planner-view';
+import { calculateGrid, minimumInvestment } from '../../server/grid-bot/engine';
 import { explainPlannerIssue, dollars } from '../../server/grid-planner/order-explanation';
 const now = 1_800_000_000_000;
 export const row = (): ProtocolMarket => ({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC', fullName: 'Bitcoin', maxLeverage: 50, maxLeverageSource: 'venue',
@@ -56,9 +56,28 @@ describe('Pacifica authority and honest planner verdicts', () => {
       expect(result.reasons[0]).not.toMatch(/observed|shared authority|lot-rounded/i);
     }
   });
-  it('explains an insufficient opening budget with the Investment action', () => {
+  it.each(['long','short'] as const)('previews default v2 %s cycles and displays their higher reserved minimum', side => {
+    const market=marketSnapshot(row(),deps());
+    if(market.constraints.state!=='available')throw Error('EXAMPLE');
+    const c=market.constraints.value;
+    for(const seed of [false,true]){
+      const result=previewGrid({...query,side,seed,stop:side==='long'?'70':'130'},market,now);
+      expect(result.requestedPlan?.policyVersion).toBe('2.0.0');expect(result.requestedPlan?.cycles).toHaveLength(4);
+      const input={side,seed,lower:query.lower,upper:query.upper,start:'100',intervals:query.intervals,entryScale:query.entryScale,profitScale:query.profitScale,
+        leverage:query.leverage,tick:c.tick,lot:c.lot,minimumQuote:c.minimumQuote,investmentStep:'0.01',transferFloor:'0',effectiveMakerCostRate:null};
+      const expected=minimumInvestment({...input,policyVersion:'2.0.0'}),legacy=minimumInvestment({...input,policyVersion:'1.0.0'});
+      expect(expected.ok).toBe(true);expect(legacy.ok).toBe(true);if(!expected.ok||!legacy.ok)return;
+      expect(result.minimum).toEqual({state:'available',value:expected.investment});
+      expect(Number(expected.investment)).toBeGreaterThan(Number(legacy.investment));
+      expect(plannerMinimumRows(result)).toEqual([{label:'Minimum investment',value:`${Number(expected.investment)} USDC`}]);
+      const underfunded=previewGrid({...query,side,seed,stop:side==='long'?'70':'130',investment:'0.01'},market,now);
+      expect(underfunded.minimumPlan?.policyVersion).toBe('2.0.0');
+      expect(plannerMinimumRows(underfunded)).toEqual(plannerMinimumRows(result));
+    }
+  });
+  it('explains an insufficient cycling budget with the Investment action', () => {
     const result = previewGrid({ ...query, investment: '10' }, marketSnapshot(row(), deps()), now);
-    expect(result.reasons).toEqual(['The investment cannot cover all 2 grid orders at the $10 minimum after quantity rounding. Raise the investment, use fewer grids, or use more leverage.']);
+    expect(result.reasons).toEqual(['The investment cannot cover all cycling orders across the range. Raise the investment, use fewer grids, or use more leverage.']);
     expect(plannerIssue(result.reasons[0])).toMatchObject({ setting: 'Investment', field: 'grid-investment' });
   });
   it('routes the maximum-order message to Investment even when it mentions leverage', () => {
@@ -126,10 +145,10 @@ describe('Pacifica authority and honest planner verdicts', () => {
     expect(plannerOverlays(invalidStop, now + invalidStop.validForMs, now)).toEqual([]);
     expect(plannerLevelMessage(invalidStop, now + invalidStop.validForMs, now, query, false, '')).toContain('Stop must align');
   });
-  it.each(['long', 'short'] as const)('engine quote weighting matches distance labels for %s entries and starting-position exits', side => {
+  it.each(['long', 'short'] as const)('legacy engine quote weighting matches distance labels for %s entries and starting-position exits', side => {
     const m = marketSnapshot(row(), deps());
     for (const scale of ['flat', 'ascending', 'descending'] as const) {
-      const result = previewGrid({ ...query, side, entryScale: scale, profitScale: scale, stop: side === 'long' ? '70' : '130', fee: '0' }, m, now);
+      const result = previewGrid({ ...query, side, entryScale: scale, profitScale: scale, stop: side === 'long' ? '70' : '130', fee: '0' }, m, now, {cycleV2Creation:false});
       expect(result.state).toBe('diagnostic');
       const plan = result.requestedPlan!; expect(plan).not.toBeNull();
       for (const role of ['entry', 'seed_exit'] as const) {
@@ -144,7 +163,7 @@ describe('Pacifica authority and honest planner verdicts', () => {
       }
       expect(Number(plan.seedQuantity)).toBeCloseTo(plan.lines.filter(l => l.role === 'seed_exit').reduce((sum, l) => sum + Number(l.quantity), 0), 8);
     }
-    const withoutSeed = previewGrid({ ...query, side, seed: false, stop: side === 'long' ? '70' : '130', fee: '0' }, m, now).requestedPlan!;
+    const withoutSeed = previewGrid({ ...query, side, seed: false, stop: side === 'long' ? '70' : '130', fee: '0' }, m, now, {cycleV2Creation:false}).requestedPlan!;
     expect(withoutSeed.seedQuantity).toBe('0'); expect(withoutSeed.lines.some(l => l.role === 'seed_exit')).toBe(false);
   });
   it('uses original observation clocks and refuses to fabricate missing maxima', () => {

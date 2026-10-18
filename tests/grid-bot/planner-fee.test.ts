@@ -3,7 +3,7 @@ import { createElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { plannerFeeDefault, PACIFICA_FEE_SOURCE } from '../../shared/planner-fee';
 import { plannerFeePercent, plannerFeeLabel, readPlannerFee } from '../../client/src/lib/planner-fee-view';
-import { feePercentToRate, plannerStatus, plannerVenueChecks } from '../../client/src/lib/grid-planner-view';
+import { feePercentToRate, plannerStatus, plannerVenueChecks, isPlannerPreview } from '../../client/src/lib/grid-planner-view';
 import { GridPlannerSheet } from '../../client/src/components/grid-planner/GridPlannerSheet';
 import { previewGrid } from '../../server/grid-planner/preview';
 import { marketSnapshot } from '../../server/grid-planner/market-snapshot';
@@ -133,6 +133,10 @@ describe('planner level USD values', () => {
     const lifted=calculateGrid({...input,lower:'90',upper:'100',start:'95',intervals:1,investment:'22.40',seed:true,entryScale:'descending',profitScale:'descending'});
     expect(lifted.ok).toBe(true);if(!lifted.ok)return;
     expect(lifted.plan.openingOrderLift?.ordinals).toEqual([1]);expect(lifted.plan.lines[1].role).toBe('seed_exit');
+    const preview={...previewGrid(query,market,now),requestedPlan:lifted.plan};
+    expect(isPlannerPreview(preview)).toBe(true);
+    expect(isPlannerPreview({...preview,requestedPlan:{...lifted.plan,policyVersion:undefined}})).toBe(false);
+    expect(isPlannerPreview({...preview,requestedPlan:{...lifted.plan,openingOrderLift:{...lifted.plan.openingOrderLift,ordinals:[2]}}})).toBe(false);
     expect(renderToStaticMarkup(createElement(GridPlannerLevels,{plan:lifted.plan,baseSymbol:'BTC'})).match(/raised to min/g)).toHaveLength(1);
   });
   it.each(['long', 'short'] as const)('identifies the actual lifted %s entry without changing sizing', side => {

@@ -3,6 +3,16 @@ import { GridDraftSession,submitGridDraftRequest,gridWidthAtMidpoint,gridFunds,g
 import { authoritativeGridPreview } from '../../server/grid-bot/draft-service';
 import { clock,intent,authority } from './draft-fixtures';
 describe('Grid sheet funds and asynchronous identity',()=>{
+  it.each([false,true])('accepts matching signed preview versions and rejects mixed versions (v2 %s)',async cycleV2Creation=>{
+    const s=new GridDraftSession(),revision=gridDraftRevision(intent);s.open=true;s.edit(revision);const id=s.request();
+    const p={...await authoritativeGridPreview('EXAMPLE',intent,revision,{observe:async()=>authority(),now:()=>clock,cycleV2Creation} as never),requestId:id,draftRevision:revision};
+    const version=cycleV2Creation?'2.0.0':'1.0.0';
+    expect(p.state).toBe('ready');expect(p.policy).toMatchObject({policyVersion:version,runtimePolicyVersion:version,feePolicyVersion:'1.0.0'});
+    expect(s.accept(p,id,revision,clock)).toBe(true);
+    for(const runtimePolicyVersion of [cycleV2Creation?'1.0.0':'2.0.0','EXAMPLE'])
+      expect(s.accept({...p,policy:{...p.policy,runtimePolicyVersion}},id,revision,clock)).toBe(false);
+    expect(s.accept({...p,policy:{...p.policy,feePolicyVersion:'EXAMPLE'}},id,revision,clock)).toBe(false);
+  });
   it.each([[null,'1'],['1',null],['EXAMPLE','1'],['-1','1']])('keeps unknown funds unknown (%s,%s)',(a,v)=>expect(gridFunds('100',a,v).state).toBe('unavailable'));
   it('rounds a positive shortfall up to cents without a zero deposit action',()=>{expect(gridFunds('100','99.999','0')).toMatchObject({shortfall:'0.01'});expect(gridFunds('100','100','0')).toMatchObject({shortfall:'0.00'});expect(gridFunds('100','50','20')).toMatchObject({shortfall:'30.00'});});
   it('preserves the midpoint and uses exact ordinary decimals',()=>{expect(gridWidth('90','110','10')).toEqual({lowerPrice:'90',upperPrice:'110'});expect(gridWidth('90','110','100')).toBeNull();expect(readableGridNumber(null)).toBe('Unknown');expect(readableGridNumber('12345.6789',2)).toBe('12,345.68');});

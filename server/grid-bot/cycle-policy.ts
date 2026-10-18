@@ -3,9 +3,9 @@ import type { GridCycle } from './engine-types';
 import type { GridPolicy } from './policy-hmac';
 
 export const GRID_CYCLE_POLICY_VERSION = '2.0.0';
-// Release only after Stage B's locked preparation, replay and lifecycle integration is reviewed.
+// New drafts use reviewed v2 cycling; signed drafts and existing bots retain their policy version.
 // Server-owned, never selected by a request or an environment flag.
-export const GRID_CYCLE_V2_CREATION = false;
+export const GRID_CYCLE_V2_CREATION = true;
 const D = Decimal.clone({ precision: 120 });
 
 /** Derive authority exclusively from immutable signed rows; never trust preview descriptors. */

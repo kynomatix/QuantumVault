@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalRequest, requestDigest as canonicalDigest } from './request-digest';
+import { canonicalRequest, requestDigest as canonicalDigest } from './request-digest.js';
 import Decimal from 'decimal.js';
 import type { MarketConstraintObservation } from '../protocol/market-constraints.js';
 import { checkEntryConstraints } from '../protocol/market-constraints.js';

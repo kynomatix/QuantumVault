@@ -1,4 +1,5 @@
 import Decimal from 'decimal.js';
+import { GRID_CYCLE_V2_CREATION } from '../grid-bot/cycle-policy';
 import { calculateGrid, calculateGridPrices, minimumInvestment, assumedPairFees, validGridDecimal } from '../grid-bot/engine';
 import type { GridGeometryInput } from '../grid-bot/engine-types';
 import { PLANNER_POLICY, type PlannerMarket, type PlannerPreview, type PlannerQuery } from './types';
@@ -20,7 +21,8 @@ export function validatePreviewQuery(q: PlannerQuery): string | null {
   return null;
 }
 
-export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number): PlannerPreview {
+export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number,
+  deps: { cycleV2Creation?: boolean } = {}): PlannerPreview {
   const result: PlannerPreview = { state: 'unavailable', reasons: [], market, retrievedAt: now, validForMs: 0,
     geometry: unknown('Geometry not evaluated'),
     requestedPlan: null, minimumPlan: null, minimum: unknown('Geometry not evaluated'), assumedMinimum: unknown('Assumed fee not evaluated'), feeRows: [],
@@ -53,7 +55,7 @@ export function previewGrid(q: PlannerQuery, market: PlannerMarket, now: number)
   const stop = new D(q.stop), tick = new D(c.tick);
   if (!stop.mod(tick).isZero() || (q.side === 'long' ? !stop.lt(q.lower) : !stop.gt(q.upper)))
     return { ...result, state: 'rejected', reasons: ['Stop must align to the venue tick and lie beyond the loss side of the range'] };
-  const input: GridGeometryInput = { side: q.side, lower: q.lower, upper: q.upper, start: r.price,
+  const input: GridGeometryInput = { policyVersion: (deps.cycleV2Creation ?? GRID_CYCLE_V2_CREATION) ? '2.0.0' : '1.0.0', side: q.side, lower: q.lower, upper: q.upper, start: r.price,
     intervals: q.intervals, entryScale: q.entryScale, profitScale: q.profitScale, seed: q.seed, leverage: q.leverage,
     tick: c.tick, lot: c.lot, minimumQuote: c.minimumQuote, investmentStep: '0.01',
     // Geometry-only capital model. No account transfer is proposed or inferred.

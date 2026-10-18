@@ -46,7 +46,7 @@ describe('version-selected immutable Grid authority',()=>{
       {...p,levels:p.levels.map((l,i)=>i===3?{...l,side:'buy' as const}:l)},
       {...p,levels:[...p.levels].reverse()},
     ]) expect(canonicalGridPolicy(changed)).toBeNull();
-    expect(gridRuntimePolicy('EXAMPLE')).toBeNull();expect(GRID_CYCLE_V2_CREATION).toBe(false);
+    expect(gridRuntimePolicy('EXAMPLE')).toBeNull();expect(GRID_CYCLE_V2_CREATION).toBe(true);
     expect(gridRuntimePolicy('2.0.0')?.digest).toBe(GRID_CYCLE_RUNTIME_POLICY_DIGEST);
     expect(GRID_CYCLE_RUNTIME_POLICY_DIGEST).not.toBe(GRID_RUNTIME_POLICY_DIGEST);
   });

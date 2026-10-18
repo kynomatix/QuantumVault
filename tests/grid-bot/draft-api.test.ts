@@ -77,11 +77,11 @@ describe('server authoritative Grid drafts',()=>{
       expect(snapshot.levels.map(l=>l.ordinal)).toEqual(preview.plan!.lines.map(l=>l.ordinal+1));
     });
   }
-  it('keeps v1 creation by default and signs v2 only through the server test injection',async()=>{
-    const {deps,storage}=setup();
+  it('creates v2 by default and preserves signed legacy drafts',async()=>{
+    const {deps,storage}=setup();deps.cycleV2Creation=false;
     const old=await createGridDraft('EXAMPLE',await request(deps),deps);
     expect(old.bot.policyVersion).toBe('1.0.0');expect(old.bot.runtimePolicyVersion).toBe('1.0.0');
-    deps.cycleV2Creation=true;deps.projectedStop=false;
+    delete deps.cycleV2Creation;deps.projectedStop=false;
     const i={...intent,seedAtCreation:false},revision=gridDraftRevision(i),preview=await authoritativeGridPreview('EXAMPLE',i,revision,deps);
     expect(preview.state).toBe('ready');expect(preview.policy.policyVersion).toBe('2.0.0');
     expect(preview.plan?.cycles?.length).toBe(4);expect(preview.plan?.seedQuantity).toBe('0');
@@ -90,6 +90,9 @@ describe('server authoritative Grid drafts',()=>{
     expect(saved.bot.policyVersion).toBe('2.0.0');expect(saved.bot.runtimePolicyVersion).toBe('2.0.0');
     expect(storage.levels.get(saved.bot.id)!.filter(l=>l.reduceOnly).every(l=>new Decimal(l.size).gt(0))).toBe(true);
     expect(old.bot.policyVersion).toBe('1.0.0');
+    const legacy=await storage.getBotSnapshot('EXAMPLE',old.bot.id);
+    expect(legacy.bot.runtimePolicyVersion).toBe('1.0.0');
+    expect(verifyGridPolicyHmac({...legacy.bot,levels:legacy.levels},umk(),legacy.bot.policyHmac).ok).toBe(true);
   });
   it('rejects v2 authority that would round when persisted at eight decimal places',async()=>{
     const {a,deps}=setup();deps.cycleV2Creation=true;
@@ -100,7 +103,7 @@ describe('server authoritative Grid drafts',()=>{
     expect(preview.state).not.toBe('ready');expect(preview.reasons).toContain('Cycle geometry exceeds durable policy precision');
   });
   it('signs and persists the lifted quantities from the fee-reserved sizing plan',async()=>{
-    const {a,deps,storage}=setup();if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
+    const {a,deps,storage}=setup();deps.cycleV2Creation=false;if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
     a.market.constraints.value.minimumQuote='10';
     const i={...intent,gridCount:50,totalInvestment:'300',leverage:'10',entryScaleType:'ascending' as const,profitScaleType:'ascending' as const};
     const draftRevision=gridDraftRevision(i),preview=await authoritativeGridPreview('EXAMPLE',i,draftRevision,deps);
@@ -116,7 +119,7 @@ describe('server authoritative Grid drafts',()=>{
     expect(storage.levels.get(saved.bot.id)!.map(l=>l.size)).toEqual(preview.levels!.map(l=>l.size));
   });
   it('saves a draft with unpublished optional limits while retaining every published limit check',async()=>{
-    const {a,deps}=setup();if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
+    const {a,deps}=setup();deps.cycleV2Creation=false;if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
     const c=a.market.constraints.value;
     c.maximumQuote={state:'unavailable',reason:'EXAMPLE'};c.priceBounds={state:'unavailable',reason:'EXAMPLE'};c.restrictions={state:'unavailable',reason:'EXAMPLE'};
     const saved=await createGridDraft('EXAMPLE',await request(deps),deps);expect(saved.result).toBe('created');
@@ -139,7 +142,7 @@ describe('server authoritative Grid drafts',()=>{
   });
   it('recomputes instead of accepting changed geometry, a seed change or fees',async()=>{const {storage,deps,a}=setup(),r=await request(deps);await expect(createGridDraft('EXAMPLE',{...r,intent:{...intent,upperPrice:'120'}},deps)).rejects.toMatchObject({code:'preview_drift'});
     await expect(createGridDraft('EXAMPLE',{...r,intent:{...intent,seedAtCreation:false}},deps)).rejects.toMatchObject({code:'preview_drift'});a.entryFee={...a.entryFee!,effectiveRate:'0'};await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'authority_unavailable'});expect(storage.bots.size).toBe(0);});
-  it('rejects authority expiry and stop clearance, while unknown capacity is not a gate',async()=>{const {deps,a}=setup();const r=await request(deps);expect((await authoritativeGridPreview('EXAMPLE',intent,r.draftRevision,deps)).capacity.state).toBe('unavailable');a.stop={state:'unavailable',reason:'EXAMPLE unknown liquidation'};await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'authority_unavailable'});});
+  it('rejects authority expiry and stop clearance, while unknown capacity is not a gate',async()=>{const {deps,a}=setup();deps.cycleV2Creation=false;const r=await request(deps);expect((await authoritativeGridPreview('EXAMPLE',intent,r.draftRevision,deps)).capacity.state).toBe('unavailable');a.stop={state:'unavailable',reason:'EXAMPLE unknown liquidation'};await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'authority_unavailable'});});
   it('rejects changed intent on the same request and never mutates the winner',async()=>{const {storage,deps}=setup(),r=await request(deps);const first=await createGridDraft('EXAMPLE',r,deps);const changed={...intent,totalInvestment:'200'},revision=gridDraftRevision(changed),p=await authoritativeGridPreview('EXAMPLE',changed,revision,deps);await expect(createGridDraft('EXAMPLE',{...r,intent:changed,draftRevision:revision,serverIntentDigest:p.serverIntentDigest!},deps)).rejects.toMatchObject({code:'idempotency_conflict'});expect(storage.bots.get(first.bot.id)?.totalInvestment).toBe('100.00');});
   it('denies tampered durable levels or HMAC on replay',async()=>{const {deps,storage}=setup(),r=await request(deps),saved=await createGridDraft('EXAMPLE',r,deps);storage.levels.get(saved.bot.id)![0].size='999.00000000';await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'idempotency_conflict'});});
   it('a missing UMK cannot commit a draft',async()=>{const {deps,storage}=setup(),r=await request(deps);deps.umk=async()=>null;await expect(createGridDraft('EXAMPLE',r,deps)).rejects.toMatchObject({code:'secret_unavailable'});expect(storage.bots.size).toBe(0);});
@@ -150,16 +153,15 @@ describe('server authoritative Grid drafts',()=>{
 const servers:Server[]=[];afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>new Promise<void>(resolve=>{s.close(()=>resolve());s.closeAllConnections();})));});
 async function api(enabled=true) {const {storage,deps}=setup(),app=express();app.use(express.json());registerGridBotRoutes(app,(req,res,next)=>{const wallet=req.headers['x-wallet'];if(!wallet){res.sendStatus(401);return;}(req as typeof req & {walletAddress:string}).walletAddress=String(wallet);next();},{deps,storage:storage as unknown as GridStorage,enabled:()=>enabled});const server=await new Promise<Server>(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s));});servers.push(server);const address=server.address();if(!address||typeof address==='string')throw Error();return{...{storage,deps},url:'http://127.0.0.1:'+address.port};}
 describe('Grid owner-only routes',()=>{
-  it('keeps production-route drafts on v1 and accepts v2 only through injected server dependencies',async()=>{
-    const {url,deps}=await api(),headers={'x-wallet':'EXAMPLE','content-type':'application/json'};
+  it('creates production-route drafts on v2 and rejects client policy overrides',async()=>{
+    const {url}=await api(),headers={'x-wallet':'EXAMPLE','content-type':'application/json'};
     const body={schemaVersion:1,requestId:1,draftRevision:gridDraftRevision(intent),intent};
     const preview=()=>fetch(url+'/api/grid-bots/preview',{method:'POST',headers,body:JSON.stringify(body)});
-    expect(await (await preview()).json()).toMatchObject({state:'ready',policy:{policyVersion:'1.0.0',runtimePolicyVersion:'1.0.0'}});
+    expect(await (await preview()).json()).toMatchObject({state:'ready',policy:{policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}});
     for(const field of ['cycleV2Creation','policyVersion','runtimePolicyVersion']){
       const response=await fetch(url+'/api/grid-bots/preview',{method:'POST',headers,body:JSON.stringify({...body,intent:{...intent,[field]:field==='cycleV2Creation'?true:'2.0.0'}})});
       expect(response.status).toBe(400);
     }
-    deps.cycleV2Creation=true;
     const v2=await (await preview()).json();expect(v2).toMatchObject({state:'ready',policy:{policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}});
     const saved=await fetch(url+'/api/grid-bots',{method:'POST',headers,body:JSON.stringify({schemaVersion:1,clientRequestId:randomUUID(),draftRevision:body.draftRevision,intent,serverIntentDigest:v2.serverIntentDigest})});
     expect(saved.status).toBe(201);expect(await saved.json()).toMatchObject({bot:{policyVersion:'2.0.0',runtimePolicyVersion:'2.0.0'}});

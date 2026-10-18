@@ -67,8 +67,8 @@ describe('current grid planner inputs', () => {
     expect(refresh.current(inputKey)).toBe(true);
   });
 
-  it.each(['long', 'short'] as const)('passes the 300 USDC / 10× / 50-grid BTC minimum for %s with a starting position', (side) => {
-    const preview = previewGrid({ ...query, side, stop: side === 'long' ? '85000' : '115000' }, market, now);
+  it.each(['long', 'short'] as const)('passes the legacy 300 USDC / 10× / 50-grid BTC minimum for %s with a starting position', (side) => {
+    const preview = previewGrid({ ...query, side, stop: side === 'long' ? '85000' : '115000' }, market, now, {cycleV2Creation:false});
     expect(preview.state).not.toBe('rejected');
     expect(preview.reasons).toEqual([]);
     expect(preview.requestedPlan).not.toBeNull();
@@ -83,22 +83,22 @@ describe('current grid planner inputs', () => {
     expect(plannerOrderSizeSummary(preview.requestedPlan, 'flat')).toBe('About $60 per grid order (equal sizes)');
   });
 
-  it('updates the split when the seed changes and does not label a minimum-sized diagnostic as the requested size', () => {
-    const unseeded = previewGrid({ ...query, seed: false }, market, now);
+  it('updates the legacy split when the seed changes and does not label a minimum-sized diagnostic as the requested size', () => {
+    const unseeded = previewGrid({ ...query, seed: false }, market, now, {cycleV2Creation:false});
     expect(unseeded.requestedPlan?.seedQuantity).toBe('0');
     expect(plannerOrderSizeSummary(unseeded.requestedPlan, 'flat')).toBe('About $120 per grid order (equal sizes)');
     for (const change of [{ leverage: '1' }, { investment: '30' }]) {
-      const underfunded = previewGrid({ ...query, ...change }, market, now);
+      const underfunded = previewGrid({ ...query, ...change }, market, now, {cycleV2Creation:false});
       expect(underfunded.state).toBe('rejected');
       expect(underfunded.minimumPlan).not.toBeNull();
       expect(plannerOrderSizeSummary(underfunded.requestedPlan, 'flat')).toBeNull();
     }
-    const scaled = previewGrid({ ...query, entryScale: 'ascending', investment: '1000' }, market, now);
+    const scaled = previewGrid({ ...query, entryScale: 'ascending', investment: '1000' }, market, now, {cycleV2Creation:false});
     expect(plannerOrderSizeSummary(scaled.requestedPlan, 'ascending')).toContain('(scaled sizes)');
   });
-  it.each(['long', 'short'] as const)('lifts the nearest BTC entries at $300 / 10x / 50 grids for %s and explains the count', side => {
+  it.each(['long', 'short'] as const)('lifts the nearest legacy BTC entries at $300 / 10x / 50 grids for %s and explains the count', side => {
     const preview = previewGrid({ ...query, side, entryScale: 'ascending', profitScale: 'ascending', fee: '0',
-      stop: side === 'long' ? '85000' : '115000' }, market, now);
+      stop: side === 'long' ? '85000' : '115000' }, market, now, {cycleV2Creation:false});
     expect(preview.reasons).toEqual([]); expect(isPlannerPreview(preview)).toBe(true);
     const plan = preview.requestedPlan!; expect(plan).not.toBeNull();
     const liftedOrdinals = plan.lines.filter(line => line.role === 'entry')

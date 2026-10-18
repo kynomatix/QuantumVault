@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {GridReadOrder,GridActionKeys,gridAdjustReady,gridFactsFresh,gridRangeState,gridBreakevenView,gridVisibleActions} from '../../client/src/lib/grid-live-view';
+import {GridReadOrder,GridActionKeys,gridAdjustReady,gridFactsFresh,gridRangeState,gridBreakevenView,gridVisibleActions,gridCycleDisplayLevels} from '../../client/src/lib/grid-live-view';
 import {gridActionAllowed} from '../../shared/grid-surface';
 import {gridSurface} from '../../server/grid-bot/surface';
 const snapshot=()=>({bot:{id:'EXAMPLE',name:'Grid',market:'BTC-PERP',direction:'long',status:'stopping',lowerPrice:'90',upperPrice:'110',gridCount:20,updatedAt:new Date(),createIntent:{lowerPrice:'90'},residualUsdc:'0',residualObservedAt:new Date()},levels:[],operations:[]});
@@ -10,6 +10,13 @@ describe('Grid owner surface request and settlement guards',()=>{
     const base={...snapshot(),cycleProjection:{generation:'1',observedAt:now,orders}},monitor={generation:'1',reconciled_at:new Date(now),observation:{observedAt:now,inventoryComplete:true,orders:[]}};
     const project=(status:string)=>gridSurface({...base,bot:{...base.bot,policyVersion:'2.0.0',status}},monitor,null,{pending:0,uncertain:0},now).cycleProjection!.orders.map(o=>o.state);
     expect(project('stopped')).toEqual(['stopped','stopped']);expect(project('paused')).toEqual(['paused','waiting for fills']);
+  });
+  it('labels both stopped cycle legs Stopped for the drawer and chart',()=>{
+    const now=Date.now(),orders=[{ownerOrdinal:0,leg:'opening',price:'90',side:'buy',size:'1',state:'queued'},{ownerOrdinal:0,leg:'closing',price:'100',side:'sell',size:'1',state:'waiting for fills'}];
+    const monitor={generation:'1',reconciled_at:new Date(now),observation:{observedAt:now,inventoryComplete:true,orders:[]}};
+    const surface=gridSurface({...snapshot(),bot:{...snapshot().bot,policyVersion:'2.0.0',status:'stopped'},cycleProjection:{generation:'1',observedAt:now,orders}},monitor,null,{pending:0,uncertain:0},now);
+    expect(gridCycleDisplayLevels(surface,now).map(o=>o.status)).toEqual(['Stopped','Stopped']);
+    expect(surface.cycleProjection!.orders.map(o=>o.state)).toEqual(['stopped','stopped']);
   });
   it('rejects delayed detail reads after a newer read, action or identity change',()=>{const reads=new GridReadOrder(),old=reads.next(),newer=reads.next();expect(reads.accepts(old)).toBe(false);expect(reads.accepts(newer)).toBe(true);reads.next();expect(reads.accepts(newer)).toBe(false);});
   it('retains lost-response action identity without triggering a replay',()=>{const keys=new GridActionKeys();let calls=0;const uuid=()=>`EXAMPLE_${++calls}`;expect(keys.key('EXAMPLE','stop',uuid)).toBe(keys.key('EXAMPLE','stop',uuid));expect(calls).toBe(1);keys.accepted('EXAMPLE','stop');keys.key('EXAMPLE','stop',uuid);expect(calls).toBe(2);});

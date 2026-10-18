@@ -1,5 +1,5 @@
 import {requestDigest as cycleRequestDigest} from './request-digest';
-export {requestDigest as cycleRequestDigest} from './request-digest';
+export {cycleRequestDigest};
 import Decimal from 'decimal.js';
 import type {GridPolicy} from './policy-hmac';
 import {canonicalGridPolicy} from './policy-hmac';
