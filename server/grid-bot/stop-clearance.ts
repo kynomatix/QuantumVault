@@ -23,8 +23,14 @@ export function projectGridStop(input: GridProjectionInput, now: number) {
     if (!tick.gt(0) || !funding.gt(0) || !max.gte(1) || !stop.gt(0) || !stop.mod(tick).eq(0)
       || !new D(p.leverage).gte(1) || new D(p.leverage).gt(max)) return deny('Invalid funding, stop tick or market leverage.');
     const long=p.side==='long', sign=long?1:-1;
-    const seedPrice=new D(p.start).mul(new D(1).plus(new D(GRID_SEED_MAX_SLIPPAGE_PERCENT).div(100).mul(sign)))
+    let seedPrice=new D(p.start).mul(new D(1).plus(new D(GRID_SEED_MAX_SLIPPAGE_PERCENT).div(100).mul(sign)))
       .div(tick).toDecimalPlaces(0,long?D.ROUND_CEIL:D.ROUND_FLOOR).mul(tick);
+    if (p.policyVersion === '2.0.0' && new D(p.seedQuantity).gt(0)) {
+      const bounds=p.seedPriceBounds;
+      if (!bounds || ![bounds.low,bounds.high].every(s=>numeric(s)&&new D(s).gt(0)&&new D(s).mod(tick).eq(0))
+        || new D(bounds.low).gt(bounds.high)) return deny('Seed execution bounds are unavailable.');
+      seedPrice=new D(long?bounds.high:bounds.low);
+    }
     let size=new D(p.seedQuantity), notional=size.mul(seedPrice), fees=notional.mul(D.max(0,input.takerRate));
     for (const level of p.lines.filter(l=>l.role==='entry')) {
       if (![level.price,level.quantity].every(s=>numeric(s)) || !new D(level.price).gt(0) || !new D(level.quantity).gte(0)) return deny('Entry exposure is unknown.');

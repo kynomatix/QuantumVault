@@ -26,7 +26,9 @@ export interface CycleReplayInput {
   operations: CycleOperation[]; fills: CycleFill[]; progress: CycleProgress[]; allocations: CycleInventoryAllocation[];
   /** Complete seed operation set and durable release decision, proved terminal before issuing unused quota.
    * entriesAllowed records permission at release; later pauses must not erase already issued credit.
-   * Current lifecycle permission is a separate Stage B admission gate. */
+   * Current lifecycle permission is a separate Stage B admission gate.
+   * An empty operation set is accepted only for seed-off policies. Absence of a seed attempt
+   * is not durable proof that provisioning can no longer submit one. */
   unusedSeedProof?: { operationIds: string[]; historyThrough: number; entriesAllowed: boolean };
 }
 export interface ReplayedGridCycle {
@@ -137,6 +139,7 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
     if(seedStates.reduce((s,o)=>s.plus(o.retained),new D(0)).gt(seedQuota))throw Error('Seed requests exceed signed capacity');
     let releaseUnused=false, unusedAvailableAt=0;
     if(input.unusedSeedProof){const proof=input.unusedSeedProof;
+      if(input.policy.seedAtCreation && proof.operationIds.length===0)throw Error('Unused seed requires a proven terminal seed operation');
       if(!timestamp(proof.historyThrough) || new Set(proof.operationIds).size!==proof.operationIds.length
         || stable([...proof.operationIds].sort())!==stable(seedStates.map(s=>s.op.id).sort())
         || seedStates.some(s=>!s.terminal || progress.get(s.op.id)!.historyThrough!>proof.historyThrough))throw Error('Unused seed lacks complete terminal proof');

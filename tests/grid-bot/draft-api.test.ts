@@ -5,6 +5,8 @@ import type { Server } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { authoritativeGridPreview,createGridDraft } from '../../server/grid-bot/draft-service';
 import { calculateGrid } from '../../server/grid-bot/engine';
+import { retainedGridCycles } from '../../server/grid-bot/cycle-policy';
+import { verifyGridPolicyHmac } from '../../server/grid-bot/policy-hmac';
 import { GridStorageError,type GridStorage,type StoredBot,type StoredLevel,type DraftRecord } from '../../server/grid-bot/storage';
 import { gridIntentSchema,gridCreateRequestSchema } from '../../shared/grid-draft';
 import { gridDraftRevision } from '../../client/src/lib/grid-draft-view';
@@ -29,6 +31,52 @@ function memory() {
 const setup=()=>{const storage=memory(),a=authority(),deps:GridDraftDeps={storage:storage as never,observe:async()=>a,now:()=>clock,umk:async()=>umk()};return{storage,a,deps};};
 const request=async(deps:GridDraftDeps)=>{const draftRevision=gridDraftRevision(intent),preview=await authoritativeGridPreview('EXAMPLE',intent,draftRevision,deps);expect(preview.state).toBe('ready');return{schemaVersion:1 as const,clientRequestId:randomUUID(),draftRevision,intent,serverIntentDigest:preview.serverIntentDigest!};};
 describe('server authoritative Grid drafts',()=>{
+  it.each(['maximum leverage','leverage value','tick','maker fee','seed fee','reference'] as const)('denies v2 preview without %s instead of using observed stop authority',async missing=>{
+    const {a,deps,storage}=setup();deps.cycleV2Creation=true;deps.projectedStop=false;
+    expect(a.stop.state).toBe('available');
+    if(a.market.constraints.state!=='available')throw Error('EXAMPLE');
+    if(missing==='maximum leverage')a.market.constraints.value.maxLeverage={state:'unavailable',reason:'EXAMPLE'};
+    if(missing==='leverage value')a.market.constraints.value.maxLeverage={state:'available',value:undefined as never};
+    if(missing==='tick')a.market.constraints.value.tick=undefined as never;
+    if(missing==='maker fee')a.entryFee={...a.entryFee!,effectiveRate:'invalid'};
+    if(missing==='seed fee')a.seedFee={...a.seedFee!,effectiveRate:'invalid'};
+    if(missing==='reference')a.market.reference={state:'unavailable',reason:'EXAMPLE reference missing'};
+    const preview=await authoritativeGridPreview('EXAMPLE',intent,gridDraftRevision(intent),deps);
+    expect(preview.state).toBe('unavailable');expect(preview.serverIntentDigest).toBeNull();
+    expect(preview.authority.stop).toEqual({state:'unavailable',reason:'Stop projection inputs unavailable'});
+    if(missing!=='reference')expect(preview.reasons).toContain('Stop projection inputs unavailable');
+    if(preview.geometrySummary)expect(preview.geometrySummary.totalRequiredCapital).toBeNull();
+    expect(storage.createDraftWithLevels).not.toHaveBeenCalled();
+  });
+  it('uses the raw v2 reference band for seed fees and venue price limits',async()=>{
+    const {a,deps}=setup();deps.cycleV2Creation=true;
+    if(a.market.constraints.state!=='available'||a.market.reference.state!=='available')throw Error('EXAMPLE');
+    a.market.reference.value.price='99.991';
+    const i={...intent,upperPrice:'100',gridCount:1},revision=gridDraftRevision(i);
+    const preview=await authoritativeGridPreview('EXAMPLE',i,revision,deps);
+    expect(preview.state).toBe('ready');expect(preview.plan?.capacityPrice).toBe('100.5');
+    expect(preview.seedTakerCost).toBe(new Decimal(preview.plan!.seedQuantity).mul('100.5').mul(a.seedFee!.effectiveRate).toFixed());
+    a.market.constraints.value.priceBounds={state:'available',value:{minimum:'1',maximum:'100.49'}};
+    const denied=await authoritativeGridPreview('EXAMPLE',i,revision,deps);
+    expect(denied.state).toBe('unavailable');expect(denied.reasons).toContain('Bounded seed execution exceeds current price limits');
+  });
+  for(const direction of ['long','short'] as const) for(const seedAtCreation of [true,false]) {
+    it(`reconstructs ${direction} seed ${seedAtCreation} preview cycles from persisted signed rows`,async()=>{
+      const {deps,storage}=setup();deps.cycleV2Creation=true;
+      const i={...intent,direction,seedAtCreation,stopPrice:direction==='long'?'80':'120'};
+      const draftRevision=gridDraftRevision(i),preview=await authoritativeGridPreview('EXAMPLE',i,draftRevision,deps);
+      expect(preview.state).toBe('ready');expect(preview.plan?.cycles?.length).toBeGreaterThan(0);
+      const saved=await createGridDraft('EXAMPLE',{schemaVersion:1,clientRequestId:randomUUID(),draftRevision,intent:i,serverIntentDigest:preview.serverIntentDigest!},deps);
+      const snapshot=await storage.getBotSnapshot('EXAMPLE',saved.bot.id),policy={...snapshot.bot,levels:snapshot.levels};
+      expect(verifyGridPolicyHmac(policy,umk(),snapshot.bot.policyHmac).ok).toBe(true);
+      const retained=retainedGridCycles(policy);expect(retained).not.toBeNull();
+      // Persisted decimals have eight places; compare identical quantities/prices in canonical plain form.
+      expect(retained!.map(c=>({...c,openingPrice:new Decimal(c.openingPrice).toFixed(),closingPrice:new Decimal(c.closingPrice).toFixed(),
+        quantity:new Decimal(c.quantity).toFixed(),initialInventory:new Decimal(c.initialInventory).toFixed(),initialOpeningCredit:new Decimal(c.initialOpeningCredit).toFixed()})))
+        .toEqual(preview.plan!.cycles);
+      expect(snapshot.levels.map(l=>l.ordinal)).toEqual(preview.plan!.lines.map(l=>l.ordinal+1));
+    });
+  }
   it('keeps v1 creation by default and signs v2 only through the server test injection',async()=>{
     const {deps,storage}=setup();
     const old=await createGridDraft('EXAMPLE',await request(deps),deps);

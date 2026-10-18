@@ -106,6 +106,28 @@ describe('v2 exact cycle replay and source-credit validation',()=>{
     expect(replayGridCycles({...h,operations:[...h.operations,{...open,preparedAt:2}]}).ok).toBe(false);
     expect(replayGridCycles({...h,unusedSeedProof:{...h.unusedSeedProof,operationIds:[]}}).ok).toBe(false);
   });
+  it.each(['long','short'] as const)('accepts an empty unused-seed proof only for a seed-off %s policy',direction=>{
+    const proof={operationIds:[],historyThrough:3,entriesAllowed:true};
+    const on=history(cyclePolicy(direction,true)),off=history(cyclePolicy(direction,false));
+    expect(replayGridCycles({...on,unusedSeedProof:proof})).toEqual({ok:false,reason:'Unused seed requires a proven terminal seed operation'});
+    expect(replayGridCycles({...off,unusedSeedProof:proof})).toEqual(replayGridCycles(off));
+    const owner=direction==='long'?3:0,open=operation(on.policy,'EXAMPLE_OPEN',owner,'opening','1',4);open.initialCredit='1';
+    expect(validateCycleSourceCredit({...on,unusedSeedProof:proof},open).ok).toBe(false);
+    expect(validateCycleSourceCredit({...off,unusedSeedProof:proof},open).ok).toBe(true);
+  });
+  it.each(['long','short'] as const)('denies a seed-off %s closing anchor until an actual opening fill backs it',direction=>{
+    const h=history(cyclePolicy(direction,false)),owner=direction==='long'?3:0;
+    const close=operation(h.policy,'EXAMPLE_CLOSE',owner,'closing','1',4);
+    expect(states(h).find(s=>s.cycle.ownerOrdinal===owner)).toMatchObject({held:'0',openingCredit:'1'});
+    expect(validateCycleSourceCredit(h,close)).toEqual({ok:false,reason:'Closing request lacks exact entry allocations'});
+    expect(replayGridCycles({...h,operations:[close]}).ok).toBe(false);
+    const allocations=[{operationId:close.id,cycleOrdinal:owner,tradeId:'EXAMPLE_ENTRY',size:'1'}];
+    expect(validateCycleSourceCredit(h,close,allocations)).toEqual({ok:false,reason:'Closing source belongs to another cycle or is not an entry fill'});
+    const open=operation(h.policy,'EXAMPLE_OPEN',owner,'opening','1',1);open.initialCredit='1';h.operations.push(open);
+    expect(validateCycleSourceCredit(h,close,allocations).ok).toBe(false);
+    h.fills.push(fill(open,'EXAMPLE_ENTRY','1',2));h.progress.push(terminal(open,'1',3));
+    expect(validateCycleSourceCredit(h,close,allocations).ok).toBe(true);
+  });
   it('retains dust and exempts backed reductions from the opening minimum',()=>{
     const h=history(cyclePolicy('long',false)),open=operation(h.policy,'EXAMPLE_OPEN',0,'opening','1',1);open.initialCredit='1';
     h.operations.push(open);h.fills.push(fill(open,'EXAMPLE_DUST','0.0049',2));h.progress.push(terminal(open,'0.0049',3));

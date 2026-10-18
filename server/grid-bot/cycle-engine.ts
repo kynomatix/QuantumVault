@@ -28,7 +28,7 @@ export function calculateCycleGrid(input: GridInput): GridResult {
     || !start.gt(prices[0]) || !start.lt(prices.at(-1)!)) return fail('invalid_start', 'Reference must be strictly inside the quantized range');
   const investment = new D(input.investment), quantum = new D(input.investmentStep), total = investment.mul(input.leverage);
   if (!investment.mod(quantum).eq(0)) return fail('invalid_investment', 'Investment must align to the quote increment');
-  const bounds = gridSeedPriceBounds(start.toFixed(), input.tick);
+  const bounds = gridSeedPriceBounds(input.start, input.tick);
   if (input.seed && !new D(bounds.low).gt(0)) return fail('invalid_geometry', 'Seed execution bound is not positive');
   const worst = D.max(prices.at(-1)!, input.seed ? bounds.high : '0');
   const opening = (p: Decimal) => long ? p.lt(start) : p.gt(start);
@@ -87,7 +87,7 @@ export function calculateCycleGrid(input: GridInput): GridResult {
     || seedQuantity.mul(bounds.high).gt(input.maximumQuote))) return fail('invalid_geometry', 'Cycle endpoint or aggregate seed exceeds maximum quote');
   const reserved = capacity(qs), allocated = lines.reduce((s, l) => s.plus(l.notional), new D(0));
   return { ok: true, plan: { policyVersion: '2.0.0', side: input.side, start: start.toFixed(), investment: investment.toFixed(), leverage: input.leverage,
-    lines, cycles, capacityPrice: worst.toFixed(), capacityNotional: reserved.toFixed(), seedQuantity: seedQuantity.toFixed(),
+    lines, cycles, capacityPrice: worst.toFixed(), capacityNotional: reserved.toFixed(), seedPriceBounds: bounds, seedQuantity: seedQuantity.toFixed(),
     allocatedNotional: allocated.toFixed(), unallocatedNotional: total.minus(reserved).toFixed(),
     feeGate: input.effectiveMakerCostRate == null ? 'not_evaluated' : 'evaluated', feeRows: input.effectiveMakerCostRate == null ? [] : feeRows,
     ...(lifted.length ? { openingOrderLift: { count: lifted.length, minimumQuote: input.minimumQuote, ordinals: lifted } } : {}) } };

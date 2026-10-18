@@ -23,9 +23,14 @@ export interface PairFee {
 }
 export interface GridPlan {
   policyVersion?: '2.0.0'; cycles?: GridCycle[]; capacityPrice?: string; capacityNotional?: string;
+  /** v2 execution band around the raw reference, before the retained start is tick-floored. */
+  seedPriceBounds?: { low: string; high: string };
   side: 'long' | 'short'; start: string; investment: string; leverage: string;
-  lines: GridLine[]; seedQuantity: string; allocatedNotional: string; unallocatedNotional: string;
+  lines: GridLine[]; seedQuantity: string; allocatedNotional: string;
+  /** v1: leveraged budget minus anchor-order notional; v2: leveraged budget minus W * sum(q), the reserved future capacity. */
+  unallocatedNotional: string;
   feeGate: 'not_evaluated' | 'evaluated'; feeRows: PairFee[];
+  /** Lifted owner ordinals are zero-based engine indices for both versions, not persisted signed ordinals. */
   openingOrderLift?: { count: number; minimumQuote: string; ordinals?: number[] };
 }
 /** All ordinals here are zero-based, including reconstructed persisted cycle owners. */

@@ -10,6 +10,24 @@ const base:GridInput={policyVersion:'2.0.0',side:'long',lower:'80',upper:'120',s
   minimumQuote:'10',investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:'0.0001'};
 function plan(input:Partial<GridInput>={}) {const r=calculateGrid({...base,...input});expect(r.ok).toBe(true);if(!r.ok)throw Error(r.issues[0].reason);return r.plan;}
 describe('v2 fixed future cycle capacity',()=>{
+  for(const side of ['long','short'] as const) for(const entryScale of ['flat','ascending','descending'] as const)
+    for(const profitScale of ['flat','ascending','descending'] as const) {
+      it(`matches v1 quantity extrema for ${side}, entry ${entryScale}, profit ${profitScale}`,()=>{
+        const geometry={side,entryScale,profitScale,seed:true};
+        const legacy=plan({...geometry,policyVersion:'1.0.0'}),cyclic=plan(geometry);
+        for(const role of ['entry','seed_exit'] as const){
+          const ranked=(p:typeof legacy)=>p.lines.filter(l=>l.role===role)
+            .sort((a,b)=>new Decimal(a.quantity).cmp(b.quantity)||a.ordinal-b.ordinal).map(l=>l.ordinal);
+          const old=ranked(legacy),next=ranked(cyclic);
+          expect(old.length).toBeGreaterThan(1);
+          // Nonbinding minimums and fine lots isolate the inherited quote weights and anchor-price divisor.
+          expect([...legacy.lines,...cyclic.lines].filter(l=>l.role===role)
+            .every(l=>new Decimal(l.quantity).mul(l.price).gt(base.minimumQuote))).toBe(true);
+          expect(next[0]).toBe(old[0]);expect(next.at(-1)).toBe(old.at(-1));
+          expect(next).toEqual(old);
+        }
+      });
+    }
   for(const side of ['long','short'] as const) for(const seed of [true,false]) for(const start of ['95','100'])
     for(const scale of ['flat','ascending','descending'] as const) {
       it(`${side}, seed ${seed}, start ${start}, ${scale}`,()=>{
@@ -40,6 +58,17 @@ describe('v2 fixed future cycle capacity',()=>{
     expect(p.capacityNotional).toBe('22.4');
     expect(calculateGrid({...base,lower:'90',upper:'100',start:'95',intervals:1,investment:'22.39',seed:false}).ok).toBe(false);
   });
+  it('uses zero-based openingOrderLift owner ordinals in both versions',()=>{
+    const geometry={lower:'90',upper:'100',start:'95',intervals:1,investment:'22.40',seed:true,
+      entryScale:'descending' as const,profitScale:'descending' as const};
+    const cyclic=plan(geometry);
+    expect(cyclic.openingOrderLift?.ordinals).toEqual([1]);
+    expect(cyclic.lines[1].quantity).toBe('0.112');expect(cyclic.cycles![1].ownerOrdinal).toBe(1);
+    // v1 lifts the bottom entry when its descending weight initially receives less than the minimum.
+    const legacy=plan({policyVersion:'1.0.0',seed:false,investment:'21',start:'95',entryScale:'descending'});
+    expect(legacy.openingOrderLift?.ordinals).toEqual([0]);
+    expect(legacy.lines[0].ordinal).toBe(0);expect(legacy.lines[0].quantity).toBe('0.125');
+  });
   it('finds the first legal quote quantum even when the doubling probe would exceed maximum quote',()=>{
     const input={...base,lower:'90',upper:'100',start:'95',intervals:1,seed:false,maximumQuote:'12'};
     const r=minimumInvestment(input);expect(r.ok).toBe(true);if(!r.ok)return;
@@ -56,6 +85,21 @@ describe('v2 fixed future cycle capacity',()=>{
     for(const side of ['long','short'] as const){const p=plan({side,upper:'100',lower:'90',start:'99.99',intervals:1});
       expect(p.capacityPrice).toBe(gridSeedPriceBounds('99.99','0.01').high);}
     expect(calculateGrid({...base,maximumQuote:'150'}).ok).toBe(false);
+  });
+  it.each(['long','short'] as const)('uses the raw reference seed band for %s capacity and stop projection',side=>{
+    const p=plan({side,upper:'100',lower:'90',start:'99.991',intervals:1});
+    expect(p.start).toBe('99.99');expect(p.seedPriceBounds).toEqual({low:'99.49',high:'100.5'});
+    expect(p.capacityPrice).toBe('100.5');
+    expect(new Decimal(p.capacityPrice!).gt(gridSeedPriceBounds(p.start,base.tick).high)).toBe(true);
+    const stop=projectGridStop({plan:p,funding:base.investment,stop:side==='long'?'80':'130',tick:base.tick,
+      maxLeverage:'20',makerRate:'0',takerRate:'0',observedAt:1,expiresAt:100},2);
+    expect(stop.state).toBe('available');
+    if(stop.state==='available')expect(stop.projection.seedWorstPrice).toBe(side==='long'?'100.5':'99.49');
+  });
+  it('denies a seeded v2 stop projection with missing execution bounds',()=>{
+    const p=plan();delete p.seedPriceBounds;
+    expect(projectGridStop({plan:p,funding:base.investment,stop:'70',tick:base.tick,maxLeverage:'20',
+      makerRate:'0',takerRate:'0',observedAt:1,expiresAt:100},2)).toEqual({state:'unavailable',reason:'Seed execution bounds are unavailable.'});
   });
   it('keeps seed-off closing anchors funded without inventing seed inventory',()=>{
     const on=plan(),off=plan({seed:false});
