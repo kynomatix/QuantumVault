@@ -24,6 +24,7 @@ export function gridVisibleActions(surface:GridBotSurface):GridOwnerAction[]{
 }
 export function gridCanAdjust(surface:GridBotSurface){return surface.startEnabled&&surface.workerRunning&&!!surface.bot.createIntent
   &&(gridAdjustReady(surface)||gridActionAllowed(surface.bot,'stop'));}
+export function gridCanStartAgain(surface:GridBotSurface){return surface.draftEnabled&&gridCanAdjust(surface)&&gridAdjustReady(surface);}
 export function gridLaunchState(surface:GridBotSurface){
   if(surface.bot.status==='draft')return surface.startEnabled?'Draft ready for review and Start':'Draft saved; Start is off';
   if(surface.bot.status==='stopping')return 'Stop pending; waiting for orders, positions and settlement';

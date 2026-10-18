@@ -4,6 +4,7 @@ import { Info, Maximize2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { createSharedTradePriceChart } from '../SharedTradePriceChart';
+import { chartStyle, chartCandleColor } from '../chartStyle';
 import { plannerPriceFormat, readableTime, type PlannerChart, type PlannerRange } from '@/lib/grid-planner-view';
 import type { GridLine } from '../../../../server/grid-bot/engine-types';
 import { gridMeasuredStart } from '../../../../shared/grid-lookback';
@@ -28,12 +29,12 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
       swatch.style.color = `hsl(${styles.getPropertyValue(`--${token}`).trim()} / ${alpha})`;
       return getComputedStyle(swatch).color;
     };
-    const primary = color('primary'), down = color('destructive'), up = color('chart-4');
+    const primary = color('primary'), down = color('destructive');
     const bandColor = color('primary', 0.1);
     canvas.applyOptions({ layout: { textColor: color('muted-foreground') },
       grid: { vertLines: { color: color('border', 0.3) }, horzLines: { color: color('border', 0.3) } },
       timeScale: { borderColor: color('border') }, rightPriceScale: { borderColor: color('border') } });
-    const series = retained.current?.series ?? canvas.addCandlestickSeries({ upColor: up, downColor: down, borderVisible: false, wickUpColor: up, wickDownColor: down });
+    const series = retained.current?.series ?? canvas.addCandlestickSeries(chartStyle.candles);
     retained.current = { canvas, series, resource };
     const addLine = (options: Parameters<typeof series.createPriceLine>[0]) => { priceLines.push(series.createPriceLine(options)); };
     const attach = (primitive: ISeriesPrimitive) => { primitives.push(primitive); series.attachPrimitive(primitive); };
@@ -41,7 +42,7 @@ export function GridPlannerPriceCanvas({ chart, lines, range, period, tick }: { 
     const measuredStart = period && finalized.length ? gridMeasuredStart(chart.timeframe, period, finalized.at(-1)!.time) : null;
     const candles = chart.candles.map(c => {
       const dim = measuredStart !== null && c.time < measuredStart;
-      const tint = color(c.close >= c.open ? 'chart-4' : 'destructive', dim ? 0.38 : 1);
+      const tint = chartCandleColor(c.close >= c.open, dim ? 0.38 : 1);
       return { time: Math.floor(c.time / 1000) as UTCTimestamp, open: c.open, high: c.high, low: c.low, close: c.close, color: tint, wickColor: tint };
     });
     const uniqueSeconds = candles.every((c, i) => !i || c.time > candles[i - 1].time);

@@ -10,6 +10,10 @@ vi.mock('react', async original => {
   return { ...react, ...hooks, default: { ...react, ...hooks } };
 });
 vi.mock('../../client/src/components/SharedTradePriceChart', () => ({ createSharedTradePriceChart: chartFactory }));
+vi.mock('../../client/src/components/chartStyle', async original => ({
+  ...await original<typeof import('../../client/src/components/chartStyle')>(),
+  resolveChartStyle: () => ({range:'#38bdf8',rangeFill:'rgba(56,189,248,0.1)',entry:'#38bdf8',exit:'#7854d4',stop:'#ef4444',muted:'#94a3b8'}),
+}));
 vi.mock('../../client/src/components/grid-bot/GridDraftCard', () => ({ gridJson: vi.fn() }));
 vi.mock('../../client/src/components/ui/dialog', () => ({ Dialog: 'div', DialogContent: 'div', DialogHeader: 'div', DialogTitle: 'div', DialogDescription: 'div' }));
 vi.mock('../../client/src/components/ui/button', () => ({ Button: 'button' }));
@@ -82,13 +86,20 @@ describe('Grid chart clock and viewport', () => {
     const level = priceLines.find(line => line.price === 95 && !line.axisLabelVisible)!;
     const lower = priceLines.find(line => line.title === 'Lower range')!;
     const breakeven = priceLines.find(line => line.title.startsWith('Breakeven'))!;
-    expect(level).toMatchObject({ title: '', lineWidth: 2, lineStyle: 2, axisLabelVisible: false });
-    for (const title of ['Lower range', 'Upper range', 'Stop', 'Breakeven']) expect(priceLines.find(line => line.title === title)).toMatchObject({ lineWidth: 3, lineStyle: 0, axisLabelVisible: true });
+    expect(addCandlestickSeries).toHaveBeenCalledWith(expect.objectContaining({upColor:'#38bdf8',downColor:'#7854d4',wickUpColor:'#38bdf8',wickDownColor:'#7854d4'}));
+    expect(level).toMatchObject({ title: '', lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
+    for (const title of ['Lower range', 'Upper range', 'Stop']) expect(priceLines.find(line => line.title === title)).toMatchObject({ lineWidth: 1, lineStyle: 0, axisLabelVisible: true });
+    expect(breakeven).toMatchObject({lineWidth:2,lineStyle:0,axisLabelVisible:true});
     expect(priceLines).toHaveLength(surface.levels.length + 4); // range boundaries + mandatory stop + one breakeven
     expect(priceLines.filter(line => line.axisLabelVisible).map(line => line.title)).toEqual(['Lower range', 'Upper range', 'Stop', 'Breakeven']);
     expect(addCandlestickSeries).toHaveBeenCalledWith(expect.objectContaining({ priceLineVisible: false, lastValueVisible: false }));
     expect(series.applyOptions.mock.calls[0][0].priceFormat.formatter(100)).toBe('$100.00');
     expect(series.attachPrimitive.mock.calls[0][0].autoscaleInfo()).toEqual({ priceRange: { minValue: 80, maxValue: 110 } });
+    type RangePrimitive={paneViews:()=>{renderer:()=>{draw:(target:{useMediaCoordinateSpace:(draw:(scope:{context:typeof ctx;mediaSize:{width:number;height:number}})=>void)=>void})=>void}}[]};
+    const ctx={save:vi.fn(),beginPath:vi.fn(),rect:vi.fn(),clip:vi.fn(),fillStyle:'',fillRect:vi.fn(),restore:vi.fn()};
+    const band=series.attachPrimitive.mock.calls[0][0] as unknown as RangePrimitive;
+    band.paneViews()[0].renderer().draw({useMediaCoordinateSpace:draw=>draw({context:ctx,mediaSize:{width:800,height:400}})});
+    expect(ctx.fillStyle).toBe('rgba(56,189,248,0.1)');expect(ctx.fillRect).toHaveBeenCalledWith(0,110,800,-20);
     const hover = subscribeCrosshairMove.mock.calls[0][0], tap = subscribeClick.mock.calls[0][0];
     hover({ point: { x: 799, y: 96 } }); expect(setHovered).toHaveBeenLastCalledWith({ price: '95.00', detail: '1 buy 1 · open', left: 580, top: 44 });
     (refs[0].current as { clientWidth: number }).clientWidth = 390;
@@ -97,7 +108,7 @@ describe('Grid chart clock and viewport', () => {
     hover({}); expect(setHovered).toHaveBeenLastCalledWith(null);
     expect(breakeven.title).toBe('Breakeven');
     render({ chart, surface, fresh: true, now: now + 1000 });
-    expect(breakeven.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 100, title: 'Breakeven', color: '#10b981' }));
+    expect(breakeven.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 100, title: 'Breakeven', color: '#38bdf8' }));
     render({ chart, surface, fresh: false, now: now + 15_001 });
     expect(series.removePriceLine).toHaveBeenCalledWith(breakeven);
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();
@@ -114,7 +125,7 @@ describe('Grid chart clock and viewport', () => {
       fills: [{ tradeId: 'EXAMPLE', time: chart.candles[0].time, leg: 'entry', size: '1', price: '96' }] };
     render({ chart, surface: polled, fresh: true, now: now + 2000 });
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();
-    expect(level.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 96, title: '', axisLabelVisible: false, lineWidth: 2 }));
+    expect(level.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 96, title: '', axisLabelVisible: false, lineWidth: 1 }));
     tap({ point: { x: 20, y: 96 } }); expect(setHovered).toHaveBeenLastCalledWith(expect.objectContaining({ price: '96.00', detail: '1 buy 1 · filled' }));
     expect(lower.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 91 }));
     expect(series.setMarkers).toHaveBeenLastCalledWith([expect.objectContaining({ text: 'entry 1 @ $96', shape: 'arrowUp' })]);
