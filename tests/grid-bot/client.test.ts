@@ -545,7 +545,7 @@ describe('Planner client authority boundaries', () => {
     expect(panel('stop')).toContain("numberField('stop'"); expect(panel('stop')).toContain('Suggested stop:');
     const stopHint = 'A blank custom stop uses the suggested price.';
     expect(sheet.split(stopHint)).toHaveLength(2); expect(panel('stop')).toContain(stopHint);
-    for (const control of ['id="grid-seed"', 'id="grid-entryScale"', 'id="grid-profitScale"', 'startingPosition enabled={form.seed}'])
+    for (const control of ['id="grid-seed"', 'id="grid-entryScale"', 'id="grid-profitScale"', "startingPosition enabled={form.seed||displayPlan?.policyVersion==='2.0.0'}"])
       expect(panel('orders')).toContain(control);
     expect(panel('range')).toContain('id="grid-period-label"');
     expect(panel('range')).toContain('Suggest auto-range');

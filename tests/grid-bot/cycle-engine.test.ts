@@ -91,11 +91,11 @@ describe('v2 fixed future cycle capacity',()=>{
       expect(p.capacityPrice).toBe(gridSeedPriceBounds('99.99','0.01').high);}
     expect(calculateGrid({...base,maximumQuote:'150'}).ok).toBe(false);
   });
-  it.each(['long','short'] as const)('uses the raw reference seed band for %s capacity and stop projection',side=>{
+  it.each(['long','short'] as const)('uses the same tick-cell seed band for %s capacity and stop projection',side=>{
     const p=plan({side,upper:'100',lower:'90',start:'99.991',intervals:1});
     expect(p.start).toBe('99.99');expect(p.seedPriceBounds).toEqual({low:'99.49',high:'100.5'});
     expect(p.capacityPrice).toBe('100.5');
-    expect(new Decimal(p.capacityPrice!).gt(gridSeedPriceBounds(p.start,base.tick).high)).toBe(true);
+    expect(p.capacityPrice).toBe(gridSeedPriceBounds(p.start,base.tick).high);
     const stop=projectGridStop({plan:p,funding:base.investment,stop:side==='long'?'80':'130',tick:base.tick,
       maxLeverage:'20',makerRate:'0',takerRate:'0',observedAt:1,expiresAt:100},2);
     expect(stop.state).toBe('available');

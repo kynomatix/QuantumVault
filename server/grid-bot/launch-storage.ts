@@ -400,7 +400,7 @@ export class GridLaunchStorage {
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[id,request.botId,key,digest,typeFor[request.kind],request.data.client_order_id??null,exact,digest,levelId]);
       if(bot.policy_version==='2.0.0'&&request.data.reduce_only===true&&['limit','close'].includes(request.kind)){
         const portions=(request.kind==='limit'?request.authority.fillAllocations:request.authority.cycleAllocations) as {tradeId:string;size:string}[];
-        const totals=new Map<string,Decimal>();
+        const totals=new Map<string,DecimalBase>();
         for(const a of portions)totals.set(a.tradeId,(totals.get(a.tradeId)??new Decimal(0)).plus(a.size));
         for(const [tradeId,size] of totals)await c.query('INSERT INTO grid_profit_allocations(operation_id,account,trade_id,size) VALUES($1,$2,$3,$4)',[id,request.account,tradeId,size.toFixed()]);
       }else if(monitor&&request.kind==='limit'&&request.data.reduce_only===true){

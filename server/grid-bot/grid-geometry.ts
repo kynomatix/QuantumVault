@@ -2,7 +2,7 @@ import Decimal from 'decimal.js';
 import type { GridPriceInput, GridPriceResult, GridResult } from './engine-types';
 
 const D = Decimal.clone({ precision: 120, rounding: Decimal.ROUND_DOWN, toExpNeg: -120, toExpPos: 120 });
-const MAX = new D('1000000000000000000');
+export const MAX = new D('1000000000000000000');
 const MIN = new D('0.000000000000000001');
 export function validGridDecimal(value: unknown, allowZero = false): value is string {
   if (typeof value !== 'string' || value.length > 37 || !/^(0|[1-9]\d{0,17})(\.\d{1,18})?$/.test(value)) return false;

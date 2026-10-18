@@ -13,7 +13,7 @@ export interface GridOperationConfirmation {
   expectedSize?:string;filledSize?:string;
 }
 export class GridStorageError extends Error {
-  constructor(public code: 'not_found' | 'conflict' | 'invariant' | 'lost_lease', message = code) { super(message); }
+  constructor(public code: 'not_found' | 'conflict' | 'invariant' | 'lost_lease', message: string = code) { super(message); }
 }
 export interface DraftRecord extends Omit<GridPolicy, 'levels'> {
   walletAddress: string; clientRequestId: string; serverIntentDigest: string; draftRevision: string;

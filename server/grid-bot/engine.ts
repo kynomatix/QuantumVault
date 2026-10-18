@@ -1,4 +1,4 @@
-import { calculateGridPrices, validGridDecimal } from './grid-geometry';
+import { MAX, calculateGridPrices, validGridDecimal } from './grid-geometry';
 export { calculateGridPrices, validGridDecimal } from './grid-geometry';
 import Decimal from 'decimal.js';
 import { calculateCycleGrid } from './cycle-engine';
