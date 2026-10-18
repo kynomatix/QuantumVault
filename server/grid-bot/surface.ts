@@ -33,7 +33,8 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
   if(!gates.workerRunning)reasons.push('Grid worker is off or unavailable.');
   return {bot:gridBotSummary(snapshot.bot),levels:snapshot.levels,operations:snapshot.operations.map((x:any)=>({id:x.id,type:x.type,state:x.state})),
     lifecycle:{action:life?.action??null,state:life?.state??null,blocker:life?.blocker??null},
-    pnl:{realised:decimal(pnl?.realised),unrealised:fresh?decimal(pnl?.unrealised):null,total:fresh?decimal(pnl?.total):null,fees:decimal(pnl?.fees),averageEntry:fresh?decimal(pnl?.averageEntry):null,breakeven:fresh?decimal(pnl?.breakeven):null},
+    pnl:{realised:decimal(pnl?.realised),unrealised:fresh?decimal(pnl?.unrealised):null,total:fresh?decimal(pnl?.total):null,fees:decimal(pnl?.fees),averageEntry:fresh?decimal(pnl?.averageEntry):null,breakeven:fresh?decimal(pnl?.breakeven):null,
+      botBreakeven:fresh?decimal(pnl?.botBreakeven):null,profitCoversPosition:fresh&&pnl?.profitCoversPosition===true},
     fills:(snapshot.fills??[]).map((f:any)=>({tradeId:f.trade_id,time:Number(f.venue_time),leg:f.leg,size:f.size,price:f.price})).reverse(),
     cycles:Number.isSafeInteger(pnl?.cycles)&&pnl.cycles>=0?pnl.cycles:null,
     qualification:{firstConfirmedAt:timestamp(snapshot.bot.canaryStartedAt),cleanSince:timestamp(snapshot.bot.canaryCleanSince),

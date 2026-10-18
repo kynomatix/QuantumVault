@@ -43,13 +43,17 @@ export function gridRangeState(surface: GridBotSurface, now: number) {
   if (!gridFactsFresh(surface, now) || !mark || !lower || !upper || !lower.lt(upper)) return 'Price unavailable';
   return mark.gt(upper) ? 'Above range' : mark.lt(lower) ? 'Below range' : 'Within range';
 }
-/** Position-only display; existing ledger accounting remains the authority. */
+/** Bot-lifetime display; legacy surfaces retain their existing position-only line. */
 export function gridBreakevenView(surface: GridBotSurface, now: number) {
-  const price = positive(surface.pnl.breakeven), size = positive(surface.position?.size ?? null);
+  const price = positive(surface.pnl.botBreakeven === undefined ? surface.pnl.breakeven : surface.pnl.botBreakeven), size = positive(surface.position?.size ?? null);
   const direction = surface.position?.direction;
   if (!gridFactsFresh(surface, now) || !price || !size || !['long', 'short'].includes(direction ?? '')) return null;
   const mark = positive(surface.mark);
   const percent = mark ? mark.minus(price).div(price).mul(direction === 'long' ? 100 : -100) : null;
   return { price: price.toFixed(), percent: percent?.toDecimalPlaces(2).toFixed(2) ?? null,
     tone: percent === null || percent.isZero() ? 'neutral' : percent.gt(0) ? 'profit' : 'loss' };
+}
+export function gridProfitCoversPosition(surface: GridBotSurface, now: number) {
+  return gridFactsFresh(surface, now) && surface.position?.direction === 'long'
+    && positive(surface.position.size) !== null && surface.pnl.profitCoversPosition === true;
 }

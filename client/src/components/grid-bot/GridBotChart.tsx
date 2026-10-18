@@ -5,7 +5,7 @@ import {Button} from '@/components/ui/button';
 import {createSharedTradePriceChart} from '../SharedTradePriceChart';
 import type {PlannerChart} from '@/lib/grid-planner-view';
 import type {GridBotSurface} from '../../../../shared/grid-surface';
-import {gridFactsFresh,gridBreakevenView} from '@/lib/grid-live-view';
+import {gridFactsFresh,gridBreakevenView,gridProfitCoversPosition} from '@/lib/grid-live-view';
 import {gridJson} from './GridDraftCard';
 import {GridChartSourceInfo} from '../grid-planner/GridChartSourceInfo';
 function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPriceLine>,key:string,price:string|null,title:string,color:string,kind:'level'|'boundary'|'live'='live'){
@@ -17,12 +17,12 @@ function updatePriceLine(series:ISeriesApi<'Candlestick'>,lines:Map<string,IPric
 function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'available'}>;surface:GridBotSurface;fresh:boolean;now:number}){
   const container=useRef<HTMLDivElement>(null);
   const [hovered,setHovered]=useState<{price:string;detail:string;left:number;top:number}|null>(null);
-  const liveLines=useRef<{canvas:IChartApi;series:ISeriesApi<'Candlestick'>;levels:Map<string,IPriceLine>;live:Map<string,IPriceLine>;fitted:boolean;times:UTCTimestamp[];hoverLevels:GridBotSurface['levels'];precision:number;prices:number[]}|null>(null);
+  const liveLines=useRef<{canvas:IChartApi;series:ISeriesApi<'Candlestick'>;levels:Map<string,IPriceLine>;live:Map<string,IPriceLine>;fitted:boolean;times:UTCTimestamp[];hoverLevels:GridBotSurface['levels'];precision:number;prices:number[];breakevenPrice:number|null}|null>(null);
   useEffect(()=>{if(!container.current)return;const canvas=createSharedTradePriceChart(container.current);
     const series=canvas.addCandlestickSeries({upColor:'#22c55e',downColor:'#ef4444',borderVisible:false,wickUpColor:'#22c55e',wickDownColor:'#ef4444'});
-    const state={canvas,series,levels:new Map<string,IPriceLine>(),live:new Map<string,IPriceLine>(),fitted:false,times:[] as UTCTimestamp[],hoverLevels:[] as GridBotSurface['levels'],precision:2,prices:[] as number[]};
+    const state={canvas,series,levels:new Map<string,IPriceLine>(),live:new Map<string,IPriceLine>(),fitted:false,times:[] as UTCTimestamp[],hoverLevels:[] as GridBotSurface['levels'],precision:2,prices:[] as number[],breakevenPrice:null as number|null};
     liveLines.current=state;
-    series.attachPrimitive({autoscaleInfo:()=>state.prices.length?{priceRange:{minValue:Math.min(...state.prices),maxValue:Math.max(...state.prices)}}:null});
+    series.attachPrimitive({autoscaleInfo:()=>{const prices=[...state.prices,...(state.breakevenPrice===null?[]:[state.breakevenPrice])];return prices.length?{priceRange:{minValue:Math.min(...prices),maxValue:Math.max(...prices)}}:null;}});
     const showLevel:Parameters<IChartApi['subscribeCrosshairMove']>[0]=event=>{
       const point=event.point;if(!point||!container.current){setHovered(null);return;}
       const nearby=state.hoverLevels.map(level=>{const y=series.priceToCoordinate(Number(level.price));return {level,distance:y===null?Infinity:Math.abs(y-point.y)};}).sort((a,b)=>a.distance-b.distance)[0];
@@ -61,6 +61,7 @@ function Canvas({chart,surface,fresh,now}:{chart:Extract<PlannerChart,{state:'av
     const update=(key:string,price:string|null,title:string,color:string)=>updatePriceLine(live.series,live.live,key,price,title,color);
     update('mark',fresh?surface.mark:null,'Pacifica mark','#38bdf8');
     const b=fresh?gridBreakevenView(surface,now):null;
+    live.breakevenPrice=b?Number(b.price):null;
     update('breakeven',b?.price??null,`Breakeven${b?.percent==null?'':` · ${b.percent}%`}`,b?.tone==='profit'?'#10b981':b?.tone==='loss'?'#ef4444':'#94a3b8');
   },[chart,surface,fresh,now]);
   return <div className="relative h-full w-full"><div ref={container} className="h-full w-full" aria-label="Perpetual candle chart with persisted Grid levels, range and stop"/>
@@ -80,6 +81,7 @@ export function GridBotChart({surface,onClose}:{surface:GridBotSurface;onClose:(
   },[chart]);
   return <Dialog open onOpenChange={open=>{if(!open)onClose();}}><DialogContent className="flex max-h-[95dvh] w-[1200px] max-w-[95vw] flex-col overflow-y-auto"><DialogHeader><DialogTitle>{surface.bot.market} Grid trade chart</DialogTitle><DialogDescription>PnL excludes funding. Persisted levels and stop overlay direct perpetual candles; these are chart prices, separate from the Pacifica execution mark.</DialogDescription></DialogHeader>
     <div className="flex flex-wrap gap-2">{['15m','1h','4h'].map(t=><Button key={t} size="sm" variant={t===timeframe?'default':'outline'} aria-pressed={t===timeframe} onClick={()=>setTimeframe(t)}>{t}</Button>)}<Button size="sm" variant="outline" onClick={()=>setRefresh(v=>v+1)}>Refresh chart</Button></div>
+    {gridProfitCoversPosition(surface,now)&&<p role="status" className="text-sm text-emerald-500">Profit covers your position</p>}
     {chart?.state==='available'?<><GridChartSourceInfo venue={chart.candles[0]?.provenance.venue.toUpperCase()??'Unknown'} timeframe={chart.timeframe}><p>{chart.candles[0]?.provenance.venue.toUpperCase()} direct perpetual candles · {chart.timeframe} · {chart.actualBars}/{chart.requestedBars} bars{chart.partial?' · partial coverage':''}</p><p>Retrieved {new Date(chart.retrievedAt).toLocaleString()}{expired?' · STALE':''}. Candle times are opening times; forming candles are unfinished. These are chart prices, separate from the Pacifica execution mark.</p></GridChartSourceInfo>{expired&&<p role="status" className="text-xs text-amber-500">Chart cache expired; refresh for a new observation.</p>}<div className="h-[60dvh] min-h-[280px]"><Canvas chart={chart} surface={surface} fresh={gridFactsFresh(surface,now)} now={now}/></div><p className="text-xs">Levels show the persisted ledger state, not a guarantee of resting venue orders. Hover or tap a line for its price and ledger state. Up to 100 recent confirmed fills are marked within candle coverage. Forming candles are unfinished.</p></>:<p role="status">{chart?.state==='unavailable'?chart.reason:'Loading chart…'}</p>}
   </DialogContent></Dialog>;
 }

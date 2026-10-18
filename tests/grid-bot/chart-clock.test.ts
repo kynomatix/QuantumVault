@@ -97,6 +97,13 @@ describe('Grid chart clock and viewport', () => {
     expect(series.removePriceLine).toHaveBeenCalledWith(breakeven); expect(series.removePriceLine).toHaveBeenCalledWith(mark);
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();
     expect(series.setData).toHaveBeenCalledTimes(1);
+    const moving={...surface,pnl:{...surface.pnl,botBreakeven:'60'}};
+    render({chart,surface:moving,fresh:true,now:now+1000});
+    expect(priceLines.find(line=>line.price===60&&line.title.startsWith('Breakeven'))).toBeDefined();
+    expect(series.attachPrimitive.mock.calls[0][0].autoscaleInfo()).toEqual({priceRange:{minValue:60,maxValue:110}});
+    const movingLine=priceLines.find(line=>line.price===60&&line.title.startsWith('Breakeven'))!;
+    render({chart,surface:{...moving,pnl:{...moving.pnl,botBreakeven:'-10',profitCoversPosition:true}},fresh:true,now:now+1000});
+    expect(series.removePriceLine).toHaveBeenCalledWith(movingLine);
     const polled: GridBotSurface = { ...surface, bot: { ...surface.bot, lowerPrice: '91' }, mark: '106',
       levels: [{ ...surface.levels[0], price: '96', status: 'filled' }],
       fills: [{ tradeId: 'EXAMPLE', time: chart.candles[0].time, leg: 'entry', size: '1', price: '96' }] };
@@ -107,7 +114,7 @@ describe('Grid chart clock and viewport', () => {
     expect(lower.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 91 }));
     expect(series.setMarkers).toHaveBeenLastCalledWith([expect.objectContaining({ text: 'entry 1 @ 96', shape: 'arrowUp' })]);
     expect(setVisibleLogicalRange).toHaveBeenLastCalledWith(viewport);
-    expect(series.setData).toHaveBeenCalledTimes(2);
+    expect(series.setData).toHaveBeenCalledTimes(4);
     render({ chart: { ...chart, candles: [{ ...chart.candles[0], close: 106 }] }, surface: { ...polled, levels: [], fills: [] }, fresh: true, now: now + 3000 });
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1);
     expect(series.removePriceLine).toHaveBeenCalledWith(level); expect(series.setMarkers).toHaveBeenLastCalledWith([]);

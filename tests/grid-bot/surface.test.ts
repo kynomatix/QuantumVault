@@ -42,7 +42,7 @@ describe('Grid owner surface request and settlement guards',()=>{
     expect(gridAdjustReady(s)).toBe(false);
   });
   it('shows a position-only fee-inclusive breakeven with direction-aware profit and loss, then removes stale authority',()=>{
-    const now=Date.now(),s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0},now);s.observedAt=new Date(now).toISOString();s.pnl.breakeven='100';s.mark='110';s.position={size:'2',direction:'long'};
+    const now=Date.now(),s=gridSurface(snapshot(),null,null,{pending:0,uncertain:0},now);s.observedAt=new Date(now).toISOString();s.pnl.botBreakeven='100';s.mark='110';s.position={size:'2',direction:'long'};
     expect(gridBreakevenView(s,now)).toEqual({price:'100',percent:'10.00',tone:'profit'});
     s.position.direction='short';expect(gridBreakevenView(s,now)).toEqual({price:'100',percent:'-10.00',tone:'loss'});
     s.mark='90';expect(gridBreakevenView(s,now)?.tone).toBe('profit');s.mark='100';expect(gridBreakevenView(s,now)?.tone).toBe('neutral');
