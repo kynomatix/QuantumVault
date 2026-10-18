@@ -13,6 +13,7 @@ vi.mock('../../client/src/components/SharedTradePriceChart', () => ({ createShar
 vi.mock('../../client/src/components/grid-bot/GridDraftCard', () => ({ gridJson: vi.fn() }));
 vi.mock('../../client/src/components/ui/dialog', () => ({ Dialog: 'div', DialogContent: 'div', DialogHeader: 'div', DialogTitle: 'div', DialogDescription: 'div' }));
 vi.mock('../../client/src/components/ui/button', () => ({ Button: 'button' }));
+vi.mock('react-dom', () => ({ createPortal: (children: unknown) => children }));
 import { GridBotChart } from '../../client/src/components/grid-bot/GridBotChart';
 import { gridJson } from '../../client/src/components/grid-bot/GridDraftCard';
 
@@ -44,7 +45,7 @@ describe('Grid chart clock and viewport', () => {
     const chart: Props['chart'] = { state: 'available', market: 'BTC-PERP', timeframe: '1h', requestedBars: 100, actualBars: 1,
       partial: true, retrievedAt: now, cacheInsertedAt: now, validForMs: 60_000, candles: [{ time: now - 3_600_000, open: 100, high: 110, low: 90, close: 105, volume: 1,
         provenance: { source: 'okx', venue: 'okx', basis: 'perp', proxy: 'direct', finality: 'finalized', timeSemantic: 'open_time' } }] };
-    hooks.useState.mockImplementation(initial => [initial, vi.fn()]).mockReturnValueOnce([chart, vi.fn()]);
+    hooks.useState.mockImplementation(initial => [typeof initial === 'function' ? {} : initial, vi.fn()]).mockReturnValueOnce([chart, vi.fn()]);
     hooks.useEffect.mockImplementation(() => {});
     const element = findCanvas(GridBotChart({ surface, onClose: vi.fn() }))!;
     expect(element).not.toBeNull();
@@ -60,7 +61,8 @@ describe('Grid chart clock and viewport', () => {
     const subscribeCrosshairMove = vi.fn((_callback: (event: PointEvent) => void) => {}), subscribeClick = vi.fn((_callback: (event: PointEvent) => void) => {});
     const unsubscribeCrosshairMove = vi.fn(), unsubscribeClick = vi.fn(), setHovered = vi.fn();
     hooks.useState.mockImplementation(initial => [initial, setHovered]);
-    chartFactory.mockReturnValue({ addCandlestickSeries: () => series, timeScale: () => ({ fitContent, getVisibleLogicalRange, setVisibleLogicalRange }), applyOptions: vi.fn(), remove,
+    const addCandlestickSeries = vi.fn(() => series);
+    chartFactory.mockReturnValue({ addCandlestickSeries, timeScale: () => ({ fitContent, getVisibleLogicalRange, setVisibleLogicalRange }), applyOptions: vi.fn(), remove,
       subscribeCrosshairMove, subscribeClick, unsubscribeCrosshairMove, unsubscribeClick });
     const disconnect = vi.fn();
     vi.stubGlobal('ResizeObserver', class { observe() {} disconnect = disconnect; });
@@ -80,9 +82,12 @@ describe('Grid chart clock and viewport', () => {
     const level = priceLines.find(line => line.price === 95 && !line.axisLabelVisible)!;
     const lower = priceLines.find(line => line.title === 'Lower range')!;
     const breakeven = priceLines.find(line => line.title.startsWith('Breakeven'))!;
-    const mark = priceLines.find(line => line.title === 'Pacifica mark')!;
     expect(level).toMatchObject({ title: '', lineWidth: 2, lineStyle: 2, axisLabelVisible: false });
-    for (const title of ['Lower range', 'Upper range', 'Stop']) expect(priceLines.find(line => line.title === title)).toMatchObject({ lineWidth: 3, lineStyle: 0, axisLabelVisible: true });
+    for (const title of ['Lower range', 'Upper range', 'Stop', 'Breakeven']) expect(priceLines.find(line => line.title === title)).toMatchObject({ lineWidth: 3, lineStyle: 0, axisLabelVisible: true });
+    expect(priceLines).toHaveLength(surface.levels.length + 4); // range boundaries + mandatory stop + one breakeven
+    expect(priceLines.filter(line => line.axisLabelVisible).map(line => line.title)).toEqual(['Lower range', 'Upper range', 'Stop', 'Breakeven']);
+    expect(addCandlestickSeries).toHaveBeenCalledWith(expect.objectContaining({ priceLineVisible: false, lastValueVisible: false }));
+    expect(series.applyOptions.mock.calls[0][0].priceFormat.formatter(100)).toBe('$100.00');
     expect(series.attachPrimitive.mock.calls[0][0].autoscaleInfo()).toEqual({ priceRange: { minValue: 80, maxValue: 110 } });
     const hover = subscribeCrosshairMove.mock.calls[0][0], tap = subscribeClick.mock.calls[0][0];
     hover({ point: { x: 799, y: 96 } }); expect(setHovered).toHaveBeenLastCalledWith({ price: '95.00', detail: '1 buy 1 · open', left: 580, top: 44 });
@@ -90,11 +95,11 @@ describe('Grid chart clock and viewport', () => {
     tap({ point: { x: 389, y: 95 } }); expect(setHovered).toHaveBeenLastCalledWith({ price: '95.00', detail: '1 buy 1 · open', left: 170, top: 43 });
     hover({ point: { x: 20, y: 50 } }); expect(setHovered).toHaveBeenLastCalledWith(null);
     hover({}); expect(setHovered).toHaveBeenLastCalledWith(null);
-    expect(breakeven.title).toContain('5.00%');
+    expect(breakeven.title).toBe('Breakeven');
     render({ chart, surface, fresh: true, now: now + 1000 });
-    expect(breakeven.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 100, title: 'Breakeven · 5.00%', color: '#10b981' }));
+    expect(breakeven.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 100, title: 'Breakeven', color: '#10b981' }));
     render({ chart, surface, fresh: false, now: now + 15_001 });
-    expect(series.removePriceLine).toHaveBeenCalledWith(breakeven); expect(series.removePriceLine).toHaveBeenCalledWith(mark);
+    expect(series.removePriceLine).toHaveBeenCalledWith(breakeven);
     expect(chartFactory).toHaveBeenCalledTimes(1); expect(fitContent).toHaveBeenCalledTimes(1); expect(remove).not.toHaveBeenCalled();
     expect(series.setData).toHaveBeenCalledTimes(1);
     const moving={...surface,pnl:{...surface.pnl,botBreakeven:'60'}};
@@ -112,7 +117,7 @@ describe('Grid chart clock and viewport', () => {
     expect(level.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 96, title: '', axisLabelVisible: false, lineWidth: 2 }));
     tap({ point: { x: 20, y: 96 } }); expect(setHovered).toHaveBeenLastCalledWith(expect.objectContaining({ price: '96.00', detail: '1 buy 1 · filled' }));
     expect(lower.applyOptions).toHaveBeenCalledWith(expect.objectContaining({ price: 91 }));
-    expect(series.setMarkers).toHaveBeenLastCalledWith([expect.objectContaining({ text: 'entry 1 @ 96', shape: 'arrowUp' })]);
+    expect(series.setMarkers).toHaveBeenLastCalledWith([expect.objectContaining({ text: 'entry 1 @ $96', shape: 'arrowUp' })]);
     expect(setVisibleLogicalRange).toHaveBeenLastCalledWith(viewport);
     expect(series.setData).toHaveBeenCalledTimes(4);
     render({ chart: { ...chart, candles: [{ ...chart.candles[0], close: 106 }] }, surface: { ...polled, levels: [], fills: [] }, fresh: true, now: now + 3000 });
@@ -129,6 +134,10 @@ describe('Grid chart clock and viewport', () => {
     expect(chartFactory).toHaveBeenCalledTimes(2); expect(fitContent).toHaveBeenCalledTimes(2); expect(remove).toHaveBeenCalledTimes(1);
     render({ chart: { ...chart, timeframe: '4h' }, surface: { ...polled, bot: { ...polled.bot, id: 'EXAMPLE-OTHER' } }, fresh: true, now: now + 5000 });
     expect(chartFactory).toHaveBeenCalledTimes(3); expect(fitContent).toHaveBeenCalledTimes(3); expect(remove).toHaveBeenCalledTimes(2);
+    const lastLine=priceLines.filter(line=>line.title==='Breakeven').at(-1)!;
+    render({chart:{...chart,timeframe:'4h'},surface:{...polled,bot:{...polled.bot,id:'EXAMPLE-OTHER',status:'stopped'}},fresh:true,now:now+6000});
+    expect(series.removePriceLine).toHaveBeenCalledWith(lastLine);
+    expect(series.attachPrimitive.mock.calls.at(-1)![0].autoscaleInfo()).toEqual({priceRange:{minValue:80,maxValue:110}});
     effects.forEach(effect => effect.cleanup?.()); expect(remove).toHaveBeenCalledTimes(3); expect(disconnect).toHaveBeenCalledTimes(3);
     expect(unsubscribeCrosshairMove).toHaveBeenCalledWith(hover); expect(unsubscribeClick).toHaveBeenCalledWith(tap);
   });
@@ -139,7 +148,7 @@ describe('Grid chart clock and viewport', () => {
       actualBars: 0, partial: true, retrievedAt: now, cacheInsertedAt: now, validForMs: 3000, candles: [] };
     const surface = { bot: { id: 'EXAMPLE', market: 'BTC-PERP' }, observedAt: null } as GridBotSurface;
     const effects: { setup: () => (() => void) | undefined; deps: unknown[] }[] = [];
-    hooks.useState.mockImplementation(initial => [initial, vi.fn()])
+    hooks.useState.mockImplementation(initial => [typeof initial === 'function' ? {} : initial, vi.fn()])
       .mockReturnValueOnce([chart, setChart]).mockReturnValueOnce(['1h', vi.fn()])
       .mockReturnValueOnce([1, vi.fn()]).mockReturnValueOnce([false, setExpired]);
     hooks.useEffect.mockImplementation((setup, deps) => effects.push({ setup, deps }));

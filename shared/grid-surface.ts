@@ -19,6 +19,10 @@ export interface GridBotSurface {
   cycles:number|null;
   qualification:{firstConfirmedAt:string|null;cleanSince:string|null;cleanTicks:number|null;promotedAt:string|null};
   position:{size:string;direction:string}|null;mark:string|null;observedAt:string|null;
+  /** Display estimate: larger venue fee plus the approved builder ceiling. */
+  stopFee?:{rate:string;observedAt:string}|null;
+  /** Terminal ledger totals and the last open-position threshold before the final close. */
+  endedRun?:{realised:string;finalBreakeven:string|null}|null;
   residual:string|null;sweep:string;
   returnedFunds:{amount:string|null;confirmedAt:string|null};
   capacity:{ordinaryWindow:number;reservedSlots:number;liveOrders:number|null;venueMaximum:number|null};

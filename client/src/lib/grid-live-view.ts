@@ -1,5 +1,7 @@
 import {gridActionAllowed,type GridBotSurface,type GridOwnerAction} from '../../../shared/grid-surface';
 import Decimal from 'decimal.js';
+import {stopLocksProfit} from '../../../shared/grid-breakeven';
+const D = Decimal.clone({precision:220});
 /** Invalidate reads on selection, identity, action submission and newer reads. */
 export class GridReadOrder {
   private version=0;
@@ -45,6 +47,7 @@ export function gridRangeState(surface: GridBotSurface, now: number) {
 }
 /** Bot-lifetime display; legacy surfaces retain their existing position-only line. */
 export function gridBreakevenView(surface: GridBotSurface, now: number) {
+  if (surface.bot.status === 'stopped') return null;
   const price = positive(surface.pnl.botBreakeven === undefined ? surface.pnl.breakeven : surface.pnl.botBreakeven), size = positive(surface.position?.size ?? null);
   const direction = surface.position?.direction;
   if (!gridFactsFresh(surface, now) || !price || !size || !['long', 'short'].includes(direction ?? '')) return null;
@@ -54,6 +57,35 @@ export function gridBreakevenView(surface: GridBotSurface, now: number) {
     tone: percent === null || percent.isZero() ? 'neutral' : percent.gt(0) ? 'profit' : 'loss' };
 }
 export function gridProfitCoversPosition(surface: GridBotSurface, now: number) {
-  return gridFactsFresh(surface, now) && surface.position?.direction === 'long'
+  return surface.bot.status !== 'stopped' && gridFactsFresh(surface, now) && surface.position?.direction === 'long'
     && positive(surface.position.size) !== null && surface.pnl.profitCoversPosition === true;
+}
+/** Distance is a move from today's mark, rather than a return on the breakeven price. */
+export function gridBreakevenSentence(surface: GridBotSurface, now: number): string | null {
+  if (gridProfitCoversPosition(surface, now)) return 'Profit covers your position';
+  const line = gridBreakevenView(surface, now), mark = positive(surface.mark);
+  if (!line || !mark) return null;
+  const side = surface.position!.direction, base = surface.bot.market.replace(/-PERP$/, '');
+  const distance = new D(mark.toFixed()).minus(line.price).div(mark.toFixed()).mul(side === 'long' ? 100 : -100);
+  if (distance.isZero()) return `${base} is at this bot's breakeven`;
+  const rounded = distance.abs().toDecimalPlaces(1, distance.gt(0) ? Decimal.ROUND_DOWN : Decimal.ROUND_UP);
+  const percent = rounded.isZero() ? 'less than 0.1' : rounded.toFixed(1);
+  return distance.gt(0) ? `${base} can ${side === 'long' ? 'fall' : 'rise'} ${percent}% before this bot is at a loss`
+    : `${base} needs to ${side === 'long' ? 'rise' : 'fall'} ${percent}% for this bot to break even`;
+}
+/** Assumes execution at the stop; already-paid fees are in Convention B. No rebates credited. */
+export function gridStopProtected(surface: GridBotSurface, now: number): boolean {
+  const fee = surface.stopFee, at = Date.parse(fee?.observedAt ?? ''), stop = positive(surface.bot.stopLossPrice);
+  if (surface.bot.status === 'stopped' || !gridFactsFresh(surface, now) || !stop || !positive(surface.position?.size ?? null)
+    || !fee || !Number.isFinite(at) || at > now || now - at > 5000
+    || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(fee.rate) || fee.rate.length > 100 || fee.rate.trim() !== fee.rate) return false;
+  const rate = new D(fee.rate), side = surface.position!.direction;
+  if (rate.gte(1) || side !== surface.bot.direction) return false;
+  // Unlike the line view, a covered long can have a zero or negative threshold.
+  const breakeven = surface.pnl.botBreakeven;
+  const netStop = new D(stop.toFixed()).mul(side === 'long' ? new D(1).minus(rate) : new D(1).plus(rate));
+  // The ledger DTO rounds to 18 places. Require more than one last-place unit
+  // of headroom so its rounding can never turn a zero-profit stop into a claim.
+  const roundingGuard = new D('0.000000000000000001');
+  return stopLocksProfit(side, (side === 'long' ? netStop.minus(roundingGuard) : netStop.plus(roundingGuard)).toFixed(), breakeven ?? null);
 }
