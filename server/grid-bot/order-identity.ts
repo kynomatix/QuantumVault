@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { canonicalRequest, requestDigest as canonicalDigest } from './request-digest';
 import Decimal from 'decimal.js';
 import type { MarketConstraintObservation } from '../protocol/market-constraints.js';
 import { checkEntryConstraints } from '../protocol/market-constraints.js';
-import { type GridFeeQuote, validateGridFeeQuote } from './fee-authority.js';
+import { type GridFeeQuote, validateGridFeeQuote, restoreGridFeeQuoteOrder } from './fee-authority.js';
 import { gridRuntimePolicy } from './runtime-policy.js';
 const D = Decimal.clone({ precision: 100 });
 // Fixed UUID namespace (RFC-4122), retained from the reviewed WO-07 golden vector.
@@ -75,11 +76,13 @@ export interface PreparedGridOrder {
   unsigned: { account: string; subaccount_id?: string; symbol: string; price: string; amount: string;
     side: 'bid' | 'ask'; tif: 'ALO'; reduce_only: boolean; client_order_id: string; builder_code?: string };
 }
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const digest = (value: unknown, runtimeVersion?: string) => runtimeVersion === '2.0.0'
+  ? canonicalDigest(value) : createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const feeIdentity = (intent: GridOrderIntent, quote: GridFeeQuote) => ({ account: intent.account, subaccountId: intent.subaccountId,
   market: intent.market, liquidityRole: 'maker' as const, builderCode: quote.builderCode, intent: intent.reduceOnly ? 'profit' as const : 'entry' as const });
 export function prepareGridOrder(intent: GridOrderIntent, quote: GridFeeQuote, constraint: MarketConstraintObservation, now: number): PreparedGridOrder {
   const runtime = gridRuntimePolicy(intent.runtimePolicyVersion ?? '1.0.0');
+  if(intent.runtimePolicyVersion === '2.0.0')quote = restoreGridFeeQuoteOrder(quote);
   if (!runtime) throw new Error('Unknown Grid runtime policy');
   if (!intent.account || !intent.signerPublicKey || !intent.signerGeneration || !intent.deployment || intent.endpoint !== 'https://api.pacifica.fi/api/v1/orders/create' || !intent.protocolSymbol || intent.market !== `${intent.protocolSymbol}-PERP`
     || !isGridClientOrderId(intent.clientOrderId) || !['long', 'short'].includes(intent.side) || typeof intent.reduceOnly !== 'boolean'
@@ -97,8 +100,8 @@ export function prepareGridOrder(intent: GridOrderIntent, quote: GridFeeQuote, c
     price: intent.price, amount: intent.amount, side: intent.side === 'long' ? 'bid' : 'ask', tif: 'ALO', reduce_only: intent.reduceOnly,
     client_order_id: intent.clientOrderId, ...(quote.builder === null ? {} : { builder_code: quote.builder.code }) };
   const value = { version: 1 as const, intent: { ...intent }, feeQuote: quote, constraint: structuredClone(constraint),
-    policyDigest: runtime.digest, constraintDigest: digest(constraint), unsigned };
-  return { ...value, requestDigest: digest(value) };
+    policyDigest: runtime.digest, constraintDigest: digest(constraint, intent.runtimePolicyVersion), unsigned };
+  return { ...value, requestDigest: digest(value, intent.runtimePolicyVersion) };
 }
 export function validatePreparedGridOrder(prepared: PreparedGridOrder, current: { account: string; subaccountId: string | null;
   signerPublicKey: string; signerGeneration: string; deployment: string; endpoint: string; constraint: MarketConstraintObservation; runtimePolicyVersion?: string }, now: number): boolean {
@@ -106,11 +109,14 @@ export function validatePreparedGridOrder(prepared: PreparedGridOrder, current: 
     const { requestDigest, ...value } = prepared;
     const runtime = gridRuntimePolicy(current.runtimePolicyVersion ?? '1.0.0');
     if (!runtime || (prepared.intent.runtimePolicyVersion ?? '1.0.0') !== (current.runtimePolicyVersion ?? '1.0.0')
-      || requestDigest !== digest(value) || prepared.policyDigest !== runtime.digest || prepared.constraintDigest !== digest(current.constraint)
+      || requestDigest !== digest(value, current.runtimePolicyVersion) || prepared.policyDigest !== runtime.digest || prepared.constraintDigest !== digest(current.constraint, current.runtimePolicyVersion)
       || Object.entries(current).some(([k, v]) => k !== 'constraint' && k !== 'runtimePolicyVersion' && prepared.intent[k as keyof GridOrderIntent] !== v)
       || now < prepared.intent.signingTimestamp || now >= prepared.intent.signingTimestamp + prepared.intent.signingExpiryMs) return false;
     const rebuilt = prepareGridOrder({ ...prepared.intent, signingTimestamp: now }, prepared.feeQuote, current.constraint, now);
-    return JSON.stringify(rebuilt.unsigned) === JSON.stringify(prepared.unsigned);
+    // JSONB and exact-request persistence may reorder every object key. V1 bytes stay unchanged.
+    return current.runtimePolicyVersion === '2.0.0'
+      ? canonicalRequest(rebuilt.unsigned) === canonicalRequest(prepared.unsigned)
+      : JSON.stringify(rebuilt.unsigned) === JSON.stringify(prepared.unsigned);
   } catch { return false; }
 }
 /** Unit 4 can compose this fee/identity check with funding, stop, quota and runtime gates before signing. */

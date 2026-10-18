@@ -68,10 +68,12 @@ export class GridPacificaSender {
       if(result?.success===true&&result.error===null&&result.data?.success===true&&result.data.error===null)
         return {rateLimited:false,terminalTransferDigest:requestDigest(r)};
     }else if(response.status===422&&(r.kind==='limit'||gridAddsExposure(r))){
-      const result=await response.json() as {success?:unknown;error_code?:unknown;code?:unknown;error?:unknown};
-      if(result.success===false&&(result.error_code===10||result.code===10||result.error==='OPEN_ORDER_LIMIT_REACHED'))return {rateLimited:false,capacityRejectedDigest:requestDigest(r)};
+      const result=await response.json() as {success?:unknown;error_code?:unknown;code?:unknown;error?:unknown;order_id?:unknown;orderId?:unknown;data?:{order_id?:unknown;orderId?:unknown}};
+      // An acceptance identity contradicts no-land, even in an error envelope.
+      if(result?.order_id!=null||result?.orderId!=null||result?.data?.order_id!=null||result?.data?.orderId!=null)return {rateLimited:false};
+      if(result?.success===false&&(result.error_code===10||result.code===10||result.error==='OPEN_ORDER_LIMIT_REACHED'))return {rateLimited:false,capacityRejectedDigest:requestDigest(r)};
       // Pacifica error-code 5 / INSUFFICIENT_BALANCE is a terminal margin denial.
-      if(gridAddsExposure(r)&&result.success===false&&(result.error_code===5||result.code===5||result.error==='INSUFFICIENT_BALANCE'||result.error==='Insufficient margin'))return {rateLimited:false,marginRejectedDigest:requestDigest(r)};
+      if(gridAddsExposure(r)&&result?.success===false&&(result.error_code===5||result.code===5||result.error==='INSUFFICIENT_BALANCE'||result.error==='Insufficient margin'))return {rateLimited:false,marginRejectedDigest:requestDigest(r)};
     }else await response.body?.cancel().catch(()=>undefined);
     return {rateLimited:response.status===429};
     });

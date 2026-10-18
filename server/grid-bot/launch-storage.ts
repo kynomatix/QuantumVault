@@ -1,6 +1,6 @@
 import {validateLockedCycleRequest} from './cycle-storage';
 import type {GridSettlementOutcome} from './execution-failure';
-import {createHash,randomUUID} from 'node:crypto';
+import {randomUUID} from 'node:crypto';
 import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
 import type {Pool,PoolClient} from 'pg';
@@ -15,9 +15,8 @@ import {canonicalGridPolicy,type GridPolicy} from './policy-hmac';
 import type {GridFirstPlacementContext} from './first-placement';
 import {gridAddsExposure,gridMarginAllowed,gridRequiredMargin,readGridMargin,GridMarginDenied,type GridMarginReading} from './margin';
 import {gridClaimPlacementBudget} from './slot-budget';
-export const canonicalRequest=(x:unknown):string=>JSON.stringify(x,(_,v)=>v && typeof v==='object' && !Array.isArray(v)
-  ? Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
-export const requestDigest=(x:unknown)=>createHash('sha256').update(canonicalRequest(x)).digest('hex');
+import {canonicalRequest,requestDigest} from './request-digest';
+export {canonicalRequest,requestDigest} from './request-digest';
 export interface ExactGridRequest {
   kind:'create'|'fund'|'leverage'|'seed'|'limit'|'cancel'|'close'|'sweep'; botId:string; account:string; masterAccount:string;
   path:string; operationType:string; timestamp:number; expiryMs:number; data:Record<string,unknown>;
@@ -84,14 +83,13 @@ export class GridLaunchStorage {
     return this.transaction(async c=>{
       if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       let pilotUntil:number|null=null;
-      if(gridAddsExposure(r)){
-        const bot=(await c.query('SELECT id,clock_timestamp() AS now FROM grid_bots WHERE id=$1 FOR UPDATE',[r.botId])).rows[0];
-        if(!bot||!await this.autoResumeFence(c,r))throw new GridLaunchTransientError('Grid send ownership unavailable');
-        pilotUntil=(await this.pilotGate(c,r.botId,new Date(bot.now).getTime())).validUntil;
-      }
-      if(!reduction(r)&&await gridWorkerEntryBlocked(c,r.botId))throw new GridLaunchTransientError('Grid send ownership unavailable');
       const retained=(await c.query('SELECT *,clock_timestamp() AS cycle_now FROM grid_bots WHERE id=$1 FOR UPDATE',[r.botId])).rows[0];
       if(!retained)throw new GridLaunchTransientError('Grid send ownership unavailable');
+      if(gridAddsExposure(r)){
+        if(!await this.autoResumeFence(c,r))throw new GridLaunchTransientError('Grid send ownership unavailable');
+        pilotUntil=(await this.pilotGate(c,r.botId,new Date(retained.cycle_now).getTime())).validUntil;
+      }
+      if(!reduction(r)&&await gridWorkerEntryBlocked(c,r.botId))throw new GridLaunchTransientError('Grid send ownership unavailable');
       const cycleUntil=await validateLockedCycleRequest(c,retained,r,new Date(retained.cycle_now).getTime());
       if(cycleUntil!==null)pilotUntil=pilotUntil===null?cycleUntil-1:Math.min(pilotUntil,cycleUntil-1);
       const owned=(await c.query(`SELECT b.id FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id

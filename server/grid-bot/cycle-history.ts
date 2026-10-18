@@ -1,4 +1,5 @@
-import {createHash} from 'node:crypto';
+import {requestDigest as cycleRequestDigest} from './request-digest';
+export {requestDigest as cycleRequestDigest} from './request-digest';
 import Decimal from 'decimal.js';
 import type {GridPolicy} from './policy-hmac';
 import {canonicalGridPolicy} from './policy-hmac';
@@ -9,9 +10,6 @@ import type {GridObservation, ReconciliationOperation} from './reconciliation';
 import {replayGridCycles, type CycleReplayInput, type CycleOperation, type CycleInventoryAllocation} from './cycle-replay';
 
 const D=Decimal.clone({precision:200});
-const canonical=(v:unknown):string=>JSON.stringify(v,(_,x)=>x&&typeof x==='object'&&!Array.isArray(x)
-  ?Object.fromEntries(Object.keys(x).sort().map(k=>[k,x[k]])):x);
-export const cycleRequestDigest=(v:unknown)=>createHash('sha256').update(canonical(v)).digest('hex');
 export type CycleOperationRow=ReconciliationOperation & {type?:string;submitted_at?:Date|string|null;terminal_at?:Date|string|null};
 export interface CycleLevelRow {id:string;ordinal:number;placement_attempt:number}
 export interface CycleStoredFill {account:string;trade_id:string;operation_id:string;venue_time:string|number;size:string;price:string;leg:'entry'|'exit'}

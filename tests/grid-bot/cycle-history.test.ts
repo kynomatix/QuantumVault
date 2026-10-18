@@ -1,5 +1,6 @@
 import {describe,expect,it} from 'vitest';
 import {cycleOperation,cycleRequestDigest,normalizeCycleHistory,validateCycleFillPrices,type CycleOperationRow} from '../../server/grid-bot/cycle-history';
+import {planCycleWindow} from '../../server/grid-bot/cycle-planner';
 import {gridClientOrderId} from '../../server/grid-bot/order-identity';
 import type {ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import type {GridObservation} from '../../server/grid-bot/reconciliation';
@@ -26,6 +27,19 @@ describe('complete cycle history adapter',()=>{
     const f=fixture(),r=normalizeCycleHistory(f);
     expect(r.cycles[0]).toMatchObject({held:'0.4',initialCredit:'0.6',openingCredit:'0.6',liveOpening:[]});
     expect(r.input.operations[0]).toMatchObject({cycleOrdinal:0,leg:'opening',side:'buy'});
+  });
+  it('keeps a post-only rejection retryable after complete terminal history without losing initial credit',()=>{
+    const f=fixture(),op=f.operations[0];op.state='failed';op.failure_classification='expected_rejection';
+    f.fills=[];f.observation.position!.size='0';Object.assign(f.observation.orders[0],{status:'rejected',reason:'post_only_rejected',filledAmount:'0',cancelledAmount:'0'});
+    Object.assign(f.orders[0],{status:'rejected',filled:'0'});
+    f.observation.history!.through=40;
+    expect(normalizeCycleHistory(f).cycles[0]).toMatchObject({initialCredit:'0',openingCommitments:'1',liveOpening:[op.id]});
+    f.observation.history!.through=80;
+    const replay=normalizeCycleHistory(f);
+    expect(replay.cycles[0]).toMatchObject({initialCredit:'1',openingCredit:'1',openingCommitments:'0',liveOpening:[]});
+    const retry=planCycleWindow({cycles:replay.cycles,direction:'long',levels:f.levels.map(l=>({...l,attempt:l.placement_attempt})),owned:[],positionSize:'0',
+      bookPrice:'85',lot:'0.001',minimumQuote:'1',freeSlots:100,inventoryComplete:true,entriesAllowed:true,canaryRemaining:'1000'}).chunks.flat();
+    expect(retry).toContainEqual(expect.objectContaining({kind:'place',level:expect.objectContaining({id:f.levels[0].id,size:'1',reduceOnly:false,attempt:1})}));
   });
   it('accepts the monitor neutral long label for an empty short account',()=>{
     const f=fixture();f.policy=cyclePolicy('short',false);f.operations=[];f.fills=[];f.orders=[];f.observation.orders=[];f.observation.position!.size='0';
@@ -60,17 +74,23 @@ describe('complete cycle history adapter',()=>{
     expect(()=>validateCycleFillPrices(f.policy,f.operations,[{...fill,price:'79.99'}])).not.toThrow();
     expect(()=>validateCycleFillPrices(f.policy,f.operations,[{...fill,price:'80',leg:'exit'}])).toThrow('identity');
   });
-  it('replays original close allocations after their unused residual was released',()=>{
+  it.each(['cancelled','rejected'] as const)('replays close allocations after %s releases the unused residual',status=>{
     const f=fixture(),request:ExactGridRequest={...structuredClone(f.operations[0].exact_request),timestamp:60,
       data:{symbol:'BTC',amount:'0.4',price:'90',side:'ask',reduce_only:true,client_order_id:gridClientOrderId({botId:f.policy.id,level:1,attempt:1,leg:'profit'})},
       authority:{policy:f.policy,levelId:f.levels[0].id,levelAttempt:1,cycle:{ownerOrdinal:0,leg:'closing'},fillAllocations:[{tradeId:'EXAMPLE_FILL',size:'0.4'}]}};
     const close:CycleOperationRow={...f.operations[0],id:'EXAMPLE_CLOSE',exact_request:request,exact_request_digest:cycleRequestDigest(request),venue_order_id:'EXAMPLE_CLOSE_ORDER'};
-    const data={...f,operations:[...f.operations,close],allocations:[{operation_id:close.id,account:f.account,trade_id:'EXAMPLE_FILL',size:'0.4',released_size:'0.3'}],
-      fills:[...f.fills,{account:f.account,trade_id:'EXAMPLE_EXIT_FILL',operation_id:close.id,venue_time:70,size:'0.1',price:'90',leg:'exit' as const}],
-      orders:[...f.orders,{operation_id:close.id,order_id:'EXAMPLE_CLOSE_ORDER',status:'cancelled',filled:'0.1',remaining:'0',observed_at:100}],
-      observation:{...f.observation,position:{direction:'long' as const,size:'0.3'},orders:[...f.observation.orders,{...f.observation.orders[0],orderId:'EXAMPLE_CLOSE_ORDER',
-        clientOrderId:String(request.data.client_order_id),side:'short' as const,price:'90',amount:'0.4',filledAmount:'0.1',cancelledAmount:'0.3',reduceOnly:true,createdAt:60,updatedAt:80}]}};
-    expect(normalizeCycleHistory(data).cycles[0]).toMatchObject({held:'0.3',openingCredit:'0.7',availableEntryLots:[{tradeId:'EXAMPLE_FILL',size:'0.3'}]});
+    if(status==='rejected'){close.state='failed';close.failure_classification='expected_rejection';}
+    const filled=status==='rejected'?'0':'0.1',remaining=status==='rejected'?'0.4':'0.3';
+    const data={...f,operations:[...f.operations,close],allocations:[{operation_id:close.id,account:f.account,trade_id:'EXAMPLE_FILL',size:'0.4',released_size:remaining}],
+      fills:[...f.fills,...(status==='rejected'?[]:[{account:f.account,trade_id:'EXAMPLE_EXIT_FILL',operation_id:close.id,venue_time:70,size:'0.1',price:'90',leg:'exit' as const}])],
+      orders:[...f.orders,{operation_id:close.id,order_id:'EXAMPLE_CLOSE_ORDER',status,filled,remaining:'0',observed_at:100}],
+      observation:{...f.observation,position:{direction:'long' as const,size:remaining},orders:[...f.observation.orders,{...f.observation.orders[0],orderId:'EXAMPLE_CLOSE_ORDER',
+        clientOrderId:String(request.data.client_order_id),side:'short' as const,price:'90',amount:'0.4',filledAmount:filled,cancelledAmount:status==='rejected'?'0':'0.3',status,reason:status==='rejected'?'post_only_rejected':null,reduceOnly:true,createdAt:60,updatedAt:80}]}};
+    const replay=normalizeCycleHistory(data);
+    expect(replay.cycles[0]).toMatchObject({held:remaining,openingCredit:status==='rejected'?'0.6':'0.7',liveClosing:[],availableEntryLots:[{tradeId:'EXAMPLE_FILL',size:remaining}]});
+    const retry=planCycleWindow({cycles:replay.cycles,direction:'long',levels:f.levels.map(l=>({...l,attempt:2})),owned:[],positionSize:remaining,
+      bookPrice:'85',lot:'0.001',minimumQuote:'1',freeSlots:100,inventoryComplete:true,entriesAllowed:true,canaryRemaining:'1000'}).chunks.flat();
+    expect(retry).toContainEqual(expect.objectContaining({kind:'place',level:expect.objectContaining({id:f.levels[0].id,size:remaining,reduceOnly:true,attempt:2})}));
     data.allocations[0].size='0.1';expect(()=>normalizeCycleHistory(data)).toThrow('Durable cycle allocations');
   });
   it('accepts explicit no-land proof only with matching digest and no venue evidence',()=>{

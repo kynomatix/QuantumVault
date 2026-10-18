@@ -124,6 +124,17 @@ describe('planner level USD values', () => {
     expect(renderToStaticMarkup(createElement(GridPlannerLevels, { plan: { ...plan, openingOrderLift: undefined }, baseSymbol: 'BTC' })))
       .not.toContain('raised to min');
   });
+  it('labels the zero v2 start node unused and badges minimum-lifted closing anchors',()=>{
+    const input={policyVersion:'2.0.0',side:'long' as const,seed:false,lower:'80',upper:'120',start:'100',intervals:4,
+      investment:'600',leverage:'1',entryScale:'flat' as const,profitScale:'flat' as const,tick:'0.01',lot:'0.001',minimumQuote:'10',investmentStep:'0.01',transferFloor:'0.01',effectiveMakerCostRate:'0.0001'};
+    const result=calculateGrid(input);expect(result.ok).toBe(true);if(!result.ok)return;
+    const html=renderToStaticMarkup(createElement(GridPlannerLevels,{plan:result.plan,baseSymbol:'BTC'}));
+    expect(html).toContain('Unused');expect(html).toContain('Waiting for opening fill');
+    const lifted=calculateGrid({...input,lower:'90',upper:'100',start:'95',intervals:1,investment:'22.40',seed:true,entryScale:'descending',profitScale:'descending'});
+    expect(lifted.ok).toBe(true);if(!lifted.ok)return;
+    expect(lifted.plan.openingOrderLift?.ordinals).toEqual([1]);expect(lifted.plan.lines[1].role).toBe('seed_exit');
+    expect(renderToStaticMarkup(createElement(GridPlannerLevels,{plan:lifted.plan,baseSymbol:'BTC'})).match(/raised to min/g)).toHaveLength(1);
+  });
   it.each(['long', 'short'] as const)('identifies the actual lifted %s entry without changing sizing', side => {
     const result = calculateGrid({ side, seed: false, lower: '80', upper: '120', start: '100', intervals: 4,
       entryScale: 'descending', profitScale: 'flat', investment: '30', leverage: '1', tick: '0.1', lot: '0.01',

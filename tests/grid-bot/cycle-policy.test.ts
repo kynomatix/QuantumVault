@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { canonicalRequest } from '../../server/grid-bot/request-digest';
 import { describe, expect, it } from 'vitest';
 import { canonicalGridPolicy, computeGridPolicyHmac, verifyGridPolicyHmac, type GridPolicy } from '../../server/grid-bot/policy-hmac';
 import { retainedGridCycles, GRID_CYCLE_V2_CREATION } from '../../server/grid-bot/cycle-policy';
@@ -74,6 +75,10 @@ describe('version-selected immutable Grid authority',()=>{
     expect(v2.unsigned).toEqual(legacy.unsigned);expect(v2.policyDigest).toBe(GRID_CYCLE_RUNTIME_POLICY_DIGEST);
     expect(validatePreparedGridOrder(v2,current,clock)).toBe(false);
     expect(validatePreparedGridOrder(v2,{...current,runtimePolicyVersion:'2.0.0'},clock)).toBe(true);
+    const persisted=JSON.parse(canonicalRequest(v2));
+    expect(validatePreparedGridOrder(persisted,{...current,runtimePolicyVersion:'2.0.0',constraint:JSON.parse(canonicalRequest(constraint))},clock)).toBe(true);
+    persisted.unsigned.amount='2';
+    expect(validatePreparedGridOrder(persisted,{...current,runtimePolicyVersion:'2.0.0'},clock)).toBe(false);
     expect(validatePreparedGridOrder(legacy,{...current,runtimePolicyVersion:'2.0.0'},clock)).toBe(false);
     expect(validatePreparedGridOrder(v2,{...current,runtimePolicyVersion:'EXAMPLE'},clock)).toBe(false);
     expect(()=>prepareGridOrder({...intent,runtimePolicyVersion:'EXAMPLE'},quote,constraint,clock)).toThrow();

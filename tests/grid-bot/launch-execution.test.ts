@@ -152,6 +152,14 @@ describe('Grid terminal sweep sender',()=>{
     const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin,sendOwned});
     expect(await sender.send(r,Buffer.from(sub.secretKey),undefined,'EXAMPLE_LEASE')).toEqual(code===5?{rateLimited:false,marginRejectedDigest:requestDigest(r)}:{rateLimited:false});expect(finalMargin).toHaveBeenCalledOnce();expect(fetcher).toHaveBeenCalledOnce();
   });
+  it.each([{order_id:'1'},{orderId:'1'},{data:{order_id:'1'}},{data:{orderId:'1'}}])('does not certify margin no-land when the response has an acceptance identity: %j',async identity=>{
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey)};
+    const fetcher=vi.fn(async()=>new Response(JSON.stringify({success:false,code:5,...identity}),{status:422}));
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,
+      {observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},
+      {finalMargin:async()=>{},sendOwned});
+    expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:false});
+  });
   it('unknown final margin sends no POST after obtaining book authority',async()=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey)},post=vi.fn();
     const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{throw new GridMarginDenied('EXAMPLE_UNKNOWN');},sendOwned});

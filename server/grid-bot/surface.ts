@@ -48,7 +48,7 @@ export function gridSurface(snapshot:any,monitor:any,life:any,events:{pending:nu
   const projection=snapshot.cycleProjection;
   const cycleProjection=fresh&&projection&&String(projection.generation)===String(monitor?.generation)&&projection.observedAt===o.observedAt
     &&Array.isArray(projection.orders)?{observedAt:new Date(projection.observedAt).toISOString(),orders:projection.orders.map((order:any)=>
-      order.leg==='opening'&&!['provisioning','canary','active'].includes(snapshot.bot.status)&&!['working','pending confirmation'].includes(order.state)?{...order,state:'paused'}:order)}:null;
+      snapshot.bot.status==='stopped'?{...order,state:'stopped'}:order.leg==='opening'&&!['provisioning','canary','active'].includes(snapshot.bot.status)&&!['working','pending confirmation'].includes(order.state)?{...order,state:'paused'}:order)}:null;
   return {...(snapshot.bot.policyVersion==='2.0.0'?{cycleProjection}:{}),autoResume:{enabled:a?.enabled??true,generation:String(a?.generation??'0'),cycle:String(a?.cycle??'0'),attempts:a?.attempts??0,armed:!!a?.armed_cycle,heldReason:a?.held_reason??null,heldSince:a?.updated_at?new Date(a.updated_at).toISOString():null,band:null,available:false},bot:gridBotSummary(snapshot.bot),levels:snapshot.levels,operations:snapshot.operations.map((x:any)=>({id:x.id,type:x.type,state:x.state})),
     lifecycle:{action:life?.action??null,state:life?.state??null,blocker:life?.blocker??null},
     pnl:{realised:decimal(pnl?.realised),unrealised:fresh?decimal(pnl?.unrealised):null,total:fresh?decimal(pnl?.total):null,fees:decimal(pnl?.fees),averageEntry:fresh?decimal(pnl?.averageEntry):null,breakeven:fresh?decimal(pnl?.breakeven):null,

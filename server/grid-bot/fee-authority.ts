@@ -1,5 +1,6 @@
 import Decimal from 'decimal.js';
 import { createHash } from 'node:crypto';
+import { canonicalRequest } from './request-digest';
 const D = Decimal.clone({ precision: 100, toExpNeg: -100, toExpPos: 100 });
 export function gridDecimal(raw: unknown, signed = false): string | null {
   if (typeof raw !== 'string' || raw.length > 80 || !(signed ? /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/ : /^(?:0|[1-9]\d*)(?:\.\d+)?$/).test(raw)) return null;
@@ -52,4 +53,14 @@ export function validateGridFeeQuote(quote: GridFeeQuote, identity: GridFeeIdent
     && (quote.builderCode === null ? quote.builder === null && quote.builderRate === '0' : quote.builder?.code === quote.builderCode
       && quote.builder.rate === quote.builderRate && gridDecimal(quote.builder.approvalCeiling) !== null && new D(quote.builder.rate).lte(quote.builder.approvalCeiling));
   } catch { return false; }
+}
+
+/** Restore the production quote's original byte order after JSONB storage; preserve its digest. */
+export function restoreGridFeeQuoteOrder(q: GridFeeQuote): GridFeeQuote {
+  const restored: GridFeeQuote = { account:q.account, subaccountId:q.subaccountId, market:q.market, liquidityRole:q.liquidityRole,
+    builderCode:q.builderCode, intent:q.intent, version:q.version, protocol:q.protocol, baseRate:q.baseRate, builderRate:q.builderRate,
+    effectiveRate:q.effectiveRate, builder:q.builder===null?null:{code:q.builder.code,rate:q.builder.rate,approvalCeiling:q.builder.approvalCeiling},
+    provenance:q.provenance, observedAt:q.observedAt, expiresAt:q.expiresAt, quoteDigest:q.quoteDigest };
+  if(canonicalRequest(restored)!==canonicalRequest(q))throw Error('Grid retained fee quote changed');
+  return restored;
 }
