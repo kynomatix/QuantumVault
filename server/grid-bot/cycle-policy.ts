@@ -1,4 +1,4 @@
-import { isGridCyclePolicyVersion, isGridBehaviourMode, gridOneShotOwners } from '../../shared/grid-behaviour';
+import { isGridCyclePolicyVersion, isGridBehaviourMode, gridOneShotOwners, gridCyclePair } from '../../shared/grid-behaviour';
 import Decimal from 'decimal.js';
 import type { GridCycle } from './engine-types';
 import type { GridPolicy } from './policy-hmac';
@@ -30,8 +30,7 @@ export function retainedGridCycles(p: GridPolicy): GridCycle[] | null {
       if (equal) { if (!quantity.isZero()) return null; continue; }
       const recycles = !selected.has(i), enabled = recycles || p.seedAtCreation;
       if (enabled ? !quantity.gt(0) : !quantity.isZero()) return null;
-      const openingOrdinal = opening ? i : i + (long ? -1 : 1);
-      const closingOrdinal = opening ? i + (long ? 1 : -1) : i;
+      const { openingOrdinal, closingOrdinal } = gridCyclePair(i, opening, long);
       if (!p.levels[openingOrdinal] || !p.levels[closingOrdinal]) return null;
       const seeded = closing && p.seedAtCreation;
       cycles.push({ ...(modes ? { enabled, recycles } : {}), ownerOrdinal: i, anchor: opening ? 'opening' : 'closing', openingOrdinal, closingOrdinal,

@@ -1,4 +1,4 @@
-import { isGridBehaviourMode, gridOneShotOwners } from '../../shared/grid-behaviour';
+import { isGridBehaviourMode, gridOneShotOwners, gridCyclePair } from '../../shared/grid-behaviour';
 import { gridPolicyExtension } from './behaviour-policy';
 import Decimal from 'decimal.js';
 import { calculateGridPrices, validGridDecimal } from './grid-geometry';
@@ -48,13 +48,13 @@ export function calculateCycleGrid(input: GridInput): GridResult {
   const count = entries.length + profits.length;
   const lines: GridLine[] = geometry.lines.map(l => ({ ...l, quantity: '0', notional: '0',
     role: new D(l.price).eq(start) ? 'virtual' : opening(new D(l.price)) ? 'entry' : 'seed_exit',
-    pairedExitOrdinal: opening(new D(l.price)) ? l.ordinal + (long ? 1 : -1) : null }));
+    pairedExitOrdinal: opening(new D(l.price)) ? gridCyclePair(l.ordinal, true, long).closingOrdinal : null }));
   const cycles: GridCycle[] = [], coefficients = new Map<number, Decimal>(), minimums = new Map<number, Decimal>();
   for (const [group, scale] of [[entries, input.entryScale], [profits, input.profitScale]] as const) {
     const weights = group.map((_, i) => weight(i, group.length, scale)), sum = weights.reduce((a, b) => a + b, 0);
     for (const [index, row] of group.entries()) {
       const i = row.ordinal, isOpening = opening(prices[i]);
-      const openingOrdinal = isOpening ? i : i + (long ? -1 : 1), closingOrdinal = isOpening ? i + (long ? 1 : -1) : i;
+      const { openingOrdinal, closingOrdinal } = gridCyclePair(i, isOpening, long);
       if (!prices[openingOrdinal] || !prices[closingOrdinal]) return fail('invalid_geometry', 'Cycle endpoint outside range');
       const recycles = !selected.has(i), enabled = recycles || input.seed;
       const minimum = recycles ? new D(input.minimumQuote).div(prices[openingOrdinal]).div(lot).ceil().mul(lot) : new D(0);

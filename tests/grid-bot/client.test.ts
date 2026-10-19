@@ -54,13 +54,10 @@ describe('Grid behaviour inline cards', () => {
       for (const mode of GRID_BEHAVIOUR_MODES) {
         const copy = gridBehaviourCopy(mode, side, seed);
         for (const part of [copy.label, copy.hint]) expect(html).toContain(part);
-        if (side === 'long' && seed) {
-          expect(html).not.toContain(copy.example);
-        } else expect(html).toContain(copy.example);
+        expect(html).not.toContain(copy.example);
       }
       expect(html).not.toContain('<video');
       expect(html).not.toContain('poster=');
-      expect(html).not.toContain('/grid-modes/');
       expect(html).not.toContain('aspect-video');
       expect(html).toContain('auto-rows-fr');
       expect(html).not.toContain('role="dialog"');

@@ -5,6 +5,11 @@ export const GRID_MODES_CREATION = true;
 export const GRID_BOUNDARY_RULE = 'interval-quarter-profit-edge-v1' as const;
 export const isGridBehaviourMode = (mode: unknown): mode is GridBehaviourMode =>
   GRID_BEHAVIOUR_MODES.includes(mode as GridBehaviourMode);
+/** Zero-based cycle endpoints: a long buy pairs with the next sell; shorts mirror it. */
+export function gridCyclePair(ownerOrdinal: number, opening: boolean, long: boolean) {
+  return { openingOrdinal: opening ? ownerOrdinal : ownerOrdinal + (long ? -1 : 1),
+    closingOrdinal: opening ? ownerOrdinal + (long ? 1 : -1) : ownerOrdinal };
+}
 /** Explicit capabilities: unknown versions never acquire cycle authority. */
 export const isGridCyclePolicyVersion = (version: unknown): version is '2.0.0' | '2.2.0' | '2.3.0' =>
   version === '2.0.0' || version === GRID_MODES_POLICY_VERSION || version === '2.3.0';

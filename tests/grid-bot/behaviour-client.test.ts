@@ -2,43 +2,52 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { Children, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GridBehaviourSelect } from '../../client/src/components/grid-planner/GridBehaviourSelect';
+import { GridModeAnimation, GridModeAnimationScene } from '../../client/src/components/grid-planner/GridModeAnimation';
+import { GRID_ANIMATION_DURATION } from '../../client/src/lib/grid-mode-animation';
 
-// Exercise the real callbacks, with the same hook harness used by card-client.
-// Native media methods are stubbed because these tests run on the Node runner.
-type HookStore = { states: unknown[]; refs: { current: unknown }[]; effects: (() => void | (() => void))[] };
-const hooks = vi.hoisted(() => ({ store: null as HookStore | null, stateIndex: 0, refIndex: 0 }));
+// Real callbacks, controlled hooks/frame lifecycle: the product suite runs on Node.
+type Effect = { deps?: unknown[]; run: () => void | (() => void); cleanup?: void | (() => void); pending: boolean };
+type HookStore = { states: unknown[]; refs: { current: unknown }[]; effects: Effect[]; memos: { deps: unknown[]; value: unknown }[] };
+const hooks = vi.hoisted(() => ({ store: null as HookStore | null, stateIndex: 0, refIndex: 0, effectIndex: 0, memoIndex: 0 }));
 vi.mock('react', async importOriginal => ({
   ...await importOriginal<typeof import('react')>(),
   useId: () => 'EXAMPLE-behaviour',
   useState: (initial: unknown) => {
-    const store = hooks.store!;
-    const index = hooks.stateIndex++;
-    if (!(index in store.states)) store.states[index] = initial;
+    const store = hooks.store!, index = hooks.stateIndex++;
+    if (!(index in store.states)) store.states[index] = typeof initial === 'function' ? initial() : initial;
     return [store.states[index], (next: unknown) => {
       store.states[index] = typeof next === 'function' ? next(store.states[index]) : next;
     }];
   },
   useRef: (initial: unknown) => {
-    const store = hooks.store!;
-    const index = hooks.refIndex++;
+    const store = hooks.store!, index = hooks.refIndex++;
     return store.refs[index] ?? (store.refs[index] = { current: initial });
   },
-  useEffect: (run: () => void | (() => void)) => { hooks.store!.effects.push(run); },
+  useMemo: (calculate: () => unknown, deps: unknown[]) => {
+    const store = hooks.store!, index = hooks.memoIndex++, old = store.memos[index];
+    if (!old || deps.some((dep, i) => !Object.is(dep, old.deps[i]))) store.memos[index] = { deps, value: calculate() };
+    return store.memos[index].value;
+  },
+  useEffect: (run: Effect['run'], deps?: unknown[]) => {
+    const store = hooks.store!, index = hooks.effectIndex++, old = store.effects[index];
+    if (!old || !deps || deps.some((dep, i) => !Object.is(dep, old.deps?.[i]))) {
+      if (old?.cleanup) old.cleanup();
+      store.effects[index] = { run, deps, pending: true };
+    }
+  },
 }));
-
 type Element = ReactElement<Record<string, any>>;
-const store = (): HookStore => ({ states: [], refs: [], effects: [] });
+const store = (): HookStore => ({ states: [], refs: [], effects: [], memos: [] });
 function render<T>(hookStore: HookStore, component: () => T): T {
-  hooks.store = hookStore; hooks.stateIndex = 0; hooks.refIndex = 0; hookStore.effects = [];
-  return component();
+  hooks.store = hookStore; hooks.stateIndex = 0; hooks.refIndex = 0; hooks.effectIndex = 0; hooks.memoIndex = 0;
+  const result = component();
+  for (const effect of hookStore.effects) if (effect.pending) { effect.cleanup = effect.run(); effect.pending = false; }
+  return result;
 }
 function pathTo(node: ReactNode, matches: (element: Element) => boolean): Element[] | undefined {
   if (!isValidElement<Element['props']>(node)) return;
   if (matches(node)) return [node];
-  for (const child of Children.toArray(node.props.children)) {
-    const path = pathTo(child, matches);
-    if (path) return [node, ...path];
-  }
+  for (const child of Children.toArray(node.props.children)) { const path = pathTo(child, matches); if (path) return [node, ...path]; }
 }
 function find(node: ReactNode, matches: (element: Element) => boolean): Element {
   const path = pathTo(node, matches);
@@ -48,142 +57,89 @@ function find(node: ReactNode, matches: (element: Element) => boolean): Element 
 function bubble(path: Element[], handler: string, extra = {}) {
   let stopped = false;
   const event = { ...extra, preventDefault: vi.fn(), stopPropagation: vi.fn(() => { stopped = true; }) };
-  for (const element of [...path].reverse()) {
-    element.props[handler]?.(event);
-    if (stopped) break;
-  }
+  for (const element of [...path].reverse()) { element.props[handler]?.(event); if (stopped) break; }
   return event;
 }
 
-describe('Grid behaviour clip interactions', () => {
+describe('Grid behaviour animation interactions', () => {
   let picker: HookStore, player: HookStore;
-  const onChange = vi.fn();
-  const focus = vi.fn();
-  const media = { play: vi.fn(() => Promise.resolve()), pause: vi.fn(), load: vi.fn() };
-  const renderPicker = () => render(picker, () => GridBehaviourSelect({ value: 'repeat_all', side: 'long', seed: true, onChange }));
+  let side: 'long' | 'short', seed: boolean, nextFrame: number;
+  const onChange = vi.fn(), focus = vi.fn(), cancelFrame = vi.fn();
+  const frames = new Map<number, FrameRequestCallback>();
+  const requestFrame = vi.fn((callback: FrameRequestCallback) => { frames.set(++nextFrame, callback); return nextFrame; });
+  const renderPicker = () => render(picker, () => GridBehaviourSelect({ value: 'repeat_all', side, seed, onChange }));
   const trigger = (tree: Element) => find(tree, element => 'aria-expanded' in element.props);
   const renderPlayer = (tree: Element) => {
-    const clip = find(tree, element => element.props.mode === 'repeat_all');
-    return render(player, () => (clip.type as (props: any) => Element)(clip.props));
+    const animation = find(tree, element => element.type === GridModeAnimation && element.props.mode === 'repeat_all');
+    return render(player, () => GridModeAnimation(animation.props));
   };
-  const open = () => {
-    trigger(renderPicker()).props.onClick();
-    return renderPicker();
-  };
+  const open = () => { trigger(renderPicker()).props.onClick(); return renderPicker(); };
+  const scene = (tree: Element) => find(tree, element => element.type === GridModeAnimationScene);
+  const button = (tree: Element) => find(tree, element => element.type === 'button');
   beforeEach(() => {
-    vi.clearAllMocks();
-    picker = store(); player = store();
-    picker.refs.push({ current: { focus } }); player.refs.push({ current: media });
-    media.play.mockResolvedValue(undefined);
+    vi.clearAllMocks(); frames.clear(); nextFrame = 0; side = 'long'; seed = true;
+    picker = store(); player = store(); picker.refs.push({ current: { focus } });
+    vi.stubGlobal('requestAnimationFrame', requestFrame); vi.stubGlobal('cancelAnimationFrame', cancelFrame);
+    vi.stubGlobal('window', { matchMedia: vi.fn(() => ({ matches: false })) });
   });
   afterEach(() => vi.unstubAllGlobals());
-
-  it('mounts videos and posters only while expanded, and removes them on close', () => {
-    const panelMarkup = (tree: Element) => render(player, () => renderToStaticMarkup(
-      find(tree, element => element.props.role === 'radiogroup'),
-    ));
-    const collapsed = panelMarkup(renderPicker());
-    expect(collapsed).not.toContain('<video');
-    expect(collapsed).not.toContain('poster=');
-    expect(collapsed).not.toContain('/grid-modes/');
-    const tree = open();
-    const expanded = panelMarkup(tree);
-    expect(expanded.match(/<video\b/g)).toHaveLength(3);
-    for (const name of ['repeat-all', 'step-back', 'step-back-edge']) {
-      expect(expanded).toContain(`src="/grid-modes/${name}.mp4"`);
-      expect(expanded).toContain(`poster="/grid-modes/${name}.png"`);
-    }
-    for (const video of expanded.match(/<video\b[^>]*>/g) ?? []) {
-      expect(video).toContain('preload="none"');
-      expect(video).toContain('muted=""');
-      expect(video).toMatch(/playsinline=""/i);
-      expect(video).not.toMatch(/\s(?:autoplay|loop|controls)=/i);
-    }
-    expect(expanded).toContain('aspect-video w-full max-w-full');
-    expect(expanded).toContain('auto-rows-fr');
-    for (const label of expanded.match(/<label\b[^]*?<\/label>/g) ?? []) expect(label).not.toContain('<video');
-    trigger(tree).props.onClick();
-    const closed = panelMarkup(renderPicker());
-    expect(closed).not.toContain('<video');
-    expect(closed).not.toContain('poster=');
-    expect(closed).not.toContain('/grid-modes/');
+  it.each([['long', true], ['short', true], ['long', false], ['short', false]] as const)(
+    'mounts all animations only while expanded: %s, seed=%s', (direction, seeded) => {
+      side = direction; seed = seeded;
+      expect(pathTo(renderPicker(), element => element.type === GridModeAnimation)).toBeUndefined();
+      const tree = open(), group = find(tree, element => element.props.role === 'radiogroup');
+      expect(Children.toArray(group.props.children)).toHaveLength(3);
+      for (const card of Children.toArray(group.props.children)) {
+        const path = pathTo(card, element => element.type === GridModeAnimation)!;
+        expect(path.at(-1)!.props).toMatchObject({ side, seed });
+        expect(path.some(element => element.type === 'label')).toBe(false);
+        expect(find(card, element => element.type === 'input').props['aria-describedby']).toMatch(/-hint$/);
+      }
+      const markup = renderToStaticMarkup(scene(renderPlayer(tree)));
+      expect(markup).toContain('aspect-video w-full max-w-full'); expect(markup).toContain('Example animation:');
+      expect(group.props.className).toContain('auto-rows-fr');
+      trigger(tree).props.onClick();
+      expect(pathTo(renderPicker(), element => element.type === GridModeAnimation)).toBeUndefined();
+    });
+  it.each([false, true])('never autoplays; tap/replay does not select or close, reduced motion=%s', reduced => {
+    vi.stubGlobal('window', { matchMedia: vi.fn(() => ({ matches: reduced })) });
+    const tree = open(), animation = renderPlayer(tree);
+    expect(scene(animation).props.elapsed).toBe(reduced ? GRID_ANIMATION_DURATION : 0);
+    expect(requestFrame).not.toHaveBeenCalled();
+    expect(button(animation).props.className.split(' ')).toEqual(expect.arrayContaining(['h-11', 'w-11']));
+    const cardPath = pathTo(tree, element => element.type === GridModeAnimation && element.props.mode === 'repeat_all')!;
+    const event = bubble([...cardPath.slice(0, -1), ...pathTo(animation, element => element.type === 'button')!], 'onClick');
+    expect(event.stopPropagation).toHaveBeenCalledOnce(); expect(requestFrame).toHaveBeenCalledOnce();
+    expect(onChange).not.toHaveBeenCalled(); expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
+    expect(scene(renderPlayer(tree)).props.elapsed).toBe(0);
+    frames.get(1)!(100); frames.get(2)!(100 + GRID_ANIMATION_DURATION);
+    expect(scene(renderPlayer(tree)).props.elapsed).toBe(GRID_ANIMATION_DURATION);
+    expect(requestFrame).toHaveBeenCalledTimes(2);
+    const end = renderPlayer(tree); expect(button(end).props['aria-label']).toMatch(/^Replay/);
+    button(end).props.onClick(); expect(scene(renderPlayer(tree)).props.elapsed).toBe(0);
   });
-
-  it('Escape from the still-focused row trigger closes the panel and restores focus', () => {
+  it('cancels the current frame on unmount and after a prop change', () => {
+    const tree = open(); button(renderPlayer(tree)).props.onClick(); frames.get(1)!(10);
+    for (const effect of player.effects) if (effect.cleanup) effect.cleanup();
+    expect(cancelFrame).toHaveBeenLastCalledWith(2);
+    player = store(); button(renderPlayer(tree)).props.onClick();
+    side = 'short'; renderPlayer(renderPicker()); expect(cancelFrame).toHaveBeenLastCalledWith(3);
+    expect(scene(renderPlayer(renderPicker())).props.elapsed).toBe(0);
+  });
+  it('Escape closes the panel and restores focus; closed panels leave Escape to the dialog', () => {
     const tree = open();
-    expect(trigger(tree).props['aria-expanded']).toBe(true);
     const event = bubble(pathTo(tree, element => 'aria-expanded' in element.props)!, 'onKeyDown', { key: 'Escape' });
     expect(trigger(renderPicker()).props['aria-expanded']).toBe(false);
-    expect(event.preventDefault).toHaveBeenCalledOnce();
-    expect(event.stopPropagation).toHaveBeenCalledOnce();
-    expect(focus).toHaveBeenCalledOnce();
-    expect(onChange).not.toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalledOnce(); expect(focus).toHaveBeenCalledOnce();
+    const closed = bubble(pathTo(renderPicker(), element => 'aria-expanded' in element.props)!, 'onKeyDown', { key: 'Escape' });
+    expect(closed.stopPropagation).not.toHaveBeenCalled(); expect(onChange).not.toHaveBeenCalled();
   });
-
-  it('leaves Escape available to the enclosing dialog when the panel is closed', () => {
-    const event = bubble(pathTo(renderPicker(), element => 'aria-expanded' in element.props)!, 'onKeyDown', { key: 'Escape' });
-    expect(event.stopPropagation).not.toHaveBeenCalled();
-    expect(focus).not.toHaveBeenCalled();
-  });
-
-  it.each([false, true])('plays only on tap, without choosing or closing, reduced motion=%s', reduced => {
-    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: reduced })));
-    const tree = open();
-    const clipPath = pathTo(tree, element => element.props.mode === 'repeat_all')!;
-    expect(clipPath.some(element => element.type === 'label')).toBe(false);
-    const clip = renderPlayer(tree);
-    const video = find(clip, element => element.type === 'video');
-    expect(video.props).toMatchObject({ muted: true, playsInline: true, preload: 'none', controls: false,
-      poster: '/grid-modes/repeat-all.png', src: '/grid-modes/repeat-all.mp4' });
-    expect(video.props.autoPlay).toBeUndefined(); expect(video.props.loop).toBeUndefined();
-    expect(find(clip, element => element.type === 'button').props.className.split(' ')).toEqual(expect.arrayContaining(['h-11', 'w-11']));
-    expect(media.play).not.toHaveBeenCalled();
-    const event = bubble([...clipPath.slice(0, -1), ...pathTo(clip, element => element.type === 'button')!], 'onClick');
-    expect(media.play).toHaveBeenCalledOnce();
-    expect(event.stopPropagation).toHaveBeenCalledOnce();
-    expect(onChange).not.toHaveBeenCalled();
-    expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
-    const playing = renderPlayer(renderPicker());
-    expect(find(playing, element => element.type === 'video').props.controls).toBe(true);
-    // Native pause/seek/replay taps are also isolated from card selection.
-    const nativeTap = bubble([...clipPath.slice(0, -1), ...pathTo(playing, element => element.type === 'video')!], 'onClick');
-    expect(nativeTap.stopPropagation).toHaveBeenCalledOnce();
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it('restores the play button if media playback is rejected', async () => {
-    media.play.mockRejectedValueOnce(Error('EXAMPLE playback unavailable'));
-    const tree = open();
-    find(renderPlayer(tree), element => element.type === 'button').props.onClick();
-    await Promise.resolve();
-    expect(find(renderPlayer(tree), element => element.type === 'video').props.controls).toBe(false);
-    expect(find(renderPlayer(tree), element => element.type === 'button')).toBeTruthy();
-  });
-
-  it('pauses on close via unmount and restores the poster on a fresh mount', () => {
-    const tree = open();
-    find(renderPlayer(tree), element => element.type === 'button').props.onClick();
-    const cleanup = player.effects[0]();
-    trigger(tree).props.onClick();
-    expect(pathTo(renderPicker(), element => element.props.mode === 'repeat_all')).toBeUndefined();
-    if (cleanup) cleanup();
-    expect(media.pause).toHaveBeenCalledOnce();
-    player = store(); player.refs.push({ current: media });
-    const reopened = renderPlayer(open());
-    expect(find(reopened, element => element.type === 'video').props.controls).toBe(false);
-    expect(find(reopened, element => element.type === 'button')).toBeTruthy();
-  });
-
   it('still selects and closes from the radio, while arrow navigation stays open', () => {
-    const tree = open();
-    const radio = find(tree, element => element.type === 'input' && element.props.value === 'step_back');
+    const radio = find(open(), element => element.type === 'input' && element.props.value === 'step_back');
     radio.props.onChange(); radio.props.onClick();
-    expect(onChange).toHaveBeenLastCalledWith('step_back');
-    expect(trigger(renderPicker()).props['aria-expanded']).toBe(false);
-    const nextTree = open();
-    const next = find(nextTree, element => element.type === 'input' && element.props.value === 'repeat_all');
+    expect(onChange).toHaveBeenLastCalledWith('step_back'); expect(trigger(renderPicker()).props['aria-expanded']).toBe(false);
+    const next = find(open(), element => element.type === 'input' && element.props.value === 'repeat_all');
     next.props.onKeyDown({ key: 'ArrowRight', preventDefault: vi.fn(), currentTarget: { closest: () => null } });
-    expect(onChange).toHaveBeenLastCalledWith('step_back');
-    expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
+    expect(onChange).toHaveBeenLastCalledWith('step_back'); expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
   });
 });

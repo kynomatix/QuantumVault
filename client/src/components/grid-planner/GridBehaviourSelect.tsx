@@ -1,47 +1,17 @@
-import { useEffect, useId, useRef, useState } from 'react';
-import { Check, ChevronDown, Play } from 'lucide-react';
+import { useId, useRef, useState } from 'react';
+import { Check, ChevronDown } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { GRID_BEHAVIOUR_MODES, gridBehaviourCopy, type GridBehaviourMode } from '../../../../shared/grid-behaviour';
 
-const CLIPS: Record<GridBehaviourMode, string> = {
-  repeat_all: 'repeat-all',
-  step_back: 'step-back',
-  step_back_edge: 'step-back-edge',
-};
-
-function BehaviourClip({ mode, label }: { mode: GridBehaviourMode; label: string }) {
-  const video = useRef<HTMLVideoElement>(null);
-  const [started, setStarted] = useState(false);
-  useEffect(() => {
-    const media = video.current;
-    return () => { media?.pause(); };
-  }, []);
-
-  // Playback is always opt-in, including with prefers-reduced-motion enabled.
-  return <div className="relative mt-auto min-w-0 max-w-full" onClick={event => event.stopPropagation()}>
-    <video ref={video} src={`/grid-modes/${CLIPS[mode]}.mp4`} poster={`/grid-modes/${CLIPS[mode]}.png`}
-      aria-label={`Example animation: ${label}`} muted playsInline preload="none" controls={started}
-      className="block aspect-video w-full max-w-full rounded-md bg-black object-contain" />
-    {!started && <button type="button" aria-label={`Play example animation: ${label}`}
-      className="absolute bottom-2 left-2 flex h-11 w-11 items-center justify-center rounded-full bg-black/80 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-      onClick={() => {
-        const media = video.current;
-        if (!media) return;
-        setStarted(true);
-        void media.play().catch(() => setStarted(false));
-      }}>
-      <Play aria-hidden="true" className="h-4 w-4" />
-    </button>}
-  </div>;
-}
+import { GridModeAnimation } from './GridModeAnimation';
+import { GRID_SETUP_INITIAL } from '@/lib/grid-setup-view';
 
 export function GridBehaviourSelect({ value, side, seed, onChange }: { value: GridBehaviourMode; side: string; seed: boolean; onChange: (mode: GridBehaviourMode) => void }) {
   const [expanded, setExpanded] = useState(false);
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const when = side === 'long' ? 'When price rises' : 'When price falls';
-  const showClips = side === 'long' && seed === true;
   const close = () => {
     setExpanded(false);
     trigger.current?.focus();
@@ -74,7 +44,7 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
           return <div key={mode} className={`relative flex h-full min-w-0 flex-col gap-2 rounded-lg border p-3 text-left break-words focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${selected ? 'border-primary bg-primary/10' : 'border-border bg-card'}`}>
             <label className="flex min-w-0 flex-1 cursor-pointer flex-col gap-2">
             <input type="radio" name={`${id}-behaviour`} value={mode} checked={selected}
-              aria-labelledby={`${id}-${mode}-title`} aria-describedby={`${id}-${mode}-hint${showClips ? '' : ` ${id}-${mode}-example`}`}
+              aria-labelledby={`${id}-${mode}-title`} aria-describedby={`${id}-${mode}-hint`}
               className="sr-only" onChange={() => onChange(mode)} onClick={close}
               onKeyDown={event => {
                 if (event.key === 'Enter' || event.key === ' ') {
@@ -93,11 +63,10 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
               <span id={`${id}-${mode}-title`} className="font-medium">{copy.label}</span>
               {selected && <Check aria-hidden="true" className="h-4 w-4 shrink-0 text-primary" />}
             </span>
-            {mode === 'step_back' && <Badge variant="secondary" className="w-fit">Recommended</Badge>}
+            {mode === GRID_SETUP_INITIAL.behaviourMode && <Badge variant="secondary" className="w-fit">Recommended</Badge>}
             <span id={`${id}-${mode}-hint`} className="text-sm text-muted-foreground">{copy.hint}</span>
-            {!showClips && <span id={`${id}-${mode}-example`} className="mt-auto pt-1 text-xs text-muted-foreground">{copy.example}</span>}
             </label>
-            {showClips && expanded && <BehaviourClip mode={mode} label={copy.label} />}
+            {expanded && <GridModeAnimation mode={mode} side={side === 'long' ? 'long' : 'short'} seed={seed} />}
           </div>;
         })}
       </div>
