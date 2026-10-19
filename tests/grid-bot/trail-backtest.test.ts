@@ -2,6 +2,7 @@ import {describe,it,expect} from 'vitest';
 import Decimal from 'decimal.js';
 import {runTrailBacktest,TRAIL_EXPERIMENT,type TrailRun} from '../../server/grid-bot/trail-backtest';
 import {moveCandles,moveBase,moveDuration} from './range-move-fixtures';
+const D=Decimal.clone({precision:80});
 const candles=Array.from({length:180},(_,i)=>{const close=100+Math.sin(i/4)*4;return {...moveCandles()[0],time:moveBase+i*moveDuration,open:100+Math.sin((i-1)/4)*4,close,high:105,low:95};});
 const base:TrailRun={candles,timeframe:'15m',start:100,end:180,market:{symbol:'BTC',tick:'0.01',lot:'0.001',minimumQuote:'10',maximumQuote:'1000000',minimumPrice:'0.01',maximumPrice:'1000000'},direction:'long',seed:false,mode:'repeat_all',variant:'d',path:'OHLC'};
 describe('shipped-cycle historical replay',()=>{
@@ -10,7 +11,7 @@ describe('shipped-cycle historical replay',()=>{
       const result=runTrailBacktest({...base,direction,seed,mode});
       expect(result.fillCount).toBeGreaterThan(0);
       expect(result.cycleState.reduce((s,c)=>s.plus(c.held),new Decimal(0)).eq(new Decimal(result.position).abs())).toBe(true);
-      expect(new Decimal(result.cash).plus(new Decimal(result.position).mul(result.finalMark)).eq(result.finalEquity)).toBe(true);
+      expect(new D(result.cash).plus(new D(result.position).mul(result.finalMark)).eq(result.finalEquity)).toBe(true);
       const fees=result.executions.reduce((sum,f)=>sum.plus(new Decimal(f.price).mul(f.size).mul(f.kind==='limit'?TRAIL_EXPERIMENT.makerRate:TRAIL_EXPERIMENT.takerRate)),new Decimal(0));
       expect(fees.toNumber()).toBeCloseTo(result.fees,10);
       if(!seed)expect(result.executions.some(f=>f.kind==='seed')).toBe(false);
@@ -28,7 +29,7 @@ describe('shipped-cycle historical replay',()=>{
     expect(runTrailBacktest({...base,candles:changed,end:120})).toEqual(before);
     const gapped=candles.filter((_,i)=>i!==110),result=runTrailBacktest({...base,candles:gapped,end:gapped.length});
     expect(result.holds.gap).toBeGreaterThan(0);
-    expect(result.executions.every(f=>f.time<gapped[110].time)).toBe(true);
+    expect(result.executions.filter(f=>f.side==='buy').every(f=>f.time<gapped[110].time)).toBe(true);
   });
   it('moves only next bar, carries sources without a new seed, and preserves one-shot credits',()=>{
     const trending=Array.from({length:180},(_,i)=>{const price=100+Math.max(0,i-100)*0.3;return {...candles[0],time:moveBase+i*moveDuration,open:price,close:price+0.1,high:price+0.2,low:price-0.1};});

@@ -44,7 +44,7 @@ for (const symbol of symbols) for (const [timeframe,duration] of [['15m',900_000
   if (!Number.isSafeInteger(market?.created_at)) throw Error('No listing timestamp');
   // Include pre-listing time to establish the left coverage boundary empirically.
   const start = Math.floor((market.created_at-30*86_400_000)/duration)*duration;
-  const rows = [], pages = [];
+  const rows = [], pages = [], rejected=[];
   for (let cursor=start; cursor<end;) {
     const until = Math.min(end,cursor+4000*duration);
     const path = 'kline?'+new URLSearchParams({symbol,interval:timeframe,start_time:String(cursor),end_time:String(until-1),limit:'4000'});
@@ -54,7 +54,9 @@ for (const symbol of symbols) for (const [timeframe,duration] of [['15m',900_000
       if (r.s !== symbol || r.i !== timeframe || !Number.isSafeInteger(r.t) || r.t < cursor || r.t >= until || r.t % duration
         || ![r.t+duration,r.t+duration-1].includes(r.T)
         || !['o','h','l','c','v'].every(k => typeof r[k] === 'string' && /^(0|[1-9]\d*)(\.\d+)?$/.test(r[k]))) throw Error('Invalid native candle');
-      rows.push([r.t,Number(r.o),Number(r.h),Number(r.l),Number(r.c),Number(r.v)]);
+      const row=[r.t,Number(r.o),Number(r.h),Number(r.l),Number(r.c),Number(r.v)];
+      if(!row.slice(1).every(Number.isFinite)||row.slice(1,5).some(v=>v<=0)||row[5]<0||row[3]>Math.min(row[1],row[4])||row[2]<Math.max(row[1],row[4]))rejected.push(row);
+      else rows.push(row);
     }
     pages.push({start:cursor,end:until,bars:page.length}); cursor=until;
   }
@@ -67,8 +69,9 @@ for (const symbol of symbols) for (const [timeframe,duration] of [['15m',900_000
   });
   const file=`${symbol}-${timeframe}.json`,bytes=JSON.stringify({symbol,timeframe,source:'pacifica',basis:'perp',columns:['time','open','high','low','close','volume'],rows});
   await writeFile(join(destination,file),bytes);
+  await writeFile(join(destination,`${symbol}-${timeframe}-rejected.json`),JSON.stringify(rejected));
   manifest.datasets.push({file,symbol,timeframe,bars:rows.length,first:rows[0]?.[0]??null,last:rows.at(-1)?.[0]??null,
-    bytes:Buffer.byteLength(bytes),sha256:createHash('sha256').update(bytes).digest('hex'),gaps,pages});
+    bytes:Buffer.byteLength(bytes),sha256:createHash('sha256').update(bytes).digest('hex'),rejectedBars:rejected.length,gaps,pages});
   await writeFile(join(destination,'manifest.json'),JSON.stringify(manifest,null,2));
   console.log(`${symbol} ${timeframe}: ${rows.length} bars, ${gaps.length} gaps`);
 }

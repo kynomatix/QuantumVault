@@ -97,11 +97,13 @@ export function runTrailBacktest(input:TrailRun) {
     const bar=bars[i],previous=bars[i-1],now=bar.time,warm=bars.slice(Math.max(0,i-GRID_TRAIL_POLICY.indicatorBars),i);
     const dataHold=trailDataHold(warm,input.timeframe,now);
     const currentValid=trailDataHold([bar],input.timeframe,now+duration);
-    if(dataHold||currentValid!=='warmup'){
-      hold(dataHold??currentValid??'warmup');
-      missingMs+=Math.max(0,now-previous.time-duration);
-      // Unknown intervals are never traversed or filled. A carried position is re-marked only.
-      equity(bar.close);continue;
+    missingMs+=Math.max(0,now-previous.time-duration);
+    if(currentValid!=='warmup')throw Error('Invalid replay candle: '+currentValid);
+    if(dataHold){
+      hold(dataHold);entriesAllowed=false;
+      // No seed/entry/move while history is broken. Known bars still execute backed exits
+      // and protective stops; missing intervals themselves are never filled or interpolated.
+      if(!seeded){equity(bar.close);continue;}
     }
     activeMs+=duration;
     if(!seeded){
@@ -116,9 +118,9 @@ export function runTrailBacktest(input:TrailRun) {
       }
       seeded=true;
     }
-    const decision=qualifyAutomaticTrail({policy:p,history:ledger,candles:warm,timeframe:input.timeframe,now,variant:input.variant});
+    const decision=dataHold?{eligible:false as const,reason:'data_hold'}:qualifyAutomaticTrail({policy:p,history:ledger,candles:warm,timeframe:input.timeframe,now,variant:input.variant});
     ledger.lastDecisionAt=now;
-    if(!decision.eligible)hold(decision.reason);
+    if(!decision.eligible){if(!dataHold)hold(decision.reason);}
     else {
       const exported=replayGridCycles({...h,exportEpochId:uuid(epoch)});
       if(!exported.ok||!exported.carry)throw Error(exported.ok?'Missing carry':exported.reason);
@@ -144,7 +146,7 @@ export function runTrailBacktest(input:TrailRun) {
     }
     const outside=previous.close<Number(p.lowerPrice)||previous.close>Number(p.upperPrice);
     if(outside)entriesAllowed=false;
-    else if(!entriesAllowed&&gridInsideAutoResumeBand(String(previous.close),gridAutoResumeBand(p.lowerPrice,p.upperPrice,m.tick)))entriesAllowed=true;
+    else if(!dataHold&&!entriesAllowed&&gridInsideAutoResumeBand(String(previous.close),gridAutoResumeBand(p.lowerPrice,p.upperPrice,m.tick)))entriesAllowed=true;
     if(outside)outMs+=duration;
     const r=replay(),capacity=cycleCapacity(h,String(previous.close));
     const plan=planCycleWindow({cycles:r.cycles,direction:p.direction,levels:p.levels.map(l=>({id:`EXAMPLE_LEVEL_${l.ordinal}`,ordinal:l.ordinal,attempt:0})),

@@ -1,13 +1,13 @@
 // Node 24's built-in TypeScript erasure, with repository extensionless import resolution.
 // Optional vendor root contains only integrity-checked, locked pure-JS dependencies.
-import {registerHooks,createRequire} from 'node:module';
+import {registerHooks,createRequire,isBuiltin} from 'node:module';
 import {existsSync} from 'node:fs';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
 const vendor=process.env.GRID_TRAIL_VENDOR;
 const requireVendor=vendor?createRequire(pathToFileURL(resolve(vendor,'package.json'))):null;
 registerHooks({resolve(specifier,context,next){
-  if(requireVendor&&!specifier.startsWith('.')&&!specifier.startsWith('/')&&!specifier.includes(':')){
+  if(requireVendor&&!isBuiltin(specifier)&&!specifier.startsWith('.')&&!specifier.startsWith('/')&&!specifier.includes(':')){
     return next(pathToFileURL(requireVendor.resolve(specifier)).href,context);
   }
   if(specifier.startsWith('.')&&context.parentURL){
