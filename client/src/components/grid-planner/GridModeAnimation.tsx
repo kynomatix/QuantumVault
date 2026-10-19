@@ -35,6 +35,8 @@ export function GridModeAnimationScene({ model, elapsed }: { model: GridAnimatio
       {frame.states[ordinal] === 'active' && <path d={`M72,${y(price)}H552`} stroke={colours.active} strokeWidth="7" opacity=".3" filter={`url(#${id}-glow)`} />}
       <path d={`M72,${y(price)}H552`} stroke={colours[frame.states[ordinal]]} strokeWidth={frame.states[ordinal] === 'active' ? 2 : 1.5} />
     </g>)}
+    <text x="60" y={y(model.reference)} textAnchor="end" dominantBaseline="middle"
+      fill="hsl(var(--muted-foreground))" fontSize="14">Start</text>
     <path d={path} fill="none" stroke={closingColour} strokeWidth="2" strokeLinecap="round" />
     <circle cx={dotX} cy={dotY} r="4" fill={closingColour} />
     {/* A word readout replaces the reference's numeric price, on the opposite side to the tags. */}

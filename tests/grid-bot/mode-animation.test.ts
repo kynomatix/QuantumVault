@@ -9,6 +9,22 @@ import { GRID_ANIMATION_DURATION, GRID_ANIMATION_TIMING, gridAnimationFrame, gri
 import { GridModeAnimationScene } from '../../client/src/components/grid-planner/GridModeAnimation';
 
 describe('Rule-driven grid animation', () => {
+  it('labels the model start line and mirrors its height for shorts, including custom starts', () => {
+    for (const start of [100, 96]) {
+      const labels = (['long', 'short'] as const).map(side => {
+        const model = gridAnimationModel({ side, start: side === 'long' ? start : 200 - start });
+        const expectedY = 282 - 224 * (model.reference - model.prices[0]) / (model.prices.at(-1)! - model.prices[0]);
+        for (const elapsed of [0, GRID_ANIMATION_TIMING.intro + 2000, GRID_ANIMATION_DURATION]) {
+          const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed }));
+          expect(html.match(/>Start<\/text>/g)).toHaveLength(1);
+          expect(html).toContain(`<text x="60" y="${expectedY}" text-anchor="end" dominant-baseline="middle" fill="hsl(var(--muted-foreground))" font-size="14">Start</text>`);
+          expect(html).toContain(`M72,${expectedY}H552`);
+        }
+        return expectedY;
+      });
+      expect(labels[0] + labels[1]).toBeCloseTo(340);
+    }
+  });
   it.each(GRID_BEHAVIOUR_MODES)('%s darkens only product one-shot owners, with custom geometry too', mode => {
     for (const side of ['long', 'short'] as const) for (const lines of [undefined, [60, 65, 80, 91, 100, 109, 120, 135, 140]]) {
       const model = gridAnimationModel({ mode, side, lines });
