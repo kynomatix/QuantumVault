@@ -19,17 +19,24 @@ export const TRAIL_EXPERIMENT = Object.freeze({version:'trail-experiment-1',inve
   halfWidth:0.06,stopDistance:0.08,intervals:8,makerRate:'0.00115',takerRate:'0.0014',marketSlippage:'0.0005',
   split:'2026-03-01T00:00:00Z',fundingIncluded:false});
 export interface TrailMarket {symbol:string;tick:string;lot:string;minimumQuote:string;maximumQuote:string;minimumPrice:string;maximumPrice:string}
+export interface TrailGeometry {lower:string;upper:string;longStop:string;shortStop:string}
 export interface TrailRun {
   candles:PlannerCandle[];timeframe:'15m'|'1h'|'4h';start:number;end:number;market:TrailMarket;
   direction:'long'|'short';seed:boolean;mode:GridBehaviourMode;variant:TrailVariant;path:'OHLC'|'OLHC';
+  geometry?:TrailGeometry;
+  /** Diagnostic reference path for verifying the idle-bar optimization. */
+  planEveryBar?:boolean;
 }
 export const trailDuration = (tf:TrailRun['timeframe']) => ({'15m':900000,'1h':3600000,'4h':14400000})[tf];
 const uuid = (n:number) => `00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
-export function makeTrailGrid(input:Pick<TrailRun,'market'|'direction'|'seed'|'mode'>,reference:string):GridPolicy {
+export function makeTrailGrid(input:Pick<TrailRun,'market'|'direction'|'seed'|'mode'|'geometry'>,reference:string):GridPolicy {
   const e=TRAIL_EXPERIMENT,m=input.market,long=input.direction==='long',tick=new D(m.tick);
   const quantize=(n:Decimal)=>n.div(tick).floor().mul(tick).toFixed(8);
-  const lower=quantize(new D(reference).mul(1-e.halfWidth)),upper=quantize(new D(reference).mul(1+e.halfWidth));
-  const stop=quantize(new D(reference).mul(long?1-e.stopDistance:1+e.stopDistance));
+  const lower=input.geometry?.lower??quantize(new D(reference).mul(1-e.halfWidth)),upper=input.geometry?.upper??quantize(new D(reference).mul(1+e.halfWidth));
+  const stop=(long?input.geometry?.longStop:input.geometry?.shortStop)??quantize(new D(reference).mul(long?1-e.stopDistance:1+e.stopDistance));
+  if(![lower,upper,stop].every(v=>new D(v).gt(0)&&new D(v).mod(tick).eq(0))
+    ||!new D(reference).gt(lower)||!new D(reference).lt(upper)
+    ||(long?!new D(stop).lt(lower):!new D(stop).gt(upper)))throw Error('Invalid launch geometry');
   const envelope=long?upper:stop;
   const result=calculateCycleGrid({side:input.direction,lower,upper,start:reference,intervals:e.intervals,
     entryScale:'flat',profitScale:'flat',seed:input.seed,leverage:String(e.leverage),tick:m.tick,lot:m.lot,
@@ -40,7 +47,7 @@ export function makeTrailGrid(input:Pick<TrailRun,'market'|'direction'|'seed'|'m
   const policy:GridPolicy={id:uuid(1),protocol:'pacifica',market:m.symbol+'-PERP',direction:input.direction,
     lowerPrice:lower,upperPrice:upper,startPrice:new D(p.start).toFixed(8),gridCount:e.intervals,totalInvestment:e.investment,
     leverage:e.leverage,entryScaleType:'flat',profitScaleType:'flat',policyVersion:'2.2.0',runtimePolicyVersion:'2.2.0',
-    feePolicyVersion:'1.0.0',stopLossPercent:'8.0000',stopLossPrice:stop,seedAtCreation:input.seed,
+    feePolicyVersion:'1.0.0',stopLossPercent:input.geometry?new D(stop).minus(reference).abs().div(reference).mul(100).toFixed(4):'8.0000',stopLossPrice:stop,seedAtCreation:input.seed,
     sizingVersion:'lean-1',safetyEnvelopePrice:envelope,gridPolicyExtension:p.gridPolicyExtension,
     levels:p.lines.map(l=>{const closing=long?new D(l.price).gt(p.start):new D(l.price).lt(p.start);
       return {ordinal:l.ordinal+1,price:new D(l.price).toFixed(8),size:new D(l.quantity).toFixed(8),reduceOnly:closing,
@@ -58,7 +65,8 @@ export function runTrailBacktest(input:TrailRun) {
   if(!input.seed)h.unusedSeedProof={operationIds:[],historyThrough:bars[input.start].time,entriesAllowed:true};
   let cash=new D(e.investment),position=new D(0),fees=new D(0),turnover=new D(0),peak=new D(e.investment),maxDrawdown=new D(0);
   let serial=0,epoch=1,entriesAllowed=true,stopped=false,seeded=false,fillCount=0,outMs=0,activeMs=0,missingMs=0;
-  const holds:Record<string,number>={},moves:{decisionAt:number;activatedAt:number;lower:string;upper:string}[]=[];
+  const initialGeometry={lower:p.lowerPrice,upper:p.upperPrice,stop:p.stopLossPrice!};
+  const holds:Record<string,number>={},moves:{decisionAt:number;activatedAt:number;lower:string;upper:string;stop:string;previousStop:string}[]=[];
   const executions:{kind:string;side:string;size:string;price:string;fee:string;time:number}[]=[];
   const hold=(why:string)=>{holds[why]=(holds[why]??0)+1;};
   let cachedReplay:Extract<ReturnType<typeof replayGridCycles>,{ok:true}>|null=null;
@@ -139,8 +147,8 @@ export function runTrailBacktest(input:TrailRun) {
         const capped=trailCapHold(p,ledger,now,candidate);
         if(capped)hold(capped);
         else {
-          p=candidate;epoch++;
-          const move={decisionAt:now,activatedAt:now+GRID_TRAIL_POLICY.latencyMs,lower:p.lowerPrice,upper:p.upperPrice};
+          const previousStop=p.stopLossPrice!;p=candidate;epoch++;
+          const move={decisionAt:now,activatedAt:now+GRID_TRAIL_POLICY.latencyMs,lower:p.lowerPrice,upper:p.upperPrice,stop:p.stopLossPrice!,previousStop};
           ledger.moves.push({...move,actor:'automatic'});moves.push(move);
           h={policy:p,account:h.account,historyComplete:true,carry:exported.carry,operations:[],fills:[],progress:[],allocations:[]};
           cachedReplay=null;
@@ -152,12 +160,18 @@ export function runTrailBacktest(input:TrailRun) {
     if(outside)entriesAllowed=false;
     else if(!dataHold&&!entriesAllowed&&gridInsideAutoResumeBand(String(previous.close),gridAutoResumeBand(p.lowerPrice,p.upperPrice,m.tick)))entriesAllowed=true;
     if(outside)outMs+=duration;
+    // Every cycle endpoint is a grid level. If no passive endpoint can be touched,
+    // the shipped planner cannot produce a fill on this bar. Stops still run below.
+    const canTouch=p.levels.some(l=>Number(l.price)<previous.close?bar.low<=Number(l.price):Number(l.price)>previous.close&&bar.high>=Number(l.price));
+    let plan:ReturnType<typeof planCycleWindow>={levels:[],allocations:{},chunks:[]};
+    if(canTouch||input.planEveryBar){
     const r=replay(),nextCapacityKey=`${epoch}/${serial}/${previous.close>Number(p.safetyEnvelopePrice)}`;
     if(nextCapacityKey!==capacityKey){cachedCapacity=cycleCapacity(h,String(previous.close));capacityKey=nextCapacityKey;}
     const capacity=cachedCapacity;
-    const plan=planCycleWindow({cycles:r.cycles,direction:p.direction,levels:p.levels.map(l=>({id:`EXAMPLE_LEVEL_${l.ordinal}`,ordinal:l.ordinal,attempt:0})),
+    plan=planCycleWindow({cycles:r.cycles,direction:p.direction,levels:p.levels.map(l=>({id:`EXAMPLE_LEVEL_${l.ordinal}`,ordinal:l.ordinal,attempt:0})),
       owned:[],positionSize:position.abs().toFixed(),bookPrice:String(previous.close),lot:m.lot,minimumQuote:m.minimumQuote,
       freeSlots:100,inventoryComplete:true,entriesAllowed,canaryRemaining:e.investment,pool:capacity});
+    }
     const pending=plan.chunks.flat().filter(a=>a.kind==='place').map(a=>a.level);
     // Each resting request is filled at most once per bar. New recycle credit waits for the next bar.
     const nodes=input.path==='OHLC'?[bar.open,bar.high,bar.low,bar.close]:[bar.open,bar.low,bar.high,bar.close];
@@ -183,7 +197,7 @@ export function runTrailBacktest(input:TrailRun) {
   const finalEquity=equity(bars[input.end-1].close),cycleState=replay().cycles;
   return {variant:input.variant,path:input.path,direction:input.direction,seed:input.seed,mode:input.mode,
     netReturn:finalEquity.div(e.investment).minus(1).toNumber(),maxDrawdown:maxDrawdown.toNumber(),fees:fees.toNumber(),
-    turnover:turnover.toNumber(),fillCount,moves:moves.length,moveLog:moves,holds,activeMs,outMs,missingMs,stopped,
+    turnover:turnover.toNumber(),fillCount,moves:moves.length,moveLog:moves,initialGeometry,holds,activeMs,outMs,missingMs,stopped,
     finalEquity:finalEquity.toFixed(),cash:cash.toFixed(),position:position.toFixed(),finalMark:bars[input.end-1].close,
     finalPolicy:p,ledger,cycleState,executions};
 }

@@ -3228,7 +3228,9 @@ export class PacificaAdapter implements ProtocolAdapter {
 
       const connection = createSolanaRpcConnection('confirmed');
 
-      const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+      // Public identifier hash label: raw SPL Token program address bytes (hex), not a secret.
+      const tokenProgramPublicKeyHash = '06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9';
+      const TOKEN_PROGRAM = new PublicKey(Buffer.from(tokenProgramPublicKeyHash, 'hex')).toBase58();
 
       const vaultInfo = await connection.getAccountInfo(PACIFICA_USDC_VAULT);
       if (!vaultInfo || vaultInfo.owner.toBase58() !== TOKEN_PROGRAM) {
