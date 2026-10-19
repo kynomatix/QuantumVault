@@ -8,6 +8,7 @@ import {settings,selectDevelopment} from './design.mjs';
 import {geometryAt,widerGeometry} from './geometry.mjs';
 import {rollingWindows,plannerLaunchGeometry} from '../../../server/grid-bot/trail-rolling.ts';
 import {makeTrailGrid,runTrailBacktest,TRAIL_EXPERIMENT} from '../../../server/grid-bot/trail-backtest.ts';
+import {retainedGridCycles} from '../../../server/grid-bot/cycle-policy.ts';
 
 const [evidence,sourceEvidence]=process.argv.slice(2),started=Date.now(),DAY=86400000,split=Date.parse('2026-03-01T00:00:00Z'),finish=Date.parse('2026-10-19T00:00:00Z');
 const write=(name,value)=>fs.writeFileSync(path.join(evidence,name),JSON.stringify(value,null,2)+'\n');
@@ -63,7 +64,7 @@ for(const period of ['development','evaluation','proxy']){
           let reason=g.ok?null:g.reason,policy=null;
           if(!reason){try{policy=makeTrailGrid(input,String(bars[w.start-1].close));}catch(error){reason=error.message;}}
           if(policy&&policy.gridCount!==setting.intervals)throw Error('Interval adapter not effective');
-          if(policy)for(const c of policy.gridPolicyExtension.cycles){if(c.recycles!==false&&Number(c.quantity)*Number(c.openingPrice)<10-1e-8)throw Error('Opening minimum violated');}
+          if(policy)for(const c of retainedGridCycles(policy)){if(c.recycles!==false&&Number(c.quantity)*Number(c.openingPrice)<10-1e-8)throw Error('Opening minimum violated');}
           for(const pathName of ['OHLC','OLHC']){
             const row={period,setting:setting.id,market:symbol,timeframe,horizonDays,direction,path:pathName,launchAt:w.launchAt,endAt:w.endAt,
               key:[symbol,timeframe,horizonDays,direction,pathName,w.launchAt].join('|'),admitted:!reason};
@@ -72,7 +73,7 @@ for(const period of ['development','evaluation','proxy']){
               const r=runTrailBacktest({...input,path:pathName});
               if(r.moves!==0)throw Error('Fixed range moved');
               Object.assign(row,{netReturn:r.netReturn,maxDrawdown:r.maxDrawdown,fees:r.fees,fillCount:r.fillCount,protectiveStop:r.holds.protective_stop?1:0,
-                seedHold:!!r.holds.launch_seed_slippage,stopped:r.stopped,missingMs:r.missingMs,openingLiftCount:policy.gridPolicyExtension.openingOrderLift?.count??0});
+                seedHold:!!r.holds.launch_seed_slippage,stopped:r.stopped,missingMs:r.missingMs});
               counts.admitted++;
             }
             fs.writeSync(fd,JSON.stringify(row)+'\n');counts.scheduled++;if(period==='development')devRows.push(row);
