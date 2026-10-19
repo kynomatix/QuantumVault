@@ -2,7 +2,9 @@ import { gridCyclePair, gridOneShotOwners, type GridBehaviourMode } from '../../
 import { GRID_SETUP_INITIAL } from './grid-setup-view';
 
 // Only presentation geometry/timing lives here. Ownership and pairing come from the product.
-export const GRID_ANIMATION_TIMING = { intro: 900, run: 5600, hold: 1600, tagFade: 200, tagLife: 260 };
+// v5 modes_anim.py:83,150,233: live for 3% of the run, hold full opacity for
+// the first 35% of that lifetime, then fade out. There is no fade-in.
+export const GRID_ANIMATION_TIMING = { intro: 900, run: 5600, hold: 1600, tagLife: 5600 * 0.03, tagHold: 0.35 };
 export const GRID_ANIMATION_DURATION = GRID_ANIMATION_TIMING.intro + GRID_ANIMATION_TIMING.run + GRID_ANIMATION_TIMING.hold;
 export const GRID_ANIMATION_LINES = Array.from({ length: Number(GRID_SETUP_INITIAL.intervals) + 1 },
   (_, i) => 90 + 20 * i / Number(GRID_SETUP_INITIAL.intervals));
@@ -44,13 +46,15 @@ export function gridAnimationModel({ lines = GRID_ANIMATION_LINES, start, side =
     const opening = direction * (p - reference) < 0;
     const pair = gridCyclePair(ownerOrdinal, opening, long);
     const recycles = !once.has(ownerOrdinal), enabled = recycles || seed;
-    return [{ ownerOrdinal, ...pair, opening, recycles, enabled,
-      closeAt: !opening && seed ? cross(direction * (prices[pair.closingOrdinal] - reference), false) : Infinity,
-      openAt: enabled && recycles ? cross(direction * (prices[pair.openingOrdinal] - reference), true) : Infinity }];
+    const closeAt = !opening && seed ? cross(direction * (prices[pair.closingOrdinal] - reference), false) : Infinity;
+    const openAt = enabled && recycles ? cross(direction * (prices[pair.openingOrdinal] - reference), true) : Infinity;
+    return [{ ownerOrdinal, ...pair, opening, recycles, enabled, closeAt, openAt,
+      closeTimeMs: GRID_ANIMATION_TIMING.intro + closeAt * GRID_ANIMATION_TIMING.run,
+      openTimeMs: GRID_ANIMATION_TIMING.intro + openAt * GRID_ANIMATION_TIMING.run }];
   });
   const fills = owners.flatMap(owner => [
-    { at: owner.closeAt, ordinal: owner.closingOrdinal, ownerOrdinal: owner.ownerOrdinal, leg: 'closing' as const, label: long ? 'SELL' : 'BUY' },
-    { at: owner.openAt, ordinal: owner.openingOrdinal, ownerOrdinal: owner.ownerOrdinal, leg: 'opening' as const, label: long ? 'BUY' : 'SELL' },
+    { at: owner.closeAt, timeMs: owner.closeTimeMs, ordinal: owner.closingOrdinal, ownerOrdinal: owner.ownerOrdinal, leg: 'closing' as const, label: long ? 'SELL' : 'BUY' },
+    { at: owner.openAt, timeMs: owner.openTimeMs, ordinal: owner.openingOrdinal, ownerOrdinal: owner.ownerOrdinal, leg: 'opening' as const, label: long ? 'BUY' : 'SELL' },
   ]).filter(fill => Number.isFinite(fill.at)).sort((a, b) => a.at - b.at);
   return { prices, reference, side, seed, mode, once, owners, fills, peak, price };
 }
@@ -62,7 +66,9 @@ export function gridAnimationFrame(model: GridAnimationModel, elapsed: number) {
   const states: AnimationLineState[] = model.prices.map(() => 'active');
   const pending: { ordinal: number; leg: 'opening' | 'closing'; ownerOrdinal: number }[] = [];
   for (const owner of model.owners) {
-    const opened = progress >= owner.openAt, closed = progress >= owner.closeAt;
+    // Use the same stored event times as the tags; reconstructing progress can
+    // round to the other side of a crossing on its exact fill frame.
+    const opened = elapsed >= owner.openTimeMs, closed = elapsed >= owner.closeTimeMs;
     states[owner.ownerOrdinal] = !owner.enabled ? 'unused' : closed && !owner.recycles ? 'dark'
       : !owner.opening && !opened && (closed || !model.seed) ? 'waiting' : 'active';
     if (!owner.enabled || closed && !owner.recycles) continue;
@@ -74,9 +80,9 @@ export function gridAnimationFrame(model: GridAnimationModel, elapsed: number) {
     if (sell ? model.prices[ordinal] > price : model.prices[ordinal] < price) pending.push({ ordinal, leg, ownerOrdinal: owner.ownerOrdinal });
   }
   const tags = model.fills.flatMap(fill => {
-    const age = elapsed - GRID_ANIMATION_TIMING.intro - fill.at * GRID_ANIMATION_TIMING.run;
-    return age >= 0 && age < GRID_ANIMATION_TIMING.tagLife ? [{ ...fill,
-      opacity: Math.min(1, (age + 16) / GRID_ANIMATION_TIMING.tagFade) * Math.min(1, (GRID_ANIMATION_TIMING.tagLife - age) / 60) }] : [];
+    const age = elapsed - fill.timeMs;
+    return elapsed >= fill.timeMs && elapsed < fill.timeMs + GRID_ANIMATION_TIMING.tagLife ? [{ ...fill,
+      opacity: 1 - Math.max(0, (age / GRID_ANIMATION_TIMING.tagLife - GRID_ANIMATION_TIMING.tagHold) / (1 - GRID_ANIMATION_TIMING.tagHold)) }] : [];
   });
   return { progress, price, states, pending, tags };
 }

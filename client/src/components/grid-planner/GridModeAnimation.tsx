@@ -36,13 +36,13 @@ export function GridModeAnimationScene({ model, elapsed }: { model: GridAnimatio
       <path d={`M72,${y(price)}H552`} stroke={colours[frame.states[ordinal]]} strokeWidth={frame.states[ordinal] === 'active' ? 2 : 1.5} />
     </g>)}
     <path d={path} fill="none" stroke={closingColour} strokeWidth="2" strokeLinecap="round" />
-    {frame.pending.map(order => <circle key={order.ownerOrdinal} data-waiting-order={order.leg}
-      cx={dotX} cy={y(model.prices[order.ordinal])} r="4" fill="none" stroke={order.leg === 'opening' ? openingColour : closingColour} strokeWidth="1.8" />)}
     <circle cx={dotX} cy={dotY} r="4" fill={closingColour} />
     {/* A word readout replaces the reference's numeric price, on the opposite side to the tags. */}
     {frame.progress < 1 && <text x={dotX + 12} y={dotY + (frame.progress < model.peak ? 18 : -12)}
       fill={closingColour} fontSize="14">Price</text>}
     {frame.tags.map(tag => {
+      // v5 modes_anim.py:165,239-243: stay beside the original fill point.
+      // The model's short fade removes the tag before it reads as a trailing order.
       const fillX = x(tag.at), fillY = y(model.prices[tag.ordinal]);
       const colour = tag.leg === 'opening' ? openingColour : 'hsl(var(--chart-5))';
       const owner = model.owners.find(row => row.ownerOrdinal === tag.ownerOrdinal)!;
@@ -52,6 +52,9 @@ export function GridModeAnimationScene({ model, elapsed }: { model: GridAnimatio
         <text x={fillX - 36} y={fillY + 5} textAnchor="middle" fill={colour} fontSize="14" fontWeight="600">{tag.label}</text>
       </g>;
     })}
+    {/* Paint resting rings last so no fill bracket or label can cover their stroke. */}
+    {frame.pending.map(order => <circle key={order.ownerOrdinal} data-waiting-order={order.leg}
+      cx={dotX} cy={y(model.prices[order.ordinal])} r="4" fill="none" stroke={order.leg === 'opening' ? openingColour : closingColour} strokeWidth="1.8" />)}
   </svg>;
 }
 

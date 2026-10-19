@@ -51,17 +51,73 @@ describe('Rule-driven grid animation', () => {
     expect(gridCyclePair(4, true, false)).toEqual({ openingOrdinal: 4, closingOrdinal: 3 });
     expect(gridCyclePair(3, false, false)).toEqual({ openingOrdinal: 4, closingOrdinal: 3 });
   });
-  it('starts tags at their exact fill crossing, fading in, and shows hollow waiting rings', () => {
+  it('matches v5 full-opacity arrival, hold, fade and 3%-of-run lifetime', () => {
     const model = gridAnimationModel({ mode: 'repeat_all' });
+    // modes_anim.py:83,150,233: 0.03 * 5600 ms, with the first 35% at opacity 1.
+    expect(GRID_ANIMATION_TIMING.tagLife).toBe(168);
     for (const fill of model.fills) {
-      const when = GRID_ANIMATION_TIMING.intro + fill.at * GRID_ANIMATION_TIMING.run;
+      const when = fill.timeMs;
       const matches = (tag: typeof fill) => tag.ownerOrdinal === fill.ownerOrdinal && tag.leg === fill.leg;
       expect(model.price(fill.at)).toBeCloseTo(model.prices[fill.ordinal]);
       expect(gridAnimationFrame(model, when - 1).tags.some(matches)).toBe(false);
-      const exact = gridAnimationFrame(model, when + .001).tags.find(matches)!;
-      expect(exact.opacity).toBeGreaterThan(0); expect(exact.opacity).toBeLessThan(.1);
-      expect(gridAnimationFrame(model, when + 180).tags.find(matches)!.opacity).toBeGreaterThan(exact.opacity);
+      expect(gridAnimationFrame(model, when).tags.find(matches)!.opacity).toBe(1);
+      expect(gridAnimationFrame(model, when + 50).tags.find(matches)!.opacity).toBe(1);
+      expect(gridAnimationFrame(model, when + 58.8).tags.find(matches)!.opacity).toBeCloseTo(1);
+      expect(gridAnimationFrame(model, when + 113.4).tags.find(matches)!.opacity).toBeCloseTo(.5);
+      expect(gridAnimationFrame(model, when + 167).tags.find(matches)!.opacity).toBeLessThan(.01);
+      expect(gridAnimationFrame(model, when + 168).tags.some(matches)).toBe(false);
+      expect(gridAnimationFrame(model, when + 200).tags.some(matches)).toBe(false);
     }
+  });
+  it.each(GRID_BEHAVIOUR_MODES)('%s flips tags and owner states on the same exact event time', mode => {
+    for (const side of ['long', 'short'] as const) for (const seed of [true, false]) {
+      const model = gridAnimationModel({ mode, side, seed });
+      for (const fill of model.fills) {
+        const owner = model.owners.find(row => row.ownerOrdinal === fill.ownerOrdinal)!;
+        expect(fill.timeMs).toBe(fill.leg === 'closing' ? owner.closeTimeMs : owner.openTimeMs);
+        const before = gridAnimationFrame(model, fill.timeMs - .000001);
+        const exact = gridAnimationFrame(model, fill.timeMs);
+        const matches = (tag: typeof fill) => tag.ownerOrdinal === fill.ownerOrdinal && tag.leg === fill.leg;
+        expect(before.tags.some(matches)).toBe(false);
+        expect(exact.tags.find(matches)!.opacity).toBe(1);
+        // Profit-side owners change state at both fills; opening owners stay active.
+        if (!owner.opening) {
+          expect(before.states[owner.ownerOrdinal]).toBe(fill.leg === 'closing' ? 'active' : 'waiting');
+          expect(exact.states[owner.ownerOrdinal]).toBe(fill.leg === 'closing' ? (owner.recycles ? 'waiting' : 'dark') : 'active');
+        }
+      }
+    }
+  });
+  it('keeps tags at the v5 fill point while fading, and removes them before +200 ms', () => {
+    for (const side of ['long', 'short'] as const) {
+      const model = gridAnimationModel({ mode: 'repeat_all', side });
+      for (const fill of model.fills) {
+        const later = gridAnimationFrame(model, fill.timeMs + 100);
+        const tag = later.tags.find(row => row.ownerOrdinal === fill.ownerOrdinal && row.leg === fill.leg)!;
+        expect(tag.at).toBe(fill.at); expect(tag.ordinal).toBe(fill.ordinal);
+        expect(later.progress).toBeGreaterThan(tag.at); expect(tag.opacity).toBeLessThan(1);
+        const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: fill.timeMs + 100 }));
+        const fillY = 282 - 224 * (model.prices[fill.ordinal] - model.prices[0]) / (model.prices.at(-1)! - model.prices[0]);
+        expect(html).toContain(`<rect x="${72 + 480 * fill.at - 62}" y="${fillY - 11}"`);
+        expect(gridAnimationFrame(model, fill.timeMs + 200).tags.some(row => row.timeMs === fill.timeMs)).toBe(false);
+      }
+    }
+  });
+  it('paints all hollow rings above fill brackets and labels throughout the tag lifetime', () => {
+    for (const side of ['long', 'short'] as const) {
+      const model = gridAnimationModel({ mode: 'repeat_all', side });
+      for (const fill of model.fills) for (const age of [0, 50, 100, 167]) {
+        const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: fill.timeMs + age }));
+        expect(html).toContain('data-fill=');
+        expect(html.indexOf('data-waiting-order=')).toBeGreaterThan(html.lastIndexOf('data-fill='));
+        const rings = html.slice(html.indexOf('data-waiting-order='));
+        expect(rings).not.toContain('<path'); expect(rings).not.toContain('<rect');
+        expect(rings).toContain('r="4" fill="none"');
+      }
+    }
+  });
+  it('shows hollow waiting rings and accessible copy', () => {
+    const model = gridAnimationModel({ mode: 'repeat_all' });
     const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: 0 }));
     expect(html).toContain('data-waiting-order='); expect(html).toContain('fill="none"');
     expect(html).toContain(gridBehaviourCopy(model.mode, model.side, model.seed).hint);
