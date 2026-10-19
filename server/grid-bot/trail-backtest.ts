@@ -61,7 +61,9 @@ export function runTrailBacktest(input:TrailRun) {
   const holds:Record<string,number>={},moves:{decisionAt:number;activatedAt:number;lower:string;upper:string}[]=[];
   const executions:{kind:string;side:string;size:string;price:string;fee:string;time:number}[]=[];
   const hold=(why:string)=>{holds[why]=(holds[why]??0)+1;};
-  const replay=()=>{const r=replayGridCycles(h);if(!r.ok)throw Error(r.reason);return r;};
+  let cachedReplay:Extract<ReturnType<typeof replayGridCycles>,{ok:true}>|null=null;
+  let capacityKey='',cachedCapacity:ReturnType<typeof cycleCapacity>;
+  const replay=()=>{if(cachedReplay)return cachedReplay;const r=replayGridCycles(h);if(!r.ok)throw Error(r.reason);cachedReplay=r;return r;};
   const equity=(mark:number|string)=>{
     const value=cash.plus(position.mul(mark));peak=D.max(peak,value);
     if(peak.gt(0))maxDrawdown=D.max(maxDrawdown,peak.minus(value).div(peak));return value;
@@ -74,6 +76,7 @@ export function runTrailBacktest(input:TrailRun) {
     h.operations.push(op);h.fills.push({operationId:op.id,tradeId:`EXAMPLE_FILL_${serial}`,account:h.account,time:at,
       size:op.size,price,leg:op.reduceOnly?'exit':'entry',fee:fee.toFixed()});
     h.progress.push({operationId:op.id,state:'terminal',filledSize:op.size,observedAt:at,terminalAt:at,historyThrough:at});
+    cachedReplay=null;
     const signed=op.side==='buy'?q:q.neg();position=position.plus(signed);cash=cash.minus(signed.mul(price)).minus(fee);
     fees=fees.plus(fee);turnover=turnover.plus(notional);fillCount++;
     executions.push({kind:op.kind,side:op.side,size:op.size,price,fee:fee.toFixed(),time:at});
@@ -140,6 +143,7 @@ export function runTrailBacktest(input:TrailRun) {
           const move={decisionAt:now,activatedAt:now+GRID_TRAIL_POLICY.latencyMs,lower:p.lowerPrice,upper:p.upperPrice};
           ledger.moves.push({...move,actor:'automatic'});moves.push(move);
           h={policy:p,account:h.account,historyComplete:true,carry:exported.carry,operations:[],fills:[],progress:[],allocations:[]};
+          cachedReplay=null;
           replay();
         }
       }
@@ -148,7 +152,9 @@ export function runTrailBacktest(input:TrailRun) {
     if(outside)entriesAllowed=false;
     else if(!dataHold&&!entriesAllowed&&gridInsideAutoResumeBand(String(previous.close),gridAutoResumeBand(p.lowerPrice,p.upperPrice,m.tick)))entriesAllowed=true;
     if(outside)outMs+=duration;
-    const r=replay(),capacity=cycleCapacity(h,String(previous.close));
+    const r=replay(),nextCapacityKey=`${epoch}/${serial}/${previous.close>Number(p.safetyEnvelopePrice)}`;
+    if(nextCapacityKey!==capacityKey){cachedCapacity=cycleCapacity(h,String(previous.close));capacityKey=nextCapacityKey;}
+    const capacity=cachedCapacity;
     const plan=planCycleWindow({cycles:r.cycles,direction:p.direction,levels:p.levels.map(l=>({id:`EXAMPLE_LEVEL_${l.ordinal}`,ordinal:l.ordinal,attempt:0})),
       owned:[],positionSize:position.abs().toFixed(),bookPrice:String(previous.close),lot:m.lot,minimumQuote:m.minimumQuote,
       freeSlots:100,inventoryComplete:true,entriesAllowed,canaryRemaining:e.investment,pool:capacity});

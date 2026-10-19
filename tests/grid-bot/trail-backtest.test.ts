@@ -43,7 +43,7 @@ describe('shipped-cycle historical replay',()=>{
     for(const c of result.cycleState.filter(c=>c.cycle.recycles===false))expect(c.openingCredit).toBe('0');
   });
   it('orders a protective stop and touched limits along each explicit path',()=>{
-    const data=structuredClone(candles);data[102]={...data[102],high:120,low:70,open:100,close:100};
+    const data=structuredClone(candles);data[100]={...data[100],high:120,low:70,close:100};
     const a=runTrailBacktest({...base,candles:data,seed:true,path:'OHLC'}),b=runTrailBacktest({...base,candles:data,seed:true,path:'OLHC'});
     expect(a.stopped&&b.stopped).toBe(true);expect(a.position).toBe('0');expect(b.position).toBe('0');
     expect(a.netReturn).not.toBe(b.netReturn);
