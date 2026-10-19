@@ -122,8 +122,9 @@ export class GridStorage {
       if(!owner.rowCount || owner.rows[0].status==='draft' && ['provision_subaccount','set_leverage','fund_subaccount','seed_position','place_level_order'].includes(input.type)) throw new GridStorageError('invariant');
       if(isGridCyclePolicyVersion(owner.rows[0].policy_version)&&['seed_position','place_level_order','close_position'].includes(input.type))throw new GridStorageError('invariant','Cycle trading requires immutable launch authority');
       if (input.levelId) {
-        const level = await c.query('SELECT id FROM grid_levels WHERE id=$1 AND bot_id=$2',[input.levelId,input.botId]);
-        if (!level.rowCount) throw new GridStorageError('invariant');
+        const level = await c.query(`SELECT id FROM grid_levels WHERE id=$1 AND bot_id=$2
+          AND epoch_id IS NOT DISTINCT FROM (SELECT active_epoch_id FROM grid_bots WHERE id=$2)`,[input.levelId,input.botId]);
+        if (!level.rowCount) throw new GridStorageError('invariant','Grid level is not in the bot active epoch');
       }
       if (input.parentOperationId) {
         const parent = await c.query('SELECT id FROM grid_operations WHERE id=$1 AND bot_id=$2',[input.parentOperationId,input.botId]);

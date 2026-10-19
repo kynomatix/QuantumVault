@@ -33,7 +33,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_wallet_safety,grid_monitor_orders,grid_monitor_state,grid_profit_allocations,grid_exact_fills,grid_read_claims,grid_execution_claims,grid_launch_accounts,grid_master_quota,grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query('INSERT INTO wallets VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
-  async function reservation(totalInvestment='100.00'){const p={...policy(),totalInvestment},h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;
+  async function reservation(totalInvestment='100.00',epoch=true){const p={...policy(),totalInvestment,...(!epoch?{stopLossPrice:null,stopLossPercent:null}:{})},h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;
     const bot:DraftRecord={...snapshot,walletAddress:wallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:gridDraftRevision(intent),createIntent:intent,authoritySnapshot:{state:'EXAMPLE'},policyHmac:h.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};
     await new GridStorage(pool,async()=>{}).createDraftWithLevels(bot,levels);
     const account=await new GridCustody(launch).reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:bot.policyHmac},umk());
@@ -42,7 +42,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:Date.now(),inventoryComplete:true,history:{from:0,through:Date.now(),inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED_AUTHORITY'},mark:null,position:{direction:'long',size:'0'},orders:[],trades:[]});
     return {bot,claim,level,observe,account};
   }
-  async function fixture(totalInvestment='100.00'){const {bot,claim,level}=await reservation(totalInvestment);
+  async function fixture(totalInvestment='100.00',epoch=true){const {bot,claim,level}=await reservation(totalInvestment,epoch);
     const now=Date.now(),cloid=randomUUID();
     const request:ExactGridRequest={kind:'limit',botId:bot.id,account:claim.account,masterAccount:claim.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:now,expiryMs:5000,
       data:{symbol:'BTC',client_order_id:cloid,side:'bid',reduce_only:false,amount:'1',price:'90'},authority:{levelId:level.id,levelAttempt:0}};
@@ -53,6 +53,19 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     return {bot,claim,level,op,request,observe};
   }
   async function landed(totalInvestment='100.00'){const f=await fixture(totalInvestment);expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);await launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false,orderId:'10'});return f;}
+  it('keeps NULL-epoch legacy levels available to planning and preparation',async()=>{
+    const f=await fixture('100.00',false);
+    expect((await pool.query('SELECT active_epoch_id FROM grid_bots WHERE id=$1',[f.bot.id])).rows[0].active_epoch_id).toBeNull();
+    expect((await pool.query('SELECT epoch_id FROM grid_operations WHERE id=$1',[f.op.id])).rows[0].epoch_id).toBeNull();
+    expect(await launch.submit(f.op,f.claim.leaseToken)).toBe(true);
+    await launch.settle(f.op,{state:'confirmed',reason:null,releaseSlot:false,orderId:'10'});
+    const bootId=randomUUID();await storage.reconcile(f.claim,bootId,f.observe());
+    const state=await storage.planningState(f.claim,bootId);
+    expect(state.levels).toHaveLength(f.bot.gridCount+1);
+    expect(state.levels.every(l=>l.epoch_id===null)).toBe(true);
+    const op=await new GridStorage(pool,async()=>{}).prepareOperation({botId:f.bot.id,levelId:f.level.id,type:'sync',idempotencyKey:'EXAMPLE_NULL_EPOCH',requestIdentity:'EXAMPLE_NULL_EPOCH'});
+    expect(op.epochId).toBeNull();
+  });
   // Retain a snapshot from a crashed earlier process, without sleeping or bypassing fresh admission.
   async function crashPrepared(key:string,request:ExactGridRequest){const digest=requestDigest(request);
     return (await pool.query(`INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type,exact_request,exact_request_digest,state)

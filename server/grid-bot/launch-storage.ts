@@ -330,6 +330,12 @@ export class GridLaunchStorage {
       const bot=(await c.query('SELECT b.*,a.account,a.master_account,a.canary_limit,a.canary_committed,a.released_at FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 FOR UPDATE OF b,a',[request.botId])).rows[0];
       if(!bot || bot.released_at || bot.account!==request.account || bot.master_account!==request.masterAccount || bot.lease_token!==leaseToken
         || new Date(bot.lease_expires_at).getTime()<=now || !(reduction(request)?liveStates:['provisioning','canary','active']).includes(bot.status))throw Error('Lost Grid ownership');
+      const levelId=request.authority.levelId??null;
+      // The bot lock fences epoch activation. Never prepare against a sealed predecessor,
+      // including retries with a retained level ID; NULL remains the legacy epoch.
+      const level=levelId?(await c.query(`SELECT * FROM grid_levels WHERE id=$1 AND bot_id=$2
+        AND epoch_id IS NOT DISTINCT FROM (SELECT active_epoch_id FROM grid_bots WHERE id=$2) FOR UPDATE`,[levelId,request.botId])).rows[0]:null;
+      if((levelId||request.kind==='limit'||request.kind==='cancel')&&!level)throw Error('Grid level is not in the bot active epoch');
       if(!reduction(request)&&await gridWorkerEntryBlocked(c,request.botId))throw new GridLaunchTransientError('Grid ownership recovery requires reconciliation');
       const lifecycle=(await c.query('SELECT * FROM grid_lifecycle WHERE bot_id=$1',[request.botId])).rows[0];
       if(lifecycle&&String(lifecycle.epoch)!==String(request.authority.lifecycleEpoch))throw Error('Grid lifecycle changed');
@@ -370,22 +376,17 @@ export class GridLaunchStorage {
       if(claim.slots && await this.slotBudget(c,request,monitor,claim.availableSlots)<claim.slots)throw Error('Grid subaccount slots unavailable');
       const exposure=gridAddsExposure(request)?await this.pilotGate(c,request.botId,now,{request,increment:claim.canaryIncrement}):null;
       const id=randomUUID();
-      const levelId=request.authority.levelId??null;
       if(request.kind==='cancel'){
         const original=request.authority.originalRequest as ExactGridRequest|undefined;
         if(!original||original.kind!=='limit'||original.botId!==request.botId||original.account!==request.account||original.data.symbol!==request.data.symbol
           ||!(await c.query('SELECT id FROM grid_operations WHERE bot_id=$1 AND exact_request_digest=$2 AND venue_order_id=$3 AND level_id=$4',[request.botId,requestDigest(original),String(request.data.order_id),levelId])).rowCount)throw Error('Cancel ownership unavailable');
       }
       if(isGridCyclePolicyVersion(bot.policy_version)&&(request.kind==='limit'||request.kind==='cancel')){
-        const level=(await c.query('SELECT * FROM grid_levels WHERE id=$1 AND bot_id=$2 FOR UPDATE',[levelId,request.botId])).rows[0];
-        if(!level)throw Error('Cycle owner unavailable');
         if(request.kind==='limit'){
           if(level.placement_attempt!==request.authority.levelAttempt)throw Error('Cycle attempt already allocated');
           await c.query('UPDATE grid_levels SET placement_attempt=placement_attempt+1,updated_at=clock_timestamp() WHERE id=$1',[levelId]);
         }
       }else if(request.kind==='limit'||request.kind==='cancel'){
-        const level=(await c.query('SELECT * FROM grid_levels WHERE id=$1 AND bot_id=$2 FOR UPDATE',[levelId,request.botId])).rows[0];
-        if(!level)throw Error('Grid level ownership unavailable');
         const profit=!!monitor&&request.data.reduce_only===true;
         const previous=(await c.query(`SELECT p.remaining,p.status FROM grid_monitor_orders p JOIN grid_operations o ON o.id=p.operation_id
           WHERE o.bot_id=$1 AND o.level_id=$2 AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1`,[request.botId,levelId])).rows[0];
@@ -398,8 +399,8 @@ export class GridLaunchStorage {
         await c.query('UPDATE grid_levels SET status=$2,client_order_uuid=COALESCE($3,client_order_uuid),updated_at=clock_timestamp() WHERE id=$1',[levelId,request.kind==='limit'?'submitting':'cancelling',request.data.client_order_id??null]);
       }
       await validateLockedCycleRequest(c,bot,request,now,id);
-      const result=await c.query(`INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type,client_order_uuid,exact_request,exact_request_digest,level_id)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[id,request.botId,key,digest,typeFor[request.kind],request.data.client_order_id??null,exact,digest,levelId]);
+      const result=await c.query(`INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type,client_order_uuid,exact_request,exact_request_digest,level_id,epoch_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[id,request.botId,key,digest,typeFor[request.kind],request.data.client_order_id??null,exact,digest,levelId,bot.active_epoch_id]);
       if(isGridCyclePolicyVersion(bot.policy_version)&&request.data.reduce_only===true&&['limit','close'].includes(request.kind)){
         const portions=(request.kind==='limit'?request.authority.fillAllocations:request.authority.cycleAllocations) as {tradeId:string;size:string}[];
         const totals=new Map<string,DecimalBase>();
@@ -413,7 +414,7 @@ export class GridLaunchStorage {
           const fill=(await c.query(`SELECT f.size,f.level_id,l.ordinal,COALESCE((SELECT sum(a.size-a.released_size) FROM grid_profit_allocations a WHERE a.account=f.account AND a.trade_id=f.trade_id AND a.released_at IS NULL),0) AS reserved
             FROM grid_exact_fills f LEFT JOIN grid_levels l ON l.id=f.level_id WHERE f.account=$1 AND f.trade_id=$2 AND f.bot_id=$3 AND f.leg='entry' FOR UPDATE OF f`,[request.account,a.tradeId,request.botId])).rows[0];
           if(!fill||new Decimal(fill.reserved).plus(a.size).gt(fill.size))throw Error('Fill backing already reserved');total=total.plus(a.size);
-          const target=(await c.query('SELECT ordinal,reduce_only FROM grid_levels WHERE id=$1 AND bot_id=$2',[levelId,request.botId])).rows[0];
+          const target=level;
           if(!target||(fill.level_id?target.ordinal!==fill.ordinal+(bot.direction==='long'?1:-1):!target.reduce_only))throw Error('Profit must pair with its adjacent entry or seed');
           await c.query('INSERT INTO grid_profit_allocations(operation_id,account,trade_id,size) VALUES($1,$2,$3,$4)',[id,request.account,a.tradeId,a.size]);
         }

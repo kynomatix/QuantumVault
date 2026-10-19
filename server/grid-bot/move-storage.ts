@@ -41,6 +41,7 @@ export class GridMoveStorage {
     return {...bot,account:account.account,master_account:account.master_account};
   }
   async surface(wallet:string,id:string){
+    this.requireEnabled();
     return this.lifecycle.monitor.launch.transaction(async c=>{
       const bot=(await c.query('SELECT id,direction,status,active_epoch_id FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rows[0];
       if(!bot)throw new GridMoveError('Bot not found');

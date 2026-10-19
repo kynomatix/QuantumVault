@@ -215,7 +215,8 @@ export class GridMonitorStorage {
       WHERE o.bot_id=$1 AND a.released_at IS NULL`,[claim.id])).rows;
     const levels=(await c.query(`SELECT l.*,CASE WHEN l.status='cancelled' AND p.status='cancelled' THEN p.remaining::text ELSE l.size::text END AS exact_size
       FROM grid_levels l LEFT JOIN LATERAL (SELECT p.* FROM grid_monitor_orders p JOIN grid_operations o ON o.id=p.operation_id
-        WHERE o.level_id=l.id AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1) p ON true WHERE l.bot_id=$1 ORDER BY l.ordinal`,[claim.id])).rows;
+        WHERE o.level_id=l.id AND o.exact_request->'data'->>'reduce_only'='false' ORDER BY o.created_at DESC,o.id DESC LIMIT 1) p ON true
+      WHERE l.bot_id=$1 AND l.epoch_id IS NOT DISTINCT FROM (SELECT active_epoch_id FROM grid_bots WHERE id=$1) ORDER BY l.ordinal`,[claim.id])).rows;
     const life=(await c.query('SELECT epoch FROM grid_lifecycle WHERE bot_id=$1',[claim.id])).rows[0];
     const auto=(await c.query('SELECT generation FROM grid_auto_resume WHERE bot_id=$1',[claim.id])).rows[0];
     const cycle=isGridCyclePolicyVersion(bot.policy_version)?await readCycleState(c,bot,claim.account,Date.now()):undefined;

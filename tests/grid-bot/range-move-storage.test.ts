@@ -3,7 +3,11 @@ import {Pool} from 'pg';
 import {createHash,randomUUID} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import bs58 from 'bs58';
-import {GridLaunchStorage} from '../../server/grid-bot/launch-storage';
+import Decimal from 'decimal.js';
+import {GridLaunchStorage,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
+import {GridStorage} from '../../server/grid-bot/storage';
+import {planCycleWindow} from '../../server/grid-bot/cycle-planner';
+import {gridClientOrderId} from '../../server/grid-bot/order-identity';
 import {GridCustody} from '../../server/grid-bot/custody';
 import {GridMonitorStorage,type GridMonitorClaim} from '../../server/grid-bot/monitor-storage';
 import {GridLifecycleStorage} from '../../server/grid-bot/lifecycle-storage';
@@ -55,7 +59,7 @@ describe('range moves from real pre-epoch PostgreSQL data',()=>{
     await pool.query(migration);
     return {p,policyHash:signed.digest,epoch:(await pool.query('SELECT * FROM grid_epochs WHERE bot_id=$1',[p.id])).rows[0]};
   }
-  it('backfills exact signed decimals, exhausts an ordinary bot and activates/replays two successive moves',async()=>{
+  it('backfills, moves twice, and plans/prepares/fills only in the active epoch without latching replay',async()=>{
     const f=await legacy(),snapshot=f.epoch.policy_snapshot;
     expect(snapshot.legacyBot).toMatchObject({lower_price:'80.00000000',total_investment:'600.00',stop_loss_percent:'20.0000'});
     expect(snapshot.legacyLevels[0]).toMatchObject({price:'80.00000000',size:'1.00000000'});
@@ -67,9 +71,9 @@ describe('range moves from real pre-epoch PostgreSQL data',()=>{
     expect(canonicalGridPolicy(archivedEpochPolicy(oldJson))).toBe(canonicalGridPolicy(f.p));
     const account=await new GridCustody(launch).reserve({botId:f.p.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:f.policyHash},umk());
     const claim:GridMonitorClaim={id:f.p.id,leaseToken:account.leaseToken,account:account.account,masterAccount:account.masterAccount};
-    let offset=0;
-    const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:now,inventoryComplete:true,history:{from:0,through:now,inclusive:true,publicationLagMs:0,source:'EXAMPLE'},mark:{price:String(123+offset),observedAt:now},position:{direction:'long',size:'0'},orders:[],trades:[]});
-    const reconcile=async()=>{const o=observe();await life.safetyObservation(claim,o);await monitor.reconcile(claim,randomUUID(),o);};
+    let offset=0,positionSize='0';const bootId=randomUUID(),orders:GridObservation['orders']=[],trades:GridObservation['trades']=[];
+    const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:now,inventoryComplete:true,history:{from:0,through:now,inclusive:true,publicationLagMs:0,source:'EXAMPLE'},mark:{price:String(123+offset),observedAt:now},position:{direction:'long',size:positionSize},orders,trades});
+    const reconcile=async()=>{const o=observe();await life.safetyObservation(claim,o);return monitor.reconcile(claim,bootId,o);};
     const advance=async(ms:number)=>{now+=ms;await pool.query('UPDATE test_clock SET at=$1',[new Date(now)]);await pool.query("UPDATE grid_bots SET lease_expires_at=clock_timestamp()+interval '1 day' WHERE id=$1",[claim.id]);};
     const collect=async():Promise<GridMoveAuthority>=>{
       const quote=(role:'maker'|'taker',intent:'entry'|'profit')=>{const r=createGridFeeQuote({account:claim.account,subaccountId:null,market:'BTC-PERP',liquidityRole:role,builderCode:'CARRY',intent},{account:claim.account,maker_fee:'0',taker_fee:'0'},[{builder_code:'CARRY',fee_rate:'0'}],[{builder_code:'CARRY',max_fee_rate:'0'}],now);if(r.availability!=='available')throw Error(r.reason);return r.quote;};
@@ -95,7 +99,51 @@ describe('range moves from real pre-epoch PostgreSQL data',()=>{
       offset+=10;
     }
     expect((await pool.query('SELECT count(*) AS n FROM grid_epochs WHERE bot_id=$1',[claim.id])).rows[0].n).toBe('3');
+    await life.sol(claim,{balance:'0.1',observedAt:now});
+    const state=await monitor.planningState(claim,bootId),bot=(await monitor.snapshot(claim)).bot;
+    expect(state.levels).toHaveLength(f.p.levels.length);
+    expect(state.levels.every(l=>l.epoch_id===bot.active_epoch_id)).toBe(true);
+    expect(new Set(state.levels.map(l=>l.ordinal)).size).toBe(state.levels.length);
+    const authority=await collect(),plan=planCycleWindow({cycles:state.cycle!.cycles,direction:'long',
+      levels:state.levels.map(l=>({id:l.id,ordinal:l.ordinal,attempt:l.placement_attempt})),owned:[],positionSize:'0',
+      bookPrice:authority.facts.bookPrice,lot:authority.facts.lot,minimumQuote:authority.facts.minimumQuote,freeSlots:100,
+      inventoryComplete:true,entriesAllowed:state.entriesAllowed,canaryRemaining:'600'});
+    expect(plan.levels.every(l=>state.levels.some(active=>active.id===l.id))).toBe(true);
+    const action=plan.chunks.flat().find(a=>a.kind==='place');if(!action||action.kind!=='place')throw Error('EXAMPLE active epoch placement missing');
+    const l=action.level,clientOrderId=gridClientOrderId({botId:claim.id,level:l.ordinal,attempt:l.attempt,leg:'entry',epochId:bot.active_epoch_id});
+    const request:ExactGridRequest={kind:'limit',botId:claim.id,account:claim.account,masterAccount:claim.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:now,expiryMs:5000,
+      data:{symbol:'BTC',client_order_id:clientOrderId,side:'bid',reduce_only:false,amount:l.size,price:l.price},
+      authority:{...state.authority,policy:state.cycle!.policy,policyHmac:bot.policy_hmac,facts:authority.facts,cycleRisk:authority.risk,
+        levelId:l.id,levelAttempt:l.attempt,cycle:l.cycle,initialCredit:l.initialCredit,recycleAllocations:l.recycleAllocations}};
+    const budget={credits:'10',slots:1 as const,canaryIncrement:new Decimal(l.price).mul(l.size).toFixed(),observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000};
+    const stale=(await pool.query('SELECT id FROM grid_levels WHERE bot_id=$1 AND ordinal=$2 AND epoch_id<>$3',[claim.id,l.ordinal,bot.active_epoch_id])).rows;
+    expect(stale).toHaveLength(2);
+    for(const old of stale){
+      await expect(launch.prepare('EXAMPLE_STALE_'+old.id,{...request,authority:{...request.authority,levelId:old.id}},budget,claim.leaseToken)).rejects.toThrow('Grid level is not in the bot active epoch');
+      await expect(new GridStorage(pool,async()=>{}).prepareOperation({botId:claim.id,levelId:old.id,type:'sync',idempotencyKey:'EXAMPLE_STALE_'+old.id,requestIdentity:'EXAMPLE_STALE_'+old.id})).rejects.toThrow('Grid level is not in the bot active epoch');
+    }
+    expect((await pool.query('SELECT count(*) AS n FROM grid_operations WHERE bot_id=$1',[claim.id])).rows[0].n).toBe('0');
+    const op=await launch.prepare('EXAMPLE_POST_MOVE',request,budget,claim.leaseToken);
+    expect((await launch.prepare('EXAMPLE_POST_MOVE',request,budget,claim.leaseToken)).id).toBe(op.id);
+    expect((await pool.query('SELECT epoch_id,level_id FROM grid_operations WHERE id=$1',[op.id])).rows[0]).toEqual({epoch_id:bot.active_epoch_id,level_id:l.id});
+    expect(await launch.submit(op,claim.leaseToken)).toBe(true);
+    await launch.settle(op,{state:'confirmed',reason:null,releaseSlot:true,orderId:'EXAMPLE_POST_MOVE'});
+    positionSize=l.size;
+    orders.push({orderId:'EXAMPLE_POST_MOVE',clientOrderId,symbol:'BTC',side:'long',price:l.price,amount:l.size,filledAmount:l.size,cancelledAmount:'0',reduceOnly:false,orderType:'limit',createdAt:now,updatedAt:now,status:'filled'});
+    trades.push({tradeId:'EXAMPLE_POST_MOVE',orderId:'EXAMPLE_POST_MOVE',clientOrderId,symbol:'BTC',side:'open_long',time:now,size:l.size,price:l.price,fee:'0'});
+    expect((await reconcile()).reconciliationComplete).toBe(true);
+    expect((await reconcile()).reconciliationComplete).toBe(true);
+    expect((await pool.query('SELECT epoch_id FROM grid_exact_fills WHERE operation_id=$1',[op.id])).rows).toEqual([{epoch_id:bot.active_epoch_id}]);
+    const after=await monitor.planningState(claim,bootId);
+    expect(after.entriesAllowed).toBe(true);expect(after.cycle!.state.blocked_reasons).toEqual([]);
+    expect(after.cycle!.policy.epochAuthority!.epochId).toBe(bot.active_epoch_id);
+    expect(after.cycle!.input.fills).toHaveLength(1);
   },30000);
+  it('gates the move surface before any database access when disabled',async()=>{
+    const moves=new GridMoveStorage(life,vi.fn(),()=>false),transaction=vi.spyOn(launch,'transaction');
+    await expect(moves.surface(wallet,randomUUID())).rejects.toThrow('Range moving is not enabled');
+    expect(transaction).not.toHaveBeenCalled();
+  });
   it('repairs each missing FK and validates a legacy NULL epoch assignment against its parent',async()=>{
     const f=await legacy();
     const fks=[['grid_bots','grid_bots_active_epoch_fk'],['grid_levels','grid_levels_epoch_fk'],['grid_operations','grid_operations_epoch_fk'],['grid_operations','grid_operations_level_epoch_fk'],['grid_exact_fills','grid_exact_fills_operation_epoch_fk'],['grid_control_requests','grid_control_origin_epoch_fk'],['grid_auto_resume','grid_auto_resume_epoch_fk']];
