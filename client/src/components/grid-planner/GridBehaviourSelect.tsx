@@ -9,10 +9,13 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const when = side === 'long' ? 'When price rises' : 'When price falls';
-  const select = (mode: GridBehaviourMode) => {
-    onChange(mode);
+  const close = () => {
     setExpanded(false);
     trigger.current?.focus();
+  };
+  const select = (mode: GridBehaviourMode) => {
+    onChange(mode);
+    close();
   };
 
   return <div className="@container min-w-0">
@@ -23,7 +26,13 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
       <span>{when}: <strong>{gridBehaviourCopy(value, side, seed).label}</strong></span>
       <ChevronDown aria-hidden="true" className={`ml-2 h-4 w-4 shrink-0 transition-transform motion-reduce:transition-none ${expanded ? 'rotate-180' : ''}`} />
     </Button>
-    <div id={`${id}-panel`} hidden={!expanded}>
+    <div id={`${id}-panel`} hidden={!expanded} onKeyDown={event => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        close();
+      }
+    }}>
       <div role="radiogroup" aria-label={`${when}: Grid behaviour`}
         className="mt-3 grid grid-cols-1 items-stretch gap-3 @min-[560px]:grid-cols-3">
         {GRID_BEHAVIOUR_MODES.map(mode => {
@@ -32,7 +41,20 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
           return <label key={mode} className={`relative flex h-full min-w-0 cursor-pointer flex-col gap-2 rounded-lg border p-3 text-left break-words focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${selected ? 'border-primary bg-primary/10' : 'border-border bg-card'}`}>
             <input type="radio" name={`${id}-behaviour`} value={mode} checked={selected}
               aria-labelledby={`${id}-${mode}-title`} aria-describedby={`${id}-${mode}-hint ${id}-${mode}-example`}
-              className="sr-only" onChange={() => select(mode)} onClick={() => { if (selected) select(mode); }} />
+              className="sr-only" onChange={() => onChange(mode)} onClick={close}
+              onKeyDown={event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  select(mode);
+                } else if (['ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown'].includes(event.key)) {
+                  // Prevent native arrow activation from generating a click that closes the panel.
+                  event.preventDefault();
+                  const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
+                  const next = GRID_BEHAVIOUR_MODES[(GRID_BEHAVIOUR_MODES.indexOf(mode) + direction + GRID_BEHAVIOUR_MODES.length) % GRID_BEHAVIOUR_MODES.length];
+                  onChange(next);
+                  event.currentTarget.closest('[role="radiogroup"]')?.querySelector<HTMLInputElement>(`input[value="${next}"]`)?.focus();
+                }
+              }} />
             <span className="flex items-start justify-between gap-2">
               <span id={`${id}-${mode}-title`} className="font-medium">{copy.label}</span>
               {selected && <Check aria-hidden="true" className="h-4 w-4 shrink-0 text-primary" />}

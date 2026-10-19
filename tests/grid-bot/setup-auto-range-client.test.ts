@@ -207,10 +207,10 @@ describe('Grid behaviour reveal interaction', () => {
     for (const mode of ['step_back', 'step_back_edge', 'repeat_all']) {
       row().props.onClick(); renderPicker();
       const radio = find(node => node.type === 'input' && node.props.value === mode);
-      // Native radios share a name, giving the group the browser's arrow-key selection.
+      // A pointer activation clicks the input and changes its checked value.
       expect(radio.props.type).toBe('radio');
       expect(radio.props.name).toBe('EXAMPLE-behaviour-behaviour');
-      radio.props.onChange(); renderPicker();
+      radio.props.onClick(); radio.props.onChange(); renderPicker();
       expect(onChange).toHaveBeenLastCalledWith(mode);
       expect(panel().props.hidden).toBe(true);
       expect(row().props['aria-expanded']).toBe(false);
@@ -223,6 +223,76 @@ describe('Grid behaviour reveal interaction', () => {
     find(node => node.type === 'input' && node.props.checked).props.onClick(); renderPicker();
     expect(panel().props.hidden).toBe(true);
     expect(focus).toHaveBeenCalledTimes(4);
+  });
+
+  function keyboardPicker() {
+    let value: Parameters<typeof GridBehaviourSelect>[0]['value'] = 'repeat_all';
+    const onChange = vi.fn((mode: typeof value) => { value = mode; });
+    const focus = vi.fn();
+    const renderPicker = () => {
+      hooks.stateIndex = 0; hooks.refIndex = 0;
+      tree = GridBehaviourSelect({ value, side: 'long', seed: true, onChange });
+      hooks.refs[0].current = { focus };
+    };
+    const row = () => find(node => node.type === Button);
+    const panel = () => find(node => node.props.id === row().props['aria-controls']);
+    const radio = (mode = value) => find(node => node.type === 'input' && node.props.value === mode);
+    renderPicker();
+    row().props.onClick(); renderPicker();
+    return { renderPicker, row, panel, radio, onChange, focus };
+  }
+
+  it('Escape from inside the panel closes only the panel and restores row focus', () => {
+    const picker = keyboardPicker();
+    const event = { key: 'Escape', target: picker.radio(), preventDefault: vi.fn(), stopPropagation: vi.fn() };
+    picker.panel().props.onKeyDown(event); picker.renderPicker();
+    expect(picker.panel().props.hidden).toBe(true);
+    expect(picker.row().props['aria-expanded']).toBe(false);
+    expect(picker.focus).toHaveBeenCalledOnce();
+    expect(picker.onChange).not.toHaveBeenCalled();
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(event.stopPropagation).toHaveBeenCalledOnce();
+  });
+
+  it.each(['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'])('%s browses and wraps cards without collapsing', key => {
+    const picker = keyboardPicker();
+    const order = key === 'ArrowRight' || key === 'ArrowDown'
+      ? ['step_back', 'step_back_edge', 'repeat_all'] as const
+      : ['step_back_edge', 'step_back', 'repeat_all'] as const;
+    for (const mode of order) {
+      const cardFocus = vi.fn();
+      const querySelector = vi.fn(() => ({ focus: cardFocus }));
+      const closest = vi.fn(() => ({ querySelector }));
+      const event = { key, preventDefault: vi.fn(), currentTarget: { closest } };
+      picker.radio().props.onKeyDown(event); picker.renderPicker();
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(closest).toHaveBeenCalledWith('[role="radiogroup"]');
+      expect(querySelector).toHaveBeenCalledWith(`input[value="${mode}"]`);
+      expect(cardFocus).toHaveBeenCalledOnce();
+      expect(picker.onChange).toHaveBeenLastCalledWith(mode);
+      expect(picker.radio(mode).props.checked).toBe(true);
+      expect(picker.panel().props.hidden).toBe(false);
+      expect(picker.row().props['aria-expanded']).toBe(true);
+      expect(picker.focus).not.toHaveBeenCalled();
+    }
+    expect(picker.onChange).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(['Enter', ' '])('%s selects the focused card and collapses with row focus', key => {
+    const picker = keyboardPicker();
+    // Exercise both a different card and activation of the already-selected card.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const event = { key, preventDefault: vi.fn() };
+      picker.radio('step_back').props.onKeyDown(event); picker.renderPicker();
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(picker.onChange).toHaveBeenLastCalledWith('step_back');
+      expect(picker.radio('step_back').props.checked).toBe(true);
+      expect(picker.panel().props.hidden).toBe(true);
+      expect(picker.row().props['aria-expanded']).toBe(false);
+      expect(picker.focus).toHaveBeenCalledTimes(attempt + 1);
+      if (attempt === 0) { picker.row().props.onClick(); picker.renderPicker(); }
+    }
+    expect(picker.onChange).toHaveBeenCalledTimes(2);
   });
 });
 
