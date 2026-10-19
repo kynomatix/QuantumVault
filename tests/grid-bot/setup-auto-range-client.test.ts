@@ -245,7 +245,8 @@ describe('Grid behaviour reveal interaction', () => {
   it('Escape from inside the panel closes only the panel and restores row focus', () => {
     const picker = keyboardPicker();
     const event = { key: 'Escape', target: picker.radio(), preventDefault: vi.fn(), stopPropagation: vi.fn() };
-    picker.panel().props.onKeyDown(event); picker.renderPicker();
+    // Escape bubbles to the shared wrapper so it also works from the row trigger.
+    tree.props.onKeyDown(event); picker.renderPicker();
     expect(picker.panel().props.hidden).toBe(true);
     expect(picker.row().props['aria-expanded']).toBe(false);
     expect(picker.focus).toHaveBeenCalledOnce();
