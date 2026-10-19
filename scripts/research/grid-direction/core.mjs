@@ -1,4 +1,5 @@
 import {computeBtcDirection} from '../../../server/grid-planner/direction.ts';
+import {validateCandles} from '../../../server/grid-planner/chart.ts';
 import {plannerRegime} from '../../../server/grid-planner/regime.ts';
 import {gridSignalViews} from '../../../client/src/lib/grid-signals-view.ts';
 import {btcUtcWeekStart,BTC_TREND_WEEK_MS as WEEK} from '../../../shared/grid-direction.ts';
@@ -21,7 +22,7 @@ export function classifySignals(views,side){
   return {...individual,'All available agree':all,'Majority agree':majority};
 }
 export function signalAt({market,timeframe,launchAt,sources,macroSources,aggregateStructureWeeks,computeWeeklyStructure}){
-  const completed=btcUtcWeekStart(launchAt),count=Math.min(200,gridHistoryWindow(timeframe,'week').chartBars);
+  const completed=btcUtcWeekStart(launchAt),poolCount=gridHistoryWindow(timeframe,'week').chartBars,count=Math.min(200,poolCount);
   let macro=computeBtcDirection([],launchAt),weekly={state:'unavailable',reason:'No complete weekly source window.'},trend={state:'unavailable',reason:'No fresh direct perpetual history.'};
   const attempts=[];
   for(const source of macroSources){
@@ -36,17 +37,19 @@ export function signalAt({market,timeframe,launchAt,sources,macroSources,aggrega
     // Match the transport selection: complete >=7-week history wins even if swings are neutral/missing.
     if(weeks.length>=7&&weeks.at(-1).time+WEEK===completed){weekly=computeWeeklyStructure(market,weeks,launchAt);weeklySource=source.venue;weeklyInput=weeks;break;}
   }
-  let best=[];
+  let selected=[];
   for(const source of sources){
-    const bars=closedWindow(source.bars??[],launchAt,duration(timeframe),count),candidate=plannerRegime(market,timeframe,bars,launchAt);
-    attempts.push({kind:'Trend',source:source.venue,state:candidate.state,bars:bars.length});
-    if(candidate.state==='available'&&bars.length===count){trend=candidate;trendSource=source.venue;trendInput=bars;break;}
-    if(candidate.state==='available'&&bars.length>best.length){best=bars;trend=candidate;trendSource=source.venue;trendInput=bars;}
+    const bars=closedWindow(source.bars??[],launchAt,duration(timeframe),poolCount);
+    const valid=validateCandles(bars,launchAt)&&bars.every((c,i)=>c.provenance.source===source.venue&&c.time%duration(timeframe)===0&&c.time+duration(timeframe)<=launchAt&&Number.isFinite(c.volume)&&c.volume>=0&&(!i||c.time===bars[i-1].time+duration(timeframe)))&&bars.at(-1)?.time+duration(timeframe)===launchAt;
+    attempts.push({kind:'Trend pool',source:source.venue,valid,bars:bars.length,requestedBars:poolCount});
+    if(valid&&bars.length>selected.length){selected=bars;trendSource=source.venue;}
+    if(valid&&bars.length===poolCount){selected=bars;trendSource=source.venue;break;}
   }
+  trendInput=selected.slice(-200);trend=plannerRegime(market,timeframe,trendInput,launchAt);
   const funding={state:'unavailable',reason:'No archived Pacifica /info quote with point-in-time freshness; current quotes and proxy funding are not substituted.'};
   const views=gridSignalViews(macro,{market,serverNow:launchAt,weekly,funding},market,timeframe,trend);
   const inputAudit={latestMacroClose:macro.regime==='unavailable'?null:macro.asOf,latestWeeklyClose:weeklyInput.at(-1)?.time+WEEK||null,latestTrendClose:trendInput.at(-1)?.time+duration(timeframe)||null,
-    weeklySource,trendSource,trendBars:trendInput.length,requestedTrendBars:count,reconstructedAvailability:true};
+    weeklySource,trendSource,trendBars:trendInput.length,requestedTrendBars:count,requestedPoolBars:poolCount,reconstructedAvailability:true};
   if(Object.entries(inputAudit).some(([k,v])=>k.startsWith('latest')&&v!==null&&v>launchAt))throw Error('Look-ahead input');
   return {market,timeframe,launchAt,macro,weekly,trend,funding,views:views.map(({name,direction,unavailable})=>({name,direction,unavailable})),inputAudit,attempts};
 }

@@ -7,7 +7,8 @@ import {signalAt,classifySignals,DAY,duration} from './core.mjs';
 import {aggregateStructureWeeks,computeWeeklyStructure} from '../../../server/grid-planner/weekly-structure.ts';
 import {runTrailBacktest,makeTrailGrid,TRAIL_EXPERIMENT} from '../../../server/grid-bot/trail-backtest.ts';
 import {rollingWindows,plannerLaunchGeometry} from '../../../server/grid-bot/trail-rolling.ts';
-const [evidence,phase]=process.argv.slice(2),started=Date.now(),out=join(evidence,phase);
+const [evidence,phase,marketFilter='',output='evaluation-v3']=process.argv.slice(2),started=Date.now(),out=join(evidence,output,phase+(marketFilter?'-'+marketFilter:''));
+mkdirSync(join(evidence,output),{recursive:true});
 if(!['pacifica','2022','2023','2024','2025'].includes(phase))throw Error('Phase required');
 mkdirSync(out);const data=loadData(evidence),signals=new Map(),rejected=[],equivalence=[],counts={read:0,runs:0,minFreeGiB:freemem()/1024**3};
 function getSignal(row){const key=[row.market,row.timeframe,row.launchAt].join('|');let s=signals.get(key);if(!s){s=signalAt({...row,sources:data.sources(row.market,row.timeframe),macroSources:data.macroSources,aggregateStructureWeeks,computeWeeklyStructure});signals.set(key,s);appendFileSync(join(out,'signals.jsonl'),JSON.stringify(s)+'\n');}return s;}
@@ -29,7 +30,7 @@ if(phase==='pacifica'){
   });
   if(counts.read!==134640||counts.runs!==26928||equivalence.length!==20)throw Error('Prior evidence cardinality mismatch');
 }else{
-  for(const market of ['BTC','ETH','SOL'])for(const timeframe of ['1h','4h']){
+  for(const market of (marketFilter?[marketFilter]:['BTC','ETH','SOL']))for(const timeframe of ['1h','4h']){
     const bars=data.sources(market,timeframe)[0].bars,metadata=data.metadata(market);
     const stop=data.pacifica.find(d=>d.symbol===market&&d.timeframe===timeframe).bars[0].time;
     for(const horizonDays of [14,30])for(const w of rollingWindows(bars,timeframe,Date.parse('2022-01-02T00:00:00Z'),stop,horizonDays)){
@@ -46,6 +47,6 @@ if(phase==='pacifica'){
     console.log(`${phase} ${market} ${timeframe} complete; cumulative ${counts.runs} runs`);
   }
 }
-const hashes=Object.fromEntries(['core.mjs','io.mjs','evaluate.mjs','loader.mjs'].map(f=>[f,sha256(readFileSync(new URL(f,import.meta.url)))]));
+const hashes=Object.fromEntries(['core.mjs','io.mjs','evaluate.mjs','loader.mjs','proxy-policy.mjs'].map(f=>[f,sha256(readFileSync(new URL(f,import.meta.url)))]));
 writeFileSync(join(out,'run-record.json'),JSON.stringify({phase,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString(),seconds:(Date.now()-started)/1000,workerCount:1,...counts,uniqueLaunches:signals.size,economics:TRAIL_EXPERIMENT,priorManifestSha256:data.priorManifestSha256,snapshotManifestSha256:data.snapshot.manifestSha256,fallbackManifestSha256:data.fallback.manifestSha256,runtimeFileSha256:hashes,equivalence,rejected},null,2));
 console.log(`${phase}: ${counts.runs} runs, ${signals.size} launches, ${rejected.length} holds, ${((Date.now()-started)/1000).toFixed(1)} seconds`);
