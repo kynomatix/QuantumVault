@@ -2,6 +2,7 @@
 import {writeFileSync,appendFileSync,mkdirSync,readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {freemem} from 'node:os';
+import {workerData} from 'node:worker_threads';
 import {loadData,readLines,prior,sha256} from './io.mjs';
 import {signalAt,classifySignals,DAY,duration} from './core.mjs';
 import {aggregateStructureWeeks,computeWeeklyStructure} from '../../../server/grid-planner/weekly-structure.ts';
@@ -35,6 +36,7 @@ if(phase==='pacifica'){
     const stop=data.pacifica.find(d=>d.symbol===market&&d.timeframe===timeframe).bars[0].time;
     for(const horizonDays of [14,30])for(const w of rollingWindows(bars,timeframe,Date.parse('2022-01-02T00:00:00Z'),stop,horizonDays)){
       if(new Date(w.launchAt).getUTCFullYear()!==Number(phase))continue;
+      if(workerData?.rank===1){const gate=new Int32Array(workerData.gate);while(Atomics.load(gate,0)===1)Atomics.wait(gate,0,1);}
       counts.minFreeGiB=Math.min(counts.minFreeGiB,freemem()/1024**3);
       if(w.hold){rejected.push({market,timeframe,horizonDays,...w});continue;}
       const g=plannerLaunchGeometry(bars,timeframe,w.start,metadata.tick);if(!g.ok){rejected.push({market,timeframe,horizonDays,...w,hold:g.reason});continue;}
@@ -48,5 +50,5 @@ if(phase==='pacifica'){
   }
 }
 const hashes=Object.fromEntries(['core.mjs','io.mjs','evaluate.mjs','loader.mjs','proxy-policy.mjs'].map(f=>[f,sha256(readFileSync(new URL(f,import.meta.url)))]));
-writeFileSync(join(out,'run-record.json'),JSON.stringify({phase,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString(),seconds:(Date.now()-started)/1000,workerCount:1,...counts,uniqueLaunches:signals.size,economics:TRAIL_EXPERIMENT,priorManifestSha256:data.priorManifestSha256,snapshotManifestSha256:data.snapshot.manifestSha256,fallbackManifestSha256:data.fallback.manifestSha256,runtimeFileSha256:hashes,equivalence,rejected},null,2));
+writeFileSync(join(out,'run-record.json'),JSON.stringify({phase,startedAt:new Date(started).toISOString(),completedAt:new Date().toISOString(),seconds:(Date.now()-started)/1000,workerCount:workerData?2:1,...counts,uniqueLaunches:signals.size,economics:TRAIL_EXPERIMENT,priorManifestSha256:data.priorManifestSha256,snapshotManifestSha256:data.snapshot.manifestSha256,fallbackManifestSha256:data.fallback.manifestSha256,runtimeFileSha256:hashes,equivalence,rejected},null,2));
 console.log(`${phase}: ${counts.runs} runs, ${signals.size} launches, ${rejected.length} holds, ${((Date.now()-started)/1000).toFixed(1)} seconds`);
