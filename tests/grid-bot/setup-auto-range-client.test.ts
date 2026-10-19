@@ -30,6 +30,7 @@ vi.mock('../../shared/grid-behaviour', async importOriginal => ({
 }));
 vi.mock('react', async importOriginal => ({
   ...await importOriginal<typeof import('react')>(),
+  useId: () => 'EXAMPLE-behaviour',
   useState: (initial: unknown) => {
     const index = hooks.stateIndex++;
     if (!(index in hooks.states)) hooks.states[index] = typeof initial === 'function' ? initial() : initial;
@@ -180,6 +181,49 @@ afterEach(() => {
   for (const effect of hooks.effects) effect.cleanup?.();
   vi.useRealTimers();
   vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.clearAllMocks();
+});
+
+describe('Grid behaviour reveal interaction', () => {
+  it.each(['long', 'short'])('toggles inline, selects each %s card, and restores row focus', side => {
+    let value: Parameters<typeof GridBehaviourSelect>[0]['value'] = 'repeat_all';
+    const onChange = vi.fn((mode: typeof value) => { value = mode; });
+    const focus = vi.fn();
+    const renderPicker = () => {
+      hooks.stateIndex = 0; hooks.refIndex = 0;
+      tree = GridBehaviourSelect({ value, side, seed: true, onChange });
+      hooks.refs[0].current = { focus };
+    };
+    const row = () => find(node => node.type === Button);
+    const panel = () => find(node => node.props.id === row().props['aria-controls']);
+    renderPicker();
+    expect(row().props['aria-expanded']).toBe(false);
+    expect(panel().props.hidden).toBe(true);
+    row().props.onClick(); renderPicker();
+    expect(row().props['aria-expanded']).toBe(true);
+    expect(panel().props.hidden).toBe(false);
+    row().props.onClick(); renderPicker();
+    expect(panel().props.hidden).toBe(true);
+    expect(onChange).not.toHaveBeenCalled();
+    for (const mode of ['step_back', 'step_back_edge', 'repeat_all']) {
+      row().props.onClick(); renderPicker();
+      const radio = find(node => node.type === 'input' && node.props.value === mode);
+      // Native radios share a name, giving the group the browser's arrow-key selection.
+      expect(radio.props.type).toBe('radio');
+      expect(radio.props.name).toBe('EXAMPLE-behaviour-behaviour');
+      radio.props.onChange(); renderPicker();
+      expect(onChange).toHaveBeenLastCalledWith(mode);
+      expect(panel().props.hidden).toBe(true);
+      expect(row().props['aria-expanded']).toBe(false);
+      expect(find(node => node.type === 'input' && node.props.value === mode).props.checked).toBe(true);
+      const title = find(node => node.props.id === radio.props['aria-labelledby']);
+      expect(row().props['aria-label']).toContain(text(title));
+    }
+    expect(focus).toHaveBeenCalledTimes(3);
+    row().props.onClick(); renderPicker();
+    find(node => node.type === 'input' && node.props.checked).props.onClick(); renderPicker();
+    expect(panel().props.hidden).toBe(true);
+    expect(focus).toHaveBeenCalledTimes(4);
+  });
 });
 
 describe('Grid setup automatic opening range', () => {

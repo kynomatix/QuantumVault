@@ -3,6 +3,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync } from 'node:fs';
 import { GridRegimeHint } from '../../client/src/components/grid-planner/GridRegimeHint';
+import { GridBehaviourSelect } from '../../client/src/components/grid-planner/GridBehaviourSelect';
+import { GRID_BEHAVIOUR_MODES, gridBehaviourCopy } from '../../shared/grid-behaviour';
 import { gridSetupAccess, gridSetupForm, gridSetupIntent, isGridRegime, gridMarketChange,
   gridStoredMarket, gridRememberMarket, gridAvailableMarket } from '../../client/src/lib/grid-setup-view';
 import { gridHistoryWindow, gridHistoryRequest } from '../../shared/grid-lookback';
@@ -29,6 +31,31 @@ const market = marketSnapshot({ internalSymbol: 'BTC-PERP', protocolSymbol: 'BTC
 const preview = previewGrid({ market: 'BTC-PERP', side: 'long', lower: '80', upper: '120', intervals: 4, entryScale: 'flat', profitScale: 'flat', seed: true,
   leverage: '1', investment: '1000', stop: '70', fee: '0' }, market, now);
 afterEach(() => vi.useRealTimers());
+describe('Grid behaviour inline cards', () => {
+  it.each(['long', 'short'])('renders accessible %s cards with unchanged seed-aware copy', side => {
+    for (const seed of [true, false]) {
+      const html = renderToStaticMarkup(createElement(GridBehaviourSelect, { value: 'repeat_all', side, seed, onChange: vi.fn() }));
+      expect(html).toContain('aria-expanded="false"');
+      expect(html).toContain('hidden=""');
+      expect(html).toContain('role="radiogroup"');
+      expect(html.match(/type="radio"/g)).toHaveLength(3);
+      expect(html.match(/checked=""/g)).toHaveLength(1);
+      expect(html).toContain('@container');
+      expect(html).toContain('grid-cols-1');
+      expect(html).toContain('@min-[560px]:grid-cols-3');
+      expect(html).toContain('border-primary bg-primary/10');
+      expect(html).toContain('Recommended');
+      for (const mode of GRID_BEHAVIOUR_MODES) {
+        const copy = gridBehaviourCopy(mode, side, seed);
+        for (const part of [copy.label, copy.hint, copy.example]) expect(html).toContain(part);
+      }
+      expect(html).not.toContain('role="dialog"');
+      expect(html).not.toContain('See example');
+      expect(html).not.toContain('Done');
+    }
+  });
+});
+
 describe('Grid screenshot panel polish', () => {
   it('uses the exchange price step instead of padded engine precision and retains tiny-price precision', () => {
     expect(plannerPriceFormat('0.10000000', ['100.000000000000000000', '110.000000000000000000'])).toEqual({ precision: 1, minMove: 0.1 });

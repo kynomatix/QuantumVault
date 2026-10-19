@@ -1,19 +1,48 @@
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogTrigger, DialogClose } from '@/components/ui/dialog';
+import { useId, useRef, useState } from 'react';
+import { Check, ChevronDown } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { GRID_BEHAVIOUR_MODES, gridBehaviourCopy, type GridBehaviourMode } from '../../../../shared/grid-behaviour';
 
 export function GridBehaviourSelect({ value, side, seed, onChange }: { value: GridBehaviourMode; side: string; seed: boolean; onChange: (mode: GridBehaviourMode) => void }) {
+  const [expanded, setExpanded] = useState(false);
+  const id = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
   const when = side === 'long' ? 'When price rises' : 'When price falls';
-  return <Dialog><DialogTrigger asChild><Button type="button" variant="outline" className="h-auto min-h-11 w-full justify-between whitespace-normal text-left py-3" aria-label={`${when}: ${gridBehaviourCopy(value, side, seed).label}`}>
-    <span>{when}: <strong>{gridBehaviourCopy(value, side, seed).label}</strong></span><span aria-hidden="true" className="ml-2">›</span>
-  </Button></DialogTrigger><DialogContent className="max-w-md max-h-[85dvh] overflow-y-auto">
-    <DialogHeader><DialogTitle>{when}</DialogTitle><DialogDescription>Choose what happens after each profit-taking order.</DialogDescription></DialogHeader>
-    <fieldset className="space-y-4"><legend className="sr-only">Grid behaviour</legend>{GRID_BEHAVIOUR_MODES.map(mode => {
-      const copy = gridBehaviourCopy(mode, side, seed);
-      return <div key={mode} className="space-y-2"><label className="flex cursor-pointer items-start gap-3 rounded-lg border p-3">
-        <input type="radio" name="grid-behaviour" value={mode} checked={value === mode} onChange={() => onChange(mode)} className="mt-1 accent-primary" />
-        <span><span className="block font-medium">{copy.label}{mode === 'repeat_all' && <span className="block text-xs text-muted-foreground">Recommended</span>}</span><span className="block text-sm text-muted-foreground mt-1">{copy.hint}</span></span>
-      </label><details className="ml-3 text-sm"><summary className="cursor-pointer text-primary">See example</summary><p className="mt-1 text-muted-foreground">{copy.example}</p></details></div>;
-    })}</fieldset><DialogClose asChild><Button type="button">Done</Button></DialogClose>
-  </DialogContent></Dialog>;
+  const select = (mode: GridBehaviourMode) => {
+    onChange(mode);
+    setExpanded(false);
+    trigger.current?.focus();
+  };
+
+  return <div className="@container min-w-0">
+    <Button ref={trigger} type="button" variant="outline"
+      className="h-auto min-h-11 w-full justify-between whitespace-normal text-left py-3"
+      aria-label={`${when}: ${gridBehaviourCopy(value, side, seed).label}`}
+      aria-expanded={expanded} aria-controls={`${id}-panel`} onClick={() => setExpanded(!expanded)}>
+      <span>{when}: <strong>{gridBehaviourCopy(value, side, seed).label}</strong></span>
+      <ChevronDown aria-hidden="true" className={`ml-2 h-4 w-4 shrink-0 transition-transform motion-reduce:transition-none ${expanded ? 'rotate-180' : ''}`} />
+    </Button>
+    <div id={`${id}-panel`} hidden={!expanded}>
+      <div role="radiogroup" aria-label={`${when}: Grid behaviour`}
+        className="mt-3 grid grid-cols-1 items-stretch gap-3 @min-[560px]:grid-cols-3">
+        {GRID_BEHAVIOUR_MODES.map(mode => {
+          const copy = gridBehaviourCopy(mode, side, seed);
+          const selected = value === mode;
+          return <label key={mode} className={`relative flex h-full min-w-0 cursor-pointer flex-col gap-2 rounded-lg border p-3 text-left break-words focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${selected ? 'border-primary bg-primary/10' : 'border-border bg-card'}`}>
+            <input type="radio" name={`${id}-behaviour`} value={mode} checked={selected}
+              aria-labelledby={`${id}-${mode}-title`} aria-describedby={`${id}-${mode}-hint ${id}-${mode}-example`}
+              className="sr-only" onChange={() => select(mode)} onClick={() => { if (selected) select(mode); }} />
+            <span className="flex items-start justify-between gap-2">
+              <span id={`${id}-${mode}-title`} className="font-medium">{copy.label}</span>
+              {selected && <Check aria-hidden="true" className="h-4 w-4 shrink-0 text-primary" />}
+            </span>
+            {mode === 'repeat_all' && <Badge variant="secondary" className="w-fit">Recommended</Badge>}
+            <span id={`${id}-${mode}-hint`} className="text-sm text-muted-foreground">{copy.hint}</span>
+            <span id={`${id}-${mode}-example`} className="mt-auto pt-1 text-xs text-muted-foreground">{copy.example}</span>
+          </label>;
+        })}
+      </div>
+    </div>
+  </div>;
 }
