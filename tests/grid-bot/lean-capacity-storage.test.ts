@@ -31,7 +31,7 @@ describe.each(['legacy','repeat_all'] as const)('lean capacity under PostgreSQL 
     admin=new Pool({connectionString:url,max:1});await admin.query('CREATE SCHEMA '+schema);
     pool=new Pool({connectionString:url,max:5,options:'-c search_path='+schema});
     await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
-    for(const file of ['0004_grid_bot_drafts','0005_grid_launch','0006_grid_monitor','0007_grid_lifecycle','0011_grid_auto_resume'])await pool.query(readFileSync(new URL('../../migrations/'+file+'.sql',import.meta.url),'utf8'));
+    for(const file of ['0004_grid_bot_drafts','0005_grid_launch','0006_grid_monitor','0007_grid_lifecycle','0011_grid_auto_resume','0012_grid_range_epochs'])await pool.query(readFileSync(new URL('../../migrations/'+file+'.sql',import.meta.url),'utf8'));
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_bots,protocol_subaccounts,wallets,grid_master_quota CASCADE');await pool.query('INSERT INTO wallets VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});

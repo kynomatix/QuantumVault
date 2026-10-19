@@ -1,3 +1,4 @@
+import {loadActiveGridLevels} from './active-epoch';
 import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
 import type {GridMonitorStorage,GridMonitorClaim} from './monitor-storage';
@@ -7,14 +8,14 @@ import {gridAutoResumeBand,gridInsideAutoResumeBand,gridAutoResumeRetry,type Gri
 import {freshGridFact,gridEntrySafety} from './lifecycle-policy';
 export interface GridResumeIdentity {policyHash:string;umkVersion:number}
 export interface GridAutoResumeToken {generation:string;cycle:string;requestId:string;epoch:string;policyHash:string;umkVersion:number}
-export const clearGridAutoResumeArm=`armed_cycle=NULL,armed_generation=NULL,armed_lifecycle_epoch=NULL,armed_band_request=NULL,armed_policy_hmac=NULL,armed_umk_version=NULL,resume_request_id=NULL,attempts=0,first_attempt_at=NULL,next_attempt_at=NULL`;
+export const clearGridAutoResumeArm=`armed_epoch_id=NULL,armed_cycle=NULL,armed_generation=NULL,armed_lifecycle_epoch=NULL,armed_band_request=NULL,armed_policy_hmac=NULL,armed_umk_version=NULL,resume_request_id=NULL,attempts=0,first_attempt_at=NULL,next_attempt_at=NULL`;
 /** All mutations acquire the owning bot lock first. No remote action is performed here. */
 export class GridAutoResumeStorage {
   constructor(readonly monitor:GridMonitorStorage,private gates=gridRuntimeGates){}
   async armed(claim:GridMonitorClaim){return this.monitor.launch.transaction(async c=>{await this.monitor.assertLease(c,claim);return !!(await c.query('SELECT 1 FROM grid_auto_resume WHERE bot_id=$1 AND enabled AND armed_cycle IS NOT NULL',[claim.id])).rowCount;});}
   async identity(wallet:string,id:string):Promise<GridResumeIdentity|null>{
     const {durableGridUmk}=await import('./service'),{retainedGridPolicy}=await import('./launch-authority'),{verifyGridPolicyHmac}=await import('./policy-hmac');
-    const snapshot=await this.monitor.launch.transaction(async c=>({bot:(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rows[0],levels:(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[id])).rows}));
+    const snapshot=await this.monitor.launch.transaction(async c=>({bot:(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rows[0],levels:(await loadActiveGridLevels(c,id,'all')).rows}));
     if(!snapshot.bot)return null;
     const before=(await this.monitor.launch.transaction(c=>c.query('SELECT umk_version,umk_encrypted_for_execution,agent_public_key,agent_private_key_encrypted_v3 FROM wallets WHERE address=$1',[wallet]))).rows[0];if(!before)return null;
     const key=await durableGridUmk(wallet);if(!key)return null;
@@ -76,10 +77,10 @@ export class GridAutoResumeStorage {
     }
     // An interrupted automatic Resume keeps its cycle and its spent budget.
     if(row.armed_cycle){
-      if(row.armed_policy_hmac!==identity.policyHash||row.armed_umk_version!==identity.umkVersion){await c.query(`UPDATE grid_auto_resume SET ${clearGridAutoResumeArm},held_reason='policy_changed' WHERE bot_id=$1`,[bot.id]);return;}
+      if((row.armed_epoch_id??null)!==(bot.active_epoch_id??null)||row.armed_policy_hmac!==identity.policyHash||row.armed_umk_version!==identity.umkVersion){await c.query(`UPDATE grid_auto_resume SET ${clearGridAutoResumeArm},held_reason='policy_changed' WHERE bot_id=$1`,[bot.id]);return;}
       await c.query("UPDATE grid_auto_resume SET armed_lifecycle_epoch=$2,armed_band_request=$3,held_reason='waiting_for_inner_band',updated_at=clock_timestamp() WHERE bot_id=$1",[bot.id,String(life.epoch),life.active_request]);return;
     }
-    await c.query(`UPDATE grid_auto_resume SET cycle=cycle+1,armed_cycle=cycle+1,armed_generation=generation,armed_lifecycle_epoch=$2,armed_band_request=$3,armed_policy_hmac=$4,armed_umk_version=$5,held_reason='waiting_for_inner_band',updated_at=clock_timestamp() WHERE bot_id=$1`,[bot.id,String(life.epoch),life.active_request,identity.policyHash,identity.umkVersion]);
+    await c.query(`UPDATE grid_auto_resume SET cycle=cycle+1,armed_cycle=cycle+1,armed_generation=generation,armed_lifecycle_epoch=$2,armed_band_request=$3,armed_policy_hmac=$4,armed_umk_version=$5,armed_epoch_id=$6,held_reason='waiting_for_inner_band',updated_at=clock_timestamp() WHERE bot_id=$1`,[bot.id,String(life.epoch),life.active_request,identity.policyHash,identity.umkVersion,bot.active_epoch_id??null]);
   }
   async hold(claim:GridMonitorClaim,reason:GridAutoResumeReason,clear=false,permit?:GridAutoResumeToken){return this.monitor.launch.transaction(async c=>{
     const bot=await this.monitor.assertLease(c,claim);const a=(await c.query('SELECT * FROM grid_auto_resume WHERE bot_id=$1 FOR UPDATE',[claim.id])).rows[0];if(!a?.enabled||!a.armed_cycle)return;
@@ -107,7 +108,7 @@ export class GridAutoResumeStorage {
       if(!this.gates().startEnabled)return reason('resume_authority_unavailable');
       const life=(await c.query('SELECT l.*,r.action,r.source,r.state FROM grid_lifecycle l JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[claim.id])).rows[0];
       if(!['range_exhausted','resuming'].includes(bot.status)||!life||String(life.epoch)!==String(a.armed_lifecycle_epoch)||String(a.generation)!==String(a.armed_generation))return {...fence,clearReason:'risk_pause'} as GridAutoResumeToken;
-      if(!await this.security(c,bot,{policyHash:a.armed_policy_hmac,umkVersion:a.armed_umk_version}))return {...fence,clearReason:bot.policy_hmac!==a.armed_policy_hmac?'policy_changed':'execution_revoked'} as unknown as GridAutoResumeToken;
+      if((a.armed_epoch_id??null)!==(bot.active_epoch_id??null)||!await this.security(c,bot,{policyHash:a.armed_policy_hmac,umkVersion:a.armed_umk_version}))return {...fence,clearReason:bot.policy_hmac!==a.armed_policy_hmac?'policy_changed':'execution_revoked'} as unknown as GridAutoResumeToken;
       const band=(await c.query("SELECT * FROM grid_control_requests WHERE id=$1 AND bot_id=$2 AND action='band' AND source='risk' AND state='complete'",[a.armed_band_request,claim.id])).rows[0];
       if(!band||!(life.active_request===a.armed_band_request&&life.state==='complete'||life.active_request===a.resume_request_id&&life.action==='resume'&&life.source==='auto'&&life.state==='pending'))return {...fence,clearReason:'risk_pause'} as GridAutoResumeToken;
       const retry=gridAutoResumeRetry(a.attempts,a.first_attempt_at?new Date(a.first_attempt_at).getTime():null,a.next_attempt_at?new Date(a.next_attempt_at).getTime():null,now);
@@ -139,7 +140,7 @@ export class GridAutoResumeStorage {
   async valid(c:PoolClient,bot:any,permit:GridAutoResumeToken,tick?:string){
     const a=(await c.query('SELECT * FROM grid_auto_resume WHERE bot_id=$1',[bot.id])).rows[0];
     const l=(await c.query('SELECT * FROM grid_lifecycle WHERE bot_id=$1',[bot.id])).rows[0];
-    if(!this.gates().startEnabled||!a?.enabled||String(a.generation)!==permit.generation||String(a.armed_cycle)!==permit.cycle||a.resume_request_id!==permit.requestId||a.armed_policy_hmac!==permit.policyHash||a.armed_umk_version!==permit.umkVersion||String(a.armed_lifecycle_epoch)!==permit.epoch||l?.active_request!==permit.requestId||String(l.epoch)!==permit.epoch||bot.status!=='resuming'||!await this.security(c,bot,permit))return false;
+    if(!this.gates().startEnabled||!a?.enabled||(a.armed_epoch_id??null)!==(bot.active_epoch_id??null)||String(a.generation)!==permit.generation||String(a.armed_cycle)!==permit.cycle||a.resume_request_id!==permit.requestId||a.armed_policy_hmac!==permit.policyHash||a.armed_umk_version!==permit.umkVersion||String(a.armed_lifecycle_epoch)!==permit.epoch||l?.active_request!==permit.requestId||String(l.epoch)!==permit.epoch||bot.status!=='resuming'||!await this.security(c,bot,permit))return false;
     if(a.first_attempt_at&&new Date(bot.db_now).getTime()-new Date(a.first_attempt_at).getTime()>=120000)return false;
     if(tick){const m=(await c.query('SELECT * FROM grid_monitor_state WHERE bot_id=$1',[bot.id])).rows[0];return !!m?.observation?.mark&&freshGridFact(m.observation.mark.observedAt,new Date(bot.db_now).getTime())&&gridInsideAutoResumeBand(m.observation.mark.price,gridAutoResumeBand(bot.lower_price,bot.upper_price,tick));}
     return true;

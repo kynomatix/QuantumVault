@@ -29,6 +29,7 @@ export interface GridLifecycleDeps {
   recover:(claim:GridMonitorClaim,op:DurableGridOperation,signal:AbortSignal)=>Promise<GridReconciliation>;
   sol:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<{balance:string;observedAt:number}|null>;
   resume:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<{policy:GridPolicy;policyHmac:string;umk:Buffer;facts:LaunchFacts;risk:GridResumeRisk;cleanup:()=>void}|null>;
+  move?:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<string>;
   settlement:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<GridSettlementFact|null>;
   recycle:(claim:GridMonitorClaim,requestId:string,proof:GridSettlementFact)=>Promise<void>;
 }
@@ -110,6 +111,13 @@ export class GridLifecycleService {
     if(entry&&!unresolvedEntryCancel)return cancel(entry);
     // Preserve all backed reduce-only exits while pausing. Orphans require owner investigation.
     if(orphan)return block('unrelated_order_requires_review');
+    if(life.action==='regrid'){
+      const remaining=owned.find(x=>x.operation);if(remaining)return cancel(remaining);
+      await s.safetyObservation(claim,observation);
+      const checked=await monitor.reconcile(claim,randomUUID(),observation);
+      if(!(checked.reconciliationComplete??checked.entriesAllowed))return block('reconciliation_required');
+      return this.deps.move?this.deps.move(claim,signal):block('range_move_unavailable');
+    }
     if(life.action==='pause'||life.action==='band'){
       if(life.action==='band'){
         await s.safetyObservation(claim,observation);

@@ -1,3 +1,4 @@
+import { validateEpochCarry, type EpochCarry, type EpochSource } from './epoch-policy';
 import Decimal from 'decimal.js';
 import type { GridCycle } from './engine-types';
 import { canonicalGridPolicy, type GridPolicy } from './policy-hmac';
@@ -13,7 +14,7 @@ export interface CycleOperation {
   initialCredit?: string; recycleAllocations?: CyclePortion[];
 }
 export interface CycleFill {
-  tradeId: string; operationId: string; account: string; time: number; size: string; price: string; leg: 'entry' | 'exit';
+  tradeId: string; operationId: string; account: string; time: number; size: string; price: string; leg: 'entry' | 'exit'; fee?: string;
 }
 /** Terminal release requires exact fills and history safely through the final order update. */
 export interface CycleProgress {
@@ -22,7 +23,7 @@ export interface CycleProgress {
 }
 export interface CycleInventoryAllocation extends CyclePortion { operationId: string; cycleOrdinal: number }
 export interface CycleReplayInput {
-  policy: GridPolicy; account: string; historyComplete: boolean;
+  policy: GridPolicy; account: string; historyComplete: boolean; carry?: EpochCarry; exportEpochId?: string; projectClosingCancellation?: boolean;
   operations: CycleOperation[]; fills: CycleFill[]; progress: CycleProgress[]; allocations: CycleInventoryAllocation[];
   /** Complete seed operation set and durable release decision, proved terminal before issuing unused quota.
    * entriesAllowed records permission at release; later pauses must not erase already issued credit.
@@ -32,11 +33,11 @@ export interface CycleReplayInput {
   unusedSeedProof?: { operationIds: string[]; historyThrough: number; entriesAllowed: boolean };
 }
 export interface ReplayedGridCycle {
-  cycle: GridCycle; held: string; openingCommitments: string; closingCommitments: string;
+  imported?:boolean;cycle: GridCycle; held: string; openingCommitments: string; closingCommitments: string;
   pendingSeed: string; initialCredit: string; recycleCredits: CyclePortion[]; openingCredit: string;
   availableEntryLots: CyclePortion[]; liveOpening: string[]; liveClosing: string[];
 }
-export type CycleReplayResult = { ok: true; cycles: ReplayedGridCycle[] }
+export type CycleReplayResult = { ok: true; cycles: ReplayedGridCycle[]; carry?: EpochCarry }
   | { ok: false; reason: string };
 
 const number = (s: unknown, positive = false): Decimal => {
@@ -54,7 +55,7 @@ function unique<T>(rows: T[], key: (r: T) => string): T[] {
   return [...map.values()];
 }
 const sourceKey = (ordinal: number, tradeId: string) => JSON.stringify([ordinal, tradeId]);
-interface Source { cycle: number; tradeId: string; operationId: string; time: number; size: Decimal; retained: Decimal; consumed: Decimal }
+interface Source { cycle: number; tradeId: string; operationId: string; time: number; size: Decimal; retained: Decimal; consumed: Decimal; inherited?: EpochSource; price: string; fee: string }
 interface OperationState { op: CycleOperation; filled: Decimal; retained: Decimal; terminal: boolean }
 
 /** No IO, row-status transitions, inferred fills, rounding up, cross-cycle credit or economic P&L. */
@@ -62,6 +63,8 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
   try {
     const descriptors = retainedGridCycles(input.policy);
     if (!input.historyComplete || !identity(input.account) || !canonicalGridPolicy(input.policy) || !descriptors) throw Error('Complete signed cycle history is required');
+    if(input.policy.epochAuthority){if(!input.carry)throw Error('Epoch carry is missing');validateEpochCarry(input.carry,input.policy.epochAuthority);}
+    else if(input.carry)throw Error('Legacy policy cannot import credit');
     const cycles = new Map(descriptors.map(c => [c.ownerOrdinal, c]));
     const operations = unique(input.operations, o => o.id).sort((a,b)=>a.preparedAt-b.preparedAt || compareId(a.id,b.id));
     const ops = new Map(operations.map(o => [o.id, o]));
@@ -97,6 +100,7 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
         || !['limit','seed','close'].includes(op.kind) || !['opening','closing'].includes(op.leg)
         || op.reduceOnly!==(op.leg==='closing') || op.side!==(input.policy.direction==='long'?(op.reduceOnly?'sell':'buy'):(op.reduceOnly?'buy':'sell'))
         || actual.gt(q)) throw Error('Invalid cycle operation identity or quantity');
+      if(input.policy.epochAuthority && op.kind==='seed')throw Error('Epochs cannot seed');
       if (op.kind==='limit') {
         if (!cycle || cycle.enabled === false || op.leg === 'opening' && cycle.recycles === false || !number(op.price,true).eq(op.leg==='opening'?cycle.openingPrice:cycle.closingPrice) || q.gt(cycle.quantity)) throw Error('Operation changed its signed endpoint or quota');
       } else if (op.cycleOrdinal!==null || op.kind==='seed' && (op.leg!=='opening' || !input.policy.seedAtCreation)
@@ -125,8 +129,14 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
     const inventory = new Map<string,Source>(), recycle = new Map<string,Source>();
     const addSource = (map:Map<string,Source>,cycle:number,f:CycleFill,size:Decimal) => {
       const key=sourceKey(cycle,f.tradeId); if(map.has(key))throw Error('Duplicate source partition');
-      map.set(key,{cycle,tradeId:f.tradeId,operationId:f.operationId,time:f.time,size,retained:new D(0),consumed:new D(0)});
+      map.set(key,{cycle,tradeId:f.tradeId,operationId:f.operationId,time:f.time,size,retained:new D(0),consumed:new D(0),price:f.price,fee:new D(f.fee??'0').mul(size).div(f.size).toFixed()});
     };
+    for(const owner of input.carry?.owners??[])for(const source of owner.sources){
+      if(!cycles.has(owner.ownerOrdinal))throw Error('Imported owner missing');
+      const map=source.kind==='inventory'?inventory:recycle,key=sourceKey(owner.ownerOrdinal,source.tradeId);
+      if(map.has(key)||trades.has(source.tradeId)||ops.has(source.operationId))throw Error('Duplicate imported source');
+      map.set(key,{cycle:owner.ownerOrdinal,tradeId:source.tradeId,operationId:source.operationId,time:source.time,size:number(source.transferred),retained:new D(0),consumed:new D(0),inherited:source,price:source.price,fee:source.fee});
+    }
     const seedCycles=descriptors.filter(c=>new D(c.initialInventory).gt(0));
     const seedAssigned=new Map(seedCycles.map(c=>[c.ownerOrdinal,new D(0)]));
     for (const f of fills) {
@@ -145,6 +155,7 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
     const seedQuota=seedCycles.reduce((s,c)=>s.plus(c.quantity),new D(0));
     if(seedStates.reduce((s,o)=>s.plus(o.retained),new D(0)).gt(seedQuota))throw Error('Seed requests exceed signed capacity');
     let releaseUnused=false, unusedProven=false, unusedAvailableAt=0;
+    if(input.carry && input.unusedSeedProof)throw Error('Epoch cannot release unused seed');
     if(input.unusedSeedProof){const proof=input.unusedSeedProof;
       if(input.policy.seedAtCreation && proof.operationIds.length===0)throw Error('Unused seed requires a proven terminal seed operation');
       if(!timestamp(proof.historyThrough) || new Set(proof.operationIds).size!==proof.operationIds.length
@@ -154,12 +165,12 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
       unusedAvailableAt=Math.max(proof.historyThrough,...seedStates.map(s=>progress.get(s.op.id)!.observedAt));
     }
     const initial=new Map(descriptors.map(c=>[c.ownerOrdinal,{
-      issued:new D(c.initialOpeningCredit).plus(releaseUnused && c.recycles !== false ?new D(c.initialInventory).minus(seedAssigned.get(c.ownerOrdinal)??0):0),retained:new D(0)
+      issued:input.carry?number(input.carry.owners.find(o=>o.ownerOrdinal===c.ownerOrdinal)!.initialRemaining):new D(c.initialOpeningCredit).plus(releaseUnused && c.recycles !== false ?new D(c.initialInventory).minus(seedAssigned.get(c.ownerOrdinal)??0):0),retained:new D(0)
     }]));
     const dependencies=new Map(operations.map(o=>[o.id,new Set<string>()]));
     const reserve = (s:Source,op:CycleOperation,retained:Decimal,consumed:Decimal) => {
       if(s.time>op.preparedAt || s.operationId===op.id)throw Error('Source was not available when request was prepared');
-      dependencies.get(op.id)!.add(s.operationId);
+      if(!s.inherited)dependencies.get(op.id)!.add(s.operationId);
       s.retained=s.retained.plus(retained);s.consumed=s.consumed.plus(consumed);
       if(s.retained.gt(s.size) || s.consumed.gt(s.retained))throw Error('Source credit is spent more than once');
     };
@@ -171,7 +182,7 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
         if(new Set(portions.map(p=>p.tradeId)).size!==portions.length || !initialSize.plus(portions.reduce((s,p)=>s.plus(number(p.size,true)),new D(0))).eq(op.size))throw Error('Opening source quantities do not equal request');
         // Immutable source order: initial issuance first, then the request's exact recycle portions.
         const issued=initial.get(op.cycleOrdinal!)!, initialRetained=D.min(retained,initialSize), initialConsumed=D.min(consumed,initialSize);
-        if(initialSize.gt(issued.issued) || initialSize.gt(0) && new D(cycles.get(op.cycleOrdinal!)!.initialInventory).gt(0)
+        if(initialSize.gt(issued.issued) || !input.carry && initialSize.gt(0) && new D(cycles.get(op.cycleOrdinal!)!.initialInventory).gt(0)
           && (!releaseUnused || op.preparedAt<unusedAvailableAt))throw Error('Initial issuance was not available when request was prepared');
         issued.retained=issued.retained.plus(initialRetained);
         if(issued.retained.gt(issued.issued))throw Error('Initial issuance is spent more than once');
@@ -181,7 +192,7 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
           const reserved=D.min(retained,q),used=D.min(consumed,q);reserve(s,op,reserved,used);retained=retained.minus(reserved);consumed=consumed.minus(used);
         }
       } else if(op.leg==='closing'){
-        const portions=allocations.filter(a=>a.operationId===op.id).sort((a,b)=>(trades.get(a.tradeId)?.time??0)-(trades.get(b.tradeId)?.time??0) || compareId(a.tradeId,b.tradeId) || a.cycleOrdinal-b.cycleOrdinal);
+        const portions=allocations.filter(a=>a.operationId===op.id).sort((a,b)=>(trades.get(a.tradeId)?.time??inventory.get(sourceKey(a.cycleOrdinal,a.tradeId))?.time??0)-(trades.get(b.tradeId)?.time??inventory.get(sourceKey(b.cycleOrdinal,b.tradeId))?.time??0) || compareId(a.tradeId,b.tradeId) || a.cycleOrdinal-b.cycleOrdinal);
         if(!portions.reduce((s,p)=>s.plus(number(p.size,true)),new D(0)).eq(op.size))throw Error('Closing request lacks exact entry allocations');
         for(const p of portions){const s=inventory.get(sourceKey(p.cycleOrdinal,p.tradeId)),q=number(p.size,true);
           if(!s || q.gt(s.size) || op.kind==='limit' && op.cycleOrdinal!==p.cycleOrdinal)throw Error('Closing source belongs to another cycle or is not an entry fill');
@@ -210,9 +221,23 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
       const initialCredit=initial.get(c.ownerOrdinal)!.issued.minus(initial.get(c.ownerOrdinal)!.retained);
       const portions=(sources:Source[])=>sources.filter(s=>s.size.gt(s.retained)).sort((a,b)=>a.time-b.time || compareId(a.tradeId,b.tradeId)).map(s=>({tradeId:s.tradeId,size:s.size.minus(s.retained).toFixed()}));
       const recycleCredits=portions(exits);
-      result.push({cycle:c,held:held.toFixed(),openingCommitments:openingCommitments.toFixed(),closingCommitments:closingCommitments.toFixed(),pendingSeed:pendingSeed.toFixed(),
+      result.push({...(input.carry?{imported:true}:{}),cycle:c,held:held.toFixed(),openingCommitments:openingCommitments.toFixed(),closingCommitments:closingCommitments.toFixed(),pendingSeed:pendingSeed.toFixed(),
         initialCredit:initialCredit.toFixed(),recycleCredits,openingCredit:recycleCredits.reduce((s,p)=>s.plus(p.size),initialCredit).toFixed(),
         availableEntryLots:portions(sources),liveOpening,liveClosing});
+    }
+    if(input.exportEpochId){
+      if([...states.values()].some(s=>!s.terminal&&!(input.projectClosingCancellation&&s.op.leg==='closing'&&progress.get(s.op.id)?.state==='live'))||result.some(c=>new D(c.pendingSeed).gt(0)||new D(c.openingCommitments).gt(0)||!input.projectClosingCancellation&&new D(c.closingCommitments).gt(0)))throw Error('Epoch cannot seal unresolved reservations');
+      const owners=result.map(r=>{
+        const old=input.carry?.owners.find(o=>o.ownerOrdinal===r.cycle.ownerOrdinal);
+        const issued=old?.initialIssued??initial.get(r.cycle.ownerOrdinal)!.issued.toFixed();
+        const sources=[...inventory.values(),...recycle.values()].filter(s=>s.cycle===r.cycle.ownerOrdinal).map(s=>({
+          kind:(inventory.get(sourceKey(s.cycle,s.tradeId))===s?'inventory':'recycle') as EpochSource['kind'],sourceEpochId:s.inherited?.sourceEpochId??input.exportEpochId!,
+          operationId:s.operationId,tradeId:s.tradeId,sourceOwner:s.cycle,destinationOwner:s.cycle,time:s.time,price:s.price,fee:s.fee,
+          quantity:s.inherited?.quantity??s.size.toFixed(),consumed:s.consumed.plus(s.inherited?.consumed??0).toFixed(),transferred:s.size.minus(s.consumed).toFixed(),parked:s.inherited?.parked??'0'}));
+        return {ownerOrdinal:r.cycle.ownerOrdinal,lineage:old?.lineage??input.policy.id+':'+r.cycle.ownerOrdinal,initialIssued:issued,
+          initialConsumed:new D(issued).minus(r.initialCredit).toFixed(),initialRemaining:r.initialCredit,remainingOneShot:r.cycle.recycles===false?r.held:'0',sources};
+      });
+      return {ok:true,cycles:result,carry:{account:input.account,originEpochId:input.exportEpochId,owners}};
     }
     return {ok:true,cycles:result};
   } catch(error) {return {ok:false,reason:error instanceof Error?error.message:'Invalid cycle history'};}
@@ -234,6 +259,7 @@ export function executableCycleQuantity(state: ReplayedGridCycle, leg: 'opening'
   const step=number(lot,true), minimum=number(minimumQuote,true);
   if((leg==='opening'?state.liveOpening:state.liveClosing).length)return '0';
   const available=leg==='opening'?number(state.openingCredit):state.availableEntryLots.reduce((s,p)=>s.plus(p.size),new D(0));
-  const q=available.div(step).floor().mul(step);
+  const capacity=leg==='opening'&&state.imported?D.max(0,new D(state.cycle.quantity).minus(state.held).minus(state.openingCommitments)):available;
+  const q=D.min(available,capacity).div(step).floor().mul(step);
   return leg==='opening' && q.mul(state.cycle.openingPrice).lt(minimum)?'0':q.toFixed();
 }

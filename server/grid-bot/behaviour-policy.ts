@@ -25,7 +25,7 @@ export function gridPolicyExtension(cycles: GridCycle[], mode: GridBehaviourMode
 export const stableGridExtension = (value: unknown): string => JSON.stringify(value, (_, v) =>
   v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.keys(v).sort().map(k => [k, v[k]])) : v);
 export function retainedGridBehaviour(snapshot: any, version: string): { gridPolicyExtension?: GridPolicyExtension } {
-  if (version !== '2.2.0') return {};
+  if (version !== '2.2.0' && version !== '2.3.0') return {};
   if (!snapshot?.gridPolicyExtension) throw Error('Grid behaviour authority unavailable');
   return { gridPolicyExtension: snapshot.gridPolicyExtension };
 }

@@ -187,17 +187,17 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 201 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 202 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(201);
-    expect(metadata).toHaveLength(201);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(201);
+    expect(sqlEntries).toHaveLength(202);
+    expect(metadata).toHaveLength(202);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(202);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
-    // Append-only repair: preserve every SQL statement and metadata entry from 000 through 196.
+    // Epoch migration preserves historical SQL; readiness metadata now describes epoch-scoped uniqueness and regrid controls.
     const preservedManifestDigest = createHash("sha256").update(JSON.stringify(
       metadata.slice(0, 197).map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
     )).digest("hex").toUpperCase();
-    expect(preservedManifestDigest).toBe("7EE1954C5F2561D78B66441826CEA222B065242C36478055EE16A760F7AD2E5A");
+    expect(preservedManifestDigest).toBe("23595FB03CA524A13E584B340EA77F479BAF120E1A17871450E41A79D2388EE9");
     expect(metadata[191]).toMatchObject({ id: '191-phoenix-ai-trader', capabilities: ['phoenix'], operation: 'ddl' });
     expect(sqlEntries[191]).toContain('phoenix_ai_executions');
     const gridMigrations = [
@@ -213,6 +213,11 @@ describe("schema readiness", () => {
       const fileSql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
       expect(sqlEntries[192 + offset].trim()).toBe(fileSql.replaceAll('\r\n', '\n').trim());
     }
+    const epochSql=readFileSync(new URL('../../migrations/0012_grid_range_epochs.sql',import.meta.url),'utf8').replaceAll('\r\n','\n').trim();
+    expect(metadata[201]).toMatchObject({id:'201-grid-range-epochs',capabilities:['grid_bot'],operation:'ddl'});
+    expect(sqlEntries[201].trim()).toBe(epochSql);
+    expect(epochSql).not.toMatch(/\bCASE\b/i);
+    for(const line of epochSql.split('\n').filter(line=>line.includes('CHECK')))expect(line).toMatch(/CHECK \(.*\)[,;]?$/);
     expect(metadata[200]).toMatchObject({id:'200-grid-auto-resume',capabilities:['grid_bot'],operation:'ddl'});
     const autoSql=readFileSync(new URL('../../migrations/0011_grid_auto_resume.sql',import.meta.url),'utf8').replaceAll('\r\n','\n').trim();
     expect(sqlEntries[200].trim()).toBe(autoSql);

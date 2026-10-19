@@ -1,3 +1,4 @@
+import { createGridMoveStorage } from './move-runtime';
 import {createGridSolReader} from './sol-authority';
 const sharedGridSol=createGridSolReader(async wallet=>(await import('../agent-wallet')).getAgentSolBalanceLamportsStrict(wallet));
 import {GridLifecycleService,type GridLifecycleDeps,type GridSettlementFact} from './lifecycle-service';
@@ -43,7 +44,7 @@ export function gridLifecycleRuntime(storage:GridMonitorStorage,reads:GridMonito
     const {bot}=await storage.snapshot(claim),security=await durableGridUmk(bot.wallet_address);if(!security)throw Error('Grid durable signing authority unavailable');
     try{return await work(await custody.recover(claim.id,bot.wallet_address,claim.leaseToken),security.umk);}finally{security.cleanup();}
   };
-  const service=new GridLifecycleService({storage:lifecycle,observe,
+  const service=new GridLifecycleService({storage:lifecycle,observe,move:(claim,signal)=>createGridMoveStorage(storage,json).activate(claim,signal),
     marketTick:async(claim,signal)=>{
       const {bot}=await storage.snapshot(claim),started=Date.now(),raw=await json.json(claim.masterAccount,'/info',{},signal) as {success?:boolean;data?:Record<string,unknown>[]};
       signal.throwIfAborted();

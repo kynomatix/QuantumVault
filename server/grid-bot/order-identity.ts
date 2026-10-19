@@ -10,10 +10,10 @@ const D = Decimal.clone({ precision: 100 });
 // Fixed UUID namespace (RFC-4122), retained from the reviewed WO-07 golden vector.
 const namespace = Buffer.from('e1f1198e94155b78a409c77fd7c73cc8', 'hex');
 export const isGridClientOrderId = (id: unknown): id is string => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
-export function gridClientOrderId(input: { botId: string; level: number; attempt: number; leg: 'entry' | 'profit' }): string {
+export function gridClientOrderId(input: { botId: string; level: number; attempt: number; leg: 'entry' | 'profit'; epochId?: string }): string {
   if (!input.botId || input.botId.trim() !== input.botId || !Number.isSafeInteger(input.level) || input.level < 1
     || !Number.isSafeInteger(input.attempt) || input.attempt < 0 || !['entry', 'profit'].includes(input.leg)) throw new Error('Invalid Grid order identity');
-  const bytes = createHash('sha1').update(namespace).update(JSON.stringify({ v: 1, botId: input.botId, level: input.level, attempt: input.attempt, leg: input.leg })).digest().subarray(0, 16);
+  const bytes = createHash('sha1').update(namespace).update(JSON.stringify({ v: input.epochId ? 2 : 1, botId: input.botId, level: input.level, attempt: input.attempt, leg: input.leg, ...(input.epochId?{epochId:input.epochId}:{}) })).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 15) | 80; bytes[8] = (bytes[8] & 63) | 128;
   const h = bytes.toString('hex'); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
 }

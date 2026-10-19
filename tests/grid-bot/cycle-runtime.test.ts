@@ -28,7 +28,7 @@ vi.mock('../../server/grid-bot/launch-authority',async original=>({...await orig
 vi.mock('../../server/grid-bot/sol-authority',()=>({createGridSolReader:()=>async()=>({balance:'0.1',observedAt:Date.now()})}));
 vi.mock('../../server/grid-bot/execution',async original=>({...await original<typeof import('../../server/grid-bot/execution')>(),GridPacificaSender:class{send=hooks.send;}}));
 
-const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql','0011_grid_auto_resume.sql'];
+const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql','0011_grid_auto_resume.sql','0012_grid_range_epochs.sql'];
 const schema='grid_cycle_runtime_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(Buffer.alloc(32,3));
 let admin:Pool,pool:Pool,launch:GridLaunchStorage,storage:GridMonitorStorage;
 beforeAll(async()=>{

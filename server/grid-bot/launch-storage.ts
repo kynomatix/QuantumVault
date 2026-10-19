@@ -1,3 +1,4 @@
+import {loadActiveGridLevels} from './active-epoch';
 import { retainedGridBehaviour } from './behaviour-policy';
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import {validateLockedCycleRequest} from './cycle-storage';
@@ -241,7 +242,7 @@ export class GridLaunchStorage {
         JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1`,[r.botId])).rows[0];
       if(!b||b.released_at||!b.created_at||b.account!==r.account||b.master_account!==r.masterAccount||!b.client_request_id||!b.server_intent_digest
         ||!b.policy_hmac||b.policy_hmac!==r.authority.policyHmac||!['provisioning','canary','active'].includes(b.status))return null;
-      const levels=(await c.query('SELECT ordinal,price,size,side,reduce_only FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[r.botId])).rows;
+      const levels=(await loadActiveGridLevels(c,r.botId,'policy')).rows;
       const policy:GridPolicy={...retainedGridSizing(b.authority_snapshot),...retainedGridBehaviour(b.authority_snapshot,b.policy_version),id:b.id,protocol:b.protocol,market:b.market,direction:b.direction,upperPrice:b.upper_price,lowerPrice:b.lower_price,
         startPrice:b.start_price,gridCount:b.grid_count,totalInvestment:b.total_investment,leverage:b.leverage,entryScaleType:b.entry_scale_type,
         profitScaleType:b.profit_scale_type,policyVersion:b.policy_version,feePolicyVersion:b.fee_policy_version,runtimePolicyVersion:b.runtime_policy_version,

@@ -1,3 +1,4 @@
+import {loadActiveGridLevels} from './active-epoch';
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import {windowLevelKey} from './window';
 import type {GridResumeRisk} from './resume-clearance';
@@ -221,7 +222,7 @@ export function gridExecutorRuntime(storage:GridMonitorStorage,reads:GridMonitor
         read:(owner,botId)=>ledger.transaction(async c=>{
           const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2',[botId,owner])).rows[0];
           if(!bot)return null;
-          const levels=(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[botId])).rows;
+          const levels=(await loadActiveGridLevels(c,botId,'all')).rows;
           return {policy:retainedGridPolicy(bot,levels),policyHmac:bot.policy_hmac,status:bot.status,
             draftRevision:bot.draft_revision,serverIntentDigest:bot.server_intent_digest};
         }),

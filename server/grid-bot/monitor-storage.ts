@@ -1,3 +1,4 @@
+import {loadActiveGridLevels} from './active-epoch';
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import {readCycleState,recordCycleReplay} from './cycle-storage';
 import {retainedGridPolicy} from './retained-policy';
@@ -56,7 +57,7 @@ export class GridMonitorStorage {
     WHERE id=$1 AND lease_token=$2`,[claim.id,claim.leaseToken]);});}
   async snapshot(claim:GridMonitorClaim){return this.launch.transaction(async c=>{const bot=await this.assertLease(c,claim);
     const operations=(await c.query(`SELECT ${gridOperationProjection} FROM grid_operations o WHERE bot_id=$1 ORDER BY created_at,id`,[claim.id])).rows as ReconciliationOperation[];
-    return {bot,operations,levels:(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[claim.id])).rows};
+    return {bot,operations,levels:(await loadActiveGridLevels(c,claim.id,'all')).rows};
   });}
   /** Durable, deduplicated owner notification. Uncertainty cannot disable a Stop already in progress. */
   async transferUnknown(claim:GridMonitorClaim,op:DurableGridOperation){return this.launch.transaction(async c=>{
@@ -106,7 +107,7 @@ export class GridMonitorStorage {
       &&BigInt(observation.history.lastIds[stream])<BigInt(previousFull.lastIds[stream]))observation={...observation,history:null};}catch{observation={...observation,history:null};}
     if(observation.history?.lastId&&previousFull?.lastId&&BigInt(observation.history.lastId)<BigInt(previousFull.lastId))observation={...observation,history:null};
     const result=reconcileGridObservation({account:claim.account,symbol:bot.market.replace(/-PERP$/,''),direction:bot.direction,
-      start:new Date(bot.created_at).getTime(),now,operations,prior,observation,...(isGridCyclePolicyVersion(bot.policy_version)?{cyclePolicy:retainedGridPolicy(bot,(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[claim.id])).rows)}:{})});
+      start:new Date(bot.created_at).getTime(),now,operations,prior,observation,...(isGridCyclePolicyVersion(bot.policy_version)?{cyclePolicy:retainedGridPolicy(bot,(await loadActiveGridLevels(c,claim.id,'all')).rows)}:{})});
     const exposure=await this.launch.pilotExposure(c,claim.id,now,{observation,fills:result.fills,authoritative:result.entriesAllowed});
     const lastFailure=(await c.query("SELECT max(terminal_at) AS at FROM grid_operations WHERE bot_id=$1 AND state='failed' AND failure_classification IN ('authentication','quota','transport')",[claim.id])).rows[0]?.at;
     let authoritativeRecovery=false;
@@ -182,7 +183,7 @@ export class GridMonitorStorage {
     const full=reconciliationComplete?{generation,safeThrough:safe,completedAt:now,lastId:observation.history?.lastId??null,lastIds:observation.history?.lastIds??null}:previousFull??null;
     const q=observation.qualification;
     const quota=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1',[claim.masterAccount])).rows[0];
-    const levels=(await c.query('SELECT price,size::text AS exact_size,reduce_only FROM grid_levels WHERE bot_id=$1 ORDER BY price,ordinal',[claim.id])).rows;
+    const levels=(await loadActiveGridLevels(c,claim.id,'reduction')).rows;
     const currentPolicy=gridCanaryPolicyCurrent(q,levels,bot.leverage,now,bot.direction);
     const healthy=result.entriesAllowed&&quota&&!quota.blocked&&currentPolicy
       &&observation.history?.publicationLagMs===GRID_HISTORY_PUBLICATION_LAG_MS&&!!observation.history.lastId;

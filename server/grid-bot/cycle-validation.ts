@@ -25,8 +25,8 @@ export function validateRetainedGridCycles(policy: GridPolicy, limits: GridCycle
       if (!open.minus(close).abs().gt(open.mul(D.max(0,limits.openingFeeRate)).plus(close.mul(D.max(0,limits.closingFeeRate))))) return deny('Current fees consume a retained cycle spread.');
     }
     const bound=gridSeedPriceBounds(policy.startPrice,limits.tick);
-    if (policy.gridPolicyExtension && policy.seedAtCreation && (new D(bound.high).gt(policy.gridPolicyExtension.seedPriceBounds.high) || new D(bound.low).lt(policy.gridPolicyExtension.seedPriceBounds.low))) return deny('Seed execution exceeds signed behaviour bounds.');
-    const worst=D.max(policy.upperPrice,policy.seedAtCreation?bound.high:'0');
+    if (policy.gridPolicyExtension && policy.seedAtCreation && !policy.epochAuthority && (new D(bound.high).gt(policy.gridPolicyExtension.seedPriceBounds.high) || new D(bound.low).lt(policy.gridPolicyExtension.seedPriceBounds.low))) return deny('Seed execution exceeds signed behaviour bounds.');
+    const worst=D.max(policy.upperPrice,policy.seedAtCreation&&!policy.epochAuthority?bound.high:'0');
     const ceiling=new D(policy.totalInvestment).mul(policy.leverage);
     if(policy.sizingVersion==='lean-1') {
       const envelope=new D(policy.safetyEnvelopePrice!);

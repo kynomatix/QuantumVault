@@ -1,3 +1,4 @@
+import { validEpochAuthority, type GridEpochAuthority } from './epoch-policy';
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import { gridPolicyExtension, stableGridExtension, type GridPolicyExtension } from './behaviour-policy';
 import Decimal from 'decimal.js';
@@ -11,6 +12,7 @@ export const GRID_POLICY_VERSION = '1.0.0';
 export interface SignedGridLevel { ordinal: number; price: string; size: string; side: 'buy' | 'sell'; reduceOnly: boolean }
 export interface GridPolicy extends GridSizing {
   gridPolicyExtension?: GridPolicyExtension;
+  epochAuthority?: GridEpochAuthority;
   id: string; protocol: 'pacifica'; market: string; direction: 'long' | 'short';
   upperPrice: string; lowerPrice: string; startPrice: string; gridCount: number;
   totalInvestment: string; leverage: number; entryScaleType: 'flat' | 'ascending' | 'descending';
@@ -24,7 +26,7 @@ const fixed = (raw: unknown, scale: number, positive = true) => typeof raw === '
   && new RegExp(`^(?:0|[1-9]\\d*)\\.\\d{${scale}}$`).test(raw) && raw.length <= 80
   && (!positive || /[1-9]/.test(raw));
 export function canonicalGridPolicy(p: GridPolicy): string | null {
-  if (!p || ![GRID_POLICY_VERSION, GRID_CYCLE_POLICY_VERSION, '2.2.0'].includes(p.policyVersion) || p.feePolicyVersion !== '1.0.0' || p.runtimePolicyVersion !== p.policyVersion
+  if (!p || ![GRID_POLICY_VERSION, GRID_CYCLE_POLICY_VERSION, '2.2.0', '2.3.0'].includes(p.policyVersion) || p.feePolicyVersion !== '1.0.0' || p.runtimePolicyVersion !== p.policyVersion
     || typeof p.id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(p.id) || p.protocol !== 'pacifica'
     || !/^[A-Z0-9]+-PERP$/.test(p.market) || !['long', 'short'].includes(p.direction)
     || ![p.upperPrice, p.lowerPrice, p.startPrice].every(v => fixed(v, 8)) || !fixed(p.totalInvestment, 2)
@@ -46,13 +48,14 @@ export function canonicalGridPolicy(p: GridPolicy): string | null {
       || new Decimal(p.safetyEnvelopePrice!).lt(p.upperPrice)
       || p.direction === 'short' && new Decimal(p.safetyEnvelopePrice!).lt(p.stopLossPrice!)) return null;
   }
-  if (p.policyVersion === '2.2.0') {
+  if ((p.policyVersion === '2.2.0' || p.policyVersion === '2.3.0')) {
     const extension = p.gridPolicyExtension, bounds = extension?.seedPriceBounds;
     if (p.sizingVersion !== 'lean-1' || !extension || !bounds || !cycles || ![bounds.low, bounds.high].every(v => fixed(v, 8))
       || new Decimal(bounds.low).gt(p.startPrice) || new Decimal(bounds.high).lt(p.startPrice)
       || p.seedAtCreation && new Decimal(bounds.high).gt(p.safetyEnvelopePrice!)
       || stableGridExtension(extension) !== stableGridExtension(gridPolicyExtension(cycles, extension.mode, p.safetyEnvelopePrice!, p.seedAtCreation, p.direction === 'long', bounds))) return null;
   } else if (p.gridPolicyExtension !== undefined) return null;
+  if(p.policyVersion === '2.3.0' ? !validEpochAuthority(p.epochAuthority,p) || p.epochAuthority!.owners.length !== cycles!.length || cycles!.some(c=>!p.epochAuthority!.owners.some(o=>o.ownerOrdinal===c.ownerOrdinal)) : p.epochAuthority !== undefined) return null;
   return JSON.stringify([isGridCyclePolicyVersion(p.policyVersion) ? 'grid-policy-hmac-v2' : 'grid-policy-hmac-v1', p.id, p.protocol, p.market, p.direction, p.upperPrice, p.lowerPrice,
     p.startPrice, p.gridCount, p.totalInvestment, p.leverage, p.entryScaleType, p.profitScaleType,
     p.policyVersion, p.feePolicyVersion, p.runtimePolicyVersion, p.stopLossPercent, p.stopLossPrice, p.seedAtCreation,
@@ -60,12 +63,13 @@ export function canonicalGridPolicy(p: GridPolicy): string | null {
     ...(cycles ? [cycles.map(c => [c.ownerOrdinal, c.anchor, c.openingOrdinal, c.closingOrdinal,
       c.openingPrice, c.closingPrice, c.quantity, c.initialInventory, c.initialOpeningCredit])] : []),
     ...(p.sizingVersion ? [[p.sizingVersion, p.safetyEnvelopePrice]] : []),
-    ...(p.gridPolicyExtension ? [stableGridExtension(p.gridPolicyExtension)] : [])]);
+    ...(p.gridPolicyExtension ? [stableGridExtension(p.gridPolicyExtension)] : []),
+    ...(p.epochAuthority ? [stableGridExtension(p.epochAuthority as any)] : [])]);
 }
 export function computeGridPolicyHmac(p: GridPolicy, umk: Buffer | null): Result {
   if (!umk) return { ok: false, reason: 'missing_secret' };
   if (!Buffer.isBuffer(umk) || umk.length !== 32) return { ok: false, reason: 'invalid_secret' };
-  if (![GRID_POLICY_VERSION, GRID_CYCLE_POLICY_VERSION, '2.2.0'].includes(p?.policyVersion)) return { ok: false, reason: 'unknown_version' };
+  if (![GRID_POLICY_VERSION, GRID_CYCLE_POLICY_VERSION, '2.2.0', '2.3.0'].includes(p?.policyVersion)) return { ok: false, reason: 'unknown_version' };
   const canonical = canonicalGridPolicy(p);
   if (!canonical) return { ok: false, reason: 'invalid_policy' };
   const subkey = deriveSubkey(umk, GRID_POLICY_HMAC_SUBKEY_PURPOSE);

@@ -1,3 +1,6 @@
+import {loadActiveGridLevels} from './active-epoch';
+import { archivedEpochPolicy } from './epoch-storage';
+import { epochDigest } from './epoch-policy';
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import type {PoolClient} from 'pg';
 import Decimal from 'decimal.js';
@@ -16,7 +19,7 @@ const D=Decimal.clone({precision:200});
 /** Caller holds the bot lock (master -> bot -> levels for admission). No partial-history API. */
 export async function readCycleState(c:PoolClient,bot:Record<string,any>,account:string,now:number){
   if(!isGridCyclePolicyVersion(bot.policy_version))throw Error('Cycle adapter requires retained v2 policy');
-  const levels=(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[bot.id])).rows;
+  const levels=(await loadActiveGridLevels(c,bot.id,'all')).rows;
   const policy=retainedGridPolicy(bot,levels);
   const state=(await c.query('SELECT * FROM grid_monitor_state WHERE bot_id=$1',[bot.id])).rows[0];
   const events=(await c.query("SELECT event_key,evidence FROM grid_risk_events WHERE bot_id=$1 AND (event_key IN ('canary-clock','cycle-unused-seed') OR event_key LIKE 'cycle-no-land:%' OR event_key LIKE 'cycle-terminal:%')",[bot.id])).rows;
@@ -39,8 +42,29 @@ export async function readCycleState(c:PoolClient,bot:Record<string,any>,account
   const noLand=Object.fromEntries(events.filter(e=>e.event_key.startsWith('cycle-no-land:')).map(e=>[e.event_key.slice('cycle-no-land:'.length),e.evidence]));
   const terminals=Object.fromEntries(events.filter(e=>e.event_key.startsWith('cycle-terminal:')).map(e=>[e.event_key.slice('cycle-terminal:'.length),e.evidence]));
   const unusedSeedProof=events.find(e=>e.event_key==='cycle-unused-seed')?.evidence as CycleReplayInput['unusedSeedProof'];
-  const history=normalizeCycleHistory({policy,account,levels,operations,fills,orders,allocations,observation:state.observation,
-    historyComplete:true,now,noLand,terminals,unusedSeedProof});
+  let carry:CycleReplayInput['carry'];
+  if(policy.epochAuthority){
+    const epochs=(await c.query('SELECT * FROM grid_epochs WHERE bot_id=$1 ORDER BY ordinal',[bot.id])).rows;
+    const {durableGridUmk}=await import('./service'),key=await durableGridUmk(bot.wallet_address);
+    if(!key)throw Error('Epoch signing authority unavailable');
+    try{
+      if(!epochs.length||epochs.at(-1).id!==bot.active_epoch_id)throw Error('Active epoch archive missing');
+      for(const [index,epoch] of epochs.entries()){
+        const retained=archivedEpochPolicy(epoch);
+        if(epoch.ordinal!==index+1||!verifyGridPolicyHmac(retained,key.umk,epoch.policy_hmac).ok)throw Error('Epoch signature unavailable');
+        if(index&&(!carry||epoch.predecessor_id!==epochs[index-1].id||epochDigest(carry)!==epoch.carry_digest||epochDigest(epoch.carry_snapshot)!==epoch.carry_digest))throw Error('Sealed predecessor changed; reconcile before trading');
+        if(epoch.id===bot.active_epoch_id){if(index!==epochs.length-1||canonicalGridPolicy(retained)!==canonicalGridPolicy(policy))throw Error('Active epoch pointer changed');break;}
+        const epochLevels=(await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 AND epoch_id=$2 ORDER BY ordinal',[bot.id,epoch.id])).rows;
+        const epochOperations=operations.filter(o=>o.epoch_id===epoch.id),ids=new Set(epochOperations.map(o=>o.id));
+        const sealed=normalizeCycleHistory({policy:retained,account,levels:epochLevels,operations:epochOperations,fills:fills.filter(f=>f.epoch_id===epoch.id),orders:orders.filter(o=>ids.has(o.operation_id)),allocations:allocations.filter(a=>ids.has(a.operation_id)),observation:state.observation,
+          historyComplete:true,now,noLand,terminals,unusedSeedProof:index===0?unusedSeedProof:undefined,carry,exportEpochId:epoch.id,comparePosition:false});
+        carry=sealed.carry;
+      }
+    }finally{key.cleanup();}
+  }
+  const active=policy.epochAuthority?operations.filter(o=>o.epoch_id===bot.active_epoch_id):operations,ids=new Set(active.map(o=>o.id));
+  const history=normalizeCycleHistory({policy,account,levels,operations:active,fills:policy.epochAuthority?fills.filter(f=>f.epoch_id===bot.active_epoch_id):fills,orders:orders.filter(o=>ids.has(o.operation_id)),allocations:allocations.filter(a=>ids.has(a.operation_id)),observation:state.observation,
+    historyComplete:true,now,noLand,terminals,carry,unusedSeedProof:policy.epochAuthority?undefined:unusedSeedProof});
   return {...history,policy,levels,state,completeUntil:full.completedAt+5000,operationRows:operations};
 }
 
@@ -61,6 +85,17 @@ export async function validateLockedCycleRequest(c:PoolClient,bot:Record<string,
     if(r.kind==='limit'){
       const amount=new D(String(r.data.amount));
       if(!amount.gt(0)||!amount.mod(facts.lot).isZero()||!r.data.reduce_only&&amount.mul(String(r.data.price)).lt(facts.minimumQuote))throw Error('Cycle order violates current limits');
+      if(history.policy.epochAuthority&&r.data.reduce_only===true){
+        const op=cycleOperation(history.policy,r.account,history.levels,candidateId??'EXAMPLE_ADMISSION',r);
+        for(const allocation of cycleRequestAllocations(op,r)){
+          const imported=history.input.carry?.owners.find(o=>o.ownerOrdinal===allocation.cycleOrdinal)?.sources.find(s=>s.kind==='inventory'&&s.tradeId===allocation.tradeId);
+          const fill=history.input.fills.find(f=>f.tradeId===allocation.tradeId&&f.leg==='entry');
+          const source=imported?{price:imported.price,quantity:imported.quantity,fee:imported.fee}:fill?{price:fill.price,quantity:fill.size,fee:fill.fee??'0'}:null;
+          if(!source)throw Error('Carried exit cost unavailable');
+          const paid=D.max(0,source.fee).div(source.quantity),price=new D(String(r.data.price)),fee=price.mul(D.max(0,facts.profit.effectiveRate));
+          if(history.policy.direction==='long'?price.minus(fee).lt(new D(source.price).plus(paid)):price.plus(fee).gt(new D(source.price).minus(paid)))throw Error('Carried exit would realize a fee-inclusive loss');
+        }
+      }
     }
     if(r.data.reduce_only!==true){
       if(!['provisioning','canary','active'].includes(bot.status)||history.state.blocked_reasons.length
@@ -98,7 +133,7 @@ export async function recordCycleReplay(c:PoolClient,bot:Record<string,any>,acco
   let history=await readCycleState(c,bot,account,now);
   const seed=history.input.operations.filter(o=>o.kind==='seed');
   const seedCompleted=seed.some(seed=>history.operationRows.some(op=>op.id===seed.id&&op.state==='confirmed'));
-  if(!history.input.unusedSeedProof&&history.policy.seedAtCreation&&seedCompleted&&['provisioning','canary','active'].includes(bot.status)){
+  if(!history.policy.epochAuthority&&!history.input.unusedSeedProof&&history.policy.seedAtCreation&&seedCompleted&&['provisioning','canary','active'].includes(bot.status)){
     const proof=history.input.progress.filter(p=>seed.some(o=>o.id===p.operationId));
     if(proof.length===seed.length&&proof.every(p=>p.state==='terminal'&&p.historyThrough!==undefined&&p.terminalAt!==undefined&&p.historyThrough>=p.terminalAt)){
       const release={operationIds:seed.map(o=>o.id),historyThrough:Math.max(...proof.map(p=>p.historyThrough!)),entriesAllowed:true};
@@ -121,7 +156,7 @@ export async function recordCycleReplay(c:PoolClient,bot:Record<string,any>,acco
 export function cycleCloseAllocations(history:Awaited<ReturnType<typeof readCycleState>>,amount:string){
   let remaining=new D(amount);const allocations:{cycleOrdinal:number;tradeId:string;size:string}[]=[];
   const lots=history.cycles.flatMap(state=>state.availableEntryLots.map(lot=>({...lot,cycleOrdinal:state.cycle.ownerOrdinal,
-    time:history.input.fills.find(fill=>fill.tradeId===lot.tradeId)!.time})))
+    time:history.input.fills.find(fill=>fill.tradeId===lot.tradeId)?.time??history.input.carry?.owners.flatMap(o=>o.sources).find(s=>s.tradeId===lot.tradeId)?.time??0})))
     .sort((a,b)=>a.time-b.time||(a.tradeId<b.tradeId?-1:a.tradeId>b.tradeId?1:0)||a.cycleOrdinal-b.cycleOrdinal);
   for(const lot of lots){const q=D.min(remaining,lot.size);
     if(q.gt(0))allocations.push({cycleOrdinal:lot.cycleOrdinal,tradeId:lot.tradeId,size:q.toFixed()});remaining=remaining.minus(q);}

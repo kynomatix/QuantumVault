@@ -16,7 +16,7 @@ export function retainedGridCycles(p: GridPolicy): GridCycle[] | null {
       || p.feePolicyVersion !== '1.0.0' || !['long', 'short'].includes(p.direction)
       || typeof p.seedAtCreation !== 'boolean' || p.levels.length !== p.gridCount + 1
       || !new D(p.startPrice).gt(p.lowerPrice) || !new D(p.startPrice).lt(p.upperPrice)) return null;
-    const cycles: GridCycle[] = [], long = p.direction === 'long', modes = p.policyVersion === '2.2.0';
+    const cycles: GridCycle[] = [], long = p.direction === 'long', modes = p.policyVersion === '2.2.0' || p.policyVersion === '2.3.0';
     if (modes && !isGridBehaviourMode(p.gridPolicyExtension?.mode)) return null;
     const profits = p.levels.flatMap((l, i) => (long ? new D(l.price).gt(p.startPrice) : new D(l.price).lt(p.startPrice)) ? [i] : []);
     const selected = new Set(modes ? gridOneShotOwners(p.gridPolicyExtension!.mode, profits, p.gridCount, long) : []);
@@ -36,7 +36,7 @@ export function retainedGridCycles(p: GridPolicy): GridCycle[] | null {
       const seeded = closing && p.seedAtCreation;
       cycles.push({ ...(modes ? { enabled, recycles } : {}), ownerOrdinal: i, anchor: opening ? 'opening' : 'closing', openingOrdinal, closingOrdinal,
         openingPrice: p.levels[openingOrdinal].price, closingPrice: p.levels[closingOrdinal].price,
-        quantity: row.size, initialInventory: seeded ? row.size : '0', initialOpeningCredit: seeded || !recycles ? '0' : row.size });
+        quantity: row.size, initialInventory: p.epochAuthority ? '0' : seeded ? row.size : '0', initialOpeningCredit: p.epochAuthority || seeded || !recycles ? '0' : row.size });
     }
     return cycles;
   } catch { return null; }

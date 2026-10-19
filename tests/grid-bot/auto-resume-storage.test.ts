@@ -15,7 +15,7 @@ import {gridDraftRevision} from '../../client/src/lib/grid-draft-view';
 import {policy,umk,intent} from './draft-fixtures';
 import {marginTestReading} from './margin-fixture';
 import type {GridObservation} from '../../server/grid-bot/reconciliation';
-const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql','0011_grid_auto_resume.sql'].map(p=>readFileSync(new URL('../../migrations/'+p,import.meta.url),'utf8'));
+const migrations=['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql','0011_grid_auto_resume.sql','0012_grid_range_epochs.sql'].map(p=>readFileSync(new URL('../../migrations/'+p,import.meta.url),'utf8'));
 describe('auto-resume PostgreSQL ownership, fencing and retry durability',()=>{
   let admin:Pool,pool:Pool,launch:GridLaunchStorage,monitor:GridMonitorStorage,life:GridLifecycleStorage,auto:GridAutoResumeStorage;
   const schema='grid_auto_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(Buffer.alloc(32,3));

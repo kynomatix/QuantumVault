@@ -1,3 +1,5 @@
+import {loadActiveGridLevels} from './active-epoch';
+import { createOriginalGridEpoch } from './epoch-storage';
 import { retainedGridBehaviour } from './behaviour-policy';
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import { randomUUID } from 'node:crypto';
@@ -65,6 +67,7 @@ export class GridStorage {
         return { bot: botRow(existing.rows[0]), result: 'existing_request' };
       }
       for (const l of levels) await c.query('INSERT INTO grid_levels (id,bot_id,ordinal,price,size,side,reduce_only) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(),bot.id,l.ordinal,l.price,l.size,l.side,l.reduceOnly]);
+      await createOriginalGridEpoch(c,created.rows[0],levels.map(l=>({...l,reduce_only:l.reduceOnly})));
       return { bot: botRow(created.rows[0]), result: 'created' };
     });
   }
@@ -82,7 +85,7 @@ export class GridStorage {
       await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
       const b = await c.query('SELECT * FROM grid_bots WHERE wallet_address=$1 AND id=$2', [wallet,id]);
       if (!b.rows[0]) throw new GridStorageError('not_found');
-      const l = await c.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal', [id]);
+      const l = await loadActiveGridLevels(c,id,'all');
       const o = await c.query("SELECT * FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed') ORDER BY prepared_at,id",[id]);
       const bot = botRow(b.rows[0]);
       if (l.rows.length !== bot.gridCount + 1 || !l.rows.every((v, i) => v.ordinal === i + 1 && decimal(v.price) && decimal(v.size) && decimal(v.cumulative_filled_size))) throw new GridStorageError('invariant');

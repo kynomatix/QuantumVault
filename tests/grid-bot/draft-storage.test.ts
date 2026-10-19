@@ -11,21 +11,45 @@ import { policy,umk,intent } from './draft-fixtures';
 import { gridDraftRevision } from '../../client/src/lib/grid-draft-view';
 const migration=readFileSync(new URL('../../migrations/0004_grid_bot_drafts.sql',import.meta.url),'utf8').trim();
 function runtimeSql(){const source=ts.createSourceFile('db.ts',readFileSync(new URL('../../server/db.ts',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true),entries:string[]=[];function visit(n:ts.Node){if(ts.isVariableDeclaration(n)&&n.name.getText(source)==='schemaMigrationSql'){let x=n.initializer;while(x&&ts.isAsExpression(x))x=x.expression;if(x&&ts.isArrayLiteralExpression(x))for(const e of x.elements)if(ts.isNoSubstitutionTemplateLiteral(e)||ts.isStringLiteral(e))entries.push(e.text);}ts.forEachChild(n,visit);}visit(source);return entries;}
-function runtimeManifest():SchemaMigrationDefinition {const source=ts.createSourceFile('db.ts',readFileSync(new URL('../../server/db.ts',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true);let result:SchemaMigrationDefinition|null=null;function visit(n:ts.Node){if(ts.isVariableDeclaration(n)&&n.name.getText(source)==='schemaMigrationMetadata'&&n.initializer){let x=n.initializer;while(ts.isAsExpression(x))x=x.expression;if(ts.isArrayLiteralExpression(x))result={...JSON.parse(x.elements[192].getText(source)),sql:migration};}ts.forEachChild(n,visit);}visit(source);if(!result)throw Error('Missing Grid schema manifest');return result;}
+function runtimeManifest(index=192):SchemaMigrationDefinition {const source=ts.createSourceFile('db.ts',readFileSync(new URL('../../server/db.ts',import.meta.url),'utf8'),ts.ScriptTarget.Latest,true);let result:SchemaMigrationDefinition|null=null;function visit(n:ts.Node){if(ts.isVariableDeclaration(n)&&n.name.getText(source)==='schemaMigrationMetadata'&&n.initializer){let x=n.initializer;while(ts.isAsExpression(x))x=x.expression;if(ts.isArrayLiteralExpression(x))result={...JSON.parse(x.elements[index].getText(source)),sql:runtimeSql()[index]};}ts.forEachChild(n,visit);}visit(source);if(!result)throw Error('Missing Grid schema manifest');return result;}
 describe('Grid migration and transactional storage on an isolated FRACTAL qvtest schema',()=>{
-  let admin:Pool,pool:Pool,storage:GridStorage;const schema='grid_u3_'+randomUUID().replaceAll('-','');
+  let admin:Pool,pool:Pool,storage:GridStorage;let originalCatalog:{tables:number;indexes:number;references:string[]};const schema='grid_u3_'+randomUUID().replaceAll('-','');
   beforeAll(async()=>{const url=process.env.DATABASE_URL;if(!url || new URL(url).pathname!=='/qvtest')throw new Error('Grid storage tests require the FRACTAL qvtest database; no other database is touched');
     admin=new Pool({connectionString:url,max:1});await admin.query('CREATE SCHEMA '+schema);pool=new Pool({connectionString:url,max:4,options:'-c search_path='+schema});
-    await pool.query('CREATE TABLE wallets(address text PRIMARY KEY); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY);');await pool.query(migration);storage=new GridStorage(pool,async()=>{});
+    await pool.query('CREATE TABLE wallets(address text PRIMARY KEY); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY);');await pool.query(migration);
+    originalCatalog={tables:(await pool.query("SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename LIKE 'grid_%'")).rowCount!,indexes:(await pool.query("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename LIKE 'grid_%' AND indexname NOT LIKE '%_pkey'")).rowCount!,references:(await pool.query("SELECT confdeltype FROM pg_constraint WHERE connamespace=current_schema()::regnamespace AND contype='f'")).rows.map(r=>r.confdeltype)};
+    for(const name of ['0005_grid_launch','0006_grid_monitor','0007_grid_lifecycle','0011_grid_auto_resume','0012_grid_range_epochs'])await pool.query(readFileSync(new URL('../../migrations/'+name+'.sql',import.meta.url),'utf8'));
+    storage=new GridStorage(pool,async()=>{});
   },30_000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30_000);
   beforeEach(async()=>{await pool.query('TRUNCATE grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query("INSERT INTO wallets VALUES ('EXAMPLE'),('REDACTED')");});
   const draft=(wallet='EXAMPLE')=>{const p=policy(),h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;const bot:DraftRecord={...snapshot,walletAddress:wallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:gridDraftRevision(intent),createIntent:intent,authoritySnapshot:{state:'EXAMPLE'},policyHmac:h.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};return{bot,levels};};
-  it('retains byte-identical Unit 3 runtime SQL, four tables, eleven indexes and nine RESTRICT references',async()=>{const sql=runtimeSql();expect(sql).toHaveLength(201);expect(sql[192]).toBe(migration);
-    const tables=await pool.query("SELECT tablename FROM pg_tables WHERE schemaname=current_schema() AND tablename LIKE 'grid_%'");expect(tables.rowCount).toBe(4);
-    const indexes=await pool.query("SELECT indexname FROM pg_indexes WHERE schemaname=current_schema() AND tablename LIKE 'grid_%' AND indexname NOT LIKE '%_pkey'");expect(indexes.rowCount).toBe(11);
-    const refs=await pool.query("SELECT confdeltype FROM pg_constraint WHERE connamespace=current_schema()::regnamespace AND contype='f'");expect(refs.rows).toHaveLength(9);expect(refs.rows.every(r=>r.confdeltype==='r')).toBe(true);});
+  it('retains byte-identical Unit 3 runtime SQL, four tables, eleven indexes and nine RESTRICT references',async()=>{const sql=runtimeSql();expect(sql).toHaveLength(202);expect(sql[192]).toBe(migration);
+    expect(originalCatalog.tables).toBe(4);expect(originalCatalog.indexes).toBe(11);expect(originalCatalog.references).toHaveLength(9);expect(originalCatalog.references.every(r=>r==='r')).toBe(true);});
   it('checks real catalog definitions and refuses a same-name weakened constraint',async()=>{const probe=()=>probeSchemaMigrationManifest(async(q,v)=>pool.query(q.replaceAll("'public'",'current_schema()'),v?.map(x=>typeof x==='string'?x.replace(/^public\./,schema+'.'):x)),[runtimeManifest()]);const ready=await probe();if(ready.evidence.length)throw new Error('Grid catalog mismatches: '+JSON.stringify(ready.evidence));expect(ready.unavailableCapabilities).not.toContain('grid_bot');await pool.query('ALTER TABLE grid_bots DROP CONSTRAINT grid_bots_protocol_check; ALTER TABLE grid_bots ADD CONSTRAINT grid_bots_protocol_check CHECK (true)');try{expect((await probe()).unavailableCapabilities).toContain('grid_bot');}finally{await pool.query("ALTER TABLE grid_bots DROP CONSTRAINT grid_bots_protocol_check; ALTER TABLE grid_bots ADD CONSTRAINT grid_bots_protocol_check CHECK (protocol = 'pacifica')");}});
+  it('verifies the epoch migration against actual PostgreSQL catalog definitions',async()=>{
+    const ready=await probeSchemaMigrationManifest(async(q,v)=>pool.query(q.replaceAll("'public'",'current_schema()'),v?.map(x=>typeof x==='string'?x.replace(/^public\./,schema+'.'):x)),[runtimeManifest(201)]);
+    expect(ready.evidence).toEqual([]);
+  });
+  it('creates immutable original epochs without changing the original policy signature',async()=>{
+    const {bot,levels}=draft();await storage.createDraftWithLevels(bot,levels);
+    const current=(await pool.query('SELECT active_epoch_id,policy_hmac FROM grid_bots WHERE id=$1',[bot.id])).rows[0];
+    const epoch=(await pool.query('SELECT * FROM grid_epochs WHERE id=$1',[current.active_epoch_id])).rows[0];
+    expect(epoch.ordinal).toBe(1);expect(epoch.policy_hmac).toBe(bot.policyHmac);expect(current.policy_hmac).toBe(bot.policyHmac);
+    expect((await pool.query('SELECT epoch_id FROM grid_levels WHERE bot_id=$1',[bot.id])).rows.every(l=>l.epoch_id===epoch.id)).toBe(true);
+    await expect(pool.query("UPDATE grid_epochs SET reason='EXAMPLE' WHERE id=$1",[epoch.id])).rejects.toThrow('immutable');
+    await expect(pool.query('DELETE FROM grid_epochs WHERE id=$1',[epoch.id])).rejects.toThrow('immutable');
+    await pool.query(runtimeSql()[201]);await pool.query(runtimeSql()[201]);
+    expect((await pool.query('SELECT id,policy_hmac FROM grid_epochs WHERE bot_id=$1',[bot.id])).rows).toEqual([{id:epoch.id,policy_hmac:bot.policyHmac}]);
+  });
+  it('binds operation attribution to its original level and rejects cross-bot epoch pointers',async()=>{
+    const a=draft(),b=draft();await storage.createDraftWithLevels(a.bot,a.levels);await storage.createDraftWithLevels(b.bot,b.levels);
+    const level=(await pool.query('SELECT * FROM grid_levels WHERE bot_id=$1 ORDER BY ordinal',[a.bot.id])).rows[0];
+    const op=await storage.prepareOperation({botId:a.bot.id,levelId:level.id,type:'sync',idempotencyKey:'EXAMPLE',requestIdentity:'EXAMPLE'});
+    expect((await pool.query('SELECT epoch_id FROM grid_operations WHERE id=$1',[op.id])).rows[0].epoch_id).toBe(level.epoch_id);
+    await expect(pool.query('UPDATE grid_bots SET active_epoch_id=$2 WHERE id=$1',[b.bot.id,level.epoch_id])).rejects.toThrow();
+    await expect(pool.query('UPDATE grid_operations SET epoch_id=NULL WHERE id=$1',[op.id])).rejects.toThrow('immutable');
+  });
   it('a repeat boot executes without waiting on existing-table locks',async()=>{const lock=await pool.connect(),boot=await pool.connect();try{await lock.query('BEGIN');await lock.query('LOCK TABLE grid_bots IN ACCESS SHARE MODE');await boot.query("SET lock_timeout='150ms'");await boot.query(migration);}finally{await lock.query('ROLLBACK');lock.release();boot.release();}});
   it('creates complete drafts transactionally and elects one winner under concurrent retry',async()=>{const {bot,levels}=draft(),results=await Promise.all([storage.createDraftWithLevels(bot,levels),storage.createDraftWithLevels({...bot,id:randomUUID()},levels)]);const winner=results.find(r=>r.result==='created')!.bot.id;expect(results.map(r=>r.bot.id)).toEqual([winner,winner]);expect(results.filter(r=>r.result==='created')).toHaveLength(1);expect((await storage.getBotSnapshot('EXAMPLE',winner)).levels).toHaveLength(2);
     await expect(storage.getBotSnapshot('REDACTED',winner)).rejects.toMatchObject({code:'not_found'});await expect(storage.getBotSnapshot('EXAMPLE',randomUUID())).rejects.toMatchObject({code:'not_found'});});

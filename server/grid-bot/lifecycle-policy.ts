@@ -5,7 +5,7 @@ import {reconcileGridLimit,type GridReconciliation} from './execution';
 import {requestDigest,type ExactGridRequest} from './launch-storage';
 import {gridWalletEntryGate} from './runtime-policy';
 const D=Decimal.clone({precision:200});
-export type GridControlAction='pause'|'resume'|'resync'|'stop'|'band';
+export type GridControlAction='pause'|'resume'|'resync'|'stop'|'band'|'regrid';
 export const freshGridFact=(at:number,now:number)=>Number.isSafeInteger(at)&&at<=now&&now-at<=5000;
 const positive=(value:unknown)=>typeof value==='string'&&/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)&&new D(value).gt(0);
 /** Only an identity-bound entry cancel may coexist with a Stop close. Never replay it. */

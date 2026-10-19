@@ -1,3 +1,4 @@
+import { GridMoveError, type GridMoveStorage } from './move-storage';
 import type { Express, Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
 import { GRID_CREATE_POLICY, GRID_CAPACITY_UNKNOWN, gridPreviewRequestSchema, gridCreateRequestSchema } from '../../shared/grid-draft';
@@ -21,7 +22,7 @@ const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe
 const advisoryQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),
   lookback:z.enum(['100','200']).optional(),period:z.enum(['day','week','month']).optional()}).strict();
 export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean;lifecycle?:Pick<GridLifecycleStorage,'request'>;autoResume?:Pick<GridAutoResumeStorage,'set'|'identity'>;tick?:(market:string)=>Promise<string|null>;
-  gates?:()=>GridRuntimeGates;start?:(wallet:string,id:string,expected:GridStartRequest,signal:AbortSignal)=>Promise<GridStartResult>}) {
+  move?:Pick<GridMoveStorage,'surface'|'set'|'proposal'|'confirm'>;gates?:()=>GridRuntimeGates;start?:(wallet:string,id:string,expected:GridStartRequest,signal:AbortSignal)=>Promise<GridStartResult>}) {
   const gates=provided?.gates??gridRuntimeGates;
   app.post('/api/grid-bots/:id/start',requireWallet,async(req,res)=>{
     res.set('Cache-Control','no-store');
@@ -51,11 +52,33 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
     if (bounded && (inFlight>=4 || recent.length>=12)) {res.status(429).json({error:'Grid preview is busy. Try again shortly.'});return;}
     if (bounded) {inFlight++;recent.push(now);starts.set(owner,recent);if(starts.size>512)starts.delete(starts.keys().next().value!);}
     try {await handler(req,res);} catch(e) {
-      if (e instanceof GridDraftError) res.status(e.code==='secret_unavailable'?409:e.code==='authority_unavailable'?422:409).json({error:e.code,reasons:e.reasons});
+      if(e instanceof GridMoveError) res.status(409).json({error:e.message});
+       else if (e instanceof GridDraftError) res.status(e.code==='secret_unavailable'?409:e.code==='authority_unavailable'?422:409).json({error:e.code,reasons:e.reasons});
       else if(e instanceof GridStorageError) res.status(e.code==='not_found'?404:e.code==='conflict'?409:503).json({error:e.code});
       else res.status(503).json({error:'Grid authority or storage unavailable'});
     } finally {if(bounded)inFlight--;}
   };
+  const moves=async()=>provided?.move??(await import('./move-runtime')).productionGridMoves();
+  app.get('/api/grid-bots/:id/range-move',requireWallet,work(async(req,res)=>{
+    res.set('Cache-Control','no-store');const id=uuid.safeParse(req.params.id);
+    if(!id.success){res.status(400).json({error:'Invalid Grid id'});return;}
+    res.json(await (await moves()).surface(wallet(req),id.data));
+  }));
+  app.post('/api/grid-bots/:id/range-following',requireWallet,work(async(req,res)=>{
+    const id=uuid.safeParse(req.params.id),body=z.object({mode:z.enum(['off','ask']),generation:z.string().regex(/^(?:0|[1-9]\d*)$/).max(18)}).strict().safeParse(req.body);
+    if(!id.success||!body.success){res.status(400).json({error:'Invalid following preference'});return;}
+    res.json(await (await moves()).set(wallet(req),id.data,body.data.mode,body.data.generation));
+  }));
+  app.post('/api/grid-bots/:id/range-move/proposal',requireWallet,work(async(req,res)=>{
+    res.set('Cache-Control','no-store');const id=uuid.safeParse(req.params.id);
+    if(!id.success){res.status(400).json({error:'Invalid Grid id'});return;}
+    res.json(await (await moves()).proposal(wallet(req),id.data,AbortSignal.timeout(30000)));
+  },true));
+  app.post('/api/grid-bots/:id/range-move/confirm',requireWallet,work(async(req,res)=>{
+    const id=uuid.safeParse(req.params.id),body=z.object({requestId:uuid,proposal:z.record(z.unknown()),proposalHash:z.string().regex(/^[0-9a-f]{64}$/)}).strict().safeParse(req.body);
+    if(!id.success||!body.success){res.status(400).json({error:'Invalid move confirmation'});return;}
+    res.status(202).json(await (await moves()).confirm(wallet(req),id.data,body.data.requestId,body.data.proposal as any,body.data.proposalHash,AbortSignal.timeout(30000)));
+  },true));
   const currentTick=provided?.tick??(async(market:string)=>{
     try{const rows=await defaultPlannerDeps.getMarkets(),row=rows.find(m=>m.internalSymbol===market);if(!row)return null;
       const constraints=marketSnapshot(row,defaultPlannerDeps).constraints;

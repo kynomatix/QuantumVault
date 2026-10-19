@@ -6,8 +6,8 @@ export const GRID_BOUNDARY_RULE = 'interval-quarter-profit-edge-v1' as const;
 export const isGridBehaviourMode = (mode: unknown): mode is GridBehaviourMode =>
   GRID_BEHAVIOUR_MODES.includes(mode as GridBehaviourMode);
 /** Explicit capabilities: unknown versions never acquire cycle authority. */
-export const isGridCyclePolicyVersion = (version: unknown): version is '2.0.0' | '2.2.0' =>
-  version === '2.0.0' || version === GRID_MODES_POLICY_VERSION;
+export const isGridCyclePolicyVersion = (version: unknown): version is '2.0.0' | '2.2.0' | '2.3.0' =>
+  version === '2.0.0' || version === GRID_MODES_POLICY_VERSION || version === '2.3.0';
 export function gridOneShotOwners(mode: GridBehaviourMode, profitOrdinals: number[], intervals: number, long: boolean) {
   // A quarter of all signed intervals, capped to profit-side owners, from the profit edge.
   const ranked = [...profitOrdinals].sort((a, b) => long ? b - a : a - b);

@@ -13,7 +13,7 @@ export function gridLevelRequest(input:{account:GridAccount;level:WindowLevel;ma
   const {account:a,level:l}=input;
   const intent:GridOrderIntent={...(l.cycle?{runtimePolicyVersion:(input.authority.policy as GridPolicy | undefined)?.runtimePolicyVersion ?? '2.0.0'}:{}),account:a.account,subaccountId:null,market:input.market,protocolSymbol:input.protocolSymbol,
     signerPublicKey:a.account,signerGeneration:input.signerGeneration,deployment:input.deployment,endpoint:'https://api.pacifica.fi/api/v1/orders/create',
-    clientOrderId:gridClientOrderId({botId:a.botId,level:l.ordinal,attempt:l.attempt,leg:l.reduceOnly?'profit':'entry'}),
+    clientOrderId:gridClientOrderId({botId:a.botId,level:l.ordinal,attempt:l.attempt,leg:l.reduceOnly?'profit':'entry',epochId:(input.authority.policy as GridPolicy|undefined)?.epochAuthority?.epochId}),
     side:l.side==='buy'?'long':'short',price:l.price,amount:l.size,reduceOnly:l.reduceOnly,signingTimestamp:input.now,signingExpiryMs:5000};
   const prepared=prepareGridOrder(intent,input.fee,input.constraint,input.now),{account:_account,subaccount_id:_sub,...data}=prepared.unsigned;
   return {kind:'limit',botId:a.botId,account:a.account,masterAccount:a.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:input.now,expiryMs:5000,data,

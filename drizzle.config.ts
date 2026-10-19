@@ -12,6 +12,8 @@ export default defineConfig({
   // Excluding them also removes Kit's pre-drop DISABLE ROW LEVEL SECURITY statements.
   tablesFilter: [
     "!grid_auto_resume",
+    "!grid_epochs",
+    "!grid_trailing",
     "!grid_control_keys",
     "!grid_control_requests",
     "!grid_exact_fills",
