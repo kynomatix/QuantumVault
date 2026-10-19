@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { Children, isValidElement, type ReactElement, type ReactNode } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { GridBehaviourSelect } from '../../client/src/components/grid-planner/GridBehaviourSelect';
 
 // Exercise the real callbacks, with the same hook harness used by card-client.
@@ -27,7 +28,7 @@ vi.mock('react', async importOriginal => ({
 
 type Element = ReactElement<Record<string, any>>;
 const store = (): HookStore => ({ states: [], refs: [], effects: [] });
-function render(hookStore: HookStore, component: () => Element) {
+function render<T>(hookStore: HookStore, component: () => T): T {
   hooks.store = hookStore; hooks.stateIndex = 0; hooks.refIndex = 0; hookStore.effects = [];
   return component();
 }
@@ -77,6 +78,37 @@ describe('Grid behaviour clip interactions', () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it('mounts videos and posters only while expanded, and removes them on close', () => {
+    const panelMarkup = (tree: Element) => render(player, () => renderToStaticMarkup(
+      find(tree, element => element.props.role === 'radiogroup'),
+    ));
+    const collapsed = panelMarkup(renderPicker());
+    expect(collapsed).not.toContain('<video');
+    expect(collapsed).not.toContain('poster=');
+    expect(collapsed).not.toContain('/grid-modes/');
+    const tree = open();
+    const expanded = panelMarkup(tree);
+    expect(expanded.match(/<video\b/g)).toHaveLength(3);
+    for (const name of ['repeat-all', 'step-back', 'step-back-edge']) {
+      expect(expanded).toContain(`src="/grid-modes/${name}.mp4"`);
+      expect(expanded).toContain(`poster="/grid-modes/${name}.png"`);
+    }
+    for (const video of expanded.match(/<video\b[^>]*>/g) ?? []) {
+      expect(video).toContain('preload="none"');
+      expect(video).toContain('muted=""');
+      expect(video).toMatch(/playsinline=""/i);
+      expect(video).not.toMatch(/\s(?:autoplay|loop|controls)=/i);
+    }
+    expect(expanded).toContain('aspect-video w-full max-w-full');
+    expect(expanded).toContain('auto-rows-fr');
+    for (const label of expanded.match(/<label\b[^]*?<\/label>/g) ?? []) expect(label).not.toContain('<video');
+    trigger(tree).props.onClick();
+    const closed = panelMarkup(renderPicker());
+    expect(closed).not.toContain('<video');
+    expect(closed).not.toContain('poster=');
+    expect(closed).not.toContain('/grid-modes/');
+  });
+
   it('Escape from the still-focused row trigger closes the panel and restores focus', () => {
     const tree = open();
     expect(trigger(tree).props['aria-expanded']).toBe(true);
@@ -104,6 +136,7 @@ describe('Grid behaviour clip interactions', () => {
     expect(video.props).toMatchObject({ muted: true, playsInline: true, preload: 'none', controls: false,
       poster: '/grid-modes/repeat-all.png', src: '/grid-modes/repeat-all.mp4' });
     expect(video.props.autoPlay).toBeUndefined(); expect(video.props.loop).toBeUndefined();
+    expect(find(clip, element => element.type === 'button').props.className.split(' ')).toEqual(expect.arrayContaining(['h-11', 'w-11']));
     expect(media.play).not.toHaveBeenCalled();
     const event = bubble([...clipPath.slice(0, -1), ...pathTo(clip, element => element.type === 'button')!], 'onClick');
     expect(media.play).toHaveBeenCalledOnce();
@@ -127,18 +160,18 @@ describe('Grid behaviour clip interactions', () => {
     expect(find(renderPlayer(tree), element => element.type === 'button')).toBeTruthy();
   });
 
-  it('stops playback and restores the poster on close, and pauses on unmount', () => {
+  it('pauses on close via unmount and restores the poster on a fresh mount', () => {
     const tree = open();
     find(renderPlayer(tree), element => element.type === 'button').props.onClick();
-    renderPlayer(tree);
     const cleanup = player.effects[0]();
     trigger(tree).props.onClick();
-    renderPlayer(renderPicker());
-    player.effects[0]();
-    expect(media.pause).toHaveBeenCalledOnce(); expect(media.load).toHaveBeenCalledOnce();
-    expect(find(renderPlayer(renderPicker()), element => element.type === 'video').props.controls).toBe(false);
+    expect(pathTo(renderPicker(), element => element.props.mode === 'repeat_all')).toBeUndefined();
     if (cleanup) cleanup();
-    expect(media.pause).toHaveBeenCalledTimes(2);
+    expect(media.pause).toHaveBeenCalledOnce();
+    player = store(); player.refs.push({ current: media });
+    const reopened = renderPlayer(open());
+    expect(find(reopened, element => element.type === 'video').props.controls).toBe(false);
+    expect(find(reopened, element => element.type === 'button')).toBeTruthy();
   });
 
   it('still selects and closes from the radio, while arrow navigation stays open', () => {

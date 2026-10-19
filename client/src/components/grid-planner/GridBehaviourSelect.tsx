@@ -10,18 +10,13 @@ const CLIPS: Record<GridBehaviourMode, string> = {
   step_back_edge: 'step-back-edge',
 };
 
-function BehaviourClip({ mode, label, active }: { mode: GridBehaviourMode; label: string; active: boolean }) {
+function BehaviourClip({ mode, label }: { mode: GridBehaviourMode; label: string }) {
   const video = useRef<HTMLVideoElement>(null);
   const [started, setStarted] = useState(false);
   useEffect(() => {
     const media = video.current;
-    if (!active) {
-      media?.pause();
-      media?.load();
-      setStarted(false);
-    }
     return () => { media?.pause(); };
-  }, [active]);
+  }, []);
 
   // Playback is always opt-in, including with prefers-reduced-motion enabled.
   return <div className="relative mt-auto min-w-0 max-w-full" onClick={event => event.stopPropagation()}>
@@ -29,7 +24,7 @@ function BehaviourClip({ mode, label, active }: { mode: GridBehaviourMode; label
       aria-label={`Example animation: ${label}`} muted playsInline preload="none" controls={started}
       className="block aspect-video w-full max-w-full rounded-md bg-black object-contain" />
     {!started && <button type="button" aria-label={`Play example animation: ${label}`}
-      className="absolute bottom-2 left-2 flex h-9 w-9 items-center justify-center rounded-full bg-black/80 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      className="absolute bottom-2 left-2 flex h-11 w-11 items-center justify-center rounded-full bg-black/80 text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       onClick={() => {
         const media = video.current;
         if (!media) return;
@@ -102,7 +97,7 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
             <span id={`${id}-${mode}-hint`} className="text-sm text-muted-foreground">{copy.hint}</span>
             {!showClips && <span id={`${id}-${mode}-example`} className="mt-auto pt-1 text-xs text-muted-foreground">{copy.example}</span>}
             </label>
-            {showClips && <BehaviourClip mode={mode} label={copy.label} active={expanded} />}
+            {showClips && expanded && <BehaviourClip mode={mode} label={copy.label} />}
           </div>;
         })}
       </div>

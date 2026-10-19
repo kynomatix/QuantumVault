@@ -50,25 +50,13 @@ describe('Grid behaviour inline cards', () => {
         for (const part of [copy.label, copy.hint]) expect(html).toContain(part);
         if (side === 'long' && seed) {
           expect(html).not.toContain(copy.example);
-          const asset = mode.replaceAll('_', '-');
-          expect(html).toContain(`src="/grid-modes/${asset}.mp4"`);
-          expect(html).toContain(`poster="/grid-modes/${asset}.png"`);
-          expect(html).toContain(`aria-label="Example animation: ${copy.label}"`);
-          expect(html).toContain(`aria-label="Play example animation: ${copy.label}"`);
         } else expect(html).toContain(copy.example);
       }
-      expect(html.match(/<video\b/g) ?? []).toHaveLength(side === 'long' && seed ? 3 : 0);
-      if (side === 'long' && seed) {
-        for (const video of html.match(/<video\b[^>]*>/g) ?? []) {
-          expect(video).toContain('preload="none"');
-          expect(video).toContain('muted=""');
-          expect(video).toMatch(/playsinline=""/i);
-          expect(video).not.toMatch(/\s(?:autoplay|loop|controls)=/i);
-        }
-        expect(html).toContain('aspect-video w-full max-w-full');
-        expect(html).toContain('auto-rows-fr');
-        for (const label of html.match(/<label\b[^]*?<\/label>/g) ?? []) expect(label).not.toContain('<video');
-      }
+      expect(html).not.toContain('<video');
+      expect(html).not.toContain('poster=');
+      expect(html).not.toContain('/grid-modes/');
+      expect(html).not.toContain('aspect-video');
+      expect(html).toContain('auto-rows-fr');
       expect(html).not.toContain('role="dialog"');
       expect(html).not.toContain('See example');
       expect(html).not.toContain('Done');
