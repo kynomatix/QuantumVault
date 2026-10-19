@@ -43,7 +43,8 @@ export function selectDevelopment(rows){
     const sameMode=s.id===sameId?null:compare(byId.get(s.id),byId.get(sameId));
     return {setting:s.id,passes:shipped.passes&&(!sameMode||sameMode.passes),shipped,sameMode};
   });
+  const pooledRisk=(c,key)=>c.shipped.paths.reduce((sum,p)=>sum+p.paired[key]*p.paired.n,0)/c.shipped.paths.reduce((sum,p)=>sum+p.paired.n,0);
   const eligible=comparisons.filter(c=>c.passes).sort((a,b)=>b.shipped.meanDelta-a.shipped.meanDelta||
-    a.shipped.paths[0].paired.meanDrawdown-b.shipped.paths[0].paired.meanDrawdown||a.shipped.paths[0].paired.stopRate-b.shipped.paths[0].paired.stopRate||a.setting.localeCompare(b.setting));
+    pooledRisk(a,'meanDrawdown')-pooledRisk(b,'meanDrawdown')||pooledRisk(a,'stopRate')-pooledRisk(b,'stopRate')||a.setting.localeCompare(b.setting));
   return {selected:eligible[0]?.setting??null,eligible:eligible.map(c=>c.setting),comparisons};
 }

@@ -46,4 +46,12 @@ describe('Grid defaults preregistered research',()=>{
     const all=settings.flatMap(s=>rows(0,0.02,0).map(r=>({...r,setting:s.id})));
     expect(selectDevelopment(all).selected).toBeNull();
   });
+  it('breaks exact return ties using risk pooled across both paths',()=>{
+    const all=settings.flatMap(s=>rows(0,0.1,1).map(r=>({...r,setting:s.id})));
+    for(const r of all){
+      if(r.setting==='day-1-10-repeat_all')Object.assign(r,{netReturn:0.01,maxDrawdown:r.path==='OHLC'?0.01:0.03,protectiveStop:0});
+      if(r.setting==='week-1.5-10-repeat_all')Object.assign(r,{netReturn:0.01,maxDrawdown:r.path==='OHLC'?0.015:0.02,protectiveStop:0});
+    }
+    expect(selectDevelopment(all).selected).toBe('week-1.5-10-repeat_all');
+  });
 });
