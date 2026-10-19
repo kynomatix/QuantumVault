@@ -132,7 +132,7 @@ export function runTrailBacktest(input:TrailRun) {
       let candidate:GridPolicy|null=null;
       try{
         const policyHmac=createHash('sha256').update(canonicalGridPolicy(p)!).digest('hex'); // research digest, not live signing authority
-        candidate=candidateGridEpoch({policy:p,policyHmac,epochId:uuid(epoch+1),originEpochId:uuid(epoch),ordinal:epoch,
+        candidate=candidateGridEpoch({policy:p,policyHmac,epochId:uuid(epoch+1),originEpochId:uuid(epoch),ordinal:epoch+1,
           carry:exported.carry,facts,close:decision.close,mark:String(bar.open)}).policy;
       }catch(error){hold('candidate: '+(error as Error).message);}
       if(candidate){
