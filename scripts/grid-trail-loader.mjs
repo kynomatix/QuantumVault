@@ -6,9 +6,12 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
 const vendor=process.env.GRID_TRAIL_VENDOR;
 const requireVendor=vendor?createRequire(pathToFileURL(resolve(vendor,'package.json'))):null;
+let resolvingVendor=false;
 registerHooks({resolve(specifier,context,next){
-  if(requireVendor&&!isBuiltin(specifier)&&!specifier.startsWith('.')&&!specifier.startsWith('/')&&!specifier.includes(':')){
-    return next(pathToFileURL(requireVendor.resolve(specifier)).href,context);
+  if(requireVendor&&!resolvingVendor&&!isBuiltin(specifier)&&!specifier.startsWith('.')&&!specifier.startsWith('/')&&!specifier.includes(':')){
+    let resolved; resolvingVendor=true;
+    try { resolved=requireVendor.resolve(specifier); } finally { resolvingVendor=false; }
+    return {url:pathToFileURL(resolved).href,shortCircuit:true};
   }
   if(specifier.startsWith('.')&&context.parentURL){
     const url=new URL(specifier,context.parentURL),path=fileURLToPath(url);

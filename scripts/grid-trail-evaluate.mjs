@@ -1,4 +1,4 @@
-// Plain Node 24 entry: node --import <extension-resolution-hook> scripts/grid-trail-evaluate.mjs <snapshot> <NEW output>
+// Plain Node 24 entry: node --experimental-transform-types --import <extension-resolution-hook> scripts/grid-trail-evaluate.mjs <snapshot> <NEW output>
 // In a normal dependency-equipped checkout the hook only resolves extensionless TS imports.
 import {readFile,mkdir,writeFile,appendFile} from 'node:fs/promises';
 import {join} from 'node:path';
