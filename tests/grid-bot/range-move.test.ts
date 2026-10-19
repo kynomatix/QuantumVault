@@ -21,7 +21,7 @@ function carried(seed=false){
 function candidate(seed=false){const c=carried(seed);return {...c,...candidateGridEpoch({policy:c.p,policyHmac:computeGridPolicyHmac(c.p,Buffer.alloc(32,1)).ok?(computeGridPolicyHmac(c.p,Buffer.alloc(32,1)) as {digest:string}).digest:'EXAMPLE',epochId:nextEpochId,originEpochId:epochId,ordinal:2,carry:c.carry,facts,close:'123',mark:'123'})};}
 describe('manual range epoch authority',()=>{
   it('provides distinct retained runtime authority for epoch orders',()=>{expect(gridRuntimePolicy('2.3.0')?.descriptor.version).toBe('2.3.0');expect(gridRuntimePolicy('2.3.0')?.digest).not.toBe(gridRuntimePolicy('2.2.0')?.digest);});
-  it('ships with the production feature switch off',()=>expect(GRID_RANGE_MOVE_ENABLED).toBe(false));
+  it('ships with manual Move range up switched on (owner go 2026-10-19)',()=>expect(GRID_RANGE_MOVE_ENABLED).toBe(true));
   it('requires finalized two-bar-right Dow confirmation above the old edge',()=>{
     const p=behaviourPolicy('repeat_all'),bars=candles(),now=base+bars.length*duration+100;
     expect(qualifyGridDow({policy:p,timeframe:'15m',candles:bars,now,after:base}).confirmedAt).toBe(base+14*duration);

@@ -3,7 +3,7 @@ import Decimal from 'decimal.js';
 import { stableGridExtension } from './behaviour-policy';
 
 /** Server-owned rollout switch. A deployment must explicitly enable the reviewed implementation. */
-export const GRID_RANGE_MOVE_ENABLED = false;
+export const GRID_RANGE_MOVE_ENABLED = true;
 export const GRID_EPOCH_POLICY_VERSION = '2.3.0';
 export const GRID_MOVE_REVISION = 'manual-dow-1';
 export interface EpochSource {
