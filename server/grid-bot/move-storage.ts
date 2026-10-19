@@ -13,6 +13,7 @@ import { preflightGridResume, type LaunchFacts } from './provision';
 import { gridResumeClearance, type GridResumeRisk } from './resume-clearance';
 import { stableGridExtension } from './behaviour-policy';
 import type { PlannerCandle } from '../grid-planner/types';
+import type { GridRebalanceLevel } from './rebalance';
 
 export class GridMoveError extends Error {}
 export interface GridMoveAuthority { facts:LaunchFacts; risk:GridResumeRisk; candles:PlannerCandle[]; umk:Buffer; cleanup:()=>void }
@@ -92,8 +93,8 @@ export class GridMoveStorage {
     const signed=computeGridPolicyHmac(candidate.policy,authority.umk);if(!signed.ok)throw new GridMoveError('Moved policy cannot be signed');
     const replay:CycleReplayInput={policy:candidate.policy,account:bot.account,historyComplete:true,carry,operations:[],fills:[],allocations:[],progress:[]};
     const canaryLimit=new Decimal(candidate.policy.totalInvestment).mul(candidate.policy.leverage).toFixed();
-    const preflight=preflightGridResume(candidate.policy,signed.digest,authority.umk,f,now,{direction:bot.direction,
-      levels:candidate.policy.levels.map(l=>({...l,id:'preview:'+l.ordinal,attempt:0,status:'pending'})),owned:[],positionSize:history.state.observation.position?.size??null,
+    const preflight=preflightGridResume(candidate.policy,signed.digest,authority.umk,f,now,{direction:candidate.policy.direction,
+      levels:candidate.policy.levels.map((l):GridRebalanceLevel=>({...l,id:'preview:'+l.ordinal,attempt:0,status:'pending'})),fills:[],reserved:[],owned:[],positionSize:history.state.observation.position?.size??null,
       bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots,inventoryComplete:true,entriesAllowed:true,canaryRemaining:canaryLimit,cycleReplay:replay});
     if(!preflight.ok)throw new GridMoveError(preflight.reason);
     if(proposal&&(proposal.carryDigest!==epochDigest(carry)||proposal.constraintsDigest!==constraints(f)||canonicalGridPolicy(proposal.policy)!==canonicalGridPolicy(candidate.policy)
