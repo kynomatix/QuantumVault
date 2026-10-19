@@ -24,7 +24,7 @@ import {moveCandles,moveBase,moveDuration} from './range-move-fixtures';
 // custody, band detection/completion, move activation and archived replay are real.
 vi.mock('../../server/grid-bot/service',async original=>({...await original<typeof import('../../server/grid-bot/service')>(),durableGridUmk:async()=>({umk:Buffer.alloc(32,7),cleanup:()=>{}})}));
 const sql=(name:string)=>readFileSync(new URL('../../migrations/'+name,import.meta.url),'utf8');
-const migration=sql('0012_grid_range_epochs.sql');
+const migration=sql('0012_grid_range_epochs.sql')+'\n'+sql('0013_grid_epoch_publish_safe.sql');
 const wallet=bs58.encode(Buffer.alloc(32,3));
 describe('range moves from real pre-epoch PostgreSQL data',()=>{
   let admin:Pool,pool:Pool,schema:string,now:number,launch:GridLaunchStorage,monitor:GridMonitorStorage,life:GridLifecycleStorage;

@@ -187,17 +187,23 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 202 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains all 203 SQL entries exactly once, in order, with explicit metadata", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(202);
-    expect(metadata).toHaveLength(202);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(202);
+    expect(sqlEntries).toHaveLength(203);
+    expect(metadata).toHaveLength(203);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(203);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // Epoch migration preserves historical SQL; readiness metadata now describes epoch-scoped uniqueness and regrid controls.
     const preservedManifestDigest = createHash("sha256").update(JSON.stringify(
       metadata.slice(0, 197).map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
     )).digest("hex").toUpperCase();
     expect(preservedManifestDigest).toBe("23595FB03CA524A13E584B340EA77F479BAF120E1A17871450E41A79D2388EE9");
+    const epochPrefixDigest = createHash("sha256").update(JSON.stringify(
+      metadata.slice(0, 202).map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
+    )).digest("hex").toUpperCase();
+    expect(epochPrefixDigest).toBe("764CCBEBB13E8226F2113007617392EEBE942B16F7E8F69A9D17FD2803335313");
+    expect(metadata[202].id).toBe('202-grid-epoch-publish-safe');
+    expect(sqlEntries[202].trim()).toBe(readFileSync('migrations/0013_grid_epoch_publish_safe.sql','utf8').trim());
     expect(metadata[191]).toMatchObject({ id: '191-phoenix-ai-trader', capabilities: ['phoenix'], operation: 'ddl' });
     expect(sqlEntries[191]).toContain('phoenix_ai_executions');
     const gridMigrations = [
