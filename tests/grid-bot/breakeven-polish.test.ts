@@ -141,7 +141,7 @@ describe('ended run in existing lifecycle details',()=>{
       if(sql.startsWith('SELECT * FROM grid_bots'))return {rows:[{id:'EXAMPLE',name:'Grid',market:'BTC-PERP',direction:'long',status:'stopped',
         grid_count:1,lower_price:'90',upper_price:'110',start_price:'100',total_investment:'500',total_fees:'0',
         stop_loss_percent:null,stop_loss_price:'80',sol_balance:null,residual_usdc:'0',updated_at:new Date(now)}]};
-      if(sql.startsWith('SELECT * FROM grid_levels'))return {rows:[90,110].map((price,i)=>({id:String(i),ordinal:i+1,price:String(price),size:'1',cumulative_filled_size:'0'}))};
+      if(sql.startsWith('SELECT id,bot_id,ordinal,price,size,side,reduce_only,status,venue_order_id,client_order_uuid,placement_attempt,cumulative_filled_size,last_filled_at,created_at,updated_at FROM grid_levels'))return {rows:[90,110].map((price,i)=>({id:String(i),ordinal:i+1,price:String(price),size:'1',cumulative_filled_size:'0'}))};
       if(sql.includes('FROM grid_exact_fills'))return {rows:sql.includes('LIMIT 100')?rows.slice(-100).reverse():rows};
       if(sql.includes('AS pending'))return {rows:[{pending:0,uncertain:0}]};
       return {rows:[]};

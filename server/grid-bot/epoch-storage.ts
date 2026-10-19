@@ -5,10 +5,23 @@ import { retainedGridPolicy } from './retained-policy';
 
 export function archivedEpochPolicy(epoch: Record<string, any>): GridPolicy {
   const snapshot=epoch.policy_snapshot;
-  const policy=snapshot?.legacyBot?retainedGridPolicy(snapshot.legacyBot,snapshot.legacyLevels):snapshot;
+  // SQL NUMERIC travels as text; older JSON snapshots may have lost trailing zeroes.
+  // Reject excess precision rather than rounding signed authority into a different value.
+  const fixed=(value:unknown,scale:number):string|null=>{
+    if(value===null)return null;
+    if(typeof value!=='string'&&typeof value!=='number')throw Error('Archived epoch decimal unavailable');
+    const decimal=new Decimal(value);
+    if(!decimal.isFinite()||decimal.decimalPlaces()>scale)throw Error('Archived epoch decimal unavailable');
+    return decimal.toFixed(scale);
+  };
+  const legacy=snapshot?.legacyBot;
+  const policy=legacy?retainedGridPolicy({...legacy,
+    lower_price:fixed(legacy.lower_price,8),upper_price:fixed(legacy.upper_price,8),start_price:fixed(legacy.start_price,8),
+    total_investment:fixed(legacy.total_investment,2),stop_loss_percent:fixed(legacy.stop_loss_percent,4),stop_loss_price:fixed(legacy.stop_loss_price,8),
+  },snapshot.legacyLevels.map((l:Record<string,any>)=>({...l,price:fixed(l.price,8),size:fixed(l.size,8)}))):snapshot;
   if(!canonicalGridPolicy(policy)||policy.id!==epoch.bot_id||policy.policyVersion!==epoch.policy_version
-    ||policy.direction!==epoch.direction||policy.lowerPrice!==epoch.lower_price||policy.upperPrice!==epoch.upper_price
-    ||policy.stopLossPrice!==epoch.stop_loss_price||policy.gridCount!==epoch.grid_count)throw Error('Archived epoch authority changed');
+    ||policy.direction!==epoch.direction||policy.lowerPrice!==fixed(epoch.lower_price,8)||policy.upperPrice!==fixed(epoch.upper_price,8)
+    ||policy.stopLossPrice!==fixed(epoch.stop_loss_price,8)||policy.gridCount!==epoch.grid_count)throw Error('Archived epoch authority changed');
   return policy;
 }
 

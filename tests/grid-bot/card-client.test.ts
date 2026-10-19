@@ -69,12 +69,12 @@ function find(node: ReactNode, testId: string): ActionElement | undefined {
 function seed({ drafts = false, planning = false, start = false, worker = false, bots = [] as GridBotSummary[] } = {}) {
   hooks.states = [drafts, bots, null, '', planning, start, worker, null, 0];
 }
-function responses(bots: GridBotSummary[] = [], enabled = true) {
+function responses(bots: GridBotSummary[] = [], enabled = true, rangeMoveEnabled = false) {
   vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => ({
     ok: true,
     json: async () => String(url).includes('includeStopped') ? { bots }
       : String(url).includes('grid-planner') ? { enabled, planningOnly: true, name: 'Grid Planner' }
-      : { enabled, startEnabled: false, workerEnabled: false },
+      : { enabled, startEnabled: false, workerEnabled: false, rangeMoveEnabled },
   })));
 }
 // A task boundary lets all three fetch/json chains and their allSettled handler finish.
@@ -87,6 +87,14 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 describe('Grid bot setup card and separate bot section', () => {
+  it.each([false,true])('uses the collection status flag before mounting per-card range move reads: %s',async rangeMoveEnabled=>{
+    responses([{...bot,status:'range_exhausted'}],true,rangeMoveEnabled);
+    render();const cleanup=hooks.effects[0].run();await settle();render();
+    const cleanups=hooks.effects.map(effect=>effect.run());await settle();
+    const rangeCalls=vi.mocked(fetch).mock.calls.filter(([url])=>String(url).includes('/range-move'));
+    expect(rangeCalls).toHaveLength(rangeMoveEnabled?1:0);
+    if(typeof cleanup==='function')cleanup();for(const dispose of cleanups)if(typeof dispose==='function')dispose();
+  });
   it('uses the sibling card, tile, text, badge and bottom button styles without listing bots in the setup card', () => {
     seed({ planning: true, bots: [bot] });
     const html = render();

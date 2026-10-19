@@ -2661,7 +2661,6 @@ export type PhoenixOperationAttempt = typeof phoenixOperationAttempts.$inferSele
 function gridOperationReference(name:string,column:AnyPgColumn):ReturnType<typeof foreignKey> {
   return foreignKey({name,columns:[column],foreignColumns:[gridOperations.id]}).onDelete('restrict');
 }
-const gridEpochReferences = pgTable("grid_epochs", { id: uuid("id").notNull(), botId: uuid("bot_id").notNull() });
 export const gridBots = pgTable("grid_bots", {
   activeEpochId: uuid("active_epoch_id"),
   market: text("market").notNull(),
@@ -2741,7 +2740,6 @@ export const gridBots = pgTable("grid_bots", {
   foreignKey({ name: "grid_bots_wallet_address_fk", columns: [t.walletAddress], foreignColumns: [wallets.address] }).onDelete("restrict"),
   foreignKey({ name: "grid_bots_protocol_subaccount_id_fk", columns: [t.protocolSubaccountId], foreignColumns: [protocolSubaccounts.id] }).onDelete("restrict"),
   gridOperationReference("grid_bots_terminal_stop_operation_id_fk",t.terminalStopOperationId),
-  foreignKey({name:"grid_bots_active_epoch_fk",columns:[t.id,t.activeEpochId],foreignColumns:[gridEpochReferences.botId,gridEpochReferences.id]}),
 ]);
 export type GridbotsRow = typeof gridBots.$inferSelect;
 export const gridLevels = pgTable("grid_levels", {
@@ -2768,7 +2766,6 @@ export const gridLevels = pgTable("grid_levels", {
   uniqueIndex("grid_levels_bot_ordinal_unique").on(t.botId, t.epochId, t.ordinal),
   uniqueIndex("grid_levels_legacy_ordinal_unique").on(t.botId,t.ordinal).where(sql`epoch_id IS NULL`),
   uniqueIndex("grid_levels_epoch_identity_unique").on(t.botId,t.epochId,t.id),
-  foreignKey({name:"grid_levels_epoch_fk",columns:[t.botId,t.epochId],foreignColumns:[gridEpochReferences.botId,gridEpochReferences.id]}),
   index("grid_levels_bot_status_idx").on(t.botId, t.status),
   index("grid_levels_venue_order_idx").on(t.venueOrderId),
   foreignKey({ name: "grid_levels_bot_id_fk", columns: [t.botId], foreignColumns: [gridBots.id] }).onDelete("restrict"),
@@ -2815,7 +2812,6 @@ export const gridOperations = pgTable("grid_operations", {
   check("grid_operations_notification_check", sql`${t.type} <> 'send_notification' OR (${t.notificationType} IS NOT NULL AND ${t.notificationPayload} IS NOT NULL)`),
   uniqueIndex("grid_operations_idempotency_unique").on(t.idempotencyKey),
   uniqueIndex("grid_operations_epoch_identity_unique").on(t.botId,t.epochId,t.id),
-  foreignKey({name:"grid_operations_epoch_fk",columns:[t.botId,t.epochId],foreignColumns:[gridEpochReferences.botId,gridEpochReferences.id]}),
   foreignKey({name:"grid_operations_level_epoch_fk",columns:[t.botId,t.epochId,t.levelId],foreignColumns:[gridLevels.botId,gridLevels.epochId,gridLevels.id]}),
   uniqueIndex("grid_operations_request_unique").on(t.requestIdentity),
   index("grid_operations_unresolved_idx").on(t.botId, t.state, t.preparedAt),

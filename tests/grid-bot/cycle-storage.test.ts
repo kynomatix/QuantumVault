@@ -18,7 +18,7 @@ function fixture(){
   const state={boot_id:'EXAMPLE_BOOT',generation:'1',safe_through:80000,reconciled_at:new Date(now),observation,blocked_reasons:[]};
   const events=[{event_key:'canary-clock',evidence:{full:{generation:'1',safeThrough:80000,completedAt:now}}}];
   const query=vi.fn(async(sql:string)=>{
-    if(sql.startsWith('SELECT * FROM grid_levels'))return {rows:levels};
+    if(sql.startsWith('SELECT id,bot_id,ordinal,price,size,side,reduce_only,status,venue_order_id,client_order_uuid,placement_attempt,cumulative_filled_size,last_filled_at,created_at,updated_at FROM grid_levels'))return {rows:levels};
     if(sql.startsWith('SELECT * FROM grid_monitor_state'))return {rows:[state]};
     if(sql.startsWith('SELECT event_key,evidence'))return {rows:events};
     if(sql.startsWith('SELECT * FROM grid_operations')||sql.startsWith('SELECT * FROM grid_exact_fills')||sql.startsWith('SELECT p.*')||sql.startsWith('SELECT a.*'))return {rows:[]};

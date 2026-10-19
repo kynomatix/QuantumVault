@@ -80,6 +80,8 @@ export function replayGridCycles(input: CycleReplayInput): CycleReplayResult {
     }
     const filled = new Map<string,Decimal>();
     for (const f of fills) {
+      if((input.exportEpochId||input.policy.epochAuthority)&&(typeof f.fee!=='string'||!f.fee.trim()||!new D(f.fee).isFinite()))
+        throw Error('Exact per-fill fee is required for range moving');
       const op=ops.get(f.operationId);
       if (!identity(f.tradeId) || f.account!==input.account || !op || !timestamp(f.time) || f.time<op.preparedAt
         || f.leg!==(op.reduceOnly?'exit':'entry')) throw Error('Fill does not belong to its immutable operation');

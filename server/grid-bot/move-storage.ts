@@ -93,7 +93,7 @@ export class GridMoveStorage {
     const replay:CycleReplayInput={policy:candidate.policy,account:bot.account,historyComplete:true,carry,operations:[],fills:[],allocations:[],progress:[]};
     const canaryLimit=new Decimal(candidate.policy.totalInvestment).mul(candidate.policy.leverage).toFixed();
     const preflight=preflightGridResume(candidate.policy,signed.digest,authority.umk,f,now,{direction:bot.direction,
-      levels:candidate.policy.levels.map(l=>({...l,id:'preview:'+l.ordinal,attempt:0})),owned:[],positionSize:history.state.observation.position?.size??null,
+      levels:candidate.policy.levels.map(l=>({...l,id:'preview:'+l.ordinal,attempt:0,status:'pending'})),owned:[],positionSize:history.state.observation.position?.size??null,
       bookPrice:f.bookPrice,lot:f.lot,minimumQuote:f.minimumQuote,freeSlots:f.availableSlots,inventoryComplete:true,entriesAllowed:true,canaryRemaining:canaryLimit,cycleReplay:replay});
     if(!preflight.ok)throw new GridMoveError(preflight.reason);
     if(proposal&&(proposal.carryDigest!==epochDigest(carry)||proposal.constraintsDigest!==constraints(f)||canonicalGridPolicy(proposal.policy)!==canonicalGridPolicy(candidate.policy)

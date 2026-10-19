@@ -30,10 +30,11 @@ export function qualifyGridDow(input:{policy:GridPolicy;timeframe:string;candles
   const pivot=long?h[1]:l[1],edge=long?p.upperPrice:p.lowerPrice;
   const favourable=long?new D(bars[h[1]].high).gt(bars[h[0]].high)&&new D(bars[h[1]].high).gt(edge)
     :new D(bars[l[1]].low).lt(bars[l[0]].low)&&new D(bars[l[1]].low).lt(edge);
-  const baseline=(long?lows:highs).filter(i=>i<pivot).at(-1);
-  if(!favourable||baseline===undefined||bars[pivot].time<input.after||last.time<input.after
+  const preceding=(long?lows:highs).filter(i=>i<pivot).slice(-2),[prior,baseline]=preceding;
+  const supportingTrend=preceding.length===2&&(long?bars[baseline].low>bars[prior].low:bars[baseline].high<bars[prior].high);
+  if(!favourable||!supportingTrend||bars[pivot].time<input.after||last.time<input.after
     ||!(long?new D(last.close).gt(edge):new D(last.close).lt(edge))
-    ||bars.slice(pivot+1).some(c=>long?c.low<bars[baseline].low:c.high>bars[baseline].high))throw Error(long?'Wait for a confirmed higher high above the range with no lower low since':'Wait for a confirmed lower low below the range with no higher high since');
+    ||bars.slice(baseline+1).some(c=>long?c.low<bars[baseline].low:c.high>bars[baseline].high))throw Error(long?'Wait for a confirmed higher high and higher low above the range with no lower low since':'Wait for a confirmed lower low and lower high below the range with no higher high since');
   // Advisory only for manual moves: missing warm-up or adverse indicators never veto Dow qualification.
   const regime=plannerRegime(p.market,input.timeframe,bars,now),high=bars.map(c=>c.high),low=bars.map(c=>c.low),close=bars.map(c=>c.close);
   const volatility=atr(high,low,close,14).at(-1),strength=adx(high,low,close,14).slice(-3);

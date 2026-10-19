@@ -2659,7 +2659,8 @@ ALTER TABLE grid_auto_resume ADD COLUMN IF NOT EXISTS armed_epoch_id uuid;
 -- Deterministic legacy identity. Never mint a signature or guess missing geometry.
 INSERT INTO grid_epochs(id,bot_id,ordinal,policy_version,policy_snapshot,policy_hmac,carry_snapshot,confirmation,reason,activated_at,direction,lower_price,upper_price,stop_loss_price,grid_count)
 SELECT md5('grid-epoch-1:'||b.id::text)::uuid,b.id,1,b.policy_version,
-  jsonb_build_object('legacyBot',to_jsonb(b),'legacyLevels',(SELECT jsonb_agg(to_jsonb(l) ORDER BY ordinal) FROM grid_levels l WHERE l.bot_id=b.id)),
+  jsonb_build_object('legacyBot',to_jsonb(b)||jsonb_build_object('lower_price',b.lower_price::numeric(30,8)::text,'upper_price',b.upper_price::numeric(30,8)::text,'start_price',b.start_price::numeric(30,8)::text,'total_investment',b.total_investment::numeric(30,2)::text,'stop_loss_percent',b.stop_loss_percent::numeric(20,4)::text,'stop_loss_price',b.stop_loss_price::numeric(30,8)::text),
+    'legacyLevels',(SELECT jsonb_agg(to_jsonb(l)||jsonb_build_object('price',l.price::numeric(30,8)::text,'size',l.size::numeric(30,8)::text) ORDER BY ordinal) FROM grid_levels l WHERE l.bot_id=b.id)),
   b.policy_hmac,'{}'::jsonb,'{}'::jsonb,'original',b.created_at,b.direction,b.lower_price,b.upper_price,b.stop_loss_price,b.grid_count
 FROM grid_bots b WHERE b.active_epoch_id IS NULL AND b.policy_hmac ~ '^[0-9a-f]{64}$'
   AND b.policy_version IN ('1.0.0','2.0.0','2.2.0') AND b.runtime_policy_version=b.policy_version
@@ -2684,11 +2685,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS grid_operations_epoch_identity_unique ON grid_
 DO $$ BEGIN
   IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_bots'::regclass AND conname='grid_bots_active_epoch_fk') THEN
     ALTER TABLE grid_bots ADD CONSTRAINT grid_bots_active_epoch_fk FOREIGN KEY (id,active_epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_levels'::regclass AND conname='grid_levels_epoch_fk') THEN
     ALTER TABLE grid_levels ADD CONSTRAINT grid_levels_epoch_fk FOREIGN KEY (bot_id,epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_operations'::regclass AND conname='grid_operations_epoch_fk') THEN
     ALTER TABLE grid_operations ADD CONSTRAINT grid_operations_epoch_fk FOREIGN KEY (bot_id,epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_operations'::regclass AND conname='grid_operations_level_epoch_fk') THEN
     ALTER TABLE grid_operations ADD CONSTRAINT grid_operations_level_epoch_fk FOREIGN KEY (bot_id,epoch_id,level_id) REFERENCES grid_levels(bot_id,epoch_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_exact_fills'::regclass AND conname='grid_exact_fills_operation_epoch_fk') THEN
     ALTER TABLE grid_exact_fills ADD CONSTRAINT grid_exact_fills_operation_epoch_fk FOREIGN KEY (bot_id,epoch_id,operation_id) REFERENCES grid_operations(bot_id,epoch_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_control_requests'::regclass AND conname='grid_control_origin_epoch_fk') THEN
     ALTER TABLE grid_control_requests ADD CONSTRAINT grid_control_origin_epoch_fk FOREIGN KEY (bot_id,origin_epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_auto_resume'::regclass AND conname='grid_auto_resume_epoch_fk') THEN
     ALTER TABLE grid_auto_resume ADD CONSTRAINT grid_auto_resume_epoch_fk FOREIGN KEY (bot_id,armed_epoch_id) REFERENCES grid_epochs(bot_id,id);
   END IF;
 END $$;
@@ -2702,7 +2715,7 @@ DECLARE expected uuid;
 BEGIN
   IF TG_OP='UPDATE' THEN
     IF OLD.epoch_id IS NOT NULL AND NEW.epoch_id IS DISTINCT FROM OLD.epoch_id THEN RAISE EXCEPTION 'Grid epoch identity is immutable'; END IF;
-    RETURN NEW;
+    IF OLD.epoch_id IS NOT NULL THEN RETURN NEW; END IF;
   END IF;
   IF TG_TABLE_NAME='grid_exact_fills' THEN SELECT epoch_id INTO expected FROM grid_operations WHERE id=NEW.operation_id AND bot_id=NEW.bot_id;
   ELSIF TG_TABLE_NAME='grid_operations' THEN

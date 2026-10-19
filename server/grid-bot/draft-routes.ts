@@ -1,3 +1,4 @@
+import { GRID_RANGE_MOVE_ENABLED } from './epoch-policy';
 import { GridMoveError, type GridMoveStorage } from './move-storage';
 import type { Express, Request, Response, RequestHandler } from 'express';
 import { z } from 'zod';
@@ -106,7 +107,7 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
       lifecycle=new GridLifecycleStorage(new GridMonitorStorage(new GridLaunchStorage(pool)));}
     const result=await lifecycle.request(wallet(req),id.data,body.data.requestId,action,{requestedBy:'owner'});res.status(result.state==='complete'?200:202).json({request:result});
   }));
-  app.get('/api/grid-bots/status',requireWallet,(_req,res)=>{res.set('Cache-Control','no-store');res.json({enabled:enabled(),...gates()});});
+  app.get('/api/grid-bots/status',requireWallet,(_req,res)=>{res.set('Cache-Control','no-store');res.json({enabled:enabled(),...gates(),rangeMoveEnabled:GRID_RANGE_MOVE_ENABLED});});
   app.get('/api/grid-bots/create-policy',requireWallet,gate,(_req,res)=>{res.json(GRID_CREATE_POLICY);});
   app.get('/api/grid-bots/markets',requireWallet,gate,work(async(_req,res)=>{
     const markets=await defaultPlannerDeps.getMarkets();res.json({markets:markets.map(m=>({market:m.internalSymbol,name:m.fullName}))});

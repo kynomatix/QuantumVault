@@ -556,6 +556,18 @@ describe("schema readiness", () => {
     });
   });
 
+  it('keeps runtime epoch foreign keys out of publish metadata while retaining epoch columns and index identity',()=>{
+    const schema=readFileSync('shared/schema.ts','utf8'),migration=readFileSync('migrations/0012_grid_range_epochs.sql','utf8');
+    expect(schema).not.toContain('gridEpochReferences');
+    for(const name of ['grid_bots_active_epoch_fk','grid_levels_epoch_fk','grid_operations_epoch_fk']){
+      expect(schema).not.toContain(name);expect(migration).toContain('ADD CONSTRAINT '+name);
+    }
+    expect(schema).toContain('activeEpochId: uuid("active_epoch_id")');
+    expect(schema).toContain('epochId: uuid("epoch_id")');
+    expect(schema).toContain('uniqueIndex("grid_levels_bot_ordinal_unique").on(t.botId, t.epochId, t.ordinal)');
+    expect(migration).toContain('CREATE UNIQUE INDEX grid_levels_bot_ordinal_unique ON grid_levels(bot_id,epoch_id,ordinal)');
+  });
+
   it("re-runs migration 028 with an awaiting_creator row and preserves the forward seven-state constraint", async () => {
     const { manifest } = readDbSchemaMigrationManifest();
     let constraintDefinition = "CHECK (status IN ('pending','confirmed','paid','failed','processing','voided','awaiting_creator'))";

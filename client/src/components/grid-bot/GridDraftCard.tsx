@@ -27,6 +27,7 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
   const [enabled,setEnabled]=useState(false),[bots,setBots]=useState<GridBotSummary[]>([]),[selected,setSelected]=useState<string|null>(null),[error,setError]=useState('');
   const [planner,setPlanner]=useState(false),[start,setStart]=useState(false),[worker,setWorker]=useState(false);
   const [create,setCreate]=useState<{key:number;intent?:GridIntent}|null>(null),[refresh,setRefresh]=useState(0);
+  const [rangeMove,setRangeMove]=useState(false);
   const order=useRef(new GridReadOrder());
   useEffect(()=>{if(!authenticated||!identity)return;
     setError('');
@@ -35,8 +36,8 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
       fetch('/api/grid-planner/status',{credentials:'include',headers:walletAuthHeaders(),signal:controller.signal}).then(async r=>r.ok?r.json():null)
     ]).then(([status,list,planning])=>{
       if(controller.signal.aborted||!order.current.accepts(seq))return;
-      if(status.status==='fulfilled'){setEnabled(status.value.enabled===true);setStart(status.value.startEnabled===true);setWorker(status.value.workerEnabled===true);}
-      else{setEnabled(false);setStart(false);setWorker(false);}
+      if(status.status==='fulfilled'){setRangeMove(status.value.rangeMoveEnabled===true);setEnabled(status.value.enabled===true);setStart(status.value.startEnabled===true);setWorker(status.value.workerEnabled===true);}
+      else{setRangeMove(false);setEnabled(false);setStart(false);setWorker(false);}
       if(list.status==='fulfilled')setBots(list.value.bots);
       else setError('Grid bots unavailable. Try again.');
       setPlanner(planning.status==='fulfilled'&&planning.value?.enabled===true&&planning.value?.planningOnly===true&&planning.value?.name==='Grid Planner');
@@ -107,7 +108,7 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
               <div className="p-2.5 rounded-lg bg-muted/30">{bot.behaviourMode && <p className="text-xs">{gridBehaviourCopy(bot.behaviourMode,bot.direction).label}</p>}<p className="text-lg font-bold">{bot.gridCount}</p><p className="text-xs text-muted-foreground">Grids</p></div>
               <div className="min-w-0 p-2.5 rounded-lg bg-muted/30"><p className="text-lg font-bold text-muted-foreground" title="P&L unavailable" aria-label="P&L unavailable">—</p><p className="text-xs text-muted-foreground">P&amp;L</p></div>
             </div>
-            <GridRangeMove id={bot.id} compact revision={String(refresh)}/><span className="mt-4 block text-sm font-medium text-primary">View bot</span>
+            {rangeMove&&<GridRangeMove id={bot.id} compact revision={String(refresh)}/>}<span className="mt-4 block text-sm font-medium text-primary">View bot</span>
           </button>
         ))}</div>
       </div>}
