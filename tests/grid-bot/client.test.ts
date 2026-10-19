@@ -44,7 +44,13 @@ describe('Grid behaviour inline cards', () => {
       expect(html).toContain('grid-cols-1');
       expect(html).toContain('@min-[560px]:grid-cols-3');
       expect(html).toContain('border-primary bg-primary/10');
-      expect(html).toContain('Recommended');
+      expect(html.match(/Recommended/g)).toHaveLength(1);
+      const cards = html.match(/<label\b[^]*?<\/label>/g) ?? [];
+      expect(cards).toHaveLength(3);
+      expect(cards.map(card => card.match(/value="([^"]+)"/)?.[1])).toEqual(['repeat_all', 'step_back', 'step_back_edge']);
+      expect(cards[0]).not.toContain('Recommended');
+      expect(cards[1]).toContain('Recommended');
+      expect(cards[2]).not.toContain('Recommended');
       for (const mode of GRID_BEHAVIOUR_MODES) {
         const copy = gridBehaviourCopy(mode, side, seed);
         for (const part of [copy.label, copy.hint]) expect(html).toContain(part);
@@ -61,6 +67,29 @@ describe('Grid behaviour inline cards', () => {
       expect(html).not.toContain('See example');
       expect(html).not.toContain('Done');
     }
+  });
+});
+
+describe('Grid setup behaviour defaults', () => {
+  it('starts new bots in step_back and carries that choice into the intent', () => {
+    const form = gridSetupForm(undefined, 'BTC-PERP');
+    expect(form.behaviourMode).toBe('step_back');
+    expect(gridSetupIntent(form, form.stop, 'manual').behaviourMode).toBe('step_back');
+  });
+
+  it.each(GRID_BEHAVIOUR_MODES)('preserves %s when resuming a saved intent', behaviourMode => {
+    const form = { ...gridSetupForm(undefined, 'BTC-PERP'), behaviourMode };
+    const intent = gridSetupIntent(form, form.stop, 'manual');
+    expect(gridSetupForm(intent, 'ETH-PERP').behaviourMode).toBe(behaviourMode);
+    expect(intent.behaviourMode).toBe(behaviourMode);
+  });
+
+  it('keeps the repeat_all fallback for a legacy intent without a mode', () => {
+    const form = gridSetupForm(undefined, 'BTC-PERP');
+    const intent = gridSetupIntent(form, form.stop, 'manual', false, false);
+    expect(intent).not.toHaveProperty('behaviourMode');
+    expect(gridSetupForm(intent, 'ETH-PERP').behaviourMode).toBe('repeat_all');
+    expect(intent).not.toHaveProperty('behaviourMode');
   });
 });
 

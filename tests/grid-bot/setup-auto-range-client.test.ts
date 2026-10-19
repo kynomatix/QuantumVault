@@ -350,10 +350,12 @@ describe('Grid setup automatic opening range', () => {
     render(); await settle();
     expect(chart()).toBeNull(); expect(prices().lower).toBe('');
   });
-  it('keeps Equal defaults and shows the opening-order minimum lift for behaviour modes', async () => {
+  it('keeps Equal defaults and shows the opening-order minimum lift for repeat_all', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     await open(); await resolve(requests[0]);
     expect(field('entryScale').props.value).toBe('flat'); expect(field('profitScale').props.value).toBe('flat');
+    // This sizing fixture's four lifted orders belong to the repeating mode.
+    find(node => node.type === GridBehaviourSelect).props.onChange('repeat_all'); render();
     edit('investment', '300'); edit('leverage', '10'); edit('intervals', '50');
     field('entryScale').props.onChange('ascending'); render();
     field('profitScale').props.onChange('ascending'); render();
@@ -386,18 +388,18 @@ describe('Grid setup automatic opening range', () => {
     edit('investment','1000');edit('intervals','4');
     await vi.advanceTimersByTimeAsync(250);await settle();
     const selector=find(node=>node.type===GridBehaviourSelect);
-    expect(selector.props.value).toBe('repeat_all');
+    expect(selector.props.value).toBe('step_back');
     expect(selector.props.side).toBe(side.toLowerCase());
     const copy=elements().map(node=>text(node)).join('\n');
     expect(copy).toContain(side==='Long'
-      ?'Sell as price rises, buy back as it falls, and keep going.'
-      :'Close as price falls, reopen as it rises, and keep going.');
+      ?'Sell the starting position once. Keep trading below the start.'
+      :'Close the starting position once. Keep trading above the start.');
     expect(copy).toContain('Quantities stay fixed; profits stay in the bot.');
     expect(copy).toContain(side==='Long'
       ?'Place backed sells above price immediately. Without it, those levels wait for a buy first.'
       :'Place backed buys below price immediately. Without it, those levels wait for a sell first.');
-    selector.props.onChange('step_back'); render();
-    expect(find(node=>node.type===GridBehaviourSelect).props.value).toBe('step_back');
+    selector.props.onChange('repeat_all'); render();
+    expect(find(node=>node.type===GridBehaviourSelect).props.value).toBe('repeat_all');
   });
   it('shows a disabled Create bot with a visible accessible launch reason and working Cancel in planning mode', async () => {
     await open();

@@ -3,7 +3,7 @@ import type { GridIntent } from '../../../shared/grid-draft';
 import type { GridRegime } from '../../../shared/grid-regime';
 
 export const GRID_SETUP_INITIAL = { market: '', side: 'long', lower: '', upper: '', intervals: '10', entryScale: 'flat', profitScale: 'flat',
-  behaviourMode: 'repeat_all' as GridBehaviourMode, seed: true, leverage: '1', investment: '', stop: '', feePercent: '', timeframe: '1h', bars: '100', rangeWindow: 'week' };
+  behaviourMode: 'step_back' as GridBehaviourMode, seed: true, leverage: '1', investment: '', stop: '', feePercent: '', timeframe: '1h', bars: '100', rangeWindow: 'week' };
 export type GridSetupForm = typeof GRID_SETUP_INITIAL;
 export function gridStoredMarket(identity: string): string {
   try { return localStorage.getItem(`grid-setup:last-market:${identity}`) || 'BTC-PERP'; }

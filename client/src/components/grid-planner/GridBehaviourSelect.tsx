@@ -93,7 +93,7 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
               <span id={`${id}-${mode}-title`} className="font-medium">{copy.label}</span>
               {selected && <Check aria-hidden="true" className="h-4 w-4 shrink-0 text-primary" />}
             </span>
-            {mode === 'repeat_all' && <Badge variant="secondary" className="w-fit">Recommended</Badge>}
+            {mode === 'step_back' && <Badge variant="secondary" className="w-fit">Recommended</Badge>}
             <span id={`${id}-${mode}-hint`} className="text-sm text-muted-foreground">{copy.hint}</span>
             {!showClips && <span id={`${id}-${mode}-example`} className="mt-auto pt-1 text-xs text-muted-foreground">{copy.example}</span>}
             </label>
