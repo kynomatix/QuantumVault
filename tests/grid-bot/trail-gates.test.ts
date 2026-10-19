@@ -1,0 +1,21 @@
+import {it,expect,vi} from 'vitest';
+import {qualifyAutomaticTrail,trailHistory} from '../../server/grid-bot/trail-policy';
+import {qualifyGridDow} from '../../server/grid-bot/move-policy';
+import {behaviourPolicy} from './behaviour-fixtures';
+import {moveCandles,moveBase,moveDuration} from './range-move-fixtures';
+vi.mock('../../server/grid-bot/move-policy',async importOriginal=>({...await importOriginal<object>(),qualifyGridDow:vi.fn()}));
+it('adds only the specified DI, exhaustion and overextension vetoes; ablation removes exhaustion only',()=>{
+  const candles=Array.from({length:100},(_,i)=>({...moveCandles()[14],time:moveBase+i*moveDuration}));
+  const p=behaviourPolicy('repeat_all'),now=moveBase+100*moveDuration,history=trailHistory(p,moveBase);
+  const query=(variant:'b'|'d'|'e'='d')=>qualifyAutomaticTrail({policy:p,history,candles,timeframe:'15m',now,variant});
+  const info={state:'available',adx:41,plusDi:30,minusDi:20,atr:2,edgeAtr:1.5,adxDeclining:true};
+  const mock=(information=info)=>vi.mocked(qualifyGridDow).mockReturnValue({information,closedAt:now,close:'123',confirmedAt:now-moveDuration} as any);
+  mock();expect(query()).toEqual({eligible:false,reason:'exhaustion'});expect(query('e').eligible).toBe(true);expect(query('b').eligible).toBe(true);
+  mock({...info,adx:40});expect(query().eligible).toBe(true);
+  mock({...info,adxDeclining:false});expect(query().eligible).toBe(true);
+  mock({...info,plusDi:20});expect(query('e')).toEqual({eligible:false,reason:'directional_di'});
+  mock({...info,edgeAtr:2.01});expect(query('e')).toEqual({eligible:false,reason:'overextension'});
+  mock({...info,adx:40,edgeAtr:2});expect(query().eligible).toBe(true);
+  vi.mocked(qualifyGridDow).mockImplementation(()=>{throw Error('Unconfirmed');});
+  expect(query('e')).toEqual({eligible:false,reason:'dow_unconfirmed'});
+});
