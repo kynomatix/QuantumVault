@@ -4,7 +4,7 @@ import { GRID_SETUP_INITIAL } from './grid-setup-view';
 // Only presentation geometry/timing lives here. Ownership and pairing come from the product.
 // v5 modes_anim.py:83,150,233: live for 3% of the run, hold full opacity for
 // the first 35% of that lifetime, then fade out. There is no fade-in.
-export const GRID_ANIMATION_TIMING = { intro: 900, run: 5600, hold: 1600, morph: 280, tagLife: 5600 * 0.03, tagHold: 0.35 };
+export const GRID_ANIMATION_TIMING = { intro: 900, run: 5600, hold: 1600, morph: 5600 * 3.5 / 100, tagLife: 5600 * 0.03, tagHold: 0.35 };
 export const GRID_ANIMATION_DURATION = GRID_ANIMATION_TIMING.intro + GRID_ANIMATION_TIMING.run + GRID_ANIMATION_TIMING.hold;
 export const GRID_ANIMATION_LINES = Array.from({ length: Number(GRID_SETUP_INITIAL.intervals) + 1 },
   (_, i) => 90 + 20 * i / Number(GRID_SETUP_INITIAL.intervals));
@@ -88,7 +88,7 @@ export function gridAnimationFrame(model: GridAnimationModel, elapsed: number) {
     if (!owner.enabled) looks[owner.ownerOrdinal] = lineLook('unused', 0);
     else if (!owner.opening) {
       // Clamp the closing fade at the opening event before fading back to active.
-      // This also stays continuous when custom grid crossings are <280 ms apart.
+      // This also stays continuous when custom grid crossings overlap the morph.
       const closeElapsed = Math.min(elapsed, owner.openTimeMs);
       const afterClose = model.seed ? 1 - gridAnimationEase((closeElapsed - owner.closeTimeMs) / GRID_ANIMATION_TIMING.morph) : 0;
       const opening = gridAnimationEase((elapsed - owner.openTimeMs) / GRID_ANIMATION_TIMING.morph);

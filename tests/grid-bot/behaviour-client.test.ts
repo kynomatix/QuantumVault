@@ -90,6 +90,20 @@ describe('Grid behaviour animation interactions', () => {
   const dialog = (tree: Element) => find(tree, element => element.type === Dialog);
   const content = (tree: Element) => find(tree, element => element.type === DialogContent);
   const enlarge = (tree: Element) => find(tree, element => element.props['aria-label']?.startsWith('Enlarge example'));
+  it.each([16, 20, 21])('selects the soft glow only after 30 measured intervals averaging over 20 ms: %s', interval => {
+    const tree = open(); button(renderPlayer(tree)).props.onClick();
+    for (let i = 0; i < 30; i++) frames.get(i + 1)!(i * interval);
+    expect(scene(renderPlayer(tree)).props.softGlow).toBe(false);
+    frames.get(31)!(30 * interval);
+    expect(scene(renderPlayer(tree)).props.softGlow).toBe(interval > 20);
+  });
+  it('uses filter-free soft glow for reduced motion, including the static end', () => {
+    vi.stubGlobal('window', { matchMedia: vi.fn(() => ({ matches: true })) });
+    const tree = open(), animation = renderPlayer(tree);
+    expect(scene(animation).props.softGlow).toBe(true);
+    expect(scene(animation).props.elapsed).toBe(GRID_ANIMATION_DURATION);
+    expect(requestFrame).not.toHaveBeenCalled();
+  });
   it('suspends off-screen and hidden playback without advancing the clock, and disconnects on unmount', () => {
     let intersection: (entries: { isIntersecting: boolean }[]) => void;
     let visibility: () => void;

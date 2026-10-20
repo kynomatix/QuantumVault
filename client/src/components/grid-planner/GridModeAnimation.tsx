@@ -5,32 +5,40 @@ import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
 import { GRID_ANIMATION_DURATION, gridAnimationFrame, gridAnimationModel, type GridModeAnimationOptions,
   type GridAnimationModel, type AnimationLineState } from '@/lib/grid-mode-animation';
 
-const colours: Record<AnimationLineState, string> = {
-  active: 'rgb(var(--grid-animation-active))', waiting: 'rgb(var(--grid-animation-waiting))',
-  dark: 'rgb(var(--grid-animation-out))', unused: 'rgb(var(--grid-animation-out))',
+// Numeric v5 palette also works in browsers without CSS color-mix().
+type RGB = readonly [number, number, number];
+const background: RGB = [11, 13, 26];
+const colours: Record<AnimationLineState, RGB> = {
+  active: [110, 193, 255], waiting: [105, 90, 190], dark: [38, 41, 54], unused: [38, 41, 54],
 };
-const openingColour = 'rgb(var(--grid-animation-buy))';
-const closingColour = 'rgb(var(--grid-animation-path))';
+const openingColour: RGB = [63, 224, 197], closingColour: RGB = [230, 238, 255];
+const mix = (from: RGB, to: RGB, amount: number): RGB => from.map((c, i) => c + (to[i] - c) * amount) as unknown as RGB;
+const rgb = (colour: RGB) => `rgb(${colour.map(Math.round).join(',')})`;
 const players = new Set<() => void>();
 
 /** Pure SVG scene, also used for end-state previews. No timers or playback on its own. */
-export function GridModeAnimationScene({ model, elapsed, portraitHeight, fit = false, reveal = false }: {
-  model: GridAnimationModel; elapsed: number; portraitHeight?: number; fit?: boolean; reveal?: boolean;
+export function GridModeAnimationScene({ model, elapsed, portraitHeight, fit = false, reveal = false, renderedWidth = 640, softGlow = false }: {
+  model: GridAnimationModel; elapsed: number; portraitHeight?: number; fit?: boolean; reveal?: boolean; renderedWidth?: number; softGlow?: boolean;
 }) {
   const id = useId();
   const portrait = portraitHeight !== undefined;
   const height = portraitHeight ?? 360;
-  const left = portrait ? 100 : 72;
+  const scale = Math.max(1, renderedWidth) / 640;
+  const fontSize = Math.max(portrait ? 28 : 14, 11 / scale);
+  const compact = !fit && renderedWidth < 480;
+  const left = Math.max(portrait ? 100 : 72, fontSize * 2.5 + 12);
   const x = (t: number) => left + (552 - left) * t;
-  const fontSize = portrait ? 28 : 14;
   const radius = portrait ? 6 : 4;
   const frame = gridAnimationFrame(model, elapsed);
-  const lineColours = frame.looks.map(look => look.active === 1 ? colours.active : look.active === 0 ? colours[look.muted]
-    : `color-mix(in srgb, ${colours.active} ${look.active * 100}%, ${colours[look.muted]})`);
+  const visibility = reveal ? frame.sceneOpacity : 1;
+  const fade = (colour: RGB, amount = 1) => rgb(mix(background, colour, visibility * amount));
+  const lineColours = frame.looks.map(look => mix(colours[look.muted], colours.active, look.active));
   const low = model.prices[0], span = model.prices[model.prices.length - 1] - low;
   const bottom = portrait ? height - 52 : 282;
   const top = portrait ? 60 : 58;
   const y = (price: number) => bottom - (bottom - top) * (price - low) / span;
+  const spacing = (bottom - top) / span * Math.min(...model.prices.slice(1).map((p, i) => p - model.prices[i]));
+  const crisp = height / 216;
   const dotX = x(frame.progress), dotY = y(frame.price);
   const path = Array.from({ length: 121 }, (_, i) => {
     const t = frame.progress * i / 120;
@@ -44,14 +52,14 @@ export function GridModeAnimationScene({ model, elapsed, portraitHeight, fit = f
     aria-describedby={`${id}-description`} className="block aspect-video w-full max-w-full rounded-md bg-background">
     <desc id={`${id}-description`}>{copy.hint}</desc>
     <defs>
-      <filter id={`${id}-glow`} filterUnits="userSpaceOnUse" x="0" y="0" width="640" height={height} colorInterpolationFilters="sRGB">
-        <feGaussianBlur stdDeviation="4.67" />
-      </filter>
+      {!softGlow && <filter id={`${id}-glow`} filterUnits="userSpaceOnUse" x="0" y="0" width="640" height={height} colorInterpolationFilters="sRGB">
+        <feGaussianBlur stdDeviation={spacing * .3} />
+      </filter>}
       <linearGradient id={`${id}-background`} x2="0" y2="1">
         <stop stopColor="rgb(var(--grid-animation-top))" /><stop offset="1" stopColor="rgb(var(--grid-animation-bottom))" />
       </linearGradient>
-      <radialGradient id={`${id}-wash`} cx="50%" cy="55%" r="55%">
-        <stop stopColor="rgb(var(--grid-animation-wash))" /><stop offset="1" stopColor="rgb(var(--grid-animation-wash))" stopOpacity="0" />
+      <radialGradient id={`${id}-wash`} cx="50%" cy="55%" r="45.45%">
+        <stop stopColor="rgb(var(--grid-animation-wash))" /><stop offset="1" stopColor="rgb(0,0,0)" />
       </radialGradient>
       <radialGradient id={`${id}-vignette`} r="70%">
         <stop offset=".45" stopColor="rgb(var(--grid-animation-top))" stopOpacity="0" />
@@ -61,38 +69,44 @@ export function GridModeAnimationScene({ model, elapsed, portraitHeight, fit = f
     <rect width="640" height={height} fill={`url(#${id}-background)`} />
     <rect width="640" height={height} fill={`url(#${id}-wash)`} style={{ mixBlendMode: 'screen' }} />
     <rect width="640" height={height} fill={`url(#${id}-vignette)`} />
-    <g data-scene="true" opacity={reveal ? frame.sceneOpacity : 1}>
+    <g data-scene="true">
     {/* One bounded blur surface, under all crisp geometry and text. */}
-    <g data-glow="true" filter={`url(#${id}-glow)`} fill="none" strokeLinecap="round" strokeLinejoin="round" style={{ mixBlendMode: 'screen' }}>
-      {model.prices.map((price, ordinal) => <path key={ordinal} d={`M${left},${y(price)}H552`}
-        stroke={lineColours[ordinal]} strokeWidth="12" opacity={frame.looks[ordinal].glow} />)}
-      <path d={path} stroke={closingColour} strokeWidth="10" opacity=".6" />
-      <circle cx={dotX} cy={dotY} r={radius * 3} fill={closingColour} opacity=".6" />
+    <g data-glow="true" data-glow-quality={softGlow ? 'soft-strokes' : 'blur'} filter={softGlow ? undefined : `url(#${id}-glow)`} fill="none" strokeLinecap="round" strokeLinejoin="round" style={{ mixBlendMode: 'screen' }}>
+      {/* Nested low-opacity strokes approximate a soft profile without a filter. */}
+      {(softGlow ? [2.8, 2, 1.2] : [1]).map((spread, layer) => <g key={spread} opacity={softGlow ? [.035, .065, .12][layer] : 1}>
+        {model.prices.map((price, ordinal) => <path key={ordinal} d={`M${left},${y(price)}H552`}
+          stroke={fade(lineColours[ordinal], frame.looks[ordinal].glow)} strokeWidth={spacing * .43 * spread} />)}
+        <path d={path} stroke={fade(closingColour, .6)} strokeWidth={spacing * .43 * spread} />
+        <circle cx={dotX} cy={dotY} r={radius * 3 * spread} fill={fade(closingColour, .6)} />
+      </g>)}
     </g>
     {model.prices.map((price, ordinal) => <g key={ordinal} data-grid-line={ordinal} data-state={frame.states[ordinal]}>
-      <path d={`M${left},${y(price)}H552`} stroke={lineColours[ordinal]} strokeWidth={frame.looks[ordinal].width} opacity={frame.looks[ordinal].opacity} />
+      <path d={`M${left},${y(price)}H552`} stroke={fade(lineColours[ordinal])}
+        strokeWidth={Math.max(1.25 / scale, crisp * (.6 + .4 * frame.looks[ordinal].active))} />
     </g>)}
     <text x={left - 12} y={y(model.reference)} textAnchor="end" dominantBaseline="middle"
-      fill="hsl(var(--muted-foreground))" fontSize={fontSize}>Start</text>
-    <path d={path} fill="none" stroke={closingColour} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-    <circle cx={dotX} cy={dotY} r={radius} fill="rgb(var(--grid-animation-text))" />
-    {frame.progress < 1 && <text data-price-readout="true" x={dotX + 12} y={dotY + (frame.progress < model.peak ? fontSize + 4 : -12)}
-      textAnchor={portrait && dotX > 500 ? 'end' : 'start'} fill={closingColour} fontSize={portrait ? 28 : 15}>{frame.readout}</text>}
-    {frame.tags.map(tag => {
+      fill={fade(closingColour)} fontSize={fontSize} fontWeight="400">Start</text>
+    <path d={path} fill="none" stroke={fade(closingColour)} strokeWidth={Math.max(1 / scale, crisp * .8)} strokeLinecap="round" strokeLinejoin="round" />
+    <circle cx={dotX} cy={dotY} r={radius} fill={fade([255, 255, 255])} />
+    {!compact && elapsed > 0 && frame.progress < 1 && <text data-price-readout="true" x={dotX + 12} y={dotY + (frame.progress < model.peak ? fontSize + 4 : -12)}
+      textAnchor={dotX > 500 ? 'end' : 'start'} fill={fade(closingColour)} fontSize={Math.max(fontSize, 15)}>{frame.readout}</text>}
+    {!compact && frame.tags.map(tag => {
       // v5 modes_anim.py:165,239-243: stay beside the original fill point.
       // The model's short fade removes the tag before it reads as a trailing order.
       const fillX = x(tag.at), fillY = y(model.prices[tag.ordinal]);
       const colour = tag.label === 'BUY' ? openingColour : colours.waiting;
+      const tagColour = fade(colour, tag.opacity);
       const owner = model.owners.find(row => row.ownerOrdinal === tag.ownerOrdinal)!;
-      return <g key={`${tag.ownerOrdinal}-${tag.leg}`} opacity={tag.opacity} data-fill={tag.label}>
-        {tag.leg === 'opening' && <path d={`M${fillX},${fillY}V${y(model.prices[owner.closingOrdinal])}`} stroke={colour} strokeWidth="1.5" />}
-        <rect x={fillX - (portrait ? 106 : 62)} y={fillY - (portrait ? 20 : 11)} width={portrait ? 96 : 52} height={portrait ? 40 : 22} rx="5" fill={colour} fillOpacity=".33" stroke={colour} strokeWidth={portrait ? 3 : 2} />
-        <text x={fillX - (portrait ? 58 : 36)} y={fillY + (portrait ? 9 : 5)} textAnchor="middle" fill="rgb(var(--grid-animation-text))" fontSize={fontSize} fontWeight="600">{tag.label}</text>
+      return <g key={`${tag.ownerOrdinal}-${tag.leg}`} data-fill={tag.label}>
+        {tag.leg === 'opening' && <path d={`M${fillX},${fillY}V${y(model.prices[owner.closingOrdinal])}`} stroke={tagColour} strokeWidth="1.5" />}
+        <rect x={fillX - (portrait ? 106 : 62)} y={fillY - (portrait ? 20 : 11)} width={portrait ? 96 : 52} height={portrait ? 40 : 22} rx="5" fill={fade(colour, tag.opacity / 3)} stroke={tagColour} strokeWidth={portrait ? 3 : 2} />
+        <text x={fillX - (portrait ? 58 : 36)} y={fillY + (portrait ? 9 : 5)} textAnchor="middle" fill={fade([255, 255, 255], tag.opacity)} fontSize={fontSize} fontWeight="600">{tag.label}</text>
       </g>;
     })}
     {/* Paint resting rings last so no fill bracket or label can cover their stroke. */}
     {frame.pending.map(order => <circle key={order.ownerOrdinal} data-waiting-order={order.leg}
-      cx={dotX} cy={y(model.prices[order.ordinal])} r={radius} fill="none" stroke={order.leg === 'opening' ? openingColour : closingColour} strokeWidth="1.8" />)}
+      cx={dotX} cy={y(model.prices[order.ordinal])} r={radius} fill="none"
+      stroke={fade((order.leg === 'closing') === (model.side === 'long') ? [255, 255, 255] : openingColour)} strokeWidth="1.8" />)}
     </g>
   </svg>;
 }
@@ -102,6 +116,9 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
   const reduced = () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   const [elapsed, setElapsed] = useState(() => reduced() ? GRID_ANIMATION_DURATION : 0);
   const [playing, setPlaying] = useState(false);
+  const [softGlow, setSoftGlow] = useState(() => !!reduced());
+  const [cardWidth, setCardWidth] = useState(300);
+  const [drawingWidth, setDrawingWidth] = useState(640);
   const [enlarged, setEnlarged] = useState(false);
   const [portrait, setPortrait] = useState(() => typeof window !== 'undefined' && !!window.matchMedia?.('(orientation: portrait)').matches);
   const [portraitHeight, setPortraitHeight] = useState(960);
@@ -114,6 +131,21 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
   const playbackElapsed = useRef(0);
   const resume = useRef<(() => void) | null>(null);
   useEffect(() => {
+    const target = container.current;
+    if (!target || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width > 0) setCardWidth(entry.contentRect.width);
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    const update = () => { if (media?.matches) setSoftGlow(true); };
+    media?.addEventListener?.('change', update);
+    return () => media?.removeEventListener?.('change', update);
+  }, []);
+  useEffect(() => {
     const media = window.matchMedia?.('(orientation: portrait)');
     if (!media) return;
     const update = () => setPortrait(media.matches);
@@ -122,12 +154,14 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
     return () => media.removeEventListener?.('change', update);
   }, []);
   useEffect(() => {
-    if (!drawing || !portrait) return;
+    if (!drawing) return;
     // Recompute geometry, rather than stretching the SVG. Uniform SVG scaling
     // keeps circles round and text legible as the header or safe areas change.
     const observer = new ResizeObserver(([entry]) => {
-      if (entry.contentRect.width > 0 && entry.contentRect.height > 0)
-        setPortraitHeight(640 * entry.contentRect.height / entry.contentRect.width);
+      if (entry.contentRect.width > 0 && entry.contentRect.height > 0) {
+        setDrawingWidth(portrait ? entry.contentRect.width : Math.min(entry.contentRect.width, entry.contentRect.height * 640 / 360));
+        if (portrait) setPortraitHeight(640 * entry.contentRect.height / entry.contentRect.width);
+      }
     });
     observer.observe(drawing);
     return () => observer.disconnect();
@@ -170,7 +204,13 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
     setElapsed(0);
     playbackElapsed.current = 0;
     setPlaying(true);
+    let probeFrames = 0, probeTotal = 0;
     const tick = (time: number) => {
+      // Exclude the initial tick and paused time; sample 30 actual frame intervals.
+      if (began.current !== null && probeFrames < 30) {
+        probeTotal += time - began.current;
+        if (++probeFrames === 30 && probeTotal / 30 > 20) setSoftGlow(true);
+      }
       began.current ??= time;
       const next = Math.min(playbackElapsed.current + time - began.current, GRID_ANIMATION_DURATION);
       began.current = time;
@@ -201,7 +241,7 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
       {replay ? <RotateCcw aria-hidden="true" className="h-4 w-4" /> : <Play aria-hidden="true" className="h-4 w-4" />}
     </button>;
   return <div ref={container} className="relative mt-auto min-w-0 max-w-full overflow-hidden pb-12" onClick={event => event.stopPropagation()}>
-    <GridModeAnimationScene model={model} elapsed={enlarged ? smallElapsed.current : elapsed} reveal={playing && !enlarged} />
+    <GridModeAnimationScene model={model} elapsed={enlarged ? smallElapsed.current : elapsed} reveal={playing && !enlarged} renderedWidth={cardWidth} softGlow={softGlow} />
     {!enlarged && playButton}
     <Dialog open={enlarged} onOpenChange={changeOpen}>
       <DialogTrigger asChild>
@@ -233,7 +273,7 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
         </DialogHeader>
         {enlarged && <>
           <div ref={setDrawing} className="min-h-0 min-w-0" style={{ flex: portrait ? '1 1 0%' : '0 1 auto', aspectRatio: portrait ? undefined : '16 / 9' }}>
-            <GridModeAnimationScene model={model} elapsed={elapsed} portraitHeight={portrait ? portraitHeight : undefined} reveal={playing} fit />
+            <GridModeAnimationScene model={model} elapsed={elapsed} portraitHeight={portrait ? portraitHeight : undefined} reveal={playing} renderedWidth={drawingWidth} softGlow={softGlow} fit />
           </div>
           {playButton}
         </>}
