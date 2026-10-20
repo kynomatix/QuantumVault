@@ -34,6 +34,19 @@ export function armRows(r) {
   return [{...r,arm:r.setting},...(r.setting==='A_WEEK'?[{...r,arm:'C_R1',admitted:r.r1==='pass'&&r.admitted,
     reason:r.r1==='pass'?r.reason:r.r1==='unavailable'?'R1 signal unavailable':'R1 condition not met'}]:[])];
 }
+export function addAdmissionMask(mask,r) {
+  for(const slot of r.slots){
+    const index=SLOTS.findIndex(s=>s.id===slot);if(index<0)continue;
+    for(const a of armRows(r))if(a.admitted){const k=cohortKey(a);mask.set(k,(mask.get(k)??0)|(1<<index));}
+  }
+}
+export function pairRows(first,second) {
+  const left=new Map(first.filter(r=>r.admitted).map(r=>[scenarioKey(r),r])),pairs=[];
+  for(const b of second.filter(r=>r.admitted)){
+    const a=left.get(scenarioKey(b));if(a)pairs.push({...a,netReturn:a.netReturn-b.netReturn});
+  }
+  return pairs;
+}
 export function quantile(values,p) {
   if(!values.length)return null;
   const a=[...values].sort((x,y)=>x-y),index=(a.length-1)*p,lo=Math.floor(index),fraction=index-lo;

@@ -1,5 +1,5 @@
 import {expect,it} from 'vitest';
-import {HOUR,DAY,SLOTS,SETTINGS,randomHour,launches,offsetWindow,physicalKey,scenarioKey,armRows,stats,spread}
+import {HOUR,DAY,SLOTS,SETTINGS,randomHour,launches,offsetWindow,physicalKey,scenarioKey,armRows,stats,spread,addAdmissionMask,pairRows,cohortKey}
   from '../../scripts/research/grid-start-time/core.mjs';
 
 it('has exactly all 21 weekday/time slots and the eight physical configurations',()=>{
@@ -66,4 +66,24 @@ it('excludes unavailable cells and reports Sunday extremes and competition ranks
   expect(s.sundayRank).toBe(1);expect(s.rangeOutlier).toBe(true);expect(s.availableSlots).toBe(3);
   expect(s.min).toBe(1);expect(s.max).toBe(5);expect(s.sd).toBeCloseTo(Math.sqrt(26/9));
   expect(spread([{slot:'Sun-00',mean:1},{slot:'Mon-00',mean:1}],'mean').sundayRank).toBe(1);
+});
+it('requires all fixed slots for the common cohort and does not use random to fill a missing slot',()=>{
+  const mask=new Map(),r={anchor:0,launchAt:0,market:'BTC',horizonDays:14,direction:'long',path:'OHLC',markPath:'OHLC',setting:'A_WEEK',builderRate:.001,r1:'pass',admitted:true};
+  for(const s of SLOTS.slice(0,-1))addAdmissionMask(mask,{...r,slots:[s.id]});
+  addAdmissionMask(mask,{...r,slots:['RANDOM']});
+  expect(mask.get(cohortKey({...r,arm:'A_WEEK'}))).not.toBe(2**21-1);
+  addAdmissionMask(mask,{...r,slots:[SLOTS.at(-1)!.id],r1:'fail'});
+  expect(mask.get(cohortKey({...r,arm:'A_WEEK'}))).toBe(2**21-1);
+  expect(mask.get(cohortKey({...r,arm:'C_R1'}))).not.toBe(2**21-1);
+});
+it('does not let repeated collision memberships create new cohort bits',()=>{
+  const mask=new Map(),r={anchor:0,market:'BTC',horizonDays:14,direction:'long',path:'OHLC',markPath:'OLHC',setting:'A_MONTH',builderRate:0,admitted:true,slots:['Sun-00','RANDOM']};
+  addAdmissionMask(mask,r);addAdmissionMask(mask,r);
+  expect(mask.get(cohortKey({...r,arm:'A_MONTH'}))).toBe(1);
+});
+it('pairs only jointly admitted same-scenario rows and preserves direction of the difference',()=>{
+  const r={anchor:0,launchAt:0,market:'BTC',horizonDays:14,direction:'long',path:'OHLC',markPath:'OHLC',admitted:true,netReturn:.04};
+  const first=[r,{...r,market:'ETH',netReturn:99}],second=[{...r,launchAt:8*HOUR,netReturn:.01},{...r,market:'ETH',admitted:false},{...r,horizonDays:30}];
+  const pairs=pairRows(first,second);expect(pairs).toHaveLength(1);expect(pairs[0].netReturn).toBeCloseTo(.03);
+  expect(pairs[0].launchAt).toBe(0);
 });
