@@ -1,10 +1,23 @@
 import {expect,it,vi} from 'vitest';
 import fs from 'node:fs';
+import {execFileSync} from 'node:child_process';
 vi.mock('../../server/grid-planner/finder-candle-cache',()=>({createFinderCandleReader:vi.fn()}));
 import {qualifyRangingMarket} from '../../server/grid-planner/scanner';
 import {closedHistory,rankSelections,armMembership,proxyCalendar,summary,selectDevelopment,SETTINGS} from '../../scripts/research/grid-finder/core.mjs';
 import {extractScanner} from '../../scripts/research/grid-finder/source.mjs';
 import {liquidationPrice,liquidationCrossing,maintenanceRate} from '../../scripts/research/grid-backtest-r2/risk.mjs';
+it('loads shipped finder and planner dependencies in the documented plain Node runtime',()=>{
+  const script = [
+    "import {qualifyRangingMarket} from './server/grid-planner/scanner.ts';",
+    "import {geometryAt} from './scripts/research/grid-defaults/geometry.mjs';",
+    "import {fixedReplay} from './scripts/research/grid-backtest-r2/fixed-replay.mjs';",
+    "if ([qualifyRangingMarket,geometryAt,fixedReplay].some(f=>typeof f!=='function')) throw Error('Missing research dependency');",
+    "process.stdout.write('dependencies loaded');",
+  ].join('\n');
+  const result=execFileSync(process.execPath,['--experimental-transform-types','--import','./scripts/research/grid-finder/loader.mjs',
+    '--input-type=module','-e',script],{encoding:'utf8',timeout:30000,env:{...process.env,FINDER_INPUT_MAP:''}});
+  expect(result).toBe('dependencies loaded');
+});
 const duration=3600000,launch=Date.UTC(2026,0,4);
 const candles=()=>Array.from({length:102},(_,i)=>({time:launch+(i-100)*duration,open:100,high:102,low:98,close:100,volume:1,
   provenance:{source:'okx',venue:'okx',basis:'perp',proxy:'direct',finality:'finalized',timeSemantic:'open_time'}}));
