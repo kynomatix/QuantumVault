@@ -22,7 +22,7 @@ export function GridBehaviourSelect({ value, side, seed, onChange }: { value: Gr
   };
 
   return <div className="@container min-w-0" onKeyDown={event => {
-    if (expanded && event.key === 'Escape') {
+    if (expanded && event.key === 'Escape' && !event.defaultPrevented) {
       event.preventDefault();
       event.stopPropagation();
       close();

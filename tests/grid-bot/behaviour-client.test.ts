@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { GridBehaviourSelect } from '../../client/src/components/grid-planner/GridBehaviourSelect';
 import { GridModeAnimation, GridModeAnimationScene } from '../../client/src/components/grid-planner/GridModeAnimation';
 import { GRID_ANIMATION_DURATION } from '../../client/src/lib/grid-mode-animation';
+import { Dialog, DialogContent } from '../../client/src/components/ui/dialog';
 
 // Real callbacks, controlled hooks/frame lifecycle: the product suite runs on Node.
 type Effect = { deps?: unknown[]; run: () => void | (() => void); cleanup?: void | (() => void); pending: boolean };
@@ -82,7 +83,82 @@ describe('Grid behaviour animation interactions', () => {
     vi.stubGlobal('requestAnimationFrame', requestFrame); vi.stubGlobal('cancelAnimationFrame', cancelFrame);
     vi.stubGlobal('window', { matchMedia: vi.fn(() => ({ matches: false })) });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    for (const effect of player.effects) if (effect.cleanup) effect.cleanup();
+    vi.unstubAllGlobals();
+  });
+  const dialog = (tree: Element) => find(tree, element => element.type === Dialog);
+  const content = (tree: Element) => find(tree, element => element.type === DialogContent);
+  const enlarge = (tree: Element) => find(tree, element => element.props['aria-label']?.startsWith('Enlarge example'));
+  it('offers labelled 44px Enlarge controls and opens without selecting or collapsing', () => {
+    const tree = open(), animation = renderPlayer(tree);
+    expect(enlarge(animation).props['aria-label']).toBe('Enlarge example animation: Keep trading the whole range');
+    expect(enlarge(animation).props.className.split(' ')).toEqual(expect.arrayContaining(['h-11', 'w-11', 'right-1']));
+    const cardPath = pathTo(tree, element => element.type === GridModeAnimation)!;
+    const event = bubble([...cardPath.slice(0, -1), ...pathTo(animation, element => element.props['aria-label']?.startsWith('Enlarge example'))!], 'onClick');
+    expect(event.stopPropagation).toHaveBeenCalledOnce();
+    dialog(animation).props.onOpenChange(true);
+    const opened = renderPlayer(tree);
+    expect(dialog(opened).props.open).toBe(true);
+    expect(requestFrame).toHaveBeenCalledOnce();
+    content(opened).props.onClick(event);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
+  });
+  it.each(['escape', 'close-or-overlay'])('%s closes only the dialog, cancels playback and restores Enlarge focus', method => {
+    const tree = open();
+    dialog(renderPlayer(tree)).props.onOpenChange(true);
+    const opened = renderPlayer(tree), restore = vi.fn();
+    enlarge(opened).props.ref.current = { focus: restore };
+    const event = { preventDefault: vi.fn(), stopPropagation: vi.fn() };
+    if (method === 'escape') {
+      content(opened).props.onEscapeKeyDown(event);
+      expect(event.preventDefault).toHaveBeenCalledOnce();
+      expect(event.stopPropagation).toHaveBeenCalledOnce();
+    } else dialog(opened).props.onOpenChange(false);
+    content(opened).props.onCloseAutoFocus(event);
+    expect(restore).toHaveBeenCalledOnce();
+    expect(dialog(renderPlayer(tree)).props.open).toBe(false);
+    expect(cancelFrame).toHaveBeenLastCalledWith(1);
+    expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
+    expect(onChange).not.toHaveBeenCalled();
+    const bubbled = bubble([tree, content(opened)], 'onKeyDown', { key: 'Escape' });
+    expect(bubbled.stopPropagation).toHaveBeenCalledOnce();
+    expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
+  });
+  it('freezes the small scene while the enlarged scene plays, and never resumes on close', () => {
+    const tree = open(); button(renderPlayer(tree)).props.onClick();
+    frames.get(1)!(100); frames.get(2)!(1100);
+    dialog(renderPlayer(tree)).props.onOpenChange(true);
+    expect(cancelFrame).toHaveBeenLastCalledWith(3);
+    frames.get(4)!(2000); frames.get(5)!(4000);
+    const opened = renderPlayer(tree);
+    expect(scene(opened).props.elapsed).toBe(1000);
+    expect(scene(content(opened)).props.elapsed).toBe(2000);
+    dialog(opened).props.onOpenChange(false);
+    expect(cancelFrame).toHaveBeenLastCalledWith(6);
+    expect(scene(renderPlayer(tree)).props.elapsed).toBe(1000);
+    expect(requestFrame).toHaveBeenCalledTimes(6);
+  });
+  it('opens reduced-motion at the end state and plays only on explicit tap', () => {
+    vi.stubGlobal('window', { matchMedia: vi.fn(() => ({ matches: true })) });
+    const tree = open(); dialog(renderPlayer(tree)).props.onOpenChange(true);
+    const opened = renderPlayer(tree);
+    expect(scene(content(opened)).props.elapsed).toBe(GRID_ANIMATION_DURATION);
+    expect(requestFrame).not.toHaveBeenCalled();
+    button(content(opened)).props.onClick();
+    expect(requestFrame).toHaveBeenCalledOnce();
+    expect(scene(content(renderPlayer(tree))).props.elapsed).toBe(0);
+  });
+  it('pauses other cards before starting playback', () => {
+    const tree = open(); button(renderPlayer(tree)).props.onClick();
+    const other = store();
+    const otherTree = render(other, () => GridModeAnimation({ mode: 'step_back', side, seed }));
+    button(otherTree).props.onClick();
+    expect(cancelFrame).toHaveBeenLastCalledWith(1);
+    for (const effect of other.effects) if (effect.cleanup) effect.cleanup();
+    expect(cancelFrame).toHaveBeenLastCalledWith(2);
+  });
   it.each([['long', true], ['short', true], ['long', false], ['short', false]] as const)(
     'mounts all animations only while expanded: %s, seed=%s', (direction, seeded) => {
       side = direction; seed = seeded;

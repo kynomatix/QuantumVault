@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { Play, RotateCcw } from 'lucide-react';
+import { Maximize2, Play, RotateCcw } from 'lucide-react';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
 import { GRID_ANIMATION_DURATION, gridAnimationFrame, gridAnimationModel, type GridModeAnimationOptions,
   type GridAnimationModel, type AnimationLineState } from '@/lib/grid-mode-animation';
@@ -10,6 +11,7 @@ const colours: Record<AnimationLineState, string> = {
 const openingColour = 'hsl(var(--chart-4))';
 const closingColour = 'hsl(var(--foreground))';
 const x = (t: number) => 72 + 480 * t;
+const players = new Set<() => void>();
 
 /** Pure SVG scene, also used for end-state previews. No timers or playback on its own. */
 export function GridModeAnimationScene({ model, elapsed }: { model: GridAnimationModel; elapsed: number }) {
@@ -65,6 +67,9 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
   const reduced = () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
   const [elapsed, setElapsed] = useState(() => reduced() ? GRID_ANIMATION_DURATION : 0);
   const [playing, setPlaying] = useState(false);
+  const [enlarged, setEnlarged] = useState(false);
+  const smallElapsed = useRef(elapsed);
+  const enlargeButton = useRef<HTMLButtonElement>(null);
   const frame = useRef<number | null>(null);
   const began = useRef<number | null>(null);
   const cancel = () => {
@@ -76,9 +81,12 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
     cancel();
     setPlaying(false);
     setElapsed(reduced() ? GRID_ANIMATION_DURATION : 0);
-    return cancel;
+    const pause = () => { cancel(); setPlaying(false); };
+    players.add(pause);
+    return () => { cancel(); players.delete(pause); };
   }, [model]);
   const play = () => {
+    players.forEach(pause => pause());
     cancel();
     setElapsed(0);
     setPlaying(true);
@@ -91,14 +99,53 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
     };
     frame.current = requestAnimationFrame(tick);
   };
+  const changeOpen = (open: boolean) => {
+    cancel();
+    setPlaying(false);
+    setEnlarged(open);
+    if (open) {
+      smallElapsed.current = elapsed;
+      players.forEach(pause => pause());
+      if (reduced()) setElapsed(GRID_ANIMATION_DURATION);
+      else play();
+    } else setElapsed(smallElapsed.current);
+  };
   const replay = playing || elapsed > 0;
-  const label = gridBehaviourCopy(model.mode, model.side, model.seed).label;
-  return <div className="relative mt-auto min-w-0 max-w-full overflow-hidden" onClick={event => event.stopPropagation()}>
-    <GridModeAnimationScene model={model} elapsed={elapsed} />
-    <button type="button" aria-label={`${replay ? 'Replay' : 'Play'} example animation: ${label}`}
+  const copy = gridBehaviourCopy(model.mode, model.side, model.seed);
+  const playButton = <button type="button" aria-label={`${replay ? 'Replay' : 'Play'} example animation: ${copy.label}`}
       className="absolute bottom-1 left-1 flex h-11 w-11 items-center justify-center rounded-full border border-border bg-background/90 text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       onClick={play}>
       {replay ? <RotateCcw aria-hidden="true" className="h-4 w-4" /> : <Play aria-hidden="true" className="h-4 w-4" />}
-    </button>
+    </button>;
+  return <div className="relative mt-auto min-w-0 max-w-full overflow-hidden" onClick={event => event.stopPropagation()}>
+    <GridModeAnimationScene model={model} elapsed={enlarged ? smallElapsed.current : elapsed} />
+    {!enlarged && playButton}
+    <Dialog open={enlarged} onOpenChange={changeOpen}>
+      <DialogTrigger asChild>
+        <button ref={enlargeButton} type="button" aria-label={`Enlarge example animation: ${copy.label}`} title="Enlarge"
+          className="absolute bottom-1 right-1 flex h-11 w-11 items-center justify-center rounded-full border border-border bg-background/90 text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+          <Maximize2 aria-hidden="true" className="h-4 w-4" />
+        </button>
+      </DialogTrigger>
+      <DialogContent className="w-[calc(100vw-1rem)] max-w-[1100px] max-h-[calc(100dvh-1rem)] overflow-y-auto rounded-lg p-3 sm:p-6"
+        onClick={event => event.stopPropagation()}
+        onKeyDown={event => event.stopPropagation()}
+        onEscapeKeyDown={event => {
+          // Radix handles Escape at document capture, before the panel's React handler.
+          event.preventDefault();
+          event.stopPropagation();
+          changeOpen(false);
+        }}
+        onCloseAutoFocus={event => { event.preventDefault(); enlargeButton.current?.focus(); }}>
+        <DialogHeader className="pr-8 text-left">
+          <DialogTitle>{copy.label}</DialogTitle>
+          <DialogDescription>{copy.hint}</DialogDescription>
+        </DialogHeader>
+        {enlarged && <div className="relative min-w-0">
+          <GridModeAnimationScene model={model} elapsed={elapsed} />
+          {playButton}
+        </div>}
+      </DialogContent>
+    </Dialog>
   </div>;
 }
