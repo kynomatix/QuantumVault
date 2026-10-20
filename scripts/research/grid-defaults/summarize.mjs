@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {readLines,sha256} from '../grid-direction/io.mjs';
-import {settings,BASELINE,metrics,idle,compare} from './design.mjs';
+import {settings,BASELINE,metrics,idle,compare,selectDevelopment} from './design.mjs';
 const [evidence,handback]=process.argv.slice(2);
 const read=name=>JSON.parse(fs.readFileSync(path.join(evidence,name),'utf8'));
 const record=read('run-record.json'),selection=read('development-selection.json');
@@ -9,13 +9,20 @@ if(!record.completedAt)throw Error('Incomplete evaluation');
 if(sha256(fs.readFileSync(path.join(evidence,'development-selection.json')))!==record.selectionSha256)throw Error('Development selection changed');
 const output=path.join(evidence,'summary');fs.mkdirSync(output);
 const csv=(name,rows)=>{const keys=[...new Set(rows.flatMap(Object.keys))];fs.writeFileSync(path.join(output,name),keys.join(',')+'\n'+rows.map(r=>keys.map(k=>JSON.stringify(r[k]??'')).join(',')).join('\n')+'\n');};
-const pooled=[],splits=[],pairs=[],confirmations=[],rejections=[],coverage=[];
+const pooled=[],splits=[],pairs=[],confirmations=[],rejections=[],coverage=[],baselineStops=[];
 for(const period of ['development','evaluation','proxy']){
   const phase=record.phases.find(p=>p.period===period),file=path.join(evidence,`runs-${period}.jsonl`);
   if(sha256(fs.readFileSync(file))!==phase.runsSha256)throw Error('Run file changed');
   const rows=[],seen=new Set();await readLines(file,r=>{const key=r.setting+'|'+r.key;if(seen.has(key))throw Error('Duplicate scenario');seen.add(key);rows.push(r);});
   if(rows.length!==phase.scheduled||rows.filter(r=>r.admitted).length!==phase.admitted)throw Error('Cardinality mismatch');
+  if(rows.some(r=>r.admitted&&['netReturn','maxDrawdown','fees','fillCount','protectiveStop'].some(k=>!Number.isFinite(r[k]))))throw Error('Nonfinite result');
+  if(period==='development'){
+    const checked=selectDevelopment(rows);
+    if(checked.selected!==selection.selected||JSON.stringify(checked.eligible)!==JSON.stringify(selection.eligible))throw Error('Corrected pooled tie-break changes locked selection; rerun development before any recommendation');
+    fs.writeFileSync(path.join(output,'selection-audit.json'),JSON.stringify({selected:checked.selected,eligible:checked.eligible,lockedSelectionUnchanged:true,pooledTieBreakVerified:true},null,2)+'\n');
+  }
   const byId=new Map(settings.map(s=>[s.id,rows.filter(r=>r.setting===s.id)]));
+  baselineStops.push({period,...metrics(byId.get(BASELINE).filter(r=>r.admitted&&r.protectiveStop))});
   for(const s of settings){
     const rr=byId.get(s.id);
     for(const pathName of ['pooled','OHLC','OLHC']){
@@ -39,17 +46,23 @@ for(const period of ['development','evaluation','proxy']){
   }
   coverage.push({period,scheduled:rows.length,admitted:phase.admitted,uniqueScenarioKeys:new Set(rows.map(r=>r.key)).size,earliestLaunch:new Date(Math.min(...rows.filter(r=>r.setting===BASELINE).map(r=>r.launchAt))).toISOString(),latestLaunch:new Date(Math.max(...rows.filter(r=>r.setting===BASELINE).map(r=>r.launchAt))).toISOString()});
 }
-csv('all-settings.csv',pooled);csv('splits.csv',splits);csv('paired-comparisons.csv',pairs);csv('rejections.csv',rejections);
+csv('all-settings.csv',pooled);csv('splits.csv',splits);csv('paired-comparisons.csv',pairs);csv('rejections.csv',rejections);csv('baseline-stopped.csv',baselineStops);
 const confirmed=!!selection.selected&&confirmations.length===3&&confirmations.every(c=>c.passes);
 fs.writeFileSync(path.join(output,'conclusion.json'),JSON.stringify({developmentSelected:selection.selected,confirmed,recommendation:confirmed?selection.selected:'keep the shipped defaults',confirmations,coverage},null,2)+'\n');
 const p=x=>Number.isFinite(x)?(x*100).toFixed(3)+'%':'N/A',f=x=>Number.isFinite(x)?x.toFixed(2):'N/A';
 let report='# Grid defaults backtest\n\n'+(confirmed
-  ?'One preregistered setting improved average results without increasing average drawdown or the stop rate in development and both historical confirmation periods. This supports a candidate default for further validation, not a promise that a future bot will make money.\n\n'
+  ?(selection.selected==='week-1-10-step_back'
+    ?'The results support changing the behaviour default to step_back and keeping the one-week range, current stop buffer and ten intervals. Bots still lost money on average in all three periods, and roughly 55–57% still hit their protective stop.\n\n'
+    :'One preregistered setting improved average results without increasing average drawdown or the stop rate in development and both historical confirmation periods. This supports a candidate default for further validation, not a promise that a future bot will make money.\n\n')
   :'Keep the shipped defaults: no preregistered setting met the full rule for a reliable improvement across development and both historical confirmation periods. A higher win rate or fewer stops alone did not establish a better default.\n\n');
 report+='## Decision\n\nDevelopment selection: '+(selection.selected??'none')+'. Final recommendation: **'+(confirmed?selection.selected:'keep the shipped defaults')+'**. Selection was written before confirmation replay and has an unchanged SHA-256 binding. No confirmation-period re-picking was permitted.\n\n';
 report+='The comparator is week / shipped stop / 10 intervals / repeat_all, seed on. The source still defaults to repeat_all; the proposed transition to step_back is tested explicitly. Entry and profit sizes are Equal, leverage is 1, and capital is fixed at 1,000 quote units. The UI has no investment default. Both 1h and 4h, both sides, 14/30-day holds and both intrabar paths are included; these pooled returns are not the result of running just the default 1h long form.\n\n';
+if(confirmed&&selection.selected==='week-1-10-step_back')report+='**Recommended defaults:** week range; existing 0.75 ATR stop buffer with shipped tick rounding; ten intervals; step_back behaviour; seed on; Equal entry/profit sizing; leverage 1. Keep the 1h timeframe default: this experiment compared parameter settings across 1h and 4h and did not preregister a timeframe-default selection. No range-window, stop-width or interval-count change passed the development rule against its own mode baseline. This is a research recommendation; no product setting was edited.\n\n';
 report+='## Shipped baseline\n\n| Period | Admitted / scheduled | Mean | Median | Profitable | Stop rate | Mean DD | Worst DD | Mean fees | Mean fills |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n';
 for(const r of pooled.filter(r=>r.setting===BASELINE&&r.path==='pooled'&&r.accounting==='admitted'))report+=`| ${r.period} | ${r.admitted}/${r.scheduled} | ${p(r.mean)} | ${p(r.median)} | ${p(r.profitable)} | ${p(r.stopRate)} | ${p(r.meanDrawdown)} | ${p(r.worstDrawdown)} | ${f(r.meanFees)} | ${f(r.meanFills)} |\n`;
+report+='\nAmong baseline bots that hit the protective stop, mean net returns were '+baselineStops.map(r=>r.period+' '+p(r.mean)).join(', ')+'. These are observed losses after simulated fees, not a fixed loss assumed from the brief.\n\n';
+report+='## Changing only behaviour to step_back\n\nThe proposed mode change is separated from range and stop changes below. These rows retain week, the shipped stop buffer and ten intervals; the complete selection rule still applies.\n\n| Period | Mean | Profitable | Stop rate | Mean DD | Passes shipped comparison on both paths |\n|---|---:|---:|---:|---:|---|\n';
+for(const r of pooled.filter(r=>r.setting==='week-1-10-step_back'&&r.path==='pooled'&&r.accounting==='admitted'))report+=`| ${r.period} | ${p(r.mean)} | ${p(r.profitable)} | ${p(r.stopRate)} | ${p(r.meanDrawdown)} | ${pairs.filter(q=>q.period===r.period&&q.setting===r.setting).every(q=>q.passes)?'yes':'no'} |\n`;
 report+='\n## Every registered setting\n\nIDs encode window, stop-buffer multiplier, intervals and behaviour mode. Tables pool both intrabar paths and show admitted bots. The complete CSV also gives each path, totals, seed holds, missing-data runs and the cash-for-rejected sensitivity. Drawdown is relative to each running equity peak, matching the prior simulator. Fees are quote units; fills include seeds and stop exits.\n';
 for(const period of ['development','evaluation','proxy']){
  report+=`\n### ${period}\n\n| Setting | Admitted / scheduled | Mean | Median | Profitable | Stop rate | Mean DD | Worst DD | Mean fees | Mean fills |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n`;
