@@ -115,7 +115,9 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   it('C6 authorizes only an untouched signed-absent reservation without inventing monitor authority',async()=>{
     const f=await reservation(),account=await new GridCustody(launch).recover(f.bot.id,wallet,f.claim.leaseToken);
     await pool.query("UPDATE grid_risk_events SET evidence=jsonb_set(evidence,'{reconciliationRequired}','true'::jsonb) WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id]);
-    const proof={state:'absent' as const,account:account.account,masterAccount:account.masterAccount,observedAt:Date.now(),expiresAt:Date.now()+5000};
+    // One clock sample keeps the proof within its maximum 5000 ms validity window.
+    const observedAt=Date.now();
+    const proof={state:'absent' as const,account:account.account,masterAccount:account.masterAccount,observedAt,expiresAt:observedAt+5000};
     await storage.authorizeProvisioning(f.claim,account,proof);
     expect((await pool.query("SELECT evidence->>'reconciliationRequired' AS required FROM grid_risk_events WHERE bot_id=$1 AND event_key='worker-ownership'",[f.bot.id])).rows[0].required).toBe('false');
     expect((await pool.query('SELECT boot_id FROM grid_monitor_state WHERE bot_id=$1',[f.bot.id])).rows[0]?.boot_id??null).toBeNull();

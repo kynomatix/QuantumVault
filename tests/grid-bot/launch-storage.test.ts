@@ -310,7 +310,9 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
   });
   it('CAS grants send exactly once and refuses stale lease or modified retained payload',async()=>{const {account}=await reserve(),v=input(account),op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);
     expect(await storage.submit(op,randomUUID())).toBe(false);expect(await storage.submit({...op,exact_request:{...op.exact_request,timestamp:1}},account.leaseToken)).toBe(false);
-    expect(await Promise.all([storage.submit(op,account.leaseToken),storage.submit(op,account.leaseToken)])).toEqual([true,false]);
+    // Separate database connections can win the CAS in either order; exactly one must win.
+    const grants=await Promise.all([storage.submit(op,account.leaseToken),storage.submit(op,account.leaseToken)]);
+    expect(grants.sort()).toEqual([false,true]);
   });
   it('does not prepare any next money operation while funding is uncertain',async()=>{const {account}=await reserve(),v=input(account),op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);await storage.submit(op,account.leaseToken);await storage.settle(op,{state:'unconfirmed',reason:'unknown',releaseSlot:false});await expect(storage.prepare('EXAMPLE_NEXT',{...v.request,kind:'leverage'},v.claim,account.leaseToken)).rejects.toThrow('Unresolved');});
   it('same idempotency key demands the same exact request and observation expiry',async()=>{const {account}=await reserve(),v=input(account),op=await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken);expect((await storage.prepare('EXAMPLE',v.request,v.claim,account.leaseToken)).id).toBe(op.id);await expect(storage.prepare('EXAMPLE',{...v.request,expiryMs:4000},v.claim,account.leaseToken)).rejects.toThrow('conflict');});
