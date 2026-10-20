@@ -23,13 +23,20 @@ for(const period of ['development','evaluation']){
  if(priorSha256!==previousBinding.runsSha256)throw Error('Round-two raw result binding mismatch');
  const current=new Map();
  for await(const r of rows(currentPath))if(/^b100-L[135]$/.test(r.setting))current.set(key(r),r);
- let matched=0,admissionDifferences=0,metricDifferences=0,bothAdmitted=0,maxAbsoluteDifference=0;
+ let matched=0,admissionDifferences=0,unexpectedAdmissionDifferences=0,metricDifferences=0,bothAdmitted=0,maxAbsoluteDifference=0;
+ const admissionDifferenceReasons={};
  const examples=[];
  for await(const r of rows(priorPath)){
   if(!/^family0-L[135]$/.test(r.setting))continue;
   const c=current.get(key(r));if(!c)continue;
   matched++;
-  if(c.admitted!==r.admitted){admissionDifferences++;if(examples.length<5)examples.push({key:key(r),currentReason:c.reason,priorReason:r.reason});}
+  if(c.admitted!==r.admitted){
+   admissionDifferences++;
+   const label=`current: ${c.reason??'ADMITTED'}; previous: ${r.reason??'ADMITTED'}`;
+   admissionDifferenceReasons[label]=(admissionDifferenceReasons[label]??0)+1;
+   if(c.admitted||!r.admitted||c.reason!=='gapped execution horizon')unexpectedAdmissionDifferences++;
+   if(examples.length<5)examples.push({key:key(r),currentReason:c.reason,priorReason:r.reason});
+  }
   if(c.admitted&&r.admitted){
    bothAdmitted++;
    for(const m of metrics){
@@ -39,12 +46,14 @@ for(const period of ['development','evaluation']){
   }
  }
  results.push({period,currentPath,currentSha256:await fileHash(currentPath),priorPath,priorSha256,
-  candidateRows:current.size,matched,bothAdmitted,admissionDifferences,metricDifferences,maxAbsoluteDifference,examples});
+  candidateRows:current.size,matched,bothAdmitted,admissionDifferences,unexpectedAdmissionDifferences,admissionDifferenceReasons,metricDifferences,maxAbsoluteDifference,examples});
 }
 const reused=JSON.parse(fs.readFileSync(path.join(root,'reused-source-bindings.json'),'utf8'));
 const sourceBindings=[];
 for(const b of reused)sourceBindings.push({...b,sourceMatches:await fileHash(b.sourcePath)===b.sha256,copiedMatches:await fileHash(b.copiedPath)===b.sha256});
 const out={kind:'research-evidence-reconciliation',results,sourceBindings,
- consistent:results.every(r=>r.matched===r.candidateRows&&!r.admissionDifferences&&!r.metricDifferences)&&sourceBindings.every(b=>b.sourceMatches&&b.copiedMatches)};
+ identicalAdmission:results.every(r=>!r.admissionDifferences),
+ note:'This study preregistered complete scheduled candle horizons. Round two allowed some early-stopped runs whose later scheduled candles were gapped.',
+ consistent:results.every(r=>r.matched===r.candidateRows&&!r.unexpectedAdmissionDifferences&&!r.metricDifferences)&&sourceBindings.every(b=>b.sourceMatches&&b.copiedMatches)};
 fs.writeFileSync(path.join(root,'baseline-reconciliation.json'),JSON.stringify(out,null,2)+'\n');
 console.log(JSON.stringify({consistent:out.consistent,periods:results.map(({period,matched,bothAdmitted,admissionDifferences,metricDifferences})=>({period,matched,bothAdmitted,admissionDifferences,metricDifferences}))}));

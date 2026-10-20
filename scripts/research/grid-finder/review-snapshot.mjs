@@ -29,7 +29,7 @@ for(const name of fs.readdirSync(root).filter(f=>/^runtime-inputs-.*\.json$/.tes
  for(const f of JSON.parse(fs.readFileSync(path.join(root,name),'utf8')).files)bind(f,'support');
 for(const f of ['scripts/grid-trail-loader.mjs','scripts/research/grid-direction/loader.mjs','scripts/research/grid-direction/proxy-policy.mjs','scripts/research/grid-defaults/design.mjs','client/src/lib/grid-setup-view.ts','client/src/components/grid-planner/GridRangingFinder.tsx','client/src/components/grid-planner/GridPlannerSheet.tsx','shared/grid-regime.ts','server/grid-planner/candle-pool.ts','server/grid-planner/finder-candle-cache.ts'])bind(path.join(work,f),'support');
 bind(reviewerPath,'support');bind(scannerPath,'support');
-for(const f of fs.readdirSync(handback,{withFileTypes:true}).filter(f=>f.isFile()&&!['REVIEW-SCAN-STATUS.md','RESUME.md'].includes(f.name)))bind(path.join(handback,f.name),f.name==='PREREGISTRATION.md'?'contract':'evidence');
+for(const f of fs.readdirSync(handback,{withFileTypes:true}).filter(f=>f.isFile()&&!f.name.endsWith('.bundle')&&!['REVIEW-SCAN-STATUS.md','RESUME.md'].includes(f.name)))bind(path.join(handback,f.name),f.name==='PREREGISTRATION.md'?'contract':'evidence');
 // Scratch Git stores and bundle transports are not reviewer-readable text.
 // All research/public evidence files are retained, including failed attempts.
 walk(root,'evidence',name=>name.includes('scratch')||name.startsWith('review-snapshot-')||name.endsWith('.bundle')||name==='source-artifact');
