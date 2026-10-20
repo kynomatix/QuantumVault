@@ -90,6 +90,43 @@ describe('Grid behaviour animation interactions', () => {
   const dialog = (tree: Element) => find(tree, element => element.type === Dialog);
   const content = (tree: Element) => find(tree, element => element.type === DialogContent);
   const enlarge = (tree: Element) => find(tree, element => element.props['aria-label']?.startsWith('Enlarge example'));
+  it.each([[390, 844, true], [844, 390, false], [1280, 900, false], [768, 1024, true]])(
+    'selects portrait geometry only in portrait viewports: %s x %s', (width, height, portrait) => {
+      vi.stubGlobal('window', { matchMedia: vi.fn(query => ({ matches: query === '(orientation: portrait)' && height >= width })) });
+      const tree = open(); dialog(renderPlayer(tree)).props.onOpenChange(true);
+      const opened = renderPlayer(tree), large = scene(content(opened));
+      expect(large.props.portraitHeight).toBe(portrait ? 960 : undefined);
+      expect(scene(opened).props.portraitHeight).toBeUndefined();
+      expect(content(opened).props.style.height).toBe(portrait
+        ? 'calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 1rem)' : undefined);
+      expect(button(content(opened)).props.className).not.toContain('absolute');
+    });
+  it('responds to rotation and measured drawing space, and cleans up both subscriptions', () => {
+    const listeners: (() => void)[] = [];
+    const media = { matches: false, addEventListener: vi.fn((_name, update) => listeners.push(update)), removeEventListener: vi.fn() };
+    vi.stubGlobal('window', { matchMedia: vi.fn(query => query === '(orientation: portrait)' ? media : { matches: false }) });
+    const observe = vi.fn(), disconnect = vi.fn();
+    let resize: (entries: { contentRect: { width: number; height: number } }[]) => void;
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: typeof resize) { resize = callback; }
+      observe = observe;
+      disconnect = disconnect;
+    });
+    const tree = open(); dialog(renderPlayer(tree)).props.onOpenChange(true);
+    const opened = renderPlayer(tree);
+    const drawing = find(content(opened), element => element.type === 'div' && !!element.props.ref);
+    const node = { nodeName: 'DIV' };
+    drawing.props.ref(node);
+    media.matches = true; listeners[0](); renderPlayer(tree);
+    expect(observe).toHaveBeenCalledWith(node);
+    resize!([{ contentRect: { width: 348, height: 640 } }]);
+    expect(scene(content(renderPlayer(tree))).props.portraitHeight).toBeCloseTo(640 * 640 / 348);
+    media.matches = false; listeners[0]();
+    expect(scene(content(renderPlayer(tree))).props.portraitHeight).toBeUndefined();
+    expect(disconnect).toHaveBeenCalledOnce();
+    for (const effect of player.effects) if (effect.cleanup) effect.cleanup();
+    expect(media.removeEventListener).toHaveBeenCalledWith('change', listeners[0]);
+  });
   it('offers labelled 44px Enlarge controls and opens without selecting or collapsing', () => {
     const tree = open(), animation = renderPlayer(tree);
     expect(enlarge(animation).props['aria-label']).toBe('Enlarge example animation: Keep trading the whole range');

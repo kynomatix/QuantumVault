@@ -9,6 +9,26 @@ import { GRID_ANIMATION_DURATION, GRID_ANIMATION_TIMING, gridAnimationFrame, gri
 import { GridModeAnimationScene } from '../../client/src/components/grid-planner/GridModeAnimation';
 
 describe('Rule-driven grid animation', () => {
+  it('spreads portrait grid geometry vertically with larger undistorted text and rings', () => {
+    for (const side of ['long', 'short'] as const) {
+      const model = gridAnimationModel({ side, mode: 'repeat_all' });
+      const elapsed = model.fills[2].timeMs + 30;
+      const wide = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed }));
+      const tall = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed, portraitHeight: 1200, fit: true }));
+      expect(wide).toContain('viewBox="0 0 640 360"');
+      expect(tall).toContain('viewBox="0 0 640 1200"');
+      expect(tall).toContain('preserveAspectRatio="xMidYMid meet"');
+      expect(tall).toContain('M100,1148H552');
+      expect(tall).toContain('M100,60H552');
+      expect(tall).toContain('font-size="28">Start');
+      expect(tall).toContain('font-size="28">Price');
+      expect(tall).toContain('font-size="28" font-weight="600"');
+      expect(tall).toContain('r="6" fill="none"');
+      expect(tall.match(/data-state="[^"]+"/g)).toEqual(wide.match(/data-state="[^"]+"/g));
+      expect(tall.match(/data-fill="[^"]+"/g)).toEqual(wide.match(/data-fill="[^"]+"/g));
+      expect(tall.match(/data-waiting-order="[^"]+"/g)).toEqual(wide.match(/data-waiting-order="[^"]+"/g));
+    }
+  });
   it('labels the model start line and mirrors its height for shorts, including custom starts', () => {
     for (const start of [100, 96]) {
       const labels = (['long', 'short'] as const).map(side => {
