@@ -2,10 +2,11 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Maximize2, Play, RotateCcw } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
 import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
-import { GRID_ANIMATION_DURATION, gridAnimationFrame, gridAnimationModel, type GridModeAnimationOptions,
+import { GRID_ANIMATION_DURATION, gridAnimationAdvance, gridAnimationFrame, gridAnimationModel, type GridModeAnimationOptions,
   type GridAnimationModel, type AnimationLineState } from '@/lib/grid-mode-animation';
 
-// Numeric v5 palette also works in browsers without CSS color-mix().
+// Single source for the numeric v5 foreground palette; works without CSS color-mix().
+// Only the stage gradients use CSS tokens.
 type RGB = readonly [number, number, number];
 const background: RGB = [11, 13, 26];
 const colours: Record<AnimationLineState, RGB> = {
@@ -42,7 +43,7 @@ export function GridModeAnimationScene({ model, elapsed, portraitHeight, fit = f
   const dotX = x(frame.progress), dotY = y(frame.price);
   const path = Array.from({ length: 121 }, (_, i) => {
     const t = frame.progress * i / 120;
-    return `${i ? 'L' : 'M'}${x(t)},${y(model.price(t))}`;
+    return `${i ? 'L' : 'M'}${x(t)},${y(i === 120 ? frame.price : model.price(t))}`;
   }).join(' ');
   const copy = gridBehaviourCopy(model.mode, model.side, model.seed);
   return <svg viewBox={`0 0 640 ${height}`} role="img" aria-label={`Example animation: ${copy.label}`}
@@ -59,7 +60,7 @@ export function GridModeAnimationScene({ model, elapsed, portraitHeight, fit = f
         <stop stopColor="rgb(var(--grid-animation-top))" /><stop offset="1" stopColor="rgb(var(--grid-animation-bottom))" />
       </linearGradient>
       <radialGradient id={`${id}-wash`} cx="50%" cy="55%" r="45.45%">
-        <stop stopColor="rgb(var(--grid-animation-wash))" /><stop offset="1" stopColor="rgb(0,0,0)" />
+        <stop stopColor="rgb(var(--grid-animation-wash))" /><stop offset="1" stopColor="rgb(0,0,0)" stopOpacity="0" />
       </radialGradient>
       <radialGradient id={`${id}-vignette`} r="70%">
         <stop offset=".45" stopColor="rgb(var(--grid-animation-top))" stopOpacity="0" />
@@ -212,7 +213,7 @@ export function GridModeAnimation(props: GridModeAnimationOptions) {
         if (++probeFrames === 30 && probeTotal / 30 > 20) setSoftGlow(true);
       }
       began.current ??= time;
-      const next = Math.min(playbackElapsed.current + time - began.current, GRID_ANIMATION_DURATION);
+      const next = gridAnimationAdvance(model, playbackElapsed.current, time - began.current);
       began.current = time;
       playbackElapsed.current = next;
       setElapsed(next);

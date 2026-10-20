@@ -22,7 +22,7 @@ export const gridAnimationEase = (value: number) => {
   return t * t * (3 - 2 * t);
 };
 
-// Theme colours stay in CSS. This weight mixes the active colour with the muted
+// The scene owns the numeric palette. This weight mixes the active colour with the muted
 // state, and drives brightness, width and bloom from the very same event clock.
 function lineLook(muted: Exclude<AnimationLineState, 'active'>, active: number) {
   const glow = muted === 'waiting' ? .15 : 0;
@@ -73,9 +73,17 @@ export function gridAnimationModel({ lines = GRID_ANIMATION_LINES, start, side =
 }
 export type GridAnimationModel = ReturnType<typeof gridAnimationModel>;
 
+/** Spend at least one rendered frame on every fill, discarding overshoot after a hitch. */
+export function gridAnimationAdvance(model: GridAnimationModel, elapsed: number, deltaMs: number) {
+  const next = Math.min(elapsed + Math.max(0, deltaMs), GRID_ANIMATION_DURATION);
+  return model.fills.find(fill => fill.timeMs > elapsed && fill.timeMs <= next)?.timeMs ?? next;
+}
+
 export function gridAnimationFrame(model: GridAnimationModel, elapsed: number) {
-  const progress = Math.max(0, Math.min(1, (elapsed - GRID_ANIMATION_TIMING.intro) / GRID_ANIMATION_TIMING.run));
-  const price = model.price(progress);
+  // Only snap at the stored crossing time: an epsilon would allow an early reaction.
+  const arrival = model.fills.find(fill => fill.timeMs === elapsed);
+  const progress = arrival?.at ?? Math.max(0, Math.min(1, (elapsed - GRID_ANIMATION_TIMING.intro) / GRID_ANIMATION_TIMING.run));
+  const price = arrival ? model.prices[arrival.ordinal] : model.price(progress);
   const states: AnimationLineState[] = model.prices.map(() => 'active');
   const looks = model.prices.map(() => lineLook('waiting', 1));
   const pending: { ordinal: number; leg: 'opening' | 'closing'; ownerOrdinal: number }[] = [];

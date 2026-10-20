@@ -5,10 +5,54 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GRID_BEHAVIOUR_MODES, gridBehaviourCopy, gridCyclePair, gridOneShotOwners } from '../../shared/grid-behaviour';
 import { GRID_SETUP_INITIAL } from '../../client/src/lib/grid-setup-view';
-import { GRID_ANIMATION_DURATION, GRID_ANIMATION_TIMING, gridAnimationFrame, gridAnimationModel } from '../../client/src/lib/grid-mode-animation';
+import { GRID_ANIMATION_DURATION, GRID_ANIMATION_TIMING, gridAnimationAdvance, gridAnimationFrame, gridAnimationModel } from '../../client/src/lib/grid-mode-animation';
 import { GridModeAnimationScene } from '../../client/src/components/grid-planner/GridModeAnimation';
 
 describe('Rule-driven grid animation', () => {
+  it.each([16, 33, 100, 250, 'jitter'] as const)('lands every crossing in order with %s ms steps, including a mid-run start', interval => {
+    for (const mode of GRID_BEHAVIOUR_MODES) for (const side of ['long', 'short'] as const) for (const seed of [true, false]) {
+      const model = gridAnimationModel({ mode, side, seed });
+      const firstTime = model.fills[0]?.timeMs ?? GRID_ANIMATION_TIMING.intro;
+      for (const start of [0, firstTime + 1, firstTime]) {
+        let elapsed = start, random = 47, steps = 0;
+        const arrivals: number[] = [];
+        while (elapsed < GRID_ANIMATION_DURATION && steps++ < 2000) {
+          random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+          const delta = interval === 'jitter' ? 1 + random % 250 : interval;
+          const next = gridAnimationAdvance(model, elapsed, delta);
+          expect(next).toBeGreaterThan(elapsed);
+          const crossed = model.fills.filter(fill => fill.timeMs > elapsed && fill.timeMs <= next);
+          expect(crossed.length).toBeLessThanOrEqual(1);
+          if (crossed.length) {
+            expect(next).toBe(crossed[0].timeMs);
+            arrivals.push(next);
+          }
+          elapsed = next;
+        }
+        expect(elapsed).toBe(GRID_ANIMATION_DURATION);
+        expect(arrivals).toEqual(model.fills.filter(fill => fill.timeMs > start).map(fill => fill.timeMs));
+        expect(gridAnimationFrame(model, elapsed)).toEqual(gridAnimationFrame(model, GRID_ANIMATION_DURATION));
+      }
+    }
+  });
+  it.each([false, true])('aligns the dot, path endpoint, tag and readout after a 100 ms hitch, dialog=%s', fit => {
+    const model = gridAnimationModel({ mode: 'repeat_all', side: 'long', seed: true });
+    for (const [label, price, readout] of [['SELL', 106, '+6.0%'], ['BUY', 108, '+8.0%']] as const) {
+      const fill = model.fills.find(fill => fill.label === label && model.prices[fill.ordinal] === price)!;
+      const elapsed = gridAnimationAdvance(model, fill.timeMs - 50, 100);
+      expect(elapsed).toBe(fill.timeMs);
+      const frame = gridAnimationFrame(model, elapsed);
+      expect(frame.price).toBe(price);
+      expect(frame.readout).toBe(readout);
+      const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed, renderedWidth: 640, fit }));
+      const x = 72 + 480 * fill.at, y = 282 - 224 * (price - 90) / 20;
+      expect(html).toContain(`<circle cx="${x}" cy="${y}" r="4"`);
+      expect(html).toContain(`L${x},${y}"`);
+      expect(html).toContain(`data-fill="${label}"`);
+      expect(html).toContain(`>${readout}</text>`);
+      expect(html).toContain('stop-color="rgb(0,0,0)" stop-opacity="0"');
+    }
+  });
   it('uses a 3.5%-of-run morph', () => {
     expect(GRID_ANIMATION_TIMING.morph / GRID_ANIMATION_TIMING.run).toBeCloseTo(.035);
     expect(GRID_ANIMATION_TIMING.morph).toBeCloseTo(196);
@@ -238,8 +282,10 @@ describe('Rule-driven grid animation', () => {
       for (const fill of model.fills) {
         const owner = model.owners.find(row => row.ownerOrdinal === fill.ownerOrdinal)!;
         expect(fill.timeMs).toBe(fill.leg === 'closing' ? owner.closeTimeMs : owner.openTimeMs);
-        const before = gridAnimationFrame(model, fill.timeMs - .000001);
+        const before = gridAnimationFrame(model, fill.timeMs - 1);
         const exact = gridAnimationFrame(model, fill.timeMs);
+        expect(exact.price).toBe(model.prices[fill.ordinal]);
+        expect(Math.abs(exact.price - model.prices[fill.ordinal])).toBeLessThan(1e-9);
         const matches = (tag: typeof fill) => tag.ownerOrdinal === fill.ownerOrdinal && tag.leg === fill.leg;
         expect(before.tags.some(matches)).toBe(false);
         expect(exact.tags.find(matches)!.opacity).toBe(1);

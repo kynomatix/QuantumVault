@@ -3,7 +3,7 @@ import { Children, isValidElement, type ReactElement, type ReactNode } from 'rea
 import { renderToStaticMarkup } from 'react-dom/server';
 import { GridBehaviourSelect } from '../../client/src/components/grid-planner/GridBehaviourSelect';
 import { GridModeAnimation, GridModeAnimationScene } from '../../client/src/components/grid-planner/GridModeAnimation';
-import { GRID_ANIMATION_DURATION } from '../../client/src/lib/grid-mode-animation';
+import { GRID_ANIMATION_DURATION, gridAnimationFrame } from '../../client/src/lib/grid-mode-animation';
 import { Dialog, DialogContent } from '../../client/src/components/ui/dialog';
 
 // Real callbacks, controlled hooks/frame lifecycle: the product suite runs on Node.
@@ -90,6 +90,62 @@ describe('Grid behaviour animation interactions', () => {
   const dialog = (tree: Element) => find(tree, element => element.type === Dialog);
   const content = (tree: Element) => find(tree, element => element.type === DialogContent);
   const enlarge = (tree: Element) => find(tree, element => element.props['aria-label']?.startsWith('Enlarge example'));
+  it.each([false, true].flatMap(enlarged => [16, 33, 100, 250, 'jitter'].map(interval => ({ enlarged, interval }))))(
+    'renders each fill through the real playback callback, resume and replay: $enlarged / $interval', ({ enlarged, interval }) => {
+      let visibility: () => void;
+      const page = { hidden: false, addEventListener: vi.fn((_name, callback) => { visibility = callback; }), removeEventListener: vi.fn() };
+      vi.stubGlobal('document', page);
+      vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} });
+      vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+      const tree = open(), initial = renderPlayer(tree);
+      initial.props.ref.current = {};
+      if (enlarged) {
+        dialog(initial).props.onOpenChange(true);
+        const opened = renderPlayer(tree);
+        find(content(opened), element => element.type === 'div' && typeof element.props.ref === 'function').props.ref({});
+      } else button(initial).props.onClick();
+      const current = () => {
+        const rendered = renderPlayer(tree);
+        return scene(enlarged ? content(rendered) : rendered).props;
+      };
+      const model = current().model;
+      let wallTime = 0, random = 47;
+      for (let playback = 0; playback < 2; playback++) {
+        const arrivals: number[] = [];
+        let paused = false, previous = 0, steps = 0;
+        frames.get(nextFrame)!(wallTime);
+        while (current().elapsed < GRID_ANIMATION_DURATION && steps++ < 2000) {
+          random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+          wallTime += interval === 'jitter' ? 1 + random % 250 : Number(interval);
+          frames.get(nextFrame)!(wallTime);
+          const { elapsed } = current();
+          const crossed = model.fills.filter((fill: { timeMs: number }) => fill.timeMs > previous && fill.timeMs <= elapsed);
+          expect(crossed.length).toBeLessThanOrEqual(1);
+          if (crossed.length) {
+            expect(elapsed).toBe(crossed[0].timeMs);
+            expect(gridAnimationFrame(model, elapsed).price).toBe(model.prices[crossed[0].ordinal]);
+            arrivals.push(elapsed);
+          }
+          previous = elapsed;
+          if (!paused && arrivals.length === 2) {
+            page.hidden = true; visibility!();
+            page.hidden = false; visibility!();
+            wallTime += 10000;
+            frames.get(nextFrame)!(wallTime);
+            expect(current().elapsed).toBe(elapsed);
+            paused = true;
+          }
+        }
+        expect(current().elapsed).toBe(GRID_ANIMATION_DURATION);
+        expect(arrivals).toEqual(model.fills.map((fill: { timeMs: number }) => fill.timeMs));
+        expect(paused).toBe(true);
+        if (playback === 0) {
+          const rendered = renderPlayer(tree);
+          button(enlarged ? content(rendered) : rendered).props.onClick();
+          expect(current().elapsed).toBe(0);
+        }
+      }
+    });
   it.each([16, 20, 21])('selects the soft glow only after 30 measured intervals averaging over 20 ms: %s', interval => {
     const tree = open(); button(renderPlayer(tree)).props.onClick();
     for (let i = 0; i < 30; i++) frames.get(i + 1)!(i * interval);
@@ -212,7 +268,7 @@ describe('Grid behaviour animation interactions', () => {
     frames.get(4)!(2000); frames.get(5)!(4000);
     const opened = renderPlayer(tree);
     expect(scene(opened).props.elapsed).toBe(1000);
-    expect(scene(content(opened)).props.elapsed).toBe(2000);
+    expect(scene(content(opened)).props.elapsed).toBe(scene(content(opened)).props.model.fills[0].timeMs);
     dialog(opened).props.onOpenChange(false);
     expect(cancelFrame).toHaveBeenLastCalledWith(6);
     expect(scene(renderPlayer(tree)).props.elapsed).toBe(1000);
@@ -266,9 +322,11 @@ describe('Grid behaviour animation interactions', () => {
     expect(event.stopPropagation).toHaveBeenCalledOnce(); expect(requestFrame).toHaveBeenCalledOnce();
     expect(onChange).not.toHaveBeenCalled(); expect(trigger(renderPicker()).props['aria-expanded']).toBe(true);
     expect(scene(renderPlayer(tree)).props.elapsed).toBe(0);
-    frames.get(1)!(100); frames.get(2)!(100 + GRID_ANIMATION_DURATION);
+    frames.get(1)!(100);
+    const fills = scene(renderPlayer(tree)).props.model.fills;
+    for (let i = 0; i <= fills.length; i++) frames.get(i + 2)!(100 + (i + 1) * GRID_ANIMATION_DURATION);
     expect(scene(renderPlayer(tree)).props.elapsed).toBe(GRID_ANIMATION_DURATION);
-    expect(requestFrame).toHaveBeenCalledTimes(2);
+    expect(requestFrame).toHaveBeenCalledTimes(fills.length + 2);
     const end = renderPlayer(tree); expect(button(end).props['aria-label']).toMatch(/^Replay/);
     button(end).props.onClick(); expect(scene(renderPlayer(tree)).props.elapsed).toBe(0);
   });
