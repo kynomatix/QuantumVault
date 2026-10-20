@@ -48,6 +48,10 @@ for(const name of ['public-history-path.txt','okx-funding-path.txt']){
 }
 for(const item of JSON.parse(fs.readFileSync(path.join(root,'reused-source-bindings.json'),'utf8')))
  bind(item.sourcePath,'support');
+for(const item of JSON.parse(fs.readFileSync(path.join(root,'baseline-reconciliation.json'),'utf8')).results){
+ bind(item.priorPath,'support');
+ bind(item.priorPath.replace(/\.jsonl$/,'-complete.json'),'support');
+}
 const trailEvidence='C:/Apps/Replit/conductor-worktrees/grid-trail-backtest-20261019-handback/evidence',configPath=path.join(trailEvidence,'round2-20261019T044511Z/evaluation/configuration.json');
 bind(configPath,'support');
 const candleRoot=JSON.parse(fs.readFileSync(configPath,'utf8')).sourceDirectory;
