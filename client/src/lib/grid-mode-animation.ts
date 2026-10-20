@@ -4,7 +4,7 @@ import { GRID_SETUP_INITIAL } from './grid-setup-view';
 // Only presentation geometry/timing lives here. Ownership and pairing come from the product.
 // v5 modes_anim.py:83,150,233: live for 3% of the run, hold full opacity for
 // the first 35% of that lifetime, then fade out. There is no fade-in.
-export const GRID_ANIMATION_TIMING = { intro: 900, run: 5600, hold: 1600, tagLife: 5600 * 0.03, tagHold: 0.35 };
+export const GRID_ANIMATION_TIMING = { intro: 900, run: 5600, hold: 1600, morph: 280, tagLife: 5600 * 0.03, tagHold: 0.35 };
 export const GRID_ANIMATION_DURATION = GRID_ANIMATION_TIMING.intro + GRID_ANIMATION_TIMING.run + GRID_ANIMATION_TIMING.hold;
 export const GRID_ANIMATION_LINES = Array.from({ length: Number(GRID_SETUP_INITIAL.intervals) + 1 },
   (_, i) => 90 + 20 * i / Number(GRID_SETUP_INITIAL.intervals));
@@ -17,6 +17,19 @@ export interface GridModeAnimationOptions {
   mode?: GridBehaviourMode;
 }
 export type AnimationLineState = 'active' | 'waiting' | 'dark' | 'unused';
+export const gridAnimationEase = (value: number) => {
+  const t = Math.max(0, Math.min(1, value));
+  return t * t * (3 - 2 * t);
+};
+
+// Theme colours stay in CSS. This weight mixes the active colour with the muted
+// state, and drives brightness, width and bloom from the very same event clock.
+function lineLook(muted: Exclude<AnimationLineState, 'active'>, active: number) {
+  const glow = muted === 'waiting' ? .15 : 0;
+  const opacity = muted === 'waiting' ? .4 : .5;
+  return { muted, active, glow: glow + (1 - glow) * active,
+    opacity: opacity + (1 - opacity) * active, width: 1.5 + 1.5 * active };
+}
 
 export function gridAnimationModel({ lines = GRID_ANIMATION_LINES, start, side = GRID_SETUP_INITIAL.side as 'long' | 'short',
   seed = GRID_SETUP_INITIAL.seed, mode = GRID_SETUP_INITIAL.behaviourMode }: GridModeAnimationOptions = {}) {
@@ -64,6 +77,7 @@ export function gridAnimationFrame(model: GridAnimationModel, elapsed: number) {
   const progress = Math.max(0, Math.min(1, (elapsed - GRID_ANIMATION_TIMING.intro) / GRID_ANIMATION_TIMING.run));
   const price = model.price(progress);
   const states: AnimationLineState[] = model.prices.map(() => 'active');
+  const looks = model.prices.map(() => lineLook('waiting', 1));
   const pending: { ordinal: number; leg: 'opening' | 'closing'; ownerOrdinal: number }[] = [];
   for (const owner of model.owners) {
     // Use the same stored event times as the tags; reconstructing progress can
@@ -71,6 +85,15 @@ export function gridAnimationFrame(model: GridAnimationModel, elapsed: number) {
     const opened = elapsed >= owner.openTimeMs, closed = elapsed >= owner.closeTimeMs;
     states[owner.ownerOrdinal] = !owner.enabled ? 'unused' : closed && !owner.recycles ? 'dark'
       : !owner.opening && !opened && (closed || !model.seed) ? 'waiting' : 'active';
+    if (!owner.enabled) looks[owner.ownerOrdinal] = lineLook('unused', 0);
+    else if (!owner.opening) {
+      // Clamp the closing fade at the opening event before fading back to active.
+      // This also stays continuous when custom grid crossings are <280 ms apart.
+      const closeElapsed = Math.min(elapsed, owner.openTimeMs);
+      const afterClose = model.seed ? 1 - gridAnimationEase((closeElapsed - owner.closeTimeMs) / GRID_ANIMATION_TIMING.morph) : 0;
+      const opening = gridAnimationEase((elapsed - owner.openTimeMs) / GRID_ANIMATION_TIMING.morph);
+      looks[owner.ownerOrdinal] = lineLook(owner.recycles ? 'waiting' : 'dark', afterClose + (1 - afterClose) * opening);
+    }
     if (!owner.enabled || closed && !owner.recycles) continue;
     const leg = opened || !owner.opening && model.seed && !closed ? 'closing' : 'opening';
     const ordinal = leg === 'closing' ? owner.closingOrdinal : owner.openingOrdinal;
@@ -84,5 +107,9 @@ export function gridAnimationFrame(model: GridAnimationModel, elapsed: number) {
     return elapsed >= fill.timeMs && elapsed < fill.timeMs + GRID_ANIMATION_TIMING.tagLife ? [{ ...fill,
       opacity: 1 - Math.max(0, (age / GRID_ANIMATION_TIMING.tagLife - GRID_ANIMATION_TIMING.tagHold) / (1 - GRID_ANIMATION_TIMING.tagHold)) }] : [];
   });
-  return { progress, price, states, pending, tags };
+  const move = model.reference === 0 ? 0 : (price - model.reference) / Math.abs(model.reference) * 100;
+  const roundedMove = Math.round(move * 10) / 10;
+  const readout = `${roundedMove < 0 ? '\u2212' : '+'}${Math.abs(roundedMove).toFixed(1)}%`;
+  return { progress, price, readout, states, looks, pending, tags,
+    sceneOpacity: gridAnimationEase(elapsed / GRID_ANIMATION_TIMING.intro) };
 }

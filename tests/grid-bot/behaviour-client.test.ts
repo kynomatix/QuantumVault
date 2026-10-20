@@ -90,6 +90,33 @@ describe('Grid behaviour animation interactions', () => {
   const dialog = (tree: Element) => find(tree, element => element.type === Dialog);
   const content = (tree: Element) => find(tree, element => element.type === DialogContent);
   const enlarge = (tree: Element) => find(tree, element => element.props['aria-label']?.startsWith('Enlarge example'));
+  it('suspends off-screen and hidden playback without advancing the clock, and disconnects on unmount', () => {
+    let intersection: (entries: { isIntersecting: boolean }[]) => void;
+    let visibility: () => void;
+    const disconnect = vi.fn(), observe = vi.fn(), removeEventListener = vi.fn();
+    const page = { hidden: false, addEventListener: vi.fn((_name, callback) => { visibility = callback; }), removeEventListener };
+    vi.stubGlobal('document', page);
+    vi.stubGlobal('IntersectionObserver', class {
+      constructor(callback: typeof intersection) { intersection = callback; }
+      observe = observe; disconnect = disconnect;
+    });
+    const tree = open(), animation = renderPlayer(tree);
+    animation.props.ref.current = {};
+    button(animation).props.onClick(); renderPlayer(tree);
+    frames.get(1)!(0); frames.get(2)!(100);
+    intersection!([{ isIntersecting: false }]);
+    expect(cancelFrame).toHaveBeenLastCalledWith(3);
+    expect(scene(renderPlayer(tree)).props.elapsed).toBe(100);
+    intersection!([{ isIntersecting: true }]);
+    frames.get(4)!(5000); frames.get(5)!(5100);
+    expect(scene(renderPlayer(tree)).props.elapsed).toBe(200);
+    page.hidden = true; visibility!(); expect(cancelFrame).toHaveBeenLastCalledWith(6);
+    page.hidden = false; visibility!(); frames.get(7)!(9000);
+    expect(scene(renderPlayer(tree)).props.elapsed).toBe(200);
+    for (const effect of player.effects) if (effect.cleanup) effect.cleanup();
+    expect(disconnect).toHaveBeenCalled(); expect(removeEventListener).toHaveBeenCalledWith('visibilitychange', visibility!);
+    expect(cancelFrame).toHaveBeenLastCalledWith(8);
+  });
   it.each([[390, 844, true], [844, 390, false], [1280, 900, false], [768, 1024, true]])(
     'selects portrait geometry only in portrait viewports: %s x %s', (width, height, portrait) => {
       vi.stubGlobal('window', { matchMedia: vi.fn(query => ({ matches: query === '(orientation: portrait)' && height >= width })) });

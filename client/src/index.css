@@ -92,6 +92,17 @@
   --chart-4: 160 70% 45%;
   --chart-5: 280 70% 60%;
 
+  /* Grid demo: v5 sky-blue bloom over a violet/navy stage. */
+  --grid-animation-top: 5 6 11;
+  --grid-animation-bottom: 11 13 26;
+  --grid-animation-wash: 28 20 60;
+  --grid-animation-active: 110 193 255;
+  --grid-animation-waiting: 105 90 190;
+  --grid-animation-out: 38 41 54;
+  --grid-animation-buy: 63 224 197;
+  --grid-animation-path: 230 238 255;
+  --grid-animation-text: 255 255 255;
+
   --radius: 0.75rem;
   --shadow-glow: 0 0 60px rgba(99, 102, 241, 0.32);
   --shadow-card: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(99, 102, 241, 0.1);

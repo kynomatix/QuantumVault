@@ -9,6 +9,85 @@ import { GRID_ANIMATION_DURATION, GRID_ANIMATION_TIMING, gridAnimationFrame, gri
 import { GridModeAnimationScene } from '../../client/src/components/grid-planner/GridModeAnimation';
 
 describe('Rule-driven grid animation', () => {
+  it.each(GRID_BEHAVIOUR_MODES)('%s morphs colours, brightness and glow on the shared fill clock', mode => {
+    for (const side of ['long', 'short'] as const) {
+      const model = gridAnimationModel({ mode, side });
+      for (const fill of model.fills.filter(fill => !model.owners.find(owner => owner.ownerOrdinal === fill.ownerOrdinal)!.opening)) {
+        const owner = model.owners.find(owner => owner.ownerOrdinal === fill.ownerOrdinal)!;
+        const look = (age: number) => gridAnimationFrame(model, fill.timeMs + age).looks[fill.ownerOrdinal];
+        const closing = fill.leg === 'closing';
+        expect(look(0).active).toBe(closing ? 1 : 0);
+        expect(look(70).active).toBeCloseTo(closing ? .84375 : .15625);
+        expect(look(140).active).toBeCloseTo(.5);
+        expect(look(280).active).toBe(closing ? 0 : 1);
+        const mutedGlow = owner.recycles ? .15 : 0;
+        expect(look(140).glow).toBeCloseTo((1 + mutedGlow) / 2);
+        expect(look(280).glow).toBe(closing ? mutedGlow : 1);
+        expect(look(140).opacity).toBeCloseTo(owner.recycles ? .7 : .75);
+        const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: fill.timeMs + 140 }));
+        expect(html).toContain(`color-mix(in srgb, rgb(var(--grid-animation-active)) 50%, rgb(var(--grid-animation-${owner.recycles ? 'waiting' : 'out'})))`);
+      }
+    }
+  });
+  it('leaves seed-off one-shot lines unlit and eases cycling lines back from waiting', () => {
+    const model = gridAnimationModel({ seed: false, mode: 'top_once' });
+    for (const elapsed of [0, 3000, GRID_ANIMATION_DURATION]) {
+      const frame = gridAnimationFrame(model, elapsed);
+      for (const ordinal of model.once) expect(frame.looks[ordinal]).toMatchObject({ muted: 'unused', active: 0, glow: 0 });
+    }
+    const fill = model.fills.find(fill => !model.owners.find(owner => owner.ownerOrdinal === fill.ownerOrdinal)!.opening)!;
+    const look = gridAnimationFrame(model, fill.timeMs + 140).looks[fill.ownerOrdinal];
+    expect(look.active).toBe(.5); expect(look.glow).toBeCloseTo(.575);
+  });
+  it('keeps overlapping fades continuous for custom grids', () => {
+    const model = gridAnimationModel({ lines: [90, 100, 101, 109, 110], mode: 'repeat_all' });
+    for (const owner of model.owners.filter(owner => Number.isFinite(owner.openTimeMs))) {
+      const before = gridAnimationFrame(model, owner.openTimeMs - .000001).looks[owner.ownerOrdinal];
+      const exact = gridAnimationFrame(model, owner.openTimeMs).looks[owner.ownerOrdinal];
+      expect(before.active).toBeCloseTo(exact.active, 6);
+    }
+  });
+  it('uses one bounded glow group with crisp text and path, including static end states', () => {
+    for (const mode of GRID_BEHAVIOUR_MODES) {
+      const model = gridAnimationModel({ mode });
+      const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: GRID_ANIMATION_DURATION }));
+      expect(html.match(/filter="url/g)).toHaveLength(1);
+      expect(html.match(/<feGaussianBlur/g)).toHaveLength(1);
+      expect(html).toContain('filterUnits="userSpaceOnUse"');
+      expect(html).toContain('shape-rendering="geometricPrecision"');
+      expect(html).toContain('stroke-linejoin="round"');
+      expect(html).toContain('<linearGradient'); expect(html.match(/<radialGradient/g)).toHaveLength(2);
+      const glow = html.split('data-glow="true"')[1].split('</g>')[0];
+      expect(glow).not.toContain('<text'); expect(glow).toContain('opacity=".6"');
+      expect(gridAnimationFrame(model, GRID_ANIMATION_DURATION).sceneOpacity).toBe(1);
+    }
+  });
+  it('shows a signed one-decimal percentage relative to Start, without negative zero', () => {
+    for (const start of [100, 200]) for (const side of ['long', 'short'] as const) {
+      const model = gridAnimationModel({ start, lines: [start - 10, start - 5, start, start + 5, start + 10], side });
+      const frame = gridAnimationFrame(model, GRID_ANIMATION_TIMING.intro + 2000);
+      const expected = `${side === 'long' ? '+' : '\u2212'}${Math.abs((frame.price - start) / start * 100).toFixed(1)}%`;
+      expect(frame.readout).toBe(expected);
+      const html = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: GRID_ANIMATION_TIMING.intro + 2000 }));
+      expect(html).toContain(`>${expected}</text>`); expect(html).not.toContain('>Price<');
+      expect(gridAnimationFrame(model, 0).readout).toBe('+0.0%');
+    }
+  });
+  it('eases the playing scene in over 900 ms and holds the complete end for 1600 ms', () => {
+    const model = gridAnimationModel();
+    expect(gridAnimationFrame(model, 0).sceneOpacity).toBe(0);
+    expect(gridAnimationFrame(model, 225).sceneOpacity).toBeCloseTo(.15625);
+    expect(gridAnimationFrame(model, 450).sceneOpacity).toBe(.5);
+    expect(gridAnimationFrame(model, 900).sceneOpacity).toBe(1);
+    const hold = gridAnimationFrame(model, GRID_ANIMATION_DURATION - 1600), end = gridAnimationFrame(model, GRID_ANIMATION_DURATION);
+    expect(hold.progress).toBe(1); expect(hold.price).toBe(end.price);
+    // The last 168 ms tag / 280 ms state morph may finish during the hold.
+    expect(hold.sceneOpacity).toBe(1); expect(end.sceneOpacity).toBe(1);
+    const idle = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: 0 }));
+    const playing = renderToStaticMarkup(createElement(GridModeAnimationScene, { model, elapsed: 0, reveal: true }));
+    expect(idle).toContain('data-scene="true" opacity="1"');
+    expect(playing).toContain('data-scene="true" opacity="0"');
+  });
   it('spreads portrait grid geometry vertically with larger undistorted text and rings', () => {
     for (const side of ['long', 'short'] as const) {
       const model = gridAnimationModel({ side, mode: 'repeat_all' });
@@ -21,7 +100,7 @@ describe('Rule-driven grid animation', () => {
       expect(tall).toContain('M100,1148H552');
       expect(tall).toContain('M100,60H552');
       expect(tall).toContain('font-size="28">Start');
-      expect(tall).toContain('font-size="28">Price');
+      expect(tall).toContain(`font-size="28">${gridAnimationFrame(model, elapsed).readout}`);
       expect(tall).toContain('font-size="28" font-weight="600"');
       expect(tall).toContain('r="6" fill="none"');
       expect(tall.match(/data-state="[^"]+"/g)).toEqual(wide.match(/data-state="[^"]+"/g));
