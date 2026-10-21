@@ -1,0 +1,32 @@
+[
+  {
+    "commitHash": "8fa8194f61b9236f6bd3a3493098423d5c2d1ae1",
+    "host": "Fractal",
+    "passed": 7,
+    "failed": 0,
+    "skipped": 0,
+    "receiptFile": "C:/Apps/Replit/conductor-worktrees/grid-ranging-pairs-20261021-handback/FOCUSED-RUN.utf8.log"
+  },
+  {
+    "testedCommitHash": "cfa184cd45f34ae2013f51c18f4bb82bd77ac4c3",
+    "host": "Fractal",
+    "environment": "Ubuntu 26.04.1 LTS",
+    "node": "v22.23.1",
+    "passed": 20,
+    "failed": 0,
+    "skipped": 0,
+    "exitCode": 0,
+    "receiptFile": "C:/Apps/Replit/conductor-worktrees/grid-ranging-pairs-20261021-handback/FOCUSED-R2-RUN.log",
+    "commitHash": "cfa184cd45f34ae2013f51c18f4bb82bd77ac4c3"
+  },
+  {
+    "testedCommitHash": "9a8a52d8ac795a06545b99c2c26fc15fdcefa52a",
+    "host": "Fractal",
+    "passed": 20,
+    "failed": 0,
+    "skipped": 0,
+    "exitCode": 0,
+    "receiptFile": "C:/Apps/Replit/conductor-worktrees/grid-ranging-pairs-20261021-handback/FOCUSED-R2-FINAL-RUN.log",
+    "commitHash": "9a8a52d8ac795a06545b99c2c26fc15fdcefa52a"
+  }
+]

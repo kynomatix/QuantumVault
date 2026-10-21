@@ -1,1 +1,1 @@
-No answer yet: 45 pairs passed funding screening, but the required scanner rejects the FRACTAL receipt; zero new simulations ran, and the handback is blocked/unsealed.
+Choosing pairs that ranged in the past did not meet the study’s fixed success rule with builder fees off. Ranging minus trending: -0.730 [-1.102, -0.359] percentage points; admitted 1289774 unique paths.
