@@ -7,6 +7,7 @@ import {features,evaluateRules} from '../grid-entry-filters/core.mjs';
 import {plannerRegime} from '../../../server/grid-planner/regime.ts';
 import {qualifyRangingMarket} from '../../../server/grid-planner/scanner.ts';
 import {MENU,HOUR,WEEK,END,weekCalendar,closeWeek} from './procedure.mjs';
+import {researchBindings} from './bindings.mjs';
 const [hb]=process.argv.slice(2),read=p=>JSON.parse(fs.readFileSync(p,'utf8')),hash=b=>createHash('sha256').update(b).digest('hex');
 if(!hb)throw Error('Handback directory required');
 const certified=fs.readFileSync(path.join(hb,'certified-root-r2.txt'),'utf8').trim(),admission=read(path.join(certified,'admission.json'));
@@ -17,9 +18,8 @@ const resume=process.argv.includes('--resume'),root=resume?fs.readFileSync(path.
 if(!resume){fs.mkdirSync(root);fs.writeFileSync(path.join(hb,'simulation-root-r2.txt'),root+'\n');}
 const write=(n,x)=>fs.writeFileSync(path.join(root,n),JSON.stringify(x)+'\n');
 const sourceRoot=fs.readFileSync(path.join(hb,'evidence-root.txt'),'utf8').trim(),instruments=read(path.join(sourceRoot,'instruments.response')).data;
-const sourceFiles=new Map();function bind(p){p=path.resolve(p);if(sourceFiles.has(p))return;const b=fs.readFileSync(p);sourceFiles.set(p,{file:p,sha256:hash(b),bytes:b.length});const s=b.toString('utf8');for(const match of s.matchAll(/(?:from\s*|import\s*)['"]([^'"]+)['"]/g)){const spec=match[1];if(!spec.startsWith('.'))continue;const base=path.resolve(path.dirname(p),spec),found=[base,base+'.ts',base+'.mjs',base.replace(/\.js$/,'.ts')].find(x=>fs.existsSync(x)&&fs.statSync(x).isFile());if(found)bind(found);}}
-bind(fileURLToPath(import.meta.url));bind(path.join(here,'../grid-finder/loader.mjs'));
-const binding={startedAt:new Date().toISOString(),preregistrationCommitHash:prereg.commitHash,preregistrationSha256:hash(fs.readFileSync(path.join(here,'PREREGISTRATION-R2.md'))),admissionFile:path.join(certified,'admission.json'),admissionSha256:hash(fs.readFileSync(path.join(certified,'admission.json'))),sourceFiles:[...sourceFiles.values()],workers:1,freeMemoryBytes:os.freemem()};
+const sourceFiles=researchBindings(path.resolve(here,'../../..'),path.join(hb,'actual-runtime-inputs-r2.json'));
+const binding={startedAt:new Date().toISOString(),preregistrationCommitHash:prereg.commitHash,preregistrationSha256:hash(fs.readFileSync(path.join(here,'PREREGISTRATION-R2.md'))),admissionFile:path.join(certified,'admission.json'),admissionSha256:hash(fs.readFileSync(path.join(certified,'admission.json'))),sourceFiles,workers:1,freeMemoryBytes:os.freemem()};
 if(resume){const old=read(path.join(root,'binding.json'));if(old.admissionSha256!==binding.admissionSha256||JSON.stringify(old.sourceFiles)!==JSON.stringify(binding.sourceFiles))throw Error('Simulation resume binding changed');}else write('binding.json',binding);
 const counters={attempted:0,admittedUniqueNew:0,plannerRejected:0,dataRejected:0,replayRejected:0,filterCashRows:0,derivedOptionRows:0,reasons:{}};
 const record=(kind,reason,n=1)=>{counters[kind]+=n;const k=kind+': '+reason;counters.reasons[k]=(counters.reasons[k]??0)+n;};
