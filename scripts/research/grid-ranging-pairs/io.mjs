@@ -1,4 +1,4 @@
-﻿import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';import {setTimeout as delay} from 'node:timers/promises';
+import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';import {setTimeout as delay} from 'node:timers/promises';
 export const HB='C:/Apps/Replit/conductor-worktrees/grid-ranging-pairs-20261021-handback';
 export const ROOT=fs.readFileSync(HB+'/coverage-root.txt','utf8').trim();
 export const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -11,7 +11,7 @@ export async function capture(url,label){
   const next=Math.max(Date.now(),rateGate);rateGate=next+120;if(next>Date.now())await delay(next-Date.now());
   const id=++seq,r={url,label,attempt,requestedAt:new Date().toISOString()};
   try{const resp=await fetch(url,{signal:AbortSignal.timeout(25000)}),bytes=Buffer.from(await resp.arrayBuffer());
-   Object.assign(r,{status:resp.status,file:'raw-'+session+'-'+String(id).padStart(6,'0')+'.response',sha256:hash(bytes),bytes:bytes.length});fs.writeFileSync(path.join(ROOT,r.file),bytes);
+   Object.assign(r,{status:resp.status,file:'raw-'+session+'-'+String(id).padStart(6,'0')+'.response',sha256:hash(bytes),bytes:bytes.length});fs.writeFileSync(path.join(ROOT,r.file),bytes,{flag:'wx'});
    if(resp.ok)return bytes;
    if(resp.status!==429&&resp.status<500)throw Error('HTTP '+resp.status);
    const retry=resp.headers.get('retry-after');await delay(Math.max(5000*2**attempt,Number(retry||0)*1000));
