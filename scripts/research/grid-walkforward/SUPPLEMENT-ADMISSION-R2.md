@@ -1,0 +1,3 @@
+﻿# Supplementary hourly funding coverage, R2
+
+Fixed before any Pacifica outcome. Certify one observed payment per nearest UTC hour, within 60 seconds on either side, including both weekly boundary hours. Keep every actual timestamp, oracle price and rate in replay. Distinct conflicting observations, missing slots, invalid values or larger displacement exclude that market-week. This is coverage indexing, never zero imputation or a shifted cashflow. Verify source hashes and retain all exclusions. Use four combinations of trade and mark OHLC/OLHC ordering, taking the lower return. Main OKX selections and the committed candidate menu are unchanged.
