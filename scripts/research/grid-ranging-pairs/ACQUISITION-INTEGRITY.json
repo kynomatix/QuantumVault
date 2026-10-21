@@ -1,0 +1,12 @@
+{
+  "checkedAt": "2026-10-21T10:16:19.336Z",
+  "stage": "pre-outcome-acquisition-integrity",
+  "requestRows": 2571,
+  "checkedResponseBindings": 2571,
+  "uniqueResponseFiles": 2571,
+  "manifestFiles": 2774,
+  "inheritedMarkets": 12,
+  "failures": [],
+  "sealed": false,
+  "admittedUniqueNewSimulations": 0
+}

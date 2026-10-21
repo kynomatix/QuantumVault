@@ -1,0 +1,1 @@
+TEST REQUEST (owner): focused. Verify point-in-time score cutoff, gaps and warmup, tercile ties, quarterly decisions, the inherited rotating launch calendar, fractional tail/bootstrap arithmetic, and restarted capture namespaces. New research behavior and the corrected capture-name collision require focused evidence. Use FRACTAL bundle-v1 only; no local test execution.
