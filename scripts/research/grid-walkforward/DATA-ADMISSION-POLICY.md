@@ -1,0 +1,13 @@
+# Walk-forward data admission policy
+
+Recorded before this job's public-data requests or strategy results. This is a feasibility screen, not a committed strategy preregistration.
+
+Choose a provisional fixed panel of 12 OKX linear USDT perpetuals from the current live catalogue, with listing time strictly before 2022-01-01 UTC. Rank by the captured ticker's 24-hour base-currency volume multiplied by last price (an approximate USDT turnover measure), descending, with instrument ID ascending as the tie-break. Require positive finite values. Retain the complete eligible ranking and rejected catalogue entries. The list is provisional until continuous prices and actual funding are certified; current listing time alone does not certify continuity. Do not replace a failed selected market opportunistically.
+
+This deliberately selects survivors using present-day liquidity. It excludes delisted markets and uses information unavailable in 2022; disclose both survivorship and universe-selection look-ahead. Past-only training would apply to strategy selection within that fixed panel, not to the panel's historical construction. No claim of a point-in-time historical universe is permitted.
+
+Screen January 2022 funding first for all 12 provisional markets. Use the official archive index and its returned download URL. Retain response bytes, request times, API status and SHA-256 hashes. Inspect the archive contents rather than trusting its filename. An absent initial half-month cannot certify a full January, regardless of exact settlement cadence. For BTC/ETH/SOL, also inspect and hash-check inherited funding snapshots and query the ordinary history endpoint over the missing interval. Never manufacture missing payments or substitute zero. Stop the research if the panel cannot be certified, report exact markets/months, and do not launch simulations or alter the first training year.
+
+If this screen passes, complete prices, funding, listing/continuity and warmup checks through the latest complete available period before strategy preregistration. October 2026 is incomplete as of dispatch; do not pretend the whole month or quarter has been observed. Pacifica BTC/ETH/SOL/HYPE/ZEC would require separate actual-history admission, never backfill before launch, and never inherit OKX's venue identity.
+
+The strategy study remains unrun until its complete menu, global/group selection, scoring, tie-breaking, scheduling, comparators, missingness, drawdown aggregation and bootstrap are committed. Both fee scenarios must be assessed separately. A data-screen failure is not evidence for or against a grid strategy.

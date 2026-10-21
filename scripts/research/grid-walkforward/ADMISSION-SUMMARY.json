@@ -1,0 +1,22 @@
+{
+  "state": "BLOCKED_DATA_ADMISSION",
+  "firstTrainingStart": "2022-01-01",
+  "firstSelectionStart": "2023-01-01",
+  "admittedUniqueNewSimulations": 0,
+  "candidateSimulations": 0,
+  "simulationRejections": 0,
+  "provisionalMarkets": 12,
+  "rejectedMarketMonths": 5,
+  "unverifiedMarketMonths": 7,
+  "failedMonth": "2022-01",
+  "confirmedMarkets": [
+    "ETH-USDT-SWAP",
+    "BTC-USDT-SWAP",
+    "SOL-USDT-SWAP",
+    "NEAR-USDT-SWAP",
+    "DOGE-USDT-SWAP"
+  ],
+  "firstObservedFunding": "2022-01-16T16:00:00Z",
+  "strategyPreregistrationCommitted": false,
+  "procedureExecuted": false
+}
