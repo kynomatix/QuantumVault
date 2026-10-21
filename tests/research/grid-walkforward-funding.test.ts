@@ -14,9 +14,15 @@ describe('observed funding settlement coverage', () => {
     expect(result.maxSettlementDelayMs).toBe(3000);
     expect(rows).toEqual(original);
   });
-  it('accepts the documented one-minute edge but rejects later events', () => {
+  it('accepts late payments when exactly one observed event occupies each eight-hour period', () => {
     expect(assessFunding(day(60000), begin, end).passed).toBe(true);
-    expect(assessFunding(day(60001), begin, end).passed).toBe(false);
+    expect(assessFunding(day(60001), begin, end).passed).toBe(true);
+    const observed = day();
+    observed[1].time += 53 * 60000;
+    observed[2].time += 174 * 60000;
+    expect(assessFunding(observed, begin, end).passed).toBe(true);
+    observed[2].time += 8 * HOUR;
+    expect(assessFunding(observed, begin, end).passed).toBe(false);
   });
   it('does not turn an absent event into zero funding', () => {
     const result = assessFunding(day().slice(1), begin, end);

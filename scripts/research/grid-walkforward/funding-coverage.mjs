@@ -4,13 +4,26 @@ export const SETTLEMENT_DELAY_MS = 60000;
 
 export function assessFunding(rows, begin, end) {
   const slots = new Map(), invalid = [], conflicts = [], delays = [];
+  const unique = new Map();
   for (const row of rows) {
+    if (unique.has(row.time) && unique.get(row.time).rate !== row.rate) conflicts.push({ time: row.time, reason: 'conflicting-observed-rate' });
+    unique.set(row.time, row);
+  }
+  const eightHourDays = new Set();
+  for (let day = begin; day < end; day += 24 * HOUR) {
+    const events = [...unique.values()].filter(r => r.time >= day && r.time < Math.min(day + 24 * HOUR, end));
+    const bins = new Set(events.map(r => Math.floor(r.time / (8 * HOUR))));
+    if (events.length === 3 && bins.size === 3) eightHourDays.add(day);
+  }
+  for (const row of unique.values()) {
     if (!Number.isSafeInteger(row.time) || !Number.isFinite(row.rate)) {
       invalid.push({ time: row.time, reason: 'invalid-observed-event' }); continue;
     }
     if (row.time < begin || row.time >= end) continue;
-    const slot = Math.floor(row.time / HOUR) * HOUR, delay = row.time - slot;
-    if (delay > SETTLEMENT_DELAY_MS) {
+    const day = Math.floor(row.time / (24 * HOUR)) * 24 * HOUR;
+    const eightHourDay = eightHourDays.has(day);
+    const slot = Math.floor(row.time / (eightHourDay ? 8 * HOUR : HOUR)) * (eightHourDay ? 8 * HOUR : HOUR), delay = row.time - slot;
+    if (!eightHourDay && delay > SETTLEMENT_DELAY_MS) {
       invalid.push({ time: row.time, reason: 'outside-one-minute-settlement-window' }); continue;
     }
     if (slots.has(slot) && (slots.get(slot).rate !== row.rate || slots.get(slot).time !== row.time)) {
