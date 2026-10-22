@@ -3,10 +3,11 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 const hb=path.resolve('../grid-long-adx-20261022-handback');
 const scratch=path.join(hb,'commit-repo');
+const baseCommitHash='f04a278b4223755aefde0f92586595fb1c4ff7d1';
 const git=(args,cwd=scratch)=>execFileSync('git.exe',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 if(!fs.existsSync(scratch)){
  git(['clone','--shared','--no-checkout',process.cwd(),scratch],process.cwd());
- git(['checkout','-b','long-adx-delivery','f04a278b4223755aefde0f92586595fb1c4ff7d1']);
+ git(['checkout','-b','long-adx-delivery',baseCommitHash]);
 }
 for(const dir of ['scripts/research/grid-long-adx','tests/research']){
  if(!fs.existsSync(dir))continue;

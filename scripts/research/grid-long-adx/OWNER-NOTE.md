@@ -1,0 +1,1 @@
+Choosing pairs that had trended less over six months and whose price bands were not unusually narrow at launch (P4) passed the fixed historical test in the primary pair set without builder fees. The broader pair set did not confirm P4, and this reused backtest does not establish future profits. New admitted simulations: 0; all paths reused.
