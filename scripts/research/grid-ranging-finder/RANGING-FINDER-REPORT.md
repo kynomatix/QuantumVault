@@ -2,6 +2,8 @@
 
 None of the five new filters reliably found markets where this grid bot did better than both today's finder and taking every eligible opportunity. Keep the tool, but call it **“Show weaker-trend markets”** until a genuinely new period of data demonstrates a better ranking.
 
+**Delivery status: UNSEALED.** The complete review-input closure scan found 46 findings in unchanged production dependencies, in addition to the two explicitly permitted raw FRACTAL QV_RUN_ID findings. These are scanner findings, not a claim of 46 exposed secrets. No source was changed or removed from the closure to clear them, and the scanner and raw receipts are unchanged. The verified research bundle is available for review, but a zero-finding freeze is blocked pending owner handling of the inherited findings. See REVIEW-SCAN-STATUS.md.
+
 ## Decision
 
 **No replacement ranking passes.** This is not evidence that a low variance ratio or low Hurst estimate cannot describe mean reversion; it is evidence that the tested launch-time criteria did not establish better grid outcomes under the registered rule. The current finder itself has no reliable advantage over ALL: primary matched difference 0.16 percentage points, one-week 95% CI [-0.15, 0.49]. ADX measures trend strength, so “weaker-trend” is more accurate than either “ranging” or “calmer.” This handback changes research files only; it does not rename the live button.

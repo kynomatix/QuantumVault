@@ -1,1 +1,1 @@
-None of the five mean-reversion filters passed; keep the finder but rename it “Show weaker-trend markets”; no live change was made.
+No mean-reversion filter passed; recommend “Show weaker-trend markets”; no live change was made, and delivery is unsealed because the review closure has 46 inherited scanner findings beyond the permitted run-ID findings.
