@@ -3,6 +3,13 @@ import {DAY,WEEK} from '../../scripts/research/grid-ranging-pairs/core.mjs';
 import {weeklyTrend,gatePass,replayMetrics,GEOMETRIES,adaptLookback,adaptReplay} from '../../scripts/research/grid-multi-timeframe/core.mjs';
 import {match,weighted,tail,compare,interval,bh,verdict} from '../../scripts/research/grid-multi-timeframe/stats.mjs';
 import fs from 'node:fs';
+import {sizingPolicy} from '../../scripts/research/grid-sizing-1b/arms.mjs';
+import {retainedGridCycles} from '../../server/grid-bot/cycle-policy';
+import {gridAutoResumeBand} from '../../server/grid-bot/auto-resume-policy';
+import {GRID_CAPS} from '../../server/grid-bot/grid-caps';
+import {gridPlacementBudget} from '../../shared/grid-capacity';
+import {movement} from '../../scripts/research/grid-backtest-r2/movement.mjs';
+import {liquidationCrossing,liquidationChargeRate,maintenanceRate} from '../../scripts/research/grid-backtest-r2/risk.mjs';
 const monday=Date.UTC(2024,0,1),daily=Array.from({length:360},(_,i)=>({time:monday-350*DAY+i*DAY,close:100+i}));
 const row=(x:any={})=>({week:0,quarter:0,symbol:'EXAMPLE',leverage:1,netReturn:0,protectiveStop:0,liquidated:false,underwaterDays:0,horizonDays:14,maxDrawdown:0,seedHold:false,...x});
 describe('multi-timeframe closed-bar signals',()=>{
@@ -23,4 +30,22 @@ describe('multi-timeframe matched calendar estimators',()=>{
  it('returns deterministic centered-bootstrap evidence and a nonzero finite p-value',()=>{const w=new Map([[0,-1],[WEEK,3],[2*WEEK,2]]);expect(interval(w,1,200)).toEqual(interval(w,1,200));expect(interval(w,1,200).p).toBeGreaterThan(0);expect(interval(new Map([[0,0]]),1,200).p).toBe(1);});
  it('adjusts the whole tested family with monotone Benjamini-Hochberg values',()=>{const a=bh([{p:.03},{p:.001},{p:.04}]);expect(a.map(x=>x.q)).toEqual([.04,.003,.04]);});
  it('requires all success conditions and rejects a contradictory broader universe',()=>{const c={one:{low:.01},quarterWins:8,quarterCount:15,left:{worst5:-.1,metrics:{protectiveStop:.2}},right:{worst5:-.2,metrics:{protectiveStop:.3}}};expect(verdict(c,{one:{high:0}}).success).toBe(true);expect(verdict(c,{one:{high:-.001}}).success).toBe(false);expect(verdict({...c,quarterWins:7},{one:{high:0}}).success).toBe(false);});
+});
+describe('multi-timeframe transformed replay integration',()=>{
+ it('preserves fills and funding while scaling intrabar and terminal times to fifteen minutes',()=>{
+  const dependencies={retainedGridCycles,gridAutoResumeBand,GRID_CAPS,gridPlacementBudget,movement,liquidationCrossing,liquidationChargeRate,maintenanceRate};
+  const source=adaptReplay(fs.readFileSync('scripts/research/grid-sizing-stops/replay.mjs','utf8')).replace(/^import .*$/gm,'').replaceAll('export function ','function ');
+  const replay=new Function(...Object.keys(dependencies),source+'\nreturn sizingReplay;')(...Object.values(dependencies));
+  const market={symbol:'EXAMPLE',tick:'0.01',lot:'0.001',minimumQuote:'10',maximumQuote:'10000000',minimumPrice:'0.01',maximumPrice:'1000000'};
+  for(const direction of ['long','short'])for(const leverage of [1,3]){
+   const {policy}=sizingPolicy({market,direction,leverage,makerRate:.00015,arm:'further_near',reference:'100',geometry:{lower:'80',upper:'120',longStop:'70',shortStop:'130'}});
+   const run=(duration:number,timeframe:string)=>{const bars=[{time:0,open:100,high:100,low:100,close:100},{time:duration,open:100,high:108,low:92,close:102},{time:2*duration,open:102,high:110,low:90,close:100}];return replay({candles:bars,markBars:bars,market,timeframe,start:1,end:3,policy,path:'OHLC',markPath:'OHLC',fundingEvents:[[],[{time:1.5*duration,rate:.001}],[]],maxLeverage:50,makerRate:.00015,takerRate:.0004,stopMode:'touch',moveMode:'fixed',closeAtHorizon:true,executions:true});};
+   const hour=run(3600000,'1h'),quarter=run(900000,'15m');
+   expect(hour.funding).not.toBe(0);expect(quarter.unavailable).toBeNull();
+   for(const metric of ['finalEquity','fees','fillCount','funding','protectiveStop','liquidated'])expect(quarter[metric]).toBe(hour[metric]);
+   expect(quarter.executions.map((e:any)=>({...e,time:e.time*4}))).toEqual(hour.executions);
+   expect(quarter.executions.at(-1).time).toBe(2700000);
+   expect(replayMetrics(quarter,900000).underwaterDays*4).toBe(replayMetrics(hour,3600000).underwaterDays);
+  }
+ });
 });
