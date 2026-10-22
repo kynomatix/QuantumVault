@@ -1,4 +1,4 @@
-import fs from 'node:fs';import path from 'node:path';import {pathToFileURL} from 'node:url';import {createHash} from 'node:crypto';
+import fs from 'node:fs';import path from 'node:path';import readline from 'node:readline';import {pathToFileURL} from 'node:url';import {createHash} from 'node:crypto';
 const HB=path.resolve('../grid-multi-timeframe-20261022-handback');
 const read=p=>JSON.parse(fs.readFileSync(p,'utf8')),hash=b=>createHash('sha256').update(b).digest('hex');
 const targetCommitHash=read(HB+'/tip.json').tipCommitHash;
@@ -9,7 +9,7 @@ const inputs=new Map();
 function bind(file,purpose='evidence',expectedSha256){file=path.resolve(file);if(fs.statSync(file).isFile())inputs.set(file,{originalPath:file,purpose,bytes:fs.statSync(file).size,...(expectedSha256?{expectedSha256}:{})});}
 for(const name of fs.readdirSync('scripts/research/grid-multi-timeframe'))bind('scripts/research/grid-multi-timeframe/'+name,'source');
 bind('tests/research/grid-multi-timeframe.test.ts','source');
-for(const name of fs.readdirSync(HB))if(/\.(md|json|ps1|sh|csv)$/.test(name)&&!['REVIEW-SCAN-STATUS.md','RESUME.md'].includes(name))bind(HB+'/'+name);
+for(const name of fs.readdirSync(HB))if(/\.(md|json|ps1|sh|csv|log)$/.test(name)&&!['REVIEW-SCAN-STATUS.md','RESUME.md'].includes(name))bind(HB+'/'+name);
 const root=fs.readFileSync(HB+'/study-root.txt','utf8').trim();
 if(!process.argv.includes('--source-only')){
 function walk(dir){for(const name of fs.readdirSync(dir)){const file=dir+'/'+name;if(fs.statSync(file).isDirectory())walk(file);else bind(file);}}
@@ -17,6 +17,10 @@ walk(root);
 for(const name of fs.readdirSync(root).filter(n=>n.endsWith('-runtime-inputs.json')))for(const file of read(root+'/'+name).files)bind(file,'support');
 bind(path.resolve('shared/grid-lookback.ts'),'support');bind(path.resolve('scripts/research/grid-sizing-stops/replay.mjs'),'support');
 for(const input of read(root+'/inputs.json'))bind(input.file,'support',input.sha256);
+for(const input of read(root+'/reconciliation-inputs.json'))bind(input.file,'support',input.sha256);
+for(const c of read(root+'/candles15m/certification.json'))if(c.passed)bind(c.file,'evidence',c.sha256);
+for await(const line of readline.createInterface({input:fs.createReadStream(root+'/candles15m/requests.jsonl'),crlfDelay:Infinity})){const request=JSON.parse(line);if(request.file)bind(request.file,'evidence',request.sha256);}
+for(const name of fs.readdirSync(root).filter(n=>n.endsWith('-complete.json')&&n!=='launch-complete.json'&&n!=='analysis-complete.json')){const r=read(root+'/'+name);if(r.output)bind(r.output,'evidence',r.outputSha256);}
 for(const name of fs.readdirSync(HB+'/evidence').filter(n=>n.startsWith('focused-'))){
  const dir=HB+'/evidence/'+name;for(const f of fs.readdirSync(dir))if(/\.(json|log|sh)$/.test(f))bind(dir+'/'+f);
 }

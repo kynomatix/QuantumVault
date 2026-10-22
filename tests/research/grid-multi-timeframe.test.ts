@@ -38,7 +38,7 @@ describe('multi-timeframe transformed replay integration',()=>{
   const replay=new Function(...Object.keys(dependencies),source+'\nreturn sizingReplay;')(...Object.values(dependencies));
   const market={symbol:'EXAMPLE',tick:'0.01',lot:'0.001',minimumQuote:'10',maximumQuote:'10000000',minimumPrice:'0.01',maximumPrice:'1000000'};
   for(const direction of ['long','short'])for(const leverage of [1,3]){
-   const {policy}=sizingPolicy({market,direction,leverage,makerRate:.00015,arm:'further_near',reference:'100',geometry:{lower:'80',upper:'120',longStop:'70',shortStop:'130'}});
+   const {policy}=sizingPolicy({market,direction,leverage,makerRate:.00015,arm:'further_near',reference:'100',geometry:{lower:'80.00000000',upper:'120.00000000',longStop:'70.00000000',shortStop:'130.00000000'}});
    const run=(duration:number,timeframe:string)=>{const bars=[{time:0,open:100,high:100,low:100,close:100},{time:duration,open:100,high:108,low:92,close:102},{time:2*duration,open:102,high:110,low:90,close:100}];return replay({candles:bars,markBars:bars,market,timeframe,start:1,end:3,policy,path:'OHLC',markPath:'OHLC',fundingEvents:[[],[{time:1.5*duration,rate:.001}],[]],maxLeverage:50,makerRate:.00015,takerRate:.0004,stopMode:'touch',moveMode:'fixed',closeAtHorizon:true,executions:true});};
    const hour=run(3600000,'1h'),quarter=run(900000,'15m');
    expect(hour.funding).not.toBe(0);expect(quarter.unavailable).toBeNull();
