@@ -43,7 +43,8 @@ describe('multi-timeframe transformed replay integration',()=>{
    const hour=run(3600000,'1h'),quarter=run(900000,'15m');
    expect(hour.funding).not.toBe(0);expect(quarter.unavailable).toBeNull();
    for(const metric of ['finalEquity','fees','fillCount','funding','protectiveStop','liquidated'])expect(quarter[metric]).toBe(hour[metric]);
-   expect(quarter.executions.map((e:any)=>({...e,time:e.time*4}))).toEqual(hour.executions);
+   // The inherited seed has a fixed two-millisecond execution offset, not a bar fraction.
+   expect(quarter.executions.map((e:any)=>({...e,time:e.kind==='seed'?(e.time-2)*4+2:e.time*4}))).toEqual(hour.executions);
    expect(quarter.executions.at(-1).time).toBe(2700000);
    expect(replayMetrics(quarter,900000).underwaterDays*4).toBe(replayMetrics(hour,3600000).underwaterDays);
   }

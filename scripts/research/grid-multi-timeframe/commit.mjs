@@ -5,7 +5,8 @@ const hb=path.resolve('../grid-multi-timeframe-20261022-handback'),scratch=hb+'/
 const git=(args,cwd=scratch)=>execFileSync('git.exe',args,{cwd,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
 if(!fs.existsSync(scratch)){
  git(['clone','--shared','--no-checkout',process.cwd(),scratch],process.cwd());
- git(['checkout','-b','mtf-delivery','4eac0f17c072d35c13d5d8b954199b64490feabf']);
+ const baseCommitHash='4eac0f17c072d35c13d5d8b954199b64490feabf';
+ git(['checkout','-b','mtf-delivery',baseCommitHash]);
 }
 for(const dir of ['scripts/research/grid-multi-timeframe','tests/research']){
  if(!fs.existsSync(dir))continue;
