@@ -1,0 +1,1 @@
+No shorter-range combination passed every registered requirement for beating the seven-day Simple grid. Some averages may improve, but none cleared the complete return, consistency and downside checks; this study does not justify changing the live preset.
