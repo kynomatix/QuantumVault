@@ -58,6 +58,7 @@ const getOpenDecisionsMock = vi.fn();
 const getUnresolvedDecisionsMock = vi.fn();
 const getBotMock = vi.fn();
 const getActiveBotsMock = vi.fn();
+const compressDecisionsMock = vi.fn();
 const getLlmCiphertextMock = vi.fn();
 const getAiTraderDecisionMock = vi.fn();
 const claimAnalysisMock = vi.fn();
@@ -81,6 +82,7 @@ vi.mock("../../server/storage", () => ({
     getUnresolvedAiTraderDecisions: (...a: unknown[]) => getUnresolvedDecisionsMock(...a),
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
     getActiveAiTraderBots: (...a: unknown[]) => getActiveBotsMock(...a),
+    compressOldAiTraderDecisions: (...a: unknown[]) => compressDecisionsMock(...a),
     getWalletLlmApiKeyCiphertext: (...a: unknown[]) => getLlmCiphertextMock(...a),
     getAiTraderDecision: (...a: unknown[]) => getAiTraderDecisionMock(...a),
     claimAiTraderAnalysis: (...a: unknown[]) => claimAnalysisMock(...a),
@@ -610,6 +612,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  compressDecisionsMock.mockReset().mockResolvedValue(0);
   startCycleMock.mockReset().mockResolvedValue(undefined);
   finishCycleMock.mockReset().mockResolvedValue(undefined);
   vi.resetModules();
@@ -790,6 +793,21 @@ afterEach(async () => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("decision history preservation", () => {
+  it("never compresses decisions on monitor startup or recurring sweeps", async () => {
+    const { startAiTraderMonitor } = await importMonitor();
+    getActiveBotsMock.mockResolvedValue([]);
+    startAiTraderMonitor();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getActiveBotsMock).toHaveBeenCalled();
+    expect(compressDecisionsMock).not.toHaveBeenCalled();
+    getActiveBotsMock.mockClear();
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+    expect(getActiveBotsMock).toHaveBeenCalled();
+    expect(compressDecisionsMock).not.toHaveBeenCalled();
+  });
 });
 
 // --- parseOpenDecision (pure) ----------------------------------------------------

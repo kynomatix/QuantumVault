@@ -451,6 +451,47 @@ afterEach(() => {
 });
 
 describe("buildMarketContext (WO-3)", () => {
+  it.each(["15m", "1h", "4h", "1d"] as const)(
+    "renders admission geometry and both sizing modes for %s",
+    async (timeframe) => {
+      const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
+      fetchOHLCVMock.mockResolvedValue(SELECTED_CANDLES_15M);
+      for (const sizingMode of ["discretionary", "risk_based"] as const) {
+        const result = await buildMarketContext({
+          market: "SOL-PERP", timeframe, adapter: makeAdapter(),
+          bot: makeBot({ timeframe, sizingMode }), preClaimBotStatus: "open",
+          recentClosedDecisions: RECENT_DECISIONS, paperPositionRows: OPEN_POSITION_ROWS,
+          agentPublicKey: AGENT_PUBKEY,
+        });
+        if ("stale" in result) throw new Error("expected a built context");
+        expect(result.user).toContain(`current context price E = ${result.contextDigest.price}`);
+        expect(result.user).toContain("Long: stop < E < target. Short: target < E < stop.");
+        expect(result.user).toContain("All prices must be finite and positive.");
+        expect(result.user).toContain("abs(target - E) / abs(E - stop) >= 1.2 (gross price distance)");
+        expect(result.user).toContain("Fees are accounting context, not an entry gate.");
+        expect(result.user).not.toContain("1.2 after fees");
+        expect(result.user).toContain("must still target >= 1.5");
+        const band = timeframe === "15m" || timeframe === "1h" ? "[0.5, 10]" : "[1, 15]";
+        expect(result.user).toContain(`abs(E - stop) / E * 100 must be within ${band}% for ${timeframe}, inclusive`);
+        expect(result.user).toContain("Stay flat when both cannot be satisfied");
+        expect(result.user).toContain("do not shave the structural stop or invent an unsupported target");
+        expect(result.user).toContain("E * (1 - 1/L + m)");
+        expect(result.user).toContain("E * (1 + 1/L - m)");
+        expect(result.user).toContain("Long stop must be above that estimate; short stop below it.");
+        expect(result.user).toContain("Risk-based sizing rechecks at its derived leverage");
+        expect(result.user).toContain("server enforcement remains authoritative");
+        expect(result.user).not.toMatch(/\bm\s*=\s*[0-9]/);
+        const slippage = "stop distance must be at least 1% (2 times the 0.5% maximum entry slippage)";
+        if (sizingMode === "risk_based") {
+          expect(result.user).toContain(slippage);
+          expect(result.user).toContain("Satisfy the larger of this and the timeframe minimum.");
+        } else {
+          expect(result.user).not.toContain(slippage);
+        }
+      }
+    },
+  );
+
   it("golden file: builds the full system+user prompt and contextDigest for an open-position bot", async () => {
     const { buildMarketContext } = await import("../../server/ai-trader/context-builder");
     const adapter = makeAdapter();

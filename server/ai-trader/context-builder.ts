@@ -25,7 +25,10 @@ import { detectPivots, classifyDow, type DowStructureResult } from "./dow-struct
 import { detectHTFLevels, type HtfLevel } from "./htf-levels";
 import { detectWM, type WMFormation } from "./wm-detector";
 import { detectActiveRange, type ActiveRange } from "./active-range";
-import { SWEEP_BUFFER_ATR } from "./guardrails";
+import {
+  SWEEP_BUFFER_ATR, RR_FLOOR, SL_BAND_LTF, SL_BAND_HTF,
+  MAX_ENTRY_SLIPPAGE_FRAC, RISK_STOP_MIN_SLIPPAGE_MULT,
+} from "./guardrails";
 import { usesFixedPaperDecisionV2 } from "@shared/ai-trader-flat-reasons";
 import { isCandleBasisUnavailableError } from "../lab/datafeed";
 import { computeUnrealizedPnl, resolvePaperPositionState } from "./paper-position-authority";
@@ -942,15 +945,20 @@ export async function buildMarketContext(
     : SMART_LEVERAGE_HARD_CEILING;
   const maxLeverage = Math.min(bot.maxLeverage, smartLeverageCap, SMART_LEVERAGE_HARD_CEILING);
 
+  const stopBand = LTF_TIMEFRAMES.has(timeframe) ? SL_BAND_LTF : SL_BAND_HTF;
   const guardrailLines = [
     `Max leverage: ${maxLeverage}x (bot cap ${bot.maxLeverage}x, smart volatility cap ${smartLeverageCap}x, hard ceiling ${SMART_LEVERAGE_HARD_CEILING}x)`,
     `Size bounds: 10%-90% of allocated collateral as margin`,
-    `Reward:risk floor (enforced): >= 1.2 after fees (target >= 1.5 per your instructions above)`,
+    `Entry admission uses the current context price E = ${price}, not a desired limit entry or an old candle price. Long: stop < E < target. Short: target < E < stop. All prices must be finite and positive.`,
+    `Hard reward:risk floor: abs(target - E) / abs(E - stop) >= ${RR_FLOOR} (gross price distance). Fees are accounting context, not an entry gate. Your strategy must still target >= 1.5 and consider real costs. Calculate this from your actual proposed prices before submitting.`,
+    `Stop distance: abs(E - stop) / E * 100 must be within [${stopBand.minPct}, ${stopBand.maxPct}]% for ${timeframe}, inclusive. Keep the required structure/ATR buffer as well. Stay flat when both cannot be satisfied; do not shave the structural stop or invent an unsupported target to pass arithmetic.`,
+    `The stop must trigger strictly before estimated liquidation. At the applied leverage L and venue maintenance-margin weight m, long liquidation estimate is E * (1 - 1/L + m), short is E * (1 + 1/L - m). Long stop must be above that estimate; short stop below it. Risk-based sizing rechecks at its derived leverage; your requested leverage does not control that final check. The venue maintenance-margin weight and final derived leverage are not provided here; server enforcement remains authoritative.`,
     `Cooldown: ${cooldownRemainingMs > 0 ? `${Math.round(cooldownRemainingMs / 60_000)}m remaining before next entry` : "clear, no cooldown active"}`,
     `Trades today: ${tradesToday}/${maxTradesPerDay} (${LTF_TIMEFRAMES.has(timeframe) ? "LTF" : "HTF"} cap)`,
   ];
   if (bot.sizingMode === "risk_based") {
     guardrailLines.push(
+      `The slippage minimum also applies: stop distance must be at least ${RISK_STOP_MIN_SLIPPAGE_MULT * MAX_ENTRY_SLIPPAGE_FRAC * 100}% (${RISK_STOP_MIN_SLIPPAGE_MULT} times the ${MAX_ENTRY_SLIPPAGE_FRAC * 100}% maximum entry slippage). Satisfy the larger of this and the timeframe minimum. Position size and leverage remain server-derived.`,
       `Sizing: automatic and risk-normalised to a confidence-scaled fraction of live equity — sizePct and leverage requests are ignored, so focus on stop quality and report confidence honestly because it directly moves position size.`
     );
   }
