@@ -39,6 +39,7 @@ import { GridRegimeHint } from './GridRegimeHint';
 import { GridRangingFinder } from './GridRangingFinder';
 import type { GridIntent } from '../../../../shared/grid-draft';
 import type { PlannerRangeFacts } from '../../../../server/grid-planner/range-facts';
+import { GridSimpleSqueeze } from './GridSimpleSqueeze';
 type RangeFacts = Awaited<ReturnType<PlannerRangeFacts['read']>>;
 async function readPlanner(path: string, signal: AbortSignal, plannerEnabled = true): Promise<unknown> {
   if (!plannerEnabled) {
@@ -471,6 +472,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
         {status}
         {!createEnabled && <p role="status">Grid launch is unavailable right now.</p>}
       </div>
+      <GridSimpleSqueeze market={form.market} identity={identity} open={open} refresh={refresh + rangeRefresh} />
       <DialogFooter className="flex-wrap gap-2 border-t pt-3">
         <Button variant="outline" disabled={draftBusy} onClick={() => handleOpenChange(false)}>Cancel</Button>
         {actions ?? <Button disabled>Review bot</Button>}

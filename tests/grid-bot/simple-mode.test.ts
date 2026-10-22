@@ -54,7 +54,8 @@ describe('Simple preset and navigation',()=>{
     const html=renderToStaticMarkup(createElement(GridSetupModeSelect,{onSelect}));
     expect(html).toContain('@min-[440px]:grid-cols-2');expect(html).toContain('auto-rows-fr');expect(html).not.toContain('Continue');
     expect(html).toContain('We set it up for you');expect(html).toContain('Every setting, your way');expect(html).toContain(GRID_BACKTEST_LABEL);
-    const why=renderToStaticMarkup(createElement(GridSimpleWhy));expect(why).not.toContain(' open=');expect(why.match(/<li>/g)).toHaveLength(10);
+    const why=renderToStaticMarkup(createElement(GridSimpleWhy));expect(why).not.toContain(' open=');expect(why.match(/<li>/g)).toHaveLength(11);
+    expect(why).toContain('Avoids launching in an unusually quiet market');
     expect(GRID_BACKTEST_RUNS).toBe(9_710_608);
   });
 });

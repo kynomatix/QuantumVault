@@ -47,7 +47,7 @@ export async function chartPoolCandles(symbol: string, timeframe: string, start:
 export async function plannerPoolCandles(market: string, timeframe: string, bars: number,
   signal: AbortSignal): Promise<PlannerCandle[]> {
   signal.throwIfAborted();
-  const duration = timeframe === '15m' ? 900_000 : timeframe === '1h' ? 3_600_000 : timeframe === '4h' ? 14_400_000 : 0;
+  const duration = timeframe === '15m' ? 900_000 : timeframe === '1h' ? 3_600_000 : timeframe === '4h' ? 14_400_000 : timeframe === '1d' ? 86_400_000 : 0;
   const symbol = market.replace(/-PERP$/, '');
   if (!duration || !Number.isSafeInteger(bars) || bars < 1 || bars > GRID_HISTORY_MAX_BARS || !/^[A-Za-z0-9-]+$/.test(symbol)) return [];
   const now = Date.now(), end = Math.floor(now / duration) * duration;

@@ -5,6 +5,7 @@ import { PlannerCharts } from './chart';
 import { PlannerDirection } from './direction';
 import { PlannerWeeklyStructure } from './weekly-structure';
 import { PlannerRangeFacts } from './range-facts';
+import { PlannerSqueeze } from './squeeze';
 import { marketSnapshot } from './market-snapshot';
 import { previewGrid, validatePreviewQuery } from './preview';
 import { gridHistoryRequest } from '../../shared/grid-lookback';
@@ -20,6 +21,7 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
   let weekly: PlannerWeeklyStructure | undefined;
   let finder: RangingMarketFinder | undefined;
   const ranges = new PlannerRangeFacts();
+  const squeeze = new PlannerSqueeze();
   let metadata: { rows: ProtocolMarket[]; observedAt: number } | undefined;
   let metadataJob: Promise<ProtocolMarket[]> | undefined, lastFailure = -Infinity;
   let previewStarts: number[] = [];
@@ -109,6 +111,18 @@ export function registerGridPlannerRoutes(app: Express, requireWallet: RequestHa
         : Promise.resolve(unknown('Pacifica funding reader unavailable.')),
     ]);
     if (!res.destroyed) res.json({ market, serverNow: deps.now(), weekly: structure, funding });
+  }));
+  app.get('/api/grid-planner/squeeze', requireWallet, route(['market'], async (req, res, deps) => {
+    const market = req.query.market;
+    if (typeof market !== 'string' || !(await boundedMetadata(deps)).some(row => row.internalSymbol === market)) {
+      res.status(400).json({ state: 'unavailable', reason: 'Choose a known Pacifica market' }); return;
+    }
+    const controller = new AbortController(), onClose = () => controller.abort();
+    res.on('close', onClose);
+    try {
+      const result = await squeeze.read(market, deps, controller.signal);
+      if (!res.destroyed) res.json(result);
+    } finally { res.off('close', onClose); }
   }));
   app.get('/api/grid-planner/range', requireWallet, route(['market', 'timeframe', 'bars', 'period'], async (req, res, deps) => {
     const { market, timeframe, bars, period } = req.query, window = gridHistoryRequest(timeframe, period, bars);

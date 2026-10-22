@@ -15,6 +15,7 @@ export function GridSimpleWhy() {
         <li>Keeps the stop: bots without one lost far more at leverage</li>
         <li>Bigger buys further from price, bigger take-profits near it</li>
         <li>Low fees matter most, so we keep them low</li>
+        <li>Avoids launching in an unusually quiet market</li>
       </ul>
       <h4 className="text-xs uppercase tracking-wide text-muted-foreground">What didn't help, so it's left out</h4>
       <ul className="grid grid-cols-1 @min-[440px]:grid-cols-2 gap-2 list-disc pl-4 text-muted-foreground">
