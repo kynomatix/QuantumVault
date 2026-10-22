@@ -174,7 +174,7 @@ describe('signed behaviour modes', () => {
       const a = authority(), requested = { ...intent, behaviourMode, direction:side, stopPrice:side==='long'?'80':'120', seedAtCreation:seed,gridCount:20,totalInvestment:'1000' };
       const deps = {now:()=>clock,observe:async()=>a,umk:async()=>umk(),storage:{} as any};
       const draft = await authoritativeGridPreview('EXAMPLE',requested,'EXAMPLE_REVISION',deps);
-      const q = {behaviourMode,market:requested.market,side,lower:requested.lowerPrice,upper:requested.upperPrice,stop:requested.stopPrice,intervals:20,entryScale:'flat' as const,profitScale:'flat' as const,seed,leverage:'1',investment:'1000',fee:seed?'0.0003':'0.0002'};
+      const q = {behaviourMode,market:requested.market,side,lower:requested.lowerPrice,upper:requested.upperPrice,stop:requested.stopPrice,intervals:20,entryScale:'flat' as const,profitScale:'flat' as const,seed,leverage:'1',investment:'1000',fee:seed?'0.0002':'0.0001'};
       const preview = previewGrid(q,a.market,clock);
       expect(draft.state).toBe('ready'); expect(draft.plan?.policyVersion).toBe('2.2.0'); expect(preview.requestedPlan?.lines).toEqual(draft.plan?.lines);
       expect(preview.minimum.state==='available'&&preview.minimum.value).toBe(draft.minimum);

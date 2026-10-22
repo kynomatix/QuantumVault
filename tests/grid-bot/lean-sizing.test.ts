@@ -57,7 +57,7 @@ describe('signed lean sizing for new drafts only',()=>{
     expect(verifyGridPolicyHmac(restored,umk(),signed.digest).ok).toBe(true);
   });
   it.each([true,false])('matches planner and authoritative sizes under the same fee assumption, seed=%s',async seed=>{
-    const a=authority(),fee=seed?'0.0003':'0.0002';
+    const a=authority(),fee=seed?'0.0002':'0.0001';
     const requested={...intent,seedAtCreation:seed,gridCount:20,totalInvestment:'1000'};
     // A hypothetical planner has no account quote: use the authoritative maximum opening rate as its assumption.
     const draft=await authoritativeGridPreview('EXAMPLE',requested,'EXAMPLE_REVISION',{now:()=>clock,observe:async()=>a,umk:async()=>umk(),storage:{} as any});

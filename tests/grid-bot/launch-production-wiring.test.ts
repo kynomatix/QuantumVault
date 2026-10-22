@@ -32,7 +32,7 @@ describe('C5 default provision wiring',()=>{
     expect(cleanup).toHaveBeenCalledOnce();expect(key.every(v=>v===0)).toBe(true);expect(markCanary).toHaveBeenCalledOnce();
   });
   it('missing production authority reserves and sends nothing and cleans the UMK',async()=>{
-    const f=launchAuthorityFixture();vi.spyOn(production,'defaultGridLaunchAuthority').mockResolvedValue(f.authority);f.deps.configuration=()=>({builderCode:null,builderOwner:null});
+    const f=launchAuthorityFixture();vi.spyOn(production,'defaultGridLaunchAuthority').mockResolvedValue(f.authority);f.deps.reads.ready=vi.fn(()=>false);
     const reserve=vi.fn(),run=vi.fn(),cleanup=vi.fn(),p=new GridProvision({now:()=>clock,durableUmk:async()=>({umk:umk(),cleanup}),
       custody:{reserve,confirmCreated:vi.fn(),confirmReused:vi.fn()},verifyEmpty:vi.fn(),execution:{run},existing:async()=>null,markCanary:vi.fn()});
     expect(await p.start({wallet:f.account.wallet,policy:f.policy,policyHmac:f.policyHash})).toMatchObject({state:'denied'});
