@@ -18,7 +18,7 @@ for(const dir of ['scripts/research/grid-ranging-finder','tests/research']){
 }
 git(['add','--','scripts/research/grid-ranging-finder']);
 if(fs.existsSync(scratch+'/tests/research/grid-ranging-finder.test.ts'))git(['add','--','tests/research/grid-ranging-finder.test.ts']);
-git(['-c','user.name=Codex','-c','user.email=codex@local','commit','-m',process.argv[2]||'research: implement mean-reversion finder study','-m','Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>']);
+if(git(['diff','--cached','--name-only']).trim())git(['-c','user.name=Codex','-c','user.email=codex@local','commit','-m',process.argv[2]||'research: implement mean-reversion finder study','-m','Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>']);
 const tipCommitHash=git(['rev-parse','HEAD']);
 fs.writeFileSync(hb+'/tip.json',JSON.stringify({tipCommitHash,scratch})+'\n');
 console.log(JSON.stringify({tipCommitHash,scratch}));
