@@ -56,7 +56,7 @@ describe('Simple preset and navigation',()=>{
     expect(html).toContain('We set it up for you');expect(html).toContain('Every setting, your way');expect(html).toContain(GRID_BACKTEST_LABEL);
     const why=renderToStaticMarkup(createElement(GridSimpleWhy));expect(why).not.toContain(' open=');expect(why.match(/<li>/g)).toHaveLength(11);
     expect(why).toContain('Avoids launching in an unusually quiet market');
-    expect(GRID_BACKTEST_RUNS).toBe(9_710_608);
+    expect(GRID_BACKTEST_RUNS).toBe(10_594_212);expect(GRID_BACKTEST_LABEL).toBe('over 10.5 million');
   });
 });
 describe('one plain Simple fix',()=>{
