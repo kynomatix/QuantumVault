@@ -297,3 +297,14 @@ describe("authorized latest-cycle projection", () => {
     mocks.latest.mockRejectedValue(new Error("EXAMPLE")); expect(await readLatestCycle("EXAMPLE")).toEqual({ status: "unavailable", cycle: null });
   });
 });
+
+it.each(['market_cooldown','market_entry_pending'])('persists %s as skipped and projects its detail', async (code) => {
+  const {CycleAudit}=await import('../../server/ai-trader/cycle-audit');
+  const {readLatestCycle}=await import('../../server/ai-trader/cycle-display');
+  const audit=new CycleAudit(bot(),new Date());await audit.begin();
+  audit.execution(code,false,'2026-10-23T04:00:00.000Z');await audit.finish(null);
+  const receipt=mocks.finish.mock.calls[0][3];
+  expect(receipt).toMatchObject({outcome:'skipped',reasonCode:'cooldown',details:{detailCodes:[code]}});
+  mocks.latest.mockResolvedValue({...receipt,id:audit.id,startedAt:new Date(),decisionIds:[]});
+  expect((await readLatestCycle('EXAMPLE')).cycle?.detailCodes).toEqual([code]);
+});

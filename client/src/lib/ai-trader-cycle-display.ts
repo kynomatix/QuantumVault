@@ -40,7 +40,11 @@ export function cycleDisplay(latest?: LatestCycle) {
   if (cycle.outcome === "running") return { ...base, outcome: cycle.completionUnknown ? "Incomplete check: completion unknown" : "Check running" };
   const failure = cycle.reasonCode === "gateway_error" || cycle.reasonCode === "gateway_timeout"
     ? sanitizeGatewayFailure(cycle.gatewayFailure) : null;
-  return { ...base, outcome: cycle.reasonCode ? REASON_LABELS[cycle.reasonCode] : "Check completed",
+  return { ...base, outcome: cycle.reasonCode === "cooldown" && cycle.detailCodes.includes("market_entry_pending")
+    ? "Skipped: entry pending on this market — waiting for reconciliation"
+    : cycle.reasonCode === "cooldown" && cycle.detailCodes.includes("market_cooldown")
+      ? `Skipped: market cooldown${cycle.availableAt ? ` — eligible after ${new Date(cycle.availableAt).toLocaleString()}` : ""}`
+      : cycle.reasonCode ? REASON_LABELS[cycle.reasonCode] : "Check completed",
     gatewayDetail: failure ? [failure.failureClass, failure.httpStatus ? `HTTP ${failure.httpStatus}` : null,
       failure.providerCode, failure.providerType, `${failure.elapsedMs} ms`, `${failure.attemptCount} attempt(s)`].filter(Boolean).join(" · ") : null,
     flatLabels: cycle.reasonCode === "model_flat" ? cycle.flatReasons?.map(reason => `Model reason: ${FLAT_REASON_LABELS[reason]}`) ?? ["Model reason not recorded"] : [], rationale: cycle.rationale,

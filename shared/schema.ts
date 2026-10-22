@@ -2319,6 +2319,27 @@ export const aiTraderScannerCandidateClaims = pgTable("ai_trader_scanner_candida
   index("ai_trader_scanner_candidate_claims_expires_at_idx").on(table.expiresAt),
 ]);
 
+// Retained independently of bots/decisions. No FK cascades or TTL cleanup.
+export const aiTraderMarketEntryAttempts = pgTable("ai_trader_market_entry_attempts", {
+  attemptId: text("attempt_id").primaryKey(),
+  decisionId: varchar("decision_id").notNull().unique(),
+  botId: varchar("bot_id").notNull(),
+  ownerWallet: text("owner_wallet").notNull(),
+  market: text("market").notNull(),
+  paperMode: boolean("paper_mode").notNull(),
+  state: text("state").notNull().default("pending"),
+  admittedAt: timestamp("admitted_at", { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+  firstConfirmedAt: timestamp("first_confirmed_at", { withTimezone: true }),
+  terminalReason: text("terminal_reason"),
+}, (table) => [
+  index("ai_market_entry_pending").on(table.ownerWallet, table.market, table.paperMode).where(sql`${table.state} = 'pending'`),
+  index("ai_market_entry_confirmed").on(table.ownerWallet, table.market, table.paperMode, table.firstConfirmedAt).where(sql`${table.state} = 'confirmed'`),
+  check("ai_market_entry_state", sql`${table.state} IN ('pending', 'confirmed', 'no_entry')`),
+  check("ai_market_entry_clock", sql`(${table.state} = 'confirmed' AND ${table.firstConfirmedAt} IS NOT NULL) OR (${table.state} <> 'confirmed' AND ${table.firstConfirmedAt} IS NULL)`),
+  check("ai_market_entry_finite", sql`isfinite(${table.admittedAt}) AND (${table.firstConfirmedAt} IS NULL OR (isfinite(${table.firstConfirmedAt}) AND ${table.firstConfirmedAt} >= ${table.admittedAt}))`),
+  check("ai_market_entry_identity", sql`length(${table.ownerWallet}) > 0 AND length(${table.market}) > 0 AND length(${table.attemptId}) > 0`),
+]);
+
 export const aiTraderCycles = pgTable("ai_trader_cycles", {
   id: uuid("id").primaryKey().defaultRandom(),
   botId: varchar("bot_id").notNull(),

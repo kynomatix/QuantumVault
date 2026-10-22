@@ -36,6 +36,8 @@ export async function readLatestCycle(botId: string): Promise<LatestCycle> {
       flatReasons, rationale,
       gatewayFailure: row.reasonCode === "gateway_error" || row.reasonCode === "gateway_timeout"
         ? sanitizeGatewayFailure(details?.gatewayFailure) : null,
+      availableAt: row.reasonCode === "cooldown" && typeof details?.availableAt === "string" && Number.isFinite(Date.parse(details.availableAt))
+        ? new Date(details.availableAt).toISOString() : null,
       detailCodes: Array.isArray(details?.detailCodes) ? details.detailCodes.filter((value): value is string => typeof value === "string" && /^[a-z0-9_]{1,80}$/i.test(value)).slice(0, 4) : [],
     } };
   } catch { return { status: "unavailable", cycle: null }; }

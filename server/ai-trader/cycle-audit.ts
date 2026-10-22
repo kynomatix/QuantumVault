@@ -179,10 +179,13 @@ export class CycleAudit {
     }
     });
   }
-  execution(code: string | null, ok: boolean): void {
+  execution(code: string | null, ok: boolean, availableAt?: string): void {
     this.observe(() => {
     if (typeof ok !== "boolean" || (code !== null && typeof code !== "string")) throw new Error("audit_execution_unknown");
-    this.set(ok ? "entry_executed" : "execution_rejected", "execution");
+    this.set(ok ? "entry_executed" : code === "market_cooldown" || code === "market_entry_pending"
+      ? "cooldown" : code === "schema_unavailable" ? "schema_not_ready" : "execution_rejected", "execution");
+    delete this.details.availableAt;
+    if (code === "market_cooldown" && availableAt && Number.isFinite(Date.parse(availableAt))) this.details.availableAt = new Date(availableAt).toISOString();
     if (code && /^[a-z0-9_]{1,80}$/.test(code)) this.details.detailCodes = [code];
     });
   }

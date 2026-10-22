@@ -4,6 +4,7 @@
 // suite still runs in a DB-less environment (mirrors tests/lab-agent/turn-lease.test.ts).
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { readFileSync } from "node:fs";
 import { eq } from "drizzle-orm";
 import type { AiTraderBot } from "@shared/schema";
 import { evaluateGraduation } from "../../server/ai-trader/graduation";
@@ -31,11 +32,22 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
     const dbModule = await import("../../server/db");
     ({ db, pool } = dbModule);
     journal = await import("../../server/ai-trader/execution-journal");
+    // Owner publication is explicit: startup only verifies the cooldown relation.
+    const published = await pool.query<{ relation: string | null }>(
+      "SELECT to_regclass('ai_trader_market_entry_attempts')::text AS relation",
+    );
+    if (!published.rows[0]?.relation) {
+      await pool.query(readFileSync(new URL("../fixtures/ai-trader-market-entry-attempts.sql", import.meta.url), "utf8"));
+    }
     await dbModule.ensureSchema();
     ({ aiTraderBots, aiTraderDecisions, aiTraderQualificationRecords } = await import("@shared/schema"));
   }, 120_000);
 
   afterAll(async () => {
+    if (pool) {
+      await pool.query("DELETE FROM ai_trader_market_entry_attempts WHERE bot_id = ANY($1::text[])",
+        [[botId, authorityBotId, qualificationBotId].filter((id): id is string => Boolean(id))]);
+    }
     // Deleting the bot cascades to its decisions (FK onDelete: 'cascade'),
     // but delete decisions explicitly first in case cascade isn't set up as expected.
     if (botId) {
@@ -253,14 +265,16 @@ describe.skipIf(!HAS_DB)("AI Trader storage round-trip (WO-2)", () => {
       now: new Date(),
       expiryMs: 10 * 60_000,
     });
-    expect(executed?.bot.status).toBe("executing");
+    expect(executed.status).toBe("claimed");
+    if (executed.status !== "claimed") throw new Error("Execution claim unavailable");
+    expect(executed.bot.status).toBe("executing");
     expect(await storage.claimAiTraderExecution({
       botId: authorityBotId,
       decisionId: decision.id,
       expectedStatus: "proposed",
       now: new Date(),
       expiryMs: 10 * 60_000,
-    })).toBeUndefined();
+    })).toEqual({ status: "bot_conflict" });
 
     const released = await storage.transitionAiTraderState({
       botId: authorityBotId,

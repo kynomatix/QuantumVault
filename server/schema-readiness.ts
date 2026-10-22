@@ -13,6 +13,7 @@ export const SCHEMA_CAPABILITIES = [
   "oracle",
   "ai_trader",
   "ai_trader_cycles",
+  "ai_trader_market_cooldown",
   "grid_bot",
 ] as const;
 

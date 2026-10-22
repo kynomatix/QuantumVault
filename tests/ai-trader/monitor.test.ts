@@ -15,6 +15,8 @@
 // reconciliation (paper reset, live flat reset, bracket completion, orphan
 // position fail-closed flatten, venue-read-failure retry signal).
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
+const preflightMarketEntriesMock = vi.hoisted(() => vi.fn());
+vi.mock('../../server/ai-trader/market-entry-cooldown', () => ({ preflightMarketEntries: preflightMarketEntriesMock }));
 import type { AiTraderBot, AiTraderDecision } from "@shared/schema";
 import type { ProtocolAdapter } from "../../server/protocol/adapter";
 import {
@@ -615,6 +617,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  preflightMarketEntriesMock.mockReset().mockResolvedValue({});
   compressDecisionsMock.mockReset().mockResolvedValue(0);
   startCycleMock.mockReset().mockResolvedValue(undefined);
   finishCycleMock.mockReset().mockResolvedValue(undefined);
@@ -2373,6 +2376,31 @@ describe("runAutoCycle", () => {
     buildContextMock.mockResolvedValue({ system: "sys", user: "usr", contextDigest: { price: 150 } });
     return bot;
   }
+
+  it.each([89,90])("cooldown preflight applies the alternative score floor to %s", async (score) => {
+    scannerCapabilitiesMock.consumersEnabled=true;
+    const {runAutoCycle}=await importMonitor();
+    armEntryCycle({marketSource:'scanner'});
+    const candidate={protocol:'pacifica',timeframe:'15m',direction:'long',setup:'W',necklineDistancePct:0.1,parentTrend:'uptrend',evaluatedAt:NOW};
+    getScannerShortlistMock.mockReturnValue([{...candidate,market:'BTC-PERP',score:95},{...candidate,market:'ETH-PERP',score}]);
+    preflightMarketEntriesMock.mockResolvedValue({'BTC-PERP':{status:'market_entry_pending'}});
+    runDecisionMock.mockResolvedValue({ok:true,decisionId:'EXAMPLE',decision:{action:'flat'},clamped:null,rejected:false,violations:[],latencyMs:5});
+    await runAutoCycle('bot-1111-2222');
+    expect(runDecisionMock).toHaveBeenCalledTimes(score===90 ? 1 : 0);
+    expect(claimScannerCandidateMock).toHaveBeenCalledTimes(score===90 ? 1 : 0);
+    expect(executeDecisionMock).not.toHaveBeenCalled();
+  });
+
+  it("cooldown scanner alternatives retain the two model call budget", async () => {
+    scannerCapabilitiesMock.consumersEnabled=true;
+    const {runAutoCycle}=await importMonitor();
+    armEntryCycle({marketSource:'scanner'});
+    getScannerShortlistMock.mockReturnValue(['BTC-PERP','ETH-PERP','SOL-PERP','AVAX-PERP'].map(market=>({protocol:'pacifica',market,timeframe:'15m',direction:'long',setup:'W',score:95,necklineDistancePct:0.1,parentTrend:'uptrend',evaluatedAt:NOW})));
+    preflightMarketEntriesMock.mockResolvedValue({'BTC-PERP':{status:'market_entry_pending'}});
+    runDecisionMock.mockResolvedValue({ok:true,decisionId:'EXAMPLE',decision:{action:'long'},clamped:null,rejected:true,violations:[],latencyMs:5});
+    await runAutoCycle('bot-1111-2222');
+    expect(runDecisionMock).toHaveBeenCalledTimes(2);
+  });
 
   async function completedHeartbeat(): Promise<string> {
     const { runMonitorTickOnce } = await importMonitor();

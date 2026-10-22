@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 const getPagedHistoryMock = vi.fn();
 const getBotMock = vi.fn();
+const getDecisionMock = vi.fn();
 const getAiTraderDecisionsMock = vi.fn();
 const getExactAiTraderGraduationDecisionsMock = vi.fn();
 const getAiTraderBotLifetimeStatsMock = vi.fn();
@@ -30,6 +31,7 @@ vi.mock("../../server/storage", () => ({
   storage: {
     getAiTraderDecisionsPaged: (...a: unknown[]) => getPagedHistoryMock(...a),
     getAiTraderBot: (...a: unknown[]) => getBotMock(...a),
+    getAiTraderDecision: (...a: unknown[]) => getDecisionMock(...a),
     getLatestAiTraderCycle: (...a: unknown[]) => getLatestCycleMock(...a),
     getAiTraderDecisions: (...a: unknown[]) => getAiTraderDecisionsMock(...a),
     getExactAiTraderGraduationDecisions: (...a: unknown[]) => getExactAiTraderGraduationDecisionsMock(...a),
@@ -1736,4 +1738,28 @@ describe('AI Trader history exact cursor transport',()=>{
   expect(getPagedHistoryMock).not.toHaveBeenCalled();
  });
 
+});
+
+describe('manual market exclusion response',()=>{
+  it.each(['market_entry_pending','market_cooldown','schema_unavailable'])('renders %s without a successful trade response',async(reason)=>{
+    vi.clearAllMocks();
+    getBotMock.mockResolvedValue({...scannerBot(),status:'proposed',marketSource:'fixed',paperMode:true});
+    getDecisionMock.mockResolvedValue({id:'EXAMPLE-decision',botId:'scanner-bot-route',outcome:null,decidedAt:new Date(),
+      clampedDecision:{action:'long'},contextDigest:{market:'SOL-PERP',price:150}});
+    getAdapterMock.mockReturnValue({getPrice:async()=>150});
+    const skipped=reason!=='schema_unavailable';
+    executeDecisionMock.mockResolvedValue({ok:false,skipped,reason,detail:'EXAMPLE exclusion'});
+    const {app,routes}=buildApp();registerAiTraderRoutes(app);
+    const result=await invoke(routes,'POST /api/ai-trader/:id/execute',{params:{id:'scanner-bot-route'},session:{walletAddress:'WALLET_ROUTE'},body:{decisionId:'EXAMPLE-decision'},query:{},headers:{}});
+    expect(result.statusCode).toBe(skipped?200:503);
+    expect(result.body).toMatchObject(skipped?{ok:false,skipped:true,reason}:{error:reason});
+    expect(result.body).not.toHaveProperty('entryPrice');
+    expect(executeDecisionMock).toHaveBeenCalledTimes(1);
+  });
+  it('does not disclose another owners decision or cooldown',async()=>{
+    vi.clearAllMocks();getBotMock.mockResolvedValue({...scannerBot(),walletAddress:'EXAMPLE-other'});
+    const {app,routes}=buildApp();registerAiTraderRoutes(app);
+    const result=await invoke(routes,'POST /api/ai-trader/:id/execute',{params:{id:'scanner-bot-route'},session:{walletAddress:'WALLET_ROUTE'},body:{decisionId:'EXAMPLE-decision'},query:{},headers:{}});
+    expect(result.statusCode).toBe(404);expect(executeDecisionMock).not.toHaveBeenCalled();expect(getDecisionMock).not.toHaveBeenCalled();
+  });
 });

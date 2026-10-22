@@ -312,7 +312,7 @@ beforeEach(() => {
   getAiTraderBotMock.mockImplementation(async () => makeBot());
   claimExecutionMock.mockImplementation(async () => {
     callOrder.push("status:executing");
-    return { bot: makeBot({ status: "executing" }), decision: { id: "d-1" } };
+    return { status: "claimed", bot: makeBot({ status: "executing" }), decision: { id: "d-1" } };
   });
   commitPaperEntryMock.mockResolvedValue({
     status: "applied",
@@ -2043,6 +2043,21 @@ describe("r2j absent market execution", () => {
     expect(adapter.setLeverage).not.toHaveBeenCalled();
     expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
     expect(claimExecutionMock).not.toHaveBeenCalled();
+    expect(commitPaperEntryMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("market cooldown sender authority", () => {
+  it.each([true,false])("paperMode=%s never sends after a sibling blocks the authoritative claim", async (paperMode) => {
+    armLiveAuth();
+    const { executeDecision } = await importExecutor();
+    const adapter=makeAdapter();
+    getAiTraderBotMock.mockResolvedValue(makeBot({paperMode}));
+    claimExecutionMock.mockResolvedValue({status:'market_entry_pending'});
+    const result=await executeDecision({authoritySource:'internal_cycle',bot:makeBot({paperMode}),decisionId:'d-1',clamped:makeClamped(),adapter,markPrice:150});
+    expect(result).toMatchObject({ok:false,skipped:true,reason:'market_entry_pending'});
+    expect(adapter.setLeverage).not.toHaveBeenCalled();
+    expect(adapter.placeMarketOrder).not.toHaveBeenCalled();
     expect(commitPaperEntryMock).not.toHaveBeenCalled();
   });
 });

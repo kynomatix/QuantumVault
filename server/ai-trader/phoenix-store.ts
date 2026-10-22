@@ -1,6 +1,8 @@
+import { marketEntryKey, lockRetainedMarketEntry, confirmMarketEntry, type CooldownQuery } from './market-entry-cooldown';
 import type { Pool } from 'pg';
 import type { AiTraderBot } from '@shared/schema';
 import { storage } from '../storage';
+import { appendTelemetry } from '../telemetry';
 import type { PhoenixAiBinding } from '../../shared/phoenix-ai-contract';
 import { aiTraderPolicyObject, assertPhoenixAiBinding } from './phoenix-policy';
 import { orderIntentHash, type PhoenixOrderIntent, type PhoenixOrderAuthority } from '../protocol/phoenix/order-contract';
@@ -41,8 +43,8 @@ export class PhoenixAiStore implements PhoenixAiRepository {
   }
   async claim(bot: AiTraderBot, decisionId: string, source: 'external_http' | 'internal_cycle') {
     const claim = await storage.claimAiTraderExecution({ botId: bot.id, decisionId,
-      expectedStatus: source === 'external_http' ? 'proposed' : 'analyzing', now: new Date(this.now()), expiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS });
-    if (!claim) return false;
+      expectedStatus: source === 'external_http' ? 'proposed' : 'analyzing', now: new Date(this.now()), expiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS, expectedIdentity: marketEntryKey(bot) });
+    if (claim.status !== "claimed") return claim;
     const execution = await this.execution(bot.id);
     if (!execution || execution.decisionId !== decisionId) throw new Error('Phoenix AI prebroadcast identity missing');
     // This required journal write is before the shared order service can sign.
@@ -52,7 +54,7 @@ export class PhoenixAiStore implements PhoenixAiRepository {
     await appendRequiredEntryPrebroadcast({ bot, decisionId, side: execution.intent.side === 'buy' ? 'long' : 'short',
       clientOrderId: execution.intent.requestKey, sizeBase: Number(execution.intent.baseUnits),
       price: Number(a.price.usd), observedAt: new Date(a.price.observedAt) });
-    return true;
+    return claim;
   }
   async graduate(bot: AiTraderBot, binding: PhoenixAiBinding, policyHmac: string): Promise<AiTraderBot | null> {
     const { rows } = await this.pool.query(`UPDATE ai_trader_bots SET phoenix_execution_bot_id=$2,phoenix_binding=$3,
@@ -71,7 +73,8 @@ export class PhoenixAiStore implements PhoenixAiRepository {
   async open(bot: AiTraderBot, e: PhoenixAiExecution, order: PhoenixOrderRecord) {
     const f = phoenixAiFill(order), d = await this.decision(e.decisionId);
     if (d?.outcome === 'executed' && Number(d.entryPrice).toFixed(8) === f.entryPrice.toFixed(8) && bot.status === 'open') { await this.state(e, 'open'); return true; }
-    const observedAt = new Date(this.now()), side = e.intent.side === 'buy' ? 'long' : 'short';
+    if (!d?.decidedAt) return false;
+    const observedAt = new Date(d.decidedAt), side = e.intent.side === 'buy' ? 'long' : 'short';
     const base = { ...journalBase(bot, e.decisionId), attemptId: `entry:${e.decisionId}`, action: 'entry' as const,
       cause: 'decision' as const, side: side as 'long' | 'short', observedAt, recordedAfterBroadcast: true };
     const result = await storage.commitAiTraderDirectLiveEntryTransition({ botId: bot.id, decisionId: e.decisionId,
@@ -80,14 +83,16 @@ export class PhoenixAiStore implements PhoenixAiRepository {
           venueOrderId: order.data.orderId, transactionSignature: order.data.attempt?.signature },
         { ...base, eventType: 'position_observed', price: f.entryPrice, sizeBase: f.sizeBase },
         { ...base, eventType: 'fill_observed', price: f.entryPrice, sizeBase: f.sizeBase, fee: f.fee },
-        { ...base, eventType: 'bracket_verified', bracketFingerprint: orderIntentHash(e.intent.protection) },
+        { ...base, eventType: 'bracket_verified' },
         { ...base, eventType: 'entry_terminal_open', price: f.entryPrice, sizeBase: f.sizeBase },
       ] });
     if (result.status === 'conflict') return false;
     await this.state(e, 'open'); return true;
   }
   async noLand(bot: AiTraderBot, e: PhoenixAiExecution) {
-    const observedAt = new Date(this.now()), side = e.intent.side === 'buy' ? 'long' : 'short';
+    const d = await this.decision(e.decisionId);
+    if (!d?.decidedAt) return false;
+    const observedAt = new Date(d.decidedAt), side = e.intent.side === 'buy' ? 'long' : 'short';
     const base = { ...journalBase(bot, e.decisionId), attemptId: `entry:${e.decisionId}`, action: 'entry' as const,
       cause: 'decision' as const, side: side as 'long' | 'short', observedAt, failureCode: 'venue_rejected' as const, recordedAfterBroadcast: true };
     const result = await storage.commitAiTraderDirectLiveEntryTransition({ botId: bot.id, decisionId: e.decisionId,
@@ -112,16 +117,40 @@ export class PhoenixAiStore implements PhoenixAiRepository {
     return rows.length === 1;
   }
   async unprotected(bot: AiTraderBot, e: PhoenixAiExecution, order: PhoenixOrderRecord) {
-    const f = phoenixAiFill(order);
-    // Store confirmed entry truth while keeping risk paused. Never emit a
-    // bracket_verified or an open terminal event for this state.
-    await this.pool.query(`WITH confirmed AS (
-      UPDATE ai_trader_decisions SET outcome='executed',entry_price=$3
-      WHERE bot_id=$1 AND id=$2 AND closed_at IS NULL AND outcome IS NULL RETURNING id)
-      UPDATE ai_trader_bots SET status='paused',pause_reason='bracket_failed',updated_at=now()
-      WHERE id=$1 AND protocol='phoenix' AND paper_mode=false
-        AND (EXISTS(SELECT 1 FROM confirmed) OR EXISTS(SELECT 1 FROM ai_trader_decisions WHERE id=$2 AND bot_id=$1 AND outcome='executed' AND closed_at IS NULL))`,
-    [bot.id, e.decisionId, f.entryPrice]);
+    const f = phoenixAiFill(order), client = await this.pool.connect();
+    const query: CooldownQuery = async (text, values) => client.query(text, values ? [...values] : undefined);
+    try {
+      await client.query('BEGIN');
+      await client.query('SAVEPOINT cooldown_identity');
+      let cooldownHeld = false;
+      try {
+        cooldownHeld = await lockRetainedMarketEntry(query, bot.id, e.decisionId);
+        await client.query('RELEASE SAVEPOINT cooldown_identity');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT cooldown_identity');
+        appendTelemetry('ai_trader_market_cooldown_reconciliation_required');
+      }
+      // Row count distinguishes the first durable fill from replay.
+      const { rows } = await client.query(`UPDATE ai_trader_decisions SET outcome='executed',entry_price=$3
+        WHERE bot_id=$1 AND id=$2 AND closed_at IS NULL AND outcome IS NULL RETURNING id`,
+      [bot.id, e.decisionId, f.entryPrice]);
+      await client.query(`UPDATE ai_trader_bots SET status='paused',pause_reason='bracket_failed',updated_at=now()
+        WHERE id=$1 AND protocol='phoenix' AND paper_mode=false
+          AND EXISTS(SELECT 1 FROM ai_trader_decisions WHERE id=$2 AND bot_id=$1 AND outcome='executed' AND closed_at IS NULL)`,
+      [bot.id, e.decisionId]);
+      if (rows.length && cooldownHeld) {
+        await client.query('SAVEPOINT cooldown_confirmation');
+        try {
+          await confirmMarketEntry(query, bot.id, e.decisionId);
+          await client.query('RELEASE SAVEPOINT cooldown_confirmation');
+        } catch {
+          await client.query('ROLLBACK TO SAVEPOINT cooldown_confirmation');
+          appendTelemetry('ai_trader_market_cooldown_reconciliation_required');
+        }
+      }
+      await client.query('COMMIT');
+    } catch (error) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
     await this.state(e, 'attention');
   }
   async close(bot: AiTraderBot, e: PhoenixAiExecution, result: Awaited<ReturnType<PhoenixSafetyService['close']>>) {

@@ -187,11 +187,11 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains the 203-entry SQL prefix and appends migration 203 exactly once", () => {
+  it("retains the 203-entry SQL prefix and appends migrations 203 and 204 exactly once", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(204);
-    expect(metadata).toHaveLength(204);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(204);
+    expect(sqlEntries).toHaveLength(205);
+    expect(metadata).toHaveLength(205);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(205);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
     // SHA-256 of every SQL entry on the rebase baseline, including later migrations.
     const preservedSqlPrefixDigest = createHash("sha256").update(JSON.stringify(sqlEntries.slice(0, 203))).digest("hex").toUpperCase();

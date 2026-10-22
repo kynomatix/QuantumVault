@@ -138,6 +138,11 @@ export function AiTraderDecisionCard({
       });
       const data = await safeResponseJson(res);
       if (!res.ok) throw new Error(data.detail || data.error || 'Execute failed');
+      if (data.skipped === true) {
+        toast({ title: 'Entry skipped', description: data.detail });
+        onExecute?.();
+        return;
+      }
       toast({ title: 'Trade executed', description: `Position opened${data.entryPrice ? ` @ $${Number(data.entryPrice).toFixed(2)}` : ''}.` });
       onExecute?.();
     } catch (err: any) {

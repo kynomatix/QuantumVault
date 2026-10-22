@@ -1,3 +1,4 @@
+import { preflightMarketEntries, type MarketEntryBlock } from "./market-entry-cooldown";
 import { isConfirmedCancellation } from "../protocol/protocol-types";
 import { CycleAudit, deferredCycleAudit, reportOrphanCycle, safeCycleAudit } from "./cycle-audit";
 // AI Trader — position monitor + lifecycle loop (WO-6, docs/AGENTIC_TRADER_PLAN.md §6).
@@ -3795,17 +3796,30 @@ export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycle
         return;
       }
 
+      const marketBlocks = await preflightMarketEntries(bot, eligible.map((candidate) => candidate.market));
+      if (marketBlocks === null) {
+        audit.set("schema_not_ready"); scheduleAutoNext(bot.id, nextCycleTimeframe(bot)); return;
+      }
       const MAX_LLM_CALLS = 2;
       let llmCalls = 0;
       let advancingAfterClaimLoss = false;
+      let lastMarketBlock: MarketEntryBlock | null = null;
       const claimBoundary = getScannerConsumptionBoundary(Date.now());
 
       for (let ci = 0; ci < eligible.length; ci++) {
         if (llmCalls >= MAX_LLM_CALLS) break;
 
         const candidate = eligible[ci];
+        const marketBlock = marketBlocks[candidate.market];
+        if (marketBlock) {
+          lastMarketBlock = marketBlock;
+          audit.execution(marketBlock.status, false, marketBlock.availableAt);
+          advancingAfterClaimLoss = true;
+          continue;
+        }
         if (advancingAfterClaimLoss && candidate.score < 90) {
-          audit.set("claim_lost", "claim");
+          if (lastMarketBlock) audit.execution(lastMarketBlock.status, false, lastMarketBlock.availableAt);
+          else audit.set("claim_lost", "claim");
           if (_obs) _obs.exitReason = "no_qualifying_alternative";
           console.log(
             `[AiTraderMonitor] scanner_candidate_below_floor bot=${bot.id.slice(0, 8)} market=${candidate.market} score=${Math.round(candidate.score)} floor=90 boundary=${claimBoundary.boundaryStart.toISOString()}`,
@@ -3946,10 +3960,22 @@ export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycle
             markPrice: markPrice ?? NaN,
             authoritySource: "internal_cycle",
           });
-          audit.execution(exec.ok ? null : exec.reason, exec.ok);
+          audit.execution(exec.ok ? null : exec.reason, exec.ok, exec.ok ? undefined : exec.availableAt);
           if (!exec.ok) {
+            if (exec.skipped) {
+              if (exec.reason === "market_cooldown" || exec.reason === "market_entry_pending") {
+                lastMarketBlock = { status: exec.reason, availableAt: exec.availableAt };
+              }
+              const refreshed = await storage.getAiTraderBot(bot.id);
+              if (refreshed?.status === "idle") {
+                bot = refreshed;
+                advancingAfterClaimLoss = true;
+                continue;
+              }
+              return;
+            }
             // exitReason stays "exec_rejected"
-            recordEntryRejection(typedExecutionRejectionReason(exec));
+            if (!exec.skipped) recordEntryRejection(typedExecutionRejectionReason(exec));
             const fresh = await storage.getAiTraderBot(bot.id);
             if (fresh?.status === "analyzing") {
               await releaseInternalAnalysis(bot.id);
@@ -4004,6 +4030,14 @@ export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycle
     }
 
     // Fixed-ticker bot path (scanner bots have already returned above).
+    const marketBlocks = await preflightMarketEntries(bot, [bot.market]);
+    if (marketBlocks === null || marketBlocks[bot.market]) {
+      const block = marketBlocks?.[bot.market];
+      if (block) audit.execution(block.status, false, block.availableAt);
+      else audit.set("schema_not_ready");
+      scheduleAutoNext(bot.id, nextCycleTimeframe(bot));
+      return;
+    }
     const preClaimBotStatus = bot.status;
     audit.phase = "claim";
     const claimed = await claimInternalAnalysis(bot);
@@ -4103,11 +4137,11 @@ export async function runAutoCycle(botId: string, cycleAudit?: CycleAudit, cycle
       markPrice: markPrice ?? NaN,
       authoritySource: "internal_cycle",
     });
-    audit.execution(exec.ok ? null : exec.reason, exec.ok);
+    audit.execution(exec.ok ? null : exec.reason, exec.ok, exec.ok ? undefined : exec.availableAt);
       if (!exec.ok) {
       // The executor writes terminal statuses (idle/paused) on its abort paths;
       // for result-only rejections make sure the bot isn't stranded in 'analyzing'.
-      recordEntryRejection(typedExecutionRejectionReason(exec));
+      if (!exec.skipped) recordEntryRejection(typedExecutionRejectionReason(exec));
       const fresh = await storage.getAiTraderBot(bot.id);
       if (fresh?.status === "analyzing") {
         await releaseInternalAnalysis(bot.id);

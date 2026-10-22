@@ -2862,6 +2862,7 @@ END $migration$;`,
        ALTER TABLE solana_signed_submit_attempts
          ADD CONSTRAINT solana_signed_submit_attempts_provider_valid
          CHECK (rpc_provider IN ('configured_primary', 'configured_backup'))`,
+      `SELECT 1 /* verify retained market entry history; owner publishes DDL */`,
     ] as const;
 
 const schemaMigrationMetadata = [
@@ -8445,6 +8446,20 @@ const schemaMigrationMetadata = [
       "kind": "data",
       "identity": "solana-signed-submit-exact-provider-domain",
       "checkSql": "SELECT EXISTS (\n  SELECT 1\n  FROM pg_constraint AS c\n  JOIN pg_class AS t ON t.oid = c.conrelid\n  JOIN pg_namespace AS n ON n.oid = t.relnamespace\n  WHERE n.nspname = current_schema()\n    AND t.relname = 'solana_signed_submit_attempts'\n    AND c.conname = 'solana_signed_submit_attempts_provider_valid'\n    AND c.contype = 'c'\n    AND pg_get_constraintdef(c.oid) = 'CHECK ((rpc_provider = ANY (ARRAY[''configured_primary''::text, ''configured_backup''::text])))'\n) AS ok;"
+    }
+  ],
+  "operation": "ddl"
+}
+, {
+  "id": "204-ai-trader-market-cooldown-verify",
+  "capabilities": [
+    "ai_trader_market_cooldown"
+  ],
+  "requirements": [
+    {
+      "kind": "data",
+      "identity": "ai-trader-market-entry-shape",
+      "checkSql": "SELECT\n(SELECT count(*) = 10 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='ai_trader_market_entry_attempts')\nAND NOT EXISTS (SELECT 1 FROM (VALUES\n ('attempt_id','text','NO'),('decision_id','character varying','NO'),('bot_id','character varying','NO'),\n ('owner_wallet','text','NO'),('market','text','NO'),('paper_mode','boolean','NO'),('state','text','NO'),\n ('admitted_at','timestamp with time zone','NO'),('first_confirmed_at','timestamp with time zone','YES'),('terminal_reason','text','YES')\n) e(n,t,z) LEFT JOIN information_schema.columns c ON c.table_schema=current_schema() AND c.table_name='ai_trader_market_entry_attempts' AND c.column_name=e.n WHERE c.data_type IS DISTINCT FROM e.t OR c.is_nullable IS DISTINCT FROM e.z)\nAND (SELECT count(*) = 6 FROM pg_constraint c WHERE c.conrelid=to_regclass('ai_trader_market_entry_attempts') AND c.convalidated AND (\n (c.contype='p' AND pg_get_constraintdef(c.oid)='PRIMARY KEY (attempt_id)') OR\n (c.contype='u' AND pg_get_constraintdef(c.oid)='UNIQUE (decision_id)') OR\n (c.conname='ai_market_entry_state' AND pg_get_constraintdef(c.oid)='CHECK ((state = ANY (ARRAY[''pending''::text, ''confirmed''::text, ''no_entry''::text])))') OR\n (c.conname='ai_market_entry_clock' AND pg_get_constraintdef(c.oid)='CHECK ((((state = ''confirmed''::text) AND (first_confirmed_at IS NOT NULL)) OR ((state <> ''confirmed''::text) AND (first_confirmed_at IS NULL))))') OR\n (c.conname='ai_market_entry_finite' AND pg_get_constraintdef(c.oid)='CHECK ((isfinite(admitted_at) AND ((first_confirmed_at IS NULL) OR (isfinite(first_confirmed_at) AND (first_confirmed_at >= admitted_at)))))') OR\n (c.conname='ai_market_entry_identity' AND pg_get_constraintdef(c.oid)='CHECK (((length(owner_wallet) > 0) AND (length(market) > 0) AND (length(attempt_id) > 0)))')))\nAND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('ai_trader_market_entry_attempts') AND contype='f')\nAND (SELECT count(*)=2 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid=to_regclass('ai_trader_market_entry_attempts') AND i.indisvalid AND i.indisready AND NOT i.indisunique AND (\n (c.relname='ai_market_entry_pending' AND pg_get_expr(i.indpred,i.indrelid)='(state = ''pending''::text)' AND pg_get_indexdef(i.indexrelid) LIKE '% USING btree (owner_wallet, market, paper_mode) WHERE %') OR\n (c.relname='ai_market_entry_confirmed' AND pg_get_expr(i.indpred,i.indrelid)='(state = ''confirmed''::text)' AND pg_get_indexdef(i.indexrelid) LIKE '% USING btree (owner_wallet, market, paper_mode, first_confirmed_at) WHERE %')))\nAS ok"
     }
   ],
   "operation": "ddl"

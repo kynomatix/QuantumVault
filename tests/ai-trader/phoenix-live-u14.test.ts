@@ -20,7 +20,7 @@ function fixture() {
  const repo = {
   bot: vi.fn(async () => bot), decision: vi.fn(async () => d), execution: vi.fn(async () => execution),
   prepare: vi.fn(async (b, id, intent, authority) => execution = { botId: b.id, decisionId: id, intent, authority, policyHash: orderIntentHash(aiTraderPolicyObject(b)) }),
-  claim: vi.fn(async () => { bot = { ...bot, status: 'executing' }; return true; }),
+  claim: vi.fn(async () => { bot = { ...bot, status: 'executing' }; return { status: 'claimed' as const, bot, decision: decision(bot) }; }),
   graduate: vi.fn(async (_b, binding, hmac) => bot = { ...bot, paperMode: false, phoenixExecutionBotId: binding.executionBotId,
    phoenixBinding: binding, protocolSubaccountId: binding.identity.traderAccountAddress, policyHmac: hmac }),
   open: vi.fn(async () => { bot = { ...bot, status: 'open' }; d = { ...d, outcome: 'executed' }; return true; }),

@@ -1,3 +1,4 @@
+import { marketEntryKey, marketEntryClaimFailure, type AiTraderExecutionClaim } from "./market-entry-cooldown";
 import { FLASH_RETIRED_MESSAGE } from '../protocol/flash-retirement.js';
 // Agentic Trader Plan Part B, WO-5 — the execution layer. Takes a guardrail-
 // clamped entry decision (WO-4 output, already persisted as a decision row) and
@@ -105,6 +106,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  */
 
 export type ExecuteFailureReason =
+  | "market_cooldown" | "market_entry_pending" | "schema_unavailable"
   | "venue_retired"
   | "not_entry"            // clamped.action is not long/short — nothing to execute
   | "invalid_clamp"        // ClampedDecision missing required numeric fields
@@ -127,7 +129,7 @@ export type ExecuteFailureReason =
 
 export type ExecuteDecisionResult =
   | { ok: true; mode: "paper" | "live"; entryPrice: number }
-  | { ok: false; reason: ExecuteFailureReason; detail: string; constraintRejection?: Extract<ConstraintAdmission, { ok: false }> };
+  | { ok: false; reason: ExecuteFailureReason; detail: string; skipped?: boolean; availableAt?: string; constraintRejection?: Extract<ConstraintAdmission, { ok: false }> };
 
 export interface ExecuteDecisionInput {
   bot: AiTraderBot;
@@ -220,9 +222,9 @@ async function unwindRejectedInternalDecision(
   return result;
 }
 
-async function claimExecution(input: ExecuteDecisionInput): Promise<AiTraderBot | null> {
+async function claimExecution(input: ExecuteDecisionInput): Promise<AiTraderExecutionClaim> {
   const freshBot = await storage.getAiTraderBot(input.bot.id);
-  if (!freshBot) return null;
+  if (!freshBot) return { status: "bot_conflict" };
   const authoritySource = executionAuthoritySource(input);
   // The storage claim below re-reads and proves exact-one unresolved decision
   // identity transactionally. This pure preflight cannot grant authority.
@@ -244,15 +246,16 @@ async function claimExecution(input: ExecuteDecisionInput): Promise<AiTraderBot 
     nowMs: Date.now(),
     proposalExpiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
   });
-  if (!verdict.allowed) return null;
+  if (!verdict.allowed) return { status: "bot_conflict" };
   const claimed = await storage.claimAiTraderExecution({
     botId: input.bot.id,
     decisionId: input.decisionId,
     expectedStatus: authoritySource === "external_http" ? "proposed" : "analyzing",
     now: new Date(),
     expiryMs: AI_TRADER_PROPOSAL_EXPIRY_MS,
+    expectedIdentity: marketEntryKey(input.bot),
   });
-  return claimed?.bot ?? null;
+  return claimed;
 }
 
 /** G6 check result, exported pure for tests. Mirrors context-builder's advisory math. */
@@ -526,10 +529,8 @@ async function executePaperEntry(input: ExecuteDecisionInput, side: PaperSide): 
   if (!Number.isFinite(markPrice) || markPrice <= 0) {
     return { ok: false, reason: "invalid_mark", detail: `paper entry needs a positive mark price, got ${markPrice}` };
   }
-  const claimedBot = await claimExecution(input);
-  if (!claimedBot) {
-    return { ok: false, reason: "bot_busy", detail: "exact decision/status execution claim was lost" };
-  }
+  const claim = await claimExecution(input);
+  if (claim.status !== "claimed") return marketEntryClaimFailure(claim);
   const entryPrice = paperEntryPrice(markPrice, side);
   const persistedDecision = await storage.getAiTraderDecision(decisionId);
   if (!persistedDecision?.decidedAt || persistedDecision.botId !== bot.id) {
@@ -839,10 +840,8 @@ async function executeLiveEntry(
     // Step 3 — crash marker FIRST (a crash between order-send and the status
     // write must leave a state the WO-6 startup reconciliation treats as
     // "possibly holding a live position").
-    const claimedBot = await claimExecution(input);
-    if (!claimedBot) {
-      return { ok: false, reason: "bot_busy", detail: "exact decision/status execution claim was lost before venue mutation" };
-    }
+    const claim = await claimExecution(input);
+    if (claim.status !== "claimed") return marketEntryClaimFailure(claim);
 
     // setLeverage throw = clean abort (architect, WO-5 review): nothing has
     // been sent to the venue yet, so idle + 'aborted_order' is provably safe —
@@ -860,6 +859,7 @@ async function executeLiveEntry(
         decisionId,
         expectedDecisionOutcome: null,
         decisionOutcome: "aborted_order",
+        neverSentEntry: true,
       });
       if (!transitioned) {
         return { ok: false, reason: "bot_busy", detail: "setLeverage refusal lost its exact decision/status predicate" };
@@ -896,6 +896,7 @@ async function executeLiveEntry(
         decisionId,
         expectedDecisionOutcome: null,
         decisionOutcome: "aborted_order",
+        neverSentEntry: true,
       });
       if (!transitioned) {
         return { ok: false, reason: "bot_busy", detail: "journal refusal lost its exact decision/status predicate" };

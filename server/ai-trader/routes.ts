@@ -1633,6 +1633,8 @@ export function registerAiTraderRoutes(app: Express): void {
         authoritySource: "external_http",
       });
       if (!result.ok) {
+        if (result.skipped) return res.json({ ok: false, skipped: true, reason: result.reason, detail: result.detail, availableAt: result.availableAt });
+        if (result.reason === "schema_unavailable") return res.status(503).json({ error: result.reason, detail: result.detail });
         const status =
           result.reason === "cooldown_active" || result.reason === "daily_cap_reached" || result.reason === "bot_busy" || result.reason === "scanner_live_execution_disabled"
             ? 409

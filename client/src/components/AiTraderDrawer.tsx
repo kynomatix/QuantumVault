@@ -426,6 +426,8 @@ function outcomeLabel(outcome: string | null): { label: string; className: strin
   switch (outcome) {
     case 'executed':
       return { label: 'Executed', className: 'text-emerald-400', icon: <CheckCircle2 className="w-3 h-3" /> };
+    case 'market_cooldown_skipped':
+      return { label: 'Market entry skipped', className: 'text-muted-foreground', icon: <SkipForward className="w-3 h-3" /> };
     case 'user_skipped':
       return { label: 'Skipped', className: 'text-muted-foreground', icon: <SkipForward className="w-3 h-3" /> };
     case 'flat':

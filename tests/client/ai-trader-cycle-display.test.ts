@@ -20,6 +20,11 @@ describe("latest automatic check display", () => {
     expect(readFlatReasons({ action: "long", flatReasonsVersion: 1, flatReasons: ["no_setup"] })).toBeNull();
     expect(readFlatReasons({ action: "flat", flatReasonsVersion: 2, flatReasons: ["no_setup"] })).toBeNull();
   });
+  it("renders market exclusion as skipped with pending and eligible-after explanations", () => {
+    const cycle={...base,outcome:'skipped' as const,reasonCode:'cooldown' as const};
+    expect(cycleDisplay({status:'available',cycle:{...cycle,detailCodes:['market_entry_pending']}}).outcome).toContain('Skipped: entry pending');
+    expect(cycleDisplay({status:'available',cycle:{...cycle,detailCodes:['market_cooldown'],availableAt:'2026-10-23T04:00:00.000Z'}}).outcome).toContain('eligible after');
+  });
   it("separates current scheduling state from a past cycle's scheduling receipt", () => {
     expect(currentScheduleLabel({ status: "paused", mode: "auto", autoNext: true })).toContain("paused");
     expect(currentScheduleLabel({ status: "idle", mode: "suggest", autoNext: true })).toContain("suggestion");

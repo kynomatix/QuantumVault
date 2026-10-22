@@ -1,3 +1,4 @@
+import { marketEntryClaimFailure, type AiTraderExecutionClaim } from "./market-entry-cooldown";
 import type { AiTraderBot, AiTraderDecision, TradingBot } from '@shared/schema';
 import type { PhoenixAiBinding } from '../../shared/phoenix-ai-contract';
 import type { ProtocolAdapter } from '../protocol/adapter';
@@ -23,7 +24,7 @@ export interface PhoenixAiRepository {
   decision(id: string): Promise<AiTraderDecision | undefined>;
   execution(botId: string): Promise<PhoenixAiExecution | null>;
   prepare(bot: AiTraderBot, decisionId: string, intent: PhoenixOrderIntent, authority: PhoenixOrderAuthority): Promise<PhoenixAiExecution>;
-  claim(bot: AiTraderBot, decisionId: string, source: 'external_http' | 'internal_cycle'): Promise<boolean>;
+  claim(bot: AiTraderBot, decisionId: string, source: 'external_http' | 'internal_cycle'): Promise<AiTraderExecutionClaim>;
   graduate(expected: AiTraderBot, binding: PhoenixAiBinding, policyHmac: string): Promise<AiTraderBot | null>;
   open(bot: AiTraderBot, execution: PhoenixAiExecution, order: PhoenixOrderRecord): Promise<boolean>;
   noLand(bot: AiTraderBot, execution: PhoenixAiExecution): Promise<boolean>;
@@ -123,7 +124,8 @@ export class PhoenixAiTraderService {
       if (existing && existing.decisionId === d.id) {
         if (existing.policyHash !== orderIntentHash(aiTraderPolicyObject(bot))) throw new Error('Phoenix AI replay policy changed');
         if (bot.status === 'proposed' || bot.status === 'analyzing') {
-          if (!await this.repository.claim(bot, d.id, input.authoritySource ?? 'external_http')) throw new Error('Phoenix AI replay claim lost');
+          const claim = await this.repository.claim(bot, d.id, input.authoritySource ?? 'external_http');
+          if (claim.status !== 'claimed') return marketEntryClaimFailure(claim);
         }
         return this.adopt(await this.repository.bot(bot.id) ?? bot, existing);
       }
@@ -133,7 +135,8 @@ export class PhoenixAiTraderService {
         || this.now() - equity.observedAt >= 5000)) throw new Error('Phoenix AI sizing equity unknown');
       const intent = buildPhoenixAiEntry(bot, d.id, input.clamped, snapshot.authority, snapshot.sequence, this.now(), equity?.micros);
       const execution = await this.repository.prepare(bot, d.id, intent, snapshot.authority);
-      if (!await this.repository.claim(bot, d.id, input.authoritySource ?? 'external_http')) throw new Error('Phoenix AI execution claim lost');
+      const claim = await this.repository.claim(bot, d.id, input.authoritySource ?? 'external_http');
+      if (claim.status !== 'claimed') return marketEntryClaimFailure(claim);
       const fresh = await this.repository.bot(bot.id);
       if (!fresh || fresh.status !== 'executing' || !this.enabled() || orderIntentHash(aiTraderPolicyObject(fresh)) !== execution.policyHash) throw new Error('Phoenix AI authority changed before entry');
       await this.authorize(fresh, true); await this.debt(fresh, binding.executionBotId);

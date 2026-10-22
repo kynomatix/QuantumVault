@@ -1,3 +1,6 @@
+import { cooldownQuery, marketEntryKey, sameMarketEntryKey, lockMarketEntry, marketEntryBlock, reserveMarketEntry,
+  lockRetainedMarketEntry, confirmMarketEntry, releaseNeverSentMarketEntry, verifyMarketEntrySchema,
+  type AiTraderExecutionClaim, type MarketEntryKey } from "./ai-trader/market-entry-cooldown";
 import type { CycleStart, CycleFinish } from "@shared/ai-trader-cycle";
 import { assertCycleFinish, AI_TRADER_CYCLE_RETENTION_DAYS, AI_TRADER_CYCLE_MAX_ROWS } from "@shared/ai-trader-cycle";
 import { aiTraderCycles, type AiTraderCycle } from "@shared/schema";
@@ -1212,7 +1215,7 @@ export interface IStorage {
     params: AiTraderScannerCandidateClaimParams,
   ): Promise<AiTraderScannerCandidateClaimResult>;
   bindAiTraderProposal(params: { botId: string; decisionId: string }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
-  claimAiTraderExecution(params: { botId: string; decisionId: string; expectedStatus: "proposed" | "analyzing"; now: Date; expiryMs: number }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined>;
+  claimAiTraderExecution(params: { botId: string; decisionId: string; expectedStatus: "proposed" | "analyzing"; now: Date; expiryMs: number; expectedIdentity?: MarketEntryKey }): Promise<AiTraderExecutionClaim>;
   transitionAiTraderState(params: {
     botId: string;
     expectedStatus: string;
@@ -1222,6 +1225,7 @@ export interface IStorage {
     decisionId?: string;
     expectedDecisionOutcome?: string | null;
     decisionOutcome?: string;
+    neverSentEntry?: boolean;
     botUpdates?: Partial<InsertAiTraderBot> & {
       graduatedAt?: Date | null;
       trialStartedAt?: Date | null;
@@ -7093,29 +7097,56 @@ export class DatabaseStorage implements IStorage {
   }
 
   async claimAiTraderExecution(params: {
-    botId: string;
-    decisionId: string;
-    expectedStatus: "proposed" | "analyzing";
-    now: Date;
-    expiryMs: number;
-  }): Promise<{ bot: AiTraderBot; decision: AiTraderDecision } | undefined> {
-    return db.transaction(async (tx) => {
-      const unresolved = await tx.select().from(aiTraderDecisions)
-        .where(and(eq(aiTraderDecisions.botId, params.botId), isNull(aiTraderDecisions.outcome)))
-        .limit(2);
-      if (unresolved.length !== 1 || unresolved[0].id !== params.decisionId) return undefined;
-      const decidedAtMs = unresolved[0].decidedAt ? new Date(unresolved[0].decidedAt).getTime() : Number.NaN;
-      if (!Number.isFinite(decidedAtMs) || params.now.getTime() - decidedAtMs > params.expiryMs) return undefined;
-      const [bot] = await tx.update(aiTraderBots)
-        .set({ status: "executing", pauseReason: null, updatedAt: sql`NOW()` } as any)
-        .where(and(
-          eq(aiTraderBots.id, params.botId),
-          eq(aiTraderBots.status, params.expectedStatus),
-          isNull(aiTraderBots.pauseReason),
-        ))
-        .returning();
-      return bot ? { bot, decision: unresolved[0] } : undefined;
-    });
+    botId: string; decisionId: string; expectedStatus: "proposed" | "analyzing";
+    now: Date; expiryMs: number; expectedIdentity?: MarketEntryKey;
+  }): Promise<AiTraderExecutionClaim> {
+    const identityChanged = new Error("market_entry_identity_changed");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await db.transaction(async (tx): Promise<AiTraderExecutionClaim> => {
+          const query = cooldownQuery(tx);
+          if (!await verifyMarketEntrySchema(query)) return { status: "schema_unavailable" };
+          const [snapshot] = await tx.select().from(aiTraderBots).where(eq(aiTraderBots.id, params.botId)).limit(1);
+          if (!snapshot) return { status: "bot_conflict" };
+          const key = marketEntryKey(snapshot);
+          if (params.expectedIdentity && !sameMarketEntryKey(key, params.expectedIdentity)) return { status: "bot_conflict" };
+          await lockMarketEntry(query, key);
+          const [bot] = await tx.select().from(aiTraderBots).where(eq(aiTraderBots.id, params.botId)).for("update");
+          if (!bot) return { status: "bot_conflict" };
+          if (!sameMarketEntryKey(key, marketEntryKey(bot))) throw identityChanged;
+          if (bot.status !== params.expectedStatus || bot.pauseReason !== null) return { status: "bot_conflict" };
+          const unresolved = await tx.select().from(aiTraderDecisions)
+            .where(and(eq(aiTraderDecisions.botId, params.botId), isNull(aiTraderDecisions.outcome))).limit(2).for("update");
+          if (unresolved.length !== 1 || unresolved[0].id !== params.decisionId) return { status: "bot_conflict" };
+          const decision = unresolved[0];
+          const decidedAtMs = decision.decidedAt ? new Date(decision.decidedAt).getTime() : NaN;
+          if (!Number.isFinite(decidedAtMs) || params.now.getTime() - decidedAtMs > params.expiryMs) return { status: "bot_conflict" };
+          const retained = await query("SELECT attempt_id FROM ai_trader_market_entry_attempts WHERE decision_id=$1", [params.decisionId]);
+          if (retained.rows.length) return { status: "bot_conflict" }; // Exact replay grants no send.
+          const blocked = await marketEntryBlock(query, key, bot.id);
+          if (blocked) {
+            await tx.update(aiTraderDecisions).set({ outcome: "market_cooldown_skipped",
+              contextDigest: { ...(decision.contextDigest as Record<string, unknown> ?? {}), marketEntrySkip: blocked } })
+              .where(eq(aiTraderDecisions.id, decision.id));
+            await tx.update(aiTraderBots).set({ status: "idle", pauseReason: null, updatedAt: sql`NOW()` })
+              .where(eq(aiTraderBots.id, bot.id));
+            return blocked;
+          }
+          await reserveMarketEntry(query, key, bot.id, decision.id);
+          const [claimed] = await tx.update(aiTraderBots).set({ status: "executing", pauseReason: null, updatedAt: sql`NOW()` })
+            .where(eq(aiTraderBots.id, bot.id)).returning();
+          return { status: "claimed", bot: claimed, decision };
+        });
+      } catch (error) {
+        const code = (error as { code?: string; cause?: { code?: string } }).code
+          ?? (error as { cause?: { code?: string } }).cause?.code;
+        if (error === identityChanged || code === "40001" || code === "40P01") continue;
+        if (code === "23505") return { status: "bot_conflict" };
+        appendTelemetry("ai_trader_market_cooldown_schema_unavailable");
+        return { status: "schema_unavailable" };
+      }
+    }
+    return { status: "bot_conflict" };
   }
 
   async transitionAiTraderState(params: {
@@ -7127,6 +7158,7 @@ export class DatabaseStorage implements IStorage {
     decisionId?: string;
     expectedDecisionOutcome?: string | null;
     decisionOutcome?: string;
+    neverSentEntry?: boolean;
     botUpdates?: Partial<InsertAiTraderBot> & {
       graduatedAt?: Date | null;
       trialStartedAt?: Date | null;
@@ -7141,6 +7173,10 @@ export class DatabaseStorage implements IStorage {
     const casMiss = new Error("ai_trader_state_cas_miss");
     try {
       return await db.transaction(async (tx) => {
+        const releaseEntry = params.neverSentEntry === true && params.decisionId !== undefined
+          && params.expectedStatus === "executing" && params.expectedDecisionOutcome === null
+          && params.decisionOutcome === "aborted_order" && params.nextStatus === "idle";
+        if (releaseEntry) await lockRetainedMarketEntry(cooldownQuery(tx), params.botId, params.decisionId!);
         if (params.decisionId !== undefined) {
           const outcomePredicate = params.expectedDecisionOutcome == null
             ? isNull(aiTraderDecisions.outcome)
@@ -7183,6 +7219,7 @@ export class DatabaseStorage implements IStorage {
           ))
           .returning();
         if (!bot && params.decisionId !== undefined && params.decisionOutcome !== undefined) throw casMiss;
+        if (bot && releaseEntry) await releaseNeverSentMarketEntry(cooldownQuery(tx), params.botId, params.decisionId!);
         return bot;
       });
     } catch (err) {
@@ -7199,6 +7236,7 @@ export class DatabaseStorage implements IStorage {
     }
     try {
       return await db.transaction(async (tx) => {
+        const cooldownHeld = await lockRetainedMarketEntry(cooldownQuery(tx), params.botId, params.decisionId);
         // Journal advisory lock first; decision then bot predicates; journal
         // inserts last. Any later throw rolls every prospective mutation back.
         const preparedJournal = await prepareExecutionJournalEventsInTransaction(
@@ -7266,6 +7304,7 @@ export class DatabaseStorage implements IStorage {
           .returning();
         if (!updatedBot) throw new AiTraderPaperEntryConflictError("bot_state_conflict");
 
+        if (cooldownHeld) await confirmMarketEntry(cooldownQuery(tx), params.botId, params.decisionId);
         await preparedJournal.insert();
         return { status: "applied", decision: updatedDecision, bot: updatedBot };
       });
@@ -7288,6 +7327,10 @@ export class DatabaseStorage implements IStorage {
     }
     try {
       return await db.transaction(async (tx) => {
+        // Savepoint includes the identity read: missing history cannot poison protection.
+        const cooldownHeld = await tx.transaction(async (entryTx) =>
+          lockRetainedMarketEntry(cooldownQuery(entryTx), params.botId, params.decisionId))
+          .catch(() => { appendTelemetry("ai_trader_market_cooldown_reconciliation_required"); return false; });
         const preparedJournal = await prepareExecutionJournalEventsInTransaction(
           tx,
           params.journalEvents,
@@ -7370,6 +7413,10 @@ export class DatabaseStorage implements IStorage {
           .returning();
         if (!updatedBot) throw new AiTraderDirectLiveEntryConflictError("bot_state_conflict");
 
+        if (cooldownHeld && params.disposition === "open") {
+          await tx.transaction(async (entryTx) => confirmMarketEntry(cooldownQuery(entryTx), params.botId, params.decisionId))
+            .catch(() => { appendTelemetry("ai_trader_market_cooldown_reconciliation_required"); });
+        }
         await preparedJournal.insert();
         return { status: "applied", decision: updatedDecision, bot: updatedBot };
       });
@@ -7686,6 +7733,11 @@ export class DatabaseStorage implements IStorage {
 
     try {
       const result = await db.transaction(async (tx) => {
+        const confirmsEntry = params.disposition === "adopt_open" || params.disposition === "adopt_for_protective_close"
+          || (params.disposition === "emergency_unwind" && params.entryFillPrice !== null);
+        const cooldownHeld = confirmsEntry && oneDecisionId !== null
+          ? await tx.transaction(async (entryTx) => lockRetainedMarketEntry(cooldownQuery(entryTx), params.botId, oneDecisionId))
+            .catch(() => { appendTelemetry("ai_trader_market_cooldown_reconciliation_required"); return false; }) : false;
         let journalPrevalidationFailure = !journalIdentityMatchesDisposition;
         if (!journalPrevalidationFailure) {
           try {
@@ -7891,6 +7943,12 @@ export class DatabaseStorage implements IStorage {
           .returning();
         if (!updatedBot) throw new AiTraderRecoveryConflictError("bot_state_conflict");
 
+        // Only a newly written entry can establish the original confirmation clock.
+        if (cooldownHeld && oneDecisionId !== null
+            && lockedDecisions.some((row: AiTraderDecision) => row.outcome !== "executed")) {
+          await tx.transaction(async (entryTx) => confirmMarketEntry(cooldownQuery(entryTx), params.botId, oneDecisionId))
+            .catch(() => { appendTelemetry("ai_trader_market_cooldown_reconciliation_required"); });
+        }
         const journal = await appendJournal();
         return { status: "applied" as const, bot: updatedBot, decisions: updatedDecisions, journal };
       });
