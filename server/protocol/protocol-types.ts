@@ -134,6 +134,7 @@ export interface OrderResult {
 }
 
 export interface CancelOrderParams {
+  symbol?: string;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
@@ -142,6 +143,7 @@ export interface CancelOrderParams {
 }
 
 export interface CancelAllOrdersParams {
+  excludeReduceOnly?: boolean;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;
@@ -153,6 +155,68 @@ export interface CancelResult {
   success: boolean;
   canceledCount?: number;
   error?: string;
+  outcome?: 'acknowledged' | 'confirmed_absent' | 'rejected' | 'partial' | 'unknown';
+  dispatch?: 'unsent' | 'attempted';
+  acknowledgedCount?: number;
+  scope?: CancelScope;
+  targets?: CancelTarget[];
+  successors?: Array<{ orderId: string; symbol: string; state: 'live' }>;
+  evidence?: CancelObservation;
+}
+
+export interface CancelScope {
+  account: string;
+  symbol: string | null;
+  operation: 'order' | 'stop' | 'tpsl' | 'all';
+  excludeReduceOnly?: boolean;
+}
+
+export interface CancelTarget {
+  orderId: string;
+  symbol: string;
+  state: 'absent' | 'live' | 'unknown';
+  requestOutcome: 'unsent' | 'acknowledged' | 'rejected' | 'unknown';
+}
+
+export interface CancelObservation {
+  account: string;
+  requestId: string;
+  startedAt: number;
+  dispatchedAt: number;
+  receivedAt: number;
+  lastOrderId: number;
+  baselineLastOrderId: number;
+  complete: true;
+  fresh: true;
+  noDedup: true;
+  phase: 'discovery' | 'confirmation';
+  mutationSettledAt?: number;
+}
+
+/** Completion consumers must bind proof to the operation they requested. */
+export function isConfirmedCancellation(result: CancelResult | null | undefined, expected: CancelScope): boolean {
+  const e = result?.evidence;
+  const s = result?.scope;
+  if (!result?.success || result.outcome !== 'confirmed_absent' || !e || !s
+    || s.account !== expected.account || s.symbol !== expected.symbol || s.operation !== expected.operation
+    || s.excludeReduceOnly !== expected.excludeReduceOnly || e.account !== expected.account
+    || e.complete !== true || e.fresh !== true || e.noDedup !== true || !e.requestId
+    || !Number.isSafeInteger(e.lastOrderId) || e.lastOrderId < 0
+    || !Number.isSafeInteger(e.baselineLastOrderId) || e.baselineLastOrderId < 0
+    || e.lastOrderId < e.baselineLastOrderId
+    || ![e.startedAt, e.dispatchedAt, e.receivedAt].every(Number.isFinite)
+    || e.startedAt > e.dispatchedAt || e.dispatchedAt > e.receivedAt
+    || !Array.isArray(result.targets) || !Array.isArray(result.successors) || result.successors.length !== 0) return false;
+  const ids = new Set<string>();
+  for (const target of result.targets) {
+    if (!target || target.state !== 'absent' || typeof target.orderId !== 'string' || !/^[1-9][0-9]*$/.test(target.orderId)
+      || !Number.isSafeInteger(Number(target.orderId)) || ids.has(target.orderId)
+      || !target.symbol || (expected.symbol !== null && target.symbol !== expected.symbol)) return false;
+    ids.add(target.orderId);
+  }
+  if (e.phase === 'discovery') return result.dispatch === 'unsent' && result.targets.length === 0;
+  return e.phase === 'confirmation' && Number.isFinite(e.mutationSettledAt)
+    && e.startedAt >= e.mutationSettledAt! && e.lastOrderId > e.baselineLastOrderId;
 }
 
 export interface ClosePositionParams {
@@ -363,6 +427,7 @@ export function liveBreakevenFingerprint(value: unknown): string {
 }
 
 export interface CancelStopOrderParams {
+  symbol?: string;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;
   mainWalletAddress: string;

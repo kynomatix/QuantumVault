@@ -4,11 +4,26 @@ import { PACIFICA_RECYCLE_EMPTY_USDC } from '../../server/protocol/pacifica/paci
 import { shouldBlockDeleteForSweep } from '../../server/routes.js';
 
 function createAdapter(): PacificaAdapter {
-  return new PacificaAdapter({
+  const adapter = new PacificaAdapter({
     baseUrl: 'https://api.pacifica.fi/api/v1',
     wsUrl: 'wss://ws.pacifica.fi/ws',
   });
+  (adapter as any).registry = {
+    isKnownInternal: (symbol: string) => ['BTC-PERP', 'ETH-PERP'].includes(symbol),
+    internalToProtocol: (symbol: string) => symbol.replace('-PERP', ''),
+    protocolToInternal: (symbol: string) => `${symbol}-PERP`,
+  };
+  return adapter;
 }
+
+function inventory(rows: any[] = []) {
+  return async (_path: string, _query: unknown, options: any) => {
+    options.onDispatch();
+    return { success: true, error: null, code: null, last_order_id: 10, data: rows };
+  };
+}
+const order = (order_id: number, symbol: string) => ({ order_id, symbol,
+  order_type: 'limit', side: 'bid', reduce_only: false, price: '10', stop_price: null });
 
 const ACCT = 'SubAccountPubkey1111111111111111111111111111';
 
@@ -19,34 +34,34 @@ function stubEmptyAccount(a: any) {
   });
   a.getPositions = async () => [];
   a.getOpenStopOrders = async () => [];
-  a.get = async () => []; // /orders/open
+  a.get = inventory();
 }
 
 describe('PacificaAdapter — Recycling Plan §8 (Phase D)', () => {
   describe('getOpenOrders', () => {
-    it('maps order_id/symbol from the /orders/open response', async () => {
+    it('maps order_id/symbol from the documented /orders envelope', async () => {
       const a = createAdapter() as any;
-      a.get = async (path: string) => {
-        expect(path).toBe('/orders/open');
-        return [{ order_id: 'o1', symbol: 'BTC' }, { id: 'o2', symbol: 'ETH' }];
+      a.get = async (path: string, query: unknown, options: any) => {
+        expect(path).toBe('/orders');
+        return inventory([order(1, 'BTC'), order(2, 'ETH')])(path, query, options);
       };
       const orders = await a.getOpenOrders(ACCT);
       expect(orders).toEqual([
-        { orderId: 'o1', symbol: 'BTC' },
-        { orderId: 'o2', symbol: 'ETH' },
+        { orderId: '1', symbol: 'BTC' },
+        { orderId: '2', symbol: 'ETH' },
       ]);
     });
 
-    it('treats a 404 as an empty list (no account / no orders)', async () => {
+    it('rejects a 404 instead of reporting empty inventory', async () => {
       const a = createAdapter() as any;
       a.get = async () => { throw new Error('HTTP 404 Not Found'); };
-      expect(await a.getOpenOrders(ACCT)).toEqual([]);
+      await expect(a.getOpenOrders(ACCT)).rejects.toThrow('404');
     });
 
-    it('returns [] when the response is not an array', async () => {
+    it('rejects a malformed inventory envelope', async () => {
       const a = createAdapter() as any;
       a.get = async () => ({ unexpected: true });
-      expect(await a.getOpenOrders(ACCT)).toEqual([]);
+      await expect(a.getOpenOrders(ACCT)).rejects.toThrow();
     });
 
     it('rethrows non-404 errors (fails closed)', async () => {
@@ -103,7 +118,7 @@ describe('PacificaAdapter — Recycling Plan §8 (Phase D)', () => {
     it('returns false when a resting order remains', async () => {
       const a = createAdapter() as any;
       stubEmptyAccount(a);
-      a.get = async () => [{ order_id: 'o1', symbol: 'BTC' }];
+      a.get = inventory([order(1, 'BTC')]);
       expect(await a.verifySubaccountEmpty({ agentPublicKey: ACCT })).toBe(false);
     });
 

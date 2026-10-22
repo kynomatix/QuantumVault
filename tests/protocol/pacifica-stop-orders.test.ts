@@ -12,6 +12,8 @@
 // structure — symbol/side/reduce_only at the top level, amount/stop_price
 // nested under stop_order:{}.
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
+import { pacificaCache } from '../../server/protocol/pacifica/pacifica-cache.js';
+import { isConfirmedCancellation } from '../../server/protocol/protocol-types.js';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter.js';
 import { PacificaSigner } from '../../server/protocol/pacifica/pacifica-signer.js';
 import { pacificaQuota } from '../../server/protocol/pacifica/pacifica-quota.js';
@@ -66,56 +68,6 @@ function stubOrderConstraints(a: any) {
   a.getStrictPositionForMarket = vi.fn(async () => ({ baseSize: -0.01 }));
   a.getExitStep = vi.fn(async (_symbol: string, field: string) => field === 'lot' ? 0.01 : 0.01);
 }
-
-describe('PacificaAdapter.getOpenStopOrders — symbol normalization', () => {
-  it('converts an INTERNAL symbol ("SOL-PERP") to the protocol symbol ("SOL")', async () => {
-    const a = createAdapter() as any;
-    stubRegistry(a);
-    const get = vi.fn(async () => [{ order_id: 'st-1', symbol: 'SOL' }]);
-    a.get = get;
-
-    const orders = await a.getOpenStopOrders(ACCT, 'sub-1', 'SOL-PERP');
-
-    expect(get).toHaveBeenCalledWith('/orders/stop', {
-      account: ACCT,
-      subaccount_id: 'sub-1',
-      symbol: 'SOL',
-    });
-    expect(orders).toHaveLength(1);
-  });
-
-  it('passes an already-converted PROTOCOL symbol ("SOL") through untouched', async () => {
-    const a = createAdapter() as any;
-    stubRegistry(a);
-    const get = vi.fn(async () => []);
-    a.get = get;
-
-    await a.getOpenStopOrders(ACCT, undefined, 'SOL');
-
-    expect(get).toHaveBeenCalledWith('/orders/stop', { account: ACCT, symbol: 'SOL' });
-  });
-
-  it('omits the symbol param entirely when none is given (unfiltered read)', async () => {
-    const a = createAdapter() as any;
-    stubRegistry(a);
-    const get = vi.fn(async () => []);
-    a.get = get;
-
-    await a.getOpenStopOrders(ACCT);
-
-    expect(get).toHaveBeenCalledWith('/orders/stop', { account: ACCT });
-  });
-
-  it('still maps 404 to an empty list and rethrows other errors', async () => {
-    const a = createAdapter() as any;
-    stubRegistry(a);
-    a.get = async () => { throw new Error('HTTP 404 Not Found'); };
-    expect(await a.getOpenStopOrders(ACCT, undefined, 'SOL-PERP')).toEqual([]);
-
-    a.get = async () => { throw new Error('HTTP 500 server error'); };
-    await expect(a.getOpenStopOrders(ACCT, undefined, 'SOL-PERP')).rejects.toThrow('500');
-  });
-});
 
 describe('PacificaAdapter.getOpenProtectiveOrders — documented /orders authority', () => {
   it('requests a fresh account order list and normalizes only the requested protective legs', async () => {
@@ -1139,4 +1091,207 @@ const deniedHttp = vi.hoisted(() => {
 afterEach(() => {
   const unexpected = deniedHttp.splice(0);
   expect(unexpected, 'Every HTTP read must be explicitly mocked').toEqual([]);
+});
+
+describe('Pacifica cancellation HTTP outcomes and scoped absence', () => {
+  const account = 'EXAMPLE_ACCOUNT';
+  const params = { agentPublicKey: account, agentSecretKey: new Uint8Array(64),
+    mainWalletAddress: 'EXAMPLE_WALLET', internalSymbol: 'SOL-PERP', symbol: 'SOL-PERP', orderId: '12' };
+  const row = (order_id = 12, extra = {}) => ({ order_id, symbol: 'SOL', side: 'ask',
+    order_type: 'stop_loss_market', reduce_only: true, stop_price: '90', price: null, ...extra });
+  const snapshot = (data: unknown[] = [], last_order_id = 20, extra = {}) => ({ success: true,
+    data, error: null, code: null, last_order_id, ...extra });
+  const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+  let a: any;
+  let fetchMock: ReturnType<typeof vi.spyOn>;
+  let sign: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    pacificaCache.invalidateAll();
+    pacificaQuota.resetCounters();
+    vi.spyOn(pacificaQuota, 'canAfford').mockReturnValue(true);
+    a = new PacificaAdapter({ baseUrl: 'http://test-pacifica.invalid' });
+    stubRegistry(a);
+    fetchMock = vi.spyOn(globalThis, 'fetch');
+    sign = vi.spyOn(PacificaSigner.prototype, 'buildRequestBody').mockImplementation(
+      (_type, data, acct) => ({ ...data, account: acct, signature: 'EXAMPLE' }) as any);
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each(['SOL', 'SOL-PERP', undefined])('projects documented stop inventory for %s', async (symbol) => {
+    fetchMock.mockImplementation(async () => reply(snapshot([row()])));
+    expect(await a.getOpenStopOrders(account, undefined, symbol)).toEqual([
+      { order_id: '12', symbol: 'SOL', side: 'ask', stop_price: '90', limit_price: undefined, order_type: 'stop_loss_market' },
+    ]);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('http://test-pacifica.invalid/orders?account=EXAMPLE_ACCOUNT');
+  });
+
+  it.each([
+    null, [], { success: true, data: [] }, snapshot([], 20, { success: false }),
+    snapshot([], 20, { error: 'EXAMPLE' }), snapshot([], 20, { account: 'WRONG' }),
+    snapshot([], 20, { has_more: true }), snapshot([], 20, { next_cursor: 'EXAMPLE' }),
+    snapshot([row(), row()]), snapshot([row(12, { symbol: 'UNKNOWN' })]),
+    snapshot([row(12, { reduce_only: null })]), snapshot([row(12, { order_type: 'future' })]),
+    snapshot([row(12, { stop_price: '' })]), snapshot([row(12, { side: 'unknown' })]),
+    snapshot([row(12, { account: 'WRONG' })]), snapshot([row(12, { li: 30 })]),
+    snapshot([row(1.5)]), snapshot([row(Number.MAX_SAFE_INTEGER + 1)]),
+  ])('fails closed on malformed inventory %#', async (body) => {
+    fetchMock.mockResolvedValue(reply(body));
+    expect(await a.cancelTpSlOrders(params)).toMatchObject({ success: false, outcome: 'unknown', dispatch: 'unsent' });
+    expect(sign).not.toHaveBeenCalled();
+    await expect(a.getOpenOrders(account)).rejects.toThrow();
+  });
+
+  it.each([404, 500, 202])('does not turn inventory HTTP %s into empty', async (status) => {
+    fetchMock.mockResolvedValue(reply(snapshot(), status));
+    await expect(a.getOpenStopOrders(account)).rejects.toThrow();
+  });
+
+  it.each(['', '0', '-1', '01', '1.0', '1e2', '1.5', '9007199254740992', '12\n', 'EXAMPLE'])('rejects unsafe identity %j before signer/read', async (orderId) => {
+    expect(await a.cancelStopOrder({ ...params, orderId })).toMatchObject({ success: false, dispatch: 'unsent' });
+    expect(sign).not.toHaveBeenCalled(); expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it.each([{ symbol: undefined }, { symbol: 'UNKNOWN' }, { subaccountId: '1' }])('rejects unsupported scope %# before signer/read', async (extra) => {
+    expect(await a.cancelStopOrder({ ...params, internalSymbol: undefined, ...extra })).toMatchObject({ success: false, dispatch: 'unsent' });
+    expect(sign).not.toHaveBeenCalled(); expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('empty discovery proves absence without any mutation', async () => {
+    fetchMock.mockResolvedValue(reply(snapshot()));
+    const result = await a.cancelTpSlOrders(params);
+    expect(isConfirmedCancellation(result, { account, symbol: 'SOL-PERP', operation: 'tpsl' })).toBe(true);
+    expect(result.canceledCount).toBe(0); expect(sign).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancelOrder', 'cancelStopOrder'])('signs exact numeric ID and symbol for %s and confirms separately', async (method) => {
+    const initial = row(12, method === 'cancelOrder' ? { order_type: 'limit', stop_price: null } : {});
+    fetchMock.mockResolvedValueOnce(reply(snapshot([initial])))
+      .mockResolvedValueOnce(reply({ success: true })).mockResolvedValueOnce(reply(snapshot([], 21)));
+    const result = await a[method](params);
+    expect(result).toMatchObject({ success: true, outcome: 'confirmed_absent', canceledCount: 1 });
+    expect(sign.mock.calls[0][1]).toEqual({ order_id: 12, symbol: 'SOL' });
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toMatchObject({ order_id: 12, symbol: 'SOL' });
+    expect(result.targets[0].requestOutcome).toBe('acknowledged');
+  });
+
+  it.each([
+    [200, { success: true }, 'acknowledged'], [200, {}, 'unknown'],
+    [200, { success: false }, 'unknown'], [200, { success: true, error: 'EXAMPLE' }, 'unknown'],
+    [200, { success: true, data: {} }, 'unknown'], [202, { success: true }, 'unknown'],
+    [400, { error: 'EXAMPLE', code: 400 }, 'rejected'], [404, { error: 'EXAMPLE', code: 404 }, 'unknown'],
+    [500, { error: 'EXAMPLE', code: 500 }, 'unknown'], [408, { error: 'EXAMPLE', code: 408 }, 'unknown'],
+  ])('retains request outcome for HTTP %s fixture %# without false completion', async (status, body, outcome) => {
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply(body, status as number)).mockResolvedValueOnce(reply(snapshot([row()], 21)));
+    const result = await a.cancelStopOrder(params);
+    expect(result).toMatchObject({ success: false, outcome, targets: [{ state: 'live', requestOutcome: outcome }] });
+    expect(result.canceledCount).toBeUndefined();
+  });
+
+  it.each([0, 1, 999])('cancel-all acknowledgement count %s does not establish absence', async (count) => {
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply({ cancelled_count: count })).mockResolvedValueOnce(reply(snapshot([row()], 21)));
+    expect(await a.cancelAllOrders({ ...params, excludeReduceOnly: false })).toMatchObject({ success: false, outcome: 'acknowledged', acknowledgedCount: count });
+  });
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '1', undefined])('rejects malformed cancel-all count %s', async (count) => {
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply({ cancelled_count: count })).mockResolvedValueOnce(reply(snapshot([row()], 21)));
+    expect(await a.cancelAllOrders({ ...params, excludeReduceOnly: false })).toMatchObject({ success: false, outcome: 'unknown' });
+  });
+  it.each([true, false])('signs explicit cancel-all policy %s', async (excludeReduceOnly) => {
+    const opening = row(13, { order_type: 'limit', stop_price: null, reduce_only: false });
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row(), opening])))
+      .mockResolvedValueOnce(reply({ cancelled_count: 1 })).mockResolvedValueOnce(reply(snapshot(excludeReduceOnly ? [row()] : [], 21)));
+    expect(await a.cancelAllOrders({ ...params, symbol: undefined, internalSymbol: undefined, excludeReduceOnly })).toMatchObject({ success: true });
+    expect(sign.mock.calls[0][1]).toEqual({ all_symbols: true, exclude_reduce_only: excludeReduceOnly });
+  });
+  it('requires explicit cancel-all policy before reading or signing', async () => {
+    expect(await a.cancelAllOrders(params)).toMatchObject({ success: false, dispatch: 'unsent' });
+    expect(fetchMock).not.toHaveBeenCalled(); expect(sign).not.toHaveBeenCalled();
+  });
+  it('signs a symbol-scoped cancel-all without broadening its scope', async () => {
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply({ cancelled_count: 1 })).mockResolvedValueOnce(reply(snapshot([], 21)));
+    const result = await a.cancelAllOrders({ ...params, excludeReduceOnly: false });
+    expect(result).toMatchObject({ success: true, scope: { symbol: 'SOL-PERP', excludeReduceOnly: false } });
+    expect(sign.mock.calls[0][1]).toEqual({ all_symbols: false, symbol: 'SOL', exclude_reduce_only: false });
+  });
+  it('keeps targets unknown if confirmation inventory fails', async () => {
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply({ success: true })).mockResolvedValueOnce(reply({}, 500));
+    expect(await a.cancelTpSlOrders(params)).toMatchObject({ success: false, outcome: 'acknowledged', targets: [{ state: 'unknown' }] });
+    expect(sign).toHaveBeenCalledOnce();
+  });
+  it('records a known unsent signing failure without a POST', async () => {
+    sign.mockImplementation(() => { throw new Error('EXAMPLE signing unavailable'); });
+    fetchMock.mockImplementation(async () => reply(snapshot([row()])));
+    expect(await a.cancelTpSlOrders(params)).toMatchObject({ success: false, outcome: 'rejected', dispatch: 'unsent', targets: [{ state: 'live', requestOutcome: 'unsent' }] });
+    expect(fetchMock.mock.calls.every(call => call[1]?.method === 'GET')).toBe(true);
+  });
+
+  it('cancels only captured protection and reports successors without touching opening orders', async () => {
+    const opening = row(14, { reduce_only: false, order_type: 'stop_market' });
+    const limit = row(15, { order_type: 'limit', stop_price: null });
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row(), row(13), opening, limit])))
+      .mockResolvedValueOnce(reply({ success: true })).mockResolvedValueOnce(reply({ error: 'EXAMPLE', code: 400 }, 400))
+      .mockResolvedValueOnce(reply(snapshot([row(13), row(16), opening, limit], 21)));
+    const result = await a.cancelTpSlOrders(params);
+    expect(result).toMatchObject({ success: false, outcome: 'partial', targets: [
+      { orderId: '12', state: 'absent', requestOutcome: 'acknowledged' },
+      { orderId: '13', state: 'live', requestOutcome: 'rejected' }], successors: [{ orderId: '16', state: 'live' }] });
+    expect(sign.mock.calls.map(call => call[1].order_id)).toEqual([12, 13]);
+    expect(fetchMock.mock.calls.filter(call => call[1]?.method === 'POST').every(call => String(call[0]).endsWith('/orders/stop/cancel'))).toBe(true);
+  });
+  it('retains ambiguous request history when fresh observation proves absence', async () => {
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockRejectedValueOnce(new Error('EXAMPLE transport')).mockResolvedValueOnce(reply(snapshot([], 21)));
+    expect(await a.cancelTpSlOrders(params)).toMatchObject({ success: true, targets: [{ state: 'absent', requestOutcome: 'unknown' }] });
+    expect(sign).toHaveBeenCalledOnce();
+  });
+  it.each([19, 20])('does not confirm disappearing targets on watermark %s', async (watermark) => {
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply({ success: true })).mockResolvedValueOnce(reply(snapshot([], watermark)));
+    expect(await a.cancelTpSlOrders(params)).toMatchObject({ success: false, outcome: 'acknowledged', targets: [{ state: 'unknown' }] });
+  });
+  it('does not accept the target on a different market as absence evidence', async () => {
+    a.getRegistry = () => ({ isKnownInternal: (s: string) => s.endsWith('-PERP'),
+      internalToProtocol: (s: string) => s.replace('-PERP', ''), protocolToInternal: (s: string) => s + '-PERP' });
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply({ success: true })).mockResolvedValueOnce(reply(snapshot([row(12, { symbol: 'BTC' })], 21)));
+    expect(await a.cancelTpSlOrders(params)).toMatchObject({ success: false, targets: [{ state: 'unknown' }] });
+  });
+  it('does not share an earlier fresh-required GET or concurrent confirmation reads', async () => {
+    let releaseOld!: (value: Response) => void;
+    const oldResponse = new Promise<Response>(resolve => { releaseOld = resolve; });
+    fetchMock.mockReturnValueOnce(oldResponse)
+      .mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce(reply({ success: true }))
+      .mockResolvedValueOnce(reply(snapshot([], 21)));
+    const oldRead = a.get('/orders', { account }, { cachePolicy: 'fresh-required', responseShape: 'envelope' });
+    const result = await a.cancelTpSlOrders(params);
+    expect(result.success).toBe(true); expect(fetchMock).toHaveBeenCalledTimes(4);
+    releaseOld(reply(snapshot([row()]))); await oldRead;
+    fetchMock.mockImplementation(async () => reply(snapshot([], 22)));
+    const [one, two] = await Promise.all([a.cancelTpSlOrders(params), a.cancelTpSlOrders(params)]);
+    expect(one.evidence.requestId).not.toBe(two.evidence.requestId);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+  });
+  it('bounds a stalled response body and never retries the mutation', async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValueOnce(reply(snapshot([row()])))
+      .mockResolvedValueOnce({ status: 200, ok: true, json: () => new Promise(() => {}) } as Response)
+      .mockResolvedValueOnce(reply(snapshot([row()], 21)));
+    const pending = a.cancelTpSlOrders(params);
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(await pending).toMatchObject({ success: false, outcome: 'unknown' });
+    expect(sign).toHaveBeenCalledOnce();
+  });
+  it('quota refusal cannot fall back to cached empty inventory', async () => {
+    vi.useFakeTimers();
+    pacificaCache.set('/orders?account=EXAMPLE_ACCOUNT:envelope', '/orders', snapshot());
+    vi.mocked(pacificaQuota.canAfford).mockReturnValue(false);
+    const pending = a.cancelTpSlOrders(params);
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(await pending).toMatchObject({ success: false, outcome: 'unknown', dispatch: 'unsent' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

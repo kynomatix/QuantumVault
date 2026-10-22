@@ -1,3 +1,4 @@
+import { isConfirmedCancellation, type CancelResult } from "./protocol/protocol-types";
 import { registerLabProvenanceRoutes } from './lab/provenance-routes';
 import { labSelection, validateLabSelection } from './lab/provenance';
 import { phoenixConsumerDisabled } from './protocol/phoenix/consumer-service';
@@ -625,6 +626,16 @@ export function shouldBlockDeleteForSweep(
  * Signing mirrors the trade path for external_key bots: the bot's own subaccount
  * key signs, agentPublicKey = the subaccount pubkey, subaccountId = undefined.
  */
+function cancellationConflict(result?: CancelResult) {
+  return {
+    success: false,
+    outcome: result?.outcome === 'confirmed_absent' ? 'unknown' : result?.outcome ?? 'unknown',
+    error: 'TP/SL removal is unconfirmed. Saved values describe desired settings; some protection may already be absent.',
+    targets: (result?.targets ?? []).map(({ orderId, symbol, state }) => ({ orderId, symbol, state })),
+    successors: (result?.successors ?? []).map(({ orderId, symbol, state }) => ({ orderId, symbol, state })),
+  };
+}
+
 async function teardownPacificaSubaccountForDelete(
   bot: TradingBot,
   logPrefix: string,
@@ -638,35 +649,16 @@ async function teardownPacificaSubaccountForDelete(
     decrypted = await _resolveBotSubaccountSecretKey(botCtx);
     const sk = decrypted.secretKey;
 
-    // 1) Cancel all resting (non-stop) orders across every symbol.
+    // 1) Cancel the captured scope, including stops. Do not recapture successors for cancellation.
     try {
       await adapter.cancelAllOrders({
         agentPublicKey: acct,
         agentSecretKey: sk,
         mainWalletAddress: bot.walletAddress,
+        excludeReduceOnly: false,
       });
     } catch (e: any) {
       console.warn(`${logPrefix} teardown: cancelAllOrders failed: ${e.message}`);
-    }
-
-    // 2) Cancel any stop / TP-SL orders individually.
-    try {
-      const stops = adapter.getOpenStopOrders ? await adapter.getOpenStopOrders(acct) : [];
-      for (const s of stops) {
-        if (!adapter.cancelStopOrder) break;
-        try {
-          await adapter.cancelStopOrder({
-            agentPublicKey: acct,
-            agentSecretKey: sk,
-            mainWalletAddress: bot.walletAddress,
-            orderId: s.order_id,
-          });
-        } catch (e: any) {
-          console.warn(`${logPrefix} teardown: cancelStopOrder ${s.order_id} failed: ${e.message}`);
-        }
-      }
-    } catch (e: any) {
-      console.warn(`${logPrefix} teardown: stop-order listing failed: ${e.message}`);
     }
 
     // 3) Close every open position with a reduce-only market order.
@@ -696,9 +688,9 @@ async function teardownPacificaSubaccountForDelete(
       if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
       const positions = await adapter.getPositions(acct);
       if (positions.some((p) => Math.abs(p.baseSize) > 0)) continue;
-      const openOrders = adapter.getOpenOrders ? await adapter.getOpenOrders(acct) : [];
+      const openOrders = adapter.getOpenOrders ? await adapter.getOpenOrders(acct) : (() => { throw new Error('Order inventory unavailable'); })();
       if (openOrders.length > 0) continue;
-      const stops = adapter.getOpenStopOrders ? await adapter.getOpenStopOrders(acct) : [];
+      const stops = adapter.getOpenStopOrders ? await adapter.getOpenStopOrders(acct) : (() => { throw new Error('Stop inventory unavailable'); })();
       if (stops.length > 0) continue;
       return { ok: true };
     }
@@ -10010,18 +10002,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(400).json({ error: "Current protocol adapter does not support TP/SL" });
       }
 
+      if (bot.activeProtocol === 'pacifica' && !adapter.cancelTpSlOrders) {
+        return res.status(409).json(cancellationConflict());
+      }
       if (adapter.cancelTpSlOrders) {
         try {
           const cancelResult = await adapter.cancelTpSlOrders({
-            agentPublicKey: signing.publicKey,
-            agentSecretKey: signing.secretKey,
-            mainWalletAddress,
-            internalSymbol: bot.market,
-            subaccountId: signing.subaccountId,
+            agentPublicKey: signing.publicKey, agentSecretKey: signing.secretKey,
+            mainWalletAddress, internalSymbol: bot.market, subaccountId: signing.subaccountId,
           });
-          console.log(`[SetTpSl] Pre-cleared existing TP/SL for bot ${bot.id}: canceled=${cancelResult.canceledCount}`);
-        } catch (err: any) {
-          console.log(`[SetTpSl] Pre-clear failed (non-fatal): ${err.message}`);
+          if (bot.activeProtocol === 'pacifica' && !isConfirmedCancellation(cancelResult, {
+            account: signing.publicKey, symbol: bot.market, operation: 'tpsl',
+          })) return res.status(409).json(cancellationConflict(cancelResult));
+        } catch {
+          if (bot.activeProtocol === 'pacifica') return res.status(409).json(cancellationConflict());
         }
       }
 
@@ -10119,15 +10113,26 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const signing = await _resolveSigningContext(agentSecret, subAccountId, cancelBotCtx);
 
       try {
+      if (bot.activeProtocol === 'pacifica' && !adapter.cancelTpSlOrders) {
+        return res.status(409).json(cancellationConflict());
+      }
       if (adapter.cancelTpSlOrders) {
-        const result = await adapter.cancelTpSlOrders({
+        let result: CancelResult;
+        try {
+        result = await adapter.cancelTpSlOrders({
           agentPublicKey: signing.publicKey,
           agentSecretKey: signing.secretKey,
           mainWalletAddress,
           internalSymbol: bot.market,
           subaccountId: signing.subaccountId,
         });
-        console.log(`[CancelTpSl] cancel_all response for bot ${bot.id} (${bot.market}): canceled_count=${result.canceledCount}, success=${result.success}, error=${result.error || 'none'}`);
+        } catch (error) {
+          if (bot.activeProtocol === 'pacifica') return res.status(409).json(cancellationConflict());
+          throw error;
+        }
+        if (bot.activeProtocol === 'pacifica' && !isConfirmedCancellation(result, {
+          account: signing.publicKey, symbol: bot.market, operation: 'tpsl',
+        })) return res.status(409).json(cancellationConflict(result));
 
         let positionStillOpen = false;
         try {

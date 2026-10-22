@@ -415,7 +415,10 @@ function makeAdapter(overrides: Record<string, unknown> = {}): ProtocolAdapter {
     getOpenStopOrders: vi.fn(async () => [{ order_id: "st-1", symbol: "SOL" }]),
     getOpenProtectiveOrders: vi.fn(async () => protectiveSnapshot("st-1")),
     setTpSl: vi.fn(async () => ({ success: true, status: "acknowledged" })),
-    cancelTpSlOrders: vi.fn(async () => ({ success: true })),
+    cancelTpSlOrders: vi.fn(async (params: any) => ({ success: true, outcome: 'confirmed_absent', dispatch: 'unsent',
+      scope: { account: params.agentPublicKey, symbol: params.internalSymbol, operation: 'tpsl' }, targets: [], successors: [], canceledCount: 0,
+      evidence: { account: params.agentPublicKey, requestId: 'EXAMPLE', startedAt: NOW, dispatchedAt: NOW, receivedAt: NOW,
+        lastOrderId: 1, baselineLastOrderId: 1, complete: true, fresh: true, noDedup: true, phase: 'discovery' } })),
     closePosition: vi.fn(async () => ({ success: true, status: "filled", fillPrice: 150.0 })),
     getPrice: vi.fn(async () => 150),
     quantizePrice: vi.fn((_market: string, price: number) => Math.round(price * 1_000) / 1_000),
@@ -1666,6 +1669,38 @@ describe("live close-result consumption", () => {
     await userClose;
     expect(closePosition).toHaveBeenCalledTimes(1);
     expect(decisionUpdates().filter((u) => u.exitReason === "user_close")).toHaveLength(1);
+  });
+
+  it.each([
+    { success: true },
+    { success: false, outcome: 'acknowledged', dispatch: 'attempted' },
+    { success: false, outcome: 'unknown', dispatch: 'attempted' },
+    { success: false, outcome: 'partial', dispatch: 'attempted' },
+  ])("keeps uncertain cancellation nonterminal while an independent close succeeds: %j", async (cancelResult) => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const closePosition = vi.fn(async () => ({ success: true, status: 'filled', fillPrice: 151 }));
+    getAdapterMock.mockReturnValue(makeAdapter({ getPositions: vi.fn(async () => [openPosition]),
+      cancelTpSlOrders: vi.fn(async () => cancelResult), closePosition }));
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    expect(await userInitiatedClose(makeBot({ paperMode: false }))).toMatchObject({ ok: true, closed: true });
+    expect(closePosition).toHaveBeenCalledOnce();
+    const events = journalEvents();
+    expect(events.filter((event: any) => event.action === 'cancel' && event.eventType.startsWith('cancel_terminal'))).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({ action: 'cancel', eventType: 'broadcast_result', failureCode: 'venue_unconfirmed' }));
+  });
+
+  it.each(['confirmed_absent', 'rejected'])("journals a qualified cancellation terminal outcome %s independently of close", async (outcome) => {
+    const { userInitiatedClose } = await importMonitor();
+    armLiveAuth();
+    const adapter = makeAdapter({ getPositions: vi.fn(async () => [openPosition]),
+      closePosition: vi.fn(async () => ({ success: true, status: 'filled', fillPrice: 151 })) });
+    if (outcome === 'rejected') (adapter as any).cancelTpSlOrders.mockResolvedValue({ success: false, outcome: 'rejected', dispatch: 'attempted' });
+    getAdapterMock.mockReturnValue(adapter);
+    getDecisionsMock.mockResolvedValue([makeOpenDecision()]);
+    expect(await userInitiatedClose(makeBot({ paperMode: false }))).toMatchObject({ ok: true, closed: true });
+    expect(journalEvents()).toContainEqual(expect.objectContaining({ action: 'cancel',
+      eventType: outcome === 'confirmed_absent' ? 'cancel_terminal_confirmed' : 'cancel_terminal_failed' }));
   });
 
   it("continues a terminal close after cancellation throws without restoring a flat position", async () => {

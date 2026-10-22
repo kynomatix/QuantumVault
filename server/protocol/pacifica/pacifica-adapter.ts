@@ -17,6 +17,9 @@ import type {
   CancelOrderParams,
   CancelAllOrdersParams,
   CancelResult,
+  CancelScope,
+  CancelTarget,
+  CancelObservation,
   ClosePositionParams,
   SetLeverageParams,
   SetMarginModeParams,
@@ -1828,61 +1831,175 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async cancelOrder(params: CancelOrderParams): Promise<CancelResult> {
-    const signer = new PacificaSigner(params.agentSecretKey);
-
-    const operationData: Record<string, unknown> = {
-      order_id: params.orderId,
-    };
-
-    const body = signer.buildRequestBody(
-      OPERATION_TYPES.CANCEL_ORDER,
-      operationData,
-      params.agentPublicKey,
-      null,
-    );
-
-    if (params.subaccountId) {
-      (body as Record<string, unknown>).subaccount_id = params.subaccountId;
-    }
-
-    const response = await this.post('/orders/cancel', body);
-
-    return {
-      success: response.success !== false,
-      canceledCount: 1,
-      error: response.error,
-    };
+    return this.cancelScoped(params, 'order');
   }
 
   async cancelAllOrders(params: CancelAllOrdersParams): Promise<CancelResult> {
-    const signer = new PacificaSigner(params.agentSecretKey);
+    return this.cancelScoped(params, 'all');
+  }
 
-    const operationData: Record<string, unknown> = {
-      all_symbols: !params.symbol,
-    };
+  private cancelSymbol(symbol: string): { wire: string; internal: string } {
+    const registry = this.getRegistry();
+    const wire = registry.isKnownInternal(symbol) ? registry.internalToProtocol(symbol) : symbol;
+    const internal = registry.protocolToInternal(wire);
+    return { wire: registry.internalToProtocol(internal), internal };
+  }
 
-    if (params.symbol) {
-      operationData.symbol = this.getRegistry().internalToProtocol(params.symbol);
+  private cancelId(value: unknown): string {
+    const id = typeof value === 'number' ? String(value) : value;
+    if (typeof id !== 'string' || !/^[1-9][0-9]*$/.test(id)
+      || !Number.isSafeInteger(Number(id)) || String(Number(id)) !== id) throw new Error('invalid_cancel_order_id');
+    return id;
+  }
+
+  /** Documented account inventory; no alias, cache fallback, or shared request. */
+  private async cancelInventory(account: string, subaccountId?: string) {
+    if (!account || subaccountId !== undefined) throw new Error('unsupported_cancel_account_scope');
+    const startedAt = Date.now();
+    let dispatchedAt: number | undefined;
+    const requestId = randomUUID();
+    const envelope = await this.get('/orders', { account }, {
+      cachePolicy: 'fresh-required', responseShape: 'envelope', noDedup: true,
+      priority: 'critical', onDispatch: () => { dispatchedAt = Date.now(); },
+    });
+    const receivedAt = Date.now();
+    if (dispatchedAt === undefined || !envelope || envelope.success !== true
+      || envelope.error !== null || envelope.code !== null || !Array.isArray(envelope.data)
+      || !Number.isSafeInteger(envelope.last_order_id) || envelope.last_order_id < 0
+      || (envelope.account !== undefined && envelope.account !== account)
+      || envelope.subaccount_id !== undefined
+      || ['has_more', 'next_cursor', 'cursor', 'next_page', 'pagination', 'truncated', 'limit', 'offset']
+        .some(key => envelope[key] !== undefined && envelope[key] !== null && envelope[key] !== false)) {
+      throw new Error('invalid_cancel_inventory');
     }
+    const ids = new Set<string>();
+    const types = new Set(['limit', 'market', 'stop_limit', 'stop_market', 'take_profit_limit', 'take_profit_market', 'stop_loss_limit', 'stop_loss_market']);
+    const rows = envelope.data.map((row: any) => {
+      if (!row || typeof row !== 'object') throw new Error('invalid_cancel_row');
+      const orderId = this.cancelId(row.order_id);
+      if (ids.has(orderId) || typeof row.symbol !== 'string' || !types.has(row.order_type)
+        || typeof row.reduce_only !== 'boolean' || !['bid', 'ask'].includes(row.side)
+        || (row.account !== undefined && row.account !== account) || row.subaccount_id !== undefined
+        || (row.li != null && (!Number.isSafeInteger(row.li) || row.li < 0 || row.li > envelope.last_order_id))) {
+        throw new Error('invalid_cancel_row');
+      }
+      ids.add(orderId);
+      const symbol = this.cancelSymbol(row.symbol);
+      const stop = !['limit', 'market'].includes(row.order_type);
+      if (stop && (typeof row.stop_price !== 'string' || !/^\d+(?:\.\d+)?$/.test(row.stop_price) || !Number.isFinite(Number(row.stop_price)) || Number(row.stop_price) <= 0)) {
+        throw new Error('invalid_cancel_stop_price');
+      }
+      if (row.price != null && (typeof row.price !== 'string' || !/^\d+(?:\.\d+)?$/.test(row.price) || !Number.isFinite(Number(row.price)) || Number(row.price) < 0)) {
+        throw new Error('invalid_cancel_limit_price');
+      }
+      const protective = row.order_type.startsWith('take_profit_') || row.order_type.startsWith('stop_loss_')
+        || (stop && row.reduce_only);
+      return { orderId, symbol: symbol.internal, wireSymbol: symbol.wire, stop, protective,
+        reduceOnly: row.reduce_only as boolean, side: row.side as string, stopPrice: row.stop_price as string,
+        limitPrice: (row.price ?? undefined) as string | undefined, orderType: row.order_type as string };
+    });
+    const evidence: CancelObservation = { account, requestId, startedAt, dispatchedAt, receivedAt,
+      lastOrderId: envelope.last_order_id, baselineLastOrderId: envelope.last_order_id,
+      complete: true, fresh: true, noDedup: true, phase: 'discovery' };
+    return { rows, evidence };
+  }
 
-    const body = signer.buildRequestBody(
-      OPERATION_TYPES.CANCEL_ALL_ORDERS,
-      operationData,
-      params.agentPublicKey,
-      null,
-    );
+  private async sendCancellation(params: CancelAllOrdersParams, operation: CancelScope['operation'],
+    fields: Record<string, unknown>): Promise<{ outcome: CancelTarget['requestOutcome']; dispatch: 'unsent' | 'attempted'; count?: number }> {
+    const endpoint = operation === 'all' ? '/orders/cancel_all' : operation === 'order' ? '/orders/cancel' : '/orders/stop/cancel';
+    const type = operation === 'all' ? OPERATION_TYPES.CANCEL_ALL_ORDERS : operation === 'order' ? OPERATION_TYPES.CANCEL_ORDER : OPERATION_TYPES.CANCEL_STOP_ORDER;
+    let body: unknown;
+    try {
+      const signer = new PacificaSigner(params.agentSecretKey);
+      body = signer.buildRequestBody(type, fields, params.agentPublicKey, null);
+    } catch { return { outcome: 'unsent', dispatch: 'unsent' }; }
+    try {
+      const response = await this.post(endpoint, body, { cancellation: true });
+      const json = response.body;
+      const object = json && typeof json === 'object' && !Array.isArray(json);
+      if (object && response.status === 400 && typeof json.error === 'string' && json.error.length > 0
+        && Number.isSafeInteger(json.code) && json.success !== true) return { outcome: 'rejected', dispatch: 'attempted' };
+      if (object && response.status === 200 && json.error == null && json.code == null && !('data' in json)) {
+        if (operation === 'all' && json.success !== false && Number.isSafeInteger(json.cancelled_count) && json.cancelled_count >= 0) {
+          return { outcome: 'acknowledged', dispatch: 'attempted', count: json.cancelled_count };
+        }
+        if (operation !== 'all' && json.success === true) return { outcome: 'acknowledged', dispatch: 'attempted' };
+      }
+    } catch { /* Transport/body ambiguity is not rejection. */ }
+    return { outcome: 'unknown', dispatch: 'attempted' };
+  }
 
-    if (params.subaccountId) {
-      (body as Record<string, unknown>).subaccount_id = params.subaccountId;
+  private async cancelScoped(params: CancelAllOrdersParams & { orderId?: string; internalSymbol?: string },
+    operation: CancelScope['operation']): Promise<CancelResult> {
+    let scope: CancelScope;
+    let requestedId: string | undefined;
+    let wireSymbol: string | undefined;
+    try {
+      if (!params.agentPublicKey || params.subaccountId !== undefined) throw new Error('unsupported_cancel_account_scope');
+      const inputSymbol = params.internalSymbol ?? params.symbol;
+      if (operation !== 'all' && !inputSymbol) throw new Error('missing_cancel_symbol');
+      const symbol = inputSymbol === undefined ? undefined : this.cancelSymbol(inputSymbol);
+      wireSymbol = symbol?.wire;
+      if (operation === 'order' || operation === 'stop') requestedId = this.cancelId(params.orderId);
+      if (operation === 'all' && typeof params.excludeReduceOnly !== 'boolean') throw new Error('missing_cancel_reduce_only_policy');
+      scope = { account: params.agentPublicKey, symbol: symbol?.internal ?? null, operation,
+        ...(operation === 'all' ? { excludeReduceOnly: params.excludeReduceOnly } : {}) };
+    } catch { return { success: false, outcome: 'rejected', dispatch: 'unsent', error: 'Invalid or unsupported cancellation scope' }; }
+    let before: Awaited<ReturnType<PacificaAdapter['cancelInventory']>>;
+    try { before = await this.cancelInventory(scope.account); }
+    catch { return { success: false, outcome: 'unknown', dispatch: 'unsent', scope, error: 'Cancellation inventory unavailable' }; }
+    const eligible = (row: typeof before.rows[number]) => (scope.symbol === null || row.symbol === scope.symbol)
+      && (operation === 'tpsl' ? row.protective : operation === 'all' ? (!scope.excludeReduceOnly || !row.reduceOnly)
+        : row.orderId === requestedId);
+    const captured = before.rows.filter(eligible);
+    if (requestedId && before.rows.some(row => row.orderId === requestedId
+      && (row.symbol !== scope.symbol || row.stop !== (operation === 'stop')))) {
+      return { success: false, outcome: 'unknown', dispatch: 'unsent', scope, error: 'Cancellation identity mismatch' };
     }
-
-    const response = await this.post('/orders/cancel_all', body);
-
-    return {
-      success: response.success !== false,
-      canceledCount: response.canceled_count,
-      error: response.error,
-    };
+    if (!captured.length) return { success: true, outcome: 'confirmed_absent', dispatch: 'unsent', scope,
+      canceledCount: 0, targets: [], successors: [], evidence: before.evidence };
+    const targets: CancelTarget[] = captured.map(row => ({ orderId: row.orderId, symbol: row.symbol, state: 'unknown', requestOutcome: 'unsent' }));
+    let dispatch: 'unsent' | 'attempted' = 'unsent';
+    let acknowledgedCount: number | undefined;
+    if (operation === 'all') {
+      const sent = await this.sendCancellation(params, operation, { all_symbols: scope.symbol === null,
+        exclude_reduce_only: scope.excludeReduceOnly, ...(wireSymbol ? { symbol: wireSymbol } : {}) });
+      dispatch = sent.dispatch;
+      acknowledgedCount = sent.count;
+      targets.forEach(target => { target.requestOutcome = sent.outcome; });
+    } else {
+      for (const target of targets) {
+        const row = captured.find(row => row.orderId === target.orderId)!;
+        const sent = await this.sendCancellation(params, operation, { symbol: row.wireSymbol, order_id: Number(row.orderId) });
+        target.requestOutcome = sent.outcome;
+        if (sent.dispatch === 'attempted') dispatch = 'attempted';
+      }
+    }
+    const mutationSettledAt = Date.now();
+    let evidence: CancelObservation | undefined;
+    let successors: CancelResult['successors'];
+    try {
+      // A new direct GET starts only after every send has settled locally.
+      const after = await this.cancelInventory(scope.account);
+      if (after.evidence.lastOrderId < before.evidence.lastOrderId
+        || (targets.some(target => !after.rows.some(row => row.orderId === target.orderId))
+          && after.evidence.lastOrderId === before.evidence.lastOrderId)
+        || after.rows.some(row => targets.some(target => target.orderId === row.orderId && target.symbol !== row.symbol))) {
+        throw new Error('contradictory_cancel_snapshot');
+      }
+      targets.forEach(target => { target.state = after.rows.some(row => row.orderId === target.orderId) ? 'live' : 'absent'; });
+      successors = after.rows.filter(row => eligible(row) && !targets.some(target => target.orderId === row.orderId))
+        .map(row => ({ orderId: row.orderId, symbol: row.symbol, state: 'live' as const }));
+      evidence = { ...after.evidence, phase: 'confirmation', mutationSettledAt, baselineLastOrderId: before.evidence.lastOrderId };
+    } catch { /* Keep captured identities and request outcomes, with unknown observation. */ }
+    const absent = targets.filter(target => target.state === 'absent').length;
+    const success = !!evidence && absent === targets.length && successors?.length === 0;
+    const outcome: CancelResult['outcome'] = success ? 'confirmed_absent' : absent > 0 ? 'partial'
+      : targets.every(target => target.requestOutcome === 'acknowledged') ? 'acknowledged'
+      : targets.every(target => ['rejected', 'unsent'].includes(target.requestOutcome)) ? 'rejected' : 'unknown';
+    return { success, outcome, dispatch, scope, targets, successors, evidence, acknowledgedCount,
+      ...(success ? { canceledCount: absent } : {}),
+      ...(success ? {} : { error: 'Cancellation removal is not confirmed; saved settings describe desired protection only' }) };
   }
 
   async closePosition(params: ClosePositionParams): Promise<OrderResult> {
@@ -2902,28 +3019,11 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async getOpenStopOrders(agentPublicKey: string, subaccountId?: string, symbol?: string): Promise<Array<{ order_id: string; symbol: string; side: string; stop_price: string; limit_price?: string; order_type?: string }>> {
-    const params: Record<string, string> = { account: agentPublicKey };
-    if (subaccountId) params.subaccount_id = subaccountId;
-    if (symbol) {
-      // Callers pass either an internal symbol ("SOL-PERP" — executor G10,
-      // ai-trader monitor) or an already-converted protocol symbol ("SOL" —
-      // verifyStopOrdersExist below). Normalize tolerantly: internal symbols
-      // convert, everything else passes through raw. Forwarding an internal
-      // symbol raw made Pacifica return an empty list, which the G10 path
-      // reads as "bracket missing" — a money-path misread (force-close).
-      const registry = this.getRegistry();
-      params.symbol = registry.isKnownInternal(symbol) ? registry.internalToProtocol(symbol) : symbol;
-    }
-    try {
-      const response = await this.get('/orders/stop', params);
-      if (!Array.isArray(response)) return [];
-      return response;
-    } catch (err: any) {
-      if (err.message && (err.message.includes('404') || err.message.includes('Not Found'))) {
-        return [];
-      }
-      throw err;
-    }
+    const market = symbol === undefined ? undefined : this.cancelSymbol(symbol).internal;
+    const inventory = await this.cancelInventory(agentPublicKey, subaccountId);
+    return inventory.rows.filter(row => row.stop && (market === undefined || row.symbol === market))
+      .map(row => ({ order_id: row.orderId, symbol: row.wireSymbol, side: row.side,
+        stop_price: row.stopPrice, limit_price: row.limitPrice, order_type: row.orderType }));
   }
 
   async getOpenProtectiveOrders(
@@ -3009,21 +3109,8 @@ export class PacificaAdapter implements ProtocolAdapter {
    * (no account / no orders) is treated as an empty list, mirroring getPositions.
    */
   async getOpenOrders(agentPublicKey: string, subaccountId?: string): Promise<Array<{ orderId: string; symbol: string }>> {
-    const params: Record<string, string> = { account: agentPublicKey };
-    if (subaccountId) params.subaccount_id = subaccountId;
-    try {
-      const response = await this.get('/orders/open', params);
-      if (!Array.isArray(response)) return [];
-      return response.map((o: any) => ({
-        orderId: String(o.order_id ?? o.id ?? ''),
-        symbol: String(o.symbol ?? ''),
-      }));
-    } catch (err: any) {
-      if (err.message && (err.message.includes('404') || err.message.includes('Not Found'))) {
-        return [];
-      }
-      throw err;
-    }
+    const inventory = await this.cancelInventory(agentPublicKey, subaccountId);
+    return inventory.rows.map(row => ({ orderId: row.orderId, symbol: row.wireSymbol }));
   }
 
   /**
@@ -3113,89 +3200,14 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   async cancelTpSlOrders(params: {
-    agentPublicKey: string;
-    agentSecretKey: Uint8Array;
-    mainWalletAddress: string;
-    internalSymbol: string;
-    subaccountId?: string;
+    agentPublicKey: string; agentSecretKey: Uint8Array; mainWalletAddress: string;
+    internalSymbol: string; subaccountId?: string;
   }): Promise<CancelResult> {
-    const protocolSymbol = this.getRegistry().internalToProtocol(params.internalSymbol);
-
-    let stopOrders: Array<{ order_id: string }> = [];
-    try {
-      stopOrders = await this.getOpenStopOrders(params.agentPublicKey, params.subaccountId, protocolSymbol);
-      console.log(`[PacificaAdapter.cancelTpSlOrders] Found ${stopOrders.length} stop orders for ${protocolSymbol}`);
-    } catch (err: any) {
-      console.log(`[PacificaAdapter.cancelTpSlOrders] Stop order listing failed (${err.message}), using cancelAllOrders fallback`);
-    }
-
-    if (stopOrders.length > 0) {
-      let canceledCount = 0;
-      const errors: string[] = [];
-      for (const order of stopOrders) {
-        try {
-          const result = await this.cancelStopOrder({
-            agentPublicKey: params.agentPublicKey,
-            agentSecretKey: params.agentSecretKey,
-            mainWalletAddress: params.mainWalletAddress,
-            orderId: order.order_id,
-            subaccountId: params.subaccountId,
-          });
-          if (result.success) canceledCount++;
-          else if (result.error) errors.push(result.error);
-        } catch (err: any) {
-          errors.push(err.message || String(err));
-        }
-      }
-      return {
-        success: canceledCount > 0 || errors.length === 0,
-        canceledCount,
-        error: errors.length > 0 ? errors.join('; ') : undefined,
-      };
-    }
-
-    console.log(`[PacificaAdapter.cancelTpSlOrders] Canceling all orders for ${protocolSymbol} via cancel_all`);
-    try {
-      const result = await this.cancelAllOrders({
-        agentPublicKey: params.agentPublicKey,
-        agentSecretKey: params.agentSecretKey,
-        mainWalletAddress: params.mainWalletAddress,
-        symbol: params.internalSymbol,
-        subaccountId: params.subaccountId,
-      });
-      console.log(`[PacificaAdapter.cancelTpSlOrders] cancel_all result: canceled=${result.canceledCount}`);
-      return result;
-    } catch (err: any) {
-      console.log(`[PacificaAdapter.cancelTpSlOrders] cancel_all also failed: ${err.message}`);
-      return { success: true, canceledCount: 0 };
-    }
+    return this.cancelScoped(params, 'tpsl');
   }
 
   async cancelStopOrder(params: CancelStopOrderParams): Promise<CancelResult> {
-    const signer = new PacificaSigner(params.agentSecretKey);
-
-    const operationData: Record<string, unknown> = {
-      order_id: params.orderId,
-    };
-
-    const body = signer.buildRequestBody(
-      OPERATION_TYPES.CANCEL_STOP_ORDER,
-      operationData,
-      params.agentPublicKey,
-      null,
-    );
-
-    if (params.subaccountId) {
-      (body as Record<string, unknown>).subaccount_id = params.subaccountId;
-    }
-
-    const response = await this.post('/orders/stop/cancel', body);
-
-    return {
-      success: response.success !== false,
-      canceledCount: 1,
-      error: response.error,
-    };
+    return this.cancelScoped(params, 'stop');
   }
 
   async executeDeposit(params: AgentDepositParams): Promise<DepositResult> {
@@ -4322,6 +4334,8 @@ export class PacificaAdapter implements ProtocolAdapter {
       bypassCache?: boolean;
       cachePolicy?: 'default' | 'fresh-required';
       responseShape?: 'data' | 'envelope';
+      noDedup?: boolean;
+      onDispatch?: () => void;
       caller?: string;
     },
   ): Promise<any> {
@@ -4340,7 +4354,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
     pacificaCache.noteMiss();
 
-    return pacificaCache.dedup(dedupKey, async () => {
+    const perform = async () => {
       // Re-check cache inside the dedup gate in case a sibling caller filled
       // it between our miss and acquiring the dedup slot.
       if (!bypassCache) {
@@ -4401,6 +4415,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         // monitor tick, freezing ALL bot monitoring until restart). The soft
         // signal also aborts the body read below; the hard cap catches wedged
         // sockets where the abort itself never fires.
+        options?.onDispatch?.();
         response = await this.fetchBounded(
           url,
           { method: 'GET', headers: { 'Content-Type': 'application/json' } },
@@ -4438,10 +4453,12 @@ export class PacificaAdapter implements ProtocolAdapter {
 
       // Bound the success-body read for the same reason.
       const json = await this.readBodyBounded(response.json(), 10_000, `GET ${path}`);
+      if (options?.noDedup && response.status !== 200) throw new Error('invalid_inventory_http_status');
       const data = responseShape === 'envelope' ? json : this.unwrapEnvelope(json);
       pacificaCache.set(cacheKey, path, data);
       return data;
-    });
+    };
+    return options?.noDedup ? perform() : pacificaCache.dedup(dedupKey, perform);
   }
 
   /** Fresh, uncached account read reserved for destructive key rotation. */
@@ -4791,7 +4808,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     return false;
   }
 
-  private async post(path: string, body: unknown): Promise<any> {
+  private async post(path: string, body: unknown, options?: { cancellation: true }): Promise<any> {
     const url = `${this.config.baseUrl}${path}`;
     const policy = pacificaPostSettlementPolicy(path, body);
     const ambiguous = (detail: string): Error => (
@@ -4820,6 +4837,11 @@ export class PacificaAdapter implements ProtocolAdapter {
       } catch (error) {
         if (!policy.mutatesVenue) throw error;
         throw ambiguous(`transport did not prove a terminal outcome: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      if (options?.cancellation) {
+        const json = await this.readBodyBounded(response.json(), PACIFICA_POST_BODY_TIMEOUT_MS, 'cancel response');
+        return { status: response.status, body: json };
       }
 
       if (!response.ok) {
@@ -4854,6 +4876,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     } finally {
       pacificaQuota.record(path);
       if (policy.mutatesVenue) this.invalidateMutationCaches();
+      if (options?.cancellation) pacificaCache.invalidate('/orders');
     }
   }
 

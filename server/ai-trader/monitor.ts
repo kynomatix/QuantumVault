@@ -1,3 +1,4 @@
+import { isConfirmedCancellation } from "../protocol/protocol-types";
 import { CycleAudit, deferredCycleAudit, reportOrphanCycle, safeCycleAudit } from "./cycle-audit";
 // AI Trader — position monitor + lifecycle loop (WO-6, docs/AGENTIC_TRADER_PLAN.md §6).
 //
@@ -1537,8 +1538,34 @@ function journalCancelAttempt(args: {
   result: CancelResult | null;
   failureCode?: JournalFailureCode;
   recordedAfterBroadcast?: boolean;
+  account?: string;
 }): void {
   const base = journalBase(args.bot, args.decisionId);
+  if (args.bot.protocol === 'pacifica') {
+    const success = isConfirmedCancellation(args.result, {
+      account: args.account ?? base.accountRef, symbol: args.bot.market, operation: 'tpsl',
+    });
+    const unsent = args.recordedAfterBroadcast === false || args.result?.dispatch === 'unsent';
+    const rejected = args.result?.outcome === 'rejected';
+    const terminalFailure = rejected || (unsent && args.failureCode === 'signing_unavailable');
+    const failureCode = success ? null : args.failureCode ?? (rejected ? 'venue_rejected' : 'venue_unconfirmed');
+    const event = { ...base, accountRef: args.account ?? base.accountRef, attemptId: args.attemptId,
+      action: 'cancel' as const, cause: args.cause, recordedAfterBroadcast: !unsent, failureCode };
+    const events: JournalEventInput[] = [{ ...event, eventType: 'attempt_claimed' }];
+    if (!unsent) events.push({ ...event, eventType: 'broadcast_attempted' });
+    events.push({ ...event, eventType: 'broadcast_result', venueStatus: rejected ? 'rejected'
+      : args.result?.outcome === 'acknowledged' ? 'acknowledged' : 'unknown' });
+    if (args.result?.evidence?.account === event.accountRef) {
+      for (const target of args.result.targets ?? []) events.push({ ...event,
+        eventType: 'reconciliation_observed', venueOrderId: target.orderId, market: target.symbol,
+        venueStatus: success && target.state === 'absent' ? 'canceled' : 'unknown' });
+    }
+    if (success || terminalFailure) events.push({ ...event,
+      eventType: success ? 'cancel_terminal_confirmed' : 'cancel_terminal_failed',
+      venueStatus: success ? 'canceled' : 'rejected' });
+    safeAppendExecutionEvents(events);
+    return;
+  }
   const success = args.result?.success === true;
   const recordedAfterBroadcast = args.recordedAfterBroadcast ?? true;
   const failureCode = success
@@ -2174,7 +2201,7 @@ async function closeLivePositionAndPause(
           internalSymbol: bot.market,
           subaccountId,
         });
-        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: canceled });
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: canceled, account: keyTrio.agentPublicKey });
         if (canceled && !canceled.success) {
           console.warn("[AiTraderMonitor] cancelTpSlOrders reported failure before protective close");
         }
@@ -2419,7 +2446,7 @@ export async function userInitiatedClose(
           internalSymbol: bot.market,
           subaccountId,
         });
-        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: canceled });
+        journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: cancelAttemptId, cause: "pre_close_bracket", result: canceled, account: keyTrio.agentPublicKey });
         if (canceled && !canceled.success) {
           console.warn("[AiTraderMonitor] cancelTpSlOrders reported failure before user-initiated close");
         }
@@ -2621,11 +2648,13 @@ async function handleLiveClose(
   // Cancel the surviving bracket leg (best-effort; reduce-only orders on a
   // flat account are inert, but leaving them resting is sloppy and confusing).
   const cancelRes = await withSigningContext(bot, async (keyTrio) => {
-    if (!adapter.cancelTpSlOrders) return true;
+    if (!adapter.cancelTpSlOrders) return bot.protocol !== 'pacifica';
     try {
       const canceled = await adapter.cancelTpSlOrders({ ...keyTrio, internalSymbol: bot.market, subaccountId });
-      journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: survivorCancelAttemptId, cause: "survivor_leg", result: canceled });
-      return canceled.success;
+      journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: survivorCancelAttemptId, cause: "survivor_leg", result: canceled, account: keyTrio.agentPublicKey });
+      return bot.protocol === 'pacifica' ? isConfirmedCancellation(canceled, {
+        account: keyTrio.agentPublicKey, symbol: bot.market, operation: 'tpsl',
+      }) : canceled.success;
     } catch (err) {
       journalCancelAttempt({ bot, decisionId: view.decision.id, attemptId: survivorCancelAttemptId, cause: "survivor_leg", result: null });
       console.warn(`[AiTraderMonitor] survivor-leg cancel failed: ${err instanceof Error ? err.message : err}`);
