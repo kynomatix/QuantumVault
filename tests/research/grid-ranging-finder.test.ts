@@ -15,7 +15,7 @@ describe('preregistered ranging finder research',()=>{
   expect(dfa(anti,[8,16,32,64,128]).h).toBeLessThan(.5);expect(dfa(persistent,[8,16,32,64,128]).h).toBeGreaterThan(.5);
  });
  it('counts a completed rejection and excludes unfinished reversal windows',()=>{
-  const bars=Array.from({length:16},()=>({high:9,low:1,close:5}));bars[0]={high:10,low:0,close:5};bars[8]={high:11,low:1,close:10};bars[9]={high:9,low:1,close:8};bars[15]={high:12,low:1,close:10};
+  const bars=Array.from({length:16},(_,i)=>({high:9,low:i*.01,close:5}));bars[0].high=10;bars[8].high=11;bars[8].close=10;bars[9].close=8;bars[15].high=12;bars[15].close=10;
   const x=edgeRejections(bars,{lookback:8,assessment:8,reversalBars:2,inset:.1});expect(x.upperCount).toBe(1);expect(x.lowerCount).toBe(0);
  });
  it('converts two line crossings to one round trip and normalizes stop distance',()=>{
@@ -36,6 +36,6 @@ describe('preregistered ranging finder research',()=>{
  it('compares common weeks with equal week weights and reports quarters',()=>{
   const row=(week,netReturn)=>({symbol:'A',week,launchAt:week,quarter:1,leverage:1,horizonDays:14,netReturn,protectiveStop:false,liquidated:false,underwaterDays:1,maxDrawdown:.1,seedHold:0});
   const c=compare([row(0,.1),row(604800000,.3),row(1209600000,999)],[row(0,0),row(6048000000,999),row(604800000,0)]);expect(c.one.mean).toBeCloseTo(.2);expect(c.one.weeks).toBe(2);expect(c.quarterWins).toBe(1);expect(c.one.low).toBeGreaterThan(0);
-  const q=bh([{p:.01},{p:.04},{p:.2}]);expect(q.map(x=>x.q)).toEqual([.03,.06,.2]);
+  const q=bh([{p:.01},{p:.04},{p:.2}]);[.03,.06,.2].forEach((expected,i)=>expect(q[i].q).toBeCloseTo(expected,12));
  });
 });
