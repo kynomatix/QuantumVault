@@ -1874,7 +1874,10 @@ export class PacificaAdapter implements ProtocolAdapter {
     }
     const ids = new Set<string>();
     const types = new Set(['limit', 'market', 'stop_limit', 'stop_market', 'take_profit_limit', 'take_profit_market', 'stop_loss_limit', 'stop_loss_market']);
-    const rows = envelope.data.map((row: any) => {
+    const rows: Array<{
+      orderId: string; symbol: string; wireSymbol: string; stop: boolean; protective: boolean;
+      reduceOnly: boolean; side: string; stopPrice: string; limitPrice: string | undefined; orderType: string;
+    }> = envelope.data.map((row: any) => {
       if (!row || typeof row !== 'object') throw new Error('invalid_cancel_row');
       const orderId = this.cancelId(row.order_id);
       if (ids.has(orderId) || typeof row.symbol !== 'string' || !types.has(row.order_type)
