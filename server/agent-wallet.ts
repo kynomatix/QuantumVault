@@ -3,7 +3,7 @@ import bs58 from 'bs58';
 import BN from 'bn.js';
 import { getBestQuote, getProviderByName } from './swap/index.js';
 import type { QuotePurpose } from './swap/types.js';
-import { createSolanaRpcConnection } from './rpc-config.js';
+import { createSolanaRpcConnection, submitSignedTransactionWithDefinitiveFailover } from './rpc-config.js';
 
 /** Wrapped-SOL mint — also how Jupiter represents native SOL as a swap input. */
 export const NATIVE_SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -1156,6 +1156,10 @@ export async function transferUsdcToWallet(
     lastValidBlockHeight: number;
     rpcProvider: 'configured_primary';
   }) => void | Promise<void>,
+  options: {
+    signedSubmitFailover?: boolean;
+    onBeforeBackup?: (info: { signature: string; blockhash: string; lastValidBlockHeight: number }) => Promise<void>;
+  } = {},
 ): Promise<{
   success: boolean;
   outcome: 'rejected_before_broadcast' | 'confirmed_success' | 'confirmed_failure' | 'ambiguous';
@@ -1166,6 +1170,7 @@ export async function transferUsdcToWallet(
   let signature: string | undefined;
   let sendInvoked = false;
   let solBalance: number | undefined;
+  let persisted = false;
   try {
     const connection = getConnection();
     const fromKeypair = resolveAgentKeypair(fromEncryptedPrivateKey);
@@ -1229,6 +1234,9 @@ export async function transferUsdcToWallet(
     signature = bs58.encode(transaction.signature);
     const serializedTransaction = transaction.serialize();
 
+    if (options.signedSubmitFailover && (!onBeforeBroadcast || !options.onBeforeBackup)) {
+      throw new Error('Signed-submit failover requires both persistence callbacks');
+    }
     try {
       await onBeforeBroadcast?.({
         signature,
@@ -1236,10 +1244,12 @@ export async function transferUsdcToWallet(
         lastValidBlockHeight,
         rpcProvider: 'configured_primary',
       });
+      persisted = Boolean(onBeforeBroadcast);
     } catch (error: any) {
       return {
         success: false,
-        outcome: 'rejected_before_broadcast',
+        outcome: options.signedSubmitFailover && error?.signedSubmitClaimLost !== true
+          ? 'ambiguous' : 'rejected_before_broadcast',
         signature,
         error: `Before-broadcast persistence failed: ${error?.message ?? String(error)}`,
         solBalance,
@@ -1247,15 +1257,27 @@ export async function transferUsdcToWallet(
     }
 
     sendInvoked = true;
-    const returnedSignature = await connection.sendRawTransaction(
-      serializedTransaction,
-      { skipPreflight: false, preflightCommitment: 'confirmed' }
+    const submitted = options.signedSubmitFailover
+      ? await submitSignedTransactionWithDefinitiveFailover({
+        serializedTransaction,
+        requestBody: JSON.stringify({ method: 'sendTransaction', jsonrpc: '2.0', params: [
+          Buffer.from(serializedTransaction).toString('base64'),
+          { encoding: 'base64', preflightCommitment: 'confirmed' },
+        ], id: 1 }),
+        requestId: 1, signature, blockhash, lastValidBlockHeight,
+        onBeforeBackup: () => options.onBeforeBackup!({ signature: signature!, blockhash, lastValidBlockHeight }),
+      })
+      : null;
+    if (submitted?.kind === 'ambiguous') return { success: false, outcome: 'ambiguous', signature, solBalance };
+    if (submitted?.kind === 'definitive_rejection') return { success: false, outcome: 'ambiguous', signature, solBalance };
+    const returnedSignature = submitted?.signature ?? await connection.sendRawTransaction(
+      serializedTransaction, { skipPreflight: false, preflightCommitment: 'confirmed' }
     );
     if (typeof returnedSignature !== 'string' || returnedSignature !== signature) {
       return { success: false, outcome: 'ambiguous', signature, error: 'RPC returned an unreadable or mismatched signature', solBalance };
     }
     
-    const confirmation = await connection.confirmTransaction({
+    const confirmation = await (submitted?.authority ?? connection).confirmTransaction({
       signature: returnedSignature,
       blockhash,
       lastValidBlockHeight,
@@ -1276,7 +1298,7 @@ export async function transferUsdcToWallet(
     console.error('[TransferToWallet] Error:', error.message);
     return {
       success: false,
-      outcome: sendInvoked ? 'ambiguous' : 'rejected_before_broadcast',
+      outcome: sendInvoked || persisted ? 'ambiguous' : 'rejected_before_broadcast',
       signature,
       error: error.message,
       solBalance,

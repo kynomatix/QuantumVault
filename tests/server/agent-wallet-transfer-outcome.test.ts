@@ -7,6 +7,11 @@ const connectionMocks = vi.hoisted(() => ({
   sendRawTransaction: vi.fn(),
   confirmTransaction: vi.fn(),
 }));
+const signedSubmitMock = vi.hoisted(() => vi.fn());
+vi.mock('../../server/rpc-config', async (importActual) => ({
+  ...await importActual<typeof import('../../server/rpc-config')>(),
+  submitSignedTransactionWithDefinitiveFailover: signedSubmitMock,
+}));
 
 vi.mock('@solana/web3.js', async (importActual) => {
   const actual = await importActual<typeof import('@solana/web3.js')>();
@@ -43,6 +48,31 @@ beforeEach(() => {
 });
 
 describe('transferUsdcToWallet outcome classification', () => {
+  it.each(['definitive_rejection', 'ambiguous'] as const)(
+    'parks an opt-in %s after persistence without another signature or settlement', async kind => {
+      const p = parties();
+      let persistedSignature = '';
+      const transition = vi.fn(async () => undefined);
+      signedSubmitMock.mockImplementationOnce(async (input) => {
+        expect(input.signature).toBe(persistedSignature);
+        expect(JSON.parse(input.requestBody)).toMatchObject({
+          id: 1, params: [expect.any(String), { encoding: 'base64', preflightCommitment: 'confirmed' }],
+        });
+        return { kind, signature: input.signature, rpcProvider: 'configured_primary' };
+      });
+      const result = await transferUsdcToWallet(
+        p.fromPublicKey, p.fromSecretKey, p.toPublicKey, 1,
+        async ({ signature }) => { persistedSignature = signature; },
+        { signedSubmitFailover: true, onBeforeBackup: transition },
+      );
+      expect(result).toMatchObject({ success: false, outcome: 'ambiguous', signature: persistedSignature });
+      expect(persistedSignature).toBeTruthy();
+      expect(signedSubmitMock).toHaveBeenCalledTimes(1);
+      expect(connectionMocks.sendRawTransaction).not.toHaveBeenCalled();
+      expect(connectionMocks.confirmTransaction).not.toHaveBeenCalled();
+      expect(transition).not.toHaveBeenCalled();
+    },
+  );
   it('rejects invalid input before signing or broadcast', async () => {
     const p = parties();
     const result = await transferUsdcToWallet(p.fromPublicKey, p.fromSecretKey, p.toPublicKey, 0);

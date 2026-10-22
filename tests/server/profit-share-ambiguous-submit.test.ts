@@ -8,6 +8,9 @@ const agentMocks = vi.hoisted(() => ({
 }));
 const storageMocks = vi.hoisted(() => ({
   persistCreatorSignedSubmitAttempt: vi.fn(),
+  persistReferralSignedSubmitAttempt: vi.fn(),
+  resetReferralClaimBeforeBroadcast: vi.fn(),
+  transitionSignedSubmitAttemptProvider: vi.fn(),
   resetCreatorClaimBeforeBroadcast: vi.fn(),
   getActiveSignedSubmitAttempt: vi.fn(),
   settleSignedSubmitAttempt: vi.fn(),
@@ -27,12 +30,25 @@ const storageMocks = vi.hoisted(() => ({
   hasJoinedActiveSignedSubmitAttempt: vi.fn(),
 }));
 const schemaMocks = vi.hoisted(() => ({ requireSchemaCapabilityReady: vi.fn() }));
+const authorityMocks = vi.hoisted(() => ({ getEpochInfo: vi.fn() }));
 const sessionMocks = vi.hoisted(() => ({
   getUmkForWebhook: vi.fn(),
   decryptAgentKeyStrict: vi.fn(),
 }));
 
 vi.mock('../../server/agent-wallet', () => agentMocks);
+vi.mock('../../server/rpc-config', () => ({
+  restoreSignedSubmitAuthority: vi.fn(() => ({
+    getEpochInfo: authorityMocks.getEpochInfo.mockImplementation(async () => {
+      const value = await agentMocks.getFinalizedEpochPositionStrict();
+      return { blockHeight: value.blockHeight, absoluteSlot: value.contextSlot };
+    }),
+    getSignatureStatuses: async (signatures: string[], options: unknown) => {
+      const value = await agentMocks.getSignatureStatusStrict(signatures[0], options);
+      return { context: { slot: value.contextSlot }, value: [value.status] };
+    },
+  })),
+}));
 vi.mock('../../server/storage', () => ({ storage: storageMocks }));
 vi.mock('../../server/schema-readiness', () => schemaMocks);
 vi.mock('../../server/session-v3', () => sessionMocks);
@@ -40,6 +56,7 @@ vi.mock('../../server/vault/agent-sol-withdraw', () => ({ SOL_WITHDRAW_EXPIRY_SL
 
 import {
   payDurableProfitShareLeg,
+  payDurableReferralLeg,
   payGrossCreatorObligation,
   payCreatorAndReferrals,
   reconcileSignedSubmitAttempt,
@@ -47,6 +64,7 @@ import {
   settleManagementProfitShare,
 } from '../../server/profit-share-payment';
 import { retryPendingProfitShares } from '../../server/profit-share-retry-job';
+import { restoreSignedSubmitAuthority } from '../../server/rpc-config';
 
 function attempt(overrides: Record<string, unknown> = {}) {
   return {
@@ -103,6 +121,8 @@ function obligation() {
 beforeEach(() => {
   vi.clearAllMocks();
   storageMocks.persistCreatorSignedSubmitAttempt.mockResolvedValue(true);
+  storageMocks.persistReferralSignedSubmitAttempt.mockResolvedValue(true);
+  storageMocks.transitionSignedSubmitAttemptProvider.mockResolvedValue(true);
   storageMocks.resetCreatorClaimBeforeBroadcast.mockResolvedValue(true);
   storageMocks.settleSignedSubmitAttempt.mockResolvedValue(true);
   storageMocks.createPendingProfitShare.mockResolvedValue(share());
@@ -142,6 +162,13 @@ describe('signed-submit resolver proof ordering', () => {
       status: { err: null, confirmationStatus: 'confirmed' },
     });
     await expect(resolveSignedSubmitAttempt(attempt())).resolves.toEqual({ outcome: 'confirmed_success' });
+    expect(restoreSignedSubmitAuthority).toHaveBeenCalledWith({
+      signature: 'deterministic-signature', blockhash: 'blockhash', lastValidBlockHeight: 500,
+      rpcProvider: 'configured_primary',
+    });
+    expect(authorityMocks.getEpochInfo).toHaveBeenCalledWith('finalized');
+    expect(agentMocks.getSignatureStatusStrict).toHaveBeenCalledWith(
+      'deterministic-signature', { searchTransactionHistory: true });
   });
 
   it('classifies an explicit on-chain error as confirmed failure after strict expiry', async () => {
@@ -321,9 +348,10 @@ describe('creator payout ambiguity durability', () => {
     storageMocks.getReferralRewardEventsForSource.mockResolvedValue([persistedLeg]);
     storageMocks.getReferralChain.mockResolvedValue([{ ancestorWallet: 'new-earner', level: 1 }]);
     storageMocks.createOrClaimPendingProfitShare.mockResolvedValue({ share: marked, claimed: true, claimToken: 'claim-2' });
+    storageMocks.getActiveSignedSubmitAttempt.mockResolvedValue(attempt({ deterministicSignature: 'paid-sig' }));
     agentMocks.transferUsdcToWallet.mockImplementation(async (_from: string, _key: Uint8Array, _to: string, _amount: number, before: Function) => {
       await before({ signature: 'paid-sig', blockhash: 'hash', lastValidBlockHeight: 500, rpcProvider: 'configured_primary' });
-      return { success: true, outcome: 'confirmed_success', signature: 'paid-sig' };
+      return { success: true, outcome: 'confirmed_success', signature: 'paid-sig', rpcProvider: 'configured_primary' };
     });
 
     const result = await payCreatorAndReferrals({
@@ -406,8 +434,10 @@ describe('creator payout ambiguity durability', () => {
     storageMocks.getReferralRewardEventsForSource.mockResolvedValue([
       { id: 'leg-1', status: 'pending', amountUsdc: '0.500000', earnerWallet: 'earner', level: 1 },
     ]);
-    agentMocks.transferUsdcToWallet.mockResolvedValue({
-      success: true, outcome: 'confirmed_success', signature: 'creator-paid',
+    storageMocks.getActiveSignedSubmitAttempt.mockResolvedValue(attempt({ deterministicSignature: 'creator-paid' }));
+    agentMocks.transferUsdcToWallet.mockImplementation(async (_a, _b, _c, _d, before) => {
+      await before({ signature: 'creator-paid', blockhash: 'hash', lastValidBlockHeight: 500, rpcProvider: 'configured_primary' });
+      return { success: true, outcome: 'confirmed_success', signature: 'creator-paid' };
     });
 
     await expect(settleManagementProfitShare({
@@ -519,6 +549,18 @@ describe('creator payout ambiguity durability', () => {
     expect(storageMocks.settleSignedSubmitAttempt).toHaveBeenCalledTimes(1);
   });
 
+  it('does not settle a terminal observation after provider compare-and-set loses', async () => {
+    storageMocks.getActiveSignedSubmitAttempt.mockResolvedValue(attempt({ rpcProvider: 'configured_primary' }));
+    storageMocks.settleSignedSubmitAttempt.mockResolvedValue(false);
+    agentMocks.getFinalizedEpochPositionStrict.mockResolvedValue({ blockHeight: 531, contextSlot: 100 });
+    agentMocks.getSignatureStatusStrict.mockResolvedValue({ contextSlot: 101, status: null });
+    await expect(reconcileSignedSubmitAttempt('profit_share_creator', 'share-1'))
+      .resolves.toMatchObject({ outcome: 'ambiguous' });
+    expect(storageMocks.settleSignedSubmitAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({ rpcProvider: 'configured_primary' }), 'expired_without_status', expect.any(String),
+    );
+  });
+
   it('restores a pre-callback processing crash once by claim age and uses createdAt for legacy null timestamps', async () => {
     const legacyCrash = share({
       status: 'processing', processingClaimToken: 'orphaned-claim', processingClaimedFromStatus: 'pending',
@@ -628,5 +670,64 @@ describe('creator payout ambiguity durability', () => {
       { referralLegs: [expect.objectContaining({ earnerWallet: 'earner', amountUsdc: '0.500000', status: 'awaiting_creator' })] },
       ['pending'],
     );
+  });
+});
+
+describe.each(['creator', 'referral'] as const)('%s immediate settlement identity', leg => {
+  const operationType = leg === 'creator' ? 'profit_share_creator' : 'referral_reward';
+  const pay = () => {
+    const params = { claimToken: 'claim-1', subscriberAgentPublicKey: 'subscriber',
+      subscriberEncryptedPrivateKey: new Uint8Array(), recipientWallet: 'recipient', amountUsdc: 1 };
+    return leg === 'creator'
+      ? payDurableProfitShareLeg({ ...params, shareId: 'share-1', operationType: 'profit_share_creator' })
+      : payDurableReferralLeg({ ...params, eventId: 'share-1' });
+  };
+  const broadcast = { signature: 'deterministic-signature', blockhash: 'blockhash',
+    lastValidBlockHeight: 500, rpcProvider: 'configured_primary' };
+
+  it('fails primary-confirmed compare-and-set after a concurrent provider transition', async () => {
+    const active = attempt({ operationType });
+    let settleEffects = 0;
+    let releaseConfirmation!: () => void;
+    let signalBroadcast!: () => void;
+    const confirmation = new Promise<void>(resolve => { releaseConfirmation = resolve; });
+    const broadcastStarted = new Promise<void>(resolve => { signalBroadcast = resolve; });
+    storageMocks.getActiveSignedSubmitAttempt.mockResolvedValue(active);
+    storageMocks.settleSignedSubmitAttempt.mockImplementation(async identity => {
+      const matches = ['operationType', 'operationId', 'deterministicSignature', 'blockhash',
+        'lastValidBlockHeight', 'rpcProvider'].every(key => identity[key] === active[key]);
+      if (matches) settleEffects++;
+      return matches;
+    });
+    agentMocks.transferUsdcToWallet.mockImplementation(async (_a, _b, _c, _d, before) => {
+      await before(broadcast);
+      signalBroadcast();
+      await confirmation;
+      return { success: true, outcome: 'confirmed_success', signature: broadcast.signature };
+    });
+    const pending = pay();
+    await broadcastStarted;
+    active.rpcProvider = 'configured_backup'; // Another worker commits while primary confirmation is pending.
+    releaseConfirmation();
+    await expect(pending).resolves.toMatchObject({ outcome: 'ambiguous' });
+    expect(storageMocks.settleSignedSubmitAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      operationType, rpcProvider: 'configured_primary', deterministicSignature: broadcast.signature,
+    }), 'confirmed_success', null);
+    expect(settleEffects).toBe(0);
+    expect(storageMocks.getActiveSignedSubmitAttempt).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('settles using this wrapper committed backup transition: %s', async backup => {
+    agentMocks.transferUsdcToWallet.mockImplementation(async (_a, _b, _c, _d, before, options) => {
+      await before(broadcast);
+      if (backup) await options.onBeforeBackup(broadcast);
+      return { success: true, outcome: 'confirmed_success', signature: broadcast.signature };
+    });
+    await expect(pay()).resolves.toMatchObject({ outcome: 'confirmed_success' });
+    expect(storageMocks.settleSignedSubmitAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      operationType, rpcProvider: backup ? 'configured_backup' : 'configured_primary',
+      deterministicSignature: broadcast.signature, blockhash: broadcast.blockhash, lastValidBlockHeight: '500',
+    }), 'confirmed_success', null);
+    expect(storageMocks.getActiveSignedSubmitAttempt).not.toHaveBeenCalled();
   });
 });

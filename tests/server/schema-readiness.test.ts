@@ -187,21 +187,24 @@ describe("schema readiness", () => {
     expect(query.mock.calls.filter(([text]) => String(text).startsWith("CREATE"))).toHaveLength(3);
   });
 
-  it("retains all 203 SQL entries exactly once, in order, with explicit metadata", () => {
+  it("retains the 203-entry SQL prefix and appends migration 203 exactly once", () => {
     const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
-    expect(sqlEntries).toHaveLength(203);
-    expect(metadata).toHaveLength(203);
-    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(203);
+    expect(sqlEntries).toHaveLength(204);
+    expect(metadata).toHaveLength(204);
+    expect(new Set(metadata.map((entry) => entry.id)).size).toBe(204);
     expect(metadata.every((entry) => entry.capabilities.length > 0 && entry.requirements.length > 0)).toBe(true);
+    // SHA-256 of every SQL entry on the rebase baseline, including later migrations.
+    const preservedSqlPrefixDigest = createHash("sha256").update(JSON.stringify(sqlEntries.slice(0, 203))).digest("hex").toUpperCase();
+    expect(preservedSqlPrefixDigest).toBe("7938D85BB5BB58640C19D18A5889677D508920D509A8D6F31FDCF11D9F8941B9");
     // Epoch migration preserves historical SQL; readiness metadata now describes epoch-scoped uniqueness and regrid controls.
     const preservedManifestDigest = createHash("sha256").update(JSON.stringify(
       metadata.slice(0, 197).map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
     )).digest("hex").toUpperCase();
-    expect(preservedManifestDigest).toBe("23595FB03CA524A13E584B340EA77F479BAF120E1A17871450E41A79D2388EE9");
+    expect(preservedManifestDigest).toBe("7906B690FF7C3DD84BAF7A0FE4674EE85ED72A4243FF30B73A47668A13617F9D");
     const epochPrefixDigest = createHash("sha256").update(JSON.stringify(
       metadata.slice(0, 202).map((entry, index) => ({ ...entry, sql: sqlEntries[index] })),
     )).digest("hex").toUpperCase();
-    expect(epochPrefixDigest).toBe("764CCBEBB13E8226F2113007617392EEBE942B16F7E8F69A9D17FD2803335313");
+    expect(epochPrefixDigest).toBe("A2235A688E2503041A48CAA3A367104DA148511FD6FF674D76B76CDE72477DC3");
     expect(metadata[202].id).toBe('202-grid-epoch-publish-safe');
     expect(sqlEntries[202].trim()).toBe(readFileSync('migrations/0013_grid_epoch_publish_safe.sql','utf8').trim());
     expect(metadata[191]).toMatchObject({ id: '191-phoenix-ai-trader', capabilities: ['phoenix'], operation: 'ddl' });
@@ -560,6 +563,30 @@ describe("schema readiness", () => {
       unique: true,
       predicateIncludes: ["status = 'confirmation_pending'"],
     });
+    expect(metadata[185].requirements).toContainEqual({
+      kind: "constraint", table: "solana_signed_submit_attempts",
+      constraint: "solana_signed_submit_attempts_provider_valid",
+    });
+    expect(metadata[203]).toMatchObject({ id: "203-enable-signed-submit-backup-provider", capabilities: ["referrals"] });
+    expect(metadata[203].requirements).toContainEqual({
+      kind: "constraint", table: "solana_signed_submit_attempts",
+      constraint: "solana_signed_submit_attempts_provider_valid",
+    });
+    expect(metadata[203].requirements).toContainEqual({
+      kind: "data", identity: "solana-signed-submit-exact-provider-domain",
+      checkSql: `SELECT EXISTS (
+  SELECT 1
+  FROM pg_constraint AS c
+  JOIN pg_class AS t ON t.oid = c.conrelid
+  JOIN pg_namespace AS n ON n.oid = t.relnamespace
+  WHERE n.nspname = current_schema()
+    AND t.relname = 'solana_signed_submit_attempts'
+    AND c.conname = 'solana_signed_submit_attempts_provider_valid'
+    AND c.contype = 'c'
+    AND pg_get_constraintdef(c.oid) = 'CHECK ((rpc_provider = ANY (ARRAY[''configured_primary''::text, ''configured_backup''::text])))'
+) AS ok;`,
+    });
+    expect(sqlEntries[203]).toContain("CHECK (rpc_provider IN ('configured_primary', 'configured_backup'))");
   });
 
   it('keeps runtime epoch foreign keys out of publish metadata while retaining epoch columns and index identity',()=>{
@@ -605,6 +632,9 @@ describe("schema readiness", () => {
         }
         if (name === "referral_reward_events_processing_claimed_from_status_valid") {
           return { rows: [{ definition: "CHECK (processing_claimed_from_status IS NULL OR processing_claimed_from_status IN ('pending','failed'))" }] };
+        }
+        if (name === "solana_signed_submit_attempts_provider_valid") {
+          return { rows: [{ definition: "CHECK (rpc_provider = 'configured_primary')" }] };
         }
         return { rows: [] };
       }
@@ -857,6 +887,60 @@ describe("schema readiness", () => {
     const snapshot = await applySchemaMigrationManifest(query, manifest);
     expect(snapshot.unavailableCapabilities).toEqual([]);
     expect(query.mock.calls.filter(([text]) => String(text).includes("pg_get_constraintdef"))).toHaveLength(1);
+  });
+
+  it("refuses an absent, primary-only, or broader signed-submit provider constraint", async () => {
+    const { manifest } = readDbSchemaMigrationManifest();
+    const migration = manifest[203];
+    const exactDefinition = "CHECK ((rpc_provider = ANY (ARRAY['configured_primary'::text, 'configured_backup'::text])))";
+    const probe = (definition: string | null) => probeSchemaMigrationManifest(
+      async (sql) => sql.includes("AS ok")
+        ? { rows: [{ ok: definition === exactDefinition }] }
+        : { rows: definition === null ? [] : [{ definition }] },
+      [migration],
+    );
+    expect((await probe(exactDefinition)).unavailableCapabilities).toEqual([]);
+    for (const definition of [null, "CHECK (rpc_provider = 'configured_primary')",
+      "CHECK (rpc_provider IN ('configured_primary', 'configured_backup', 'other'))"]) {
+      const result = await probe(definition);
+      expect(result.unavailableCapabilities).toEqual(['referrals']);
+    }
+  });
+
+  it("proves the exact provider CHECK rendering against real PostgreSQL", async () => {
+    if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required for the PostgreSQL rendering proof");
+    const { sqlEntries, metadata } = readDbSchemaMigrationManifest();
+    const checkSql = metadata[203].requirements.find((entry) => entry.kind === "data")?.checkSql;
+    expect(checkSql).toBeTruthy();
+    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    await client.connect();
+    try {
+      await client.query("BEGIN");
+      const schema = `rpc_provider_proof_${process.pid}_${Date.now()}`;
+      await client.query(`CREATE SCHEMA ${schema}`);
+      await client.query(`SET LOCAL search_path TO ${schema}`);
+      await client.query("CREATE TABLE solana_signed_submit_attempts (rpc_provider text NOT NULL)");
+      await client.query(sqlEntries[203]);
+      const definition = await client.query(`SELECT pg_get_constraintdef(c.oid) AS definition FROM pg_constraint AS c JOIN pg_class AS t ON t.oid = c.conrelid JOIN pg_namespace AS n ON n.oid = t.relnamespace WHERE n.nspname = $1 AND t.relname = 'solana_signed_submit_attempts' AND c.conname = 'solana_signed_submit_attempts_provider_valid'`, [schema]);
+      expect(definition.rows).toHaveLength(1);
+      expect(definition.rows[0].definition).toBe("CHECK ((rpc_provider = ANY (ARRAY['configured_primary'::text, 'configured_backup'::text])))");
+      const readCheck = async () => {
+        const result = await client.query(checkSql!);
+        expect(result.rows).toHaveLength(1);
+        return result.rows[0].ok;
+      };
+      expect(await readCheck()).toBe(true);
+      for (const domain of ["'configured_primary'", "'configured_primary', 'configured_backup', 'other'"]) {
+        await client.query("ALTER TABLE solana_signed_submit_attempts DROP CONSTRAINT solana_signed_submit_attempts_provider_valid");
+        await client.query(`ALTER TABLE solana_signed_submit_attempts ADD CONSTRAINT solana_signed_submit_attempts_provider_valid CHECK (rpc_provider IN (${domain}))`);
+        expect(await readCheck()).toBe(false);
+      }
+      await client.query("ALTER TABLE solana_signed_submit_attempts DROP CONSTRAINT solana_signed_submit_attempts_provider_valid");
+      expect(await readCheck()).toBe(false);
+    } finally {
+      await client.query("ROLLBACK");
+      await client.end();
+    }
   });
 
   it("distinguishes catalog-query failure from a genuinely absent object", async () => {

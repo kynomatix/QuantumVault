@@ -26,6 +26,18 @@ const sessionMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../../server/agent-wallet', () => agentMocks);
+vi.mock('../../server/rpc-config', () => ({
+  restoreSignedSubmitAuthority: vi.fn(() => ({
+    getEpochInfo: async () => {
+      const value = await agentMocks.getFinalizedEpochPositionStrict();
+      return { blockHeight: value.blockHeight, absoluteSlot: value.contextSlot };
+    },
+    getSignatureStatuses: async (signatures: string[], options: unknown) => {
+      const value = await agentMocks.getSignatureStatusStrict(signatures[0], options);
+      return { context: { slot: value.contextSlot }, value: [value.status] };
+    },
+  })),
+}));
 vi.mock('../../server/storage', () => ({ storage: storageMocks }));
 vi.mock('../../server/schema-readiness', () => schemaMocks);
 vi.mock('../../server/session-v3', () => sessionMocks);

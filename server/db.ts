@@ -2856,8 +2856,13 @@ BEGIN
   CREATE TRIGGER grid_operations_assign_epoch BEFORE INSERT OR UPDATE ON grid_operations FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();
   DROP TRIGGER IF EXISTS grid_fills_assign_epoch ON grid_exact_fills;
   CREATE TRIGGER grid_fills_assign_epoch BEFORE INSERT OR UPDATE ON grid_exact_fills FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();
-END $migration$;`
-] as const;
+END $migration$;`,
+      `ALTER TABLE solana_signed_submit_attempts
+         DROP CONSTRAINT IF EXISTS solana_signed_submit_attempts_provider_valid;
+       ALTER TABLE solana_signed_submit_attempts
+         ADD CONSTRAINT solana_signed_submit_attempts_provider_valid
+         CHECK (rpc_provider IN ('configured_primary', 'configured_backup'))`,
+    ] as const;
 
 const schemaMigrationMetadata = [
   {
@@ -6256,12 +6261,12 @@ const schemaMigrationMetadata = [
         "constraintDefinitions": [
           "PRIMARY KEY (id)",
           "operation_type IN ('profit_share_creator', 'referral_reward')",
-          "rpc_provider = 'configured_primary'",
           "status IN ('confirmation_pending', 'confirmed_success', 'confirmed_failure', 'expired_without_status')",
           "UNIQUE (operation_type, operation_id, deterministic_signature)"
         ]
       },
-      { "kind": "index", "table": "solana_signed_submit_attempts", "index": "solana_signed_submit_attempts_active_unique", "columns": ["operation_type", "operation_id"], "unique": true, "predicateIncludes": ["status = 'confirmation_pending'"] }
+      { "kind": "index", "table": "solana_signed_submit_attempts", "index": "solana_signed_submit_attempts_active_unique", "columns": ["operation_type", "operation_id"], "unique": true, "predicateIncludes": ["status = 'confirmation_pending'"] },
+      { "kind": "constraint", "table": "solana_signed_submit_attempts", "constraint": "solana_signed_submit_attempts_provider_valid" }
     ],
     "operation": "ddl"
   },
@@ -8424,6 +8429,25 @@ const schemaMigrationMetadata = [
       "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE oid='grid_validate_epoch_scope()'::regprocedure AND encode(sha256(convert_to(prosrc,'UTF8')),'hex')='f7944e4e0c90cc6db80faebc6d1ee9983c0d66bd63016ecfe1ffb5698749b368') AND EXISTS (SELECT 1 FROM pg_proc WHERE oid='grid_assign_epoch()'::regprocedure AND encode(sha256(convert_to(prosrc,'UTF8')),'hex')='48b29a2d1362d4cdd162efd3924069f0082cbf71b25dffbf10016c8790122ef5') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_epochs'::regclass AND tgname='grid_epochs_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=7 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_bots'::regclass AND tgname='grid_bots_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_control_requests'::regclass AND tgname='grid_control_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_auto_resume'::regclass AND tgname='grid_auto_resume_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_levels'::regclass AND tgname='grid_levels_assign_epoch' AND tgfoid='grid_assign_epoch()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_operations'::regclass AND tgname='grid_operations_assign_epoch' AND tgfoid='grid_assign_epoch()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_exact_fills'::regclass AND tgname='grid_fills_assign_epoch' AND tgfoid='grid_assign_epoch()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AS ok"
     }
   ]
+},
+{
+  "id": "203-enable-signed-submit-backup-provider",
+  "capabilities": [
+    "referrals"
+  ],
+  "requirements": [
+    {
+      "kind": "constraint",
+      "table": "solana_signed_submit_attempts",
+      "constraint": "solana_signed_submit_attempts_provider_valid"
+    },
+    {
+      "kind": "data",
+      "identity": "solana-signed-submit-exact-provider-domain",
+      "checkSql": "SELECT EXISTS (\n  SELECT 1\n  FROM pg_constraint AS c\n  JOIN pg_class AS t ON t.oid = c.conrelid\n  JOIN pg_namespace AS n ON n.oid = t.relnamespace\n  WHERE n.nspname = current_schema()\n    AND t.relname = 'solana_signed_submit_attempts'\n    AND c.conname = 'solana_signed_submit_attempts_provider_valid'\n    AND c.contype = 'c'\n    AND pg_get_constraintdef(c.oid) = 'CHECK ((rpc_provider = ANY (ARRAY[''configured_primary''::text, ''configured_backup''::text])))'\n) AS ok;"
+    }
+  ],
+  "operation": "ddl"
 }
 ] as const;
 

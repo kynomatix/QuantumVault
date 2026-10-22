@@ -183,13 +183,18 @@ export type AiTraderScannerCandidateClaimResult =
 export type SignedSubmitOperationType = "profit_share_creator" | "referral_reward";
 export type SignedSubmitTerminalStatus = "confirmed_success" | "confirmed_failure" | "expired_without_status";
 
+// Immediate settlement uses the identity captured before broadcast; reconciliation also supplies id.
+export type SignedSubmitSettlementIdentity = Pick<SolanaSignedSubmitAttempt,
+  'operationType' | 'operationId' | 'deterministicSignature' | 'blockhash' | 'lastValidBlockHeight' | 'rpcProvider'
+> & { id?: string };
+
 export interface SignedSubmitAttemptInput {
   operationType: SignedSubmitOperationType;
   operationId: string;
   deterministicSignature: string;
   blockhash: string;
   lastValidBlockHeight: number;
-  rpcProvider: "configured_primary";
+  rpcProvider: "configured_primary" | "configured_backup";
 }
 
 export type AiTraderScannerCandidateClaimParams = {
@@ -1123,8 +1128,9 @@ export interface IStorage {
   ): Promise<{ share: PendingProfitShare; claimed: boolean; claimToken: string | null }>;
   persistCreatorSignedSubmitAttempt(shareId: string, claimToken: string, attempt: SignedSubmitAttemptInput): Promise<boolean>;
   persistReferralSignedSubmitAttempt(eventId: string, claimToken: string, attempt: SignedSubmitAttemptInput): Promise<boolean>;
+  transitionSignedSubmitAttemptProvider(attempt: SignedSubmitAttemptInput, claimToken: string): Promise<boolean>;
   getActiveSignedSubmitAttempt(operationType: SignedSubmitOperationType, operationId: string): Promise<SolanaSignedSubmitAttempt | undefined>;
-  settleSignedSubmitAttempt(attempt: SolanaSignedSubmitAttempt, status: SignedSubmitTerminalStatus, lastError?: string | null): Promise<boolean>;
+  settleSignedSubmitAttempt(attempt: SignedSubmitSettlementIdentity, status: SignedSubmitTerminalStatus, lastError?: string | null): Promise<boolean>;
   resetCreatorClaimBeforeBroadcast(shareId: string, claimToken: string, error: string): Promise<boolean>;
   resetReferralClaimBeforeBroadcast(eventId: string, claimToken: string, error: string): Promise<boolean>;
   resetStaleProfitShareClaim(shareId: string, staleBefore: Date): Promise<boolean>;
@@ -5930,6 +5936,38 @@ export class DatabaseStorage implements IStorage {
     }).catch(() => false);
   }
 
+  async transitionSignedSubmitAttemptProvider(
+    attempt: SignedSubmitAttemptInput,
+    claimToken: string,
+  ): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      const owned = attempt.operationType === 'profit_share_creator'
+        ? await tx.select({ id: pendingProfitShares.id }).from(pendingProfitShares).where(and(
+          eq(pendingProfitShares.id, attempt.operationId),
+          eq(pendingProfitShares.status, 'processing'),
+          eq(pendingProfitShares.processingClaimToken, claimToken),
+        )).for('update')
+        : await tx.select({ id: referralRewardEvents.id }).from(referralRewardEvents).where(and(
+          eq(referralRewardEvents.id, attempt.operationId),
+          eq(referralRewardEvents.status, 'processing'),
+          eq(referralRewardEvents.processingClaimToken, claimToken),
+        )).for('update');
+      if (owned.length !== 1) return false;
+      const rows = await tx.update(solanaSignedSubmitAttempts).set({
+        rpcProvider: 'configured_backup', updatedAt: new Date(),
+      }).where(and(
+        eq(solanaSignedSubmitAttempts.operationType, attempt.operationType),
+        eq(solanaSignedSubmitAttempts.operationId, attempt.operationId),
+        eq(solanaSignedSubmitAttempts.deterministicSignature, attempt.deterministicSignature),
+        eq(solanaSignedSubmitAttempts.blockhash, attempt.blockhash),
+        eq(solanaSignedSubmitAttempts.lastValidBlockHeight, String(attempt.lastValidBlockHeight)),
+        eq(solanaSignedSubmitAttempts.rpcProvider, 'configured_primary'),
+        eq(solanaSignedSubmitAttempts.status, 'confirmation_pending'),
+      )).returning({ id: solanaSignedSubmitAttempts.id });
+      return rows.length === 1;
+    });
+  }
+
   async getActiveSignedSubmitAttempt(
     operationType: SignedSubmitOperationType,
     operationId: string,
@@ -5943,7 +5981,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async settleSignedSubmitAttempt(
-    attempt: SolanaSignedSubmitAttempt,
+    attempt: SignedSubmitSettlementIdentity,
     status: SignedSubmitTerminalStatus,
     lastError: string | null = null,
   ): Promise<boolean> {
@@ -5953,8 +5991,14 @@ export class DatabaseStorage implements IStorage {
         lastError,
         updatedAt: new Date(),
       }).where(and(
-        eq(solanaSignedSubmitAttempts.id, attempt.id),
+        attempt.id === undefined ? undefined : eq(solanaSignedSubmitAttempts.id, attempt.id),
         eq(solanaSignedSubmitAttempts.status, 'confirmation_pending'),
+        eq(solanaSignedSubmitAttempts.rpcProvider, attempt.rpcProvider),
+        eq(solanaSignedSubmitAttempts.operationType, attempt.operationType),
+        eq(solanaSignedSubmitAttempts.operationId, attempt.operationId),
+        eq(solanaSignedSubmitAttempts.deterministicSignature, attempt.deterministicSignature),
+        eq(solanaSignedSubmitAttempts.blockhash, attempt.blockhash),
+        eq(solanaSignedSubmitAttempts.lastValidBlockHeight, attempt.lastValidBlockHeight),
       )).returning({ id: solanaSignedSubmitAttempts.id });
       if (!terminal[0]) return false;
       const now = new Date();

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { PublicKey } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, SystemProgram, Transaction } from '@solana/web3.js';
+import bs58 from 'bs58';
 
 import {
   __resetSolanaRpcTransportForTests,
@@ -7,10 +8,36 @@ import {
   createSolanaRpcTransport,
   fetchSolanaRpc,
   SolanaRpcResponseTooLargeError,
+  submitSignedTransactionWithDefinitiveFailover,
 } from '../../server/rpc-config.js';
 
 const PRIMARY = 'https://primary.invalid/?api-key=primary-secret';
 const BACKUP = 'https://backup.invalid/?token=backup-secret';
+
+function signedFixture() {
+  const originalPrimary = process.env.SOLANA_RPC_URL;
+  const originalBackup = process.env.TRITON_ONE_RPC;
+  process.env.SOLANA_RPC_URL = PRIMARY;
+  process.env.TRITON_ONE_RPC = BACKUP;
+  const signer = Keypair.generate();
+  const blockhash = Keypair.generate().publicKey.toBase58();
+  const tx = new Transaction({ feePayer: signer.publicKey, blockhash, lastValidBlockHeight: 500 });
+  tx.add(SystemProgram.transfer({ fromPubkey: signer.publicKey, toPubkey: Keypair.generate().publicKey, lamports: 1 }));
+  tx.sign(signer);
+  const serializedTransaction = tx.serialize();
+  const signature = bs58.encode(tx.signature!);
+  const requestBody = JSON.stringify({ method: 'sendTransaction', jsonrpc: '2.0', params: [
+    serializedTransaction.toString('base64'), { encoding: 'base64', preflightCommitment: 'confirmed' },
+  ], id: 1 });
+  const restore = () => {
+    if (originalPrimary === undefined) delete process.env.SOLANA_RPC_URL;
+    else process.env.SOLANA_RPC_URL = originalPrimary;
+    if (originalBackup === undefined) delete process.env.TRITON_ONE_RPC;
+    else process.env.TRITON_ONE_RPC = originalBackup;
+  };
+  return { serializedTransaction, signature, blockhash, lastValidBlockHeight: 500,
+    requestBody, requestId: 1, onBeforeBackup: vi.fn(async () => undefined), restore };
+}
 
 function request(method = 'getBalance'): RequestInit {
   return {
@@ -750,5 +777,108 @@ describe('Solana RPC runtime failover', () => {
 
     expect((connection as unknown as { _rpcWsEndpoint: string })._rpcWsEndpoint)
       .toBe('wss://primary.invalid/?api-key=primary-secret');
+  });
+
+  it('matches the real web3.js 1.98.4 sendRawTransaction body byte for byte after ID normalization', async () => {
+    const input = signedFixture();
+    try {
+      let web3Body = '';
+      const web3Fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        web3Body = String(init?.body);
+        const id = JSON.parse(web3Body).id;
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id, result: input.signature }));
+      });
+      const connection = new Connection(PRIMARY, { commitment: 'confirmed', fetch: web3Fetch });
+      await expect(connection.sendRawTransaction(input.serializedTransaction,
+        { skipPreflight: false, preflightCommitment: 'confirmed' })).resolves.toBe(input.signature);
+      const apiFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) =>
+        new Response(JSON.stringify({ jsonrpc: '2.0', id: JSON.parse(String(init?.body)).id, result: input.signature })));
+      await expect(submitSignedTransactionWithDefinitiveFailover(input, { fetchImpl: apiFetch }))
+        .resolves.toMatchObject({ kind: 'accepted', signature: input.signature });
+      const normalizeId = (body: string) => body.replace(/"id":(?:\d+|"[^"]+")/, '"id":1');
+      expect(normalizeId(input.requestBody)).toBe(normalizeId(web3Body));
+      expect(String(apiFetch.mock.calls[0][1]?.body)).toBe(input.requestBody);
+    } finally { input.restore(); }
+  });
+
+  it.each([-32002, -32003, -32005, -32004, -32602])(
+    'uses the closed signed-submit error allowlist for %i', async code => {
+      const input = signedFixture();
+      try {
+        const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body));
+          if (body.method === 'getBlockHeight')
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: 400 }));
+          if (String(url) === BACKUP)
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: input.signature }));
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code, message: 'rejected' } }));
+        });
+        const result = await submitSignedTransactionWithDefinitiveFailover(input, { fetchImpl });
+        const eligible = [-32002, -32003, -32005].includes(code);
+        expect(result.kind).toBe(eligible ? 'accepted' : 'ambiguous');
+        expect(input.onBeforeBackup).toHaveBeenCalledTimes(eligible ? 1 : 0);
+        expect(fetchImpl.mock.calls.filter(([url]) => String(url) === BACKUP)).toHaveLength(eligible ? 1 : 0);
+      } finally { input.restore(); }
+    },
+  );
+
+  it('rejects another matching positive request ID before any send', async () => {
+    const input = signedFixture();
+    try {
+      const fetchImpl = vi.fn();
+      const body = JSON.parse(input.requestBody);
+      body.id = 2;
+      await expect(submitSignedTransactionWithDefinitiveFailover(
+        { ...input, requestId: 2, requestBody: JSON.stringify(body) }, { fetchImpl }))
+        .rejects.toThrow('Invalid signed-submit request');
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally { input.restore(); }
+  });
+  it('rejects absent, wrong, and extra encoding keys before any send', async () => {
+    const input = signedFixture();
+    try {
+      const fetchImpl = vi.fn();
+      for (const config of [
+        { preflightCommitment: 'confirmed' },
+        { encoding: 'base58', preflightCommitment: 'confirmed' },
+        { encoding: 'base64', preflightCommitment: 'confirmed', maxRetries: 0 },
+      ]) {
+        const body = JSON.parse(input.requestBody);
+        body.params[1] = config;
+        await expect(submitSignedTransactionWithDefinitiveFailover(
+          { ...input, requestBody: JSON.stringify(body) }, { fetchImpl })).rejects.toThrow();
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally { input.restore(); }
+  });
+
+  it.each([0, 1, 4, 5])('keeps %i primary 429 replies inside one five-send budget', async throttles => {
+    const input = signedFixture();
+    try {
+      let sends = 0;
+      const fetchImpl = vi.fn(async () => {
+        sends += 1;
+        return sends <= throttles ? new Response('', { status: 429 })
+          : new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: input.signature }));
+      });
+      const result = await submitSignedTransactionWithDefinitiveFailover(input,
+        { fetchImpl, signed429BackoffMs: [0, 0, 0, 0] });
+      expect(result.kind).toBe(throttles === 5 ? 'ambiguous' : 'accepted');
+      expect(sends).toBe(throttles === 5 ? 5 : throttles + 1);
+      expect(input.onBeforeBackup).not.toHaveBeenCalled();
+    } finally { input.restore(); }
+  });
+
+  it('parks an oversize signed response under the original signature', async () => {
+    const input = signedFixture();
+    try {
+      const fetchImpl = vi.fn(async () => new Response('x'.repeat(100)));
+      await expect(submitSignedTransactionWithDefinitiveFailover(input,
+        { fetchImpl, maxResponseBytes: 4 })).resolves.toMatchObject({
+          kind: 'ambiguous', signature: input.signature, rpcProvider: 'configured_primary',
+        });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(input.onBeforeBackup).not.toHaveBeenCalled();
+    } finally { input.restore(); }
   });
 });

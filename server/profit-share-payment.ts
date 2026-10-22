@@ -1,12 +1,10 @@
-import {
-  getFinalizedEpochPositionStrict,
-  getSignatureStatusStrict,
-  transferUsdcToWallet,
-} from './agent-wallet';
+import { transferUsdcToWallet } from './agent-wallet';
+import { restoreSignedSubmitAuthority, type SignedSubmitProvider } from './rpc-config';
 import { requireSchemaCapabilityReady } from './schema-readiness';
 import {
   storage,
   type SignedSubmitOperationType,
+  type SignedSubmitSettlementIdentity,
 } from './storage';
 import type {
   InsertPendingProfitShare,
@@ -62,23 +60,36 @@ type ResolverResult =
 
 export async function resolveSignedSubmitAttempt(attempt: SolanaSignedSubmitAttempt): Promise<ResolverResult> {
   try {
-    const epoch = await getFinalizedEpochPositionStrict();
+    const authority = restoreSignedSubmitAuthority({
+      signature: attempt.deterministicSignature,
+      blockhash: attempt.blockhash,
+      lastValidBlockHeight: Number(attempt.lastValidBlockHeight),
+      rpcProvider: attempt.rpcProvider as SignedSubmitProvider,
+    });
+    const epochInfo = await authority.getEpochInfo('finalized');
+    const blockHeight = epochInfo.blockHeight;
+    const contextSlot = epochInfo.absoluteSlot;
+    if (typeof blockHeight !== 'number' || !Number.isSafeInteger(blockHeight) || blockHeight < 0
+      || !Number.isSafeInteger(contextSlot) || contextSlot < 0) {
+      return { outcome: 'ambiguous', error: 'Malformed finalized epoch position' };
+    }
     const lastValid = Number(attempt.lastValidBlockHeight);
     if (!Number.isSafeInteger(lastValid) || lastValid < 0) {
       return { outcome: 'ambiguous', error: 'Stored last-valid block height is malformed' };
     }
-    if (epoch.blockHeight <= lastValid + SOL_WITHDRAW_EXPIRY_SLACK_BLOCKS) {
+    if (blockHeight <= lastValid + SOL_WITHDRAW_EXPIRY_SLACK_BLOCKS) {
       return { outcome: 'ambiguous' };
     }
-    const observed = await getSignatureStatusStrict(attempt.deterministicSignature, { withContext: true });
-    if (observed.contextSlot < epoch.contextSlot) return { outcome: 'ambiguous' };
-    if (!observed.status) {
+    const observed = await authority.getSignatureStatuses([attempt.deterministicSignature], { searchTransactionHistory: true });
+    if (!Number.isSafeInteger(observed.context.slot) || observed.context.slot < contextSlot) return { outcome: 'ambiguous' };
+    const status = observed.value[0];
+    if (!status) {
       return { outcome: 'expired_without_status', error: 'Blockhash expired without signature status' };
     }
-    if (observed.status.err != null) {
-      return { outcome: 'confirmed_failure', error: `Transaction failed on-chain: ${JSON.stringify(observed.status.err)}` };
+    if (status.err != null) {
+      return { outcome: 'confirmed_failure', error: `Transaction failed on-chain: ${JSON.stringify(status.err)}` };
     }
-    if (observed.status.confirmationStatus === 'confirmed' || observed.status.confirmationStatus === 'finalized') {
+    if (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized') {
       return { outcome: 'confirmed_success' };
     }
     return { outcome: 'ambiguous' };
@@ -95,7 +106,9 @@ export async function reconcileSignedSubmitAttempt(
   if (!attempt) return null;
   const result = await resolveSignedSubmitAttempt(attempt);
   if (result.outcome !== 'ambiguous') {
-    await storage.settleSignedSubmitAttempt(attempt, result.outcome, result.error ?? null);
+    if (!await storage.settleSignedSubmitAttempt(attempt, result.outcome, result.error ?? null)) {
+      return { outcome: 'ambiguous', error: 'Signed-submit authority changed during observation' };
+    }
   }
   return result;
 }
@@ -105,6 +118,7 @@ export async function payDurableProfitShareLeg(
 ): Promise<{ outcome: SignedSubmitOutcome; signature?: string; error?: string }> {
   await requireSchemaCapabilityReady('referrals');
   let attemptPersistenceLost = false;
+  const settlement: { identity?: SignedSubmitSettlementIdentity; backupCommitted: boolean } = { backupCommitted: false };
   const transfer = await transferUsdcToWallet(
     params.subscriberAgentPublicKey,
     params.subscriberEncryptedPrivateKey,
@@ -125,15 +139,33 @@ export async function payDurableProfitShareLeg(
       );
       if (!persisted) {
         attemptPersistenceLost = true;
-        throw new Error('Creator payout claim was lost before broadcast');
+        throw Object.assign(new Error('Creator payout claim was lost before broadcast'), { signedSubmitClaimLost: true });
       }
+      settlement.identity = {
+        operationType: params.operationType, operationId: params.shareId,
+        deterministicSignature: attempt.signature, blockhash: attempt.blockhash,
+        lastValidBlockHeight: String(attempt.lastValidBlockHeight), rpcProvider: 'configured_primary',
+      };
     },
+    { signedSubmitFailover: true, onBeforeBackup: async (identity) => {
+      if (!await storage.transitionSignedSubmitAttemptProvider({
+        operationType: params.operationType, operationId: params.shareId,
+        deterministicSignature: identity.signature, blockhash: identity.blockhash,
+        lastValidBlockHeight: identity.lastValidBlockHeight, rpcProvider: 'configured_primary',
+      }, params.claimToken)) throw new Error('Creator signed-submit provider transition was lost');
+      settlement.backupCommitted = true;
+    } },
   );
   if (transfer.outcome === 'rejected_before_broadcast' && !attemptPersistenceLost) {
     await storage.resetCreatorClaimBeforeBroadcast(params.shareId, params.claimToken, transfer.error ?? 'Rejected before broadcast');
   } else if (transfer.outcome === 'confirmed_success' || transfer.outcome === 'confirmed_failure') {
-    const active = await storage.getActiveSignedSubmitAttempt(params.operationType, params.shareId);
-    if (active) await storage.settleSignedSubmitAttempt(active, transfer.outcome, transfer.error ?? null);
+    const identity = settlement.identity && {
+      ...settlement.identity,
+      rpcProvider: settlement.backupCommitted ? 'configured_backup' as const : 'configured_primary' as const,
+    };
+    if (!identity || !await storage.settleSignedSubmitAttempt(identity, transfer.outcome, transfer.error ?? null)) {
+      return { outcome: 'ambiguous', signature: transfer.signature, error: 'Signed-submit authority changed before settlement' };
+    }
   }
   return { outcome: transfer.outcome, signature: transfer.signature, error: transfer.error };
 }
@@ -148,6 +180,7 @@ export async function payDurableReferralLeg(params: {
 }): Promise<{ outcome: SignedSubmitOutcome; signature?: string; error?: string }> {
   await requireSchemaCapabilityReady('referrals');
   let attemptPersistenceLost = false;
+  const settlement: { identity?: SignedSubmitSettlementIdentity; backupCommitted: boolean } = { backupCommitted: false };
   const transfer = await transferUsdcToWallet(
     params.subscriberAgentPublicKey,
     params.subscriberEncryptedPrivateKey,
@@ -168,15 +201,33 @@ export async function payDurableReferralLeg(params: {
       );
       if (!persisted) {
         attemptPersistenceLost = true;
-        throw new Error('Referral payout claim was lost before broadcast');
+        throw Object.assign(new Error('Referral payout claim was lost before broadcast'), { signedSubmitClaimLost: true });
       }
+      settlement.identity = {
+        operationType: 'referral_reward', operationId: params.eventId,
+        deterministicSignature: attempt.signature, blockhash: attempt.blockhash,
+        lastValidBlockHeight: String(attempt.lastValidBlockHeight), rpcProvider: 'configured_primary',
+      };
     },
+    { signedSubmitFailover: true, onBeforeBackup: async (identity) => {
+      if (!await storage.transitionSignedSubmitAttemptProvider({
+        operationType: 'referral_reward', operationId: params.eventId,
+        deterministicSignature: identity.signature, blockhash: identity.blockhash,
+        lastValidBlockHeight: identity.lastValidBlockHeight, rpcProvider: 'configured_primary',
+      }, params.claimToken)) throw new Error('Referral signed-submit provider transition was lost');
+      settlement.backupCommitted = true;
+    } },
   );
   if (transfer.outcome === 'rejected_before_broadcast' && !attemptPersistenceLost) {
     await storage.resetReferralClaimBeforeBroadcast(params.eventId, params.claimToken, transfer.error ?? 'Rejected before broadcast');
   } else if (transfer.outcome === 'confirmed_success' || transfer.outcome === 'confirmed_failure') {
-    const active = await storage.getActiveSignedSubmitAttempt('referral_reward', params.eventId);
-    if (active) await storage.settleSignedSubmitAttempt(active, transfer.outcome, transfer.error ?? null);
+    const identity = settlement.identity && {
+      ...settlement.identity,
+      rpcProvider: settlement.backupCommitted ? 'configured_backup' as const : 'configured_primary' as const,
+    };
+    if (!identity || !await storage.settleSignedSubmitAttempt(identity, transfer.outcome, transfer.error ?? null)) {
+      return { outcome: 'ambiguous', signature: transfer.signature, error: 'Signed-submit authority changed before settlement' };
+    }
   }
   return { outcome: transfer.outcome, signature: transfer.signature, error: transfer.error };
 }

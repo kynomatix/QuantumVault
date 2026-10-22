@@ -1429,7 +1429,7 @@ export const solanaSignedSubmitAttempts = pgTable("solana_signed_submit_attempts
     .on(table.operationType, table.operationId)
     .where(sql`${table.status} = 'confirmation_pending'`),
   check("solana_signed_submit_attempts_operation_type_valid", sql`${table.operationType} IN ('profit_share_creator', 'referral_reward')`),
-  check("solana_signed_submit_attempts_provider_valid", sql`${table.rpcProvider} = 'configured_primary'`),
+  check("solana_signed_submit_attempts_provider_valid", sql`${table.rpcProvider} IN ('configured_primary', 'configured_backup')`),
   check("solana_signed_submit_attempts_status_valid", sql`${table.status} IN ('confirmation_pending', 'confirmed_success', 'confirmed_failure', 'expired_without_status')`),
 ]));
 
