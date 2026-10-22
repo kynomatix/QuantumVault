@@ -97,7 +97,7 @@ export function GridRangingFinder({ enabled, identity, timeframe, disabled, onSe
         {current.busy && <Button type="button" size="sm" variant="ghost" onClick={() => request.current?.abort()}>Cancel scan</Button>}
       </div>
       <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Why these markets?</summary>
-        <p className="mt-2">Weak trend means ADX(14) below 20 and an unbroken recent range. In our backtests these markets did not give better grid results than others, so this describes the market; it is not a recommendation. Price data may come from another venue; live order checks use Pacifica.</p>
+        <p className="mt-2">Weak trend means ADX(14) below 20 and an unbroken recent range. Use it as a starting point for your own look at the chart. Price data may come from another venue; live order checks use Pacifica.</p>
         <p>Sorted by ADX, lowest first: weakest measured trend. Selecting a row changes the market picker and loads fresh facts; the detected band is not applied.</p>
         {candidates.map(candidate => <p key={candidate.market}>{candidate.symbol}: {candidate.venue} direct perpetual candles, 100 finalized {timeframe} candles ending {readableTime(candidate.latestFinalizedTime)} (candle open time).</p>)}
       </details>
