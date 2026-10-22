@@ -1,0 +1,23 @@
+import fs from 'node:fs';import path from 'node:path';import {createHash} from 'node:crypto';import {execFileSync} from 'node:child_process';
+import {selections} from '../grid-ranging-pairs/design.mjs';
+const hb=path.resolve('../grid-ranging-finder-20261023-handback'),old=path.resolve('../grid-multi-timeframe-20261022-handback');
+const read=p=>JSON.parse(fs.readFileSync(p,'utf8').replace(/^\uFEFF/,'')),oldRoot=fs.readFileSync(old+'/study-root.txt','utf8').trim();
+const root=hb+'/evidence/study-'+new Date().toISOString().replace(/[-:.]/g,'');if(fs.existsSync(root))throw Error('Fresh root required');fs.mkdirSync(root,{recursive:true});
+const {tipCommitHash,scratch}=read(hb+'/tip.json'),git=args=>execFileSync('git.exe',args,{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+const prereg=fs.readFileSync('scripts/research/grid-ranging-finder/PREREGISTRATION.md','utf8');
+if(execFileSync('git.exe',['show',tipCommitHash+':scripts/research/grid-ranging-finder/PREREGISTRATION.md'],{cwd:scratch,encoding:'utf8'}).replaceAll('\r\n','\n')!==prereg.replaceAll('\r\n','\n'))throw Error('Registration not committed');
+const inputs=new Map();async function bind(file,expected){file=path.resolve(file);if(inputs.has(file))return;const h=createHash('sha256');for await(const bytes of fs.createReadStream(file))h.update(bytes);const sha256=h.digest('hex');if(expected&&sha256!==expected.toLowerCase())throw Error('Input hash mismatch '+file);inputs.set(file,{file,sha256,bytes:fs.statSync(file).size});}
+for(const input of read(oldRoot+'/inputs.json'))await bind(input.file,input.sha256);
+for(const file of ['markets.json','selections.json','launches.json','registration.json'])await bind(oldRoot+'/'+file);
+const markets=read(oldRoot+'/markets.json'),selected=read(oldRoot+'/selections.json'),launches=read(oldRoot+'/launches.json');
+if(markets.length!==45||markets.filter(m=>m.universe==='A').length!==25||launches.length!==188)throw Error('Unexpected frozen population');
+if(JSON.stringify(selections(markets.map(m=>({...m,daily:read(m.dailyFile).rows}))))!==JSON.stringify(selected))throw Error('Eligibility recomputation differs');
+const unchanged=['server/grid-planner/scanner.ts','server/grid-planner/regime.ts','server/grid-planner/range-facts.ts','server/grid-bot/range.ts','shared/grid-lookback.ts','server/grid-bot/grid-geometry.ts','server/grid-bot/behaviour-policy.ts'];
+const mainCommitHash=git(['rev-parse','origin/main']);if(mainCommitHash!=='f10e6774355b5b1e970568105ac6a8e9c80b40ea')throw Error('Main ref changed after registration');
+const sourceBindings=unchanged.map(file=>{const baseBlobHash=git(['rev-parse','HEAD:'+file]),mainBlobHash=git(['rev-parse','origin/main:'+file]);if(baseBlobHash!==mainBlobHash)throw Error('Preset source differs '+file);return {file,baseBlobHash,mainBlobHash};});
+const mainCycle=git(['show','origin/main:shared/grid-behaviour.ts']);if(!mainCycle.includes('openingOrdinal: opening ? ownerOrdinal : ownerOrdinal + (long ? -1 : 1)')||!mainCycle.includes('closingOrdinal: opening ? ownerOrdinal + (long ? 1 : -1) : ownerOrdinal'))throw Error('Cycle endpoint equivalence failed');
+for(const file of ['client/src/lib/grid-simple-view.ts','server/grid-planner/squeeze.ts','server/grid-bot/cycle-engine.ts','server/grid-bot/cycle-policy.ts','shared/grid-behaviour.ts'])sourceBindings.push({file,mainBlobHash:git(['rev-parse','origin/main:'+file])});
+const preset=git(['show','origin/main:client/src/lib/grid-simple-view.ts']);for(const s of ["intervals: '10'","behaviourMode: 'step_back'","entryScale: 'ascending'","profitScale: 'descending'","seed: true","timeframe: '1h'","rangeWindow: 'week'"])if(!preset.includes(s))throw Error('Simple changed '+s);
+const squeeze=git(['show','origin/main:server/grid-planner/squeeze.ts']);fs.writeFileSync(root+'/main-squeeze-source.txt',squeeze+'\n');
+for(const [name,value]of Object.entries({'inputs.json':[...inputs.values()],'markets.json':markets,'selections.json':selected,'launches.json':launches,'registration.json':{preregistrationCommitHash:tipCommitHash,mainCommitHash,oldRoot,createdAt:new Date().toISOString(),sourceBindings}}))fs.writeFileSync(root+'/'+name,JSON.stringify(value)+'\n',{flag:'wx'});
+fs.writeFileSync(hb+'/study-root.txt',root+'\n');fs.writeFileSync(hb+'/RESUME.md','Registration committed; frozen inputs and eligibility verified. No new signals or results yet. Study: '+root+'\n');console.log(JSON.stringify({root,inputBindings:inputs.size,markets:markets.length,launches:launches.length}));
