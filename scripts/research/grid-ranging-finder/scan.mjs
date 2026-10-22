@@ -7,9 +7,9 @@ const {canonicalJson,scanInputManifest}=await import(pathToFileURL(reviewerPath)
 const dest=HB+'/evidence/readonly-scan-'+new Date().toISOString().replace(/[-:.]/g,'');if(fs.existsSync(dest))throw Error('Existing scan root');fs.mkdirSync(dest);
 const inputs=new Map();
 function bind(file,purpose='evidence',expectedSha256){file=path.resolve(file);if(fs.statSync(file).isFile())inputs.set(file,{originalPath:file,purpose,bytes:fs.statSync(file).size,...(expectedSha256?{expectedSha256}:{})});}
-const visited=new Set();function closure(file){file=path.resolve(file);if(visited.has(file))return;visited.add(file);bind(file,'support');for(const m of fs.readFileSync(file,'utf8').matchAll(/(?:from\s*|import\s*)['"]([^'"]+)['"]/g)){if(!m[1].startsWith('.'))continue;const base=path.resolve(path.dirname(file),m[1]),found=[base,base+'.mjs',base+'.ts',base.replace(/\.js$/,'.ts')].find(f=>fs.existsSync(f)&&fs.statSync(f).isFile());if(found)closure(found);}}
-for(const name of fs.readdirSync('scripts/research/grid-ranging-finder')){bind('scripts/research/grid-ranging-finder/'+name,'source');if(name.endsWith('.mjs'))closure('scripts/research/grid-ranging-finder/'+name);}
-closure('tests/research/grid-ranging-finder.test.ts');closure('scripts/research/grid-walkforward/loader.mjs');closure('scripts/research/grid-multi-timeframe/worker.mjs');
+const visited=new Set();function visitSource(file){file=path.resolve(file);if(visited.has(file))return;visited.add(file);bind(file,'support');for(const m of fs.readFileSync(file,'utf8').matchAll(/(?:from\s*|import\s*)['"]([^'"]+)['"]/g)){if(!m[1].startsWith('.'))continue;const base=path.resolve(path.dirname(file),m[1]),found=[base,base+'.mjs',base+'.ts',base.replace(/\.js$/,'.ts')].find(f=>fs.existsSync(f)&&fs.statSync(f).isFile());if(found)visitSource(found);}}
+for(const name of fs.readdirSync('scripts/research/grid-ranging-finder')){bind('scripts/research/grid-ranging-finder/'+name,'source');if(name.endsWith('.mjs'))visitSource('scripts/research/grid-ranging-finder/'+name);}
+visitSource('tests/research/grid-ranging-finder.test.ts');visitSource('scripts/research/grid-walkforward/loader.mjs');visitSource('scripts/research/grid-multi-timeframe/worker.mjs');
 for(const name of fs.readdirSync(HB))if(/\.(md|json|ps1|sh|csv|log)$/.test(name)&&!['REVIEW-SCAN-STATUS.md','RESUME.md'].includes(name))bind(HB+'/'+name);
 const root=fs.readFileSync(HB+'/study-root.txt','utf8').trim();
 for(const name of fs.readdirSync(root))if(fs.statSync(root+'/'+name).isFile())bind(root+'/'+name);
