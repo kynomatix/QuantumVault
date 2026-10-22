@@ -1,4 +1,7 @@
 import { GridBehaviourSelect } from './GridBehaviourSelect';
+import { GridSimpleSetup } from './GridSimpleSetup';
+import { gridSimplePreset, gridSimpleLeverages, gridSimpleSideStop, gridRememberMode, type GridSetupMode } from '@/lib/grid-simple-view';
+import { gridCurrentStopRisk } from '@/lib/grid-draft-view';
 import { GRID_MODES_CREATION, gridBehaviourCopy } from '../../../../shared/grid-behaviour';
 import { gridModeLines, gridModeBoundary } from '@/lib/grid-behaviour-view';
 import { isGridCyclePolicyVersion } from '../../../../shared/grid-behaviour';
@@ -60,10 +63,15 @@ function PriceAge({ observedAt, clock }: { observedAt: number; clock: { serverNo
 }
 
 export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled = true, createEnabled = false,
-  liveEnabled = false, initialIntent, onSaved = () => {} }: { open: boolean; onOpenChange: (open: boolean) => void;
+  liveEnabled = false, initialIntent, initialMode = 'advanced', onSaved = () => {} }: { open: boolean; onOpenChange: (open: boolean) => void;
     identity: string; plannerEnabled?: boolean; createEnabled?: boolean; liveEnabled?: boolean; initialIntent?: GridIntent;
-    onSaved?: (bot: Record<string, unknown>) => void }) {
-  const [form, setForm] = useState(() => gridSetupForm(initialIntent, gridStoredMarket(identity))), [markets, setMarkets] = useState<PlannerMarket[]>([]);
+    initialMode?: GridSetupMode; onSaved?: (bot: Record<string, unknown>) => void }) {
+  const [mode, setMode] = useState<GridSetupMode>(initialMode), [confirmSimple, setConfirmSimple] = useState(false);
+  const simple = mode === 'simple';
+  const [form, setForm] = useState(() => {
+    const initial = gridSetupForm(initialIntent, gridStoredMarket(identity));
+    return simple && !initialIntent ? gridSimplePreset(initial) : initial;
+  }), [markets, setMarkets] = useState<PlannerMarket[]>([]);
   const [feeDefault, setFeeDefault] = useState<PlannerFee>(null);
   const feeEdited = useRef(false);
   const [feeWasEdited, setFeeWasEdited] = useState(false);
@@ -146,13 +154,14 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     if (key === 'market') {
       defaultMarketPendingRef.current = false;
       setDefaultMarketPending(false);
-      const change = gridMarketChange(form, String(value), rangeSource, rangePercent.current);
+      const change = gridMarketChange(form, String(value), simple ? 'auto' : rangeSource, simple ? null : rangePercent.current);
       priceRefresh.current?.dispose();
       Object.values(generation.current).forEach(g => g.invalidate());
       invalidate(); setDraftPreview(null); setChart(null); setChartError(''); setMarketError(''); setRangeFacts(null); setRangeError(''); setRangeBusy(false);
       manual.current = null;
       pendingPercent.current = change.mode === 'percent' && value ? { market: String(value), percent: rangePercent.current! } : null;
       applyAutoAfterRefresh.current = change.mode === 'auto' && !!value; setAutoApplying(applyAutoAfterRefresh.current);
+      if (simple) { setRangeSource('auto'); setTimeRangeApplied(false); }
       setRangeShortcut(null); setRangeNote(change.note); setForm(change.form); return;
     }
     priceRefresh.current?.cancelShortcut();
@@ -170,7 +179,8 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     if (['lower', 'upper'].includes(key)) setRangeShortcut(null);
     setForm(previous => ({ ...previous, [key]: value,
       ...(['timeframe', 'rangeWindow'].includes(key) && rangeSource === 'auto' ? { lower: '', upper: '', stop: '' } : {}),
-      ...(key === 'side' && rangeSource === 'auto' && rangeFacts?.range.state === 'available'
+      ...(key === 'side' && simple ? { stop: gridSimpleSideStop(previous, String(value)) } : {}),
+      ...(key === 'side' && !simple && rangeSource === 'auto' && rangeFacts?.range.state === 'available'
         ? { stop: value === 'long' ? rangeFacts.range.longStop : rangeFacts.range.shortStop } : {}) }));
   };
   useEffect(() => {
@@ -186,6 +196,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   }, [open, identity, defaultMarketPending, markets, form.market, draftBusy]);
   const refreshObservations = () => {
     if (draftBusy) return;
+    if (simple && (!form.lower || !form.upper || !form.stop)) { applyAutoAfterRefresh.current = true; setAutoApplying(true); }
     priceRefresh.current?.dispose();
     Object.values(generation.current).forEach(g => g.invalidate());
     setError(''); setChartError(''); setNow(Date.now());
@@ -232,7 +243,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     setRangeFacts(current => current?.inputKey === observationKey ? current : null);
   }, [observationKey]);
   useEffect(() => {
-    if (!open || defaultMarketPending || !form.market) return;
+    if (!open || simple || defaultMarketPending || !form.market) return;
     const request = generation.current.chart.start(observationKey); setChartError('');
     const startedAt = Date.now();
     readPlanner(`chart?${new URLSearchParams({ market: form.market, timeframe: form.timeframe, period: form.rangeWindow })}`, request.signal, plannerEnabled).then(value => {
@@ -248,10 +259,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       setNow(Date.now());
     }).catch(e => { if (request.current(observationInputKey.current)) setChartError(e.message); });
     return () => generation.current.chart.invalidate();
-  }, [open, identity, form.market, form.timeframe, form.rangeWindow, refresh, chartRefresh, plannerEnabled, defaultMarketPending]);
+  }, [open, simple, identity, form.market, form.timeframe, form.rangeWindow, refresh, chartRefresh, plannerEnabled, defaultMarketPending]);
   useEffect(() => {
     generation.current.preview.invalidate(); setLoading(false);
-    if (!open || defaultMarketPending || !plannerEnabled || !form.market || query.error) return;
+    if (!open || simple || defaultMarketPending || !plannerEnabled || !form.market || query.error) return;
     if (!form.lower || !form.upper || (form.investment && !effectiveStop)) return;
     const request = generation.current.preview.start(query.value);
     const current = () => request.current(previewInputKey.current);
@@ -266,7 +277,7 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
       }).catch(e => { if (current()) setError(e.message); }).finally(() => { if (current()) setLoading(false); });
     }, 250);
     return () => { clearTimeout(timer); generation.current.preview.invalidate(); };
-  }, [open, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry, plannerEnabled, defaultMarketPending]);
+  }, [open, simple, identity, query.value, query.error, refresh, referenceExpiry, constraintExpiry, plannerEnabled, defaultMarketPending]);
   useEffect(() => {
     if (!open) { Object.values(generation.current).forEach(g => g.invalidate()); setPreview(null); setChart(null); setExpandedSettingsPanel('direction-size'); return; }
     const deadlines = [previewExpiry, chartExpiry, referenceExpiry, constraintExpiry, rangeExpiry].filter(t => t > Date.now());
@@ -349,6 +360,32 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
   };
   const shortcutReason = plannerShortcutReason(form.market, !!reference, marketError, marketLoading);
   const draftIntent = useMemo(() => gridSetupIntent(form, effectiveStop, rangeSource, timeRangeApplied), [form, effectiveStop, rangeSource, timeRangeApplied]);
+  const advancedSnapshot = useRef<{ form: typeof form; rangeSource: typeof rangeSource; timeRangeApplied: boolean } | null>(null);
+  const switchMode = (next: GridSetupMode) => { if (draftBusy) return; setMode(next); gridRememberMode(identity, next); };
+  const restoreAdvanced = () => {
+    const snapshot = advancedSnapshot.current;
+    if (draftBusy || !snapshot) return;
+    Object.values(generation.current).forEach(g => g.invalidate());
+    applyAutoAfterRefresh.current = false; setAutoApplying(false); setDraftPreview(null); setPreview(null);
+    setForm(snapshot.form); setRangeSource(snapshot.rangeSource); setTimeRangeApplied(snapshot.timeRangeApplied);
+    advancedSnapshot.current = null; setRangeError(''); setRefresh(value => value + 1); switchMode('advanced');
+  };
+  const applySimple = () => {
+    if (draftBusy) return;
+    advancedSnapshot.current = { form: { ...form }, rangeSource, timeRangeApplied };
+    priceRefresh.current?.cancelShortcut();
+    Object.values(generation.current).forEach(g => g.invalidate());
+    setDraftPreview(null); setPreview(null); setRangeFacts(null); setRangeError('');
+    manual.current = null; rangePercent.current = null; pendingPercent.current = null;
+    const preset = gridSimplePreset(form);
+    setForm({ ...preset, leverage: simpleLeverages.includes(preset.leverage) ? preset.leverage : '1' }); setRangeSource('auto'); setTimeRangeApplied(false);
+    applyAutoAfterRefresh.current = true; setAutoApplying(true); setRangeRefresh(value => value + 1);
+    setConfirmSimple(false); switchMode('simple');
+  };
+  const simpleLeverages = gridSimpleLeverages(selected?.constraints.state === 'available' && now < constraintExpiry
+    && selected.constraints.value.maxLeverage.state === 'available' ? selected.constraints.value.maxLeverage.value : null);
+  const simpleRisk = gridCurrentStopRisk(draftPreview, draftIntent, now);
+  const simpleUnavailable = !GRID_MODES_CREATION || !simpleLeverages.includes(form.leverage) || !reference || !!rangeError || autoApplying;
   const usingPlannerGeometry = !form.investment && plannerEnabled;
   const lines = useMemo(() => createEnabled && !usingPlannerGeometry
     ? draftPreview?.state === 'ready' && draftPreview.draftRevision === gridDraftRevision(draftIntent)
@@ -424,12 +461,32 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     }
     onOpenChange(value);
   };
+  const renderSimple = ({ status, actions, depositDialog }: Partial<GridDraftContent> = {}) =>
+    <DialogContent className="max-w-lg sm:max-w-[760px] max-h-[90dvh] flex flex-col" data-testid="sheet-grid-simple">
+      <DialogHeader><DialogTitle>Grid Bot · Simple</DialogTitle><DialogDescription>Pick a market, direction and amount. We set the rest from our backtests.</DialogDescription></DialogHeader>
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-4 py-2 pr-1">
+        <GridSimpleSetup form={form} markets={markets} leverages={simpleLeverages} stop={effectiveStop} loss={simpleRisk?.loss ?? null}
+          busy={draftBusy} onEdit={edit} onAdvanced={() => switchMode('advanced')} />
+        {advancedSnapshot.current && <Button variant="ghost" className="text-primary no-underline hover:no-underline" disabled={draftBusy} onClick={restoreAdvanced}>Undo reset to Simple</Button>}
+        {status}
+        {!createEnabled && <p role="status">Grid launch is unavailable right now.</p>}
+      </div>
+      <DialogFooter className="flex-wrap gap-2 border-t pt-3">
+        <Button variant="outline" disabled={draftBusy} onClick={() => handleOpenChange(false)}>Cancel</Button>
+        {actions ?? <Button disabled>Review bot</Button>}
+      </DialogFooter>{depositDialog}
+    </DialogContent>;
   const renderSetup = ({ details, status, actions, depositDialog }: Partial<GridDraftContent> = {}) =>
     <DialogContent className="max-w-lg sm:max-w-[760px] max-h-[90dvh] flex flex-col" data-testid="sheet-grid-planner">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-xl"><BarChart3 className="h-5 w-5 text-primary" />Grid Bot</DialogTitle>
           <DialogDescription>Choose a range and plan your grid.</DialogDescription>
           <Badge variant="secondary" className="w-fit mt-1">{liveEnabled ? 'Review your setup before creating a bot' : 'Planning only'}</Badge>
+          <Button type="button" variant="ghost" className="w-fit text-primary no-underline hover:no-underline px-0" disabled={draftBusy} onClick={() => setConfirmSimple(true)}>Switch to Simple</Button>
+          {confirmSimple && <div className="rounded-lg border p-3 space-y-2 text-sm" role="group" aria-label="Reset to Simple settings">
+            <p>Simple applies the last 7 days' range, 10 levels, step back, the starting position, sizing and stop. Market, direction and amount stay. Leverage above 3x resets to 1x.</p>
+            <div className="flex gap-2"><Button type="button" variant="outline" disabled={draftBusy} onClick={() => setConfirmSimple(false)}>Cancel</Button><Button type="button" disabled={draftBusy} onClick={applySimple}>Continue</Button></div>
+          </div>}
         </DialogHeader>
 
       <div className="flex-1 min-h-0 overflow-y-auto space-y-3 sm:space-y-5 py-2 pr-1 pb-[max(2rem,env(safe-area-inset-bottom))]">
@@ -640,7 +697,10 @@ export function GridPlannerSheet({ open, onOpenChange, identity, plannerEnabled 
     </DialogContent>;
   return <Dialog open={open} onOpenChange={handleOpenChange}>
     {createEnabled ? <GridDraftActions key={identity} open={open} intent={draftIntent} onSaved={onSaved} onBusyChange={setDraftBusy}
-      onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} onIssue={showIssue} renderDetails={feesPanel} renderLayout={renderSetup} />
-      : renderSetup()}
+      onCreated={bot => { if (typeof bot.id === 'string') gridRememberMode(identity, mode, bot.id); }}
+      simple={simple} setupUnavailable={simpleUnavailable} onRefreshSetup={refreshObservations}
+      onSimpleFix={action => { if (action === 'leverage') edit('leverage', '1'); else document.getElementById(action === 'amount' ? 'grid-simple-amount' : 'grid-simple-market')?.focus(); }}
+      onPreview={setDraftPreview} liveEnabled={liveEnabled} rangeBusy={autoApplying} onIssue={showIssue} renderDetails={simple ? () => null : feesPanel} renderLayout={simple ? renderSimple : renderSetup} />
+      : simple ? renderSimple() : renderSetup()}
   </Dialog>;
 }

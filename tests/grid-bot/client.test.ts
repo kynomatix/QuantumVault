@@ -541,7 +541,9 @@ describe('Planner client authority boundaries', () => {
     const app = readFileSync('client/src/pages/App.tsx', 'utf8');
     expect(app.match(/<GridDraftCard\b/g)).toHaveLength(1); expect(app).not.toContain('GridPlannerCard');
     const card = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
-    expect(card.match(/<GridPlannerSheet\b/g)).toHaveLength(1); expect(card).not.toContain('GridCreateSheet');
+    expect(card.match(/<GridSetupEntry\b/g)).toHaveLength(1); expect(card).not.toContain('GridCreateSheet');
+    const entry = readFileSync('client/src/components/grid-planner/GridSetupEntry.tsx', 'utf8');
+    expect(entry.match(/<GridPlannerSheet\b/g)).toHaveLength(1);
     expect(readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8')).toContain('rangeBusy={autoApplying}');
     expect(card).toContain('initialIntent={create.intent}'); expect(card).toContain('createEnabled={enabled}');
     for (const props of [{ authenticated: false, identity: null }, { authenticated: true, identity: 'EXAMPLE' }]) {
@@ -622,7 +624,7 @@ describe('Planner client authority boundaries', () => {
   it('folds draft funding and capacity details without changing the action owner or save guards', () => {
     const sheet = readFileSync('client/src/components/grid-planner/GridPlannerSheet.tsx', 'utf8');
     const actions = readFileSync('client/src/components/grid-bot/GridDraftActions.tsx', 'utf8');
-    expect(sheet).toContain('rangeBusy={autoApplying} onIssue={showIssue} renderDetails={feesPanel}');
+    expect(sheet).toContain('rangeBusy={autoApplying} onIssue={showIssue} renderDetails={simple ? () => null : feesPanel}');
     const details = actions.slice(actions.indexOf('  const details = <>'), actions.indexOf('  const status ='));
     for (const text of ['Draft sizing, observed fees and funds', 'Capacity before trading', 'Unknown capacity does not prevent saving a draft.'])
       expect(details).toContain(text);
@@ -653,7 +655,7 @@ describe('Planner client authority boundaries', () => {
     expect(layout.indexOf('</DialogHeader>')).toBeLessThan(layout.indexOf('overflow-y-auto'));
     expect(layout.indexOf('{status}')).toBeLessThan(layout.indexOf('<DialogFooter'));
     expect(layout).toContain('{depositDialog}');
-    expect(setup).toContain('renderDetails={feesPanel} renderLayout={renderSetup}');
+    expect(setup).toContain('renderDetails={simple ? () => null : feesPanel} renderLayout={simple ? renderSimple : renderSetup}');
     const close = setup.slice(setup.indexOf('  const handleOpenChange'), setup.indexOf('  const renderSetup'));
     expect(close).toContain('if (draftBusy) return;');
     expect(close).toContain('priceRefresh.current?.dispose()');
@@ -695,8 +697,8 @@ describe('Planner client authority boundaries', () => {
     const card = readFileSync('client/src/components/grid-bot/GridDraftCard.tsx', 'utf8');
     expect(drawer).toContain('<Sheet open onOpenChange=');
     expect(drawer).toContain('Adjust Range');
-    expect(drawer).toContain("onAdjust({...surface.bot.createIntent,rangeSource:'manual'})");
+    expect(drawer).toContain("onAdjust({...surface.bot.createIntent,rangeSource:'manual'},surface.bot.id)");
     expect(card).toContain('initialIntent={create.intent}');
-    expect(card).toContain('onAdjust={intent=>{setSelected(null);setCreate({key:Date.now(),intent});}}');
+    expect(card).toContain('onAdjust={(intent,sourceBotId)=>{setSelected(null);setCreate({key:Date.now(),intent,sourceBotId});}}');
   });
 });

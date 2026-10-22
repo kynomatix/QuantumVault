@@ -14,6 +14,7 @@ import { projectGridStop } from './stop-clearance';
 import { GRID_CYCLE_V2_CREATION } from './cycle-policy';
 import { gridSeedPriceBounds } from './cycle-engine';
 import { GRID_LEAN_SIZING_CREATION } from './lean-sizing';
+import { gridStopRiskSummary } from './stop-risk-summary';
 
 const D = Decimal.clone({ precision:100, toExpNeg:-100, toExpPos:100 });
 export class GridDraftError extends Error { constructor(public code: 'authority_unavailable'|'preview_drift'|'idempotency_conflict'|'secret_unavailable'|'invalid_intent', public reasons: string[] = []) { super(code); } }
@@ -144,9 +145,10 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
         :restingEntryMargin.plus(seedNotional.div(intent.leverage)).plus(seedTakerCost)).toDecimalPlaces(2,D.ROUND_CEIL).toFixed(2),
       feeClearance:summaryPlan.feeGate==='evaluated' && summaryPlan.feeRows.every(row=>row.clears)?'clears' as const:'unknown' as const};
   })():null;
-  const bound={schemaVersion:1,draftRevision,intent,authority,plan,minimum,seedTakerCost,geometrySummary,policy:createPolicy};
+  const stopRisk=ready?gridStopRiskSummary(plan,intent.stopPrice,authority,now,expiresAt):{state:'unavailable' as const,reason:'Accepted preview unavailable'};
+  const bound={schemaVersion:1,draftRevision,intent,authority,plan,minimum,seedTakerCost,geometrySummary,stopRisk,policy:createPolicy};
   return { schemaVersion:1 as const,state:ready?'ready' as const:'unavailable' as const, reasons,policy:createPolicy,
-    plan,levels:plan?signedLevels(plan):[],minimum,seedTakerCost,geometrySummary,authority,capacity:GRID_CAPACITY_UNKNOWN,
+    plan,levels:plan?signedLevels(plan):[],minimum,seedTakerCost,geometrySummary,stopRisk,authority,capacity:GRID_CAPACITY_UNKNOWN,
     serverIntentDigest:ready?digest(bound):null,expiresAt,receivedAt:now,pnlLabel:'Excludes funding' as const };
 }
 export async function createGridDraft(wallet:string,request:GridCreateRequest,deps:GridDraftDeps) {

@@ -7,7 +7,7 @@ import {walletAuthHeaders} from '@/lib/queryClient';
 import {GridReadOrder} from '@/lib/grid-live-view';
 import type {GridBotSummary} from '../../../../shared/grid-surface';
 import type {GridIntent} from '../../../../shared/grid-draft';
-import {GridPlannerSheet} from '../grid-planner/GridPlannerSheet';
+import {GridSetupEntry} from '../grid-planner/GridSetupEntry';
 import {gridSetupAccess} from '@/lib/grid-setup-view';
 import {readableDecimal} from '@/lib/grid-planner-view';
 import {GridBotDrawer} from './GridBotDrawer';
@@ -26,7 +26,7 @@ export function GridDraftCard({authenticated,identity,renderLayout}:GridDraftCar
 function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps){
   const [enabled,setEnabled]=useState(false),[bots,setBots]=useState<GridBotSummary[]>([]),[selected,setSelected]=useState<string|null>(null),[error,setError]=useState('');
   const [planner,setPlanner]=useState(false),[start,setStart]=useState(false),[worker,setWorker]=useState(false);
-  const [create,setCreate]=useState<{key:number;intent?:GridIntent}|null>(null),[refresh,setRefresh]=useState(0);
+  const [create,setCreate]=useState<{key:number;intent?:GridIntent;sourceBotId?:string}|null>(null),[refresh,setRefresh]=useState(0);
   const [rangeMove,setRangeMove]=useState(false);
   const order=useRef(new GridReadOrder());
   useEffect(()=>{if(!authenticated||!identity)return;
@@ -116,8 +116,8 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
   );
   return <>
     {renderLayout?renderLayout(card,botSection):<>{card}{botSection}</>}
-    {selected&&identity?<GridBotDrawer key={identity+selected} id={selected} createEnabled={enabled} onClose={()=>{setSelected(null);setRefresh(v=>v+1);}} onAdjust={intent=>{setSelected(null);setCreate({key:Date.now(),intent});}}/>:null}
-    {create&&identity?<GridPlannerSheet key={identity+create.key} identity={identity} open plannerEnabled={planner} createEnabled={enabled} liveEnabled={access.live}
+    {selected&&identity?<GridBotDrawer key={identity+selected} id={selected} createEnabled={enabled} onClose={()=>{setSelected(null);setRefresh(v=>v+1);}} onAdjust={(intent,sourceBotId)=>{setSelected(null);setCreate({key:Date.now(),intent,sourceBotId});}}/>:null}
+    {create&&identity?<GridSetupEntry key={identity+create.key} identity={identity} sourceBotId={create.sourceBotId} open plannerEnabled={planner} createEnabled={enabled} liveEnabled={access.live}
       onOpenChange={open=>{if(!open)setCreate(null);}} initialIntent={create.intent} onSaved={()=>{setCreate(null);setRefresh(v=>v+1);}}/>:null}
   </>;
 }

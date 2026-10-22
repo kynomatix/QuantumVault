@@ -8,6 +8,15 @@ const D=Decimal.clone({precision:100,toExpNeg:-100,toExpPos:100});
 export const GRID_PREVIEW_DEBOUNCE_MS=350;
 export const gridDraftRevision=(intent:GridIntent)=>JSON.stringify(intent);
 const decimal=(v:unknown)=>typeof v==='string' && /^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(v) && v.length<=80?new D(v):null;
+/** A held display quote is not fresh stop-risk authority. Check revision and both deadlines. */
+export function gridCurrentStopRisk(preview: GridDraftPreview | null, intent: GridIntent, now: number) {
+  const risk = preview?.stopRisk;
+  return preview?.state === 'ready' && preview.draftRevision === gridDraftRevision(intent) && now < preview.expiresAt
+    && risk?.state === 'available' && risk.scenario === 'adverse_entries_plus_seed' && risk.stopPrice === intent.stopPrice
+    && Number.isSafeInteger(risk.expiresAt) && now < risk.expiresAt && risk.expiresAt <= preview.expiresAt
+    && [risk.loss, risk.inventory, risk.entryFees, risk.exitFee].every(v => decimal(v) !== null)
+    && decimal(risk.inventory)!.gt(0) ? risk : null;
+}
 export function gridFunds(investment:string,agent:string|null,vault:string|null) {
   const i=decimal(investment),a=decimal(agent),v=decimal(vault);
   if(!i || !i.gt(0) || !a || !v) return {state:'unavailable' as const,available:null,shortfall:null};
