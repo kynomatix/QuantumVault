@@ -1,6 +1,8 @@
 import {describe,it,expect} from 'vitest';
 import {indicators,averageAdx,squeezeAt,adxRanks,pickerMembership,correlation,spearman} from '../../scripts/research/grid-long-adx/core.mjs';
 import {DAY} from '../../scripts/research/grid-ranging-pairs/core.mjs';
+import {compare as fastCompare,absolute as fastAbsolute} from '../../scripts/research/grid-long-adx/fast-stats.mjs';
+import {compare as originalCompare,absolute as originalAbsolute} from '../../scripts/research/grid-ranging-pairs/analysis-core.mjs';
 const start=Date.UTC(2022,0,1);
 const bars=(count=800,fn=(i:number)=>100+i)=>Array.from({length:count},(_,i)=>({time:start+i*DAY,close:fn(i),high:fn(i)+1,low:fn(i)-1}));
 describe('long ADX and squeeze preregistered signals',()=>{
@@ -14,4 +16,12 @@ describe('long ADX and squeeze preregistered signals',()=>{
  it('ranks available scores into floor-terciles with ASCII ties',()=>{const r=adxRanks(['D','B','E','A','C','F'].map(symbol=>({symbol,p2:symbol==='F'?null:10})),'p2');expect(r.ranging).toEqual(['A']);expect(r.trending).toEqual(['E']);expect(r.all).toHaveLength(5);});
  it('makes conjunction and missing state explicit without replacing selections',()=>{const s={all:['A','B'],trending:['B'],p1:{ranging:['A'],trending:['B']},p2:{ranging:['A'],trending:['B']}};expect(pickerMembership(s,{available:true,squeezed:false},'A')).toMatchObject({P1:true,P2:true,P3:true,P4:true});expect(pickerMembership(s,{available:false},'A')).toMatchObject({P2:true,P3:false,P4:false,all:true});});
  it('handles correlation ties and constant variables',()=>{expect(correlation([[1,2],[2,4],[3,6]])).toBeCloseTo(1);expect(spearman([[1,4],[1,4],[2,2],[3,1]])).toBeCloseTo(-1);expect(correlation([[1,2],[1,4]])).toBeNull();});
+});
+describe('unchanged estimators with shared seeded resamples',()=>{
+ const row=(i:number,symbol:string)=>({symbol,week:i*7*DAY,launchAt:i*7*DAY,quarter:i<5?0:1,horizonDays:14,window:'week',arm:'flat_flat',leverage:1,builderRate:0,direction:'long',netReturn:Math.sin(i+symbol.length),maxDrawdown:i/100,protectiveStop:i%2,liquidated:i%3===0,underwaterDays:i,seedHold:false});
+ const left=[0,1,3,4,8,9].flatMap(i=>[row(i,'A'),row(i,'BBB')]),right=[0,1,2,3,4,8,9].map(i=>row(i,'CC'));
+ function equivalent(a:any,b:any){if(typeof a==='number'){expect(a).toBeCloseTo(b,12);return;}if(a===null||typeof a!=='object'){expect(a).toEqual(b);return;}expect(Object.keys(a)).toEqual(Object.keys(b));for(const k of Object.keys(a))equivalent(a[k],b[k]);}
+ it('matches all inherited absolute metrics and 10000-draw one/four-week intervals',()=>equivalent(fastAbsolute(left),originalAbsolute(left)));
+ it('matches paired contrasts, empty weeks, quartiles and tails',()=>equivalent(fastCompare(left,right),originalCompare(left,right)));
+ it('preserves unavailable populations',()=>equivalent(fastCompare([],right),originalCompare([],right)));
 });
