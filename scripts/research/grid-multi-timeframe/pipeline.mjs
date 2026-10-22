@@ -1,0 +1,9 @@
+import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';
+const hb=path.resolve('../grid-multi-timeframe-20261022-handback'),root=fs.readFileSync(hb+'/study-root.txt','utf8').trim();
+async function waitForCertification(){const file=root+'/candles15m/complete.json';if(fs.existsSync(file))return;await new Promise((resolve,reject)=>{const watcher=fs.watch(path.dirname(file),(_,name)=>{if(String(name)!=='complete.json'||!fs.existsSync(file))return;clearTimeout(timer);watcher.close();resolve();});const timer=setTimeout(()=>{watcher.close();reject(Error('Certification did not complete within two hours'));},2*60*60*1000);watcher.on('error',e=>{clearTimeout(timer);watcher.close();reject(e);});if(fs.existsSync(file)){clearTimeout(timer);watcher.close();resolve();}});}
+async function step(name,args){const file=root+'/phase-'+name+'.utf8.log',fd=fs.openSync(file,'wx');try{const code=await new Promise((resolve,reject)=>{const child=spawn(process.execPath,args,{windowsHide:true,stdio:['ignore',fd,fd]});child.once('error',e=>reject(Error('PROCESS CREATION FAILED: '+e.message)));child.once('exit',resolve);});if(code!==0)throw Error(name+' failed; inspect '+file);}finally{fs.closeSync(fd);}console.log(JSON.stringify({completedPhase:name}));}
+await waitForCertification();
+const focused=fs.readFileSync(hb+'/focused-root.txt','utf8').trim(),result=JSON.parse(fs.readFileSync(focused+'/result.json','utf8'));if(!result.result||result.result.failed||result.result.exitCode||result.sshExit)throw Error('Focused tests must pass before simulations');
+await step('source-commit',['scripts/research/grid-multi-timeframe/commit.mjs','research: complete multi-timeframe study orchestration before simulations']);
+for(const name of ['launch','analyze','reconcile','report','review','deliver','scan','finalize'])await step(name,['scripts/research/grid-multi-timeframe/'+name+'.mjs']);
+console.log(JSON.stringify({complete:true,handback:hb}));

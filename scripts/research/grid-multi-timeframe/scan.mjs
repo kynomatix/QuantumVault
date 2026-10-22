@@ -12,10 +12,13 @@ bind('tests/research/grid-multi-timeframe.test.ts','source');
 for(const name of fs.readdirSync(HB))if(/\.(md|json|ps1|sh|csv|log)$/.test(name)&&!['REVIEW-SCAN-STATUS.md','RESUME.md'].includes(name))bind(HB+'/'+name);
 const root=fs.readFileSync(HB+'/study-root.txt','utf8').trim();
 if(!process.argv.includes('--source-only')){
-function walk(dir){for(const name of fs.readdirSync(dir)){const file=dir+'/'+name;if(fs.statSync(file).isDirectory())walk(file);else bind(file);}}
+function walk(dir){for(const name of fs.readdirSync(dir)){if(['phase-scan.utf8.log','phase-finalize.utf8.log'].includes(name))continue;const file=dir+'/'+name;if(fs.statSync(file).isDirectory())walk(file);else bind(file);}}
 walk(root);
 for(const name of fs.readdirSync(root).filter(n=>n.endsWith('-runtime-inputs.json')))for(const file of read(root+'/'+name).files)bind(file,'support');
 bind(path.resolve('shared/grid-lookback.ts'),'support');bind(path.resolve('scripts/research/grid-sizing-stops/replay.mjs'),'support');
+for(const file of ['grid-ranging-pairs/core.mjs','grid-ranging-pairs/design.mjs','grid-long-adx/core.mjs','grid-walkforward/loader.mjs','grid-walkforward/pure-policy.mjs','grid-finder/loader.mjs','grid-finder/source.mjs','grid-backtest-r2/loader.mjs'])bind(path.resolve('scripts/research/'+file),'support');
+const visited=new Set();function loaderClosure(file){file=path.resolve(file);if(visited.has(file))return;visited.add(file);bind(file,'support');for(const m of fs.readFileSync(file,'utf8').matchAll(/(?:from\s*|import\s*)['"]([^'"]+)['"]/g)){if(!m[1].startsWith('.'))continue;const base=path.resolve(path.dirname(file),m[1]),found=[base,base+'.mjs',base+'.ts',base.replace(/\.js$/,'.ts')].find(f=>fs.existsSync(f)&&fs.statSync(f).isFile());if(found)loaderClosure(found);}}
+loaderClosure('scripts/research/grid-multi-timeframe/loader.mjs');
 for(const input of read(root+'/inputs.json'))bind(input.file,'support',input.sha256);
 for(const input of read(root+'/reconciliation-inputs.json'))bind(input.file,'support',input.sha256);
 for(const c of read(root+'/candles15m/certification.json'))if(c.passed)bind(c.file,'evidence',c.sha256);
