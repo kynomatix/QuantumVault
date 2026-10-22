@@ -1,0 +1,12 @@
+import {DAY,WEEK,mean} from '../grid-ranging-pairs/core.mjs';
+export const GEOMETRIES=[{id:'D1M15',days:1,timeframe:'15m',duration:900000,period:'day',horizonDays:3},{id:'D3M15',days:3,timeframe:'15m',duration:900000,period:'three',horizonDays:7},{id:'D3H1',days:3,timeframe:'1h',duration:3600000,period:'three',horizonDays:7},{id:'D7H1',days:7,timeframe:'1h',duration:3600000,period:'week',horizonDays:14}];
+export function weeklyTrend(daily,at){
+ const day=Math.floor(at/DAY)*DAY,anchor=Date.UTC(1970,0,5),week=anchor+Math.floor((day-anchor)/WEEK)*WEEK,index=new Map(daily.filter(d=>d.time+DAY<=at).map(d=>[d.time,d]));
+ const current=index.get(day-DAY);if(!current)return {available:false,reason:'missing last closed daily bar'};
+ const closes=[];for(let t=week-50*WEEK;t<week;t+=WEEK){for(let k=0;k<7;k++)if(!index.has(t+k*DAY))return {available:false,reason:'incomplete 50 closed weeks'};closes.push(index.get(t+6*DAY).close);}
+ const sma=mean(closes);return {available:true,close:current.close,sma,lastWeekEnd:week,side:current.close>sma?'long':current.close<sma?'short':null};
+}
+export function gatePass(gate,signal,direction){const p3=signal.squeeze.available&&!signal.squeeze.squeezed,trend=signal.trend.available&&signal.trend.side===direction;return gate==='G0'?true:gate==='G1'?p3:gate==='G2'?p3&&signal.lowAdx:gate==='G3'?trend:gate==='G4'?p3&&trend:false;}
+export function adaptLookback(source){const a="['day', 'week', 'month']",b='{ day: 1, week: 7, month: 30 }';if(source.split(a).length!==2||source.split(b).length!==2)throw Error('Range map adapter no longer matches');return source.replace(a,"['day', 'three', 'week', 'month']").replace(b,'{ day: 1, three: 3, week: 7, month: 30 }');}
+export function adaptReplay(source){const from="input.timeframe==='1h'?3600000:14400000";if(source.split(from).length!==2)throw Error('Replay duration adapter no longer matches');return source.replace(from,"input.timeframe==='15m'?900000:input.timeframe==='1h'?3600000:14400000");}
+export function replayMetrics(r,duration){if(r.unavailable)throw Error(r.unavailable);return {netReturn:r.finalEquity/1000-1,maxDrawdown:r.maxDrawdown,fees:r.fees,fillCount:r.fillCount,protectiveStop:r.protectiveStop,liquidated:r.liquidated,seedHold:r.seedHold,funding:r.funding,underwaterDays:r.hourlyEquities.filter(x=>x<1000).length*duration/DAY,underwaterAtHorizon:r.finalEquity<1000,finalEquity:r.finalEquity};}

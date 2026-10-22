@@ -1,0 +1,26 @@
+import {describe,it,expect} from 'vitest';
+import {DAY,WEEK} from '../../scripts/research/grid-ranging-pairs/core.mjs';
+import {weeklyTrend,gatePass,replayMetrics,GEOMETRIES,adaptLookback,adaptReplay} from '../../scripts/research/grid-multi-timeframe/core.mjs';
+import {match,weighted,tail,compare,interval,bh,verdict} from '../../scripts/research/grid-multi-timeframe/stats.mjs';
+import fs from 'node:fs';
+const monday=Date.UTC(2024,0,1),daily=Array.from({length:360},(_,i)=>({time:monday-350*DAY+i*DAY,close:100+i}));
+const row=(x:any={})=>({week:0,quarter:0,symbol:'EXAMPLE',leverage:1,netReturn:0,protectiveStop:0,liquidated:false,underwaterDays:0,horizonDays:14,maxDrawdown:0,seedHold:false,...x});
+describe('multi-timeframe closed-bar signals',()=>{
+ it('uses fifty completed weeks and excludes the current partial week from the SMA',()=>{const at=monday+3*DAY+8*3600000,r=weeklyTrend(daily,at);expect(r.available).toBe(true);expect(r.lastWeekEnd).toBe(monday);expect(r.sma).toBeCloseTo(100+6+49*7/2);expect(r.close).toBe(452);expect(r.side).toBe('long');});
+ it('does not use future daily closes',()=>{const at=monday+DAY;const changed=daily.map(r=>r.time+DAY>at?{...r,close:1e9}:r);expect(weeklyTrend(changed,at)).toEqual(weeklyTrend(daily,at));});
+ it('requires every day of all fifty weeks, and treats exact trend ties as unaligned',()=>{expect(weeklyTrend(daily.filter((_,i)=>i!==2),monday).available).toBe(false);expect(weeklyTrend(daily.map(r=>({...r,close:100})),monday).side).toBeNull();});
+ it('keeps no-gate unconditional and does not let unavailable signals pass a conjunction',()=>{const s={squeeze:{available:false},lowAdx:true,trend:{available:true,side:'long'}};expect(gatePass('G0',s,'short')).toBe(true);expect(gatePass('G1',s,'long')).toBe(false);expect(gatePass('G2',s,'long')).toBe(false);expect(gatePass('G3',s,'long')).toBe(true);expect(gatePass('G4',s,'long')).toBe(false);});
+ it('distinguishes P4 from squeeze-only and respects the selected direction',()=>{const s={squeeze:{available:true,squeezed:false},lowAdx:false,trend:{available:true,side:'short'}};expect(gatePass('G1',s,'long')).toBe(true);expect(gatePass('G2',s,'long')).toBe(false);expect(gatePass('G4',s,'short')).toBe(true);expect(gatePass('G4',s,'long')).toBe(false);});
+ it('measures quarter-hour underwater observations in days rather than hours',()=>{const r={finalEquity:900,hourlyEquities:Array(96).fill(900)};expect(replayMetrics(r,900000).underwaterDays).toBe(1);expect(replayMetrics(r,3600000).underwaterDays).toBe(4);});
+ it('extends the range map without changing the registered existing durations',()=>{const source=fs.readFileSync('shared/grid-lookback.ts','utf8'),s=adaptLookback(source);expect(s).toContain('three: 3');expect(s).toContain('day: 1');expect(s).toContain('week: 7');expect(GEOMETRIES.map(g=>g.horizonDays)).toEqual([3,7,7,14]);expect(()=>adaptLookback('changed source')).toThrow();});
+ it('patches only the replay duration declaration and rejects an ambiguous source',()=>{const source=fs.readFileSync('scripts/research/grid-sizing-stops/replay.mjs','utf8'),changed=adaptReplay(source);expect(changed.replace("input.timeframe==='15m'?900000:",'')).toBe(source);expect(()=>adaptReplay(source+source)).toThrow();});
+});
+describe('multi-timeframe matched calendar estimators',()=>{
+ it('matches week and leverage but preserves gate selection of different pairs and sides',()=>{const [a,b]=match([row({symbol:'A'}),row({leverage:3})],[row({symbol:'B',horizonDays:3})]);expect(a).toHaveLength(1);expect(b).toHaveLength(1);expect(b[0].symbol).toBe('B');});
+ it('equally weights leverage strata despite unequal numbers of admitted rows',()=>{const rows=[row({netReturn:1}),row({netReturn:3}),row({leverage:3,netReturn:10})];const w=weighted(rows);expect(w.weeks.get(0)[0]).toBe(6);expect(w.weights.reduce((s,x)=>s+x.weight,0)).toBeCloseTo(1);expect(tail(w.weights,.5)).toBe(2);});
+ it('uses exact matched populations for tails and metrics',()=>{const c=compare([row({netReturn:1}),row({week:WEEK,netReturn:-100})],[row()]);expect(c.left.rows).toBe(1);expect(c.left.worst5).toBe(1);expect(c.one).toMatchObject({mean:1,low:1,high:1});});
+ it('preserves missing calendar weeks in block draws and never manufactures zero returns',()=>{const ci=interval(new Map([[0,2],[2*WEEK,2]]),4,200);expect(ci).toMatchObject({mean:2,low:2,high:2,weeks:2,calendarWeeks:3});expect(interval(new Map()).low).toBeNull();});
+ it('returns deterministic centered-bootstrap evidence and a nonzero finite p-value',()=>{const w=new Map([[0,-1],[WEEK,3],[2*WEEK,2]]);expect(interval(w,1,200)).toEqual(interval(w,1,200));expect(interval(w,1,200).p).toBeGreaterThan(0);expect(interval(new Map([[0,0]]),1,200).p).toBe(1);});
+ it('adjusts the whole tested family with monotone Benjamini-Hochberg values',()=>{const a=bh([{p:.03},{p:.001},{p:.04}]);expect(a.map(x=>x.q)).toEqual([.04,.003,.04]);});
+ it('requires all success conditions and rejects a contradictory broader universe',()=>{const c={one:{low:.01},quarterWins:8,quarterCount:15,left:{worst5:-.1,metrics:{protectiveStop:.2}},right:{worst5:-.2,metrics:{protectiveStop:.3}}};expect(verdict(c,{one:{high:0}}).success).toBe(true);expect(verdict(c,{one:{high:-.001}}).success).toBe(false);expect(verdict({...c,quarterWins:7},{one:{high:0}}).success).toBe(false);});
+});
