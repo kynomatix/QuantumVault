@@ -13,7 +13,7 @@ for(const name of fs.readdirSync(HB))if(/\.(md|json|ps1|sh)$/.test(name)&&!['REV
 const root=fs.readFileSync(HB+'/study-root.txt','utf8').trim();
 if(!process.argv.includes('--source-only')){
 for(const name of fs.readdirSync(root))bind(root+'/'+name);
-for(const input of read(root+'/input-bindings.json'))bind(input.file,'inherited-support',input.sha256);
+for(const input of read(root+'/input-bindings.json'))bind(input.file,'support',input.sha256);
 for(const name of fs.readdirSync(HB+'/evidence').filter(n=>n.startsWith('focused-'))){
  const dir=HB+'/evidence/'+name;for(const f of fs.readdirSync(dir))if(/\.(json|log|sh)$/.test(f))bind(dir+'/'+f);
 }

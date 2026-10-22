@@ -22,3 +22,5 @@ Only new scripts/research/grid-long-adx paths and tests/research/grid-long-adx.t
 Read-only reviewer snapshot scanning covers delivered source, study outputs, focused receipts, input bindings and their inherited data/source closure. See REVIEW-SCAN-STATUS.md for final findings. No formal freeze or seal is claimed.
 
 Delivery verification also binds all seven tested source files to the final working sources. New signal/statistics modules and tests must match tested bytes exactly. Two inherited modules use CRLF in this checkout and LF in Git; only that newline normalization is accepted and recorded, with both working SHA-256 and tested Git blob hash retained.
+
+The first complete snapshot scan stopped at manifest validation: inherited-support is not an accepted purpose value. The manifest builder now uses the reviewer-defined support value. The reviewer and scanner were not edited; the fresh complete scan is recorded separately. The installer had already passed before this metadata correction and is rerun against the final bundle.

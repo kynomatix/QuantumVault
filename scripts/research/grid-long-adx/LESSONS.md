@@ -2,3 +2,4 @@
 2026-10-22 — grid-long-adx: Long research ancestry can exceed FRACTAL's safe bundle size even when the new diff is small; a minimal source projection can test exact bound research blobs without uploading unrelated reports, but is build-time evidence rather than full-tree gate evidence.
 2026-10-22 — grid-long-adx: The bundle sender prefixes its runner JSON with STDOUT; parse the envelope before classifying a successful remote run as missing a receipt.
 2026-10-22 — grid-long-adx: Sharing seeded resamples across linear group differences preserves the estimator and avoids repeating millions of bootstrap sums; verify sparse-week, tail and interval equivalence on FRACTAL.
+2026-10-22 - grid-long-adx: Reviewer snapshot manifests accept only the documented purpose enum; inherited inputs use support, not a newly invented category. A source-only preflight cannot validate later full-closure rows.
