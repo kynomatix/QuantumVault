@@ -61,27 +61,27 @@ afterEach(() => { hooks.effects.forEach(effect => effect.cleanup?.()); vi.unstub
 
 describe('ranging finder interaction', () => {
   it('shows only the trigger until clicked, never scans on mount and can collapse without another request', async () => {
-    render(); render(); expect(text()).toBe('Find ranging markets'); expect(fetch).not.toHaveBeenCalled();
+    render(); render(); expect(text()).toBe('Show weaker-trend markets'); expect(fetch).not.toHaveBeenCalled();
     expect(elements().some(node => node.props.id === 'grid-ranging-markets')).toBe(false);
-    click('Find ranging markets'); expect(fetch).toHaveBeenCalledTimes(1);
+    click('Show weaker-trend markets'); expect(fetch).toHaveBeenCalledTimes(1);
     expect(requests[0].url.searchParams.get('timeframe')).toBe('1h');
-    button('Find ranging markets').props.onClick(); render();
+    button('Show weaker-trend markets').props.onClick(); render();
     expect(elements().some(node => node.props.id === 'grid-ranging-markets')).toBe(false);
     await resolve(page()); expect(elements().some(node => node.props.id === 'grid-ranging-markets')).toBe(false);
-    click('Find ranging markets'); expect(elements().some(node => node.props.id === 'grid-ranging-markets')).toBe(true);
+    click('Show weaker-trend markets'); expect(elements().some(node => node.props.id === 'grid-ranging-markets')).toBe(true);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
   it('shows five rows initially, expands locally, and selects only the market', async () => {
-    render(); click('Find ranging markets'); await resolve(page());
+    render(); click('Show weaker-trend markets'); await resolve(page());
     const candidates = () => elements().filter(node => node.props['aria-label']?.startsWith('Select M'));
-    expect(candidates()).toHaveLength(5); expect(text()).toContain('Ranging'); expect(text()).toContain('ADX 10.0');
+    expect(candidates()).toHaveLength(5); expect(text()).toContain('Weak trend'); expect(text()).toContain('ADX 10.0');
     expect(text()).toContain('Detected band:'); expect(text()).toContain('Updated'); expect(text()).toContain('weakest measured trend');
     expect(text()).not.toContain('best markets');
     candidates()[0].props.onClick(); expect(props.onSelect).toHaveBeenCalledExactlyOnceWith('M0-PERP');
     click('Show more candidates'); expect(candidates()).toHaveLength(8); expect(fetch).toHaveBeenCalledTimes(1);
   });
   it('reports coverage, partial and unavailable states, and pages only after another explicit click', async () => {
-    render(); click('Find ranging markets'); await resolve(page(0));
+    render(); click('Show weaker-trend markets'); await resolve(page(0));
     expect(text()).toContain('Checked 20 of 45 markets. 1 unavailable; 25 not yet checked. 1 ineligible.');
     expect(text()).toContain('No qualifying markets in this scan.'); expect(text()).toContain('Scan truncated');
     click('Check next 20 markets'); button('Check next 20 markets').props.onClick();
@@ -91,24 +91,24 @@ describe('ranging finder interaction', () => {
     expect(text()).toContain('Deadline reached; this batch is partial.');
   });
   it('cancels on interval, identity and close changes and hides old facts before effect cleanup', async () => {
-    render(); click('Find ranging markets'); const old = requests[0];
-    render({ timeframe: '4h' }, false); expect(text()).toBe('Find ranging markets');
+    render(); click('Show weaker-trend markets'); const old = requests[0];
+    render({ timeframe: '4h' }, false); expect(text()).toBe('Show weaker-trend markets');
     render({ timeframe: '4h' }); expect(old.signal.aborted).toBe(true);
-    await new Promise<void>(done => setImmediate(done)); render(); expect(text()).toBe('Find ranging markets');
-    click('Find ranging markets'); render({ identity: 'REDACTED' }); expect(requests[1].signal.aborted).toBe(true);
-    click('Find ranging markets'); render({ enabled: false }); expect(requests[2].signal.aborted).toBe(true); expect(tree).toBeNull();
+    await new Promise<void>(done => setImmediate(done)); render(); expect(text()).toBe('Show weaker-trend markets');
+    click('Show weaker-trend markets'); render({ identity: 'REDACTED' }); expect(requests[1].signal.aborted).toBe(true);
+    click('Show weaker-trend markets'); render({ enabled: false }); expect(requests[2].signal.aborted).toBe(true); expect(tree).toBeNull();
     await new Promise<void>(done => setImmediate(done));
   });
   it('keeps previous coverage when a page crosses the history cut and offers an explicit restart', async () => {
-    render(); click('Find ranging markets'); await resolve(page(1)); click('Check next 20 markets');
+    render(); click('Show weaker-trend markets'); await resolve(page(1)); click('Check next 20 markets');
     await resolve(page(1, 20, { historyCut: page().historyCut + 3_600_000 }));
     expect(text()).toContain('history or market list changed'); expect(text()).toContain('Checked 20 of 45 markets.');
     expect(button('Check first 20 again').props.disabled).toBe(false);
   });
   it('cancels on request and never scans when disabled', async () => {
-    render({ disabled: true }); expect(button('Find ranging markets').props.disabled).toBe(true);
-    button('Find ranging markets').props.onClick(); expect(fetch).not.toHaveBeenCalled();
-    render({ disabled: false }); click('Find ranging markets'); click('Cancel scan');
+    render({ disabled: true }); expect(button('Show weaker-trend markets').props.disabled).toBe(true);
+    button('Show weaker-trend markets').props.onClick(); expect(fetch).not.toHaveBeenCalled();
+    render({ disabled: false }); click('Show weaker-trend markets'); click('Cancel scan');
     await new Promise<void>(done => setImmediate(done)); render();
     expect(requests[0].signal.aborted).toBe(true); expect(text()).toContain('cancelled or timed out');
   });

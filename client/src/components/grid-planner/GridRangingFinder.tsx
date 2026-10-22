@@ -72,8 +72,8 @@ export function GridRangingFinder({ enabled, identity, timeframe, disabled, onSe
       aria-controls="grid-ranging-markets" onClick={() => {
         if (!current) { void scan(0); return; }
         setSession({ ...current, expanded: !current.expanded });
-      }}><Search className="h-3.5 w-3.5 mr-2" />Find ranging markets<ChevronDown className="h-3.5 w-3.5 ml-2" /></Button>
-    {current?.expanded && <section id="grid-ranging-markets" aria-label="Ranging market results" className="col-span-2 row-start-4 rounded-lg border p-3 space-y-3 sm:row-start-3">
+      }}><Search className="h-3.5 w-3.5 mr-2" />Show weaker-trend markets<ChevronDown className="h-3.5 w-3.5 ml-2" /></Button>
+    {current?.expanded && <section id="grid-ranging-markets" aria-label="Weaker-trend market results" className="col-span-2 row-start-4 rounded-lg border p-3 space-y-3 sm:row-start-3">
       <p className="text-xs text-muted-foreground">{timeframe} · 100 finalized candles · weakest measured trend</p>
       <p role="status" className="text-xs text-muted-foreground">{last ? finderCoverage(pages) : 'No markets checked yet.'}
         {current.busy && ' Checking up to 20 markets…'}{last?.truncated && ' Scan truncated; more markets remain.'}
@@ -82,9 +82,9 @@ export function GridRangingFinder({ enabled, identity, timeframe, disabled, onSe
       {!current.busy && last && candidates.length === 0 && <p className="text-sm">No qualifying markets in this scan.</p>}
       <div className="space-y-2">{candidates.slice(0, current.results?.visible ?? 5).map(candidate => <button key={candidate.market}
         type="button" disabled={disabled || current.busy} onClick={() => onSelect(candidate.market)}
-        aria-label={`Select ${candidate.symbol}. Ranging, ADX ${candidate.adx.toFixed(1)}. Load fresh market facts.`}
+        aria-label={`Select ${candidate.symbol}. Weak trend, ADX ${candidate.adx.toFixed(1)}. Load fresh market facts.`}
         className="w-full rounded-md border px-3 py-2 text-left hover:bg-accent focus-visible:outline focus-visible:outline-2 disabled:opacity-50">
-        <span className="flex justify-between gap-2 text-sm"><span className="font-medium">{candidate.symbol} <span className="text-emerald-500">Ranging</span></span><span>ADX {candidate.adx.toFixed(1)}</span></span>
+        <span className="flex justify-between gap-2 text-sm"><span className="font-medium">{candidate.symbol} <span className="text-muted-foreground">Weak trend</span></span><span>ADX {candidate.adx.toFixed(1)}</span></span>
         <span className="block text-xs">Detected band: {readableDecimal(candidate.lowerPrice)}–{readableDecimal(candidate.upperPrice)}</span>
         <span className="block text-xs text-muted-foreground">Updated {readableTime(candidate.updatedAt)}</span>
       </button>)}</div>
@@ -97,7 +97,7 @@ export function GridRangingFinder({ enabled, identity, timeframe, disabled, onSe
         {current.busy && <Button type="button" size="sm" variant="ghost" onClick={() => request.current?.abort()}>Cancel scan</Button>}
       </div>
       <details className="text-xs text-muted-foreground"><summary className="cursor-pointer">Why these markets?</summary>
-        <p className="mt-2">Candidates have ADX(14) below 20 and an unbroken recent range. This does not predict returns. Price data may come from another venue; live order checks use Pacifica.</p>
+        <p className="mt-2">Weak trend means ADX(14) below 20 and an unbroken recent range. In our backtests these markets did not give better grid results than others, so this describes the market; it is not a recommendation. Price data may come from another venue; live order checks use Pacifica.</p>
         <p>Sorted by ADX, lowest first: weakest measured trend. Selecting a row changes the market picker and loads fresh facts; the detected band is not applied.</p>
         {candidates.map(candidate => <p key={candidate.market}>{candidate.symbol}: {candidate.venue} direct perpetual candles, 100 finalized {timeframe} candles ending {readableTime(candidate.latestFinalizedTime)} (candle open time).</p>)}
       </details>
