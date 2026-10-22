@@ -63,7 +63,6 @@ export interface GridLaunchAuthorityDeps {
   sol(wallet:string,signal:AbortSignal):Promise<{balance:string;observedAt:number}|null>;
   reusable(wallet:string,masterAccount:string):Promise<string[]>;
   capacity(masterAccount:string,account:string):Promise<{activeBots:number;reservations:{id:string;slots:number}[]}>;
-  configuration():{builderCode:string|null;builderOwner:string|null};
   environment():Pick<NodeJS.ProcessEnv,'REUSE_ON_CREATE'|'RECYCLE_ON_DELETE'|'REPLIT_DEPLOYMENT'|'GRID_RECYCLER_DEPLOYMENT'>;
   now():number;
 }
@@ -80,17 +79,15 @@ export class GridLaunchAuthority {
     try{
       const master=security.masterAccount,target=account?.account??master,symbol=policy.market.replace(/-PERP$/,'');
       if(!master||account&&(account.wallet!==wallet||account.botId!==policy.id||account.masterAccount!==master||target===master||!account.leaseToken))deny('Grid retained account identity changed.');
-      const {builderCode,builderOwner}=this.deps.configuration(),env=this.deps.environment();
+      const env=this.deps.environment();
       const recycler={reuse:env.REUSE_ON_CREATE,recycle:env.RECYCLE_ON_DELETE,deployment:env.REPLIT_DEPLOYMENT??'',expectedDeployment:env.GRID_RECYCLER_DEPLOYMENT??'',checkedAt:started};
-      if(!this.deps.reads.ready()||builderCode!=='CARRY'||!builderOwner||builderOwner.trim()!==builderOwner
-        ||!gridRecyclerGate(recycler,this.deps.now()))return deny('Grid transport, CARRY configuration or recycler authority unavailable.');
+      if(!this.deps.reads.ready()
+        ||!gridRecyclerGate(recycler,this.deps.now()))return deny('Grid transport or recycler authority unavailable.');
       // Settle every read before releasing the signing key, including failure/abort paths.
       const jobs=[
         ()=>this.deps.reads.json(master,'/account',{account:master},signal),
         ()=>this.deps.reads.json(master,'/account',{account:target},signal),
         ()=>this.deps.reads.json(master,'/account/settings',{account:target},signal),
-        ()=>this.deps.reads.json(master,'/account/builder_codes/approvals',{account:target},signal),
-        ()=>this.deps.reads.json(master,'/builder/overview',{account:builderOwner},signal),
         ()=>this.deps.reads.json(master,'/info',{},signal),()=>this.deps.reads.json(master,'/book',{symbol},signal),
         ()=>this.deps.reads.json(master,'/orders',{account:target},signal),()=>this.deps.reads.json(master,'/positions',{account:target},signal),
         ()=>this.deps.reads.subaccounts(master,security.signingKey,signal),()=>this.deps.sol(master,signal),()=>this.deps.reusable(wallet,master),
@@ -100,7 +97,7 @@ export class GridLaunchAuthority {
       if(settled.some(r=>r.status==='rejected'&&r.reason instanceof GridLaunchTransientError))throw new GridLaunchTransientError('Fresh Grid launch reads are waiting for durable quota authority.');
       if(settled.some(r=>r.status==='rejected'))deny('Fresh Grid launch observations unavailable.');
       const values=settled.map(r=>(r as PromiseFulfilledResult<unknown>).value);
-      const [rawMaster,rawTarget,rawSettings,rawApprovals,rawOverview,rawInfo,rawBook,rawOrders,rawPositions,rawInventory,rawSol,rawReusable,rawCapacity]=values;
+      const [rawMaster,rawTarget,rawSettings,rawInfo,rawBook,rawOrders,rawPositions,rawInventory,rawSol,rawReusable,rawCapacity]=values;
       const now=this.deps.now(),m=accountData(rawMaster,master),a=accountData(rawTarget,target),settings=accountData(rawSettings,target);
       const masterAt=fresh(m.updated_at,now),accountAt=fresh(a.updated_at,now);
       const withdrawable=decimal(m.available_to_withdraw),available=decimal(a.available_to_spend);
@@ -120,15 +117,14 @@ export class GridLaunchAuthority {
         market.isolated_only===true||matching[0].isolated===true?'restricted':'unknown';
       if(restrictions!=='unrestricted')deny('Grid cross-margin market restriction authority unavailable.');
       const book=gridBookFact(rawBook,symbol,started,now);if(!book)deny('Fresh Grid book unavailable.');
-      const approvals=rows(rawApprovals,target),overview=rows(rawOverview,builderOwner);
       const fee=(role:'maker'|'taker',intent:'entry'|'profit')=>{
-        const result=createGridFeeQuote({account:target,subaccountId:null,market:policy.market,liquidityRole:role,builderCode:'CARRY',intent},a,overview,approvals,started,AGE);
-        if(result.availability!=='available')return deny('Current Grid account fees or CARRY approval unavailable.');return result.quote;
+        const result=createGridFeeQuote({account:target,subaccountId:null,market:policy.market,liquidityRole:role,builderCode:null,intent},a,null,null,started,AGE);
+        if(result.availability!=='available')return deny('Current Grid account fees unavailable.');return result.quote;
       };
       const margin=await readGridMargin({json:async(_master,path,params)=>{
         if(_master!==master||params.account!==target)deny('Grid margin identity changed.');
-        return path==='/account'?rawTarget:path==='/account/settings'?rawSettings:path==='/account/builder_codes/approvals'?rawApprovals:deny('Grid margin source unavailable.');
-      }},{kind:'limit',botId:policy.id,account:target,masterAccount:master,path:'/orders/create',operationType:'create_order',timestamp:started,expiryMs:AGE,data:{symbol,reduce_only:false,builder_code:'CARRY'},authority:{}});
+        return path==='/account'?rawTarget:path==='/account/settings'?rawSettings:deny('Grid margin source unavailable.');
+      }},{kind:'limit',botId:policy.id,account:target,masterAccount:master,path:'/orders/create',operationType:'create_order',timestamp:started,expiryMs:AGE,data:{symbol,reduce_only:false},authority:{}});
       if(!margin||margin.available!==available||margin.leverage!==String(matching[0].leverage))deny('Strict C1 Grid margin authority unavailable.');
       margin!.observedAt=started;fresh(margin!.accountUpdatedAt,now);
       const inventory=object(envelope(rawInventory,master)),subaccounts=inventory.subaccounts;
@@ -193,7 +189,6 @@ export function productionGridLaunchAuthority(reads:GridLaunchReads,ledger:GridL
   return new GridLaunchAuthority({reads,unlock:unlockGridLaunchAgent,sol:sharedSol,now:Date.now,environment:()=>({
     REUSE_ON_CREATE:process.env.REUSE_ON_CREATE,RECYCLE_ON_DELETE:process.env.RECYCLE_ON_DELETE,
     REPLIT_DEPLOYMENT:process.env.REPLIT_DEPLOYMENT,GRID_RECYCLER_DEPLOYMENT:process.env.GRID_RECYCLER_DEPLOYMENT}),
-    configuration:()=>{const adapter=requireGridAdapter();return adapter.getGridLaunchConfiguration?.()??{builderCode:null,builderOwner:null};},
     capacity:(master,account)=>ledger.transaction(async c=>({
       activeBots:Number((await c.query(`SELECT count(*) AS count FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
         WHERE a.master_account=$1 AND a.released_at IS NULL AND b.status=ANY($2::text[])`,[master,['provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping']])).rows[0].count),
@@ -205,8 +200,6 @@ export function productionGridLaunchAuthority(reads:GridLaunchReads,ledger:GridL
       AND p.derivation_index IS NULL AND p.aad_version=1 AND p.last_verified_empty_at IS NOT NULL AND p.subaccount_key_encrypted_v3 IS NOT NULL
       AND NOT EXISTS(SELECT 1 FROM grid_launch_accounts a WHERE a.protocol_subaccount_id=p.id AND a.released_at IS NULL)`,[wallet,master])).rows.map(r=>r.account))});
 }
-import {getAdapter} from '../protocol/adapter-registry';
-const requireGridAdapter=()=>getAdapter('pacifica') as ReturnType<typeof getAdapter>&{getGridLaunchConfiguration?:()=>{builderCode:string|null;builderOwner:string|null}};
 let defaultAuthority:Promise<GridLaunchAuthority>|undefined;
 export function defaultGridLaunchAuthority(){
   return defaultAuthority??=Promise.all([import('../db'),import('./launch-storage'),import('./launch-reads'),import('../protocol/pacifica/pacifica-transport')])

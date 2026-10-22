@@ -78,11 +78,11 @@ export async function authoritativeGridPreview(wallet:string,intent:GridIntent,d
       if (!a || !lower.eq(snap(a.lowerPrice,D.ROUND_CEIL)) || !upper.eq(snap(a.upperPrice,D.ROUND_FLOOR))
         || !stop.eq(snap(a.stopPrice,intent.direction==='long'?D.ROUND_FLOOR:D.ROUND_CEIL))) reject('Auto range changed or finalized history unavailable; manual range remains available');
     }
-    const identity=(role:'maker'|'taker',purpose:'entry'|'profit')=>({account:authority.referenceAccount??'',subaccountId:null,market:intent.market,liquidityRole:role,builderCode:'CARRY',intent:purpose});
+    const identity=(role:'maker'|'taker',purpose:'entry'|'profit')=>({account:authority.referenceAccount??'',subaccountId:null,market:intent.market,liquidityRole:role,builderCode:null,intent:purpose});
     const entry=authority.entryFee,profit=authority.profitFee,seed=authority.seedFee;
     const makerValid=!!entry && !!profit && validateGridFeeQuote(entry,identity('maker','entry'),now) && validateGridFeeQuote(profit,identity('maker','profit'),now);
     const seedValid=!intent.seedAtCreation || !!seed && validateGridFeeQuote(seed,identity('taker','entry'),now);
-    if (!makerValid) reject('Current account maker and builder fee quotes unavailable');
+    if (!makerValid) reject('Current account maker fee quotes unavailable');
     if (!seedValid) reject('Current seed taker fee unavailable');
     const makerRate=makerValid?D.max(0,entry!.effectiveRate,profit!.effectiveRate).toFixed():null;
     const takerRate=intent.seedAtCreation && seedValid?new D(seed!.effectiveRate):new D(0);

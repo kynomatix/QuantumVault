@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createGridFeeQuote, validateGridFeeQuote, type GridFeeIdentity, type GridFeeQuote } from '../../server/grid-bot/fee-authority.js';
 import { gridClientOrderId, parseGridVenueOrders, resolveGridOrder, prepareGridOrder, validatePreparedGridOrder, withGridOrderAuthority, type GridOrderIntent } from '../../server/grid-bot/order-identity.js';
@@ -6,7 +7,7 @@ import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter
 import { PacificaTransportAuthority } from '../../server/protocol/pacifica/pacifica-transport.js';
 const NOW = 1_800_000_000_000;
 const EXAMPLE_KEY = 'EXAMPLE1_1111111111111111';
-const identity: GridFeeIdentity = { account: 'EXAMPLE_ACCOUNT', subaccountId: 'EXAMPLE_SUBACCOUNT', market: 'BTC-PERP', liquidityRole: 'maker', builderCode: 'CARRY', intent: 'entry' };
+const identity: GridFeeIdentity = { account: 'EXAMPLE_ACCOUNT', subaccountId: 'EXAMPLE_SUBACCOUNT', market: 'BTC-PERP', liquidityRole: 'maker', builderCode: null, intent: 'entry' };
 const account = { subaccount_id: identity.subaccountId, maker_fee: '0.00020000000000000001', taker_fee: '0.0007' };
 const overview = [{ builder_code: 'CARRY', fee_rate: '0.00010000000000000002' }];
 const approvals = [{ builder_code: 'CARRY', max_fee_rate: '0.001' }];
@@ -29,12 +30,36 @@ const historyRow = (status = 'filled', overrides: Record<string, unknown> = {}) 
   amount: '0.002', filled_amount: status === 'filled' ? '0.002' : '0', order_status: status, ...overrides });
 const response = (data: unknown, more: Record<string, unknown> = {}, metadata = true) => new Response(JSON.stringify({ success: true, data, ...more }), {
   headers: metadata ? { ratelimit: '"credits";r=3000;t=60', 'ratelimit-policy': '"credits";q=3000;w=60' } : {} });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
-describe('exact retained maker/CARRY authority', () => {
-  it('adds the actual rate exactly; ceiling is permission, not charged economics', () => {
-    const q = quote(); expect(q).toMatchObject({ baseRate: account.maker_fee, builderRate: overview[0].fee_rate,
-      effectiveRate: '0.00030000000000000003', builder: { code: 'CARRY', approvalCeiling: '0.001' } });
+describe('exact retained maker venue-only authority', () => {
+  it('rejects an intact legacy CARRY quote safely, including order dispatch', async () => {
+    const { quoteDigest: _old, ...unsigned } = quote();
+    const legacy = { ...unsigned, builderCode: 'CARRY', builderRate: '0.0001', effectiveRate: '0.00030000000000000001',
+      builder: { code: 'CARRY', rate: '0.0001', approvalCeiling: '0.001' } };
+    const q = { ...legacy, quoteDigest: createHash('sha256').update(JSON.stringify(legacy)).digest('hex') };
+    expect(validateGridFeeQuote(q, identity, NOW)).toBe(false);
+    expect(validateGridFeeQuote(q, { ...identity, builderCode: 'CARRY' }, NOW)).toBe(false);
+    expect(() => prepareGridOrder(intent(), q, constraints(), NOW)).toThrow('Grid authority unavailable');
+    const p = prepareGridOrder(intent(), quote(), constraints(), NOW), dispatch = vi.fn();
+    const { requestDigest: _request, ...old } = { ...p, feeQuote: q, unsigned: { ...p.unsigned, builder_code: 'CARRY' } };
+    const retained = { ...old, requestDigest: createHash('sha256').update(JSON.stringify(old)).digest('hex') };
+    expect(await withGridOrderAuthority(retained, current(), NOW, dispatch)).toEqual({ disposition: 'not_sent' });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+  it.each([undefined, 'CARRY'])('ignores builder environment/configuration %s', async builder => {
+    vi.stubEnv('PACIFICA_BUILDER_CODE', builder);vi.useFakeTimers();vi.setSystemTime(NOW);
+    const fetch = vi.fn().mockResolvedValue(response(account));vi.stubGlobal('fetch', fetch);
+    const adapter = new PacificaAdapter({ builderCode: builder, referralAddress: builder ? 'EXAMPLE_OWNER' : undefined }, new PacificaTransportAuthority(EXAMPLE_KEY));
+    expect(await adapter.getGridFeeQuote(identity)).toMatchObject({ availability: 'available', quote: { builderCode: null, builder: null, builderRate: '0', effectiveRate: account.maker_fee } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await adapter.getGridFeeQuote({ ...identity, builderCode: 'CARRY' })).availability).toBe('unavailable');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the venue rate exactly with a null builder and zero builder rate', () => {
+    const q = quote(); expect(q).toMatchObject({ baseRate: account.maker_fee, builderCode: null, builderRate: '0',
+      effectiveRate: account.maker_fee, builder: null });
     expect(validateGridFeeQuote(q, identity, NOW)).toBe(true);
     expect(q.provenance).toContain('/account.maker_fee');
   });
@@ -50,11 +75,11 @@ describe('exact retained maker/CARRY authority', () => {
     [null, approvals], [[], approvals], [[...overview, ...overview], approvals], [overview, null], [overview, []],
     [overview, [...approvals, ...approvals]], [overview, [{ builder_code: 'OTHER', max_fee_rate: '0.001' }]],
     [overview, [{ builder_code: 'CARRY', max_fee_rate: '0.00001' }]],
-  ])('denies absent, duplicate or insufficient builder proof', (o, a) => {
-    expect(createGridFeeQuote(identity, account, o, a, NOW).availability).toBe('unavailable');
+  ])('ignores absent, duplicate or insufficient builder proof', (o, a) => {
+    expect(createGridFeeQuote(identity, account, o, a, NOW).availability).toBe('available');
   });
-  it('requires CARRY and exact account/subaccount identity', () => {
-    expect(createGridFeeQuote({ ...identity, builderCode: null }, account, overview, approvals, NOW).availability).toBe('unavailable');
+  it('requires exemption and exact account/subaccount identity', () => {
+    expect(createGridFeeQuote({ ...identity, builderCode: 'CARRY' }, account, overview, approvals, NOW).availability).toBe('unavailable');
     expect(createGridFeeQuote(identity, { ...account, account: 'EXAMPLE_OTHER' }, overview, approvals, NOW).availability).toBe('unavailable');
     expect(createGridFeeQuote(identity, { ...account, subaccount_id: 'EXAMPLE_OTHER' }, overview, approvals, NOW).availability).toBe('unavailable');
   });
@@ -66,14 +91,14 @@ describe('exact retained maker/CARRY authority', () => {
     expect(validateGridFeeQuote(q, identity, NOW - 1)).toBe(false);
     expect(validateGridFeeQuote({ ...q, effectiveRate: '0' }, identity, NOW)).toBe(false);
   });
-  it('uses fresh account, overview and approval envelopes with Config Key and observed quota', async () => {
+  it('uses only a fresh account envelope with Config Key and observed quota', async () => {
     vi.useFakeTimers(); vi.setSystemTime(NOW);
     const fetch = vi.fn().mockResolvedValueOnce(response(account)).mockResolvedValueOnce(response(overview)).mockResolvedValueOnce(response(approvals));
     vi.stubGlobal('fetch', fetch);
     const adapter = new PacificaAdapter({ referralAddress: 'EXAMPLE_BUILDER_OWNER' }, new PacificaTransportAuthority(EXAMPLE_KEY));
     const result = await adapter.getGridFeeQuote(identity);
     expect(result.availability).toBe('available');
-    expect(fetch.mock.calls.map(c => new URL(c[0]).pathname)).toEqual(['/api/v1/account', '/api/v1/builder/overview', '/api/v1/account/builder_codes/approvals']);
+    expect(fetch.mock.calls.map(c => new URL(c[0]).pathname)).toEqual(['/api/v1/account']);
     for (const [, init] of fetch.mock.calls) expect(new Headers(init.headers).get('PF-API-KEY')).toBe(EXAMPLE_KEY);
   });
   it('missing key or metadata denies Grid fee authority; generic taker suppression stays compatible', async () => {
@@ -96,9 +121,10 @@ describe('stable exact identity and prepared request handoff', () => {
   it.each([{ botId: '' }, { botId: ' EXAMPLE' }, { level: 0 }, { level: 1.5 }, { attempt: -1 }, { attempt: NaN }, { leg: 'OTHER' }])('rejects invalid identity before any I/O', change => {
     expect(() => gridClientOrderId({ ...tuple, ...change } as any)).toThrow('Invalid');
   });
-  it('retains exact price/amount, ALO, builder and explicit subaccount; signs nothing', async () => {
+  it('retains exact price/amount, ALO and explicit subaccount without a builder; signs nothing', async () => {
     const p = prepareGridOrder(intent(), quote(), constraints(), NOW);
-    expect(p.unsigned).toMatchObject({ price: '10000.50', amount: '0.002', tif: 'ALO', builder_code: 'CARRY', subaccount_id: identity.subaccountId, client_order_id: CLOID });
+    expect(p.unsigned).toMatchObject({ price: '10000.50', amount: '0.002', tif: 'ALO', subaccount_id: identity.subaccountId, client_order_id: CLOID });
+    expect(p.unsigned).not.toHaveProperty('builder_code');
     expect(validatePreparedGridOrder(p, current(), NOW + 1)).toBe(true);
     const dispatch = vi.fn(async request => request); const result = await withGridOrderAuthority(p, current(), NOW + 1, dispatch);
     expect(result.disposition).toBe('dispatched'); expect(dispatch).toHaveBeenCalledExactlyOnceWith(p.unsigned);
@@ -107,9 +133,9 @@ describe('stable exact identity and prepared request handoff', () => {
   it.each([{ price: '10000.51' }, { amount: '0.0021' }, { clientOrderId: 'EXAMPLE_INVALID' }, { protocolSymbol: 'SOL' }, { signingTimestamp: NOW - 1 }])('denies bad prepared geometry/identity without re-quantizing', change => {
     expect(() => prepareGridOrder({ ...intent(), ...change }, quote(), constraints(), NOW)).toThrow();
   });
-  it('profit uses the same maker/CARRY authority, exact reduce-only amount and no opening minimum', () => {
+  it('profit uses the same maker venue-only authority, exact reduce-only amount and no opening minimum', () => {
     const p = prepareGridOrder({ ...intent(), amount: '0.001', price: '1', reduceOnly: true }, quote({ intent: 'profit' }), constraints(), NOW);
-    expect(p.unsigned).toMatchObject({ reduce_only: true, builder_code: 'CARRY', amount: '0.001' });
+    expect(p.unsigned).toMatchObject({ reduce_only: true, amount: '0.001' });expect(p.unsigned).not.toHaveProperty('builder_code');
   });
   it.each(['account', 'subaccountId', 'signerPublicKey', 'signerGeneration', 'deployment', 'endpoint'])('denies identity/generation drift before dispatch: %s', async field => {
     const p = prepareGridOrder(intent(), quote(), constraints(), NOW), dispatch = vi.fn();

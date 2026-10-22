@@ -4,8 +4,15 @@ import {preflightGridLaunch} from '../../server/grid-bot/provision';
 import {gridResumeClearance} from '../../server/grid-bot/lifecycle-service';
 import {launchAuthorityFixture,clock,umk} from './launch-authority-fixtures';
 beforeEach(()=>vi.spyOn(Date,'now').mockReturnValue(clock));
-afterEach(()=>vi.restoreAllMocks());
+afterEach(()=>{vi.restoreAllMocks();vi.unstubAllEnvs();});
 describe('C5 production launch facts',()=>{
+  it.each([undefined,'CARRY'])('launches independently of builder environment %s and absent approvals',async builder=>{
+    vi.stubEnv('PACIFICA_BUILDER_CODE',builder);const f=launchAuthorityFixture();f.raw.approvals=[];f.raw.overview=[];
+    const facts=await f.authority.observe(f.account.wallet,f.policy,null,umk());
+    expect(preflightGridLaunch(f.policy,f.policyHash,umk(),facts,clock).ok).toBe(true);
+    for(const quote of [facts.maker,facts.profit,facts.taker])expect(quote).toMatchObject({builderCode:null,builder:null,builderRate:'0'});
+    expect(vi.mocked(f.deps.reads.json).mock.calls.some(c=>c[1].includes('builder'))).toBe(false);
+  });
   it.each([false,true])('binds fresh initial facts without changing full investment or seed geometry (seed %s)',async seed=>{
     const f=launchAuthorityFixture(seed),before=structuredClone(f.policy);
     const facts=await f.authority.observe(f.account.wallet,f.policy,null,umk());
@@ -22,8 +29,8 @@ describe('C5 production launch facts',()=>{
     const f=launchAuthorityFixture();f.raw.master.available_to_withdraw='7';f.raw.sub.maker_fee='-0.0001';f.raw.sub.taker_fee='0.0002';
     f.raw.approvals[0].max_fee_rate='0.001';f.raw.overview[0].fee_rate='0.0001';
     const facts=await f.authority.observe(f.account.wallet,f.policy,f.account,umk());
-    expect(facts.masterWithdrawable).toBe('7');expect(facts.maker.account).toBe(f.account.account);expect(facts.maker.effectiveRate).toBe('0');
-    expect(facts.taker?.effectiveRate).toBe('0.0003');expect(facts.margin?.feeRate).toBe('0.0012');
+    expect(facts.masterWithdrawable).toBe('7');expect(facts.maker.account).toBe(f.account.account);expect(facts.maker.effectiveRate).toBe('-0.0001');
+    expect(facts.taker?.effectiveRate).toBe('0.0002');expect(facts.margin?.feeRate).toBe('0.0002');
     const calls=vi.mocked(f.deps.reads.json).mock.calls;expect(calls.every(c=>c[0]===f.account.masterAccount)).toBe(true);
     expect(calls.filter(c=>['/account/settings','/account/builder_codes/approvals','/orders','/positions'].includes(c[1])).every(c=>c[2].account===f.account.account)).toBe(true);
   });
@@ -51,16 +58,13 @@ describe('C5 production launch facts',()=>{
     ['book identity mismatch',f=>f.raw.book.s='ETH'],['book stale',f=>f.raw.book.t=clock-5000],['book future',f=>f.raw.book.t=clock+1],
     ['crossed book',f=>f.raw.book.l[0][0].p='101'],['empty book',f=>f.raw.book.l[1]=[]],['numeric book',f=>f.raw.book.l[0][0].p=100],
     ['maker unavailable',f=>delete f.raw.sub.maker_fee],['taker unavailable',f=>delete f.raw.sub.taker_fee],
-    ['builder approval missing',f=>f.raw.approvals=[]],['builder overview missing',f=>f.raw.overview=[]],['builder ceiling exceeded',f=>f.raw.overview[0].fee_rate='0.001'],
-    ['builder ambiguous',f=>f.raw.approvals.push(f.raw.approvals[0])],['builder wrong account',f=>f.raw.approvals[0].account='EXAMPLE_OTHER'],
     ['inventory missing',f=>delete f.raw.inventory.subaccounts],['inventory duplicate',f=>f.raw.inventory.subaccounts.push(f.raw.inventory.subaccounts[0])],
     ['account not a child',f=>f.raw.inventory.subaccounts=[]],['inventory absent address',f=>delete f.raw.inventory.subaccounts[0].address],
     ['orders count mismatch',f=>f.raw.sub.orders_count=1],['positions count mismatch',f=>f.raw.sub.positions_count=1],
     ['malformed order',f=>{f.raw.orders=[{}];f.raw.sub.orders_count=1;}],['other market cannot imply flatness',f=>{f.raw.positions=[{symbol:'ETH',side:'bid',amount:'1'}];f.raw.sub.positions_count=1;}],
     ['SOL unknown',f=>f.deps.sol=vi.fn(async()=>null)],['SOL stale',f=>f.deps.sol=vi.fn(async()=>({balance:'1',observedAt:clock-5000}))],
     ['SOL below reserve',f=>f.deps.sol=vi.fn(async()=>({balance:'0.049999999',observedAt:clock}))],
-    ['private transport missing',f=>f.deps.reads.ready=vi.fn(()=>false)],['CARRY config missing',f=>f.deps.configuration=()=>({builderCode:null,builderOwner:'EXAMPLE'})],
-    ['CARRY owner missing',f=>f.deps.configuration=()=>({builderCode:'CARRY',builderOwner:null})],['wrong builder',f=>f.deps.configuration=()=>({builderCode:'QuantumVault',builderOwner:'EXAMPLE'})],
+    ['private transport missing',f=>f.deps.reads.ready=vi.fn(()=>false)],
     ['recycling disabled',f=>f.deps.environment=()=>({REUSE_ON_CREATE:'true',RECYCLE_ON_DELETE:'false',REPLIT_DEPLOYMENT:'EXAMPLE',GRID_RECYCLER_DEPLOYMENT:'EXAMPLE'})],
     ['deployment mismatch',f=>f.deps.environment=()=>({REUSE_ON_CREATE:'true',RECYCLE_ON_DELETE:'true',REPLIT_DEPLOYMENT:'EXAMPLE_A',GRID_RECYCLER_DEPLOYMENT:'EXAMPLE_B'})],
     ['generation changed',f=>f.current.mockResolvedValue(false)],['read rejected',f=>f.deps.reads.json=vi.fn(async()=>{throw Error('EXAMPLE transport');})],

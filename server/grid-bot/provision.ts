@@ -56,8 +56,8 @@ function gridCurrentAuthority(policy:GridPolicy,policyHmac:string,umk:Buffer,f:L
       || !new Decimal(f.observedCredits).gt(0))return deny('Funding, leverage, quota or market restrictions deny launch.');
     if(!new Decimal(f.availableGridCredits).gte(resume||alreadyFunded?10:policy.seedAtCreation?50:40))return {ok:false as const,transient:true,reason:'Grid quota is temporarily unavailable.'};
     const account=f.account??f.masterAccount;
-    const fee=(quote:GridFeeQuote|null,role:'maker'|'taker',intent:'entry'|'profit')=>quote&&validateGridFeeQuote(quote,{account,subaccountId:null,market:policy.market,liquidityRole:role,builderCode:'CARRY',intent},now);
-    if(!fee(f.maker,'maker','entry')||!fee(f.profit,'maker','profit')||!resume&&policy.seedAtCreation&&!fee(f.taker,'taker','entry'))return deny('Current account fees and builder approval are unavailable.');
+    const fee=(quote:GridFeeQuote|null,role:'maker'|'taker',intent:'entry'|'profit')=>quote&&validateGridFeeQuote(quote,{account,subaccountId:null,market:policy.market,liquidityRole:role,builderCode:null,intent},now);
+    if(!fee(f.maker,'maker','entry')||!fee(f.profit,'maker','profit')||!resume&&policy.seedAtCreation&&!fee(f.taker,'taker','entry'))return deny('Current account fees are unavailable.');
     const maker=Decimal.max(0,f.maker.effectiveRate,f.profit.effectiveRate),taker=!resume&&policy.seedAtCreation?new Decimal(f.taker!.effectiveRate):new Decimal(0);
     return {ok:true as const,maker,taker};
   }catch{return deny('A required current authority input is unknown or invalid.');}
@@ -194,7 +194,7 @@ export class GridProvision {
         {kind:'leverage',path:'/account/leverage',operationType:'update_leverage',data:{symbol,leverage:input.policy.leverage}});
       if(input.policy.seedAtCreation&&new Decimal(admission.plan.seedQuantity).gt(0))steps.push({kind:'seed',path:'/orders/create_market',operationType:'create_market_order',
         data:{symbol,amount:admission.plan.seedQuantity,side:input.policy.direction==='long'?'bid':'ask',reduce_only:false,slippage_percent:GRID_SEED_MAX_SLIPPAGE_PERCENT,
-          client_order_id:gridClientOrderId({botId:input.policy.id,level:GRID_SEED_IDENTITY_LEVEL,attempt:0,leg:'entry'}),...(facts.taker?.builder?{builder_code:facts.taker.builder.code}:{})}});
+          client_order_id:gridClientOrderId({botId:input.policy.id,level:GRID_SEED_IDENTITY_LEVEL,attempt:0,leg:'entry'})}});
       for(const step of steps){
         const {key,op:old}=await attempt(step.kind);
         if(old?.state==='confirmed'){if(step.kind==='create')await this.deps.custody.confirmCreated(account);continue;}
@@ -212,8 +212,6 @@ export class GridProvision {
           if(isGridCyclePolicyVersion(input.policy.policyVersion))step.data.client_order_id=gridClientOrderId({botId:input.policy.id+':'+key,level:GRID_SEED_IDENTITY_LEVEL,attempt:0,leg:'entry'});
           if(current.margin.leverage!==String(input.policy.leverage))return {state:'denied',reason:'Actual subaccount leverage does not match the confirmed policy.',account};
           if(!current.taker)return {state:'denied',reason:'Fresh subaccount taker fee unavailable.',account};
-          delete step.data.builder_code;
-          if(current.taker.builder)step.data.builder_code=current.taker.builder.code;
         }
         const request:ExactGridRequest=old?.exact_request??{...step,botId:input.policy.id,account:account.account,masterAccount:account.masterAccount,timestamp,expiryMs:5000,
           authority:{...authority,policyHmac:input.policyHmac,policy:input.policy,admission:latest,facts:current,seedWorstPrice:latest.stop.state==='available'?latest.stop.projection.seedWorstPrice:null}};

@@ -6,7 +6,7 @@ import type { GridIntent } from '../../shared/grid-draft';
 export const clock=1_800_000_000_000;
 export const intent:GridIntent={schemaVersion:1,protocol:'pacifica',market:'BTC-PERP',timeframe:'1h',lookback:100,rangeSource:'manual',lowerPrice:'90',upperPrice:'110',stopPrice:'80',gridCount:4,direction:'long',entryScaleType:'flat',profitScaleType:'flat',totalInvestment:'100',leverage:'1',seedAtCreation:true};
 export function authority():GridDraftAuthority {
-  const fee=(liquidityRole:'maker'|'taker',purpose:'entry'|'profit')=>{const r=createGridFeeQuote({account:'EXAMPLE',subaccountId:null,market:'BTC-PERP',liquidityRole,builderCode:'CARRY',intent:purpose},
+  const fee=(liquidityRole:'maker'|'taker',purpose:'entry'|'profit')=>{const r=createGridFeeQuote({account:'EXAMPLE',subaccountId:null,market:'BTC-PERP',liquidityRole,builderCode:null,intent:purpose},
     {account:'EXAMPLE',maker_fee:'0.0001',taker_fee:'0.0002'},[{builder_code:'CARRY',fee_rate:'0.0001'}],[{builder_code:'CARRY',max_fee_rate:'0.001'}],clock);if(r.availability!=='available')throw Error();return r.quote;};
   return {market:{market:'BTC-PERP',name:'Bitcoin',protocolSymbol:'BTC',constraints:{state:'available',value:{tick:'0.01',lot:'0.001',minimumQuote:'1',observedAt:clock,expiresAt:clock+60_000,
     maxLeverage:{state:'available',value:'10'},maximumQuote:{state:'available',value:'1000000'},priceBounds:{state:'available',value:{minimum:'1',maximum:'1000000'}},restrictions:{state:'available',value:'unrestricted'},source:'/info',venue:'pacifica'}},

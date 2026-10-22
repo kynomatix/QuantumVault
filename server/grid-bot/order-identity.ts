@@ -79,8 +79,8 @@ export interface PreparedGridOrder {
 }
 const digest = (value: unknown, runtimeVersion?: string) => isGridCyclePolicyVersion(runtimeVersion)
   ? canonicalDigest(value) : createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const feeIdentity = (intent: GridOrderIntent, quote: GridFeeQuote) => ({ account: intent.account, subaccountId: intent.subaccountId,
-  market: intent.market, liquidityRole: 'maker' as const, builderCode: quote.builderCode, intent: intent.reduceOnly ? 'profit' as const : 'entry' as const });
+const feeIdentity = (intent: GridOrderIntent) => ({ account: intent.account, subaccountId: intent.subaccountId,
+  market: intent.market, liquidityRole: 'maker' as const, builderCode: null, intent: intent.reduceOnly ? 'profit' as const : 'entry' as const });
 export function prepareGridOrder(intent: GridOrderIntent, quote: GridFeeQuote, constraint: MarketConstraintObservation, now: number): PreparedGridOrder {
   const runtime = gridRuntimePolicy(intent.runtimePolicyVersion ?? '1.0.0');
   if(isGridCyclePolicyVersion(intent.runtimePolicyVersion))quote = restoreGridFeeQuoteOrder(quote);
@@ -90,7 +90,7 @@ export function prepareGridOrder(intent: GridOrderIntent, quote: GridFeeQuote, c
     || !exactAmount(intent.price) || !exactAmount(intent.amount) || !new D(intent.price).gt(0) || !new D(intent.amount).gt(0)
     || !Number.isSafeInteger(intent.signingTimestamp) || intent.signingTimestamp !== now || !Number.isSafeInteger(intent.signingExpiryMs)
     || intent.signingExpiryMs <= 0 || intent.signingExpiryMs > 15_000 || (intent.subaccountId !== null && !intent.subaccountId)) throw new Error('Invalid Grid order intent');
-  if (!validateGridFeeQuote(quote, feeIdentity(intent, quote), now) || !checkEntryConstraints(constraint, intent.market, now).ok) throw new Error('Grid authority unavailable');
+  if (!validateGridFeeQuote(quote, feeIdentity(intent), now) || !checkEntryConstraints(constraint, intent.market, now).ok) throw new Error('Grid authority unavailable');
   if ([constraint.tick, constraint.lot, constraint.openingMinimum].some(c => !c || !exactAmount(c.exact) || !new D(c.exact).gt(0)
     || !Number.isFinite(c.value) || Number(c.exact) !== c.value)) throw new Error('Malformed Grid market constraints');
   // Preserve exact planned geometry; do not re-quantize an authorized request.
@@ -99,7 +99,7 @@ export function prepareGridOrder(intent: GridOrderIntent, quote: GridFeeQuote, c
   const unsigned: PreparedGridOrder['unsigned'] = { account: intent.account,
     ...(intent.subaccountId === null ? {} : { subaccount_id: intent.subaccountId }), symbol: intent.protocolSymbol,
     price: intent.price, amount: intent.amount, side: intent.side === 'long' ? 'bid' : 'ask', tif: 'ALO', reduce_only: intent.reduceOnly,
-    client_order_id: intent.clientOrderId, ...(quote.builder === null ? {} : { builder_code: quote.builder.code }) };
+    client_order_id: intent.clientOrderId };
   const value = { version: 1 as const, intent: { ...intent }, feeQuote: quote, constraint: structuredClone(constraint),
     policyDigest: runtime.digest, constraintDigest: digest(constraint, intent.runtimePolicyVersion), unsigned };
   return { ...value, requestDigest: digest(value, intent.runtimePolicyVersion) };

@@ -43,7 +43,7 @@ export function defaultGridDraftDeps(storage:GridStorage):GridDraftDeps {
       const adapter=getAdapter('pacifica');
       const fee=async (liquidityRole:'maker'|'taker',purpose:'entry'|'profit') => {
         if (!account || !adapter.getGridFeeQuote) return null;
-        try { const result=await adapter.getGridFeeQuote({account,subaccountId:null,market:intent.market,liquidityRole,builderCode:'CARRY',intent:purpose});
+        try { const result=await adapter.getGridFeeQuote({account,subaccountId:null,market:intent.market,liquidityRole,builderCode:null,intent:purpose});
           return result.availability==='available'?result.quote:null; } catch { return null; }
       };
       const [entryFee,profitFee,seedFee]=await Promise.all([fee('maker','entry'),fee('maker','profit'),intent.seedAtCreation?fee('taker','entry'):Promise.resolve(null)]);

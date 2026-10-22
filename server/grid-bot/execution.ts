@@ -14,6 +14,8 @@ export function validExactRequest(r:ExactGridRequest):boolean{
   const expected=endpoints[r.kind];
   if(!expected || r.path!==expected[0] || r.operationType!==expected[1] || !r.account || !r.masterAccount || r.account===r.masterAccount)return false;
   const d=r.data;
+  // Also reject retained pre-exemption payloads at the final Grid signing boundary.
+  if(['limit','seed','close'].includes(r.kind)&&'builder_code' in d)return false;
   if(['signature','timestamp','expiry_window','account','agent_wallet','type'].some(k=>k in d))return false;
   if(r.kind==='limit')return d.tif==='ALO' && typeof d.reduce_only==='boolean' && typeof d.client_order_id==='string' && !!d.symbol;
   if(r.kind==='seed')return d.slippage_percent==='0.5' && d.reduce_only===false && typeof d.client_order_id==='string' && !!d.symbol;

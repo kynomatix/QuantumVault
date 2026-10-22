@@ -16,14 +16,14 @@ const numeric = (value: unknown): value is string => typeof value === 'string' &
  * maker entries and a taker exit. Seed uses its adverse canonical execution bound. No recycling,
  * funding, gaps or stop failure is modeled: this estimate is NOT a cap on losses.
  * The existing account taker quote supplies the exit assumption too: fee-authority derives its
- * rate from liquidity role + builder, independent of entry/profit purpose. No new fee override.
+ * venue rate from liquidity role, independent of entry/profit purpose. No new fee override.
  */
 export function gridStopRiskSummary(plan: GridPlan | null, stopPrice: string, authority: GridDraftAuthority, now: number, expiresAt: number): GridStopRisk {
   const deny = (reason: string): GridStopRisk => ({ state: 'unavailable', reason });
   try {
     if (!plan || authority.stop.state !== 'available' || !numeric(stopPrice) || !numeric(plan.start) || !numeric(plan.seedQuantity)
       || !Number.isSafeInteger(expiresAt) || now >= expiresAt) return deny('Fresh stop and plan authority unavailable');
-    const identity = { account: authority.referenceAccount ?? '', subaccountId: null, market: authority.market.market, builderCode: 'CARRY', intent: 'entry' as const };
+    const identity = { account: authority.referenceAccount ?? '', subaccountId: null, market: authority.market.market, builderCode: null, intent: 'entry' as const };
     const maker = authority.entryFee, taker = authority.seedFee;
     if (!maker || !taker || !validateGridFeeQuote(maker, { ...identity, liquidityRole: 'maker' }, now)
       || !validateGridFeeQuote(taker, { ...identity, liquidityRole: 'taker' }, now)) return deny('Current entry and taker exit fees unavailable');

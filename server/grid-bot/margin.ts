@@ -27,25 +27,20 @@ function data(v:unknown):any{const r=v as any;if(r?.success!==true||!r.data||typ
  * Existing precedent: pacifica-adapter.ts getAccountInfo maps it to availableMargin,
  * and ai-trader/executor.ts sizes real trades with that value. This bot reads its
  * own isolated account afresh; no main-account collateral or cached alias fallback.
- * Approved builder ceiling bounds the current builder charge conservatively. */
+ * Grid pays venue fees only; builder approvals are not margin authority. */
 export async function readGridMargin(reads:Pick<GridLaunchReads,'json'>,r:ExactGridRequest):Promise<GridMarginReading|null>{
-  if(!gridAddsExposure(r))return null;
+  if(!gridAddsExposure(r)||'builder_code' in r.data)return null;
   try{
     const started=Date.now(),params={account:r.account};
-    const [rawAccount,rawSettings,rawApprovals]=await Promise.all([
-      reads.json(r.masterAccount,'/account',params),reads.json(r.masterAccount,'/account/settings',params),
-      reads.json(r.masterAccount,'/account/builder_codes/approvals',params)]);
-    const a=data(rawAccount),s=data(rawSettings),approvals=data(rawApprovals);
-    if(a.account!==undefined&&a.account!==r.account||s.account!==undefined&&s.account!==r.account||!Array.isArray(s.margin_settings)||!Array.isArray(approvals))return null;
+    const [rawAccount,rawSettings]=await Promise.all([
+      reads.json(r.masterAccount,'/account',params),reads.json(r.masterAccount,'/account/settings',params)]);
+    const a=data(rawAccount),s=data(rawSettings);
+    if(a.account!==undefined&&a.account!==r.account||s.account!==undefined&&s.account!==r.account||!Array.isArray(s.margin_settings))return null;
     const settings=s.margin_settings.filter((x:any)=>x.symbol===r.data.symbol);
     if(settings.length!==1||!Number.isSafeInteger(settings[0].leverage)||settings[0].leverage<1)return null;
-    const builder=r.data.builder_code;
-    if(builder!==undefined&&builder!=='CARRY')return null;
-    const grants=approvals.filter((x:any)=>x.builder_code===(builder??'CARRY'));
-    if(grants.length!==1)return null;
     // Use the larger execution fee, even for an ALO entry; rebates never fund entry risk.
     const maker=typeof a.maker_fee==='string'&&a.maker_fee.startsWith('-')?(decimal(a.maker_fee.slice(1)),new D(0)):decimal(a.maker_fee);
-    const fee=D.max(maker,decimal(a.taker_fee)).plus(decimal(grants[0].max_fee_rate));
+    const fee=D.max(maker,decimal(a.taker_fee));
     if(fee.gte(1))return null;
     decimal(a.available_to_spend);
     return {account:r.account,symbol:String(r.data.symbol),available:a.available_to_spend,leverage:String(settings[0].leverage),feeRate:fee.toFixed(),observedAt:started,accountUpdatedAt:a.updated_at};

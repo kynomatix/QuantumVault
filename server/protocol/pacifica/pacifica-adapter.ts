@@ -473,20 +473,15 @@ export class PacificaAdapter implements ProtocolAdapter {
   getGridVenueAuthority() { return this.gridTransport.status(); }
 
   async getGridFeeQuote(input: GridFeeIdentity): Promise<GridFeeResult> {
+    if (input.builderCode !== null) return { availability: 'unavailable', reason: 'grid_builder_exempt' };
     if (this.gridTransport.keyStatus !== 'present') return { availability: 'unavailable', reason: 'config_key_unavailable' };
     const observedAt = Date.now();
     try {
       const params: Record<string, string> = { account: input.account };
       if (input.subaccountId !== null) params.subaccount_id = input.subaccountId;
       const account = (await this.readGridEnvelope('/account', params)).data;
-      let overview: unknown = null, approvals: unknown = null;
-      if (input.builderCode !== null) {
-        if (!this.config.referralAddress) return { availability: 'unavailable', reason: 'builder_owner_unconfigured' };
-        overview = (await this.readGridEnvelope('/builder/overview', { account: this.config.referralAddress })).data;
-        approvals = (await this.readGridEnvelope('/account/builder_codes/approvals', { account: input.account })).data;
-      }
       if (!this.gridTransport.status().liveEntryAllowed) return { availability: 'unavailable', reason: 'quota_authority_unavailable' };
-      return createGridFeeQuote(input, account, overview, approvals, observedAt);
+      return createGridFeeQuote(input, account, null, null, observedAt);
     } catch { return { availability: 'unavailable', reason: 'fee_read_unavailable' }; }
   }
 
@@ -536,9 +531,6 @@ export class PacificaAdapter implements ProtocolAdapter {
       return unknown('history_page_bound');
     } catch { return unknown('venue_lookup_unavailable'); }
   }
-
-  /** Public identifiers only; production launch reads never take adapter balance defaults. */
-  getGridLaunchConfiguration(){return {builderCode:this.config.builderCode??null,builderOwner:this.config.referralAddress??null};}
 
   async getGridCapacitySnapshot(input: Omit<CapacityInput, 'orders' | 'observedAt' | 'expiresAt' | 'complete' | 'now'> & { ownership?: Record<string, RestingUse['category']> }) {
     const observedAt = Date.now();

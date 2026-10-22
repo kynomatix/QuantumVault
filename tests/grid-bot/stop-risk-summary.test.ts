@@ -15,20 +15,21 @@ function scenario(short=false,seed=true) {
 }
 describe('read-only stop loss scenario',()=>{
   it.each([false,true])('marks all adverse entries plus one seed, symmetric short=%s',short=>{
-    const s=scenario(short),r=s.run();expect(r).toMatchObject({state:'available',inventory:'3',loss:short?'40.69':'40.64',entryFees:short?'0.07385':'0.06615',exitFee:short?'0.108':'0.072',expiresAt:clock+15_000,scenario:'adverse_entries_plus_seed'});
+    const s=scenario(short),r=s.run();for(const q of [s.a.entryFee,s.a.seedFee])expect(q).toMatchObject({builderCode:null,builder:null,builderRate:'0'});expect(r).toMatchObject({state:'available',inventory:'3',loss:short?'40.62':'40.59',entryFees:short?'0.0419':'0.0381',exitFee:short?'0.072':'0.048',expiresAt:clock+15_000,scenario:'adverse_entries_plus_seed'});
     // The seed owner's paired opening is never counted again, even if moved into the adverse path.
     s.p.cycles![1].openingPrice=short?'105':'95';expect(s.run()).toEqual(r);
   });
   it('supports no seed, and ignores levels beyond the stop',()=>{
-    const s=scenario(false,false);expect(s.run()).toMatchObject({state:'available',inventory:'2',loss:'20.09'});
-    s.p.cycles!.push({...s.p.cycles![0],ownerOrdinal:2,openingPrice:'70'});expect(s.run()).toMatchObject({state:'available',inventory:'2',loss:'20.09'});
+    const s=scenario(false,false);expect(s.run()).toMatchObject({state:'available',inventory:'2',loss:'20.05'});
+    s.p.cycles!.push({...s.p.cycles![0],ownerOrdinal:2,openingPrice:'70'});expect(s.run()).toMatchObject({state:'available',inventory:'2',loss:'20.05'});
   });
-  it.each(['seed mismatch','duplicate owner','missing bounds','stale stop','missing taker','wrong fee identity','wrong stop','legacy','malformed quantity'])( 'returns unavailable for %s',kind=>{
+  it.each(['seed mismatch','duplicate owner','missing bounds','stale stop','missing taker','wrong fee identity','legacy builder quote','wrong stop','legacy','malformed quantity'])( 'returns unavailable for %s',kind=>{
     const s=scenario();
     if(kind==='seed mismatch')s.p.seedQuantity='2';if(kind==='duplicate owner')s.p.cycles!.push(s.p.cycles![0]);
     if(kind==='missing bounds')delete s.p.seedPriceBounds;
     if(kind==='stale stop'&&s.a.stop.state==='available')s.a.stop.expiresAt=clock;
     if(kind==='missing taker')s.a.seedFee=null;
+    if(kind==='legacy builder quote')s.a.entryFee={...s.a.entryFee!,builderCode:'CARRY'};
     if(kind==='wrong fee identity')s.a.referenceAccount='REDACTED';
     if(kind==='wrong stop'&&s.a.stop.state==='available')s.a.stop.boundedAdverseExitPrice='79';
     if(kind==='legacy')delete s.p.policyVersion;

@@ -17,6 +17,12 @@ const claim:GridClaim={credits:'10',slots:1,canaryIncrement:'90',observedCredits
 function harness(){const r=request();let row:DurableGridOperation|null=null;
   const deps:GridExecutionDeps={storage:{read:vi.fn(async()=>row),prepare:vi.fn(async()=>row={id:randomUUID(),state:'prepared',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null}),submit:vi.fn(async()=>{row!.state='submitted';return true;}),settle:vi.fn(async(_op,outcome)=>{row!.state=outcome.state;row!.failure_classification=outcome.reason;})},preflight:vi.fn(async()=>true),send:vi.fn(async()=>({rateLimited:false})),reconcile:vi.fn(async()=>({state:'unknown' as const}))};return {r,deps,execution:new GridExecution(deps),get row(){return row;}};}
 describe('write ahead and exact identity execution',()=>{
+  it.each(['limit','seed','close'] as const)('rejects a legacy builder-bearing %s payload at the sender',async kind=>{
+    const r=request();r.kind=kind;if(kind!=='limit'){r.path='/orders/create_market';r.operationType='create_market_order';r.data.slippage_percent='0.5';r.data.reduce_only=kind==='close';}
+    r.data.builder_code='CARRY';const fetcher=vi.fn();
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE_KEY'),fetcher);
+    await expect(sender.send(r,Buffer.alloc(64))).rejects.toThrow('Grid transport authority unavailable');expect(fetcher).not.toHaveBeenCalled();
+  });
   it.each(['absent','prepared','submitted'] as const)('recovery-only %s work never claims a budget or sends',async state=>{
     const h=harness();
     if(state!=='absent')await h.deps.storage.prepare('EXAMPLE',h.r,claim,'EXAMPLE');

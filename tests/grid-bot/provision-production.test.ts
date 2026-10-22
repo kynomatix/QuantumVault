@@ -68,14 +68,14 @@ describe('C6 provisioning with the real C5 raw-read authority',()=>{
   it.each([{seed:false,reused:false},{seed:true,reused:false},{seed:false,reused:true}])('progresses full funding and unchanged seed/ALO geometry: %j',async({seed,reused})=>{
     const f=fixture(seed,reused);expect((await f.start()).state).toBe('canary');
     const expected=[...(!reused?['create']:[]),'fund','leverage',...(seed?['seed']:[]),'limit'];
-    expect(f.sent.map(r=>r.kind)).toEqual(expected);expect(f.steps).toEqual(expected);
+    expect(f.sent.map(r=>r.kind)).toEqual(expected);for(const r of f.sent)expect(r.data).not.toHaveProperty('builder_code');expect(f.steps).toEqual(expected);
     expect(f.sent.find(r=>r.kind==='fund')?.data.amount).toBe(f.policy.totalInvestment);
     expect(f.sent.at(-1)).toMatchObject({kind:'limit',data:{tif:'ALO',reduce_only:false}});
     if(reused)expect(f.deps.custody.confirmReused).toHaveBeenCalledOnce();else expect(f.deps.custody.confirmCreated).toHaveBeenCalledOnce();
     expect(f.deps.markCanary).toHaveBeenCalledOnce();
   });
-  it('missing real CARRY approval denies before reservation or funding',async()=>{const f=fixture();f.raw.approvals=[];
-    expect((await f.start()).state).toBe('denied');expect(f.deps.custody.reserve).not.toHaveBeenCalled();expect(f.sent).toEqual([]);});
+  it('missing builder approvals do not block reservation or funding',async()=>{const f=fixture();f.raw.approvals=[];
+    expect((await f.start()).state).toBe('canary');expect(f.deps.custody.reserve).toHaveBeenCalled();expect(f.sent.length).toBeGreaterThan(0);});
   it('a Stop between funding and leverage blocks every subsequent send',async()=>{
     const f=fixture();f.deps.beforeStep=async(_a,kind)=>{if(kind==='leverage')throw new GridLaunchTransientError('EXAMPLE Stop owns account');return {};};
     expect((await f.start()).state).toBe('pending');expect(f.sent.map(r=>r.kind)).toEqual(['create','fund']);expect(f.deps.markCanary).not.toHaveBeenCalled();

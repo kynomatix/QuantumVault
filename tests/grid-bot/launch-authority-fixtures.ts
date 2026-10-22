@@ -30,7 +30,6 @@ export function launchAuthorityFixture(seed=false,investment='100'){
         raw[path==='/account/settings'?'settings':path==='/account/builder_codes/approvals'?'approvals':path==='/builder/overview'?'overview':path.slice(1)])))},
     unlock:vi.fn(async()=>({masterAccount:'EXAMPLE_MASTER',umkVersion:1,signingKey:secret,cleanup,current})),sol:vi.fn(async()=>({balance:'0.1',observedAt:clock})),
     reusable:vi.fn(async()=>[]),capacity:vi.fn(async()=>({activeBots:1,reservations:[]})),
-    configuration:()=>({builderCode:'CARRY',builderOwner:'EXAMPLE_BUILDER'}),
     environment:()=>({REUSE_ON_CREATE:'true',RECYCLE_ON_DELETE:'true',REPLIT_DEPLOYMENT:'EXAMPLE_DEPLOYMENT',GRID_RECYCLER_DEPLOYMENT:'EXAMPLE_DEPLOYMENT'}),now:()=>Date.now()
   };
   return {policy,policyHash:signature.digest,account,raw,deps,cleanup,current,secret,authority:new GridLaunchAuthority(deps)};

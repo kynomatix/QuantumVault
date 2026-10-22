@@ -66,7 +66,7 @@ export class GridMonitorReads {
     const mark=await this.mark(master,symbol,signal);
     let qualification:GridObservation['qualification']=null;
     if(safe)try{
-      const started=Date.now(),margin=await readGridMargin(this.reads,{kind:'limit',botId:'qualification',account,masterAccount:master,path:'/orders/create',operationType:'create_order',timestamp:started,expiryMs:5000,data:{symbol,reduce_only:false,builder_code:'CARRY'},authority:{}});
+      const started=Date.now(),margin=await readGridMargin(this.reads,{kind:'limit',botId:'qualification',account,masterAccount:master,path:'/orders/create',operationType:'create_order',timestamp:started,expiryMs:5000,data:{symbol,reduce_only:false},authority:{}});
       const info=envelope(await this.reads.json(master,'/info',{},signal)).data.filter(x=>x.symbol===symbol);
       const now=Date.now();
       if(margin&&[margin.observedAt,margin.accountUpdatedAt].every(at=>Number.isSafeInteger(at)&&at<=now&&now-at<=5000)&&info.length===1&&Number.isSafeInteger(info[0].max_leverage)&&(info[0].max_leverage as number)>=1){const m=info[0];
