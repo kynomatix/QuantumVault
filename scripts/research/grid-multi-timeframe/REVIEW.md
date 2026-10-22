@@ -26,3 +26,5 @@ Primary and advised comparators are separate. Pooled leverage averages equal-wei
 ## Limits and review scan
 
 The comparison changes execution resolution, range, stop geometry and horizon together. Conditional admitted-bot returns are not a fully invested portfolio or annualized result. Survivor bias, exchange proxies, current constraints and ideal fills remain. No independent reviewer was dispatched. The unchanged reviewer snapshot secret scanner is run read-only over source, loaded dependencies, inherited inputs, new evidence and delivery material; the final scan result is in REVIEW-SCAN-STATUS.md. The known standalone QV_RUN_ID entropy finding in raw FRACTAL receipts is disclosed under the owner’s exception; receipts and scanner are never edited. No other finding may be accepted silently.
+
+Delivery byte verification caught CRLF working bytes in scan.mjs against its normalized LF Git blob. Only that research file's line endings were normalized before repeating delivery verification; scanner logic and raw receipts were unchanged. The failed delivery log is retained.
