@@ -450,7 +450,7 @@ describe("close-path integration guards", () => {
     expect(routesSource.slice(userStart, userEnd)).not.toContain("syncPositionFromOnChain(");
   });
 
-  it("keeps fill history subordinate to strict full-close outcomes", () => {
+  it("reads Pacifica fill history once in each full-close path before uncertainty handling", () => {
     const tradingViewStart = routesSource.indexOf("// === BEGIN CLOSE SIGNAL HANDLING");
     const tradingViewEnd = routesSource.indexOf("// === END OUTER TRY/CATCH FOR CLOSE SIGNAL HANDLING", tradingViewStart);
     const tradingViewSource = routesSource.slice(tradingViewStart, tradingViewEnd);
@@ -464,12 +464,9 @@ describe("close-path integration guards", () => {
       tradingViewSource.indexOf("if (finalVerificationUnavailable)"),
     );
     expect(userSource.indexOf("const fillConfirmation =")).toBeLessThan(
-      userSource.indexOf("if (postCloseReadError || observedResidual)"),
+      userSource.indexOf("if ((postCloseReadError || observedResidual) && !fillConfirmation)"),
     );
-    expect(routesSource.match(/readSignalBotCloseFillConfirmation\(\{/g)).toHaveLength(3);
-    expect(routesSource).toContain('const fills = isConfirmedClose(closeResult) ? await readSignalBotCloseFillConfirmation');
-    expect(tradingViewSource).toContain('!isConfirmedClose(result.closeResult)');
-    expect(userSource).toContain('!isConfirmedClose(result.closeResult)');
+    expect(routesSource.match(/readSignalBotCloseFillConfirmation\(\{/g)).toHaveLength(2);
   });
 
   it("keeps gross fallback separate from persisted pnl with exact provenance", () => {

@@ -215,7 +215,6 @@ export function summarizeSignalBotCloseFills(input: {
   openSide: "long" | "short";
   expectedSize: number;
   notBeforeMs: number;
-  requireExactSize?: boolean;
 }): SignalBotCloseFillConfirmation | null {
   if (!Number.isFinite(input.expectedSize) || input.expectedSize <= 0
       || !Number.isFinite(input.notBeforeMs)) return null;
@@ -248,11 +247,9 @@ export function summarizeSignalBotCloseFills(input: {
     }
     fillIds.push(trade.tradeId);
     fillTimestampMs = Math.max(fillTimestampMs, trade.timestamp);
-    if (!input.requireExactSize && filledSize >= input.expectedSize * 0.95) break;
+    if (filledSize >= input.expectedSize * 0.95) break;
   }
   if (filledSize < input.expectedSize * 0.95 || weightedPrice <= 0 || fillIds.length === 0) return null;
-  if (input.requireExactSize && (new Set(fillIds).size !== fillIds.length
-    || Math.abs(filledSize - input.expectedSize) > Number.EPSILON * Math.max(1, input.expectedSize) * 8)) return null;
   return {
     fillPrice: weightedPrice / filledSize,
     filledSize,

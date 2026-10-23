@@ -415,8 +415,7 @@ export class PositionService {
       normalizeMarket(p.market) === normalizedMarket
     );
 
-    const size = onChainPos ? onChainPos.baseAssetAmount : 0;
-    if (!Number.isFinite(size)) throw new Error('PositionService: invalid position amount');
+    const size = onChainPos?.baseAssetAmount || 0;
     const side: 'LONG' | 'SHORT' | 'FLAT' = 
       Math.abs(size) < 0.0001 ? 'FLAT' : 
       size > 0 ? 'LONG' : 'SHORT';

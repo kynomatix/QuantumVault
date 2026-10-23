@@ -1,4 +1,3 @@
-import { readCloseSnapshot } from './protocol/close-outcome';
 import { FLASH_RETIRED_MESSAGE } from './protocol/flash-retirement.js';
 import { sendTradeNotification } from "./notification-service";
 import { syncPositionFromOnChain } from "./reconciliation-service";
@@ -100,7 +99,6 @@ async function driftClosePerpPosition(
   size?: number, _slippageBps?: number, _privateKeyBase58?: string,
   agentPublicKey?: string, side?: 'long' | 'short', adapter = getDefaultAdapter()
 ): Promise<any> {
-  if (adapter.protocolName === 'pacifica') throw new Error('close_resend_suspended_until_durable_intent');
   const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
   const mainWalletAddress = await _lookupMainWallet(pubKey);
@@ -558,7 +556,6 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
     dbJobId = dbJob.id;
     console.log(`[TradeRetry] Persisted job ${dbJobId} to database`);
   } catch (dbErr) {
-    if (job.side === 'close' && (job.protocol === 'pacifica' || !job.protocol)) throw dbErr;
     // Fallback to generated ID if database fails (job won't survive restart)
     dbJobId = generateJobId();
     console.warn(`[TradeRetry] Failed to persist job to database, using fallback ID ${dbJobId}:`, dbErr);
@@ -678,21 +675,6 @@ async function rejectRetryAtLeverageAdmission(job: RetryJob, error: string): Pro
 async function processRetryJob(job: RetryJob): Promise<void> {
   // Includes close jobs: retire before keys, admission, RPC or another attempt.
   const retirementBot = await storage.getTradingBotById(job.botId);
-  // Slice A cannot prove original signer/epoch identity. Never execute or
-  // complete these jobs, including when today's bot has been replaced/deleted.
-  if (job.side === 'close' && (job.protocol === 'pacifica' || !job.protocol
-      || retirementBot?.activeProtocol === 'pacifica')) {
-    job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
-    job.lastError = 'close_confirmation_pending; resend_suspended_until_durable_intent';
-    // The recorded address is observation-only. Never substitute today's bot.
-    if (job.protocol === 'pacifica' && job.protocolSubaccountId && retirementBot?.activeProtocol === 'pacifica') {
-      try {
-        await readCloseSnapshot(getAdapterForBot(retirementBot), job.protocolSubaccountId);
-      } catch { /* Unknown remains pending; observation never authorizes replay. */ }
-    }
-    await storage.updateTradeRetryJob(job.id, { nextRetryAt: new Date(job.nextRetryAt), lastError: job.lastError });
-    return;
-  }
   if (retirementBot?.activeProtocol === 'phoenix' || job.protocol === 'phoenix') {
     await storage.markTradeRetryJobFailed(job.id, 'Phoenix retries require durable Phoenix recovery');
     retryQueue.delete(job.id);
@@ -1461,20 +1443,6 @@ export async function startRetryWorker(): Promise<void> {
       const MAX_CLOSE_JOB_AGE_MS = 30 * 60 * 1000; // 30 minute TTL for CLOSE retry jobs (subscriber copies must still close even if delayed)
       
       for (const dbJob of pendingJobs) {
-        if (dbJob.side === 'close' && (dbJob.protocol === 'pacifica' || !dbJob.protocol)) {
-          retryQueue.set(dbJob.id, {
-            id: dbJob.id, botId: dbJob.botId, protocol: dbJob.protocol,
-            walletAddress: dbJob.walletAddress, agentPublicKey: '', market: dbJob.market,
-            side: 'close', size: Number(dbJob.size), subAccountId: 0,
-            protocolSubaccountId: dbJob.protocolSubaccountId ?? undefined,
-            reduceOnly: true, slippageBps: 0, leverage: 1,
-            priority: dbJob.priority === 'critical' ? 'critical' : 'normal',
-            attempts: dbJob.attempts, maxAttempts: dbJob.maxAttempts,
-            nextRetryAt: new Date(dbJob.nextRetryAt).getTime(), createdAt: new Date(dbJob.createdAt).getTime(),
-            originalTradeId: dbJob.originalTradeId, lastError: 'close_confirmation_pending; resend_suspended_until_durable_intent',
-          });
-          continue;
-        }
         // CLEANUP: Check if job is too old (stale)
         // CLOSE orders get a shorter TTL but 30 min allows time for subscriber copy trades to complete retries
         const isCloseJob = dbJob.side === 'close';
@@ -1572,8 +1540,6 @@ export async function backfillRecoveredClosePnl(): Promise<void> {
       const bots = await storage.getTradingBots(walletAddress);
       
       for (const bot of bots) {
-        // Legacy recovered rows lack qualified original-account close evidence.
-        if (bot.activeProtocol === 'pacifica') continue;
         const trades = await storage.getBotTrades(bot.id, 200);
         const recoveredCloses = trades.filter(t => t.status === 'recovered' && t.side === 'CLOSE' && !t.pnl && t.price && parseFloat(t.price) > 0);
         

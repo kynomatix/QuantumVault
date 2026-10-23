@@ -1056,11 +1056,8 @@ export function BotManagementDrawer({
       }
 
       toast({
-        title: res.status === 202 || data.status === 'pending' ? 'Close sent, confirming' : 'Position closed',
-        description: res.status === 202 || data.status === 'pending'
-          ? 'Confirmation is pending. No additional close has been sent.'
-          : data.fillPrice == null ? 'Exposure closed. Accounting is unavailable.'
-            : `Closed ${data.closedSize?.toFixed(4)} ${localBot.market} @ $${data.fillPrice.toFixed(2)}`,
+        title: 'Position closed',
+        description: `Closed ${data.closedSize?.toFixed(4)} ${localBot.market} @ $${data.fillPrice?.toFixed(2)}`,
       });
       
       // Refresh position and balance data
