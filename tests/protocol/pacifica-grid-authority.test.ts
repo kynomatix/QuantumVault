@@ -188,13 +188,14 @@ describe('ambiguous settlement is fresh, exact and read-only', () => {
     expect(resolveGridOrder(CLOID, 'SOL', parseGridVenueOrders([row()]), null).state).toBe('unknown');
     expect(resolveGridOrder(CLOID, 'BTC', [], parseGridVenueOrders([historyRow(), historyRow('cancelled')], true)).state).toBe('unknown');
   });
-  it('malformed or unavailable open inventory denies settlement; legacy malformed reader stays unchanged', async () => {
+  it('malformed or unavailable open inventory denies settlement; the general open-order reader also fails closed', async () => {
     const adapter = new PacificaAdapter(undefined, new PacificaTransportAuthority(undefined));
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response({ malformed: true })));
     await expect(adapter.getGridOpenOrders(identity.account)).rejects.toThrow('inventory unavailable');
     expect((await adapter.lookupGridOrder({ account: identity.account, subaccountId: identity.subaccountId, clientOrderId: CLOID, protocolSymbol: 'BTC' })).state).toBe('unknown');
     vi.spyOn(adapter as any, 'get').mockResolvedValue({ malformed: true });
-    expect(await adapter.getOpenOrders(identity.account)).toEqual([]);
+    // Since e4aab907 (cancel truthfulness) the general reader rejects malformed inventory instead of returning [].
+    await expect(adapter.getOpenOrders(identity.account)).rejects.toThrow();
   });
   it('invalid CLOID performs zero venue calls', async () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
