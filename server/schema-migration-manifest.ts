@@ -1,0 +1,8018 @@
+import type { SchemaMigrationDefinition } from "./schema-readiness-probe";
+
+const schemaMigrationSql = [
+      `CREATE TABLE IF NOT EXISTS lab_candle_cache_v2 (
+        id serial PRIMARY KEY,
+        symbol text NOT NULL,
+        timeframe text NOT NULL,
+        time numeric(20,0) NOT NULL,
+        open real NOT NULL,
+        high real NOT NULL,
+        low real NOT NULL,
+        close real NOT NULL,
+        volume real NOT NULL,
+        source text NOT NULL CHECK (source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown')),
+        venue text NOT NULL CHECK (venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')),
+        basis text NOT NULL CHECK (basis IN ('perp', 'spot', 'index', 'unknown')),
+        proxy text NOT NULL CHECK (proxy IN ('direct', 'proxy', 'unknown')),
+        finality text NOT NULL CHECK (finality IN ('finalized', 'forming', 'unknown')),
+        time_semantic text NOT NULL CHECK (time_semantic IN ('open_time', 'unknown'))
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS lab_candle_cache_v2_identity_unique
+         ON lab_candle_cache_v2
+         (symbol, timeframe, time, source, venue, basis, proxy, finality, time_semantic)`,
+      `CREATE INDEX IF NOT EXISTS lab_candle_cache_v2_lookup
+         ON lab_candle_cache_v2
+         (symbol, timeframe, basis, finality, proxy, time)`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS queue_order integer`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS config_snapshot jsonb`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_execution_events (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_identity text NOT NULL UNIQUE,
+        attempt_id text NOT NULL,
+        bot_id varchar NOT NULL,
+        decision_id varchar,
+        action text NOT NULL CHECK (action IN ('entry','close','cancel')),
+        cause text NOT NULL CHECK (cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')),
+        event_type text NOT NULL,
+        phase smallint,
+        protocol text NOT NULL,
+        account_scope text NOT NULL CHECK (account_scope IN ('main','bot_subaccount','unknown')),
+        account_ref text,
+        market text NOT NULL,
+        side text CHECK (side IS NULL OR side IN ('long','short')),
+        client_order_id text,
+        venue_order_id text,
+        transaction_signature text,
+        venue_status text CHECK (venue_status IS NULL OR venue_status IN ('submitted','acknowledged','filled','partial_fill','canceled','expired','rejected','unknown')),
+        price numeric(30,12) CHECK (price IS NULL OR price <> 'NaN'::numeric),
+        size_base numeric(30,12) CHECK (size_base IS NULL OR (size_base >= 0 AND size_base <> 'NaN'::numeric)),
+        fee numeric(30,12) CHECK (fee IS NULL OR (fee >= 0 AND fee <> 'NaN'::numeric)),
+        realized_pnl numeric(30,12) CHECK (realized_pnl IS NULL OR realized_pnl <> 'NaN'::numeric),
+        failure_code text CHECK (failure_code IS NULL OR failure_code IN ('venue_rejected','venue_unconfirmed','venue_error','identity_mismatch','signing_unavailable','position_not_confirmed','bracket_failed','unknown')),
+        recorded_after_broadcast boolean NOT NULL DEFAULT false,
+        observed_at timestamp NOT NULL,
+        recorded_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT ai_trader_execution_phase_check CHECK (
+          (event_type = 'attempt_claimed' AND phase = 0) OR
+          (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR
+          (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR
+          (event_type = 'broadcast_result' AND phase = 20) OR
+          (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR
+          (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR
+          (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR
+          (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90)
+        )
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_execution_attempt ON ai_trader_execution_events (attempt_id, phase, observed_at, id)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_execution_bot ON ai_trader_execution_events (bot_id, recorded_at DESC, id DESC)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_execution_decision ON ai_trader_execution_events (decision_id, recorded_at, id)`,
+      `CREATE OR REPLACE FUNCTION qv_reject_ai_trader_execution_event_mutation()
+        RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+          RAISE EXCEPTION 'ai_trader_execution_events is append-only';
+        END $$`,
+      `DO $$ BEGIN
+         CREATE TRIGGER ai_trader_execution_events_append_only
+           BEFORE UPDATE OR DELETE ON ai_trader_execution_events
+           FOR EACH ROW EXECUTE FUNCTION qv_reject_ai_trader_execution_event_mutation();
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `CREATE TABLE IF NOT EXISTS platform_cumulative_stats (
+        id text PRIMARY KEY DEFAULT 'singleton',
+        total_volume numeric(30,6) NOT NULL DEFAULT 0,
+        total_trades integer NOT NULL DEFAULT 0,
+        updated_at timestamp DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_opt_runs_user_status ON lab_optimization_runs (user_id, status, id)`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_opt_results_run_id ON lab_optimization_results (run_id)`,
+
+      // --- Phase 7 / Item 12g: per-bot subaccount auth mode (Drift-blocker). ---
+      // Idempotent: safe to run on fresh DB, partially-migrated DB, or fully-migrated DB.
+      // Backfill rule (one-time historical reconstruction): a bot with a stored
+      // subaccount keypair (bot_subaccount_key_encrypted IS NOT NULL) was using
+      // external_key auth (Pacifica-style); everything else used main_plus_id (Drift-style).
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS subaccount_auth_mode text`,
+      `UPDATE trading_bots SET subaccount_auth_mode = 'external_key'
+         WHERE subaccount_auth_mode IS NULL AND bot_subaccount_key_encrypted IS NOT NULL`,
+      `UPDATE trading_bots SET subaccount_auth_mode = 'main_plus_id'
+         WHERE subaccount_auth_mode IS NULL`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_subaccount_auth_mode_check
+           CHECK (subaccount_auth_mode IN ('external_key', 'main_plus_id'));
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_external_key_invariant
+           CHECK (
+             NOT (subaccount_auth_mode = 'external_key' AND subaccount_status = 'active')
+             OR (protocol_subaccount_id IS NOT NULL AND bot_subaccount_key_encrypted IS NOT NULL)
+           );
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `ALTER TABLE trading_bots ALTER COLUMN subaccount_auth_mode SET NOT NULL`,
+
+      // --- Phase 4b (Task 99): per-bot subaccount key V3 encryption column. ---
+      // Idempotent. Adds the v3 column and relaxes the external-key invariant
+      // so it accepts either the legacy or v3 ciphertext. Login backfills any
+      // legacy-only rows on the owner's next sign-in.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS bot_subaccount_key_encrypted_v3 text`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_external_key_invariant;
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_external_key_invariant
+           CHECK (
+             NOT (subaccount_auth_mode = 'external_key' AND subaccount_status = 'active')
+             OR (
+               protocol_subaccount_id IS NOT NULL
+               AND (bot_subaccount_key_encrypted IS NOT NULL OR bot_subaccount_key_encrypted_v3 IS NOT NULL)
+             )
+           );
+       END $$`,
+
+      // --- Phase 7 / Group D item 18: formalize active_protocol allowed values. ---
+      // Idempotent: safe to run on fresh DB, partially-migrated DB, or fully-migrated DB.
+      // Backfill rule (one-time historical reconstruction): the only NULL rows in
+      // production today are the dormant pre-adapter Drift bots described in item 12d
+      // (legacy bots with no Pacifica subaccount and no migrated collateral; they
+      // cannot be re-pointed to Pacifica). They are by definition Drift. New bots
+      // always set active_protocol explicitly at creation (item 18 fixed the four
+      // insert sites in routes.ts). After backfill, the column is constrained to
+      // ('pacifica', 'drift') and made NOT NULL — this lets `getAdapterForBot()`
+      // drop its warn-logging null fallback (removed in the item-18 closeout commit).
+      //
+      // ATOMICITY: the three steps (UPDATE → ADD CONSTRAINT → SET NOT NULL) are
+      // wrapped in a single PL/pgSQL DO block so they execute in one transaction.
+      // Without this, a concurrent writer (e.g. an old instance during rolling
+      // deploy) could insert a NULL row between the UPDATE and the SET NOT NULL,
+      // causing the latter to fail and leaving the schema partially tightened.
+      // The inner BEGIN/EXCEPTION handles the duplicate-constraint case on re-run.
+      `DO $$ BEGIN
+         UPDATE trading_bots SET active_protocol = 'drift' WHERE active_protocol IS NULL;
+         BEGIN
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
+             CHECK (active_protocol IN ('pacifica', 'drift'));
+         EXCEPTION WHEN duplicate_object THEN NULL; END;
+         ALTER TABLE trading_bots ALTER COLUMN active_protocol SET NOT NULL;
+       END $$`,
+
+      // --- Clone the two native-engine community strategies (SBR v1 and
+      // Adaptive Regime V3.8) from the BuhE wallet to the AqTT wallet.
+      // Idempotent: NOT EXISTS guard means re-running is a no-op once the
+      // AqTT-owned copies are present. Copies share Pine source, parsed
+      // inputs, groups, and strategy_settings (including nativeEngine=true),
+      // so the AqTT copies route through the same native engine path as
+      // the originals.
+      // --- MLM referral chain & rewards (Task 70) ---
+      `CREATE TABLE IF NOT EXISTS referral_links (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        descendant_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        ancestor_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        level integer NOT NULL,
+        created_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT referral_links_descendant_level_unique UNIQUE (descendant_wallet, level),
+        CONSTRAINT referral_links_no_self CHECK (descendant_wallet <> ancestor_wallet),
+        CONSTRAINT referral_links_level_range CHECK (level BETWEEN 1 AND 3)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_links_ancestor ON referral_links (ancestor_wallet)`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_links_descendant ON referral_links (descendant_wallet)`,
+      `CREATE TABLE IF NOT EXISTS referral_reward_events (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        source_type text NOT NULL,
+        source_id text NOT NULL,
+        earner_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        referee_wallet text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        level integer NOT NULL,
+        amount_usdc numeric(20, 6) NOT NULL,
+        status text NOT NULL DEFAULT 'pending',
+        created_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT referral_reward_events_unique UNIQUE (source_type, source_id, earner_wallet, level),
+        CONSTRAINT referral_reward_events_level_range CHECK (level BETWEEN 1 AND 3),
+        CONSTRAINT referral_reward_events_status_valid CHECK (status IN ('pending','confirmed','paid','failed'))
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_reward_events_earner ON referral_reward_events (earner_wallet)`,
+      `DO $$
+       DECLARE
+         current_definition text;
+       BEGIN
+         SELECT pg_get_constraintdef(oid, true)
+           INTO current_definition
+           FROM pg_constraint
+          WHERE conrelid = 'referral_reward_events'::regclass
+            AND conname = 'referral_reward_events_status_valid';
+         IF current_definition IS NULL OR position('awaiting_creator' in current_definition) = 0 THEN
+           ALTER TABLE referral_reward_events
+             DROP CONSTRAINT IF EXISTS referral_reward_events_status_valid;
+           ALTER TABLE referral_reward_events
+             ADD CONSTRAINT referral_reward_events_status_valid
+             CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'));
+         END IF;
+       END $$;`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS funding_wallet text`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS transfer_signature text`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS retry_count integer NOT NULL DEFAULT 0`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS last_error text`,
+      `ALTER TABLE referral_reward_events ADD COLUMN IF NOT EXISTS last_attempt_at timestamp`,
+      `CREATE INDEX IF NOT EXISTS idx_referral_reward_events_status_created ON referral_reward_events (status, created_at)`,
+      // Backfill: existing wallets.referred_by -> referral_links level 1 (and L2/L3 if resolvable),
+      // skipping rows that already exist. Idempotent.
+      `INSERT INTO referral_links (descendant_wallet, ancestor_wallet, level)
+       SELECT w.address, w.referred_by, 1
+         FROM wallets w
+        WHERE w.referred_by IS NOT NULL
+          AND w.referred_by <> w.address
+          AND EXISTS (SELECT 1 FROM wallets a WHERE a.address = w.referred_by)
+       ON CONFLICT (descendant_wallet, level) DO NOTHING`,
+      `INSERT INTO referral_links (descendant_wallet, ancestor_wallet, level)
+       SELECT w.address, w2.referred_by, 2
+         FROM wallets w
+         JOIN wallets w2 ON w2.address = w.referred_by
+        WHERE w2.referred_by IS NOT NULL
+          AND w2.referred_by <> w.address
+          AND EXISTS (SELECT 1 FROM wallets a WHERE a.address = w2.referred_by)
+       ON CONFLICT (descendant_wallet, level) DO NOTHING`,
+      `INSERT INTO referral_links (descendant_wallet, ancestor_wallet, level)
+       SELECT w.address, w3.referred_by, 3
+         FROM wallets w
+         JOIN wallets w2 ON w2.address = w.referred_by
+         JOIN wallets w3 ON w3.address = w2.referred_by
+        WHERE w3.referred_by IS NOT NULL
+          AND w3.referred_by <> w.address
+          AND EXISTS (SELECT 1 FROM wallets a WHERE a.address = w3.referred_by)
+       ON CONFLICT (descendant_wallet, level) DO NOTHING`,
+
+      // --- Task 119: portfolio P&L correctness ---
+      // Add on-chain block time to equity_events so the reconciler can
+      // attribute late-discovered deposits to when they actually happened.
+      `ALTER TABLE equity_events ADD COLUMN IF NOT EXISTS tx_block_time timestamp`,
+      // Add trading-P&L fields to portfolio_daily_snapshots. All columns are
+      // additive with safe defaults so this migration is reversible and
+      // backwards-compatible with the existing reader.
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_external_deposits numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_external_withdrawals numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_internal_transfers numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS cumulative_trading_pnl numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS net_external_flow numeric(20,6) NOT NULL DEFAULT 0`,
+      `ALTER TABLE portfolio_daily_snapshots ADD COLUMN IF NOT EXISTS pnl_percent numeric(12,6) NOT NULL DEFAULT 0`,
+
+      // --- Task 129: Telegram daily summary opt-in toggle + idempotency marker ---
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_summary_enabled boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS daily_summary_last_sent_date text`,
+
+      // --- Task 143: Pacifica Builder Code & Referral idempotency flags ---
+      // Idempotent ALTERs. Default false so existing rows are migrated lazily on
+      // the next trade (the adapter's ensurePacificaEnrollment hook fires).
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
+
+      // --- Task 201: hands-off auto-mode admin whitelist (additive, idempotent). ---
+      // Default false → every wallet starts in watched mode; an admin flips it on.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS hands_off_approved boolean NOT NULL DEFAULT false`,
+
+      // --- Task 149: per-bot Pacifica enrollment flags ---
+      // Phase 4b bots are their own Pacifica main accounts (keypair behind
+      // bot_subaccount_key_encrypted_v3, pubkey in protocol_subaccount_id),
+      // so enrollment must be tracked per-bot. Mirrors the wallets flags
+      // above. Default false → migrated lazily on the bot's next trade.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_builder_approved boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS pacifica_referral_claimed boolean NOT NULL DEFAULT false`,
+
+      // Auto-repark idle funds (Task: per-bot persistent setting + server-managed
+      // debounce deadline). Additive + idempotent. auto_park_idle defaults OFF;
+      // auto_park_due_at is set when a position fully closes and cleared on open,
+      // then consumed by the periodic repark scanner. See server/vault/auto-repark.ts.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_park_idle boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_park_due_at timestamp`,
+
+      // Per-bot park DESTINATION (Task: persisted picker + migrate-on-save). Additive +
+      // idempotent. NULL = legacy inference. When set on a Flash bot the auto-repark
+      // executor treats it as authoritative and migrates parked funds into it.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS park_destination_asset text`,
+      // On-open unpark mode (Flash vaults). Defaults TRUE = all-out (safest): existing
+      // auto-park bots become full-buffer-on-open automatically. Additive + idempotent.
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS vault_all_out boolean NOT NULL DEFAULT true`,
+
+      // Defend-the-loan auto collateral top-up (Task: opt-in per-bot setting). Additive +
+      // idempotent. Defaults OFF → the scanner never tops up a loan the user didn't opt in.
+      // See server/vault/jupiter-lend-perbot-carve.ts (runPerbotCollateralTopUp).
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_collateral_top_up boolean NOT NULL DEFAULT false`,
+
+      // Defend-the-loan auto repay (opt-in per-bot setting). Additive + idempotent.
+      // Defaults OFF → the scanner never repays a loan the user didn't opt in.
+      // See server/vault/auto-topup.ts (decideAutoRepay).
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS auto_repay_enabled boolean NOT NULL DEFAULT false`,
+
+      // --- Phase 4b (Flash agent-HD wallets): recoverable per-bot wallet indices. ---
+      // Additive + idempotent. The allocator lives on `wallets` (burn-on-allocate,
+      // never reused). Each agent_hd bot stores its non-secret HD index + path version;
+      // legacy random bots leave both NULL. DB-level CHECK/UNIQUE are the real fund-safety
+      // enforcement so a manual or buggy write can never commingle two bots on one wallet.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS next_bot_derivation_index integer NOT NULL DEFAULT 1`,
+      // Orphan slots verified empty (swept or live-bot drift) — excluded from the
+      // stranded-funds indicator so the recovery button clears once nothing remains.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS recovered_orphan_indices integer[] NOT NULL DEFAULT '{}'`,
+
+      // QuantumLab AI Strategy Creator (Task 187): BYO OpenRouter key, V3-encrypted
+      // (UMK-wrapped only, interactive-only). Additive + idempotent. Plaintext is
+      // never stored; only the ciphertext, a display-only last4, provider, and mtime.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_encrypted text`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_last4 text`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_provider text`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS llm_api_key_updated_at timestamp`,
+
+      // Vaults Phase 0a: account-level manual park/unpark settings. Additive + idempotent.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vault_enabled boolean NOT NULL DEFAULT false`,
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS vault_default_asset text`,
+
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
+      `ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_derivation_index_positive
+           CHECK (derivation_index IS NULL OR derivation_index >= 1);
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_derivation_dual_model
+           CHECK (
+             (derivation_index IS NULL AND derivation_path_version IS NULL)
+             OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL)
+           );
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_wallet_derivation_index_unique
+           UNIQUE (wallet_address, derivation_index);
+       EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$`,
+
+      // --- HD-derivation metadata on the spare pool (Pacifica agent_hd reuse). ---
+      // When a Pacifica bot is deleted its subaccount is swept-empty and pooled as a
+      // spare. On reuse the new bot MUST inherit the spare's ORIGINAL derivation index
+      // so the seed fallback re-derives the SAME pubkey (else pubkey-mismatch →
+      // fail-closed → the reused slot silently loses recoverability). Additive +
+      // idempotent. Legacy random-key spares carry NULL/NULL → blob-only, as before.
+      `ALTER TABLE protocol_subaccounts ADD COLUMN IF NOT EXISTS derivation_index integer`,
+      `ALTER TABLE protocol_subaccounts ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
+      `DO $$ BEGIN
+         ALTER TABLE protocol_subaccounts ADD CONSTRAINT protocol_subaccounts_derivation_index_positive
+           CHECK (derivation_index IS NULL OR derivation_index >= 1);
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+      `DO $$ BEGIN
+         ALTER TABLE protocol_subaccounts ADD CONSTRAINT protocol_subaccounts_derivation_dual_model
+           CHECK (
+             (derivation_index IS NULL AND derivation_path_version IS NULL)
+             OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL)
+           );
+       EXCEPTION WHEN duplicate_object THEN NULL; END $$`,
+
+      `INSERT INTO lab_strategies (user_id, name, description, pine_script, parsed_inputs, groups, strategy_settings)
+       SELECT 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez',
+              src.name, src.description, src.pine_script, src.parsed_inputs, src.groups, src.strategy_settings
+         FROM lab_strategies src
+        WHERE src.user_id = 'BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41'
+          AND src.name IN ('SBR v1 – Structure Break & Retest', 'Adaptive Regime V3.8')
+          AND NOT EXISTS (
+            SELECT 1 FROM lab_strategies dest
+             WHERE dest.user_id = 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez'
+               AND dest.name = src.name
+          )`,
+
+      // --- Flash Trade adapter Phase 1: expand active_protocol CHECK to include 'flash'. ---
+      // The original constraint (added in Group D item 18) only allowed ('pacifica', 'drift').
+      // Drop-and-recreate is required because PostgreSQL does not support ALTER CONSTRAINT for
+      // CHECK constraints. Idempotent: the DO block re-drops before adding, so re-running
+      // against an already-migrated DB is safe and produces the final desired constraint.
+      // No data backfill needed — no 'flash' rows exist yet; the constraint is broadened,
+      // not narrowed, so existing rows are unaffected.
+      `DO $$ BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass
+           AND conname = 'trading_bots_active_protocol_check' AND position('phoenix' in pg_get_constraintdef(oid)) > 0) THEN
+           ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check
+             CHECK (active_protocol IN ('pacifica', 'drift', 'flash'));
+         END IF;
+       END $$`,
+
+      // --- bot_trades protocol label honesty. ---
+      // The column originally defaulted to 'pacifica', so any insert that
+      // omitted `protocol` was silently mislabeled as Pacifica regardless of
+      // the actual venue (Flash/Drift). createBotTrade() now stamps the real
+      // protocol from the owning bot, so drop the misleading default — a
+      // genuinely unknown protocol should read NULL, never a wrong venue.
+      // Idempotent: DROP DEFAULT is a no-op once the default is already gone.
+      `ALTER TABLE bot_trades ALTER COLUMN protocol DROP DEFAULT`,
+
+      // --- Task 188: QuantumLab backtest accuracy foundation. ---
+      // Validity (out-of-sample holdout) + fidelity (slippage friction + engine
+      // self-consistency check). All columns nullable / backward-compatible:
+      // legacy runs read NULL (holdout disabled, no friction record, no parity),
+      // and legacy result rows read NULL is/oos metrics. Each statement is
+      // additive ADD COLUMN IF NOT EXISTS — idempotent, never drops anything.
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS oos_fraction real`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS slippage real`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS parity_match boolean`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS parity_diffs jsonb`,
+      `ALTER TABLE lab_optimization_results ADD COLUMN IF NOT EXISTS is_metrics jsonb`,
+      `ALTER TABLE lab_optimization_results ADD COLUMN IF NOT EXISTS oos_metrics jsonb`,
+
+      // --- QuantumLab Sandbox Agent (Phase A): agent task state + run idempotency. ---
+      // Additive + idempotent. lab_agent_tasks is the agent's durable working
+      // memory (goal / plan / owned runs / leash counters). The agent_* columns on
+      // lab_optimization_runs link a run to its owning task and make a resumed task
+      // safe to retry: the partial UNIQUE index maps each
+      // (user_id, agent_task_id, agent_idempotency_key) to ONE run, so a reconnect
+      // can never double-queue on the single shared worker. Runs are the source of
+      // truth; every non-agent (manual/UI) run leaves all agent_* columns NULL/false.
+      `CREATE TABLE IF NOT EXISTS lab_agent_tasks (
+        id serial PRIMARY KEY,
+        wallet_address text NOT NULL,
+        status text NOT NULL DEFAULT 'active',
+        mode text NOT NULL DEFAULT 'chat',
+        goal text,
+        plan jsonb,
+        memory jsonb,
+        active_run_id integer,
+        owned_run_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+        loop_count integer NOT NULL DEFAULT 0,
+        spend_estimate_usd real NOT NULL DEFAULT 0,
+        stop_reason text,
+        last_reconciled_at timestamp,
+        awaiting_since timestamp,
+        cancel_requested_at timestamp,
+        toolkit_version integer NOT NULL DEFAULT 1,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_agent_tasks_wallet_status ON lab_agent_tasks (wallet_address, status)`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_task_id integer`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_idempotency_key text`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_correlation_id text`,
+      `ALTER TABLE lab_optimization_runs ADD COLUMN IF NOT EXISTS agent_owned boolean NOT NULL DEFAULT false`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_lab_opt_runs_agent_idem
+         ON lab_optimization_runs (user_id, agent_task_id, agent_idempotency_key)
+         WHERE agent_idempotency_key IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_opt_runs_agent_task
+         ON lab_optimization_runs (agent_task_id)
+         WHERE agent_task_id IS NOT NULL`,
+
+      // --- QuantumLab Sandbox Agent (Phase B): chat transcript. ---
+      // Additive + idempotent. Wallet-scoping is enforced in the storage layer
+      // through the owning lab_agent_tasks row, never by task_id alone. The CHECK
+      // lives INSIDE the CREATE so it ships atomically with a brand-new table and
+      // never runs as a standalone ADD CONSTRAINT (which throws 42P07 on re-run
+      // and would silently skip later migrations — see the per-statement note below).
+      `CREATE TABLE IF NOT EXISTS lab_agent_messages (
+        id serial PRIMARY KEY,
+        task_id integer NOT NULL,
+        role text NOT NULL CHECK (role IN ('user','agent','tool')),
+        content text NOT NULL,
+        suggested_actions jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_lab_agent_messages_task_created ON lab_agent_messages (task_id, created_at, id)`,
+
+      // --- QuantumLab Sandbox Agent (Phase C): turn-loop orchestration state. ---
+      // Additive + idempotent. The DB is the source of truth for the turn loop so a
+      // turn can be resumed crash-safely; see server/lab-agent/orchestrator.ts.
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_state text NOT NULL DEFAULT 'ready'`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_lease text`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_lease_expires_at timestamp`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS turn_state_changed_at timestamp`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS step_index integer NOT NULL DEFAULT 0`,
+      `ALTER TABLE lab_agent_tasks ADD COLUMN IF NOT EXISTS current_step jsonb`,
+
+      // --- Phase 0a Vaults: per-wallet parked yield-asset positions. ---
+      // Cost-basis accounting cache; on-chain token balance is display truth.
+      // One row per (wallet, asset). Idempotent: safe on fresh / migrated DBs.
+      `CREATE TABLE IF NOT EXISTS vault_positions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        asset_key text NOT NULL,
+        mint text NOT NULL,
+        token_amount_raw text NOT NULL DEFAULT '0',
+        usdc_cost_basis numeric(20, 6) NOT NULL DEFAULT 0,
+        status text NOT NULL DEFAULT 'active',
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now(),
+        CONSTRAINT vault_positions_wallet_asset_unique UNIQUE (wallet_address, asset_key)
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_vault_positions_wallet ON vault_positions (wallet_address)`,
+
+      // --- Phase 4 Vaults: per-bot scoping for vault_positions. ---
+      // trading_bot_id NULL = account-level vault (main agent wallet); non-null =
+      // a specific bot's own per-bot wallet (Flash independent_trader). Additive +
+      // idempotent. ORDER MATTERS: create the new partial unique indexes BEFORE
+      // dropping the old blanket unique constraint, so uniqueness is never briefly
+      // unenforced if a later statement fails. Plain column (no FK): on-chain is
+      // truth, so an orphan cost-basis row after a bot delete is benign clutter.
+      `ALTER TABLE vault_positions ADD COLUMN IF NOT EXISTS trading_bot_id varchar`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS vault_positions_account_unique ON vault_positions (wallet_address, asset_key) WHERE trading_bot_id IS NULL`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS vault_positions_bot_unique ON vault_positions (wallet_address, trading_bot_id, asset_key) WHERE trading_bot_id IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_vault_positions_bot ON vault_positions (trading_bot_id) WHERE trading_bot_id IS NOT NULL`,
+      `ALTER TABLE vault_positions DROP CONSTRAINT IF EXISTS vault_positions_wallet_asset_unique`,
+
+      // --- Phase 1 Vaults: yield-oracle realized-APY price snapshots. ---
+      // Display-only series; the yield oracle annualizes the movement of each
+      // asset's on-chain price over time. One row per (asset, sample). Additive +
+      // idempotent. Compound index serves the per-asset trailing-window scan.
+      `CREATE TABLE IF NOT EXISTS yield_price_snapshots (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_key text NOT NULL,
+        price_usdc_per_token numeric(30, 12) NOT NULL,
+        as_of timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_yield_price_snapshots_asset_time ON yield_price_snapshots (asset_key, as_of)`,
+
+      // --- Vaults: external (DeFiLlama) realized-APY cache. ---
+      // One upserted row per asset_key holding the last-good REAL APY from the
+      // external yield index, so a cold process / restart serves a measured number
+      // immediately and the UI never regresses to an estimate during a brief upstream
+      // outage. Display-only (no money). Additive + idempotent.
+      `CREATE TABLE IF NOT EXISTS yield_apy_cache (
+        asset_key text PRIMARY KEY,
+        apy numeric(10, 4),
+        apy_base numeric(10, 4),
+        apy_reward numeric(10, 4),
+        apy_mean_30d numeric(10, 4),
+        source text NOT NULL,
+        pool_id text,
+        as_of timestamp NOT NULL DEFAULT now()
+      )`,
+
+      // --- SOL Loop Vault P3: hourly rate telemetry (allocation-tick input). ---
+      // Rates are FRACTIONS (0.08 = 8%), nullable per-field (partial upstream
+      // outage still records readable fields; policy fails closed on null at
+      // read time). Telemetry/policy input only — money paths re-read live.
+      // Bounded retention (pruned by the sampler). Additive + idempotent.
+      `CREATE TABLE IF NOT EXISTS loop_rate_samples (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        vault_id integer NOT NULL,
+        symbol text NOT NULL,
+        staking_apy numeric(12, 8),
+        staking_apy_mean_30d numeric(12, 8),
+        borrow_apr numeric(12, 8),
+        withdraw_utilization numeric(8, 6),
+        net_carry_2x numeric(12, 8),
+        liquidation_threshold numeric(8, 6),
+        as_of timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_rate_samples_vault_time ON loop_rate_samples (vault_id, as_of)`,
+      // Dynamic-leverage input: vault LT sampled into the rate row (additive;
+      // pre-migration rows stay null → consumers fail closed, self-heals on
+      // the next hourly sample).
+      `ALTER TABLE loop_rate_samples ADD COLUMN IF NOT EXISTS liquidation_threshold numeric(8, 6)`,
+
+      // --- Vaults borrow engine (Phase A scaffold): debt LEDGER. ---
+      // Empty + additive; NO writers wired yet (Phase A = spec & hard gates, no
+      // money moves). One row per isolated borrow position. Scope mirrors
+      // vault_positions / server/vault/scope.ts: trading_bot_id NULL = account
+      // level (agent-main wallet pledges to Jupiter Lend/Fluid); non-null = a
+      // bot's own per-bot wallet (Flash). MONEY-SAFETY: debt is a LIABILITY — it
+      // is NEVER folded into equity_events / sumNetDepositedFromEvents (that
+      // would fabricate PnL); displayed equity = assets − debt. Health is read
+      // AUTHORITATIVELY on-chain (REST = cross-check only); health_as_of is the
+      // ORACLE publish time, never the pool liquidity lastUpdateTimestamp. The
+      // active-position uniqueness model is deferred to the build phase (no
+      // writers exist to constrain yet); only non-unique scope indexes here.
+      // Policy-neutral columns only: hard max-LTV cap and fee/monetization model
+      // are PENDING owner decisions and live in config/policy, not this schema.
+      `CREATE TABLE IF NOT EXISTS borrow_positions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        trading_bot_id varchar,
+        debt_venue text NOT NULL,
+        venue_vault_id text,
+        venue_position_id text,
+        collateral_asset_key text NOT NULL,
+        collateral_mint text NOT NULL,
+        collateral_amount_raw text NOT NULL DEFAULT '0',
+        debt_asset_key text NOT NULL DEFAULT 'usdc',
+        debt_mint text NOT NULL,
+        debt_amount_raw text NOT NULL DEFAULT '0',
+        attributed_bot_id varchar,
+        status text NOT NULL DEFAULT 'pending',
+        health_snapshot jsonb,
+        health_as_of timestamp,
+        health_source text,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_positions_wallet ON borrow_positions (wallet_address)`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_positions_bot ON borrow_positions (trading_bot_id) WHERE trading_bot_id IS NOT NULL`,
+      // Additive: persist the venue's position id (Jupiter Lend NFT) for repay/
+      // close/monitor. Idempotent for DBs created before this column existed.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS venue_position_id text`,
+      // Additive (FC-2): durable borrow-health alert state so band-crossing
+      // Telegram alerts survive restarts, never repeat for the same band, and
+      // only reset downward after anti-flap hysteresis. Mirrors schema.ts.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_observed_health_band text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS health_band_changed_at timestamp`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_health_alert_band text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_health_alert_at timestamp`,
+      // Additive: auto collateral top-up ("defend the loan") throttle timestamp.
+      // The autonomous scanner claims a position by stamping this, so a loan that
+      // stays urgent can't re-fire (top-up OR alert) within the cooldown window.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_auto_topup_attempt_at timestamp`,
+      // Additive (SOL Loop Vault P2): position-family discriminator. 'borrow' =
+      // the shipped LST→stable engine; 'loop' = leveraged LST→WSOL staking loop.
+      // Existing rows are borrow rows, so the default backfills correctly.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'borrow'`,
+      // Additive (SOL Loop Vault P3): policy brain state on kind='loop' rows.
+      // 'levered' (has debt, safety-tick eligible) | 'holding' (zero debt, HF
+      // null — excluded from keeper decideDeleverage). Null on borrow rows.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS policy_state text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS policy_reason text`,
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS policy_state_changed_at timestamp`,
+      // Additive (SOL Loop Vault P3): safety-tick action throttle on loop rows.
+      // The reflex claims a position by stamping this atomically, so an unhealthy
+      // loop is handed to the executor at most once per cooldown window.
+      `ALTER TABLE borrow_positions ADD COLUMN IF NOT EXISTS last_policy_action_at timestamp`,
+
+      // --- SOL Loop Vault P3: append-only policy decision journal. ---
+      // One row per tick evaluation (including outcome 'none') so hysteresis is
+      // DB-derived and the observation gate is one SQL pass. Never a money gate.
+      `CREATE TABLE IF NOT EXISTS loop_policy_decisions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        borrow_position_id varchar,
+        vault_id integer NOT NULL,
+        tick text NOT NULL,
+        action text NOT NULL,
+        fraction numeric(8, 6),
+        reason text NOT NULL,
+        details jsonb,
+        created_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_policy_decisions_vault_time ON loop_policy_decisions (vault_id, created_at)`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_policy_decisions_wallet ON loop_policy_decisions (wallet_address)`,
+
+      // --- SOL Loop Vault P3 (T106): tick heartbeats for the observation gate. ---
+      // One row per completed safety/allocation pass; lets the admin status
+      // route measure tick coverage even with zero loop positions. Pruned.
+      `CREATE TABLE IF NOT EXISTS loop_tick_heartbeats (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        tick text NOT NULL,
+        evaluated integer NOT NULL DEFAULT 0,
+        acted integer NOT NULL DEFAULT 0,
+        failed integer NOT NULL DEFAULT 0,
+        skipped integer,
+        skip_reason_counts jsonb,
+        created_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `ALTER TABLE loop_tick_heartbeats ADD COLUMN IF NOT EXISTS skipped integer`,
+      `ALTER TABLE loop_tick_heartbeats ADD COLUMN IF NOT EXISTS skip_reason_counts jsonb`,
+      `CREATE INDEX IF NOT EXISTS idx_loop_tick_heartbeats_tick_time ON loop_tick_heartbeats (tick, created_at)`,
+
+      // --- Vaults borrow engine (Phase A scaffold): money-op AUDIT log. ---
+      // Append-only record of every multi-hop borrow/repay/carry operation, so
+      // the (future) money state machine is resumable + idempotent: DB-unique
+      // operation id + per-step on-chain tx signatures + status/step, mirroring
+      // the audited park/unpark safety model. Empty + additive; no writers yet.
+      `CREATE TABLE IF NOT EXISTS borrow_operations (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        borrow_position_id varchar,
+        operation_type text NOT NULL,
+        status text NOT NULL DEFAULT 'pending',
+        step text,
+        tx_signatures jsonb NOT NULL DEFAULT '[]',
+        error text,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_operations_wallet ON borrow_operations (wallet_address)`,
+      `CREATE INDEX IF NOT EXISTS idx_borrow_operations_position ON borrow_operations (borrow_position_id) WHERE borrow_position_id IS NOT NULL`,
+      // Additive (resumable + idempotent multi-hop repays): caller idempotency
+      // key + resume-context metadata + immutable result payload. Idempotent for
+      // DBs created before these columns existed. Each ALTER is its own statement
+      // so a re-run that no-ops one never skips a later migration.
+      `ALTER TABLE borrow_operations ADD COLUMN IF NOT EXISTS client_request_id text`,
+      `ALTER TABLE borrow_operations ADD COLUMN IF NOT EXISTS metadata jsonb`,
+      `ALTER TABLE borrow_operations ADD COLUMN IF NOT EXISTS result jsonb`,
+      // UNIQUE per (wallet, client_request_id) so a retried logical op reuses its
+      // row instead of double-executing. Partial: only enforced on non-null keys.
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_borrow_operations_client_req ON borrow_operations (wallet_address, client_request_id) WHERE client_request_id IS NOT NULL`,
+
+      // --- Fixed Yield vault: PT holdings bought on a fixed-rate venue. ---
+      // One row per open PT position (Exponent first). On-chain PT balance is
+      // the display truth; this row is cost-basis + maturity bookkeeping. Ops
+      // audit through borrow_operations (fy_deposit / fy_exit / fy_redeem).
+      `CREATE TABLE IF NOT EXISTS fy_positions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL REFERENCES wallets(address) ON DELETE CASCADE,
+        venue text NOT NULL DEFAULT 'exponent',
+        market_address text NOT NULL,
+        venue_vault_address text,
+        pt_mint text NOT NULL,
+        pt_decimals integer NOT NULL DEFAULT 9,
+        underlying_mint text NOT NULL,
+        underlying_symbol text NOT NULL,
+        pt_amount_raw text NOT NULL DEFAULT '0',
+        cost_basis_usdc numeric(20, 6) NOT NULL DEFAULT '0',
+        implied_apy_at_entry numeric(10, 6),
+        maturity_at timestamp NOT NULL,
+        status text NOT NULL DEFAULT 'active',
+        notified_maturity_at timestamp,
+        created_at timestamp NOT NULL DEFAULT now(),
+        updated_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_fy_positions_wallet ON fy_positions (wallet_address)`,
+
+      // --- HERMES_EXIT_PLAN Phase 3b: on-chain Pyth oracle snapshot store. ---
+      // Append-only 26h ring for on-chain Pyth price readings (borrow-gate feeds
+      // + Flash crypto feeds). Pruned by oracle-snapshot-recorder.ts on every
+      // tick. Additive + idempotent. No foreign keys — purely observational.
+      `CREATE TABLE IF NOT EXISTS oracle_price_snapshots (
+        id serial PRIMARY KEY,
+        feed_id text NOT NULL,
+        symbol text NOT NULL,
+        price_usd real NOT NULL,
+        publish_time_sec integer NOT NULL,
+        taken_at timestamp NOT NULL DEFAULT now(),
+        source text NOT NULL DEFAULT 'onchain'
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_oracle_snapshots_feed_taken ON oracle_price_snapshots (feed_id, taken_at)`,
+
+      // --- Controlled scanner incident evidence retention. ---
+      // Independent of error_log coalescing and pruneErrors. active_slot=1 is
+      // unique for every unreleased hold; released rows clear it to NULL.
+      `CREATE TABLE IF NOT EXISTS scanner_incident_holds (
+        id text PRIMARY KEY,
+        state text NOT NULL CHECK (state IN ('baseline', 'canary', 'exported', 'released')),
+        active_slot integer DEFAULT 1,
+        export_row_count integer,
+        export_digest text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        canary_started_at timestamptz,
+        exported_at timestamptz,
+        released_at timestamptz,
+        CONSTRAINT scanner_incident_holds_active_slot_check CHECK (
+          (state = 'released' AND active_slot IS NULL)
+          OR (state <> 'released' AND active_slot = 1)
+        ),
+        CONSTRAINT scanner_incident_holds_export_proof_check CHECK (
+          (state IN ('exported', 'released') AND export_row_count IS NOT NULL AND export_digest IS NOT NULL)
+          OR (state IN ('baseline', 'canary') AND export_row_count IS NULL AND export_digest IS NULL)
+        )
+      )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS scanner_incident_holds_active_slot_unique
+         ON scanner_incident_holds (active_slot)`,
+      `CREATE TABLE IF NOT EXISTS scanner_incident_occurrences (
+        event_id varchar PRIMARY KEY,
+        hold_id text NOT NULL REFERENCES scanner_incident_holds(id) ON DELETE CASCADE,
+        "window" text NOT NULL CHECK ("window" IN ('baseline', 'canary')),
+        fingerprint text NOT NULL,
+        observed_at timestamptz NOT NULL,
+        category text NOT NULL DEFAULT 'scanner' CHECK (category = 'scanner'),
+        source text NOT NULL,
+        summary text NOT NULL,
+        context jsonb NOT NULL DEFAULT '{}'::jsonb
+      )`,
+      `CREATE INDEX IF NOT EXISTS scanner_incident_occurrences_hold_order_idx
+         ON scanner_incident_occurrences (hold_id, observed_at, event_id)`,
+      `CREATE INDEX IF NOT EXISTS scanner_incident_occurrences_hold_fingerprint_idx
+         ON scanner_incident_occurrences (hold_id, fingerprint)`,
+
+      // --- AGENTIC_TRADER_PLAN WO-2: AI Trader bots + decision audit trail. ---
+      // Additive + idempotent, mirrors the shared/schema.ts pgTable definitions
+      // verbatim (see AGENTIC_TRADER_PLAN.md §7). Schema/storage only for WO-2 —
+      // no routes/executor/monitor read or write these tables yet. FK is inline
+      // (created atomically with the table) to avoid the separate
+      // ADD CONSTRAINT 42P07-vs-42710 trap described above.
+      `CREATE TABLE IF NOT EXISTS ai_trader_bots (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        wallet_address text NOT NULL,
+        protocol text NOT NULL,
+        protocol_subaccount_id text,
+        market text NOT NULL,
+        timeframe text NOT NULL,
+        mode text NOT NULL DEFAULT 'suggest',
+        risk_profile text NOT NULL DEFAULT 'guarded',
+        paper_mode boolean NOT NULL DEFAULT true,
+        auto_next boolean NOT NULL DEFAULT false,
+        model text NOT NULL DEFAULT 'anthropic/claude-opus-4.8',
+        allocated_usdc numeric(20, 2) NOT NULL,
+        max_leverage integer NOT NULL DEFAULT 3,
+        stop_policy text NOT NULL DEFAULT 'static',
+        park_when_idle boolean NOT NULL DEFAULT false,
+        graduation_state text NOT NULL DEFAULT 'in_trial',
+        graduation_criteria jsonb NOT NULL,
+        trial_started_at timestamp DEFAULT now(),
+        graduated_at timestamp,
+        current_qualification_era_digest text,
+        graduated_qualification_era_digest text,
+        qualification_era_invalidation_reason text,
+        policy_hmac text NOT NULL,
+        status text NOT NULL DEFAULT 'idle',
+        pause_reason text,
+        daily_realized_pnl numeric(20, 2) DEFAULT '0',
+        consecutive_losses integer NOT NULL DEFAULT 0,
+        created_at timestamp DEFAULT now(),
+        updated_at timestamp DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_bots_wallet ON ai_trader_bots (wallet_address)`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_bots_status ON ai_trader_bots (status)`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_decisions (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        bot_id varchar REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
+        context_digest jsonb,
+        qualification_era_digest text,
+        raw_decision jsonb NOT NULL,
+        clamped_decision jsonb,
+        guardrail_violations jsonb,
+        outcome text,
+        entry_price numeric(20, 8),
+        exit_price numeric(20, 8),
+        exit_reason text,
+        realized_pnl numeric(20, 2),
+        fees_paid numeric(20, 6),
+        llm_cost_usd numeric(10, 6),
+        llm_latency_ms integer,
+        decided_at timestamp DEFAULT now(),
+        closed_at timestamp
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_decisions_bot_decided ON ai_trader_decisions (bot_id, decided_at DESC)`,
+      // Partial index for the trades-only query path (outcome='executed' filter).
+      // Covers getAiTraderDecisionsPaged with outcomes='executed', avoids full-table seq scan
+      // on bots with thousands of flat rows. Deferred 60-day rollup — slim compressed rows
+      // are cheap; revisit if row counts cause measurable query latency.
+      `CREATE INDEX IF NOT EXISTS idx_ai_trader_decisions_executed ON ai_trader_decisions (bot_id, decided_at DESC) WHERE outcome = 'executed'`,
+
+      // WO-7: free paper-trial counter for wallets with no BYO OpenRouter key.
+      `ALTER TABLE wallets ADD COLUMN IF NOT EXISTS ai_trader_free_calls_used integer NOT NULL DEFAULT 0`,
+
+      // WO-7.1 go-live: per-bot venue subaccount key (V3 ciphertext) + HD
+      // derivation metadata on ai_trader_bots, mirroring trading_bots. Additive
+      // + idempotent; live signing fails closed when the key is absent.
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS bot_subaccount_key_encrypted_v3 text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS derivation_index integer`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS derivation_path_version integer`,
+
+      // WO-8h item 3: model attribution on every decision row (stamps the model
+      // used at decision time so track records stay attributable when models change
+      // mid-flight). Backfill existing rows from the bot's current model.
+      `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS model_used text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS current_qualification_era_digest text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS graduated_qualification_era_digest text`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS qualification_era_invalidation_reason text`,
+      `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS qualification_era_digest text`,
+      `UPDATE ai_trader_decisions d
+         SET model_used = b.model
+         FROM ai_trader_bots b
+         WHERE d.bot_id = b.id
+           AND d.model_used IS NULL`,
+
+      // risk-based-sizing-spec Phase A: optional confidence-scaled risk-based
+      // sizing (per-bot, off by default). Additive + idempotent, mirrors
+      // shared/schema.ts. sizing_mode: 'discretionary' | 'risk_based'; the
+      // risk band is % of the sizing base per trade (validated 0.1–3.0 at the
+      // API layer; guardrails.ts re-validates and fails closed at runtime).
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS sizing_mode text NOT NULL DEFAULT 'discretionary'`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS risk_min_pct numeric(5, 2) NOT NULL DEFAULT 0.50`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS risk_max_pct numeric(5, 2) NOT NULL DEFAULT 1.50`,
+
+      // COT-A: CFTC Bitcoin Legacy futures-only COT positioning cache.
+      // Idempotent startup DDL — never db:push. Single global BTC signal, one row per
+      // weekly CFTC release. report_date is a date column held as text in Drizzle.
+      `CREATE TABLE IF NOT EXISTS cot_snapshots (
+        id serial PRIMARY KEY,
+        report_date date NOT NULL UNIQUE,
+        commercial_net integer NOT NULL,
+        noncomm_net integer NOT NULL,
+        nonrept_net integer NOT NULL,
+        dumb_net integer NOT NULL,
+        comm_index numeric(6,2),
+        noncomm_index numeric(6,2),
+        nonrept_index numeric(6,2),
+        dumb_index numeric(6,2),
+        state text NOT NULL DEFAULT 'insufficient_data',
+        weeks_in_window integer NOT NULL DEFAULT 0,
+        fetched_at timestamp NOT NULL DEFAULT now()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_cot_snapshots_report_date ON cot_snapshots (report_date DESC)`,
+
+      // Reflection-playbook-spec Phase A: per-bot accumulated lesson playbook.
+      // Accumulate-only — injection gated behind calibration precondition + structure-bricks
+      // keep-gate review. Idempotent startup DDL; never db:push.
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook jsonb`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook_version integer NOT NULL DEFAULT 0`,
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS playbook_updated_at timestamp`,
+
+      // --- WO-B: scanner bot mode. ---
+      // 'fixed' (default) preserves today's behaviour byte-for-byte for all existing bots.
+      // 'scanner' makes the bot pick from the shortlist each 15m boundary via runAutoCycle.
+      // market/timeframe stay NOT NULL; scanner bots write the chosen values before each
+      // decision so all downstream readers (monitor 15s loop, executor, UI) work unmodified.
+      // Rollback: DROP COLUMN market_source is safe — every reader treats missing/default as 'fixed'.
+      `ALTER TABLE ai_trader_bots ADD COLUMN IF NOT EXISTS market_source text NOT NULL DEFAULT 'fixed'`,
+
+      // --- WO-15A: batch financial-enrichment index on equity_events. ---
+      // Additive: never changes any row or constraint. Idempotent CREATE INDEX IF NOT EXISTS.
+      // Rollback: DROP INDEX IF EXISTS idx_equity_events_bot_created
+      `CREATE INDEX IF NOT EXISTS idx_equity_events_bot_created ON equity_events(trading_bot_id, created_at DESC)`,
+
+      // --- One-time rogue AVAX close correction. ---
+      // A no-fill reconciler observation was persisted as a second close for a
+      // position that had already closed. Pin every immutable/economic field so
+      // a reused ID or changed row fails closed instead of deleting history.
+      // The anonymous block is one transaction: delete + stats repair commit
+      // together. Once the row is absent, every later startup is a no-op.
+      `DO $qv$
+       DECLARE
+         target_trade bot_trades%ROWTYPE;
+         canonical_stats RECORD;
+       BEGIN
+         IF NOT EXISTS (
+           SELECT 1 FROM bot_trades
+            WHERE id = '491abec1-39c2-42c5-8963-e5f4fb644b3a'
+         ) THEN
+           RETURN;
+         END IF;
+
+         -- Blue/green publish overlap can leave the outgoing instance trading.
+         -- Serialize with every bot_trades reader/writer before taking the
+         -- canonical stats snapshot. Existing stats recomputes read this table
+         -- inside their transaction, so ACCESS EXCLUSIVE also drains any stale
+         -- read/merge/write already running on the outgoing process.
+         LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = '491abec1-39c2-42c5-8963-e5f4fb644b3a'
+            AND trading_bot_id = 'c74f5d5a-be0f-4db9-8909-0605ece3a49d'
+            AND wallet_address = 'AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez'
+            AND market = 'AVAX-PERP'
+            AND side = 'long'
+            AND size = 38.63000000
+            AND price = 8.927900
+            AND fee = 0
+            AND pnl = -105.84
+            AND status = 'executed'
+            AND protocol = 'pacifica'
+            AND protocol_fill_id = 'tx-reconciler-position-epoch|c74f5d5a-be0f-4db9-8909-0605ece3a49d|AVAX|527034b2-6a0f-457b-a962-4b78aa890774'
+            AND tx_signature IS NULL
+            AND execution_method = 'on-chain-detected'
+            AND executed_at = TIMESTAMP '2026-08-13 05:27:28.496574'
+          FOR UPDATE;
+
+         IF NOT FOUND THEN
+           RAISE EXCEPTION 'rogue AVAX trade fingerprint mismatch';
+         END IF;
+
+         PERFORM 1
+           FROM trading_bots
+          WHERE id = target_trade.trading_bot_id
+            AND wallet_address = target_trade.wallet_address
+            AND name = 'AVAX 4H FLUX MOMENTUM'
+          FOR UPDATE;
+         IF NOT FOUND THEN
+           RAISE EXCEPTION 'rogue AVAX trade owner fingerprint mismatch';
+         END IF;
+
+         DELETE FROM bot_trades
+          WHERE id = target_trade.id;
+
+         SELECT
+           COALESCE(SUM(bt.pnl::numeric), 0) AS total_pnl,
+           COUNT(*)::int AS total_trades,
+           COUNT(*) FILTER (WHERE bt.pnl::numeric > 0)::int AS winning_trades,
+           COUNT(*) FILTER (WHERE bt.pnl::numeric < 0)::int AS losing_trades,
+           MAX(bt.executed_at) AS last_trade_at
+           INTO canonical_stats
+           FROM bot_trades bt
+          WHERE bt.trading_bot_id = target_trade.trading_bot_id
+            AND bt.pnl IS NOT NULL
+            AND bt.status IN ('executed', 'liquidated', 'recovered')
+            AND NOT (
+              bt.tx_signature IS NULL
+              AND COALESCE(bt.fee, 0) = 0
+              AND EXISTS (
+                SELECT 1 FROM bot_trades sibling
+                 WHERE sibling.trading_bot_id = bt.trading_bot_id
+                   AND sibling.market = bt.market
+                   AND sibling.id <> bt.id
+                   AND sibling.pnl IS NOT NULL
+                   AND sibling.status IN ('executed', 'liquidated', 'recovered')
+                   AND ABS(EXTRACT(EPOCH FROM (sibling.executed_at - bt.executed_at))) <= 120
+                   AND ABS(ABS(sibling.size) - ABS(bt.size)) <= 0.01 * ABS(bt.size)
+                   AND (sibling.tx_signature IS NOT NULL OR COALESCE(sibling.fee, 0) > 0)
+              )
+            );
+
+         UPDATE trading_bots
+            SET stats = COALESCE(stats, '{}'::jsonb) || jsonb_build_object(
+                  'totalPnl', canonical_stats.total_pnl,
+                  'totalTrades', canonical_stats.total_trades,
+                  'winningTrades', canonical_stats.winning_trades,
+                  'losingTrades', canonical_stats.losing_trades,
+                  'totalVolume', GREATEST(
+                    0,
+                    COALESCE((stats->>'totalVolume')::numeric, 0)
+                      - ABS(target_trade.size::numeric) * target_trade.price::numeric
+                  ),
+                  'lastTradeAt', CASE
+                    WHEN canonical_stats.last_trade_at IS NULL THEN NULL
+                    ELSE to_char(canonical_stats.last_trade_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                  END
+                ),
+                updated_at = NOW()
+          WHERE id = target_trade.trading_bot_id;
+
+         IF NOT FOUND THEN
+           RAISE EXCEPTION 'rogue AVAX trade stats repair missed owner';
+         END IF;
+       END
+       $qv$`,
+
+      // --- One-time ZEC/LINK close fee and PnL history repair. ---
+      // The three close rows were persisted before exact Pacifica close-fill
+      // accounting was available. Values below are sums of the venue-reported
+      // fee and net realized PnL fields for each exact order group; no price-
+      // movement PnL or fee is calculated here. The block fingerprints every
+      // target, repairs the rows and their derived bot stats atomically, and is
+      // a no-op only when all stored-scale values already match venue truth.
+      `DO $qv$
+       DECLARE
+         target_trade bot_trades%ROWTYPE;
+         target_owner RECORD;
+         canonical_stats RECORD;
+       BEGIN
+         -- Drain every concurrent bot_trades reader/writer before taking the
+         -- production fingerprints or rebuilding the derived owner counters.
+         LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = 'd1d024a2-05b2-4d4b-8648-2ee445534716'
+          FOR UPDATE;
+         IF NOT FOUND
+            OR target_trade.trading_bot_id IS DISTINCT FROM 'cbf14cd4-3243-4ac5-9c6f-e09d0da5f0a0'
+            OR target_trade.market IS DISTINCT FROM 'ZEC-PERP'
+            OR target_trade.side IS DISTINCT FROM 'CLOSE'
+            OR target_trade.size IS DISTINCT FROM 1.57000000
+            OR target_trade.price IS DISTINCT FROM 506.490000
+            OR target_trade.status IS DISTINCT FROM 'executed'
+            OR target_trade.protocol IS DISTINCT FROM 'pacifica'
+            OR target_trade.tx_signature IS DISTINCT FROM '11727250059'
+            OR target_trade.protocol_fill_id IS NOT NULL
+            OR target_trade.execution_method IS DISTINCT FROM 'legacy'
+            OR target_trade.executed_at IS DISTINCT FROM TIMESTAMP '2026-08-19 12:00:11.139238'
+            OR target_trade.error_message IS DISTINCT FROM 'WARNING: Signed close left residual position LONG 1.57'
+            OR md5(COALESCE(target_trade.webhook_payload::text, '')) <> 'f466634d722d4208e08c3fe37954d55d'
+         THEN
+           RAISE EXCEPTION 'ZEC/LINK close repair fingerprint mismatch: d1d024a2';
+         END IF;
+         IF target_trade.fee IS NULL AND target_trade.pnl IS NULL THEN
+           UPDATE bot_trades
+              SET fee = 1.113780,
+                  pnl = -1.215979
+            WHERE id = target_trade.id;
+         ELSIF target_trade.fee = 1.113780 AND target_trade.pnl = -1.22 THEN
+           NULL;
+         ELSE
+           RAISE EXCEPTION 'ZEC/LINK close repair stored values mismatch: d1d024a2';
+         END IF;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = 'e31fba28-bba3-4be1-85a0-b5b5c96d6825'
+          FOR UPDATE;
+         IF NOT FOUND
+            OR target_trade.trading_bot_id IS DISTINCT FROM 'e74e9c11-538b-4ed4-9872-d8157486b784'
+            OR target_trade.market IS DISTINCT FROM 'LINK-PERP'
+            OR target_trade.side IS DISTINCT FROM 'CLOSE'
+            OR target_trade.size IS DISTINCT FROM 12.20000000
+            OR target_trade.price IS DISTINCT FROM 11.473000
+            OR target_trade.status IS DISTINCT FROM 'executed'
+            OR target_trade.protocol IS DISTINCT FROM 'pacifica'
+            OR target_trade.tx_signature IS DISTINCT FROM '11823286221'
+            OR target_trade.protocol_fill_id IS DISTINCT FROM 'tx-11823286221'
+            OR target_trade.execution_method IS DISTINCT FROM 'legacy'
+            OR target_trade.executed_at IS DISTINCT FROM TIMESTAMP '2026-08-21 10:00:30.033300'
+            OR target_trade.error_message IS NOT NULL
+            OR md5(COALESCE(target_trade.webhook_payload::text, '')) <> '97858ab8541444ac14d1a7628f2bee86'
+         THEN
+           RAISE EXCEPTION 'ZEC/LINK close repair fingerprint mismatch: e31fba28';
+         END IF;
+         IF target_trade.fee IS NULL AND target_trade.pnl IS NULL THEN
+           UPDATE bot_trades
+              SET fee = 0.195549,
+                  pnl = -1.391149
+            WHERE id = target_trade.id;
+         ELSIF target_trade.fee = 0.195549 AND target_trade.pnl = -1.39 THEN
+           NULL;
+         ELSE
+           RAISE EXCEPTION 'ZEC/LINK close repair stored values mismatch: e31fba28';
+         END IF;
+
+         SELECT *
+           INTO target_trade
+           FROM bot_trades
+          WHERE id = 'b35049e2-44d2-4137-9259-6bbd1a7a75d0'
+          FOR UPDATE;
+         IF NOT FOUND
+            OR target_trade.trading_bot_id IS DISTINCT FROM 'cbf14cd4-3243-4ac5-9c6f-e09d0da5f0a0'
+            OR target_trade.market IS DISTINCT FROM 'ZEC-PERP'
+            OR target_trade.side IS DISTINCT FROM 'CLOSE'
+            OR target_trade.size IS DISTINCT FROM 1.72000000
+            OR target_trade.price IS DISTINCT FROM 793.250000
+            OR target_trade.status IS DISTINCT FROM 'executed'
+            OR target_trade.protocol IS DISTINCT FROM 'pacifica'
+            OR target_trade.tx_signature IS DISTINCT FROM '11872514945'
+            OR target_trade.protocol_fill_id IS DISTINCT FROM 'tx-11872514945'
+            OR target_trade.execution_method IS DISTINCT FROM 'legacy'
+            OR target_trade.executed_at IS DISTINCT FROM TIMESTAMP '2026-08-22 06:00:01.886714'
+            OR target_trade.error_message IS NOT NULL
+            OR md5(COALESCE(target_trade.webhook_payload::text, '')) <> 'e058df0387c8d213f3d36e51f52a92fd'
+         THEN
+           RAISE EXCEPTION 'ZEC/LINK close repair fingerprint mismatch: b35049e2';
+         END IF;
+         IF target_trade.fee IS NULL AND target_trade.pnl IS NULL THEN
+           UPDATE bot_trades
+              SET fee = 1.907666,
+                  pnl = 382.030534
+            WHERE id = target_trade.id;
+         ELSIF target_trade.fee = 1.907666 AND target_trade.pnl = 382.03 THEN
+           NULL;
+         ELSE
+           RAISE EXCEPTION 'ZEC/LINK close repair stored values mismatch: b35049e2';
+         END IF;
+
+         FOR target_owner IN
+           SELECT * FROM (VALUES
+             ('cbf14cd4-3243-4ac5-9c6f-e09d0da5f0a0'::text, 'ZEC 2H FLUX MOMENTUM'::text),
+             ('e74e9c11-538b-4ed4-9872-d8157486b784'::text, 'LINK 2H FLUX MOMENTUM'::text)
+           ) AS expected(id, name)
+         LOOP
+           PERFORM 1
+             FROM trading_bots
+            WHERE id = target_owner.id
+              AND name = target_owner.name
+            FOR UPDATE;
+           IF NOT FOUND THEN
+             RAISE EXCEPTION 'ZEC/LINK close repair owner fingerprint mismatch: %', target_owner.id;
+           END IF;
+
+           SELECT
+             COALESCE(SUM(bt.pnl::numeric), 0) AS total_pnl,
+             COUNT(*)::int AS total_trades,
+             COUNT(*) FILTER (WHERE bt.pnl::numeric > 0)::int AS winning_trades,
+             COUNT(*) FILTER (WHERE bt.pnl::numeric < 0)::int AS losing_trades,
+             MAX(bt.executed_at) AS last_trade_at
+             INTO canonical_stats
+             FROM bot_trades bt
+            WHERE bt.trading_bot_id = target_owner.id
+              AND bt.pnl IS NOT NULL
+              AND bt.status IN ('executed', 'liquidated', 'recovered')
+              AND NOT (
+                bt.tx_signature IS NULL
+                AND COALESCE(bt.fee, 0) = 0
+                AND EXISTS (
+                  SELECT 1 FROM bot_trades sibling
+                   WHERE sibling.trading_bot_id = bt.trading_bot_id
+                     AND sibling.market = bt.market
+                     AND sibling.id <> bt.id
+                     AND sibling.pnl IS NOT NULL
+                     AND sibling.status IN ('executed', 'liquidated', 'recovered')
+                     AND ABS(EXTRACT(EPOCH FROM (sibling.executed_at - bt.executed_at))) <= 120
+                     AND ABS(ABS(sibling.size) - ABS(bt.size)) <= 0.01 * ABS(bt.size)
+                     AND (sibling.tx_signature IS NOT NULL OR COALESCE(sibling.fee, 0) > 0)
+                )
+              );
+
+           UPDATE trading_bots
+              SET stats = COALESCE(stats, '{}'::jsonb) || jsonb_build_object(
+                    'totalPnl', canonical_stats.total_pnl,
+                    'totalTrades', canonical_stats.total_trades,
+                    'winningTrades', canonical_stats.winning_trades,
+                    'losingTrades', canonical_stats.losing_trades,
+                    'lastTradeAt', CASE
+                      WHEN canonical_stats.last_trade_at IS NULL THEN NULL
+                      ELSE to_char(canonical_stats.last_trade_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    END
+                  ),
+                  updated_at = NOW()
+            WHERE id = target_owner.id;
+           IF NOT FOUND THEN
+             RAISE EXCEPTION 'ZEC/LINK close repair stats update missed owner: %', target_owner.id;
+           END IF;
+         END LOOP;
+       END
+       $qv$`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_qualification_records (
+         id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+         bot_id varchar NOT NULL REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
+         qualification_era_digest text NOT NULL,
+         trial_started_at timestamp NOT NULL,
+         evaluated_at timestamp NOT NULL,
+         criteria jsonb NOT NULL,
+         allocation_usdc numeric(20,2) NOT NULL,
+         decision_ids jsonb NOT NULL,
+         equity_series jsonb NOT NULL,
+         equity_series_digest text NOT NULL,
+         trade_count integer NOT NULL,
+         net_pnl numeric(20,6) NOT NULL,
+         fees jsonb NOT NULL,
+         profit_factor jsonb NOT NULL,
+         max_drawdown_pct numeric(12,6) NOT NULL,
+         open_position_mtm numeric(20,6) NOT NULL,
+         leverage_observation jsonb,
+         evidence_source_digest text NOT NULL,
+         created_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT ai_trader_qualification_records_bot_era_unique
+           UNIQUE (bot_id, qualification_era_digest)
+       );
+       CREATE INDEX IF NOT EXISTS idx_ai_trader_qualification_records_bot_evaluated
+         ON ai_trader_qualification_records (bot_id, evaluated_at DESC);
+       CREATE OR REPLACE FUNCTION qv_reject_ai_trader_qualification_record_update()
+       RETURNS trigger LANGUAGE plpgsql AS $qv$
+       BEGIN
+         RAISE EXCEPTION 'ai_trader_qualification_records are immutable';
+       END
+       $qv$;
+       DO $qv$
+       BEGIN
+         IF NOT EXISTS (
+           SELECT 1 FROM pg_trigger
+            WHERE tgname = 'ai_trader_qualification_records_no_update'
+              AND tgrelid = 'ai_trader_qualification_records'::regclass
+              AND NOT tgisinternal
+         ) THEN
+           CREATE TRIGGER ai_trader_qualification_records_no_update
+             BEFORE UPDATE ON ai_trader_qualification_records
+             FOR EACH ROW EXECUTE FUNCTION qv_reject_ai_trader_qualification_record_update();
+         END IF;
+       END
+       $qv$`,
+      // --- Pin bot_trades.pnl convention and classify historical evidence. ---
+      // Money values are never rewritten. Historical full-close reconciler
+      // rows are classified from durable provenance; every reader can then
+      // normalize exactly once. Derived trading_bots stats are rebuilt from
+      // the canonical net value in the same transaction.
+      `DO $qv$
+       BEGIN
+         LOCK TABLE bot_trades IN ACCESS EXCLUSIVE MODE;
+
+         ALTER TABLE bot_trades
+           ADD COLUMN IF NOT EXISTS pnl_convention text,
+           ADD COLUMN IF NOT EXISTS fee_truth_status text;
+
+         UPDATE bot_trades
+            SET pnl_convention = CASE
+                  WHEN execution_method = 'on-chain-detected'
+                   AND webhook_payload->>'reconciled' = 'true'
+                   AND webhook_payload->>'closeReason' IN ('external_close', 'tpsl', 'liquidation')
+                  THEN 'gross_before_close_fee'
+                  ELSE 'net_of_close_fee'
+                END,
+                fee_truth_status = CASE
+                  WHEN id IN (
+                    'd1d024a2-05b2-4d4b-8648-2ee445534716',
+                    'e31fba28-bba3-4be1-85a0-b5b5c96d6825',
+                    'b35049e2-44d2-4137-9259-6bbd1a7a75d0'
+                  )
+                  THEN 'venue_exact_repaired'
+                  ELSE 'legacy_unverified'
+                END
+          WHERE pnl_convention IS NULL
+             OR fee_truth_status IS NULL;
+
+         ALTER TABLE bot_trades
+           ALTER COLUMN pnl_convention SET DEFAULT 'net_of_close_fee',
+           ALTER COLUMN pnl_convention SET NOT NULL,
+           ALTER COLUMN fee_truth_status SET DEFAULT 'current_pipeline',
+           ALTER COLUMN fee_truth_status SET NOT NULL;
+
+         IF NOT EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'bot_trades_pnl_convention_check'
+              AND conrelid = 'bot_trades'::regclass
+         ) THEN
+           ALTER TABLE bot_trades ADD CONSTRAINT bot_trades_pnl_convention_check
+             CHECK (pnl_convention IN ('net_of_close_fee', 'gross_before_close_fee'));
+         END IF;
+
+         IF NOT EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conname = 'bot_trades_fee_truth_status_check'
+              AND conrelid = 'bot_trades'::regclass
+         ) THEN
+           ALTER TABLE bot_trades ADD CONSTRAINT bot_trades_fee_truth_status_check
+             CHECK (fee_truth_status IN ('legacy_unverified', 'venue_exact_repaired', 'current_pipeline'));
+         END IF;
+
+         WITH canonical_rows AS (
+           SELECT bt.trading_bot_id,
+                  CASE
+                    WHEN bt.pnl_convention = 'net_of_close_fee'
+                    THEN bt.pnl::numeric
+                    WHEN bt.pnl_convention = 'gross_before_close_fee' AND bt.fee IS NOT NULL
+                    THEN bt.pnl::numeric - bt.fee::numeric
+                    ELSE NULL
+                  END AS net_pnl
+             FROM bot_trades bt
+            WHERE bt.pnl IS NOT NULL
+              AND bt.status IN ('executed', 'liquidated', 'recovered')
+              AND NOT (
+                bt.tx_signature IS NULL
+                AND COALESCE(bt.fee, 0) = 0
+                AND EXISTS (
+                  SELECT 1 FROM bot_trades sibling
+                   WHERE sibling.trading_bot_id = bt.trading_bot_id
+                     AND sibling.market = bt.market
+                     AND sibling.id <> bt.id
+                     AND sibling.pnl IS NOT NULL
+                     AND sibling.status IN ('executed', 'liquidated', 'recovered')
+                     AND ABS(EXTRACT(EPOCH FROM (sibling.executed_at - bt.executed_at))) <= 120
+                     AND ABS(ABS(sibling.size) - ABS(bt.size)) <= 0.01 * ABS(bt.size)
+                     AND (sibling.tx_signature IS NOT NULL OR COALESCE(sibling.fee, 0) > 0)
+                )
+              )
+         ),
+         canonical_stats AS (
+           SELECT bot.id,
+                  COALESCE(SUM(rows.net_pnl), 0) AS total_pnl,
+                  COUNT(rows.net_pnl)::int AS total_trades,
+                  COUNT(rows.net_pnl) FILTER (WHERE rows.net_pnl > 0)::int AS winning_trades,
+                  COUNT(rows.net_pnl) FILTER (WHERE rows.net_pnl < 0)::int AS losing_trades
+             FROM trading_bots bot
+             LEFT JOIN canonical_rows rows ON rows.trading_bot_id = bot.id
+            GROUP BY bot.id
+         )
+         UPDATE trading_bots bot
+            SET stats = COALESCE(bot.stats, '{}'::jsonb) || jsonb_build_object(
+                  'totalPnl', canonical_stats.total_pnl,
+                  'totalTrades', canonical_stats.total_trades,
+                  'winningTrades', canonical_stats.winning_trades,
+                  'losingTrades', canonical_stats.losing_trades
+                ),
+                updated_at = NOW()
+           FROM canonical_stats
+          WHERE bot.id = canonical_stats.id;
+       END
+       $qv$`,
+      `CREATE TABLE IF NOT EXISTS ai_trader_scanner_candidate_claims (
+         id serial PRIMARY KEY,
+         wallet_address text NOT NULL,
+         boundary_start timestamptz NOT NULL,
+         market text NOT NULL,
+         bot_id varchar NOT NULL,
+         protocol text NOT NULL,
+         candidate_timeframe text NOT NULL,
+         expires_at timestamptz NOT NULL,
+         created_at timestamptz NOT NULL DEFAULT now()
+       )`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS ai_trader_scanner_claims_wallet_boundary_market_unique
+         ON ai_trader_scanner_candidate_claims (wallet_address, boundary_start, market);
+       CREATE INDEX IF NOT EXISTS ai_trader_scanner_candidate_claims_expires_at_idx
+         ON ai_trader_scanner_candidate_claims (expires_at)`,
+      `DO $qv$
+       DECLARE
+         source_definition text;
+         venue_definition text;
+       BEGIN
+         SELECT pg_get_constraintdef(oid)
+           INTO source_definition
+           FROM pg_constraint
+          WHERE conrelid = 'lab_candle_cache_v2'::regclass
+            AND conname = 'lab_candle_cache_v2_source_check';
+         IF source_definition IS NULL OR position('hyperliquid' in source_definition) = 0 THEN
+           ALTER TABLE lab_candle_cache_v2
+             DROP CONSTRAINT IF EXISTS lab_candle_cache_v2_source_check;
+           ALTER TABLE lab_candle_cache_v2
+             ADD CONSTRAINT lab_candle_cache_v2_source_check
+             CHECK (source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown'));
+         END IF;
+
+         SELECT pg_get_constraintdef(oid)
+           INTO venue_definition
+           FROM pg_constraint
+          WHERE conrelid = 'lab_candle_cache_v2'::regclass
+            AND conname = 'lab_candle_cache_v2_venue_check';
+         IF venue_definition IS NULL OR position('hyperliquid' in venue_definition) = 0 THEN
+           ALTER TABLE lab_candle_cache_v2
+             DROP CONSTRAINT IF EXISTS lab_candle_cache_v2_venue_check;
+           ALTER TABLE lab_candle_cache_v2
+             ADD CONSTRAINT lab_candle_cache_v2_venue_check
+             CHECK (venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown'));
+         END IF;
+       END
+       $qv$`,
+      `ALTER TABLE ai_trader_decisions ADD COLUMN IF NOT EXISTS price_excursion jsonb`,
+      `ALTER TABLE ai_trader_execution_events
+        ADD COLUMN IF NOT EXISTS authority_fingerprint text,
+        ADD COLUMN IF NOT EXISTS position_fingerprint text,
+        ADD COLUMN IF NOT EXISTS bracket_fingerprint text,
+        ADD COLUMN IF NOT EXISTS attempt_ordinal smallint;
+       DO $qv$
+       DECLARE
+         action_definition text;
+         phase_definition text;
+         cause_definition text;
+         protective_claim_definition text;
+       BEGIN
+         IF EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'ai_trader_execution_events'::regclass
+              AND conname = 'ai_trader_execution_action_check'
+         ) THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT ai_trader_execution_action_check;
+         END IF;
+         SELECT pg_get_constraintdef(oid, true)
+           INTO action_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_events_action_check';
+         IF action_definition IS DISTINCT FROM $constraint$CHECK (action = ANY (ARRAY['entry'::text, 'close'::text, 'cancel'::text, 'protective'::text]))$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_events_action_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_events_action_check
+             CHECK (action IN ('entry','close','cancel','protective'));
+         END IF;
+
+         SELECT pg_get_constraintdef(oid, true)
+           INTO phase_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_phase_check';
+         IF phase_definition IS DISTINCT FROM $constraint$CHECK (event_type = 'attempt_claimed'::text AND phase = 0 OR event_type = 'prebroadcast_authorized'::text AND action = 'entry'::text AND phase = 10 OR event_type = 'broadcast_attempted'::text AND (action = ANY (ARRAY['close'::text, 'cancel'::text])) AND phase = 10 OR event_type = 'broadcast_result'::text AND phase = 20 OR (event_type = ANY (ARRAY['position_observed'::text, 'fill_observed'::text, 'bracket_verified'::text, 'reconciliation_observed'::text])) AND phase IS NULL OR (event_type = ANY (ARRAY['entry_terminal_open'::text, 'entry_terminal_no_land'::text, 'entry_terminal_unwound'::text])) AND action = 'entry'::text AND phase = 90 OR (event_type = ANY (ARRAY['close_terminal_confirmed'::text, 'close_terminal_failed'::text])) AND action = 'close'::text AND phase = 90 OR (event_type = ANY (ARRAY['cancel_terminal_confirmed'::text, 'cancel_terminal_failed'::text])) AND action = 'cancel'::text AND phase = 90)$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_phase_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_phase_check CHECK (
+               (event_type = 'attempt_claimed' AND phase = 0) OR
+               (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR
+               (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR
+               (event_type = 'broadcast_result' AND phase = 20) OR
+               (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR
+               (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR
+               (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR
+               (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90)
+             );
+         END IF;
+
+         IF EXISTS (
+           SELECT 1 FROM pg_constraint
+            WHERE conrelid = 'ai_trader_execution_events'::regclass
+              AND conname = 'ai_trader_execution_cause_check'
+         ) THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT ai_trader_execution_cause_check;
+         END IF;
+         SELECT pg_get_constraintdef(oid, true)
+           INTO cause_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_events_cause_check';
+         IF cause_definition IS DISTINCT FROM $constraint$CHECK (cause = ANY (ARRAY['decision'::text, 'paper'::text, 'emergency_unwind'::text, 'protective'::text, 'user_requested'::text, 'venue_detected'::text, 'unconfirmed_orphan'::text, 'startup_orphan'::text, 'pre_close_bracket'::text, 'survivor_leg'::text]))$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_events_cause_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_events_cause_check
+             CHECK (cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg'));
+         END IF;
+
+         SELECT pg_get_constraintdef(oid, true)
+           INTO protective_claim_definition
+           FROM pg_constraint
+          WHERE conrelid = 'ai_trader_execution_events'::regclass
+            AND conname = 'ai_trader_execution_protective_claim_check';
+         IF protective_claim_definition IS DISTINCT FROM $constraint$CHECK (action = 'protective'::text AND cause = 'protective'::text AND event_type = 'attempt_claimed'::text AND phase = 0 AND decision_id IS NOT NULL AND authority_fingerprint ~ '^[0-9A-F]{64}$'::text AND position_fingerprint ~ '^[0-9A-F]{64}$'::text AND bracket_fingerprint ~ '^[0-9A-F]{64}$'::text AND attempt_ordinal >= 1 AND attempt_ordinal <= 5 OR action <> 'protective'::text AND authority_fingerprint IS NULL AND position_fingerprint IS NULL AND bracket_fingerprint IS NULL AND attempt_ordinal IS NULL)$constraint$ THEN
+           ALTER TABLE ai_trader_execution_events
+             DROP CONSTRAINT IF EXISTS ai_trader_execution_protective_claim_check;
+           ALTER TABLE ai_trader_execution_events
+             ADD CONSTRAINT ai_trader_execution_protective_claim_check CHECK (
+               (action = 'protective' AND cause = 'protective' AND event_type = 'attempt_claimed' AND phase = 0 AND decision_id IS NOT NULL
+                 AND authority_fingerprint ~ '^[0-9A-F]{64}$' AND position_fingerprint ~ '^[0-9A-F]{64}$'
+                 AND bracket_fingerprint ~ '^[0-9A-F]{64}$' AND attempt_ordinal BETWEEN 1 AND 5)
+               OR
+               (action <> 'protective'
+                 AND authority_fingerprint IS NULL AND position_fingerprint IS NULL
+                 AND bracket_fingerprint IS NULL AND attempt_ordinal IS NULL)
+             );
+         END IF;
+       END
+       $qv$`,
+      `ALTER TABLE pending_profit_shares
+         ADD COLUMN IF NOT EXISTS referral_legs_initialized_at timestamp,
+         ADD COLUMN IF NOT EXISTS processing_claim_token uuid,
+         ADD COLUMN IF NOT EXISTS processing_claimed_from_status text;
+       ALTER TABLE pending_profit_shares
+         DROP CONSTRAINT IF EXISTS pending_profit_shares_processing_claimed_from_status_valid;
+       ALTER TABLE pending_profit_shares
+         ADD CONSTRAINT pending_profit_shares_processing_claimed_from_status_valid
+         CHECK (processing_claimed_from_status IS NULL OR processing_claimed_from_status IN ('pending','deferred'));
+
+       ALTER TABLE referral_reward_events
+          ADD COLUMN IF NOT EXISTS processing_claim_token uuid,
+          ADD COLUMN IF NOT EXISTS processing_claimed_from_status text,
+          ADD COLUMN IF NOT EXISTS released_at timestamp;
+       ALTER TABLE referral_reward_events
+         DROP CONSTRAINT IF EXISTS referral_reward_events_processing_claimed_from_status_valid;
+       ALTER TABLE referral_reward_events
+         ADD CONSTRAINT referral_reward_events_processing_claimed_from_status_valid
+         CHECK (processing_claimed_from_status IS NULL OR processing_claimed_from_status IN ('pending','failed'));
+       ALTER TABLE referral_reward_events
+         DROP CONSTRAINT IF EXISTS referral_reward_events_status_valid;
+       ALTER TABLE referral_reward_events
+         ADD CONSTRAINT referral_reward_events_status_valid
+         CHECK (status IN ('pending','confirmed','paid','failed','processing','voided','awaiting_creator'));
+
+       CREATE TABLE IF NOT EXISTS solana_signed_submit_attempts (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+         operation_type text NOT NULL,
+         operation_id varchar NOT NULL,
+         deterministic_signature text NOT NULL,
+         blockhash text NOT NULL,
+         last_valid_block_height numeric(20,0) NOT NULL,
+         rpc_provider text NOT NULL,
+         status text NOT NULL DEFAULT 'confirmation_pending',
+         last_error text,
+         created_at timestamp NOT NULL DEFAULT now(),
+         updated_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT solana_signed_submit_attempts_operation_type_valid CHECK (operation_type IN ('profit_share_creator','referral_reward')),
+         CONSTRAINT solana_signed_submit_attempts_provider_valid CHECK (rpc_provider = 'configured_primary'),
+         CONSTRAINT solana_signed_submit_attempts_status_valid CHECK (status IN ('confirmation_pending','confirmed_success','confirmed_failure','expired_without_status')),
+         CONSTRAINT solana_signed_submit_attempts_identity_unique UNIQUE (operation_type, operation_id, deterministic_signature)
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS solana_signed_submit_attempts_active_unique
+         ON solana_signed_submit_attempts (operation_type, operation_id)
+         WHERE status = 'confirmation_pending'`,
+      // Phoenix U02: no row backfill, no assets or encrypted metadata changed.
+      // The runner submits this entire SQL string as one query, so index creation
+      // cannot use CONCURRENTLY and a same-query NOT VALID/VALIDATE would retain
+      // the preceding DROP CONSTRAINT lock. Guard every trading_bots DDL on reboot.
+      `DO $phoenix$ BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass
+           AND conname = 'trading_bots_active_protocol_check' AND convalidated
+           AND position('phoenix' in pg_get_constraintdef(oid)) > 0) THEN
+           ALTER TABLE trading_bots DROP CONSTRAINT IF EXISTS trading_bots_active_protocol_check;
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_active_protocol_check CHECK (active_protocol IN ('pacifica','drift','flash','phoenix'));
+         END IF;
+         IF (SELECT count(*) FROM pg_attribute WHERE attrelid = 'trading_bots'::regclass
+           AND attname = ANY (ARRAY['phoenix_authority_wallet','phoenix_trader_account','phoenix_network',
+             'phoenix_program_address','phoenix_portfolio_index','phoenix_subaccount_index'])
+           AND attnum > 0 AND NOT attisdropped) < 6 THEN
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_authority_wallet text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_trader_account text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_network text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_program_address text;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_portfolio_index integer;
+           ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS phoenix_subaccount_index integer;
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass AND conname = 'trading_bots_phoenix_identity_check') THEN
+           ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_phoenix_identity_check CHECK ((active_protocol <> 'phoenix' AND phoenix_authority_wallet IS NULL AND phoenix_trader_account IS NULL AND phoenix_network IS NULL AND phoenix_program_address IS NULL AND phoenix_portfolio_index IS NULL AND phoenix_subaccount_index IS NULL)
+          OR (active_protocol = 'phoenix' AND phoenix_authority_wallet IS NOT NULL AND phoenix_trader_account IS NOT NULL
+            AND phoenix_network IS NOT NULL AND phoenix_program_address IS NOT NULL AND phoenix_portfolio_index IS NOT NULL AND phoenix_subaccount_index IS NOT NULL
+            AND derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL AND protocol_subaccount_id IS NOT NULL
+            AND phoenix_authority_wallet <> phoenix_trader_account AND phoenix_network = 'solana-mainnet'
+            AND phoenix_program_address = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih'
+            AND phoenix_authority_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$' AND phoenix_trader_account ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'
+            AND phoenix_portfolio_index = 0 AND phoenix_subaccount_index = 0 AND derivation_index >= 1 AND derivation_path_version = 1
+            AND protocol_subaccount_id = phoenix_trader_account));
+         END IF;
+       END $phoenix$;
+       DO $phoenix_indexes$ BEGIN
+         IF to_regclass('trading_bots_phoenix_authority_unique') IS NULL THEN
+           CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_authority_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_authority_wallet);
+         END IF;
+         IF to_regclass('trading_bots_phoenix_trader_unique') IS NULL THEN
+           CREATE UNIQUE INDEX IF NOT EXISTS trading_bots_phoenix_trader_unique ON trading_bots (phoenix_network, phoenix_program_address, phoenix_trader_account);
+         END IF;
+       END $phoenix_indexes$;
+       DO $phoenix_function$ BEGIN
+         IF to_regprocedure('qv_phoenix_identity_immutable()') IS NULL THEN
+           EXECUTE $ddl$CREATE FUNCTION qv_phoenix_identity_immutable() RETURNS trigger LANGUAGE plpgsql AS $phoenix_body$
+       BEGIN
+         IF (OLD.active_protocol = 'phoenix' OR NEW.active_protocol = 'phoenix') AND
+           ROW(OLD.active_protocol, OLD.wallet_address, OLD.protocol_subaccount_id, OLD.derivation_index, OLD.derivation_path_version,
+             OLD.phoenix_authority_wallet, OLD.phoenix_trader_account, OLD.phoenix_network, OLD.phoenix_program_address, OLD.phoenix_portfolio_index, OLD.phoenix_subaccount_index)
+           IS DISTINCT FROM
+           ROW(NEW.active_protocol, NEW.wallet_address, NEW.protocol_subaccount_id, NEW.derivation_index, NEW.derivation_path_version,
+             NEW.phoenix_authority_wallet, NEW.phoenix_trader_account, NEW.phoenix_network, NEW.phoenix_program_address, NEW.phoenix_portfolio_index, NEW.phoenix_subaccount_index)
+         THEN RAISE EXCEPTION 'Phoenix identity is immutable; new bots only'; END IF;
+         RETURN NEW;
+       END $phoenix_body$ $ddl$;
+         END IF;
+       END $phoenix_function$;
+       DO $phoenix_trigger$ BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'trading_bots'::regclass
+           AND tgname = 'trading_bots_phoenix_identity_immutable' AND tgqual IS NOT NULL AND NOT tgisinternal) THEN
+           DROP TRIGGER IF EXISTS trading_bots_phoenix_identity_immutable ON trading_bots;
+           CREATE TRIGGER trading_bots_phoenix_identity_immutable BEFORE UPDATE ON trading_bots
+             FOR EACH ROW WHEN (OLD.active_protocol = 'phoenix' OR NEW.active_protocol = 'phoenix')
+             EXECUTE FUNCTION qv_phoenix_identity_immutable();
+         END IF;
+       END $phoenix_trigger$;
+       CREATE TABLE IF NOT EXISTS phoenix_operations (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bot_id varchar NOT NULL REFERENCES trading_bots(id),
+         request_key text NOT NULL, kind text NOT NULL, intent jsonb NOT NULL, intent_hash text NOT NULL,
+         state text NOT NULL DEFAULT 'prepared', revision integer NOT NULL DEFAULT 0, observation jsonb,
+         created_at timestamp NOT NULL DEFAULT now(), updated_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT phoenix_operations_replay_unique UNIQUE (bot_id, request_key),
+         CONSTRAINT phoenix_operations_kind_check CHECK (kind IN ('register','deposit','withdraw','transfer')),
+         CONSTRAINT phoenix_operations_state_check CHECK (state IN ('prepared','submission_pending','queued','unknown','completed','failed','dropped')),
+         CONSTRAINT phoenix_operations_values_check CHECK (revision >= 0 AND length(request_key) BETWEEN 1 AND 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object')
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_operations_active_unique ON phoenix_operations (bot_id) WHERE state NOT IN ('completed','failed','dropped');
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_operations_registration_unique ON phoenix_operations (bot_id) WHERE kind = 'register';
+       CREATE TABLE IF NOT EXISTS phoenix_operation_attempts (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), operation_id uuid NOT NULL REFERENCES phoenix_operations(id),
+         attempt_number integer NOT NULL, signature text NOT NULL, blockhash text NOT NULL,
+         last_valid_block_height numeric(20,0) NOT NULL, transaction_hash text NOT NULL,
+         state text NOT NULL DEFAULT 'submission_pending', created_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT phoenix_attempt_number_unique UNIQUE (operation_id, attempt_number),
+         CONSTRAINT phoenix_attempt_signature_unique UNIQUE (signature),
+         CONSTRAINT phoenix_attempt_state_check CHECK (state IN ('submission_pending','confirmed','failed','expired')),
+         CONSTRAINT phoenix_attempt_values_check CHECK (attempt_number BETWEEN 1 AND 5 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$')
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_attempt_pending_unique ON phoenix_operation_attempts (operation_id) WHERE state = 'submission_pending' `,
+      `       CREATE TABLE IF NOT EXISTS phoenix_order_intents (
+         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bot_id varchar NOT NULL REFERENCES trading_bots(id),
+         request_key text NOT NULL, sequence numeric(20,0) NOT NULL, intent jsonb NOT NULL, intent_hash text NOT NULL,
+         state text NOT NULL DEFAULT 'admitted', revision integer NOT NULL DEFAULT 0, data jsonb NOT NULL,
+         created_at timestamp NOT NULL DEFAULT now(), updated_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT phoenix_order_replay_unique UNIQUE(bot_id,request_key),
+         CONSTRAINT phoenix_order_sequence_unique UNIQUE(bot_id,sequence),
+         CONSTRAINT phoenix_order_state_check CHECK(state IN ('admitted','funding','signing','submission_pending','accepted','landed','unknown','settled','rejected')),
+         CONSTRAINT phoenix_order_values_check CHECK(sequence > 0 AND revision >= 0 AND length(request_key) BETWEEN 1 AND 200 AND length(intent_hash)=64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent)='object' AND jsonb_typeof(data)='object')
+       );
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_order_active_unique ON phoenix_order_intents(bot_id) WHERE state NOT IN ('settled','rejected');
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_order_signature_unique ON phoenix_order_intents((data->'attempt'->>'signature')) WHERE data->'attempt'->>'signature' IS NOT NULL; `,
+      `       DO $phoenix_protection$ BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='phoenix_operations'::regclass
+           AND conname='phoenix_operations_kind_check' AND pg_get_constraintdef(oid) LIKE '%protection%') THEN
+           ALTER TABLE phoenix_operations DROP CONSTRAINT IF EXISTS phoenix_operations_kind_check;
+           ALTER TABLE phoenix_operations ADD CONSTRAINT phoenix_operations_kind_check CHECK (kind IN ('register','deposit','withdraw','transfer','protection'));
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='phoenix_operation_attempts'::regclass
+           AND conname='phoenix_attempt_values_check' AND pg_get_constraintdef(oid) LIKE '%256%') THEN
+           ALTER TABLE phoenix_operation_attempts DROP CONSTRAINT IF EXISTS phoenix_attempt_values_check;
+           ALTER TABLE phoenix_operation_attempts ADD CONSTRAINT phoenix_attempt_values_check CHECK (attempt_number BETWEEN 1 AND 256 AND last_valid_block_height >= 0 AND length(signature) BETWEEN 64 AND 88 AND length(blockhash) BETWEEN 32 AND 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$');
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('phoenix_operations_active_unique')
+           AND pg_get_expr(indpred,indrelid) LIKE '%protection%') THEN
+           DROP INDEX IF EXISTS phoenix_operations_active_unique;
+           CREATE UNIQUE INDEX phoenix_operations_active_unique ON phoenix_operations(bot_id)
+             WHERE state NOT IN ('completed','failed','dropped') AND kind <> 'protection';
+         END IF;
+       END $phoenix_protection$;
+       CREATE UNIQUE INDEX IF NOT EXISTS phoenix_protection_replace_unique ON phoenix_operations(bot_id)
+         WHERE kind='protection' AND state NOT IN ('completed','failed','dropped')
+           AND intent->'protection'->'request'->>'action' IN ('replace','breakeven'); `,
+      `CREATE TABLE IF NOT EXISTS phoenix_accounting_state (
+         bot_id varchar PRIMARY KEY REFERENCES trading_bots(id), revision integer NOT NULL CHECK(revision >= 1),
+         status text NOT NULL CHECK(status IN ('complete','unknown')), origin jsonb NOT NULL, snapshot jsonb NOT NULL);
+       CREATE TABLE IF NOT EXISTS phoenix_accounting_events (
+         bot_id varchar NOT NULL REFERENCES trading_bots(id), event_id text NOT NULL, data jsonb NOT NULL,
+         PRIMARY KEY(bot_id,event_id));
+       CREATE TABLE IF NOT EXISTS phoenix_position_epochs (
+         bot_id varchar NOT NULL REFERENCES trading_bots(id), epoch_id text NOT NULL, opened_at bigint NOT NULL,
+         data jsonb NOT NULL, payout_provenance jsonb NOT NULL, PRIMARY KEY(bot_id,epoch_id));
+       CREATE TABLE IF NOT EXISTS phoenix_equity_snapshots (
+         bot_id varchar NOT NULL REFERENCES trading_bots(id), snapshot_hash text NOT NULL, data jsonb NOT NULL,
+         PRIMARY KEY(bot_id,snapshot_hash)); `,
+      `DO $phoenix_parking$ BEGIN
+         IF to_regclass('phoenix_parking_intents') IS NULL THEN
+           CREATE TABLE phoenix_parking_intents (
+             id uuid PRIMARY KEY DEFAULT gen_random_uuid(), bot_id varchar NOT NULL REFERENCES trading_bots(id),
+             request_key text NOT NULL, intent jsonb NOT NULL, intent_hash text NOT NULL,
+             state text NOT NULL DEFAULT 'active' CHECK(state IN ('active','completed','cancelled','attention')),
+             revision integer NOT NULL DEFAULT 0 CHECK(revision >= 0), legs jsonb NOT NULL DEFAULT '[]'::jsonb,
+             created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+             UNIQUE(bot_id,request_key), CHECK(length(intent_hash)=64 AND intent_hash ~ '^[0-9a-f]{64}$'),
+             CHECK(jsonb_typeof(intent)='object' AND jsonb_typeof(legs)='array'));
+         END IF;
+         IF to_regclass('phoenix_parking_active_unique') IS NULL THEN
+           CREATE UNIQUE INDEX phoenix_parking_active_unique ON phoenix_parking_intents(bot_id) WHERE state IN ('active','attention');
+         END IF;
+         IF to_regclass('phoenix_parking_borrow_unique') IS NULL THEN
+           CREATE UNIQUE INDEX phoenix_parking_borrow_unique ON phoenix_parking_intents(bot_id,(intent->>'borrowAuthorizationId'))
+             WHERE intent->>'borrowAuthorizationId' IS NOT NULL;
+         END IF;
+       END $phoenix_parking$; `,
+      `DO $phoenix_ai$ BEGIN
+         IF (SELECT count(*) FROM pg_attribute WHERE attrelid='ai_trader_bots'::regclass
+             AND attname IN ('phoenix_execution_bot_id','phoenix_binding') AND NOT attisdropped) <> 2 THEN
+           ALTER TABLE ai_trader_bots
+             ADD COLUMN IF NOT EXISTS phoenix_execution_bot_id varchar REFERENCES trading_bots(id),
+             ADD COLUMN IF NOT EXISTS phoenix_binding jsonb;
+         END IF;
+         IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='ai_trader_bots'::regclass AND conname='ai_trader_phoenix_binding_check') THEN
+           ALTER TABLE ai_trader_bots ADD CONSTRAINT ai_trader_phoenix_binding_check CHECK ((
+             (phoenix_execution_bot_id IS NULL AND phoenix_binding IS NULL AND (protocol <> 'phoenix' OR paper_mode)) OR
+             (protocol='phoenix' AND phoenix_execution_bot_id IS NOT NULL AND phoenix_binding IS NOT NULL
+               AND jsonb_typeof(phoenix_binding)='object' AND phoenix_binding->>'version'='1'
+               AND phoenix_binding->>'aiBotId'=id AND phoenix_binding->>'executionBotId'=phoenix_execution_bot_id
+               AND phoenix_binding->'identity'->>'traderAccountAddress'=protocol_subaccount_id)) IS TRUE);
+         END IF;
+         IF to_regclass('ai_trader_phoenix_custody_unique') IS NULL THEN
+           CREATE UNIQUE INDEX ai_trader_phoenix_custody_unique ON ai_trader_bots(phoenix_execution_bot_id)
+             WHERE phoenix_execution_bot_id IS NOT NULL;
+         END IF;
+         IF to_regclass('phoenix_ai_executions') IS NULL THEN
+           CREATE TABLE phoenix_ai_executions (
+             bot_id varchar NOT NULL REFERENCES ai_trader_bots(id), decision_id varchar NOT NULL REFERENCES ai_trader_decisions(id),
+             execution_bot_id varchar NOT NULL REFERENCES trading_bots(id), intent jsonb NOT NULL, authority jsonb NOT NULL, policy_hash text NOT NULL,
+             state text NOT NULL DEFAULT 'prepared' CHECK(state IN ('prepared','open','closed','no_land','attention')),
+             PRIMARY KEY(bot_id,decision_id), CHECK(length(policy_hash)=64 AND policy_hash ~ '^[0-9a-f]{64}$'));
+         END IF;
+         IF to_regclass('phoenix_ai_execution_active_unique') IS NULL THEN
+           CREATE UNIQUE INDEX phoenix_ai_execution_active_unique ON phoenix_ai_executions(bot_id)
+             WHERE state IN ('prepared','open','attention');
+         END IF;
+       END $phoenix_ai$; `,
+`DO $$
+BEGIN
+  -- Catalogue-only repeat boot: complete installations execute no lock-taking DDL.
+  IF to_regclass('grid_bots') IS NOT NULL AND to_regclass('grid_levels') IS NOT NULL AND to_regclass('grid_operations') IS NOT NULL AND to_regclass('grid_fills') IS NOT NULL AND to_regclass('grid_bots_wallet_request_unique') IS NOT NULL AND to_regclass('grid_bots_owner_status_idx') IS NOT NULL AND to_regclass('grid_bots_scheduler_idx') IS NOT NULL AND to_regclass('grid_levels_bot_ordinal_unique') IS NOT NULL AND to_regclass('grid_levels_bot_status_idx') IS NOT NULL AND to_regclass('grid_levels_venue_order_idx') IS NOT NULL AND to_regclass('grid_operations_idempotency_unique') IS NOT NULL AND to_regclass('grid_operations_request_unique') IS NOT NULL AND to_regclass('grid_operations_unresolved_idx') IS NOT NULL AND to_regclass('grid_fills_trade_unique') IS NOT NULL AND to_regclass('grid_fills_bot_time_idx') IS NOT NULL AND (SELECT count(*) FROM pg_constraint WHERE conname IN ('grid_bots_protocol_check','grid_bots_server_intent_digest_check','grid_bots_policy_hmac_check','grid_bots_geometry_check','grid_bots_direction_check','grid_bots_scale_check','grid_bots_stop_check','grid_bots_source_check','grid_bots_status_check','grid_bots_live_subaccount_check','grid_bots_lease_check','grid_bots_counts_check','grid_bots_sol_check','grid_bots_residual_check','grid_levels_ordinal_check','grid_levels_geometry_check','grid_levels_status_check','grid_operations_identity_check','grid_operations_type_check','grid_operations_state_check','grid_operations_failure_check','grid_operations_terminal_check','grid_operations_amount_check','grid_operations_trigger_check','grid_operations_notification_check','grid_fills_values_check','grid_bots_wallet_address_fk','grid_bots_protocol_subaccount_id_fk','grid_levels_bot_id_fk','grid_operations_bot_id_fk','grid_operations_level_id_fk','grid_operations_parent_operation_id_fk','grid_fills_bot_id_fk','grid_fills_level_id_fk','grid_bots_terminal_stop_operation_id_fk') AND connamespace = current_schema()::regnamespace) = 35 THEN RETURN; END IF;
+  CREATE TABLE IF NOT EXISTS grid_bots (
+  id uuid PRIMARY KEY,
+  wallet_address text NOT NULL,
+  protocol text NOT NULL DEFAULT 'pacifica',
+  market text NOT NULL,
+  protocol_subaccount_id integer,
+  name text NOT NULL DEFAULT 'Grid draft',
+  client_request_id uuid NOT NULL,
+  server_intent_digest text NOT NULL,
+  draft_revision text NOT NULL,
+  create_intent jsonb NOT NULL,
+  authority_snapshot jsonb NOT NULL,
+  upper_price numeric(30,8) NOT NULL,
+  lower_price numeric(30,8) NOT NULL,
+  start_price numeric(30,8) NOT NULL,
+  grid_count integer NOT NULL,
+  direction text NOT NULL,
+  total_investment numeric(30,2) NOT NULL,
+  leverage integer NOT NULL,
+  entry_scale_type text NOT NULL,
+  profit_scale_type text NOT NULL,
+  policy_hmac text NOT NULL,
+  policy_version text NOT NULL,
+  fee_policy_version text NOT NULL,
+  runtime_policy_version text NOT NULL,
+  stop_loss_percent numeric(20,4),
+  stop_loss_price numeric(30,8),
+  seed_at_creation boolean NOT NULL,
+  range_source text NOT NULL,
+  chart_timeframe text NOT NULL,
+  lowest_active_buy_level integer,
+  highest_active_sell_level integer,
+  status text NOT NULL DEFAULT 'draft',
+  pause_reason text,
+  lease_token uuid,
+  lease_expires_at timestamptz,
+  last_tick_at timestamptz,
+  reconciliation_cursor text,
+  last_reconciliation_at timestamptz,
+  startup_reconciled_at timestamptz,
+  canary_started_at timestamptz,
+  canary_clean_since timestamptz,
+  canary_promoted_at timestamptz,
+  canary_clean_ticks integer NOT NULL DEFAULT 0,
+  consecutive_failures integer NOT NULL DEFAULT 0,
+  incident_identity text,
+  incident_opened_at timestamptz,
+  incident_notified_at timestamptz,
+  sol_balance numeric(30,9),
+  sol_balance_observed_at timestamptz,
+  sol_guard_state text NOT NULL DEFAULT 'unknown',
+  residual_usdc numeric(30,8),
+  residual_observed_at timestamptz,
+  total_fees numeric(30,8) NOT NULL DEFAULT 0,
+  terminal_stop_operation_id uuid,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT grid_bots_protocol_check CHECK (protocol = 'pacifica'),
+  CONSTRAINT grid_bots_server_intent_digest_check CHECK (server_intent_digest ~ '^[0-9A-F]{64}$'),
+  CONSTRAINT grid_bots_policy_hmac_check CHECK (policy_hmac ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT grid_bots_geometry_check CHECK (lower_price > 0 AND upper_price > lower_price AND start_price BETWEEN lower_price AND upper_price AND grid_count BETWEEN 1 AND 100 AND total_investment > 0 AND leverage > 0),
+  CONSTRAINT grid_bots_direction_check CHECK (direction IN ('long','short')),
+  CONSTRAINT grid_bots_scale_check CHECK (entry_scale_type IN ('flat','ascending','descending') AND profit_scale_type IN ('flat','ascending','descending')),
+  CONSTRAINT grid_bots_stop_check CHECK ((stop_loss_percent IS NULL AND stop_loss_price IS NULL) OR (stop_loss_percent IS NOT NULL AND stop_loss_price IS NOT NULL AND stop_loss_percent > 0 AND stop_loss_price > 0)),
+  CONSTRAINT grid_bots_source_check CHECK (range_source IN ('manual','auto') AND chart_timeframe IN ('15m','1h','4h')),
+  CONSTRAINT grid_bots_status_check CHECK (status IN ('draft','provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping','stopped','failed')),
+  CONSTRAINT grid_bots_live_subaccount_check CHECK (status IN ('draft','stopped','failed') OR protocol_subaccount_id IS NOT NULL),
+  CONSTRAINT grid_bots_lease_check CHECK ((lease_token IS NULL) = (lease_expires_at IS NULL)),
+  CONSTRAINT grid_bots_counts_check CHECK (canary_clean_ticks >= 0 AND consecutive_failures >= 0 AND total_fees >= 0),
+  CONSTRAINT grid_bots_sol_check CHECK ((sol_balance IS NULL) = (sol_balance_observed_at IS NULL) AND (sol_balance IS NULL OR sol_balance >= 0) AND sol_guard_state IN ('unknown','healthy','warning','entry_blocked')),
+  CONSTRAINT grid_bots_residual_check CHECK ((residual_usdc IS NULL) = (residual_observed_at IS NULL) AND (residual_usdc IS NULL OR residual_usdc >= 0))
+);
+  CREATE TABLE IF NOT EXISTS grid_levels (
+  id uuid PRIMARY KEY,
+  bot_id uuid NOT NULL,
+  ordinal integer NOT NULL,
+  price numeric(30,8) NOT NULL,
+  size numeric(30,8) NOT NULL,
+  side text NOT NULL,
+  reduce_only boolean NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  venue_order_id text,
+  client_order_uuid uuid,
+  placement_attempt integer NOT NULL DEFAULT 0,
+  cumulative_filled_size numeric(30,8) NOT NULL DEFAULT 0,
+  last_filled_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT grid_levels_ordinal_check CHECK (ordinal BETWEEN 1 AND 101),
+  CONSTRAINT grid_levels_geometry_check CHECK (price > 0 AND size >= 0 AND side IN ('buy','sell') AND placement_attempt >= 0 AND cumulative_filled_size BETWEEN 0 AND size),
+  CONSTRAINT grid_levels_status_check CHECK (status IN ('pending','submitting','active','partially_filled','filled','cancelling','cancelled','failed'))
+);
+  CREATE TABLE IF NOT EXISTS grid_operations (
+  id uuid PRIMARY KEY,
+  bot_id uuid NOT NULL,
+  level_id uuid,
+  parent_operation_id uuid,
+  idempotency_key text NOT NULL,
+  request_identity text NOT NULL,
+  type text NOT NULL,
+  state text NOT NULL DEFAULT 'prepared',
+  attempt integer NOT NULL DEFAULT 1,
+  client_order_uuid uuid,
+  venue_order_id text,
+  transaction_signature text,
+  amount_usdc numeric(30,8),
+  trigger_price numeric(30,8),
+  trigger_pnl numeric(30,8),
+  trigger_observed_at timestamptz,
+  notification_type text,
+  notification_payload jsonb,
+  failure_classification text,
+  failure_code text,
+  prepared_at timestamptz NOT NULL DEFAULT now(),
+  submitted_at timestamptz,
+  terminal_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT grid_operations_identity_check CHECK (length(btrim(idempotency_key)) > 0 AND length(btrim(request_identity)) > 0 AND attempt > 0),
+  CONSTRAINT grid_operations_type_check CHECK (type IN ('provision_subaccount','set_leverage','fund_subaccount','seed_position','place_level_order','cancel_level_order','cancel_all_orders','pause','resume','sync','stop_trigger','close_position','sweep_subaccount','release_subaccount','send_notification')),
+  CONSTRAINT grid_operations_state_check CHECK (state IN ('prepared','submitted','unconfirmed','confirmed','failed')),
+  CONSTRAINT grid_operations_failure_check CHECK ((failure_classification IS NULL OR failure_classification IN ('expected_rejection','transport','authentication','quota','margin','policy','invariant','venue_rejection','unknown')) AND (state NOT IN ('unconfirmed','failed') OR failure_classification IS NOT NULL) AND (state <> 'confirmed' OR failure_classification IS NULL)),
+  CONSTRAINT grid_operations_terminal_check CHECK ((state IN ('confirmed','failed')) = (terminal_at IS NOT NULL) AND (state <> 'submitted' OR submitted_at IS NOT NULL)),
+  CONSTRAINT grid_operations_amount_check CHECK (amount_usdc IS NULL OR amount_usdc >= 0),
+  CONSTRAINT grid_operations_trigger_check CHECK (type <> 'stop_trigger' OR (trigger_price IS NOT NULL AND trigger_price > 0 AND trigger_pnl IS NOT NULL AND trigger_observed_at IS NOT NULL)),
+  CONSTRAINT grid_operations_notification_check CHECK (type <> 'send_notification' OR (notification_type IS NOT NULL AND notification_payload IS NOT NULL))
+);
+  CREATE TABLE IF NOT EXISTS grid_fills (
+  id uuid PRIMARY KEY,
+  bot_id uuid NOT NULL,
+  level_id uuid NOT NULL,
+  venue_trade_id text NOT NULL,
+  venue_order_id text,
+  client_order_uuid uuid,
+  side text NOT NULL,
+  price numeric(30,8) NOT NULL,
+  size numeric(30,8) NOT NULL,
+  fee numeric(30,8) NOT NULL,
+  fee_asset text NOT NULL,
+  partial boolean NOT NULL,
+  venue_fill_time timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT grid_fills_values_check CHECK (price > 0 AND size > 0 AND fee >= 0 AND length(btrim(venue_trade_id)) > 0 AND length(btrim(fee_asset)) > 0 AND side IN ('buy','sell'))
+);
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_bots'::regclass AND conname = 'grid_bots_wallet_address_fk') THEN ALTER TABLE grid_bots ADD CONSTRAINT grid_bots_wallet_address_fk FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_bots'::regclass AND conname = 'grid_bots_protocol_subaccount_id_fk') THEN ALTER TABLE grid_bots ADD CONSTRAINT grid_bots_protocol_subaccount_id_fk FOREIGN KEY (protocol_subaccount_id) REFERENCES protocol_subaccounts(id) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_levels'::regclass AND conname = 'grid_levels_bot_id_fk') THEN ALTER TABLE grid_levels ADD CONSTRAINT grid_levels_bot_id_fk FOREIGN KEY (bot_id) REFERENCES grid_bots(id) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_operations'::regclass AND conname = 'grid_operations_bot_id_fk') THEN ALTER TABLE grid_operations ADD CONSTRAINT grid_operations_bot_id_fk FOREIGN KEY (bot_id) REFERENCES grid_bots(id) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_operations'::regclass AND conname = 'grid_operations_level_id_fk') THEN ALTER TABLE grid_operations ADD CONSTRAINT grid_operations_level_id_fk FOREIGN KEY (level_id) REFERENCES grid_levels(id) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_operations'::regclass AND conname = 'grid_operations_parent_operation_id_fk') THEN ALTER TABLE grid_operations ADD CONSTRAINT grid_operations_parent_operation_id_fk FOREIGN KEY (parent_operation_id) REFERENCES grid_operations(id) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_fills'::regclass AND conname = 'grid_fills_bot_id_fk') THEN ALTER TABLE grid_fills ADD CONSTRAINT grid_fills_bot_id_fk FOREIGN KEY (bot_id) REFERENCES grid_bots(id) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_fills'::regclass AND conname = 'grid_fills_level_id_fk') THEN ALTER TABLE grid_fills ADD CONSTRAINT grid_fills_level_id_fk FOREIGN KEY (level_id) REFERENCES grid_levels(id) ON DELETE RESTRICT; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'grid_bots'::regclass AND conname = 'grid_bots_terminal_stop_operation_id_fk') THEN ALTER TABLE grid_bots ADD CONSTRAINT grid_bots_terminal_stop_operation_id_fk FOREIGN KEY (terminal_stop_operation_id) REFERENCES grid_operations(id) ON DELETE RESTRICT; END IF;
+  CREATE UNIQUE INDEX IF NOT EXISTS grid_bots_wallet_request_unique ON grid_bots (wallet_address, client_request_id);
+  CREATE INDEX IF NOT EXISTS grid_bots_owner_status_idx ON grid_bots (wallet_address, status);
+  CREATE INDEX IF NOT EXISTS grid_bots_scheduler_idx ON grid_bots (status, lease_expires_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS grid_levels_bot_ordinal_unique ON grid_levels (bot_id, ordinal);
+  CREATE INDEX IF NOT EXISTS grid_levels_bot_status_idx ON grid_levels (bot_id, status);
+  CREATE INDEX IF NOT EXISTS grid_levels_venue_order_idx ON grid_levels (venue_order_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS grid_operations_idempotency_unique ON grid_operations (idempotency_key);
+  CREATE UNIQUE INDEX IF NOT EXISTS grid_operations_request_unique ON grid_operations (request_identity);
+  CREATE INDEX IF NOT EXISTS grid_operations_unresolved_idx ON grid_operations (bot_id, state, prepared_at);
+  CREATE UNIQUE INDEX IF NOT EXISTS grid_fills_trade_unique ON grid_fills (venue_trade_id);
+  CREATE INDEX IF NOT EXISTS grid_fills_bot_time_idx ON grid_fills (bot_id, venue_fill_time, venue_trade_id);
+END $$;`,
+`DO $$ BEGIN
+  -- Catalogue-only repeat boot; no lock-taking DDL after a complete installation.
+  IF to_regclass('grid_launch_accounts') IS NOT NULL AND to_regclass('grid_master_quota') IS NOT NULL
+    AND to_regclass('grid_execution_claims') IS NOT NULL
+    AND to_regclass('grid_read_claims') IS NOT NULL
+    AND to_regclass('grid_read_master_idx') IS NOT NULL AND to_regclass('grid_launch_live_account_idx') IS NOT NULL AND to_regclass('grid_launch_live_pool_idx') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid='grid_operations'::regclass AND attname='exact_request' AND NOT attisdropped)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_execution_claims') AND conname='grid_claim_values')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_launch_accounts') AND conname='grid_launch_values')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='grid_operations'::regclass AND conname='grid_exact_request_pair')
+    AND to_regclass('grid_claim_master_idx') IS NOT NULL THEN RETURN; END IF;
+  ALTER TABLE grid_operations ADD COLUMN IF NOT EXISTS exact_request jsonb;
+  ALTER TABLE grid_operations ADD COLUMN IF NOT EXISTS exact_request_digest text;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='grid_operations'::regclass AND conname='grid_exact_request_pair') THEN
+    ALTER TABLE grid_operations ADD CONSTRAINT grid_exact_request_pair CHECK
+      ((exact_request IS NULL AND exact_request_digest IS NULL) OR
+       (exact_request IS NOT NULL AND exact_request_digest IS NOT NULL AND jsonb_typeof(exact_request)='object' AND exact_request_digest ~ '^[0-9a-f]{64}$'));
+  END IF;
+  CREATE TABLE IF NOT EXISTS grid_master_quota (
+    master_account text PRIMARY KEY, share numeric NOT NULL DEFAULT 0.5,
+    backoff_until timestamptz NOT NULL DEFAULT '-infinity',
+    CONSTRAINT grid_master_share CHECK (share > 0 AND share <= 1)
+  );
+  CREATE TABLE IF NOT EXISTS grid_launch_accounts (
+    bot_id uuid PRIMARY KEY REFERENCES grid_bots(id) ON DELETE RESTRICT,
+    protocol_subaccount_id integer NOT NULL REFERENCES protocol_subaccounts(id) ON DELETE RESTRICT,
+    master_account text NOT NULL REFERENCES grid_master_quota(master_account),
+    account text NOT NULL, reused boolean NOT NULL DEFAULT false, released_at timestamptz, canary_limit numeric NOT NULL, canary_committed numeric NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT grid_launch_values CHECK (canary_limit > 0 AND canary_committed >= 0 AND canary_committed <= canary_limit)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS grid_launch_live_account_idx ON grid_launch_accounts(account) WHERE released_at IS NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS grid_launch_live_pool_idx ON grid_launch_accounts(protocol_subaccount_id) WHERE released_at IS NULL;
+  CREATE TABLE IF NOT EXISTS grid_execution_claims (
+    operation_id uuid PRIMARY KEY REFERENCES grid_operations(id) ON DELETE RESTRICT,
+    bot_id uuid NOT NULL REFERENCES grid_launch_accounts(bot_id), master_account text NOT NULL REFERENCES grid_master_quota(master_account),
+    account text NOT NULL, credits numeric NOT NULL, slots integer NOT NULL, canary_increment numeric NOT NULL,
+    prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(), settled_at timestamptz,
+    slot_released boolean NOT NULL DEFAULT false,
+    CONSTRAINT grid_claim_values CHECK (credits > 0 AND slots BETWEEN 0 AND 1 AND canary_increment >= 0)
+  );
+  CREATE INDEX IF NOT EXISTS grid_claim_master_idx ON grid_execution_claims(master_account,prepared_at);
+  CREATE TABLE IF NOT EXISTS grid_read_claims (
+    id uuid PRIMARY KEY, master_account text NOT NULL REFERENCES grid_master_quota(master_account),
+    credits numeric NOT NULL CHECK (credits > 0), claimed_at timestamptz NOT NULL DEFAULT clock_timestamp()
+  );
+  CREATE INDEX IF NOT EXISTS grid_read_master_idx ON grid_read_claims(master_account,claimed_at);
+END $$;`,
+`DO $$ BEGIN
+  -- Repeat boot performs catalog reads only; existing tables never acquire DDL locks.
+  IF to_regclass('grid_monitor_state') IS NOT NULL AND to_regclass('grid_exact_fills') IS NOT NULL
+    AND to_regclass('grid_profit_allocations') IS NOT NULL AND to_regclass('grid_monitor_orders') IS NOT NULL AND to_regclass('grid_exact_fills_time_idx') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_exact_fills') AND conname='grid_exact_fill_values')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_profit_allocations') AND conname='grid_allocation_values')
+    AND EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('grid_profit_allocations') AND attname='settled_at' AND NOT attisdropped) THEN RETURN; END IF;
+  CREATE TABLE IF NOT EXISTS grid_monitor_state (
+    bot_id uuid PRIMARY KEY REFERENCES grid_bots(id), boot_id uuid,
+    generation bigint NOT NULL DEFAULT 0, safe_through bigint,
+    observation jsonb, pnl jsonb, blocked_reasons jsonb NOT NULL DEFAULT '["startup_required"]',
+    reconciled_at timestamptz
+  );
+  CREATE TABLE IF NOT EXISTS grid_exact_fills (
+    account text NOT NULL, trade_id text NOT NULL, bot_id uuid NOT NULL REFERENCES grid_bots(id),
+    operation_id uuid NOT NULL REFERENCES grid_operations(id), level_id uuid REFERENCES grid_levels(id),
+    order_id text NOT NULL, venue_time bigint NOT NULL, leg text NOT NULL,
+    size numeric NOT NULL, price numeric NOT NULL, fee numeric NOT NULL,
+    PRIMARY KEY(account,trade_id),
+    CONSTRAINT grid_exact_fill_values CHECK (size>0 AND price>0 AND fee>=0 AND venue_time>=0 AND leg IN ('entry','exit'))
+  );
+  CREATE INDEX IF NOT EXISTS grid_exact_fills_time_idx ON grid_exact_fills(bot_id,venue_time,trade_id);
+  CREATE TABLE IF NOT EXISTS grid_profit_allocations (
+    operation_id uuid NOT NULL REFERENCES grid_operations(id), account text NOT NULL,
+    trade_id text NOT NULL, size numeric NOT NULL, released_at timestamptz, released_size numeric NOT NULL DEFAULT 0, settled_at timestamptz,
+    PRIMARY KEY(operation_id,account,trade_id), FOREIGN KEY(account,trade_id) REFERENCES grid_exact_fills(account,trade_id),
+    CONSTRAINT grid_allocation_values CHECK(size>0 AND released_size>=0 AND released_size<=size)
+  );
+  CREATE TABLE IF NOT EXISTS grid_monitor_orders (
+    operation_id uuid PRIMARY KEY REFERENCES grid_operations(id), order_id text NOT NULL,
+    status text NOT NULL, filled numeric NOT NULL, remaining numeric NOT NULL,
+    observed_at bigint NOT NULL, CONSTRAINT grid_monitor_order_values CHECK (filled>=0 AND remaining>=0 AND observed_at>=0)
+  );
+END $$;
+`,
+`DO $$ BEGIN
+  -- Repeat boot uses catalog reads only, without locking live trading tables for DDL.
+  IF to_regclass('grid_lifecycle') IS NOT NULL AND to_regclass('grid_control_requests') IS NOT NULL
+    AND to_regclass('grid_risk_events') IS NOT NULL AND to_regclass('grid_control_keys') IS NOT NULL AND to_regclass('grid_wallet_safety') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_control_requests') AND conname='grid_control_action')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('grid_lifecycle') AND conname='grid_lifecycle_epoch') THEN RETURN; END IF;
+  CREATE TABLE IF NOT EXISTS grid_control_requests (
+    id uuid PRIMARY KEY, bot_id uuid NOT NULL REFERENCES grid_bots(id), request_key text NOT NULL,
+    action text NOT NULL, source text NOT NULL, state text NOT NULL DEFAULT 'pending',
+    previous_status text NOT NULL, evidence jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz, UNIQUE(bot_id,request_key),
+    CONSTRAINT grid_control_action CHECK(action IN ('pause','resume','resync','stop','band') AND source IN ('owner','risk') AND state IN ('pending','complete','superseded'))
+  );
+  CREATE TABLE IF NOT EXISTS grid_lifecycle (
+    bot_id uuid PRIMARY KEY REFERENCES grid_bots(id), epoch bigint NOT NULL DEFAULT 0,
+    active_request uuid REFERENCES grid_control_requests(id), blocker text, terminal_proof jsonb,
+    CONSTRAINT grid_lifecycle_epoch CHECK(epoch>=0)
+  );
+  CREATE TABLE IF NOT EXISTS grid_control_keys (
+    bot_id uuid NOT NULL REFERENCES grid_bots(id), request_key text NOT NULL,
+    control_id uuid NOT NULL REFERENCES grid_control_requests(id), evidence jsonb NOT NULL,
+    PRIMARY KEY(bot_id,request_key)
+  );
+  -- Durable incident outbox. Unique identity prevents a second notification on retry/restart.
+  CREATE TABLE IF NOT EXISTS grid_wallet_safety (
+    execution_wallet text PRIMARY KEY, balance_lamports numeric(30,0), observed_at timestamptz,
+    guard_state text NOT NULL, incident_id uuid, policy_version text NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS grid_risk_events (
+    bot_id uuid NOT NULL REFERENCES grid_bots(id), event_key text NOT NULL, kind text NOT NULL,
+    evidence jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT clock_timestamp(), delivered_at timestamptz,
+    PRIMARY KEY(bot_id,event_key)
+  );
+END $$;
+`,
+`-- Dedicated finalized BTC weekly history and durable refresh cadence; existing tables are untouched.
+DO $$
+BEGIN
+  IF to_regclass('public.planner_btc_weekly_closes') IS NOT NULL
+    AND to_regclass('public.planner_btc_weekly_refresh') IS NOT NULL
+    AND (SELECT count(*) FROM pg_constraint WHERE conrelid=to_regclass('public.planner_btc_weekly_closes')
+      AND conname IN ('planner_btc_weekly_identity_unique','planner_btc_weekly_market_check','planner_btc_weekly_utc_check',
+        'planner_btc_weekly_close_check','planner_btc_weekly_source_check','planner_btc_weekly_aggregation_check','planner_btc_weekly_finalized_check')) = 7
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.planner_btc_weekly_refresh')
+      AND conname='planner_btc_weekly_refresh_market_check') THEN RETURN;
+  END IF;
+  CREATE TABLE IF NOT EXISTS planner_btc_weekly_closes (
+    market text NOT NULL, week_start timestamptz NOT NULL, close text NOT NULL,
+    source text NOT NULL, basis text NOT NULL, aggregation text NOT NULL,
+    finalized boolean NOT NULL, fetched_at timestamptz NOT NULL,
+    CONSTRAINT planner_btc_weekly_identity_unique UNIQUE(market,week_start),
+    CONSTRAINT planner_btc_weekly_market_check CHECK(market='BTC'),
+    CONSTRAINT planner_btc_weekly_utc_check CHECK(week_start >= '1970-01-05 00:00:00+00'::timestamptz
+      AND extract(isodow FROM week_start AT TIME ZONE 'UTC')=1 AND (week_start AT TIME ZONE 'UTC')::time='00:00:00'::time),
+    CONSTRAINT planner_btc_weekly_close_check CHECK(CASE WHEN close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' THEN close::numeric > 0 ELSE false END),
+    CONSTRAINT planner_btc_weekly_source_check CHECK((source='okx-index' AND basis='index')
+      OR (source IN ('gate-spot','kraken-spot','coinbase-spot') AND basis='spot')
+      OR (source IN ('pacifica-mark','hyperliquid-perp','pacifica-perp','okx-perp') AND basis='perp')),
+    CONSTRAINT planner_btc_weekly_aggregation_check CHECK(aggregation IN ('native','daily')),
+    CONSTRAINT planner_btc_weekly_finalized_check CHECK(finalized AND fetched_at >= week_start + interval '168 hours')
+  );
+  CREATE TABLE IF NOT EXISTS planner_btc_weekly_refresh (
+    market text PRIMARY KEY, last_attempt_at timestamptz NOT NULL,
+    CONSTRAINT planner_btc_weekly_refresh_market_check CHECK(market='BTC')
+  );
+END $$;
+`,
+`-- Replit's publisher requires a single-line PostgreSQL CHECK definition.
+DO $$
+DECLARE
+  current_definition text;
+BEGIN
+  SELECT pg_get_constraintdef(oid, true)
+    INTO current_definition
+    FROM pg_constraint
+    WHERE conrelid = to_regclass('public.planner_btc_weekly_closes')
+      AND conname = 'planner_btc_weekly_close_check';
+  IF current_definition IS NOT DISTINCT FROM $constraint$CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$'::text AND close !~ '^0{1,12}(\\.0{1,18})?$'::text)$constraint$ THEN
+    RETURN;
+  END IF;
+  ALTER TABLE public.planner_btc_weekly_closes
+    DROP CONSTRAINT IF EXISTS planner_btc_weekly_close_check;
+  ALTER TABLE public.planner_btc_weekly_closes
+    ADD CONSTRAINT planner_btc_weekly_close_check
+    CHECK (close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' AND close !~ '^0{1,12}(\\.0{1,18})?$');
+END $$;
+`,
+`ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_strategy_id integer REFERENCES lab_strategies(id) ON DELETE SET NULL;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_run_id integer REFERENCES lab_optimization_runs(id) ON DELETE SET NULL;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_result_id integer REFERENCES lab_optimization_results(id) ON DELETE SET NULL;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_deploy_snapshot jsonb;
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_link_state text DEFAULT 'unlinked';
+ALTER TABLE trading_bots ADD COLUMN IF NOT EXISTS lab_linked_at timestamptz;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'trading_bots'::regclass AND conname = 'trading_bots_lab_link_state_check') THEN
+    ALTER TABLE trading_bots ADD CONSTRAINT trading_bots_lab_link_state_check CHECK (lab_link_state IN ('linked','owner_confirmed','unlinked'));
+  END IF;
+END $$;
+`,
+`CREATE TABLE IF NOT EXISTS ai_trader_cycles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  bot_id varchar NOT NULL REFERENCES ai_trader_bots(id) ON DELETE CASCADE,
+  schema_version smallint NOT NULL DEFAULT 1,
+  reason_version smallint NOT NULL DEFAULT 1,
+  trigger text NOT NULL DEFAULT 'auto',
+  planned_boundary timestamptz,
+  started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  finished_at timestamptz,
+  phase text NOT NULL DEFAULT 'initial',
+  outcome text NOT NULL DEFAULT 'running',
+  reason_code text,
+  rearmed boolean,
+  next_planned_boundary timestamptz,
+  candidate_count integer NOT NULL DEFAULT 0,
+  model_call_count integer NOT NULL DEFAULT 0,
+  decision_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  bot_updated_at timestamp,
+  protocol text NOT NULL,
+  market text NOT NULL,
+  timeframe text NOT NULL,
+  market_source text NOT NULL,
+  paper_mode boolean NOT NULL,
+  model text NOT NULL,
+  prompt_version_hash text,
+  context_version_hash text,
+  owner_boot_id uuid NOT NULL,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
+  CONSTRAINT ai_cycles_schema_ck CHECK (schema_version = 1 AND reason_version = 1),
+  CONSTRAINT ai_cycles_trigger_ck CHECK (trigger IN ('auto','manual')),
+  CONSTRAINT ai_cycles_boundary_ck CHECK (trigger <> 'auto' OR planned_boundary IS NOT NULL),
+  CONSTRAINT ai_cycles_phase_ck CHECK (phase IN ('initial','boundary_lane','preflight','claim','context','model','execution','position','settlement')),
+  CONSTRAINT ai_cycles_outcome_ck CHECK (outcome IN ('running','skipped','failed','model_decided','proposed','executed','position_managed')),
+  CONSTRAINT ai_cycles_reason_ck CHECK (reason_code IS NULL OR reason_code IN ('paused','position_open','auto_next_off','mode_suggest','venue_retired','venue_unavailable','schema_not_ready','cooldown','daily_cap','model_key_missing','reauth_required','model_unsupported','state_unresolved','claim_lost','scanner_disabled','shortlist_empty','shortlist_stale','feed_basis_unavailable','feed_stale','feed_cache_degraded','gateway_timeout','gateway_error','model_malformed','audit_write_failed','model_flat','model_entry','model_close','guardrail_rejected','close_without_position','proposal_created','entry_executed','execution_rejected','position_management','scanner_boundary_lane_timeout','scanner_boundary_lane_wait_failed','cycle_interrupted','internal_error','wallet_agent_missing','malfunction_ceiling')),
+  CONSTRAINT ai_cycles_terminal_ck CHECK ((outcome = 'running' AND finished_at IS NULL AND reason_code IS NULL AND rearmed IS NULL) OR (outcome <> 'running' AND finished_at IS NOT NULL AND reason_code IS NOT NULL AND rearmed IS NOT NULL)),
+  CONSTRAINT ai_cycles_time_ck CHECK (finished_at IS NULL OR finished_at >= started_at),
+  CONSTRAINT ai_cycles_count_ck CHECK (candidate_count >= 0 AND model_call_count >= 0),
+  CONSTRAINT ai_cycles_decisions_type_ck CHECK (jsonb_typeof(decision_ids) = 'array'),
+  CONSTRAINT ai_cycles_decisions_count_ck CHECK (jsonb_array_length(decision_ids) <= 2),
+  CONSTRAINT ai_cycles_details_type_ck CHECK (jsonb_typeof(details) = 'object'),
+  CONSTRAINT ai_cycles_details_size_ck CHECK (octet_length(details::text) <= 8192),
+  CONSTRAINT ai_cycles_decisions_size_ck CHECK (octet_length(decision_ids::text) <= 512),
+  CONSTRAINT ai_cycles_prompt_hash_ck CHECK (prompt_version_hash IS NULL OR prompt_version_hash ~ '^[0-9A-Fa-f]{64}$'),
+  CONSTRAINT ai_cycles_context_hash_ck CHECK (context_version_hash IS NULL OR context_version_hash ~ '^[0-9A-Fa-f]{64}$')
+);
+CREATE INDEX IF NOT EXISTS ai_trader_cycles_bot_latest_idx ON ai_trader_cycles (bot_id, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS ai_trader_cycles_running_idx ON ai_trader_cycles (started_at) WHERE outcome = 'running';
+`,
+`CREATE TABLE IF NOT EXISTS grid_auto_resume (
+  bot_id uuid PRIMARY KEY REFERENCES grid_bots(id),
+  enabled boolean NOT NULL DEFAULT true,
+  generation bigint NOT NULL DEFAULT 0,
+  cycle bigint NOT NULL DEFAULT 0,
+  armed_cycle bigint,
+  armed_generation bigint,
+  armed_lifecycle_epoch bigint,
+  armed_band_request uuid REFERENCES grid_control_requests(id),
+  armed_policy_hmac text,
+  armed_umk_version integer,
+  resume_request_id uuid REFERENCES grid_control_requests(id),
+  attempts smallint NOT NULL DEFAULT 0,
+  first_attempt_at timestamptz,
+  next_attempt_at timestamptz,
+  held_reason text,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT grid_auto_resume_counts CHECK (generation>=0 AND cycle>=0 AND attempts>=0 AND attempts<=3),
+  CONSTRAINT grid_auto_resume_arm CHECK ((armed_cycle IS NULL AND armed_generation IS NULL AND armed_lifecycle_epoch IS NULL AND armed_band_request IS NULL AND armed_policy_hmac IS NULL AND armed_umk_version IS NULL AND resume_request_id IS NULL AND attempts=0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (enabled AND armed_cycle IS NOT NULL AND armed_cycle=cycle AND armed_cycle>0 AND armed_generation IS NOT NULL AND armed_generation=generation AND armed_lifecycle_epoch IS NOT NULL AND armed_lifecycle_epoch>=0 AND armed_band_request IS NOT NULL AND armed_policy_hmac IS NOT NULL AND armed_policy_hmac ~ '^[0-9a-f]{64}$' AND armed_umk_version IS NOT NULL AND armed_umk_version>0)),
+  CONSTRAINT grid_auto_resume_retry CHECK ((attempts=0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (attempts>0 AND first_attempt_at IS NOT NULL AND (next_attempt_at IS NULL OR next_attempt_at>=first_attempt_at))),
+  CONSTRAINT grid_auto_resume_reason CHECK (held_reason IS NULL OR held_reason IN ('waiting_for_inner_band','range_unavailable','reconciliation_required','operation_pending','market_data_unavailable','resume_authority_unavailable','risk_pause','stop_clearance_unavailable','policy_changed','execution_revoked','retry_limit','preference_off'))
+);
+ALTER TABLE grid_auto_resume ALTER COLUMN enabled SET DEFAULT true;
+ALTER TABLE grid_control_requests DROP CONSTRAINT IF EXISTS grid_control_action;
+ALTER TABLE grid_control_requests ADD CONSTRAINT grid_control_action CHECK (action IN ('pause','resume','resync','stop','band') AND source IN ('owner','risk','auto') AND state IN ('pending','complete','superseded') AND (source<>'auto' OR action='resume'));
+`,
+`CREATE UNIQUE INDEX IF NOT EXISTS grid_control_requests_bot_identity_unique ON grid_control_requests(bot_id,id);
+CREATE TABLE IF NOT EXISTS grid_epochs (
+  id uuid PRIMARY KEY,
+  bot_id uuid NOT NULL REFERENCES grid_bots(id),
+  ordinal integer NOT NULL,
+  predecessor_id uuid,
+  creating_control_request_id uuid,
+  policy_version text NOT NULL,
+  policy_snapshot jsonb NOT NULL,
+  policy_hmac text NOT NULL,
+  carry_snapshot jsonb NOT NULL,
+  carry_digest text,
+  confirmation jsonb NOT NULL,
+  reason text NOT NULL,
+  activated_at timestamptz NOT NULL,
+  direction text NOT NULL,
+  lower_price numeric(30,8) NOT NULL,
+  upper_price numeric(30,8) NOT NULL,
+  stop_loss_price numeric(30,8) NOT NULL,
+  grid_count integer NOT NULL,
+  CONSTRAINT grid_epochs_bot_id_unique UNIQUE (bot_id,id),
+  CONSTRAINT grid_epochs_ordinal_unique UNIQUE (bot_id,ordinal),
+  CONSTRAINT grid_epochs_successor_unique UNIQUE (predecessor_id),
+  CONSTRAINT grid_epochs_request_unique UNIQUE (creating_control_request_id),
+  CONSTRAINT grid_epochs_control_request_fk FOREIGN KEY (bot_id,creating_control_request_id) REFERENCES grid_control_requests(bot_id,id),
+  CONSTRAINT grid_epochs_predecessor_fk FOREIGN KEY (bot_id,predecessor_id) REFERENCES grid_epochs(bot_id,id),
+  CONSTRAINT grid_epochs_origin_check CHECK ((ordinal=1 AND predecessor_id IS NULL AND creating_control_request_id IS NULL AND carry_digest IS NULL) OR (ordinal>1 AND predecessor_id IS NOT NULL AND creating_control_request_id IS NOT NULL AND carry_digest IS NOT NULL)),
+  CONSTRAINT grid_epochs_geometry_check CHECK (lower_price>0 AND upper_price>lower_price AND stop_loss_price>0 AND grid_count BETWEEN 1 AND 100),
+  CONSTRAINT grid_epochs_stop_check CHECK ((direction='long' AND stop_loss_price<lower_price) OR (direction='short' AND stop_loss_price>upper_price)),
+  CONSTRAINT grid_epochs_authority_check CHECK (jsonb_typeof(policy_snapshot)='object' AND jsonb_typeof(carry_snapshot)='object' AND jsonb_typeof(confirmation)='object' AND policy_hmac ~ '^[0-9a-f]{64}$' AND (carry_digest IS NULL OR carry_digest ~ '^[0-9a-f]{64}$'))
+);
+CREATE TABLE IF NOT EXISTS grid_trailing (
+  bot_id uuid PRIMARY KEY REFERENCES grid_bots(id),
+  mode text NOT NULL DEFAULT 'off',
+  generation bigint NOT NULL DEFAULT 0,
+  policy_revision text NOT NULL DEFAULT 'manual-dow-1',
+  cooldown_ms bigint NOT NULL DEFAULT 3600000,
+  daily_limit integer NOT NULL DEFAULT 3,
+  lifetime_limit integer NOT NULL DEFAULT 10,
+  max_widths integer NOT NULL DEFAULT 1,
+  last_closed_candle bigint,
+  last_source text,
+  attempts integer NOT NULL DEFAULT 0,
+  retry_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT grid_trailing_mode_check CHECK (mode IN ('off','ask','automatic') AND generation>=0),
+  CONSTRAINT grid_trailing_limits_check CHECK (cooldown_ms>=3600000 AND daily_limit BETWEEN 1 AND 3 AND lifetime_limit BETWEEN 1 AND 10 AND max_widths=1 AND attempts BETWEEN 0 AND 3),
+  CONSTRAINT grid_trailing_watermark_check CHECK ((last_closed_candle IS NULL AND last_source IS NULL) OR (last_closed_candle IS NOT NULL AND last_closed_candle>=0 AND last_source IS NOT NULL))
+);
+ALTER TABLE grid_bots ADD COLUMN IF NOT EXISTS active_epoch_id uuid;
+ALTER TABLE grid_levels ADD COLUMN IF NOT EXISTS epoch_id uuid;
+ALTER TABLE grid_operations ADD COLUMN IF NOT EXISTS epoch_id uuid;
+ALTER TABLE grid_exact_fills ADD COLUMN IF NOT EXISTS epoch_id uuid;
+ALTER TABLE grid_control_requests ADD COLUMN IF NOT EXISTS origin_epoch_id uuid;
+ALTER TABLE grid_auto_resume ADD COLUMN IF NOT EXISTS armed_epoch_id uuid;
+-- Deterministic legacy identity. Never mint a signature or guess missing geometry.
+INSERT INTO grid_epochs(id,bot_id,ordinal,policy_version,policy_snapshot,policy_hmac,carry_snapshot,confirmation,reason,activated_at,direction,lower_price,upper_price,stop_loss_price,grid_count)
+SELECT md5('grid-epoch-1:'||b.id::text)::uuid,b.id,1,b.policy_version,
+  jsonb_build_object('legacyBot',to_jsonb(b)||jsonb_build_object('lower_price',b.lower_price::numeric(30,8)::text,'upper_price',b.upper_price::numeric(30,8)::text,'start_price',b.start_price::numeric(30,8)::text,'total_investment',b.total_investment::numeric(30,2)::text,'stop_loss_percent',b.stop_loss_percent::numeric(20,4)::text,'stop_loss_price',b.stop_loss_price::numeric(30,8)::text),
+    'legacyLevels',(SELECT jsonb_agg(to_jsonb(l)||jsonb_build_object('price',l.price::numeric(30,8)::text,'size',l.size::numeric(30,8)::text) ORDER BY ordinal) FROM grid_levels l WHERE l.bot_id=b.id)),
+  b.policy_hmac,'{}'::jsonb,'{}'::jsonb,'original',b.created_at,b.direction,b.lower_price,b.upper_price,b.stop_loss_price,b.grid_count
+FROM grid_bots b WHERE b.active_epoch_id IS NULL AND b.policy_hmac ~ '^[0-9a-f]{64}$'
+  AND b.policy_version IN ('1.0.0','2.0.0','2.2.0') AND b.runtime_policy_version=b.policy_version
+  AND b.lower_price>0 AND b.start_price>b.lower_price AND b.start_price<b.upper_price AND b.grid_count BETWEEN 1 AND 100
+  AND ((b.direction='long' AND b.stop_loss_price>0 AND b.stop_loss_price<b.lower_price) OR (b.direction='short' AND b.stop_loss_price>b.upper_price))
+  AND (SELECT count(*) FROM grid_levels l WHERE l.bot_id=b.id)=b.grid_count+1
+  AND (SELECT min(ordinal)=1 AND max(ordinal)=b.grid_count+1 AND min(price)=b.lower_price AND max(price)=b.upper_price FROM grid_levels l WHERE l.bot_id=b.id)
+ON CONFLICT DO NOTHING;
+UPDATE grid_bots b SET active_epoch_id=e.id FROM grid_epochs e WHERE e.bot_id=b.id AND e.ordinal=1 AND b.active_epoch_id IS NULL;
+UPDATE grid_levels l SET epoch_id=b.active_epoch_id FROM grid_bots b WHERE l.bot_id=b.id AND l.epoch_id IS NULL AND b.active_epoch_id IS NOT NULL;
+UPDATE grid_operations o SET epoch_id=b.active_epoch_id FROM grid_bots b WHERE o.bot_id=b.id AND o.epoch_id IS NULL AND b.active_epoch_id IS NOT NULL;
+UPDATE grid_exact_fills f SET epoch_id=o.epoch_id FROM grid_operations o WHERE f.operation_id=o.id AND f.bot_id=o.bot_id AND f.epoch_id IS NULL AND o.epoch_id IS NOT NULL;
+UPDATE grid_control_requests r SET origin_epoch_id=b.active_epoch_id FROM grid_bots b WHERE r.bot_id=b.id AND r.origin_epoch_id IS NULL AND b.active_epoch_id IS NOT NULL;
+UPDATE grid_auto_resume a SET armed_epoch_id=b.active_epoch_id FROM grid_bots b WHERE a.bot_id=b.id AND a.armed_cycle IS NOT NULL AND a.armed_epoch_id IS NULL;
+INSERT INTO grid_trailing(bot_id) SELECT id FROM grid_bots ON CONFLICT DO NOTHING;
+-- Keep this name: the original startup guard checks it before replaying legacy DDL.
+DROP INDEX IF EXISTS grid_levels_bot_ordinal_unique;
+CREATE UNIQUE INDEX grid_levels_bot_ordinal_unique ON grid_levels(bot_id,epoch_id,ordinal);
+CREATE UNIQUE INDEX IF NOT EXISTS grid_levels_legacy_ordinal_unique ON grid_levels(bot_id,ordinal) WHERE epoch_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS grid_levels_epoch_identity_unique ON grid_levels(bot_id,epoch_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS grid_operations_epoch_identity_unique ON grid_operations(bot_id,epoch_id,id);
+DO $$ BEGIN
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_bots'::regclass AND conname='grid_bots_active_epoch_fk') THEN
+    ALTER TABLE grid_bots ADD CONSTRAINT grid_bots_active_epoch_fk FOREIGN KEY (id,active_epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_levels'::regclass AND conname='grid_levels_epoch_fk') THEN
+    ALTER TABLE grid_levels ADD CONSTRAINT grid_levels_epoch_fk FOREIGN KEY (bot_id,epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_operations'::regclass AND conname='grid_operations_epoch_fk') THEN
+    ALTER TABLE grid_operations ADD CONSTRAINT grid_operations_epoch_fk FOREIGN KEY (bot_id,epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_operations'::regclass AND conname='grid_operations_level_epoch_fk') THEN
+    ALTER TABLE grid_operations ADD CONSTRAINT grid_operations_level_epoch_fk FOREIGN KEY (bot_id,epoch_id,level_id) REFERENCES grid_levels(bot_id,epoch_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_exact_fills'::regclass AND conname='grid_exact_fills_operation_epoch_fk') THEN
+    ALTER TABLE grid_exact_fills ADD CONSTRAINT grid_exact_fills_operation_epoch_fk FOREIGN KEY (bot_id,epoch_id,operation_id) REFERENCES grid_operations(bot_id,epoch_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_control_requests'::regclass AND conname='grid_control_origin_epoch_fk') THEN
+    ALTER TABLE grid_control_requests ADD CONSTRAINT grid_control_origin_epoch_fk FOREIGN KEY (bot_id,origin_epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='grid_auto_resume'::regclass AND conname='grid_auto_resume_epoch_fk') THEN
+    ALTER TABLE grid_auto_resume ADD CONSTRAINT grid_auto_resume_epoch_fk FOREIGN KEY (bot_id,armed_epoch_id) REFERENCES grid_epochs(bot_id,id);
+  END IF;
+END $$;
+ALTER TABLE grid_control_requests DROP CONSTRAINT IF EXISTS grid_control_action;
+ALTER TABLE grid_control_requests ADD CONSTRAINT grid_control_action CHECK (action IN ('pause','resume','resync','stop','band','regrid') AND source IN ('owner','risk','auto') AND state IN ('pending','complete','superseded') AND (source<>'auto' OR action IN ('resume','regrid')) AND (action<>'regrid' OR origin_epoch_id IS NOT NULL));
+CREATE OR REPLACE FUNCTION grid_epoch_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Grid epochs are immutable'; END $$;
+DROP TRIGGER IF EXISTS grid_epoch_immutable ON grid_epochs;
+CREATE TRIGGER grid_epoch_immutable BEFORE UPDATE OR DELETE ON grid_epochs FOR EACH ROW EXECUTE FUNCTION grid_epoch_immutable();
+CREATE OR REPLACE FUNCTION grid_assign_epoch() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE expected uuid;
+BEGIN
+  IF TG_OP='UPDATE' THEN
+    IF OLD.epoch_id IS NOT NULL AND NEW.epoch_id IS DISTINCT FROM OLD.epoch_id THEN RAISE EXCEPTION 'Grid epoch identity is immutable'; END IF;
+    IF OLD.epoch_id IS NOT NULL THEN RETURN NEW; END IF;
+  END IF;
+  IF TG_TABLE_NAME='grid_exact_fills' THEN SELECT epoch_id INTO expected FROM grid_operations WHERE id=NEW.operation_id AND bot_id=NEW.bot_id;
+  ELSIF TG_TABLE_NAME='grid_operations' THEN
+    IF NEW.level_id IS NOT NULL THEN SELECT epoch_id INTO expected FROM grid_levels WHERE id=NEW.level_id AND bot_id=NEW.bot_id;
+    ELSE SELECT active_epoch_id INTO expected FROM grid_bots WHERE id=NEW.bot_id; END IF;
+  ELSE SELECT active_epoch_id INTO expected FROM grid_bots WHERE id=NEW.bot_id; END IF;
+  IF NEW.epoch_id IS NULL THEN NEW.epoch_id:=expected;
+  ELSIF NEW.epoch_id IS DISTINCT FROM expected THEN RAISE EXCEPTION 'Grid epoch scope mismatch'; END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS grid_levels_assign_epoch ON grid_levels;
+CREATE TRIGGER grid_levels_assign_epoch BEFORE INSERT OR UPDATE OF epoch_id ON grid_levels FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();
+DROP TRIGGER IF EXISTS grid_operations_assign_epoch ON grid_operations;
+CREATE TRIGGER grid_operations_assign_epoch BEFORE INSERT OR UPDATE OF epoch_id ON grid_operations FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();
+DROP TRIGGER IF EXISTS grid_fills_assign_epoch ON grid_exact_fills;
+CREATE TRIGGER grid_fills_assign_epoch BEFORE INSERT OR UPDATE OF epoch_id ON grid_exact_fills FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();`
+,
+`-- Replit diffs the live development catalog. Every epoch FK must reference a
+-- primary key, even if it emits FKs before new UNIQUE constraints/indexes.
+-- One statement/transaction locks writers through validation and replacement.
+DO $migration$
+DECLARE item record;
+BEGIN
+  LOCK TABLE grid_bots,grid_epochs,grid_levels,grid_operations,grid_exact_fills,grid_control_requests,grid_auto_resume IN SHARE ROW EXCLUSIVE MODE;
+  IF EXISTS (SELECT 1 FROM grid_epochs e JOIN grid_control_requests r ON r.id=e.creating_control_request_id WHERE e.bot_id<>r.bot_id)
+    OR EXISTS (SELECT 1 FROM grid_epochs e JOIN grid_epochs p ON p.id=e.predecessor_id WHERE e.bot_id<>p.bot_id)
+    OR EXISTS (SELECT 1 FROM grid_bots b JOIN grid_epochs e ON e.id=b.active_epoch_id WHERE b.id<>e.bot_id)
+    OR EXISTS (SELECT 1 FROM grid_levels l JOIN grid_epochs e ON e.id=l.epoch_id WHERE l.bot_id<>e.bot_id)
+    OR EXISTS (SELECT 1 FROM grid_operations o JOIN grid_epochs e ON e.id=o.epoch_id WHERE o.bot_id<>e.bot_id)
+    OR EXISTS (SELECT 1 FROM grid_operations o JOIN grid_levels l ON l.id=o.level_id WHERE o.epoch_id IS NOT NULL AND (o.bot_id<>l.bot_id OR o.epoch_id IS DISTINCT FROM l.epoch_id))
+    OR EXISTS (SELECT 1 FROM grid_exact_fills f JOIN grid_operations o ON o.id=f.operation_id WHERE f.epoch_id IS NOT NULL AND (f.bot_id<>o.bot_id OR f.epoch_id IS DISTINCT FROM o.epoch_id))
+    OR EXISTS (SELECT 1 FROM grid_control_requests r JOIN grid_epochs e ON e.id=r.origin_epoch_id WHERE r.bot_id<>e.bot_id)
+    OR EXISTS (SELECT 1 FROM grid_auto_resume a JOIN grid_epochs e ON e.id=a.armed_epoch_id WHERE a.bot_id<>e.bot_id)
+  THEN RAISE EXCEPTION 'Grid epoch scope mismatch during publish migration'; END IF;
+  FOR item IN SELECT * FROM (VALUES
+    ('grid_epochs','grid_epochs_control_request_fk','creating_control_request_id','grid_control_requests'),
+    ('grid_epochs','grid_epochs_predecessor_fk','predecessor_id','grid_epochs'),
+    ('grid_bots','grid_bots_active_epoch_fk','active_epoch_id','grid_epochs'),
+    ('grid_levels','grid_levels_epoch_fk','epoch_id','grid_epochs'),
+    ('grid_operations','grid_operations_epoch_fk','epoch_id','grid_epochs'),
+    ('grid_operations','grid_operations_level_epoch_fk','level_id','grid_levels'),
+    ('grid_exact_fills','grid_exact_fills_operation_epoch_fk','operation_id','grid_operations'),
+    ('grid_control_requests','grid_control_origin_epoch_fk','origin_epoch_id','grid_epochs'),
+    ('grid_auto_resume','grid_auto_resume_epoch_fk','armed_epoch_id','grid_epochs')
+  ) AS f(table_name,constraint_name,column_name,parent_table)
+  LOOP
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=item.table_name::regclass AND conname=item.constraint_name
+      AND (contype<>'f' OR cardinality(conkey)<>1 OR confrelid<>item.parent_table::regclass
+        OR conkey<>ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=item.table_name::regclass AND attname=item.column_name)]::smallint[]
+        OR confkey<>ARRAY[(SELECT attnum FROM pg_attribute WHERE attrelid=item.parent_table::regclass AND attname='id')]::smallint[])) THEN
+      EXECUTE format('ALTER TABLE %I DROP CONSTRAINT IF EXISTS %I',item.table_name,item.constraint_name);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=item.table_name::regclass AND conname=item.constraint_name) THEN
+      EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES %I(id)',item.table_name,item.constraint_name,item.column_name,item.parent_table);
+    END IF;
+  END LOOP;
+
+  -- Parents cannot be reassigned to another bot after a child was checked.
+  -- SHARE locks also serialize validation against legacy NULL-epoch backfills.
+  CREATE OR REPLACE FUNCTION grid_validate_epoch_scope() RETURNS trigger LANGUAGE plpgsql AS $scope$
+  DECLARE owner_id uuid; scoped_epoch uuid;
+  BEGIN
+    IF TG_TABLE_NAME='grid_bots' THEN
+      IF TG_OP='UPDATE' THEN
+        IF NEW.id IS DISTINCT FROM OLD.id THEN RAISE EXCEPTION 'Grid scope identity is immutable'; END IF;
+      END IF;
+      owner_id:=NEW.id; scoped_epoch:=NEW.active_epoch_id;
+    ELSE
+      owner_id:=NEW.bot_id;
+      IF TG_OP='UPDATE' THEN
+        IF NEW.bot_id IS DISTINCT FROM OLD.bot_id THEN RAISE EXCEPTION 'Grid scope identity is immutable'; END IF;
+        IF TG_TABLE_NAME='grid_control_requests' THEN
+          IF NEW.id IS DISTINCT FROM OLD.id THEN RAISE EXCEPTION 'Grid scope identity is immutable'; END IF;
+        END IF;
+      END IF;
+      IF TG_TABLE_NAME='grid_epochs' THEN
+        scoped_epoch:=NEW.predecessor_id;
+        IF NEW.creating_control_request_id IS NOT NULL THEN
+          PERFORM 1 FROM grid_control_requests WHERE id=NEW.creating_control_request_id AND bot_id=owner_id FOR SHARE;
+          IF NOT FOUND THEN RAISE EXCEPTION 'Grid epoch scope mismatch'; END IF;
+        END IF;
+      ELSIF TG_TABLE_NAME='grid_control_requests' THEN scoped_epoch:=NEW.origin_epoch_id;
+      ELSE scoped_epoch:=NEW.armed_epoch_id;
+      END IF;
+    END IF;
+    IF scoped_epoch IS NOT NULL THEN
+      PERFORM 1 FROM grid_epochs WHERE id=scoped_epoch AND bot_id=owner_id FOR SHARE;
+      IF NOT FOUND THEN RAISE EXCEPTION 'Grid epoch scope mismatch'; END IF;
+    END IF;
+    RETURN NEW;
+  END $scope$;
+
+  CREATE OR REPLACE FUNCTION grid_assign_epoch() RETURNS trigger LANGUAGE plpgsql AS $assign$
+  DECLARE expected uuid;
+  BEGIN
+    IF TG_OP='UPDATE' THEN
+      IF NEW.bot_id IS DISTINCT FROM OLD.bot_id THEN RAISE EXCEPTION 'Grid scope identity is immutable'; END IF;
+      IF TG_TABLE_NAME<>'grid_exact_fills' THEN
+        IF NEW.id IS DISTINCT FROM OLD.id THEN RAISE EXCEPTION 'Grid scope identity is immutable'; END IF;
+      END IF;
+      IF OLD.epoch_id IS NOT NULL AND NEW.epoch_id IS DISTINCT FROM OLD.epoch_id THEN RAISE EXCEPTION 'Grid epoch identity is immutable'; END IF;
+      expected:=OLD.epoch_id;
+    END IF;
+    IF TG_TABLE_NAME='grid_exact_fills' THEN
+      SELECT epoch_id INTO expected FROM grid_operations WHERE id=NEW.operation_id AND bot_id=NEW.bot_id FOR SHARE;
+      IF NOT FOUND THEN RAISE EXCEPTION 'Grid epoch scope mismatch'; END IF;
+    ELSIF TG_TABLE_NAME='grid_operations' THEN
+      IF NEW.level_id IS NOT NULL THEN
+        SELECT epoch_id INTO expected FROM grid_levels WHERE id=NEW.level_id AND bot_id=NEW.bot_id FOR SHARE;
+        IF NOT FOUND THEN RAISE EXCEPTION 'Grid epoch scope mismatch'; END IF;
+      ELSIF expected IS NULL THEN
+        SELECT active_epoch_id INTO expected FROM grid_bots WHERE id=NEW.bot_id FOR SHARE;
+      END IF;
+    ELSIF expected IS NULL THEN
+      SELECT active_epoch_id INTO expected FROM grid_bots WHERE id=NEW.bot_id FOR SHARE;
+    END IF;
+    IF NEW.epoch_id IS NULL THEN NEW.epoch_id:=expected;
+    ELSIF NEW.epoch_id IS DISTINCT FROM expected THEN RAISE EXCEPTION 'Grid epoch scope mismatch'; END IF;
+    IF NEW.epoch_id IS NOT NULL THEN
+      PERFORM 1 FROM grid_epochs WHERE id=NEW.epoch_id AND bot_id=NEW.bot_id FOR SHARE;
+      IF NOT FOUND THEN RAISE EXCEPTION 'Grid epoch scope mismatch'; END IF;
+    END IF;
+    RETURN NEW;
+  END $assign$;
+
+  -- Replace individually so a partial installation is repaired on the next boot.
+  DROP TRIGGER IF EXISTS grid_epochs_validate_scope ON grid_epochs;
+  CREATE TRIGGER grid_epochs_validate_scope BEFORE INSERT ON grid_epochs FOR EACH ROW EXECUTE FUNCTION grid_validate_epoch_scope();
+  DROP TRIGGER IF EXISTS grid_bots_validate_scope ON grid_bots;
+  CREATE TRIGGER grid_bots_validate_scope BEFORE INSERT OR UPDATE ON grid_bots FOR EACH ROW EXECUTE FUNCTION grid_validate_epoch_scope();
+  DROP TRIGGER IF EXISTS grid_control_validate_scope ON grid_control_requests;
+  CREATE TRIGGER grid_control_validate_scope BEFORE INSERT OR UPDATE ON grid_control_requests FOR EACH ROW EXECUTE FUNCTION grid_validate_epoch_scope();
+  DROP TRIGGER IF EXISTS grid_auto_resume_validate_scope ON grid_auto_resume;
+  CREATE TRIGGER grid_auto_resume_validate_scope BEFORE INSERT OR UPDATE ON grid_auto_resume FOR EACH ROW EXECUTE FUNCTION grid_validate_epoch_scope();
+  DROP TRIGGER IF EXISTS grid_levels_assign_epoch ON grid_levels;
+  CREATE TRIGGER grid_levels_assign_epoch BEFORE INSERT OR UPDATE ON grid_levels FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();
+  DROP TRIGGER IF EXISTS grid_operations_assign_epoch ON grid_operations;
+  CREATE TRIGGER grid_operations_assign_epoch BEFORE INSERT OR UPDATE ON grid_operations FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();
+  DROP TRIGGER IF EXISTS grid_fills_assign_epoch ON grid_exact_fills;
+  CREATE TRIGGER grid_fills_assign_epoch BEFORE INSERT OR UPDATE ON grid_exact_fills FOR EACH ROW EXECUTE FUNCTION grid_assign_epoch();
+END $migration$;`,
+      `ALTER TABLE solana_signed_submit_attempts
+         DROP CONSTRAINT IF EXISTS solana_signed_submit_attempts_provider_valid;
+       ALTER TABLE solana_signed_submit_attempts
+         ADD CONSTRAINT solana_signed_submit_attempts_provider_valid
+         CHECK (rpc_provider IN ('configured_primary', 'configured_backup'))`,
+      `SELECT 1 /* verify retained market entry history; owner publishes DDL */`,
+    ] as const;
+
+const schemaMigrationMetadata = [
+  {
+    "id": "000-create-table-if-not",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "lab_candle_cache_v2",
+        "columns": [
+          "id",
+          "symbol",
+          "timeframe",
+          "time",
+          "open",
+          "high",
+          "low",
+          "close",
+          "volume",
+          "source",
+          "venue",
+          "basis",
+          "proxy",
+          "finality",
+          "time_semantic"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown')",
+          "venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')",
+          "basis IN ('perp', 'spot', 'index', 'unknown')",
+          "proxy IN ('direct', 'proxy', 'unknown')",
+          "finality IN ('finalized', 'forming', 'unknown')",
+          "time_semantic IN ('open_time', 'unknown')"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "001-create-unique-index-if",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_candle_cache_v2",
+        "index": "lab_candle_cache_v2_identity_unique",
+        "columns": [
+          "symbol",
+          "timeframe",
+          "time",
+          "source",
+          "venue",
+          "basis",
+          "proxy",
+          "finality",
+          "time_semantic"
+        ],
+        "unique": true
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "002-create-index-if-not",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_candle_cache_v2",
+        "index": "lab_candle_cache_v2_lookup",
+        "columns": [
+          "symbol",
+          "timeframe",
+          "basis",
+          "finality",
+          "proxy",
+          "time"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "003-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "queue_order"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "004-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "config_snapshot"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "005-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_execution_events",
+        "columns": [
+          "id",
+          "event_identity",
+          "attempt_id",
+          "bot_id",
+          "decision_id",
+          "action",
+          "cause",
+          "event_type",
+          "phase",
+          "protocol",
+          "account_scope",
+          "account_ref",
+          "market",
+          "side",
+          "client_order_id",
+          "venue_order_id",
+          "transaction_signature",
+          "venue_status",
+          "price",
+          "size_base",
+          "fee",
+          "realized_pnl",
+          "failure_code",
+          "recorded_after_broadcast",
+          "observed_at",
+          "recorded_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "action IN ('entry','close','cancel')",
+          "cause IN ('decision','paper','emergency_unwind','protective','user_requested','venue_detected','unconfirmed_orphan','startup_orphan','pre_close_bracket','survivor_leg')",
+          "account_scope IN ('main','bot_subaccount','unknown')",
+          "side IS NULL OR side IN ('long','short')",
+          "venue_status IS NULL OR venue_status IN ('submitted','acknowledged','filled','partial_fill','canceled','expired','rejected','unknown')",
+          "price IS NULL OR price <> 'NaN'::numeric",
+          "size_base IS NULL OR (size_base >= 0 AND size_base <> 'NaN'::numeric)",
+          "fee IS NULL OR (fee >= 0 AND fee <> 'NaN'::numeric)",
+          "realized_pnl IS NULL OR realized_pnl <> 'NaN'::numeric",
+          "failure_code IS NULL OR failure_code IN ('venue_rejected','venue_unconfirmed','venue_error','identity_mismatch','signing_unavailable','position_not_confirmed','bracket_failed','unknown')",
+          "CHECK ( (event_type = 'attempt_claimed' AND phase = 0) OR (event_type = 'prebroadcast_authorized' AND action = 'entry' AND phase = 10) OR (event_type = 'broadcast_attempted' AND action IN ('close','cancel') AND phase = 10) OR (event_type = 'broadcast_result' AND phase = 20) OR (event_type IN ('position_observed','fill_observed','bracket_verified','reconciliation_observed') AND phase IS NULL) OR (event_type IN ('entry_terminal_open','entry_terminal_no_land','entry_terminal_unwound') AND action = 'entry' AND phase = 90) OR (event_type IN ('close_terminal_confirmed','close_terminal_failed') AND action = 'close' AND phase = 90) OR (event_type IN ('cancel_terminal_confirmed','cancel_terminal_failed') AND action = 'cancel' AND phase = 90) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "006-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_execution_events",
+        "index": "idx_ai_trader_execution_attempt",
+        "columns": [
+          "attempt_id",
+          "phase",
+          "observed_at",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "007-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_execution_events",
+        "index": "idx_ai_trader_execution_bot",
+        "columns": [
+          "bot_id",
+          "recorded_at DESC",
+          "id DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "008-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_execution_events",
+        "index": "idx_ai_trader_execution_decision",
+        "columns": [
+          "decision_id",
+          "recorded_at",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "009-create-or-replace-function",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "function:qv_reject_ai_trader_execution_event_mutation",
+        "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname='qv_reject_ai_trader_execution_event_mutation') AS ok"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "010-do--begin-create",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "trigger:ai_trader_execution_events_append_only",
+        "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='ai_trader_execution_events_append_only' AND NOT tgisinternal) AS ok"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "011-create-table-if-not",
+    "capabilities": [
+      "platform"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "platform_cumulative_stats",
+        "columns": [
+          "id",
+          "total_volume",
+          "total_trades",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "012-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_runs",
+        "index": "idx_lab_opt_runs_user_status",
+        "columns": [
+          "user_id",
+          "status",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "013-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_results",
+        "index": "idx_lab_opt_results_run_id",
+        "columns": [
+          "run_id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "014-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "subaccount_auth_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "015-update-trading_bots-set-subaccount_auth_mode",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-009-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM trading_bots WHERE subaccount_auth_mode IS NULL AND bot_subaccount_key_encrypted IS NOT NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "016-update-trading_bots-set-subaccount_auth_mode",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-010-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM trading_bots WHERE subaccount_auth_mode IS NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "017-do--begin-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_subaccount_auth_mode_check",
+        "definitionIncludes": [
+          "CHECK (subaccount_auth_mode IN ('external_key', 'main_plus_id'))"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "018-do--begin-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_external_key_invariant",
+        "definitionIncludes": [
+          "CHECK ( NOT (subaccount_auth_mode = 'external_key' AND subaccount_status = 'active') OR (protocol_subaccount_id IS NOT NULL AND bot_subaccount_key_encrypted IS NOT NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "019-alter-table-trading_bots-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "subaccount_auth_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "020-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "bot_subaccount_key_encrypted_v3"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "021-do--begin-alter",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_external_key_invariant",
+        "definitionIncludes": [
+          "CHECK ( NOT (subaccount_auth_mode = 'external_key' AND subaccount_status = 'active') OR ( protocol_subaccount_id IS NOT NULL AND (bot_subaccount_key_encrypted IS NOT NULL OR bot_subaccount_key_encrypted_v3 IS NOT NULL) ) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "022-do--begin-update",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_active_protocol_check",
+        "definitionIncludes": [
+          "'pacifica'",
+          "'drift'"
+        ]
+      },
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "active_protocol"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "023-create-table-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "referral_links",
+        "columns": [
+          "id",
+          "descendant_wallet",
+          "ancestor_wallet",
+          "level",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (descendant_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "FOREIGN KEY (ancestor_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "UNIQUE (descendant_wallet, level)",
+          "CHECK (descendant_wallet <> ancestor_wallet)",
+          "CHECK (level BETWEEN 1 AND 3)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "024-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_links",
+        "index": "idx_referral_links_ancestor",
+        "columns": [
+          "ancestor_wallet"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "025-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_links",
+        "index": "idx_referral_links_descendant",
+        "columns": [
+          "descendant_wallet"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "026-create-table-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "referral_reward_events",
+        "columns": [
+          "id",
+          "source_type",
+          "source_id",
+          "earner_wallet",
+          "referee_wallet",
+          "level",
+          "amount_usdc",
+          "status",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (earner_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "FOREIGN KEY (referee_wallet) REFERENCES wallets(address) ON DELETE CASCADE",
+          "UNIQUE (source_type, source_id, earner_wallet, level)",
+          "CHECK (level BETWEEN 1 AND 3)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "027-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_reward_events",
+        "index": "idx_referral_reward_events_earner",
+        "columns": [
+          "earner_wallet"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "028-do--begin-if",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "referral_reward_events",
+        "constraint": "referral_reward_events_status_valid",
+        "definitionIncludes": [
+          "CHECK (status IN ('pending','confirmed','paid','failed','processing','voided'))"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "029-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "funding_wallet"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "030-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "transfer_signature"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "031-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "retry_count"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "032-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "last_error"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "033-alter-table-referral_reward_events-add",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "referral_reward_events",
+        "column": "last_attempt_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "034-create-index-if-not",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "referral_reward_events",
+        "index": "idx_referral_reward_events_status_created",
+        "columns": [
+          "status",
+          "created_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "035-insert-into-referral_links-descendant_wallet",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-029-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM wallets w WHERE w.referred_by IS NOT NULL AND w.referred_by <> w.address AND EXISTS (SELECT 1 FROM wallets a WHERE a.address=w.referred_by) AND NOT EXISTS (SELECT 1 FROM referral_links r WHERE r.descendant_wallet=w.address AND r.level=1 AND r.ancestor_wallet=w.referred_by)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "036-insert-into-referral_links-descendant_wallet",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-030-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM wallets w JOIN wallets w2 ON w2.address=w.referred_by WHERE w2.referred_by IS NOT NULL AND w2.referred_by <> w.address AND EXISTS (SELECT 1 FROM wallets a WHERE a.address=w2.referred_by) AND NOT EXISTS (SELECT 1 FROM referral_links r WHERE r.descendant_wallet=w.address AND r.level=2 AND r.ancestor_wallet=w2.referred_by)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "037-insert-into-referral_links-descendant_wallet",
+    "capabilities": [
+      "referrals"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-031-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM wallets w JOIN wallets w2 ON w2.address=w.referred_by JOIN wallets w3 ON w3.address=w2.referred_by WHERE w3.referred_by IS NOT NULL AND w3.referred_by <> w.address AND EXISTS (SELECT 1 FROM wallets a WHERE a.address=w3.referred_by) AND NOT EXISTS (SELECT 1 FROM referral_links r WHERE r.descendant_wallet=w.address AND r.level=3 AND r.ancestor_wallet=w3.referred_by)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "038-alter-table-equity_events-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "equity_events",
+        "column": "tx_block_time"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "039-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_external_deposits"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "040-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_external_withdrawals"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "041-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_internal_transfers"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "042-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "cumulative_trading_pnl"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "043-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "net_external_flow"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "044-alter-table-portfolio_daily_snapshots-add",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "portfolio_daily_snapshots",
+        "column": "pnl_percent"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "045-alter-table-wallets-add",
+    "capabilities": [
+      "notifications"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "daily_summary_enabled"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "046-alter-table-wallets-add",
+    "capabilities": [
+      "notifications"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "daily_summary_last_sent_date"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "047-alter-table-wallets-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "pacifica_builder_approved"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "048-alter-table-wallets-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "pacifica_referral_claimed"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "049-alter-table-wallets-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "hands_off_approved"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "050-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "pacifica_builder_approved"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "051-alter-table-trading_bots-add",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "pacifica_referral_claimed"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "052-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_park_idle"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "053-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_park_due_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "054-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "park_destination_asset"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "055-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "vault_all_out"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "056-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_collateral_top_up"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "057-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "auto_repay_enabled"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "058-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "next_bot_derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "059-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "recovered_orphan_indices"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "060-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_encrypted"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "061-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_last4"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "062-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_provider"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "063-alter-table-wallets-add",
+    "capabilities": [
+      "wallet_security"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "llm_api_key_updated_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "064-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "vault_enabled"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "065-alter-table-wallets-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "vault_default_asset"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "066-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "067-alter-table-trading_bots-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "trading_bots",
+        "column": "derivation_path_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "068-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_derivation_index_positive",
+        "definitionIncludes": [
+          "CHECK (derivation_index IS NULL OR derivation_index >= 1)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "069-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_derivation_dual_model",
+        "definitionIncludes": [
+          "CHECK ( (derivation_index IS NULL AND derivation_path_version IS NULL) OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "070-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_wallet_derivation_index_unique",
+        "definitionIncludes": [
+          "UNIQUE (wallet_address, derivation_index)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "071-alter-table-protocol_subaccounts-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "protocol_subaccounts",
+        "column": "derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "072-alter-table-protocol_subaccounts-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "protocol_subaccounts",
+        "column": "derivation_path_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "073-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "protocol_subaccounts",
+        "constraint": "protocol_subaccounts_derivation_index_positive",
+        "definitionIncludes": [
+          "CHECK (derivation_index IS NULL OR derivation_index >= 1)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "074-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "protocol_subaccounts",
+        "constraint": "protocol_subaccounts_derivation_dual_model",
+        "definitionIncludes": [
+          "CHECK ( (derivation_index IS NULL AND derivation_path_version IS NULL) OR (derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "075-insert-into-lab_strategies-user_id",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-069-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM lab_strategies src WHERE src.user_id='BuhEYpvrWV1y18jZoY8Hgfyf2pj3nqYXvmPefvBVzk41' AND src.name IN ('SBR v1 – Structure Break & Retest','Adaptive Regime V3.8') AND NOT EXISTS (SELECT 1 FROM lab_strategies dest WHERE dest.user_id='AqTTQQajeKDjbDU5sb6JoQfTJ8HfHzpjne2sFmYthCez' AND dest.name=src.name)) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "076-do--begin-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "trading_bots",
+        "constraint": "trading_bots_active_protocol_check",
+        "definitionIncludes": [
+          "'pacifica'",
+          "'drift'",
+          "'flash'"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "077-alter-table-bot_trades-alter",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "bot_trades",
+        "column": "protocol"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "078-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "oos_fraction"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "079-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "slippage"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "080-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "parity_match"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "081-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "parity_diffs"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "082-alter-table-lab_optimization_results-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_results",
+        "column": "is_metrics"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "083-alter-table-lab_optimization_results-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_results",
+        "column": "oos_metrics"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "084-create-table-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "lab_agent_tasks",
+        "columns": [
+          "id",
+          "wallet_address",
+          "status",
+          "mode",
+          "goal",
+          "plan",
+          "memory",
+          "active_run_id",
+          "owned_run_ids",
+          "loop_count",
+          "spend_estimate_usd",
+          "stop_reason",
+          "last_reconciled_at",
+          "awaiting_since",
+          "cancel_requested_at",
+          "toolkit_version",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "085-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_agent_tasks",
+        "index": "idx_lab_agent_tasks_wallet_status",
+        "columns": [
+          "wallet_address",
+          "status"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "086-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_task_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "087-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_idempotency_key"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "088-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_correlation_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "089-alter-table-lab_optimization_runs-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_optimization_runs",
+        "column": "agent_owned"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "090-create-unique-index-if",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_runs",
+        "index": "uq_lab_opt_runs_agent_idem",
+        "columns": [
+          "user_id",
+          "agent_task_id",
+          "agent_idempotency_key"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "agent_idempotency_key IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "091-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_optimization_runs",
+        "index": "idx_lab_opt_runs_agent_task",
+        "columns": [
+          "agent_task_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "agent_task_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "092-create-table-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "lab_agent_messages",
+        "columns": [
+          "id",
+          "task_id",
+          "role",
+          "content",
+          "suggested_actions",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "role IN ('user','agent','tool')"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "093-create-index-if-not",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "lab_agent_messages",
+        "index": "idx_lab_agent_messages_task_created",
+        "columns": [
+          "task_id",
+          "created_at",
+          "id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "094-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_state"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "095-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_lease"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "096-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_lease_expires_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "097-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "turn_state_changed_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "098-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "step_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "099-alter-table-lab_agent_tasks-add",
+    "capabilities": [
+      "lab"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "lab_agent_tasks",
+        "column": "current_step"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "100-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "vault_positions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "asset_key",
+          "mint",
+          "token_amount_raw",
+          "usdc_cost_basis",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "101-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "idx_vault_positions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "102-alter-table-vault_positions-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "vault_positions",
+        "column": "trading_bot_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "103-create-unique-index-if",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "vault_positions_account_unique",
+        "columns": [
+          "wallet_address",
+          "asset_key"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "trading_bot_id IS NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "104-create-unique-index-if",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "vault_positions_bot_unique",
+        "columns": [
+          "wallet_address",
+          "trading_bot_id",
+          "asset_key"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "trading_bot_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "105-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "vault_positions",
+        "index": "idx_vault_positions_bot",
+        "columns": [
+          "trading_bot_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "trading_bot_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "106-alter-table-vault_positions-drop",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint_absent",
+        "table": "vault_positions",
+        "constraint": "vault_positions_wallet_asset_unique"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "107-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "yield_price_snapshots",
+        "columns": [
+          "id",
+          "asset_key",
+          "price_usdc_per_token",
+          "as_of"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "108-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "yield_price_snapshots",
+        "index": "idx_yield_price_snapshots_asset_time",
+        "columns": [
+          "asset_key",
+          "as_of"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "109-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "yield_apy_cache",
+        "columns": [
+          "asset_key",
+          "apy",
+          "apy_base",
+          "apy_reward",
+          "apy_mean_30d",
+          "source",
+          "pool_id",
+          "as_of"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (asset_key)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "110-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "loop_rate_samples",
+        "columns": [
+          "id",
+          "vault_id",
+          "symbol",
+          "staking_apy",
+          "staking_apy_mean_30d",
+          "borrow_apr",
+          "withdraw_utilization",
+          "net_carry_2x",
+          "liquidation_threshold",
+          "as_of"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "111-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_rate_samples",
+        "index": "idx_loop_rate_samples_vault_time",
+        "columns": [
+          "vault_id",
+          "as_of"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "112-alter-table-loop_rate_samples-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "loop_rate_samples",
+        "column": "liquidation_threshold"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "113-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "borrow_positions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "trading_bot_id",
+          "debt_venue",
+          "venue_vault_id",
+          "venue_position_id",
+          "collateral_asset_key",
+          "collateral_mint",
+          "collateral_amount_raw",
+          "debt_asset_key",
+          "debt_mint",
+          "debt_amount_raw",
+          "attributed_bot_id",
+          "status",
+          "health_snapshot",
+          "health_as_of",
+          "health_source",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "114-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_positions",
+        "index": "idx_borrow_positions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "115-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_positions",
+        "index": "idx_borrow_positions_bot",
+        "columns": [
+          "trading_bot_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "trading_bot_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "116-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "venue_position_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "117-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_observed_health_band"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "118-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "health_band_changed_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "119-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_health_alert_band"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "120-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_health_alert_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "121-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_auto_topup_attempt_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "122-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "kind"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "123-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "policy_state"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "124-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "policy_reason"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "125-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "policy_state_changed_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "126-alter-table-borrow_positions-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_positions",
+        "column": "last_policy_action_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "127-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "loop_policy_decisions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "borrow_position_id",
+          "vault_id",
+          "tick",
+          "action",
+          "fraction",
+          "reason",
+          "details",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "128-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_policy_decisions",
+        "index": "idx_loop_policy_decisions_vault_time",
+        "columns": [
+          "vault_id",
+          "created_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "129-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_policy_decisions",
+        "index": "idx_loop_policy_decisions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "130-create-table-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "loop_tick_heartbeats",
+        "columns": [
+          "id",
+          "tick",
+          "evaluated",
+          "acted",
+          "failed",
+          "skipped",
+          "skip_reason_counts",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "131-alter-table-loop_tick_heartbeats-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "loop_tick_heartbeats",
+        "column": "skipped"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "132-alter-table-loop_tick_heartbeats-add",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "loop_tick_heartbeats",
+        "column": "skip_reason_counts"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "133-create-index-if-not",
+    "capabilities": [
+      "sol_loop"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "loop_tick_heartbeats",
+        "index": "idx_loop_tick_heartbeats_tick_time",
+        "columns": [
+          "tick",
+          "created_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "134-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "borrow_operations",
+        "columns": [
+          "id",
+          "wallet_address",
+          "borrow_position_id",
+          "operation_type",
+          "status",
+          "step",
+          "tx_signatures",
+          "error",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "135-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_operations",
+        "index": "idx_borrow_operations_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "136-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_operations",
+        "index": "idx_borrow_operations_position",
+        "columns": [
+          "borrow_position_id"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "borrow_position_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "137-alter-table-borrow_operations-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_operations",
+        "column": "client_request_id"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "138-alter-table-borrow_operations-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_operations",
+        "column": "metadata"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "139-alter-table-borrow_operations-add",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "borrow_operations",
+        "column": "result"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "140-create-unique-index-if",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "borrow_operations",
+        "index": "uq_borrow_operations_client_req",
+        "columns": [
+          "wallet_address",
+          "client_request_id"
+        ],
+        "unique": true,
+        "predicateIncludes": [
+          "client_request_id IS NOT NULL"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "141-create-table-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "fy_positions",
+        "columns": [
+          "id",
+          "wallet_address",
+          "venue",
+          "market_address",
+          "venue_vault_address",
+          "pt_mint",
+          "pt_decimals",
+          "underlying_mint",
+          "underlying_symbol",
+          "pt_amount_raw",
+          "cost_basis_usdc",
+          "implied_apy_at_entry",
+          "maturity_at",
+          "status",
+          "notified_maturity_at",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "142-create-index-if-not",
+    "capabilities": [
+      "vault"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "fy_positions",
+        "index": "idx_fy_positions_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "143-create-table-if-not",
+    "capabilities": [
+      "oracle"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "oracle_price_snapshots",
+        "columns": [
+          "id",
+          "feed_id",
+          "symbol",
+          "price_usd",
+          "publish_time_sec",
+          "taken_at",
+          "source"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "144-create-index-if-not",
+    "capabilities": [
+      "oracle"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "oracle_price_snapshots",
+        "index": "idx_oracle_snapshots_feed_taken",
+        "columns": [
+          "feed_id",
+          "taken_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "145-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "scanner_incident_holds",
+        "columns": [
+          "id",
+          "state",
+          "active_slot",
+          "export_row_count",
+          "export_digest",
+          "created_at",
+          "canary_started_at",
+          "exported_at",
+          "released_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "state IN ('baseline', 'canary', 'exported', 'released')",
+          "CHECK ( (state = 'released' AND active_slot IS NULL) OR (state <> 'released' AND active_slot = 1) )",
+          "CHECK ( (state IN ('exported', 'released') AND export_row_count IS NOT NULL AND export_digest IS NOT NULL) OR (state IN ('baseline', 'canary') AND export_row_count IS NULL AND export_digest IS NULL) )"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "146-create-unique-index-if",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "scanner_incident_holds",
+        "index": "scanner_incident_holds_active_slot_unique",
+        "columns": [
+          "active_slot"
+        ],
+        "unique": true
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "147-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "scanner_incident_occurrences",
+        "columns": [
+          "event_id",
+          "hold_id",
+          "window",
+          "fingerprint",
+          "observed_at",
+          "category",
+          "source",
+          "summary",
+          "context"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (event_id)",
+          "FOREIGN KEY (hold_id) REFERENCES scanner_incident_holds(id) ON DELETE CASCADE",
+          "\"window\" IN ('baseline', 'canary')",
+          "category = 'scanner'"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "148-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "scanner_incident_occurrences",
+        "index": "scanner_incident_occurrences_hold_order_idx",
+        "columns": [
+          "hold_id",
+          "observed_at",
+          "event_id"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "149-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "scanner_incident_occurrences",
+        "index": "scanner_incident_occurrences_hold_fingerprint_idx",
+        "columns": [
+          "hold_id",
+          "fingerprint"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "150-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_bots",
+        "columns": [
+          "id",
+          "wallet_address",
+          "protocol",
+          "protocol_subaccount_id",
+          "market",
+          "timeframe",
+          "mode",
+          "risk_profile",
+          "paper_mode",
+          "auto_next",
+          "model",
+          "allocated_usdc",
+          "max_leverage",
+          "stop_policy",
+          "park_when_idle",
+          "graduation_state",
+          "graduation_criteria",
+          "trial_started_at",
+          "graduated_at",
+          "policy_hmac",
+          "status",
+          "pause_reason",
+          "daily_realized_pnl",
+          "consecutive_losses",
+          "created_at",
+          "updated_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "151-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_bots",
+        "index": "idx_ai_trader_bots_wallet",
+        "columns": [
+          "wallet_address"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "152-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_bots",
+        "index": "idx_ai_trader_bots_status",
+        "columns": [
+          "status"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "153-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_decisions",
+        "columns": [
+          "id",
+          "bot_id",
+          "context_digest",
+          "raw_decision",
+          "clamped_decision",
+          "guardrail_violations",
+          "outcome",
+          "entry_price",
+          "exit_price",
+          "exit_reason",
+          "realized_pnl",
+          "fees_paid",
+          "llm_cost_usd",
+          "llm_latency_ms",
+          "decided_at",
+          "closed_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "FOREIGN KEY (bot_id) REFERENCES ai_trader_bots(id) ON DELETE CASCADE"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "154-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_decisions",
+        "index": "idx_ai_trader_decisions_bot_decided",
+        "columns": [
+          "bot_id",
+          "decided_at DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "155-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_decisions",
+        "index": "idx_ai_trader_decisions_executed",
+        "columns": [
+          "bot_id",
+          "decided_at DESC"
+        ],
+        "unique": false,
+        "predicateIncludes": [
+          "outcome = 'executed'"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "156-alter-table-wallets-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "wallets",
+        "column": "ai_trader_free_calls_used"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "157-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "bot_subaccount_key_encrypted_v3"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "158-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "derivation_index"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "159-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "derivation_path_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "160-alter-table-ai_trader_decisions-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_decisions",
+        "column": "model_used"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "161-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "current_qualification_era_digest"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "162-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "graduated_qualification_era_digest"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "163-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "qualification_era_invalidation_reason"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "164-alter-table-ai_trader_decisions-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_decisions",
+        "column": "qualification_era_digest"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "165-update-ai_trader_decisions-d-set",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "migration-150-backfill",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM ai_trader_decisions d JOIN ai_trader_bots b ON b.id=d.bot_id WHERE d.model_used IS NULL) AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "166-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "sizing_mode"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "167-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "risk_min_pct"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "168-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "risk_max_pct"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "169-create-table-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "cot_snapshots",
+        "columns": [
+          "id",
+          "report_date",
+          "commercial_net",
+          "noncomm_net",
+          "nonrept_net",
+          "dumb_net",
+          "comm_index",
+          "noncomm_index",
+          "nonrept_index",
+          "dumb_index",
+          "state",
+          "weeks_in_window",
+          "fetched_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "170-create-index-if-not",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "cot_snapshots",
+        "index": "idx_cot_snapshots_report_date",
+        "columns": [
+          "report_date DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "171-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "playbook"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "172-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "playbook_version"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "173-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "playbook_updated_at"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "174-alter-table-ai_trader_bots-add",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "ai_trader_bots",
+        "column": "market_source"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "175-create-index-if-not",
+    "capabilities": [
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "equity_events",
+        "index": "idx_equity_events_bot_created",
+        "columns": [
+          "trading_bot_id",
+          "created_at DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "176-scrub-rogue-avax-close",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "rogue-avax-close-491abec1-absent",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM bot_trades WHERE id='491abec1-39c2-42c5-8963-e5f4fb644b3a') AS ok"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "177-repair-zec-link-close-fee-pnl",
+    "capabilities": [
+      "signal_bot"
+    ],
+    "requirements": [
+      {
+        "kind": "data",
+        "identity": "zec-link-close-fee-pnl-venue-truth",
+        "checkSql": "SELECT COUNT(*) = 3 AS ok FROM bot_trades WHERE (id='d1d024a2-05b2-4d4b-8648-2ee445534716' AND fee=1.113780 AND pnl=-1.22) OR (id='e31fba28-bba3-4be1-85a0-b5b5c96d6825' AND fee=0.195549 AND pnl=-1.39) OR (id='b35049e2-44d2-4137-9259-6bbd1a7a75d0' AND fee=1.907666 AND pnl=382.03)"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "178-create-ai-trader-qualification-records",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_qualification_records",
+        "columns": [
+          "id",
+          "bot_id",
+          "qualification_era_digest",
+          "trial_started_at",
+          "evaluated_at",
+          "criteria",
+          "allocation_usdc",
+          "decision_ids",
+          "equity_series",
+          "equity_series_digest",
+          "trade_count",
+          "net_pnl",
+          "fees",
+          "profit_factor",
+          "max_drawdown_pct",
+          "open_position_mtm",
+          "leverage_observation",
+          "evidence_source_digest",
+          "created_at"
+        ]
+      },
+      {
+        "kind": "index",
+        "table": "ai_trader_qualification_records",
+        "index": "idx_ai_trader_qualification_records_bot_evaluated",
+        "columns": [
+          "bot_id",
+          "evaluated_at DESC"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "179-pin-bot-trades-pnl-convention",
+    "capabilities": [
+      "signal_bot",
+      "portfolio"
+    ],
+    "requirements": [
+      {
+        "kind": "column",
+        "table": "bot_trades",
+        "column": "pnl_convention"
+      },
+      {
+        "kind": "column",
+        "table": "bot_trades",
+        "column": "fee_truth_status"
+      },
+      {
+        "kind": "constraint",
+        "table": "bot_trades",
+        "constraint": "bot_trades_pnl_convention_check",
+        "definitionIncludes": [
+          "pnl_convention IN ('net_of_close_fee', 'gross_before_close_fee')"
+        ]
+      },
+      {
+        "kind": "constraint",
+        "table": "bot_trades",
+        "constraint": "bot_trades_fee_truth_status_check",
+        "definitionIncludes": [
+          "fee_truth_status IN ('legacy_unverified', 'venue_exact_repaired', 'current_pipeline')"
+        ]
+      },
+      {
+        "kind": "data",
+        "identity": "bot-trades-pnl-convention-classified",
+        "checkSql": "SELECT NOT EXISTS (SELECT 1 FROM bot_trades WHERE pnl_convention IS NULL OR pnl_convention NOT IN ('net_of_close_fee','gross_before_close_fee') OR fee_truth_status IS NULL OR fee_truth_status NOT IN ('legacy_unverified','venue_exact_repaired','current_pipeline')) AND COUNT(*) FILTER (WHERE id IN ('d1d024a2-05b2-4d4b-8648-2ee445534716','e31fba28-bba3-4be1-85a0-b5b5c96d6825','b35049e2-44d2-4137-9259-6bbd1a7a75d0') AND fee_truth_status='venue_exact_repaired') = COUNT(*) FILTER (WHERE id IN ('d1d024a2-05b2-4d4b-8648-2ee445534716','e31fba28-bba3-4be1-85a0-b5b5c96d6825','b35049e2-44d2-4137-9259-6bbd1a7a75d0')) AS ok FROM bot_trades"
+      }
+    ],
+    "operation": "backfill"
+  },
+  {
+    "id": "180-create-ai-trader-scanner-candidate-claims",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "table",
+        "table": "ai_trader_scanner_candidate_claims",
+        "columns": [
+          "id",
+          "wallet_address",
+          "boundary_start",
+          "market",
+          "bot_id",
+          "protocol",
+          "candidate_timeframe",
+          "expires_at",
+          "created_at"
+        ],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "181-create-ai-trader-scanner-candidate-claim-indexes",
+    "capabilities": [
+      "ai_trader"
+    ],
+    "requirements": [
+      {
+        "kind": "index",
+        "table": "ai_trader_scanner_candidate_claims",
+        "index": "ai_trader_scanner_claims_wallet_boundary_market_unique",
+        "columns": [
+          "wallet_address",
+          "boundary_start",
+          "market"
+        ],
+        "unique": true
+      },
+      {
+        "kind": "index",
+        "table": "ai_trader_scanner_candidate_claims",
+        "index": "ai_trader_scanner_candidate_claims_expires_at_idx",
+        "columns": [
+          "expires_at"
+        ],
+        "unique": false
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "182-extend-lab-candle-cache-hyperliquid-provenance",
+    "capabilities": [
+      "lab_scanner"
+    ],
+    "requirements": [
+      {
+        "kind": "constraint",
+        "table": "lab_candle_cache_v2",
+        "constraint": "lab_candle_cache_v2_source_check",
+        "definitionIncludes": [
+          "source IN ('okx', 'gate', 'pyth', 'hyperliquid', 'unknown')"
+        ]
+      },
+      {
+        "kind": "constraint",
+        "table": "lab_candle_cache_v2",
+        "constraint": "lab_candle_cache_v2_venue_check",
+        "definitionIncludes": [
+          "venue IN ('okx', 'gate', 'hyperliquid', 'none', 'unknown')"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "183-add-ai-trader-price-excursion-observation",
+    "capabilities": ["ai_trader"],
+    "requirements": [
+      { "kind": "column", "table": "ai_trader_decisions", "column": "price_excursion" },
+      {
+        "kind": "data",
+        "identity": "ai-trader-price-excursion-nullable-jsonb",
+        "checkSql": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'ai_trader_decisions' AND column_name = 'price_excursion' AND data_type = 'jsonb' AND is_nullable = 'YES') AS ok"
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "184-add-live-breakeven-protective-journal-claim",
+    "capabilities": ["ai_trader"],
+    "requirements": [
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "authority_fingerprint" },
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "position_fingerprint" },
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "bracket_fingerprint" },
+      { "kind": "column", "table": "ai_trader_execution_events", "column": "attempt_ordinal" },
+      {
+        "kind": "data",
+        "identity": "ai-trader-live-breakeven-claim-column-shape",
+        "checkSql": "SELECT COUNT(*) = 4 AS ok FROM (VALUES ('authority_fingerprint','text'),('position_fingerprint','text'),('bracket_fingerprint','text'),('attempt_ordinal','smallint')) AS expected(column_name,data_type) JOIN information_schema.columns actual ON actual.column_name=expected.column_name AND actual.table_schema='public' AND actual.table_name='ai_trader_execution_events' AND actual.data_type=expected.data_type AND actual.is_nullable='YES'"
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_events_action_check",
+        "definitionIncludes": ["action IN ('entry', 'close', 'cancel', 'protective')"]
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_phase_check",
+        "definitionIncludes": [
+          "event_type = 'attempt_claimed'",
+          "phase = 0"
+        ]
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_events_cause_check",
+        "definitionIncludes": ["cause IN ('decision', 'paper', 'emergency_unwind', 'protective', 'user_requested', 'venue_detected', 'unconfirmed_orphan', 'startup_orphan', 'pre_close_bracket', 'survivor_leg')"]
+      },
+      {
+        "kind": "constraint",
+        "table": "ai_trader_execution_events",
+        "constraint": "ai_trader_execution_protective_claim_check",
+        "definitionIncludes": [
+          "action = 'protective'",
+          "phase = 0",
+          "action <> 'protective'",
+          "attempt_ordinal >= 1",
+          "attempt_ordinal <= 5"
+        ]
+      }
+    ],
+    "operation": "ddl"
+  },
+  {
+    "id": "185-add-solana-signed-submit-durability",
+    "capabilities": ["referrals"],
+    "requirements": [
+      { "kind": "column", "table": "pending_profit_shares", "column": "referral_legs_initialized_at" },
+      { "kind": "column", "table": "pending_profit_shares", "column": "processing_claim_token" },
+      { "kind": "column", "table": "pending_profit_shares", "column": "processing_claimed_from_status" },
+      { "kind": "constraint", "table": "pending_profit_shares", "constraint": "pending_profit_shares_processing_claimed_from_status_valid", "definitionIncludes": ["processing_claimed_from_status IS NULL", "processing_claimed_from_status IN ('pending', 'deferred')"] },
+      { "kind": "column", "table": "referral_reward_events", "column": "processing_claim_token" },
+      { "kind": "column", "table": "referral_reward_events", "column": "processing_claimed_from_status" },
+      { "kind": "column", "table": "referral_reward_events", "column": "released_at" },
+      { "kind": "constraint", "table": "referral_reward_events", "constraint": "referral_reward_events_processing_claimed_from_status_valid", "definitionIncludes": ["processing_claimed_from_status IS NULL", "processing_claimed_from_status IN ('pending', 'failed')"] },
+      { "kind": "constraint", "table": "referral_reward_events", "constraint": "referral_reward_events_status_valid", "definitionIncludes": ["status IN ('pending', 'confirmed', 'paid', 'failed', 'processing', 'voided', 'awaiting_creator')"] },
+      {
+        "kind": "table",
+        "table": "solana_signed_submit_attempts",
+        "columns": ["id", "operation_type", "operation_id", "deterministic_signature", "blockhash", "last_valid_block_height", "rpc_provider", "status", "last_error", "created_at", "updated_at"],
+        "constraintDefinitions": [
+          "PRIMARY KEY (id)",
+          "operation_type IN ('profit_share_creator', 'referral_reward')",
+          "status IN ('confirmation_pending', 'confirmed_success', 'confirmed_failure', 'expired_without_status')",
+          "UNIQUE (operation_type, operation_id, deterministic_signature)"
+        ]
+      },
+      { "kind": "index", "table": "solana_signed_submit_attempts", "index": "solana_signed_submit_attempts_active_unique", "columns": ["operation_type", "operation_id"], "unique": true, "predicateIncludes": ["status = 'confirmation_pending'"] },
+      { "kind": "constraint", "table": "solana_signed_submit_attempts", "constraint": "solana_signed_submit_attempts_provider_valid" }
+    ],
+    "operation": "ddl"
+  },
+{
+  "id": "186-phoenix-identity-and-operations",
+  "capabilities": [
+    "phoenix"
+  ],
+  "requirements": [
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_active_protocol_check",
+      "definitionIncludes": ["'phoenix'"]
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_authority_wallet"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_trader_account"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_network"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_program_address"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_portfolio_index"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "phoenix_subaccount_index"
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_phoenix_identity_check",
+      "definitionIncludes": [
+        "(active_protocol <> 'phoenix' AND phoenix_authority_wallet IS NULL AND phoenix_trader_account IS NULL AND phoenix_network IS NULL AND phoenix_program_address IS NULL AND phoenix_portfolio_index IS NULL AND phoenix_subaccount_index IS NULL)\n          OR (active_protocol = 'phoenix' AND phoenix_authority_wallet IS NOT NULL AND phoenix_trader_account IS NOT NULL\n            AND phoenix_network IS NOT NULL AND phoenix_program_address IS NOT NULL AND phoenix_portfolio_index IS NOT NULL AND phoenix_subaccount_index IS NOT NULL\n            AND derivation_index IS NOT NULL AND derivation_path_version IS NOT NULL AND protocol_subaccount_id IS NOT NULL\n            AND phoenix_authority_wallet <> phoenix_trader_account AND phoenix_network = 'solana-mainnet'\n            AND phoenix_program_address = 'EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih'\n            AND phoenix_authority_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$' AND phoenix_trader_account ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'\n            AND phoenix_portfolio_index = 0 AND phoenix_subaccount_index = 0 AND derivation_index >= 1 AND derivation_path_version = 1\n            AND protocol_subaccount_id = phoenix_trader_account)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "trading_bots",
+      "index": "trading_bots_phoenix_authority_unique",
+      "columns": [
+        "phoenix_network",
+        "phoenix_program_address",
+        "phoenix_authority_wallet"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "trading_bots",
+      "index": "trading_bots_phoenix_trader_unique",
+      "columns": [
+        "phoenix_network",
+        "phoenix_program_address",
+        "phoenix_trader_account"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "table",
+      "table": "phoenix_operations",
+      "columns": [
+        "id",
+        "bot_id",
+        "request_key",
+        "kind",
+        "intent",
+        "intent_hash",
+        "state",
+        "revision",
+        "observation",
+        "created_at",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "UNIQUE (bot_id, request_key)",
+        "CHECK (state IN ('prepared','submission_pending','queued','unknown','completed','failed','dropped'))",
+        "CHECK (revision >= 0 AND length(request_key) >= 1 AND length(request_key) <= 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object')",
+        "FOREIGN KEY (bot_id) REFERENCES trading_bots(id)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "phoenix_operation_attempts",
+      "columns": [
+        "id",
+        "operation_id",
+        "attempt_number",
+        "signature",
+        "blockhash",
+        "last_valid_block_height",
+        "transaction_hash",
+        "state",
+        "created_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "UNIQUE (operation_id, attempt_number)",
+        "UNIQUE (signature)",
+        "CHECK (state IN ('submission_pending','confirmed','failed','expired'))",
+        "FOREIGN KEY (operation_id) REFERENCES phoenix_operations(id)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_operations_active_unique",
+      "columns": [
+        "bot_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "state <> ALL (ARRAY['completed','failed','dropped'])"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_operations_registration_unique",
+      "columns": [
+        "bot_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "kind = 'register'"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operation_attempts",
+      "index": "phoenix_attempt_pending_unique",
+      "columns": [
+        "operation_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "state = 'submission_pending'"
+      ]
+    },
+    {
+      "kind": "data",
+      "identity": "phoenix-immutable-trigger",
+      "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'trading_bots'::regclass AND tgname = 'trading_bots_phoenix_identity_immutable' AND tgenabled = 'O' AND NOT tgisinternal) AS ok"
+    }
+  ],
+  "operation": "ddl"
+},
+{
+  "id": "187-phoenix-order-intents",
+  "capabilities": [
+    "phoenix"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "phoenix_order_intents",
+      "columns": [
+        "id",
+        "bot_id",
+        "request_key",
+        "sequence",
+        "intent",
+        "intent_hash",
+        "state",
+        "revision",
+        "data",
+        "created_at",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "UNIQUE (bot_id, request_key)",
+        "UNIQUE (bot_id, sequence)",
+        "CHECK (state IN ('admitted','funding','signing','submission_pending','accepted','landed','unknown','settled','rejected'))",
+        "CHECK (sequence > 0 AND revision >= 0 AND length(request_key) >= 1 AND length(request_key) <= 200 AND length(intent_hash) = 64 AND intent_hash ~ '^[0-9a-f]{64}$' AND jsonb_typeof(intent) = 'object' AND jsonb_typeof(data) = 'object')",
+        "FOREIGN KEY (bot_id) REFERENCES trading_bots(id)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_order_intents",
+      "index": "phoenix_order_active_unique",
+      "columns": [
+        "bot_id"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "state <> ALL (ARRAY['settled','rejected'])"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_order_intents",
+      "index": "phoenix_order_signature_unique",
+      "unique": true,
+      "columns": ["((data -> 'attempt') ->> 'signature')"],
+      "predicateIncludes": ["((data -> 'attempt') ->> 'signature') IS NOT NULL"]
+    }
+  ]
+},
+{
+  "id": "188-phoenix-protection-safety",
+  "capabilities": [
+    "phoenix"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "phoenix_operations",
+      "columns": [
+        "kind",
+        "intent",
+        "observation"
+      ],
+      "constraintDefinitions": [
+        "CHECK (kind IN ('register','deposit','withdraw','transfer','protection'))"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "phoenix_operation_attempts",
+      "columns": [
+        "attempt_number"
+      ],
+      "constraintDefinitions": [
+        "CHECK (attempt_number >= 1 AND attempt_number <= 256 AND last_valid_block_height >= 0 AND length(signature) >= 64 AND length(signature) <= 88 AND length(blockhash) >= 32 AND length(blockhash) <= 44 AND length(transaction_hash) = 64 AND transaction_hash ~ '^[0-9a-f]{64}$')"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_operations_active_unique",
+      "unique": true,
+      "columns": [
+        "bot_id"
+      ],
+      "predicateIncludes": [
+        "state <> ALL (ARRAY['completed', 'failed', 'dropped'])",
+        "kind <> 'protection'"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "phoenix_operations",
+      "index": "phoenix_protection_replace_unique",
+      "unique": true,
+      "columns": [
+        "bot_id"
+      ],
+      "predicateIncludes": [
+        "kind = 'protection'",
+        "state <> ALL (ARRAY['completed', 'failed', 'dropped'])",
+        "(((intent -> 'protection') -> 'request') ->> 'action') = ANY (ARRAY['replace', 'breakeven'])"
+      ]
+    }
+  ]
+}
+,
+{
+  "id": "189-phoenix-accounting",
+  "capabilities": ["phoenix"],
+  "operation": "ddl",
+  "requirements": [
+    { "kind": "table", "table": "phoenix_accounting_state", "columns": ["bot_id", "revision", "status", "origin", "snapshot"],
+      "constraintDefinitions": ["PRIMARY KEY (bot_id)", "CHECK (revision >= 1)", "CHECK (status IN ('complete','unknown'))"] },
+    { "kind": "table", "table": "phoenix_accounting_events", "columns": ["bot_id", "event_id", "data"], "constraintDefinitions": ["PRIMARY KEY (bot_id,event_id)"] },
+    { "kind": "table", "table": "phoenix_position_epochs", "columns": ["bot_id", "epoch_id", "opened_at", "data", "payout_provenance"], "constraintDefinitions": ["PRIMARY KEY (bot_id,epoch_id)"] },
+    { "kind": "table", "table": "phoenix_equity_snapshots", "columns": ["bot_id", "snapshot_hash", "data"], "constraintDefinitions": ["PRIMARY KEY (bot_id,snapshot_hash)"] }
+  ]
+}
+,
+{
+  "id": "190-phoenix-parking",
+  "capabilities": ["phoenix"],
+  "operation": "ddl",
+  "requirements": [
+    { "kind": "table", "table": "phoenix_parking_intents", "columns": ["id", "bot_id", "request_key", "intent", "intent_hash", "state", "revision", "legs"],
+      "constraintDefinitions": ["PRIMARY KEY (id)", "UNIQUE (bot_id,request_key)", "CHECK (revision >= 0)", "CHECK (state IN ('active','completed','cancelled','attention'))"] },
+    { "kind": "index", "table": "phoenix_parking_intents", "index": "phoenix_parking_active_unique", "columns": ["bot_id"], "unique": true,
+      "predicateIncludes": ["state = ANY (ARRAY['active', 'attention'])"] },
+    { "kind": "index", "table": "phoenix_parking_intents", "index": "phoenix_parking_borrow_unique", "columns": ["bot_id", "(intent ->> 'borrowAuthorizationId')"], "unique": true,
+      "predicateIncludes": ["(intent ->> 'borrowAuthorizationId') IS NOT NULL"] }
+  ]
+}
+,
+{
+  "id": "191-phoenix-ai-trader",
+  "capabilities": ["phoenix"],
+  "operation": "ddl",
+  "requirements": [
+    { "kind": "table", "table": "ai_trader_bots", "columns": ["phoenix_execution_bot_id", "phoenix_binding"],
+      "constraintDefinitions": ["phoenix_execution_bot_id IS NULL", "phoenix_binding IS NULL"] },
+    { "kind": "table", "table": "phoenix_ai_executions", "columns": ["bot_id", "decision_id", "execution_bot_id", "intent", "authority", "policy_hash", "state"],
+      "constraintDefinitions": ["PRIMARY KEY (bot_id,decision_id)", "state = ANY", "'attention'"] },
+    { "kind": "index", "table": "ai_trader_bots", "index": "ai_trader_phoenix_custody_unique", "columns": ["phoenix_execution_bot_id"], "unique": true,
+      "predicateIncludes": ["phoenix_execution_bot_id IS NOT NULL"] },
+    { "kind": "index", "table": "phoenix_ai_executions", "index": "phoenix_ai_execution_active_unique", "columns": ["bot_id"], "unique": true,
+      "predicateIncludes": ["state = ANY (ARRAY['prepared', 'open', 'attention'])"] }
+  ]
+},
+{
+  "id": "192-grid-bot-drafts",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "grid_bots",
+      "columns": [
+        "id",
+        "wallet_address",
+        "protocol",
+        "protocol_subaccount_id",
+        "name",
+        "client_request_id",
+        "market",
+        "server_intent_digest",
+        "draft_revision",
+        "create_intent",
+        "authority_snapshot",
+        "upper_price",
+        "lower_price",
+        "start_price",
+        "grid_count",
+        "direction",
+        "total_investment",
+        "leverage",
+        "entry_scale_type",
+        "profit_scale_type",
+        "policy_hmac",
+        "policy_version",
+        "fee_policy_version",
+        "runtime_policy_version",
+        "stop_loss_percent",
+        "stop_loss_price",
+        "seed_at_creation",
+        "range_source",
+        "chart_timeframe",
+        "lowest_active_buy_level",
+        "highest_active_sell_level",
+        "status",
+        "pause_reason",
+        "lease_token",
+        "lease_expires_at",
+        "last_tick_at",
+        "reconciliation_cursor",
+        "last_reconciliation_at",
+        "startup_reconciled_at",
+        "canary_started_at",
+        "canary_clean_since",
+        "canary_promoted_at",
+        "canary_clean_ticks",
+        "consecutive_failures",
+        "incident_identity",
+        "incident_opened_at",
+        "incident_notified_at",
+        "sol_balance",
+        "sol_balance_observed_at",
+        "sol_guard_state",
+        "residual_usdc",
+        "residual_observed_at",
+        "total_fees",
+        "terminal_stop_operation_id",
+        "created_at",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_protocol_check",
+      "definitionIncludes": [
+        "protocol = 'pacifica'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_server_intent_digest_check",
+      "definitionIncludes": [
+        "server_intent_digest ~ '^[0-9A-F]{64}$'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_policy_hmac_check",
+      "definitionIncludes": [
+        "policy_hmac ~ '^[0-9a-f]{64}$'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_geometry_check",
+      "definitionIncludes": [
+        "lower_price > 0 AND upper_price > lower_price AND start_price >= lower_price AND start_price <= upper_price AND grid_count BETWEEN 1 AND 100 AND total_investment > 0 AND leverage > 0"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_direction_check",
+      "definitionIncludes": [
+        "direction IN ('long','short')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_scale_check",
+      "definitionIncludes": [
+        "entry_scale_type IN ('flat','ascending','descending') AND profit_scale_type IN ('flat','ascending','descending')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_stop_check",
+      "definitionIncludes": [
+        "(stop_loss_percent IS NULL AND stop_loss_price IS NULL) OR (stop_loss_percent IS NOT NULL AND stop_loss_price IS NOT NULL AND stop_loss_percent > 0 AND stop_loss_price > 0)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_source_check",
+      "definitionIncludes": [
+        "range_source IN ('manual','auto') AND chart_timeframe IN ('15m','1h','4h')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_status_check",
+      "definitionIncludes": [
+        "status IN ('draft','provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping','stopped','failed')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_live_subaccount_check",
+      "definitionIncludes": [
+        "status IN ('draft','stopped','failed') OR protocol_subaccount_id IS NOT NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_lease_check",
+      "definitionIncludes": [
+        "(lease_token IS NULL) = (lease_expires_at IS NULL)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_counts_check",
+      "definitionIncludes": [
+        "canary_clean_ticks >= 0 AND consecutive_failures >= 0 AND total_fees >= 0"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_sol_check",
+      "definitionIncludes": [
+        "(sol_balance IS NULL) = (sol_balance_observed_at IS NULL) AND (sol_balance IS NULL OR sol_balance >= 0) AND sol_guard_state IN ('unknown','healthy','warning','entry_blocked')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_residual_check",
+      "definitionIncludes": [
+        "(residual_usdc IS NULL) = (residual_observed_at IS NULL) AND (residual_usdc IS NULL OR residual_usdc >= 0)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_levels",
+      "columns": [
+        "id",
+        "bot_id",
+        "ordinal",
+        "price",
+        "size",
+        "side",
+        "reduce_only",
+        "status",
+        "venue_order_id",
+        "client_order_uuid",
+        "placement_attempt",
+        "cumulative_filled_size",
+        "last_filled_at",
+        "created_at",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_levels",
+      "constraint": "grid_levels_ordinal_check",
+      "definitionIncludes": [
+        "ordinal BETWEEN 1 AND 101"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_levels",
+      "constraint": "grid_levels_geometry_check",
+      "definitionIncludes": [
+        "price > 0 AND size >= 0 AND side IN ('buy','sell') AND placement_attempt >= 0 AND cumulative_filled_size >= 0 AND cumulative_filled_size <= size"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_levels",
+      "constraint": "grid_levels_status_check",
+      "definitionIncludes": [
+        "status IN ('pending','submitting','active','partially_filled','filled','cancelling','cancelled','failed')"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_operations",
+      "columns": [
+        "id",
+        "bot_id",
+        "level_id",
+        "parent_operation_id",
+        "idempotency_key",
+        "request_identity",
+        "type",
+        "state",
+        "attempt",
+        "client_order_uuid",
+        "venue_order_id",
+        "transaction_signature",
+        "amount_usdc",
+        "trigger_price",
+        "trigger_pnl",
+        "trigger_observed_at",
+        "notification_type",
+        "notification_payload",
+        "failure_classification",
+        "failure_code",
+        "prepared_at",
+        "submitted_at",
+        "terminal_at",
+        "created_at",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_identity_check",
+      "definitionIncludes": [
+        "length(btrim(idempotency_key)) > 0 AND length(btrim(request_identity)) > 0 AND attempt > 0"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_type_check",
+      "definitionIncludes": [
+        "type IN ('provision_subaccount','set_leverage','fund_subaccount','seed_position','place_level_order','cancel_level_order','cancel_all_orders','pause','resume','sync','stop_trigger','close_position','sweep_subaccount','release_subaccount','send_notification')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_state_check",
+      "definitionIncludes": [
+        "state IN ('prepared','submitted','unconfirmed','confirmed','failed')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_failure_check",
+      "definitionIncludes": [
+        "failure_classification IN ('expected_rejection','transport','authentication','quota','margin','policy','invariant','venue_rejection','unknown')",
+        "failure_classification IS NOT NULL",
+        "state <> 'confirmed' OR failure_classification IS NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_terminal_check",
+      "definitionIncludes": [
+        "(state IN ('confirmed','failed')) = (terminal_at IS NOT NULL) AND (state <> 'submitted' OR submitted_at IS NOT NULL)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_amount_check",
+      "definitionIncludes": [
+        "amount_usdc IS NULL OR amount_usdc >= 0"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_trigger_check",
+      "definitionIncludes": [
+        "type <> 'stop_trigger' OR (trigger_price IS NOT NULL AND trigger_price > 0 AND trigger_pnl IS NOT NULL AND trigger_observed_at IS NOT NULL)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_notification_check",
+      "definitionIncludes": [
+        "type <> 'send_notification' OR (notification_type IS NOT NULL AND notification_payload IS NOT NULL)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_fills",
+      "columns": [
+        "id",
+        "bot_id",
+        "level_id",
+        "venue_trade_id",
+        "venue_order_id",
+        "client_order_uuid",
+        "side",
+        "price",
+        "size",
+        "fee",
+        "fee_asset",
+        "partial",
+        "venue_fill_time",
+        "created_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_fills",
+      "constraint": "grid_fills_values_check",
+      "definitionIncludes": [
+        "price > 0 AND size > 0 AND fee >= 0 AND length(btrim(venue_trade_id)) > 0 AND length(btrim(fee_asset)) > 0 AND side IN ('buy','sell')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_wallet_address_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (wallet_address)",
+        "REFERENCES wallets(address)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_protocol_subaccount_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (protocol_subaccount_id)",
+        "REFERENCES protocol_subaccounts(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_levels",
+      "constraint": "grid_levels_bot_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id)",
+        "REFERENCES grid_bots(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_bot_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id)",
+        "REFERENCES grid_bots(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_level_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (level_id)",
+        "REFERENCES grid_levels(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_parent_operation_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (parent_operation_id)",
+        "REFERENCES grid_operations(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_fills",
+      "constraint": "grid_fills_bot_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id)",
+        "REFERENCES grid_bots(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_fills",
+      "constraint": "grid_fills_level_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (level_id)",
+        "REFERENCES grid_levels(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_terminal_stop_operation_id_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (terminal_stop_operation_id)",
+        "REFERENCES grid_operations(id)",
+        "ON DELETE RESTRICT"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_bots",
+      "index": "grid_bots_wallet_request_unique",
+      "columns": [
+        "wallet_address",
+        "client_request_id"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "grid_bots",
+      "index": "grid_bots_owner_status_idx",
+      "columns": [
+        "wallet_address",
+        "status"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "grid_bots",
+      "index": "grid_bots_scheduler_idx",
+      "columns": [
+        "status",
+        "lease_expires_at"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "grid_levels",
+      "index": "grid_levels_bot_ordinal_unique",
+      "columns": [
+        "bot_id",
+        "epoch_id",
+        "ordinal"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "grid_levels",
+      "index": "grid_levels_bot_status_idx",
+      "columns": [
+        "bot_id",
+        "status"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "grid_levels",
+      "index": "grid_levels_venue_order_idx",
+      "columns": [
+        "venue_order_id"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "grid_operations",
+      "index": "grid_operations_idempotency_unique",
+      "columns": [
+        "idempotency_key"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "grid_operations",
+      "index": "grid_operations_request_unique",
+      "columns": [
+        "request_identity"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "grid_operations",
+      "index": "grid_operations_unresolved_idx",
+      "columns": [
+        "bot_id",
+        "state",
+        "prepared_at"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "grid_fills",
+      "index": "grid_fills_trade_unique",
+      "columns": [
+        "venue_trade_id"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "grid_fills",
+      "index": "grid_fills_bot_time_idx",
+      "columns": [
+        "bot_id",
+        "venue_fill_time",
+        "venue_trade_id"
+      ],
+      "unique": false
+    }
+  ],
+  "operation": "ddl"
+},
+{
+  "id": "193-grid-launch-ledger",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "requirements": [
+    {
+      "kind": "index",
+      "table": "grid_read_claims",
+      "index": "grid_read_master_idx",
+      "columns": [
+        "master_account",
+        "claimed_at"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "grid_launch_accounts",
+      "index": "grid_launch_live_account_idx",
+      "columns": [
+        "account"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "index",
+      "table": "grid_launch_accounts",
+      "index": "grid_launch_live_pool_idx",
+      "columns": [
+        "protocol_subaccount_id"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "table",
+      "table": "grid_read_claims",
+      "columns": [
+        "id",
+        "master_account",
+        "credits",
+        "claimed_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_operations",
+      "columns": [
+        "exact_request",
+        "exact_request_digest"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_exact_request_pair",
+      "definitionIncludes": [
+        "exact_request IS NOT NULL",
+        "exact_request_digest IS NOT NULL",
+        "jsonb_typeof",
+        "{64}"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_master_quota",
+      "columns": [
+        "master_account",
+        "share",
+        "backoff_until"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (master_account)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_master_quota",
+      "constraint": "grid_master_share",
+      "definitionIncludes": [
+        "share >",
+        "share <="
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_launch_accounts",
+      "columns": [
+        "bot_id",
+        "protocol_subaccount_id",
+        "master_account",
+        "account",
+        "reused",
+        "released_at",
+        "canary_limit",
+        "canary_committed",
+        "created_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (bot_id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_launch_accounts",
+      "constraint": "grid_launch_values",
+      "definitionIncludes": [
+        "canary_limit >",
+        "canary_committed >=",
+        "canary_committed <= canary_limit"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_execution_claims",
+      "columns": [
+        "operation_id",
+        "bot_id",
+        "master_account",
+        "account",
+        "credits",
+        "slots",
+        "canary_increment",
+        "prepared_at",
+        "settled_at",
+        "slot_released"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (operation_id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_execution_claims",
+      "constraint": "grid_claim_values",
+      "definitionIncludes": [
+        "credits >",
+        "slots >=",
+        "slots <=",
+        "canary_increment >="
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_execution_claims",
+      "index": "grid_claim_master_idx",
+      "columns": [
+        "master_account",
+        "prepared_at"
+      ],
+      "unique": false
+    }
+  ],
+  "operation": "ddl"
+},
+{
+  "id": "194-grid-monitor-ledger",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "grid_monitor_state",
+      "columns": [
+        "bot_id",
+        "boot_id",
+        "generation",
+        "safe_through",
+        "observation",
+        "pnl",
+        "blocked_reasons",
+        "reconciled_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (bot_id)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_exact_fills",
+      "columns": [
+        "account",
+        "trade_id",
+        "bot_id",
+        "operation_id",
+        "level_id",
+        "order_id",
+        "venue_time",
+        "leg",
+        "size",
+        "price",
+        "fee"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (account, trade_id)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_monitor_orders",
+      "columns": [
+        "operation_id",
+        "order_id",
+        "status",
+        "filled",
+        "remaining",
+        "observed_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (operation_id)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_profit_allocations",
+      "columns": [
+        "operation_id",
+        "account",
+        "trade_id",
+        "size",
+        "released_at",
+        "released_size",
+        "settled_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (operation_id, account, trade_id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_exact_fills",
+      "constraint": "grid_exact_fill_values",
+      "definitionIncludes": [
+        "size >",
+        "price >",
+        "fee >=",
+        "venue_time >="
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_profit_allocations",
+      "constraint": "grid_allocation_values",
+      "definitionIncludes": [
+        "size >",
+        "released_size >=",
+        "released_size <="
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_exact_fills",
+      "index": "grid_exact_fills_time_idx",
+      "columns": [
+        "bot_id",
+        "venue_time",
+        "trade_id"
+      ],
+      "unique": false
+    }
+  ]
+},
+{
+  "id": "195-grid-lifecycle-controls",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "grid_control_keys",
+      "columns": [
+        "bot_id",
+        "request_key",
+        "control_id",
+        "evidence"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (bot_id, request_key)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_control_requests",
+      "columns": [
+        "id",
+        "bot_id",
+        "request_key",
+        "action",
+        "source",
+        "state",
+        "previous_status",
+        "evidence",
+        "created_at",
+        "completed_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "UNIQUE (bot_id, request_key)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_lifecycle",
+      "columns": [
+        "bot_id",
+        "epoch",
+        "active_request",
+        "blocker",
+        "terminal_proof"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (bot_id)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_risk_events",
+      "columns": [
+        "bot_id",
+        "event_key",
+        "kind",
+        "evidence",
+        "created_at",
+        "delivered_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (bot_id, event_key)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_control_requests",
+      "constraint": "grid_control_action",
+      "definitionIncludes": [
+        "pause",
+        "resume",
+        "resync",
+        "stop",
+        "band",
+        "owner",
+        "risk",
+        "pending",
+        "complete",
+        "superseded"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_lifecycle",
+      "constraint": "grid_lifecycle_epoch",
+      "definitionIncludes": [
+        "epoch >="
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_wallet_safety",
+      "columns": [
+        "execution_wallet",
+        "balance_lamports",
+        "observed_at",
+        "guard_state",
+        "incident_id",
+        "policy_version"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (execution_wallet)"
+      ]
+    }
+  ]
+},
+{
+  "id": "196-planner-btc-weekly",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "planner_btc_weekly_closes",
+      "columns": [
+        "market",
+        "week_start",
+        "close",
+        "source",
+        "basis",
+        "aggregation",
+        "finalized",
+        "fetched_at"
+      ],
+      "constraintDefinitions": [
+        "UNIQUE (market, week_start)"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "planner_btc_weekly_refresh",
+      "columns": [
+        "market",
+        "last_attempt_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (market)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_closes",
+      "constraint": "planner_btc_weekly_market_check",
+      "definitionIncludes": [
+        "BTC"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_closes",
+      "constraint": "planner_btc_weekly_utc_check",
+      "definitionIncludes": [
+        "isodow",
+        "UTC",
+        "00:00:00"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_closes",
+      "constraint": "planner_btc_weekly_close_check",
+      "definitionIncludes": [
+        "case when close ~",
+        "^[0-9]{1,12}(\\.[0-9]{1,18})?$",
+        "then close > 0",
+        "else false end"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_closes",
+      "constraint": "planner_btc_weekly_source_check",
+      "definitionIncludes": [
+        "okx-index",
+        "gate-spot",
+        "kraken-spot",
+        "coinbase-spot",
+        "pacifica-mark",
+        "hyperliquid-perp",
+        "pacifica-perp",
+        "okx-perp",
+        "index",
+        "spot",
+        "perp"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_closes",
+      "constraint": "planner_btc_weekly_aggregation_check",
+      "definitionIncludes": [
+        "native",
+        "daily"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_closes",
+      "constraint": "planner_btc_weekly_finalized_check",
+      "definitionIncludes": [
+        "finalized",
+        "fetched_at",
+        "week_start"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_refresh",
+      "constraint": "planner_btc_weekly_refresh_market_check",
+      "definitionIncludes": [
+        "BTC"
+      ]
+    }
+  ]
+},
+{
+  "id": "197-planner-btc-weekly-close-check",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "constraint",
+      "table": "planner_btc_weekly_closes",
+      "constraint": "planner_btc_weekly_close_check",
+      "definitionIncludes": [
+        "close ~ '^[0-9]{1,12}(\\.[0-9]{1,18})?$' AND close !~ '^0{1,12}(\\.0{1,18})?$'"
+      ]
+    }
+  ]
+},
+{
+  "id": "198-lab-signal-provenance",
+  "capabilities": [
+    "signal_bot",
+    "lab",
+    "phoenix"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_strategy_id"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_run_id"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_result_id"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_deploy_snapshot"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_link_state"
+    },
+    {
+      "kind": "column",
+      "table": "trading_bots",
+      "column": "lab_linked_at"
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_link_state_check",
+      "definitionIncludes": [
+        "lab_link_state",
+        "linked",
+        "owner_confirmed",
+        "unlinked"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_strategy_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (lab_strategy_id)",
+        "REFERENCES lab_strategies(id)",
+        "ON DELETE SET NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_run_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (lab_run_id)",
+        "REFERENCES lab_optimization_runs(id)",
+        "ON DELETE SET NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "trading_bots",
+      "constraint": "trading_bots_lab_result_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (lab_result_id)",
+        "REFERENCES lab_optimization_results(id)",
+        "ON DELETE SET NULL"
+      ]
+    }
+  ]
+},
+{
+  "id": "199-ai-trader-cycles",
+  "capabilities": [
+    "ai_trader_cycles"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "ai_trader_cycles",
+      "columns": [
+        "id",
+        "bot_id",
+        "schema_version",
+        "reason_version",
+        "trigger",
+        "planned_boundary",
+        "started_at",
+        "finished_at",
+        "phase",
+        "outcome",
+        "reason_code",
+        "rearmed",
+        "next_planned_boundary",
+        "candidate_count",
+        "model_call_count",
+        "decision_ids",
+        "bot_updated_at",
+        "protocol",
+        "market",
+        "timeframe",
+        "market_source",
+        "paper_mode",
+        "model",
+        "prompt_version_hash",
+        "context_version_hash",
+        "owner_boot_id",
+        "details"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (id)",
+        "FOREIGN KEY (bot_id)",
+        "ON DELETE CASCADE"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_schema_ck",
+      "definitionIncludes": [
+        "schema_version = 1 AND reason_version = 1"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_trigger_ck",
+      "definitionIncludes": [
+        "trigger IN ('auto','manual')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_boundary_ck",
+      "definitionIncludes": [
+        "trigger <> 'auto' OR planned_boundary IS NOT NULL"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_phase_ck",
+      "definitionIncludes": [
+        "phase IN ('initial','boundary_lane','preflight','claim','context','model','execution','position','settlement')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_outcome_ck",
+      "definitionIncludes": [
+        "outcome IN ('running','skipped','failed','model_decided','proposed','executed','position_managed')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_reason_ck",
+      "definitionIncludes": [
+        "reason_code IS NULL OR reason_code IN ('paused','position_open','auto_next_off','mode_suggest','venue_retired','venue_unavailable','schema_not_ready','cooldown','daily_cap','model_key_missing','reauth_required','model_unsupported','state_unresolved','claim_lost','scanner_disabled','shortlist_empty','shortlist_stale','feed_basis_unavailable','feed_stale','feed_cache_degraded','gateway_timeout','gateway_error','model_malformed','audit_write_failed','model_flat','model_entry','model_close','guardrail_rejected','close_without_position','proposal_created','entry_executed','execution_rejected','position_management','scanner_boundary_lane_timeout','scanner_boundary_lane_wait_failed','cycle_interrupted','internal_error','wallet_agent_missing','malfunction_ceiling')"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_terminal_ck",
+      "definitionIncludes": [
+        "(outcome = 'running' AND finished_at IS NULL AND reason_code IS NULL AND rearmed IS NULL) OR (outcome <> 'running' AND finished_at IS NOT NULL AND reason_code IS NOT NULL AND rearmed IS NOT NULL)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_time_ck",
+      "definitionIncludes": [
+        "finished_at IS NULL OR finished_at >= started_at"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_count_ck",
+      "definitionIncludes": [
+        "candidate_count >= 0 AND model_call_count >= 0"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_decisions_type_ck",
+      "definitionIncludes": [
+        "jsonb_typeof(decision_ids) = 'array'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_decisions_count_ck",
+      "definitionIncludes": [
+        "jsonb_array_length(decision_ids) <= 2"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_details_type_ck",
+      "definitionIncludes": [
+        "jsonb_typeof(details) = 'object'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_details_size_ck",
+      "definitionIncludes": [
+        "octet_length(details::text) <= 8192"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_decisions_size_ck",
+      "definitionIncludes": [
+        "octet_length(decision_ids::text) <= 512"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_prompt_hash_ck",
+      "definitionIncludes": [
+        "prompt_version_hash IS NULL OR prompt_version_hash ~ '^[0-9A-Fa-f]{64}$'"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "ai_trader_cycles",
+      "constraint": "ai_cycles_context_hash_ck",
+      "definitionIncludes": [
+        "context_version_hash IS NULL OR context_version_hash ~ '^[0-9A-Fa-f]{64}$'"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "ai_trader_cycles",
+      "index": "ai_trader_cycles_bot_latest_idx",
+      "columns": [
+        "bot_id",
+        "started_at DESC",
+        "id DESC"
+      ],
+      "unique": false
+    },
+    {
+      "kind": "index",
+      "table": "ai_trader_cycles",
+      "index": "ai_trader_cycles_running_idx",
+      "columns": [
+        "started_at"
+      ],
+      "unique": false,
+      "predicateIncludes": [
+        "outcome = 'running'"
+      ]
+    }
+  ]
+},
+{
+  "id": "200-grid-auto-resume",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "table",
+      "table": "grid_auto_resume",
+      "columns": [
+        "bot_id",
+        "enabled",
+        "generation",
+        "cycle",
+        "armed_cycle",
+        "armed_generation",
+        "armed_lifecycle_epoch",
+        "armed_band_request",
+        "armed_policy_hmac",
+        "armed_umk_version",
+        "resume_request_id",
+        "attempts",
+        "first_attempt_at",
+        "next_attempt_at",
+        "held_reason",
+        "updated_at"
+      ],
+      "constraintDefinitions": [
+        "PRIMARY KEY (bot_id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_counts",
+      "definitionIncludes": [
+        "(generation >= 0 AND cycle >= 0 AND attempts >= 0 AND attempts <= 3)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_arm",
+      "definitionIncludes": [
+        "((armed_cycle IS NULL AND armed_generation IS NULL AND armed_lifecycle_epoch IS NULL AND armed_band_request IS NULL AND armed_policy_hmac IS NULL AND armed_umk_version IS NULL AND resume_request_id IS NULL AND attempts = 0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (enabled AND armed_cycle IS NOT NULL AND armed_cycle = cycle AND armed_cycle > 0 AND armed_generation IS NOT NULL AND armed_generation = generation AND armed_lifecycle_epoch IS NOT NULL AND armed_lifecycle_epoch >= 0 AND armed_band_request IS NOT NULL AND armed_policy_hmac IS NOT NULL AND armed_policy_hmac ~ '^[0-9a-f]{64}$' AND armed_umk_version IS NOT NULL AND armed_umk_version > 0))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_retry",
+      "definitionIncludes": [
+        "((attempts = 0 AND first_attempt_at IS NULL AND next_attempt_at IS NULL) OR (attempts > 0 AND first_attempt_at IS NOT NULL AND (next_attempt_at IS NULL OR next_attempt_at >= first_attempt_at)))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_reason",
+      "definitionIncludes": [
+        "(held_reason IS NULL OR held_reason IN ('waiting_for_inner_band','range_unavailable','reconciliation_required','operation_pending','market_data_unavailable','resume_authority_unavailable','risk_pause','stop_clearance_unavailable','policy_changed','execution_revoked','retry_limit','preference_off'))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_control_requests",
+      "constraint": "grid_control_action",
+      "definitionIncludes": [
+        "(action IN ('pause','resume','resync','stop','band','regrid') AND source IN ('owner','risk','auto') AND state IN ('pending','complete','superseded') AND (source <> 'auto' OR action IN ('resume','regrid')) AND (action <> 'regrid' OR origin_epoch_id IS NOT NULL))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_bot_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id) REFERENCES grid_bots(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_armed_band_request_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (armed_band_request) REFERENCES grid_control_requests(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_resume_request_id_fkey",
+      "definitionIncludes": [
+        "FOREIGN KEY (resume_request_id) REFERENCES grid_control_requests(id)"
+      ]
+    },
+    {
+      "kind": "data",
+      "identity": "grid_auto_resume.enabled.default",
+      "checkSql": "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='grid_auto_resume' AND column_name='enabled' AND column_default='true' AND is_nullable='NO') AS ok"
+    }
+  ]
+},
+{
+  "id": "201-grid-range-epochs",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_control_request_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id, creating_control_request_id) REFERENCES grid_control_requests(bot_id, id)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_levels",
+      "index": "grid_levels_legacy_ordinal_unique",
+      "columns": [
+        "bot_id",
+        "ordinal"
+      ],
+      "unique": true,
+      "predicateIncludes": [
+        "epoch_id IS NULL"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_control_requests",
+      "index": "grid_control_requests_bot_identity_unique",
+      "columns": [
+        "bot_id",
+        "id"
+      ],
+      "unique": true
+    },
+    {
+      "kind": "table",
+      "table": "grid_epochs",
+      "columns": [
+        "id",
+        "bot_id",
+        "ordinal",
+        "predecessor_id",
+        "creating_control_request_id",
+        "policy_version",
+        "policy_snapshot",
+        "policy_hmac",
+        "carry_snapshot",
+        "carry_digest",
+        "confirmation",
+        "reason",
+        "activated_at",
+        "direction",
+        "lower_price",
+        "upper_price",
+        "stop_loss_price",
+        "grid_count"
+      ]
+    },
+    {
+      "kind": "table",
+      "table": "grid_trailing",
+      "columns": [
+        "bot_id",
+        "mode",
+        "generation",
+        "policy_revision",
+        "cooldown_ms",
+        "daily_limit",
+        "lifetime_limit",
+        "max_widths",
+        "last_closed_candle",
+        "last_source",
+        "attempts",
+        "retry_at",
+        "updated_at"
+      ]
+    },
+    {
+      "kind": "column",
+      "table": "grid_bots",
+      "column": "active_epoch_id"
+    },
+    {
+      "kind": "column",
+      "table": "grid_levels",
+      "column": "epoch_id"
+    },
+    {
+      "kind": "column",
+      "table": "grid_operations",
+      "column": "epoch_id"
+    },
+    {
+      "kind": "column",
+      "table": "grid_exact_fills",
+      "column": "epoch_id"
+    },
+    {
+      "kind": "column",
+      "table": "grid_control_requests",
+      "column": "origin_epoch_id"
+    },
+    {
+      "kind": "column",
+      "table": "grid_auto_resume",
+      "column": "armed_epoch_id"
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_origin_check",
+      "definitionIncludes": [
+        "((ordinal = 1 AND predecessor_id IS NULL AND creating_control_request_id IS NULL AND carry_digest IS NULL) OR (ordinal > 1 AND predecessor_id IS NOT NULL AND creating_control_request_id IS NOT NULL AND carry_digest IS NOT NULL))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_geometry_check",
+      "definitionIncludes": [
+        "(lower_price > 0 AND upper_price > lower_price AND stop_loss_price > 0 AND grid_count BETWEEN 1 AND 100)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_stop_check",
+      "definitionIncludes": [
+        "((direction = 'long' AND stop_loss_price < lower_price) OR (direction = 'short' AND stop_loss_price > upper_price))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_authority_check",
+      "definitionIncludes": [
+        "(jsonb_typeof(policy_snapshot) = 'object' AND jsonb_typeof(carry_snapshot) = 'object' AND jsonb_typeof(confirmation) = 'object' AND policy_hmac ~ '^[0-9a-f]{64}$' AND (carry_digest IS NULL OR carry_digest ~ '^[0-9a-f]{64}$'))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_trailing",
+      "constraint": "grid_trailing_mode_check",
+      "definitionIncludes": [
+        "(mode IN ('off','ask','automatic') AND generation >= 0)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_trailing",
+      "constraint": "grid_trailing_limits_check",
+      "definitionIncludes": [
+        "(cooldown_ms >= 3600000 AND daily_limit BETWEEN 1 AND 3 AND lifetime_limit BETWEEN 1 AND 10 AND max_widths = 1 AND attempts BETWEEN 0 AND 3)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_trailing",
+      "constraint": "grid_trailing_watermark_check",
+      "definitionIncludes": [
+        "((last_closed_candle IS NULL AND last_source IS NULL) OR (last_closed_candle IS NOT NULL AND last_closed_candle >= 0 AND last_source IS NOT NULL))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_control_requests",
+      "constraint": "grid_control_action",
+      "definitionIncludes": [
+        "(action IN ('pause','resume','resync','stop','band','regrid') AND source IN ('owner','risk','auto') AND state IN ('pending','complete','superseded') AND (source <> 'auto' OR action IN ('resume','regrid')) AND (action <> 'regrid' OR origin_epoch_id IS NOT NULL))"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_active_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (id,active_epoch_id) REFERENCES grid_epochs(bot_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_levels",
+      "constraint": "grid_levels_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id,epoch_id) REFERENCES grid_epochs(bot_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id,epoch_id) REFERENCES grid_epochs(bot_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_level_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id,epoch_id,level_id) REFERENCES grid_levels(bot_id,epoch_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_exact_fills",
+      "constraint": "grid_exact_fills_operation_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id,epoch_id,operation_id) REFERENCES grid_operations(bot_id,epoch_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_control_requests",
+      "constraint": "grid_control_origin_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id,origin_epoch_id) REFERENCES grid_epochs(bot_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id,armed_epoch_id) REFERENCES grid_epochs(bot_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_predecessor_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (bot_id,predecessor_id) REFERENCES grid_epochs(bot_id,id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_ordinal_unique",
+      "definitionIncludes": [
+        "UNIQUE (bot_id,ordinal)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_successor_unique",
+      "definitionIncludes": [
+        "UNIQUE (predecessor_id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_request_unique",
+      "definitionIncludes": [
+        "UNIQUE (creating_control_request_id)"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_levels",
+      "index": "grid_levels_bot_ordinal_unique",
+      "unique": true,
+      "columns": [
+        "bot_id",
+        "epoch_id",
+        "ordinal"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_levels",
+      "index": "grid_levels_epoch_identity_unique",
+      "unique": true,
+      "columns": [
+        "bot_id",
+        "epoch_id",
+        "id"
+      ]
+    },
+    {
+      "kind": "index",
+      "table": "grid_operations",
+      "index": "grid_operations_epoch_identity_unique",
+      "unique": true,
+      "columns": [
+        "bot_id",
+        "epoch_id",
+        "id"
+      ]
+    },
+    {
+      "kind": "data",
+      "identity": "grid_epochs.immutable_and_attributed",
+      "checkSql": "SELECT count(*)=4 AS ok FROM pg_trigger WHERE NOT tgisinternal AND tgenabled='O' AND (tgrelid,tgname) IN (('grid_epochs'::regclass,'grid_epoch_immutable'),('grid_levels'::regclass,'grid_levels_assign_epoch'),('grid_operations'::regclass,'grid_operations_assign_epoch'),('grid_exact_fills'::regclass,'grid_fills_assign_epoch'))"
+    }
+  ]
+}
+,
+{
+  "id": "202-grid-epoch-publish-safe",
+  "capabilities": [
+    "grid_bot"
+  ],
+  "operation": "ddl",
+  "requirements": [
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_control_request_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (creating_control_request_id) REFERENCES grid_control_requests(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_epochs",
+      "constraint": "grid_epochs_predecessor_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (predecessor_id) REFERENCES grid_epochs(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_bots",
+      "constraint": "grid_bots_active_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (active_epoch_id) REFERENCES grid_epochs(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_levels",
+      "constraint": "grid_levels_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (epoch_id) REFERENCES grid_epochs(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (epoch_id) REFERENCES grid_epochs(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_operations",
+      "constraint": "grid_operations_level_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (level_id) REFERENCES grid_levels(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_exact_fills",
+      "constraint": "grid_exact_fills_operation_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (operation_id) REFERENCES grid_operations(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_control_requests",
+      "constraint": "grid_control_origin_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (origin_epoch_id) REFERENCES grid_epochs(id)"
+      ]
+    },
+    {
+      "kind": "constraint",
+      "table": "grid_auto_resume",
+      "constraint": "grid_auto_resume_epoch_fk",
+      "definitionIncludes": [
+        "FOREIGN KEY (armed_epoch_id) REFERENCES grid_epochs(id)"
+      ]
+    },
+    {
+      "kind": "data",
+      "identity": "grid_epochs.publish_scope_guards",
+      "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_proc WHERE oid='grid_validate_epoch_scope()'::regprocedure AND encode(sha256(convert_to(prosrc,'UTF8')),'hex')='f7944e4e0c90cc6db80faebc6d1ee9983c0d66bd63016ecfe1ffb5698749b368') AND EXISTS (SELECT 1 FROM pg_proc WHERE oid='grid_assign_epoch()'::regprocedure AND encode(sha256(convert_to(prosrc,'UTF8')),'hex')='48b29a2d1362d4cdd162efd3924069f0082cbf71b25dffbf10016c8790122ef5') AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_epochs'::regclass AND tgname='grid_epochs_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=7 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_bots'::regclass AND tgname='grid_bots_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_control_requests'::regclass AND tgname='grid_control_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_auto_resume'::regclass AND tgname='grid_auto_resume_validate_scope' AND tgfoid='grid_validate_epoch_scope()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_levels'::regclass AND tgname='grid_levels_assign_epoch' AND tgfoid='grid_assign_epoch()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_operations'::regclass AND tgname='grid_operations_assign_epoch' AND tgfoid='grid_assign_epoch()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='grid_exact_fills'::regclass AND tgname='grid_fills_assign_epoch' AND tgfoid='grid_assign_epoch()'::regprocedure AND tgenabled='O' AND NOT tgisinternal AND tgtype=23 AND tgattr=''::int2vector AND tgqual IS NULL) AS ok"
+    }
+  ]
+},
+{
+  "id": "203-enable-signed-submit-backup-provider",
+  "capabilities": [
+    "referrals"
+  ],
+  "requirements": [
+    {
+      "kind": "constraint",
+      "table": "solana_signed_submit_attempts",
+      "constraint": "solana_signed_submit_attempts_provider_valid"
+    },
+    {
+      "kind": "data",
+      "identity": "solana-signed-submit-exact-provider-domain",
+      "checkSql": "SELECT EXISTS (\n  SELECT 1\n  FROM pg_constraint AS c\n  JOIN pg_class AS t ON t.oid = c.conrelid\n  JOIN pg_namespace AS n ON n.oid = t.relnamespace\n  WHERE n.nspname = current_schema()\n    AND t.relname = 'solana_signed_submit_attempts'\n    AND c.conname = 'solana_signed_submit_attempts_provider_valid'\n    AND c.contype = 'c'\n    AND pg_get_constraintdef(c.oid) = 'CHECK ((rpc_provider = ANY (ARRAY[''configured_primary''::text, ''configured_backup''::text])))'\n) AS ok;"
+    }
+  ],
+  "operation": "ddl"
+}
+, {
+  "id": "204-ai-trader-market-cooldown-verify",
+  "capabilities": [
+    "ai_trader_market_cooldown"
+  ],
+  "requirements": [
+    {
+      "kind": "data",
+      "identity": "ai-trader-market-entry-shape",
+      "checkSql": "SELECT\n(SELECT count(*) = 10 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='ai_trader_market_entry_attempts')\nAND NOT EXISTS (SELECT 1 FROM (VALUES\n ('attempt_id','text','NO'),('decision_id','character varying','NO'),('bot_id','character varying','NO'),\n ('owner_wallet','text','NO'),('market','text','NO'),('paper_mode','boolean','NO'),('state','text','NO'),\n ('admitted_at','timestamp with time zone','NO'),('first_confirmed_at','timestamp with time zone','YES'),('terminal_reason','text','YES')\n) e(n,t,z) LEFT JOIN information_schema.columns c ON c.table_schema=current_schema() AND c.table_name='ai_trader_market_entry_attempts' AND c.column_name=e.n WHERE c.data_type IS DISTINCT FROM e.t OR c.is_nullable IS DISTINCT FROM e.z)\nAND (SELECT count(*) = 6 FROM pg_constraint c WHERE c.conrelid=to_regclass('ai_trader_market_entry_attempts') AND c.convalidated AND (\n (c.contype='p' AND pg_get_constraintdef(c.oid)='PRIMARY KEY (attempt_id)') OR\n (c.contype='u' AND pg_get_constraintdef(c.oid)='UNIQUE (decision_id)') OR\n (c.conname='ai_market_entry_state' AND pg_get_constraintdef(c.oid)='CHECK ((state = ANY (ARRAY[''pending''::text, ''confirmed''::text, ''no_entry''::text])))') OR\n (c.conname='ai_market_entry_clock' AND pg_get_constraintdef(c.oid)='CHECK ((((state = ''confirmed''::text) AND (first_confirmed_at IS NOT NULL)) OR ((state <> ''confirmed''::text) AND (first_confirmed_at IS NULL))))') OR\n (c.conname='ai_market_entry_finite' AND pg_get_constraintdef(c.oid)='CHECK ((isfinite(admitted_at) AND ((first_confirmed_at IS NULL) OR (isfinite(first_confirmed_at) AND (first_confirmed_at >= admitted_at)))))') OR\n (c.conname='ai_market_entry_identity' AND pg_get_constraintdef(c.oid)='CHECK (((length(owner_wallet) > 0) AND (length(market) > 0) AND (length(attempt_id) > 0)))')))\nAND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('ai_trader_market_entry_attempts') AND contype='f')\nAND (SELECT count(*)=2 FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid=to_regclass('ai_trader_market_entry_attempts') AND i.indisvalid AND i.indisready AND NOT i.indisunique AND (\n (c.relname='ai_market_entry_pending' AND pg_get_expr(i.indpred,i.indrelid)='(state = ''pending''::text)' AND pg_get_indexdef(i.indexrelid) LIKE '% USING btree (owner_wallet, market, paper_mode) WHERE %') OR\n (c.relname='ai_market_entry_confirmed' AND pg_get_expr(i.indpred,i.indrelid)='(state = ''confirmed''::text)' AND pg_get_indexdef(i.indexrelid) LIKE '% USING btree (owner_wallet, market, paper_mode, first_confirmed_at) WHERE %')))\nAS ok"
+    }
+  ],
+  "operation": "ddl"
+}
+] as const;
+
+export const SCHEMA_MIGRATION_MANIFEST: readonly SchemaMigrationDefinition[] =
+  schemaMigrationSql.map((sql, index) => {
+    const metadataEntry = schemaMigrationMetadata[index];
+    if (!metadataEntry) throw new Error(`missing schema migration metadata at index ${index}`);
+    return { ...metadataEntry, sql } as SchemaMigrationDefinition;
+  });
+

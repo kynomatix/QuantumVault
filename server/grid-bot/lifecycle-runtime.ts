@@ -1,6 +1,6 @@
 import { createGridMoveStorage } from './move-runtime';
 import {createGridSolReader} from './sol-authority';
-const sharedGridSol=createGridSolReader(async wallet=>(await import('../agent-wallet')).getAgentSolBalanceLamportsStrict(wallet));
+const sharedGridSol=createGridSolReader(async wallet=>(await import('../solana-balance-read')).getAgentSolBalanceLamportsStrict(wallet));
 import {GridLifecycleService,type GridLifecycleDeps,type GridSettlementFact} from './lifecycle-service';
 import {GridLifecycleStorage} from './lifecycle-storage';
 import type {GridMonitorStorage,GridMonitorClaim} from './monitor-storage';

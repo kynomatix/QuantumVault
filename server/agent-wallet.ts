@@ -1,3 +1,4 @@
+import { getConnection } from './solana-balance-read';
 import { Connection, PublicKey, Keypair, Transaction, VersionedTransaction, TransactionMessage, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY, LAMPORTS_PER_SOL, SendTransactionError, type AddressLookupTableAccount } from '@solana/web3.js';
 import bs58 from 'bs58';
 import BN from 'bn.js';
@@ -75,15 +76,7 @@ export function agentDepositPreflightHttpResponse(error: unknown): {
   };
 }
 
-let connectionInstance: Connection | null = null;
 let finalizedPrimaryConnectionInstance: Connection | null = null;
-
-function getConnection(): Connection {
-  if (!connectionInstance) {
-    connectionInstance = createSolanaRpcConnection('confirmed');
-  }
-  return connectionInstance;
-}
 
 /** Shared mainnet RPC connection for server-signed flows (e.g. the vault Kamino route). */
 export function getServerConnection(): Connection {
@@ -1065,15 +1058,7 @@ export async function executeAgentSolWithdrawDurable(
  * Throws on any RPC/transport failure or malformed response — callers must
  * fail closed (defer the withdrawal), never assume zero.
  */
-export async function getAgentSolBalanceLamportsStrict(agentPublicKey: string): Promise<bigint> {
-  const connection = getConnection();
-  const pubkey = new PublicKey(agentPublicKey);
-  const lamports = await connection.getBalance(pubkey);
-  if (typeof lamports !== 'number' || !Number.isSafeInteger(lamports) || lamports < 0) {
-    throw new Error(`Malformed lamports balance from RPC: ${String(lamports)}`);
-  }
-  return BigInt(lamports);
-}
+export { getAgentSolBalanceLamportsStrict } from './solana-balance-read';
 
 /**
  * Strict signature status probe (searches full transaction history).

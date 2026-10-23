@@ -4,7 +4,7 @@ import bs58 from 'bs58';
 import Decimal from 'decimal.js';
 import {deriveSubkey,encryptToBase64,decryptFromBase64,buildPooledSubaccountAAD,zeroizeBuffer} from '../crypto-v3';
 import {GridLaunchStorage} from './launch-storage';
-import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../storage';
+import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../wallet-lock-constants';
 import type {GridSettlementFact} from './lifecycle-service';
 import {gridRecyclerGate,gridExposureLimit} from './runtime-policy';
 import {freshGridFact} from './lifecycle-policy';

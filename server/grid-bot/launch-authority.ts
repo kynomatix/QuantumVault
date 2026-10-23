@@ -165,7 +165,7 @@ export class GridLaunchAuthority {
   }
 }
 
-const sharedSol=createGridSolReader(async wallet=>(await import('../agent-wallet')).getAgentSolBalanceLamportsStrict(wallet));
+const sharedSol=createGridSolReader(async wallet=>(await import('../solana-balance-read')).getAgentSolBalanceLamportsStrict(wallet));
 /** Existing wrapped UMK plus exact V3 agent key; no session or legacy-key fallback. */
 export async function unlockGridLaunchAgent(wallet:string,umk:Buffer):Promise<GridLaunchSecurity|null>{
   const [{storage},{decryptAgentKeyV3}]=await Promise.all([import('../storage'),import('../session-v3')]);

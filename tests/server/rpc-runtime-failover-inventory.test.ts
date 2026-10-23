@@ -27,7 +27,7 @@ describe('Solana RPC connection inventory', () => {
       { path: 'server/drift-executor.mjs', count: 5 },
       { path: 'server/protocol/drift/drift-adapter.ts', count: 1 },
       { path: 'server/protocol/flash/flash-ws.ts', count: 1 },
-      { path: 'server/rpc-config.ts', count: 1 },
+      { path: 'server/solana-rpc-transport.ts', count: 1 },
     ]);
   });
 
@@ -66,7 +66,7 @@ describe('Solana RPC connection inventory', () => {
   });
 
   it('pins websocket traffic to primary and removes the authorized credential-bearing log', () => {
-    const rpcConfig = readFileSync(join(ROOT, 'rpc-config.ts'), 'utf8');
+    const rpcConfig = readFileSync(join(ROOT, 'solana-rpc-transport.ts'), 'utf8');
     const swift = readFileSync(join(ROOT, 'swift-executor.ts'), 'utf8');
 
     expect(rpcConfig).toContain("wsEndpoint: endpoint.replace(/^http:/, 'ws:').replace(/^https:/, 'wss:')");
@@ -75,7 +75,7 @@ describe('Solana RPC connection inventory', () => {
   });
 
   it('keeps the reviewed shared transport API explicit', () => {
-    const rpcConfig = readFileSync(join(ROOT, 'rpc-config.ts'), 'utf8');
+    const rpcConfig = readFileSync(join(ROOT, 'solana-rpc-transport.ts'), 'utf8');
 
     expect(rpcConfig).toContain('export interface SolanaRpcTransportEvent');
     expect(rpcConfig).toContain('observe?: (event: SolanaRpcTransportEvent) => void');
