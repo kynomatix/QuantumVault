@@ -6,7 +6,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { getTableColumns } from 'drizzle-orm';
 import * as schema from '@shared/schema';
 import { lockMarketEntry, marketEntryBlock, reserveMarketEntry, lockRetainedMarketEntry, confirmMarketEntry,
-  releaseNeverSentMarketEntry, verifyMarketEntrySchema, type CooldownQuery } from '../../server/ai-trader/market-entry-cooldown';
+  releaseNeverSentMarketEntry, verifyMarketEntrySchema, preflightMarketEntries, type CooldownQuery } from '../../server/ai-trader/market-entry-cooldown';
 import { readDbSchemaMigrationManifest } from '../helpers/schema-migration-manifest';
 import { probeSchemaMigrationManifest } from '../../server/schema-readiness';
 import * as journal from '../../server/ai-trader/execution-journal';
@@ -278,5 +278,19 @@ describe('first durable entry writers and failure isolation', () => {
     await store.unprotected(bot,execution,filled(intent)); const first=await retained();
     expect(first.state).toBe('confirmed'); expect((await storage.getAiTraderBot(bot.id))?.status).toBe('paused');
     await store.unprotected(bot,execution,filled(intent)); expect(await retained()).toEqual(first);
+  });
+});
+
+describe('preflight through the real Drizzle db (production regression 2026-10-23)', () => {
+  const bot = (id: string, market = key.market) => ({ id, walletAddress: key.ownerWallet, paperMode: key.paperMode, market } as any);
+  it('returns an empty map, not null, when nothing blocks one market', async () => {
+    await expect(preflightMarketEntries(bot('fixed-bot'), ['SPCX-PERP'])).resolves.toEqual({});
+  });
+  it('blocks a sibling pending attempt across several candidate markets and ignores the bot itself', async () => {
+    const first = await seed('sibling-bot');
+    await transaction(async (q) => { await lockMarketEntry(q, key); await reserveMarketEntry(q, key, first.botId, first.decisionId); });
+    await expect(preflightMarketEntries(bot('other-bot'), [key.market, 'ETH-PERP', key.market]))
+      .resolves.toEqual({ [key.market]: { status: 'market_entry_pending' } });
+    await expect(preflightMarketEntries(bot('sibling-bot'), [key.market])).resolves.toEqual({});
   });
 });
