@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { readCloseSnapshot, qualifiedFlatObservation } from '../../server/protocol/close-outcome';
 import { describe, it, expect, vi } from 'vitest';
 import { isConfirmedCancellation, type CancelResult } from '../../server/protocol/protocol-types';
 
@@ -28,9 +29,17 @@ function confirmed(): CancelResult {
 function harness(result: CancelResult | Error | undefined, protocol = 'pacifica') {
   const handlers: Record<string, Function> = {};
   const cleanup = vi.fn(), keyCleanup = vi.fn(), umkCleanup = vi.fn();
-  const bot = { id: 'EXAMPLE_BOT', walletAddress: 'EXAMPLE_OWNER', market: 'SOL-PERP', activeProtocol: protocol,
+  const bot = { id: 'EXAMPLE_BOT', walletAddress: 'EXAMPLE_OWNER', market: 'SOL-PERP', activeProtocol: protocol, protocolSubaccountId: account,
     riskConfig: { takeProfitPrice: 110, stopLossPrice: 90, unrelated: 7 } };
+  let observations = 0;
   const adapter = {
+    getCloseConfirmationSnapshot: vi.fn(async () => {
+      const now = Date.now(); const sequence = ++observations;
+      return { positions: sequence === 1 ? [{ internalSymbol: 'SOL-PERP', baseSize: 1 }] : [],
+        evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${sequence}`, startedAt: now, dispatchedAt: now, receivedAt: now,
+          lastOrderId: sequence, fresh: true, complete: true, noDedup: true } };
+    }),
+    placeMarketOrder: vi.fn(async () => ({ success: true, orderId: 'EXAMPLE_ORDER' })),
     cancelTpSlOrders: result === undefined ? undefined : vi.fn(async () => { if (result instanceof Error) throw result; return result; }),
     setTpSl: vi.fn(async () => ({ success: true, appliedTakeProfitPrice: 120, appliedStopLossPrice: 80 })),
     getPositions: vi.fn(async () => [{ internalSymbol: 'SOL-PERP', baseSize: 1 }]),
@@ -38,11 +47,14 @@ function harness(result: CancelResult | Error | undefined, protocol = 'pacifica'
     closePosition: vi.fn(async () => ({ success: true })),
     getOpenOrders: vi.fn(async () => []), getOpenStopOrders: vi.fn(async () => []),
   };
-  const storage = { getTradingBotById: vi.fn(async () => bot),
+  const storage = { getBotTrades: vi.fn(async (): Promise<Array<{ id: string; side: string; status: string }>> => []),
+    createBotTrade: vi.fn(async () => ({ id: 'EXAMPLE_INTENT' })), updateBotTrade: vi.fn(), recordCloseEventAtomic: vi.fn(),
+    getTradingBotById: vi.fn(async () => bot),
     getWallet: vi.fn(async () => ({ agentPrivateKeyEncryptedV3: 'EXAMPLE', agentPublicKey: account })),
     getBotPosition: vi.fn(async () => ({ baseSize: '1' })), updateTradingBot: vi.fn() };
   const deps = { app: { post: (path: string, _auth: unknown, handler: Function) => { handlers[path] = handler; } },
-    requireWallet: () => {}, storage, isConfirmedCancellation,
+    requireWallet: () => {}, storage, fullClosesInFlight: new Set<string>(),
+    DatabaseStorage: { canonicalCloseFillId: () => 'EXAMPLE_FILL' }, isConfirmedCancellation, readCloseSnapshot, qualifiedFlatObservation,
     getUmkForWebhook: async () => ({ umk: new Uint8Array(32), cleanup: umkCleanup }),
     decryptAgentKeyStrict: async () => ({ secretKey: new Uint8Array(64), cleanup: keyCleanup }),
     getBotSubaccountContext: () => ({ botPublicKey: account }),
@@ -121,7 +133,13 @@ describe('Pacifica teardown cancellation independence', () => {
     h.adapter.getOpenOrders.mockRejectedValue(new Error('EXAMPLE inventory unavailable'));
     expect(await h.teardown()).toMatchObject({ ok: false });
     expect(h.adapter.cancelAllOrders).toHaveBeenCalledWith(expect.objectContaining({ excludeReduceOnly: false }));
-    expect(h.adapter.closePosition).toHaveBeenCalledOnce(); expect(h.cleanup).toHaveBeenCalledOnce();
+    expect(h.adapter.placeMarketOrder).toHaveBeenCalledOnce(); expect(h.cleanup).toHaveBeenCalledOnce();
+  });
+  it('never resends an outstanding close during teardown', async () => {
+    const h = harness(confirmed());
+    h.storage.getBotTrades.mockResolvedValue([{ id: 'EXAMPLE_INTENT', side: 'CLOSE', status: 'pending' }]);
+    expect(await h.teardown()).toMatchObject({ ok: false, error: 'prior_close_confirmation_pending' });
+    expect(h.adapter.placeMarketOrder).not.toHaveBeenCalled();
   });
   it('does not recapture and cancel successor stops', async () => {
     const h = harness(confirmed());

@@ -6,7 +6,7 @@ import { SymbolRegistry } from '../../server/protocol/symbol-registry';
 import { classifyCloseFeeEvidence } from '../../server/trading/signal-bot-close-integrity';
 
 describe('trade retry reduce-only close with UNKNOWN mark', () => {
-  it.each(['bid', 'ask'])('submits the full %s position after both price sources fail', async (side) => {
+  it.each(['bid', 'ask'])('suspends an ambiguous %s close retry even when both price sources fail', async (side) => {
     const adapter = new PacificaAdapter({ baseUrl: 'https://test-pacifica.invalid' });
     (adapter as any).initialized = true;
     (adapter as any).registry = new SymbolRegistry([{ internal: 'BTC-PERP', protocol: 'BTC', aliases: [] }]);
@@ -18,9 +18,9 @@ describe('trade retry reduce-only close with UNKNOWN mark', () => {
       success: true, status: 'filled', orderId: 'EXAMPLE-close', fillPrice: 99,
     });
 
-    // Execute the production private close routine with only its external services
-    // injected. This preserves the actual getPositions -> reduce-only order branch
-    // without importing the retry queue's database and background worker.
+    // A3/A5 suspend automatic ambiguous-close resends until durable intent exists.
+    // Exercise the production retry helper; a usable position cannot authorize
+    // replaying a close whose original submission may already have landed.
     const source = readFileSync('server/trade-retry-service.ts', 'utf8');
     const start = source.indexOf('async function driftClosePerpPosition(');
     const end = source.indexOf('async function driftGetPerpPositions(', start);
@@ -36,12 +36,10 @@ describe('trade retry reduce-only close with UNKNOWN mark', () => {
       async () => 'EXAMPLE-wallet', (id: number) => id > 0 ? String(id) : undefined,
       () => adapter, async () => null, classifyCloseFeeEvidence,
     );
-    const result = await close(new Uint8Array(), 'BTC-PERP', 3);
-    expect(result).toMatchObject({ success: true, fillPrice: 99 });
-    expect(placeMarketOrder).toHaveBeenCalledWith(expect.objectContaining({
-      internalSymbol: 'BTC-PERP', sizeBase: 2, side: side === 'bid' ? 'short' : 'long',
-      reduceOnly: true, subaccountId: '3',
-    }));
+    await expect(close(new Uint8Array(), 'BTC-PERP', 3))
+      .rejects.toThrow('close_resend_suspended_until_durable_intent');
+    expect(placeMarketOrder).not.toHaveBeenCalled();
+    expect(adapter.getAllPrices).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });
 });

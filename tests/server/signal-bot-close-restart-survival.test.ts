@@ -8,6 +8,7 @@ const routeMocks = vi.hoisted(() => ({
   adapter: {
     protocolName: 'pacifica',
     getStrictPositionForMarket: vi.fn(),
+    getCloseConfirmationSnapshot: vi.fn(),
     getPositions: vi.fn(),
     getTradeHistory: vi.fn(),
     getFeeRateQuote: vi.fn(),
@@ -215,6 +216,8 @@ async function postFlip(
 }
 
 function primeCloseRoute(cachedPosition: unknown) {
+  vi.mocked(storage.getBotTrades).mockReset().mockResolvedValue([]);
+  routeMocks.adapter.getCloseConfirmationSnapshot.mockReset().mockRejectedValue(new Error('EXAMPLE confirmation unavailable'));
   vi.mocked(storage.createWebhookLog as any).mockReset().mockResolvedValue({ id: 'webhook-log-1' });
   vi.mocked(storage.getTradingBotById as any).mockReset().mockResolvedValue(routeBot);
   vi.mocked(storage.getPublishedBotByTradingBotId as any).mockReset().mockResolvedValue(null);
@@ -248,6 +251,20 @@ function primeCloseRoute(cachedPosition: unknown) {
   });
 }
 
+// A1/A2: completion requires an independent, account-bound snapshot pair.
+function primeCloseSnapshots(baseSize: number, post: unknown = null) {
+  let sequence = 0;
+  routeMocks.adapter.getCloseConfirmationSnapshot.mockReset().mockImplementation(async (account: string) => {
+    sequence++;
+    if (sequence > 1 && post instanceof Error) throw post;
+    const remaining = sequence === 1 ? baseSize : (post as { baseSize?: number } | null)?.baseSize ?? 0;
+    const now = Date.now();
+    return { positions: remaining === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: remaining, entryPrice: 64000 }],
+      evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${sequence}`, startedAt: now,
+        dispatchedAt: now, receivedAt: now, lastOrderId: sequence, complete: true, fresh: true, noDedup: true } };
+  });
+}
+
 function primeFlipRoute(options: {
   bot?: Record<string, unknown>;
   cachedPosition?: unknown;
@@ -260,7 +277,7 @@ function primeFlipRoute(options: {
     baseSize: '-0.25',
     avgEntryPrice: '64000',
   };
-  primeCloseRoute(cachedPosition);
+  primeCloseRoute({ ...cachedPosition as Record<string, unknown>, lastTradeId: 'EXAMPLE_ENTRY' });
   vi.mocked(storage.getTradingBotById as any).mockResolvedValue({ ...routeBot, ...options.bot });
   vi.mocked(storage.recordCloseEventAtomic as any).mockResolvedValue({
     isNew: true,
@@ -274,6 +291,12 @@ function primeFlipRoute(options: {
   const post = Object.prototype.hasOwnProperty.call(options, 'postCloseAuthority')
     ? options.postCloseAuthority
     : null;
+  const size = Number((cachedPosition as { baseSize?: string }).baseSize);
+  primeCloseSnapshots(size, post);
+  routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
+    tradeId: 'EXAMPLE_FILL', orderId: 'flip-close-signature', internalSymbol: 'BTC-PERP',
+    side: size > 0 ? 'short' : 'long', size: Math.abs(size), price: 65000, fee: 0, timestamp: Date.now(),
+  }]);
   if (initial instanceof Error) routeMocks.adapter.getStrictPositionForMarket.mockRejectedValueOnce(initial);
   else routeMocks.adapter.getStrictPositionForMarket.mockResolvedValueOnce(initial);
   if (post instanceof Error) routeMocks.adapter.getStrictPositionForMarket.mockRejectedValueOnce(post);
@@ -764,7 +787,7 @@ describe('close-path and restart contract wiring', () => {
     );
 
     it.each(['tradingview', 'user'] as const)(
-      '%s sends one close order and returns 202 when one position read and one fill read cannot confirm it',
+      '%s sends one close order and returns 202 when qualified position evidence is unavailable',
       async (endpoint) => {
         primeCloseRoute({
           market: 'BTC-PERP',
@@ -789,9 +812,10 @@ describe('close-path and restart contract wiring', () => {
         const response = await postFullClose(endpoint);
 
         expect(response.status).toBe(202);
-        expect(response.body.closeOutcome).toBe('confirmation_pending');
+        expect(response.body.closeOutcome).toBe('unknown');
         expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
-        expect(routeMocks.adapter.getTradeHistory).toHaveBeenCalledTimes(1);
+        // A2: fills cannot substitute for failed flatness evidence.
+        expect(routeMocks.adapter.getTradeHistory).not.toHaveBeenCalled();
         expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
         expect(storage.updateBotTrade).toHaveBeenCalledWith('close-trade-1', expect.objectContaining({
           status: 'pending',
@@ -1020,6 +1044,8 @@ describe('close-path and restart contract wiring', () => {
     );
 
     it('contains one subscriber classification failure and still closes the next paused subscriber without reopening it', async () => {
+      vi.mocked(storage.getBotTrades).mockReset().mockResolvedValue([]);
+      primeCloseSnapshots(-0.25);
       const sourceBotId = 'published-source-bot';
       const failingSubscriber = { ...routeBot, id: 'subscriber-failing', walletAddress: 'wallet-failing' };
       const pausedSubscriber = {
@@ -1033,9 +1059,10 @@ describe('close-path and restart contract wiring', () => {
 
       vi.mocked(storage.getPublishedBotByTradingBotId as any).mockResolvedValue({ id: 'published-1', name: 'Source', isActive: true });
       vi.mocked(storage.getSubscriberBotsBySourceId as any).mockResolvedValue([failingSubscriber, pausedSubscriber]);
-      vi.mocked(storage.getBotPosition as any)
-        .mockRejectedValueOnce(new Error('first subscriber DB read failed'))
-        .mockResolvedValueOnce({ market: 'BTC-PERP', baseSize: '-0.25', avgEntryPrice: '64000' });
+      vi.mocked(storage.getBotPosition).mockReset().mockImplementation(async (botId: string) => {
+        if (botId === failingSubscriber.id) throw new Error('first subscriber DB read failed');
+        return { market: 'BTC-PERP', baseSize: '-0.25', avgEntryPrice: '64000', lastTradeId: 'EXAMPLE_ENTRY' } as never;
+      });
       vi.mocked(storage.getTradingBotById as any).mockResolvedValue(pausedSubscriber);
       vi.mocked(storage.getWallet as any).mockResolvedValue(pausedWallet);
       vi.mocked(storage.createBotTrade as any)
@@ -1067,7 +1094,8 @@ describe('close-path and restart contract wiring', () => {
         isFlipSignal: true,
       });
 
-      expect(storage.getBotPosition).toHaveBeenCalledTimes(2);
+      // A2/A4: classification plus before/after epoch checks for the second subscriber.
+      expect(storage.getBotPosition).toHaveBeenCalledTimes(4);
       expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
       expect(storage.recordCloseEventAtomic).toHaveBeenCalledTimes(1);
       expect(storage.createBotTrade).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -1084,6 +1112,8 @@ describe('close-path and restart contract wiring', () => {
     }, 10_000);
 
     it('keeps a subscriber FLIP unresolved after a signature-less close and reaches neither finalizer nor open execution', async () => {
+      vi.mocked(storage.getBotTrades).mockReset().mockResolvedValue([]);
+      primeCloseSnapshots(-0.25);
       const sourceBotId = 'published-source-bot';
       const subscriber = {
         ...routeBot,
