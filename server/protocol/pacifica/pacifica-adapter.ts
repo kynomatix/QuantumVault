@@ -1852,6 +1852,56 @@ export class PacificaAdapter implements ProtocolAdapter {
     return id;
   }
 
+  private readonly closeWatermarks = new Map<string, number>();
+
+  /** Complete account inventory, independent of the permissive positions reader.
+   * The public API assigns no flat-position meaning to HTTP 404. Let it throw.
+   */
+  async getCloseConfirmationSnapshot(account: string, subaccountId?: string): Promise<import('../close-outcome.js').CloseSnapshot> {
+    if (!account || account.trim() !== account || subaccountId !== undefined) throw new Error('unsupported_close_account_scope');
+    const startedAt = Date.now();
+    let dispatchedAt: number | undefined;
+    const requestId = randomUUID();
+    const envelope: unknown = await this.get('/positions', { account }, {
+      cachePolicy: 'fresh-required', responseShape: 'envelope', noDedup: true,
+      priority: 'critical', onDispatch: () => { dispatchedAt = Date.now(); },
+    });
+    const receivedAt = Date.now();
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) throw new Error('invalid_close_envelope');
+    const body = envelope as Record<string, unknown>;
+    const watermark = body.last_order_id;
+    if (dispatchedAt === undefined || receivedAt - startedAt > 10_000 || body.success !== true
+      || body.error !== null || body.code !== null || !Array.isArray(body.data)
+      || typeof watermark !== 'number' || !Number.isSafeInteger(watermark) || watermark < 0
+      || (body.account !== undefined && body.account !== account) || body.subaccount_id !== undefined
+      || ['has_more', 'next_cursor', 'cursor', 'next_page', 'pagination', 'truncated', 'limit', 'offset']
+        .some(key => body[key] !== undefined && body[key] !== null && body[key] !== false)
+      || watermark < (this.closeWatermarks.get(account) ?? 0)) throw new Error('invalid_close_envelope');
+    const symbols = new Set<string>();
+    const positions = body.data.map((value: unknown): ProtocolPosition => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_close_row');
+      const row = value as Record<string, unknown>;
+      if (typeof row.symbol !== 'string' || !['bid', 'ask'].includes(String(row.side))
+        || (row.account !== undefined && row.account !== account) || row.subaccount_id !== undefined
+        || typeof row.amount !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d+)?$(?![\s\S])/.test(row.amount)
+        || !Number.isFinite(Number(row.amount)) || (Number(row.amount) === 0 && /[1-9]/.test(row.amount))
+        || (row.li != null && (typeof row.li !== 'number' || !Number.isSafeInteger(row.li) || row.li < 0 || row.li > watermark))) {
+        throw new Error('invalid_close_row');
+      }
+      const symbol = this.cancelSymbol(row.symbol);
+      if (symbol.wire !== row.symbol || symbols.has(symbol.internal)) throw new Error('ambiguous_close_symbol');
+      symbols.add(symbol.internal);
+      // Entry/mark are context only. Flatness depends exclusively on the validated amount.
+      const entryPrice = Number(row.entry_price);
+      return { internalSymbol: symbol.internal, baseSize: (row.side === 'ask' ? -1 : 1) * Number(row.amount),
+        entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : 0,
+        markPrice: null, unrealizedPnl: null, leverage: 1, liquidationPrice: null, marginMode: 'cross' };
+    });
+    this.closeWatermarks.set(account, watermark);
+    return { positions, evidence: { account, environment: this.config.baseUrl, requestId, startedAt,
+      dispatchedAt, receivedAt, lastOrderId: watermark, complete: true, fresh: true, noDedup: true } };
+  }
+
   /** Documented account inventory; no alias, cache fallback, or shared request. */
   private async cancelInventory(account: string, subaccountId?: string) {
     if (!account || subaccountId !== undefined) throw new Error('unsupported_cancel_account_scope');
@@ -4002,7 +4052,12 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   private mapPosition(p: PacificaPositionResponse, midPrices: Record<string, number> = {}): ProtocolPosition {
-    const rawAmount = parseFloat(p.amount || p.size || '0');
+    const amount = p.amount ?? p.size;
+    if (typeof amount !== 'string' || amount.trim() === ''
+      || !Number.isFinite(Number(amount)) || (Number(amount) === 0 && /[1-9]/.test(amount))) {
+      throw new Error('invalid_position_amount');
+    }
+    const rawAmount = Number(amount);
     const size = p.side === 'ask' ? -rawAmount : rawAmount;
     const entryPrice = parseFloat(p.entry_price);
     const internalSymbol = this.safeProtocolToInternal(p.symbol);

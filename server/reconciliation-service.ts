@@ -1,3 +1,4 @@
+import { readCloseSnapshot, qualifiedFlatObservation, type CloseSnapshot } from './protocol/close-outcome';
 import { startJobTiming } from "./job-timing";
 import { storage, DatabaseStorage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
@@ -556,10 +557,15 @@ async function detectOnChainClose(
       totalFee += fill.fee;
       matchedTradeIds.push(fill.tradeId);
       if (fill.orderId) matchedOrderIds.push(fill.orderId);
-      if (aggregatedSize >= absSize * 0.95) break;
+      if (adapter.protocolName !== 'pacifica' && aggregatedSize >= absSize * 0.95) break;
     }
 
-    const hasClosingTrades = aggregatedSize >= absSize * 0.80;
+    const hasClosingTrades = adapter.protocolName === 'pacifica'
+      ? Math.abs(aggregatedSize - absSize) <= Number.EPSILON * Math.max(1, absSize) * 8
+        && new Set(matchedTradeIds).size === matchedTradeIds.length
+        && closingFills.every(fill => Number.isFinite(fill.size) && fill.size > 0
+          && Number.isFinite(fill.price) && fill.price > 0 && Number.isFinite(fill.fee) && fill.fee >= 0)
+      : aggregatedSize >= absSize * 0.80;
 
     let closeReason: 'tpsl' | 'liquidation' | 'external_close' = 'external_close';
     let tpslSubtype: 'TP' | 'SL' | undefined;
@@ -687,8 +693,8 @@ async function detectOnChainClose(
 
       if (accountInfo.equity < 1 && accountInfo.balance < 1) {
         console.log(`[Reconcile] Likely liquidation for bot ${botId} (no closing trades): equity=$${accountInfo.equity.toFixed(2)}, balance=$${accountInfo.balance.toFixed(2)}`);
-        // Liquidation carries its own evidence (equity AND balance ≈ 0) —
-        // it is not gated on the estimation corroboration window.
+        // Low equity classifies the reason only. The caller must still
+        // independently qualify flatness before every terminal effect.
         estimationCloseFirstSeen.delete(corroborationKey);
         return {
           detected: true,
@@ -735,8 +741,9 @@ async function detectOnChainClose(
       try {
         // Match the caller's read scope exactly: bot-subaccount key reads take
         // no subaccount ID; the legacy Drift path passes the numeric subaccount.
-        const confirmPositions = botSubaccountPublicKey
-          ? await adapter.getPositions(botSubaccountPublicKey)
+        const confirmPositions = adapter.protocolName === 'pacifica'
+          ? (await readCloseSnapshot(adapter, readAccount)).positions
+          : botSubaccountPublicKey ? await adapter.getPositions(botSubaccountPublicKey)
           : await adapter.getPositions(agentPublicKey, positionSubAccountId !== undefined ? _subIdStr(positionSubAccountId) : undefined);
         const unknownConfirmPosition = confirmPositions.find(p => unknownProtocolSymbol(p.internalSymbol));
         if (unknownConfirmPosition) {
@@ -1463,10 +1470,18 @@ export async function reconcileBotPosition(
       return reconcilePhoenixBotAccounting(botRowForAdapter);
     }
     const adapter = getAdapterForBot(botRowForAdapter);
+    let strictSnapshot: CloseSnapshot | undefined;
+    if (adapter.protocolName === 'pacifica') {
+      // Only the provisioned account can authorize this bot's exposure transition.
+      if (!botSubaccountPublicKey || botSubaccountPublicKey !== botRowForAdapter.protocolSubaccountId) {
+        return { synced: false, discrepancy: false };
+      }
+      strictSnapshot = await readCloseSnapshot(adapter, botSubaccountPublicKey);
+    }
     let fetchResult;
     if (botSubaccountPublicKey) {
       try {
-        const positions = await adapter.getPositions(botSubaccountPublicKey);
+        const positions = strictSnapshot?.positions ?? await adapter.getPositions(botSubaccountPublicKey);
         fetchResult = { positions: positions.map(p => ({
           marketIndex: 0,
           market: p.internalSymbol,
@@ -1505,8 +1520,9 @@ export async function reconcileBotPosition(
     const dbPosition = await storage.getBotPosition(botId, market);
     
     const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
-    const onChainBaseSize = onChainPos?.baseAssetAmount || 0;
-    const onChainHasRealPosition = onChainPos && Math.abs(onChainBaseSize) > 0.0001;
+    const onChainBaseSize = onChainPos ? onChainPos.baseAssetAmount : 0;
+    if (!Number.isFinite(onChainBaseSize) || !Number.isFinite(dbBaseSize)) return { synced: false, discrepancy: false };
+    const onChainHasRealPosition = onChainPos && (strictSnapshot ? onChainBaseSize !== 0 : Math.abs(onChainBaseSize) > 0.0001);
 
     if (onChainHasRealPosition) {
       // Position visible on the venue — any pending estimation-close candidate
@@ -1521,6 +1537,18 @@ export async function reconcileBotPosition(
       );
 
       if (closeDetection.detected) {
+        if (strictSnapshot && botSubaccountPublicKey) {
+          // History/low equity only explain the close; they cannot establish flatness.
+          const after = await readCloseSnapshot(adapter, botSubaccountPublicKey);
+          const currentBot = await storage.getTradingBotById(botId);
+          const currentPosition = await storage.getBotPosition(botId, market);
+          if (currentBot?.protocolSubaccountId !== botSubaccountPublicKey
+            || currentPosition?.lastTradeId !== dbPosition!.lastTradeId
+            || currentPosition?.baseSize !== dbPosition!.baseSize
+            || !qualifiedFlatObservation(botSubaccountPublicKey, market, strictSnapshot, after, strictSnapshot.evidence.receivedAt)) {
+            return { synced: false, discrepancy: true };
+          }
+        }
         // Auto-repark: the position is gone on-chain (manual TP/SL or other
         // external close the webhook never saw). Arm the debounce in BOTH the
         // already-booked and full-book branches below; the scanner re-verifies
@@ -1723,6 +1751,31 @@ export async function reconcileBotPosition(
             && (positionEpochFloor === null || (Number.isFinite(executedAt) && executedAt >= positionEpochFloor));
         });
 
+        if (pendingClose && strictSnapshot) {
+          const matchedOrders = closeDetection.matchedOrderIdsForDiagnostics?.split(',') ?? [];
+          const attributable = closeDetection.accountingEvidence?.kind === 'venue_exact'
+            && pendingClose.txSignature && matchedOrders.length > 0
+            && matchedOrders.every(orderId => orderId === pendingClose.txSignature);
+          if (!attributable) {
+            const dedupKey = canonicalReconcilerFullCloseId({ botId, market, positionEpochId: dbPosition!.lastTradeId });
+            if (!dedupKey) return { synced: false, discrepancy: true };
+            const existingPayload = pendingClose.webhookPayload && typeof pendingClose.webhookPayload === 'object'
+              ? pendingClose.webhookPayload as Record<string, unknown> : {};
+            await storage.recordCloseEventAtomic({
+              botId,
+              update: { tradeId: pendingClose.id, fields: {
+                status: 'executed', price: dbPosition!.avgEntryPrice, fee: null, pnl: null,
+                protocolFillId: dedupKey, executionMethod: 'on-chain-detected',
+                webhookPayload: { ...existingPayload, reconciled: true, priceRole: 'observation_context_only',
+                  closeAccounting: { kind: 'unavailable', reason: 'attributable_close_fills_unavailable', observedAt: Date.now() } },
+              } },
+              deltas: { lastTradeAt: new Date().toISOString() },
+              confirmedPositionCloseIncomplete: { walletAddress, market },
+            });
+            lastReconcileTime.set(botId, Date.now());
+            return { synced: true, discrepancy: true };
+          }
+        }
         if (pendingClose) {
           // A pending order is finalized only from a venue fill identity. The
           // existing estimated-close fallback remains available for rows that

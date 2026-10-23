@@ -634,6 +634,7 @@ export interface PublicReadAdapter<TMarkets, TCapabilities> {
 }
 
 export interface ProtocolAdapter {
+  getCloseConfirmationSnapshot?(account: string, subaccountId?: string): Promise<import('./close-outcome.js').CloseSnapshot>;
   readonly protocolName: string;
   readonly protocolVersion: string;
   readonly collateralMint: string;
