@@ -88,9 +88,10 @@ export async function preflightMarketEntries(bot: AiTraderBot, markets: readonly
     const { rows } = await query(`WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS at)
       SELECT market,bool_or(state='pending') AS pending,max(first_confirmed_at + interval '4 hours')::text AS available_at
       FROM ai_trader_market_entry_attempts,clock
-      WHERE owner_wallet=$1 AND paper_mode=$2 AND bot_id<>$3 AND market=ANY($4::text[])
+      WHERE owner_wallet=$1 AND paper_mode=$2 AND bot_id<>$3 AND market IN (SELECT jsonb_array_elements_text($4::jsonb))
         AND (state='pending' OR (state='confirmed' AND first_confirmed_at + interval '4 hours'>clock.at)) GROUP BY market`,
-      [bot.walletAddress, bot.paperMode, bot.id, [...new Set(markets)]]);
+      // One JSON text parameter: Drizzle expands a JS array into a parameter list, which broke ANY($4::text[]) in production.
+      [bot.walletAddress, bot.paperMode, bot.id, JSON.stringify([...new Set(markets)])]);
     const blocked: Record<string, MarketEntryBlock> = {};
     for (const row of rows) if (typeof row.market === "string") blocked[row.market] = row.pending === true
       ? { status: "market_entry_pending" } : { status: "market_cooldown", availableAt: String(row.available_at) };
