@@ -11,13 +11,23 @@ function getEncryptionKey(): string {
   return key;
 }
 
-const ENCRYPTION_KEY = getEncryptionKey();
+let encryptionKey: string | undefined;
+
+// MAIN calls this before opening its HTTP port. Other importers initialize on use.
+export function validateLegacyEncryptionKey(): void {
+  encryptionKey ??= getEncryptionKey();
+}
+
+function initializedEncryptionKey(): string {
+  validateLegacyEncryptionKey();
+  return encryptionKey!;
+}
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
 const AUTH_TAG_LENGTH = 16;
 
 export function encrypt(text: string): string {
-  const key = Buffer.from(ENCRYPTION_KEY, 'hex');
+  const key = Buffer.from(initializedEncryptionKey(), 'hex');
   const iv = crypto.randomBytes(IV_LENGTH);
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   
@@ -30,7 +40,7 @@ export function encrypt(text: string): string {
 }
 
 export function decrypt(encryptedText: string): string {
-  const key = Buffer.from(ENCRYPTION_KEY, 'hex');
+  const key = Buffer.from(initializedEncryptionKey(), 'hex');
   const parts = encryptedText.split(':');
   
   if (parts.length !== 3) {

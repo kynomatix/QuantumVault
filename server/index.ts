@@ -1,3 +1,9 @@
+import { assertWebProcessRole } from "./process-role";
+import { validateLegacyEncryptionKey } from "./crypto";
+
+assertWebProcessRole(process.env);
+validateLegacyEncryptionKey();
+
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";

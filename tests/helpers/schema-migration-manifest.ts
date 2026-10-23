@@ -8,7 +8,7 @@ export function readDbSchemaMigrationManifest(): {
   metadata: Array<Omit<SchemaMigrationDefinition, "sql">>;
   manifest: SchemaMigrationDefinition[];
 } {
-  const sourcePath = new URL("../../server/db.ts", import.meta.url);
+  const sourcePath = new URL("../../server/schema-migration-manifest.ts", import.meta.url);
   const sourceText = readFileSync(sourcePath, "utf8");
   const source = ts.createSourceFile(sourcePath.pathname, sourceText, ts.ScriptTarget.Latest, true);
   let sqlArray: ts.ArrayLiteralExpression | undefined;
@@ -27,7 +27,7 @@ export function readDbSchemaMigrationManifest(): {
     ts.forEachChild(node, visit);
   };
   visit(source);
-  if (!sqlArray || !metadataArray) throw new Error("schema migration arrays missing from server/db.ts");
+  if (!sqlArray || !metadataArray) throw new Error("schema migration arrays missing from server/schema-migration-manifest.ts");
   const sqlEntries = sqlArray.elements.map((element) => {
     if (!ts.isNoSubstitutionTemplateLiteral(element) && !ts.isStringLiteral(element)) {
       throw new Error("schemaMigrationSql contains a non-literal entry");

@@ -77,7 +77,10 @@ describe.skipIf(!hasDb)("Reset Agent Wallet atomic finalizer (real DB)", () => {
 
   it("pins the distinct non-blocking advisory-lock namespace", () => {
     const src = readFileSync(resolve(__dirname, "../../server/storage.ts"), "utf8");
-    expect(src).toMatch(/AGENT_WALLET_RESET_LOCK_NAMESPACE\s*=\s*927412/);
+    const constants = readFileSync(resolve(__dirname, "../../server/wallet-lock-constants.ts"), "utf8");
+    expect(constants).toMatch(/AGENT_WALLET_RESET_LOCK_NAMESPACE\s*=\s*927412/);
+    expect(src).toContain('import { AGENT_WALLET_RESET_LOCK_NAMESPACE } from "./wallet-lock-constants"');
+    expect(src).toContain('export { AGENT_WALLET_RESET_LOCK_NAMESPACE } from "./wallet-lock-constants"');
     expect(src).toMatch(/pg_try_advisory_xact_lock/);
   });
 

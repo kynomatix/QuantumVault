@@ -4,7 +4,7 @@ import type { SchemaMigrationDefinition } from '../../server/schema-readiness';
 
 // Read the real runtime manifest without importing db.ts or booting the application.
 export function phoenixMigrationFixture() {
-  const path = new URL('../../server/db.ts', import.meta.url);
+  const path = new URL('../../server/schema-migration-manifest.ts', import.meta.url);
   const source = ts.createSourceFile(path.pathname, readFileSync(path, 'utf8'), ts.ScriptTarget.Latest, true);
   const arrays = new Map<string, ts.ArrayLiteralExpression>();
   function visit(node: ts.Node) {

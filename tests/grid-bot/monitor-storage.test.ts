@@ -354,7 +354,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
     expect((await storage.snapshot(f.claim)).operations).toHaveLength(1);
   });
   it('repeat boot avoids DDL locks and preserves exact columns',async()=>{const c=await pool.connect();await c.query('BEGIN');await c.query('LOCK TABLE grid_exact_fills IN ACCESS SHARE MODE');try{await pool.query("SET lock_timeout='500ms'");await pool.query(migrations[2]);}finally{await c.query('ROLLBACK');c.release();}
-    const source=readFileSync(new URL('../../server/db.ts',import.meta.url),'utf8');expect(source.replaceAll('\r\n','\n')).toContain(migrations[2].trim().replaceAll('\r\n','\n'));expect(source).toContain('194-grid-monitor-ledger');
+    const source=readFileSync(new URL('../../server/schema-migration-manifest.ts',import.meta.url),'utf8');expect(source.replaceAll('\r\n','\n')).toContain(migrations[2].trim().replaceAll('\r\n','\n'));expect(source).toContain('194-grid-monitor-ledger');
   });
   it('deduplicates across pages, committed retries and concurrent reconcilers exactly once',async()=>{const f=await landed(),boot=randomUUID(),o=f.observe();o.trades.push({...o.trades[0]});
     const results=await Promise.all([storage.reconcile(f.claim,boot,o),storage.reconcile(f.claim,boot,o)]);expect(results.every(r=>r.entriesAllowed)).toBe(true);
@@ -516,7 +516,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   it('lifecycle migration repeat boot is catalog-only and embedded exactly',async()=>{
     const c=await pool.connect();await c.query('BEGIN');await c.query('LOCK TABLE grid_control_requests IN ACCESS SHARE MODE');
     try{await pool.query("SET lock_timeout='500ms'");await pool.query(migrations[3]);}finally{await c.query('ROLLBACK');c.release();}
-    expect(readFileSync(new URL('../../server/db.ts',import.meta.url),'utf8').replaceAll('\r\n','\n')).toContain(migrations[3].trim().replaceAll('\r\n','\n'));
+    expect(readFileSync(new URL('../../server/schema-migration-manifest.ts',import.meta.url),'utf8').replaceAll('\r\n','\n')).toContain(migrations[3].trim().replaceAll('\r\n','\n'));
   });
   it('owner control is scoped, concurrent-idempotent, and fences already prepared entries',async()=>{
     const f=await fixture(),control=new GridLifecycleStorage(storage),key=randomUUID();

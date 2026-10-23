@@ -1,3 +1,4 @@
+import { AGENT_WALLET_RESET_LOCK_NAMESPACE } from "./wallet-lock-constants";
 import { cooldownQuery, marketEntryKey, sameMarketEntryKey, lockMarketEntry, marketEntryBlock, reserveMarketEntry,
   lockRetainedMarketEntry, confirmMarketEntry, releaseNeverSentMarketEntry, verifyMarketEntrySchema,
   type AiTraderExecutionClaim, type MarketEntryKey } from "./ai-trader/market-entry-cooldown";
@@ -609,7 +610,7 @@ export type BotListEnrichment = {
   borrowDebts: Map<string, number>;
 };
 
-export const AGENT_WALLET_RESET_LOCK_NAMESPACE = 927412;
+export { AGENT_WALLET_RESET_LOCK_NAMESPACE } from "./wallet-lock-constants";
 
 export interface AgentWalletResetReplacement {
   walletAddress: string;

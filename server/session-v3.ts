@@ -1,3 +1,7 @@
+import { getServerExecutionKey } from './execution/server-key';
+import { unwrapExecutionUmk } from './execution/umk';
+import { decryptAgentKeyV3 } from './execution/agent-key';
+export { decryptAgentKeyV3 } from './execution/agent-key';
 import { botPolicyRecord, type BotPolicyInput } from './protocol/phoenix/policy';
 import nodeCrypto from 'crypto';
 import { escapeTelegramHtml } from './telegram-html';
@@ -899,13 +903,6 @@ function getSessionById(sessionId: string): SessionData | undefined {
 
 // Execution no longer expires - stays enabled until manually revoked
 
-function getServerExecutionKey(): Buffer {
-  const keyHex = process.env.SERVER_EXECUTION_KEY;
-  if (!keyHex || keyHex.length !== 64) {
-    throw new Error('SERVER_EXECUTION_KEY must be a 64-character hex string (32 bytes)');
-  }
-  return Buffer.from(keyHex, 'hex');
-}
 
 export async function enableExecution(
   sessionId: string,
@@ -1037,31 +1034,9 @@ export async function revokeExecution(
 export async function getUmkForWebhook(
   walletAddress: string
 ): Promise<{ umk: Buffer; cleanup: () => void } | null> {
+  // Preserve MAIN's lookup behavior; the worker supplies its own explicit-column reader.
   const wallet = await storage.getWallet(walletAddress);
-  
-  if (!wallet?.executionEnabled || !wallet.umkEncryptedForExecution) {
-    return null;
-  }
-  
-  // No expiry check - execution stays enabled until manually revoked
-  
-  if (wallet.emergencyStopTriggered) {
-    return null;
-  }
-  
-  try {
-    const serverKey = getServerExecutionKey();
-    const aad = buildAAD(walletAddress, 'EUMK_EXEC');
-    const umk = decryptFromBase64(wallet.umkEncryptedForExecution, serverKey, aad);
-    
-    return {
-      umk,
-      cleanup: () => zeroizeBuffer(umk),
-    };
-  } catch (err) {
-    console.error('[Security] Failed to unwrap UMK for webhook:', err);
-    return null;
-  }
+  return unwrapExecutionUmk(walletAddress, wallet);
 }
 
 /**
@@ -1324,20 +1299,6 @@ export function encryptAgentKeyV3(
   }
 }
 
-export function decryptAgentKeyV3(
-  umk: Buffer,
-  encryptedV3: string,
-  walletAddress: string
-): Buffer {
-  const privkeySubkey = deriveSubkey(umk, SUBKEY_PURPOSES.AGENT_PRIVKEY);
-  try {
-    const aad = buildAAD(walletAddress, 'AGENT_PRIVKEY');
-    const ciphertext = Buffer.from(encryptedV3, 'base64');
-    return decryptBuffer(ciphertext, privkeySubkey, aad);
-  } finally {
-    zeroizeBuffer(privkeySubkey);
-  }
-}
 
 // ============================================================================
 // LLM API key (BYO) v3 encryption — QuantumLab AI Strategy Creator (Task 187)

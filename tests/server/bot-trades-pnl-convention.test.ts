@@ -83,7 +83,7 @@ describe("bot_trades PnL convention", () => {
   it("binds every reader to the shared resolver and the migration to durable provenance", () => {
     const storage = readFileSync("server/storage.ts", "utf8");
     const routes = readFileSync("server/routes.ts", "utf8");
-    const db = readFileSync("server/db.ts", "utf8");
+    const db = readFileSync("server/schema-migration-manifest.ts", "utf8");
     const migration = db.slice(
       db.indexOf("// --- Pin bot_trades.pnl convention"),
       db.indexOf("] as const;", db.indexOf("// --- Pin bot_trades.pnl convention")),

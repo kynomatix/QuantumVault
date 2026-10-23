@@ -654,8 +654,8 @@ describe("[M] Index present with DESC direction in both Drizzle schema and ensur
     expect(src).toContain("createdAt.desc()");
   });
 
-  it("server/db.ts DDL declares idx_equity_events_bot_created with created_at DESC", () => {
-    const src = readFileSync(resolve(root, "server/db.ts"), "utf-8");
+  it("server/schema-migration-manifest.ts DDL declares idx_equity_events_bot_created with created_at DESC", () => {
+    const src = readFileSync(resolve(root, "server/schema-migration-manifest.ts"), "utf-8");
     // Full IF NOT EXISTS guard present
     expect(src).toContain(
       "CREATE INDEX IF NOT EXISTS idx_equity_events_bot_created"
@@ -664,8 +664,8 @@ describe("[M] Index present with DESC direction in both Drizzle schema and ensur
     expect(src).toContain("created_at DESC");
   });
 
-  it("server/db.ts rollback comment present", () => {
-    const src = readFileSync(resolve(root, "server/db.ts"), "utf-8");
+  it("server/schema-migration-manifest.ts rollback comment present", () => {
+    const src = readFileSync(resolve(root, "server/schema-migration-manifest.ts"), "utf-8");
     expect(src).toContain("DROP INDEX IF EXISTS idx_equity_events_bot_created");
   });
 });
