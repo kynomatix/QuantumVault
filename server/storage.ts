@@ -20,6 +20,7 @@ import {
   type ScannerIncidentOccurrenceExportRow,
 } from "./ai-trader/scanner-incident-evidence";
 import Decimal from "decimal.js";
+import { subscriberClosePersistence, type SubscriberCloseAccounting } from "./trading/subscriber-close-accounting";
 import {
   buildAccountingIncompleteFlatPosition,
   buildConfirmedFlatPosition,
@@ -826,6 +827,10 @@ export interface IStorage {
       market: string;
     };
   }): Promise<{ trade?: BotTrade; isNew: boolean }>;
+  getSubscriberCloseAccountingCandidates(botId: string): Promise<BotTrade[]>;
+  remediateSubscriberCloseAccountingAtomic(opts: {
+    botId: string; tradeId: string; accounting: SubscriberCloseAccounting;
+  }): Promise<{ trade: BotTrade; remediated: boolean }>;
   remediateReconcilerCloseAccountingAtomic(opts: {
     botId: string;
     tradeId: string;
@@ -2893,6 +2898,76 @@ export class DatabaseStorage implements IStorage {
    * no-op, while conflicting exact evidence fails closed. Position exposure is
    * deliberately untouched because the bot may have reopened this market.
    */
+  /** Attach exact subscriber evidence once, preserving the reconciler's identity
+   * and any subsequently reopened position. Approximate size/time is NEVER an
+   * attribution rule here: the original submitted order must match. */
+  async remediateSubscriberCloseAccountingAtomic(opts: {
+    botId: string; tradeId: string; accounting: SubscriberCloseAccounting;
+  }): Promise<{ trade: BotTrade; remediated: boolean }> {
+    const a = opts.accounting;
+    const facts = subscriberClosePersistence(a);
+    const exact = a.reason === null && a.pnl !== null && a.fee !== null
+      && a.size !== null && a.price !== null && a.volume !== null && a.fillIds.length > 0;
+    const deferred = a.reason !== null && a.pnl === null && a.recovery?.closeResult?.outcome === "confirmed"
+      && a.recovery.account === a.account && a.recovery.market === a.market && a.recovery.orderId === a.orderId;
+    if (a.outcome !== "confirmed" || !a.orderId || (!exact && !deferred)) {
+      throw new Error("subscriber repair requires exact confirmed evidence or its durable recovery request");
+    }
+    return db.transaction(async tx => {
+      const [locked] = await tx.select().from(botTrades)
+        .where(and(eq(botTrades.id, opts.tradeId), eq(botTrades.tradingBotId, opts.botId)))
+        .for("update").limit(1);
+      if (!locked) throw new Error("subscriber repair trade missing");
+      const payload = locked.webhookPayload && typeof locked.webhookPayload === "object"
+        ? locked.webhookPayload as Record<string, unknown> : {};
+      const prior = payload.subscriberCloseAccounting as SubscriberCloseAccounting | undefined;
+      const attributable = locked.market === a.market && locked.side === "CLOSE"
+        && ["executed", "recovered", "liquidated"].includes(locked.status)
+        && (prior ? prior.account === a.account && prior.orderId === a.orderId
+          : locked.txSignature === a.orderId);
+      // An unrelated reconciler winner is not permission to attach this order.
+      if (!attributable) return { trade: locked, remediated: false };
+      if (locked.pnl !== null) {
+        if (exact && prior?.reason === null && (prior.pnl !== a.pnl || prior.fee !== a.fee
+            || prior.size !== a.size || prior.price !== a.price
+            || JSON.stringify(prior.fillIds) !== JSON.stringify(a.fillIds))) {
+          throw new Error("conflicting exact subscriber close evidence");
+        }
+        return { trade: locked, remediated: false };
+      }
+      if (!isReconcilerAccountingIncompletePayload(payload)) return { trade: locked, remediated: false };
+      if (!exact) {
+        // Reconciliation may win before the submitting route sees fills. Keep
+        // the original strict confirmation so a later pass can recover them.
+        const [trade] = await tx.update(botTrades).set({
+          size: facts.size, price: facts.price, fee: facts.fee, pnl: null,
+          webhookPayload: { ...payload, ...facts.webhookPayload },
+        }).where(eq(botTrades.id, locked.id)).returning();
+        return { trade, remediated: false };
+      }
+      const [trade] = await tx.update(botTrades).set({
+        size: facts.size, price: facts.price, fee: facts.fee, pnl: facts.pnl, pnlConvention: "net_of_close_fee",
+        webhookPayload: { ...payload, ...facts.webhookPayload,
+          subscriberShareEligibility: { eligible: facts.shareEligible, canonicalFillId: locked.protocolFillId },
+          accountingRemediation: { source: "attributed_subscriber_fill", prior: payload.closeAccounting } },
+      }).where(eq(botTrades.id, locked.id)).returning();
+      await this.recomputeAndMergeBotStats(opts.botId, {
+        totalPnlDelta: facts.pnlDelta, totalVolumeDelta: facts.volumeDelta,
+      }, tx);
+      const [position] = await tx.select().from(botPositions).where(and(
+        eq(botPositions.tradingBotId, opts.botId), eq(botPositions.market, locked.market),
+      )).for("update").limit(1);
+      if (!position) throw new Error("subscriber repair position missing");
+      const Money = Decimal.clone({ precision: 48 });
+      await tx.update(botPositions).set({
+        realizedPnl: new Money(position.realizedPnl ?? '0').plus(a.pnl!).toFixed(),
+        totalFees: new Money(position.totalFees ?? '0').plus(a.fee!).toFixed(),
+        updatedAt: sql`NOW()`,
+      }).where(eq(botPositions.id, position.id));
+      return { trade, remediated: true };
+    });
+  }
+
   async remediateReconcilerCloseAccountingAtomic(opts: {
     botId: string;
     tradeId: string;
@@ -2924,6 +2999,7 @@ export class DatabaseStorage implements IStorage {
       const payload = locked.webhookPayload && typeof locked.webhookPayload === "object"
         ? locked.webhookPayload as Record<string, any>
         : {};
+      if (payload.subscriberCloseAccounting) throw new Error("use subscriber close accounting repair");
       const prior = payload.closeAccounting;
       if (prior?.kind === "venue_exact") {
         const same = prior.protocolFillId === evidence.protocolFillId
@@ -3005,6 +3081,13 @@ export class DatabaseStorage implements IStorage {
       }
       return { trade: updated[0], remediated: true };
     });
+  }
+
+  async getSubscriberCloseAccountingCandidates(botId: string): Promise<BotTrade[]> {
+    return db.select().from(botTrades).where(and(eq(botTrades.tradingBotId, botId),
+      isNull(botTrades.pnl), inArray(botTrades.status, ['pending', 'executed', 'recovered', 'liquidated']),
+      sql`${botTrades.webhookPayload}->'subscriberCloseAccounting'->'recovery' IS NOT NULL`))
+      .orderBy(asc(botTrades.executedAt));
   }
 
   async getBotTrades(tradingBotId: string, limit: number = 50): Promise<BotTrade[]> {

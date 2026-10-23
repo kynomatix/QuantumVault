@@ -1,4 +1,5 @@
 import { readCloseSnapshot, qualifiedFlatObservation, type CloseSnapshot } from './protocol/close-outcome';
+import { recoverSubscriberCloseEvidence } from './trading/subscriber-close-recovery';
 import { startJobTiming } from "./job-timing";
 import { storage, DatabaseStorage } from "./storage";
 import { normalizeMarket } from "./protocol/symbol-registry";
@@ -1262,6 +1263,10 @@ async function bookPartialReduction(opts: {
       ? pendingPartial.webhookPayload as Record<string, unknown>
       : {}),
     reconciled: true,
+    ...(pendingPartial?.webhookPayload && typeof pendingPartial.webhookPayload === 'object'
+      && 'subscriberCloseAccounting' in pendingPartial.webhookPayload
+      ? { closeAccounting: { kind: 'venue_exact', protocolFillId: dedupKey,
+          fillPrice: avgFillPrice, fee: totalFee, pnl: slicePnl, pnlConvention: 'net_of_close_fee' } } : {}),
     closeReason: partialSubtype,
     detectedAt: new Date().toISOString(),
     matchedFillIds: markerSelection.kind === 'eligible'
@@ -1470,6 +1475,10 @@ export async function reconcileBotPosition(
       return reconcilePhoenixBotAccounting(botRowForAdapter);
     }
     const adapter = getAdapterForBot(botRowForAdapter);
+    if (adapter.protocolName === 'pacifica' && botRowForAdapter.sourcePublishedBotId
+        && botSubaccountPublicKey === botRowForAdapter.protocolSubaccountId && botSubaccountPublicKey) {
+      await recoverSubscriberCloseEvidence({ botId, account: botSubaccountPublicKey, adapter, storage });
+    }
     let strictSnapshot: CloseSnapshot | undefined;
     if (adapter.protocolName === 'pacifica') {
       // Only the provisioned account can authorize this bot's exposure transition.
@@ -1752,8 +1761,13 @@ export async function reconcileBotPosition(
         });
 
         if (pendingClose && strictSnapshot) {
+          const pendingPayload = pendingClose.webhookPayload && typeof pendingClose.webhookPayload === 'object'
+            ? pendingClose.webhookPayload as Record<string, unknown> : {};
           const matchedOrders = closeDetection.matchedOrderIdsForDiagnostics?.split(',') ?? [];
-          const attributable = closeDetection.accountingEvidence?.kind === 'venue_exact'
+          // Subscriber money must pass its saved strict outcome and exact own-fill
+          // coverage checks. Generic reconciliation cannot substitute for them.
+          const attributable = !pendingPayload.subscriberCloseAccounting
+            && closeDetection.accountingEvidence?.kind === 'venue_exact'
             && pendingClose.txSignature && matchedOrders.length > 0
             && matchedOrders.every(orderId => orderId === pendingClose.txSignature);
           if (!attributable) {
@@ -1764,9 +1778,11 @@ export async function reconcileBotPosition(
             await storage.recordCloseEventAtomic({
               botId,
               update: { tradeId: pendingClose.id, fields: {
-                status: 'executed', price: dbPosition!.avgEntryPrice, fee: null, pnl: null,
+                status: 'executed', pnl: null,
+                ...(!pendingPayload.subscriberCloseAccounting ? { price: dbPosition!.avgEntryPrice, fee: null } : {}),
                 protocolFillId: dedupKey, executionMethod: 'on-chain-detected',
-                webhookPayload: { ...existingPayload, reconciled: true, priceRole: 'observation_context_only',
+                webhookPayload: { ...existingPayload, reconciled: true,
+                  ...(!pendingPayload.subscriberCloseAccounting ? { priceRole: 'observation_context_only' } : {}),
                   closeAccounting: { kind: 'unavailable', reason: 'attributable_close_fills_unavailable', observedAt: Date.now() } },
               } },
               deltas: { lastTradeAt: new Date().toISOString() },

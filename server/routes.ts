@@ -1511,6 +1511,8 @@ async function addParkedValueForBotDisplayEquity(
 
 const fullClosesInFlight = new Set<string>();
 
+import { readSubscriberCloseAccounting, subscriberClosePersistence, subscriberPartialExecution, type SubscriberCloseAccounting } from './trading/subscriber-close-accounting';
+
 async function closePerpPosition(
   encryptedPrivateKey: Uint8Array,
   market: string,
@@ -1526,7 +1528,8 @@ async function closePerpPosition(
   confirmFullClose = true,
   ownPendingTradeId?: string,
   closeBotId?: string,
-): Promise<{ success: boolean; submissionAccepted?: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number; actualFee?: number; feeEvidence: CloseFeeEvidence; closeResult?: CloseResult }> {
+  subscriberAccounting = false,
+): Promise<{ success: boolean; submissionAccepted?: boolean; signature?: string; error?: string; executionMethod?: string; fillPrice?: number; actualFee?: number; feeEvidence: CloseFeeEvidence; closeResult?: CloseResult; subscriberAccounting?: SubscriberCloseAccounting }> {
   let signing: Awaited<ReturnType<typeof _resolveSigningContext>> | null = null;
   let closeResult: CloseResult | undefined;
   let closeLock: string | undefined;
@@ -1566,6 +1569,10 @@ async function closePerpPosition(
           || (position.baseSize > 0) !== (positionSide === 'long')))) {
         throw new Error('close_target_changed_or_unknown');
       }
+    }
+    if (subscriberAccounting && !confirmFullClose && adapter.protocolName === 'pacifica') {
+      try { baseline = await readCloseSnapshot(adapter, agentPubKey, signing.subaccountId); }
+      catch { /* Reduction may proceed; missing accounting evidence cannot authorize economics. */ }
     }
     const sentAt = Date.now();
     let orderResult;
@@ -1613,6 +1620,18 @@ async function closePerpPosition(
       if (!orderResult.success || !orderResult.orderId || orderResult.landingDisposition === 'unconfirmed') {
         closeResult = { ...closeResult, outcome: orderResult.status === 'rejected' ? 'rejected' : 'unknown', reason: 'close_dispatch_unresolved' };
       }
+      if (subscriberAccounting) {
+        const accounting = await readSubscriberCloseAccounting(adapter, {
+          account: agentPubKey, market, orderId: orderResult.orderId, openSide: positionSide!,
+          requestedSize: positionSizeBase!, sentAt, baseline, closeResult,
+        });
+        return { success: isConfirmedClose(closeResult), submissionAccepted: orderResult.success, signature: orderResult.orderId, closeResult,
+          error: isConfirmedClose(closeResult) ? undefined : closeResult.reason, executionMethod: 'adapter',
+          subscriberAccounting: accounting, fillPrice: accounting.price === null ? undefined : Number(accounting.price),
+          actualFee: accounting.fee === null ? undefined : Number(accounting.fee),
+          feeEvidence: accounting.fee === null ? { kind: 'unavailable', reason: accounting.reason ?? 'exact_close_fee_unavailable' }
+            : { kind: 'venue_exact', amount: Number(accounting.fee), protocol: 'pacifica' } };
+      }
       const fills = isConfirmedClose(closeResult) ? await readSignalBotCloseFillConfirmation({
         adapter, account: agentPubKey, market, openSide: positionSide!, expectedSize: positionSizeBase!,
         closeSentAtMs: sentAt, expectedOrderId: orderResult.orderId,
@@ -1623,6 +1642,19 @@ async function closePerpPosition(
         fillPrice: fills?.fillPrice, actualFee: fills?.fee,
         feeEvidence: fills ? { kind: 'venue_exact', amount: fills.fee, protocol: 'pacifica' }
           : { kind: 'unavailable', reason: 'attributable_close_fills_unavailable' } };
+    }
+    if (subscriberAccounting) {
+      // Partial reductions retain actual fills but never crystallize an epoch.
+      closeResult = { outcome: 'partial', account: agentPubKey, market, reason: 'non_crystallizing_reduction' };
+      const accounting = await readSubscriberCloseAccounting(adapter, {
+        account: agentPubKey, market, orderId: orderResult.orderId, openSide: positionSide!,
+        requestedSize: positionSizeBase!, sentAt, baseline, closeResult,
+      });
+      return { success: orderResult.success, signature: orderResult.orderId, closeResult, subscriberAccounting: accounting,
+        error: orderResult.error, executionMethod: 'adapter',
+        fillPrice: accounting.price === null ? undefined : Number(accounting.price),
+        feeEvidence: accounting.fee === null ? { kind: 'unavailable', reason: accounting.reason ?? 'exact_close_fee_unavailable' }
+          : { kind: 'venue_exact', amount: Number(accounting.fee), protocol: 'pacifica' } };
     }
     const feeRateQuote = orderResult.success
       ? await resolveFeeRateQuote(adapter, {
@@ -4981,6 +5013,7 @@ async function readSignalBotCloseFillConfirmation(input: {
 }
 
 interface CanonicalCloseFinalizationInput {
+  subscriberAccounting?: SubscriberCloseAccounting;
   closeResult?: CloseResult;
   bot: TradingBot;
   tradeId: string;
@@ -5015,6 +5048,7 @@ function closeFeeEventPayload(input: CanonicalCloseFinalizationInput): Record<st
     feeEvidence: input.feeEvidence,
     ...(input.feeEvidence.kind === 'unavailable' ? { closeAccounting: { status: 'unavailable' }, priceRole: 'observation_context_only' } : {}),
     ...(displayAccounting && input.bot.activeProtocol !== 'pacifica' ? { displayAccounting } : {}),
+    ...(input.subscriberAccounting ? subscriberClosePersistence(input.subscriberAccounting).webhookPayload : {}),
   };
 }
 
@@ -5090,6 +5124,7 @@ async function finalizeSignedPartialCloseAccounting(input: {
   protocolFillId: string;
   executionMethod: string;
   webhookPayload: unknown;
+  subscriberAccounting?: SubscriberCloseAccounting;
 }): Promise<SignedPartialCloseAccountingResult> {
   const preCloseBaseSize = Number(input.preClosePosition?.baseSize);
   const basePayload = typeof input.webhookPayload === "object" && input.webhookPayload !== null
@@ -5133,7 +5168,7 @@ async function finalizeSignedPartialCloseAccounting(input: {
     walletAddress: input.bot.walletAddress,
     market: input.bot.market,
     side: input.closeSide,
-    size: String(input.closedSize),
+    size: input.subscriberAccounting ? input.subscriberAccounting.size ?? '0' : String(input.closedSize),
     price: String(input.executionPrice ?? 0),
     fee: null,
     pnl: null,
@@ -5253,6 +5288,9 @@ async function finalizeSignedPartialCloseAccounting(input: {
           errorMessage: null,
           webhookPayload: {
             ...markerPayload,
+            ...(input.subscriberAccounting ? { closeAccounting: { kind: 'venue_exact',
+              protocolFillId: input.protocolFillId, fillPrice: input.executionPrice,
+              fee: input.fee, pnl: input.pnl, pnlConvention: 'net_of_close_fee' } } : {}),
             partialCloseAccounting: {
               ...markerPayload.partialCloseAccounting,
               status: "complete",
@@ -5299,6 +5337,7 @@ async function finalizeSignedPartialCloseAccounting(input: {
 async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInput) {
   if (input.bot.activeProtocol === 'pacifica' && !isConfirmedClose(input.closeResult)) throw new Error('unconfirmed_full_close');
   const accounting = closeFeePersistence(input.feeEvidence, input.pnl);
+  const subscriber = input.subscriberAccounting ? subscriberClosePersistence(input.subscriberAccounting) : null;
   const fillId = DatabaseStorage.canonicalCloseFillId({
     signature: input.canonicalFillSignature ?? input.signature,
     botId: input.bot.id,
@@ -5318,14 +5357,15 @@ async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInp
         price: String(input.fillPrice),
         fee: accounting.fee,
         pnl: accounting.pnl,
+        ...(subscriber ? { size: subscriber.size, price: subscriber.price, fee: subscriber.fee, pnl: subscriber.pnl, pnlConvention: 'net_of_close_fee' as const } : {}),
         executionMethod: input.executionMethod || "legacy",
         protocolFillId: fillId,
         webhookPayload: closeFeeEventPayload(input),
       },
     },
     deltas: {
-      totalPnlDelta: accounting.pnlDelta,
-      totalVolumeDelta: accounting.pnl === null ? 0 : input.size * input.fillPrice,
+      totalPnlDelta: subscriber?.pnlDelta ?? accounting.pnlDelta,
+      totalVolumeDelta: subscriber?.volumeDelta ?? (accounting.pnl === null ? 0 : input.size * input.fillPrice),
       lastTradeAt: new Date().toISOString(),
     },
     ...(accounting.pnl === null ? { confirmedPositionCloseIncomplete: {
@@ -5335,12 +5375,20 @@ async function finalizePerBotConfirmedClose(input: CanonicalCloseFinalizationInp
       realizedPnlDelta: accounting.pnlDelta, feeDelta: accounting.feeDelta,
     }}),
   });
-  return { ...result, fillId };
+  if (!result.isNew && result.trade && input.subscriberAccounting) {
+    const repaired = await storage.remediateSubscriberCloseAccountingAtomic({
+      botId: input.bot.id, tradeId: result.trade.id, accounting: input.subscriberAccounting,
+    });
+    return { trade: repaired.trade, isNew: repaired.remediated,
+      fillId: repaired.trade.protocolFillId ?? fillId };
+  }
+  return { ...result, fillId: result.trade?.protocolFillId ?? fillId };
 }
 
 async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizationInput) {
   if (input.bot.activeProtocol === 'pacifica' && !isConfirmedClose(input.closeResult)) throw new Error('unconfirmed_full_close');
   const accounting = closeFeePersistence(input.feeEvidence, input.pnl);
+  const subscriber = input.subscriberAccounting ? subscriberClosePersistence(input.subscriberAccounting) : null;
   if (!input.tradeId) throw new Error("user-webhook finalizer requires an existing close trade");
   const fillId = DatabaseStorage.canonicalCloseFillId({
     signature: input.canonicalFillSignature ?? input.signature,
@@ -5361,13 +5409,14 @@ async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizati
         price: String(input.fillPrice),
         fee: accounting.fee,
         pnl: accounting.pnl,
+        ...(subscriber ? { size: subscriber.size, price: subscriber.price, fee: subscriber.fee, pnl: subscriber.pnl, pnlConvention: 'net_of_close_fee' as const } : {}),
         protocolFillId: fillId,
         webhookPayload: closeFeeEventPayload(input),
       },
     },
     deltas: {
-      totalPnlDelta: accounting.pnlDelta,
-      totalVolumeDelta: accounting.pnl === null ? 0 : input.size * input.fillPrice,
+      totalPnlDelta: subscriber?.pnlDelta ?? accounting.pnlDelta,
+      totalVolumeDelta: subscriber?.volumeDelta ?? (accounting.pnl === null ? 0 : input.size * input.fillPrice),
       lastTradeAt: new Date().toISOString(),
     },
     ...(accounting.pnl === null ? { confirmedPositionCloseIncomplete: {
@@ -5377,7 +5426,14 @@ async function finalizeUserWebhookConfirmedClose(input: CanonicalCloseFinalizati
       realizedPnlDelta: accounting.pnlDelta, feeDelta: accounting.feeDelta,
     }}),
   });
-  return { ...result, fillId };
+  if (!result.isNew && result.trade && input.subscriberAccounting) {
+    const repaired = await storage.remediateSubscriberCloseAccountingAtomic({
+      botId: input.bot.id, tradeId: result.trade.id, accounting: input.subscriberAccounting,
+    });
+    return { trade: repaired.trade, isNew: repaired.remediated,
+      fillId: repaired.trade.protocolFillId ?? fillId };
+  }
+  return { ...result, fillId: result.trade?.protocolFillId ?? fillId };
 }
 
 function signalBotFlipHttpPayload<T extends Record<string, unknown>>(
@@ -5422,6 +5478,7 @@ async function executeSignalBotFlipClose(
   let flipCloseResult: CloseResult | undefined;
   let closeTradeId: string | undefined;
   let closeExecution: SignalBotFlipCloseExecution | undefined;
+  let subscriberAccounting: SubscriberCloseAccounting | undefined;
 
   const disposition = await resolveSignalBotFlipCloseThenOpen({
     classifiedSignal: input.classifiedSignal,
@@ -5446,7 +5503,7 @@ async function executeSignalBotFlipClose(
         market: input.bot.market,
         side: "CLOSE",
         size: String(position.size),
-        price: input.signalPrice,
+        price: input.executionLabel === "subscriber" ? "0" : input.signalPrice,
         status: "pending",
         fee: null,
         pnl: null,
@@ -5454,6 +5511,7 @@ async function executeSignalBotFlipClose(
           ...(typeof input.webhookPayload === "object" && input.webhookPayload !== null
             ? input.webhookPayload as Record<string, unknown>
             : { payload: input.webhookPayload }),
+          signalPrice: input.signalPrice, requestedSize: String(position.size),
           reversalClose: true,
           reversalConsumer: input.executionLabel,
           positionSource: position.source,
@@ -5473,9 +5531,10 @@ async function executeSignalBotFlipClose(
         input.botCtx ?? undefined,
         input.walletAddress,
         getAdapterForBot(input.bot),
-        true, pending.id, input.bot.id,
+        true, pending.id, input.bot.id, input.executionLabel === 'subscriber',
       );
       flipCloseResult = result.closeResult;
+      subscriberAccounting = result.subscriberAccounting;
       closeExecution = {
         success: result.submissionAccepted ?? result.success,
         signature: result.signature || null,
@@ -5488,10 +5547,14 @@ async function executeSignalBotFlipClose(
     },
     finalizeConfirmedClose: async (position, execution) => {
       if (!closeTradeId) throw new Error("confirmed FLIP close has no pending trade identity");
-      const fillPrice = execution.fillPrice ?? parseFloat(input.signalPrice || "0");
+      const fillPrice = input.executionLabel === 'subscriber'
+        ? Number(subscriberAccounting?.price ?? 0)
+        : execution.fillPrice ?? parseFloat(input.signalPrice || "0");
       const safeFillPrice = Number.isFinite(fillPrice) ? fillPrice : 0;
       const fee = closeFeeAmount(execution.feeEvidence);
-      const pnl = fee !== null && position.entryPrice > 0 && safeFillPrice > 0
+      const pnl = input.executionLabel === 'subscriber'
+        ? (subscriberAccounting?.pnl == null ? null : Number(subscriberAccounting.pnl))
+        : fee !== null && position.entryPrice > 0 && safeFillPrice > 0
         ? position.side === "LONG"
           ? (safeFillPrice - position.entryPrice) * position.size - fee
           : (position.entryPrice - safeFillPrice) * position.size - fee
@@ -5504,12 +5567,13 @@ async function executeSignalBotFlipClose(
         tradeId: closeTradeId,
         closeResult: flipCloseResult,
         signature: execution.signature,
-        size: position.size,
+        size: input.executionLabel === 'subscriber' ? Number(subscriberAccounting?.size ?? 0) : position.size,
         fillPrice: safeFillPrice,
         feeEvidence: execution.feeEvidence,
         pnl,
         executionMethod: execution.executionMethod,
         webhookPayload: input.webhookPayload,
+        subscriberAccounting,
       });
 
       // Preserve the existing confirmed-close side effects without allowing
@@ -5556,6 +5620,14 @@ async function executeSignalBotFlipClose(
       status: (input.bot.activeProtocol === 'pacifica' || unresolvedWithVenueEvidence) ? "pending" : "failed",
       txSignature: signature,
       errorMessage: `FLIP close terminal: ${disposition.close.kind}`,
+      ...(subscriberAccounting ? {
+        size: subscriberAccounting.size ?? '0', price: subscriberAccounting.price ?? '0',
+        fee: subscriberAccounting.fee, pnl: null,
+        webhookPayload: { ...(typeof input.webhookPayload === 'object' && input.webhookPayload !== null
+          ? input.webhookPayload as Record<string, unknown> : {}),
+          reversalClose: true, signalPrice: input.signalPrice,
+          ...subscriberClosePersistence(subscriberAccounting).webhookPayload },
+      } : {}),
     });
   }
   return disposition;
@@ -5788,12 +5860,9 @@ export async function routeSignalToSubscribers(
             return 'skippedFlat';
           }
           
-          const subscriberCloseAdapter = getAdapterForBot(subBot);
-          const subscriberPendingClose = subscriberCloseAdapter.protocolName === 'pacifica'
-            ? await storage.createBotTrade({ tradingBotId: subBot.id, walletAddress: subBot.walletAddress,
+          const subscriberPendingClose = await storage.createBotTrade({ tradingBotId: subBot.id, walletAddress: subBot.walletAddress,
                 market: subBot.market, side: 'CLOSE', size: String(Math.abs(position.size)), price: '0',
-                fee: null, pnl: null, status: 'pending', webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId } })
-            : null;
+                fee: null, pnl: null, status: 'pending', webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, requestedSize: String(Math.abs(position.size)), signalPrice: signal.price } });
           const subCloseSlippageBps = subWallet.slippageBps ?? 50;
           const closeResult = await closePerpPosition(
             subAgentKey,
@@ -5807,136 +5876,45 @@ export async function routeSignalToSubscribers(
             subCloseCtx,
             subBot.walletAddress,
             getAdapterForBot(subBot),
-            true, subscriberPendingClose?.id, subBot.id,
+            true, subscriberPendingClose.id, subBot.id, true,
           );
-          if (subscriberCloseAdapter.protocolName === 'pacifica' && subscriberPendingClose) {
+          if (closeResult.success || closeResult.signature) {
+            const accounting = closeResult.subscriberAccounting;
             if (!isConfirmedClose(closeResult.closeResult)) {
-              await storage.updateBotTrade(subscriberPendingClose.id, { status: 'pending', txSignature: closeResult.signature ?? null,
-                fee: null, pnl: null, errorMessage: closeResult.closeResult?.reason ?? 'close_confirmation_unavailable' });
+              const facts = accounting ? subscriberClosePersistence(accounting) : null;
+              await storage.updateBotTrade(subscriberPendingClose.id, {
+                status: 'pending', txSignature: closeResult.signature ?? null,
+                size: facts?.size ?? '0', price: facts?.price ?? '0', fee: facts?.fee ?? null, pnl: null,
+                errorMessage: closeResult.closeResult?.reason ?? 'close_confirmation_unavailable',
+                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId,
+                  requestedSize: String(Math.abs(position.size)), signalPrice: signal.price,
+                  ...facts?.webhookPayload },
+              });
               return 'closeFailed';
             }
-            const fillPrice = closeResult.fillPrice ?? 0;
-            const { pnl } = closeAccounting(closeResult.feeEvidence, position.entryPrice || 0, fillPrice,
-              Math.abs(position.size), position.side === 'LONG' ? 'short' : 'long');
+            if (!accounting) throw new Error('subscriber_accounting_contract_unavailable');
+            const facts = subscriberClosePersistence(accounting);
+            const pnl = accounting.pnl === null ? null : Number(accounting.pnl);
             const finalized = await finalizePerBotConfirmedClose({ bot: subBot, tradeId: subscriberPendingClose.id,
-              signature: closeResult.signature!, closeResult: closeResult.closeResult, size: Math.abs(position.size),
-              fillPrice, feeEvidence: closeResult.feeEvidence, pnl, webhookPayload: subscriberPendingClose.webhookPayload });
-            if (finalized.isNew && pnl !== null && pnl > 0) {
+              signature: closeResult.signature!, closeResult: closeResult.closeResult,
+              size: Number(accounting.size ?? 0), fillPrice: Number(accounting.price ?? 0),
+              feeEvidence: closeResult.feeEvidence, pnl, subscriberAccounting: accounting,
+              fillTimestampMs: accounting.timestamp ?? undefined, webhookPayload: subscriberPendingClose.webhookPayload });
+            if (finalized.isNew && facts.shareEligible && pnl !== null) {
               await distributeCreatorProfitShare({ subscriberBotId: subBot.id, subscriberWalletAddress: subBot.walletAddress,
                 subscriberAgentPublicKey: subWallet.agentPublicKey!, subscriberEncryptedPrivateKey: subAgentKey,
                 driftSubaccountId: subAccountId, realizedPnl: pnl, tradeId: finalized.fillId });
             }
-            if (finalized.isNew && pnl !== null) await sendTradeNotification(subWallet.address,
+            if (finalized.isNew && pnl !== null) await sendTradeNotification(subBot.walletAddress,
               { type: 'position_closed', botName: subBot.name, market: subBot.market, pnl });
-            return 'closeSuccess';
-          }
-
-
-          if (closeResult.success) {
-            const fillPrice = parseFloat(signal.price);
-            
-            const closeNotional = Math.abs(position.size) * fillPrice;
-            const closeEntryPrice = position.entryPrice || 0;
-            const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(
-              closeResult.feeEvidence,
-              closeEntryPrice,
-              fillPrice,
-              Math.abs(position.size),
-              position.side === 'LONG' ? 'short' : 'long',
-            );
-            if (closeTradePnl !== null) {
-              console.log(`[Subscriber Routing] PnL calculated for ${subBot.id}: entry=$${closeEntryPrice.toFixed(2)}, exit=$${fillPrice.toFixed(2)}, pnl=$${closeTradePnl.toFixed(4)}`);
-            }
-            
-            const subRouteFillId = DatabaseStorage.canonicalCloseFillId({
-              signature: closeResult.signature,
-              botId: subBot.id,
-              side: 'CLOSE',
-              size: Math.abs(position.size).toFixed(8),
-              market: subBot.market,
-              fillPrice,
-              timestampMs: Date.now(),
-            });
-            const subRouteAtomic = await storage.recordCloseEventAtomic({
-              botId: subBot.id,
-              insert: {
-                tradingBotId: subBot.id,
-                walletAddress: subBot.walletAddress,
-                market: subBot.market,
-                side: "CLOSE",
-                size: Math.abs(position.size).toFixed(8),
-                price: closeResult.fillPrice?.toString() || fillPrice.toFixed(6),
-                status: 'executed',
-                fee: closeFee === null ? null : closeFee.toFixed(6),
-                pnl: closeTradePnl === null ? null : closeTradePnl.toFixed(6),
-                txSignature: closeResult.signature || null,
-                protocolFillId: subRouteFillId,
-                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, feeEvidence: closeResult.feeEvidence },
-                executionMethod: closeResult.executionMethod || 'legacy',
-              },
-              deltas: {
-                totalPnlDelta: closeTradePnl ?? 0,
-                totalVolumeDelta: closeNotional,
-                lastTradeAt: new Date().toISOString(),
-              },
-            });
-
-            // PROFIT SHARE: Distribute to creator if subscriber closed with profit.
-            // Gate on isNew (5.5/T4) so a reconciler/retry replay of the SAME close
-            // can't pay the creator twice; key tradeId off the canonical fill id so
-            // any IOU dedupes on the (subscriber_bot_id, trade_id) unique index.
-            if (closeTradePnl !== null && closeTradePnl > 0 && subRouteAtomic.isNew) {
-              const tradeId = subRouteFillId;
-              console.log(`[Subscriber Routing] Initiating profit share for ${subBot.id}: pnl=$${closeTradePnl.toFixed(4)}`);
-              // V3 Phase 3b fund-safety: this is fire-and-forget, but the
-              // outer try/finally zeros `subAgentKey` as soon as the
-              // trade call returns. Hand the profit-share path an isolated
-              // copy that it owns and zeros itself in its own finally.
-              const profitShareKeyCopy = new Uint8Array(subAgentKey);
-              distributeCreatorProfitShare({
-                subscriberBotId: subBot.id,
-                subscriberWalletAddress: subBot.walletAddress,
-                subscriberAgentPublicKey: subWallet.agentPublicKey!,
-                subscriberEncryptedPrivateKey: profitShareKeyCopy,
-                driftSubaccountId: subAccountId,
-                realizedPnl: closeTradePnl,
-                tradeId,
-              }).then(result => {
-                if (result.success && result.amount) {
-                  console.log(`[Subscriber Routing] Profit share distributed: $${result.amount.toFixed(4)} from ${subBot.id}`);
-                } else if (!result.success && result.error) {
-                  console.error(`[Subscriber Routing] Profit share failed for ${subBot.id}: ${result.error}`);
-                }
-              }).catch(err => console.error(`[Subscriber Routing] Profit share error for ${subBot.id}:`, err))
-                .finally(() => { profitShareKeyCopy.fill(0); });
-            }
-
-            if (closeTradePnl !== null) {
-              sendTradeNotification(subWallet.address, {
-                type: 'position_closed',
-                botName: subBot.name,
-                market: subBot.market,
-                pnl: closeTradePnl,
-              }).catch(err => console.error('[Subscriber Routing] Notification error:', err));
-            }
-            
             return 'closeSuccess';
           } else {
             console.error(`[Subscriber Routing] Close failed for subscriber bot ${subBot.id}:`, closeResult.error);
             const closeErrorMsg = parseDriftError(closeResult.error);
             
-            const failedCloseTrade = await storage.createBotTrade({
-              tradingBotId: subBot.id,
-              walletAddress: subBot.walletAddress,
-              market: subBot.market,
-              side: "CLOSE",
-              size: Math.abs(position.size).toFixed(8),
-              price: signal.price,
-              status: 'failed',
-              fee: '0',
-              errorMessage: closeErrorMsg,
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId },
-              executionMethod: 'legacy',
+            await storage.updateBotTrade(subscriberPendingClose.id, {
+              status: closeResult.closeResult?.outcome === 'rejected' ? 'failed' : 'pending',
+              errorMessage: closeErrorMsg, fee: null, pnl: null,
             });
 
             // V3 Phase 3b: subscriber-fanout transient retries are intentionally
@@ -5980,6 +5958,7 @@ export async function routeSignalToSubscribers(
 
           console.log(`[Subscriber Routing] Partial close for ${subBot.id}: fraction=${(signal.partialCloseFraction * 100).toFixed(1)}%, size=${subPartialSize.toFixed(4)}`);
           const subPartialCloseSlippage = subWallet.slippageBps ?? 50;
+          const subPartialEpoch = await storage.getBotPosition(subBot.id, subBot.market);
           const subPartialResult = await closePerpPosition(
             subAgentKey,
             subBot.market,
@@ -5992,66 +5971,33 @@ export async function routeSignalToSubscribers(
             subPartialCtx,
             subBot.walletAddress,
             getAdapterForBot(subBot),
-            false,
+            false, undefined, subBot.id, true,
           );
 
-          if (subPartialResult.success) {
-            const subPartialFillPrice = subPartialResult.fillPrice ?? parseFloat(signal.price);
-            const subPartialEntryPrice = subPartialPosition.entryPrice || 0;
-            const subPartialNotional = subPartialSize * subPartialFillPrice;
-            const { fee: subPartialFee, pnl: subPartialPnl } = closeAccounting(
-              subPartialResult.feeEvidence,
-              subPartialEntryPrice,
-              subPartialFillPrice,
-              subPartialSize,
-              subPartialPosition.side === 'LONG' ? 'short' : 'long',
-            );
-
+          if (subPartialResult.success || subPartialResult.signature) {
+            const accounting = subPartialResult.subscriberAccounting;
+            if (!accounting) throw new Error('subscriber_accounting_contract_unavailable');
+            const facts = subscriberClosePersistence(accounting);
             const subPartialDedupKey = DatabaseStorage.canonicalCloseFillId({
-              signature: subPartialResult.signature ? `tx-${subPartialResult.signature}` : undefined,
-              botId: subBot.id,
-              side: subPartialPosition.side === 'LONG' ? 'short' : 'long',
-              size: subPartialSize,
-              market: subBot.market,
-              fillPrice: subPartialFillPrice,
-              timestampMs: Date.now(),
+              signature: subPartialResult.signature,
+              botId: subBot.id, side: 'CLOSE', size: Number(accounting.size ?? 0),
+              market: subBot.market, fillPrice: Number(accounting.price ?? 0),
+              timestampMs: accounting.timestamp ?? Date.now(),
             });
-
-            await storage.recordCloseEventAtomic({
-              botId: subBot.id,
-              insert: {
-                tradingBotId: subBot.id,
-                walletAddress: subBot.walletAddress,
-                market: subBot.market,
-                side: subPartialPosition.side === 'LONG' ? 'short' : 'long',
-                size: String(subPartialSize),
-                price: String(subPartialFillPrice),
-                fee: subPartialFee === null ? null : String(subPartialFee),
-                pnl: subPartialPnl === null ? null : String(subPartialPnl),
-                status: 'executed',
-                txSignature: subPartialResult.signature || null,
-                protocolFillId: subPartialDedupKey,
-                webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, partialClose: true, fraction: signal.partialCloseFraction, feeEvidence: subPartialResult.feeEvidence },
-                executionMethod: subPartialResult.executionMethod || 'legacy',
-              },
-              deltas: {
-                totalPnlDelta: subPartialPnl ?? 0,
-                totalVolumeDelta: subPartialNotional,
-                lastTradeAt: new Date().toISOString(),
-              },
+            const execution = subscriberPartialExecution(accounting);
+            await finalizeSignedPartialCloseAccounting({
+              bot: subBot, queryAccount: subPartialQueryAccount!, querySubaccountId: subPartialQuerySubId,
+              botSubaccountPublicKey: subPartialCtx?.botPublicKey, preClosePosition: subPartialEpoch,
+              closedSize: Number(accounting.size ?? subPartialSize), closedFraction: signal.partialCloseFraction,
+              closeSide: subPartialPosition.side === 'LONG' ? 'short' : 'long',
+              executionPrice: execution.price, executionPriceAuthority: execution.price === null ? null : 'venue_execution',
+              signalPriceContext: Number(signal.price), fee: execution.fee, pnl: execution.pnl,
+              feeEvidence: subPartialResult.feeEvidence, signature: subPartialResult.signature,
+              protocolFillId: subPartialDedupKey, executionMethod: subPartialResult.executionMethod ?? 'adapter',
+              subscriberAccounting: accounting,
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId,
+                requestedSize: String(subPartialSize), signalPrice: signal.price, ...facts.webhookPayload },
             });
-
-            if (subPartialPnl !== null) schedulePartialCloseNotification({
-              walletAddress: subBot.walletAddress,
-              botId: subBot.id,
-              botName: subBot.name,
-              market: subBot.market,
-              side: subPartialPosition.side as 'LONG' | 'SHORT',
-              closedFraction: signal.partialCloseFraction,
-              realizedPnl: subPartialPnl,
-              price: subPartialFillPrice,
-            });
-
             return 'partialCloseSuccess';
           } else {
             console.error(`[Subscriber Routing] Partial close failed for ${subBot.id}: ${subPartialResult.error}`);
