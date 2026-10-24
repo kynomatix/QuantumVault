@@ -1,5 +1,5 @@
 import { configDefaults, defineConfig } from 'vitest/config';
-import { realDatabaseSuites } from './tests/helpers/real-database-suites';
+import { isolatedDatabaseSuites, realDatabaseSuites, sharedDatabaseSuites } from './tests/helpers/real-database-suites';
 import path from 'path';
 
 export default defineConfig({
@@ -25,11 +25,21 @@ export default defineConfig({
       {
         extends: true,
         test: {
-          name: 'database',
-          include: realDatabaseSuites,
-          // One qvtest database: DDL, catalogs, fixed keys and pool slots are shared.
-          // Preserve deliberate connection concurrency inside each database suite.
+          name: 'database-shared',
+          include: sharedDatabaseSuites,
+          // Public DDL and fixed keys must finish before private-schema fixtures run.
           fileParallelism: false,
+          sequence: { groupOrder: 1 },
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'database-isolated',
+          include: isolatedDatabaseSuites,
+          // Bound aggregate pools while preserving each suite's connection races.
+          maxWorkers: 4,
+          sequence: { groupOrder: 2 },
         },
       },
     ],
