@@ -20,11 +20,15 @@ export interface PublicSnapshot {
   incidentCode: CriticalIncidentCode | null;
 }
 const stamp = (value: number | null) => value !== null && Number.isFinite(value) ? new Date(value).toISOString() : null;
+/** The owner surface and public health use the same strict 45-second boundary. */
+export function checksFresh(times: readonly (number | null)[], now: number): boolean {
+  return times.every(t => t !== null && Number.isFinite(t) && t <= now && now - t < 45_000);
+}
 export function publicSnapshot(memory: StatusMemory, now = Date.now()): PublicSnapshot {
   const times = [memory.renewalAt, memory.passAt, ...memory.botCheckTimes];
   const oldest = times.every(t => t !== null && Number.isFinite(t) && t <= now) ? Math.min(...times as number[]) : null;
   const age = oldest === null ? null : Math.floor((now - oldest) / 1000);
-  const offline = memory.standby || !memory.database || !memory.inControl || age === null || age >= 45;
+  const offline = memory.standby || !memory.database || !memory.inControl || !checksFresh(times, now);
   const critical = memory.critical || !!memory.incidentCode;
   const attention = critical || !memory.reconciled || memory.paused;
   const state: WorkerState = offline ? 'offline' : attention ? 'attention' : memory.test ? 'test' : 'running';

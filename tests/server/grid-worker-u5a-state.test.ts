@@ -10,7 +10,7 @@ import {probeGridWorkerSchema} from '../../server/grid-worker/boot';
 const facts=():AdminFacts=>({host:{execution_mode:'external',run_mode:'trading',execution_enabled:true,entries_paused:false,
   holder_role:'grid-worker',pause_revision:'3',pause_ack_revision:'3',holder_live:true,heartbeat_online:true,heartbeat_fresh:true,progress_fresh:true,
   authority_tracking_enabled:true,start_scope:'owner_allowlist',legacy_controls_enabled:true,observer_fenced:false,drain_requested:false},
-  catalog:true,identity:true,history:true,ownerKeys:true,unacknowledged:false,unresolved:false,protective:false,pauseUnconfirmed:false});
+  catalog:true,identity:true,history:true,ownerKeys:true,unacknowledged:false,unresolved:false,protective:false,pauseUnconfirmed:false,botChecksFresh:true});
 describe('U5a server card and reset truth',()=>{
   it('enumerates every reset blocker using the same facts',()=>{
     const f=facts();expect(resetBlockedBy(f,false)).toEqual([]);

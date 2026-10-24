@@ -145,7 +145,7 @@ describe('U5a owner API uses signed receipt transactions',()=>{
     }
   });
   it('validates the route challenge and rejects malformed, altered, noncanonical and stale receipt vectors atomically',async()=>{
-    const good=await api('/challenge',{action:'pause',target:'all',expectedPauseRevision:'0'});expect(good.status).toBe(200);const message=String(good.data.message),m=parseOwnerMessage(message);
+    const good=await api('/challenge',{action:'pause',target:'all',expectedPauseRevision:'0'});expect(good.status).toBe(200);expect(good.data.expectedPauseRevision).toBe('0');const message=String(good.data.message),m=parseOwnerMessage(message);
     expect(Date.parse(m.expires)-Date.parse(m.issued)).toBe(120000);
     const malformed=[message+'\n',message+' ',message.replaceAll('\n','\r\n'),message.replace('scope:grid_worker','scope:other'),
       message.replace('action:pause\nscope:grid_worker','scope:grid_worker\naction:pause'),message.replace('target:all','target:ALL'),
@@ -181,7 +181,7 @@ describe('U5a owner API uses signed receipt transactions',()=>{
     const renew=(async()=>{await new Promise(r=>setTimeout(r,250));expect(await service.renew(holder,1000,true)).toMatchObject({bootId:holder.bootId});
       await new Promise(r=>setTimeout(r,5200));await tx(async c=>{const h=(await c.query('SELECT pause_revision FROM grid_worker_host')).rows[0];await acknowledgePause(c,holder,String(h.pause_revision));});})();
     const [result]=await Promise.all([response,post,renew]);expect(result.status,JSON.stringify(result.data)).toBe(200);
-    expect(result.data).toMatchObject({latched:true,acknowledged:true,unknown:false,cancellationsComplete:true});
+    expect(result.data).toMatchObject({latched:true,saved:true,acknowledgementOutcome:'confirmed',acknowledged:true,unknown:false,cancellationsComplete:true});
     expect(Date.now()-start).toBeGreaterThanOrEqual(5000);expect(Date.now()-start).toBeLessThan(20000);
     expect((await api('/pause',signed(message))).status).toBe(409);
   },25000);
@@ -190,7 +190,7 @@ describe('U5a owner API uses signed receipt transactions',()=>{
       "NEW.message_digest:=encode(sha256(convert_to('EXAMPLE_WRONG_DIGEST','UTF8')),'hex');":"NEW.consumed_at:=clock_timestamp();NEW.consumed_by:='EXAMPLE';";
     await pool.query(`CREATE OR REPLACE FUNCTION fixture_receipt() RETURNS trigger LANGUAGE plpgsql AS $body$ BEGIN ${assignment} RETURN NEW; END $body$`);
     await pool.query('CREATE TRIGGER fixture_receipt BEFORE INSERT ON owner_action_receipts FOR EACH ROW EXECUTE FUNCTION fixture_receipt()');
-    try{const response=await api('/pause',signed(await challenge()));expect(response.status).toBe(409);expect(response.data.latched).toBe(false);
+    try{const response=await api('/pause',signed(await challenge()));expect(response.status).toBe(409);expect(response.data.latched).toBe(false);expect(response.data.saved).toBe(false);
       expect((await pool.query('SELECT pause_revision FROM grid_worker_host')).rows[0].pause_revision).toBe('0');
       expect(await openCodes()).toEqual([]);
     }finally{await pool.query('DROP TRIGGER fixture_receipt ON owner_action_receipts');}
@@ -198,7 +198,7 @@ describe('U5a owner API uses signed receipt transactions',()=>{
   it('reports an unacknowledged committed pause as unknown within twenty seconds',async()=>{
     await acquire();const message=await challenge(),start=Date.now(),response=await api('/pause',signed(message));
     expect(Date.now()-start).toBeLessThan(20000);expect(response.status).toBe(503);
-    expect(response.data).toMatchObject({latched:true,acknowledged:false,unknown:true,incidentRecorded:true,cancellationsComplete:null});
+    expect(response.data).toMatchObject({latched:true,saved:true,acknowledgementOutcome:'not_confirmed',acknowledged:false,unknown:true,incidentRecorded:true,cancellationsComplete:null});
     expect(await openCodes()).toEqual(['pause_unacknowledged']);
   },25000);
   it('acknowledges only the signed occurrence, seen needs no signature, and MAIN flag blocks reset',async()=>{
@@ -251,7 +251,7 @@ describe('U5a R2 revision and MAIN relay contracts',()=>{
     const c=await pool.connect();await c.query('BEGIN');await hostFence(c,'exclusive');
     try{const response=await api('/status');expect(response.status,JSON.stringify(response.data)).toBe(200);
       expect(response.data.incidents.map((i:{code:string})=>i.code)).toEqual(['stop_failed']);
-      expect(response.data).toMatchObject({cardState:'needs_you',executionMode:'legacy',entriesPaused:true,pauseRevision:'0',cancellationsComplete:true,botsPaused:{total:0,paused:0}});
+      expect(response.data).toMatchObject({cardState:'exec_off',executionMode:'legacy',entriesPaused:true,pauseRevision:'0',cancellationsComplete:true,botsPaused:{total:0,paused:0}});
       expect(response.data.resetBlockedBy).not.toContain('worker_checks');expect(response.data.resetBlockedBy).not.toContain('monitor_fence');
       expect(response.data.ages.observedAt).toBeTruthy();expect(response.data.host).toHaveProperty('holder_live');
       expect(response.data.incidents[0]).toMatchObject({occurrence_count:'1',acknowledged:false,seen:false,bot_id:null});
@@ -280,4 +280,20 @@ it('counts paused positions as at risk and cancellations only for the current pa
   expect(response.data).toMatchObject({gridBotsAtRisk:2,botsPaused:{total:3,paused:1},cancellationsComplete:false});
   await complete(ids[1],'0');await complete(ids[2],'0');
   expect((await api('/status')).data).toMatchObject({botsPaused:{total:3,paused:3},cancellationsComplete:true});
+});
+
+it('U5b exposes stored acknowledgement capability, complete critical totals and list truncation',async()=>{
+  const writer=new GridIncidents(pool,terminate);
+  for(let n=0;n<102;n++)await writer.record({code:'stop_failed',dedupKey:'EXAMPLE_U5B:'+n});
+  await pool.query("UPDATE grid_worker_incidents SET acknowledged_at=clock_timestamp(),acknowledged_by=$1 WHERE id=(SELECT id FROM grid_worker_incidents LIMIT 1)",[owner]);
+  const payload=await tx(c=>adminStatus(c,false),'none');
+  expect(payload.incidents).toHaveLength(100);expect(payload.truncated).toBe(true);
+  expect(payload.unacknowledgedCritical).toBe(101);expect(payload.acknowledgedCritical).toBe(1);
+  for(const row of payload.incidents)expect(row.canAcknowledge).toBe(!row.acknowledged);
+  expect(payload.executionRestrictions).toEqual(['trading_off','test']);expect(payload.stopsAllowed).toBe(false);expect(typeof payload.stopsAllowed).toBe('boolean');
+  await pool.query("DELETE FROM grid_worker_incidents");
+  await pool.query("INSERT INTO grid_worker_incidents(id,dedup_key,severity,code,first_seen_at,last_seen_at) VALUES($1,'EXAMPLE_U5B_STORED_WARNING','warning','stop_failed',clock_timestamp(),clock_timestamp())",[randomUUID()]);
+  const downgraded=await tx(c=>adminStatus(c,false),'none');
+  expect(downgraded.incidents[0]).toMatchObject({severity:'critical',canAcknowledge:false});
+  expect(downgraded.unacknowledgedCritical).toBe(1);expect(downgraded.truncated).toBe(false);
 });

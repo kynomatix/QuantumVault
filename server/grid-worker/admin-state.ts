@@ -6,13 +6,21 @@ import {mainIdentityMatches} from './main-readiness-identity';
 import {OWNER_MASTER_PUBLIC_KEYS} from './owner-master-keys';
 import {RECONCILIATION_STREAMS} from './reconciliation';
 import {CRITICAL_PRIORITY} from './incident-policy';
+import {checksFresh} from './status';
 
 export type ResetBlocker='server_flag'|'open_alert'|'review_required'|'worker_checks'|'monitor_fence'|'history_checks';
 export type CardState='offline'|'exec_off'|'pause_unconfirmed'|'needs_you'|'check_bots'|'test'|'paused'|'legacy_paused'
   |'attention_fence'|'attention_history'|'attention_checks'|'attention_drain'|'attention_open'|'legacy'|'running';
 export interface AdminFacts {
   host:Record<string,any>; catalog:boolean; identity:boolean; history:boolean; ownerKeys:boolean;
-  unacknowledged:boolean; unresolved:boolean; protective:boolean; pauseUnconfirmed:boolean;
+  unacknowledged:boolean; unresolved:boolean; protective:boolean; pauseUnconfirmed:boolean; botChecksFresh:boolean;
+}
+export function executionRestrictions(f:AdminFacts):('trading_off'|'test'|'drain')[]{
+  const h=f.host, result:('trading_off'|'test'|'drain')[]=[];
+  if(!h.execution_enabled)result.push('trading_off');
+  if(h.run_mode!=='trading')result.push('test');
+  if(h.drain_requested)result.push('drain');
+  return result;
 }
 /** This function is shared by status and reset; a display can never bypass a reset predicate. */
 export function resetBlockedBy(f:AdminFacts,entriesPaused:boolean):ResetBlocker[]{
@@ -29,11 +37,12 @@ export function resetBlockedBy(f:AdminFacts,entriesPaused:boolean):ResetBlocker[
 export function ownerCardState(f:AdminFacts,blocked:readonly ResetBlocker[]):CardState{
   const h=f.host,external=h.execution_mode==='external';
   if(external&&(h.holder_role!=='grid-worker'||!h.holder_live||!h.heartbeat_online))return 'offline';
-  if(external&&!h.execution_enabled)return 'exec_off';
+  if(!h.execution_enabled)return 'exec_off';
   if(external&&h.entries_paused&&String(h.pause_ack_revision)!==String(h.pause_revision)&&f.pauseUnconfirmed)return 'pause_unconfirmed';
   if(f.unacknowledged)return 'needs_you';
   if(f.protective)return 'check_bots';
-  if(external&&h.run_mode!=='trading')return 'test';
+  if(h.run_mode!=='trading')return 'test';
+  if(h.drain_requested)return 'attention_drain';
   if(h.entries_paused){
     if(!external)return 'legacy_paused';
     if(String(h.pause_ack_revision)===String(h.pause_revision))return 'paused';
@@ -41,8 +50,7 @@ export function ownerCardState(f:AdminFacts,blocked:readonly ResetBlocker[]):Car
   }
   if(external&&h.observer_fenced)return 'attention_fence';
   if(!f.history)return 'attention_history';
-  if(external&&(!h.heartbeat_fresh||!h.progress_fresh))return 'attention_checks';
-  if(external&&h.drain_requested)return 'attention_drain';
+  if(external&&(!h.heartbeat_fresh||!h.progress_fresh||!f.botChecksFresh))return 'attention_checks';
   if(f.unresolved||blocked.length)return 'attention_open';
   return external?'running':'legacy';
 }
@@ -56,6 +64,9 @@ export async function readAdminFacts(c:PoolClient):Promise<AdminFacts>{
     EXTRACT(epoch FROM clock_timestamp()-last_healthz_poll_at) AS monitor_poll_seconds
     FROM grid_worker_host WHERE singleton_id=1`)).rows[0];
   if(!host)throw Error('GRID_ADMIN_HOST_MISSING');
+  const botChecks=(await c.query(`SELECT last_tick_at,clock_timestamp() AS checked_at FROM grid_bots
+    WHERE status NOT IN ('draft','failed','stopped')`)).rows;
+  const botChecksFresh=botChecks.every(b=>checksFresh([b.last_tick_at===null?null:new Date(b.last_tick_at).getTime()],new Date(b.checked_at).getTime()));
   const required=new Set<string>(GRID_WORKER_REQUIRED_CAPABILITIES);let databaseFailure:unknown=null;
   const catalog=await probeSchemaMigrationManifest(async(text,values)=>{
     try{return await c.query(text,values?[...values]:undefined);}catch(error){databaseFailure??=error;throw error;}
@@ -76,7 +87,7 @@ export async function readAdminFacts(c:PoolClient):Promise<AdminFacts>{
     ownerKeys:host.execution_mode==='legacy'||OWNER_MASTER_PUBLIC_KEYS.length>0,
     unacknowledged:incidents.some(i=>i.acknowledged_at===null),unresolved:incidents.some(i=>i.resolved_at===null),
     protective:incidents.some(i=>['stop_failed','protective_failure'].includes(i.code)&&i.resolved_at===null),
-    pauseUnconfirmed:incidents.some(i=>i.code==='pause_unacknowledged')};
+    pauseUnconfirmed:incidents.some(i=>i.code==='pause_unacknowledged'),botChecksFresh};
 }
 export async function pauseCompletion(c:PoolClient,revision:string){
   return (await c.query(`SELECT count(*)::integer AS total,
@@ -92,12 +103,16 @@ export async function adminStatus(c:PoolClient,entriesPaused:boolean){
     OR (${effectiveSeverity}<>'critical' AND (inbox_seen_at IS NULL OR last_seen_at>=clock_timestamp()-interval '24 hours'))`;
   const incidents=(await c.query(`SELECT id,bot_id,${effectiveSeverity} AS severity,code,occurrence_count,first_seen_at,last_seen_at,resolved_at,acknowledged_at,inbox_seen_at,
     acknowledged_at IS NOT NULL AS acknowledged,inbox_seen_at IS NOT NULL AS seen,
+    severity='critical' AND acknowledged_at IS NULL AS "canAcknowledge",
     EXTRACT(epoch FROM clock_timestamp()-first_seen_at) AS first_seen_seconds,
     EXTRACT(epoch FROM clock_timestamp()-last_seen_at) AS last_seen_seconds,
     EXTRACT(epoch FROM clock_timestamp()-resolved_at) AS resolved_seconds
     FROM grid_worker_incidents WHERE ${incidentWhere}
     ORDER BY CASE WHEN ${effectiveSeverity}='critical' THEN 0 ELSE 1 END,first_seen_at DESC,id LIMIT 100`)).rows;
-  const counts=(await c.query(`SELECT ${effectiveSeverity} AS severity,count(*)::integer AS count FROM grid_worker_incidents WHERE ${incidentWhere} GROUP BY ${effectiveSeverity}`)).rows;
+  const counts=(await c.query(`SELECT ${effectiveSeverity} AS severity,count(*)::integer AS count,
+    count(*) FILTER(WHERE acknowledged_at IS NULL)::integer AS unacknowledged,
+    count(*) FILTER(WHERE acknowledged_at IS NOT NULL)::integer AS acknowledged
+    FROM grid_worker_incidents WHERE ${incidentWhere} GROUP BY ${effectiveSeverity}`)).rows;
   const botsPaused=await pauseCompletion(c,String(h.pause_revision));
   const risk=(await c.query(`SELECT count(*)::integer AS n FROM grid_bots b LEFT JOIN grid_monitor_state m ON m.bot_id=b.id
     WHERE b.status NOT IN ('draft','failed','stopped','paused') OR
@@ -107,7 +122,14 @@ export async function adminStatus(c:PoolClient,entriesPaused:boolean){
   // Explicit allowlist: no owner keys, budgets or database identity escape into the card payload.
   const safeHost=Object.fromEntries(['execution_mode','run_mode','execution_enabled','entries_paused','observer_fenced','legacy_controls_enabled',
     'pause_revision','pause_ack_revision','pause_ack_at','last_healthz_poll_at','heartbeat_at','progress_at','observed_at','holder_live'].map(k=>[k,h[k]]));
+  const restrictions=executionRestrictions(facts),critical=counts.find(r=>r.severity==='critical');
+  const stopsAllowed=restrictions.length===0&&facts.catalog&&facts.identity&&facts.ownerKeys&&
+    (h.execution_mode==='legacy'?h.legacy_controls_enabled===true:
+      h.holder_role==='grid-worker'&&h.holder_live===true&&h.heartbeat_fresh===true&&h.progress_fresh===true&&facts.botChecksFresh&&h.authority_tracking_enabled===true);
   return {host:safeHost,incidents,cardState:ownerCardState(facts,blocked),resetBlockedBy:blocked,
+    executionRestrictions:restrictions,stopsAllowed,
+    unacknowledgedCritical:Number(critical?.unacknowledged??0),acknowledgedCritical:Number(critical?.acknowledged??0),
+    truncated:counts.reduce((n,r)=>n+Number(r.count),0)>incidents.length,
     incidentCounts:Object.fromEntries(counts.map(r=>[r.severity,r.count])),gridBotsAtRisk:Number(risk),botsPaused,
     cancellationsComplete:botsPaused.paused===botsPaused.total,executionMode:h.execution_mode,entriesPaused:h.entries_paused,
     pauseRevision:String(h.pause_revision),pauseAckRevision:h.pause_ack_revision===null?null:String(h.pause_ack_revision),

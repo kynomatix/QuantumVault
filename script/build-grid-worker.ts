@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
 import {resolveGitBuildIdentity} from './git-build-identity';
+import {auditGridWorkerCopy} from './grid-worker-copy-audit';
 
 const builtins = new Set(builtinModules.flatMap(name => [name, `node:${name}`]));
 const forbiddenPath = /(?:server\/(?:crypto\.ts|session-v3\.ts|storage\.ts|db\.ts|agent-wallet\.ts|grid-worker\/admin-routes\.ts)|adapter-registry|pacifica-adapter|notification-service|mnemonic|bip39|account\/withdraw)/i;
@@ -61,6 +62,9 @@ export function auditWorkerOutput(code: string, metafile: Metafile) {
 
 export async function buildGridWorker(outdir = 'dist') {
   if (/\b(?:example|mockup|preview|illustrative)\b/i.test(await readFile('server/grid-worker/status-page.ts','utf8'))) throw Error('GRID_STATUS_COPY_INVALID');
+  for(const file of ['client/src/lib/grid-worker-copy.ts','client/src/components/grid-bot/GridWorkerStatusView.tsx',
+    'client/src/components/grid-bot/GridWorkerInbox.tsx','client/src/components/grid-bot/GridWorkerContext.tsx'])
+    auditGridWorkerCopy(await readFile(file,'utf8'),file);
   const git = resolveGitBuildIdentity();
   const identity = {commitHash:git.commitSha,treeHash:git.treeSha,
     lockfileSha256:createHash('sha256').update(await readFile('package-lock.json')).digest('hex')};

@@ -1,0 +1,12 @@
+.gw-surface{container-type:inline-size;min-width:0;color:hsl(235 20% 98%);font-size:14px;line-height:1.5;overflow-wrap:anywhere}
+.gw-surface *{box-sizing:border-box}.gw-surface p{margin:8px 0}.gw-card{background:hsl(235 26% 9%);border:1px solid hsl(235 30% 18%);border-radius:14px;padding:20px}
+.gw-card header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px}.gw-card h2{font-size:16px;font-weight:600;margin:0}
+.gw-muted{font-size:12px;color:hsl(235 14% 68%)}.gw-pill{display:inline-block;border:1px solid currentColor;border-radius:99px;padding:3px 10px;font-size:12px;font-weight:600}
+.gw-red{color:hsl(0 88% 76%)}.gw-amber{color:hsl(38 92% 65%)}.gw-teal{color:hsl(160 70% 55%)}.gw-primary{color:hsl(248 90% 78%)}
+.gw-banner{border:1px solid hsl(0 70% 45%);background:hsl(0 45% 12%);border-radius:12px;padding:14px 18px;margin-bottom:12px}.gw-banner strong{color:hsl(0 88% 76%)}
+.gw-wallet,.gw-restriction{padding:10px 12px;border:1px solid hsl(235 28% 28%);border-radius:10px}.gw-restriction{color:hsl(38 92% 65%)}
+.gw-rows{margin:16px 0;border-top:1px solid hsl(235 30% 18%)}.gw-rows>div{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid hsl(235 30% 18%)}.gw-rows dd{margin:0;text-align:right}
+.gw-actions{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0 8px}.gw-surface button{font:inherit;color:inherit;border:1px solid hsl(235 28% 28%);border-radius:8px;background:transparent;padding:7px 12px;min-height:36px;cursor:pointer;max-width:100%;white-space:normal}
+.gw-surface button.gw-primary{background:hsl(248 90% 60%);color:white}.gw-surface button:disabled{opacity:.5;cursor:not-allowed}.gw-surface button:focus-visible{outline:2px solid hsl(248 90% 78%);outline-offset:3px}
+.gw-inbox{border-top:1px solid hsl(235 30% 18%);margin-top:16px;padding-top:12px}.gw-list{list-style:none;padding:0;margin:10px 0}.gw-incident{display:flex;align-items:flex-start;gap:16px;border-bottom:1px solid hsl(235 30% 18%);padding:12px 0}.gw-incident>button{flex-shrink:0;font-size:12px}.gw-incident>span{max-width:130px}.gw-grow{flex:1;min-width:0}.gw-incident strong{font-size:12px}.gw-name{font-weight:600;white-space:normal;overflow-wrap:anywhere}.gw-drawer-line{font-size:13px;min-width:0;white-space:normal;overflow-wrap:anywhere;color:hsl(38 92% 65%)}
+@container(max-width:520px){.gw-card{padding:14px}.gw-banner{padding:12px 14px}.gw-banner p{margin-top:2px}.gw-incident{flex-wrap:wrap;gap:8px}.gw-grow{flex-basis:100%}}

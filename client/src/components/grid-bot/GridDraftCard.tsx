@@ -1,4 +1,5 @@
 import {GridRangeMove} from './GridRangeMove';
+import {GridWorkerProvider} from './GridWorkerContext';
 import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
 import React,{useEffect,useRef,useState} from 'react';
 import {BarChart3} from 'lucide-react';
@@ -116,12 +117,12 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
       </div>}
     </>
   );
-  return <>
+  return <GridWorkerProvider wallet={identity} authenticated={authenticated} bots={bots}>
     {renderLayout?renderLayout(card,botSection):<>{card}{botSection}</>}
     {selected&&identity?<GridBotDrawer key={identity+selected} id={selected} createEnabled={enabled} onClose={()=>{setSelected(null);setRefresh(v=>v+1);}} onAdjust={(intent,sourceBotId)=>{setSelected(null);setCreate({key:Date.now(),intent,sourceBotId});}}/>:null}
     {create&&identity?<GridSetupEntry key={identity+create.key} identity={identity} sourceBotId={create.sourceBotId} open plannerEnabled={planner} createEnabled={enabled} liveEnabled={access.live}
       onOpenChange={open=>{if(!open)setCreate(null);}} initialIntent={create.intent} onSaved={()=>{setCreate(null);setRefresh(v=>v+1);}}/>:null}
-  </>;
+  </GridWorkerProvider>;
 }
 function GridComingSoon(){
   return <div className="gradient-border p-5 noise flex flex-col gap-3 opacity-60 select-none cursor-not-allowed" aria-hidden="true" data-testid="card-grid-bot-coming-soon">

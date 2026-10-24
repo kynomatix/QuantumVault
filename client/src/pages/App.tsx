@@ -128,6 +128,7 @@ import { CreateBotModal } from '@/components/CreateBotModal';
 import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
 import { AiTraderDrawer } from '@/components/AiTraderDrawer';
 import { GridDraftCard } from '@/components/grid-bot/GridDraftCard';
+import { GridWorkerStatusSlot } from '@/components/grid-bot/GridWorkerContext';
 import { TradeHistoryModal, resolveTradePriceDisplay } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
@@ -3633,6 +3634,7 @@ export default function AppPage() {
                   return (
                     <GridDraftCard authenticated={sessionConnected} identity={publicKeyString} renderLayout={(gridCard, gridBots) => (
                     <div className="space-y-8">
+                      <GridWorkerStatusSlot/>
                       {/* Bot type cards — always visible at the top */}
                       <div className="grid md:grid-cols-3 gap-5">
                         <div className="gradient-border p-5 noise flex flex-col gap-3" data-testid="card-ai-trader">
