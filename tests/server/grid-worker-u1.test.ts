@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes, generateKeyPairSync, createPrivateKey, sign, verify } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdtempSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -14,6 +14,8 @@ import { unwrapExecutionUmk, readExecutionWallet } from '../../server/execution/
 import { getServerExecutionKey } from '../../server/execution/server-key';
 import { buildAAD, encryptToBase64, decryptFromBase64, deriveSubkey, SUBKEY_PURPOSES, encryptBuffer } from '../../server/crypto-v3';
 import { SCHEMA_MIGRATION_MANIFEST } from '../../server/schema-migration-manifest';
+import { probeGridWorkerSchema } from '../../server/grid-worker/boot';
+import { probeSchemaMigrationManifest } from '../../server/schema-readiness-probe';
 import { buildGridWorker, auditWorkerOutput } from '../../script/build-grid-worker';
 import { gridWorkerFixtureUrl } from '../helpers/grid-worker-fixture-url';
 
@@ -80,7 +82,23 @@ describe('U1 process and MAIN boundaries', () => {
     expect(functionText(currentDb, 'checkUmkStorageSecretHealth')).toBe(functionText(oldDb, 'checkUmkStorageSecretHealth'));
     const start = oldDb.indexOf('const schemaMigrationSql =');
     const end = oldDb.indexOf('registerSchemaMigrationManifest(SCHEMA_MIGRATION_MANIFEST)');
-    expect(source('server/schema-migration-manifest.ts').trimEnd().endsWith(oldDb.slice(start, end).trimEnd())).toBe(true);
+    const historical = oldDb.slice(start, end);
+    const literalArrays = (text: string) => {
+      const ast = ts.createSourceFile('manifest.ts', text, ts.ScriptTarget.Latest, true);
+      const result: string[][] = [];
+      for (const statement of ast.statements) if (ts.isVariableStatement(statement)) {
+        for (const declaration of statement.declarationList.declarations) {
+          if (!['schemaMigrationSql', 'schemaMigrationMetadata'].includes(declaration.name.getText(ast))) continue;
+          const value = declaration.initializer;
+          const array = value && ts.isAsExpression(value) ? value.expression : value;
+          if (array && ts.isArrayLiteralExpression(array)) result.push(array.elements.map(element => element.getText(ast)));
+        }
+      }
+      return result;
+    };
+    const preserved = literalArrays(historical), current = literalArrays(source('server/schema-migration-manifest.ts'));
+    expect(preserved).toHaveLength(2);
+    for (let i=0;i<2;i++) expect(current[i].slice(0,preserved[i].length)).toEqual(preserved[i]);
     const before = baselineSource('server/rpc-config.ts');
     for (const name of ['getPrimaryRpcUrl', 'getBackupRpcUrl', 'createSolanaRpcTransport', 'createSolanaRpcConnection', 'fetchSolanaRpc']) {
       expect(functionText(source('server/solana-rpc-transport.ts'), name)).toBe(functionText(before, name));
@@ -137,6 +155,7 @@ describe('U1 execution parity', () => {
 function catalogFixture() {
   const requirements = SCHEMA_MIGRATION_MANIFEST.flatMap(m => [...m.requirements]);
   return vi.fn(async (sql: string, values: readonly unknown[] = []) => {
+    if (sql.includes('AS \"checkedAt\"')) return { rows: [{ checkedAt: new Date(0), expiresAt: new Date(60_000) }] };
     if (/^(BEGIN READ ONLY|COMMIT|ROLLBACK)$/.test(sql)) return { rows: [] };
     if (!/^SELECT\b/i.test(sql.trim())) throw new Error('fixture refused a write');
     // Data postconditions also query information_schema/pg_index. Match their
@@ -158,6 +177,34 @@ function catalogFixture() {
     return { rows: [{ ok: true }] };
   });
 }
+
+describe('U2a readiness isolation', () => {
+  it('package absence changes only grid_worker and leaves previous requirements identical', async () => {
+    const legacy = SCHEMA_MIGRATION_MANIFEST.filter(m => !m.capabilities.includes('grid_worker'));
+    const added = SCHEMA_MIGRATION_MANIFEST.filter(m => m.capabilities.includes('grid_worker'));
+    expect(added).toHaveLength(1);
+    expect(added[0].sql.trim()).toBe('SELECT 1');
+    expect(added[0].capabilities).toEqual(['grid_worker']);
+    const requirement = added[0].requirements[0];
+    if (requirement.kind !== 'data') throw Error('isolated data requirement expected');
+    expect(legacy.flatMap(m => [...m.requirements]).some(r => r.kind === 'data' && r.identity === requirement.identity)).toBe(false);
+    const query = catalogFixture();
+    const before = await probeSchemaMigrationManifest(query, legacy);
+    const after = await probeSchemaMigrationManifest((sql, values) => sql === requirement.checkSql ? Promise.reject(Error('package absent')) : query(sql, values), SCHEMA_MIGRATION_MANIFEST);
+    expect(after.unavailableCapabilities.filter(c => c !== 'grid_worker')).toEqual(before.unavailableCapabilities);
+    expect(after.evidence.filter(e => e.capability !== 'grid_worker')).toEqual(before.evidence);
+    expect(after.unavailableCapabilities).toContain('grid_worker');
+  });
+  it('unrelated missing capability cannot block required worker capabilities', async () => {
+    const query = catalogFixture();
+    const required = new Set(['grid_bot', 'wallet_security', 'grid_worker']);
+    const unrelated = SCHEMA_MIGRATION_MANIFEST.filter(m => !m.capabilities.some(c => required.has(c))).flatMap(m => [...m.requirements]).filter(r => r.kind === 'data');
+    const forbidden = new Set(unrelated.map(r => r.kind === 'data' ? r.checkSql : ''));
+    const snapshot = await probeGridWorkerSchema((sql, values) => forbidden.has(sql) ? Promise.resolve({ rows: [{ ok: false }] }) : query(sql, values));
+    expect(snapshot.unavailableCapabilities.filter(c => required.has(c))).toEqual([]);
+    expect(Date.parse(snapshot.expiresAt) - Date.parse(snapshot.checkedAt)).toBe(60_000);
+  });
+});
 
 let built: ReturnType<typeof buildGridWorker> | undefined;
 const artifactBuild = () => built ??= buildGridWorker(artifactDir);
@@ -227,7 +274,7 @@ describe('U1 built artifact', () => {
   it('BootSchemaDenied', async () => {
     const { artifact } = await artifactFixture();
     const query = catalogFixture();
-    const failedSql = SCHEMA_MIGRATION_MANIFEST.flatMap(m => [...m.requirements]).find(r => r.kind === 'data')!;
+    const failedSql = SCHEMA_MIGRATION_MANIFEST.filter(m => m.capabilities.includes('grid_worker')).flatMap(m => [...m.requirements]).find(r => r.kind === 'data')!;
     if (failedSql.kind !== 'data') throw new Error('fixture data requirement missing');
     await expect(artifact.bootGridWorker(() => ({
       connect: async () => ({ query: (sql: string, values: readonly unknown[]) => sql === failedSql.checkSql
@@ -242,6 +289,8 @@ describe('U1 built artifact', () => {
 
 const typedFiles = {
   Worker: 'tests/server/grid-worker-u1.test.ts',
+  U2a: 'tests/server/grid-worker-u2a-schema.test.ts',
+  U2aWallets: 'tests/server/grid-worker-u2a-wallets.test.ts',
   Database: 'tests/server/grid-worker-database.test.ts',
   Url: 'tests/helpers/grid-worker-fixture-url.ts',
   Draft: 'tests/grid-bot/draft-storage.test.ts',
@@ -268,6 +317,33 @@ function diagnosticsFor(path: string) {
     .map(d => `TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, '\n')}`);
 }
 describe('U1 compiler diagnostics', () => {
+  it('TypesCiBaselineDriftMatchesMain', () => {
+    const result = spawnSync(process.execPath, ['node_modules/typescript/bin/tsc', '--noEmit', '--incremental', 'false'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 150_000 });
+    if (result.error) throw result.error;
+    expect([0, 2]).toContain(result.status);
+    const lines = result.stdout.split('\n').filter(line => /error TS[0-9]+:/.test(line)).map(line => line.replace(/\([0-9]+,[0-9]+\)/, '').trim()).sort();
+    const counts = new Map<string, number>();
+    for (const line of readFileSync('.github/typecheck-baseline.txt', 'utf8').split('\n').filter(Boolean)) counts.set(line, (counts.get(line) ?? 0) + 1);
+    const added = lines.filter(line => { const n = counts.get(line) ?? 0; if (n) { counts.set(line, n - 1); return false; } return true; });
+    const mainCommitHash = '905aa2650a765fa1e2a58f3dee474cce33e5e46d';
+    const checkout = mkdtempSync(join(tmpdir(), 'grid-u2a-main-types-'));
+    try {
+      const archive = execFileSync('git', ['archive', '--format=tar', mainCommitHash], { maxBuffer: 128 * 1024 * 1024 });
+      execFileSync('tar', ['-x', '-C', checkout], { input: archive });
+      symlinkSync(resolve('node_modules'), join(checkout, 'node_modules'), 'dir');
+      const main = spawnSync(process.execPath, [resolve('node_modules/typescript/bin/tsc'), '--noEmit', '--incremental', 'false'], { cwd: checkout, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 150_000 });
+      if (main.error) throw main.error;
+      expect([0, 2]).toContain(main.status);
+      const baselineLines = main.stdout.split('\n').filter(line => /error TS[0-9]+:/.test(line)).map(line => line.replace(/\([0-9]+,[0-9]+\)/, '').trim()).sort();
+      const remaining = [...baselineLines];
+      const newErrors = lines.filter(line => { const index = remaining.indexOf(line); if (index < 0) return true; remaining.splice(index, 1); return false; });
+      writeFileSync(join(artifactDir, 'typecheck-ci.json'), JSON.stringify({ mainCommitHash, total: lines.length, storedBaselineDrift: added.length, newErrors: newErrors.length, added, newDiagnostics: newErrors }, null, 2));
+      const first = newErrors[0] ?? '';
+      const previous = baselineLines.find(line => line.split(': error ')[0] === first.split(': error ')[0]) ?? '';
+      let common = 0; while (common < Math.min(first.length, previous.length) && first[common] === previous[common]) common++;
+      expect(newErrors, JSON.stringify({ count: newErrors.length, path: first.split(': error ')[0], current: first.slice(common, common + 65), main: previous.slice(common, common + 65) })).toEqual([]);
+    } finally { rmSync(checkout, { recursive: true, force: true }); }
+  }, 320_000);
   for (const [name, path] of Object.entries(typedFiles)) it(`Types${name}`, () => {
     const diagnostics = diagnosticsFor(path);
     writeFileSync(join(artifactDir, `typecheck-${name}.json`), JSON.stringify(diagnostics, null, 2));

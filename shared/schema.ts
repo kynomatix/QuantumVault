@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { type AnyPgColumn, foreignKey, pgTable, text, varchar, uuid, integer, smallint, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
+import { type AnyPgColumn, foreignKey, pgTable, bigint, char, text, varchar, uuid, integer, smallint, decimal, timestamp, boolean, jsonb, unique, uniqueIndex, json, index, serial, real, check } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 import type { LabDeploySnapshot, LabLinkState } from './lab-provenance';
@@ -2864,3 +2864,202 @@ export const gridFills = pgTable("grid_fills", {
   foreignKey({ name: "grid_fills_level_id_fk", columns: [t.levelId], foreignColumns: [gridLevels.id] }).onDelete("restrict"),
 ]);
 export type GridfillsRow = typeof gridFills.$inferSelect;
+
+// U2a owner-published grid worker tables. Excluded from drizzle-kit push.
+// The canonical SQL package owns constraints, indexes and triggers.
+export const gridWorkerOwner = pgTable("grid_worker_owner", {
+  singletonId: smallint("singleton_id").notNull().default(sql`1`),
+  walletAddress: text("wallet_address").notNull(),
+  installedAt: timestamp("installed_at", { withTimezone: true, mode: "string" }).notNull().default(sql`clock_timestamp()`),
+});
+export type GridWorkerOwner = typeof gridWorkerOwner.$inferSelect;
+
+export const gridWorkerHost = pgTable("grid_worker_host", {
+  singletonId: smallint("singleton_id").notNull().default(sql`1`),
+  executionMode: text("execution_mode").notNull().default(sql`'legacy'`),
+  runMode: text("run_mode").notNull().default(sql`'test'`),
+  executionEnabled: boolean("execution_enabled").notNull().default(sql`false`),
+  entriesPaused: boolean("entries_paused").notNull().default(sql`true`),
+  drainRequested: boolean("drain_requested").notNull().default(sql`false`),
+  holderBootId: uuid("holder_boot_id"),
+  holderRole: text("holder_role"),
+  fencingEpoch: bigint("fencing_epoch", { mode: "bigint" }).notNull().default(sql`0`),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }).notNull().default(sql`'-infinity'`),
+  heartbeatAt: timestamp("heartbeat_at", { withTimezone: true, mode: "string" }),
+  progressAt: timestamp("progress_at", { withTimezone: true, mode: "string" }),
+  lastHealthzPollAt: timestamp("last_healthz_poll_at", { withTimezone: true, mode: "string" }),
+  pauseAckAt: timestamp("pause_ack_at", { withTimezone: true, mode: "string" }),
+  protocolVersion: text("protocol_version").notNull(),
+  commitHash: text("commit_hash"),
+  treeHash: text("tree_hash"),
+  lockfileSha256: text("lockfile_sha256"),
+  startScope: text("start_scope").notNull().default(sql`'owner_allowlist'`),
+  ownerWallet: text("owner_wallet"),
+  perBotCapUsd: decimal("per_bot_cap_usd"),
+  globalCeilingUsd: decimal("global_ceiling_usd"),
+  scopeRevision: bigint("scope_revision", { mode: "bigint" }).notNull().default(sql`1`),
+  observerFenced: boolean("observer_fenced").notNull().default(sql`true`),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().default(sql`clock_timestamp()`),
+  authorityTrackingEnabled: boolean("authority_tracking_enabled").notNull().default(sql`false`),
+  legacyControlsEnabled: boolean("legacy_controls_enabled").notNull().default(sql`false`),
+  pauseRevision: bigint("pause_revision", { mode: "bigint" }).notNull().default(sql`0`),
+  pauseAckRevision: bigint("pause_ack_revision", { mode: "bigint" }),
+});
+export type GridWorkerHost = typeof gridWorkerHost.$inferSelect;
+
+export const gridWorkerWalletAuthority = pgTable("grid_worker_wallet_authority", {
+  walletAddress: text("wallet_address").notNull(),
+  generation: bigint("generation", { mode: "bigint" }).notNull().default(sql`0`),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().default(sql`clock_timestamp()`),
+});
+export type GridWorkerWalletAuthority = typeof gridWorkerWalletAuthority.$inferSelect;
+
+export const gridWorkerRequests = pgTable("grid_worker_requests", {
+  id: uuid("id").notNull(),
+  ownerWallet: text("owner_wallet").notNull(),
+  botId: uuid("bot_id").notNull(),
+  action: text("action").notNull(),
+  requestKey: text("request_key").notNull(),
+  draftRevision: text("draft_revision").notNull(),
+  serverIntentDigest: text("server_intent_digest").notNull(),
+  policyHmac: text("policy_hmac").notNull(),
+  spendingPolicyDigest: text("spending_policy_digest").notNull(),
+  walletGeneration: bigint("wallet_generation", { mode: "bigint" }).notNull(),
+  scopeRevision: bigint("scope_revision", { mode: "bigint" }).notNull(),
+  consentVersion: text("consent_version").notNull(),
+  consentMac: text("consent_mac").notNull(),
+  issuedAt: timestamp("issued_at", { withTimezone: true, mode: "string" }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  state: text("state").notNull().default(sql`'pending'`),
+  admittedAt: timestamp("admitted_at", { withTimezone: true, mode: "string" }),
+  completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+  controlRequestId: uuid("control_request_id"),
+  resultCode: text("result_code"),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().default(sql`clock_timestamp()`),
+});
+export type GridWorkerRequests = typeof gridWorkerRequests.$inferSelect;
+
+export const gridWorkerReservations = pgTable("grid_worker_reservations", {
+  botId: uuid("bot_id").notNull(),
+  startRequestId: uuid("start_request_id").notNull(),
+  ownerWallet: text("owner_wallet").notNull(),
+  walletGeneration: bigint("wallet_generation", { mode: "bigint" }).notNull(),
+  policyDigest: text("policy_digest").notNull(),
+  scopeRevision: bigint("scope_revision", { mode: "bigint" }).notNull(),
+  investmentUsd: decimal("investment_usd").notNull(),
+  leverage: integer("leverage").notNull(),
+  budgetNotionalUsd: decimal("budget_notional_usd").notNull(),
+  observedExposureUsd: decimal("observed_exposure_usd").notNull(),
+  reserveUsd: decimal("reserve_usd").notNull(),
+  cashCommitmentUsd: decimal("cash_commitment_usd").notNull(),
+  feeReserveUsd: decimal("fee_reserve_usd").notNull(),
+  state: text("state").notNull().default(sql`'held'`),
+  factsAt: timestamp("facts_at", { withTimezone: true, mode: "string" }).notNull(),
+  terminalProofDigest: text("terminal_proof_digest"),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().default(sql`clock_timestamp()`),
+});
+export type GridWorkerReservations = typeof gridWorkerReservations.$inferSelect;
+
+export const gridWorkerSendAudit = pgTable("grid_worker_send_audit", {
+  id: uuid("id").notNull(),
+  operationId: uuid("operation_id").notNull(),
+  botId: uuid("bot_id").notNull(),
+  requestId: uuid("request_id"),
+  requestIdentity: text("request_identity").notNull(),
+  attempt: integer("attempt").notNull(),
+  kind: text("kind").notNull(),
+  holderBootId: uuid("holder_boot_id").notNull(),
+  senderRole: text("sender_role").notNull(),
+  fencingEpoch: bigint("fencing_epoch", { mode: "bigint" }).notNull(),
+  walletGeneration: bigint("wallet_generation", { mode: "bigint" }).notNull(),
+  policyDigest: text("policy_digest").notNull(),
+  requestDigest: text("request_digest").notNull(),
+  signedAt: timestamp("signed_at", { withTimezone: true, mode: "string" }).notNull(),
+  signedExpiresAt: timestamp("signed_expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  preparedAt: timestamp("prepared_at", { withTimezone: true, mode: "string" }).notNull(),
+  authorizedAt: timestamp("authorized_at", { withTimezone: true, mode: "string" }),
+  completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
+  outcome: text("outcome").notNull().default(sql`'unknown'`),
+  venueOrderId: text("venue_order_id"),
+  venueTradeId: text("venue_trade_id"),
+  outcomeCode: text("outcome_code"),
+});
+export type GridWorkerSendAudit = typeof gridWorkerSendAudit.$inferSelect;
+
+export const gridWorkerIncidents = pgTable("grid_worker_incidents", {
+  id: uuid("id").notNull(),
+  dedupKey: text("dedup_key").notNull(),
+  severity: text("severity").notNull(),
+  code: text("code").notNull(),
+  botId: uuid("bot_id"),
+  holderBootId: uuid("holder_boot_id"),
+  fencingEpoch: bigint("fencing_epoch", { mode: "bigint" }),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true, mode: "string" }).notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true, mode: "string" }).notNull(),
+  occurrenceCount: bigint("occurrence_count", { mode: "bigint" }).notNull().default(sql`1`),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true, mode: "string" }),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true, mode: "string" }),
+  acknowledgedBy: text("acknowledged_by"),
+  inboxSeenAt: timestamp("inbox_seen_at", { withTimezone: true, mode: "string" }),
+  evidenceDigest: text("evidence_digest"),
+});
+export type GridWorkerIncidents = typeof gridWorkerIncidents.$inferSelect;
+
+export const gridWorkerReconciliation = pgTable("grid_worker_reconciliation", {
+  account: text("account").notNull(),
+  masterAccount: text("master_account").notNull(),
+  botId: uuid("bot_id"),
+  stream: text("stream").notNull(),
+  cursor: text("cursor"),
+  coveredThroughAt: timestamp("covered_through_at", { withTimezone: true, mode: "string" }),
+  lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true, mode: "string" }),
+  lastCompleteAt: timestamp("last_complete_at", { withTimezone: true, mode: "string" }),
+  state: text("state").notNull().default(sql`'pending'`),
+  evidenceDigest: text("evidence_digest"),
+});
+export type GridWorkerReconciliation = typeof gridWorkerReconciliation.$inferSelect;
+
+export const gridWorkerQuotaPolicy = pgTable("grid_worker_quota_policy", {
+  provider: text("provider").notNull(),
+  domainId: text("domain_id").notNull(),
+  windowMs: integer("window_ms").notNull(),
+  totalUnits: decimal("total_units").notNull(),
+  workerLimitUnits: decimal("worker_limit_units").notNull(),
+  workerProtectiveReserveUnits: decimal("worker_protective_reserve_units").notNull(),
+  policyDigest: text("policy_digest").notNull(),
+  validUntil: timestamp("valid_until", { withTimezone: true, mode: "string" }).notNull(),
+});
+export type GridWorkerQuotaPolicy = typeof gridWorkerQuotaPolicy.$inferSelect;
+
+export const gridWorkerQuotaWindows = pgTable("grid_worker_quota_windows", {
+  provider: text("provider").notNull(),
+  domainId: text("domain_id").notNull(),
+  windowMs: integer("window_ms").notNull(),
+  totalUnits: decimal("total_units").notNull(),
+  workerLimitUnits: decimal("worker_limit_units").notNull(),
+  workerProtectiveReserveUnits: decimal("worker_protective_reserve_units").notNull(),
+  policyDigest: text("policy_digest").notNull(),
+  windowStart: timestamp("window_start", { withTimezone: true, mode: "string" }).notNull(),
+  workerUsedUnits: decimal("worker_used_units").notNull().default(sql`0`),
+  observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  backoffUntil: timestamp("backoff_until", { withTimezone: true, mode: "string" }),
+});
+export type GridWorkerQuotaWindows = typeof gridWorkerQuotaWindows.$inferSelect;
+
+export const ownerActionReceipts = pgTable("owner_action_receipts", {
+  receiptId: uuid("receipt_id").notNull().default(sql`gen_random_uuid()`),
+  ownerWallet: text("owner_wallet").notNull(),
+  action: text("action").notNull(),
+  scope: text("scope").notNull(),
+  target: text("target").notNull(),
+  nonce: text("nonce").notNull(),
+  messageDigest: char("message_digest", { length: 64 }).notNull(),
+  paramsDigest: text("params_digest").notNull(),
+  issuedAt: timestamp("issued_at", { withTimezone: true, mode: "string" }).notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }).notNull(),
+  verifiedAt: timestamp("verified_at", { withTimezone: true, mode: "string" }).notNull().default(sql`clock_timestamp()`),
+  consumedAt: timestamp("consumed_at", { withTimezone: true, mode: "string" }),
+  consumedBy: text("consumed_by"),
+});
+export type OwnerActionReceipts = typeof ownerActionReceipts.$inferSelect;
+

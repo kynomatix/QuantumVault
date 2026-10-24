@@ -11,6 +11,17 @@ export default defineConfig({
   // Runtime SQL owns these undeclared tables (server/db.ts); never diff/drop them.
   // Excluding them also removes Kit's pre-drop DISABLE ROW LEVEL SECURITY statements.
   tablesFilter: [
+    "!owner_action_receipts",
+    "!grid_worker_quota_windows",
+    "!grid_worker_quota_policy",
+    "!grid_worker_reconciliation",
+    "!grid_worker_incidents",
+    "!grid_worker_send_audit",
+    "!grid_worker_reservations",
+    "!grid_worker_requests",
+    "!grid_worker_wallet_authority",
+    "!grid_worker_host",
+    "!grid_worker_owner",
     "!grid_auto_resume",
     "!grid_epochs",
     "!grid_trailing",

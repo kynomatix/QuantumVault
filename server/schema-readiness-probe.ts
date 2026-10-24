@@ -15,6 +15,7 @@ export const SCHEMA_CAPABILITIES = [
   "ai_trader_cycles",
   "ai_trader_market_cooldown",
   "grid_bot",
+  "grid_worker",
 ] as const;
 
 export type SchemaCapability = (typeof SCHEMA_CAPABILITIES)[number];
