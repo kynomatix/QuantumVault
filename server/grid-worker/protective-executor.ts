@@ -103,7 +103,7 @@ export class ProtectiveExecutor{
         },{mode:'none',terminate:this.terminate,budget});
         mainQuota.install(await readQuotaPolicies(c));
         const wait=await rescueWait(c,r.bot_id,requestId);
-        if(wait>0){await c.query("UPDATE grid_worker_requests SET result_code='waiting' WHERE id=$1",[requestId]);return (await rescueView(c,owner,r.request_key))!;}
+        if(wait>0){await walletFences(c,[owner]);await identityFences(c,[r.bot_id],[]);await c.query("UPDATE grid_worker_requests SET result_code='waiting' WHERE id=$1",[requestId]);return (await rescueView(c,owner,r.request_key))!;}
         const ledger=new GridLaunchStorage(this.pool,async()=>budget.check(),undefined,undefined,
           {requestId,botId:r.bot_id,epoch,validate,terminate:this.terminate});
         const monitor=new GridMonitorStorage(ledger),claim=await monitor.claimProtective(requestId,r.bot_id);
@@ -116,7 +116,7 @@ export class ProtectiveExecutor{
         const lifecycle=gridLifecycleCore(monitor,reads,json,this.dependencies,{},true);
         const outcome=await lifecycle.service.tick(claim,budget.abort.signal);budget.check();
         // Keep the request lock's idle interval below PostgreSQL's twelve-second ceiling.
-        await c.query('SELECT 1');
+        await walletFences(c,[owner]);await identityFences(c,[r.bot_id],[]);await c.query('SELECT 1');
         if(outcome==='protective_verify_required'&&await this.verify(c,json,claim,budget))await this.finish(c,r,'complete');
         else if(['unrelated_order_requires_review','failed','position_direction_changed'].includes(outcome))await this.finish(c,r,'partial_ended');
         else await c.query("UPDATE grid_worker_requests SET result_code=$2 WHERE id=$1",[requestId,unresolved?'settling':outcome==='protective_verify_required'?'verifying':'closing']);
@@ -130,6 +130,7 @@ export class ProtectiveExecutor{
     }
   }
   private async finish(c:PoolClient,r:Record<string,any>,phase:'complete'|'partial_ended'|'ended'){
+    await walletFences(c,[r.owner_wallet]);await identityFences(c,[r.bot_id],[]);
     const unknown=(await c.query(`SELECT 1 FROM grid_worker_send_audit WHERE bot_id=$1 AND outcome='unknown'
       UNION ALL SELECT 1 FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed') LIMIT 1`,[r.bot_id])).rowCount;
     const outcome=unknown?'unknown_ended':phase;

@@ -1,9 +1,13 @@
+import {walletFences} from './transaction';
+import {identityFences} from './identity-locks';
 import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
 import {GridStorageError} from '../grid-bot/storage-error';
 
 /** Shared host fence required. GET paths never call this recovery producer. */
 export async function recoverAbandonedRescues(c:PoolClient){
+  const candidates=(await c.query("SELECT owner_wallet,bot_id FROM grid_worker_requests WHERE action='protective_close' AND state='admitted'")).rows;
+  await walletFences(c,candidates.map(r=>r.owner_wallet));await identityFences(c,candidates.map(r=>r.bot_id),[]);
   const rows=(await c.query(`UPDATE grid_worker_requests r SET state='complete',completed_at=clock_timestamp(),
     result_code=CASE WHEN EXISTS(SELECT 1 FROM grid_worker_send_audit a WHERE a.bot_id=r.bot_id AND a.outcome='unknown')
       OR EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=r.bot_id AND o.state IN ('prepared','submitted','unconfirmed'))

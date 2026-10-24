@@ -150,7 +150,7 @@ it('records the third blocked stop pass and creates a fresh incident after ackno
   await truth.observe(botId);await truth.observe(botId);expect(await rows()).toHaveLength(0);
   await truth.observe(botId);expect(await rows()).toHaveLength(1);
   const old=(await rows())[0].id;
-  await pool.query('UPDATE grid_worker_incidents SET acknowledged_at=clock_timestamp(),inbox_seen_at=clock_timestamp() WHERE id=$1',[old]);
+  await pool.query('UPDATE grid_worker_incidents SET acknowledged_at=clock_timestamp(),acknowledged_by=$2,inbox_seen_at=clock_timestamp() WHERE id=$1',[old,owner]);
   await truth.observe(botId,Error('GRID_QUOTA_BACKOFF'));expect(await rows()).toHaveLength(1);expect((await rows())[0].id).not.toBe(old);
 });
 it('refuses forged and other-bot retained consent before any POST',async()=>{
