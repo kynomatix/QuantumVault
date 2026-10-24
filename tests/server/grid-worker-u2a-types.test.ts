@@ -7,7 +7,7 @@ it('U2a full product typecheck has CI New errors: 0 and changed tests typecheck'
   const config = ts.readConfigFile('tsconfig.json', ts.sys.readFile);
   expect(config.error).toBeUndefined();
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, '.');
-  const testFiles = ['tests/server/grid-worker-u2a-schema.test.ts', 'tests/server/grid-worker-u2a-types.test.ts'].map(f => resolve(f));
+  const testFiles = ['tests/server/grid-worker-u2a-schema.test.ts', 'tests/server/grid-worker-u2a-types.test.ts', 'tests/server/grid-worker-u2b-auth.test.ts', 'tests/server/grid-worker-u2b-postgres.test.ts', 'tests/grid-bot/first-placement.test.ts', 'tests/grid-bot/launch-storage.test.ts'].map(f => resolve(f));
   const program = ts.createProgram([...parsed.fileNames, ...testFiles], { ...parsed.options, incremental: false, noEmit: true });
   const errors = ts.getPreEmitDiagnostics(program).filter(d => d.category === ts.DiagnosticCategory.Error);
   const baseline = new Map<string, number>();
@@ -21,6 +21,6 @@ it('U2a full product typecheck has CI New errors: 0 and changed tests typecheck'
     const count = baseline.get(line) ?? 0;
     if (count > 0) baseline.set(line, count - 1); else added.push(line);
   }
-  expect(added, 'CI New errors: ' + added.length).toEqual([]);
+  expect(added, 'CI New errors: ' + added.length + ' ' + JSON.stringify(added)).toEqual([]);
   expect(errors.filter(d => d.file && testFiles.includes(resolve(d.file.fileName)))).toEqual([]);
 }, 180_000);

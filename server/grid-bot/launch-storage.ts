@@ -5,6 +5,13 @@ import {validateLockedCycleRequest} from './cycle-storage';
 import {retainedGridSizing} from './lean-sizing';
 import type {GridSettlementOutcome} from './execution-failure';
 import {randomUUID} from 'node:crypto';
+import {fencedTransaction, walletFences, type GridDeadline} from '../grid-worker/transaction';
+import {readLegacyHost,requireLegacyAction,type WorkerHost} from '../grid-worker/host';
+import {independentLane,backendTerminator} from '../grid-worker/lanes';
+import {GridIncidents} from '../grid-worker/incidents';
+import {prepareSendAudit,authorizeSendAudit,completeSendAudit,type SendAudit} from '../grid-worker/audit';
+import {ownerSha256} from '../grid-worker/owner-auth';
+import type {GridAction} from '../grid-worker/kill';
 import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
 import type {Pool,PoolClient} from 'pg';
@@ -75,7 +82,10 @@ function reductionAuthority(r:ExactGridRequest,monitor:any,now:number){
 export class GridLaunchTransientError extends Error {}
 /** Reservations lock master, then bot. The POST fence takes no quota lock. */
 export class GridLaunchStorage {
-  constructor(private pool:Pool,private ready=()=>requireSchemaCapabilityReady('grid_bot',async(q,v)=>pool.query(q,v?[...v]:undefined)),
+  private readonly bootId=randomUUID();
+  private readonly hosts=new WeakMap<PoolClient,WorkerHost|null>();
+  private incidentWriter?:GridIncidents;
+  constructor(private pool:Pool,private ready=(client?:PoolClient)=>requireSchemaCapabilityReady('grid_bot',async(q,v)=>(client??pool).query(q,v?[...v]:undefined)),
     private marginRead?:(r:ExactGridRequest)=>Promise<GridMarginReading|null>){}
   /** All POST kinds share the takeover fence through completion. No async gap after final authority. */
   private async autoResumeFence(c:PoolClient,r:ExactGridRequest){
@@ -83,9 +93,13 @@ export class GridLaunchStorage {
     const a=(await c.query('SELECT generation FROM grid_auto_resume WHERE bot_id=$1',[r.botId])).rows[0];
     return String(a?.generation??'0')===String(r.authority.autoResumeGeneration??'0');
   }
-  async sendOwned<T>(r:ExactGridRequest,leaseToken:string,post:()=>Promise<T>):Promise<T>{
-    return this.transaction(async c=>{
+  async sendOwned<T>(r:ExactGridRequest,leaseToken:string,post:(signal:AbortSignal)=>Promise<T>):Promise<T>{
+    return this.transaction(async (c,deadline)=>{
+      this.hostAction(c,this.requestAction(r),{terminalProof:r.kind==='sweep',protectiveDrain:reduction(r)});
+      await this.prelockWallet(c,r.botId);
       if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
+      const op=(await c.query("SELECT id,exact_request_digest FROM grid_operations WHERE bot_id=$1 AND state='submitted' AND exact_request_digest=$2",[r.botId,requestDigest(r)])).rows[0];
+      const audit=await this.legacyAudit(c,op?.id,r);
       let pilotUntil:number|null=null;
       const retained=(await c.query('SELECT *,clock_timestamp() AS cycle_now FROM grid_bots WHERE id=$1 FOR UPDATE',[r.botId])).rows[0];
       if(!retained)throw new GridLaunchTransientError('Grid send ownership unavailable');
@@ -108,7 +122,9 @@ export class GridLaunchStorage {
          AND EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.state='submitted' AND o.exact_request_digest=$8) FOR UPDATE OF b`,
          [r.botId,leaseToken,r.account,r.masterAccount,reduction(r)?liveStates:['provisioning','canary','active'],r.timestamp,r.expiryMs,requestDigest(r),r.authority.lifecycleEpoch??null,['close','sweep'].includes(r.kind),pilotUntil])).rowCount;
       if(!owned)throw new GridLaunchTransientError('Grid send ownership unavailable');
-      return post();
+      if(audit)await authorizeSendAudit(c,audit);
+      deadline.beforeTransport(r.timestamp,r.timestamp+r.expiryMs);
+      return post(deadline.abort.signal);
     });
   }
   private async freshMargin(r:ExactGridRequest){
@@ -214,6 +230,9 @@ export class GridLaunchStorage {
     if(!gridAddsExposure(r))return;
     const reading=await this.freshMargin(r);
     const allowed=await this.transaction(async c=>{
+      this.hostAction(c,this.requestAction(r));
+      await this.prelockWallet(c,r.botId);
+      if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[r.masterAccount]);
       const bot=(await c.query('SELECT b.*,a.account,a.master_account,clock_timestamp() AS now FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 AND a.released_at IS NULL FOR UPDATE OF b,a',[r.botId])).rows[0];
       const op=(await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND exact_request_digest=$2 AND state='submitted'",[r.botId,requestDigest(r)])).rows[0];
@@ -227,10 +246,47 @@ export class GridLaunchStorage {
     if(allowed===null)throw new GridLaunchTransientError('Final Grid submit ownership unavailable');
     if(!allowed)throw new GridMarginDenied('Final Grid margin authority denied exposure');
   }
-  async transaction<T>(work:(c:PoolClient)=>Promise<T>):Promise<T>{
-    await this.ready();const c=await this.pool.connect();
-    try{await c.query('BEGIN');const r=await work(c);await c.query('COMMIT');return r;}
-    catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}
+  hostAction(c:PoolClient,action:GridAction,options:Parameters<typeof requireLegacyAction>[2]={}){
+    if(!this.hosts.has(c))throw Error('GRID_HOST_FENCE_REQUIRED');
+    requireLegacyAction(this.hosts.get(c)??null,action,options);
+  }
+  private requestAction(r:ExactGridRequest):GridAction {
+    return r.kind==='cancel'?'cancel':r.kind==='close'||r.kind==='limit'&&r.data.reduce_only===true?'close':r.kind==='sweep'?'sweep':['create','fund','leverage','seed'].includes(r.kind)?'start':'cycle';
+  }
+  private async prelockWallet(c:PoolClient,botId:string){
+    const row=(await c.query('SELECT wallet_address FROM grid_bots WHERE id=$1',[botId])).rows[0];
+    if(!row)throw Error('GRID_WALLET_IDENTITY_MISSING');
+    await walletFences(c,[row.wallet_address]);
+  }
+  private async legacyAudit(c:PoolClient,operationId:string,r:ExactGridRequest):Promise<SendAudit|null>{
+    const host=this.hosts.get(c);
+    if(!host?.authority_tracking_enabled)return null;
+    const row=(await c.query(`SELECT a.generation,w.agent_public_key,w.execution_enabled,w.emergency_stop_triggered,
+      w.umk_encrypted_for_execution IS NOT NULL AS wrapped,w.agent_private_key_encrypted_v3 IS NOT NULL AS signer,
+      w.execution_expires_at IS NULL OR w.execution_expires_at>clock_timestamp() AS grant_live
+      FROM grid_bots b JOIN wallets w ON w.address=b.wallet_address JOIN grid_worker_wallet_authority a ON a.wallet_address=w.address
+      JOIN grid_launch_accounts l ON l.bot_id=b.id JOIN protocol_subaccounts p ON p.id=l.protocol_subaccount_id
+      WHERE b.id=$1 AND p.wallet_address=w.address AND p.agent_public_key=w.agent_public_key
+      AND l.account=$2 AND l.master_account=$3 FOR UPDATE OF w,a`,[r.botId,r.account,r.masterAccount])).rows[0];
+    if(!row||!row.execution_enabled||row.emergency_stop_triggered||!row.wrapped||!row.signer||!row.grant_live||row.agent_public_key!==r.masterAccount)throw Error('GRID_CURRENT_AUTHORITY_INVALID');
+    const operation=(await c.query('SELECT request_identity FROM grid_operations WHERE id=$1 AND bot_id=$2',[operationId,r.botId])).rows[0];
+    if(!operation)throw Error('GRID_AUDIT_OPERATION_INVALID');
+    return {operationId,botId:r.botId,requestIdentity:operation.request_identity,attempt:1,kind:r.kind,bootId:this.bootId,role:'legacy',
+      epoch:String(host.fencing_epoch),generation:String(row.generation),policyDigest:ownerSha256(String(r.authority.policyHmac??'')),requestDigest:requestDigest(r),signedAt:r.timestamp,expiresAt:r.timestamp+r.expiryMs};
+  }
+  async transaction<T>(work:(c:PoolClient,deadline:GridDeadline)=>Promise<T>):Promise<T>{
+    const lane=independentLane(this.pool),terminate=backendTerminator(lane);
+    this.incidentWriter??=new GridIncidents(lane,terminate);
+    try {
+      return await fencedTransaction(this.pool,async(c,deadline)=>{
+        await this.ready(c);
+        const host=await readLegacyHost(c);this.hosts.set(c,host);
+        return work(c,deadline);
+      },{terminate});
+    }catch(error){
+      if(error instanceof Error&&error.message==='GRID_MAIN_CONTENDER_SEEN')await this.incidentWriter.record({code:'contender_seen',dedupKey:'main:contender'});
+      throw error;
+    }
   }
   async read(botId:string,key:string):Promise<DurableGridOperation|null>{
     await this.ready();return (await this.pool.query(`SELECT ${gridOperationProjection} FROM grid_operations o WHERE bot_id=$1 AND idempotency_key=$2`,[botId,key])).rows[0]??null;
@@ -293,6 +349,9 @@ export class GridLaunchStorage {
   /** Only a never-submitted expired request may be abandoned. It cannot be silently refreshed. */
   async expirePrepared(op:DurableGridOperation,leaseToken:string):Promise<boolean>{
     return this.transaction(async c=>{
+      this.hostAction(c,'settle');
+      await this.prelockWallet(c,op.exact_request.botId);
+      if(!await gridWorkerFence(c,op.exact_request.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount]);
       const version=(await c.query('SELECT policy_version FROM grid_bots WHERE id=$1',[op.exact_request.botId])).rows[0]?.policy_version;
       if(isGridCyclePolicyVersion(version))await c.query('SELECT id FROM grid_bots WHERE id=$1 FOR UPDATE',[op.exact_request.botId]);
@@ -325,6 +384,9 @@ export class GridLaunchStorage {
     if(new Decimal(claim.canaryIncrement).lt(minimumRisk))throw Error('Understated canary commitment');
     if(!gridAddsExposure(request)&&!new Decimal(claim.canaryIncrement).isZero())throw Error('Only entries reserve exposure');
     const prepared=await this.transaction(async c=>{
+      this.hostAction(c,this.requestAction(exact),{terminalProof:exact.kind==='sweep',protectiveDrain:reduction(exact)});
+      await this.prelockWallet(c,exact.botId);
+      if(!await gridWorkerFence(c,exact.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       const master=(await c.query('SELECT *,clock_timestamp() AS clock FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[request.masterAccount])).rows[0];
       if(!master)throw Error('Master quota unavailable');const now=new Date(master.clock).getTime();
       const bot=(await c.query('SELECT b.*,a.account,a.master_account,a.canary_limit,a.canary_committed,a.released_at FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 FOR UPDATE OF b,a',[request.botId])).rows[0];
@@ -437,6 +499,10 @@ export class GridLaunchStorage {
     if(requestDigest(op.exact_request)!==op.exact_request_digest)return false;
     const margin=await this.freshMargin(op.exact_request);
     return this.transaction(async c=>{
+      this.hostAction(c,this.requestAction(op.exact_request),{terminalProof:op.exact_request.kind==='sweep',protectiveDrain:reduction(op.exact_request)});
+      await this.prelockWallet(c,op.exact_request.botId);
+      if(!await gridWorkerFence(c,op.exact_request.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
+      const audit=await this.legacyAudit(c,op.id,op.exact_request);
       const q=(await c.query('SELECT backoff_until>clock_timestamp() AS blocked FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount])).rows[0];
       if(!q||q.blocked)return false;
       const bot=(await c.query('SELECT *,clock_timestamp() AS now FROM grid_bots WHERE id=$1 FOR UPDATE',[op.exact_request.botId])).rows[0];
@@ -467,7 +533,9 @@ export class GridLaunchStorage {
         AND b.lease_token=$3 AND b.lease_expires_at>clock_timestamp() AND b.status IN ('provisioning','canary','active','pausing','paused','resuming','reconciling','range_exhausted','stopping')
         AND ($4::bigint+$5::bigint)>extract(epoch from clock_timestamp())*1000
         AND ($6::bigint IS NULL OR $6::bigint>extract(epoch from clock_timestamp())*1000) RETURNING o.id`,
-      [op.id,op.exact_request_digest,leaseToken,op.exact_request.timestamp,op.exact_request.expiryMs,cycleUntil]);return !!r.rowCount;
+      [op.id,op.exact_request_digest,leaseToken,op.exact_request.timestamp,op.exact_request.expiryMs,cycleUntil]);
+      if(r.rowCount&&audit)await prepareSendAudit(c,audit);
+      return !!r.rowCount;
     });
   }
   async settle(op:DurableGridOperation,outcome:GridSettlementOutcome,leaseToken?:string){
@@ -476,6 +544,9 @@ export class GridLaunchStorage {
     const qualifying=outcome.state==='failed'&&['authentication','quota','transport'].includes(outcome.reason??'');
     if(qualifying&&(!outcome.terminalFailure||outcome.terminalFailure.requestDigest!==op.exact_request_digest||outcome.terminalFailure.classification!==outcome.reason))throw Error('Grid terminal failure authority unavailable');
     return this.transaction(async c=>{
+      this.hostAction(c,'settle');
+      await this.prelockWallet(c,op.exact_request.botId);
+      if(!await gridWorkerFence(c,op.exact_request.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[op.exact_request.masterAccount]);
       if(leaseToken&&!(await c.query('SELECT id FROM grid_bots WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() FOR UPDATE',[op.exact_request.botId,leaseToken])).rowCount)throw Error('Grid recovery ownership lost');
       if(outcome.transferProof){
@@ -499,6 +570,10 @@ export class GridLaunchStorage {
       const r=await c.query(`UPDATE grid_operations SET state=$2,failure_classification=$3,terminal_at=CASE WHEN $2='unconfirmed' THEN NULL ELSE clock_timestamp() END,
         updated_at=clock_timestamp() WHERE id=$1 AND state IN ('submitted','unconfirmed') AND exact_request_digest=$4 RETURNING id`,[op.id,outcome.state,outcome.reason,op.exact_request_digest]);
       if(!r.rowCount)throw Error('Settlement CAS conflict');
+      if(this.hosts.get(c)?.authority_tracking_enabled&&outcome.state!=='unconfirmed'){
+        const present=(await c.query('SELECT id FROM grid_worker_send_audit WHERE operation_id=$1',[op.id])).rowCount;
+        if(present)await completeSendAudit(c,op.id,outcome.state==='confirmed'?'confirmed':'failed',outcome.reason??'confirmed',outcome.orderId);
+      }
       if(outcome.state==='failed'&&outcome.reason==='venue_rejection'&&outcome.capacityRejected)await this.capacityPause(c,op.exact_request);
       if(outcome.state==='failed'&&outcome.reason==='margin'){
         const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 FOR UPDATE',[op.exact_request.botId])).rows[0];
@@ -533,6 +608,8 @@ export class GridLaunchStorage {
   }
   async markCanary(account:{botId:string;leaseToken:string}){
     return this.transaction(async c=>{
+      this.hostAction(c,'start');
+      if(!await gridWorkerFence(c,account.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       const r=await c.query(`UPDATE grid_bots b SET status='canary',updated_at=clock_timestamp()
         WHERE id=$1 AND lease_token=$2 AND lease_expires_at>clock_timestamp() AND status IN ('provisioning','canary')
         AND NOT EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.state IN ('prepared','submitted','unconfirmed'))

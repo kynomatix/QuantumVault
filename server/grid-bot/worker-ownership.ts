@@ -4,6 +4,10 @@ import type {PoolClient} from 'pg';
 export async function gridWorkerFence(c:PoolClient,botId:string){
   return (await c.query("SELECT pg_try_advisory_xact_lock(hashtext('grid:worker:send'),hashtext($1)) AS acquired",[botId])).rows[0].acquired===true;
 }
+/** Idempotent owner controls may queue within the caller's bounded transaction. */
+export async function waitGridWorkerFence(c:PoolClient,botId:string){
+  await c.query("SELECT pg_advisory_xact_lock(hashtext('grid:worker:send'),hashtext($1))",[botId]);
+}
 export async function recordGridWorker(c:PoolClient,botId:string,generation:string,reconciliationRequired:boolean){
   await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at)
     VALUES($1,'worker-ownership','internal_worker_ownership',$2,clock_timestamp()) ON CONFLICT(bot_id,event_key)

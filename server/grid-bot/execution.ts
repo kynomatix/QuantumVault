@@ -51,12 +51,12 @@ export class GridPacificaSender {
     if(gridAddsExposure(r)){if(!this.margin)throw new GridMarginDenied('Grid final margin boundary unavailable');await this.margin.finalMargin(r,leaseToken??'');}
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired during margin observation.');
     if(!this.margin)throw new GridLaunchTransientError('Grid send ownership boundary unavailable');
-    return this.margin.sendOwned(r,leaseToken??'',async()=>{
+    return this.margin.sendOwned(r,leaseToken??'',async(signal)=>{
     // A suspended process cannot use a permission obtained before the signed window expired.
     if(Date.now()>=r.timestamp+r.expiryMs)throw new GridLaunchTransientError('Grid signed request expired before POST');
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired before POST.');
     // One bounded request only. Header/HTTP success alone never settles money or an order.
-    const response=this.transport.response(await this.fetcher(url,init));
+    const response=this.transport.response(await this.fetcher(url,{...init,signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(5000)])}));
     if(response.status===400||response.status===403||response.status===429){
       const body=response.status===400?await response.json().catch(()=>null):null;
       const terminalFailure=gridTerminalHttpFailure(response.status,body,requestDigest(r));

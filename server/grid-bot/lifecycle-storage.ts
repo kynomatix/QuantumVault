@@ -3,6 +3,7 @@ import Decimal from 'decimal.js';
 import {GridStorageError} from './storage';
 import {GridMonitorStorage,type GridMonitorClaim} from './monitor-storage';
 import {canonicalRequest} from './launch-storage';
+import {gridWorkerFence,waitGridWorkerFence} from './worker-ownership';
 import {gridWalletEntryGate} from './runtime-policy';
 import {freshGridFact,gridEntrySafety,type GridControlAction} from './lifecycle-policy';
 import type {GridObservation} from './reconciliation';
@@ -15,6 +16,8 @@ export class GridLifecycleStorage {
   async request(wallet:string,botId:string,key:string,action:GridControlAction,evidence:Record<string,unknown>={},source:'owner'|'risk'='owner',claim?:GridMonitorClaim):Promise<GridControl>{
     if(!['owner','risk'].includes(source)||!key||key.length>200||!['pause','resume','resync','stop','band'].includes(action)||source==='owner'&&action==='band')throw new GridStorageError('invariant');
     return this.monitor.launch.transaction(async c=>{
+      this.monitor.launch.hostAction(c,action==='resume'?'resume':'settle');
+      await waitGridWorkerFence(c,botId);
       const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[botId,wallet])).rows[0];
       if(!bot)throw new GridStorageError('not_found');
       if(source==='risk'){if(!claim||claim.id!==botId)throw new GridStorageError('lost_lease');await this.monitor.assertLease(c,claim);}
@@ -68,7 +71,10 @@ export class GridLifecycleStorage {
     });
   }
   async complete(claim:GridMonitorClaim,requestId:string,status:'paused'|'range_exhausted'|'active'|'canary',proof?:{identity?:GridResumeIdentity|null;token?:GridAutoResumeToken;tick?:string;epoch?:string}){
-    await this.monitor.launch.transaction(async c=>{const bot=await this.monitor.assertLease(c,claim);
+    await this.monitor.launch.transaction(async c=>{
+      this.monitor.launch.hostAction(c,['active','canary'].includes(status)?'resume':'settle');
+      if(!await gridWorkerFence(c,claim.id))throw new GridStorageError('conflict');
+      const bot=await this.monitor.assertLease(c,claim);
       const l=(await c.query('SELECT l.*,r.action,r.source,r.state FROM grid_lifecycle l JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1 FOR UPDATE OF l',[claim.id])).rows[0];
       if(l?.active_request!==requestId||l.state!=='pending'||proof?.epoch!==undefined&&String(l.epoch)!==proof.epoch)throw new GridStorageError('conflict');
       if(l.action==='stop')throw new GridStorageError('invariant');

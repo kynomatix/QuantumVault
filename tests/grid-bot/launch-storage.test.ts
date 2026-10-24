@@ -1,3 +1,4 @@
+import type { GridDeadline } from '../../server/grid-worker/transaction';
 import {beforeAll,afterAll,beforeEach,describe,it,expect} from 'vitest';
 import {Pool,type PoolClient} from 'pg';
 import {randomUUID} from 'node:crypto';
@@ -51,14 +52,14 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const backendPids=new Set<number>();let started=0,release!:()=>void;
     const allStarted=new Promise<void>(resolve=>{release=resolve;});
     class ConcurrentStorage extends GridLaunchStorage {
-      override transaction<T>(work:(client:PoolClient)=>Promise<T>):Promise<T>{
-        return super.transaction(async client=>{
+      override transaction<T>(work:(client:PoolClient,deadline:GridDeadline)=>Promise<T>):Promise<T>{
+        return super.transaction(async (client,deadline)=>{
           await client.query("SET LOCAL statement_timeout='10s'");
           backendPids.add((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
           // All four BEGINs must be live before any reserve can acquire admission authority.
           if(++started===candidates.length)release();
           await allStarted;
-          return work(client);
+          return work(client,deadline);
         }).catch(error=>{release();throw error;});
       }
     }
@@ -90,12 +91,12 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const backendPids=new Set<number>();let started=0,release!:()=>void;
     const allStarted=new Promise<void>(resolve=>{release=resolve;});
     class ConcurrentExposureStorage extends GridLaunchStorage {
-      override transaction<T>(work:(client:PoolClient)=>Promise<T>):Promise<T>{
-        return super.transaction(async client=>{
+      override transaction<T>(work:(client:PoolClient,deadline:GridDeadline)=>Promise<T>):Promise<T>{
+        return super.transaction(async (client,deadline)=>{
           await client.query("SET LOCAL statement_timeout='10s'");
           backendPids.add((await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
           if(++started===attempts.length)release();
-          await allStarted;return work(client);
+          await allStarted;return work(client,deadline);
         }).catch(error=>{release();throw error;});
       }
     }
@@ -159,7 +160,9 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const expired=new class extends GridLaunchStorage {
       override async pilotExposure(...args:Parameters<GridLaunchStorage['pilotExposure']>){
         // Simulate an observation ageing out after accounting, before final authority.
-        return {...await super.pilotExposure(...args),validUntil:0};
+        const result=await super.pilotExposure(...args);
+        if(result.validUntil!==undefined)result.validUntil=0;
+        return result;
       }
     }(pool,async()=>{});
     let posts=0;await expect(expired.sendOwned(v.request,account.leaseToken,async()=>{posts++;})).rejects.toThrow('send ownership');
@@ -234,7 +237,9 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const bot=await draft();await pool.query('UPDATE wallets SET agent_public_key=$1 WHERE address=$2',['EXAMPLE_MASTER',wallet]);
     const c=await pool.connect();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,wallet]);
     const boundedPool=new Pool({connectionString:process.env.DATABASE_URL,max:1,options:'-c search_path='+schema+' -c lock_timeout=100ms'});
-    try{await expect(new GridCustody(new GridLaunchStorage(boundedPool,async()=>{})).reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:bot.policyHmac},umk())).rejects.toThrow('lock timeout');}
+    // U2b fixes both budgets at two seconds; PostgreSQL may cancel either timer first.
+    const started=Date.now();
+    try{await expect(new GridCustody(new GridLaunchStorage(boundedPool,async()=>{})).reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:bot.policyHmac},umk())).rejects.toThrow(/(?:lock|statement) timeout/);expect(Date.now()-started).toBeLessThan(4000);}
     finally{await c.query('ROLLBACK');c.release();await boundedPool.end();}
     expect((await pool.query('SELECT bot_id FROM grid_launch_accounts')).rowCount).toBe(0);
   });

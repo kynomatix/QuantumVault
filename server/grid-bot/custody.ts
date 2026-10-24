@@ -8,7 +8,7 @@ import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../wallet-lock-constants';
 import type {GridSettlementFact} from './lifecycle-service';
 import {gridRecyclerGate,gridExposureLimit} from './runtime-policy';
 import {freshGridFact} from './lifecycle-policy';
-import {recordGridWorker} from './worker-ownership';
+import {recordGridWorker,gridWorkerFence} from './worker-ownership';
 
 // Leave recovery time beyond the durable 60-second rate-limit backoff.
 export const GRID_LAUNCH_LEASE_MS = 120_000;
@@ -29,8 +29,10 @@ export class GridCustody {
     try {
       const encrypted=encryptToBase64(secret,subkey,buildPooledSubaccountAAD('grid:pacifica',input.wallet,account));
       return await this.storage.transaction(async c=>{
+        this.storage.hostAction(c,'start');
         // Same wallet-generation lock namespace as storage.ts's legacy pool/reset path.
         await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,input.wallet]);
+        if(!await gridWorkerFence(c,input.botId))throw Error('Grid sender still active');
         const owner=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1 FOR UPDATE',[input.wallet])).rows[0];
         if(owner?.agent_public_key!==input.masterAccount)throw Error('Grid master generation changed');
         await c.query('INSERT INTO grid_master_quota(master_account,share) VALUES($1,$2) ON CONFLICT DO NOTHING',[input.masterAccount,share.toFixed()]);
@@ -100,6 +102,10 @@ export class GridCustody {
       const pooledKey=deriveSubkey(umk,'bot_subaccount_privkey');
       try{const pooled=encryptToBase64(secret,pooledKey,buildPooledSubaccountAAD('pacifica',identity.wallet,identity.account));
         return await this.storage.transaction(async c=>{
+          const terminalProof=proof.state==='empty'&&validGridEmptyProof(identity,proof,now);
+          this.storage.hostAction(c,terminalProof?'release':'settle',{terminalProof});
+          await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,identity.wallet]);
+          if(!await gridWorkerFence(c,identity.botId))throw Error('Grid sender still active');
           await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[identity.masterAccount]);
           const a=(await c.query(`SELECT a.protocol_subaccount_id FROM grid_launch_accounts a JOIN grid_bots b ON b.id=a.bot_id
             WHERE a.bot_id=$1 AND a.account=$2 AND a.master_account=$3 AND a.released_at IS NULL AND b.wallet_address=$4
@@ -136,7 +142,9 @@ export class GridCustody {
       const key=deriveSubkey(umk,'bot_subaccount_privkey');
       try{const pooled=encryptToBase64(secret,key,buildPooledSubaccountAAD('pacifica',identity.wallet,identity.account));
         await this.storage.transaction(async c=>{
+          this.storage.hostAction(c,'release',{terminalProof:true});
           await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,identity.wallet]);
+          if(!await gridWorkerFence(c,identity.botId))throw Error('Grid sender still active');
           const owner=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1 FOR UPDATE',[identity.wallet])).rows[0];
           if(owner?.agent_public_key!==identity.masterAccount)throw Error('Grid wallet generation changed');
           await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[identity.masterAccount]);

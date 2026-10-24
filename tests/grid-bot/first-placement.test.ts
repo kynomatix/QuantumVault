@@ -8,7 +8,7 @@ import {GridPacificaSender} from '../../server/grid-bot/execution';
 import {PacificaTransportAuthority} from '../../server/protocol/pacifica/pacifica-transport';
 import {policy as basePolicy} from './draft-fixtures';
 
-const sendOwned=async<T>(_r:ExactGridRequest,_lease:string,post:()=>Promise<T>)=>post();
+const sendOwned=async<T>(_r:ExactGridRequest,_lease:string,post:(signal:AbortSignal)=>Promise<T>)=>post(new AbortController().signal);
 const base=basePolicy();
 const policy=()=>({...base,startPrice:'100.50000000',lowerPrice:'100.00000000',upperPrice:'102.00000000',gridCount:2,
   levels:[100,101,102].map((price,i)=>({ordinal:i+1,price:price.toFixed(8),size:'1.00000000',side:'buy' as const,reduceOnly:false}))});
@@ -95,7 +95,7 @@ describe('retained first-placement context',()=>{
     const f:ExactGridRequest={...r,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:r.account,amount:p.totalInvestment}};
     const ops:any[]=[{idempotency_key:`grid:${r.botId}:launch:fund`,state:'confirmed',exact_request:f,exact_request_digest:requestDigest(f),terminal_at:new Date(1000)}];
     const query=vi.fn(async(sql:string)=>({rows:sql.includes('JOIN grid_launch_accounts')?[b]:sql.includes('SELECT ordinal')?p.levels.map(l=>({...l,reduce_only:l.reduceOnly})):sql.includes('FROM grid_operations')?ops:[]}));
-    const c={query,release:vi.fn()},storage=new GridLaunchStorage({connect:async()=>c} as unknown as Pool,async()=>{});
+    const c={query,release:vi.fn(),processID:1},storage=new GridLaunchStorage({connect:async()=>c} as unknown as Pool,async()=>{});
     return {r,b,f,ops,storage};
   }
   it('uses saved owner-confirmed immutable preview and the exact terminal funding record',async()=>{const h=retained();expect(await h.storage.firstPlacementContext(h.r)).toMatchObject({confirmedAt:900,fundedAt:1000,alreadyPlaced:false});});
