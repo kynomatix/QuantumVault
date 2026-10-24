@@ -17,6 +17,7 @@ import {WorkerQuota} from '../../server/grid-worker/quota';
 import {workerFetch} from '../../server/grid-worker/transport';
 import {withProtectivePurpose} from '../../server/grid-worker/protective-purpose';
 import {verifyProtectiveConsent} from '../../server/grid-worker/protective-consent';
+import {serviceBotPass} from '../../server/grid-worker/bot-pass';
 import {ProtectionTruth} from '../../server/grid-worker/protection-truth';
 import {GridIncidents} from '../../server/grid-worker/incidents';
 import {rescueOffer,rescueView} from '../../server/grid-worker/rescue-state';
@@ -159,4 +160,15 @@ it('refuses forged and other-bot retained consent before any POST',async()=>{
   await expect(tx(c=>verifyProtectiveConsent(c,{...stored,bot_id:randomUUID()},fixture.key!))).rejects.toThrow('GRID_PROTECTIVE_CONSENT_INVALID');
   await expect(tx(c=>verifyProtectiveConsent(c,{...stored,consent_mac:fixtureSha256},fixture.key!))).rejects.toThrow('GRID_PROTECTIVE_CONSENT_INVALID');
   expect(posts).toBe(0);
+});
+it('continues the same pass after one bot fails and records its own stop incident',async()=>{
+  const r=await start();expect(r.status,r.data).toBe(200);const other=randomUUID(),ran:string[]=[];
+  const truth=new ProtectionTruth(pool,terminate,new GridIncidents(pool,terminate));
+  await serviceBotPass(new AbortController().signal,{
+    assertHolder:()=>{},claim:async seen=>[botId,other].find(id=>!seen.includes(id))?{id:[botId,other].find(id=>!seen.includes(id))!}:null,
+    allowed:()=>true,refused:async()=>{},tick:async c=>{ran.push(c.id);if(c.id===botId)throw Error('GRID_QUOTA_BACKOFF');},
+    observed:(c,e)=>truth.observe(c.id,e),observationFailed:async()=>{throw Error('EXAMPLE_TRUTH_FAILURE');},release:async()=>{},
+  });
+  expect(ran).toEqual([botId,other]);
+  expect((await pool.query("SELECT bot_id FROM grid_worker_incidents WHERE code='stop_failed'")).rows).toEqual([{bot_id:botId}]);
 });

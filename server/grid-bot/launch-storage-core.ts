@@ -235,7 +235,7 @@ export class GridLaunchStorage {
   private async pilotGate(c:PoolClient,botId:string,now:number,candidate?:{request:ExactGridRequest;increment:string}){
     const exposure=await this.pilotExposure(c,botId,now,undefined,candidate);
     if(exposure.exposureUsd===null||exposure.limitUsd===null)throw new GridLaunchTransientError('Grid configured exposure is unknown; reconcile before adding risk.');
-    if(new Decimal(exposure.exposureUsd).gt(exposure.limitUsd))throw new GridLaunchTransientError('Grid configured exposure limit exceeded (investment Ãƒâ€” leverage).');
+    if(new Decimal(exposure.exposureUsd).gt(exposure.limitUsd))throw new GridLaunchTransientError('Grid configured exposure limit exceeded (investment times leverage).');
     return {...exposure,exposureUsd:exposure.exposureUsd};
   }
   private async capacityBlocked(c:PoolClient,r:ExactGridRequest){

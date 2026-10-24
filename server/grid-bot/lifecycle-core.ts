@@ -51,7 +51,7 @@ export function gridLifecycleCore(storage:GridMonitorStorage,reads:GridMonitorRe
       return typeof rows[0].tick_size==='string'?rows[0].tick_size:null;
     },
     sol:authorities.sol??((claim,signal)=>dependencies.sol(claim.masterAccount,signal)),
-    resume:authorities.resume??gridProductionResume(storage,dependencies.authority(json,storage.launch),dependencies.umk),
+    resume:protectiveOnly?async()=>null:authorities.resume??gridProductionResume(storage,dependencies.authority(json,storage.launch),dependencies.umk),
     send:(claim,r)=>withKey(claim,(identity,umk)=>custody.withSecret(identity,umk,secret=>sender.send(r,secret,undefined,claim.leaseToken))),
     recover:authorities.recover??(async(claim,op,signal)=>{
       const r=op.exact_request;

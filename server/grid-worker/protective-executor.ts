@@ -149,8 +149,9 @@ export class ProtectiveExecutor{
       let cursor:string|undefined;const seen=new Set<string>();
       for(let i=0;i<100;i++){
         const raw=await json.json(claim.masterAccount,path,{account:claim.account,...(cursor?{cursor}:{})},budget.abort.signal) as Record<string,any>;
-        if(raw?.success!==true||!Array.isArray(raw.data)||raw.data.length!==0)return false;
-        if(raw.has_more!==true)break;
+        if(raw?.success!==true||!Array.isArray(raw.data)||raw.data.length!==0||typeof raw.has_more!=='boolean'
+          ||raw.partial===true||raw.complete===false||raw.sequence_gap===true)return false;
+        if(!raw.has_more){if(raw.next_cursor!=null)return false;break;}
         if(typeof raw.next_cursor!=='string'||!raw.next_cursor||seen.has(raw.next_cursor)||i===99)return false;
         cursor=raw.next_cursor;seen.add(cursor);
       }

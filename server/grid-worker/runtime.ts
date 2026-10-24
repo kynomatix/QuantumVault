@@ -13,6 +13,7 @@ import {WorkerObserver} from './observer';
 import {priorityIncident,resolveHealthyConditions} from './incident-policy';
 import {runtimeFailureCode} from './runtime-failure';
 import {GridIncidents} from './incidents';
+import {serviceBotPass} from './bot-pass';
 import {ProtectionTruth} from './protection-truth';
 import {recoverAbandonedRescues} from './rescue-recovery';
 import {WorkerQuota} from './quota';
@@ -64,22 +65,13 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   const scheduler=new WorkerScheduler({
     async existing(signal){
       if(!host||host.run_mode!=='trading'||!host.execution_enabled)return;
-      const seen:string[]=[];
-      for(let i=0;i<100;i++){
-        signal.throwIfAborted();holder();const claim=await monitor.claim(seen);if(!claim)break;seen.push(claim.id);
-        try{
-          if(!OWNER_MASTER_PUBLIC_KEYS.includes(claim.masterAccount)){
-            await incidents.record({code:'authority_refused',dedupKey:'authority-refused:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch});
-            continue;
-          }
-          await executor.tick(claim,signal);await protection.observe(claim.id);
-        }catch(error){
-          signal.throwIfAborted();holder();
-          try{await protection.observe(claim.id,error);}catch{await incidents.record({code:'protective_failure',dedupKey:'protective-failure:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch});}
-        }finally{
-          if(lease&&leaseLocallyValid(lease)&&ready())try{await monitor.release(claim);}catch{/* Retain the bounded bot lease on release uncertainty. */}
-        }
-      }
+      await serviceBotPass(signal,{
+        assertHolder:holder,claim:seen=>monitor.claim(seen),allowed:claim=>OWNER_MASTER_PUBLIC_KEYS.includes(claim.masterAccount),
+        refused:claim=>incidents.record({code:'authority_refused',dedupKey:'authority-refused:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch}),
+        tick:claim=>executor.tick(claim,signal),observed:(claim,error)=>protection.observe(claim.id,error),
+        observationFailed:claim=>incidents.record({code:'protective_failure',dedupKey:'protective-failure:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch}),
+        release:async claim=>{if(lease&&leaseLocallyValid(lease)&&ready())try{await monitor.release(claim);}catch{/* Retain the bounded bot lease on uncertainty. */}},
+      });
     },
     // The injected executor tick services lifecycle/protection before new order work.
     lifecycle:async()=>{},
