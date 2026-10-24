@@ -13,7 +13,7 @@ import {gridActionAllowed} from '../grid-worker/kill';
 import {leaseLocallyValid} from '../grid-worker/lease-clock';
 import {identityMatches} from '../grid-worker/build-identity';
 import {aggregateReservationFence} from '../grid-worker/spending';
-import type {WorkerLedgerContext} from '../grid-worker/ledger-context';
+import type {WorkerLedgerContext,ProtectiveLedgerContext} from '../grid-worker/ledger-context';
 import {independentLane,backendTerminator} from '../grid-worker/lanes';
 import {GridIncidents} from '../grid-worker/incidents';
 import {prepareSendAudit,authorizeSendAudit,completeSendAudit,type SendAudit} from '../grid-worker/audit';
@@ -95,7 +95,12 @@ export class GridLaunchStorage {
   private readonly hosts=new WeakMap<PoolClient,WorkerHost|null>();
   private incidentWriter?:GridIncidents;
   constructor(private pool:Pool,private ready:(client?:PoolClient)=>Promise<void>=async()=>{throw Error('GRID_READINESS_INJECTION_REQUIRED');},
-    private marginRead?:(r:ExactGridRequest)=>Promise<GridMarginReading|null>,private worker?:WorkerLedgerContext){}
+    private marginRead?:(r:ExactGridRequest)=>Promise<GridMarginReading|null>,private worker?:WorkerLedgerContext,private protective?:ProtectiveLedgerContext){
+      if(worker&&protective)throw Error('GRID_LEDGER_ROLE_CONFLICT');
+    }
+  protectiveTarget(){return this.protective?.botId;}
+  protectiveRequest(){return this.protective?.requestId;}
+  private target(botId:string){if(this.protective&&botId!==this.protective.botId)throw Error('GRID_PROTECTIVE_TARGET');}
   /** All POST kinds share the takeover fence through completion. No async gap after final authority. */
   private async autoResumeFence(c:PoolClient,r:ExactGridRequest){
     if(!gridAddsExposure(r))return true;
@@ -191,8 +196,7 @@ export class GridLaunchStorage {
   private async freshMargin(r:ExactGridRequest){
     if(!gridAddsExposure(r))return null;
     if(this.marginRead){try{return await this.marginRead(r);}catch{return null;}}
-    const [{GridLaunchReads},{pacificaTransportAuthority}]=await Promise.all([import('./launch-reads'),import('../protocol/pacifica/pacifica-transport')]);
-    return readGridMargin(new GridLaunchReads(pacificaTransportAuthority(),this,'0.5'),r);
+    return null;
   }
   /** Caller holds the bot lock. Durable claims, exact fills and the monitor snapshot are
    * read together; neither promotion nor a replacement worker supplies fresh capacity. */
@@ -317,6 +321,12 @@ export class GridLaunchStorage {
         &&(h.entries_paused||h.observer_fenced||h.drain_requested||!h.execution_enabled||h.run_mode!=='trading'))throw Error('GRID_HOST_ACTION_DENIED');
       return;
     }
+    if(this.protective){
+      const h=this.hosts.get(c);
+      if(!gridActionAllowed(action,legacyKillContext(h??null,{...options,role:'protective',holderValid:!!h?.holder_live,
+        identityValid:true,scopeAndConsent:true})))throw Error('GRID_HOST_ACTION_DENIED');
+      return;
+    }
     if(this.worker){
       const host=this.hosts.get(c),lease=this.worker.lease();
       const context=legacyKillContext(host??null,{...options,role:'grid-worker',
@@ -338,12 +348,14 @@ export class GridLaunchStorage {
     return r.kind==='cancel'?'cancel':r.kind==='close'||r.kind==='limit'&&r.data.reduce_only===true?'close':r.kind==='sweep'?'sweep':['create','fund','leverage','seed'].includes(r.kind)?'start':'cycle';
   }
   private async prelockWallet(c:PoolClient,botId:string){
+    this.target(botId);
     const row=(await c.query('SELECT wallet_address FROM grid_bots WHERE id=$1',[botId])).rows[0];
     if(!row)throw Error('GRID_WALLET_IDENTITY_MISSING');
     await walletFences(c,[row.wallet_address]);
   }
   private async legacyAudit(c:PoolClient,operationId:string,r:ExactGridRequest):Promise<SendAudit|null>{
     const host=this.hosts.get(c);
+    if(this.protective&&(r.botId!==this.protective.botId||r.authority.protectiveRequestId!==this.protective.requestId||!['cancel','close'].includes(r.kind)||r.kind==='close'&&r.data.reduce_only!==true))throw Error('GRID_PROTECTIVE_SEND_SCOPE');
     if(!host?.authority_tracking_enabled)return null;
     const row=(await c.query(`SELECT a.generation,w.agent_public_key,w.execution_enabled,w.emergency_stop_triggered,
       w.umk_encrypted_for_execution IS NOT NULL AS wrapped,w.agent_private_key_encrypted_v3 IS NOT NULL AS signer,
@@ -355,18 +367,22 @@ export class GridLaunchStorage {
     if(!row||!row.execution_enabled||row.emergency_stop_triggered||!row.wrapped||!row.signer||!row.grant_live||row.agent_public_key!==r.masterAccount)throw Error('GRID_CURRENT_AUTHORITY_INVALID');
     const operation=(await c.query('SELECT request_identity FROM grid_operations WHERE id=$1 AND bot_id=$2',[operationId,r.botId])).rows[0];
     if(!operation)throw Error('GRID_AUDIT_OPERATION_INVALID');
-    return {operationId,botId:r.botId,requestIdentity:operation.request_identity,attempt:1,kind:r.kind,bootId:this.worker?.lease().bootId??this.bootId,role:this.worker?'grid-worker':'legacy',
+    return {operationId,botId:r.botId,...(this.protective?{requestId:this.protective.requestId}:{}),requestIdentity:operation.request_identity,attempt:1,kind:r.kind,bootId:this.protective?.requestId??this.worker?.lease().bootId??this.bootId,role:this.protective?'protective':this.worker?'grid-worker':'legacy',
       epoch:String(host.fencing_epoch),generation:String(row.generation),policyDigest:ownerSha256(String(r.authority.policyHmac??'')),requestDigest:requestDigest(r),signedAt:r.timestamp,expiresAt:r.timestamp+r.expiryMs};
   }
   async transaction<T>(work:(c:PoolClient,deadline:GridDeadline)=>Promise<T>,ownerControl=false):Promise<T>{
-    const lane=this.worker?this.pool:independentLane(this.pool),terminate=this.worker?.terminate??backendTerminator(lane);
+    const lane=this.worker||this.protective?this.pool:independentLane(this.pool),terminate=this.protective?.terminate??this.worker?.terminate??backendTerminator(lane);
     this.incidentWriter??=new GridIncidents(lane,terminate);
     try {
       return await fencedTransaction(this.pool,async(c,deadline)=>{
         await this.ready(c);
         if(process.env.GRID_ENTRIES_PAUSED==='true'&&(await c.query("SELECT to_regclass('grid_worker_host') IS NOT NULL AS present")).rows[0]?.present)await tightenHost(c,{pause:true});
-        const control=ownerControl&&!this.worker&&process.env.GRID_REMOTE_WORKER_ENABLED==='true';
-        const host=this.worker||control?(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live FROM grid_worker_host WHERE singleton_id=1')).rows[0]:await readLegacyHost(c);this.hosts.set(c,host);if(control)this.controls.add(c);
+        const control=ownerControl&&!this.worker&&!this.protective&&process.env.GRID_REMOTE_WORKER_ENABLED==='true';
+        const host=this.worker||this.protective||control?(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live FROM grid_worker_host WHERE singleton_id=1')).rows[0]:await readLegacyHost(c);this.hosts.set(c,host);if(control)this.controls.add(c);
+        if(this.protective){
+          if(!host?.holder_live||host.holder_role!=='protective'||host.holder_boot_id!==this.protective.requestId||String(host.fencing_epoch)!==this.protective.epoch)throw Error('GRID_PROTECTIVE_LEASE_LOST');
+          await this.protective.validate(c);await localContext(c,'settle',{bootId:this.protective.requestId,epoch:this.protective.epoch});
+        }
         if(this.worker){
           const lease=this.worker.lease();
           if(!this.worker.ready()||!leaseLocallyValid(lease)||!host?.holder_live||host.holder_role!=='grid-worker'||host.holder_boot_id!==lease.bootId||String(host.fencing_epoch)!==lease.epoch||!identityMatches(host))throw Error('GRID_WORKER_AUTHORITY_INVALID');

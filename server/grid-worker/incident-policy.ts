@@ -7,7 +7,7 @@ export const INCIDENT_RESOLUTION = Object.freeze({
   clock_unhealthy: 'condition: database and monotonic clock bounds verified',
   schema_drift: 'condition: catalog and build identity verified',
   progress_stale: 'condition: a successful supervisor pass within 30 seconds',
-  stop_failed: 'event: exact failed protective operation requires verified settlement; U6 recovery, latched in U5',
+  stop_failed: 'event: fresh identity-bound venue-flat proof with no unknown operations, or terminal stopped; never auto-acknowledged',
   transfer_refused: 'event: exact refusal requires reviewed authority and transfer reconciliation; latched in U5',
   authority_refused: 'event: exact refusal requires reviewed authority reconciliation; latched in U5',
   egress_refused: 'event: exact refused destination and payload require security review; latched in U5',
@@ -15,7 +15,7 @@ export const INCIDENT_RESOLUTION = Object.freeze({
   observer_silent: 'condition: exact health GET received since acquisition within 60 seconds',
   audit_mismatch: 'event: complete retained audit must be reconciled; U7 recovery, latched in U5',
   reconciliation_unavailable: 'condition: complete reconciliation pass successful',
-  protective_failure: 'event: exact protection failure requires verified settlement; U6 recovery, latched in U5',
+  protective_failure: 'event: fresh identity-bound venue-flat proof with no unknown operations, or terminal stopped; never auto-acknowledged',
 } as const);
 export type CriticalIncidentCode = keyof typeof INCIDENT_RESOLUTION;
 export const CRITICAL_PRIORITY = Object.freeze(Object.keys(INCIDENT_RESOLUTION) as CriticalIncidentCode[]);

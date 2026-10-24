@@ -30,7 +30,7 @@ export function gridTerminalFact(raw:unknown,claim:GridMonitorClaim,o:GridObserv
   return {account:claim.account,masterAccount:claim.masterAccount,balance:d.balance as string,withdrawable:d.available_to_withdraw as string,
     observedAt:d.updated_at as number,settlementComplete:true,source:'pacifica:/account+retained-operation-ledger+'+o.history.source,recycler};
 }
-export function gridLifecycleCore(storage:GridMonitorStorage,reads:GridMonitorReads,json:GridLaunchReads,dependencies:GridRuntimeDependencies,authorities:Partial<Pick<GridLifecycleDeps,'resume'|'settlement'|'sol'|'recover'>>={}){
+export function gridLifecycleCore(storage:GridMonitorStorage,reads:GridMonitorReads,json:GridLaunchReads,dependencies:GridRuntimeDependencies,authorities:Partial<Pick<GridLifecycleDeps,'resume'|'settlement'|'sol'|'recover'>>={},protectiveOnly=false){
   const custody=new GridCustody(storage.launch),sender=new GridPacificaSender(dependencies.transport,dependencies.fetcher,new GridFirstPlacementAuthority(storage.launch,json),storage.launch),lifecycle=new GridLifecycleStorage(storage);
   const observe=async(claim:GridMonitorClaim,signal:AbortSignal)=>{
     const {bot}=await storage.snapshot(claim),symbol=bot.market.replace(/-PERP$/,''),from=new Date(bot.created_at).getTime();
@@ -42,7 +42,7 @@ export function gridLifecycleCore(storage:GridMonitorStorage,reads:GridMonitorRe
     const {bot}=await storage.snapshot(claim),security=await dependencies.umk(bot.wallet_address);if(!security)throw Error('Grid durable signing authority unavailable');
     try{return await work(await custody.recover(claim.id,bot.wallet_address,claim.leaseToken),security.umk);}finally{security.cleanup();}
   };
-  const service=new GridLifecycleService({storage:lifecycle,observe,move:(claim,signal)=>dependencies.move(storage,json,claim,signal),
+  const service=new GridLifecycleService({storage:lifecycle,observe,protectiveOnly,move:(claim,signal)=>dependencies.move(storage,json,claim,signal),
     marketTick:async(claim,signal)=>{
       const {bot}=await storage.snapshot(claim),started=Date.now(),raw=await json.json(claim.masterAccount,'/info',{},signal) as {success?:boolean;data?:Record<string,unknown>[]};
       signal.throwIfAborted();

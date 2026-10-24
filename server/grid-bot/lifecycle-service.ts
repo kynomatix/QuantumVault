@@ -1,4 +1,5 @@
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
+import {withProtectivePurpose} from '../grid-worker/protective-purpose';
 import {gridResumeClearance,type GridResumeRisk} from './resume-clearance';
 export {gridResumeClearance,type GridResumeRisk} from './resume-clearance';
 import {cycleCloseAllocations} from './cycle-storage';
@@ -22,6 +23,7 @@ export interface GridSettlementFact {
   settlementComplete:true;source:string;recycler:LaunchFacts['recycler'];
 }
 export interface GridLifecycleDeps {
+  protectiveOnly?:boolean;
   storage:GridLifecycleStorage;
   marketTick?:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<string|null>;
   observe:(claim:GridMonitorClaim,signal:AbortSignal)=>Promise<GridObservation>;
@@ -47,7 +49,8 @@ export class GridLifecycleService {
       await s.blocked(claim,reason);return reason;
     };
     let {bot,life}=await s.state(claim);
-    const observation=await this.deps.observe(claim,signal);signal.throwIfAborted();
+    if(this.deps.protectiveOnly&&(bot.status!=='stopping'||life?.state!=='pending'||life.action!=='stop'))throw Error('GRID_PROTECTIVE_STOP_REQUIRED');
+    const observation=await withProtectivePurpose(()=>this.deps.observe(claim,signal));signal.throwIfAborted();
     if(observation.account!==claim.account||observation.symbol!==bot.market.replace(/-PERP$/,''))return block('inventory_identity_unavailable');
     // Stops are evaluated in paused/range-exhausted states as well as active states.
     const trigger=gridRiskTrigger({direction:bot.direction,stopLossPrice:bot.stop_loss_price,lowerPrice:bot.lower_price,upperPrice:bot.upper_price},observation.mark,Date.now());
@@ -56,8 +59,11 @@ export class GridLifecycleService {
     else if(bot.consecutive_failures>=5&&['active','canary','resuming'].includes(bot.status))await s.request(bot.wallet_address,claim.id,'breaker:'+randomUUID(),'pause',{reason:'circuit_breaker',failures:bot.consecutive_failures},'risk',claim);
     else if(bot.status==='pausing'&&life?.state!=='pending'&&['venue_rejection','policy','invariant','circuit_breaker'].includes(bot.pause_reason))await s.request(bot.wallet_address,claim.id,'failure:'+randomUUID(),'pause',{reason:bot.pause_reason},'risk',claim);
     if(!observation.inventoryComplete||!freshGridFact(observation.observedAt,Date.now()))return block('inventory_unavailable');
-    let sol:null|{balance:string;observedAt:number}=null;try{sol=await this.deps.sol(claim,signal);}catch{signal.throwIfAborted();}
-    await s.sol(claim,sol);({bot,life}=await s.state(claim));
+    if(!this.deps.protectiveOnly){
+      let sol:null|{balance:string;observedAt:number}=null;try{sol=await this.deps.sol(claim,signal);}catch{signal.throwIfAborted();}
+      await s.sol(claim,sol);
+    }
+    ({bot,life}=await s.state(claim));
     const snapshot=await monitor.snapshot(claim);
     // Recover uncertain requests first. Acknowledgments and disappearance are never terminal facts.
     let unresolvedEntryCancel=false,unresolvedTransfer=false;
@@ -100,11 +106,13 @@ export class GridLifecycleService {
       const now=Date.now(),r:ExactGridRequest={kind,botId:claim.id,account:claim.account,masterAccount:claim.masterAccount,
         path:kind==='cancel'?'/orders/cancel':kind==='close'?'/orders/create_market':'/account/subaccount/transfer',
         operationType:kind==='cancel'?'cancel_order':kind==='close'?'create_market_order':'transfer_funds',timestamp:now,expiryMs:5000,data,
-        authority:{...authority,...(cycleClose?{cycleAllocations:cycleCloseAllocations(cycleClose,String(data.amount))}:{}),lifecycleEpoch:String(life.epoch),controlRequestId:life.active_request}};
+        authority:{...authority,...(launch.protectiveRequest?.()?{protectiveRequestId:launch.protectiveRequest()}:{}),...(cycleClose?{cycleAllocations:cycleCloseAllocations(cycleClose,String(data.amount))}:{}),lifecycleEpoch:String(life.epoch),controlRequestId:life.active_request}};
       const execution=new GridExecution({storage:launch,preflight:async retained=>{
         signal.throwIfAborted();const current=await s.state(claim);
         return current.life?.active_request===life.active_request&&String(current.life.epoch)===String(life.epoch)&&requestDigest(retained)===requestDigest(r)&&freshGridFact(observation.observedAt,Date.now());
-      },send:retained=>this.deps.send(claim,retained),reconcile:op=>this.deps.recover(claim,op,signal)});
+      },send:retained=>retained.kind==='cancel'||retained.kind==='close'
+        ?withProtectivePurpose(()=>this.deps.send(claim,retained)):this.deps.send(claim,retained),
+        reconcile:op=>this.deps.recover(claim,op,signal)});
         return execution.run('control:'+life.active_request+':'+randomUUID(),r,{credits:GRID_ACTION_CREDITS,slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},claim.leaseToken);
     };
     const cancel=async(target:NonNullable<typeof entry>)=>act('cancel',{symbol:target.order.symbol,order_id:target.order.orderId},{levelId:target.operation!.level_id,originalRequest:target.operation!.exact_request});
@@ -178,6 +186,7 @@ export class GridLifecycleService {
     if(unresolvedEntryCancel)return block('venue_operation_unresolved');
     const exit=owned.find(x=>x.operation);if(exit)return cancel(exit);
     if(unresolvedTransfer)return block('transfer_outcome_unknown');
+    if(this.deps.protectiveOnly)return 'protective_verify_required';
     if(!(reconciled.reconciliationComplete??reconciled.entriesAllowed))return block('terminal_history_unavailable');
     const settlement=await this.deps.settlement(claim,signal);
     if(!settlement||settlement.account!==claim.account||settlement.masterAccount!==claim.masterAccount||!settlement.settlementComplete||!settlement.source

@@ -31,7 +31,11 @@ export function currentPause(s:WorkerStatus|null,revision?:string|null):boolean 
   return revision==null?decimalCompare(s.pauseRevision,s.pauseRevision)===0:(decimalCompare(s.pauseRevision,revision)??-1)>=0;
 }
 /** Revisions are deliberately outside the unchanged signed wire; check the challenge echo too. */
-export function validWorkerChallenge(value:unknown,request:WorkerTarget&{expectedPauseRevision:string}):value is {message:string;expectedPauseRevision:string}{
+export interface RescueChallengeRequest {action:'break_glass_close';target:string;params:{botId:string}}
+export function validWorkerChallenge(value:unknown,request:WorkerTarget&{expectedPauseRevision:string}):value is {message:string;expectedPauseRevision:string};
+export function validWorkerChallenge(value:unknown,request:RescueChallengeRequest):Promise<boolean>;
+export function validWorkerChallenge(value:unknown,request:(WorkerTarget&{expectedPauseRevision:string})|RescueChallengeRequest):boolean|Promise<boolean>{
+  if(request.action==='break_glass_close')return validRescueChallenge(value,request);
   if(!value||typeof value!=='object')return false;
   const c=value as Record<string,unknown>;
   if(c.expectedPauseRevision!==request.expectedPauseRevision||typeof c.message!=='string')return false;
@@ -41,6 +45,20 @@ export function validWorkerChallenge(value:unknown,request:WorkerTarget&{expecte
   if(!/^issued:\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(lines[5])||!/^expires:\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(lines[6]))return false;
   const issued=Date.parse(lines[5].slice(7)),expires=Date.parse(lines[6].slice(8));
   return Number.isFinite(issued)&&Number.isFinite(expires)&&new Date(issued).toISOString()===lines[5].slice(7)&&new Date(expires).toISOString()===lines[6].slice(8)&&expires>issued&&expires-issued<=120_000;
+}
+async function validRescueChallenge(value:unknown,request:RescueChallengeRequest):Promise<boolean>{
+  if(!value||typeof value!=='object'||Object.keys(request.params).join(',')!=='botId'
+    ||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(request.params.botId)
+    ||request.target!=='bot:'+request.params.botId)return false;
+  const message=(value as Record<string,unknown>).message;if(typeof message!=='string')return false;
+  const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify({botId:request.params.botId})));
+  const paramsDigest=Array.from(new Uint8Array(bytes),n=>n.toString(16).padStart(2,'0')).join('');
+  const lines=message.split('\n');
+  if(lines[7]!=='params:'+paramsDigest||lines[1]!=='action:break_glass_close'||lines[3]!=='target:'+request.target)return false;
+  // Reuse the exact nonce, timestamp, duration and eight-line checks of the existing wire validator.
+  lines[1]='action:pause';lines[3]='target:all';lines[7]='params:none';
+  return validWorkerChallenge({message:lines.join('\n'),expectedPauseRevision:'0'},
+    {action:'pause',target:'all',expectedPauseRevision:'0'});
 }
 /** node-pg keeps int8/numeric as decimal strings; never coerce booleans or blanks. */
 function wireNumber(value:unknown,integer:boolean):number {

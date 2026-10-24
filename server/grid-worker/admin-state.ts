@@ -7,13 +7,15 @@ import {OWNER_MASTER_PUBLIC_KEYS} from './owner-master-keys';
 import {RECONCILIATION_STREAMS} from './reconciliation';
 import {CRITICAL_PRIORITY} from './incident-policy';
 import {checksFresh} from './status';
+import {rescueView,rescueOffer} from './rescue-state';
 
-export type ResetBlocker='server_flag'|'open_alert'|'review_required'|'worker_checks'|'monitor_fence'|'history_checks';
+export type ResetBlocker='server_flag'|'open_alert'|'review_required'|'worker_checks'|'monitor_fence'|'history_checks'|'rescue';
 export type CardState='offline'|'exec_off'|'pause_unconfirmed'|'needs_you'|'check_bots'|'test'|'paused'|'legacy_paused'
-  |'attention_fence'|'attention_history'|'attention_checks'|'attention_drain'|'attention_open'|'legacy'|'running';
+  |'attention_fence'|'attention_history'|'attention_checks'|'attention_drain'|'attention_open'|'legacy'|'running'|'rescue_running'|'rescue_unknown';
 export interface AdminFacts {
   host:Record<string,any>; catalog:boolean; identity:boolean; history:boolean; ownerKeys:boolean;
   unacknowledged:boolean; unresolved:boolean; protective:boolean; pauseUnconfirmed:boolean; botChecksFresh:boolean;
+  rescueLive?:boolean;rescueUnknown?:boolean;
 }
 export function executionRestrictions(f:AdminFacts):('trading_off'|'test'|'drain')[]{
   const h=f.host, result:('trading_off'|'test'|'drain')[]=[];
@@ -26,6 +28,7 @@ export function executionRestrictions(f:AdminFacts):('trading_off'|'test'|'drain
 export function resetBlockedBy(f:AdminFacts,entriesPaused:boolean):ResetBlocker[]{
   const h=f.host,external=h.execution_mode==='external',blocked:ResetBlocker[]=[];
   if(entriesPaused)blocked.push('server_flag');
+  if(f.rescueLive||f.rescueUnknown)blocked.push('rescue');
   if(f.unacknowledged)blocked.push('open_alert');
   if(f.unresolved||!f.catalog||!f.identity||external&&(!h.authority_tracking_enabled||h.start_scope!=='owner_allowlist')
     ||!f.ownerKeys||!external&&!h.legacy_controls_enabled)blocked.push('review_required');
@@ -36,6 +39,8 @@ export function resetBlockedBy(f:AdminFacts,entriesPaused:boolean):ResetBlocker[
 }
 export function ownerCardState(f:AdminFacts,blocked:readonly ResetBlocker[]):CardState{
   const h=f.host,external=h.execution_mode==='external';
+  if(f.rescueLive)return 'rescue_running';
+  if(f.rescueUnknown)return 'rescue_unknown';
   if(external&&(h.holder_role!=='grid-worker'||!h.holder_live||!h.heartbeat_online))return 'offline';
   if(!h.execution_enabled)return 'exec_off';
   if(external&&h.entries_paused&&String(h.pause_ack_revision)!==String(h.pause_revision)&&f.pauseUnconfirmed)return 'pause_unconfirmed';
@@ -83,7 +88,8 @@ export async function readAdminFacts(c:PoolClient):Promise<AdminFacts>{
       AND r.state='complete' AND r.last_complete_at BETWEEN clock_timestamp()-interval '30 seconds' AND clock_timestamp()
       AND r.covered_through_at BETWEEN clock_timestamp()-interval '125 seconds' AND clock_timestamp()) LIMIT 1`,
     [JSON.stringify(RECONCILIATION_STREAMS)])).rowCount;
-  return {host,catalog:!catalog.unavailableCapabilities.some(x=>required.has(x)),identity:host.execution_mode==='legacy'||mainIdentityMatches(host),history,
+  const rescue=await rescueView(c,host.owner_wallet);
+  return {host,rescueLive:rescue?.live??false,rescueUnknown:rescue?.unknownOpen??false,catalog:!catalog.unavailableCapabilities.some(x=>required.has(x)),identity:host.execution_mode==='legacy'||mainIdentityMatches(host),history,
     ownerKeys:host.execution_mode==='legacy'||OWNER_MASTER_PUBLIC_KEYS.length>0,
     unacknowledged:incidents.some(i=>i.acknowledged_at===null),unresolved:incidents.some(i=>i.resolved_at===null),
     protective:incidents.some(i=>['stop_failed','protective_failure'].includes(i.code)&&i.resolved_at===null),
@@ -98,6 +104,10 @@ export async function pauseCompletion(c:PoolClient,revision:string){
 /** Warnings remain retained; seen warnings older than 24h are omitted from the inbox, never criticals. */
 export async function adminStatus(c:PoolClient,entriesPaused:boolean){
   const facts=await readAdminFacts(c),h=facts.host,blocked=resetBlockedBy(facts,entriesPaused);
+  const rescue=await rescueView(c,h.owner_wallet),rescueOffers=[];
+  for(const b of (await c.query('SELECT id FROM grid_bots WHERE wallet_address=$1 ORDER BY id',[h.owner_wallet])).rows){
+    const offer=await rescueOffer(c,h.owner_wallet,b.id);if(offer)rescueOffers.push(offer);
+  }
   const effectiveSeverity=`CASE WHEN severity='critical' OR NOT(code IN ('exposure_above_budget','quota_pressure','notification_delayed')) THEN 'critical' ELSE severity END`;
   const incidentWhere=`(${effectiveSeverity}='critical' AND (acknowledged_at IS NULL OR resolved_at IS NULL OR inbox_seen_at IS NULL))
     OR (${effectiveSeverity}<>'critical' AND (inbox_seen_at IS NULL OR last_seen_at>=clock_timestamp()-interval '24 hours'))`;
@@ -126,7 +136,7 @@ export async function adminStatus(c:PoolClient,entriesPaused:boolean){
   const stopsAllowed=restrictions.length===0&&facts.catalog&&facts.identity&&facts.ownerKeys&&
     (h.execution_mode==='legacy'?h.legacy_controls_enabled===true:
       h.holder_role==='grid-worker'&&h.holder_live===true&&h.heartbeat_fresh===true&&h.progress_fresh===true&&facts.botChecksFresh&&h.authority_tracking_enabled===true);
-  return {host:safeHost,incidents,cardState:ownerCardState(facts,blocked),resetBlockedBy:blocked,
+  return {host:safeHost,incidents,cardState:ownerCardState(facts,blocked),resetBlockedBy:blocked,rescue,rescueOffers,rescueAlertsPhone:false,
     executionRestrictions:restrictions,stopsAllowed,
     unacknowledgedCritical:Number(critical?.unacknowledged??0),acknowledgedCritical:Number(critical?.acknowledged??0),
     truncated:counts.reduce((n,r)=>n+Number(r.count),0)>incidents.length,

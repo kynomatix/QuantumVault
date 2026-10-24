@@ -122,6 +122,29 @@ async function verified(c:PoolClient,row:Record<string,any>,umk:Buffer,states:re
 /** No scheduler and no custody call. A returned admission exists only after COMMIT. */
 export class WorkerStartRequests {
   constructor(private readonly lane:ClientLane,private readonly terminate:(pid:number)=>Promise<void>,private readonly incidents:Pick<GridIncidents,'record'>){}
+  /** A failed Start may release only a locked, custody-free and operation-free reservation. */
+  async releaseFailedZeroState(id:string,holder:WorkerRequestContext):Promise<boolean>{
+    return fencedTransaction(this.lane,async c=>{
+      const row=await requestLocks(c,id);await workerHost(c,holder,true);
+      if(row.action!=='start'||row.state!=='admitted')return false;
+      const bot=(await c.query('SELECT status FROM grid_bots WHERE id=$1 FOR UPDATE',[row.bot_id])).rows[0];
+      if(!bot||!['draft','failed'].includes(bot.status))return false;
+      const used=(await c.query(`SELECT
+        EXISTS(SELECT 1 FROM grid_launch_accounts WHERE bot_id=$1)
+        OR EXISTS(SELECT 1 FROM protocol_subaccounts WHERE bot_id=$1)
+        OR EXISTS(SELECT 1 FROM grid_operations WHERE bot_id=$1)
+        OR EXISTS(SELECT 1 FROM grid_execution_claims WHERE bot_id=$1)
+        OR EXISTS(SELECT 1 FROM grid_worker_send_audit WHERE bot_id=$1) AS used`,[row.bot_id])).rows[0];
+      if(used.used)return false;
+      const proofDigest=createHash('sha256').update(JSON.stringify({kind:'failed_start_zero_state_v1',botId:row.bot_id,requestId:id,
+        custody:false,operations:false,claims:false,audits:false})).digest('hex');
+      const changed=await c.query(`UPDATE grid_worker_reservations SET state='released',terminal_proof_digest=$2,updated_at=clock_timestamp()
+        WHERE start_request_id=$1 AND state IN ('held','uncertain') RETURNING bot_id`,[id,proofDigest]);
+      if(changed.rowCount!==1)return false;
+      await c.query("UPDATE grid_worker_requests SET state='complete',result_code='failed_start_zero_state',completed_at=clock_timestamp() WHERE id=$1",[id]);
+      return true;
+    },{terminate:this.terminate});
+  }
   async admit(id:string,holder:WorkerRequestContext,umk:Buffer,facts:LaunchFacts,spending:SpendingFacts):Promise<StoredStartConsent> {
     try{return await fencedTransaction(this.lane,async c=>{
       const row=await requestLocks(c,id),h=await workerHost(c,holder);

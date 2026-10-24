@@ -1,7 +1,8 @@
 import {guardedWorkerFetch, assertWorkerEgress, type WorkerEgress} from './egress';
 import type {WorkerQuota,QuotaProvider} from './quota';
+import {protectiveQuotaRequest} from './protective-purpose';
 /** One choke point, including retries. There is deliberately no automatic resend. */
-export function workerFetch(quota: WorkerQuota, fetcher: typeof fetch = fetch): typeof fetch {
+export function workerFetch(quota: Pick<WorkerQuota,'debit'|'rateLimited'>, fetcher: typeof fetch = fetch): typeof fetch {
   return async(input, init = {}) => {
     if(typeof input!=='string'&&!(input instanceof URL))throw Error('GRID_EGRESS_REFUSED');
     const url=String(input),u=new URL(url),method=init.method??'GET';
@@ -16,8 +17,7 @@ export function workerFetch(quota: WorkerQuota, fetcher: typeof fetch = fetch): 
     }
     assertWorkerEgress(url,request);
     // Charge 120 decicredits per venue request conservatively, including the signed read.
-    // No protective allocation is consumed by ordinary worker work (U6 owns it).
-    await quota.debit(provider,request.kind==='venue'?120:1);
+    await quota.debit(provider,request.kind==='venue'?120:1,protectiveQuotaRequest(u,method,init.body));
     init.signal?.throwIfAborted();
     const response=await guardedWorkerFetch(fetcher,url,request,{...init,method,signal:init.signal?AbortSignal.any([init.signal,AbortSignal.timeout(5000)]):AbortSignal.timeout(5000)});
     if(response.status===429){await quota.rateLimited(provider);await response.body?.cancel();throw Error('GRID_QUOTA_BACKOFF');}

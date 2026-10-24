@@ -1,4 +1,6 @@
 import {walletFences} from '../grid-worker/transaction';
+import {refuseRescueMutation} from '../grid-worker/rescue-recovery';
+import type {PoolClient} from 'pg';
 import {identityFences} from '../grid-worker/identity-locks';
 import {supersedeStartConsents} from '../grid-worker/consent';
 import {randomUUID} from 'node:crypto';
@@ -26,10 +28,12 @@ export class GridLifecycleStorage {
     if(request)await this.request(request.wallet,claim.id,`host-pause:${request.revision}:${claim.id}`,'pause',{},'risk',claim);
   }
   /** Owner scope, request deduplication and the entry fence commit in one transaction. */
-  async request(wallet:string,botId:string,key:string,action:GridControlAction,evidence:Record<string,unknown>={},source:'owner'|'risk'='owner',claim?:GridMonitorClaim):Promise<GridControl>{
+  async request(wallet:string,botId:string,key:string,action:GridControlAction,evidence:Record<string,unknown>={},source:'owner'|'risk'='owner',claim?:GridMonitorClaim,outer?:PoolClient):Promise<GridControl>{
     if(!['owner','risk'].includes(source)||!key||key.length>200||!['pause','resume','resync','stop','band'].includes(action)||source==='owner'&&action==='band')throw new GridStorageError('invariant');
-    return this.monitor.launch.transaction(async c=>{
-      this.monitor.launch.hostAction(c,action==='resume'?'resume':'settle');
+    const work=async(c:PoolClient)=>{
+      if(outer){
+        if(action!=='stop'||source!=='owner'||!(await c.query('SELECT grid_worker_has_host_lock(true) AS held')).rows[0]?.held)throw Error('GRID_PROTECTIVE_STOP_FENCE');
+      }else this.monitor.launch.hostAction(c,action==='resume'?'resume':'settle');
       await walletFences(c,[wallet]);
       await waitGridWorkerFence(c,botId);
       const workerPackage=source==='owner'&&action==='stop'&&!!(await c.query("SELECT to_regclass('grid_worker_requests') IS NOT NULL AS present")).rows[0]?.present;
@@ -39,6 +43,7 @@ export class GridLifecycleStorage {
       }
       const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[botId,wallet])).rows[0];
       if(!bot)throw new GridStorageError('not_found');
+      if(source==='owner'&&!outer)await refuseRescueMutation(c,botId);
       if(source==='risk'){if(!claim||claim.id!==botId)throw new GridStorageError('lost_lease');await this.monitor.assertLease(c,claim);}
       const prior=(await c.query('SELECT r.*,k.evidence AS requested_evidence FROM grid_control_keys k JOIN grid_control_requests r ON r.id=k.control_id WHERE k.bot_id=$1 AND k.request_key=$2',[botId,key])).rows[0];
       if(prior){if(prior.action!==action||canonicalRequest(prior.requested_evidence)!==canonicalRequest(evidence))throw new GridStorageError('conflict');return prior;}
@@ -70,7 +75,8 @@ export class GridLifecycleStorage {
       await c.query('UPDATE grid_monitor_state SET boot_id=NULL,generation=generation+1 WHERE bot_id=$1',[botId]);
       await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[botId,id,action,evidence]);
       return bind(row);
-    },source==='owner');
+    };
+    return outer?work(outer):this.monitor.launch.transaction(work,source==='owner');
   }
   async state(claim:GridMonitorClaim){return this.monitor.launch.transaction(async c=>{const bot=await this.monitor.assertLease(c,claim);
     const life=(await c.query('SELECT l.*,r.action,r.source,r.state,r.previous_status,r.evidence FROM grid_lifecycle l LEFT JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[claim.id])).rows[0];return {bot,life};});}

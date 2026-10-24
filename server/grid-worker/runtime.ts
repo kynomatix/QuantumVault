@@ -13,6 +13,8 @@ import {WorkerObserver} from './observer';
 import {priorityIncident,resolveHealthyConditions} from './incident-policy';
 import {runtimeFailureCode} from './runtime-failure';
 import {GridIncidents} from './incidents';
+import {ProtectionTruth} from './protection-truth';
+import {recoverAbandonedRescues} from './rescue-recovery';
 import {WorkerQuota} from './quota';
 import {workerDependencies} from './dependencies';
 import {WorkerScheduler} from './scheduler';
@@ -46,6 +48,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(Number(env.PORT??5000),'0.0.0.0',()=>{server.removeListener('error',reject);resolve();});});
   const terminate=async(pid:number)=>{await pool.query('SELECT pg_terminate_backend($1)',[pid]);};
   const incidents=new GridIncidents(pool,terminate),quota=new WorkerQuota(pool,terminate),dependencies=workerDependencies(pool,quota,env);
+  const protection=new ProtectionTruth(pool,terminate,incidents);
   installWorkerBindings(dependencies.umk,()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.execution_enabled===true&&host?.run_mode==='trading'&&!host?.entries_paused&&!host?.observer_fenced);
   const holder=()=>{if(!lease||!leaseLocallyValid(lease)||!ready())throw Error('GRID_LEASE_EXPIRED');return lease;};
   let queue:WorkerStartQueue;
@@ -64,8 +67,18 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
       const seen:string[]=[];
       for(let i=0;i<100;i++){
         signal.throwIfAborted();holder();const claim=await monitor.claim(seen);if(!claim)break;seen.push(claim.id);
-        if(!OWNER_MASTER_PUBLIC_KEYS.includes(claim.masterAccount))throw Error('GRID_OWNER_MASTER_UNCONFIRMED');
-        await executor.tick(claim,signal);signal.throwIfAborted();if(lease&&leaseLocallyValid(lease)&&ready())await monitor.release(claim);
+        try{
+          if(!OWNER_MASTER_PUBLIC_KEYS.includes(claim.masterAccount)){
+            await incidents.record({code:'authority_refused',dedupKey:'authority-refused:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch});
+            continue;
+          }
+          await executor.tick(claim,signal);await protection.observe(claim.id);
+        }catch(error){
+          signal.throwIfAborted();holder();
+          try{await protection.observe(claim.id,error);}catch{await incidents.record({code:'protective_failure',dedupKey:'protective-failure:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch});}
+        }finally{
+          if(lease&&leaseLocallyValid(lease)&&ready())try{await monitor.release(claim);}catch{/* Retain the bounded bot lease on release uncertainty. */}
+        }
       }
     },
     // The injected executor tick services lifecycle/protection before new order work.
@@ -96,6 +109,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
       if(memory.standby){if(lease)await die('lease_lost');return;}
       if(!identityMatches(host)||host.protocol_version!=='grid-worker-v3-a1-wire1'){if(lease)await die('schema_drift');return;}
       if(!lease){
+        await fencedTransaction(pool,recoverAbandonedRescues,{terminate});
         // No unverified acceptance bound: acquire only when there are NO retained unknown windows.
         const pending=(await pool.query(`SELECT 1 FROM grid_operations WHERE state IN ('prepared','submitted','unconfirmed')
           UNION ALL SELECT 1 FROM grid_worker_send_audit WHERE outcome='unknown' LIMIT 1`)).rowCount;

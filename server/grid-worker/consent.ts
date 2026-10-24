@@ -103,6 +103,6 @@ export async function verifyStartConsent(c: PoolClient, value: StoredStartConsen
 }
 export async function supersedeStartConsents(c: PoolClient, owner: string, botIds: readonly string[], reason: 'draft_changed'|'stop'): Promise<number> {
   const result=await c.query(`UPDATE grid_worker_requests SET state='superseded',completed_at=clock_timestamp(),result_code=$3
-    WHERE owner_wallet=$1 AND bot_id IN (SELECT value::uuid FROM jsonb_array_elements_text($2::jsonb)) AND state='pending'`,[owner,JSON.stringify(botIds),reason]);
+    WHERE owner_wallet=$1 AND action='start' AND bot_id IN (SELECT value::uuid FROM jsonb_array_elements_text($2::jsonb)) AND state='pending'`,[owner,JSON.stringify(botIds),reason]);
   return result.rowCount??0;
 }

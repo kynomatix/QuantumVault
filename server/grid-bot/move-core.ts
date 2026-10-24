@@ -11,7 +11,7 @@ import { verifyGridPolicyHmac } from './policy-hmac';
 
 
 
-export function createGridMoveCore(storage:GridMonitorStorage,reads:GridLaunchReads,dependencies:GridRuntimeDependencies,candlesRead:(symbol:string,timeframe:string,bars:number,end:number,signal:AbortSignal)=>Promise<PlannerCandle[]>){
+export function createGridMoveCore(storage:GridMonitorStorage,reads:GridLaunchReads,dependencies:Pick<GridRuntimeDependencies,'authority'|'umk'>,candlesRead:(symbol:string,timeframe:string,bars:number,end:number,signal:AbortSignal)=>Promise<PlannerCandle[]>){
   const authority=dependencies.authority(reads,storage.launch);
   return new GridMoveStorage(new GridLifecycleStorage(storage),async(wallet,id,signal)=>{
     const snapshot=await storage.launch.transaction(async c=>({

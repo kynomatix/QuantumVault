@@ -14,7 +14,7 @@ import {workerFetch} from './transport';
 import type {WorkerQuota} from './quota';
 
 /** No MAIN defaults, sessions, canonical UMK, general adapter or background service. */
-export function workerDependencies(pool:Pool,quota:WorkerQuota,env:Readonly<NodeJS.ProcessEnv>):GridRuntimeDependencies {
+export function workerDependencies(pool:Pool,quota:Pick<WorkerQuota,'debit'|'rateLimited'>,env:Readonly<NodeJS.ProcessEnv>):GridRuntimeDependencies {
   const fetcher=workerFetch(quota),transport=new PacificaTransportAuthority(env.PACIFICA_API_KEY);
   const environment={REUSE_ON_CREATE:env.REUSE_ON_CREATE,RECYCLE_ON_DELETE:env.RECYCLE_ON_DELETE,REPLIT_DEPLOYMENT:env.REPLIT_DEPLOYMENT,GRID_RECYCLER_DEPLOYMENT:env.GRID_RECYCLER_DEPLOYMENT};
   const dependencies:GridRuntimeDependencies={

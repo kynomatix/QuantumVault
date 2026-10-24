@@ -33,6 +33,7 @@ export class GridMoveStorage {
   constructor(readonly lifecycle:GridLifecycleStorage,readonly collect:(wallet:string,id:string,signal:AbortSignal)=>Promise<GridMoveAuthority>,readonly enabled:()=>boolean=()=>GRID_RANGE_MOVE_ENABLED){}
   private requireEnabled(){if(!this.enabled())throw new GridMoveError('Range moving is not enabled');}
   private async lock(c:PoolClient,wallet:string,id:string){
+    await refuseRescueMutation(c,id);
     const account=(await c.query('SELECT a.* FROM grid_launch_accounts a JOIN grid_bots b ON b.id=a.bot_id WHERE a.bot_id=$1 AND b.wallet_address=$2 AND a.released_at IS NULL',[id,wallet])).rows[0];
     if(!account)throw new GridMoveError('The bot account is unavailable');
     await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[account.master_account]);
@@ -170,3 +171,4 @@ export class GridMoveStorage {
     });}finally{authority.cleanup();}
   }
 }
+import {refuseRescueMutation} from '../grid-worker/rescue-recovery';
