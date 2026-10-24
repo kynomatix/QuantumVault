@@ -51,11 +51,13 @@ describe('U2a PostgreSQL package', () => {
   const walletLock = (wallet = 'EXAMPLE') => db.query('SELECT pg_advisory_xact_lock(927412,hashtext($1))', [wallet]);
   const identityLock = (kind: 'bot' | 'pool', id: string | number) => db.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', ['qv:grid-worker:v3:' + kind + ':' + id]);
   async function context(action: string) { await db.query("SELECT set_config('qv.grid_worker_action',$1,true)", [action]); }
-  async function seed() {
+  async function seed(expiredHolder?: string) {
     await fence();
     await db.query("INSERT INTO wallets(address) VALUES('EXAMPLE'),('EXAMPLE_OTHER')");
     await db.query("INSERT INTO grid_worker_owner(wallet_address) VALUES('EXAMPLE')");
-    await db.query("INSERT INTO grid_worker_host(protocol_version,owner_wallet) VALUES('grid-worker-v3-a1-wire1','EXAMPLE')");
+    await db.query(`INSERT INTO grid_worker_host(protocol_version,owner_wallet,holder_boot_id,holder_role,lease_expires_at)
+      VALUES('grid-worker-v3-a1-wire1','EXAMPLE',$1,CASE WHEN $1::uuid IS NULL THEN NULL ELSE 'grid-worker' END,
+        CASE WHEN $1::uuid IS NULL THEN '-infinity'::timestamptz ELSE clock_timestamp()-interval '1 second' END)`, [expiredHolder ?? null]);
   }
   async function arm() {
     for (const wallet of ['EXAMPLE', 'EXAMPLE_OTHER']) {
@@ -289,10 +291,10 @@ describe('U2a PostgreSQL package', () => {
     await refused("UPDATE grid_launch_accounts SET master_account='EXAMPLE_OTHER'", [], 'GRID_LAUNCH_OWNER_MISMATCH');
   });
   it('host holder CAS, observer clear and pause acknowledgement preserve epoch and scope rules', async () => {
-    await seed(); await context('transition');
-    await db.query("SET LOCAL qv.grid_worker_ready='true'; SET LOCAL qv.grid_worker_owner_verified='true'");
+    await seed(); await context('lease_acquire');
+    await db.query("SET LOCAL qv.grid_worker_ready='true'; SET LOCAL qv.grid_worker_owner_verified='false'");
     const holder = randomUUID();
-    await db.query("UPDATE grid_worker_host SET holder_boot_id=$1,holder_role='grid-worker',fencing_epoch=1,lease_expires_at=clock_timestamp()+interval '60 seconds'", [holder]);
+    await db.query("UPDATE grid_worker_host SET holder_boot_id=$1,holder_role='grid-worker',fencing_epoch=1,lease_expires_at=clock_timestamp()+interval '45 seconds'", [holder]);
     await context('heartbeat');
     await refused('UPDATE grid_worker_host SET heartbeat_at=clock_timestamp()', [], 'GRID_HEARTBEAT_CAS_REQUIRED');
     await db.query("SELECT set_config('qv.grid_worker_holder',$1,true),set_config('qv.grid_worker_epoch','1',true)", [holder]);
@@ -300,12 +302,114 @@ describe('U2a PostgreSQL package', () => {
     await context('observer_clear'); await db.query('UPDATE grid_worker_host SET observer_fenced=false');
     await context('pause_ack'); await db.query('UPDATE grid_worker_host SET pause_ack_at=clock_timestamp(),pause_ack_revision=pause_revision');
     await context('transition');
+    await refused('UPDATE grid_worker_host SET per_bot_cap_usd=10', [], 'GRID_OWNER_TRANSITION_REQUIRED');
+    // The following scope/reset cases explicitly model an owner-verified transition, not lease acquisition.
+    await db.query("SET LOCAL qv.grid_worker_owner_verified='true'");
     await refused('UPDATE grid_worker_host SET per_bot_cap_usd=10', [], 'GRID_SCOPE_REVISION_REQUIRED');
     await db.query('UPDATE grid_worker_host SET per_bot_cap_usd=10,scope_revision=scope_revision+1');
     await context('reset');
     await refused('UPDATE grid_worker_host SET entries_paused=false,pause_revision=pause_revision+1,pause_ack_at=NULL,pause_ack_revision=NULL', [], 'GRID_RESET_REQUIRED');
     await db.query("SET LOCAL qv.grid_worker_deployment_flags_clear='true'");
     await db.query('UPDATE grid_worker_host SET entries_paused=false,pause_revision=pause_revision+1,pause_ack_at=NULL,pause_ack_revision=NULL');
+  });
+  const acquireSql = "UPDATE grid_worker_host SET holder_boot_id=$1,holder_role='grid-worker',fencing_epoch=fencing_epoch+1,lease_expires_at=clock_timestamp()+interval '45 seconds',heartbeat_at=clock_timestamp(),progress_at=clock_timestamp()";
+  const releaseSql = "UPDATE grid_worker_host SET holder_boot_id=NULL,holder_role=NULL,fencing_epoch=fencing_epoch+1,lease_expires_at='-infinity'";
+  async function leaseContext(action = 'lease_acquire', holder = randomUUID(), epoch = '0') {
+    await context(action);
+    await db.query("SET LOCAL qv.grid_worker_ready='true'; SET LOCAL qv.grid_worker_owner_verified='false'");
+    await db.query("SELECT set_config('qv.grid_worker_holder',$1,true),set_config('qv.grid_worker_epoch',$2,true)", [holder, epoch]);
+    return holder;
+  }
+  for (const expired of [false, true]) it('lease acquisition accepts ' + (expired ? 'expired holder' : 'empty holder') + ' without owner verification', async () => {
+    await seed(expired ? randomUUID() : undefined);
+    const before = (await db.query('SELECT to_jsonb(h) AS host FROM grid_worker_host h')).rows[0].host;
+    const holder = await leaseContext();
+    await db.query(acquireSql, [holder]);
+    const after = (await db.query('SELECT to_jsonb(h) AS host FROM grid_worker_host h')).rows[0].host;
+    for (const field of ['holder_boot_id','holder_role','fencing_epoch','lease_expires_at','heartbeat_at','progress_at']) { delete before[field]; delete after[field]; }
+    expect(after).toEqual(before);
+    expect((await db.query('SELECT fencing_epoch,holder_boot_id,lease_expires_at<=clock_timestamp()+interval \'45 seconds\' AS bounded FROM grid_worker_host')).rows[0]).toEqual({ fencing_epoch: '1', holder_boot_id: holder, bounded: true });
+  });
+  for (const action of ['lease_acquire','lease_release']) for (const lock of ['none','shared']) it(action + ' refuses ' + lock + ' lock', async () => {
+    const holder = randomUUID(); await seed(holder); await db.query('COMMIT; BEGIN');
+    try {
+      if (lock === 'shared') await fence(true);
+      await leaseContext(action, holder);
+      await refused(action === 'lease_acquire' ? acquireSql : releaseSql, action === 'lease_acquire' ? [randomUUID()] : [], 'GRID_HOST_EXCLUSIVE_REQUIRED');
+    } finally {
+      await db.query('ROLLBACK; BEGIN');
+      await db.query('DELETE FROM grid_worker_host; DELETE FROM grid_worker_owner; DELETE FROM wallets');
+      await db.query('COMMIT; BEGIN');
+    }
+  });
+  it('lease contexts refuse a live previous lease and acquire requires readiness', async () => {
+    await seed(); const holder = await leaseContext();
+    await db.query("SET LOCAL qv.grid_worker_ready='false'");
+    await refused(acquireSql, [holder], 'GRID_LEASE_ACQUIRE_INVALID');
+    await db.query("SET LOCAL qv.grid_worker_ready='true'"); await db.query(acquireSql, [holder]);
+    await refused(acquireSql, [randomUUID()], 'GRID_LEASE_ACQUIRE_INVALID');
+    await leaseContext('lease_release', holder, '1'); await refused(releaseSql, [], 'GRID_LEASE_RELEASE_INVALID');
+  });
+  for (const [column, value] of Object.entries({ execution_mode: "'external'", run_mode: "'trading'", execution_enabled: 'true', entries_paused: 'false', drain_requested: 'true', last_healthz_poll_at: 'clock_timestamp()', pause_ack_at: 'clock_timestamp()', commit_hash: "'EXAMPLE'", tree_hash: "'EXAMPLE'", lockfile_sha256: "'EXAMPLE'", start_scope: "'expanded'", per_bot_cap_usd: '10', global_ceiling_usd: '10', scope_revision: '2', observer_fenced: 'false', updated_at: 'clock_timestamp()', authority_tracking_enabled: 'true', legacy_controls_enabled: 'true', pause_revision: '1', pause_ack_revision: '0' })) {
+    for (const action of ['lease_acquire', 'lease_release']) it(action + ' cannot change ' + column, async () => {
+      const holder = randomUUID(); await seed(holder); await leaseContext(action, holder);
+      await refused((action === 'lease_acquire' ? acquireSql : releaseSql) + ',' + column + '=' + value, action === 'lease_acquire' ? [randomUUID()] : [], action === 'lease_acquire' ? 'GRID_LEASE_ACQUIRE_INVALID' : 'GRID_LEASE_RELEASE_INVALID');
+    });
+  }
+  it('lease acquisition requires worker role, exact next epoch and a positive bounded lease', async () => {
+    await seed(); await leaseContext();
+    for (const sql of [acquireSql.replace("'grid-worker'", "'protective'"), acquireSql.replace('fencing_epoch+1', 'fencing_epoch'), acquireSql.replace('fencing_epoch+1', 'fencing_epoch+2'), acquireSql.replace("interval '45 seconds'", "interval '-1 second'")]) await refused(sql, [randomUUID()], 'GRID_LEASE_ACQUIRE_INVALID');
+    await refused(acquireSql.replace("interval '45 seconds'", "interval '46 seconds'"), [randomUUID()], 'GRID_HOST_CLOCK_INVALID');
+  });
+  it('expired release requires holder and epoch CAS and changes only release columns', async () => {
+    const holder = randomUUID(); await seed(holder); await leaseContext('lease_release', randomUUID());
+    await refused(releaseSql, [], 'GRID_LEASE_RELEASE_INVALID');
+    await leaseContext('lease_release', holder, '1'); await refused(releaseSql, [], 'GRID_LEASE_RELEASE_INVALID');
+    await leaseContext('lease_release', holder);
+    for (const sql of [releaseSql.replace('fencing_epoch+1', 'fencing_epoch'), releaseSql.replace('fencing_epoch+1', 'fencing_epoch+2'), releaseSql.replace("lease_expires_at='-infinity'", 'lease_expires_at=clock_timestamp()'), releaseSql+',heartbeat_at=clock_timestamp()', releaseSql+',progress_at=clock_timestamp()']) await refused(sql, [], 'GRID_LEASE_RELEASE_INVALID');
+    await db.query(releaseSql);
+    expect((await db.query("SELECT holder_boot_id,holder_role,fencing_epoch,lease_expires_at='-infinity' AS expired FROM grid_worker_host")).rows[0]).toEqual({ holder_boot_id: null, holder_role: null, fencing_epoch: '1', expired: true });
+    await refused(releaseSql, [], 'GRID_LEASE_RELEASE_INVALID');
+  });
+  it('heartbeat caps lease and DB clocks and refuses null or regressed progress', async () => {
+    await seed(); const holder = await leaseContext(); await db.query(acquireSql, [holder]);
+    await leaseContext('heartbeat', holder, '1');
+    for (const column of ['lease_expires_at','heartbeat_at','progress_at','last_healthz_poll_at']) await refused('UPDATE grid_worker_host SET '+column+"=clock_timestamp()+interval '46 seconds'", [], 'GRID_HOST_CLOCK_INVALID');
+    for (const column of ['heartbeat_at','progress_at']) for (const value of ['NULL', "clock_timestamp()-interval '1 second'"]) await refused('UPDATE grid_worker_host SET '+column+'='+value, [], 'GRID_HEARTBEAT_CAS_REQUIRED');
+    await db.query("UPDATE grid_worker_host SET lease_expires_at=clock_timestamp()+interval '45 seconds',heartbeat_at=clock_timestamp(),progress_at=clock_timestamp()");
+  });
+  it('heartbeat cannot renew an expired lease', async () => {
+    const holder = randomUUID(); await seed(holder); await leaseContext('heartbeat', holder);
+    await refused("UPDATE grid_worker_host SET lease_expires_at=clock_timestamp()+interval '45 seconds'", [], 'GRID_HEARTBEAT_CAS_REQUIRED');
+  });
+  async function audit() {
+    await seed(); const botId = await bot(), operationId = randomUUID();
+    await db.query("INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type) VALUES($1,$2,'EXAMPLE','EXAMPLE','place_level_order')", [operationId, botId]);
+    await db.query(`INSERT INTO grid_worker_send_audit(id,operation_id,bot_id,request_identity,attempt,kind,holder_boot_id,sender_role,fencing_epoch,wallet_generation,policy_digest,request_digest,signed_at,signed_expires_at,prepared_at)
+      VALUES($1,$2,$3,'EXAMPLE',1,'limit',$4,'grid-worker',0,0,$5,$5,clock_timestamp(),clock_timestamp()+interval '10 seconds',clock_timestamp())`, [randomUUID(), operationId, botId, randomUUID(), digest('EXAMPLE')]);
+  }
+  it('audit prevents deletion and every identity, attribution, digest and window change', async () => {
+    await audit();
+    await refused('DELETE FROM grid_worker_send_audit', [], 'GRID_AUDIT_DELETE_FORBIDDEN');
+    const changes = { id: 'gen_random_uuid()', operation_id: 'gen_random_uuid()', bot_id: 'gen_random_uuid()', request_id: 'gen_random_uuid()', request_identity: "'EXAMPLE_CHANGED'", attempt: '2', kind: "'cancel'", holder_boot_id: 'gen_random_uuid()', sender_role: "'legacy'", fencing_epoch: '1', wallet_generation: '1', policy_digest: "repeat('0',64)", request_digest: "repeat('0',64)", signed_at: "signed_at-interval '1 second'", signed_expires_at: "signed_expires_at-interval '1 second'", prepared_at: 'clock_timestamp()' };
+    for (const [column, value] of Object.entries(changes)) await refused('UPDATE grid_worker_send_audit SET '+column+'='+value, [], 'GRID_AUDIT_IMMUTABLE');
+    expect((await db.query('SELECT count(*)::int AS n FROM grid_worker_send_audit')).rows[0].n).toBe(1);
+  });
+  for (const outcome of ['confirmed','refused','failed']) it('audit authorization and ' + outcome + ' resolution lock once', async () => {
+    await audit();
+    await db.query('UPDATE grid_worker_send_audit SET authorized_at=clock_timestamp()');
+    for (const value of ['NULL','clock_timestamp()']) await refused('UPDATE grid_worker_send_audit SET authorized_at='+value, [], 'GRID_AUDIT_AUTHORIZATION_LOCKED');
+    await refused("UPDATE grid_worker_send_audit SET venue_order_id='EXAMPLE'", [], 'GRID_AUDIT_OUTCOME_LOCKED');
+    await refused("UPDATE grid_worker_send_audit SET outcome='confirmed'", [], 'GRID_AUDIT_OUTCOME_LOCKED');
+    await db.query("UPDATE grid_worker_send_audit SET outcome=$1,completed_at=clock_timestamp(),venue_order_id='EXAMPLE_ORDER',venue_trade_id='EXAMPLE_TRADE',outcome_code='EXAMPLE'", [outcome]);
+    for (const mutation of ["outcome='unknown',completed_at=NULL", "outcome='"+(outcome === 'failed' ? 'confirmed' : 'failed')+"'", 'completed_at=clock_timestamp()', "venue_order_id='EXAMPLE_CHANGED'", "venue_trade_id='EXAMPLE_CHANGED'", "outcome_code='EXAMPLE_CHANGED'"]) await refused('UPDATE grid_worker_send_audit SET '+mutation, [], 'GRID_AUDIT_OUTCOME_LOCKED');
+    await refused('DELETE FROM grid_worker_send_audit', [], 'GRID_AUDIT_DELETE_FORBIDDEN');
+  });
+  it('audit preserves unknown pre-send row on resolution rollback', async () => {
+    await audit(); await db.query('SAVEPOINT resolution');
+    await db.query("UPDATE grid_worker_send_audit SET authorized_at=clock_timestamp(),outcome='failed',completed_at=clock_timestamp()");
+    await db.query('ROLLBACK TO SAVEPOINT resolution');
+    expect((await db.query('SELECT outcome,authorized_at,completed_at FROM grid_worker_send_audit')).rows[0]).toEqual({ outcome: 'unknown', authorized_at: null, completed_at: null });
   });
   it('data staging remains separate from catalog readiness', async () => {
     await seed(); expect((await probeGridWorkerData(query)).stage).toBe('seeded');
