@@ -1,4 +1,5 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
+import { realDatabaseSuites } from './tests/helpers/real-database-suites';
 import path from 'path';
 
 export default defineConfig({
@@ -12,7 +13,26 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['tests/**/*.test.ts'],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'unit',
+          include: ['tests/**/*.test.ts'],
+          exclude: [...configDefaults.exclude, ...realDatabaseSuites],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'database',
+          include: realDatabaseSuites,
+          // One qvtest database: DDL, catalogs, fixed keys and pool slots are shared.
+          // Preserve deliberate connection concurrency inside each database suite.
+          fileParallelism: false,
+        },
+      },
+    ],
     environment: 'node',
     env: {
       PYTH_HERMES_MODE: process.env.PYTH_HERMES_MODE ?? 'live',
