@@ -115,7 +115,7 @@ it('exhaustive intersection of role and host kill matrices', () => {
       const roleAllowed = executionMode === 'legacy' ? role === 'legacy' : role !== 'legacy';
       for (const action of actions) {
         const base = c.identityValid && c.holderValid && roleAllowed && !(controls && c.runMode === 'test');
-        const protective = role !== 'protective' || ['cancel','close','settle'].includes(action);
+        const protective = role !== 'protective' || ['cancel','close','settle'].includes(action) || action === 'claim' && c.scopeAndConsent;
         const authority = c.authorityValid && (!controls || c.executionEnabled);
         const matrix: Record<GridAction, boolean> = {
           read:true,
@@ -125,7 +125,7 @@ it('exhaustive intersection of role and host kill matrices', () => {
           cancel:!controls || !c.drainRequested || c.alreadyOwned && c.protectiveDrain,
           close:!controls || !c.drainRequested || c.alreadyOwned && c.protectiveDrain,
           sweep:c.alreadyOwned && c.terminalProof, release:c.alreadyOwned && c.terminalProof,
-          claim:!controls || !c.drainRequested, settle:true,
+          claim:!controls || !c.drainRequested || role === 'protective' && c.scopeAndConsent, settle:true,
         };
         const expected = action === 'read' || base && protective && (action === 'settle' || authority) && matrix[action];
         const actual = gridActionAllowed(action, c);
