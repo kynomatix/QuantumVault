@@ -22,6 +22,7 @@ import {resolveProtection} from './protection-truth';
 import {mainQuota} from './main-quota';
 import {readQuotaPolicies} from './quota';
 import {recoverAbandonedRescues} from './rescue-recovery';
+import {withProtectivePurpose} from './protective-purpose';
 
 export interface RescueInput{botId:string;message:string;signature:string}
 export class ProtectiveExecutor{
@@ -112,13 +113,20 @@ export class ProtectiveExecutor{
         const unresolved=(await c.query(`SELECT 1 FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed') LIMIT 1`,[r.bot_id])).rowCount;
         const attempts=Number((await c.query(`SELECT count(*) AS n FROM grid_operations WHERE bot_id=$1 AND exact_request->'authority'->>'protectiveRequestId'=$2
           AND exact_request->>'kind'='close'`,[r.bot_id,requestId])).rows[0].n);
-        if(attempts>=3&&!unresolved){await this.finish(c,r,await this.verify(c,json,claim,budget)?'complete':'partial_ended');return (await rescueView(c,owner,r.request_key))!;}
+        if(attempts>=3&&!unresolved){await this.finish(c,r,await withProtectivePurpose(()=>this.verify(c,json,claim,budget))?'complete':'partial_ended');return (await rescueView(c,owner,r.request_key))!;}
         const lifecycle=gridLifecycleCore(monitor,reads,json,this.dependencies,{},true);
         const outcome=await lifecycle.service.tick(claim,budget.abort.signal);budget.check();
         // Keep the request lock's idle interval below PostgreSQL's twelve-second ceiling.
         await walletFences(c,[owner]);await identityFences(c,[r.bot_id],[]);await c.query('SELECT 1');
-        if(outcome==='protective_verify_required'&&await this.verify(c,json,claim,budget))await this.finish(c,r,'complete');
-        else if(['unrelated_order_requires_review','failed','position_direction_changed'].includes(outcome))await this.finish(c,r,'partial_ended');
+        const blocker=(await c.query('SELECT blocker FROM grid_lifecycle WHERE bot_id=$1',[r.bot_id])).rows[0]?.blocker;
+        const passes=(await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at)
+          VALUES($1,$2,'internal_protection',jsonb_build_object('passes',CASE WHEN $3 THEN 1 ELSE 0 END),clock_timestamp())
+          ON CONFLICT(bot_id,event_key) DO UPDATE SET evidence=jsonb_build_object('passes',
+            CASE WHEN $3 THEN coalesce((grid_risk_events.evidence->>'passes')::integer,0)+1 ELSE 0 END),delivered_at=clock_timestamp()
+          RETURNING evidence`,[r.bot_id,'rescue-blocked:'+requestId,!!blocker])).rows[0].evidence.passes;
+        if(outcome==='protective_verify_required'&&await withProtectivePurpose(()=>this.verify(c,json,claim,budget)))await this.finish(c,r,'complete');
+        else if(['unrelated_order_requires_review','failed','not_sent','position_direction_changed'].includes(outcome)
+          ||/refused|failed|quota|backoff|rejection/.test(blocker??'')||passes>=3)await this.finish(c,r,'partial_ended');
         else await c.query("UPDATE grid_worker_requests SET result_code=$2 WHERE id=$1",[requestId,unresolved?'settling':outcome==='protective_verify_required'?'verifying':'closing']);
         return (await rescueView(c,owner,r.request_key))!;
       },{terminate:this.terminate,budget:new GridDeadline(11000)});

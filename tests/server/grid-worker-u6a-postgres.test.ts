@@ -19,6 +19,7 @@ import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 import {ProtectiveExecutor} from '../../server/grid-worker/protective-executor';
 import {registerGridWorkerAdminRoutes} from '../../server/grid-worker/admin-routes';
 import {adminStatus} from '../../server/grid-worker/admin-state';
+import {GridLifecycleService} from '../../server/grid-bot/lifecycle-service';
 import {WorkerQuota} from '../../server/grid-worker/quota';
 import {workerFetch} from '../../server/grid-worker/transport';
 import {withProtectivePurpose} from '../../server/grid-worker/protective-purpose';
@@ -54,7 +55,7 @@ async function start(){const c=await challenge();expect(c.status).toBe(200);retu
 beforeAll(async()=>{
   const connectionString=process.env.DATABASE_URL;if(!connectionString||new URL(connectionString).pathname!=='/qvtest')throw Error('FRACTAL qvtest required');
   fixture.key=randomBytes(32);admin=new Pool({connectionString,max:1});await admin.query('CREATE SCHEMA '+schema);
-  pool=new Pool({connectionString,max:8,options:'-c search_path='+schema+',pg_catalog'});pool.on('connect',c=>{isolate(c);diagnostics(c);c.on('error',()=>{});});pool.on('error',()=>{});
+  pool=new Pool({connectionString,max:8,options:'-c search_path='+schema+',public,pg_catalog'});pool.on('connect',c=>{isolate(c);diagnostics(c);c.on('error',()=>{});});pool.on('error',()=>{});
   const tables=(await admin.query("SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename !~ '^grid_worker_' AND tablename<>'owner_action_receipts'")).rows;
   for(const {tablename} of tables){if(!/^[a-z0-9_]+$/.test(tablename))throw Error('EXAMPLE_TABLE');await pool.query(`CREATE TABLE ${tablename} (LIKE public.${tablename} INCLUDING ALL)`);}
   await pool.query(`CREATE SEQUENCE fixture_pool_seq START ${randomInt(1_000_000,1_500_000_000)} OWNED BY protocol_subaccounts.id; ALTER TABLE protocol_subaccounts ALTER COLUMN id SET DEFAULT nextval('fixture_pool_seq')`);
@@ -235,4 +236,21 @@ it('round-trips real status with rescue state and reset blocker',async()=>{
   expect(parseWorkerStatus(JSON.parse(JSON.stringify(status.data)))).not.toBeNull();
   expect(status.data.cardState).toBe('rescue_running');expect(status.data.resetBlockedBy).toContain('rescue');
   expect(status.data.rescue.requestId).toBe(r.data.rescue.requestId);expect(status.data.rescueAlertsPhone).toBe(false);
+});
+
+it('ends three blocked MAIN steps with a durable protective failure',async()=>{
+  const r=await start();expect(r.status).toBe(200);
+  const tick=vi.spyOn(GridLifecycleService.prototype,'tick').mockImplementation(async claim=>{
+    await pool.query("UPDATE grid_lifecycle SET blocker='history_incomplete' WHERE bot_id=$1",[claim.id]);
+    return 'history_incomplete';
+  });
+  try{
+    for(let n=0;n<3;n++){
+      const step=await api('/rescue/'+r.data.rescue.requestId+'/step',{});
+      expect(step.status,JSON.stringify(step.data)).toBe(200);
+      expect(step.data.phase).toBe(n===2?'partial_ended':'closing');
+    }
+    expect((await pool.query("SELECT id FROM grid_worker_incidents WHERE code='protective_failure' AND bot_id=$1 AND resolved_at IS NULL",[botId])).rows).toHaveLength(1);
+    expect(posts).toBe(0);
+  }finally{tick.mockRestore();}
 });
