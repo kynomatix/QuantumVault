@@ -13,6 +13,10 @@ import {behaviourPolicy} from '../grid-bot/behaviour-fixtures';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 import {ProtectiveExecutor} from '../../server/grid-worker/protective-executor';
 import {registerGridWorkerAdminRoutes} from '../../server/grid-worker/admin-routes';
+import {WorkerQuota} from '../../server/grid-worker/quota';
+import {workerFetch} from '../../server/grid-worker/transport';
+import {withProtectivePurpose} from '../../server/grid-worker/protective-purpose';
+import {verifyProtectiveConsent} from '../../server/grid-worker/protective-consent';
 import {ProtectionTruth} from '../../server/grid-worker/protection-truth';
 import {GridIncidents} from '../../server/grid-worker/incidents';
 import {rescueOffer,rescueView} from '../../server/grid-worker/rescue-state';
@@ -109,6 +113,7 @@ it('serializes duplicate steps without waiting and never posts during contention
 });
 it('steps against a fake flat venue and retains a typed DB-derived result',async()=>{
   const r=await start();expect(r.status,r.data).toBe(200);
+  await executor.step(owner,r.data.rescue.requestId);
   const step=await api('/rescue/'+r.data.rescue.requestId+'/step',{});expect(step.status,JSON.stringify(step.data)).toBe(200);
   expect(['step','wait','done']).toContain(step.data.next);expect(posts).toBe(0);
   const view=await tx(c=>rescueView(c,owner,r.data.requestKey));expect(view?.requestId).toBe(r.data.rescue.requestId);
@@ -123,4 +128,35 @@ it('deduplicates stop failures and resolves only on fresh identity-bound flat pr
   const market=(await pool.query('SELECT market FROM grid_bots WHERE id=$1',[botId])).rows[0].market;
   await pool.query("UPDATE grid_monitor_state SET observation=$2::jsonb,reconciled_at=clock_timestamp() WHERE bot_id=$1",[botId,JSON.stringify({account,symbol:market.replace(/-PERP$/,''),observedAt:Date.now(),inventoryComplete:true,orders:[],position:{size:'0'}})]);
   await truth.observe(botId);expect((await incidents()).rows[0].resolved_at).not.toBeNull();expect((await incidents()).rows[0].acknowledged_at).toBeNull();
+});
+
+it('uses reserved quota only for protection and keeps backoff binding',async()=>{
+  await pool.query(`INSERT INTO grid_worker_quota_policy(provider,domain_id,window_ms,total_units,worker_limit_units,worker_protective_reserve_units,policy_digest,valid_until)
+    VALUES('pacifica_rest','deployment',60000,1000,600,240,$1,clock_timestamp()+interval '1 hour')`,[fixtureSha256]);
+  const quota=new WorkerQuota(pool,terminate),send=workerFetch(quota,async()=>new Response('{}'));
+  await quota.debit('pacifica_rest',360);
+  await expect(send('https://api.pacifica.fi/api/v1/positions')).rejects.toThrow('GRID_QUOTA_UNAVAILABLE');
+  await withProtectivePurpose(()=>send('https://api.pacifica.fi/api/v1/positions'));
+  await expect(withProtectivePurpose(()=>send('https://api.pacifica.fi/api/v1/orders/create',{method:'POST',body:JSON.stringify({reduce_only:false})}))).rejects.toThrow('GRID_QUOTA_UNAVAILABLE');
+  await quota.rateLimited('pacifica_rest');
+  await expect(withProtectivePurpose(()=>send('https://api.pacifica.fi/api/v1/positions'))).rejects.toThrow('GRID_QUOTA_UNAVAILABLE');
+});
+it('records the third blocked stop pass and creates a fresh incident after acknowledgement',async()=>{
+  const r=await start();expect(r.status,r.data).toBe(200);
+  await pool.query("UPDATE grid_lifecycle SET blocker='history_incomplete' WHERE bot_id=$1",[botId]);
+  const truth=new ProtectionTruth(pool,terminate,new GridIncidents(pool,terminate));
+  const rows=async()=>(await pool.query("SELECT id FROM grid_worker_incidents WHERE code='stop_failed' AND bot_id=$1 AND acknowledged_at IS NULL",[botId])).rows;
+  await truth.observe(botId);await truth.observe(botId);expect(await rows()).toHaveLength(0);
+  await truth.observe(botId);expect(await rows()).toHaveLength(1);
+  const old=(await rows())[0].id;
+  await pool.query('UPDATE grid_worker_incidents SET acknowledged_at=clock_timestamp(),inbox_seen_at=clock_timestamp() WHERE id=$1',[old]);
+  await truth.observe(botId,Error('GRID_QUOTA_BACKOFF'));expect(await rows()).toHaveLength(1);expect((await rows())[0].id).not.toBe(old);
+});
+it('refuses forged and other-bot retained consent before any POST',async()=>{
+  const r=await start();expect(r.status,r.data).toBe(200);
+  const stored=(await pool.query('SELECT * FROM grid_worker_requests WHERE id=$1',[r.data.rescue.requestId])).rows[0];
+  await tx(c=>verifyProtectiveConsent(c,stored,fixture.key!));
+  await expect(tx(c=>verifyProtectiveConsent(c,{...stored,bot_id:randomUUID()},fixture.key!))).rejects.toThrow('GRID_PROTECTIVE_CONSENT_INVALID');
+  await expect(tx(c=>verifyProtectiveConsent(c,{...stored,consent_mac:fixtureSha256},fixture.key!))).rejects.toThrow('GRID_PROTECTIVE_CONSENT_INVALID');
+  expect(posts).toBe(0);
 });
