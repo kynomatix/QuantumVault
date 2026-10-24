@@ -22,7 +22,7 @@ BEGIN
 )
 SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb)::text,'UTF8')),'hex') AS "catalogSha256",
  encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest) FILTER (WHERE identity LIKE 'table:%'),'{}'::jsonb)::text,'UTF8')),'hex') AS "tablesSha256",
- COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM '89732a159b7c77b4d88da856664f465d4b707826a4586153e607f9fbbd55a0b9' THEN RAISE EXCEPTION 'GRID_TABLE_CATALOG_DIVERGENT'; END IF;
+ COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM '08ddf3d0d35300eddaeaca960a8fe253e67546ec0e76745f5baa6cb960130321' THEN RAISE EXCEPTION 'GRID_TABLE_CATALOG_DIVERGENT'; END IF;
 IF EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() AND p.proname='grid_worker_has_host_lock') THEN
  IF (SELECT capture."objectHashes"->>'function:grid_worker_has_host_lock(exclusive_required boolean)' FROM (WITH package_tables AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')
@@ -592,7 +592,7 @@ SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}':
 ELSE
  CREATE TRIGGER grid_worker_reservations_owner_validate BEFORE INSERT OR UPDATE ON grid_worker_reservations FOR EACH ROW EXECUTE FUNCTION grid_worker_validate_owner_scope();
 END IF;
- IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = 'ac369c2583f71f5d28f6e6dc38d40b29d3203f539b6e129aea5e9aa3a983a5f5' AS ok FROM (WITH package_tables AS (
+ IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = 'a981da1ef16a7590790ae2de79db1b5801ec00a71916453e3bed4c713cdb9bb1' AS ok FROM (WITH package_tables AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')
 ), objects AS (
  SELECT 'table:'||c.relname AS identity, jsonb_build_object('kind',c.relkind,'rls',c.relrowsecurity,'forceRls',c.relforcerowsecurity,

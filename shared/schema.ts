@@ -2969,7 +2969,7 @@ export const gridWorkerSendAudit = pgTable("grid_worker_send_audit", {
   attempt: integer("attempt").notNull(),
   kind: text("kind").notNull(),
   holderBootId: uuid("holder_boot_id").notNull(),
-  senderRole: text("sender_role").notNull(),
+  senderRole: text("sender_role", { enum: ["legacy", "grid-worker", "protective"] }).notNull(),
   fencingEpoch: bigint("fencing_epoch", { mode: "bigint" }).notNull(),
   walletGeneration: bigint("wallet_generation", { mode: "bigint" }).notNull(),
   policyDigest: text("policy_digest").notNull(),

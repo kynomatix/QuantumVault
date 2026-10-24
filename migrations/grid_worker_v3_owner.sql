@@ -8,7 +8,7 @@ DO $install$
 BEGIN
  IF current_setting('server_version_num')::integer < 140000 THEN RAISE EXCEPTION 'GRID_POSTGRES_VERSION'; END IF;
  IF EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')) OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() AND p.proname IN ('grid_worker_has_host_lock','grid_worker_has_wallet_lock','grid_worker_validate_host','grid_worker_validate_generation','grid_worker_track_wallet','grid_worker_validate_owner_scope','grid_worker_consume_receipt','grid_worker_pause_from_verified_receipt')) THEN
- IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = 'ac369c2583f71f5d28f6e6dc38d40b29d3203f539b6e129aea5e9aa3a983a5f5' AS ok FROM (WITH package_tables AS (
+ IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = 'a981da1ef16a7590790ae2de79db1b5801ec00a71916453e3bed4c713cdb9bb1' AS ok FROM (WITH package_tables AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')
 ), objects AS (
  SELECT 'table:'||c.relname AS identity, jsonb_build_object('kind',c.relkind,'rls',c.relrowsecurity,'forceRls',c.relforcerowsecurity,
@@ -192,7 +192,7 @@ CREATE TABLE grid_worker_send_audit (
   CONSTRAINT grid_worker_audit_operation_fk FOREIGN KEY (operation_id) REFERENCES grid_operations(id) ON DELETE RESTRICT,
   CONSTRAINT grid_worker_audit_bot_fk FOREIGN KEY (bot_id) REFERENCES grid_bots(id) ON DELETE RESTRICT,
   CONSTRAINT grid_worker_audit_request_fk FOREIGN KEY (request_id) REFERENCES grid_worker_requests(id) ON DELETE RESTRICT,
-  CONSTRAINT grid_worker_audit_kind CHECK (kind IN ('create','fund','leverage','seed','limit','cancel','close','sweep') AND outcome IN ('unknown','confirmed','refused','failed') AND sender_role IN ('grid-worker','protective')),
+  CONSTRAINT grid_worker_audit_kind CHECK (kind IN ('create','fund','leverage','seed','limit','cancel','close','sweep') AND outcome IN ('unknown','confirmed','refused','failed') AND sender_role IN ('legacy','grid-worker','protective')),
   CONSTRAINT grid_worker_audit_clock CHECK (isfinite(signed_at) AND isfinite(signed_expires_at) AND signed_expires_at > signed_at AND signed_expires_at <= signed_at + interval '15 seconds' AND attempt > 0 AND fencing_epoch >= 0 AND wallet_generation >= 0),
   CONSTRAINT grid_worker_audit_completion CHECK ((outcome = 'unknown') = (completed_at IS NULL)),
   CONSTRAINT grid_worker_audit_dates CHECK ((prepared_at IS NULL OR isfinite(prepared_at)) AND (authorized_at IS NULL OR isfinite(authorized_at)) AND (completed_at IS NULL OR isfinite(completed_at))),

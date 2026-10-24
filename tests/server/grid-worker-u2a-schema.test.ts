@@ -112,6 +112,29 @@ describe('U2a PostgreSQL package', () => {
     await seed(); await refused(pause, [randomUUID()], 'GRID_RECEIPT_MISSING');
   });
 
+  it('accepts legacy, worker and protective send attribution and rejects an unknown sender role', async () => {
+    await seed();
+    const botId = await bot(), operationId = randomUUID();
+    await db.query(`INSERT INTO grid_operations(id,bot_id,idempotency_key,request_identity,type)
+      VALUES($1,$2,'EXAMPLE','EXAMPLE','place_level_order')`, [operationId, botId]);
+    const insert = `INSERT INTO grid_worker_send_audit(id,operation_id,bot_id,request_identity,attempt,kind,
+      holder_boot_id,sender_role,fencing_epoch,wallet_generation,policy_digest,request_digest,
+      signed_at,signed_expires_at,prepared_at)
+      VALUES($1,$2,$3,'EXAMPLE',$4,'limit',$5,$6,0,0,$7,$7,
+        transaction_timestamp(),transaction_timestamp()+interval '10 seconds',transaction_timestamp())
+      RETURNING sender_role`;
+    let attempt = 1;
+    for (const role of ['legacy', 'grid-worker', 'protective']) {
+      const row = await db.query(insert, [randomUUID(), operationId, botId, attempt++, randomUUID(), role, digest('EXAMPLE')]);
+      expect(row.rows[0].sender_role).toBe(role);
+    }
+    await db.query('SAVEPOINT invalid_role');
+    await expect(db.query(insert, [randomUUID(), operationId, botId, attempt, randomUUID(), 'EXAMPLE_UNKNOWN', digest('EXAMPLE')]))
+      .rejects.toMatchObject({ code: '23514', constraint: 'grid_worker_audit_kind' });
+    await db.query('ROLLBACK TO SAVEPOINT invalid_role');
+    expect((await db.query('SELECT count(*)::integer AS count FROM grid_worker_send_audit')).rows[0].count).toBe(3);
+  });
+
   it('all catalog attributes match the captured package', async () => {
     expect((await db.query(GRID_WORKER_CATALOG_CHECK_SQL)).rows[0].ok).toBe(true);
     expect((await probeGridWorkerData(query)).stage).toBe('unseeded');
