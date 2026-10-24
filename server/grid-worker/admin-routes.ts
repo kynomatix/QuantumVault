@@ -74,6 +74,7 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
             ON h.singleton_id=o.singleton_id AND h.owner_wallet=o.wallet_address
             WHERE o.singleton_id=1`)).rows[0];
           if(!owner||owner.wallet_address!==wallet)throw Error('GRID_ADMIN_NOT_FOUND');
+          if((req.body as {action?:unknown})?.action==='break_glass_close'&&owner.execution_mode!=='external')throw Error('GRID_ADMIN_NOT_FOUND');
           admitted=true;external=owner.execution_mode==='external';
           return run(c,wallet,req.body,req.params.id,d!,()=>{mutationStarted=true;});
         },{mode:method==='get'?'none':'exclusive',pause,terminate:d.terminate,budget:new GridDeadline(pause?Math.min(9000,overall.remaining()):Math.min(18000,overall.remaining()))});

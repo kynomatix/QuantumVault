@@ -1,4 +1,4 @@
-﻿import { createChart, CrosshairMode } from "lightweight-charts";
+import { createChart, CrosshairMode } from "lightweight-charts";
 /** Common price canvas for AI decision and Signal Bot history charts. */
 export function createSharedTradePriceChart(container: HTMLElement) {
   return createChart(container, {

@@ -74,12 +74,13 @@ export class ProtectiveExecutor{
     return fencedTransaction(this.pool,async c=>{const view=await rescueView(c,owner,requestKey);if(!view)throw Error('GRID_RESCUE_START_UNKNOWN');return view;},{mode:'none',terminate:this.terminate});
   }
   async step(owner:string,requestId:string):Promise<RescueView|{next:'wait';retryAfterSeconds:2}>{
-    let failure:RescueRefusal|undefined;
+    let failure:RescueRefusal|undefined,botId:string|undefined;
     try{
       const result=await fencedTransaction(this.pool,async(c,budget)=>{
         await this.ready(c);
         const r=(await c.query("SELECT * FROM grid_worker_requests WHERE id=$1 AND action='protective_close' FOR NO KEY UPDATE NOWAIT",[requestId])).rows[0];
         if(!r||r.owner_wallet!==owner)throw new RescueRefusal('not_owner');
+        botId=r.bot_id;
         if(r.state!=='admitted'){const done=await rescueView(c,owner,r.request_key);if(!done)throw new RescueRefusal('changed');return done;}
         const h=(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS live,clock_timestamp() AS db_now FROM grid_worker_host WHERE singleton_id=1')).rows[0];
         const ended=new Date(r.expires_at).getTime()<=new Date(h.db_now).getTime()?'expired':h.holder_boot_id!==requestId||h.holder_role!=='protective'?'superseded':!h.live?'lease_lost':null;
@@ -124,7 +125,7 @@ export class ProtectiveExecutor{
       if(failure)throw failure;return result;
     }catch(error){
       if((error as {code?:string})?.code==='55P03')return {next:'wait',retryAfterSeconds:2};
-      if(!(error instanceof RescueRefusal))await this.incidents.record({code:'protective_failure',dedupKey:'protective-request:'+requestId,bootId:requestId});
+      if(botId&&!(error instanceof RescueRefusal))await this.incidents.record({code:'protective_failure',dedupKey:'protective-failure:'+botId,botId,bootId:requestId});
       throw error;
     }
   }

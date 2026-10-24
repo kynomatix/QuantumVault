@@ -11,7 +11,16 @@ const uuid=z.string().uuid().regex(/^[0-9a-f-]+$/);
 const start=z.object({botId:uuid,message:z.string().max(2048),signature:z.string().max(128)}).strict();
 /** Separate MAIN routes; middleware preserves disabled/non-owner indistinguishability. */
 export function registerRescueRoutes(app:Express,off:RequestHandler,auth:RequestHandler,dependencies:()=>Promise<AdminDependencies>){
-  app.get('/api/grid-worker/rescue',off,auth,async(req,res)=>{
+  const external:RequestHandler=async(req,res,next)=>{
+    try{
+      const d=await dependencies(),wallet=(req as typeof req&{walletAddress:string}).walletAddress;
+      const allowed=await fencedTransaction(d.lane,async c=>(await c.query(`SELECT 1 FROM grid_worker_host h
+        JOIN grid_worker_owner o ON o.wallet_address=h.owner_wallet WHERE h.singleton_id=1
+        AND h.execution_mode='external' AND h.owner_wallet=$1`,[wallet])).rowCount===1,{mode:'none',terminate:d.terminate});
+      if(!allowed){res.removeHeader('Cache-Control');next('route');return;}next();
+    }catch{res.status(503).json({error:'unavailable'});}
+  };
+  app.get('/api/grid-worker/rescue',off,auth,external,async(req,res)=>{
     try{
       const requestKey=z.string().regex(/^[0-9a-f]{64}$/).parse(req.query.requestKey),d=await dependencies();
       const wallet=(req as typeof req&{walletAddress:string}).walletAddress;
@@ -22,7 +31,7 @@ export function registerRescueRoutes(app:Express,off:RequestHandler,auth:Request
       res.json({rescue,rescueAlertsPhone:false});
     }catch(error){res.status(error instanceof z.ZodError?400:503).json({error:'unavailable'});}
   });
-  app.post('/api/grid-worker/rescue',off,auth,async(req,res)=>{
+  app.post('/api/grid-worker/rescue',off,auth,external,async(req,res)=>{
     let requestKey:string|undefined,attempted=false;
     try{
       const input=start.parse(req.body);requestKey=ownerSha256(parseOwnerMessage(input.message).nonce);
@@ -38,7 +47,7 @@ export function registerRescueRoutes(app:Express,off:RequestHandler,auth:Request
       res.status(503).json({started:attempted?'unknown':false,requestKey:requestKey??null,error:'unavailable'});
     }
   });
-  app.post('/api/grid-worker/rescue/:id/step',off,auth,async(req,res)=>{
+  app.post('/api/grid-worker/rescue/:id/step',off,auth,external,async(req,res)=>{
     try{
       const id=uuid.parse(req.params.id);z.object({}).strict().parse(req.body??{});
       const d=await dependencies();if(!d.rescue)throw Error('GRID_RESCUE_UNAVAILABLE');

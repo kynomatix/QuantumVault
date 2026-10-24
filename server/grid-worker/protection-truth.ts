@@ -45,6 +45,7 @@ export class ProtectionTruth {
   }
 }
 export async function resolveProtection(c:PoolClient,botId:string){
+  await c.query("DELETE FROM grid_risk_events WHERE bot_id=$1 AND event_key='protective-pass-count'",[botId]);
   await c.query(`UPDATE grid_worker_incidents SET resolved_at=clock_timestamp() WHERE bot_id=$1
     AND code IN ('stop_failed','protective_failure') AND resolved_at IS NULL`,[botId]);
 }

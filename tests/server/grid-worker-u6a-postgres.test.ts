@@ -58,7 +58,7 @@ beforeEach(async()=>{
   const tables=(await pool.query('SELECT tablename FROM pg_tables WHERE schemaname=$1',[schema])).rows;
   await pool.query('TRUNCATE '+tables.map(r=>'"'+r.tablename+'"').join(',')+' CASCADE');
   await pool.query("INSERT INTO wallets(address,agent_public_key,execution_enabled,umk_encrypted_for_execution,agent_private_key_encrypted_v3,umk_version) VALUES($1,$2,true,'EXAMPLE','EXAMPLE',3)",[owner,master]);
-  const p={...behaviourPolicy('continuous'),id:randomUUID()},h=computeGridPolicyHmac(p,fixture.key!);if(!h.ok)throw Error('EXAMPLE_POLICY');botId=p.id;
+  const p={...behaviourPolicy('repeat_all'),id:randomUUID()},h=computeGridPolicyHmac(p,fixture.key!);if(!h.ok)throw Error('EXAMPLE_POLICY:'+h.reason);botId=p.id;
   const {levels,...base}=p;
   await new GridStorage(pool,async()=>{}).createDraftWithLevels({...base,walletAddress:owner,clientRequestId:randomUUID(),serverIntentDigest:fixtureSha256.toUpperCase(),draftRevision:'EXAMPLE',createIntent:{},authoritySnapshot:{},policyHmac:h.digest,name:'EXAMPLE',rangeSource:'manual',chartTimeframe:'1h'} as DraftRecord,levels);
   await tx(async c=>{
