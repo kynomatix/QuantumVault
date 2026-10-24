@@ -18,6 +18,7 @@ import {behaviourPolicy} from '../grid-bot/behaviour-fixtures';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 import {ProtectiveExecutor} from '../../server/grid-worker/protective-executor';
 import {registerGridWorkerAdminRoutes} from '../../server/grid-worker/admin-routes';
+import {adminStatus} from '../../server/grid-worker/admin-state';
 import {WorkerQuota} from '../../server/grid-worker/quota';
 import {workerFetch} from '../../server/grid-worker/transport';
 import {withProtectivePurpose} from '../../server/grid-worker/protective-purpose';
@@ -229,6 +230,7 @@ it('releases a failed Start reservation only after proving zero custody and exec
 
 it('round-trips real status with rescue state and reset blocker',async()=>{
   const r=await start();expect(r.status).toBe(200);
+  await tx(c=>adminStatus(c,false),'none');
   const status=await api('/status');expect(status.status,JSON.stringify(status.data)).toBe(200);
   expect(parseWorkerStatus(JSON.parse(JSON.stringify(status.data)))).not.toBeNull();
   expect(status.data.cardState).toBe('rescue_running');expect(status.data.resetBlockedBy).toContain('rescue');
