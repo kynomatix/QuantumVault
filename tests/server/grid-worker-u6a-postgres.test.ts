@@ -9,6 +9,9 @@ import nacl from 'tweetnacl';
 import {deriveSubkey,encryptToBase64,buildPooledSubaccountAAD} from '../../server/crypto-v3';
 import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
 import {fencedTransaction,walletFences} from '../../server/grid-worker/transaction';
+import {identityFences} from '../../server/grid-worker/identity-locks';
+import {recoverAbandonedRescues} from '../../server/grid-worker/rescue-recovery';
+import {WorkerStartRequests} from '../../server/grid-worker/requests';
 import {localContext} from '../../server/grid-worker/host';
 import {GridStorage,type DraftRecord} from '../../server/grid-bot/storage';
 import {behaviourPolicy} from '../grid-bot/behaviour-fixtures';
@@ -184,4 +187,42 @@ it('signs one reduce-only close against a fake venue and never replays an uncert
   expect(posts,JSON.stringify(ops.rows)).toBe(1);
   expect(ops.rows[0].exact_request).toMatchObject({kind:'close',data:{reduce_only:true},authority:{protectiveRequestId:r.data.rescue.requestId}});
   await executor.step(owner,r.data.rescue.requestId);expect(posts).toBe(1);
+});
+
+it('rejects changed targets, wrong signatures and extra step credentials before any send',async()=>{
+  const c=await challenge(),message=c.data.message;
+  const wrong=generateKeyPairSync('ed25519');
+  expect((await api('/rescue',{botId,message,signature:bs58.encode(sign(null,Buffer.from(message),wrong.privateKey))})).status).toBe(409);
+  expect((await api('/rescue',{botId:randomUUID(),message,signature:bs58.encode(sign(null,Buffer.from(message),keys.privateKey))})).status).toBe(409);
+  const r=await start();expect(r.status).toBe(200);
+  expect((await api('/rescue/'+r.data.rescue.requestId+'/step',{signature:'EXAMPLE'})).status).toBe(400);expect(posts).toBe(0);
+});
+it('recovers abandoned requests with prelocks while skipping an in-flight step',async()=>{
+  const r=await start(),id=r.data.rescue.requestId;
+  await tx(async c=>{await walletFences(c,[owner]);await identityFences(c,[botId],[]);await c.query("UPDATE grid_worker_requests SET issued_at=clock_timestamp()-interval '2 minutes',expires_at=clock_timestamp()-interval '1 minute' WHERE id=$1",[id]);});
+  const locked=await pool.connect();try{
+    await locked.query('BEGIN');await locked.query('SELECT id FROM grid_worker_requests WHERE id=$1 FOR NO KEY UPDATE',[id]);
+    await tx(c=>recoverAbandonedRescues(c));expect((await pool.query('SELECT state FROM grid_worker_requests WHERE id=$1',[id])).rows[0].state).toBe('admitted');
+  }finally{await locked.query('ROLLBACK');locked.release();}
+  await tx(c=>recoverAbandonedRescues(c));
+  expect((await pool.query('SELECT state,result_code FROM grid_worker_requests WHERE id=$1',[id])).rows[0]).toEqual({state:'complete',result_code:'ended'});
+  expect((await pool.query("SELECT bot_id FROM grid_worker_incidents WHERE code='protective_failure'")).rows[0].bot_id).toBe(botId);
+});
+it('releases a failed Start reservation only after proving zero custody and execution state',async()=>{
+  const r=await start(),id=r.data.rescue.requestId,workerId=randomUUID();
+  const holder=await tx(async c=>{
+    await walletFences(c,[owner]);await identityFences(c,[botId],[]);
+    await c.query("UPDATE grid_worker_requests SET action='start' WHERE id=$1",[id]);
+    await c.query(`INSERT INTO grid_worker_reservations(bot_id,start_request_id,owner_wallet,wallet_generation,policy_digest,scope_revision,
+      investment_usd,leverage,budget_notional_usd,observed_exposure_usd,reserve_usd,cash_commitment_usd,fee_reserve_usd,facts_at)
+      SELECT bot_id,id,owner_wallet,wallet_generation,policy_hmac,scope_revision,100,1,100,0,100,100,0,clock_timestamp() FROM grid_worker_requests WHERE id=$1`,[id]);
+    await c.query("UPDATE grid_bots SET status='failed' WHERE id=$1",[botId]);
+    await localContext(c,'transition');await c.query("SELECT set_config('qv.grid_worker_owner_verified','true',true),set_config('qv.grid_worker_ready','true',true)");
+    return (await c.query("UPDATE grid_worker_host SET holder_role='grid-worker',holder_boot_id=$1,fencing_epoch=fencing_epoch+1,lease_expires_at=clock_timestamp()+interval '45 seconds' RETURNING holder_boot_id AS \"bootId\",fencing_epoch::text AS epoch",[workerId])).rows[0];
+  },'exclusive');
+  const worker=new WorkerStartRequests(pool,terminate,new GridIncidents(pool,terminate));
+  expect(await worker.releaseFailedZeroState(id,holder)).toBe(false);
+  await tx(async c=>{await c.query('DELETE FROM grid_launch_accounts WHERE bot_id=$1',[botId]);await c.query('UPDATE grid_bots SET protocol_subaccount_id=NULL WHERE id=$1',[botId]);});
+  expect(await worker.releaseFailedZeroState(id,holder)).toBe(true);
+  expect((await pool.query('SELECT state,terminal_proof_digest FROM grid_worker_reservations')).rows[0]).toMatchObject({state:'released',terminal_proof_digest:expect.stringMatching(/^[0-9a-f]{64}$/)});
 });

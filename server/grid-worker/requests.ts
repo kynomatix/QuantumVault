@@ -127,8 +127,8 @@ export class WorkerStartRequests {
     return fencedTransaction(this.lane,async c=>{
       const row=await requestLocks(c,id);await workerHost(c,holder,true);
       if(row.action!=='start'||row.state!=='admitted')return false;
-      const bot=(await c.query('SELECT status FROM grid_bots WHERE id=$1 FOR UPDATE',[row.bot_id])).rows[0];
-      if(!bot||!['draft','failed'].includes(bot.status))return false;
+      const bot=(await c.query('SELECT status,protocol_subaccount_id FROM grid_bots WHERE id=$1 FOR UPDATE',[row.bot_id])).rows[0];
+      if(!bot||bot.protocol_subaccount_id!==null||!['draft','failed'].includes(bot.status))return false;
       const used=(await c.query(`SELECT
         EXISTS(SELECT 1 FROM grid_launch_accounts WHERE bot_id=$1)
         OR EXISTS(SELECT 1 FROM protocol_subaccounts WHERE bot_id=$1)
