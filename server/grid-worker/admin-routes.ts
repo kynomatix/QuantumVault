@@ -46,7 +46,8 @@ async function production():Promise<AdminDependencies>{
     const probe=await lane.connect();
     try{await probeGridWorkerSchema((text,values)=>probe.query(text,values?[...values]:undefined));}finally{probe.release();}
     const h=(await c.query('SELECT * FROM grid_worker_host WHERE singleton_id=1')).rows[0];
-    if(!h||h.execution_mode!=='external'||!mainIdentityMatches(h)||OWNER_MASTER_PUBLIC_KEYS.length===0)throw Error('GRID_RESCUE_NOT_READY');
+    const master=h?(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1',[h.owner_wallet])).rows[0]?.agent_public_key:null;
+    if(!h||h.execution_mode!=='external'||!mainIdentityMatches(h)||!master||!OWNER_MASTER_PUBLIC_KEYS.includes(master))throw Error('GRID_RESCUE_NOT_READY');
   });
   return {lane,terminate:backendTerminator(independentLane(pool)),enabled:()=>process.env.GRID_REMOTE_WORKER_ENABLED==='true',
     entriesPaused:()=>process.env.GRID_ENTRIES_PAUSED==='true',readiness:ownerResetReady,ownerWallet:mainOwnerWallet,rescue};

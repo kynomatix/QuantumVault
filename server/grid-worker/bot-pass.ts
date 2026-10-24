@@ -9,7 +9,7 @@ export async function serviceBotPass<C extends {id:string}>(signal:AbortSignal,d
   for(let i=0;i<100;i++){
     signal.throwIfAborted();d.assertHolder();const claim=await d.claim(seen);if(!claim)break;seen.push(claim.id);
     try{
-      if(!d.allowed(claim)){await d.refused(claim);continue;}
+      if(!d.allowed(claim)){await d.refused(claim);await d.observed(claim,Error('GRID_AUTHORITY_REFUSED'));continue;}
       await d.tick(claim);await d.observed(claim);
     }catch(error){
       signal.throwIfAborted();d.assertHolder();

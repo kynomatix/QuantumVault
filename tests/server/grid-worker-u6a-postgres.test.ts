@@ -20,6 +20,7 @@ import {ProtectiveExecutor} from '../../server/grid-worker/protective-executor';
 import {registerGridWorkerAdminRoutes} from '../../server/grid-worker/admin-routes';
 import {adminStatus} from '../../server/grid-worker/admin-state';
 import {GridLifecycleService} from '../../server/grid-bot/lifecycle-service';
+import {parseOwnerMessage,ownerSha256} from '../../server/grid-worker/owner-auth';
 import {WorkerQuota} from '../../server/grid-worker/quota';
 import {workerFetch} from '../../server/grid-worker/transport';
 import {withProtectivePurpose} from '../../server/grid-worker/protective-purpose';
@@ -253,4 +254,19 @@ it('ends three blocked MAIN steps with a durable protective failure',async()=>{
     expect((await pool.query("SELECT id FROM grid_worker_incidents WHERE code='protective_failure' AND bot_id=$1 AND resolved_at IS NULL",[botId])).rows).toHaveLength(1);
     expect(posts).toBe(0);
   }finally{tick.mockRestore();}
+});
+
+it('rejects malformed receipt wire and an expired nonce at the real rescue route',async()=>{
+  const c=await challenge(),original=c.data.message as string;
+  const variants=[original+'\n',original.replaceAll('\n','\r\n'),original.replace('QV-OWNER-ACTION v1','QV-OWNER-ACTION v2'),
+    original.replace('scope:grid_worker','scope:other'),original.replace('action:break_glass_close','action:pause'),
+    original.replace('params:','params:EXAMPLE'),original.replace('target:bot:','target:incident:'),
+    original.replace('issued:','issued: '),original.replace('nonce:','nonce:0'),original.replace('expires:','extra:value\nexpires:')];
+  for(const message of variants){
+    const r=await api('/rescue',{botId,message,signature:bs58.encode(sign(null,Buffer.from(message),keys.privateKey))});
+    expect(r.status,JSON.stringify(r.data)).toBe(409);
+  }
+  await pool.query("UPDATE auth_nonces SET expires_at=clock_timestamp()-interval '1 second' WHERE nonce_hash=$1",[ownerSha256(parseOwnerMessage(original).nonce)]);
+  expect((await api('/rescue',{botId,message:original,signature:bs58.encode(sign(null,Buffer.from(original),keys.privateKey))})).status).toBe(409);
+  expect(posts).toBe(0);expect((await pool.query('SELECT id FROM grid_worker_requests')).rowCount).toBe(0);
 });

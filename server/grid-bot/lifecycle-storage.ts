@@ -80,7 +80,7 @@ export class GridLifecycleStorage {
   }
   async state(claim:GridMonitorClaim){return this.monitor.launch.transaction(async c=>{const bot=await this.monitor.assertLease(c,claim);
     const life=(await c.query('SELECT l.*,r.action,r.source,r.state,r.previous_status,r.evidence FROM grid_lifecycle l LEFT JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[claim.id])).rows[0];return {bot,life};});}
-  async blocked(claim:GridMonitorClaim,reason:string){await this.monitor.launch.transaction(async c=>{await this.monitor.assertLease(c,claim);
+  async blocked(claim:GridMonitorClaim,reason:string|null){await this.monitor.launch.transaction(async c=>{await this.monitor.assertLease(c,claim);
     await c.query('UPDATE grid_lifecycle SET blocker=$2 WHERE bot_id=$1',[claim.id,reason]);});}
   async safetyObservation(claim:GridMonitorClaim,observation:GridObservation){await this.monitor.launch.transaction(async c=>{
     const bot=await this.monitor.assertLease(c,claim);
