@@ -2,7 +2,7 @@ import {GridCustody} from './custody';
 import type {GridReconciliation} from './execution';
 import type {GridLaunchReads} from './launch-reads';
 import {reconcileGridTransfer} from './launch-reconciliation';
-import {requestDigest,type DurableGridOperation} from './launch-storage';
+import {requestDigest,type DurableGridOperation} from './launch-storage-core';
 import type {GridMonitorClaim,GridMonitorStorage} from './monitor-storage';
 import {gridSignedInventory} from './provision-evidence';
 import {readGridTransferEvidence} from './transfer-evidence';

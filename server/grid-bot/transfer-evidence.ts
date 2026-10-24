@@ -1,6 +1,6 @@
 import Decimal from 'decimal.js';
 import type {GridLaunchReads} from './launch-reads';
-import type {ExactGridRequest} from './launch-storage';
+import type {ExactGridRequest} from './launch-storage-core';
 
 export interface GridBalanceEvent {amount:string;eventType:string;createdAt:number}
 export interface GridTransferEvidence {

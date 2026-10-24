@@ -1,5 +1,5 @@
 import {createGridSolReader} from '../../server/grid-bot/sol-authority';
-import * as provision from '../../server/grid-bot/provision';
+import * as provision from '../../server/grid-bot/provision-core';
 import {describe,it,expect,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {gridEntrySafety,gridRiskTrigger,reconcileGridReduction,gridOwnedLive} from '../../server/grid-bot/lifecycle-policy';

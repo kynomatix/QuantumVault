@@ -8,8 +8,8 @@ export function assertGridWorkerEnvironment(env: Environment): void {
   if (env.QV_PROCESS_ROLE !== 'grid-worker' || env.REPLIT_DEPLOYMENT !== '1') {
     throw new Error('GRID_WORKER_ROLE_INVALID');
   }
-  const forbidden = /^(?:PG.*|AGENT_ENCRYPTION_KEY|UMK_STORAGE_SECRET|SESSION_SECRET|ADMIN_PASSWORD|LOG_READ_TOKEN|TELEGRAM_.*|DATA_RELAY_.*|QV_PROD_DATABASE_URL)$/;
-  if (Object.keys(env).some(name => env[name] !== undefined && forbidden.test(name))) {
+  const forbidden = /^(?:PG.*|AGENT_.*|UMK_.*|SESSION_SECRET|ADMIN_PASSWORD|LOG_READ_TOKEN|TELEGRAM_.*|DATA_RELAY_.*|QV_PROD_DATABASE_URL)$/;
+  if (Object.keys(env).some(name => forbidden.test(name))) {
     throw new Error('GRID_WORKER_SECRET_BOUNDARY');
   }
   if (!/^[a-fA-F0-9]{64}$/.test(env.SERVER_EXECUTION_KEY ?? '')) throw new Error('GRID_WORKER_EXECUTION_KEY_INVALID');

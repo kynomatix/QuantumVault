@@ -1,5 +1,6 @@
 import bs58 from 'bs58';
 import { randomUUID } from 'node:crypto';
+import {debitMainQuota,mainQuota} from '../../grid-worker/main-quota';
 import { ObservedPacificaQuota, parseRestQuota, parseWsQuota } from './pacifica-observed-quota.js';
 
 export function validPacificaConfigKey(value: unknown): value is string {
@@ -36,6 +37,7 @@ export class PacificaTransportAuthority {
       reason: this.keyStatus !== 'present' ? `config_key_${this.keyStatus}` : quota.availability !== 'observed' ? 'quota_metadata_missing_or_stale' : quota.entryDeciCredits <= 0 ? 'quota_budget_exhausted' : null };
   }
   restInit(url: string, init: RequestInit): RequestInit {
+    debitMainQuota('pacifica_rest',120);
     const headers = new Headers(init.headers);
     headers.delete('PF-API-KEY');
     if (this.#key) {
@@ -45,11 +47,14 @@ export class PacificaTransportAuthority {
     return { ...init, headers, redirect: 'error' };
   }
   websocketOptions(url: string): { headers: Record<string, string>; followRedirects: false } {
+    // WS message costs cannot be bounded at connection setup. External MAIN refuses this transport.
+    if(process.env.GRID_REMOTE_WORKER_ENABLED==='true'&&process.env.QV_PROCESS_ROLE!=='grid-worker')throw Error('GRID_MAIN_WS_QUOTA_UNAVAILABLE');
     if (this.#key && !approvedTarget(url, true)) throw new PacificaCredentialTargetError();
     return { headers: this.#key ? { 'PF-API-KEY': this.#key } : {}, followRedirects: false };
   }
   /** Called at response headers, before any potentially hanging body read. */
   response(response: Response): Response {
+    if(response.status===429)mainQuota.rateLimited('pacifica_rest');
     if (this.#key) this.quota.observe(response.ok
       ? parseRestQuota(response.headers?.get('ratelimit') ?? null, response.headers?.get('ratelimit-policy') ?? null) : null);
     const sanitize = (value: unknown): unknown => {

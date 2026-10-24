@@ -9,7 +9,7 @@ import {retainedGridPolicy} from './retained-policy';
 import {cycleOperation,cycleRequestAllocations,cycleRequestDigest,normalizeCycleHistory} from './cycle-history';
 import {validateCycleSourceCredit,type CycleReplayInput} from './cycle-replay';
 import {reconcileGridObservation} from './reconciliation';
-import type {ExactGridRequest} from './launch-storage';
+import type {ExactGridRequest} from './launch-storage-core';
 import {validateRetainedGridCycles} from './cycle-validation';
 import {projectCycleOrders} from './cycle-projection';
 import {gridResumeClearance} from './resume-clearance';

@@ -2,7 +2,7 @@ import {loadActiveGridLevels} from './active-epoch';
 import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
 import type {GridMonitorStorage,GridMonitorClaim} from './monitor-storage';
-import {GridStorageError} from './storage';
+import {GridStorageError} from './storage-error';
 import {gridRuntimeGates} from './service';
 import {gridAutoResumeBand,gridInsideAutoResumeBand,gridAutoResumeRetry,type GridAutoResumeReason} from './auto-resume-policy';
 import {freshGridFact,gridEntrySafety} from './lifecycle-policy';
@@ -14,7 +14,7 @@ export class GridAutoResumeStorage {
   constructor(readonly monitor:GridMonitorStorage,private gates=gridRuntimeGates){}
   async armed(claim:GridMonitorClaim){return this.monitor.launch.transaction(async c=>{await this.monitor.assertLease(c,claim);return !!(await c.query('SELECT 1 FROM grid_auto_resume WHERE bot_id=$1 AND enabled AND armed_cycle IS NOT NULL',[claim.id])).rowCount;});}
   async identity(wallet:string,id:string):Promise<GridResumeIdentity|null>{
-    const {durableGridUmk}=await import('./service'),{retainedGridPolicy}=await import('./launch-authority'),{verifyGridPolicyHmac}=await import('./policy-hmac');
+    const {durableGridUmk}=await import('./service'),{retainedGridPolicy}=await import('./launch-authority-core'),{verifyGridPolicyHmac}=await import('./policy-hmac');
     const snapshot=await this.monitor.launch.transaction(async c=>({bot:(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2',[id,wallet])).rows[0],levels:(await loadActiveGridLevels(c,id,'all')).rows}));
     if(!snapshot.bot)return null;
     const before=(await this.monitor.launch.transaction(c=>c.query('SELECT umk_version,umk_encrypted_for_execution,agent_public_key,agent_private_key_encrypted_v3 FROM wallets WHERE address=$1',[wallet]))).rows[0];if(!before)return null;

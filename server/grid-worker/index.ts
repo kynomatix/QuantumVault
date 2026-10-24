@@ -2,9 +2,9 @@ import { assertGridWorkerEnvironment } from '../process-role';
 export { getExecutionUmk, readExecutionWallet } from '../execution/umk';
 export { decryptAgentKeyV3 } from '../execution/agent-key';
 
-// U1 is a boot-check executable. It never schedules work or opens a listener.
+// Retained read-only probe API for offline schema verification. The executable uses the U4 service below.
 export async function bootGridWorker(
-  databaseFactory?: typeof import('./database').createGridWorkerDatabase,
+  databaseFactory?: (url:string)=>Pick<ReturnType<typeof import('./database').createGridWorkerDatabase>,'connect'|'close'>,
 ): Promise<void> {
   assertGridWorkerEnvironment(process.env);
   const [{ createGridWorkerDatabase }, { probeGridWorkerSchema }] = await Promise.all([
@@ -28,9 +28,18 @@ export async function bootGridWorker(
   console.log('GRID_WORKER_U1_BOOT_OK');
 }
 
+export async function bootGridWorkerService() {
+  const {workerEnvironment} = await import('./environment');
+  const env = workerEnvironment(process.env, line => console.log(line));
+  const {startWorkerRuntime} = await import('./runtime');
+  return startWorkerRuntime(env);
+}
 if (require.main === module) {
-  const fatal = () => { console.error('GRID_WORKER_U1_BOOT_FAILED'); process.exit(1); };
+  const fatal = () => { console.error('GRID_WORKER_BOOT_FAILED'); process.exit(1); };
   process.on('uncaughtException', fatal);
   process.on('unhandledRejection', fatal);
-  void bootGridWorker().catch(fatal);
+  let stopping=false,runtime:Awaited<ReturnType<typeof bootGridWorkerService>>|undefined;
+  const stop=()=>{stopping=true;if(runtime)void runtime.stop().catch(fatal);};
+  process.once('SIGTERM',stop);process.once('SIGINT',stop);
+  void bootGridWorkerService().then(value=>{runtime=value;if(stopping)stop();}).catch(fatal);
 }

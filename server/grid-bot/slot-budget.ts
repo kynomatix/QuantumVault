@@ -1,5 +1,5 @@
 import {gridPlacementBudget, VENUE_OPEN_ORDER_CAPACITY} from '../../shared/grid-capacity';
-import type {ExactGridRequest} from './launch-storage';
+import type {ExactGridRequest} from './launch-storage-core';
 import type {GridVenueOrder} from './order-identity';
 import Decimal from 'decimal.js';
 

@@ -4,7 +4,7 @@ import type {MarketConstraintObservation} from '../protocol/market-constraints';
 import type {GridFeeQuote} from './fee-authority';
 import type {GridAccount} from './custody';
 import {GridExecution} from './execution';
-import type {ExactGridRequest,GridClaim} from './launch-storage';
+import type {ExactGridRequest,GridClaim} from './launch-storage-core';
 import type {WindowAction,WindowLevel} from './window';
 import {GRID_TRANSPORT_BATCH_ACTIONS} from '../../shared/grid-capacity';
 

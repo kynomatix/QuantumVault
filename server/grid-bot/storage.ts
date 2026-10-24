@@ -20,9 +20,8 @@ export interface GridOperationConfirmation {
   venueOrderId:string|null;clientOrderUuid:string|null;transactionSignature:string|null;confirmedAmountUsdc:string|null;
   expectedSize?:string;filledSize?:string;
 }
-export class GridStorageError extends Error {
-  constructor(public code: 'not_found' | 'conflict' | 'invariant' | 'lost_lease', message: string = code) { super(message); }
-}
+import {GridStorageError} from './storage-error';
+export {GridStorageError} from './storage-error';
 export interface DraftRecord extends Omit<GridPolicy, 'levels'> {
   walletAddress: string; clientRequestId: string; serverIntentDigest: string; draftRevision: string;
   createIntent: unknown; authoritySnapshot: unknown; policyHmac: string; name: string;

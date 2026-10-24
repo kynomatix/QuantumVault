@@ -1,5 +1,5 @@
 import Decimal from 'decimal.js';
-import type {ExactGridRequest} from '../grid-bot/launch-storage';
+import type {ExactGridRequest} from '../grid-bot/launch-storage-core';
 
 const endpoints={create:['/account/subaccount/create','subaccount_confirm'],fund:['/account/subaccount/transfer','transfer_funds'],
   leverage:['/account/leverage','update_leverage'],seed:['/orders/create_market','create_market_order'],

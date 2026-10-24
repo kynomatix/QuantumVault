@@ -1,4 +1,4 @@
-import {GridLaunchTransientError} from './launch-storage';
+import {GridLaunchTransientError} from './launch-storage-core';
 import type {GridMonitorClaim,GridMonitorStorage} from './monitor-storage';
 export interface GridMonitorDeps {
   storage:Pick<GridMonitorStorage,'claim'|'release'|'block'>;

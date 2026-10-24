@@ -4,7 +4,7 @@ import {readCycleState,recordCycleReplay} from './cycle-storage';
 import {retainedGridPolicy} from './retained-policy';
 import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
-import {GridLaunchStorage,canonicalRequest,requestDigest,gridOperationProjection,type DurableGridOperation} from './launch-storage';
+import {GridLaunchStorage,canonicalRequest,requestDigest,gridOperationProjection,type DurableGridOperation} from './launch-storage-core';
 import {reconcileGridObservation,type GridObservation,type ReconciliationOperation} from './reconciliation';
 import {validGridEmptyProof,type GridAccount,type GridEmptyProof} from './custody';
 import type {GridEconomicFill} from './pnl';
@@ -18,22 +18,23 @@ const states=['provisioning','canary','active','pausing','paused','resuming','re
 export interface GridMonitorClaim {id:string;leaseToken:string;account:string;masterAccount:string}
 const fillsFromRows=(rows:Record<string,any>[]):GridEconomicFill[]=>rows.map(r=>({tradeId:r.trade_id,operationId:r.operation_id,orderId:r.order_id,levelId:r.level_id,time:Number(r.venue_time),leg:r.leg,size:r.size,price:r.price,fee:r.fee}));
 export class GridMonitorStorage {
-  constructor(readonly launch:GridLaunchStorage){}
+  constructor(readonly launch:GridLaunchStorage,private readonly allowedMasters?:readonly string[]){}
   /** Expiry nominates a generation; the send fence retires it. Unregistered legacy owners stay blocked. */
   async claim(exclude:string[]=[]):Promise<GridMonitorClaim|null>{return this.launch.transaction(async c=>{
     this.launch.hostAction(c,'claim');
     const rows=(await c.query(`SELECT b.id,b.lease_token,a.account,a.master_account FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
-      WHERE b.status=ANY($1::text[]) AND a.released_at IS NULL AND NOT(b.id=ANY($2::uuid[]))
+      WHERE b.status IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND a.released_at IS NULL AND b.id NOT IN (SELECT value::uuid FROM jsonb_array_elements_text($2::jsonb))
       AND (b.lease_token IS NULL OR (b.lease_expires_at<=clock_timestamp() AND EXISTS
         (SELECT 1 FROM grid_risk_events e WHERE e.bot_id=b.id AND e.event_key='worker-ownership'
           AND e.evidence->>'version'='1' AND e.evidence->>'generation'=b.lease_token::text)))
       AND (b.last_tick_at IS NULL OR b.last_tick_at<=clock_timestamp()-interval '15 seconds')
-      ORDER BY b.last_tick_at NULLS FIRST,b.id LIMIT 2`,[states,exclude])).rows;
+      ${this.allowedMasters===undefined?'':"AND a.master_account IN (SELECT value FROM jsonb_array_elements_text($3::jsonb))"}
+      ORDER BY b.last_tick_at NULLS FIRST,b.id LIMIT 2`,this.allowedMasters===undefined?[JSON.stringify(states),JSON.stringify(exclude)]:[JSON.stringify(states),JSON.stringify(exclude),JSON.stringify(this.allowedMasters)])).rows;
     for(const row of rows){
       if(!await gridWorkerFence(c,row.id))continue;
       if(!(await c.query(`SELECT id FROM grid_bots WHERE id=$1 AND lease_token IS NOT DISTINCT FROM $2::uuid
-        AND (lease_token IS NULL OR lease_expires_at<=clock_timestamp()) AND status=ANY($3::text[])
-        AND (last_tick_at IS NULL OR last_tick_at<=clock_timestamp()-interval '15 seconds') FOR UPDATE`,[row.id,row.lease_token,states])).rowCount)continue;
+        AND (lease_token IS NULL OR lease_expires_at<=clock_timestamp()) AND status IN (SELECT value FROM jsonb_array_elements_text($3::jsonb))
+        AND (last_tick_at IS NULL OR last_tick_at<=clock_timestamp()-interval '15 seconds') FOR UPDATE`,[row.id,row.lease_token,JSON.stringify(states)])).rowCount)continue;
       // Even a disconnected sender cannot leave a still-valid signed request behind at takeover.
       const operations=(await c.query("SELECT exact_request FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[row.id])).rows;
       const now=Number((await c.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS now')).rows[0].now);
@@ -54,7 +55,7 @@ export class GridMonitorStorage {
   });}
   async assertLease(c:PoolClient,claim:GridMonitorClaim){const bot=(await c.query(`SELECT b.*,a.account,a.master_account,clock_timestamp() AS db_now
     FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 AND b.lease_token=$2
-    AND b.lease_expires_at>clock_timestamp() AND a.released_at IS NULL AND b.status=ANY($3::text[]) FOR UPDATE OF b`,[claim.id,claim.leaseToken,states])).rows[0];
+    AND b.lease_expires_at>clock_timestamp() AND a.released_at IS NULL AND b.status IN (SELECT value FROM jsonb_array_elements_text($3::jsonb)) FOR UPDATE OF b`,[claim.id,claim.leaseToken,JSON.stringify(states)])).rows[0];
     if(!bot||bot.account!==claim.account||bot.master_account!==claim.masterAccount)throw Error('Grid ownership uncertain');return bot;
   }
   async release(claim:GridMonitorClaim){await this.launch.transaction(async c=>{this.launch.hostAction(c,'claim');if(!await gridWorkerFence(c,claim.id))throw Error('Grid sender still active');await c.query(`UPDATE grid_bots SET lease_token=NULL,lease_expires_at=NULL,last_tick_at=clock_timestamp()

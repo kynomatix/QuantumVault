@@ -17,7 +17,7 @@ const hooks=vi.hoisted(()=>({collect:vi.fn(),observe:vi.fn(),unlock:vi.fn(),dura
 vi.mock('../../server/grid-bot/service',()=>({durableGridUmk:hooks.durable}));
 vi.mock('../../server/grid-bot/launch-authority',async (importOriginal)=>({...await importOriginal<typeof import('../../server/grid-bot/launch-authority')>(),
   productionGridLaunchAuthority:()=>({collect:hooks.collect,observe:hooks.observe}),unlockGridLaunchAgent:hooks.unlock,gridProductionResume:vi.fn()}));
-vi.mock('../../server/grid-bot/lifecycle-runtime',()=>({gridLifecycleRuntime:()=>({service:{tick:hooks.lifecycleTick},lifecycle:{state:hooks.lifecycleState}})}));
+vi.mock('../../server/grid-bot/lifecycle-core',()=>({gridLifecycleCore:()=>({service:{tick:hooks.lifecycleTick},lifecycle:{state:hooks.lifecycleState}})}));
 vi.mock('../../server/grid-bot/custody',async (importOriginal)=>({...await importOriginal<typeof import('../../server/grid-bot/custody')>(),
   GridCustody:class {recover=hooks.recover;reserve=hooks.reserve;withSecret=hooks.secret;confirmCreated=hooks.confirmCreated;confirmReused=hooks.confirmReused;}}));
 vi.mock('../../server/grid-bot/execution',async (importOriginal)=>({...await importOriginal<typeof import('../../server/grid-bot/execution')>(),

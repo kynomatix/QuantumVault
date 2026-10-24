@@ -9,7 +9,7 @@ import { gridPolicyExtension } from './behaviour-policy';
 import { canonicalGridPolicy, type GridPolicy } from './policy-hmac';
 import { epochDigest, GRID_EPOCH_POLICY_VERSION, GRID_MOVE_REVISION, type EpochCarry } from './epoch-policy';
 import { validateRetainedGridCycles } from './cycle-validation';
-import type { LaunchFacts } from './provision';
+import type { LaunchFacts } from './provision-core';
 
 const D=Decimal.clone({precision:200});
 /** Same strict two-bars-each-side swing definition as weekly structure; only the bot's finalized timeframe. */

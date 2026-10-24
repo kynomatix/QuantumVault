@@ -46,7 +46,8 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
       const result=await start(wallet(req),id.data,body.data,AbortSignal.timeout(60000));
       res.status(result.state==='denied'?422:result.state==='canary'?200:202).json(result);
     }catch(error){
-      if(error instanceof StartRefusal)res.status(409).json({error:error.message});
+      if(error instanceof Error&&error.message==='GRID_CONSENT_REQUEST_CONFLICT')res.status(409).json({error:'Start request conflicts with an earlier confirmation.'});
+      else if(error instanceof StartRefusal)res.status(409).json({error:error.message});
       else if(error instanceof GridStorageError)res.status(error.code==='not_found'?404:409).json({error:error.code});
       else res.status(503).json({error:'Grid launch authority unavailable. Refresh bot details; retrying this draft retains the same launch identity.'});
     }

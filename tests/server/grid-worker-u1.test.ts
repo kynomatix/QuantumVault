@@ -266,7 +266,7 @@ describe('U1 built artifact', () => {
     return r;
   }
   it('BootDenied', async () => { expect((await invalidBoot()).status).toBe(1); });
-  it('BootSanitized', async () => { expect((await invalidBoot()).stderr.trim()).toBe('GRID_WORKER_U1_BOOT_FAILED'); });
+  it('BootSanitized', async () => { expect((await invalidBoot()).stderr.trim()).toBe('GRID_WORKER_BOOT_FAILED'); });
   it('BootReadonly', async () => { expect((await bootFixture()).query.mock.calls[0][0]).toBe('BEGIN READ ONLY'); });
   it('BootCommit', async () => { expect((await bootFixture()).query.mock.calls.at(-1)?.[0]).toBe('COMMIT'); });
   it('BootRelease', async () => { expect((await bootFixture()).release).toHaveBeenCalledOnce(); });

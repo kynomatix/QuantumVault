@@ -2,7 +2,10 @@ import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from 'vitest';
 import {Pool,type PoolClient} from 'pg';
 import {randomUUID,randomInt,randomBytes,createHash} from 'node:crypto';
 import bs58 from 'bs58';
-import {readFileSync} from 'node:fs';
+import {readFileSync,mkdtempSync,rmSync} from 'node:fs';
+import {join} from 'node:path';
+import {spawn} from 'node:child_process';
+import {build} from 'esbuild';
 import {drizzle} from 'drizzle-orm/node-postgres';
 import * as schemaTypes from '../../shared/schema';
 import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
@@ -211,7 +214,7 @@ describe('U3 PostgreSQL admission and spending',()=>{
     await expect(worker().admit(id,holder,umk(),await launchFacts(),spending())).rejects.toThrow();
     await expect(tx(c=>verifyAdmittedStart(c,id,holder,umk()))).rejects.toThrow();
   });
-  it.each([null,'0','251'])('database refuses invalid future cap %s',async cap=>{
+  it.each([null,'-1','0','251'])('database refuses invalid future cap %s',async cap=>{
     await external();await expect(tx(async c=>{
       await c.query('ALTER TABLE grid_worker_host DISABLE TRIGGER USER');
       await c.query("UPDATE grid_worker_host SET start_scope='expanded',per_bot_cap_usd=$1,global_ceiling_usd=1000",[cap]);
@@ -225,4 +228,76 @@ describe('U3 PostgreSQL admission and spending',()=>{
       expect(new Set(rows.map(r=>r.lock_hash)).size).toBe(keys.length);
     });
   });
+});
+
+
+import {WorkerQuota} from '../../server/grid-worker/quota';
+describe('U4 shared quota and rolling windows',()=>{
+  beforeEach(async()=>{await pool.query('TRUNCATE grid_worker_quota_windows,grid_worker_quota_policy');});
+  const quotaPolicy=async()=>{await pool.query(`INSERT INTO grid_worker_quota_policy
+    (provider,domain_id,window_ms,total_units,worker_limit_units,worker_protective_reserve_units,policy_digest,valid_until)
+    VALUES('pacifica_rest','deployment',60000,1000,600,120,$1,clock_timestamp()+interval '5 minutes')`,[createHash('sha256').update('EXAMPLE_U4_QUOTA').digest('hex')]);};
+  it('serializes independent connections and retains a protective reserve',async()=>{
+    await quotaPolicy();const a=new WorkerQuota(pool,terminate),b=new WorkerQuota(pool,terminate);
+    const outcomes=await Promise.allSettled(Array.from({length:8},(_,i)=>(i%2?a:b).debit('pacifica_rest',120)));
+    expect(outcomes.filter(r=>r.status==='fulfilled')).toHaveLength(4);
+    expect(Number((await pool.query('SELECT sum(worker_used_units) AS used FROM grid_worker_quota_windows')).rows[0].used)).toBe(480);
+    await a.debit('pacifica_rest',120,true);await expect(b.debit('pacifica_rest',1,true)).rejects.toThrow('GRID_QUOTA_UNAVAILABLE');
+  });
+  it('shares the ordinary allocation between two operating-system processes',async()=>{
+    await quotaPolicy();const dir=mkdtempSync(join(process.cwd(),'.u4-quota-')),file=join(dir,'child.cjs');
+    try{
+      await build({stdin:{contents:`import {Pool} from 'pg';import {WorkerQuota} from './server/grid-worker/quota';
+        const pool=new Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path='+process.argv[2]+',pg_catalog',max:2});
+        const q=new WorkerQuota(pool,async pid=>{await pool.query('SELECT pg_terminate_backend($1)',[pid]);});
+        (async()=>{let passed=0;try{for(let i=0;i<4;i++){try{await q.debit('pacifica_rest',120);passed++;}catch(e){if(e.message!=='GRID_QUOTA_UNAVAILABLE')throw e;}}
+        process.stdout.write(String(passed));}finally{await pool.end();}})().catch(()=>{process.exitCode=1;});`,resolveDir:process.cwd(),loader:'ts'},outfile:file,bundle:true,packages:'external',platform:'node',format:'cjs',logLevel:'silent'});
+      const run=()=>new Promise<number>((resolve,reject)=>{const child=spawn(process.execPath,[file,schema],{stdio:['ignore','pipe','pipe']});let out='';
+        child.stdout.on('data',b=>{out+=String(b);});child.on('error',reject);child.on('exit',code=>code===0&&/^[0-4]$/.test(out)?resolve(Number(out)):reject(Error('EXAMPLE_CHILD_FAILED')));});
+      expect((await Promise.all([run(),run()])).reduce((a,b)=>a+b,0)).toBe(4);
+      expect(Number((await pool.query('SELECT sum(worker_used_units) AS used FROM grid_worker_quota_windows')).rows[0].used)).toBe(480);
+    }finally{rmSync(dir,{recursive:true,force:true});}
+  },30000);
+  it('counts previous buckets and refuses backoff, absent and expired policies',async()=>{
+    const q=new WorkerQuota(pool,terminate);await expect(q.debit('pacifica_rest',120)).rejects.toThrow();
+    await quotaPolicy();await q.debit('pacifica_rest',480);
+    await pool.query("UPDATE grid_worker_quota_windows SET window_start=window_start-interval '60 seconds'");
+    await expect(q.debit('pacifica_rest',120)).rejects.toThrow();
+    await q.rateLimited('pacifica_rest');await expect(q.debit('pacifica_rest',1,true)).rejects.toThrow();
+    await pool.query("UPDATE grid_worker_quota_policy SET valid_until=clock_timestamp()-interval '1 second'");
+    await expect(q.debit('pacifica_rest',1,true)).rejects.toThrow();
+  });
+});
+
+import {startWorkerRuntime} from '../../server/grid-worker/runtime';
+// Runtime orchestration uses the real isolated PostgreSQL schema. Full readiness and
+// emitted identity checks are independently exercised by the U1/U2a build suites.
+vi.mock('../../server/grid-worker/boot',()=>({probeGridWorkerSchema:async()=>({})}));
+vi.mock('../../server/grid-worker/build-identity',()=>({identityMatches:()=>true,workerBuildIdentity:{commitHash:'EXAMPLE'}}));
+describe('U4 PostgreSQL supervisor lifecycle',()=>{
+  const factory=()=>({pool,connect:()=>pool.connect(),close:async()=>{}});
+  it('legacy standby keeps HTTP alive and never obtains a holder',async()=>{
+    const fatal=vi.fn(),runtime=await startWorkerRuntime({PORT:'0',GRID_REMOTE_WORKER_ENABLED:'true'},factory,fatal);
+    try{expect(runtime.status().standby).toBe(true);expect(runtime.status().inControl).toBe(false);
+      expect((await pool.query('SELECT holder_boot_id FROM grid_worker_host')).rows[0].holder_boot_id).toBeNull();expect(fatal).not.toHaveBeenCalled();}
+    finally{await runtime.stop();}
+  });
+  it('external test mode renews, dispatches zero money, writes zero outbox and releases only after expiry',async()=>{
+    await arm();await tx(async c=>{await localContext(c,'transition');
+      await c.query("SELECT set_config('qv.grid_worker_owner_verified','true',true),set_config('qv.grid_worker_ready','true',true)");
+      const fixtureSha256=createHash('sha256').update('EXAMPLE_RUNTIME_BUILD').digest('hex');
+      await c.query("UPDATE grid_worker_host SET execution_mode='external',run_mode='test',execution_enabled=false,legacy_controls_enabled=true,commit_hash=$1,tree_hash=$1,lockfile_sha256=$2",[fixtureSha256.slice(0,40),fixtureSha256]);
+    },'exclusive');
+    const fatal=vi.fn(),fetcher=vi.spyOn(globalThis,'fetch').mockRejectedValue(Error('EXAMPLE_UNEXPECTED_EGRESS'));
+    const before=Number((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n);
+    const runtime=await startWorkerRuntime({PORT:'0',GRID_REMOTE_WORKER_ENABLED:'true'},factory,fatal);
+    try{expect(runtime.status().inControl).toBe(true);expect(runtime.status().test).toBe(true);
+      await delay(16000);expect(runtime.status().passAt).not.toBeNull();expect(fatal).not.toHaveBeenCalled();expect(fetcher).not.toHaveBeenCalled();
+      expect(Number((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n)).toBe(before);
+      expect(Number((await pool.query('SELECT count(*) AS n FROM grid_worker_send_audit')).rows[0].n)).toBe(0);
+      expect(Number((await pool.query('SELECT count(*) AS n FROM grid_operations')).rows[0].n)).toBe(0);
+    }finally{await runtime.stop();fetcher.mockRestore();}
+    const host=(await pool.query('SELECT holder_boot_id,drain_requested FROM grid_worker_host')).rows[0];
+    expect(host.holder_boot_id).toBeNull();expect(host.drain_requested).toBe(false);
+  },80000);
 });

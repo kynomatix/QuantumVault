@@ -3,7 +3,7 @@ import nacl from 'tweetnacl';
 import bs58 from 'bs58';
 import Decimal from 'decimal.js';
 import {deriveSubkey,encryptToBase64,decryptFromBase64,buildPooledSubaccountAAD,zeroizeBuffer} from '../crypto-v3';
-import {GridLaunchStorage} from './launch-storage';
+import {GridLaunchStorage} from './launch-storage-core';
 import {AGENT_WALLET_RESET_LOCK_NAMESPACE} from '../wallet-lock-constants';
 import type {GridSettlementFact} from './lifecycle-service';
 import {gridRecyclerGate,gridExposureLimit} from './runtime-policy';
@@ -32,6 +32,7 @@ export class GridCustody {
       const encrypted=encryptToBase64(secret,subkey,buildPooledSubaccountAAD('grid:pacifica',input.wallet,account));
       return await this.storage.transaction(async c=>{
         this.storage.hostAction(c,'start');
+        await this.storage.verifyWorkerStart(c,input.botId);
         // Same wallet-generation lock namespace as storage.ts's legacy pool/reset path.
         await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,input.wallet]);
         if(!await gridWorkerFence(c,input.botId))throw Error('Grid sender still active');
@@ -177,6 +178,7 @@ export class GridCustody {
           await c.query('UPDATE grid_launch_accounts SET released_at=clock_timestamp() WHERE bot_id=$1',[identity.botId]);
           await c.query('UPDATE grid_execution_claims SET slot_released=true WHERE bot_id=$1',[identity.botId]);
           await c.query("UPDATE grid_bots SET status='stopped',residual_usdc=0,residual_observed_at=$2,updated_at=clock_timestamp() WHERE id=$1",[identity.botId,new Date(proof.observedAt)]);
+          await this.storage.releaseWorkerReservation(c,identity.botId);
           await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[identity.botId,requestId+':complete','stopped',{controlRequestId:requestId}]);
         });
       }finally{zeroizeBuffer(key);}

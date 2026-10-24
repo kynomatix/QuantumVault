@@ -5,6 +5,7 @@ import { resolve, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import ts from 'typescript';
+import {resolveGitBuildIdentity} from './git-build-identity';
 
 const builtins = new Set(builtinModules.flatMap(name => [name, `node:${name}`]));
 const forbiddenPath = /(?:server\/(?:crypto\.ts|session-v3\.ts|storage\.ts|db\.ts|agent-wallet\.ts)|adapter-registry|pacifica-adapter|notification-service|mnemonic|bip39|account\/withdraw)/i;
@@ -59,16 +60,21 @@ export function auditWorkerOutput(code: string, metafile: Metafile) {
 }
 
 export async function buildGridWorker(outdir = 'dist') {
+  if (/\b(?:example|mockup|preview|illustrative)\b/i.test(await readFile('server/grid-worker/status-page.ts','utf8'))) throw Error('GRID_STATUS_COPY_INVALID');
+  const git = resolveGitBuildIdentity();
+  const identity = {commitHash:git.commitSha,treeHash:git.treeSha,
+    lockfileSha256:createHash('sha256').update(await readFile('package-lock.json')).digest('hex')};
   await mkdir(outdir, { recursive: true });
   const outfile = resolve(outdir, 'grid-worker.cjs');
   const result = await build({
     entryPoints: ['server/grid-worker/index.ts'], outfile, bundle: true,
     platform: 'node', target: 'node20', format: 'cjs', metafile: true,
     write: false, treeShaking: true, logLevel: 'silent',
-    define: { 'process.env.NODE_PG_FORCE_NATIVE': 'undefined' },
+    define: { 'process.env.NODE_PG_FORCE_NATIVE': 'undefined', GRID_WORKER_BUILD_IDENTITY:JSON.stringify(identity) },
     plugins: [{
       name: 'node-tcp-pg-only',
       setup(builder) {
+        builder.onResolve({filter:/^\.\/service$/},args=>args.importer.replaceAll('\\','/').includes('/server/grid-bot/')?{path:resolve('server/grid-worker/runtime-bindings.ts')}:undefined);
         // The worker has one supported transport: pg's JS TCP/TLS client.
         // Optional native and Cloudflare transports cannot enter its artifact.
         builder.onResolve({ filter: /^(pg-native|pg-cloudflare)$/ }, args => ({ path: args.path, namespace: 'worker-unsupported' }));
@@ -79,7 +85,7 @@ export async function buildGridWorker(outdir = 'dist') {
   const code = result.outputFiles[0].text;
   const closure = auditWorkerOutput(code, result.metafile);
   const artifactSha256 = createHash('sha256').update(code).digest('hex');
-  const proof = { artifactSha256, ...closure };
+  const proof = { artifactSha256, ...identity, ...closure, injectedBindings:{'server/grid-bot/service.ts':'server/grid-worker/runtime-bindings.ts'} };
   // No artifact is published until the emitted-output audit passes.
   await writeFile(outfile, code, 'utf8');
   await writeFile(resolve(outdir, 'grid-worker.meta.json'), JSON.stringify(result.metafile, null, 2) + '\n');

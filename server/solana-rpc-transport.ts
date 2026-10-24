@@ -1,3 +1,4 @@
+import {debitMainQuota} from './grid-worker/main-quota';
 import {
   Connection,
   type Commitment,
@@ -268,6 +269,8 @@ export async function boundedAttempt(
   }, timeoutMs);
 
   try {
+    // Both endpoints share the conservative MAIN complement when remote mode is enabled.
+    debitMainQuota(new URL(url).hostname==='api.mainnet-beta.solana.com'?'rpc_backup':'rpc_primary');
     const request = fetchImpl(url, { ...init, signal: controller.signal });
     const cancelled = new Promise<never>((_, reject) => {
       controller.signal.addEventListener('abort', () => reject(abortError(controller.signal)), { once: true });

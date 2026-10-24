@@ -32,5 +32,6 @@ export function createGridMoveStorage(storage:GridMonitorStorage,reads:GridLaunc
 
 let singleton:Promise<GridMoveStorage>|undefined;
 export function productionGridMoves(){
+  if(process.env.GRID_REMOTE_WORKER_ENABLED==='true')throw Error('GRID_MAIN_MONEY_SUPPRESSED');
   return singleton??=Promise.all([import('../db'),import('./launch-storage'),import('./monitor-storage'),import('./launch-reads')]).then(([{pool},{GridLaunchStorage},{GridMonitorStorage},{GridLaunchReads}])=>{const ledger=new GridLaunchStorage(pool);return createGridMoveStorage(new GridMonitorStorage(ledger),new GridLaunchReads(pacificaTransportAuthority(),ledger,'0.5'));});
 }

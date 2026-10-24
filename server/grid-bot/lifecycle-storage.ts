@@ -1,8 +1,11 @@
+import {walletFences} from '../grid-worker/transaction';
+import {identityFences} from '../grid-worker/identity-locks';
+import {supersedeStartConsents} from '../grid-worker/consent';
 import {randomUUID} from 'node:crypto';
 import Decimal from 'decimal.js';
-import {GridStorageError} from './storage';
+import {GridStorageError} from './storage-error';
 import {GridMonitorStorage,type GridMonitorClaim} from './monitor-storage';
-import {canonicalRequest} from './launch-storage';
+import {canonicalRequest} from './launch-storage-core';
 import {gridWorkerFence,waitGridWorkerFence} from './worker-ownership';
 import {gridWalletEntryGate} from './runtime-policy';
 import {freshGridFact,gridEntrySafety,type GridControlAction} from './lifecycle-policy';
@@ -17,7 +20,12 @@ export class GridLifecycleStorage {
     if(!['owner','risk'].includes(source)||!key||key.length>200||!['pause','resume','resync','stop','band'].includes(action)||source==='owner'&&action==='band')throw new GridStorageError('invariant');
     return this.monitor.launch.transaction(async c=>{
       this.monitor.launch.hostAction(c,action==='resume'?'resume':'settle');
+      await walletFences(c,[wallet]);
       await waitGridWorkerFence(c,botId);
+      if(source==='owner'&&action==='stop'&&process.env.GRID_REMOTE_WORKER_ENABLED==='true'){
+        await identityFences(c,[botId],[]);
+        await supersedeStartConsents(c,wallet,[botId],'stop');
+      }
       const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[botId,wallet])).rows[0];
       if(!bot)throw new GridStorageError('not_found');
       if(source==='risk'){if(!claim||claim.id!==botId)throw new GridStorageError('lost_lease');await this.monitor.assertLease(c,claim);}
@@ -32,6 +40,13 @@ export class GridLifecycleStorage {
         const last=(await c.query("SELECT * FROM grid_control_requests WHERE bot_id=$1 AND action='stop' AND state='complete' ORDER BY completed_at DESC LIMIT 1",[botId])).rows[0];
         if(last)return bind(last);
       }
+      if(bot.status==='draft'&&source==='owner'&&action==='stop'&&process.env.GRID_REMOTE_WORKER_ENABLED==='true'){
+        // Cancelling an unadmitted draft commits the consent supersession without custody or execution.
+        if((await c.query("SELECT 1 FROM grid_worker_requests WHERE bot_id=$1 AND state='admitted' LIMIT 1",[botId])).rowCount)throw new GridStorageError('conflict');
+        const row=(await c.query(`INSERT INTO grid_control_requests(id,bot_id,request_key,action,source,previous_status,evidence,state,completed_at)
+          VALUES($1,$2,$3,'stop','owner','draft',$4,'complete',clock_timestamp()) RETURNING *`,[randomUUID(),botId,key,evidence])).rows[0];
+        return bind(row);
+      }
       if(['draft','failed','stopped'].includes(bot.status)||bot.status==='stopping'&&action!=='stop'
         ||current?.state==='pending'&&action!=='stop'&&action!=='pause'&&action!=='band')throw new GridStorageError('conflict');
       if(action==='resume'&&!['paused','range_exhausted'].includes(bot.status))throw new GridStorageError('conflict');
@@ -44,7 +59,7 @@ export class GridLifecycleStorage {
       await c.query('UPDATE grid_monitor_state SET boot_id=NULL,generation=generation+1 WHERE bot_id=$1',[botId]);
       await c.query('INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING',[botId,id,action,evidence]);
       return bind(row);
-    });
+    },source==='owner');
   }
   async state(claim:GridMonitorClaim){return this.monitor.launch.transaction(async c=>{const bot=await this.monitor.assertLease(c,claim);
     const life=(await c.query('SELECT l.*,r.action,r.source,r.state,r.previous_status,r.evidence FROM grid_lifecycle l LEFT JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1',[claim.id])).rows[0];return {bot,life};});}

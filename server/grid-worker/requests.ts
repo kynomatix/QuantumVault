@@ -56,7 +56,7 @@ async function expirePending(c:PoolClient,owner:string,botId:string) {
 /** MAIN data plane: no lease, signer, custody or reservation imports with side effects. */
 export class MainStartRequests {
   constructor(private readonly lane:ClientLane,private readonly terminate:(pid:number)=>Promise<void>){}
-  async external():Promise<boolean>{return fencedTransaction(this.lane,async c=>{
+  async external():Promise<boolean>{if(process.env.GRID_REMOTE_WORKER_ENABLED!=='true')return false;return fencedTransaction(this.lane,async c=>{
     if(!(await c.query("SELECT to_regclass('grid_worker_host') IS NOT NULL AS present")).rows[0]?.present)return false;
     return (await externalHost(c))?.execution_mode==='external';
   },{terminate:this.terminate});}

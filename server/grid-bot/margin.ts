@@ -1,5 +1,5 @@
 import Decimal from 'decimal.js';
-import type {ExactGridRequest} from './launch-storage';
+import type {ExactGridRequest} from './launch-storage-core';
 import type {GridLaunchReads} from './launch-reads';
 const D=Decimal.clone({precision:200});
 export const GRID_MARGIN_BUFFER='1.02';

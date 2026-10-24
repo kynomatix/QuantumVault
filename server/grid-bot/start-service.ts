@@ -1,6 +1,6 @@
 import type {GridStartRequest, GridStartResult} from '../../shared/grid-start';
 import type {GridPolicy} from './policy-hmac';
-import {GridStorageError} from './storage';
+import {GridStorageError} from './storage-error';
 
 export interface GridStartDraft extends GridStartRequest {
   status: string;

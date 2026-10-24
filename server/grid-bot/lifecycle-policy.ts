@@ -2,7 +2,7 @@ import Decimal from 'decimal.js';
 import type {GridPolicy} from './policy-hmac';
 import type {GridObservation,ReconciliationOperation} from './reconciliation';
 import {reconcileGridLimit,type GridReconciliation} from './execution';
-import {requestDigest,type ExactGridRequest} from './launch-storage';
+import {requestDigest,type ExactGridRequest} from './launch-storage-core';
 import {gridWalletEntryGate} from './runtime-policy';
 const D=Decimal.clone({precision:200});
 export type GridControlAction='pause'|'resume'|'resync'|'stop'|'band'|'regrid';

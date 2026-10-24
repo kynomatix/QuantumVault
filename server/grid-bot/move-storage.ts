@@ -9,7 +9,7 @@ import { replayGridCycles, type CycleReplayInput } from './cycle-replay';
 import { epochDigest, GRID_RANGE_MOVE_ENABLED, GRID_MOVE_REVISION, type EpochCarry } from './epoch-policy';
 import { candidateGridEpoch, qualifyGridDow } from './move-policy';
 import { computeGridPolicyHmac, canonicalGridPolicy, type GridPolicy } from './policy-hmac';
-import { preflightGridResume, type LaunchFacts } from './provision';
+import { preflightGridResume, type LaunchFacts } from './provision-core';
 import { gridResumeClearance, type GridResumeRisk } from './resume-clearance';
 import { stableGridExtension } from './behaviour-policy';
 import type { PlannerCandle } from '../grid-planner/types';

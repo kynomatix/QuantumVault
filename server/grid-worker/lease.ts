@@ -2,13 +2,14 @@ import type { PoolClient } from 'pg';
 import { performance } from 'node:perf_hooks';
 import { localContext } from './host';
 import { fencedTransaction, type ClientLane } from './transaction';
-export interface WorkerLease { bootId: string; epoch: string; sentAt: number; localExpiresAt: number }
+import {leaseLocallyValid,type WorkerLease} from './lease-clock';
+export {leaseLocallyValid,type WorkerLease} from './lease-clock';
 export interface AcceptanceBound { verified: boolean; milliseconds: number; skewMs: number }
 function boundValid(bound: AcceptanceBound) {
   return bound.verified && Number.isSafeInteger(bound.milliseconds) && bound.milliseconds >= 0
     && Number.isSafeInteger(bound.skewMs) && bound.skewMs >= 0 && bound.skewMs < 45_000;
 }
-export function leaseLocallyValid(lease: WorkerLease, now = performance.now()) { return now >= lease.sentAt && now < lease.localExpiresAt; }
+
 export async function takeoverWindowsClear(c: PoolClient, bound: AcceptanceBound): Promise<boolean> {
   if (!boundValid(bound)) return false;
   const now = Number((await c.query('SELECT extract(epoch FROM clock_timestamp())*1000 AS now')).rows[0].now);
@@ -33,7 +34,7 @@ export class GridWorkerLease {
     private readonly terminate: (pid: number) => Promise<void>, private readonly ready: () => Promise<boolean>) {
     if (execution === renewal) throw Error('GRID_DEDICATED_RENEWAL_REQUIRED');
   }
-  async acquire(bootId: string, bound: AcceptanceBound, reconcile: () => Promise<boolean>): Promise<WorkerLease> {
+  async acquire(bootId: string, bound: AcceptanceBound, reconcile: (lease: WorkerLease) => Promise<boolean>): Promise<WorkerLease> {
     if (!boundValid(bound) || !await this.ready()) throw Error('GRID_LEASE_NOT_READY');
     const lease = await fencedTransaction(this.execution, async c => {
       if (!await takeoverWindowsClear(c, bound)) throw Error('GRID_TAKEOVER_WINDOWS_PENDING');
@@ -46,7 +47,7 @@ export class GridWorkerLease {
       if (!row) throw Error('GRID_LEASE_CONTENDED');
       return { bootId, epoch: String(row.fencing_epoch), sentAt, localExpiresAt: sentAt + 45_000 - bound.skewMs };
     }, { mode: 'exclusive', terminate: this.terminate });
-    if (!await reconcile() || !leaseLocallyValid(lease)) throw Error('GRID_TAKEOVER_RECONCILIATION_REQUIRED');
+    if (!await reconcile(lease) || !leaseLocallyValid(lease)) throw Error('GRID_TAKEOVER_RECONCILIATION_REQUIRED');
     return lease;
   }
   async renew(lease: WorkerLease, skewMs: number, progress: boolean, healthPoll = false): Promise<WorkerLease> {

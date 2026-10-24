@@ -1,8 +1,10 @@
 import {gridRuntimeGates,gridWorkerState} from './service';
 import {GridMonitor} from './monitor';
+import {mainMoneySuppressed,startMainQuotaRefresh} from '../grid-worker/main-runtime';
 let monitor:GridMonitor|null=null;
 export async function startGridBotMonitor(){
   await (await import('./notifications')).startGridNotifications();
+  if(mainMoneySuppressed()){await startMainQuotaRefresh((await import('../db')).pool);gridWorkerState(false);return;}
   if(!gridRuntimeGates().workerEnabled||monitor)return;
   const [{pool},{GridLaunchStorage},{GridMonitorStorage},{GridMonitorReads},{GridLaunchReads},{pacificaTransportAuthority},{gridExecutorRuntime}]=await Promise.all([
     import('../db'),import('./launch-storage'),import('./monitor-storage'),import('./monitor-reads'),import('./launch-reads'),import('../protocol/pacifica/pacifica-transport'),import('./executor-runtime')]);
@@ -12,4 +14,4 @@ export async function startGridBotMonitor(){
   monitor.start();
   gridWorkerState(true);
 }
-export async function stopGridBotMonitor(){gridWorkerState(false);await (await import('./notifications')).stopGridNotifications();const current=monitor;await current?.stop();if(monitor===current)monitor=null;}
+export async function stopGridBotMonitor(){gridWorkerState(false);if(!mainMoneySuppressed())await (await import('./notifications')).stopGridNotifications();const current=monitor;await current?.stop();if(monitor===current)monitor=null;}

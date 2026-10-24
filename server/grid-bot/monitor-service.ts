@@ -6,7 +6,7 @@ import type {GridObservation,ReconciliationOperation} from './reconciliation';
 import type {GridReconciliation} from './execution';
 import {reconcileGridLimit,gridReconciliationOutcome} from './execution';
 import {reconcileGridLaunch} from './launch-reconciliation';
-import {requestDigest} from './launch-storage';
+import {requestDigest} from './launch-storage-core';
 import {gridWindow,type WindowLevel} from './window';
 import {planGridRebalance} from './rebalance';
 import {reconcileGridReduction} from './lifecycle-policy';

@@ -7,7 +7,7 @@ import {readFileSync} from 'node:fs';
 import Decimal from 'decimal.js';
 import bs58 from 'bs58';
 import {gridExecutorRuntime} from '../../server/grid-bot/executor-runtime';
-import {GridProvision} from '../../server/grid-bot/provision';
+import {GridProvision} from '../../server/grid-bot/provision-core';
 import {GridStorage,type DraftRecord} from '../../server/grid-bot/storage';
 import {GridLaunchStorage,requestDigest,type ExactGridRequest} from '../../server/grid-bot/launch-storage';
 import {GridMonitorStorage} from '../../server/grid-bot/monitor-storage';

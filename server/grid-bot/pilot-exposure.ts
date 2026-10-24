@@ -1,5 +1,5 @@
 import Decimal from 'decimal.js';
-import type {ExactGridRequest} from './launch-storage';
+import type {ExactGridRequest} from './launch-storage-core';
 import {gridAddsExposure} from './margin';
 import {orderedGridFills,type GridEconomicFill} from './pnl';
 import type {GridObservation} from './reconciliation';

@@ -12,6 +12,7 @@ it('U2a full product typecheck has CI New errors: 0 and changed tests typecheck'
   testFiles.push(...['auto-resume-storage','cycle-runtime','draft-storage','lean-capacity-storage','monitor-storage','range-move-storage'].map(f=>resolve('tests/grid-bot/'+f+'.test.ts')));
   testFiles.push(resolve('tests/server/grid-worker-u2a-wallets.test.ts'));
   testFiles.push(resolve('tests/server/grid-worker-package-final.test.ts'));
+  testFiles.push(resolve('tests/server/grid-worker-u4.test.ts'),resolve('tests/server/grid-worker-u3-postgres.test.ts'));
   const program = ts.createProgram([...parsed.fileNames, ...testFiles], { ...parsed.options, incremental: false, noEmit: true });
   const errors = ts.getPreEmitDiagnostics(program).filter(d => d.category === ts.DiagnosticCategory.Error);
   const baseline = new Map<string, number>();

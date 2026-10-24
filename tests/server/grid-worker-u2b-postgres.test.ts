@@ -1,3 +1,5 @@
+import {createConnection,type Socket} from 'node:net';
+import {workerHttp,statusCache} from '../../server/grid-worker/http';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Pool, type PoolClient } from 'pg';
 import { createHash, createPrivateKey, createPublicKey, randomUUID, sign } from 'node:crypto';
@@ -219,6 +221,22 @@ describe('U2b PostgreSQL races and durable evidence', () => {
     const readers=Array.from({length:5},async()=>{for(let n=0;n<20;n++)await tx(async()=>{order.push('shared');});});
     release.resolve();await Promise.all([first,exclusive,...readers]);expect(order[0]).toBe('exclusive');
   });
+  it('U4 slow HTTP connections and database reads cannot starve the dedicated renewal lane',async()=>{
+    await external();const current=await lease().acquire(randomUUID(),acceptance,async()=>true),now=Date.now();
+    const cache=statusCache(()=>({standby:false,database:true,inControl:true,test:true,paused:true,critical:false,reconciled:false,
+      renewalAt:now,passAt:now,botCheckTimes:[],running:0,waiting:0,commitHash:'EXAMPLE'}));
+    const server=workerHttp(cache,()=>{}),sockets:Socket[]=[];
+    await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+    const address=server.address();if(!address||typeof address==='string')throw Error('EXAMPLE_ADDRESS');
+    try{
+      await Promise.all(Array.from({length:32},()=>new Promise<void>(resolve=>{const socket=createConnection(address.port,'127.0.0.1');sockets.push(socket);
+        socket.on('error',()=>resolve());socket.on('connect',()=>{socket.write('GET / HTTP/1.1\r\nHost: EXAMPLE\r\n');resolve();});})));
+      const reads=Array.from({length:3},()=>pool.query('SELECT pg_sleep(2)'));
+      const started=Date.now(),renewed=await lease().renew(current,50,true,true);
+      expect(renewed.localExpiresAt).toBeGreaterThan(current.localExpiresAt);expect(Date.now()-started).toBeLessThan(5000);
+      await Promise.all(reads);
+    }finally{sockets.forEach(s=>s.destroy());server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));cache.close();}
+  },15000);
   it('five-second POST drains for exclusive owner pause; independent renewal and matching ack complete within20s',async()=>{
     await external();const current=await lease().acquire(randomUUID(),acceptance,async()=>true);
     const message=await challenge();const entered=latch(),start=Date.now();

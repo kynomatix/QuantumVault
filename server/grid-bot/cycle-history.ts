@@ -5,7 +5,7 @@ import type {GridPolicy} from './policy-hmac';
 import {canonicalGridPolicy} from './policy-hmac';
 import {retainedGridCycles} from './cycle-policy';
 import {gridClientOrderId} from './order-identity';
-import type {ExactGridRequest} from './launch-storage';
+import type {ExactGridRequest} from './launch-storage-core';
 import type {GridObservation, ReconciliationOperation} from './reconciliation';
 import {replayGridCycles, type CycleReplayInput, type CycleOperation, type CycleInventoryAllocation} from './cycle-replay';
 

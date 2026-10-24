@@ -35,6 +35,7 @@ export function createGridWorkerDatabase(databaseUrl: string) {
     client.on('error', () => { console.error('GRID_WORKER_DATABASE_CLIENT_ERROR'); });
   });
   return {
+    pool,
     async connect(): Promise<PoolClient> {
       const client = await pool.connect();
       try {
