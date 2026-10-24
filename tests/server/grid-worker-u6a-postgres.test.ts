@@ -26,7 +26,7 @@ import {serviceBotPass} from '../../server/grid-worker/bot-pass';
 import {ProtectionTruth} from '../../server/grid-worker/protection-truth';
 import {GridIncidents} from '../../server/grid-worker/incidents';
 import {rescueOffer,rescueView} from '../../server/grid-worker/rescue-state';
-import {validWorkerChallenge} from '../../client/src/lib/grid-worker-view';
+import {validWorkerChallenge,parseWorkerStatus} from '../../client/src/lib/grid-worker-view';
 import type {GridRuntimeDependencies} from '../../server/grid-bot/runtime-dependencies';
 const fixture=vi.hoisted(()=>({key:undefined as Buffer|undefined}));
 vi.mock('../../server/execution/umk',()=>({getExecutionUmk:async()=>({umk:Buffer.from(fixture.key!),cleanup(){}})}));
@@ -225,4 +225,12 @@ it('releases a failed Start reservation only after proving zero custody and exec
   await tx(async c=>{await c.query('DELETE FROM grid_launch_accounts WHERE bot_id=$1',[botId]);await c.query('UPDATE grid_bots SET protocol_subaccount_id=NULL WHERE id=$1',[botId]);});
   expect(await worker.releaseFailedZeroState(id,holder)).toBe(true);
   expect((await pool.query('SELECT state,terminal_proof_digest FROM grid_worker_reservations')).rows[0]).toMatchObject({state:'released',terminal_proof_digest:expect.stringMatching(/^[0-9a-f]{64}$/)});
+});
+
+it('round-trips real status with rescue state and reset blocker',async()=>{
+  const r=await start();expect(r.status).toBe(200);
+  const status=await api('/status');expect(status.status,JSON.stringify(status.data)).toBe(200);
+  expect(parseWorkerStatus(JSON.parse(JSON.stringify(status.data)))).not.toBeNull();
+  expect(status.data.cardState).toBe('rescue_running');expect(status.data.resetBlockedBy).toContain('rescue');
+  expect(status.data.rescue.requestId).toBe(r.data.rescue.requestId);expect(status.data.rescueAlertsPhone).toBe(false);
 });

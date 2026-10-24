@@ -55,7 +55,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   let queue:WorkerStartQueue;
   const ledger:GridLaunchStorage=new GridLaunchStorage(pool,async()=>{if(!ready())throw Error('GRID_WORKER_NOT_READY');},r=>readGridMargin(json,r),
     {lease:holder,ready,terminate,verifyStart:(c,id)=>queue.verify(c,id),releaseReservation:(c,id)=>queue.release(c,id)});
-  const json:GridLaunchReads=new GridLaunchReads(dependencies.transport,ledger,'0.5',dependencies.fetcher),reads=new GridMonitorReads(json),monitor=new GridMonitorStorage(ledger,OWNER_MASTER_PUBLIC_KEYS);
+  const json:GridLaunchReads=new GridLaunchReads(dependencies.transport,ledger,'0.5',dependencies.fetcher),reads=new GridMonitorReads(json),monitor=new GridMonitorStorage(ledger);
   const executor=gridExecutorCore(monitor,reads,json,dependencies),reconciliation=new WorkerReconciliation(pool,terminate,json,reads,dependencies,incidents);
   queue=new WorkerStartQueue(pool,terminate,incidents,holder,dependencies,async()=>{
     // Full transfer/withdrawal history is deliberately unavailable in the frozen read inventory.
