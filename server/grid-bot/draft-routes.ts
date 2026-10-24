@@ -29,7 +29,7 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
   const requests=async()=>provided?provided.requests??null:(await import('./start-requests')).mainStartRequests();
   app.post('/api/grid-bots/:id/start',requireWallet,async(req,res)=>{
     res.set('Cache-Control','no-store');
-    if(!gates().startEnabled){res.status(503).json({error:'Grid Start is off or its worker is unavailable. Existing safety controls remain available.'});return;}
+    if(process.env.GRID_ENTRIES_PAUSED==='true'||!gates().startEnabled){res.status(503).json({error:'Grid Start is off or its worker is unavailable. Existing safety controls remain available.'});return;}
     const id=uuid.safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid Grid id'});return;}
     try{
       const queue=await requests();

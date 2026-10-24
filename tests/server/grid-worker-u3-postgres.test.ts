@@ -273,8 +273,10 @@ import {startWorkerRuntime} from '../../server/grid-worker/runtime';
 // Runtime orchestration uses the real isolated PostgreSQL schema. Full readiness and
 // emitted identity checks are independently exercised by the U1/U2a build suites.
 vi.mock('../../server/grid-worker/boot',()=>({probeGridWorkerSchema:async()=>({})}));
-vi.mock('../../server/grid-worker/build-identity',()=>({identityMatches:()=>true,workerBuildIdentity:{commitHash:'EXAMPLE'}}));
+vi.mock('../../server/grid-worker/build-identity',()=>({identityMatches:vi.fn(()=>true),workerBuildIdentity:{commitHash:'EXAMPLE'}}));
+import {identityMatches} from '../../server/grid-worker/build-identity';
 describe('U4 PostgreSQL supervisor lifecycle',()=>{
+  beforeEach(async()=>{vi.mocked(identityMatches).mockReturnValue(true);await pool.query('TRUNCATE grid_worker_incidents');});
   const factory=()=>({pool,connect:()=>pool.connect(),close:async()=>{}});
   it('legacy standby keeps HTTP alive and never obtains a holder',async()=>{
     const fatal=vi.fn(),runtime=await startWorkerRuntime({PORT:'0',GRID_REMOTE_WORKER_ENABLED:'true'},factory,fatal);
@@ -282,7 +284,7 @@ describe('U4 PostgreSQL supervisor lifecycle',()=>{
       expect((await pool.query('SELECT holder_boot_id FROM grid_worker_host')).rows[0].holder_boot_id).toBeNull();expect(fatal).not.toHaveBeenCalled();}
     finally{await runtime.stop();}
   });
-  it('external test mode renews, dispatches zero money, writes zero outbox and releases only after expiry',async()=>{
+  it.each(['lease','identity'] as const)('external test mode renews with zero money then self-fences on %s loss',async loss=>{
     await arm();await tx(async c=>{await localContext(c,'transition');
       await c.query("SELECT set_config('qv.grid_worker_owner_verified','true',true),set_config('qv.grid_worker_ready','true',true)");
       const fixtureSha256=createHash('sha256').update('EXAMPLE_RUNTIME_BUILD').digest('hex');
@@ -296,7 +298,14 @@ describe('U4 PostgreSQL supervisor lifecycle',()=>{
       expect(Number((await pool.query('SELECT count(*) AS n FROM grid_risk_events')).rows[0].n)).toBe(before);
       expect(Number((await pool.query('SELECT count(*) AS n FROM grid_worker_send_audit')).rows[0].n)).toBe(0);
       expect(Number((await pool.query('SELECT count(*) AS n FROM grid_operations')).rows[0].n)).toBe(0);
-    }finally{await runtime.stop();fetcher.mockRestore();}
+      if(loss==='identity')vi.mocked(identityMatches).mockReturnValue(false);
+      else await tx(async c=>{await c.query('ALTER TABLE grid_worker_host DISABLE TRIGGER USER');
+        await c.query("UPDATE grid_worker_host SET lease_expires_at=clock_timestamp()-interval '1 second'");
+        await c.query('ALTER TABLE grid_worker_host ENABLE TRIGGER USER');},'exclusive');
+      await delay(5500);expect(fatal).toHaveBeenCalledOnce();expect(runtime.status().inControl).toBe(false);
+      expect((await pool.query("SELECT code FROM grid_worker_incidents WHERE code=$1",[loss==='identity'?'schema_drift':'lease_lost'])).rowCount).toBe(1);
+      expect(fetcher).not.toHaveBeenCalled();
+    }finally{await runtime.stop();fetcher.mockRestore();vi.mocked(identityMatches).mockReturnValue(true);}
     const host=(await pool.query('SELECT holder_boot_id,drain_requested FROM grid_worker_host')).rows[0];
     expect(host.holder_boot_id).toBeNull();expect(host.drain_requested).toBe(false);
   },80000);

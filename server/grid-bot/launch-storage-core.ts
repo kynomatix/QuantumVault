@@ -8,7 +8,7 @@ import type {GridSettlementOutcome} from './execution-failure';
 import {randomUUID} from 'node:crypto';
 import {fencedTransaction, walletFences, type GridDeadline} from '../grid-worker/transaction';
 import {readLegacyHost,requireLegacyAction,type WorkerHost} from '../grid-worker/host';
-import {localContext,legacyKillContext} from '../grid-worker/host';
+import {localContext,legacyKillContext,tightenHost} from '../grid-worker/host';
 import {gridActionAllowed} from '../grid-worker/kill';
 import {leaseLocallyValid} from '../grid-worker/lease-clock';
 import {identityMatches} from '../grid-worker/build-identity';
@@ -99,6 +99,11 @@ export class GridLaunchStorage {
   /** All POST kinds share the takeover fence through completion. No async gap after final authority. */
   private async autoResumeFence(c:PoolClient,r:ExactGridRequest){
     if(!gridAddsExposure(r))return true;
+    const host=this.hosts.get(c);
+    if(host?.observer_fenced&&(host.execution_mode==='external'||host.legacy_controls_enabled)){
+      const bot=(await c.query('SELECT status FROM grid_bots WHERE id=$1',[r.botId])).rows[0];
+      if(!bot||!['active','canary'].includes(bot.status))return false;
+    }
     const a=(await c.query('SELECT generation FROM grid_auto_resume WHERE bot_id=$1',[r.botId])).rows[0];
     return String(a?.generation??'0')===String(r.authority.autoResumeGeneration??'0');
   }
@@ -305,7 +310,13 @@ export class GridLaunchStorage {
   }
   hostAction(c:PoolClient,action:GridAction,options:Parameters<typeof requireLegacyAction>[2]={}){
     if(!this.hosts.has(c))throw Error('GRID_HOST_FENCE_REQUIRED');
-    if(this.controls.has(c)&&['settle','resume'].includes(action))return;
+    if(process.env.GRID_ENTRIES_PAUSED==='true'&&['start','resume','cycle'].includes(action))throw Error('GRID_HOST_ACTION_DENIED');
+    if(this.controls.has(c)&&['settle','resume'].includes(action)){
+      const h=this.hosts.get(c);
+      if(action==='resume'&&h&&(h.execution_mode==='external'||h.legacy_controls_enabled)
+        &&(h.entries_paused||h.observer_fenced||h.drain_requested||!h.execution_enabled||h.run_mode!=='trading'))throw Error('GRID_HOST_ACTION_DENIED');
+      return;
+    }
     if(this.worker){
       const host=this.hosts.get(c),lease=this.worker.lease();
       const context=legacyKillContext(host??null,{...options,role:'grid-worker',
@@ -315,6 +326,11 @@ export class GridLaunchStorage {
       return;
     }
     requireLegacyAction(this.hosts.get(c)??null,action,options);
+  }
+  hostPause(c:PoolClient):string|null {
+    if(!this.hosts.has(c))throw Error('GRID_HOST_FENCE_REQUIRED');
+    const h=this.hosts.get(c);
+    return h?.entries_paused&&(h.execution_mode==='external'||h.legacy_controls_enabled||process.env.GRID_ENTRIES_PAUSED==='true')?String(h.pause_revision):null;
   }
   async verifyWorkerStart(c:PoolClient,botId:string){if(this.worker)await this.worker.verifyStart(c,botId);}
   async releaseWorkerReservation(c:PoolClient,botId:string){if(this.worker)await this.worker.releaseReservation(c,botId);}
@@ -348,6 +364,7 @@ export class GridLaunchStorage {
     try {
       return await fencedTransaction(this.pool,async(c,deadline)=>{
         await this.ready(c);
+        if(process.env.GRID_ENTRIES_PAUSED==='true'&&(await c.query("SELECT to_regclass('grid_worker_host') IS NOT NULL AS present")).rows[0]?.present)await tightenHost(c,{pause:true});
         const control=ownerControl&&!this.worker&&process.env.GRID_REMOTE_WORKER_ENABLED==='true';
         const host=this.worker||control?(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live FROM grid_worker_host WHERE singleton_id=1')).rows[0]:await readLegacyHost(c);this.hosts.set(c,host);if(control)this.controls.add(c);
         if(this.worker){

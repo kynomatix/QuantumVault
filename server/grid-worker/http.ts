@@ -25,7 +25,7 @@ export function statusHandler(cache: ReturnType<typeof statusCache>, poll: () =>
     response.writeHead(status, {'Content-Type':known&&allowed?(path==='/'?'text/html; charset=utf-8':'application/json; charset=utf-8'):'text/plain; charset=utf-8',
       'Content-Length':body.length,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',
       'X-Robots-Tag':'noindex','Content-Security-Policy':bytes.csp,...(status===405?{'Allow':'GET, HEAD'}:{})});
-    if (known && allowed && path === '/healthz') poll();
+    if (method === 'GET' && path === '/healthz') poll();
     response.end(method==='HEAD'?undefined:body);
   };
 }

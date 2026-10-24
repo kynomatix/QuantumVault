@@ -1,3 +1,4 @@
+import {priorityIncident,type CriticalIncidentCode} from './incident-policy';
 export type WorkerState = 'offline' | 'attention' | 'test' | 'running';
 export const STATUS_REASONS = Object.freeze({
   standby: 'Waiting for the worker to be enabled.', stale: 'The latest checks are overdue.',
@@ -9,12 +10,14 @@ export interface StatusMemory {
   standby: boolean; database: boolean; inControl: boolean; test: boolean; paused: boolean;
   critical: boolean; reconciled: boolean; renewalAt: number | null; passAt: number | null;
   botCheckTimes: readonly (number | null)[]; waiting: number; running: number; commitHash: string;
+  incidentCode?: CriticalIncidentCode | null;
 }
 export interface PublicSnapshot {
   schemaVersion: 1; protocolVersion: 'grid-worker-v3-a1-wire1'; state: WorkerState; reason: StatusReason;
   snapshotAt: string | null; ageSeconds: number | null; database: boolean; inControl: boolean;
   mode: 'test' | 'trading'; botsOnHold: boolean; lastCheckIn: string | null; lastBotCheck: string | null;
   botsRunning: number; waitingToStart: number; commit: string | null;
+  incidentCode: CriticalIncidentCode | null;
 }
 const stamp = (value: number | null) => value !== null && Number.isFinite(value) ? new Date(value).toISOString() : null;
 export function publicSnapshot(memory: StatusMemory, now = Date.now()): PublicSnapshot {
@@ -22,13 +25,15 @@ export function publicSnapshot(memory: StatusMemory, now = Date.now()): PublicSn
   const oldest = times.every(t => t !== null && Number.isFinite(t) && t <= now) ? Math.min(...times as number[]) : null;
   const age = oldest === null ? null : Math.floor((now - oldest) / 1000);
   const offline = memory.standby || !memory.database || !memory.inControl || age === null || age >= 45;
-  const attention = memory.critical || !memory.reconciled || memory.paused;
+  const critical = memory.critical || !!memory.incidentCode;
+  const attention = critical || !memory.reconciled || memory.paused;
   const state: WorkerState = offline ? 'offline' : attention ? 'attention' : memory.test ? 'test' : 'running';
-  const reason: StatusReason = memory.standby ? 'standby' : offline ? 'stale' : memory.critical ? 'critical'
+  const reason: StatusReason = memory.standby ? 'standby' : offline ? 'stale' : critical ? 'critical'
     : !memory.reconciled ? 'reconciliation' : memory.paused ? 'paused' : memory.test ? 'test' : 'running';
   const counts = (n: number) => Number.isSafeInteger(n) && n >= 0 ? Math.min(n, 999999) : 0;
   const botTimes = memory.botCheckTimes;
   return {schemaVersion: 1, protocolVersion: 'grid-worker-v3-a1-wire1', state, reason, snapshotAt: stamp(oldest), ageSeconds: age,
+    incidentCode: priorityIncident(memory.incidentCode ? [memory.incidentCode] : []),
     database: memory.database, inControl: memory.inControl, mode: memory.test ? 'test' : 'trading', botsOnHold: memory.paused,
     lastCheckIn: stamp(memory.renewalAt), lastBotCheck: stamp(botTimes.length ? (botTimes.every(t => t !== null) ? Math.min(...botTimes as number[]) : null) : memory.passAt),
     botsRunning: counts(memory.running), waitingToStart: counts(memory.waiting), commit: /^[a-f0-9]{40}$/.test(memory.commitHash) ? memory.commitHash.slice(0, 8) : null};

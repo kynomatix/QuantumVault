@@ -176,13 +176,13 @@ export class WorkerStartRequests {
 /** U4 must call within its locked custody/final-send transaction. Expiry does not strand admitted work. */
 export async function verifyAdmittedStart(c:PoolClient,id:string,holder:WorkerRequestContext,umk:Buffer):Promise<StoredStartConsent> {
   const row=await requestLocks(c,id);await workerHost(c,holder);
-  const {consent}=await verified(c,row,umk,['admitted']);
   const r=(await c.query(`SELECT state,start_request_id,observed_exposure_usd>budget_notional_usd AS over_budget,
     facts_at<=clock_timestamp() AND facts_at>clock_timestamp()-interval '5 seconds' AS fresh
     FROM grid_worker_reservations WHERE bot_id=$1 FOR UPDATE`,[row.bot_id])).rows[0];
   if(!r||r.start_request_id!==id||!['held','uncertain'].includes(r.state))throw new StartRefusal('authority_refused');
   if(!r.fresh)throw new StartRefusal('authority_refused');
   if(r.over_budget)throw new StartRefusal('spending_limit');
+  const {consent}=await verified(c,row,umk,['admitted']);
   const h=await externalHost(c),totals=await allReservationTotals(c);
   if(h.global_ceiling_usd!==null&&(new Decimal(totals.reserve).gt(h.global_ceiling_usd)||new Decimal(totals.cash).gt(h.global_ceiling_usd)))throw new StartRefusal('spending_limit');
   return consent;

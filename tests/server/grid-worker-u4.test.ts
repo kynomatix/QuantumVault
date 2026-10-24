@@ -47,8 +47,9 @@ describe('U4 public liveness',()=>{
     try{const get=run('GET'),head=run('HEAD');expect(head.head).toEqual(get.head);expect(head.body).toBeUndefined();expect(get.head[0]).toBe(path==='/'?200:503);
       for(const method of ['POST','PUT','PATCH','DELETE','OPTIONS','CONNECT','TRACE'])expect(run(method).head[0]).toBe(405);
       for(const url of ['/healthz?x=1','/?x=1','/healthz/','/metrics','/%68ealthz'])expect(run('GET',url).head[0]).toBe(404);
-      expect(poll).toHaveBeenCalledTimes(path==='/healthz'?2:0);
+      expect(poll).toHaveBeenCalledTimes(path==='/healthz'?1:0);
       expect(get.head[1]['Content-Security-Policy']).toContain("default-src 'none'");
+      expect(get.head[1]).toMatchObject({'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Robots-Tag':'noindex'});
     }finally{cache.close();}
   });
   it('caps connections and request time and renders only public values',()=>{

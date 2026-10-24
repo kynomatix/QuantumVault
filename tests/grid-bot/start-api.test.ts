@@ -25,6 +25,13 @@ async function withApi(env:NodeJS.ProcessEnv,run:(url:string,start:ReturnType<ty
 }
 const headers={'content-type':'application/json','x-wallet':'EXAMPLE_OWNER'};
 describe('C7 guarded Start and independent release flags',()=>{
+  it('maps retained consent conflicts to 409 and refuses Start while MAIN entries flag is set',async()=>{
+    gridWorkerState(true);await withApi({GRID_BOT_ENABLED:'true',GRID_START_ENABLED:'true',GRID_WORKER_ENABLED:'true'},async(url,start)=>{
+      const post=()=>fetch(url+'/'+randomUUID()+'/start',{method:'POST',headers,body:JSON.stringify(expected)});
+      start.mockRejectedValueOnce(Error('GRID_CONSENT_REQUEST_CONFLICT'));expect((await post()).status).toBe(409);
+      start.mockClear();vi.stubEnv('GRID_ENTRIES_PAUSED','true');expect((await post()).status).toBe(503);expect(start).not.toHaveBeenCalled();
+    });
+  });
   it.each([undefined,'','false','TRUE','True','1',' true','true ','on','yes'])('rejects ambiguous flag %s',value=>expect(gridFlag(value)).toBe(false));
   it('enables only exact true and defaults off',()=>{expect(gridFlag('true')).toBe(true);expect(gridRuntimeGates({})).toMatchObject({startConfigured:false,startEnabled:false,workerEnabled:false,workerRunning:false});});
   it('requires a running worker and draft access before admitting new Starts',()=>{

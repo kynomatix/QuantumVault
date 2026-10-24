@@ -4,6 +4,7 @@ import {describe,it,expect,vi} from 'vitest';
 import {randomUUID} from 'node:crypto';
 import {gridEntrySafety,gridRiskTrigger,reconcileGridReduction,gridOwnedLive} from '../../server/grid-bot/lifecycle-policy';
 import {GridLifecycleService,gridResumeClearance,type GridLifecycleDeps,type GridSettlementFact} from '../../server/grid-bot/lifecycle-service';
+import {GridLifecycleStorage} from '../../server/grid-bot/lifecycle-storage';
 import {gridTerminalFact} from '../../server/grid-bot/lifecycle-runtime';
 import {reconcileGridLimit} from '../../server/grid-bot/execution';
 import {requestDigest,type ExactGridRequest,type DurableGridOperation} from '../../server/grid-bot/launch-storage';
@@ -33,6 +34,18 @@ function fixture(action:string|null='stop'){
   return {claim,request,order,bot,observation,operations,launch,monitor,storage,deps,service,proof,own,get life(){return life;}};
 }
 describe('Grid lifecycle boundary and failure drills',()=>{
+  it('host pause uses the monitor claim and stable revision key, then cancels only entries through ordinary Pause',async()=>{
+    const f=fixture(null);f.own();const hostPause=vi.fn(()=> '7');
+    Object.assign(f.launch,{hostPause});
+    const storage=new GridLifecycleStorage(f.monitor as unknown as ConstructorParameters<typeof GridLifecycleStorage>[0]);
+    const request=vi.spyOn(storage,'request').mockImplementation(f.storage.request as any);
+    await storage.observeHostPause(f.claim);await storage.observeHostPause(f.claim);
+    expect(request).toHaveBeenNthCalledWith(1,'EXAMPLE_OWNER',f.claim.id,'host-pause:7:'+f.claim.id,'pause',{},'risk',f.claim);
+    expect(request.mock.calls[0][2]).toBe(request.mock.calls[1][2]);
+    await f.service.tick(f.claim,signal());
+    expect(f.deps.send).toHaveBeenCalledWith(f.claim,expect.objectContaining({kind:'cancel',data:expect.objectContaining({order_id:'10'})}));
+    expect(f.deps.send.mock.calls.every(call=>call[1].kind==='cancel')).toBe(true);expect(f.deps.recycle).not.toHaveBeenCalled();
+  });
   it('range move cancels a backed old exit before activating an epoch',async()=>{const f=fixture('regrid');f.own(true);expect(await f.service.tick(f.claim,signal())).toBe('pending');expect(f.deps.send).toHaveBeenCalledWith(f.claim,expect.objectContaining({kind:'cancel',data:expect.objectContaining({order_id:'10'})}));expect(f.deps.move).not.toHaveBeenCalled();});
   it('range move waits for terminal uncertain requests',async()=>{const f=fixture('regrid');f.own();f.operations[0].state='unconfirmed';expect(await f.service.tick(f.claim,signal())).toBe('venue_operation_unresolved');expect(f.deps.move).not.toHaveBeenCalled();expect(f.deps.send).not.toHaveBeenCalled();});
   it('range move requires completed reconciliation before activation',async()=>{const f=fixture('regrid');f.monitor.reconcile.mockResolvedValue({entriesAllowed:false});expect(await f.service.tick(f.claim,signal())).toBe('reconciliation_required');expect(f.deps.move).not.toHaveBeenCalled();f.monitor.reconcile.mockResolvedValue({entriesAllowed:true});expect(await f.service.tick(f.claim,signal())).toBe('range_moved');expect(f.deps.move).toHaveBeenCalledOnce();expect(f.storage.complete).not.toHaveBeenCalled();});

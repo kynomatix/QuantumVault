@@ -5,6 +5,7 @@ import { fencedTransaction, type ClientLane } from './transaction';
 import {leaseLocallyValid,type WorkerLease} from './lease-clock';
 export {leaseLocallyValid,type WorkerLease} from './lease-clock';
 export interface AcceptanceBound { verified: boolean; milliseconds: number; skewMs: number }
+export interface RenewalGates { entries_paused: boolean; pause_revision: string; pause_ack_revision: string | null; observer_fenced: boolean }
 function boundValid(bound: AcceptanceBound) {
   return bound.verified && Number.isSafeInteger(bound.milliseconds) && bound.milliseconds >= 0
     && Number.isSafeInteger(bound.skewMs) && bound.skewMs >= 0 && bound.skewMs < 45_000;
@@ -50,7 +51,7 @@ export class GridWorkerLease {
     if (!await reconcile(lease) || !leaseLocallyValid(lease)) throw Error('GRID_TAKEOVER_RECONCILIATION_REQUIRED');
     return lease;
   }
-  async renew(lease: WorkerLease, skewMs: number, progress: boolean, healthPoll = false): Promise<WorkerLease> {
+  async renew(lease: WorkerLease, skewMs: number, progress: boolean, healthPoll = false): Promise<WorkerLease & RenewalGates> {
     if (!leaseLocallyValid(lease) || !Number.isSafeInteger(skewMs) || skewMs < 0 || skewMs >= 45_000) throw Error('GRID_LEASE_EXPIRED');
     return fencedTransaction(this.renewal, async c => {
       await localContext(c, 'heartbeat', lease);
@@ -59,11 +60,13 @@ export class GridWorkerLease {
       const row = (await c.query(`UPDATE grid_worker_host SET lease_expires_at=clock_timestamp()+interval '45 seconds',heartbeat_at=clock_timestamp(),
         progress_at=CASE WHEN $3 THEN clock_timestamp() ELSE progress_at END,
         last_healthz_poll_at=CASE WHEN $4 THEN clock_timestamp() ELSE last_healthz_poll_at END
-        WHERE singleton_id=1 AND holder_boot_id=$1::uuid AND fencing_epoch=$2::bigint AND lease_expires_at>clock_timestamp() RETURNING fencing_epoch`,
+        WHERE singleton_id=1 AND holder_boot_id=$1::uuid AND fencing_epoch=$2::bigint AND lease_expires_at>clock_timestamp()
+        RETURNING fencing_epoch,entries_paused,pause_revision,pause_ack_revision,observer_fenced`,
         [lease.bootId, lease.epoch, progress, healthPoll && await this.ready()])).rows[0];
       const next = { ...lease, sentAt, localExpiresAt: sentAt + 45_000 - skewMs };
       if (!row || !leaseLocallyValid(next)) throw Error('GRID_LEASE_EXPIRED');
-      return next;
+      return { ...next, entries_paused: row.entries_paused, pause_revision: String(row.pause_revision),
+        pause_ack_revision: row.pause_ack_revision === null ? null : String(row.pause_ack_revision), observer_fenced: row.observer_fenced };
     }, { mode: 'none', terminate: this.terminate });
   }
   async release(lease: WorkerLease): Promise<void> {

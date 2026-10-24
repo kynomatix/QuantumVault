@@ -1848,6 +1848,7 @@ import { classifySignal } from "./trading/signal-classifier";
 import { registerTelegramMiniAppRoutes } from "./telegram-mini-app";
 import { registerAiTraderRoutes } from "./ai-trader/routes";
 import { registerGridBotRoutes } from "./grid-bot/draft-routes";
+import { registerGridWorkerAdminRoutes } from "./grid-worker/admin-routes";
 import { registerGridPlannerRoutes } from "./grid-planner/routes";
 import { registerMarketStatsRoutes } from "./market-stats/routes";
 import { createSigningNonce, verifySignatureAndConsumeNonce, initializeWalletSecurity, getSession, getSessionByWalletAddress, invalidateSession, cleanupExpiredNonces, revealMnemonic, enableExecution, revokeExecution, emergencyStopWallet, getUmkForWebhook, healExecutionUmkFromStorage, restoreWalletSecurityFromStorage, computeBotPolicyHmac, verifyBotPolicyHmac, decryptAgentKeyStrict, decryptBotSubaccountKey, repairStaleV3AgentKeyFromLegacy, generateAgentWalletWithMnemonic, encryptAndStoreMnemonic, encryptMnemonicForStorage, encryptAgentKeyV3, encryptBotSubaccountKeyV3, encryptPooledSubaccountKeyV3, rebindRetainedKeyToBotUuidV3, decryptMnemonic, deriveBotKeypairFromAgentSeed, BOT_DERIVATION_PATH_VERSION } from "./session-v3";
@@ -6638,6 +6639,7 @@ export async function registerRoutes(
   registerGridPlannerRoutes(app, requireWallet);
   registerMarketStatsRoutes(app, requireWallet);
   registerGridBotRoutes(app, requireWallet);
+  registerGridWorkerAdminRoutes(app, requireWallet);
 
   // Helper to generate a unique referral code
   const generateReferralCode = (): string => {

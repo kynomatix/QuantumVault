@@ -15,6 +15,16 @@ export interface GridControl {id:string;bot_id:string;action:GridControlAction;s
 export class GridLifecycleStorage {
   readonly auto:GridAutoResumeStorage;
   constructor(readonly monitor:GridMonitorStorage){this.auto=new GridAutoResumeStorage(monitor);}
+  /** Only the executor holding this bot claim turns the host revision into ordinary Pause. */
+  async observeHostPause(claim:GridMonitorClaim):Promise<void>{
+    const request=await this.monitor.launch.transaction(async c=>{
+      const revision=this.monitor.launch.hostPause(c);if(revision===null)return null;
+      const bot=await this.monitor.assertLease(c,claim);
+      if(['draft','failed','stopped','stopping'].includes(bot.status))return null;
+      return {wallet:String(bot.wallet_address),revision};
+    });
+    if(request)await this.request(request.wallet,claim.id,`host-pause:${request.revision}:${claim.id}`,'pause',{},'risk',claim);
+  }
   /** Owner scope, request deduplication and the entry fence commit in one transaction. */
   async request(wallet:string,botId:string,key:string,action:GridControlAction,evidence:Record<string,unknown>={},source:'owner'|'risk'='owner',claim?:GridMonitorClaim):Promise<GridControl>{
     if(!['owner','risk'].includes(source)||!key||key.length>200||!['pause','resume','resync','stop','band'].includes(action)||source==='owner'&&action==='band')throw new GridStorageError('invariant');
@@ -22,7 +32,8 @@ export class GridLifecycleStorage {
       this.monitor.launch.hostAction(c,action==='resume'?'resume':'settle');
       await walletFences(c,[wallet]);
       await waitGridWorkerFence(c,botId);
-      if(source==='owner'&&action==='stop'&&process.env.GRID_REMOTE_WORKER_ENABLED==='true'){
+      const workerPackage=source==='owner'&&action==='stop'&&!!(await c.query("SELECT to_regclass('grid_worker_requests') IS NOT NULL AS present")).rows[0]?.present;
+      if(workerPackage){
         await identityFences(c,[botId],[]);
         await supersedeStartConsents(c,wallet,[botId],'stop');
       }
@@ -40,7 +51,7 @@ export class GridLifecycleStorage {
         const last=(await c.query("SELECT * FROM grid_control_requests WHERE bot_id=$1 AND action='stop' AND state='complete' ORDER BY completed_at DESC LIMIT 1",[botId])).rows[0];
         if(last)return bind(last);
       }
-      if(bot.status==='draft'&&source==='owner'&&action==='stop'&&process.env.GRID_REMOTE_WORKER_ENABLED==='true'){
+      if(bot.status==='draft'&&workerPackage){
         // Cancelling an unadmitted draft commits the consent supersession without custody or execution.
         if((await c.query("SELECT 1 FROM grid_worker_requests WHERE bot_id=$1 AND state='admitted' LIMIT 1",[botId])).rowCount)throw new GridStorageError('conflict');
         const row=(await c.query(`INSERT INTO grid_control_requests(id,bot_id,request_key,action,source,previous_status,evidence,state,completed_at)

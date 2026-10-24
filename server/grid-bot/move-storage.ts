@@ -119,6 +119,7 @@ export class GridMoveStorage {
     try{
       if(!timingSafeEqual(Buffer.from(gridMoveProposalHash(p,authority.umk),'hex'),Buffer.from(proposalHash,'hex')))throw new GridMoveError('Move confirmation signature changed');
       return await this.lifecycle.monitor.launch.transaction(async c=>{
+        this.lifecycle.monitor.launch.hostAction(c,'resume');
         const bot=await this.lock(c,wallet,id);
         const prior=(await c.query('SELECT r.*,k.evidence AS requested_evidence FROM grid_control_keys k JOIN grid_control_requests r ON r.id=k.control_id WHERE k.bot_id=$1 AND k.request_key=$2',[id,key])).rows[0];
         if(prior){if(prior.action!=='regrid'||prior.requested_evidence?.proposalHash!==proposalHash)throw new GridMoveError('Request identity changed');return {id:prior.id,state:prior.state};}
@@ -137,6 +138,7 @@ export class GridMoveStorage {
   async activate(claim:GridMonitorClaim,signal:AbortSignal){
     this.requireEnabled();const snapshot=await this.lifecycle.monitor.snapshot(claim),authority=await this.collect(snapshot.bot.wallet_address,claim.id,signal);
     try{return await this.lifecycle.monitor.launch.transaction(async c=>{
+      this.lifecycle.monitor.launch.hostAction(c,'resume');
       const bot=await this.lock(c,snapshot.bot.wallet_address,claim.id);await this.lifecycle.monitor.assertLease(c,claim);
       const request=(await c.query("SELECT r.* FROM grid_lifecycle l JOIN grid_control_requests r ON r.id=l.active_request WHERE l.bot_id=$1 AND r.action='regrid' AND r.state='pending'",[claim.id])).rows[0];
       if(!request)return 'move_superseded';

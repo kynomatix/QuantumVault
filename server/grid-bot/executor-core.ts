@@ -213,7 +213,7 @@ export function gridExecutorCore(storage:GridMonitorStorage,reads:GridMonitorRea
       });
     }finally{key.cleanup();}
   }
-  const executor=new GridExecutor({recover:recoverPending,lifecycle:(claim,signal)=>lifecycle.service.tick(claim,signal),
+    const executor=new GridExecutor({recover:recoverPending,lifecycle:async(claim,signal)=>{await lifecycle.lifecycle.observeHostPause(claim);return lifecycle.service.tick(claim,signal);},
     status:async claim=>(await storage.snapshot(claim)).bot.status,reconcile:(claim,signal)=>monitor.tick(claim,signal),roll,
     provision:async(claim,signal)=>{const {bot,levels}=await storage.snapshot(claim),account=await custody.recover(claim.id,bot.wallet_address,claim.leaseToken);
       return provision(bot.wallet_address,retainedGridPolicy(bot,levels),bot.policy_hmac,signal,account);}});

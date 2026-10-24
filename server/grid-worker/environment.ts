@@ -3,7 +3,7 @@ import { assertGridWorkerEnvironment } from '../process-role';
 export const WORKER_ENVIRONMENT_READS = Object.freeze([
   'QV_PROCESS_ROLE', 'REPLIT_DEPLOYMENT', 'DATABASE_URL', 'SERVER_EXECUTION_KEY',
   'PORT', 'SOLANA_ENV', 'DRIFT_ENV', 'PACIFICA_API_KEY', 'HELIUS_API_KEY',
-  'GRID_REMOTE_WORKER_ENABLED', 'REUSE_ON_CREATE', 'RECYCLE_ON_DELETE', 'GRID_RECYCLER_DEPLOYMENT',
+  'GRID_REMOTE_WORKER_ENABLED', 'GRID_ENTRIES_PAUSED', 'REUSE_ON_CREATE', 'RECYCLE_ON_DELETE', 'GRID_RECYCLER_DEPLOYMENT',
 ] as const);
 export type WorkerEnvironment = Readonly<Partial<Record<typeof WORKER_ENVIRONMENT_READS[number], string>>>;
 /** Enumerate names without touching unknown values or accessors (conductor R1). */

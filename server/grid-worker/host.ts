@@ -42,7 +42,7 @@ export async function pauseHost(c: PoolClient, owner: VerifiedOwnerContext): Pro
 }
 export async function resetPause(c: PoolClient, owner: VerifiedOwnerContext, readiness: () => Promise<boolean>, deploymentFlags: { remoteWorkerEnabled: boolean; entriesPaused: boolean }) {
   requireVerifiedOwner(owner, 'reset_pause', 'all');
-  if (deploymentFlags.remoteWorkerEnabled || deploymentFlags.entriesPaused || !await readiness()) throw Error('GRID_RESET_REQUIRED');
+  if (deploymentFlags.entriesPaused || !await readiness()) throw Error('GRID_RESET_REQUIRED');
   await c.query("SELECT grid_worker_consume_receipt($1::uuid,'reset_pause','all','none')", [owner.receiptId]);
   await c.query("SELECT set_config('qv.grid_worker_owner_verified','true',true),set_config('qv.grid_worker_ready','true',true),set_config('qv.grid_worker_deployment_flags_clear','true',true)");
   await localContext(c, 'reset');

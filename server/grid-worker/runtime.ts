@@ -7,8 +7,10 @@ import {createGridWorkerDatabase} from './database';
 import {probeGridWorkerSchema} from './boot';
 import {GridWorkerLease,type WorkerLease,leaseLocallyValid} from './lease';
 import {identityMatches,workerBuildIdentity} from './build-identity';
-import {fencedTransaction} from './transaction';
-import {acknowledgePause,clearObserver} from './host';
+import {fencedTransaction,GridDeadline} from './transaction';
+import {acknowledgePause,tightenHost} from './host';
+import {WorkerObserver} from './observer';
+import {priorityIncident,resolveHealthyConditions} from './incident-policy';
 import {GridIncidents} from './incidents';
 import {WorkerQuota} from './quota';
 import {workerDependencies} from './dependencies';
@@ -30,19 +32,20 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   fatal:()=>void=()=>process.exit(1)):Promise<RuntimeHandle>{
   const database=databaseFactory(env.DATABASE_URL!),pool=database.pool,bootId=randomUUID();
   let lease:WorkerLease|undefined,renewal:PoolClient|undefined,closing=false,readyUntil=0,probing=false,working=false,renewing=false;
-  let dying=false;
+  let dying=false,maintaining=false;
   const active=new Set<Promise<void>>();
   const launch=(job:()=>Promise<void>)=>{const task=job();active.add(task);void task.finally(()=>active.delete(task)).catch(()=>fatal());};
-  let host:Record<string,any>|undefined,lastPoll=0,lastProgress=0;
+  let host:Record<string,any>|undefined,lastProgress=0;
+  const observer=new WorkerObserver();
   const clock={wall:Date.now(),mono:performance.now()};
   const ready=()=>!closing&&performance.now()<readyUntil&&Math.abs((Date.now()-clock.wall)-(performance.now()-clock.mono))<1000;
   const memory:StatusMemory={standby:true,database:false,inControl:false,test:true,paused:true,critical:false,reconciled:false,
     renewalAt:null,passAt:null,botCheckTimes:[],running:0,waiting:0,commitHash:workerBuildIdentity.commitHash};
-  const cache=statusCache(()=>memory),server=workerHttp(cache,()=>{lastPoll=Date.now();});
+  const cache=statusCache(()=>memory),server=workerHttp(cache,()=>observer.poll());
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(Number(env.PORT??5000),'0.0.0.0',()=>{server.removeListener('error',reject);resolve();});});
   const terminate=async(pid:number)=>{await pool.query('SELECT pg_terminate_backend($1)',[pid]);};
   const incidents=new GridIncidents(pool,terminate),quota=new WorkerQuota(pool,terminate),dependencies=workerDependencies(pool,quota,env);
-  installWorkerBindings(dependencies.umk,()=>ready()&&!!lease&&leaseLocallyValid(lease)&&host?.execution_enabled===true&&host?.run_mode==='trading'&&!host?.entries_paused&&!host?.observer_fenced);
+  installWorkerBindings(dependencies.umk,()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.execution_enabled===true&&host?.run_mode==='trading'&&!host?.entries_paused&&!host?.observer_fenced);
   const holder=()=>{if(!lease||!leaseLocallyValid(lease)||!ready())throw Error('GRID_LEASE_EXPIRED');return lease;};
   let queue:WorkerStartQueue;
   const ledger:GridLaunchStorage=new GridLaunchStorage(pool,async()=>{if(!ready())throw Error('GRID_WORKER_NOT_READY');},r=>readGridMargin(json,r),
@@ -68,7 +71,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
     lifecycle:async()=>{},
     async reconcile(signal){const clean=await reconciliation.pass(signal);memory.reconciled=clean;return clean;},
     startOne:signal=>queue.one(signal),
-  },()=>ready()&&!!lease&&leaseLocallyValid(lease)&&host?.run_mode==='trading'&&host.execution_enabled&&!host.entries_paused&&!host.observer_fenced&&!host.drain_requested&&memory.reconciled);
+  },()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.run_mode==='trading'&&host.execution_enabled&&!host.entries_paused&&!host.observer_fenced&&!host.drain_requested&&memory.reconciled);
   let leaseService:GridWorkerLease|undefined;
   const die=async(code:'lease_lost'|'clock_unhealthy'|'schema_drift')=>{
     if(dying)return;dying=true;memory.critical=true;memory.inControl=false;readyUntil=0;
@@ -82,7 +85,8 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
         host=(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live,clock_timestamp() AS db_now FROM grid_worker_host WHERE singleton_id=1')).rows[0];
         if(!host||Math.abs(new Date(host.db_now).getTime()-Date.now())>=1000)throw Error('GRID_CLOCK_UNHEALTHY');
         memory.database=true;memory.test=host.run_mode!=='trading';memory.paused=host.entries_paused;
-        memory.critical=!!(await c.query("SELECT 1 FROM grid_worker_incidents WHERE severity='critical' AND acknowledged_at IS NULL LIMIT 1")).rowCount;
+        const open=(await c.query("SELECT DISTINCT code FROM grid_worker_incidents WHERE severity='critical' AND (acknowledged_at IS NULL OR resolved_at IS NULL)")).rows;
+        memory.critical=open.length>0||(!!lease&&observer.silent);memory.incidentCode=priorityIncident([...open.map(r=>r.code),...(lease&&observer.silent?['observer_silent']:[])]);
         const bots=(await c.query("SELECT last_tick_at FROM grid_bots WHERE status NOT IN ('draft','failed','stopped') LIMIT 1001")).rows;
         memory.botCheckTimes=bots.map(b=>b.last_tick_at?new Date(b.last_tick_at).getTime():null);memory.running=bots.length;
         memory.waiting=Number((await c.query("SELECT count(*) AS count FROM grid_worker_requests WHERE state='pending' AND expires_at>clock_timestamp()")).rows[0].count);
@@ -99,7 +103,11 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
         const renewalLane={connect:async()=>new Proxy(renewal!,{get(target,key){if(key==='release')return (destroy?:boolean)=>{if(destroy){target.release(true);renewal=undefined;}};
           const value=Reflect.get(target,key);return typeof value==='function'?value.bind(target):value;}})};
         leaseService=new GridWorkerLease(pool,renewalLane,terminate,async()=>ready()&&!!host&&identityMatches(host));
-        lease=await leaseService.acquire(bootId,{verified:true,milliseconds:0,skewMs:1000},async acquired=>{lease=acquired;memory.reconciled=await reconciliation.pass(AbortSignal.timeout(30000));return true;});
+        lease=await leaseService.acquire(bootId,{verified:true,milliseconds:0,skewMs:1000},async acquired=>{
+          lease=acquired;host!.observer_fenced=true;
+          await fencedTransaction(pool,async c=>{await observer.acquire(c);if(env.GRID_ENTRIES_PAUSED==='true')await tightenHost(c,{pause:true});},{terminate});
+          memory.reconciled=await reconciliation.pass(AbortSignal.timeout(30000));return true;
+        });
         memory.inControl=true;memory.renewalAt=Date.now();
       }
       if(lease&&!leaseLocallyValid(lease))await die('lease_lost');
@@ -110,14 +118,39 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
     if(renewing||!lease||!leaseService)return;renewing=true;
     try{
       if(!ready()&&!closing)throw Error('GRID_CLOCK_OR_READINESS');
-      lease=await leaseService.renew(lease,1000,lastProgress>0&&Date.now()-lastProgress<30000,lastPoll>0&&Date.now()-lastPoll<10000);
+      const pollVersion=observer.version;
+      const renewed=await leaseService.renew(lease,1000,lastProgress>0&&Date.now()-lastProgress<30000,observer.pendingPoll);
+      observer.flushed(pollVersion);
+      lease=renewed;host={...host,...renewed};
       memory.renewalAt=Date.now();
-      // Acknowledgment is exposed only after COMMIT. This uses an execution lane; renewal remains fence-free.
-      if(host?.entries_paused)await fencedTransaction(pool,async c=>{await acknowledgePause(c,lease!,String(host!.pause_revision));},{terminate});
-      if(!closing&&host?.observer_fenced&&memory.reconciled&&lastPoll>0&&Date.now()-lastPoll<10000&&lastProgress>0&&Date.now()-lastProgress<30000){
-        await fencedTransaction(pool,c=>clearObserver(c,lease!,async()=>ready()&&memory.reconciled),{terminate});
+      memory.paused=renewed.entries_paused||env.GRID_ENTRIES_PAUSED==='true';
+    }catch{await die('lease_lost');renewing=false;return;}
+    renewing=false;
+    if(maintaining)return;maintaining=true;
+    const budget=new GridDeadline(8000);
+    if(observer.silent){host!.observer_fenced=true;memory.critical=true;memory.incidentCode=priorityIncident([memory.incidentCode??'','observer_silent']);cache.rebuild();}
+    try{
+      // Local gates close before acknowledgment. A reset racing this maintenance is retried, never fatal.
+      if(env.GRID_ENTRIES_PAUSED==='true'){
+        host!.entries_paused=true;
+        await fencedTransaction(pool,c=>tightenHost(c,{pause:true}),{terminate,budget});
       }
-    }catch{await die('lease_lost');}finally{renewing=false;}
+      await fencedTransaction(pool,async c=>{
+        const h=(await c.query('SELECT entries_paused,pause_revision,pause_ack_revision FROM grid_worker_host WHERE singleton_id=1')).rows[0];
+        if(h?.entries_paused){host!.entries_paused=true;memory.paused=true;
+          if(String(h.pause_revision)!==String(h.pause_ack_revision))await acknowledgePause(c,lease!,String(h.pause_revision));}
+      },{terminate,budget});
+      if(!closing){
+        const state=await fencedTransaction(pool,async c=>{
+          const progress=lastProgress>0&&Date.now()-lastProgress<30000;
+          if(ready()&&host&&identityMatches(host))await resolveHealthyConditions(c,{progress,reconciled:memory.reconciled&&progress});
+          return observer.maintain(c,lease!,async()=>ready()&&memory.reconciled&&progress);
+        },{terminate,budget});
+        observer.committed(state);
+        if(state==='silent'){host!.observer_fenced=true;memory.critical=true;memory.incidentCode=priorityIncident([memory.incidentCode??'','observer_silent']);}
+      }
+    }catch{/* Pause/observer maintenance is retried next renewal, independently of ownership. */}
+    finally{maintaining=false;cache.rebuild();}
   }
   async function pass(){
     if(working||closing||!lease||!ready())return;working=true;
