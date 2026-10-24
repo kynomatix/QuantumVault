@@ -27,8 +27,8 @@ export class WorkerObserver {
     if (this.silent) {
       await tightenHost(c, {observer: true});
       if (!this.silentRecorded) {
-        await c.query(`INSERT INTO grid_worker_incidents(id,dedup_key,severity,code,holder_boot_id,fencing_epoch)
-          VALUES($1,'grid-worker:observer-silent','critical','observer_silent',$2,$3)
+        await c.query(`INSERT INTO grid_worker_incidents(id,dedup_key,severity,code,holder_boot_id,fencing_epoch,first_seen_at,last_seen_at)
+          VALUES($1,'grid-worker:observer-silent','critical','observer_silent',$2,$3,clock_timestamp(),clock_timestamp())
           ON CONFLICT(dedup_key) WHERE acknowledged_at IS NULL DO UPDATE
           SET resolved_at=NULL,last_seen_at=clock_timestamp(),occurrence_count=grid_worker_incidents.occurrence_count+1`,
           [randomUUID(),holder.bootId,holder.epoch]);

@@ -168,9 +168,9 @@ export class WorkerStartRequests {
       await c.query(`UPDATE grid_worker_reservations SET observed_exposure_usd=$2,reserve_usd=$3,cash_commitment_usd=$4,
         fee_reserve_usd=$5,state=$6,facts_at=$7,updated_at=clock_timestamp() WHERE bot_id=$1 AND state IN ('held','uncertain')`,
         [row.bot_id,r.exposure,r.reserve,r.cash,r.fees,r.uncertain?'uncertain':'held',new Date(r.factsAt)]);
-      return r.aboveBudget;
+      return {aboveBudget:r.aboveBudget,botId:String(row.bot_id)};
     },{terminate:this.terminate});
-    if(above)await this.incidents.record({code:'exposure_above_budget',dedupKey:'grid-worker:exposure:'+id});
+    if(above.aboveBudget)await this.incidents.record({code:'exposure_above_budget',dedupKey:'grid-worker:exposure:'+id,botId:above.botId});
   }
 }
 /** U4 must call within its locked custody/final-send transaction. Expiry does not strand admitted work. */

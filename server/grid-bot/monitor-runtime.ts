@@ -4,7 +4,8 @@ import {mainMoneySuppressed,startMainQuotaRefresh} from '../grid-worker/main-run
 let monitor:GridMonitor|null=null;
 export async function startGridBotMonitor(){
   await (await import('./notifications')).startGridNotifications();
-  if(mainMoneySuppressed()){await startMainQuotaRefresh((await import('../db')).pool);gridWorkerState(false);return;}
+  if(mainMoneySuppressed()||process.env.GRID_ENTRIES_PAUSED==='true')await startMainQuotaRefresh((await import('../db')).pool);
+  if(mainMoneySuppressed()){gridWorkerState(false);return;}
   if(!gridRuntimeGates().workerEnabled||monitor)return;
   const [{pool},{GridLaunchStorage},{GridMonitorStorage},{GridMonitorReads},{GridLaunchReads},{pacificaTransportAuthority},{gridExecutorRuntime}]=await Promise.all([
     import('../db'),import('./launch-storage'),import('./monitor-storage'),import('./monitor-reads'),import('./launch-reads'),import('../protocol/pacifica/pacifica-transport'),import('./executor-runtime')]);

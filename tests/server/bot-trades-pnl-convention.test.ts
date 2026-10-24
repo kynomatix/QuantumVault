@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import ts from "typescript";
 import {
   classifyLegacyBotTradePnlConvention,
   resolveBotTradeNetPnl,
@@ -76,8 +77,17 @@ describe("bot_trades PnL convention", () => {
     expect(source).toContain("fee: closeFee === null ? null : String(closeFee)");
     expect(source).toContain("pnl: closePnl === null ? null : String(closePnl)");
     expect(source).toContain("confirmedPositionCloseIncomplete: { walletAddress, market }");
-    expect(source.match(/pnlConvention: 'net_of_close_fee'/g)).toHaveLength(3);
-    expect(source.match(/feeTruthStatus: 'current_pipeline'/g)).toHaveLength(3);
+    const ast = ts.createSourceFile('reconciliation-service.ts', source, ts.ScriptTarget.Latest, true);
+    const writers: ts.ObjectLiteralExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isObjectLiteralExpression(node) && node.properties.some(p => ts.isPropertyAssignment(p)
+          && p.name.getText(ast) === 'feeTruthStatus' && p.initializer.getText(ast) === "'current_pipeline'")) writers.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    expect(writers.length).toBeGreaterThanOrEqual(3);
+    for (const writer of writers) expect(writer.properties.some(p => ts.isPropertyAssignment(p)
+      && p.name.getText(ast) === 'pnlConvention' && p.initializer.getText(ast) === "'net_of_close_fee'")).toBe(true);
   });
 
   it("binds every reader to the shared resolver and the migration to durable provenance", () => {

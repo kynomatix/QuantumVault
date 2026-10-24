@@ -13,11 +13,11 @@ import {gridWalletEntryGate} from '../../server/grid-bot/runtime-policy';
 import {launchAuthorityFixture,retainedFixture,clock,umk} from './launch-authority-fixtures';
 
 const hooks=vi.hoisted(()=>({collect:vi.fn(),observe:vi.fn(),unlock:vi.fn(),durable:vi.fn(),send:vi.fn(),recover:vi.fn(),reserve:vi.fn(),secret:vi.fn(),
-  lifecycleTick:vi.fn(),lifecycleState:vi.fn(),confirmCreated:vi.fn(),confirmReused:vi.fn()}));
+  lifecycleTick:vi.fn(),lifecycleState:vi.fn(),observeHostPause:vi.fn(),confirmCreated:vi.fn(),confirmReused:vi.fn()}));
 vi.mock('../../server/grid-bot/service',()=>({durableGridUmk:hooks.durable}));
 vi.mock('../../server/grid-bot/launch-authority',async (importOriginal)=>({...await importOriginal<typeof import('../../server/grid-bot/launch-authority')>(),
   productionGridLaunchAuthority:()=>({collect:hooks.collect,observe:hooks.observe}),unlockGridLaunchAgent:hooks.unlock,gridProductionResume:vi.fn()}));
-vi.mock('../../server/grid-bot/lifecycle-core',()=>({gridLifecycleCore:()=>({service:{tick:hooks.lifecycleTick},lifecycle:{state:hooks.lifecycleState}})}));
+vi.mock('../../server/grid-bot/lifecycle-core',()=>({gridLifecycleCore:()=>({service:{tick:hooks.lifecycleTick},lifecycle:{state:hooks.lifecycleState,observeHostPause:hooks.observeHostPause}})}));
 vi.mock('../../server/grid-bot/custody',async (importOriginal)=>({...await importOriginal<typeof import('../../server/grid-bot/custody')>(),
   GridCustody:class {recover=hooks.recover;reserve=hooks.reserve;withSecret=hooks.secret;confirmCreated=hooks.confirmCreated;confirmReused=hooks.confirmReused;}}));
 vi.mock('../../server/grid-bot/execution',async (importOriginal)=>({...await importOriginal<typeof import('../../server/grid-bot/execution')>(),

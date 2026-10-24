@@ -15,7 +15,11 @@ export async function probeGridWorkerSchema(query: CatalogQuery): Promise<GridWo
   try {
     const required = new Set<string>(GRID_WORKER_REQUIRED_CAPABILITIES);
     const manifest = SCHEMA_MIGRATION_MANIFEST.filter(entry => entry.capabilities.some(capability => required.has(capability)));
-    const snapshot = await probeSchemaMigrationManifest(query, manifest);
+    let databaseFailure:unknown=null;
+    const snapshot = await probeSchemaMigrationManifest(async(text,values)=>{
+      try{return await query(text,values);}catch(error){databaseFailure??=error;throw error;}
+    }, manifest);
+    if(databaseFailure)throw databaseFailure;
     installSchemaReadinessSnapshot(snapshot);
     if (snapshot.unavailableCapabilities.some(capability => required.has(capability))) throw new Error('GRID_WORKER_SCHEMA_UNAVAILABLE');
     const row = (await query(GRID_WORKER_CLOCK_SQL)).rows[0];
@@ -24,8 +28,8 @@ export async function probeGridWorkerSchema(query: CatalogQuery): Promise<GridWo
     if (!Number.isFinite(Date.parse(checkedAt)) || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) - Date.parse(checkedAt) !== 60_000) throw new Error('GRID_WORKER_SCHEMA_CLOCK');
     await query('COMMIT');
     return Object.freeze({ ...snapshot, checkedAt, expiresAt });
-  } catch {
-    await query('ROLLBACK');
-    throw new Error('GRID_WORKER_SCHEMA_UNAVAILABLE');
+  } catch (error) {
+    try { await query('ROLLBACK'); } catch { /* Preserve the original database or clock failure. */ }
+    throw error;
   }
 }

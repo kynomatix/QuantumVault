@@ -167,8 +167,9 @@ describe('U2b PostgreSQL races and durable evidence', () => {
   });
   it('DB UTC challenge ignores connection timezone; reset flags and readiness are mandatory',async()=>{
     const message=await tx(async c=>{await c.query("SET LOCAL TIME ZONE 'Australia/Sydney'");return issueOwnerChallenge(c,owner,'reset_pause','all');});
-    await expect(tx(async c=>resetPause(c,await verifyOwnerReceipt(c,signed(message)),async()=>true,{remoteWorkerEnabled:true,entriesPaused:false}),'exclusive')).rejects.toThrow('GRID_RESET_REQUIRED');
-    await tx(async c=>resetPause(c,await verifyOwnerReceipt(c,signed(message)),async()=>true,{remoteWorkerEnabled:false,entriesPaused:false}),'exclusive');
+    await expect(tx(async c=>resetPause(c,await verifyOwnerReceipt(c,signed(message)),async()=>true,{remoteWorkerEnabled:true,entriesPaused:true}),'exclusive')).rejects.toThrow('GRID_RESET_REQUIRED');
+    await expect(tx(async c=>resetPause(c,await verifyOwnerReceipt(c,signed(message)),async()=>false,{remoteWorkerEnabled:true,entriesPaused:false}),'exclusive')).rejects.toThrow('GRID_RESET_REQUIRED');
+    await tx(async c=>resetPause(c,await verifyOwnerReceipt(c,signed(message)),async()=>true,{remoteWorkerEnabled:true,entriesPaused:false}),'exclusive');
     expect((await pool.query('SELECT entries_paused FROM grid_worker_host')).rows[0].entries_paused).toBe(false);
   });
   it('two contenders: one commit and one reconciliation/send admission; MAIN refuses holder',async()=>{

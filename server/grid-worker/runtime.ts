@@ -11,6 +11,7 @@ import {fencedTransaction,GridDeadline} from './transaction';
 import {acknowledgePause,tightenHost} from './host';
 import {WorkerObserver} from './observer';
 import {priorityIncident,resolveHealthyConditions} from './incident-policy';
+import {runtimeFailureCode} from './runtime-failure';
 import {GridIncidents} from './incidents';
 import {WorkerQuota} from './quota';
 import {workerDependencies} from './dependencies';
@@ -73,7 +74,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
     startOne:signal=>queue.one(signal),
   },()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.run_mode==='trading'&&host.execution_enabled&&!host.entries_paused&&!host.observer_fenced&&!host.drain_requested&&memory.reconciled);
   let leaseService:GridWorkerLease|undefined;
-  const die=async(code:'lease_lost'|'clock_unhealthy'|'schema_drift')=>{
+  const die=async(code:'lease_lost'|'clock_unhealthy'|'schema_drift'|'database_unavailable')=>{
     if(dying)return;dying=true;memory.critical=true;memory.inControl=false;readyUntil=0;
     try{await incidents.record({code,dedupKey:'grid-worker:'+code,bootId,epoch:lease?.epoch});}finally{fatal();}
   };
@@ -111,7 +112,8 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
         memory.inControl=true;memory.renewalAt=Date.now();
       }
       if(lease&&!leaseLocallyValid(lease))await die('lease_lost');
-    }catch{memory.database=false;readyUntil=0;if(lease)await die('schema_drift');else {renewal?.release();renewal=undefined;}}
+    }catch(error){memory.database=false;readyUntil=0;const code=runtimeFailureCode(error);memory.incidentCode=code;
+      if(lease)await die(code);else {renewal?.release();renewal=undefined;}}
     finally{probing=false;}
   }
   async function renew(){
@@ -124,7 +126,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
       lease=renewed;host={...host,...renewed};
       memory.renewalAt=Date.now();
       memory.paused=renewed.entries_paused||env.GRID_ENTRIES_PAUSED==='true';
-    }catch{await die('lease_lost');renewing=false;return;}
+    }catch(error){await die(error instanceof Error&&/CLOCK/.test(error.message)?'clock_unhealthy':'lease_lost');renewing=false;return;}
     renewing=false;
     if(maintaining)return;maintaining=true;
     const budget=new GridDeadline(8000);

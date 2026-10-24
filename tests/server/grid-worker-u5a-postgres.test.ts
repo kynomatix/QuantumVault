@@ -6,7 +6,7 @@ import {createHash,createPrivateKey,createPublicKey,randomUUID,sign} from 'node:
 import {readFileSync} from 'node:fs';
 import bs58 from 'bs58';
 import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
-import {fencedTransaction,walletFences,type ClientLane} from '../../server/grid-worker/transaction';
+import {fencedTransaction,walletFences,hostFence,type ClientLane} from '../../server/grid-worker/transaction';
 import {independentLane,backendTerminator} from '../../server/grid-worker/lanes';
 import {localContext,tightenHost,acknowledgePause,acknowledgeCritical,legacyKillContext,resetPause} from '../../server/grid-worker/host';
 import {GridWorkerLease,type WorkerLease} from '../../server/grid-worker/lease';
@@ -14,8 +14,13 @@ import {WorkerObserver} from '../../server/grid-worker/observer';
 import {GridIncidents} from '../../server/grid-worker/incidents';
 import {issueOwnerChallenge,verifyOwnerReceipt} from '../../server/grid-worker/owner-receipts';
 import {parseOwnerMessage,serializeOwnerMessage} from '../../server/grid-worker/owner-auth';
+import {adminStatus} from '../../server/grid-worker/admin-state';
 import {registerGridWorkerAdminRoutes} from '../../server/grid-worker/admin-routes';
 import {CRITICAL_PRIORITY,priorityIncident,resolveHealthyConditions} from '../../server/grid-worker/incident-policy';
+import {behaviourPolicy} from '../grid-bot/behaviour-fixtures';
+import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
+import {umk} from '../grid-bot/draft-fixtures';
+import {relayMainEntriesPause} from '../../server/grid-worker/main-runtime';
 import {publicSnapshot,healthStatus} from '../../server/grid-worker/status';
 import {gridActionAllowed} from '../../server/grid-worker/kill';
 
@@ -40,7 +45,7 @@ const receipt=async(c:PoolClient,message:string)=>verifyOwnerReceipt(c,{...signe
 const api=async(path:string,body?:unknown)=>{
   const r=await fetch(url+'/api/grid-worker'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
   const text=await r.text();let data:Record<string,any>={};try{data=JSON.parse(text);}catch{/* 404 is deliberately uninformative. */}
-  return {status:r.status,data};
+  return {status:r.status,data,text,cache:r.headers.get('Cache-Control'),type:r.headers.get('Content-Type')};
 };
 async function external(){await tx(async c=>{
   await walletFences(c,[owner]);await c.query('INSERT INTO grid_worker_wallet_authority(wallet_address) VALUES($1)',[owner]);
@@ -58,20 +63,23 @@ async function openCodes(){return (await pool.query("SELECT code FROM grid_worke
 beforeAll(async()=>{
   const connectionString=process.env.DATABASE_URL;if(!connectionString||new URL(connectionString).pathname!=='/qvtest')throw Error('FRACTAL qvtest required');
   admin=new Pool({connectionString,max:1});await admin.query('CREATE SCHEMA '+schema);
-  pool=new Pool({connectionString,max:6,options:'-c search_path='+schema+',pg_catalog'});
+  // Fixture writes resolve to cloned private tables. Read-only catalog probes may inspect existing public epoch objects.
+  pool=new Pool({connectionString,max:6,options:'-c search_path='+schema+',public,pg_catalog'});
   pool.on('connect',c=>{isolate(c);diagnostics(c);c.on('error',()=>{});});pool.on('error',()=>{});
-  for(const table of ['wallets','grid_bots','grid_operations','grid_control_requests','grid_control_keys','protocol_subaccounts','grid_launch_accounts','auth_nonces'])await pool.query(`CREATE TABLE ${table} (LIKE public.${table} INCLUDING ALL)`);
+  for(const table of ['wallets','grid_bots','grid_operations','grid_control_requests','grid_control_keys','protocol_subaccounts','grid_launch_accounts','auth_nonces','grid_monitor_state'])await pool.query(`CREATE TABLE ${table} (LIKE public.${table} INCLUDING ALL)`);
   await pool.query(readFileSync('migrations/grid_worker_v3_owner.sql','utf8').replaceAll('SET search_path = pg_catalog, public','SET search_path = pg_catalog, '+schema));
   terminate=backendTerminator(lane());service=new GridWorkerLease(pool,lane(),terminate,async()=>true);
   const app=express();app.use(express.json({limit:'8kb'}));
+  app.use((req,_res,next)=>{(req as unknown as {session:{walletAddress:string}}).session={walletAddress:session};next();});
   registerGridWorkerAdminRoutes(app,(req,_res,next)=>{(req as typeof req&{walletAddress:string}).walletAddress=session;next();},
-    {lane:pool,terminate,enabled:()=>enabled,entriesPaused:()=>flag,readiness:async()=>true});
+    {lane:pool,terminate,enabled:()=>enabled,entriesPaused:()=>flag,readiness:async()=>true,ownerWallet:()=>owner});
+  app.use((_req,res)=>{res.status(404).send('Unknown API');});
   server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));
   const address=server.address();if(!address||typeof address==='string')throw Error('EXAMPLE_LISTENER');url='http://127.0.0.1:'+address.port;
 },30000);
 beforeEach(async()=>{
   enabled=true;flag=false;session=owner;
-  await pool.query('TRUNCATE grid_worker_host,grid_worker_owner,grid_worker_wallet_authority,grid_worker_incidents,owner_action_receipts,auth_nonces,grid_control_keys,grid_control_requests,grid_operations,grid_bots,wallets CASCADE');
+  await pool.query('TRUNCATE grid_worker_host,grid_worker_owner,grid_worker_wallet_authority,grid_worker_incidents,owner_action_receipts,auth_nonces,grid_control_keys,grid_control_requests,grid_operations,grid_monitor_state,grid_bots,wallets CASCADE');
   await tx(async c=>{await c.query('INSERT INTO wallets(address) VALUES($1)',[owner]);await c.query('INSERT INTO grid_worker_owner(wallet_address) VALUES($1)',[owner]);
     await c.query("INSERT INTO grid_worker_host(protocol_version,owner_wallet) VALUES('grid-worker-v3-a1-wire1',$1)",[owner]);},'exclusive');
 });
@@ -133,11 +141,11 @@ describe('U5a owner API uses signed receipt transactions',()=>{
   it('is dormant and hides every route from nonowners',async()=>{
     for(const inactive of [true,false]){enabled=!inactive;session=inactive?owner:'EXAMPLE_NONOWNER';
       for(const [path,body] of [['/status',undefined],['/challenge',{}],['/pause',{}],['/reset-pause',{}],['/incidents/'+randomUUID()+'/ack',{}],['/incidents/seen',{}]] as const)
-        expect((await api(path,body)).status).toBe(404);
+        expect(await api(path,body)).toEqual(await api('/unknown',body));
     }
   });
   it('validates the route challenge and rejects malformed, altered, noncanonical and stale receipt vectors atomically',async()=>{
-    const good=await api('/challenge',{action:'pause',target:'all'});expect(good.status).toBe(200);const message=String(good.data.message),m=parseOwnerMessage(message);
+    const good=await api('/challenge',{action:'pause',target:'all',expectedPauseRevision:'0'});expect(good.status).toBe(200);const message=String(good.data.message),m=parseOwnerMessage(message);
     expect(Date.parse(m.expires)-Date.parse(m.issued)).toBe(120000);
     const malformed=[message+'\n',message+' ',message.replaceAll('\n','\r\n'),message.replace('scope:grid_worker','scope:other'),
       message.replace('action:pause\nscope:grid_worker','scope:grid_worker\naction:pause'),message.replace('target:all','target:ALL'),
@@ -157,11 +165,11 @@ describe('U5a owner API uses signed receipt transactions',()=>{
   });
   it('resets only with a valid reset receipt and rejects unresolved critical occurrences',async()=>{
     const message=await challenge('reset_pause');
-    expect((await api('/reset-pause',signed(message))).status).toBe(200);
+    expect((await api('/reset-pause',{...signed(message),expectedPauseRevision:'0'})).status).toBe(200);
     expect((await pool.query('SELECT entries_paused FROM grid_worker_host')).rows[0].entries_paused).toBe(false);
     await tx(c=>tightenHost(c,{pause:true}));
     await new GridIncidents(pool,terminate).record({code:'observer_silent',dedupKey:'EXAMPLE_RESET'});
-    expect((await api('/reset-pause',signed(await challenge('reset_pause')))).status).toBe(409);
+    expect((await api('/reset-pause',{...signed(await challenge('reset_pause')),expectedPauseRevision:String((await pool.query('SELECT pause_revision FROM grid_worker_host')).rows[0].pause_revision)})).status).toBe(409);
     expect((await pool.query('SELECT entries_paused FROM grid_worker_host')).rows[0].entries_paused).toBe(true);
   });
   it('pause waits through an in-flight five second shared POST fence, observes renewal ack, and rejects replay',async()=>{
@@ -182,13 +190,13 @@ describe('U5a owner API uses signed receipt transactions',()=>{
       "NEW.message_digest:=encode(sha256(convert_to('EXAMPLE_WRONG_DIGEST','UTF8')),'hex');":"NEW.consumed_at:=clock_timestamp();NEW.consumed_by:='EXAMPLE';";
     await pool.query(`CREATE OR REPLACE FUNCTION fixture_receipt() RETURNS trigger LANGUAGE plpgsql AS $body$ BEGIN ${assignment} RETURN NEW; END $body$`);
     await pool.query('CREATE TRIGGER fixture_receipt BEFORE INSERT ON owner_action_receipts FOR EACH ROW EXECUTE FUNCTION fixture_receipt()');
-    try{expect((await api('/pause',signed(await challenge()))).status).toBe(409);
+    try{const response=await api('/pause',signed(await challenge()));expect(response.status).toBe(409);expect(response.data.latched).toBe(false);
       expect((await pool.query('SELECT pause_revision FROM grid_worker_host')).rows[0].pause_revision).toBe('0');
       expect(await openCodes()).toEqual([]);
     }finally{await pool.query('DROP TRIGGER fixture_receipt ON owner_action_receipts');}
   });
   it('reports an unacknowledged committed pause as unknown within twenty seconds',async()=>{
-    const message=await challenge(),start=Date.now(),response=await api('/pause',signed(message));
+    await acquire();const message=await challenge(),start=Date.now(),response=await api('/pause',signed(message));
     expect(Date.now()-start).toBeLessThan(20000);expect(response.status).toBe(503);
     expect(response.data).toMatchObject({latched:true,acknowledged:false,unknown:true,incidentRecorded:true,cancellationsComplete:null});
     expect(await openCodes()).toEqual(['pause_unacknowledged']);
@@ -202,6 +210,74 @@ describe('U5a owner API uses signed receipt transactions',()=>{
     expect(await openCodes()).toEqual(['observer_silent']);
     expect((await api('/incidents/seen',{ids:[id]})).status).toBe(200);
     expect((await pool.query('SELECT inbox_seen_at FROM grid_worker_incidents')).rows[0].inbox_seen_at).not.toBeNull();
-    flag=true;expect((await api('/reset-pause',signed(await challenge('reset_pause')))).status).toBe(409);
+    flag=true;expect((await api('/reset-pause',{...signed(await challenge('reset_pause')),expectedPauseRevision:String((await pool.query('SELECT pause_revision FROM grid_worker_host')).rows[0].pause_revision)})).status).toBe(409);
   });
+});
+
+describe('U5a R2 revision and MAIN relay contracts',()=>{
+  it('legacy pause returns immediately without inventing a worker acknowledgement incident',async()=>{
+    const start=Date.now(),response=await api('/pause',signed(await challenge()));
+    expect(response.status).toBe(200);expect(response.data).toMatchObject({latched:true,acknowledged:null,unknown:false});
+    expect(Date.now()-start).toBeLessThan(3000);expect(await openCodes()).toEqual([]);
+  });
+  it('rejects stale challenge and reset revisions before consuming a receipt',async()=>{
+    expect((await api('/challenge',{action:'reset_pause',target:'all',expectedPauseRevision:'1'})).status).toBe(409);
+    const message=await challenge('reset_pause');
+    expect((await api('/reset-pause',{...signed(message),expectedPauseRevision:'1'})).status).toBe(409);
+    expect((await pool.query('SELECT count(*) AS n FROM owner_action_receipts')).rows[0].n).toBe('0');
+  });
+  it('MAIN flag alone latches the DB pause observed by the external worker and clearing it never resets',async()=>{
+    const holder=await acquire();await reset();
+    await relayMainEntriesPause(pool,terminate,false);expect((await service.renew(holder,1000,true)).entries_paused).toBe(false);
+    await relayMainEntriesPause(pool,terminate,true);const paused=await service.renew(holder,1000,true);expect(paused.entries_paused).toBe(true);
+    await relayMainEntriesPause(pool,terminate,false);expect((await service.renew(holder,1000,true)).pause_revision).toBe(paused.pause_revision);
+    expect((await service.renew(holder,1000,true)).entries_paused).toBe(true);
+  });
+  it('resolves pause timeout only for current revision acknowledgement, retaining the acknowledgement requirement',async()=>{
+    const holder=await acquire();await new GridIncidents(pool,terminate).record({code:'pause_unacknowledged',dedupKey:'EXAMPLE_ACK'});
+    await tx(c=>resolveHealthyConditions(c,{progress:false,reconciled:false}));
+    expect((await pool.query("SELECT resolved_at FROM grid_worker_incidents WHERE code='pause_unacknowledged'")).rows[0].resolved_at).toBeNull();
+    const h=await service.renew(holder,1000,true);await tx(c=>acknowledgePause(c,holder,h.pause_revision));
+    await tx(c=>resolveHealthyConditions(c,{progress:false,reconciled:false}));
+    const incident=(await pool.query("SELECT resolved_at,acknowledged_at FROM grid_worker_incidents WHERE code='pause_unacknowledged'")).rows[0];
+    expect(incident.resolved_at).not.toBeNull();expect(incident.acknowledged_at).toBeNull();
+  });
+  it('status has no host lock, provides DB ages, and retains critical cards above old seen warnings',async()=>{
+    const writer=new GridIncidents(pool,terminate);
+    await writer.record({code:'exposure_above_budget',dedupKey:'EXAMPLE_WARNING'});
+    await writer.record({code:'stop_failed',dedupKey:'EXAMPLE_CRITICAL'});
+    await pool.query("UPDATE grid_worker_incidents SET inbox_seen_at=clock_timestamp(),first_seen_at=clock_timestamp()-interval '26 hours',last_seen_at=clock_timestamp()-interval '25 hours' WHERE severity='warning'");
+    await tx(c=>adminStatus(c,false),'none');
+    const c=await pool.connect();await c.query('BEGIN');await hostFence(c,'exclusive');
+    try{const response=await api('/status');expect(response.status,JSON.stringify(response.data)).toBe(200);
+      expect(response.data.incidents.map((i:{code:string})=>i.code)).toEqual(['stop_failed']);
+      expect(response.data).toMatchObject({cardState:'needs_you',executionMode:'legacy',entriesPaused:true,pauseRevision:'0',cancellationsComplete:true,botsPaused:{total:0,paused:0}});
+      expect(response.data.resetBlockedBy).not.toContain('worker_checks');expect(response.data.resetBlockedBy).not.toContain('monitor_fence');
+      expect(response.data.ages.observedAt).toBeTruthy();expect(response.data.host).toHaveProperty('holder_live');
+      expect(response.data.incidents[0]).toMatchObject({occurrence_count:'1',acknowledged:false,seen:false,bot_id:null});
+    }finally{await c.query('ROLLBACK');c.release();}
+  });
+});
+
+it('counts paused positions as at risk and cancellations only for the current pause revision',async()=>{
+  const ids:string[]=[];
+  for(const [status,position] of [['paused','1'],['paused','0'],['active','0']] as const){
+    const policy={...behaviourPolicy('repeat_all','long',false),id:randomUUID()},mac=computeGridPolicyHmac(policy,umk());
+    if(!mac.ok)throw Error('EXAMPLE_POLICY');
+    const {levels,sizingVersion,safetyEnvelopePrice,gridPolicyExtension,...base}=policy;
+    const row={...base,status,protocolSubaccountId:1,walletAddress:owner,clientRequestId:randomUUID(),serverIntentDigest:fixtureSha256.toString('hex').toUpperCase(),
+      draftRevision:'EXAMPLE',createIntent:{},authoritySnapshot:{gridSizing:{sizingVersion,safetyEnvelopePrice},gridPolicyExtension},policyHmac:mac.digest,rangeSource:'manual',chartTimeframe:'15m'};
+    const entries=Object.entries(row);await pool.query(`INSERT INTO grid_bots(${entries.map(([k])=>k.replace(/[A-Z]/g,c=>'_'+c.toLowerCase())).join(',')}) VALUES(${entries.map((_,i)=>'$'+(i+1)).join(',')})`,entries.map(([,v])=>v));
+    await pool.query('INSERT INTO grid_monitor_state(bot_id,observation) VALUES($1,$2::jsonb)',[policy.id,JSON.stringify({position:{size:position}})]);ids.push(policy.id);
+  }
+  const complete=async(botId:string,revision:string)=>{
+    const id=randomUUID(),key=`host-pause:${revision}:${botId}`;
+    await pool.query("INSERT INTO grid_control_requests(id,bot_id,request_key,action,source,previous_status,evidence,state,completed_at) VALUES($1,$2,$3,'pause','risk','active','{}','complete',clock_timestamp())",[id,botId,key]);
+    await pool.query("INSERT INTO grid_control_keys(bot_id,request_key,control_id,evidence) VALUES($1,$2,$3,'{}')",[botId,key,id]);
+  };
+  await complete(ids[0],'0');await complete(ids[1],'1');
+  const response=await api('/status');expect(response.status).toBe(200);
+  expect(response.data).toMatchObject({gridBotsAtRisk:2,botsPaused:{total:3,paused:1},cancellationsComplete:false});
+  await complete(ids[1],'0');await complete(ids[2],'0');
+  expect((await api('/status')).data).toMatchObject({botsPaused:{total:3,paused:3},cancellationsComplete:true});
 });

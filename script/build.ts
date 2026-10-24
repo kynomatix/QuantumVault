@@ -4,6 +4,7 @@ import { rm, readFile, stat, symlink, unlink } from "fs/promises";
 import { existsSync } from "fs";
 import { join } from "path";
 import { resolveGitBuildIdentity } from "./git-build-identity";
+import { mainReadinessDefine } from "./main-readiness-define";
 
 const allowlist = [
   "@google/generative-ai",
@@ -90,6 +91,7 @@ async function buildAll() {
       "__QV_BUILD_COMMIT_SHA__": JSON.stringify(buildIdentity.commitSha),
       "__QV_BUILD_TREE_SHA__": JSON.stringify(buildIdentity.treeSha),
       "__QV_BUILD_IDENTITY_VERIFIED__": JSON.stringify(buildIdentity.identityVerified),
+      ...mainReadinessDefine(buildIdentity),
     },
     minify: true,
     external: externals,
