@@ -26,6 +26,44 @@ it('each existing SignaturePurpose domain rejects owner signatures in both direc
 });
 
 describe('U2b exact owner wire', () => {
+  it('host transition uses exact own fields and lossless bigint identities', () => {
+    const v=OWNER_RECEIPT_VECTORS.find(v=>v.action==='host_transition')!;
+    const params=JSON.parse(v.paramsJson!) as Record<string,unknown>;
+    for(const [key,value] of Object.entries(params)) {
+      const missing={...params}; delete missing[key];
+      expect(()=>canonicalOwnerParams('host_transition',missing)).toThrow();
+      expect(()=>canonicalOwnerParams('host_transition',{...params,[key]:typeof value==='boolean'?'true':null})).toThrow();
+    }
+    for(const changes of [{expectedFencingEpoch:0},{expectedScopeRevision:'01'},{expectedFencingEpoch:'9223372036854775808'},
+      {expectedFencingEpoch:'-1'},{expectedScopeRevision:'1.0'},{executionMode:'EXAMPLE'},{runMode:'EXAMPLE'},
+      {commitHash:String(params.commitHash).toUpperCase()},{lockfileSha256:'EXAMPLE'}, {extra:true}]) {
+      expect(()=>canonicalOwnerParams('host_transition',{...params,...changes})).toThrow();
+    }
+    for(const expectedFencingEpoch of ['0','9007199254740993','9223372036854775807']) {
+      expect(canonicalOwnerParams('host_transition',{...params,expectedFencingEpoch})).toContain('"expectedFencingEpoch":"'+expectedFencingEpoch+'"');
+    }
+    const inherited=Object.assign(Object.create({extra:true}),params);
+    expect(()=>canonicalOwnerParams('host_transition',inherited)).toThrow();
+    const accessor={...params}; Object.defineProperty(accessor,'executionMode',{get(){throw Error('EXAMPLE_ACCESSOR_INVOKED');}});
+    expect(()=>canonicalOwnerParams('host_transition',accessor)).toThrow('GRID_OWNER_WIRE_INVALID');
+    expect(()=>canonicalOwnerParams('host_transition',{...params,[Symbol('EXAMPLE')]:true})).toThrow();
+    expect(()=>parseOwnerMessage(v.message.replace(v.paramsDigest,'none'))).toThrow();
+  });
+  it('quota policy requires a nonempty sorted unique digest list without sparse or decorated arrays', () => {
+    const policyDigests=[ownerSha256('EXAMPLE_A'),ownerSha256('EXAMPLE_B')].sort();
+    expect(canonicalOwnerParams('quota_policy',{policyDigests})).toBe(JSON.stringify({policyDigests}));
+    const decorated=Object.assign([...policyDigests],{extra:true});
+    const accessor=[...policyDigests]; Object.defineProperty(accessor,'0',{get(){throw Error('EXAMPLE_ACCESSOR_INVOKED');}});
+    expect(()=>canonicalOwnerParams('quota_policy',{policyDigests:accessor})).toThrow('GRID_OWNER_WIRE_INVALID');
+    for(const invalid of [[],[policyDigests[0],policyDigests[0]],[...policyDigests].reverse(),[policyDigests[0].toUpperCase()],[null],new Array(1),decorated]) {
+      expect(()=>canonicalOwnerParams('quota_policy',{policyDigests:invalid})).toThrow();
+    }
+    for(const action of ['host_transition','quota_policy'] as const) {
+      expect(()=>ownerParamsDigest(action)).toThrow();
+      const v=OWNER_RECEIPT_VECTORS.find(v=>v.action===action)!;
+      expect(()=>parseOwnerMessage(v.message.replace(v.paramsDigest,'none'))).toThrow();
+    }
+  });
   for (const v of OWNER_RECEIPT_VECTORS) it(v.action + ' deterministic bytes signature and canonical params', () => {
     const parsed = parseOwnerMessage(Uint8Array.from(v.messageBytes));
     expect(serializeOwnerMessage(parsed)).toBe(v.message);

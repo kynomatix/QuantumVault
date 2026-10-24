@@ -9,9 +9,11 @@ const fixtureDer = Buffer.concat([Buffer.from([48,46,2,1,0,48,5,6,3,43,101,112,4
 const EXAMPLE = createPrivateKey({ key: fixtureDer, type: 'pkcs8', format: 'der' });
 const ownerWallet = bs58.encode(createPublicKey(EXAMPLE).export({ type: 'spki', format: 'der' }).subarray(-32));
 const botId = '00000000-0000-4000-8000-000000000001';
-export const OWNER_RECEIPT_VECTORS = ['pause', 'reset_pause', 'ack_critical', 'widen_scope', 'break_glass_close'].map(action => {
+export const OWNER_RECEIPT_VECTORS = ['pause', 'reset_pause', 'ack_critical', 'widen_scope', 'break_glass_close', 'host_transition', 'quota_policy'].map(action => {
   const params = action === 'widen_scope' ? { globalCapUsd: '200', perBotCapUsd: '100', wallets: [ownerWallet] }
-    : action === 'break_glass_close' ? { botId } : undefined;
+    : action === 'break_glass_close' ? { botId }
+    : action === 'host_transition' ? { commitHash: sha256('EXAMPLE_COMMIT').toString('hex').slice(0,40), drainRequested: false, executionEnabled: false, executionMode: 'external', expectedFencingEpoch: '0', expectedScopeRevision: '1', legacyControlsEnabled: true, lockfileSha256: sha256('EXAMPLE_LOCKFILE').toString('hex'), runMode: 'test', treeHash: sha256('EXAMPLE_TREE').toString('hex').slice(0,40) }
+    : action === 'quota_policy' ? { policyDigests: [sha256('EXAMPLE_POLICY').toString('hex')] } : undefined;
   const paramsJson = params ? JSON.stringify(params) : undefined;
   const paramsDigest = paramsJson ? sha256(paramsJson).toString('hex') : 'none';
   const nonce = bs58.encode(sha256('EXAMPLE_NONCE_' + action));

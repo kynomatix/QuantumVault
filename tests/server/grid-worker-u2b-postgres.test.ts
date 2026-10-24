@@ -7,6 +7,7 @@ import bs58 from 'bs58';
 import { fencedTransaction, GridDeadline, hostFence, walletFences, type ClientLane } from '../../server/grid-worker/transaction';
 import { backendTerminator, independentLane } from '../../server/grid-worker/lanes';
 import { issueOwnerChallenge, verifyOwnerReceipt } from '../../server/grid-worker/owner-receipts';
+import { OWNER_RECEIPT_VECTORS } from '../helpers/grid-worker-owner-receipt-vectors';
 import { parseOwnerMessage, serializeOwnerMessage } from '../../server/grid-worker/owner-auth';
 import { acknowledgeCritical, acknowledgePause, localContext, pauseHost, readLegacyHost, resetPause, legacyKillContext } from '../../server/grid-worker/host';
 import { GridWorkerLease, takeoverWindowsClear } from '../../server/grid-worker/lease';
@@ -120,6 +121,22 @@ describe('U2b PostgreSQL races and durable evidence', () => {
   const lease = () => new GridWorkerLease(pool,controlLane(),terminate,async()=>true);
   const acceptance = {verified:true,milliseconds:0,skewMs:50};
   async function challenge(action:'pause'|'reset_pause'|'ack_critical'='pause',target='all',ttl=120_000) { return tx(c=>issueOwnerChallenge(c,owner,action,target,undefined,ttl)); }
+  for(const action of ['host_transition','quota_policy'] as const) it(action+' challenge and verified receipt bind exact params with atomic nonce use',async()=>{
+    const params: unknown=JSON.parse(OWNER_RECEIPT_VECTORS.find(v=>v.action===action)!.paramsJson!);
+    const message=await tx(c=>issueOwnerChallenge(c,owner,action,'host:example',params));
+    const changed=action==='host_transition'?{...params as Record<string,unknown>,drainRequested:true}:{policyDigests:[sha256('EXAMPLE_DIFFERENT').toString('hex')]};
+    await expect(tx(c=>verifyOwnerReceipt(c,{...signed(message),params:changed}),'exclusive')).rejects.toThrow('GRID_RECEIPT_PARAMS');
+    await expect(tx(async c=>{await verifyOwnerReceipt(c,{...signed(message),params});throw Error('EXAMPLE_ROLLBACK');},'exclusive')).rejects.toThrow('EXAMPLE_ROLLBACK');
+    expect((await pool.query('SELECT used_at FROM auth_nonces')).rows[0].used_at).toBeNull();
+    const receipt=await tx(async c=>{
+      const verified=await verifyOwnerReceipt(c,{...signed(message),params});
+      await c.query('SELECT grid_worker_consume_receipt($1,$2,$3,$4)',[verified.receiptId,action,verified.target,verified.paramsDigest]);
+      return verified;
+    },'exclusive');
+    expect(receipt.action).toBe(action);
+    expect((await pool.query('SELECT consumed_at IS NOT NULL AS consumed FROM owner_action_receipts')).rows[0].consumed).toBe(true);
+    await expect(tx(c=>verifyOwnerReceipt(c,{...signed(message),params}),'exclusive')).rejects.toThrow('GRID_OWNER_NONCE_INVALID');
+  });
   it('nonce verification consume and latch share one transaction; rollback restores nonce; replay refused',async()=>{
     const message=await challenge();
     await expect(tx(async c=>{const verified=await verifyOwnerReceipt(c,signed(message));await pauseHost(c,verified);throw Error('EXAMPLE_CALLER_ROLLBACK');},'exclusive')).rejects.toThrow('EXAMPLE_CALLER_ROLLBACK');

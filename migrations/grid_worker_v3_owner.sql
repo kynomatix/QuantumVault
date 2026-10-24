@@ -7,8 +7,8 @@ SELECT pg_advisory_xact_lock(hashtextextended('qv:grid-worker:v3:host',0));
 DO $install$
 BEGIN
  IF current_setting('server_version_num')::integer < 140000 THEN RAISE EXCEPTION 'GRID_POSTGRES_VERSION'; END IF;
- IF EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')) OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() AND p.proname IN ('grid_worker_has_host_lock','grid_worker_has_wallet_lock','grid_worker_validate_host','grid_worker_validate_audit','grid_worker_validate_generation','grid_worker_track_wallet','grid_worker_validate_owner_scope','grid_worker_consume_receipt','grid_worker_pause_from_verified_receipt')) THEN
- IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = '7234c8347e63ebea0192ab79be7c3f26531800d6f1b9e08eca13ac338db3c216' AS ok FROM (WITH package_tables AS (
+ IF EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')) OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname=current_schema() AND p.proname IN ('grid_worker_has_host_lock','grid_worker_has_wallet_lock','grid_worker_validate_host','grid_worker_validate_audit','grid_worker_validate_generation','grid_worker_track_wallet','grid_worker_validate_owner_scope','grid_worker_validate_release','grid_worker_consume_receipt','grid_worker_pause_from_verified_receipt')) THEN
+ IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = 'd993266f4ccd97df0d6f10aa0237acb9e6df8863ea5e3f8561b8153f675b46ff' AS ok FROM (WITH package_tables AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')
 ), objects AS (
  SELECT 'table:'||c.relname AS identity, jsonb_build_object('kind',c.relkind,'rls',c.relrowsecurity,'forceRls',c.relforcerowsecurity,
@@ -16,9 +16,9 @@ BEGIN
  'constraints',(SELECT jsonb_agg(jsonb_build_object('name',k.conname,'type',k.contype,'definition',pg_get_constraintdef(k.oid),'delete',k.confdeltype,'update',k.confupdtype,'valid',k.convalidated,'deferrable',k.condeferrable,'deferred',k.condeferred) ORDER BY k.conname) FROM pg_constraint k WHERE k.conrelid=c.oid),
  'indexes',(SELECT jsonb_agg(jsonb_build_object('name',ic.relname,'definition',replace(pg_get_indexdef(i.indexrelid),quote_ident(current_schema())||'.','public.'),'predicate',pg_get_expr(i.indpred,i.indrelid),'valid',i.indisvalid,'ready',i.indisready,'unique',i.indisunique) ORDER BY ic.relname) FROM pg_index i JOIN pg_class ic ON ic.oid=i.indexrelid WHERE i.indrelid=c.oid)) AS definition FROM package_tables c
  UNION ALL
- SELECT 'function:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')', jsonb_build_object('body',p.prosrc,'language',l.lanname,'securityDefiner',p.prosecdef,'config',replace(array_to_string(p.proconfig,';'),current_schema(),'public'),'arguments',pg_get_function_arguments(p.oid),'returns',pg_get_function_result(p.oid),'volatility',p.provolatile,'strict',p.proisstrict,'leakproof',p.proleakproof,'parallel',p.proparallel,'kind',p.prokind) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname=current_schema() AND p.proname IN ('grid_worker_has_host_lock','grid_worker_has_wallet_lock','grid_worker_validate_host','grid_worker_validate_audit','grid_worker_validate_generation','grid_worker_track_wallet','grid_worker_validate_owner_scope','grid_worker_consume_receipt','grid_worker_pause_from_verified_receipt')
+ SELECT 'function:'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')', jsonb_build_object('body',p.prosrc,'language',l.lanname,'securityDefiner',p.prosecdef,'config',replace(array_to_string(p.proconfig,';'),current_schema(),'public'),'arguments',pg_get_function_arguments(p.oid),'returns',pg_get_function_result(p.oid),'volatility',p.provolatile,'strict',p.proisstrict,'leakproof',p.proleakproof,'parallel',p.proparallel,'kind',p.prokind) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname=current_schema() AND p.proname IN ('grid_worker_has_host_lock','grid_worker_has_wallet_lock','grid_worker_validate_host','grid_worker_validate_audit','grid_worker_validate_generation','grid_worker_track_wallet','grid_worker_validate_owner_scope','grid_worker_validate_release','grid_worker_consume_receipt','grid_worker_pause_from_verified_receipt')
  UNION ALL
- SELECT 'trigger:'||c.relname||'.'||t.tgname, jsonb_build_object('definition',replace(pg_get_triggerdef(t.oid),quote_ident(current_schema())||'.','public.'),'function',p.proname,'functionSchema',CASE WHEN n.nspname=current_schema() THEN 'public' ELSE n.nspname END,'functionArgs',pg_get_function_identity_arguments(p.oid),'type',t.tgtype,'attributes',t.tgattr::text,'qual',CASE WHEN t.tgqual IS NULL THEN NULL ELSE substring(pg_get_triggerdef(t.oid) from ' WHEN (.*) EXECUTE FUNCTION ') END,'enabled',t.tgenabled,'arguments',encode(t.tgargs,'hex'),'constraint',t.tgconstraint<>0,'deferrable',t.tgdeferrable,'deferred',t.tginitdeferred) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace cn ON cn.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace n ON n.oid=p.pronamespace WHERE cn.nspname=current_schema() AND NOT t.tgisinternal AND (c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts') OR t.tgname IN ('grid_worker_host_validate','grid_worker_audit_validate','grid_worker_generation_validate','grid_worker_wallet_update','grid_worker_wallet_insert','grid_worker_grid_bots_insert','grid_worker_grid_bots_update','grid_worker_protocol_subaccounts_insert','grid_worker_protocol_subaccounts_update','grid_worker_grid_launch_accounts_insert','grid_worker_grid_launch_accounts_update','grid_worker_requests_owner_validate','grid_worker_reservations_owner_validate'))
+ SELECT 'trigger:'||c.relname||'.'||t.tgname, jsonb_build_object('definition',replace(pg_get_triggerdef(t.oid),quote_ident(current_schema())||'.','public.'),'function',p.proname,'functionSchema',CASE WHEN n.nspname=current_schema() THEN 'public' ELSE n.nspname END,'functionArgs',pg_get_function_identity_arguments(p.oid),'type',t.tgtype,'attributes',t.tgattr::text,'qual',CASE WHEN t.tgqual IS NULL THEN NULL ELSE substring(pg_get_triggerdef(t.oid) from ' WHEN (.*) EXECUTE FUNCTION ') END,'enabled',t.tgenabled,'arguments',encode(t.tgargs,'hex'),'constraint',t.tgconstraint<>0,'deferrable',t.tgdeferrable,'deferred',t.tginitdeferred) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace cn ON cn.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace n ON n.oid=p.pronamespace WHERE cn.nspname=current_schema() AND NOT t.tgisinternal AND (c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts') OR t.tgname IN ('grid_worker_host_validate','grid_worker_audit_validate','grid_worker_generation_validate','grid_worker_wallet_update','grid_worker_wallet_insert','grid_worker_grid_bots_insert','grid_worker_grid_bots_update','grid_worker_protocol_subaccounts_insert','grid_worker_protocol_subaccounts_update','grid_worker_grid_launch_accounts_insert','grid_worker_grid_launch_accounts_update','grid_worker_requests_owner_validate','grid_worker_reservations_owner_validate','grid_worker_launch_release_validate','grid_worker_pool_release_validate'))
 ), digests AS (
  SELECT identity,encode(sha256(convert_to(definition::text,'UTF8')),'hex') AS digest FROM objects
 )
@@ -242,7 +242,7 @@ CREATE TABLE grid_worker_reconciliation (
   evidence_digest text,
   PRIMARY KEY (account,stream),
   CONSTRAINT grid_worker_reconciliation_bot_fk FOREIGN KEY (bot_id) REFERENCES grid_bots(id) ON DELETE RESTRICT,
-  CONSTRAINT grid_worker_reconciliation_state CHECK (stream IN ('orders','fills','transfers') AND state IN ('pending','complete','incomplete','mismatch') AND length(account)>0 AND length(master_account)>0 AND (state <> 'complete' OR (last_complete_at IS NOT NULL AND covered_through_at IS NOT NULL AND evidence_digest IS NOT NULL))),
+  CONSTRAINT grid_worker_reconciliation_state CHECK (stream IN ('orders','fills','transfers','withdrawals') AND state IN ('pending','complete','incomplete','mismatch') AND length(account)>0 AND length(master_account)>0 AND (state <> 'complete' OR (last_complete_at IS NOT NULL AND covered_through_at IS NOT NULL AND evidence_digest IS NOT NULL))),
   CONSTRAINT grid_worker_reconciliation_clock CHECK ((covered_through_at IS NULL OR isfinite(covered_through_at)) AND (last_attempt_at IS NULL OR isfinite(last_attempt_at)) AND (last_complete_at IS NULL OR isfinite(last_complete_at))),
   CONSTRAINT grid_worker_reconciliation_digest CHECK ((evidence_digest IS NULL OR evidence_digest ~ '^[0-9a-f]{64}$'))
 );
@@ -304,7 +304,7 @@ CREATE TABLE owner_action_receipts (
   PRIMARY KEY (receipt_id),
   UNIQUE (nonce),
   CONSTRAINT owner_receipt_wallet_fk FOREIGN KEY (owner_wallet) REFERENCES wallets(address) ON DELETE RESTRICT,
-  CONSTRAINT owner_receipt_action CHECK (action IN ('pause','reset_pause','ack_critical','widen_scope','break_glass_close')),
+  CONSTRAINT owner_receipt_action CHECK (action IN ('pause','reset_pause','ack_critical','widen_scope','break_glass_close','host_transition','quota_policy')),
   CONSTRAINT owner_receipt_scope CHECK (scope = 'grid_worker'),
   CONSTRAINT owner_receipt_message_digest CHECK ((message_digest IS NULL OR message_digest ~ '^[0-9a-f]{64}$')),
   CONSTRAINT owner_receipt_params_digest CHECK (params_digest = 'none' OR params_digest ~ '^[0-9a-f]{64}$'),
@@ -340,7 +340,7 @@ BEGIN
   IF action_context IN ('lease_acquire','lease_release') THEN
     IF NOT grid_worker_has_host_lock(true) THEN RAISE EXCEPTION 'GRID_HOST_EXCLUSIVE_REQUIRED'; END IF;
     IF action_context='lease_acquire' THEN
-      IF current_setting('qv.grid_worker_ready',true) IS DISTINCT FROM 'true' OR (OLD.holder_boot_id IS NOT NULL AND OLD.lease_expires_at>db_now) OR NEW.holder_boot_id IS NULL OR NEW.holder_role IS DISTINCT FROM 'grid-worker' OR NEW.fencing_epoch<>OLD.fencing_epoch+1 OR NEW.lease_expires_at<=db_now OR (to_jsonb(NEW)-ARRAY['holder_boot_id','holder_role','fencing_epoch','lease_expires_at','heartbeat_at','progress_at']) IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['holder_boot_id','holder_role','fencing_epoch','lease_expires_at','heartbeat_at','progress_at']) THEN RAISE EXCEPTION 'GRID_LEASE_ACQUIRE_INVALID'; END IF;
+      IF OLD.execution_mode<>'external' OR current_setting('qv.grid_worker_ready',true) IS DISTINCT FROM 'true' OR (OLD.holder_boot_id IS NOT NULL AND OLD.lease_expires_at>db_now) OR NEW.holder_boot_id IS NULL OR NEW.holder_role IS DISTINCT FROM 'grid-worker' OR NEW.fencing_epoch<>OLD.fencing_epoch+1 OR NEW.lease_expires_at<=db_now OR (to_jsonb(NEW)-ARRAY['holder_boot_id','holder_role','fencing_epoch','lease_expires_at','heartbeat_at','progress_at']) IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['holder_boot_id','holder_role','fencing_epoch','lease_expires_at','heartbeat_at','progress_at']) THEN RAISE EXCEPTION 'GRID_LEASE_ACQUIRE_INVALID'; END IF;
     ELSE
       IF OLD.holder_boot_id IS NULL OR OLD.lease_expires_at>db_now OR current_setting('qv.grid_worker_holder',true) IS DISTINCT FROM OLD.holder_boot_id::text OR current_setting('qv.grid_worker_epoch',true) IS DISTINCT FROM OLD.fencing_epoch::text OR NEW.holder_boot_id IS NOT NULL OR NEW.holder_role IS NOT NULL OR NEW.lease_expires_at IS DISTINCT FROM '-infinity'::timestamptz OR NEW.fencing_epoch<>OLD.fencing_epoch+1 OR (to_jsonb(NEW)-ARRAY['holder_boot_id','holder_role','fencing_epoch','lease_expires_at']) IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['holder_boot_id','holder_role','fencing_epoch','lease_expires_at']) THEN RAISE EXCEPTION 'GRID_LEASE_RELEASE_INVALID'; END IF;
     END IF;
@@ -376,13 +376,14 @@ BEGIN
     -- Context is not authentication: U2b must consume fresh owner receipts in this transaction.
     -- The shared-login residual risk is explicitly accepted; these validators enforce ordering/shape.
     IF current_setting('qv.grid_worker_ready',true) IS DISTINCT FROM 'true' OR current_setting('qv.grid_worker_owner_verified',true) IS DISTINCT FROM 'true' THEN RAISE EXCEPTION 'GRID_OWNER_TRANSITION_REQUIRED'; END IF;
+    IF action_context='reset' AND (to_jsonb(NEW)-ARRAY['entries_paused','pause_revision','pause_ack_at','pause_ack_revision']) IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['entries_paused','pause_revision','pause_ack_at','pause_ack_revision']) THEN RAISE EXCEPTION 'GRID_RESET_MUTATION_INVALID'; END IF;
     IF OLD.entries_paused AND NOT NEW.entries_paused AND (action_context<>'reset' OR current_setting('qv.grid_worker_deployment_flags_clear',true) IS DISTINCT FROM 'true' OR EXISTS(SELECT 1 FROM grid_worker_incidents WHERE severity='critical' AND (resolved_at IS NULL OR acknowledged_at IS NULL))) THEN RAISE EXCEPTION 'GRID_RESET_REQUIRED'; END IF;
   END IF;
   IF NEW.entries_paused IS DISTINCT FROM OLD.entries_paused THEN
     IF NEW.pause_revision<>OLD.pause_revision+1 OR NEW.pause_ack_at IS NOT NULL OR NEW.pause_ack_revision IS NOT NULL THEN RAISE EXCEPTION 'GRID_PAUSE_REVISION_REQUIRED'; END IF;
   ELSIF NEW.pause_revision<>OLD.pause_revision OR NEW.pause_ack_at IS DISTINCT FROM OLD.pause_ack_at OR NEW.pause_ack_revision IS DISTINCT FROM OLD.pause_ack_revision THEN RAISE EXCEPTION 'GRID_PAUSE_REVISION_INVALID'; END IF;
   changed_scope := ROW(NEW.start_scope,NEW.per_bot_cap_usd,NEW.global_ceiling_usd) IS DISTINCT FROM ROW(OLD.start_scope,OLD.per_bot_cap_usd,OLD.global_ceiling_usd);
-  IF changed_scope THEN
+  IF changed_scope OR (action_context='transition' AND NEW.scope_revision=OLD.scope_revision+1) THEN
     IF NEW.scope_revision<>OLD.scope_revision+1 THEN RAISE EXCEPTION 'GRID_SCOPE_REVISION_REQUIRED'; END IF;
     UPDATE grid_worker_requests SET state='superseded',completed_at=clock_timestamp(),result_code='scope_changed' WHERE state='pending';
   ELSIF NEW.scope_revision<>OLD.scope_revision THEN RAISE EXCEPTION 'GRID_SCOPE_REVISION_INVALID'; END IF;
@@ -468,6 +469,33 @@ BEGIN
 END
 $body$;
 
+CREATE FUNCTION grid_worker_validate_release() RETURNS trigger LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, public AS $body$
+DECLARE h grid_worker_host%ROWTYPE; wallet text; pool_id integer; bot_ids uuid[]; bot_id uuid; lock_key bigint;
+BEGIN
+  SELECT * INTO h FROM grid_worker_host WHERE singleton_id=1;
+  -- Legacy or unseeded package remains dormant. External mode never falls through.
+  IF NOT FOUND OR h.execution_mode='legacy' THEN RETURN NEW; END IF;
+  IF NOT grid_worker_has_host_lock(false) THEN RAISE EXCEPTION 'GRID_RELEASE_HOST_PRELOCK_REQUIRED'; END IF;
+  IF h.holder_role IS DISTINCT FROM 'grid-worker' OR h.holder_boot_id IS NULL OR h.lease_expires_at IS NULL OR h.lease_expires_at<=clock_timestamp() OR current_setting('qv.grid_worker_holder',true) IS DISTINCT FROM h.holder_boot_id::text OR current_setting('qv.grid_worker_epoch',true) IS DISTINCT FROM h.fencing_epoch::text THEN RAISE EXCEPTION 'GRID_RELEASE_WORKER_REQUIRED'; END IF;
+  IF TG_TABLE_NAME='grid_launch_accounts' THEN
+    pool_id:=OLD.protocol_subaccount_id; bot_ids:=ARRAY[OLD.bot_id];
+    IF ROW(NEW.bot_id,NEW.protocol_subaccount_id,NEW.master_account,NEW.account) IS DISTINCT FROM ROW(OLD.bot_id,OLD.protocol_subaccount_id,OLD.master_account,OLD.account) THEN RAISE EXCEPTION 'GRID_RELEASE_IDENTITY_CHANGED'; END IF;
+    SELECT b.wallet_address INTO wallet FROM grid_bots b WHERE b.id=OLD.bot_id;
+    IF NOT EXISTS(SELECT 1 FROM protocol_subaccounts p JOIN wallets w ON w.address=p.wallet_address WHERE p.id=pool_id AND p.wallet_address=wallet AND p.agent_public_key=OLD.master_account AND w.agent_public_key=OLD.master_account AND p.protocol_subaccount_id=OLD.account AND p.protocol='pacifica') THEN RAISE EXCEPTION 'GRID_RELEASE_OWNER_MISMATCH'; END IF;
+  ELSE
+    pool_id:=OLD.id; wallet:=OLD.wallet_address;
+    IF ROW(NEW.id,NEW.wallet_address,NEW.agent_public_key,NEW.protocol_subaccount_id,NEW.protocol) IS DISTINCT FROM ROW(OLD.id,OLD.wallet_address,OLD.agent_public_key,OLD.protocol_subaccount_id,OLD.protocol) THEN RAISE EXCEPTION 'GRID_RELEASE_IDENTITY_CHANGED'; END IF;
+    SELECT array_agg(l.bot_id) INTO bot_ids FROM grid_launch_accounts l WHERE l.protocol_subaccount_id=pool_id AND l.released_at IS NULL;
+    IF COALESCE(cardinality(bot_ids),0)=0 OR EXISTS(SELECT 1 FROM grid_launch_accounts l JOIN grid_bots b ON b.id=l.bot_id WHERE l.protocol_subaccount_id=pool_id AND l.released_at IS NULL AND (b.wallet_address IS DISTINCT FROM wallet OR l.master_account IS DISTINCT FROM OLD.agent_public_key OR l.account IS DISTINCT FROM OLD.protocol_subaccount_id)) OR NOT EXISTS(SELECT 1 FROM wallets w WHERE w.address=wallet AND w.agent_public_key=OLD.agent_public_key) THEN RAISE EXCEPTION 'GRID_RELEASE_OWNER_MISMATCH'; END IF;
+  END IF;
+  IF wallet IS NULL OR NOT grid_worker_has_wallet_lock(wallet) THEN RAISE EXCEPTION 'GRID_RELEASE_WALLET_PRELOCK_REQUIRED'; END IF;
+  FOREACH lock_key IN ARRAY ARRAY[hashtextextended('qv:grid-worker:v3:pool:'||pool_id::text,0)] || ARRAY(SELECT hashtextextended('qv:grid-worker:v3:bot:'||x::text,0) FROM unnest(bot_ids) x) LOOP
+    IF NOT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted AND database=(SELECT oid FROM pg_database WHERE datname=current_database()) AND classid=((lock_key >> 32) & 4294967295)::oid AND objid=(lock_key & 4294967295)::oid AND objsubid=1 AND mode='ExclusiveLock') THEN RAISE EXCEPTION 'GRID_RELEASE_IDENTITY_PRELOCK_REQUIRED'; END IF;
+  END LOOP;
+  RETURN NEW;
+END
+$body$;
+
 CREATE FUNCTION grid_worker_consume_receipt(receipt_id uuid, expected_action text, expected_target text, expected_params_digest text) RETURNS void LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, public AS $body$
 DECLARE r owner_action_receipts%ROWTYPE; db_now timestamptz := clock_timestamp(); message text;
 BEGIN
@@ -476,7 +504,7 @@ BEGIN
   IF NOT FOUND THEN RAISE EXCEPTION 'GRID_RECEIPT_MISSING'; END IF;
   IF r.action IS DISTINCT FROM expected_action OR r.scope<>'grid_worker' OR r.target IS DISTINCT FROM expected_target OR r.params_digest IS DISTINCT FROM expected_params_digest THEN RAISE EXCEPTION 'GRID_RECEIPT_BINDING'; END IF;
   IF NOT EXISTS(SELECT 1 FROM grid_worker_owner o JOIN grid_worker_host h ON h.singleton_id=o.singleton_id AND h.owner_wallet=o.wallet_address WHERE o.singleton_id=1 AND o.wallet_address=r.owner_wallet) THEN RAISE EXCEPTION 'GRID_RECEIPT_OWNER'; END IF;
-  IF (r.action IN ('pause','reset_pause','ack_critical') AND r.params_digest<>'none') OR (r.action IN ('widen_scope','break_glass_close') AND r.params_digest='none') THEN RAISE EXCEPTION 'GRID_RECEIPT_PARAMS'; END IF;
+  IF (r.action IN ('pause','reset_pause','ack_critical') AND r.params_digest<>'none') OR (r.action IN ('widen_scope','break_glass_close','host_transition','quota_policy') AND r.params_digest='none') THEN RAISE EXCEPTION 'GRID_RECEIPT_PARAMS'; END IF;
   IF r.consumed_at IS NOT NULL THEN RAISE EXCEPTION 'GRID_RECEIPT_CONSUMED'; END IF;
   IF r.issued_at>db_now OR r.expires_at<=db_now OR r.expires_at<=r.issued_at OR r.expires_at>r.issued_at+interval '300 seconds' OR NOT isfinite(r.issued_at) OR NOT isfinite(r.expires_at) THEN RAISE EXCEPTION 'GRID_RECEIPT_EXPIRED'; END IF;
   IF r.verified_at<db_now-interval '60 seconds' OR r.verified_at>db_now OR r.verified_at<r.issued_at THEN RAISE EXCEPTION 'GRID_RECEIPT_STALE'; END IF;
@@ -513,6 +541,8 @@ CREATE TRIGGER grid_worker_grid_launch_accounts_insert BEFORE INSERT ON grid_lau
 CREATE TRIGGER grid_worker_grid_launch_accounts_update BEFORE UPDATE OF bot_id,master_account,protocol_subaccount_id ON grid_launch_accounts FOR EACH ROW WHEN (OLD.bot_id IS DISTINCT FROM NEW.bot_id OR OLD.master_account IS DISTINCT FROM NEW.master_account OR OLD.protocol_subaccount_id IS DISTINCT FROM NEW.protocol_subaccount_id) EXECUTE FUNCTION grid_worker_validate_owner_scope();
 CREATE TRIGGER grid_worker_requests_owner_validate BEFORE INSERT OR UPDATE ON grid_worker_requests FOR EACH ROW EXECUTE FUNCTION grid_worker_validate_owner_scope();
 CREATE TRIGGER grid_worker_reservations_owner_validate BEFORE INSERT OR UPDATE ON grid_worker_reservations FOR EACH ROW EXECUTE FUNCTION grid_worker_validate_owner_scope();
+CREATE TRIGGER grid_worker_launch_release_validate BEFORE UPDATE OF released_at ON grid_launch_accounts FOR EACH ROW WHEN (OLD.released_at IS NULL AND NEW.released_at IS NOT NULL) EXECUTE FUNCTION grid_worker_validate_release();
+CREATE TRIGGER grid_worker_pool_release_validate BEFORE UPDATE OF status ON protocol_subaccounts FOR EACH ROW WHEN (OLD.status IN ('grid_reserved','grid_owned') AND NEW.status IS DISTINCT FROM OLD.status) EXECUTE FUNCTION grid_worker_validate_release();
 END
 $install$;
 COMMIT;

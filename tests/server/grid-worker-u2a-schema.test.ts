@@ -69,6 +69,11 @@ describe('U2a PostgreSQL package', () => {
     await context('bootstrap_tracking');
     await db.query('UPDATE grid_worker_host SET authority_tracking_enabled=true');
   }
+  async function externalLeaseFixture() {
+    await arm(); await context('transition');
+    await db.query("SET LOCAL qv.grid_worker_ready='true'; SET LOCAL qv.grid_worker_owner_verified='true'");
+    await db.query("UPDATE grid_worker_host SET execution_mode='external',legacy_controls_enabled=true");
+  }
   async function refused(sql: string, values: unknown[] = [], code?: string) {
     await db.query('SAVEPOINT negative');
     if (code) await expect(db.query(sql, values)).rejects.toThrow(code);
@@ -103,7 +108,7 @@ describe('U2a PostgreSQL package', () => {
   const pause = 'SELECT grid_worker_pause_from_verified_receipt($1::uuid)';
 
   it('commits deterministic message, digest and signature vectors for all actions', () => {
-    expect(OWNER_RECEIPT_VECTORS).toHaveLength(5);
+    expect(OWNER_RECEIPT_VECTORS).toHaveLength(7);
     for (const vector of OWNER_RECEIPT_VECTORS) {
       expect(Buffer.from(vector.messageBytes).toString('utf8')).toBe(vector.message);
       expect(digest(vector.message)).toBe(vector.messageDigest);
@@ -293,7 +298,7 @@ describe('U2a PostgreSQL package', () => {
     await refused("UPDATE grid_launch_accounts SET master_account='EXAMPLE_OTHER'", [], 'GRID_LAUNCH_OWNER_MISMATCH');
   });
   it('host holder CAS, observer clear and pause acknowledgement preserve epoch and scope rules', async () => {
-    await seed(); await context('lease_acquire');
+    await seed(); await externalLeaseFixture(); await context('lease_acquire');
     await db.query("SET LOCAL qv.grid_worker_ready='true'; SET LOCAL qv.grid_worker_owner_verified='false'");
     const holder = randomUUID();
     await db.query("UPDATE grid_worker_host SET holder_boot_id=$1,holder_role='grid-worker',fencing_epoch=1,lease_expires_at=clock_timestamp()+interval '45 seconds'", [holder]);
@@ -323,7 +328,7 @@ describe('U2a PostgreSQL package', () => {
     return holder;
   }
   for (const expired of [false, true]) it('lease acquisition accepts ' + (expired ? 'expired holder' : 'empty holder') + ' without owner verification', async () => {
-    await seed(expired ? randomUUID() : undefined);
+    await seed(expired ? randomUUID() : undefined); await externalLeaseFixture();
     const before = (await db.query('SELECT to_jsonb(h) AS host FROM grid_worker_host h')).rows[0].host;
     const holder = await leaseContext();
     await db.query(acquireSql, [holder]);
@@ -345,7 +350,7 @@ describe('U2a PostgreSQL package', () => {
     }
   });
   it('lease contexts refuse a live previous lease and acquire requires readiness', async () => {
-    await seed(); const holder = await leaseContext();
+    await seed(); await externalLeaseFixture(); const holder = await leaseContext();
     await db.query("SET LOCAL qv.grid_worker_ready='false'");
     await refused(acquireSql, [holder], 'GRID_LEASE_ACQUIRE_INVALID');
     await db.query("SET LOCAL qv.grid_worker_ready='true'"); await db.query(acquireSql, [holder]);
@@ -354,12 +359,14 @@ describe('U2a PostgreSQL package', () => {
   });
   for (const [column, value] of Object.entries({ execution_mode: "'external'", run_mode: "'trading'", execution_enabled: 'true', entries_paused: 'false', drain_requested: 'true', last_healthz_poll_at: 'clock_timestamp()', pause_ack_at: 'clock_timestamp()', commit_hash: "'EXAMPLE'", tree_hash: "'EXAMPLE'", lockfile_sha256: "'EXAMPLE'", start_scope: "'expanded'", per_bot_cap_usd: '10', global_ceiling_usd: '10', scope_revision: '2', observer_fenced: 'false', updated_at: 'clock_timestamp()', authority_tracking_enabled: 'true', legacy_controls_enabled: 'true', pause_revision: '1', pause_ack_revision: '0' })) {
     for (const action of ['lease_acquire', 'lease_release']) it(action + ' cannot change ' + column, async () => {
-      const holder = randomUUID(); await seed(holder); await leaseContext(action, holder);
-      await refused((action === 'lease_acquire' ? acquireSql : releaseSql) + ',' + column + '=' + value, action === 'lease_acquire' ? [randomUUID()] : [], action === 'lease_acquire' ? 'GRID_LEASE_ACQUIRE_INVALID' : 'GRID_LEASE_RELEASE_INVALID');
+      const holder = randomUUID(); await seed(holder); await externalLeaseFixture(); await leaseContext(action, holder);
+      const mutation = column === 'execution_mode' ? "'legacy'" : column === 'authority_tracking_enabled' || column === 'legacy_controls_enabled' ? 'false' : value;
+      const monotonic = column === 'authority_tracking_enabled' || column === 'legacy_controls_enabled';
+      await refused((action === 'lease_acquire' ? acquireSql : releaseSql) + ',' + column + '=' + mutation, action === 'lease_acquire' ? [randomUUID()] : [], monotonic ? 'GRID_HOST_MONOTONIC' : action === 'lease_acquire' ? 'GRID_LEASE_ACQUIRE_INVALID' : 'GRID_LEASE_RELEASE_INVALID');
     });
   }
   it('lease acquisition requires worker role, exact next epoch and a positive bounded lease', async () => {
-    await seed(); await leaseContext();
+    await seed(); await externalLeaseFixture(); await leaseContext();
     for (const sql of [acquireSql.replace("'grid-worker'", "'protective'"), acquireSql.replace('fencing_epoch+1', 'fencing_epoch'), acquireSql.replace('fencing_epoch+1', 'fencing_epoch+2'), acquireSql.replace("interval '45 seconds'", "interval '-1 second'")]) await refused(sql, [randomUUID()], 'GRID_LEASE_ACQUIRE_INVALID');
     await refused(acquireSql.replace("interval '45 seconds'", "interval '46 seconds'"), [randomUUID()], 'GRID_HOST_CLOCK_INVALID');
   });
@@ -374,7 +381,7 @@ describe('U2a PostgreSQL package', () => {
     await refused(releaseSql, [], 'GRID_LEASE_RELEASE_INVALID');
   });
   it('heartbeat caps lease and DB clocks and refuses null or regressed progress', async () => {
-    await seed(); const holder = await leaseContext(); await db.query(acquireSql, [holder]);
+    await seed(); await externalLeaseFixture(); const holder = await leaseContext(); await db.query(acquireSql, [holder]);
     await leaseContext('heartbeat', holder, '1');
     for (const column of ['lease_expires_at','heartbeat_at','progress_at','last_healthz_poll_at']) await refused('UPDATE grid_worker_host SET '+column+"=clock_timestamp()+interval '46 seconds'", [], 'GRID_HOST_CLOCK_INVALID');
     for (const column of ['heartbeat_at','progress_at']) for (const value of ['NULL', "clock_timestamp()-interval '1 second'"]) await refused('UPDATE grid_worker_host SET '+column+'='+value, [], 'GRID_HEARTBEAT_CAS_REQUIRED');

@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import bs58 from 'bs58';
 
-export const ownerActions = ['pause', 'reset_pause', 'ack_critical', 'widen_scope', 'break_glass_close'] as const;
+export const ownerActions = ['pause', 'reset_pause', 'ack_critical', 'widen_scope', 'break_glass_close', 'host_transition', 'quota_policy'] as const;
 export type OwnerAction = typeof ownerActions[number];
 export interface OwnerMessage {
   action: OwnerAction; scope: 'grid_worker'; target: string; nonce: string;
@@ -23,21 +23,47 @@ function validString(s: string): boolean {
   }
   return true;
 }
-/** RFC 8785 for this protocol's restricted strings/arrays/object domain. No numeric coercion. */
+const parameterActions: readonly OwnerAction[] = ['widen_scope', 'break_glass_close', 'host_transition', 'quota_policy'];
+function dataArray(value: unknown): value is unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || Reflect.ownKeys(value).length !== value.length + 1) return false;
+  for (let i = 0; i < value.length; i++) if (!Object.getOwnPropertyDescriptor(value, String(i))?.hasOwnProperty('value')) return false;
+  return true;
+}
+/** RFC 8785 for this protocol's restricted strings/booleans/arrays/object domain. No numeric coercion. */
 export function canonicalOwnerParams(action: OwnerAction, input: unknown): string | undefined {
-  if (!['widen_scope', 'break_glass_close'].includes(action)) { if (input !== undefined) refuse(); return undefined; }
+  if (!parameterActions.includes(action)) { if (input !== undefined) refuse(); return undefined; }
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.getPrototypeOf(input) !== Object.prototype) return refuse();
   const obj = input as Record<string, unknown>;
-  const keys = action === 'widen_scope' ? ['globalCapUsd', 'perBotCapUsd', 'wallets'] : ['botId'];
-  if (Object.keys(obj).sort().join(',') !== keys.join(',')) refuse();
+  const keys = (action === 'widen_scope' ? ['globalCapUsd', 'perBotCapUsd', 'wallets']
+    : action === 'host_transition' ? ['executionMode', 'runMode', 'executionEnabled', 'legacyControlsEnabled', 'drainRequested', 'commitHash', 'treeHash', 'lockfileSha256', 'expectedFencingEpoch', 'expectedScopeRevision']
+    : action === 'quota_policy' ? ['policyDigests'] : ['botId']).sort();
+  if (Reflect.ownKeys(obj).length !== keys.length || Object.keys(obj).sort().join(',') !== keys.join(',')) refuse();
+  if (keys.some(key => !Object.getOwnPropertyDescriptor(obj, key)?.hasOwnProperty('value'))) refuse();
   if (action === 'widen_scope') {
     for (const key of ['globalCapUsd', 'perBotCapUsd']) if (typeof obj[key] !== 'string' || !exact(/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/, obj[key] as string)) refuse();
-    if (!Array.isArray(obj.wallets) || obj.wallets.some((w, i, all) => typeof w !== 'string' || (i > 0 && all[i - 1] >= w))) refuse();
+    if (!dataArray(obj.wallets) || obj.wallets.some((w, i, all) => typeof w !== 'string' || (i > 0 && (all[i - 1] as string) >= w))) refuse();
     for (const wallet of obj.wallets as string[]) ownerPublicKey(wallet);
+  } else if (action === 'host_transition') {
+    if (!['legacy', 'external'].includes(obj.executionMode as string) || !['test', 'trading'].includes(obj.runMode as string)) refuse();
+    for (const key of ['executionEnabled', 'legacyControlsEnabled', 'drainRequested']) if (typeof obj[key] !== 'boolean') refuse();
+    for (const key of ['commitHash', 'treeHash', 'lockfileSha256']) {
+      if (typeof obj[key] !== 'string' || !exact(key === 'lockfileSha256' ? /^[0-9a-f]{64}$/ : /^[0-9a-f]{40}$/, obj[key] as string)) refuse();
+    }
+    // Decimal strings preserve PostgreSQL bigint identity without JS rounding.
+    for (const key of ['expectedFencingEpoch', 'expectedScopeRevision']) {
+      if (typeof obj[key] !== 'string' || !exact(/^(?:0|[1-9][0-9]*)$/, obj[key] as string) || BigInt(obj[key] as string) > 9223372036854775807n) refuse();
+    }
+  } else if (action === 'quota_policy') {
+    if (!dataArray(obj.policyDigests) || obj.policyDigests.length === 0
+      || obj.policyDigests.some((d, i, all) => typeof d !== 'string' || !exact(/^[0-9a-f]{64}$/, d) || (i > 0 && (all[i - 1] as string) >= d))) refuse();
   } else if (typeof obj.botId !== 'string' || !exact(uuid, obj.botId)) refuse();
   const encode = (value: unknown): string => {
     if (typeof value === 'string' && validString(value)) return JSON.stringify(value);
-    if (Array.isArray(value)) return '[' + value.map(encode).join(',') + ']';
+    if (typeof value === 'boolean') return JSON.stringify(value);
+    if (Array.isArray(value)) {
+      if (!dataArray(value)) refuse();
+      return '[' + value.map(encode).join(',') + ']';
+    }
     return refuse();
   };
   return '{' + keys.map(key => JSON.stringify(key) + ':' + encode(obj[key])).join(',') + '}';
@@ -68,7 +94,7 @@ export function parseOwnerMessage(bytes: Uint8Array | string): OwnerMessage {
   }
   const window = Date.parse(expires) - Date.parse(issued);
   if (window <= 0 || window > 120_000) refuse();
-  const hasParams = action === 'widen_scope' || action === 'break_glass_close';
+  const hasParams = parameterActions.includes(action as OwnerAction);
   if (hasParams ? !exact(/^[0-9a-f]{64}$/, paramsDigest) : paramsDigest !== 'none') refuse();
   const result = { action: action as OwnerAction, scope: 'grid_worker' as const, target, nonce, issued, expires, paramsDigest };
   if (serializeOwnerMessage(result) !== message) refuse();
