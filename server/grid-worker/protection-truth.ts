@@ -11,6 +11,9 @@ export class ProtectionTruth {
       const r=(await c.query(`SELECT b.status,b.market,a.account,h.drain_requested,l.blocker,r.action,r.state,m.observation,
         extract(epoch FROM clock_timestamp())*1000 AS now,
         m.reconciled_at BETWEEN clock_timestamp()-interval '5 seconds' AND clock_timestamp() AS fresh,
+        EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.exact_request->>'kind' IN ('cancel','close')
+          AND o.exact_request->'authority'->>'controlRequestId'=l.active_request::text
+          AND (o.state='failed' OR o.failure_classification IS NOT NULL AND o.failure_classification<>'unknown')) AS protective_denied,
         EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.state IN ('prepared','submitted','unconfirmed'))
           OR EXISTS(SELECT 1 FROM grid_worker_send_audit s WHERE s.bot_id=b.id AND s.outcome='unknown') AS unknown,
         EXISTS(SELECT 1 FROM grid_operations o WHERE o.bot_id=b.id AND o.state IN ('prepared','submitted','unconfirmed')
@@ -30,7 +33,7 @@ export class ProtectionTruth {
       const protection=stop||r.state==='pending'&&['pause','band'].includes(r.action)||r.drain_requested;
       if(!protection){await c.query("DELETE FROM grid_risk_events WHERE bot_id=$1 AND event_key='protective-pass-count'",[botId]);return null;}
       const failed=error instanceof Error?error.message:error?'unknown':null;
-      const immediate=!!failed||/refused|failed|quota|backoff|rejection/.test(r.blocker??'');
+      const immediate=!!failed||r.protective_denied||/refused|failed|quota|backoff|rejection/.test(r.blocker??'');
       const blocked=!!r.blocker||!!failed;
       const count=(await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at)
         VALUES($1,'protective-pass-count','internal_protection',$2::jsonb,clock_timestamp())

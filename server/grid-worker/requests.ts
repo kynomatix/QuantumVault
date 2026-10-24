@@ -131,7 +131,7 @@ export class WorkerStartRequests {
       if(!bot||bot.protocol_subaccount_id!==null||!['draft','failed'].includes(bot.status))return false;
       const used=(await c.query(`SELECT
         EXISTS(SELECT 1 FROM grid_launch_accounts WHERE bot_id=$1)
-        OR EXISTS(SELECT 1 FROM protocol_subaccounts WHERE bot_id=$1)
+        OR EXISTS(SELECT 1 FROM protocol_subaccounts WHERE bot_id=$1::text)
         OR EXISTS(SELECT 1 FROM grid_operations WHERE bot_id=$1)
         OR EXISTS(SELECT 1 FROM grid_execution_claims WHERE bot_id=$1)
         OR EXISTS(SELECT 1 FROM grid_worker_send_audit WHERE bot_id=$1) AS used`,[row.bot_id])).rows[0];

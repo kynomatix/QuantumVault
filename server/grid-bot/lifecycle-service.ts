@@ -113,7 +113,9 @@ export class GridLifecycleService {
       },send:retained=>retained.kind==='cancel'||retained.kind==='close'
         ?withProtectivePurpose(()=>this.deps.send(claim,retained)):this.deps.send(claim,retained),
         reconcile:op=>this.deps.recover(claim,op,signal)});
-        return execution.run('control:'+life.active_request+':'+randomUUID(),r,{credits:GRID_ACTION_CREDITS,slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},claim.leaseToken);
+        const outcome=await execution.run('control:'+life.active_request+':'+randomUUID(),r,{credits:GRID_ACTION_CREDITS,slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:0,observedAt:now,expiresAt:now+5000},claim.leaseToken);
+      if((kind==='cancel'||kind==='close')&&outcome!=='confirmed')await s.blocked(claim,outcome==='failed'?'protective_execution_failed':outcome==='not_sent'?'protective_execution_refused':'protective_operation_pending');
+      return outcome;
     };
     const cancel=async(target:NonNullable<typeof entry>)=>act('cancel',{symbol:target.order.symbol,order_id:target.order.orderId},{levelId:target.operation!.level_id,originalRequest:target.operation!.exact_request});
     if(entry&&!unresolvedEntryCancel)return cancel(entry);
