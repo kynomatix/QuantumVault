@@ -11,6 +11,8 @@ import {independentLane,backendTerminator} from '../grid-worker/lanes';
 import {GridIncidents} from '../grid-worker/incidents';
 import {prepareSendAudit,authorizeSendAudit,completeSendAudit,type SendAudit} from '../grid-worker/audit';
 import {ownerSha256} from '../grid-worker/owner-auth';
+import {currentAuthority} from '../grid-worker/authority';
+import {launchIdentityFences} from '../grid-worker/identity-locks';
 import type {GridAction} from '../grid-worker/kill';
 import DecimalBase from 'decimal.js';
 const Decimal=DecimalBase.clone({precision:200});
@@ -98,6 +100,8 @@ export class GridLaunchStorage {
       this.hostAction(c,this.requestAction(r),{terminalProof:r.kind==='sweep',protectiveDrain:reduction(r)});
       await this.prelockWallet(c,r.botId);
       if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
+      await launchIdentityFences(c,r.botId);
+      const authority=await currentAuthority(c,{botId:r.botId,masterAccount:r.masterAccount,account:r.account});
       const op=(await c.query("SELECT id,exact_request_digest FROM grid_operations WHERE bot_id=$1 AND state='submitted' AND exact_request_digest=$2",[r.botId,requestDigest(r)])).rows[0];
       const audit=await this.legacyAudit(c,op?.id,r);
       let pilotUntil:number|null=null;
@@ -123,6 +127,8 @@ export class GridLaunchStorage {
          [r.botId,leaseToken,r.account,r.masterAccount,reduction(r)?liveStates:['provisioning','canary','active'],r.timestamp,r.expiryMs,requestDigest(r),r.authority.lifecycleEpoch??null,['close','sweep'].includes(r.kind),pilotUntil])).rowCount;
       if(!owned)throw new GridLaunchTransientError('Grid send ownership unavailable');
       if(audit)await authorizeSendAudit(c,audit);
+      await currentAuthority(c,{botId:r.botId,wallet:authority.wallet,masterAccount:r.masterAccount,account:r.account,
+        ...(authority.generation===null?{}:{generation:authority.generation})});
       deadline.beforeTransport(r.timestamp,r.timestamp+r.expiryMs);
       return post(deadline.abort.signal);
     });
@@ -285,6 +291,7 @@ export class GridLaunchStorage {
       },{terminate});
     }catch(error){
       if(error instanceof Error&&error.message==='GRID_MAIN_CONTENDER_SEEN')await this.incidentWriter.record({code:'contender_seen',dedupKey:'main:contender'});
+      if(error instanceof Error&&error.message==='GRID_AUTHORITY_HISTORY_MISSING')await this.incidentWriter.record({code:'schema_drift',dedupKey:'authority:missing-history'});
       throw error;
     }
   }

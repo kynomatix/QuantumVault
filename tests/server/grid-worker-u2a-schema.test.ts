@@ -10,17 +10,19 @@ import { computeGridPolicyHmac } from '../../server/grid-bot/policy-hmac';
 import { umk } from '../grid-bot/draft-fixtures';
 import { U2A_CONSOLE_TEMPLATES } from '../helpers/grid-worker-u2a-console-templates';
 import { OWNER_RECEIPT_VECTORS } from '../helpers/grid-worker-owner-receipt-vectors';
+import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
 
 describe('U2a PostgreSQL package', () => {
   let admin: Pool, fixturePool: Pool, db: PoolClient;
   const schema = 'grid_u2a_' + randomUUID().replaceAll('-', '');
+  const isolate=gridWorkerIsolation();
   beforeAll(async () => {
     const url = process.env.DATABASE_URL;
     if (!url || new URL(url).pathname !== '/qvtest') throw Error('FRACTAL qvtest required');
     admin = new Pool({ connectionString: url, max: 1 });
     await admin.query('CREATE SCHEMA ' + schema);
     fixturePool = new Pool({ connectionString: url, max: 1, options: '-c search_path=' + schema + ',pg_catalog' });
-    db = await fixturePool.connect();
+    db = isolate(await fixturePool.connect());
     // Clone only schema, retaining real column ordinals for exact trigger attributes.
     for (const table of ['wallets', 'grid_bots', 'grid_operations', 'grid_control_requests', 'protocol_subaccounts', 'grid_launch_accounts']) {
       await db.query(`CREATE TABLE ${table} (LIKE public.${table} INCLUDING ALL)`);

@@ -1,3 +1,5 @@
+import {randomBytes,randomInt} from 'node:crypto';
+import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
 import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it,vi} from 'vitest';
 import {Pool} from 'pg';
 import {randomUUID} from 'node:crypto';
@@ -35,13 +37,15 @@ beforeAll(async()=>{
   const url=process.env.DATABASE_URL;if(!url||new URL(url).pathname!=='/qvtest')throw Error('FRACTAL isolated qvtest schema required');
   admin=new Pool({connectionString:url,max:1});await admin.query('CREATE SCHEMA '+schema);
   pool=new Pool({connectionString:url,max:5,options:'-c search_path='+schema});
-  await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text);
+  pool.on('connect',gridWorkerIsolation());
+    await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text,execution_enabled boolean DEFAULT true,emergency_stop_triggered boolean DEFAULT false,umk_version integer DEFAULT 1,umk_encrypted_for_execution text DEFAULT 'EXAMPLE',agent_private_key_encrypted_v3 text DEFAULT 'EXAMPLE',execution_expires_at timestamptz);
     CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    await pool.query('ALTER SEQUENCE protocol_subaccounts_id_seq RESTART WITH '+randomInt(1000000,1500000000));
   for(const name of migrations)await pool.query(readFileSync(new URL('../../migrations/'+name,import.meta.url),'utf8'));
   launch=new GridLaunchStorage(pool,async()=>{},async r=>({...marginTestReading(r),leverage:'2',feeRate:'0'}));storage=new GridMonitorStorage(launch);
 },30000);
 afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
-beforeEach(async()=>{vi.resetAllMocks();await pool.query('TRUNCATE grid_bots,protocol_subaccounts,wallets,grid_master_quota,grid_wallet_safety CASCADE');await pool.query('INSERT INTO wallets VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
+beforeEach(async()=>{vi.resetAllMocks();await pool.query('TRUNCATE grid_bots,protocol_subaccounts,wallets,grid_master_quota,grid_wallet_safety CASCADE');await pool.query('INSERT INTO wallets(address,agent_public_key) VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
 afterEach(()=>vi.restoreAllMocks());
 
 async function fixture(seed:boolean){
@@ -135,7 +139,7 @@ describe('production-composed v2 activation with durable PostgreSQL history',()=
     expect(op.state).toBe('confirmed');
     // Isolate settlement of this exact durable request at the submitted boundary.
     await pool.query("UPDATE grid_operations SET state='submitted',terminal_at=NULL,venue_order_id=NULL WHERE id=$1",[op.id]);
-    await launch.settle({...op,state:'submitted',venue_order_id:null},{state:'failed',reason:'margin',releaseSlot:true,...(orderId?{orderId}:{})},f.claim.leaseToken);
+    await launch.settle({...op,state:'submitted'},{state:'failed',reason:'margin',releaseSlot:true,...(orderId?{orderId}:{})},f.claim.leaseToken);
     const proof=(await pool.query("SELECT evidence FROM grid_risk_events WHERE bot_id=$1 AND event_key=$2",[f.claim.id,'cycle-no-land:'+op.id])).rows;
     expect(proof).toHaveLength(orderId?0:1);
     if(!orderId)expect(proof[0].evidence.requestDigest).toBe(op.exact_request_digest);

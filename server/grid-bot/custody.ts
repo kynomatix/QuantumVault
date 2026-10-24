@@ -9,6 +9,8 @@ import type {GridSettlementFact} from './lifecycle-service';
 import {gridRecyclerGate,gridExposureLimit} from './runtime-policy';
 import {freshGridFact} from './lifecycle-policy';
 import {recordGridWorker,gridWorkerFence} from './worker-ownership';
+import {allocatePoolId,identityFences,launchIdentityFences} from '../grid-worker/identity-locks';
+import {currentAuthority} from '../grid-worker/authority';
 
 // Leave recovery time beyond the durable 60-second rate-limit backoff.
 export const GRID_LAUNCH_LEASE_MS = 120_000;
@@ -33,6 +35,17 @@ export class GridCustody {
         // Same wallet-generation lock namespace as storage.ts's legacy pool/reset path.
         await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,input.wallet]);
         if(!await gridWorkerFence(c,input.botId))throw Error('Grid sender still active');
+        const findSpare=async()=>(await c.query(`SELECT p.* FROM protocol_subaccounts p WHERE wallet_address=$1 AND protocol='pacifica'
+          AND agent_public_key=$2 AND status='spare' AND bot_id IS NULL AND derivation_index IS NULL AND aad_version=1
+          AND last_verified_empty_at IS NOT NULL AND subaccount_key_encrypted_v3 IS NOT NULL
+          AND NOT EXISTS(SELECT 1 FROM grid_launch_accounts a WHERE a.protocol_subaccount_id=p.id AND a.released_at IS NULL)
+          ORDER BY released_at NULLS FIRST,id LIMIT 1`,[input.wallet,input.masterAccount])).rows[0];
+        const discovered=await findSpare(),poolId=discovered?.id??await allocatePoolId(c);
+        const oldPool=(await c.query('SELECT protocol_subaccount_id FROM grid_launch_accounts WHERE bot_id=$1',[input.botId])).rows[0]?.protocol_subaccount_id;
+        await identityFences(c,[input.botId],oldPool==null?[poolId]:[poolId,oldPool]);
+        const spare=await findSpare();
+        if(discovered?.id!==spare?.id || oldPool!==(await c.query('SELECT protocol_subaccount_id FROM grid_launch_accounts WHERE bot_id=$1',[input.botId])).rows[0]?.protocol_subaccount_id)throw Error('GRID_POOL_IDENTITY_CHANGED');
+        await currentAuthority(c,{botId:input.botId,wallet:input.wallet,masterAccount:input.masterAccount,requirePool:false});
         const owner=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1 FOR UPDATE',[input.wallet])).rows[0];
         if(owner?.agent_public_key!==input.masterAccount)throw Error('Grid master generation changed');
         await c.query('INSERT INTO grid_master_quota(master_account,share) VALUES($1,$2) ON CONFLICT DO NOTHING',[input.masterAccount,share.toFixed()]);
@@ -44,11 +57,6 @@ export class GridCustody {
         if(limit===null)throw Error('Grid configured exposure is unknown');
         // Claim an eligible random-key spare directly; never call the trading_bots finalizer.
         // A failed claim/decryption is terminal for this transaction, never a fresh-create fallback.
-        const spare=(await c.query(`SELECT p.* FROM protocol_subaccounts p WHERE wallet_address=$1 AND protocol='pacifica'
-          AND agent_public_key=$2 AND status='spare' AND bot_id IS NULL AND derivation_index IS NULL AND aad_version=1
-          AND last_verified_empty_at IS NOT NULL AND subaccount_key_encrypted_v3 IS NOT NULL
-          AND NOT EXISTS(SELECT 1 FROM grid_launch_accounts a WHERE a.protocol_subaccount_id=p.id AND a.released_at IS NULL)
-          ORDER BY released_at NULLS FIRST FOR UPDATE SKIP LOCKED LIMIT 1`,[input.wallet,input.masterAccount])).rows[0];
         let chosenAccount=account,chosenEncrypted=encrypted;
         if(spare){
           const pooledKey=deriveSubkey(umk,'bot_subaccount_privkey');let recovered:Buffer|undefined;
@@ -57,8 +65,8 @@ export class GridCustody {
             chosenAccount=spare.protocol_subaccount_id;chosenEncrypted=encryptToBase64(recovered,subkey,buildPooledSubaccountAAD('grid:pacifica',input.wallet,chosenAccount));
           }finally{zeroizeBuffer(pooledKey);if(recovered)zeroizeBuffer(recovered);}
         }
-        const row=spare?(await c.query(`UPDATE protocol_subaccounts SET status='grid_reserved',claim_token=$2,claimed_at=clock_timestamp(),subaccount_key_encrypted_v3=$3 WHERE id=$1 RETURNING id`,[spare.id,leaseToken,chosenEncrypted])).rows[0]:(await c.query(`INSERT INTO protocol_subaccounts(wallet_address,protocol,protocol_subaccount_id,status,agent_public_key,subaccount_key_encrypted_v3,aad_version,claim_token,claimed_at)
-          VALUES($1,'pacifica',$2,'grid_reserved',$3,$4,1,$5,clock_timestamp()) RETURNING id`,[input.wallet,account,input.masterAccount,encrypted,leaseToken])).rows[0];
+        const row=spare?(await c.query(`UPDATE protocol_subaccounts SET status='grid_reserved',claim_token=$2,claimed_at=clock_timestamp(),subaccount_key_encrypted_v3=$3 WHERE id=$1 RETURNING id`,[spare.id,leaseToken,chosenEncrypted])).rows[0]:(await c.query(`INSERT INTO protocol_subaccounts(id,wallet_address,protocol,protocol_subaccount_id,status,agent_public_key,subaccount_key_encrypted_v3,aad_version,claim_token,claimed_at)
+          VALUES($6,$1,'pacifica',$2,'grid_reserved',$3,$4,1,$5,clock_timestamp()) RETURNING id`,[input.wallet,account,input.masterAccount,encrypted,leaseToken,poolId])).rows[0];
         // Keep the existing storage columns; callers cannot supply an independent ceiling.
         await c.query('INSERT INTO grid_launch_accounts(bot_id,protocol_subaccount_id,master_account,account,canary_limit,reused) VALUES($1,$2,$3,$4,$5,$6)',[input.botId,row.id,input.masterAccount,chosenAccount,limit,!!spare]);
         await c.query("UPDATE grid_bots SET protocol_subaccount_id=$2,status='provisioning',lease_token=$3,lease_expires_at=clock_timestamp()+$4*interval '1 millisecond',updated_at=clock_timestamp() WHERE id=$1",[input.botId,row.id,leaseToken,GRID_LAUNCH_LEASE_MS]);
@@ -106,6 +114,7 @@ export class GridCustody {
           this.storage.hostAction(c,terminalProof?'release':'settle',{terminalProof});
           await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,identity.wallet]);
           if(!await gridWorkerFence(c,identity.botId))throw Error('Grid sender still active');
+          await launchIdentityFences(c,identity.botId);
           await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[identity.masterAccount]);
           const a=(await c.query(`SELECT a.protocol_subaccount_id FROM grid_launch_accounts a JOIN grid_bots b ON b.id=a.bot_id
             WHERE a.bot_id=$1 AND a.account=$2 AND a.master_account=$3 AND a.released_at IS NULL AND b.wallet_address=$4
@@ -145,6 +154,7 @@ export class GridCustody {
           this.storage.hostAction(c,'release',{terminalProof:true});
           await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,identity.wallet]);
           if(!await gridWorkerFence(c,identity.botId))throw Error('Grid sender still active');
+          await launchIdentityFences(c,identity.botId);
           const owner=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1 FOR UPDATE',[identity.wallet])).rows[0];
           if(owner?.agent_public_key!==identity.masterAccount)throw Error('Grid wallet generation changed');
           await c.query('SELECT master_account FROM grid_master_quota WHERE master_account=$1 FOR UPDATE',[identity.masterAccount]);

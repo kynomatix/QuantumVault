@@ -1,3 +1,5 @@
+import {randomBytes,randomInt} from 'node:crypto';
+import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
 import {beforeAll,afterAll,beforeEach,describe,it,expect} from 'vitest';
 import {randomUUID,createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
@@ -22,7 +24,9 @@ describe('auto-resume PostgreSQL ownership, fencing and retry durability',()=>{
   beforeAll(async()=>{
     const url=process.env.DATABASE_URL;if(!url||new URL(url).pathname!=='/qvtest')throw Error('FRACTAL isolated qvtest schema required');
     admin=new Pool({connectionString:url,max:1});await admin.query('CREATE SCHEMA '+schema);pool=new Pool({connectionString:url,max:6,options:'-c search_path='+schema});
-    await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text,execution_enabled boolean DEFAULT true,emergency_stop_triggered boolean DEFAULT false,umk_version integer DEFAULT 1,umk_encrypted_for_execution text DEFAULT 'EXAMPLE'); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    pool.on('connect',gridWorkerIsolation());
+    await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text,execution_enabled boolean DEFAULT true,emergency_stop_triggered boolean DEFAULT false,umk_version integer DEFAULT 1,umk_encrypted_for_execution text DEFAULT 'EXAMPLE',agent_private_key_encrypted_v3 text DEFAULT 'EXAMPLE',execution_expires_at timestamptz); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    await pool.query('ALTER SEQUENCE protocol_subaccounts_id_seq RESTART WITH '+randomInt(1000000,1500000000));
     for(const sql of migrations)await pool.query(sql);launch=new GridLaunchStorage(pool,async()=>{},async r=>marginTestReading(r));monitor=new GridMonitorStorage(launch);life=new GridLifecycleStorage(monitor);auto=new GridAutoResumeStorage(monitor,()=>({draftEnabled:true,startConfigured:true,workerEnabled:true,workerRunning:true,startEnabled:true,draftOnly:false}));
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);

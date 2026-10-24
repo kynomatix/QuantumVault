@@ -1,3 +1,6 @@
+import {randomBytes,randomInt} from 'node:crypto';
+import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
+import type {GridDeadline} from '../../server/grid-worker/transaction';
 import {beforeAll,afterAll,beforeEach,describe,it,expect,vi} from 'vitest';
 import {Pool,type PoolClient} from 'pg';
 import {randomUUID} from 'node:crypto';
@@ -23,18 +26,21 @@ import {marginTestReading} from './margin-fixture';
 vi.mock('../../server/grid-bot/service',()=>({durableGridUmk:async()=>({umk:Buffer.alloc(32,7),cleanup:()=>{}})}));
 
 describe.each(['legacy','repeat_all'] as const)('lean capacity under PostgreSQL admission and send locks: %s',(mode)=>{
+  const isolate=gridWorkerIsolation();
   let admin:Pool,pool:Pool;
-  const schema='grid_lean_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(3)).publicKey);
+  const schema='grid_lean_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(nacl.sign.keyPair.fromSeed(randomBytes(32)).publicKey);
   const store=(p=pool)=>new GridLaunchStorage(p,async()=>{},async r=>marginTestReading(r));
   beforeAll(async()=>{
     const url=process.env.DATABASE_URL;if(!url||new URL(url).pathname!=='/qvtest')throw Error('FRACTAL isolated qvtest schema required');
     admin=new Pool({connectionString:url,max:1});await admin.query('CREATE SCHEMA '+schema);
     pool=new Pool({connectionString:url,max:5,options:'-c search_path='+schema});
-    await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    pool.on('connect',isolate);
+    await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text,execution_enabled boolean DEFAULT true,emergency_stop_triggered boolean DEFAULT false,umk_version integer DEFAULT 1,umk_encrypted_for_execution text DEFAULT 'EXAMPLE',agent_private_key_encrypted_v3 text DEFAULT 'EXAMPLE',execution_expires_at timestamptz); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    await pool.query('ALTER SEQUENCE protocol_subaccounts_id_seq RESTART WITH '+randomInt(1000000,1500000000));
     for(const file of ['0004_grid_bot_drafts','0005_grid_launch','0006_grid_monitor','0007_grid_lifecycle','0011_grid_auto_resume','0012_grid_range_epochs'])await pool.query(readFileSync(new URL('../../migrations/'+file+'.sql',import.meta.url),'utf8'));
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
-  beforeEach(async()=>{await pool.query('TRUNCATE grid_bots,protocol_subaccounts,wallets,grid_master_quota CASCADE');await pool.query('INSERT INTO wallets VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
+  beforeEach(async()=>{await pool.query('TRUNCATE grid_bots,protocol_subaccounts,wallets,grid_master_quota CASCADE');await pool.query('INSERT INTO wallets(address,agent_public_key) VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);});
   async function fixture(behaviour:GridBehaviourMode|'legacy'=mode){
     const base={...cyclePolicy('long',false),id:randomUUID(),totalInvestment:'300.00',sizingVersion:'lean-1' as const,safetyEnvelopePrice:'120.00000000'};
     const policy=behaviour==='legacy'?base:withBehaviour(base,behaviour);
@@ -81,12 +87,13 @@ describe.each(['legacy','repeat_all'] as const)('lean capacity under PostgreSQL 
       expect(cycleCapacity((await readCycleState(c,bot,f.account.account,Date.now())).input,'95')?.used).toBe('120');
     });
     const workers=[0,1].map(()=>new Pool({connectionString:process.env.DATABASE_URL,max:1,options:'-c search_path='+schema}));
+    workers.forEach(p=>p.on('connect',isolate));
     let started=0,release!:()=>void;const barrier=new Promise<void>(resolve=>{release=resolve;}),pids=new Set<number>();
     class ConcurrentStorage extends GridLaunchStorage {
-      override transaction<T>(work:(c:PoolClient)=>Promise<T>):Promise<T>{return super.transaction(async c=>{
+      override transaction<T>(work:(c:PoolClient,deadline:GridDeadline)=>Promise<T>):Promise<T>{return super.transaction(async (c,deadline)=>{
         await c.query("SET LOCAL statement_timeout='10s'");pids.add((await c.query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
         if(++started===2)release();await barrier;
-        const result=await work(c);if(result)await live(c,result as DurableGridOperation);return result;
+        const result=await work(c,deadline);if(result)await live(c,result as unknown as DurableGridOperation);return result;
       }).catch(e=>{release();throw e;});}
     }
     try{

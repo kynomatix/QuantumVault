@@ -3,7 +3,7 @@ import { performance } from 'node:perf_hooks';
 
 export interface ClientLane { connect(): Promise<PoolClient> }
 export interface FenceOptions {
-  mode?: 'shared' | 'exclusive' | 'none'; pause?: boolean;
+  mode?: 'shared' | 'exclusive' | 'none'; pause?: boolean; tightening?: boolean;
   terminate: (pid: number) => Promise<void>;
   unknown?: () => Promise<void>;
   budget?: GridDeadline;
@@ -75,7 +75,7 @@ export async function fencedTransaction<T>(lane: ClientLane, work: (c: PoolClien
       const value = Reflect.get(target, key); return typeof value === 'function' ? value.bind(target) : value;
     } });
     await guarded.query('BEGIN');
-    await guarded.query(options.pause
+    await guarded.query(options.pause || options.tightening
       ? "SET LOCAL lock_timeout='8s'; SET LOCAL statement_timeout='9s'; SET LOCAL idle_in_transaction_session_timeout='12s'"
       : "SET LOCAL lock_timeout='2s'; SET LOCAL statement_timeout='2s'; SET LOCAL idle_in_transaction_session_timeout='12s'");
     if (options.mode !== 'none') await hostFence(guarded, options.mode ?? 'shared');

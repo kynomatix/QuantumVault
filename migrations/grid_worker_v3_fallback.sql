@@ -203,10 +203,11 @@ IF EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WH
 )
 SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb)::text,'UTF8')),'hex') AS "catalogSha256",
  encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest) FILTER (WHERE identity LIKE 'table:%'),'{}'::jsonb)::text,'UTF8')),'hex') AS "tablesSha256",
- COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM 'ea1f31e0c52d2e86a1787ad2f3b64907c8108deac057ade07da01f9a2c8130f3' THEN RAISE EXCEPTION 'GRID_FUNCTION_DIVERGENT'; END IF;
+ COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM '72cc0e5774d79549d5f3a433070b5dd3186b3445e4b98136430263d23d73ea70' THEN RAISE EXCEPTION 'GRID_FUNCTION_DIVERGENT'; END IF;
 ELSE
  CREATE FUNCTION grid_worker_validate_generation() RETURNS trigger LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, public AS $body$
 BEGIN
+  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'GRID_AUTHORITY_HISTORY_DELETE_REFUSED'; END IF;
   IF NOT grid_worker_has_host_lock(false) OR NOT grid_worker_has_wallet_lock(NEW.wallet_address) THEN RAISE EXCEPTION 'GRID_AUTHORITY_PRELOCK_REQUIRED'; END IF;
   IF TG_OP='UPDATE' AND (NEW.wallet_address<>OLD.wallet_address OR NEW.generation<OLD.generation) THEN RAISE EXCEPTION 'GRID_GENERATION_MONOTONIC'; END IF;
   RETURN NEW;
@@ -265,7 +266,7 @@ IF EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WH
 )
 SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb)::text,'UTF8')),'hex') AS "catalogSha256",
  encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest) FILTER (WHERE identity LIKE 'table:%'),'{}'::jsonb)::text,'UTF8')),'hex') AS "tablesSha256",
- COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM '9f64d6f61be0f25d15dce31bd2cc2d831dbdb70d00367693be32bc433de55294' THEN RAISE EXCEPTION 'GRID_FUNCTION_DIVERGENT'; END IF;
+ COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM 'e7893abdfa874702385e3756a39ce8ea5f809dfeae2a13dbe54ee27a1f6af6a3' THEN RAISE EXCEPTION 'GRID_FUNCTION_DIVERGENT'; END IF;
 ELSE
  CREATE FUNCTION grid_worker_validate_owner_scope() RETURNS trigger LANGUAGE plpgsql VOLATILE SECURITY INVOKER SET search_path = pg_catalog, public AS $body$
 DECLARE wallet text; bot uuid; master text; pool_id integer; pool_wallet text; pool_agent text; h grid_worker_host%ROWTYPE; lock_keys bigint[] := ARRAY[]::bigint[]; lock_key bigint;
@@ -282,7 +283,7 @@ BEGIN
     wallet:=NEW.wallet_address;
     lock_keys:=ARRAY[hashtextextended('qv:grid-worker:v3:pool:'||NEW.id::text,0)] || ARRAY(SELECT hashtextextended('qv:grid-worker:v3:bot:'||l.bot_id::text,0) FROM grid_launch_accounts l WHERE l.protocol_subaccount_id=NEW.id AND l.released_at IS NULL);
     IF TG_OP='UPDATE' THEN IF NOT grid_worker_has_wallet_lock(OLD.wallet_address) THEN RAISE EXCEPTION 'GRID_WALLET_PRELOCK_REQUIRED'; END IF; END IF;
-    IF EXISTS(SELECT 1 FROM grid_launch_accounts l JOIN grid_bots b ON b.id=l.bot_id WHERE l.protocol_subaccount_id=NEW.id AND l.released_at IS NULL AND (b.wallet_address<>wallet OR l.master_account IS DISTINCT FROM NEW.agent_public_key)) THEN RAISE EXCEPTION 'GRID_POOL_OWNER_MISMATCH'; END IF;
+    IF EXISTS(SELECT 1 FROM grid_launch_accounts l JOIN grid_bots b ON b.id=l.bot_id WHERE l.protocol_subaccount_id=NEW.id AND l.released_at IS NULL AND (b.wallet_address<>wallet OR l.master_account IS DISTINCT FROM NEW.agent_public_key OR l.account IS DISTINCT FROM NEW.protocol_subaccount_id OR NEW.protocol<>'pacifica')) THEN RAISE EXCEPTION 'GRID_POOL_OWNER_MISMATCH'; END IF;
   ELSIF TG_TABLE_NAME='grid_launch_accounts' THEN
     bot:=NEW.bot_id; master:=NEW.master_account; pool_id:=NEW.protocol_subaccount_id;
     lock_keys:=ARRAY[hashtextextended('qv:grid-worker:v3:bot:'||bot::text,0),hashtextextended('qv:grid-worker:v3:pool:'||pool_id::text,0)];
@@ -438,9 +439,9 @@ IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('grid_worker_wallet
 )
 SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb)::text,'UTF8')),'hex') AS "catalogSha256",
  encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest) FILTER (WHERE identity LIKE 'table:%'),'{}'::jsonb)::text,'UTF8')),'hex') AS "tablesSha256",
- COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM 'ed09533a282fbe6066e2994678880d01cd22368673cb118d3a9e6d361ed76278' THEN RAISE EXCEPTION 'GRID_TRIGGER_DIVERGENT'; END IF;
+ COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM '05ddd555f409ff9a6b7f6acba877912ccb6e141d9b29991ee0fbac2737b249cf' THEN RAISE EXCEPTION 'GRID_TRIGGER_DIVERGENT'; END IF;
 ELSE
- CREATE TRIGGER grid_worker_generation_validate BEFORE INSERT OR UPDATE ON grid_worker_wallet_authority FOR EACH ROW EXECUTE FUNCTION grid_worker_validate_generation();
+ CREATE TRIGGER grid_worker_generation_validate BEFORE INSERT OR UPDATE OR DELETE ON grid_worker_wallet_authority FOR EACH ROW EXECUTE FUNCTION grid_worker_validate_generation();
 END IF;
 IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('wallets') AND tgname='grid_worker_wallet_update') THEN
  IF (SELECT capture."objectHashes"->>'trigger:wallets.grid_worker_wallet_update' FROM (WITH package_tables AS (
@@ -459,9 +460,9 @@ IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('wallets') AND tgna
 )
 SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb)::text,'UTF8')),'hex') AS "catalogSha256",
  encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest) FILTER (WHERE identity LIKE 'table:%'),'{}'::jsonb)::text,'UTF8')),'hex') AS "tablesSha256",
- COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM 'ff4a4be56b795fd344291a8112e25a66746bfd5dcf3b628311a5f90336c9ddd1' THEN RAISE EXCEPTION 'GRID_TRIGGER_DIVERGENT'; END IF;
+ COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM 'a9df6f5d94bd027b0f33f0b57ea6291d03edee75d2031e309e829b04a7d15f20' THEN RAISE EXCEPTION 'GRID_TRIGGER_DIVERGENT'; END IF;
 ELSE
- CREATE TRIGGER grid_worker_wallet_update AFTER UPDATE OF execution_enabled,umk_encrypted_for_execution,execution_expires_at,emergency_stop_triggered,agent_public_key,agent_private_key_encrypted_v3,umk_version ON wallets FOR EACH ROW WHEN (OLD.execution_enabled IS DISTINCT FROM NEW.execution_enabled OR OLD.umk_encrypted_for_execution IS DISTINCT FROM NEW.umk_encrypted_for_execution OR OLD.execution_expires_at IS DISTINCT FROM NEW.execution_expires_at OR OLD.emergency_stop_triggered IS DISTINCT FROM NEW.emergency_stop_triggered OR OLD.agent_public_key IS DISTINCT FROM NEW.agent_public_key OR OLD.agent_private_key_encrypted_v3 IS DISTINCT FROM NEW.agent_private_key_encrypted_v3 OR OLD.umk_version IS DISTINCT FROM NEW.umk_version) EXECUTE FUNCTION grid_worker_track_wallet();
+ CREATE TRIGGER grid_worker_wallet_update AFTER UPDATE OF execution_enabled,umk_encrypted_for_execution,execution_expires_at,emergency_stop_triggered,agent_public_key,agent_private_key_encrypted_v3,umk_version,encrypted_user_master_key,user_salt,agent_private_key_encrypted ON wallets FOR EACH ROW WHEN (OLD.execution_enabled IS DISTINCT FROM NEW.execution_enabled OR OLD.umk_encrypted_for_execution IS DISTINCT FROM NEW.umk_encrypted_for_execution OR OLD.execution_expires_at IS DISTINCT FROM NEW.execution_expires_at OR OLD.emergency_stop_triggered IS DISTINCT FROM NEW.emergency_stop_triggered OR OLD.agent_public_key IS DISTINCT FROM NEW.agent_public_key OR OLD.agent_private_key_encrypted_v3 IS DISTINCT FROM NEW.agent_private_key_encrypted_v3 OR OLD.umk_version IS DISTINCT FROM NEW.umk_version OR OLD.encrypted_user_master_key IS DISTINCT FROM NEW.encrypted_user_master_key OR OLD.user_salt IS DISTINCT FROM NEW.user_salt OR OLD.agent_private_key_encrypted IS DISTINCT FROM NEW.agent_private_key_encrypted) EXECUTE FUNCTION grid_worker_track_wallet();
 END IF;
 IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('wallets') AND tgname='grid_worker_wallet_insert') THEN
  IF (SELECT capture."objectHashes"->>'trigger:wallets.grid_worker_wallet_insert' FROM (WITH package_tables AS (
@@ -564,9 +565,9 @@ IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('protocol_subaccoun
 )
 SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb)::text,'UTF8')),'hex') AS "catalogSha256",
  encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest) FILTER (WHERE identity LIKE 'table:%'),'{}'::jsonb)::text,'UTF8')),'hex') AS "tablesSha256",
- COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM '1afd05c73fe5f76dac829ee9f0fa55485d82509cc2e35d7cf622b732c517eb2b' THEN RAISE EXCEPTION 'GRID_TRIGGER_DIVERGENT'; END IF;
+ COALESCE(jsonb_object_agg(identity,digest),'{}'::jsonb) AS "objectHashes" FROM digests) capture) IS DISTINCT FROM 'de88f6419dd3ab893dc7a29ff047453884e9dc8a79f54ff9da5da9061283f358' THEN RAISE EXCEPTION 'GRID_TRIGGER_DIVERGENT'; END IF;
 ELSE
- CREATE TRIGGER grid_worker_protocol_subaccounts_update BEFORE UPDATE OF wallet_address,agent_public_key ON protocol_subaccounts FOR EACH ROW WHEN (OLD.wallet_address IS DISTINCT FROM NEW.wallet_address OR OLD.agent_public_key IS DISTINCT FROM NEW.agent_public_key) EXECUTE FUNCTION grid_worker_validate_owner_scope();
+ CREATE TRIGGER grid_worker_protocol_subaccounts_update BEFORE UPDATE OF wallet_address,agent_public_key,subaccount_key_encrypted_v3,aad_version,protocol,protocol_subaccount_id ON protocol_subaccounts FOR EACH ROW WHEN (OLD.wallet_address IS DISTINCT FROM NEW.wallet_address OR OLD.agent_public_key IS DISTINCT FROM NEW.agent_public_key OR OLD.subaccount_key_encrypted_v3 IS DISTINCT FROM NEW.subaccount_key_encrypted_v3 OR OLD.aad_version IS DISTINCT FROM NEW.aad_version OR OLD.protocol IS DISTINCT FROM NEW.protocol OR OLD.protocol_subaccount_id IS DISTINCT FROM NEW.protocol_subaccount_id) EXECUTE FUNCTION grid_worker_validate_owner_scope();
 END IF;
 IF EXISTS(SELECT 1 FROM pg_trigger WHERE tgrelid=to_regclass('grid_launch_accounts') AND tgname='grid_worker_grid_launch_accounts_insert') THEN
  IF (SELECT capture."objectHashes"->>'trigger:grid_launch_accounts.grid_worker_grid_launch_accounts_insert' FROM (WITH package_tables AS (
@@ -652,7 +653,7 @@ SELECT encode(sha256(convert_to(COALESCE(jsonb_object_agg(identity,digest),'{}':
 ELSE
  CREATE TRIGGER grid_worker_reservations_owner_validate BEFORE INSERT OR UPDATE ON grid_worker_reservations FOR EACH ROW EXECUTE FUNCTION grid_worker_validate_owner_scope();
 END IF;
- IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = '741cd21b3cc44368e0dd7e135d14633dcd8d444144492c2387062a67f9cf1977' AS ok FROM (WITH package_tables AS (
+ IF NOT (SELECT current_setting('server_version_num')::integer >= 140000 AND capture."catalogSha256" = '7234c8347e63ebea0192ab79be7c3f26531800d6f1b9e08eca13ac338db3c216' AS ok FROM (WITH package_tables AS (
  SELECT c.* FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relname IN ('grid_worker_owner','grid_worker_host','grid_worker_wallet_authority','grid_worker_requests','grid_worker_reservations','grid_worker_send_audit','grid_worker_incidents','grid_worker_reconciliation','grid_worker_quota_policy','grid_worker_quota_windows','owner_action_receipts')
 ), objects AS (
  SELECT 'table:'||c.relname AS identity, jsonb_build_object('kind',c.relkind,'rls',c.relrowsecurity,'forceRls',c.relforcerowsecurity,

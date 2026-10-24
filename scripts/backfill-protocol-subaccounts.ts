@@ -17,7 +17,8 @@
  * Run:  npx tsx scripts/backfill-protocol-subaccounts.ts
  */
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
-import { db } from "../server/db.js";
+import { db, pool } from "../server/db.js";
+import {walletWrite} from '../server/grid-worker/wallet-writers.js';
 import { tradingBots, wallets, protocolSubaccounts } from "../shared/schema.js";
 
 async function main() {
@@ -41,9 +42,11 @@ async function main() {
     const subId = r.protocolSubaccountId;
     if (!subId) continue;
 
-    const ins = await db
+    const result = await walletWrite(pool,[r.walletAddress],async(tx,poolId)=>{
+    const ins = await tx
       .insert(protocolSubaccounts)
       .values({
+        id: poolId,
         walletAddress: r.walletAddress,
         botId: r.botId,
         protocol: r.protocol,
@@ -55,12 +58,11 @@ async function main() {
       .returning({ id: protocolSubaccounts.id });
 
     if (ins.length > 0) {
-      inserted++;
-      continue;
+      return 'inserted';
     }
 
     // Row already existed — only backfill a missing agent_public_key. Never touch status.
-    const upd = await db
+    const upd = await tx
       .update(protocolSubaccounts)
       .set({ agentPublicKey: r.agentPublicKey ?? null })
       .where(
@@ -72,7 +74,10 @@ async function main() {
       )
       .returning({ id: protocolSubaccounts.id });
 
-    if (upd.length > 0) filledAgent++;
+    return upd.length > 0 ? 'filled' : 'existing';
+    },{identity:{protocol:r.protocol,protocolSubaccountId:subId,insert:true}});
+    if(result==='inserted')inserted++;
+    else if(result==='filled')filledAgent++;
     else alreadyComplete++;
   }
 

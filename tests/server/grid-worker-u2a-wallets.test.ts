@@ -9,6 +9,8 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { sql, eq, and, or, isNull, isNotNull } from 'drizzle-orm';
 import * as schema from '../../shared/schema';
 import { assessResetBlockerRows } from '../../server/vault/reset-blocker-policy';
+import { walletWrite, rejectUnfencedAuthority } from '../../server/grid-worker/wallet-writers';
+import { gridWorkerIsolation } from '../helpers/grid-worker-isolation';
 
 const baseCommitHash = '905aa2650a765fa1e2a58f3dee474cce33e5e46d';
 const names = ['createWallet', 'updateWallet', 'updateWalletLastSeen', 'updateWalletAgentKeys', 'updateWalletAgentKeyV3', 'updateWalletExecution', 'resyncWalletExecutionUmk', 'atomicRevokeExecutionAndPauseBots', 'updateWalletEmergencyStop', 'finalizeAgentWalletReset'];
@@ -28,8 +30,7 @@ const baseline = execFileSync('git', ['show', baseCommitHash + ':server/storage.
 const tables = ['wallets', 'grid_bots', 'grid_operations', 'grid_control_requests', 'protocol_subaccounts', 'grid_launch_accounts', 'borrow_positions', 'borrow_operations', 'trading_bots', 'ai_trader_bots', 'orphaned_subaccounts'];
 const normalize = (value: unknown) => JSON.parse(JSON.stringify(value, (key, item) => ['createdAt', 'lastSeen'].includes(key) ? 'EXAMPLE_DB_TIME' : item));
 
-describe('U2a actual wallet writer parity', () => {
-  it('preserves every tested writer body byte for byte', () => expect(methods(source)).toEqual(methods(baseline)));
+describe('U2c fenced wallet writer result parity with U2a', () => {
   for (const seeded of [false, true]) it('same writer results with ' + (seeded ? 'seeded' : 'absent') + ' host', async () => {
     const url = process.env.DATABASE_URL;
     if (!url || new URL(url).pathname !== '/qvtest') throw Error('FRACTAL qvtest required');
@@ -40,7 +41,8 @@ describe('U2a actual wallet writer parity', () => {
       for (const installed of [false, true]) {
         const namespace = 'grid_wallet_' + randomUUID().replaceAll('-', '');
         await admin.query('CREATE SCHEMA ' + namespace);
-        const pool = new Pool({ connectionString: url, max: 1, options: '-c search_path=' + namespace + ',pg_catalog' });
+        const pool = new Pool({ connectionString: url, max: 2, options: '-c search_path=' + namespace + ',pg_catalog' });
+        pool.on('connect',gridWorkerIsolation());
         const client = await pool.connect();
         try {
           for (const name of tables) await client.query(`CREATE TABLE ${name} (LIKE public.${name} INCLUDING ALL)`);
@@ -48,7 +50,7 @@ describe('U2a actual wallet writer parity', () => {
             await client.query(readFileSync('migrations/grid_worker_v3_owner.sql', 'utf8').replaceAll('SET search_path = pg_catalog, public', 'SET search_path = pg_catalog, ' + namespace));
           }
           const js = ts.transpileModule('class Writer {\n' + methods(installed ? source : baseline).join('\n') + '\n}; new Writer()', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-          const writer = vm.runInNewContext(js, { ...schema, db: drizzle(client), sql, eq, and, or, isNull, isNotNull, AGENT_WALLET_RESET_LOCK_NAMESPACE: 927412, assessResetBlockerRows });
+          const writer = vm.runInNewContext(js, { ...schema, db: drizzle(client), pool, walletWrite, rejectUnfencedAuthority, sql, eq, and, or, isNull, isNotNull, AGENT_WALLET_RESET_LOCK_NAMESPACE: 927412, assessResetBlockerRows });
           const outcomes: unknown[] = [];
           outcomes.push(await writer.createWallet({ address: walletAddress, agentPublicKey: 'EXAMPLE_OLD' }));
           if (installed && seeded) {
@@ -59,6 +61,7 @@ describe('U2a actual wallet writer parity', () => {
           }
           await writer.updateWalletLastSeen(walletAddress);
           outcomes.push(await writer.updateWallet(walletAddress, { displayName: 'EXAMPLE', notificationsEnabled: true }));
+          if(installed)await expect(writer.updateWallet(walletAddress,{agentPublicKey:'EXAMPLE_BYPASS'})).rejects.toThrow('GRID_FENCED_WALLET_WRITER_REQUIRED');
           outcomes.push(await writer.updateWalletExecution(walletAddress, { executionEnabled: true, umkEncryptedForExecution: 'EXAMPLE', executionExpiresAt: new Date('2099-01-01T00:00:00Z') }));
           outcomes.push(await writer.resyncWalletExecutionUmk(walletAddress, 'EXAMPLE_RESYNC'));
           outcomes.push(await writer.atomicRevokeExecutionAndPauseBots(walletAddress, 'EXAMPLE'));

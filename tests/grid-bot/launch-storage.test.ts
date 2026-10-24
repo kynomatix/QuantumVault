@@ -1,3 +1,5 @@
+import {randomBytes,randomInt} from 'node:crypto';
+import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
 import type { GridDeadline } from '../../server/grid-worker/transaction';
 import {beforeAll,afterAll,beforeEach,describe,it,expect} from 'vitest';
 import {Pool,type PoolClient} from 'pg';
@@ -15,11 +17,14 @@ import {gridDraftRevision} from '../../client/src/lib/grid-draft-view';
 import {marginTestReading} from './margin-fixture';
 const migration=readFileSync(new URL('../../migrations/0005_grid_launch.sql',import.meta.url),'utf8');
 describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
+  const isolate=gridWorkerIsolation();
   let admin:Pool,pool:Pool,storage:GridLaunchStorage,custody:GridCustody;
-  const schema='grid_u4_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(3)).publicKey);
+  const schema='grid_u4_'+randomUUID().replaceAll('-',''),wallet=bs58.encode(nacl.sign.keyPair.fromSeed(randomBytes(32)).publicKey);
   beforeAll(async()=>{const url=process.env.DATABASE_URL;if(!url||new URL(url).pathname!=='/qvtest')throw Error('FRACTAL isolated qvtest schema required');
     admin=new Pool({connectionString:url,max:1});await admin.query('CREATE SCHEMA '+schema);pool=new Pool({connectionString:url,max:5,options:'-c search_path='+schema});
-    await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    pool.on('connect',isolate);
+    await pool.query(`CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text,execution_enabled boolean DEFAULT true,emergency_stop_triggered boolean DEFAULT false,umk_version integer DEFAULT 1,umk_encrypted_for_execution text DEFAULT 'EXAMPLE',agent_private_key_encrypted_v3 text DEFAULT 'EXAMPLE',execution_expires_at timestamptz); CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    await pool.query('ALTER SEQUENCE protocol_subaccounts_id_seq RESTART WITH '+randomInt(1000000,1500000000));
     await pool.query(readFileSync(new URL('../../migrations/0004_grid_bot_drafts.sql',import.meta.url),'utf8'));await pool.query(migration);
     await pool.query(readFileSync(new URL('../../migrations/0006_grid_monitor.sql',import.meta.url),'utf8'));
     await pool.query(readFileSync(new URL('../../migrations/0007_grid_lifecycle.sql',import.meta.url),'utf8'));
@@ -28,7 +33,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     storage=new GridLaunchStorage(pool,async()=>{});custody=new GridCustody(storage);
   },30000);
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30000);
-  beforeEach(async()=>{await pool.query('TRUNCATE grid_read_claims,grid_execution_claims,grid_launch_accounts,grid_master_quota,grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query('INSERT INTO wallets VALUES($1,NULL)',[wallet]);});
+  beforeEach(async()=>{await pool.query('TRUNCATE grid_read_claims,grid_execution_claims,grid_launch_accounts,grid_master_quota,grid_fills,grid_operations,grid_levels,grid_bots,protocol_subaccounts,wallets CASCADE');await pool.query('INSERT INTO wallets(address,agent_public_key) VALUES($1,NULL)',[wallet]);});
   async function draft(draftWallet=wallet,configuration={totalInvestment:'100.00',leverage:1}){const p={...policy(),...configuration},h=computeGridPolicyHmac(p,umk());if(!h.ok)throw Error();const {levels,...snapshot}=p;
     const bot:DraftRecord={...snapshot,walletAddress:draftWallet,clientRequestId:randomUUID(),serverIntentDigest:'A'.repeat(64),draftRevision:gridDraftRevision(intent),createIntent:intent,authoritySnapshot:{state:'EXAMPLE'},policyHmac:h.digest,name:'Grid draft',rangeSource:'manual',chartTimeframe:'1h'};
     await new GridStorage(pool,async()=>{}).createDraftWithLevels(bot,levels);return bot;
@@ -45,10 +50,11 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const candidates=await Promise.all([0,1,2,3].map(async i=>{
       // Custody AAD decodes the wallet as a 32-byte base58 public key before opening a transaction.
       const address=bs58.encode(nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(i+4)).publicKey),master='EXAMPLE_C2_MASTER_'+i;
-      await pool.query('INSERT INTO wallets VALUES($1,$2)',[address,master]);return {bot:await draft(address),address,master};
+      await pool.query('INSERT INTO wallets(address,agent_public_key) VALUES($1,$2)',[address,master]);return {bot:await draft(address),address,master};
     }));
     // Each worker owns a separate one-connection pool; the suite pool cannot serialize them.
     const workerPools=candidates.map(()=>new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000,options:'-c search_path='+schema}));
+    workerPools.forEach(p=>p.on('connect',isolate));
     const backendPids=new Set<number>();let started=0,release!:()=>void;
     const allStarted=new Promise<void>(resolve=>{release=resolve;});
     class ConcurrentStorage extends GridLaunchStorage {
@@ -88,6 +94,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const initial=await s.prepare('EXAMPLE_INITIAL_RISK',first.request,first.claim,account.leaseToken);expect(await s.submit(initial,account.leaseToken)).toBe(true);await s.settle(initial,{state:'confirmed',reason:null,releaseSlot:true});
     const attempts=[seed(account,'3','300'),seed(account,'3','300')];
     const workers=attempts.map(()=>new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000,options:'-c search_path='+schema}));
+    workers.forEach(p=>p.on('connect',isolate));
     const backendPids=new Set<number>();let started=0,release!:()=>void;
     const allStarted=new Promise<void>(resolve=>{release=resolve;});
     class ConcurrentExposureStorage extends GridLaunchStorage {
@@ -237,6 +244,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     const bot=await draft();await pool.query('UPDATE wallets SET agent_public_key=$1 WHERE address=$2',['EXAMPLE_MASTER',wallet]);
     const c=await pool.connect();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock($1::integer,hashtext($2))',[AGENT_WALLET_RESET_LOCK_NAMESPACE,wallet]);
     const boundedPool=new Pool({connectionString:process.env.DATABASE_URL,max:1,options:'-c search_path='+schema+' -c lock_timeout=100ms'});
+    boundedPool.on('connect',isolate);
     // U2b fixes both budgets at two seconds; PostgreSQL may cancel either timer first.
     const started=Date.now();
     try{await expect(new GridCustody(new GridLaunchStorage(boundedPool,async()=>{})).reserve({botId:bot.id,wallet,masterAccount:'EXAMPLE_MASTER',policyHmac:bot.policyHmac},umk())).rejects.toThrow(/(?:lock|statement) timeout/);expect(Date.now()-started).toBeLessThan(4000);}

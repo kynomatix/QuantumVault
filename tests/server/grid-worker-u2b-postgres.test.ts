@@ -18,7 +18,7 @@ import { computeGridPolicyHmac } from '../../server/grid-bot/policy-hmac';
 import { umk } from '../grid-bot/draft-fixtures';
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest();
-const EXAMPLE = createPrivateKey({ key:Buffer.concat([Buffer.from([48,46,2,1,0,48,5,6,3,43,101,112,4,34,4,32]),sha256('EXAMPLE_U2B')]),format:'der',type:'pkcs8' });
+const EXAMPLE = createPrivateKey({ key:Buffer.concat([Buffer.from([48,46,2,1,0,48,5,6,3,43,101,112,4,34,4,32]),sha256('EXAMPLE_U2B:'+randomUUID())]),format:'der',type:'pkcs8' });
 const owner = bs58.encode(createPublicKey(EXAMPLE).export({type:'spki',format:'der'}).subarray(-32));
 const signed = (message: string) => ({message,signature:bs58.encode(sign(null,Buffer.from(message),EXAMPLE)),signer:owner,sessionWallet:owner});
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve,ms));
@@ -31,11 +31,13 @@ describe('U2b PostgreSQL races and durable evidence', () => {
   // trigger bodies), so deliberate pause/stall tests cannot fence other suites.
   // Product SQL and the frozen package retain the canonical identity unchanged.
   const fixtureHost = 'qv:grid-worker:v3:host:' + schema;
+  const fixtureWalletNamespace=String(1_000_000+Math.floor(Math.random()*1_000_000_000));
   function isolateHost(c: PoolClient) {
     c.query = new Proxy(c.query, { apply(query, receiver, args) {
-      const rewrite = (sql: string) => sql.replaceAll("'qv:grid-worker:v3:host'", "'" + fixtureHost + "'");
+      const rewrite = (sql: string) => sql.replaceAll("'qv:grid-worker:v3:host'", "'" + fixtureHost + "'").replaceAll('927412',fixtureWalletNamespace).replaceAll('qv:grid-worker:v3:bot:','qv:grid-worker:v3:'+schema+':bot:').replaceAll('qv:grid-worker:v3:pool:','qv:grid-worker:v3:'+schema+':pool:');
       if (typeof args[0] === 'string') args[0] = rewrite(args[0]);
       else if (args[0] && typeof args[0].text === 'string') args[0] = { ...args[0], text: rewrite(args[0].text) };
+      if(Array.isArray(args[1]))args[1]=args[1].map(v=>typeof v==='string'?v.replaceAll('qv:grid-worker:v3:bot:','qv:grid-worker:v3:'+schema+':bot:').replaceAll('qv:grid-worker:v3:pool:','qv:grid-worker:v3:'+schema+':pool:'):v===927412?Number(fixtureWalletNamespace):v);
       return Reflect.apply(query, receiver, args);
     } });
     return c;
@@ -69,7 +71,7 @@ describe('U2b PostgreSQL races and durable evidence', () => {
   });
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30_000);
   it('different schemas share canonical host locks, but fixture exclusive locks leave MAIN admission free', async () => {
-    const canonical = 'qv:grid-worker:v3:host';
+    const canonical = 'EXAMPLE_isolation_control:'+schema;
     const fixture = await pool.connect(), main = await admin.connect();
     try {
       await fixture.query('BEGIN'); await main.query('BEGIN');
@@ -81,7 +83,7 @@ describe('U2b PostgreSQL races and durable evidence', () => {
       expect((await main.query('SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1,0)) AS ok', [fixtureHost])).rows[0].ok).toBe(false);
       // The unmodified product helper on a public client uses the canonical key.
       await main.query("SET LOCAL statement_timeout='500ms'");
-      await hostFence(main, 'shared');
+      await main.query('SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))',[canonical]);
     } finally {
       await fixture.query('ROLLBACK'); await main.query('ROLLBACK'); fixture.release(); main.release();
     }

@@ -1,3 +1,5 @@
+import {randomBytes,randomInt} from 'node:crypto';
+import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
 import {afterAll,afterEach,beforeAll,beforeEach,describe,expect,it,vi} from 'vitest';
 import {Pool} from 'pg';
 import {createHash,randomUUID} from 'node:crypto';
@@ -39,9 +41,11 @@ describe('range moves from real pre-epoch PostgreSQL data',()=>{
     // including the second move cooldown, without touching the shared database clock.
     pool=new Pool({connectionString:process.env.DATABASE_URL,max:6,options:'-c search_path='+schema+',pg_catalog'});
     now=moveBase;vi.spyOn(Date,'now').mockImplementation(()=>now);
+    pool.on('connect',gridWorkerIsolation());
     await pool.query(`CREATE TABLE test_clock(at timestamptz NOT NULL); INSERT INTO test_clock VALUES(to_timestamp(${moveBase}/1000)); CREATE FUNCTION clock_timestamp() RETURNS timestamptz LANGUAGE sql STABLE AS 'SELECT at FROM test_clock';
-      CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text,agent_private_key_encrypted_v3 text DEFAULT 'EXAMPLE',execution_enabled boolean DEFAULT true,emergency_stop_triggered boolean DEFAULT false,umk_version integer DEFAULT 1,umk_encrypted_for_execution text DEFAULT 'EXAMPLE');
+      CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text,agent_private_key_encrypted_v3 text DEFAULT 'EXAMPLE',execution_enabled boolean DEFAULT true,emergency_stop_triggered boolean DEFAULT false,umk_version integer DEFAULT 1,umk_encrypted_for_execution text DEFAULT 'EXAMPLE',execution_expires_at timestamptz);
       CREATE TABLE protocol_subaccounts(id serial PRIMARY KEY,wallet_address text,bot_id text,protocol text,protocol_subaccount_id text UNIQUE,status text,agent_public_key text,subaccount_key_encrypted_v3 text,aad_version integer,claim_token text,claimed_at timestamptz,confirmed_at timestamptz,derivation_index integer,last_verified_empty_at timestamptz,released_at timestamptz);`);
+    await pool.query(`ALTER SEQUENCE protocol_subaccounts_id_seq RESTART WITH ${randomInt(1_000_000,1_500_000_000)}`);
     for(const name of ['0004_grid_bot_drafts.sql','0005_grid_launch.sql','0006_grid_monitor.sql','0007_grid_lifecycle.sql','0011_grid_auto_resume.sql'])await pool.query(sql(name));
     await pool.query('INSERT INTO wallets(address,agent_public_key) VALUES($1,$2)',[wallet,'EXAMPLE_MASTER']);
     launch=new GridLaunchStorage(pool,async()=>{},async r=>marginTestReading(r));monitor=new GridMonitorStorage(launch);life=new GridLifecycleStorage(monitor);

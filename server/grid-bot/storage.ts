@@ -10,6 +10,9 @@ import type { GridPolicy, SignedGridLevel } from './policy-hmac';
 import {gridSurface} from './surface';
 import type {GridBotSurface} from '../../shared/grid-surface';
 import {retainedGridSizing} from './lean-sizing';
+import {fencedTransaction,walletFences} from '../grid-worker/transaction';
+import {identityFences} from '../grid-worker/identity-locks';
+import {backendTerminator,independentLane} from '../grid-worker/lanes';
 
 /** Trusted reconciliation must supply operation-specific terminal facts; a fill alone is never terminal proof. */
 export interface GridOperationConfirmation {
@@ -55,7 +58,10 @@ export class GridStorage {
   async createDraftWithLevels(bot: DraftRecord, levels: SignedGridLevel[]): Promise<{ bot: StoredBot; result: 'created' | 'existing_request' }> {
     if (levels.length !== bot.gridCount + 1 || !levels.every((l, i) => l.ordinal === i + 1)
       || !/^[0-9A-F]{64}$/.test(bot.serverIntentDigest)) throw new GridStorageError('invariant');
-    return this.transaction(async c => {
+    await this.readiness();
+    return fencedTransaction(this.pool,async c => {
+      await walletFences(c,[bot.walletAddress]);
+      await identityFences(c,[bot.id],[]);
       const {sizingVersion,safetyEnvelopePrice,gridPolicyExtension,...record}=bot;
       if(sizingVersion) record.authoritySnapshot={...(bot.authoritySnapshot as object),gridSizing:{sizingVersion,safetyEnvelopePrice}};
       if(gridPolicyExtension) record.authoritySnapshot={...(record.authoritySnapshot as object),gridPolicyExtension};
@@ -69,7 +75,7 @@ export class GridStorage {
       for (const l of levels) await c.query('INSERT INTO grid_levels (id,bot_id,ordinal,price,size,side,reduce_only) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(),bot.id,l.ordinal,l.price,l.size,l.side,l.reduceOnly]);
       await createOriginalGridEpoch(c,created.rows[0],levels.map(l=>({...l,reduce_only:l.reduceOnly})));
       return { bot: botRow(created.rows[0]), result: 'created' };
-    });
+    },{terminate:backendTerminator(independentLane(this.pool))});
   }
   async findByClientRequest(wallet: string, request: string): Promise<StoredBot | null> {
     await this.readiness(); const r = await this.pool.query('SELECT * FROM grid_bots WHERE wallet_address=$1 AND client_request_id=$2', [wallet,request]);

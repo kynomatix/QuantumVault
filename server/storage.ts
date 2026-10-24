@@ -11,7 +11,8 @@ import { createHash, randomBytes, randomUUID } from "crypto";
 import { vaultLockKey as computeVaultLockKey } from "./vault/scope";
 import { autoDefenseProtocols, autoDefenseOptedIn } from './vault/auto-defense-capabilities';
 import { phoenixDefenseCapabilities } from './protocol/phoenix/auto-defense-runtime';
-import { db } from "./db";
+import { db, pool } from "./db";
+import { walletWrite, rejectUnfencedAuthority } from "./grid-worker/wallet-writers";
 import { readPriceExcursion } from "@shared/ai-trader-excursion";
 import {
   buildScannerIncidentExport,
@@ -639,6 +640,7 @@ export interface IStorage {
   updateWalletLastSeen(address: string): Promise<void>;
   getOrCreateWallet(address: string): Promise<Wallet>;
   updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void>;
+  updateWalletAgentIdentityV3(address: string, agentPublicKey: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
   updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void>;
   finalizeAgentWalletReset(p: AgentWalletResetReplacement): Promise<AgentWalletResetFinalizeOutcome>;
   setWalletLlmApiKey(address: string, encryptedV3: string, last4: string, provider: string): Promise<void>;
@@ -1448,8 +1450,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createWallet(wallet: InsertWallet): Promise<Wallet> {
-    const result = await db.insert(wallets).values(wallet).returning();
-    return result[0];
+    return walletWrite(pool, [wallet.address], async (tx, poolId) => {
+      const result = await tx.insert(wallets).values(wallet).returning();
+      return result[0];
+    }, {});
   }
 
   async updateWalletLastSeen(address: string): Promise<void> {
@@ -1466,16 +1470,26 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void> {
-    await db.update(wallets).set({ 
-      agentPublicKey, 
-      agentPrivateKeyEncrypted 
-    }).where(eq(wallets.address, address));
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      await tx.update(wallets).set({
+        agentPublicKey,
+        agentPrivateKeyEncrypted
+      }).where(eq(wallets.address, address));
+    }, {});
+  }
+
+  async updateWalletAgentIdentityV3(address: string, agentPublicKey: string, agentPrivateKeyEncryptedV3: string): Promise<void> {
+    await walletWrite(pool, [address], async tx => {
+      await tx.update(wallets).set({ agentPublicKey, agentPrivateKeyEncryptedV3 }).where(eq(wallets.address, address));
+    });
   }
 
   async updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void> {
-    await db.update(wallets).set({ 
-      agentPrivateKeyEncryptedV3 
-    }).where(eq(wallets.address, address));
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      await tx.update(wallets).set({
+        agentPrivateKeyEncryptedV3
+      }).where(eq(wallets.address, address));
+    }, {});
   }
 
   // --- QuantumLab AI Strategy Creator (Task 187): BYO LLM key (V3-encrypted) ---
@@ -1526,6 +1540,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined> {
+    rejectUnfencedAuthority(updates);
     const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
     return result[0];
   }
@@ -1541,7 +1556,7 @@ export class DatabaseStorage implements IStorage {
   async finalizeAgentWalletReset(
     p: AgentWalletResetReplacement,
   ): Promise<AgentWalletResetFinalizeOutcome> {
-    return db.transaction(async (tx) => {
+    return walletWrite<AgentWalletResetFinalizeOutcome>(pool, [p.walletAddress], async (tx) => {
       const lockResult = await tx.execute(sql`
         SELECT pg_try_advisory_xact_lock(
           ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
@@ -1656,6 +1671,9 @@ export class DatabaseStorage implements IStorage {
       ));
 
       return { outcome: "committed", clearedBotCount: cleared.length };
+    }, { tryWallet: true, allPools: true }).catch(error => {
+      if (error instanceof Error && error.message === "GRID_WALLET_BUSY") return { outcome: "busy" } as const;
+      throw error;
     });
   }
 
@@ -1698,14 +1716,16 @@ export class DatabaseStorage implements IStorage {
   // ADD upserts a row (a whitelist is an admin intent list — the wallet may not
   // have connected yet); REMOVE only flips an existing row (a no-op if absent).
   async setHandsOffApproved(address: string, approved: boolean): Promise<void> {
-    if (approved) {
-      await db
-        .insert(wallets)
-        .values({ address, handsOffApproved: true })
-        .onConflictDoUpdate({ target: wallets.address, set: { handsOffApproved: true } });
-    } else {
-      await db.update(wallets).set({ handsOffApproved: false }).where(eq(wallets.address, address));
-    }
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      if (approved) {
+        await tx
+          .insert(wallets)
+          .values({ address, handsOffApproved: true })
+          .onConflictDoUpdate({ target: wallets.address, set: { handsOffApproved: true } });
+      } else {
+        await tx.update(wallets).set({ handsOffApproved: false }).where(eq(wallets.address, address));
+      }
+    }, {});
   }
 
   async listHandsOffApproved(): Promise<{ address: string; displayName: string | null }[]> {
@@ -1877,28 +1897,14 @@ export class DatabaseStorage implements IStorage {
     derivationIndex?: number | null;
     derivationPathVersion?: number | null;
   }): Promise<void> {
-    await db.insert(protocolSubaccounts)
-      .values({
-        walletAddress: params.walletAddress,
-        botId: null,
-        protocol: params.protocol,
-        protocolSubaccountId: params.protocolSubaccountId,
-        status: 'spare',
-        agentPublicKey: params.agentPublicKey,
-        subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
-        aadVersion: params.aadVersion,
-        derivationIndex: params.derivationIndex ?? null,
-        derivationPathVersion: params.derivationPathVersion ?? null,
-        releasedAt: sql`NOW()`,
-        lastVerifiedEmptyAt: sql`NOW()`,
-        lastError: null,
-      } as any)
-      .onConflictDoUpdate({
-        target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
-        set: {
+    return walletWrite(pool, [params.walletAddress], async (tx, poolId) => {
+      await tx.insert(protocolSubaccounts)
+        .values({
+          id: poolId,
           walletAddress: params.walletAddress,
-          // Detach from the (about-to-be-deleted) bot so the spare is unowned.
           botId: null,
+          protocol: params.protocol,
+          protocolSubaccountId: params.protocolSubaccountId,
           status: 'spare',
           agentPublicKey: params.agentPublicKey,
           subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
@@ -1908,8 +1914,25 @@ export class DatabaseStorage implements IStorage {
           releasedAt: sql`NOW()`,
           lastVerifiedEmptyAt: sql`NOW()`,
           lastError: null,
-        } as any,
-      });
+        } as any)
+        .onConflictDoUpdate({
+          target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
+          set: {
+            walletAddress: params.walletAddress,
+            // Detach from the (about-to-be-deleted) bot so the spare is unowned.
+            botId: null,
+            status: 'spare',
+            agentPublicKey: params.agentPublicKey,
+            subaccountKeyEncryptedV3: params.subaccountKeyEncryptedV3,
+            aadVersion: params.aadVersion,
+            derivationIndex: params.derivationIndex ?? null,
+            derivationPathVersion: params.derivationPathVersion ?? null,
+            releasedAt: sql`NOW()`,
+            lastVerifiedEmptyAt: sql`NOW()`,
+            lastError: null,
+          } as any,
+        });
+    }, { identity: { protocol: params.protocol, protocolSubaccountId: params.protocolSubaccountId, insert: true } });
   }
 
   async markSubaccountStuckFunds(params: {
@@ -1929,76 +1952,79 @@ export class DatabaseStorage implements IStorage {
     derivationIndex?: number | null;
     derivationPathVersion?: number | null;
   }): Promise<boolean> {
-    // Fund-safety: by the time this is called the caller has decided funds are genuinely
-    // stranded (sweep failed / stranding on delete). Surface it in the admin panel even if
-    // the CAS below later no-ops (another owner already quarantined the same slot).
-    void import("./error-log").then((m) => m.recordCriticalError({
-      category: "fund_safety",
-      severity: "critical",
-      source: "stuck-funds-quarantine",
-      message: `Subaccount quarantined as stuck_funds: ${params.lastError || "sweep failed / funds stranded"}`,
-      context: { protocol: params.protocol, subaccountId: params.protocolSubaccountId, botId: params.botId },
-    })).catch(() => {});
-    // Only overwrite derivation columns when the caller explicitly supplies them, so
-    // an omitting caller (e.g. reuse CAS) leaves any existing original index intact.
-    const derivationSet: Record<string, any> = {};
-    if (params.derivationIndex !== undefined) derivationSet.derivationIndex = params.derivationIndex;
-    if (params.derivationPathVersion !== undefined) derivationSet.derivationPathVersion = params.derivationPathVersion;
-    // §5.1.4 CAS-guarded quarantine. When a claimToken is supplied the caller is a
-    // lease holder (reuse-on-create / lease-recovery). A TTL-based recovery assumes
-    // a slow holder is dead and can reclaim+re-finalize the slot to another owner;
-    // if the original (now stale) holder later quarantines, an UNCONDITIONAL write
-    // would clobber that new owner's active row and detach its bot. So guard on
-    // (status='reserving' AND claim_token) and no-op when we've lost the lease.
-    if (params.claimToken !== undefined) {
-      const result = await db.update(protocolSubaccounts)
-        .set({
-          status: 'stuck_funds',
-          botId: params.botId,
-          agentPublicKey: params.agentPublicKey,
-          lastError: params.lastError,
-          claimToken: null,
-          claimedAt: null,
-          ...derivationSet,
-        } as any)
-        .where(and(
-          eq(protocolSubaccounts.protocol, params.protocol),
-          eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
-          eq(protocolSubaccounts.status, 'reserving'),
-          eq(protocolSubaccounts.claimToken, params.claimToken),
-        ))
-        .returning({ id: protocolSubaccounts.id });
-      if (result.length === 0) {
-        console.warn(`[Storage] markSubaccountStuckFunds CAS lost for ${params.protocol}/${params.protocolSubaccountId} (lease reclaimed/finalized by another owner) — not clobbering current row`);
-        return false;
+    return walletWrite(pool, [params.walletAddress], async (tx, poolId) => {
+      // Fund-safety: by the time this is called the caller has decided funds are genuinely
+      // stranded (sweep failed / stranding on delete). Surface it in the admin panel even if
+      // the CAS below later no-ops (another owner already quarantined the same slot).
+      void import("./error-log").then((m) => m.recordCriticalError({
+        category: "fund_safety",
+        severity: "critical",
+        source: "stuck-funds-quarantine",
+        message: `Subaccount quarantined as stuck_funds: ${params.lastError || "sweep failed / funds stranded"}`,
+        context: { protocol: params.protocol, subaccountId: params.protocolSubaccountId, botId: params.botId },
+      })).catch(() => {});
+      // Only overwrite derivation columns when the caller explicitly supplies them, so
+      // an omitting caller (e.g. reuse CAS) leaves any existing original index intact.
+      const derivationSet: Record<string, any> = {};
+      if (params.derivationIndex !== undefined) derivationSet.derivationIndex = params.derivationIndex;
+      if (params.derivationPathVersion !== undefined) derivationSet.derivationPathVersion = params.derivationPathVersion;
+      // §5.1.4 CAS-guarded quarantine. When a claimToken is supplied the caller is a
+      // lease holder (reuse-on-create / lease-recovery). A TTL-based recovery assumes
+      // a slow holder is dead and can reclaim+re-finalize the slot to another owner;
+      // if the original (now stale) holder later quarantines, an UNCONDITIONAL write
+      // would clobber that new owner's active row and detach its bot. So guard on
+      // (status='reserving' AND claim_token) and no-op when we've lost the lease.
+      if (params.claimToken !== undefined) {
+        const result = await tx.update(protocolSubaccounts)
+          .set({
+            status: 'stuck_funds',
+            botId: params.botId,
+            agentPublicKey: params.agentPublicKey,
+            lastError: params.lastError,
+            claimToken: null,
+            claimedAt: null,
+            ...derivationSet,
+          } as any)
+          .where(and(
+            eq(protocolSubaccounts.protocol, params.protocol),
+            eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
+            eq(protocolSubaccounts.status, 'reserving'),
+            eq(protocolSubaccounts.claimToken, params.claimToken),
+          ))
+          .returning({ id: protocolSubaccounts.id });
+        if (result.length === 0) {
+          console.warn(`[Storage] markSubaccountStuckFunds CAS lost for ${params.protocol}/${params.protocolSubaccountId} (lease reclaimed/finalized by another owner) — not clobbering current row`);
+          return false;
+        }
+        return true;
       }
-      return true;
-    }
-    // Unconditional path: the caller owns the row outright (delete/fresh-provision),
-    // with no competing lease holder.
-    await db.insert(protocolSubaccounts)
-      .values({
-        walletAddress: params.walletAddress,
-        botId: params.botId,
-        protocol: params.protocol,
-        protocolSubaccountId: params.protocolSubaccountId,
-        status: 'stuck_funds',
-        agentPublicKey: params.agentPublicKey,
-        lastError: params.lastError,
-        ...derivationSet,
-      } as any)
-      .onConflictDoUpdate({
-        target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
-        set: {
+      // Unconditional path: the caller owns the row outright (delete/fresh-provision),
+      // with no competing lease holder.
+      await tx.insert(protocolSubaccounts)
+        .values({
+          id: poolId,
           walletAddress: params.walletAddress,
           botId: params.botId,
+          protocol: params.protocol,
+          protocolSubaccountId: params.protocolSubaccountId,
           status: 'stuck_funds',
           agentPublicKey: params.agentPublicKey,
           lastError: params.lastError,
           ...derivationSet,
-        } as any,
-      });
-    return true;
+        } as any)
+        .onConflictDoUpdate({
+          target: [protocolSubaccounts.protocol, protocolSubaccounts.protocolSubaccountId],
+          set: {
+            walletAddress: params.walletAddress,
+            botId: params.botId,
+            status: 'stuck_funds',
+            agentPublicKey: params.agentPublicKey,
+            lastError: params.lastError,
+            ...derivationSet,
+          } as any,
+        });
+      return true;
+    }, { identity: { protocol: params.protocol, protocolSubaccountId: params.protocolSubaccountId, insert: true } });
   }
 
   async prepareExternalSubaccountReservation(params: {
@@ -2012,7 +2038,7 @@ export class DatabaseStorage implements IStorage {
     derivationIndex: number | null;
     derivationPathVersion: number | null;
   }): Promise<PrepareExternalSubaccountOutcome> {
-    return db.transaction(async (tx) => {
+    return walletWrite(pool, [params.walletAddress], async (tx, poolId) => {
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
           ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
@@ -2027,6 +2053,7 @@ export class DatabaseStorage implements IStorage {
         return { outcome: "stale_generation" } as const;
       }
       const inserted = await tx.insert(protocolSubaccounts).values({
+        id: poolId,
         walletAddress: params.walletAddress,
         botId: null,
         protocol: params.protocol,
@@ -2046,7 +2073,7 @@ export class DatabaseStorage implements IStorage {
       return inserted.length === 1
         ? { outcome: "prepared" } as const
         : { outcome: "conflict" } as const;
-    });
+    }, { identity: { protocol: params.protocol, protocolSubaccountId: params.protocolSubaccountId, insert: true } });
   }
 
   async claimSpareSubaccount(params: {
@@ -2066,7 +2093,7 @@ export class DatabaseStorage implements IStorage {
     // the trading_bots (wallet_address, derivation_index) UNIQUE. So skip any HD spare
     // whose index is still held by a live trading_bots row; once the delete lands it
     // becomes claimable. Legacy random spares (derivation_index IS NULL) are unaffected.
-    return db.transaction(async (tx) => {
+    return walletWrite(pool, [params.walletAddress], async (tx) => {
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
           ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
@@ -5376,34 +5403,39 @@ export class DatabaseStorage implements IStorage {
     umkEncryptedForExecution?: string;
     policyHmac?: string;
   }): Promise<Wallet | undefined> {
-    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
-    return result[0];
+    if ('address' in updates) throw Error('GRID_WALLET_IDENTITY_IMMUTABLE');
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      const result = await tx.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+      return result[0];
+    }, {});
   }
 
   async initWalletUmkIfAbsent(address: string, userSalt: string, encryptedUserMasterKey: string): Promise<boolean> {
-    // Atomic first-writer-wins UMK init. This is an UPSERT (not a plain UPDATE)
-    // because a brand-new wallet has NO row yet at /api/auth/verify time — the
-    // nonce + signature-verify steps never create one. A plain UPDATE would
-    // affect 0 rows for a first-time signup, the caller would read back no UMK,
-    // and initializeWalletSecurity would throw "concurrent UMK init lost but DB
-    // has no UMK" — bricking every new account.
-    //
-    // ON CONFLICT semantics preserve the original race guard:
-    //   - row absent           -> INSERT          -> rowCount 1 -> won
-    //   - row present, salt NULL-> DO UPDATE match -> rowCount 1 -> won
-    //   - row present, salt set -> WHERE fails     -> rowCount 0 -> lost
-    // Postgres serializes the conflict, so two concurrent first-time inserts
-    // resolve to exactly one winner; the loser sees salt set and re-derives.
-    const result = await db.execute(sql`
-      INSERT INTO wallets (address, user_salt, encrypted_user_master_key, umk_version)
-      VALUES (${address}, ${userSalt}, ${encryptedUserMasterKey}, 3)
-      ON CONFLICT (address) DO UPDATE
-         SET user_salt = EXCLUDED.user_salt,
-             encrypted_user_master_key = EXCLUDED.encrypted_user_master_key,
-             umk_version = 3
-       WHERE wallets.user_salt IS NULL
-    `);
-    return (result.rowCount ?? 0) > 0;
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      // Atomic first-writer-wins UMK init. This is an UPSERT (not a plain UPDATE)
+      // because a brand-new wallet has NO row yet at /api/auth/verify time — the
+      // nonce + signature-verify steps never create one. A plain UPDATE would
+      // affect 0 rows for a first-time signup, the caller would read back no UMK,
+      // and initializeWalletSecurity would throw "concurrent UMK init lost but DB
+      // has no UMK" — bricking every new account.
+      //
+      // ON CONFLICT semantics preserve the original race guard:
+      //   - row absent           -> INSERT          -> rowCount 1 -> won
+      //   - row present, salt NULL-> DO UPDATE match -> rowCount 1 -> won
+      //   - row present, salt set -> WHERE fails     -> rowCount 0 -> lost
+      // Postgres serializes the conflict, so two concurrent first-time inserts
+      // resolve to exactly one winner; the loser sees salt set and re-derives.
+      const result = await tx.execute(sql`
+        INSERT INTO wallets (address, user_salt, encrypted_user_master_key, umk_version)
+        VALUES (${address}, ${userSalt}, ${encryptedUserMasterKey}, 3)
+        ON CONFLICT (address) DO UPDATE
+           SET user_salt = EXCLUDED.user_salt,
+               encrypted_user_master_key = EXCLUDED.encrypted_user_master_key,
+               umk_version = 3
+         WHERE wallets.user_salt IS NULL
+      `);
+      return (result.rowCount ?? 0) > 0;
+    }, {});
   }
 
   // V3 Phase 0: UMK-at-rest re-keying progress monitor.
@@ -5435,8 +5467,10 @@ export class DatabaseStorage implements IStorage {
     umkEncryptedForExecution: string | null;
     executionExpiresAt: Date | null;
   }): Promise<Wallet | undefined> {
-    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
-    return result[0];
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      const result = await tx.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+      return result[0];
+    }, { tightening: !updates.executionEnabled });
   }
 
   // Security v3: resync ONLY the execution-wrapped UMK copy, and ONLY while
@@ -5445,12 +5479,14 @@ export class DatabaseStorage implements IStorage {
   // clobbered back into an enabled state by a login-time resync — money paths
   // must fail closed. Returns true iff the row was updated (still enabled).
   async resyncWalletExecutionUmk(address: string, umkEncryptedForExecution: string): Promise<boolean> {
-    const result = await db
-      .update(wallets)
-      .set({ umkEncryptedForExecution })
-      .where(and(eq(wallets.address, address), eq(wallets.executionEnabled, true)))
-      .returning({ address: wallets.address });
-    return result.length > 0;
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      const result = await tx
+        .update(wallets)
+        .set({ umkEncryptedForExecution })
+        .where(and(eq(wallets.address, address), eq(wallets.executionEnabled, true)))
+        .returning({ address: wallets.address });
+      return result.length > 0;
+    }, {});
   }
 
   // Phase 4b: atomically clear the wallet's execution authorization AND pause
@@ -5461,7 +5497,7 @@ export class DatabaseStorage implements IStorage {
     walletAddress: string,
     pauseReason: string,
   ): Promise<{ id: string; name: string }[]> {
-    return await db.transaction(async (tx) => {
+    return await walletWrite(pool, [walletAddress], async (tx) => {
       await tx
         .update(wallets)
         .set({
@@ -5487,7 +5523,7 @@ export class DatabaseStorage implements IStorage {
         .returning({ id: tradingBots.id, name: tradingBots.name });
 
       return paused;
-    });
+    }, { tightening: true });
   }
 
   // Security v3: Emergency stop
@@ -5499,8 +5535,10 @@ export class DatabaseStorage implements IStorage {
     emergencyStopAt: Date;
     emergencyStopBy: string;
   }): Promise<Wallet | undefined> {
-    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
-    return result[0];
+    return walletWrite(pool, [address], async (tx, poolId) => {
+      const result = await tx.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+      return result[0];
+    }, { tightening: true });
   }
 
   // Security v3: Auth nonces for signature verification

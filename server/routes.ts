@@ -6831,8 +6831,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             await encryptAndStoreMnemonic(walletAddress, generatedWallet.mnemonicBuffer, session.umk);
 
             // Persist the agent public key and V3 ciphertext only.
-            await storage.updateWallet(walletAddress, { agentPublicKey });
-            await storage.updateWalletAgentKeyV3(walletAddress, encryptedV3);
+            await storage.updateWalletAgentIdentityV3(walletAddress, agentPublicKey, encryptedV3);
 
             console.log(`[Agent] Generated new agent wallet with mnemonic for ${walletAddress}: ${agentPublicKey}`);
           }
