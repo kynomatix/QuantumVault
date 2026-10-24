@@ -17,7 +17,7 @@ it('U2a full product typecheck has CI New errors: 0 and changed tests typecheck'
   testFiles.push(...['tests/server/grid-worker-u5b-fields.test.ts','tests/grid-bot/grid-worker-u5b-view.test.ts','tests/grid-bot/grid-worker-u5b-wire.test.ts','tests/grid-bot/grid-worker-u5b-actions.test.ts','tests/helpers/grid-worker-u5b-fixtures.ts','script/grid-worker-copy-audit.ts'].map(f=>resolve(f)));
   testFiles.push(resolve('tests/grid-bot/start-api.test.ts'),resolve('tests/grid-bot/lifecycle.test.ts'));
   testFiles.push(...['tests/server/grid-worker-u5a-state.test.ts','tests/grid-bot/executor-runtime.test.ts','tests/flash-retirement.test.ts','tests/protocol/phoenix-consumer-wiring-u09.test.ts','tests/server/bot-trades-pnl-convention.test.ts','script/main-readiness-define.ts'].map(f=>resolve(f)));
-  testFiles.push(resolve('vitest.config.ts'), resolve('tests/helpers/real-database-suites.ts'));
+  testFiles.push(resolve('vitest.config.ts'), resolve('tests/helpers/real-database-suites.ts'), resolve('tests/helpers/serial-database-suite.ts'));
   const program = ts.createProgram([...parsed.fileNames, ...testFiles], { ...parsed.options, incremental: false, noEmit: true });
   const errors = ts.getPreEmitDiagnostics(program).filter(d => d.category === ts.DiagnosticCategory.Error);
   const baseline = new Map<string, number>();

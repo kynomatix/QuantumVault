@@ -1,6 +1,6 @@
 // Real PostgreSQL consumers, including indirect cooldown imports.
 // Keep injected/mocked clients parallel; classify new real-database suites here.
-// Shared public DDL/rows finish in a serial phase before private-schema catalog work.
+// All real-database files share the setup-session lock, including catalog work.
 export const sharedDatabaseSuites = [
   'tests/ai-trader/cycle-retention.test.ts',
   'tests/ai-trader/execution-journal.test.ts',
@@ -19,7 +19,7 @@ export const sharedDatabaseSuites = [
 ];
 
 // These suites use unique schemas or transaction-local temporary tables.
-// Their bounded phase runs only after all shared-public fixtures have finished.
+// They also need serialization against shared-public DDL and aggregate pool load.
 export const isolatedDatabaseSuites = [
   'tests/ai-trader/market-entry-cooldown.test.ts',
   'tests/ai-trader/phoenix-persistence-u14.test.ts',

@@ -1,5 +1,5 @@
 import { configDefaults, defineConfig } from 'vitest/config';
-import { isolatedDatabaseSuites, realDatabaseSuites, sharedDatabaseSuites } from './tests/helpers/real-database-suites';
+import { realDatabaseSuites } from './tests/helpers/real-database-suites';
 import path from 'path';
 
 export default defineConfig({
@@ -25,21 +25,12 @@ export default defineConfig({
       {
         extends: true,
         test: {
-          name: 'database-shared',
-          include: sharedDatabaseSuites,
-          // Public DDL and fixed keys must finish before private-schema fixtures run.
-          fileParallelism: false,
-          sequence: { groupOrder: 1 },
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: 'database-isolated',
-          include: isolatedDatabaseSuites,
-          // Bound aggregate pools while preserving each suite's connection races.
-          maxWorkers: 4,
-          sequence: { groupOrder: 2 },
+          name: 'database',
+          include: realDatabaseSuites,
+          // Keep the normal worker group so database work overlaps parallel units.
+          // setupFiles serializes database files before their imports can issue SQL.
+          setupFiles: ['./tests/helpers/serial-database-suite.ts'],
+          sequence: { hooks: 'stack' },
         },
       },
     ],
