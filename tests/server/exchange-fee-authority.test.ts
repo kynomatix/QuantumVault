@@ -251,7 +251,7 @@ describe('Signal Bot fee-rate admission authority', () => {
 });
 
 describe('Signal Bot route choke point', () => {
-  const source = readFileSync(resolve(process.cwd(), 'server/routes.ts'), 'utf8');
+  const source = readFileSync(resolve(process.cwd(), 'server/routes.ts'), 'utf8').replaceAll('\r\n', '\n');
   const start = source.indexOf('async function executePerpOrder(');
   const end = source.indexOf('\nasync function getPerpPositions(', start);
   const wrapper = source.slice(start, end);
@@ -270,8 +270,27 @@ describe('Signal Bot route choke point', () => {
   it('requires explicit close-fee evidence and never restores the legacy numeric default', () => {
     expect(source).not.toContain('const DEFAULT_EXCHANGE_FEE_RATE = 0.0004;');
     expect(source).not.toContain('getExchangeFeeRate()');
-    expect(source).toContain('const { fee: closeFee, pnl: closeTradePnl } = closeAccounting(');
-    expect(source).toContain('fee: closeFee === null ? null : closeFee.toFixed(6)');
+    // Profit-share U1 (commitHash: 96d6916b) removed the subscriber's
+    // signal-price accounting block. Pin the fee contract at its current owners.
+    const functionSource = (name: string) => {
+      const start = source.indexOf(`function ${name}(`);
+      expect(start, name).toBeGreaterThanOrEqual(0);
+      const end = source.indexOf('\n}', start);
+      expect(end, name).toBeGreaterThan(start);
+      return source.slice(start, end + 2);
+    };
+    const accounting = functionSource('closeAccounting');
+    expect(accounting).toContain('const fee = closeFeeAmount(feeEvidence)');
+    expect(accounting).toContain('pnl: fee === null ? null : grossPnl - fee');
+    for (const name of ['finalizePerBotConfirmedClose', 'finalizeUserWebhookConfirmedClose']) {
+      const finalizer = functionSource(name);
+      expect(finalizer).toContain('closeFeePersistence(input.feeEvidence, input.pnl)');
+      expect(finalizer).toContain('fee: accounting.fee');
+      expect(finalizer).toContain('pnl: accounting.pnl');
+      expect(finalizer).toContain('subscriberClosePersistence(input.subscriberAccounting)');
+      expect(finalizer).toContain('fee: subscriber.fee, pnl: subscriber.pnl');
+      expect(finalizer).toContain('webhookPayload: closeFeeEventPayload(input)');
+    }
     expect(source).toContain('fee: String(input.fee)');
     expect(source).toContain('feeEvidence: input.feeEvidence');
   });

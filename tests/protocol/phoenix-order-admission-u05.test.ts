@@ -10,11 +10,13 @@ import { authority, intent, now, key, pin, lifetime } from '../helpers/phoenix-o
 const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order-route-baseline.json', 'utf8')) as {
   baseCommitHash: string; routeSha256: Record<string, string>;
 };
-// drizzle-orm 0.45 error wrapping: r1's reviewed cause-code fallback changes these route pins.
+// Reviewed close-truth repair (commitHash: df61a316) adds strict completion,
+// original-order fill attribution and pending/null accounting to both webhooks.
+// Phoenix boundaries and incumbent entry policy remain pinned below.
 incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
-  'sha256:01adbe3c90b07ecbaed57ef2b58349bceab1a24beb2c64464a6e6b7b42438783';
+  'sha256:3ec45060c762806e5e490b0914352e7b66fcbb6db5cb413b24fa562ad78ea45e';
 incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
-  'sha256:a95a0e4d5ee0752801360154b5703213d144d17ab753082a2d99a4915b510bb7';
+  'sha256:d7eb9db318d6b6999a26794561438b616a378795f1f9a6b87d74e60b42bda578';
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {
@@ -95,7 +97,7 @@ describe('Phoenix U05 exact admission and explicit wire policy', () => {
     expect(() => signOrderTransaction(i, a, pin, lifetime, new Uint8Array(64), now)).toThrow();
     expect(() => signOrderTransaction(i, a, pin, lifetime, key.secretKey, now + 5000)).toThrow();
   });
-  it('preserves incumbent order routes byte for byte outside the reviewed Phoenix boundaries', () => {
+  it('preserves reviewed incumbent order routes outside the Phoenix boundaries', () => {
     const current = readFileSync('server/routes.ts', 'utf8').replaceAll('\r\n', '\n');
     const branch = "      if (bot.activeProtocol === 'phoenix') {\n        const { phoenixOrderDisabled } = await import('./protocol/phoenix/order-routes');\n        return res.status(503).json(phoenixOrderDisabled());\n      }\n\n";
     const signalBranch = "      if (bot.activeProtocol === 'phoenix') {\n        const { handlePhoenixTradingView } = await import('./protocol/phoenix/signal-routes');\n        return handlePhoenixTradingView(bot, req.body, res);\n      }\n\n";
