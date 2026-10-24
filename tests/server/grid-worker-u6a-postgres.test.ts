@@ -5,6 +5,8 @@ import {readFileSync} from 'node:fs';
 import express from 'express';
 import type {Server} from 'node:http';
 import bs58 from 'bs58';
+import nacl from 'tweetnacl';
+import {deriveSubkey,encryptToBase64,buildPooledSubaccountAAD} from '../../server/crypto-v3';
 import {gridWorkerIsolation} from '../helpers/grid-worker-isolation';
 import {fencedTransaction,walletFences} from '../../server/grid-worker/transaction';
 import {localContext} from '../../server/grid-worker/host';
@@ -27,17 +29,17 @@ const fixture=vi.hoisted(()=>({key:undefined as Buffer|undefined}));
 vi.mock('../../server/execution/umk',()=>({getExecutionUmk:async()=>({umk:Buffer.from(fixture.key!),cleanup(){}})}));
 const schema='grid_u6a_'+randomUUID().replaceAll('-',''),isolate=gridWorkerIsolation();
 const keys=generateKeyPairSync('ed25519'),owner=bs58.encode(keys.publicKey.export({format:'der',type:'spki'}).subarray(-32));
-const master=bs58.encode(randomBytes(32)),account=bs58.encode(randomBytes(32));
+const subaccount=nacl.sign.keyPair(),master=bs58.encode(randomBytes(32)),account=bs58.encode(subaccount.publicKey);
 const fixtureSha256=createHash('sha256').update('EXAMPLE_U6A').digest('hex');
-let pool:Pool,admin:Pool,server:Server,url:string,botId:string,session=owner,enabled=true,posts=0;
+let pool:Pool,admin:Pool,server:Server,url:string,botId:string,session=owner,enabled=true,posts=0,position=false;
 let executor:ProtectiveExecutor;
 const terminate=async(pid:number)=>{await pool.query('SELECT pg_terminate_backend($1)',[pid]);};
 const tx=<T>(work:(c:PoolClient)=>Promise<T>,mode:'shared'|'exclusive'|'none'='shared')=>fencedTransaction(pool,work,{mode,terminate});
 function diagnostics(c:PoolClient){c.query=new Proxy(c.query,{apply(fn,self,args){const r=Reflect.apply(fn,self,args);return r&&typeof r.catch==='function'?r.catch((e:Error&{code?:string;detail?:string;hint?:string})=>{e.message+=' [PostgreSQL code='+e.code+' DETAIL='+e.detail+' hint='+e.hint+']';throw e;}):r;}});}
 const fakeFetch:typeof fetch=async(input,init)=>{
-  const path=new URL(String(input)).pathname;if(init?.method==='POST'){posts++;throw Error('EXAMPLE_UNEXPECTED_POST');}
+  const path=new URL(String(input)).pathname;if(init?.method==='POST'){posts++;if(!position||!path.endsWith('/orders/create_market'))throw Error('EXAMPLE_UNEXPECTED_POST');const payload=JSON.parse(String(init.body));expect(payload.reduce_only).toBe(true);expect(payload.amount).toBe('1');expect(payload.account).toBe(account);return new Response(JSON.stringify({success:true,data:{order_id:'123'}}),{status:200});}
   const data=path.endsWith('/account')?{positions_count:0,orders_count:0,stop_orders_count:0,updated_at:Date.now()}:
-    path.endsWith('/info/prices')?[{symbol:'SOL',mark:'100',timestamp:Date.now()}]:[];
+    path.endsWith('/positions')&&position?[{symbol:'BTC',side:'bid',amount:'1'}]:path.endsWith('/info/prices')?[{symbol:'BTC',mark:'100',timestamp:Date.now()}]:[];
   return new Response(JSON.stringify({success:true,data,has_more:false,last_order_id:0}),{status:200});
 };
 const deps={fetcher:fakeFetch,transport:{keyStatus:'present',quota:{snapshot:()=>({availability:'unavailable'})},restInit:(_url:string,init:RequestInit)=>init,response:(r:Response)=>r},
@@ -59,7 +61,7 @@ beforeAll(async()=>{
   app.use((_req,res)=>res.status(404).send('Unknown API'));server=app.listen(0,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));url='http://127.0.0.1:'+(server.address() as {port:number}).port;
 },60000);
 beforeEach(async()=>{
-  session=owner;enabled=true;posts=0;
+  session=owner;enabled=true;posts=0;position=false;
   const tables=(await pool.query('SELECT tablename FROM pg_tables WHERE schemaname=$1',[schema])).rows;
   await pool.query('TRUNCATE '+tables.map(r=>'"'+r.tablename+'"').join(',')+' CASCADE');
   await pool.query("INSERT INTO wallets(address,agent_public_key,execution_enabled,umk_encrypted_for_execution,agent_private_key_encrypted_v3,umk_version) VALUES($1,$2,true,'EXAMPLE','EXAMPLE',3)",[owner,master]);
@@ -68,7 +70,8 @@ beforeEach(async()=>{
   await new GridStorage(pool,async()=>{}).createDraftWithLevels({...base,walletAddress:owner,clientRequestId:randomUUID(),serverIntentDigest:fixtureSha256.toUpperCase(),draftRevision:'EXAMPLE',createIntent:{},authoritySnapshot:{},policyHmac:h.digest,name:'EXAMPLE',rangeSource:'manual',chartTimeframe:'1h'} as DraftRecord,levels);
   await tx(async c=>{
     await walletFences(c,[owner]);
-    const id=(await c.query("INSERT INTO protocol_subaccounts(wallet_address,agent_public_key,protocol,protocol_subaccount_id,bot_id,status) VALUES($1,$2,'pacifica',$3,$4,'active') RETURNING id",[owner,master,account,botId])).rows[0].id;
+    const derived=deriveSubkey(fixture.key!,'grid_subaccount_privkey');const encrypted=encryptToBase64(Buffer.from(subaccount.secretKey),derived,buildPooledSubaccountAAD('grid:pacifica',owner,account));derived.fill(0);
+    const id=(await c.query("INSERT INTO protocol_subaccounts(wallet_address,agent_public_key,protocol,protocol_subaccount_id,status,aad_version,subaccount_key_encrypted_v3) VALUES($1,$2,'pacifica',$3,'grid_owned',1,$4) RETURNING id",[owner,master,account,encrypted])).rows[0].id;
     await c.query("UPDATE grid_bots SET status='active',protocol_subaccount_id=$2 WHERE id=$1",[botId,id]);
     await c.query('INSERT INTO grid_launch_accounts(bot_id,protocol_subaccount_id,master_account,account,canary_limit) VALUES($1,$2,$3,$4,100)',[botId,id,master,account]);
     await c.query('INSERT INTO grid_worker_owner(wallet_address) VALUES($1)',[owner]);
@@ -116,7 +119,7 @@ it('steps against a fake flat venue and retains a typed DB-derived result',async
   const r=await start();expect(r.status,r.data).toBe(200);
   await executor.step(owner,r.data.rescue.requestId);
   const step=await api('/rescue/'+r.data.rescue.requestId+'/step',{});expect(step.status,JSON.stringify(step.data)).toBe(200);
-  expect(['step','wait','done']).toContain(step.data.next);expect(posts).toBe(0);
+  expect(step.data.next).toBe('done');expect(posts).toBe(0);
   const view=await tx(c=>rescueView(c,owner,r.data.requestKey));expect(view?.requestId).toBe(r.data.rescue.requestId);
 });
 it('deduplicates stop failures and resolves only on fresh identity-bound flat proof without acknowledgement',async()=>{
@@ -171,4 +174,14 @@ it('continues the same pass after one bot fails and records its own stop inciden
   });
   expect(ran).toEqual([botId,other]);
   expect((await pool.query("SELECT bot_id FROM grid_worker_incidents WHERE code='stop_failed'")).rows).toEqual([{bot_id:botId}]);
+});
+it('signs one reduce-only close against a fake venue and never replays an uncertain operation',async()=>{
+  position=true;
+  await tx(c=>c.query("UPDATE grid_bots SET policy_version='1.0.0',runtime_policy_version='1.0.0' WHERE id=$1",[botId]));
+  const r=await start();expect(r.status,r.data).toBe(200);
+  await executor.step(owner,r.data.rescue.requestId);
+  const ops=await pool.query('SELECT state,exact_request FROM grid_operations WHERE bot_id=$1',[botId]);
+  expect(posts,JSON.stringify(ops.rows)).toBe(1);
+  expect(ops.rows[0].exact_request).toMatchObject({kind:'close',data:{reduce_only:true},authority:{protectiveRequestId:r.data.rescue.requestId}});
+  await executor.step(owner,r.data.rescue.requestId);expect(posts).toBe(1);
 });
