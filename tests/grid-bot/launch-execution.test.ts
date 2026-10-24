@@ -69,7 +69,7 @@ describe('write ahead and exact identity execution',()=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));
     const r={...request(),kind:'cancel' as const,timestamp:Date.now(),path:'/orders/cancel',operationType:'cancel_order',account:bs58.encode(sub.publicKey),data:{symbol:'BTC',order_id:'10'}};
     const fetcher=vi.fn(async()=>new Response(body===null?null:JSON.stringify(body),{status}));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,undefined,{finalMargin:async()=>{},sendOwned});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,undefined,{validatePayload:async()=>{},finalMargin:async()=>{},sendOwned});
     const result=await sender.send(r,Buffer.from(sub.secretKey));
     expect(result.terminalFailure).toEqual(classification?{requestDigest:requestDigest(r),classification}:undefined);
     expect(result.rateLimited).toBe(status===429);expect(fetcher).toHaveBeenCalledOnce();
@@ -116,7 +116,7 @@ describe('write ahead and exact identity execution',()=>{
   });
   it('crash between submitted marker and send never replays',async()=>{const h=harness();await h.deps.storage.prepare('EXAMPLE',h.r,claim,'EXAMPLE');await h.deps.storage.submit(h.row!,'EXAMPLE');expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');expect(h.deps.send).not.toHaveBeenCalled();});
   it('rejects changed payload on retry and wrong reconciliation digest',async()=>{const h=harness();await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE');await expect(h.execution.run('EXAMPLE',{...h.r,timestamp:1001},claim,'EXAMPLE')).rejects.toThrow('changed');vi.mocked(h.deps.reconcile).mockResolvedValue({state:'confirmed',requestDigest:'EXAMPLE_HASH',releaseSlot:false});expect(await h.execution.run('EXAMPLE',h.r,claim,'EXAMPLE')).toBe('pending');});
-  it('confirms only a terminal transfer response bound to this exact request',async()=>{const h=harness();h.r.kind='fund';h.r.path='/account/subaccount/transfer';h.r.operationType='transfer_funds';h.r.data={to_account:h.r.account,amount:'100'};
+  it('confirms only a terminal transfer response bound to this exact request',async()=>{const h=harness();h.r.kind='fund';h.r.path='/account/subaccount/transfer';h.r.operationType='transfer_funds';h.r.data={to_account:h.r.account,amount:'100',idempotency_key:randomUUID()};
     vi.mocked(h.deps.send).mockResolvedValue({rateLimited:false,terminalTransferDigest:requestDigest(h.r)});expect(await h.execution.run('EXAMPLE',h.r,{...claim,slots:0},'EXAMPLE')).toBe('confirmed');expect(h.deps.reconcile).not.toHaveBeenCalled();});
   it('seed history needs the exact full aggregate fill, never acknowledgement or partial exposure',()=>{const r={...request(),kind:'seed' as const};r.data={symbol:'BTC',amount:'1',side:'bid',reduce_only:false,client_order_id:r.data.client_order_id};
     const order:GridVenueOrder={orderId:'1',clientOrderId:String(r.data.client_order_id),symbol:'BTC',price:'100',amount:'1',filledAmount:'1',cancelledAmount:null,reduceOnly:false,orderType:'market',side:'long',status:'filled',createdAt:1000,updatedAt:1001};
@@ -134,7 +134,7 @@ describe('write ahead and exact identity execution',()=>{
     const r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey),masterAccount:bs58.encode(master.publicKey)};
     const fetcher=vi.fn(async()=>new Response(null,{status:429})),key='EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9));
     // This test exercises signing/transport only; concrete book authority has its own boundary tests.
-    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{},sendOwned});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true,terminalFailure:{requestDigest:requestDigest(r),classification:'quota'}});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority(key),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{validatePayload:async()=>{},finalMargin:async()=>{},sendOwned});expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:true,terminalFailure:{requestDigest:requestDigest(r),classification:'quota'}});
     const [url,init]=fetcher.mock.calls[0] as unknown as [string,RequestInit];expect(url).toBe('https://api.pacifica.fi/api/v1/orders/create');expect(init.redirect).toBe('error');expect(new Headers(init.headers).get('PF-API-KEY')).toBe(key);
     expect(JSON.parse(String(init.body))).toMatchObject({account:r.account,timestamp:r.timestamp,expiry_window:5000,tif:'ALO'});
     await expect(sender.send({...r,path:'/EXAMPLE'},Buffer.from(sub.secretKey))).rejects.toThrow();expect(fetcher).toHaveBeenCalledOnce();
@@ -155,7 +155,7 @@ describe('Grid terminal sweep sender',()=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey)};
     const fetcher=vi.fn(async()=>new Response(JSON.stringify({success:false,code,error:'EXAMPLE_DENIAL'}),{status:422}));
     const finalMargin=vi.fn(async(_r:ExactGridRequest,lease:string)=>{expect(lease).toBe('EXAMPLE_LEASE');expect(fetcher).not.toHaveBeenCalled();});
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin,sendOwned});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{validatePayload:async()=>{},finalMargin,sendOwned});
     expect(await sender.send(r,Buffer.from(sub.secretKey),undefined,'EXAMPLE_LEASE')).toEqual(code===5?{rateLimited:false,marginRejectedDigest:requestDigest(r)}:{rateLimited:false});expect(finalMargin).toHaveBeenCalledOnce();expect(fetcher).toHaveBeenCalledOnce();
   });
   it.each([{order_id:'1'},{orderId:'1'},{data:{order_id:'1'}},{data:{orderId:'1'}}])('does not certify margin no-land when the response has an acceptance identity: %j',async identity=>{
@@ -163,12 +163,12 @@ describe('Grid terminal sweep sender',()=>{
     const fetcher=vi.fn(async()=>new Response(JSON.stringify({success:false,code:5,...identity}),{status:422}));
     const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,
       {observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},
-      {finalMargin:async()=>{},sendOwned});
+      {validatePayload:async()=>{},finalMargin:async()=>{},sendOwned});
     expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual({rateLimited:false});
   });
   it('unknown final margin sends no POST after obtaining book authority',async()=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),timestamp:Date.now(),account:bs58.encode(sub.publicKey)},post=vi.fn();
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{finalMargin:async()=>{throw new GridMarginDenied('EXAMPLE_UNKNOWN');},sendOwned});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,{observe:async()=>({requestDigest:requestDigest(r),context:{policy:null as any,confirmedAt:0,fundedAt:0,alreadyPlaced:true},bookPrice:null,observedAt:null,readStartedAt:0}),valid:()=>true},{validatePayload:async()=>{},finalMargin:async()=>{throw new GridMarginDenied('EXAMPLE_UNKNOWN');},sendOwned});
     await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow(GridMarginDenied);expect(post).not.toHaveBeenCalled();
   });
 
@@ -179,13 +179,13 @@ describe('Grid terminal sweep sender',()=>{
   });
   it('rejects a stalled process whose signed window expired before the owned POST callback',async()=>{
     const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7)),r={...request(),account:bs58.encode(sub.publicKey),data:{...request().data,reduce_only:true}},post=vi.fn();
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,undefined,{finalMargin:async()=>{},sendOwned});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post,undefined,{validatePayload:async()=>{},finalMargin:async()=>{},sendOwned});
     await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('expired before POST');expect(post).not.toHaveBeenCalled();
   });
   it.each([true,false])('requires the full nested terminal envelope: %s',async terminal=>{
-    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));const r:ExactGridRequest={...request(),kind:'sweep',timestamp:Date.now(),account:bs58.encode(sub.publicKey),path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:'EXAMPLE_MASTER',amount:'1'},authority:{settlementComplete:true}};
+    const sub=nacl.sign.keyPair.fromSeed(new Uint8Array(32).fill(7));const r:ExactGridRequest={...request(),kind:'sweep',timestamp:Date.now(),account:bs58.encode(sub.publicKey),path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{to_account:'EXAMPLE_MASTER',amount:'1',idempotency_key:randomUUID()},authority:{settlementComplete:true}};
     const body=terminal?{success:true,error:null,data:{success:true,error:null}}:{success:true};const fetcher=vi.fn(async()=>new Response(JSON.stringify(body),{status:200}));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,undefined,{finalMargin:async()=>{},sendOwned});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),fetcher as typeof fetch,undefined,{validatePayload:async()=>{},finalMargin:async()=>{},sendOwned});
     expect(await sender.send(r,Buffer.from(sub.secretKey))).toEqual(terminal?{rateLimited:false,terminalTransferDigest:requestDigest(r)}:{rateLimited:false});
     expect(JSON.parse(String((fetcher.mock.calls[0] as unknown as [string,RequestInit])[1].body))).toMatchObject({account:r.account,to_account:r.masterAccount,amount:'1'});
   });

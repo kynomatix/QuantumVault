@@ -14,7 +14,7 @@ const policy=()=>({...base,startPrice:'100.50000000',lowerPrice:'100.00000000',u
   levels:[100,101,102].map((price,i)=>({ordinal:i+1,price:price.toFixed(8),size:'1.00000000',side:'buy' as const,reduceOnly:false}))});
 const request=(kind:'seed'|'limit'='limit'):ExactGridRequest=>({kind,botId:policy().id,account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',
   path:kind==='seed'?'/orders/create_market':'/orders/create',operationType:kind==='seed'?'create_market_order':'create_order',timestamp:1000,expiryMs:5000,
-  data:{symbol:'BTC',side:'bid',amount:'1.00000000',reduce_only:false,client_order_id:'EXAMPLE',...(kind==='seed'?{slippage_percent:'0.5'}:{price:'100.00000000',tif:'ALO'})},
+  data:{symbol:'BTC',side:'bid',amount:'1.00000000',reduce_only:false,client_order_id:policy().id,...(kind==='seed'?{slippage_percent:'0.5'}:{price:'100.00000000',tif:'ALO'})},
   authority:{policy:policy(),policyHmac:'EXAMPLE'}});
 const context=():GridFirstPlacementContext=>({policy:policy(),confirmedAt:900,fundedAt:1000,alreadyPlaced:false});
 const book=(price='100.5',t=1000)=>({success:true,error:null,data:{s:'BTC',t,l:[[{p:String(Number(price)-0.01),a:'1'}],[{p:String(Number(price)+0.01),a:'1'}]]}});
@@ -75,14 +75,14 @@ describe('first-placement signing boundary',()=>{
     const h=harness(),r={...request(),account:bs58.encode(sub.publicKey)},transport=new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9)));
     const original=transport.restInit.bind(transport);vi.spyOn(transport,'restInit').mockImplementation((...args)=>{const init=original(...args);h.setNow(1000+delay);return init;});
     const clock=vi.spyOn(Date,'now').mockReturnValue(1000);
-    const post=vi.fn(async()=>new Response(null,{status:200})),sender=new GridPacificaSender(transport,post as typeof fetch,h.authority,{finalMargin:async()=>{},sendOwned});
+    const post=vi.fn(async()=>new Response(null,{status:200})),sender=new GridPacificaSender(transport,post as typeof fetch,h.authority,{validatePayload:async()=>{},finalMargin:async()=>{},sendOwned});
     if(delay===5000){await sender.send(r,Buffer.from(sub.secretKey));expect(post).toHaveBeenCalledOnce();}
     else {await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('expired');expect(post).not.toHaveBeenCalled();}
     clock.mockRestore();
   });
   it('fails closed when the concrete authority is absent, while reduce-only orders remain usable',async()=>{
     const r={...request(),account:bs58.encode(sub.publicKey)},post=vi.fn(async()=>new Response(null,{status:200}));
-    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post as typeof fetch,undefined,{finalMargin:async()=>{},sendOwned});
+    const sender=new GridPacificaSender(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),post as typeof fetch,undefined,{validatePayload:async()=>{},finalMargin:async()=>{},sendOwned});
     await expect(sender.send(r,Buffer.from(sub.secretKey))).rejects.toThrow('first placement');expect(post).not.toHaveBeenCalled();
     await sender.send({...r,timestamp:Date.now(),data:{...r.data,reduce_only:true}},Buffer.from(sub.secretKey));expect(post).toHaveBeenCalledOnce();
   });

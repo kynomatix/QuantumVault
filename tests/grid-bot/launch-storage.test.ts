@@ -43,7 +43,7 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     claim:{credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000} as GridClaim};};
   const exposureStorage=()=>new GridLaunchStorage(pool,async()=>{},async r=>({...marginTestReading(r),leverage:String((await pool.query('SELECT leverage FROM grid_bots WHERE id=$1',[r.botId])).rows[0].leverage)}));
   function seed(account:Awaited<ReturnType<typeof reserve>>['account'],amount:string,notional:string){const v=input(account);
-    v.request={...v.request,kind:'seed',path:'/orders/create_market',operationType:'create_market_order',data:{symbol:'BTC',amount,side:'bid',reduce_only:false},authority:{seedWorstPrice:'100'}};
+    v.request={...v.request,kind:'seed',path:'/orders/create_market',operationType:'create_market_order',data:{symbol:'BTC',amount,side:'bid',reduce_only:false,slippage_percent:'0.5',client_order_id:randomUUID()},authority:{seedWorstPrice:'100',policy:{direction:'long'},admission:{plan:{seedQuantity:amount}}}};
     v.claim.canaryIncrement=notional;return v;
   }
   it('C2 admits all four concurrent launches on independent database connections',async()=>{
@@ -160,6 +160,20 @@ describe('Grid launch durable PostgreSQL ledger and isolated custody',()=>{
     // Recovery/settlement remains available with the oversized current mark.
     await s.settle(op,{state:'unconfirmed',reason:'unknown',releaseSlot:false});
     expect((await custody.recover(account.botId,wallet,account.leaseToken)).account).toBe(account.account);
+  });
+  it.each(['extra','inherited','missing','destination','leverage','amount'])('U3 rejects %s payload before signing and inside sendOwned',async kind=>{
+    const {account}=await reserve(),v=seed(account,'1','100'),s=exposureStorage();
+    if(kind==='extra')v.request.data.builder='EXAMPLE';
+    if(kind==='inherited')v.request.data=Object.assign(Object.create({builder:'EXAMPLE'}),v.request.data);
+    if(kind==='missing')delete v.request.data.side;
+    if(kind==='amount'){v.request.data.amount='0.5';v.claim.canaryIncrement='50';}
+    if(kind==='destination')v.request={...v.request,kind:'fund',path:'/account/subaccount/transfer',operationType:'transfer_funds',data:{amount:'100',to_account:'EXAMPLE_WRONG_DESTINATION',idempotency_key:randomUUID()}};
+    if(kind==='leverage')v.request={...v.request,kind:'leverage',path:'/account/leverage',operationType:'update_leverage',data:{symbol:'BTC',leverage:2},authority:{facts:{observedAt:Date.now(),expiresAt:Date.now()+5000,maxLeverage:'50'}}};
+    if(kind==='destination'||kind==='leverage')v.claim.canaryIncrement='0';
+    const op=await s.prepare('EXAMPLE_U3_PAYLOAD',v.request,v.claim,account.leaseToken);expect(await s.submit(op,account.leaseToken)).toBe(true);
+    await expect(s.validatePayload(v.request)).rejects.toThrow('GRID_PAYLOAD_REFUSED');
+    let posts=0;await expect(s.sendOwned(v.request,account.leaseToken,async()=>{posts++;})).rejects.toThrow('GRID_PAYLOAD_REFUSED');
+    expect(posts).toBe(0);
   });
   it('C2 checks exposure observation expiry in the last ownership statement before POST',async()=>{
     const {account}=await reserve(),s=exposureStorage(),v=seed(account,'1','100');

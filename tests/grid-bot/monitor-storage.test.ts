@@ -49,7 +49,7 @@ describe('Grid monitor PostgreSQL crash, restart and financial boundaries',()=>{
   async function fixture(totalInvestment='100.00',epoch=true){const {bot,claim,level}=await reservation(totalInvestment,epoch);
     const now=Date.now(),cloid=randomUUID();
     const request:ExactGridRequest={kind:'limit',botId:bot.id,account:claim.account,masterAccount:claim.masterAccount,path:'/orders/create',operationType:'create_order',timestamp:now,expiryMs:5000,
-      data:{symbol:'BTC',client_order_id:cloid,side:'bid',reduce_only:false,amount:'1',price:'90'},authority:{levelId:level.id,levelAttempt:0}};
+      data:{symbol:'BTC',client_order_id:cloid,side:'bid',reduce_only:false,tif:'ALO',amount:'1',price:'90'},authority:{levelId:level.id,levelAttempt:0}};
     const op=await launch.prepare('EXAMPLE_OPERATION',request,{credits:'10',slots:1,canaryIncrement:'90',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000},claim.leaseToken);
     const observe=():GridObservation=>({account:claim.account,symbol:'BTC',observedAt:Date.now(),inventoryComplete:true,history:{from:0,through:Date.now(),inclusive:true,publicationLagMs:0,source:'EXAMPLE_REVIEWED_AUTHORITY'},mark:{price:'90',observedAt:Date.now()},position:{direction:'long',size:'0.98'},
       orders:[{orderId:'10',clientOrderId:cloid,symbol:'BTC',side:'long',price:'90',amount:'1',filledAmount:'0.98',cancelledAmount:'0',reduceOnly:false,orderType:'limit',createdAt:now,updatedAt:now,status:'partially_filled'}],

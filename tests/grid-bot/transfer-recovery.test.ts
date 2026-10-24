@@ -7,8 +7,8 @@ import {gridNotificationText} from '../../server/grid-bot/notifications';
 
 const now=9000,signal=()=>new AbortController().signal;
 function fixture(kind:'fund'|'sweep',landed=true){
-  const r:ExactGridRequest={kind,botId:'EXAMPLE_BOT',account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',path:'/account/subaccount/transfer',
-    operationType:'transfer_funds',timestamp:1000,expiryMs:5000,data:{amount:'100',to_account:kind==='fund'?'EXAMPLE_SUB':'EXAMPLE_MASTER',idempotency_key:'EXAMPLE_TRANSFER_KEY'},
+  const r:ExactGridRequest={kind,botId:crypto.randomUUID(),account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',path:'/account/subaccount/transfer',
+    operationType:'transfer_funds',timestamp:1000,expiryMs:5000,data:{amount:'100',to_account:kind==='fund'?'EXAMPLE_SUB':'EXAMPLE_MASTER',idempotency_key:crypto.randomUUID()},
     authority:kind==='sweep'?{settlementComplete:true,settlement:{account:'EXAMPLE_SUB',masterAccount:'EXAMPLE_MASTER',settlementComplete:true,balance:'100',withdrawable:'100',observedAt:900}}:{}};
   const op:DurableGridOperation={id:'EXAMPLE_TRANSFER',state:'unconfirmed',exact_request:r,exact_request_digest:requestDigest(r),failure_classification:'unknown',submitted_at:new Date(1000)};
   const create:ExactGridRequest={...r,kind:'create',timestamp:100,path:'/account/subaccount/create',operationType:'subaccount_confirm',data:{},authority:{}};
@@ -102,7 +102,7 @@ describe('C4 boundaries and replacement attempts',()=>{
     const terminal=gridReconciliationOutcome(result);Object.assign(f.op,{state:terminal.state,failure_classification:terminal.reason,transfer_recovery:terminal.transferProof});
     const rows=new Map<string,DurableGridOperation>([[base,f.op]]),read=async(key:string)=>rows.get(key)??null;
     const attempt=await gridProvisionAttempt(read,f.r.botId,'fund',now);
-    const fresh:ExactGridRequest={...f.r,timestamp:now,data:{...f.r.data,idempotency_key:'EXAMPLE_NEW_TRANSFER_KEY'}};
+    const fresh:ExactGridRequest={...f.r,timestamp:now,data:{...f.r.data,idempotency_key:crypto.randomUUID()}};
     const deps:GridExecutionDeps={now:()=>now,storage:{read:async(_bot,key)=>read(key),
       prepare:async(key,r)=>{const op:DurableGridOperation={id:'EXAMPLE_NEW_OPERATION',state:'prepared',submitted_at:null,exact_request:r,exact_request_digest:requestDigest(r),failure_classification:null};rows.set(key,op);return op;},
       submit:async op=>{op.state='submitted';op.submitted_at=new Date(now);return true;},settle:async(op,o)=>{op.state=o.state;op.failure_classification=o.reason;}},

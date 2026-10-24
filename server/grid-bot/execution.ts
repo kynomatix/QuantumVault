@@ -7,29 +7,16 @@ import {gridNeedsBook,type GridFirstPlacementBoundary} from './first-placement';
 import {gridAddsExposure,GridMarginDenied} from './margin';
 import {gridTerminalHttpFailure,type GridSendResult,type GridSettlementOutcome,type GridTerminalFailure,type GridTerminalFailureClass} from './execution-failure';
 
-const endpoints={create:['/account/subaccount/create','subaccount_confirm'],fund:['/account/subaccount/transfer','transfer_funds'],
-  leverage:['/account/leverage','update_leverage'],seed:['/orders/create_market','create_market_order'],
-  limit:['/orders/create','create_order'],cancel:['/orders/cancel','cancel_order'],close:['/orders/create_market','create_market_order'],sweep:['/account/subaccount/transfer','transfer_funds']} as const;
-export function validExactRequest(r:ExactGridRequest):boolean{
-  const expected=endpoints[r.kind];
-  if(!expected || r.path!==expected[0] || r.operationType!==expected[1] || !r.account || !r.masterAccount || r.account===r.masterAccount)return false;
-  const d=r.data;
-  // Also reject retained pre-exemption payloads at the final Grid signing boundary.
-  if(['limit','seed','close'].includes(r.kind)&&'builder_code' in d)return false;
-  if(['signature','timestamp','expiry_window','account','agent_wallet','type'].some(k=>k in d))return false;
-  if(r.kind==='limit')return d.tif==='ALO' && typeof d.reduce_only==='boolean' && typeof d.client_order_id==='string' && !!d.symbol;
-  if(r.kind==='seed')return d.slippage_percent==='0.5' && d.reduce_only===false && typeof d.client_order_id==='string' && !!d.symbol;
-  if(r.kind==='close')return d.slippage_percent==='0.5'&&d.reduce_only===true&&typeof d.client_order_id==='string'&&!!d.symbol&&['bid','ask'].includes(String(d.side))&&typeof d.amount==='string'&&new Decimal(d.amount).gt(0);
-  if(r.kind==='sweep')return d.to_account===r.masterAccount&&typeof d.amount==='string'&&new Decimal(d.amount).gt(0)&&r.authority.settlementComplete===true;
-  if(r.kind==='fund')return d.to_account===r.account && typeof d.amount==='string' && new Decimal(d.amount).gt(0);
-  if(r.kind==='create')return Object.keys(d).length===0;
-  return true;
-}
+import {gridPayload,validGridPayload} from '../grid-worker/payload';
+export const validExactRequest=validGridPayload;
 /** Only this Grid-specific boundary signs and posts. No enrollment, leverage or legacy adapter side effects. */
 export class GridPacificaSender {
-  constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary,private margin?:Pick<GridLaunchStorage,'finalMargin'|'sendOwned'>){}
+  constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary,private margin?:Pick<GridLaunchStorage,'finalMargin'|'sendOwned'|'validatePayload'>){}
   async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer,leaseToken?:string):Promise<GridSendResult>{
     if(!validExactRequest(r) || this.transport.keyStatus!=='present')throw Error('Grid transport authority unavailable');
+    if(!this.margin)throw new GridLaunchTransientError('Grid send ownership boundary unavailable');
+    await this.margin.validatePayload(r);
+    const payload=gridPayload(r);
     const sub=new PacificaSigner(subaccountSecret);
     if(sub.getPublicKey()!==r.account)throw Error('Grid signing account mismatch');
     const needsBook=gridNeedsBook(r);
@@ -43,8 +30,8 @@ export class GridPacificaSender {
         const subSignature=sub.signMessage(buildSigningMessage('subaccount_initiate',{account:r.masterAccount},r.timestamp,r.expiryMs));
         const mainSignature=master.signMessage(buildSigningMessage('subaccount_confirm',{signature:subSignature},r.timestamp,r.expiryMs));
         body={main_account:r.masterAccount,subaccount:r.account,main_signature:mainSignature,sub_signature:subSignature,timestamp:r.timestamp,expiry_window:r.expiryMs};
-      }else body={...r.data,account:r.masterAccount,agent_wallet:null,signature:master.signMessage(buildSigningMessage(r.operationType,r.data,r.timestamp,r.expiryMs)),timestamp:r.timestamp,expiry_window:r.expiryMs};
-    }else body={...r.data,account:r.account,agent_wallet:null,signature:sub.signMessage(buildSigningMessage(r.operationType,r.data,r.timestamp,r.expiryMs)),timestamp:r.timestamp,expiry_window:r.expiryMs};
+      }else body={...payload,account:r.masterAccount,agent_wallet:null,signature:master.signMessage(buildSigningMessage(r.operationType,payload,r.timestamp,r.expiryMs)),timestamp:r.timestamp,expiry_window:r.expiryMs};
+    }else body={...payload,account:r.account,agent_wallet:null,signature:sub.signMessage(buildSigningMessage(r.operationType,payload,r.timestamp,r.expiryMs)),timestamp:r.timestamp,expiry_window:r.expiryMs};
     const url='https://api.pacifica.fi/api/v1'+r.path;
     const init=this.transport.restInit(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(5000)});
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired during preparation; recover or confirm a fresh preview.');
@@ -56,7 +43,8 @@ export class GridPacificaSender {
     if(Date.now()>=r.timestamp+r.expiryMs)throw new GridLaunchTransientError('Grid signed request expired before POST');
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired before POST.');
     // One bounded request only. Header/HTTP success alone never settles money or an order.
-    const response=this.transport.response(await this.fetcher(url,{...init,signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(5000)])}));
+    const response=this.transport.response(await this.fetcher(url,{...init,redirect:'error',signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(5000)])}));
+    if(response.redirected||response.status>=300&&response.status<400)throw Error('GRID_EGRESS_REFUSED');
     if(response.status===400||response.status===403||response.status===429){
       const body=response.status===400?await response.json().catch(()=>null):null;
       const terminalFailure=gridTerminalHttpFailure(response.status,body,requestDigest(r));

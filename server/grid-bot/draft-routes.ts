@@ -15,7 +15,8 @@ import type {GridLifecycleStorage} from './lifecycle-storage';
 import type {GridAutoResumeStorage} from './auto-resume-storage';
 import {gridAutoResumeBand} from './auto-resume-policy';
 import {gridRuntimeGates,type GridRuntimeGates} from './service';
-import {gridStartRequestSchema,type GridStartRequest,type GridStartResult} from '../../shared/grid-start';
+import {gridStartRequestSchema,gridWorkerStartRequestSchema,type GridStartRequest,type GridStartResult} from '../../shared/grid-start';
+import {StartRefusal,type MainStartRequests} from '../grid-worker/requests';
 import {GRID_CYCLE_V2_CREATION} from './cycle-policy';
 
 const uuid=z.string().uuid();
@@ -23,21 +24,40 @@ const rangeQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe
 const advisoryQuery=z.object({market:z.string().regex(/^[A-Z0-9]+-PERP$/),timeframe:z.enum(['15m','1h','4h']),
   lookback:z.enum(['100','200']).optional(),period:z.enum(['day','week','month']).optional()}).strict();
 export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,provided?:{deps:GridDraftDeps;storage:GridStorage;enabled?:()=>boolean;lifecycle?:Pick<GridLifecycleStorage,'request'>;autoResume?:Pick<GridAutoResumeStorage,'set'|'identity'>;tick?:(market:string)=>Promise<string|null>;
-  move?:Pick<GridMoveStorage,'surface'|'set'|'proposal'|'confirm'>;gates?:()=>GridRuntimeGates;start?:(wallet:string,id:string,expected:GridStartRequest,signal:AbortSignal)=>Promise<GridStartResult>}) {
+  move?:Pick<GridMoveStorage,'surface'|'set'|'proposal'|'confirm'>;gates?:()=>GridRuntimeGates;requests?:Pick<MainStartRequests,'external'|'confirm'|'recover'|'states'>;start?:(wallet:string,id:string,expected:GridStartRequest,signal:AbortSignal)=>Promise<GridStartResult>}) {
   const gates=provided?.gates??gridRuntimeGates;
+  const requests=async()=>provided?provided.requests??null:(await import('./start-requests')).mainStartRequests();
   app.post('/api/grid-bots/:id/start',requireWallet,async(req,res)=>{
     res.set('Cache-Control','no-store');
     if(!gates().startEnabled){res.status(503).json({error:'Grid Start is off or its worker is unavailable. Existing safety controls remain available.'});return;}
     const id=uuid.safeParse(req.params.id);if(!id.success){res.status(400).json({error:'Invalid Grid id'});return;}
-    const body=gridStartRequestSchema.safeParse(req.body);if(!body.success){res.status(400).json({error:'Confirm the retained Grid draft before starting.'});return;}
     try{
+      const queue=await requests();
+      if(queue&&await queue.external()){
+        const body=gridWorkerStartRequestSchema.safeParse(req.body);
+        if(!body.success){res.status(400).json({error:'Explicitly confirm the retained Grid draft before starting.'});return;}
+        const {deps}=await runtime(),key=await deps.umk(wallet(req));
+        if(!key){res.status(409).json({error:'Unlock your wallet before confirming Start.'});return;}
+        const result=await queue.confirm(wallet(req),id.data,body.data,key);
+        res.status(['refused','expired','superseded'].includes(result.state)?422:202).json({launchId:id.data,state:['refused','expired','superseded'].includes(result.state)?'denied':'pending',requestState:result.state,reason:result.reason??(result.state==='pending'?'Waiting to start.':'Start admitted. Exchange confirmation is still pending.')});return;
+      }
+      const body=gridStartRequestSchema.safeParse(req.body);if(!body.success){res.status(400).json({error:'Confirm the retained Grid draft before starting.'});return;}
       const start=provided?.start??(async(owner:string,bot:string,expected:GridStartRequest,signal:AbortSignal)=>(await (await import('./executor-runtime')).productionGridExecutor()).start(owner,bot,expected,signal));
       const result=await start(wallet(req),id.data,body.data,AbortSignal.timeout(60000));
       res.status(result.state==='denied'?422:result.state==='canary'?200:202).json(result);
     }catch(error){
-      if(error instanceof GridStorageError)res.status(error.code==='not_found'?404:409).json({error:error.code});
+      if(error instanceof StartRefusal)res.status(409).json({error:error.message});
+      else if(error instanceof GridStorageError)res.status(error.code==='not_found'?404:409).json({error:error.code});
       else res.status(503).json({error:'Grid launch authority unavailable. Refresh bot details; retrying this draft retains the same launch identity.'});
     }
+  });
+  app.get('/api/grid-bots/:id/start-request',requireWallet,async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    const id=uuid.safeParse(req.params.id),query=z.object({requestKey:z.string().uuid()}).strict().safeParse(req.query);
+    if(!id.success||!query.success){res.status(400).json({error:'Invalid Start lookup'});return;}
+    try{const queue=await requests();if(!queue||!await queue.external()){res.json({external:false,request:null});return;}
+      res.json({external:true,request:await queue.recover(wallet(req),id.data,query.data.requestKey)});
+    }catch{res.status(503).json({error:'Start confirmation is unavailable. Refresh before retrying.'});}
   });
   const enabled=provided?.enabled??(()=>process.env.GRID_BOT_ENABLED==='true');
   let initialized:Promise<{deps:GridDraftDeps;storage:GridStorage}>|null=null;
@@ -107,7 +127,7 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
       lifecycle=new GridLifecycleStorage(new GridMonitorStorage(new GridLaunchStorage(pool)));}
     const result=await lifecycle.request(wallet(req),id.data,body.data.requestId,action,{requestedBy:'owner'});res.status(result.state==='complete'?200:202).json({request:result});
   }));
-  app.get('/api/grid-bots/status',requireWallet,(_req,res)=>{res.set('Cache-Control','no-store');res.json({enabled:enabled(),...gates(),rangeMoveEnabled:GRID_RANGE_MOVE_ENABLED});});
+  app.get('/api/grid-bots/status',requireWallet,async(_req,res)=>{res.set('Cache-Control','no-store');try{const queue=await requests();res.json({enabled:enabled(),...gates(),externalStart:queue?await queue.external():false,rangeMoveEnabled:GRID_RANGE_MOVE_ENABLED});}catch{res.status(503).json({error:'Grid status unavailable'});}});
   app.get('/api/grid-bots/create-policy',requireWallet,gate,(_req,res)=>{res.json(GRID_CREATE_POLICY);});
   app.get('/api/grid-bots/markets',requireWallet,gate,work(async(_req,res)=>{
     const markets=await defaultPlannerDeps.getMarkets();res.json({markets:markets.map(m=>({market:m.internalSymbol,name:m.fullName}))});
@@ -165,7 +185,9 @@ export function registerGridBotRoutes(app:Express,requireWallet:RequestHandler,p
   }));
   app.get('/api/grid-bots',requireWallet,work(async(req,res)=>{
     const q=z.object({includeStopped:z.enum(['true','false']).optional()}).strict().safeParse(req.query);if(!q.success){res.status(400).json({error:'Invalid list filters'});return;}
-    const {storage}=await runtime();res.json({bots:await storage.listBots(wallet(req),q.data.includeStopped==='true'),pnlLabel:'Excludes funding'});
+    const {storage}=await runtime(),bots=await storage.listBots(wallet(req),q.data.includeStopped==='true'),queue=await requests();
+    const states=queue&&await queue.external()?await queue.states(wallet(req),bots.map(bot=>bot.id)):{};
+    res.json({bots:bots.map(bot=>({...bot,...states[bot.id]})),pnlLabel:'Excludes funding'});
   }));
   app.get('/api/grid-bots/:id/surface',requireWallet,work(async(req,res)=>{
     if(!uuid.safeParse(req.params.id).success){res.status(400).json({error:'Invalid bot identity'});return;}

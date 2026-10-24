@@ -1,4 +1,5 @@
 import {loadActiveGridLevels} from './active-epoch';
+import {gridPayload,authorizeGridPayload} from '../grid-worker/payload';
 import { retainedGridBehaviour } from './behaviour-policy';
 import { isGridCyclePolicyVersion } from '../../shared/grid-behaviour';
 import {validateLockedCycleRequest} from './cycle-storage';
@@ -95,12 +96,53 @@ export class GridLaunchStorage {
     const a=(await c.query('SELECT generation FROM grid_auto_resume WHERE bot_id=$1',[r.botId])).rows[0];
     return String(a?.generation??'0')===String(r.authority.autoResumeGeneration??'0');
   }
+  /** The same database proof is required before signing and immediately before POST. */
+  async validatePayload(r:ExactGridRequest):Promise<void>{
+    gridPayload(r);
+    return this.transaction(async c=>{
+      this.hostAction(c,this.requestAction(r),{terminalProof:r.kind==='sweep',protectiveDrain:reduction(r)});
+      await this.prelockWallet(c,r.botId);
+      if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
+      await launchIdentityFences(c,r.botId);await this.payloadAuthority(c,r);
+    });
+  }
+  private async payloadAuthority(c:PoolClient,r:ExactGridRequest):Promise<void>{
+    if(r.kind==='sweep'){
+      const current=(await c.query('SELECT w.agent_public_key FROM grid_bots b JOIN wallets w ON w.address=b.wallet_address WHERE b.id=$1',[r.botId])).rows[0];
+      if(!current||current.agent_public_key!==r.masterAccount||r.data.to_account!==r.masterAccount)throw Error('GRID_TRANSFER_REFUSED');
+    }
+    const identity=await currentAuthority(c,{botId:r.botId,masterAccount:r.masterAccount,account:r.account});
+    gridPayload(r);
+    const bot=(await c.query(`SELECT b.total_investment,b.leverage,w.agent_public_key,clock_timestamp() AS db_now
+      FROM grid_bots b JOIN wallets w ON w.address=b.wallet_address WHERE b.id=$1 AND w.address=$2`,[r.botId,identity.wallet])).rows[0];
+    const digest=requestDigest(r);
+    if(!bot||!(await c.query("SELECT id FROM grid_operations WHERE bot_id=$1 AND exact_request_digest=$2 AND state='submitted'",[r.botId,digest])).rowCount)throw new GridLaunchTransientError('Grid send ownership unavailable');
+    const monitor=(await c.query("SELECT *,reconciled_at>clock_timestamp()-interval '5 seconds' AS fresh FROM grid_monitor_state WHERE bot_id=$1",[r.botId])).rows[0];
+    const now=new Date(bot.db_now).getTime(),observation=monitor?.observation,position=observation?.position;
+    const original=r.authority.originalRequest as ExactGridRequest|undefined;
+    const owned=r.kind==='cancel'&&original&&original.botId===r.botId&&original.account===r.account&&original.kind==='limit'
+      &&original.data.symbol===r.data.symbol&&(await c.query(`SELECT id FROM grid_operations WHERE bot_id=$1 AND exact_request_digest=$2
+        AND venue_order_id=$3 AND level_id=$4`,[r.botId,requestDigest(original),String(r.data.order_id),r.authority.levelId])).rowCount;
+    const used=r.kind==='fund'&&(await c.query(`SELECT id FROM grid_operations WHERE bot_id=$1 AND type='fund_subaccount'
+      AND state<>'failed' AND (exact_request_digest<>$2 OR state='confirmed')`,[r.botId,digest])).rowCount!==0;
+    const facts=r.authority.facts as {maxLeverage?:string;observedAt?:number;expiresAt?:number}|undefined;
+    if(r.kind==='leverage'&&(!facts||typeof facts.observedAt!=='number'||!freshGridFact(facts.observedAt,now)||!facts.expiresAt||facts.expiresAt<=now))throw Error('GRID_PAYLOAD_REFUSED');
+    const admission=r.authority.admission as {plan?:{seedQuantity?:string;side?:string}}|undefined;
+    const policy=r.authority.policy as GridPolicy|undefined;
+    authorizeGridPayload(r,{investment:bot.total_investment,leverage:bot.leverage,maxLeverage:facts?.maxLeverage??'0',currentMaster:bot.agent_public_key,
+      fundAlreadyUsed:!!used,seedAmount:admission?.plan?.seedQuantity,seedSide:policy?.direction==='long'?'bid':'ask',
+      ...(owned?{ownedOrder:{orderId:String(r.data.order_id),symbol:String(r.data.symbol)}}:{}),
+      ...(position?{position:{account:observation.account,symbol:observation.symbol,size:position.size,side:position.direction==='long'?'ask' as const:'bid' as const,
+        observedAt:observation.observedAt,complete:monitor.fresh&&observation.inventoryComplete}}:{}),
+      ...(r.kind==='sweep'?{settlement:{complete:reductionAuthority(r,monitor,now),amount:String(r.data.amount),observedAt:observation?.observedAt}}:{})},now);
+  }
   async sendOwned<T>(r:ExactGridRequest,leaseToken:string,post:(signal:AbortSignal)=>Promise<T>):Promise<T>{
     return this.transaction(async (c,deadline)=>{
       this.hostAction(c,this.requestAction(r),{terminalProof:r.kind==='sweep',protectiveDrain:reduction(r)});
       await this.prelockWallet(c,r.botId);
       if(!await gridWorkerFence(c,r.botId))throw new GridLaunchTransientError('Grid sender fence unavailable');
       await launchIdentityFences(c,r.botId);
+      await this.payloadAuthority(c,r);
       const authority=await currentAuthority(c,{botId:r.botId,masterAccount:r.masterAccount,account:r.account});
       const op=(await c.query("SELECT id,exact_request_digest FROM grid_operations WHERE bot_id=$1 AND state='submitted' AND exact_request_digest=$2",[r.botId,requestDigest(r)])).rows[0];
       const audit=await this.legacyAudit(c,op?.id,r);
@@ -292,6 +334,7 @@ export class GridLaunchStorage {
     }catch(error){
       if(error instanceof Error&&error.message==='GRID_MAIN_CONTENDER_SEEN')await this.incidentWriter.record({code:'contender_seen',dedupKey:'main:contender'});
       if(error instanceof Error&&error.message==='GRID_AUTHORITY_HISTORY_MISSING')await this.incidentWriter.record({code:'schema_drift',dedupKey:'authority:missing-history'});
+      if(error instanceof Error&&error.message==='GRID_TRANSFER_REFUSED')await this.incidentWriter.record({code:'transfer_refused',dedupKey:'grid:transfer:owner-recovery'});
       throw error;
     }
   }

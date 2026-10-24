@@ -143,7 +143,7 @@ describe('U2c PostgreSQL authority and consent',()=>{
     await arm();const b=await draft(),s=new GridLaunchStorage(pool,async()=>{}),custody=new GridCustody(s);
     const account=await custody.reserve({botId:b.id,wallet:owner,masterAccount:'EXAMPLE_MASTER',policyHmac:b.policyHmac},umk());
     const now=Date.now(),request:ExactGridRequest={kind:'fund',botId:b.id,account:account.account,masterAccount:account.masterAccount,
-      path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now,expiryMs:15_000,data:{to_account:account.account,amount:'100'},authority:{}};
+      path:'/account/subaccount/transfer',operationType:'transfer_funds',timestamp:now,expiryMs:15_000,data:{to_account:account.account,amount:'100',idempotency_key:randomUUID()},authority:{}};
     const claim:GridClaim={credits:'10',slots:0,canaryIncrement:'0',observedCredits:'300',availableSlots:100,observedAt:now,expiresAt:now+5000};
     const op=await s.prepare('EXAMPLE_'+randomUUID(),request,claim,account.leaseToken);expect(await s.submit(op,account.leaseToken)).toBe(true);
     const entered=latch();let posts=0;

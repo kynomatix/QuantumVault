@@ -72,7 +72,7 @@ async function fixture(){
       current:vi.fn(async()=>++calls===1?state.agentCurrent:state.afterAgent),cleanup:vi.fn(()=>{signingKey.fill(0);})};agents.push(agent);return agent;});
   const subSecret=Buffer.alloc(64,8);
   hooks.secret.mockImplementation(async(_a:unknown,_umk:Buffer,work:(material:Buffer)=>Promise<unknown>)=>work(subSecret));
-  const order=(r:ExactGridRequest,status:GridVenueOrder['status']='open'):GridVenueOrder=>({orderId:'EXAMPLE_ORDER',clientOrderId:String(r.data.client_order_id),symbol:'BTC',
+  const order=(r:ExactGridRequest,status:GridVenueOrder['status']='open'):GridVenueOrder=>({orderId:'123',clientOrderId:String(r.data.client_order_id),symbol:'BTC',
     side:r.data.side==='bid'?'long':'short',reduceOnly:r.data.reduce_only===true,orderType:r.kind==='seed'?'market':'limit',price:String(r.data.price??'100'),amount:String(r.data.amount),
     filledAmount:status==='filled'?String(r.data.amount):'0',cancelledAmount:'0',status,createdAt:r.timestamp,updatedAt:clock,reason:null});
   hooks.send.mockImplementation(async(r:ExactGridRequest):Promise<GridSendResult>=>{journal.push('send:'+r.kind);
@@ -95,7 +95,7 @@ describe('C6 production runtime final send authority',()=>{
     const f=await fixture(),source=f.levels.find(l=>!l.reduce_only)!;
     source.status='filled';f.state.entries=false;f.facts.minimumQuote='10';
     f.observation.position!.size='0.01';f.risk.positionSize='0.01';f.risk.liquidationPrice='1';
-    f.planning.fills.push({tradeId:'EXAMPLE_TRADE',operationId:'EXAMPLE_ENTRY',orderId:'EXAMPLE_ORDER',levelId:source.id,time:clock-1000,leg:'entry',size:'0.01',price:source.price,fee:'0'});
+    f.planning.fills.push({tradeId:'EXAMPLE_TRADE',operationId:'EXAMPLE_ENTRY',orderId:'123',levelId:source.id,time:clock-1000,leg:'entry',size:'0.01',price:source.price,fee:'0'});
     await f.tick();
     expect(hooks.send).toHaveBeenCalledOnce();
     const request=hooks.send.mock.calls[0][0] as ExactGridRequest;
@@ -252,9 +252,9 @@ describe('C6 runtime recovery and rolling',()=>{
   });
   it('reconstructs a cancel solely from its exact owned source',async()=>{
     const f=await fixture();await f.tick();const original=f.operations[0],request=original.exact_request;
-    original.venue_order_id='EXAMPLE_ORDER';f.state.entries=false;f.state.planningEntries=false;hooks.send.mockClear();await f.tick();
+    original.venue_order_id='123';f.state.entries=false;f.state.planningEntries=false;hooks.send.mockClear();await f.tick();
     expect(hooks.send).toHaveBeenCalledOnce();const cancel=hooks.send.mock.calls[0][0] as ExactGridRequest;
-    expect(cancel).toMatchObject({kind:'cancel',data:{symbol:'BTC',order_id:'EXAMPLE_ORDER'},authority:{levelId:original.level_id,originalRequest:request}});
+    expect(cancel).toMatchObject({kind:'cancel',data:{symbol:'BTC',order_id:'123'},authority:{levelId:original.level_id,originalRequest:request}});
     expect(f.ledger.prepare.mock.calls.at(-1)?.[2]).toMatchObject({slots:0,canaryIncrement:'0'});
   });
   it.each([false,true])('SOL entry denial with complete reconciliation keeps backed reductions (backing=%s)',async backing=>{
@@ -262,7 +262,7 @@ describe('C6 runtime recovery and rolling',()=>{
     f.state.entries=false;f.state.planningEntries=true; // Even a later permissive plan cannot erase this tick's monitor decision.
     if(backing){const source=f.levels.find(l=>!l.reduce_only);if(!source)throw Error('EXAMPLE entry source missing');source.status='filled';
       f.observation.position!.size='0.1';f.risk.positionSize='0.1';f.risk.liquidationPrice='1';
-      f.planning.fills.push({tradeId:'EXAMPLE_TRADE',operationId:'EXAMPLE_ENTRY',orderId:'EXAMPLE_ORDER',levelId:source.id,time:clock-1000,leg:'entry',size:'0.1',price:source.price,fee:'0'});}
+      f.planning.fills.push({tradeId:'EXAMPLE_TRADE',operationId:'EXAMPLE_ENTRY',orderId:'123',levelId:source.id,time:clock-1000,leg:'entry',size:'0.1',price:source.price,fee:'0'});}
     await f.tick();
     if(backing){expect(hooks.send).toHaveBeenCalledOnce();expect(hooks.send.mock.calls[0][0]).toMatchObject({kind:'limit',data:{reduce_only:true}});
       expect(f.ledger.prepare.mock.calls[0][2].canaryIncrement).toBe('0');}

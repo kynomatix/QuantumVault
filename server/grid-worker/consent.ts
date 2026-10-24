@@ -40,7 +40,7 @@ export function verifyStartConsentMac(c: StartConsent, mac: string, umk: Buffer)
   return expected.length === actual.length && timingSafeEqual(expected,actual);
 }
 export interface StoredStartConsent { id: string; consent: StartConsent; consentMac: string; state: string }
-function stored(r: Record<string, any>): StoredStartConsent {
+export function storedStartConsent(r: Record<string, any>): StoredStartConsent {
   return {id:r.id,state:r.state,consentMac:r.consent_mac,consent:{version:'1',action:r.action,owner:r.owner_wallet,botId:r.bot_id,
     draftRevision:r.draft_revision,serverIntentDigest:r.server_intent_digest,policyHmac:r.policy_hmac,spendingPolicyDigest:r.spending_policy_digest,
     walletGeneration:String(r.wallet_generation),scopeRevision:String(r.scope_revision),consentVersion:r.consent_version,
@@ -70,7 +70,7 @@ export async function issueStartConsent(c: PoolClient, intent: StartIntent, umk:
   if (!Number.isSafeInteger(lifetimeMs)||lifetimeMs<1||lifetimeMs>600_000) throw Error('GRID_CONSENT_LIFETIME');
   const ctx=await context(c,intent.owner,intent.botId);
   const existing=(await c.query('SELECT * FROM grid_worker_requests WHERE owner_wallet=$1 AND request_key=$2 FOR UPDATE',[intent.owner,intent.requestKey])).rows[0];
-  if(existing){const value=stored(existing);if(!Object.entries(intent).every(([k,v])=>value.consent[k as keyof StartConsent]===v))throw Error('GRID_CONSENT_REQUEST_CONFLICT');
+  if(existing){const value=storedStartConsent(existing);if(!Object.entries(intent).every(([k,v])=>value.consent[k as keyof StartConsent]===v))throw Error('GRID_CONSENT_REQUEST_CONFLICT');
     if(!verifyStartConsentMac(value.consent,value.consentMac,umk))throw Error('GRID_CONSENT_MAC');return value;}
   if(String(ctx.draft_revision)!==intent.draftRevision || String(ctx.server_intent_digest).toLowerCase()!==intent.serverIntentDigest
     || String(ctx.policy_hmac).toLowerCase()!==intent.policyHmac)throw Error('GRID_CONSENT_DRAFT_CHANGED');
@@ -90,7 +90,7 @@ export async function verifyStartConsent(c: PoolClient, value: StoredStartConsen
   const ctx=await context(c,value.consent.owner,value.consent.botId);
   const r=(await c.query('SELECT * FROM grid_worker_requests WHERE id=$1 FOR UPDATE',[value.id])).rows[0];
   if(!r)throw Error('GRID_CONSENT_MISSING');
-  const retained=stored(r);
+  const retained=storedStartConsent(r);
   if(!allowedStates.includes(retained.state)||['complete','superseded','refused','expired'].includes(retained.state)
     ||encodeStartConsent(retained.consent)!==encodeStartConsent(value.consent)||retained.consentMac!==value.consentMac)throw Error('GRID_CONSENT_REPLAY');
   if(value.consent.walletGeneration!==ctx.generation || value.consent.scopeRevision!==ctx.scope_revision
@@ -99,7 +99,7 @@ export async function verifyStartConsent(c: PoolClient, value: StoredStartConsen
     ||value.consent.serverIntentDigest!==String(ctx.server_intent_digest).toLowerCase()
     ||value.consent.policyHmac!==String(ctx.policy_hmac).toLowerCase())throw Error('GRID_CONSENT_DRAFT_CHANGED');
   const now=new Date(ctx.db_now).getTime();
-  if(Date.parse(value.consent.issuedAt)>now||Date.parse(value.consent.expiresAt)<=now)throw Error('GRID_CONSENT_EXPIRED');
+  if(Date.parse(value.consent.issuedAt)>now||retained.state==='pending'&&Date.parse(value.consent.expiresAt)<=now)throw Error('GRID_CONSENT_EXPIRED');
 }
 export async function supersedeStartConsents(c: PoolClient, owner: string, botIds: readonly string[], reason: 'draft_changed'|'stop'): Promise<number> {
   const result=await c.query(`UPDATE grid_worker_requests SET state='superseded',completed_at=clock_timestamp(),result_code=$3

@@ -11,6 +11,7 @@ import {GridSetupEntry} from '../grid-planner/GridSetupEntry';
 import {gridSetupAccess} from '@/lib/grid-setup-view';
 import {readableDecimal} from '@/lib/grid-planner-view';
 import {GridBotDrawer} from './GridBotDrawer';
+import {gridStartStatus} from '@/lib/grid-start-view';
 export const gridJson=async(path:string,options:RequestInit={})=>{
   const r=await fetch('/api/grid-bots'+path,{...options,credentials:'include',headers:{...walletAuthHeaders(),'Content-Type':'application/json',...options.headers}});
   const body=await r.json();if(!r.ok)throw Error(body.error??'Grid request unavailable');return body;
@@ -101,7 +102,8 @@ function GridCollection({authenticated,identity,renderLayout}:GridDraftCardProps
                   <p className="text-sm text-muted-foreground">{bot.market} · {bot.direction}</p>
                 </div>
               </div>
-              <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground capitalize">{bot.status.replaceAll('_',' ')}</span>
+              <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground capitalize">{(bot.status==='draft'?gridStartStatus(bot.startState):undefined)??bot.status.replaceAll('_',' ')}</span>
+              {bot.startMessage?<p role="status" className="text-sm text-muted-foreground">{bot.startMessage}</p>:null}
             </div>
             <div className="grid grid-cols-3 gap-3 text-center">
               <div className="p-2.5 rounded-lg bg-muted/30"><p className="text-sm font-bold">{readableDecimal(bot.lowerPrice)} – {readableDecimal(bot.upperPrice)}</p><p className="text-xs text-muted-foreground">Range</p></div>

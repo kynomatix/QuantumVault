@@ -59,8 +59,9 @@ export function GridDraftActions({open,intent,onSaved,onCreated,onBusyChange,liv
       const bot=saved??await save(false);if(!bot)return;
       if(!session.current.open||currentRevision.current!==revision)return;
       const identity=gridDraftStartIdentity(bot);if(!identity||identity.expected.draftRevision!==revision)throw Error('Refresh the retained draft before starting.');
-      setBusy(true);setMessage('Checking launch authority and provisioning the isolated account…');
-      const result=await submitGridStart(identity.id,identity.expected,json);
+      setBusy(true);setMessage('Checking Start confirmation…');
+      const mode=await json('/api/grid-bots/status');
+      const result=await submitGridStart(identity.id,identity.expected,json,mode.externalStart===true);
       if(session.current.open){setMessage(result.reason??'Launch recorded. Open bot details to follow funding and order confirmation.');
         setLaunchFailed(result.state==='denied');
         if(result.state!=='denied')onSaved(bot);}

@@ -12,5 +12,5 @@ it('adds zero TypeScript errors against the CI multiset baseline',()=>{
   const added:string[]=[];
   for(const line of current){const count=baseline.get(line)??0;if(count)baseline.set(line,count-1);else added.push(line);}
   console.log(`TypeScript errors: ${current.length}; New errors: ${added.length}`);
-  expect(added).toEqual([]);
+  expect(added,added.join('\n')).toEqual([]);
 },200_000);

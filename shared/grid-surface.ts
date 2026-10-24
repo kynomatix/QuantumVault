@@ -3,6 +3,7 @@ import type {GridIntent} from './grid-draft';
 import type {GridStartRequest} from './grid-start';
 export type GridOwnerAction='pause'|'resume'|'resync'|'stop';
 export interface GridBotSummary {
+  startState?:import('./grid-start').GridStartRequestState;startMessage?:string;
   id:string;name:string;market:string;direction:string;status:string;lowerPrice:string;upperPrice:string;
   totalInvestment:string;stopLossPrice:string|null;gridCount:number;chartTimeframe:string;updatedAt:string;
   createIntent?:GridIntent;
