@@ -97,7 +97,7 @@ it('R1 FOR UPDATE blocks the committed protective audit; NO KEY UPDATE permits a
       VALUES(${entries.map((_,i)=>'$'+(i+1)).join(',')})`,entries.map(([,v])=>v));
     await a.query(`INSERT INTO grid_worker_requests(id,owner_wallet,bot_id,action,request_key,draft_revision,server_intent_digest,
       policy_hmac,spending_policy_digest,wallet_generation,scope_revision,consent_version,consent_mac,issued_at,expires_at,state,admitted_at)
-      VALUES($1,$2,$3,'protective_close',$1::text,'EXAMPLE',$4,'EXAMPLE',$4,0,1,'1','EXAMPLE',clock_timestamp(),
+      VALUES($1::uuid,$2,$3,'protective_close',$1::uuid::text,'EXAMPLE',$4,'EXAMPLE',$4,0,1,'1','EXAMPLE',clock_timestamp(),
       clock_timestamp()+interval '10 minutes','admitted',clock_timestamp())`,[requestId,owner,policy.id,fixtureDigest]);
     audit={operationId,botId:policy.id,requestId,requestIdentity:'EXAMPLE',attempt:1,kind:'close',bootId:requestId,role:'protective',
       epoch:'2',generation:'0',policyDigest:fixtureDigest,requestDigest:fixtureDigest,signedAt:Date.now(),expiresAt:Date.now()+5000};
