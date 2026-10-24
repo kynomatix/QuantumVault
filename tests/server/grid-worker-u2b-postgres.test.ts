@@ -4,7 +4,7 @@ import { createHash, createPrivateKey, createPublicKey, randomUUID, sign } from 
 import { readFileSync } from 'node:fs';
 import { Worker } from 'node:worker_threads';
 import bs58 from 'bs58';
-import { fencedTransaction, GridDeadline, hostFence, walletFences } from '../../server/grid-worker/transaction';
+import { fencedTransaction, GridDeadline, hostFence, walletFences, type ClientLane } from '../../server/grid-worker/transaction';
 import { backendTerminator, independentLane } from '../../server/grid-worker/lanes';
 import { issueOwnerChallenge, verifyOwnerReceipt } from '../../server/grid-worker/owner-receipts';
 import { parseOwnerMessage, serializeOwnerMessage } from '../../server/grid-worker/owner-auth';
@@ -26,6 +26,24 @@ function latch() { let resolve!: () => void; const promise = new Promise<void>(r
 
 describe('U2b PostgreSQL races and durable evidence', () => {
   const schema = 'grid_u2b_' + randomUUID().replaceAll('-','');
+  // PostgreSQL advisory keys are database-wide, even across search_path schemas.
+  // Translate ONLY the host identity in this fixture's SQL (including its copied
+  // trigger bodies), so deliberate pause/stall tests cannot fence other suites.
+  // Product SQL and the frozen package retain the canonical identity unchanged.
+  const fixtureHost = 'qv:grid-worker:v3:host:' + schema;
+  function isolateHost(c: PoolClient) {
+    c.query = new Proxy(c.query, { apply(query, receiver, args) {
+      const rewrite = (sql: string) => sql.replaceAll("'qv:grid-worker:v3:host'", "'" + fixtureHost + "'");
+      if (typeof args[0] === 'string') args[0] = rewrite(args[0]);
+      else if (args[0] && typeof args[0].text === 'string') args[0] = { ...args[0], text: rewrite(args[0].text) };
+      return Reflect.apply(query, receiver, args);
+    } });
+    return c;
+  }
+  const controlLane = (): ClientLane => {
+    const lane = independentLane(pool);
+    return { connect: async () => isolateHost(await lane.connect()) };
+  };
   let admin: Pool, pool: Pool, terminate: (pid:number)=>Promise<void>;
   const tx = <T>(work:(c:PoolClient,d:GridDeadline)=>Promise<T>, mode:'shared'|'exclusive'|'none'='shared', pause=false) => fencedTransaction(pool,work,{mode,pause,terminate});
   beforeAll(async () => {
@@ -33,8 +51,8 @@ describe('U2b PostgreSQL races and durable evidence', () => {
     if(!url || new URL(url).pathname!=='/qvtest')throw Error('FRACTAL qvtest required');
     admin=new Pool({connectionString:url,max:2}); await admin.query('CREATE SCHEMA '+schema);
     pool=new Pool({connectionString:url,max:8,options:'-c search_path='+schema+',pg_catalog'});
-    pool.on('error',()=>{}); pool.on('connect',c=>c.on('error',()=>{}));
-    terminate=backendTerminator(independentLane(pool));
+    pool.on('error',()=>{}); pool.on('connect',c=>{isolateHost(c);c.on('error',()=>{});});
+    terminate=backendTerminator(controlLane());
     const c=await pool.connect();
     try {
       for(const table of ['wallets','grid_bots','grid_operations','grid_control_requests','protocol_subaccounts','grid_launch_accounts','auth_nonces']) await c.query(`CREATE TABLE ${table} (LIKE public.${table} INCLUDING ALL)`);
@@ -50,6 +68,40 @@ describe('U2b PostgreSQL races and durable evidence', () => {
     },'exclusive');
   });
   afterAll(async()=>{await pool?.end();if(admin){await admin.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await admin.end();}},30_000);
+  it('different schemas share canonical host locks, but fixture exclusive locks leave MAIN admission free', async () => {
+    const canonical = 'qv:grid-worker:v3:host';
+    const fixture = await pool.connect(), main = await admin.connect();
+    try {
+      await fixture.query('BEGIN'); await main.query('BEGIN');
+      // Parameter binding deliberately bypasses the fixture's literal translation.
+      await fixture.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [canonical]);
+      expect((await main.query('SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1,0)) AS ok', [canonical])).rows[0].ok).toBe(false);
+      await fixture.query('ROLLBACK'); await fixture.query('BEGIN');
+      await hostFence(fixture, 'exclusive');
+      expect((await main.query('SELECT pg_try_advisory_xact_lock_shared(hashtextextended($1,0)) AS ok', [fixtureHost])).rows[0].ok).toBe(false);
+      // The unmodified product helper on a public client uses the canonical key.
+      await main.query("SET LOCAL statement_timeout='500ms'");
+      await hostFence(main, 'shared');
+    } finally {
+      await fixture.query('ROLLBACK'); await main.query('ROLLBACK'); fixture.release(); main.release();
+    }
+  });
+  it('fenced commit and rollback restore timeout settings on the same pooled backend', async () => {
+    const single = new Pool({connectionString:process.env.DATABASE_URL,max:1,options:'-c search_path='+schema+',pg_catalog'});
+    single.on('connect', isolateHost);
+    const settings = "SELECT pg_backend_pid() AS pid,current_setting('statement_timeout') AS statement,current_setting('lock_timeout') AS lock,current_setting('idle_in_transaction_session_timeout') AS idle";
+    try {
+      const before = (await single.query(settings)).rows[0];
+      for (const rollback of [false,true]) {
+        const run = fencedTransaction(single, async c => {
+          expect((await c.query(settings)).rows[0]).toEqual({pid:before.pid,statement:'2s',lock:'2s',idle:'12s'});
+          if (rollback) throw Error('EXAMPLE_ROLLBACK');
+        }, {terminate});
+        if (rollback) await expect(run).rejects.toThrow('EXAMPLE_ROLLBACK'); else await run;
+        expect((await single.query(settings)).rows[0]).toEqual(before);
+      }
+    } finally { await single.end(); }
+  });
   async function external() {
     // Fixture models the separately reviewed future owner activation. Application exposes no such API.
     await tx(async c=>{
@@ -63,7 +115,7 @@ describe('U2b PostgreSQL races and durable evidence', () => {
       await c.query("UPDATE grid_worker_host SET execution_mode='external',run_mode='trading',execution_enabled=true,legacy_controls_enabled=true,commit_hash=$1,tree_hash=$1,lockfile_sha256=$2",[fixtureSha256.slice(0,40),fixtureSha256]);
     },'exclusive');
   }
-  const lease = () => new GridWorkerLease(pool,independentLane(pool),terminate,async()=>true);
+  const lease = () => new GridWorkerLease(pool,controlLane(),terminate,async()=>true);
   const acceptance = {verified:true,milliseconds:0,skewMs:50};
   async function challenge(action:'pause'|'reset_pause'|'ack_critical'='pause',target='all',ttl=120_000) { return tx(c=>issueOwnerChallenge(c,owner,action,target,undefined,ttl)); }
   it('nonce verification consume and latch share one transaction; rollback restores nonce; replay refused',async()=>{
@@ -116,7 +168,7 @@ describe('U2b PostgreSQL races and durable evidence', () => {
     await expect(tx(c=>readLegacyHost(c,'external'))).rejects.toThrow();
   });
   it('independent incident commits survive caller rollback; ack recurrence gets new uuid',async()=>{
-    const incidents=new GridIncidents(independentLane(pool),terminate);
+    const incidents=new GridIncidents(controlLane(),terminate);
     await expect(tx(async()=>{expect(await incidents.record({code:'schema_drift',dedupKey:'EXAMPLE'})).toBe(true);throw Error('EXAMPLE_ROLLBACK');})).rejects.toThrow('EXAMPLE_ROLLBACK');
     expect(await incidents.schemaDrift()).toBe(true);
     const first=(await pool.query("SELECT id FROM grid_worker_incidents WHERE dedup_key='EXAMPLE'")).rows[0].id;
@@ -163,13 +215,13 @@ describe('U2b PostgreSQL races and durable evidence', () => {
     const message=await challenge(),ready=latch();let workerPid=0;
     const worker=new Worker(`const {parentPort,workerData}=require('node:worker_threads');const {Client}=require('pg');
       (async()=>{const c=new Client({connectionString:process.env.DATABASE_URL,options:'-c search_path='+workerData.schema+',pg_catalog'});c.on('error',()=>{});await c.connect();
-      await c.query("BEGIN; SET LOCAL idle_in_transaction_session_timeout='12s'");await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended('qv:grid-worker:v3:host',0))");parentPort.postMessage(c.processID);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,45500);await c.end().catch(()=>{});parentPort.postMessage('done');})().catch(()=>process.exit(1));`,{eval:true,workerData:{schema}});
+      await c.query("BEGIN; SET LOCAL idle_in_transaction_session_timeout='12s'");await c.query("SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))",[workerData.fixtureHost]);parentPort.postMessage(c.processID);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,45500);await c.end().catch(()=>{});parentPort.postMessage('done');})().catch(()=>process.exit(1));`,{eval:true,workerData:{schema,fixtureHost}});
     const completed=new Promise<void>((resolve,reject)=>{worker.on('message',v=>{if(typeof v==='number'){workerPid=v;ready.resolve();}});worker.on('error',reject);worker.on('exit',code=>code?reject(Error('EXAMPLE_STALL_EXIT')):resolve());});
     await ready.promise;
     const start=Date.now();await expect(tx(async c=>pauseHost(c,await verifyOwnerReceipt(c,signed(message))),'exclusive',true)).rejects.toThrow();
     expect(Date.now()-start).toBeLessThan(10_000);expect(workerPid).toBeGreaterThan(0);
-    const incidents=new GridIncidents(independentLane(pool),terminate);expect(await incidents.record({code:'pause_unacknowledged',dedupKey:'EXAMPLE_PAUSE'})).toBe(true);
+    const incidents=new GridIncidents(controlLane(),terminate);expect(await incidents.record({code:'pause_unacknowledged',dedupKey:'EXAMPLE_PAUSE'})).toBe(true);
     await completed;
     const host=await tx(c=>readLegacyHost(c));expect(host?.holder_boot_id).toBeNull();expect(gridActionAllowed('cycle',legacyKillContext(host))).toBe(true);
     expect((await pool.query("SELECT code FROM grid_worker_incidents")).rows.map(r=>r.code)).toEqual(['pause_unacknowledged']);
