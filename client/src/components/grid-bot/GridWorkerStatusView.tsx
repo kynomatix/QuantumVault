@@ -8,7 +8,6 @@ export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,o
   const copy=cardCopy(p),phone=phoneState(p),stale=copy.tone==='muted',paused=currentPause(s),reason=resumeReason(s,stale);
   const monitor=aged(s.ages.monitorPollSeconds,p.elapsedSeconds),worker=aged(s.ages.workerCheckInSeconds,p.elapsedSeconds);
   const busy=p.busy||!canSign,unknown=p.overlay==='save_unknown';
-  const sameOutcome=p.outcome?.pauseRevision===s.pauseRevision&&paused;
   const rows=!rowsCollapsed&&(paused||p.overlay==='pausing'||unknown);
   return <section className="gw-surface" aria-label="Grid worker">
     {(phone==='off'||phone==='stale')&&<div className="gw-banner" role="status">
@@ -27,7 +26,7 @@ export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,o
       {p.overlay==='signing'&&p.target&&<p className="gw-wallet">Your wallet shows a QV-OWNER-ACTION message with action:{p.target.action} and {p.target.action==='ack_critical'?`target ending …${p.target.target.slice(-4)}`:'target:all'}. Sign only if it says that.</p>}
       {p.notice&&<p role="status" className="gw-red">{p.notice}</p>}
       {rows&&<dl className="gw-rows"><div><dt>Pause saved</dt><dd>{unknown?'Unknown':p.overlay==='pausing'&&!paused?'Saving…':paused?'Yes':'Unknown'}</dd></div>
-        <div><dt>{s.executionMode==='legacy'?'Bots paused':'Worker confirmed'}</dt><dd>{s.executionMode==='legacy'?`${s.botsPaused.paused} of ${s.botsPaused.total}`:paused&&s.pauseAckRevision===s.pauseRevision?'Yes':sameOutcome&&p.outcome?.acknowledgementOutcome==='timeout'?'Not after 20 s':p.overlay==='pausing'?'Waiting':'Not confirmed yet'}</dd></div>
+        <div><dt>{s.executionMode==='legacy'?'Bots paused':'Worker confirmed'}</dt><dd>{s.executionMode==='legacy'?`${s.botsPaused.paused} of ${s.botsPaused.total}`:paused&&s.pauseAckRevision===s.pauseRevision?'Yes':p.overlay==='pausing'?'Waiting':'Not confirmed yet'}</dd></div>
         <div><dt>Cancel waiting entry orders</dt><dd>{paused&&s.cancellationsComplete?'Done':paused?'In progress':'Not yet'}</dd></div>
       </dl>}
       <div className="gw-actions">

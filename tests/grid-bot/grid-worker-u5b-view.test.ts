@@ -59,3 +59,14 @@ describe('U5b real markup and copy',()=>{
     expect(html).not.toContain('<dd>Yes</dd>');
   });
 });
+
+it('unconfirmed acknowledgement never invents elapsed timeout copy',()=>{
+  const html=render(presentation({status:status({entriesPaused:true,cardState:'pause_unconfirmed'}),outcome:{saved:true,pauseRevision:'3',acknowledgementOutcome:'not_confirmed'}}));
+  expect(html).toContain('Not confirmed yet');expect(html).not.toContain('Not after 20 s');
+});
+it('drawer uses the exclusive server state for offline versus pause-not-confirmed',()=>{
+  for(const [cardState,line] of [['offline','The grid worker is offline; stops won'],['pause_unconfirmed','Pause saved, but the worker hasn']] as const){
+    const html=renderToStaticMarkup(React.createElement(GridWorkerDrawerView,{state:presentation({status:status({cardState,entriesPaused:true,pauseAckRevision:null})}),botId:fixtureId(2)}));
+    expect(html).toContain(line);expect((html.match(/<p\b/g)??[]).length).toBe(1);
+  }
+});

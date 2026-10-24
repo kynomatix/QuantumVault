@@ -14,10 +14,9 @@ describe('U5b additive server truth',()=>{
     expect(checksFresh([55000],100000)).toBe(false);expect(checksFresh([55001],100000)).toBe(true);
     const f=facts();expect(ownerCardState(f,[])).toBe('running');f.botChecksFresh=false;expect(ownerCardState(f,[])).toBe('attention_checks');
   });
-  it('separates persisted, unknown and rejected saves from acknowledgement and true elapsed timeout',()=>{
-    expect(pauseSaveOutcome(false,undefined,30000)).toEqual({saved:false,acknowledgementOutcome:'not_confirmed'});
-    expect(pauseSaveOutcome(true,undefined,30000)).toEqual({saved:'unknown',acknowledgementOutcome:'not_confirmed'});
-    expect(pauseSaveOutcome(true,'4',19999)).toEqual({saved:true,acknowledgementOutcome:'not_confirmed'});
-    expect(pauseSaveOutcome(true,'4',20000)).toEqual({saved:true,acknowledgementOutcome:'timeout'});
+  it('separates persisted, unknown and rejected saves from unconfirmed acknowledgement',()=>{
+    expect(pauseSaveOutcome(false,undefined)).toEqual({saved:false,acknowledgementOutcome:'not_confirmed'});
+    expect(pauseSaveOutcome(true,undefined)).toEqual({saved:'unknown',acknowledgementOutcome:'not_confirmed'});
+    expect(pauseSaveOutcome(true,'4')).toEqual({saved:true,acknowledgementOutcome:'not_confirmed'});
   });
 });

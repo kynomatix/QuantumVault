@@ -25,7 +25,7 @@ export function renderCases():[string,WorkerPresentation][]{
   for(const code of Object.keys(incidentCopy))cases.push(['incident-'+code,presentation({status:status({incidents:[incident({code})],unacknowledgedCritical:1})})]);
   for(const notice of Object.keys(outcomeCopy) as (keyof typeof outcomeCopy)[])cases.push(['outcome-'+notice,presentation({notice:outcomeCopy[notice]})]);
   for(const action of ['reset_pause','ack_critical'] as const)cases.push(['signing-'+action,presentation({overlay:'signing',target:{action,target:action==='ack_critical'?'incident:'+fixtureId(1):'all'},busy:true})]);
-  cases.push(['timeout',presentation({status:status({entriesPaused:true,cardState:'pause_unconfirmed'}),outcome:{saved:true,pauseRevision:'3',acknowledgementOutcome:'timeout'}})],
+  cases.push(['not-confirmed',presentation({status:status({entriesPaused:true,cardState:'pause_unconfirmed'}),outcome:{saved:true,pauseRevision:'3',acknowledgementOutcome:'not_confirmed'}})],
     ['no-check-in',presentation({status:status({cardState:'offline',ages:{workerCheckInSeconds:null,monitorPollSeconds:null,observedAt:'2026-10-25T00:00:00.000Z'}})})],
     ['phone-fenced',presentation({status:status({host:{legacy_controls_enabled:false,observer_fenced:true},unacknowledgedCritical:1,ages:{workerCheckInSeconds:3,monitorPollSeconds:310,observedAt:'2026-10-25T00:00:00.000Z'}})})],
     ['acknowledged-event',presentation({status:status({incidents:[incident({acknowledged:true,canAcknowledge:false})],acknowledgedCritical:1})})],

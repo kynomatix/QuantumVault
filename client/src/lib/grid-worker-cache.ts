@@ -17,7 +17,7 @@ export class GridWorkerCache {
   tick(){
     if(this.disposed||this.denied)return;
     if(this.receivedAt!==null){const elapsedSeconds=Math.max(0,(this.now()-this.receivedAt)/1000);
-      this.update({elapsedSeconds,...(elapsedSeconds>=60?{overlay:'stale' as const}:{})});}
+      this.update({elapsedSeconds,...(elapsedSeconds>=60&&!this.value.busy?{overlay:'stale' as const}:{})});}
     if(this.now()>=this.nextPoll)void this.refresh();
   }
   refresh=():Promise<WorkerStatus|null>=>{
@@ -37,13 +37,13 @@ export class GridWorkerCache {
             outcome={...outcome,saved:true,pauseRevision:status.pauseRevision};
           this.update({status,outcome,admitted:true,elapsedSeconds:0,
             ...(this.resumedAt!==null&&this.now()-this.resumedAt<=30_000&&status.entriesPaused?{notice:this.resumeNotice}:{}),
-            overlay:cardStates.includes(status.cardState as typeof cardStates[number])?(this.value.busy?this.value.overlay:outcome?.saved==='unknown'?'save_unknown':'none'):'stale'});
+            overlay:this.value.busy?this.value.overlay:cardStates.includes(status.cardState as typeof cardStates[number])?(outcome?.saved==='unknown'?'save_unknown':'none'):'stale'});
           return status;
         }
         if(!this.knownOwner&&result.status===404){this.denied=true;this.update(initial());return null;}
-        if(this.knownOwner||result.status===503||result.status===409){this.knownOwner=true;this.update({admitted:true,overlay:'stale'});}
+        if(this.knownOwner||result.status===503||result.status===409){this.knownOwner=true;this.update({admitted:true,...(!this.value.busy?{overlay:'stale' as const}:{})});}
         return null;
-      }catch{if(this.knownOwner)this.update({overlay:'stale'});return null;}
+      }catch{if(this.knownOwner&&!this.value.busy)this.update({overlay:'stale'});return null;}
       finally{clearTimeout(timeout);this.pending=null;this.controller=null;this.nextPoll=this.knownOwner?this.now()+(this.value.busy?2000:30000):Infinity;}
     })();return this.pending;
   };

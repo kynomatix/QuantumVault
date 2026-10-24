@@ -58,3 +58,23 @@ describe('U5b wallet-scoped status and signed actions',()=>{
     expect(()=>auditGridWorkerCopy('const x=<p>Error: EXAMPLE</p>','EXAMPLE.tsx')).toThrow('GRID_STATUS_COPY_INVALID');
   });
 });
+
+describe('U5b action overlay freshness',()=>{
+  it.each(['signing','pausing','resuming'] as const)('keeps %s until the action settles despite stale ticks and poll failures',async overlay=>{
+    let now=0,code=200,body:unknown=status();
+    const c=new GridWorkerCache('EXAMPLE',async()=>({status:code,body}),()=>now);
+    await c.refresh();c.update({busy:true,overlay});now=61000;code=503;
+    c.tick();await c.refresh();expect(c.snapshot()).toMatchObject({overlay,elapsedSeconds:61});
+    code=200;body=status({cardState:'EXAMPLE_UNKNOWN'});await c.refresh();expect(c.snapshot().overlay).toBe(overlay);
+    body=null;await c.refresh();expect(c.snapshot().overlay).toBe(overlay);
+    c.update({busy:false});now=122000;c.tick();await c.refresh();expect(c.snapshot().overlay).toBe('stale');c.dispose();
+  });
+  it('applies stale after a real signed action settles with an unavailable final refresh',async()=>{
+    let now=0,code=200;const c=new GridWorkerCache('EXAMPLE',async()=>({status:code,body:status()}),()=>now);
+    const post=async(path:string)=>({status:200,body:path==='/challenge'?challenge():{saved:true,pauseRevision:'4',acknowledgementOutcome:'confirmed'}});
+    await new GridWorkerActions(c,post,()=>now).run('pause','all',async()=>{
+      now=61000;code=503;c.tick();await c.refresh();expect(c.snapshot().overlay).toBe('signing');return new Uint8Array(64);
+    },()=>true);
+    expect(c.snapshot()).toMatchObject({busy:false,target:null,overlay:'stale'});c.dispose();
+  });
+});

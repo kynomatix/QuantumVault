@@ -7,11 +7,10 @@ import {acknowledgeCritical,pauseHost,resetPause} from './host';
 import {GridIncidents} from './incidents';
 import {adminStatus,readAdminFacts,resetBlockedBy} from './admin-state';
 import {mainOwnerWallet} from './main-runtime';
-import {performance} from 'node:perf_hooks';
 
-export function pauseSaveOutcome(mutationStarted:boolean,revision:string|undefined,acknowledgementWaitMs:number){
+export function pauseSaveOutcome(mutationStarted:boolean,revision:string|undefined){
   return {saved:revision?true:mutationStarted?'unknown' as const:false,
-    acknowledgementOutcome:revision&&acknowledgementWaitMs>=20_000?'timeout' as const:'not_confirmed' as const};
+    acknowledgementOutcome:'not_confirmed' as const};
 }
 
 const action=z.enum(['pause','reset_pause','ack_critical']);
@@ -49,7 +48,7 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
   const route=(method:'get'|'post',path:string,run:(c:PoolClient,wallet:string,body:unknown,id:unknown,d:AdminDependencies,mutating:()=>void)=>Promise<unknown>,pause=false)=>{
     app[method]('/api/grid-worker'+path,off,requireWallet,async(req,res,next)=>{
       const overall=new GridDeadline(20_000);let d:AdminDependencies|undefined,revision:string|undefined;
-      let admitted=false,mutationStarted=false,external=false,acknowledgementWaitMs=0;
+      let admitted=false,mutationStarted=false,external=false;
       try{
         d=provided??await production();
         const wallet=(req as typeof req & {walletAddress:string}).walletAddress;
@@ -64,7 +63,6 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
         },{mode:method==='get'?'none':'exclusive',pause,terminate:d.terminate,budget:new GridDeadline(pause?Math.min(9000,overall.remaining()):Math.min(18000,overall.remaining()))});
         if(!pause){res.json(result);return;}
         revision=String(result);
-        const waitStarted=performance.now();let superseded=false;
         // COMMIT is confirmed before latched=true. Cancellation completion is a separate observation.
         while(overall.remaining()>1500){
           const state=await fencedTransaction(d.lane,async c=>(await c.query(`SELECT execution_mode,entries_paused,pause_revision,pause_ack_revision,
@@ -76,10 +74,9 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
           if(state?.entries_paused&&String(state.pause_revision)===revision&&(state.execution_mode==='legacy'||String(state.pause_ack_revision)===revision)){
             res.json({latched:true,saved:true,acknowledgementOutcome:state.execution_mode==='legacy'?'not_required':'confirmed',acknowledged:state.execution_mode==='legacy'?null:true,unknown:false,pauseRevision:revision,cancellationsComplete:state.cancellations_complete===true});return;
           }
-          if(state&&String(state.pause_revision)!==revision){superseded=true;break;}
+          if(state&&String(state.pause_revision)!==revision){break;}
           await new Promise<void>(resolve=>setTimeout(resolve,Math.min(100,Math.max(0,overall.remaining()-1500))));
         }
-        if(!superseded)acknowledgementWaitMs=performance.now()-waitStarted;
         throw Error('GRID_PAUSE_ACK_TIMEOUT');
       }catch(error){
         const rejected=error instanceof Error&&/^GRID_(?:OWNER|RECEIPT|VERIFIED|RESET|INCIDENT|ADMIN_TARGET)/.test(error.message);
@@ -87,11 +84,11 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
           // An uncertain commit is never converted into a successful latch response.
           const incidents=new GridIncidents(d.lane,d.terminate);
           const incidentRecorded=external&&await incidents.record({code:'pause_unacknowledged',dedupKey:'grid-worker:pause-unacknowledged'},new GridDeadline(Math.max(1,overall.remaining())));
-          res.status(503).json({latched:revision?true:null,...pauseSaveOutcome(mutationStarted,revision,acknowledgementWaitMs),acknowledged:false,unknown:true,pauseRevision:revision??null,cancellationsComplete:null,incidentRecorded});return;
+          res.status(503).json({latched:revision?true:null,...pauseSaveOutcome(mutationStarted,revision),acknowledged:false,unknown:true,pauseRevision:revision??null,cancellationsComplete:null,incidentRecorded});return;
         }
         if(!admitted){res.removeHeader('Cache-Control');next('route');return;}
         res.status(error instanceof z.ZodError?400:rejected?409:503)
-          .json({error:'Worker control unavailable. Refresh status before trying again.',...(pause?{latched:false,...pauseSaveOutcome(false,undefined,0),acknowledged:false,unknown:false}:{} )});
+          .json({error:'Worker control unavailable. Refresh status before trying again.',...(pause?{latched:false,...pauseSaveOutcome(false,undefined),acknowledged:false,unknown:false}:{} )});
       }
     });
   };

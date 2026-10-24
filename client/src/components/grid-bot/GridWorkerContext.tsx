@@ -2,7 +2,7 @@ import React,{createContext,lazy,Suspense,useContext,useEffect,useMemo,useSyncEx
 import {walletAuthHeaders} from '@/lib/queryClient';
 import {GridWorkerCache} from '@/lib/grid-worker-cache';
 import {controlsVisible,type WorkerPresentation} from '@/lib/grid-worker-view';
-type BotName={id:string;name:string|null};
+import {gridWorkerBotNames,type WorkerBotName} from '@/lib/grid-worker-names';
 const Context=createContext<{cache:GridWorkerCache;names:ReadonlyMap<string,string>}|null>(null);
 const empty:WorkerPresentation={status:null,admitted:false,overlay:'none',elapsedSeconds:0,target:null,outcome:null,notice:'',busy:false};
 const noop=()=>()=>{};
@@ -11,7 +11,7 @@ const Status=lazy(()=>import('./GridWorkerStatus').then(m=>({default:m.GridWorke
 const Drawer=lazy(()=>import('./GridWorkerStatus').then(m=>({default:m.GridWorkerDrawerLine})));
 // Denial survives remounts in this page, but owner data does not survive a wallet switch.
 const deniedWallets=new Set<string>();
-export function GridWorkerProvider({wallet,authenticated,bots,children}:{wallet:string|null;authenticated:boolean;bots:readonly BotName[];children:React.ReactNode}){
+export function GridWorkerProvider({wallet,authenticated,bots,children}:{wallet:string|null;authenticated:boolean;bots:readonly WorkerBotName[];children:React.ReactNode}){
   const cache=useMemo(()=>{let admitted=false;return wallet&&authenticated?new GridWorkerCache(wallet,async signal=>{
     if(deniedWallets.has(wallet))return {status:404,body:null};
     const r=await fetch('/api/grid-worker/status',{credentials:'include',headers:walletAuthHeaders(),signal});
@@ -19,7 +19,7 @@ export function GridWorkerProvider({wallet,authenticated,bots,children}:{wallet:
     if(r.status===404&&!admitted)deniedWallets.add(wallet);
     return {status:r.status,body:r.status===200?await r.json():null};
   }):null;},[wallet,authenticated]);
-  const names=useMemo(()=>new Map(bots.map(b=>[b.id,b.name?.trim()||'A grid bot'])),[bots]);
+  const names=useMemo(()=>gridWorkerBotNames(bots),[bots]);
   useEffect(()=>{
     if(!cache||typeof window==='undefined'||typeof document==='undefined')return;
     const release=cache.retain();

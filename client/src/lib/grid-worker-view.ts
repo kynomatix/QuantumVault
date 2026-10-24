@@ -15,7 +15,7 @@ export interface WorkerStatus {
   cancellationsComplete:boolean;botsPaused:{paused:number;total:number};
   ages:{workerCheckInSeconds:number|null;monitorPollSeconds:number|null;observedAt:string};
 }
-export interface PauseOutcome {saved:boolean|'unknown';acknowledgementOutcome:'confirmed'|'not_required'|'not_confirmed'|'timeout';pauseRevision:string|null}
+export interface PauseOutcome {saved:boolean|'unknown';acknowledgementOutcome:'confirmed'|'not_required'|'not_confirmed';pauseRevision:string|null}
 export interface WorkerTarget {action:WorkerAction;target:string}
 export interface WorkerPresentation {
   status:WorkerStatus|null;admitted:boolean;overlay:WorkerOverlay;elapsedSeconds:number;
@@ -42,28 +42,45 @@ export function validWorkerChallenge(value:unknown,request:WorkerTarget&{expecte
   const issued=Date.parse(lines[5].slice(7)),expires=Date.parse(lines[6].slice(8));
   return Number.isFinite(issued)&&Number.isFinite(expires)&&new Date(issued).toISOString()===lines[5].slice(7)&&new Date(expires).toISOString()===lines[6].slice(8)&&expires>issued&&expires-issued<=120_000;
 }
+/** node-pg keeps int8/numeric as decimal strings; never coerce booleans or blanks. */
+function wireNumber(value:unknown,integer:boolean):number {
+  if(typeof value!=='number'&&(typeof value!=='string'||!(integer?/^(0|[1-9][0-9]*)$/:/^(0|[1-9][0-9]*)(\.[0-9]+)?$/).test(value)))return NaN;
+  const n=Number(value);
+  return Number.isFinite(n)&&n>=0&&n<=Number.MAX_SAFE_INTEGER&&(!integer||Number.isSafeInteger(n))?n:NaN;
+}
+function wireAge(value:unknown):number|null {return value===null?null:wireNumber(value,false);}
+function wireRevision(value:unknown):value is string {
+  return typeof value==='string'&&decimalCompare(value,value)===0&&(decimalCompare(value,'9223372036854775807')??1)<=0;
+}
 export function parseWorkerStatus(value:unknown):WorkerStatus|null {
   if(!value||typeof value!=='object')return null;
-  const s=value as WorkerStatus;
-  if(!['external','legacy'].includes(s.executionMode)||typeof s.cardState!=='string'||typeof s.entriesPaused!=='boolean'||
-    typeof s.pauseRevision!=='string'||decimalCompare(s.pauseRevision,s.pauseRevision)!==0||!s.host||!s.ages||!s.botsPaused||
-    !Array.isArray(s.incidents)||!Array.isArray(s.executionRestrictions)||!Array.isArray(s.resetBlockedBy)||
-    typeof s.unacknowledgedCritical!=='number'||typeof s.acknowledgedCritical!=='number'||typeof s.truncated!=='boolean')return null;
+  const raw=value as WorkerStatus;
+  if(!['external','legacy'].includes(raw.executionMode)||typeof raw.cardState!=='string'||typeof raw.entriesPaused!=='boolean'||
+    !wireRevision(raw.pauseRevision)||!raw.host||!raw.ages||!raw.botsPaused||
+    !Array.isArray(raw.incidents)||!Array.isArray(raw.executionRestrictions)||!Array.isArray(raw.resetBlockedBy)||
+    !raw.incidentCounts||typeof raw.incidentCounts!=='object'||Array.isArray(raw.incidentCounts)||typeof raw.truncated!=='boolean')return null;
+  const s:WorkerStatus={...raw,
+    unacknowledgedCritical:wireNumber(raw.unacknowledgedCritical,true),acknowledgedCritical:wireNumber(raw.acknowledgedCritical,true),
+    gridBotsAtRisk:wireNumber(raw.gridBotsAtRisk,true),
+    botsPaused:{paused:wireNumber(raw.botsPaused.paused,true),total:wireNumber(raw.botsPaused.total,true)},
+    incidentCounts:Object.fromEntries(Object.entries(raw.incidentCounts).map(([key,n])=>[key,wireNumber(n,true)])),
+    ages:{...raw.ages,workerCheckInSeconds:wireAge(raw.ages.workerCheckInSeconds),monitorPollSeconds:wireAge(raw.ages.monitorPollSeconds)}};
   const count=(n:unknown)=>typeof n==='number'&&Number.isSafeInteger(n)&&n>=0;
   const age=(n:unknown)=>n===null||typeof n==='number'&&Number.isFinite(n)&&n>=0;
   if(typeof s.host.legacy_controls_enabled!=='boolean'||typeof s.host.observer_fenced!=='boolean'||typeof s.stopsAllowed!=='boolean'||typeof s.cancellationsComplete!=='boolean'||
     !count(s.unacknowledgedCritical)||!count(s.acknowledgedCritical)||!count(s.gridBotsAtRisk)||!count(s.botsPaused.paused)||!count(s.botsPaused.total)||
     !age(s.ages.workerCheckInSeconds)||!age(s.ages.monitorPollSeconds)||typeof s.ages.observedAt!=='string'||
-    !s.incidentCounts||!Object.values(s.incidentCounts).every(count)||!s.executionRestrictions.every(r=>typeof r==='string')||!s.resetBlockedBy.every(r=>typeof r==='string')||
-    s.pauseAckRevision!==null&&(typeof s.pauseAckRevision!=='string'||decimalCompare(s.pauseAckRevision,s.pauseAckRevision)!==0))return null;
+    !Object.values(s.incidentCounts).every(count)||!s.executionRestrictions.every(r=>typeof r==='string')||!s.resetBlockedBy.every(r=>typeof r==='string')||
+    s.pauseAckRevision!==null&&!wireRevision(s.pauseAckRevision))return null;
   const incidents:WorkerIncident[]=[];
   for(const row of s.incidents){
     if(!row||typeof row.id!=='string'||row.bot_id!==null&&typeof row.bot_id!=='string'||typeof row.code!=='string'||typeof row.severity!=='string'||
-      typeof row.canAcknowledge!=='boolean'||typeof row.acknowledged!=='boolean'||typeof row.seen!=='boolean'||!count(row.occurrence_count)||
+      typeof row.canAcknowledge!=='boolean'||typeof row.acknowledged!=='boolean'||typeof row.seen!=='boolean'||
       row.resolved_at!==null&&typeof row.resolved_at!=='string')return null;
-    const ages=[row.first_seen_seconds,row.last_seen_seconds,row.resolved_seconds].map(n=>n===null?null:Number(n));
-    if(!ages.every(age))return null;
-    incidents.push({...row,first_seen_seconds:ages[0],last_seen_seconds:ages[1],resolved_seconds:ages[2]});
+    const occurrence_count=wireNumber(row.occurrence_count,true);
+    const ages=[row.first_seen_seconds,row.last_seen_seconds,row.resolved_seconds].map(wireAge);
+    if(!count(occurrence_count)||!ages.every(age))return null;
+    incidents.push({...row,occurrence_count,first_seen_seconds:ages[0],last_seen_seconds:ages[1],resolved_seconds:ages[2]});
   }
   return {...s,incidents};
 }

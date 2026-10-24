@@ -34,7 +34,7 @@ export class GridWorkerActions {
       if(action==='pause'){
         const body=response.body as Partial<PauseOutcome>|null;
         const outcome:PauseOutcome={saved:body?.saved===true?true:body?.saved===false?false:'unknown',
-          acknowledgementOutcome:['confirmed','not_required','timeout'].includes(body?.acknowledgementOutcome??'')?body!.acknowledgementOutcome!:'not_confirmed',pauseRevision:typeof body?.pauseRevision==='string'?body.pauseRevision:null};
+          acknowledgementOutcome:['confirmed','not_required'].includes(body?.acknowledgementOutcome??'')?body!.acknowledgementOutcome!:'not_confirmed',pauseRevision:typeof body?.pauseRevision==='string'?body.pauseRevision:null};
         this.cache.update({outcome,overlay:outcome.saved==='unknown'?'save_unknown':'none',notice:outcome.saved===false?outcomeCopy.refused:''});
       }else if(response.status!==200)throw Error(action==='reset_pause'?'changed':'ackFailed');
       else if(action==='reset_pause')this.cache.resumed(outcomeCopy.repaused);

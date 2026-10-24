@@ -62,7 +62,7 @@ export function auditWorkerOutput(code: string, metafile: Metafile) {
 
 export async function buildGridWorker(outdir = 'dist') {
   if (/\b(?:example|mockup|preview|illustrative)\b/i.test(await readFile('server/grid-worker/status-page.ts','utf8'))) throw Error('GRID_STATUS_COPY_INVALID');
-  for(const file of ['client/src/lib/grid-worker-copy.ts','client/src/components/grid-bot/GridWorkerStatusView.tsx',
+  for(const file of ['client/src/lib/grid-worker-copy.ts','client/src/lib/grid-worker-names.ts','client/src/components/grid-bot/GridWorkerStatusView.tsx',
     'client/src/components/grid-bot/GridWorkerInbox.tsx','client/src/components/grid-bot/GridWorkerContext.tsx'])
     auditGridWorkerCopy(await readFile(file,'utf8'),file);
   const git = resolveGitBuildIdentity();

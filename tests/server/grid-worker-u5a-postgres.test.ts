@@ -1,6 +1,11 @@
 import {afterAll,beforeAll,beforeEach,describe,expect,it} from 'vitest';
 import {Pool,type PoolClient} from 'pg';
 import express from 'express';
+import React from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
+import {parseWorkerStatus,type WorkerStatus} from '../../client/src/lib/grid-worker-view';
+import {GridWorkerStatusView} from '../../client/src/components/grid-bot/GridWorkerStatusView';
+import {presentation} from '../helpers/grid-worker-u5b-fixtures';
 import type {Server} from 'node:http';
 import {createHash,createPrivateKey,createPublicKey,randomUUID,sign} from 'node:crypto';
 import {readFileSync} from 'node:fs';
@@ -296,4 +301,82 @@ it('U5b exposes stored acknowledgement capability, complete critical totals and 
   const downgraded=await tx(c=>adminStatus(c,false),'none');
   expect(downgraded.incidents[0]).toMatchObject({severity:'critical',canAcknowledge:false});
   expect(downgraded.unacknowledgedCritical).toBe(1);expect(downgraded.truncated).toBe(false);
+});
+
+// The client consumes the real route JSON, including PostgreSQL int8/numeric strings.
+async function legacyControls(){await tx(async c=>{
+  const digest=fixtureSha256.toString('hex');
+  await localContext(c,'transition');
+  await c.query("SELECT set_config('qv.grid_worker_owner_verified','true',true),set_config('qv.grid_worker_ready','true',true)");
+  await c.query("UPDATE grid_worker_host SET run_mode='trading',execution_enabled=true,legacy_controls_enabled=true,commit_hash=$1,tree_hash=$1,lockfile_sha256=$2",[digest.slice(0,40),digest]);
+},'exclusive');}
+async function wireStatus(){
+  const response=await api('/status');expect(response.status,JSON.stringify(response.data)).toBe(200);return response.data;
+}
+function parsedCard(raw:unknown,cardState:string,pill:string,names:ReadonlyMap<string,string>=new Map()):WorkerStatus {
+  const parsed=parseWorkerStatus(JSON.parse(JSON.stringify(raw)));
+  expect(parsed).not.toBeNull();expect(parsed!.cardState).toBe(cardState);
+  const html=renderToStaticMarkup(React.createElement(GridWorkerStatusView,{state:presentation({status:parsed}),names,canSign:true,expanded:true}));
+  expect(html).toContain(pill);expect(html).not.toContain('Not checked recently');return parsed!;
+}
+async function boundaryBot(){
+  const policy={...behaviourPolicy('repeat_all','long',false),id:randomUUID()},mac=computeGridPolicyHmac(policy,umk());
+  if(!mac.ok)throw Error('EXAMPLE_POLICY');
+  const {levels,sizingVersion,safetyEnvelopePrice,gridPolicyExtension,...base}=policy;
+  const row={...base,status:'paused',protocolSubaccountId:1,walletAddress:owner,clientRequestId:randomUUID(),serverIntentDigest:fixtureSha256.toString('hex').toUpperCase(),
+    draftRevision:'EXAMPLE',createIntent:{},authoritySnapshot:{gridSizing:{sizingVersion,safetyEnvelopePrice},gridPolicyExtension},policyHmac:mac.digest,rangeSource:'manual',chartTimeframe:'15m'};
+  const entries=Object.entries(row);
+  await pool.query(`INSERT INTO grid_bots(${entries.map(([k])=>k.replace(/[A-Z]/g,c=>'_'+c.toLowerCase())).join(',')}) VALUES(${entries.map((_,i)=>'$'+(i+1)).join(',')})`,entries.map(([,v])=>v));
+  return policy.id;
+}
+describe('U5b real PostgreSQL to client markup boundary',()=>{
+  it('round-trips no incidents with all numeric fields from the status route',async()=>{
+    await legacyControls();await reset();const raw=await wireStatus();
+    // This isolated fixture intentionally lacks the complete migration capability catalog.
+    const parsed=parsedCard(raw,'attention_open','Needs attention');
+    expect(parsed.incidents).toEqual([]);expect(parsed.incidentCounts).toEqual({});
+    expect(parsed).toMatchObject({unacknowledgedCritical:0,acknowledgedCritical:0,gridBotsAtRisk:0,botsPaused:{paused:0,total:0},pauseAckRevision:null});
+  });
+  it('round-trips a critical occurrence with a real bot reference and PostgreSQL bigint count',async()=>{
+    await legacyControls();const botId=await boundaryBot();
+    expect(await new GridIncidents(pool,terminate).record({code:'stop_failed',botId,dedupKey:'EXAMPLE_BOUNDARY_BOT'})).toBe(true);
+    const raw=await wireStatus();expect(raw.incidents[0]).toMatchObject({occurrence_count:'1',bot_id:botId});
+    expect(typeof raw.incidents[0].first_seen_seconds).toBe('string');
+    const parsed=parsedCard(raw,'needs_you','Needs you',new Map([[botId,'Evening grid']]));
+    expect(parsed.incidents[0]).toMatchObject({occurrence_count:1,bot_id:botId,canAcknowledge:true});
+    expect(typeof parsed.incidents[0].first_seen_seconds).toBe('number');
+    const html=renderToStaticMarkup(React.createElement(GridWorkerStatusView,{state:presentation({status:parsed}),names:new Map([[botId,'Evening grid']]),canSign:true,expanded:true}));
+    expect(html).toContain('Evening grid');expect(html).not.toContain(botId);
+  });
+  it.each(['warning','critical'])('round-trips a future unknown code stored at %s through real state SQL',async severity=>{
+    await legacyControls();
+    // The current package deliberately forbids future codes. A transaction-local TEMP
+    // fixture models a future producer without changing any package or persistent table.
+    const raw=await tx(async c=>{
+      await c.query(`CREATE TEMP TABLE grid_worker_incidents (LIKE ${schema}.grid_worker_incidents INCLUDING DEFAULTS) ON COMMIT DROP`);
+      await c.query("INSERT INTO grid_worker_incidents(id,dedup_key,severity,code,first_seen_at,last_seen_at) VALUES($1,'EXAMPLE_FUTURE',$2,'EXAMPLE_FUTURE_CODE',clock_timestamp(),clock_timestamp())",[randomUUID(),severity]);
+      return adminStatus(c,false);
+    },'none');
+    const parsed=parsedCard(raw,'needs_you','Needs you');
+    expect(parsed.incidents[0]).toMatchObject({severity:'critical',canAcknowledge:severity==='critical',occurrence_count:1});
+    expect(parsed.resetBlockedBy).toContain('open_alert');
+    const html=renderToStaticMarkup(React.createElement(GridWorkerStatusView,{state:presentation({status:parsed}),names:new Map(),canSign:true,expanded:true}));
+    expect(html).not.toContain('EXAMPLE_FUTURE_CODE');if(severity==='warning')expect(html).toContain('Review needed');
+  });
+  it('round-trips the truncated list while retaining global totals',async()=>{
+    await legacyControls();
+    await pool.query("INSERT INTO grid_worker_incidents(id,dedup_key,severity,code,first_seen_at,last_seen_at) SELECT gen_random_uuid(),'EXAMPLE_BOUNDARY_'||n,'critical','stop_failed',clock_timestamp(),clock_timestamp() FROM generate_series(1,102) n");
+    await pool.query("UPDATE grid_worker_incidents SET acknowledged_at=clock_timestamp(),acknowledged_by=$1 WHERE id=(SELECT id FROM grid_worker_incidents LIMIT 1)",[owner]);
+    const parsed=parsedCard(await wireStatus(),'needs_you','Needs you');
+    expect(parsed.incidents).toHaveLength(100);expect(parsed).toMatchObject({truncated:true,unacknowledgedCritical:101,acknowledgedCritical:1,incidentCounts:{critical:102}});
+  });
+  it('round-trips legacy paused without a worker acknowledgement',async()=>{
+    await legacyControls();const parsed=parsedCard(await wireStatus(),'legacy_paused','New activity paused');
+    expect(parsed).toMatchObject({entriesPaused:true,pauseRevision:'0',pauseAckRevision:null});
+  });
+  it('round-trips pause_unconfirmed without inventing an elapsed timeout',async()=>{
+    await acquire();const parsed=parsedCard(await wireStatus(),'pause_unconfirmed','Pause not confirmed');
+    const html=renderToStaticMarkup(React.createElement(GridWorkerStatusView,{state:presentation({status:parsed}),names:new Map(),canSign:true}));
+    expect(html).toContain('Not confirmed yet');expect(html).not.toContain('Not after 20 s');
+  });
 });

@@ -14,7 +14,7 @@ it('U2a full product typecheck has CI New errors: 0 and changed tests typecheck'
   testFiles.push(resolve('tests/server/grid-worker-package-final.test.ts'));
   testFiles.push(resolve('tests/server/grid-worker-u4.test.ts'),resolve('tests/server/grid-worker-u3-postgres.test.ts'));
   testFiles.push(resolve('tests/server/grid-worker-u5a-postgres.test.ts'));
-  testFiles.push(...['tests/server/grid-worker-u5b-fields.test.ts','tests/grid-bot/grid-worker-u5b-view.test.ts','tests/grid-bot/grid-worker-u5b-actions.test.ts','tests/helpers/grid-worker-u5b-fixtures.ts','script/grid-worker-copy-audit.ts'].map(f=>resolve(f)));
+  testFiles.push(...['tests/server/grid-worker-u5b-fields.test.ts','tests/grid-bot/grid-worker-u5b-view.test.ts','tests/grid-bot/grid-worker-u5b-wire.test.ts','tests/grid-bot/grid-worker-u5b-actions.test.ts','tests/helpers/grid-worker-u5b-fixtures.ts','script/grid-worker-copy-audit.ts'].map(f=>resolve(f)));
   testFiles.push(resolve('tests/grid-bot/start-api.test.ts'),resolve('tests/grid-bot/lifecycle.test.ts'));
   testFiles.push(...['tests/server/grid-worker-u5a-state.test.ts','tests/grid-bot/executor-runtime.test.ts','tests/flash-retirement.test.ts','tests/protocol/phoenix-consumer-wiring-u09.test.ts','tests/server/bot-trades-pnl-convention.test.ts','script/main-readiness-define.ts'].map(f=>resolve(f)));
   const program = ts.createProgram([...parsed.fileNames, ...testFiles], { ...parsed.options, incremental: false, noEmit: true });
