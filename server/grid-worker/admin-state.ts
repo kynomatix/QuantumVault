@@ -1,3 +1,6 @@
+import {transitionHistoryReady} from './transition-history';
+import {quotaControls} from './quota-policy';
+import {hostTransitionOffer} from './host-transition';
 import type {PoolClient} from 'pg';
 import {GRID_WORKER_REQUIRED_CAPABILITIES} from './boot';
 import {SCHEMA_MIGRATION_MANIFEST} from '../schema-migration-manifest';
@@ -10,7 +13,7 @@ import {checksFresh} from './status';
 import {rescueView,rescueOffer} from './rescue-state';
 
 export type ResetBlocker='server_flag'|'open_alert'|'review_required'|'worker_checks'|'monitor_fence'|'history_checks'|'rescue';
-export type CardState='offline'|'exec_off'|'pause_unconfirmed'|'needs_you'|'check_bots'|'test'|'paused'|'legacy_paused'
+export type CardState='awaiting_worker'|'offline'|'exec_off'|'pause_unconfirmed'|'needs_you'|'check_bots'|'test'|'paused'|'legacy_paused'
   |'attention_fence'|'attention_history'|'attention_checks'|'attention_drain'|'attention_open'|'legacy'|'running'|'rescue_running'|'rescue_unknown';
 export interface AdminFacts {
   host:Record<string,any>; catalog:boolean; identity:boolean; history:boolean; ownerKeys:boolean;
@@ -41,7 +44,13 @@ export function ownerCardState(f:AdminFacts,blocked:readonly ResetBlocker[]):Car
   const h=f.host,external=h.execution_mode==='external';
   if(f.rescueLive)return 'rescue_running';
   if(f.rescueUnknown)return 'rescue_unknown';
-  if(external&&(h.holder_role!=='grid-worker'||!h.holder_live||!h.heartbeat_online))return 'offline';
+  if(external&&(h.holder_role!=='grid-worker'||!h.holder_live||!h.heartbeat_online)){
+    if(!h.awaiting_worker)return 'offline';
+    if(f.unacknowledged)return 'needs_you';
+    if(f.protective)return 'check_bots';
+    if(f.unresolved)return 'attention_open';
+    return h.awaiting_worker===true?'awaiting_worker':'offline';
+  }
   if(!h.execution_enabled)return 'exec_off';
   if(external&&h.entries_paused&&String(h.pause_ack_revision)!==String(h.pause_revision)&&f.pauseUnconfirmed)return 'pause_unconfirmed';
   if(f.unacknowledged)return 'needs_you';
@@ -69,6 +78,10 @@ export async function readAdminFacts(c:PoolClient):Promise<AdminFacts>{
     EXTRACT(epoch FROM clock_timestamp()-last_healthz_poll_at) AS monitor_poll_seconds
     FROM grid_worker_host WHERE singleton_id=1`)).rows[0];
   if(!host)throw Error('GRID_ADMIN_HOST_MISSING');
+  host.awaiting_worker=host.execution_mode==='external'&&host.holder_boot_id===null&&!!(await c.query(`SELECT 1 FROM (
+    SELECT consumed_at FROM owner_action_receipts WHERE action='host_transition' AND target='all' AND owner_wallet=$1 AND consumed_at IS NOT NULL
+    ORDER BY consumed_at DESC LIMIT 1) latest WHERE consumed_at BETWEEN clock_timestamp()-interval '120 seconds' AND clock_timestamp()
+    AND ($2::timestamptz IS NULL OR $2::timestamptz<consumed_at)`,[host.owner_wallet,host.heartbeat_at])).rowCount;
   const botChecks=(await c.query(`SELECT last_tick_at,clock_timestamp() AS checked_at FROM grid_bots
     WHERE status NOT IN ('draft','failed','stopped')`)).rows;
   const botChecksFresh=botChecks.every(b=>checksFresh([b.last_tick_at===null?null:new Date(b.last_tick_at).getTime()],new Date(b.checked_at).getTime()));
@@ -81,16 +94,7 @@ export async function readAdminFacts(c:PoolClient):Promise<AdminFacts>{
     WHERE (severity='critical' OR NOT(code=ANY(SELECT jsonb_array_elements_text($1::jsonb))))
       AND (acknowledged_at IS NULL OR resolved_at IS NULL)`,[JSON.stringify([...CRITICAL_PRIORITY,'exposure_above_budget','quota_pressure','notification_delayed'])])).rows;
   // Legacy controls have no worker history producer. Their per-bot launch/entry checks still apply.
-  const history=host.execution_mode==='legacy'||OWNER_MASTER_PUBLIC_KEYS.length>0&&!(await c.query(`WITH accounts AS (
-      SELECT unnest($2::text[]) AS account,false AS grid
-      UNION SELECT p.protocol_subaccount_id,EXISTS(SELECT 1 FROM grid_launch_accounts a WHERE a.protocol_subaccount_id=p.id)
-        FROM protocol_subaccounts p WHERE p.protocol='pacifica' AND p.agent_public_key=ANY($2::text[]) AND p.protocol_subaccount_id IS NOT NULL)
-    SELECT 1 FROM accounts a CROSS JOIN jsonb_array_elements_text($1::jsonb) s(stream)
-    WHERE (a.grid OR s.stream IN ('transfers','withdrawals')) AND NOT EXISTS(
-      SELECT 1 FROM grid_worker_reconciliation r WHERE r.account=a.account AND r.stream=s.stream
-      AND r.state='complete' AND r.last_complete_at BETWEEN clock_timestamp()-interval '30 seconds' AND clock_timestamp()
-      AND r.covered_through_at BETWEEN clock_timestamp()-interval '125 seconds' AND clock_timestamp()) LIMIT 1`,
-    [JSON.stringify(RECONCILIATION_STREAMS),OWNER_MASTER_PUBLIC_KEYS])).rowCount;
+  const history=host.execution_mode==='legacy'||await transitionHistoryReady(c);
   const rescue=await rescueView(c,host.owner_wallet);
   return {host,rescueLive:rescue?.live??false,rescueUnknown:rescue?.unknownOpen??false,catalog:!catalog.unavailableCapabilities.some(x=>required.has(x)),identity:host.execution_mode==='legacy'||mainIdentityMatches(host),history,
     ownerKeys:host.execution_mode==='legacy'||OWNER_MASTER_PUBLIC_KEYS.length>0,
@@ -142,14 +146,18 @@ export async function adminStatus(c:PoolClient,entriesPaused:boolean){
       (m.observation->'position' IS NOT NULL AND m.observation->'position'<>'null'::jsonb
        AND COALESCE(m.observation->'position'->>'size','unknown')!~ '^-?0(\\.0+)?$')`)).rows[0].n;
   const age=(value:unknown)=>value===null||!Number.isFinite(Number(value))?null:Math.max(0,Math.floor(Number(value)));
-  // Explicit allowlist: no owner keys, budgets or database identity escape into the card payload.
+  // Explicit allowlist: no owner keys or database identity escape into the card payload.
   const safeHost=Object.fromEntries(['execution_mode','run_mode','execution_enabled','entries_paused','observer_fenced','legacy_controls_enabled',
     'pause_revision','pause_ack_revision','pause_ack_at','last_healthz_poll_at','heartbeat_at','progress_at','observed_at','holder_live'].map(k=>[k,h[k]]));
-  const restrictions=executionRestrictions(facts),critical=counts.find(r=>r.severity==='critical');
-  const stopsAllowed=restrictions.length===0&&facts.catalog&&facts.identity&&facts.ownerKeys&&
+  const controls=await quotaControls(c),offer=await hostTransitionOffer(c);
+  const limits=controls.quotaPolicy.available&&controls.quotaPolicy.providers.every(p=>p.secondsLeft>0);
+  const restrictions:string[]=executionRestrictions(facts);
+  if(!controls.quotaPolicy.available)restrictions.push('limits_unavailable');else if(!limits)restrictions.push('limits_expired');
+  const critical=counts.find(r=>r.severity==='critical');
+  const stopsAllowed=limits&&!controls.quotaPolicy.backoff&&restrictions.length===0&&facts.catalog&&facts.identity&&facts.ownerKeys&&
     (h.execution_mode==='legacy'?h.legacy_controls_enabled===true:
       h.holder_role==='grid-worker'&&h.holder_live===true&&h.heartbeat_fresh===true&&h.progress_fresh===true&&facts.botChecksFresh&&h.authority_tracking_enabled===true);
-  return {host:safeHost,incidents,cardState:ownerCardState(facts,blocked),resetBlockedBy:blocked,rescue,rescueOffers,rescueAlertsPhone:false,
+  return {...controls,hostTransitionOffer:offer,host:safeHost,incidents,cardState:ownerCardState(facts,blocked),resetBlockedBy:blocked,rescue,rescueOffers,rescueAlertsPhone:false,
     executionRestrictions:restrictions,stopsAllowed,
     unacknowledgedCritical:Number(critical?.unacknowledged??0),acknowledgedCritical:Number(critical?.acknowledged??0),
     truncated:counts.reduce((n,r)=>n+Number(r.count),0)>incidents.length,

@@ -378,6 +378,8 @@ export class GridLaunchStorage {
         await this.ready(c);
         if(process.env.GRID_ENTRIES_PAUSED==='true'&&(await c.query("SELECT to_regclass('grid_worker_host') IS NOT NULL AS present")).rows[0]?.present)await tightenHost(c,{pause:true});
         const control=ownerControl&&!this.worker&&!this.protective&&process.env.GRID_REMOTE_WORKER_ENABLED==='true';
+        if(!this.worker&&!this.protective&&!control&&process.env.GRID_REMOTE_WORKER_ENABLED==='true'
+          &&(await c.query("SELECT 1 FROM grid_worker_host WHERE singleton_id=1 AND execution_mode='external'")).rowCount)throw Error('GRID_MAIN_MONEY_SUPPRESSED');
         const host=this.worker||this.protective||control?(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live FROM grid_worker_host WHERE singleton_id=1')).rows[0]:await readLegacyHost(c);this.hosts.set(c,host);if(control)this.controls.add(c);
         if(this.protective){
           if(!host?.holder_live||host.holder_role!=='protective'||host.holder_boot_id!==this.protective.requestId||String(host.fencing_epoch)!==this.protective.epoch)throw Error('GRID_PROTECTIVE_LEASE_LOST');

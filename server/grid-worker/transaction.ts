@@ -2,11 +2,13 @@ import type { PoolClient } from 'pg';
 import { performance } from 'node:perf_hooks';
 
 export interface ClientLane { connect(): Promise<PoolClient> }
+export interface TransactionOutcome { commitIssued:boolean; committed:boolean; rolledBack:boolean }
 export interface FenceOptions {
   mode?: 'shared' | 'exclusive' | 'none'; pause?: boolean; tightening?: boolean;
   terminate: (pid: number) => Promise<void>;
   unknown?: () => Promise<void>;
   budget?: GridDeadline;
+  outcome?: TransactionOutcome;
 }
 export class GridDeadline {
   readonly started = performance.now();
@@ -82,14 +84,16 @@ export async function fencedTransaction<T>(lane: ClientLane, work: (c: PoolClien
     if (options.pause) await guarded.query("SET LOCAL lock_timeout='1s'; SET LOCAL statement_timeout='1s'");
     const result = await work(guarded, deadline);
     deadline.check();
+    if(options.outcome)options.outcome.commitIssued=true;
     await guarded.query('COMMIT');
+    if(options.outcome)options.outcome.committed=true;
     deadline.check();
     return result;
   })();
   try { return await Promise.race([operation, expired]); }
   catch (error) {
     if (deadline.closed || deadline.remaining() <= 0) await expire();
-    else if (client && !released) { try { await client.query('ROLLBACK'); } catch { destroy(); } }
+    else if (client && !released) { try { await client.query('ROLLBACK'); if(options.outcome)options.outcome.rolledBack=true; } catch { destroy(); } }
     throw error;
   } finally {
     if (timer) clearTimeout(timer);

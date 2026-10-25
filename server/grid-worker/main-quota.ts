@@ -36,6 +36,16 @@ export class MainQuota {
     if(limit<1||w.used+units>limit)throw Error('GRID_MAIN_QUOTA_UNAVAILABLE');
     w.used+=units;w.debits.push({at:now,units,until:now+duration});
   }
+  /** Advisory only: never removes debits, installs policies or spends capacity. */
+  inspect(provider:QuotaProvider,units:number,now=Date.now()):boolean {
+    const w=this.windows.get(provider);
+    if(!Number.isSafeInteger(units)||units<0||!w||!this.enabled.has(provider)||now<(this.warmUntil.get(provider)??0)
+      ||now<w.observedAt||now-w.observedAt>=10000||now<w.start||now<w.backoff
+      ||now>=new Date(w.policy.valid_until).getTime()||!Number.isSafeInteger(w.policy.window_ms)||w.policy.window_ms<1
+      ||!/^[a-f0-9]{64}$/.test(w.policy.policy_digest))return false;
+    const used=w.debits.filter(d=>now<d.until).reduce((sum,d)=>sum+d.units,0);
+    return used+units<=mainAllocation(Number(w.policy.total_units),Number(w.policy.worker_limit_units));
+  }
   rateLimited(provider: QuotaProvider, now=Date.now()){const w=this.windows.get(provider);if(w)w.backoff=now+60000;}
 }
 export const mainQuota = new MainQuota(true);

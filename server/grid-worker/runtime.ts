@@ -1,3 +1,4 @@
+import {currentWorkerHolder} from './current-holder';
 import {collectStartFacts} from './start-facts';
 import {installWorkerBindings} from './runtime-bindings';
 import {readGridMargin} from '../grid-bot/margin';
@@ -49,15 +50,16 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   const cache=statusCache(()=>memory),server=workerHttp(cache,()=>observer.poll());
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(Number(env.PORT??5000),'0.0.0.0',()=>{server.removeListener('error',reject);resolve();});});
   const terminate=async(pid:number)=>{await pool.query('SELECT pg_terminate_backend($1)',[pid]);};
-  const incidents=new GridIncidents(pool,terminate),quota=new WorkerQuota(pool,terminate),dependencies=workerDependencies(pool,quota,env);
-  const protection=new ProtectionTruth(pool,terminate,incidents);
+  const current=()=>lease, bootIncidents=new GridIncidents(pool,terminate),fatalIncidents=new GridIncidents(pool,terminate,current,true);
+  const incidents=new GridIncidents(pool,terminate,current),quota=new WorkerQuota(pool,terminate),dependencies=workerDependencies(pool,quota,env);
+  const protection=new ProtectionTruth(pool,terminate,incidents,current);
   installWorkerBindings(dependencies.umk,()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&!memory.critical&&memory.reconciled&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.execution_enabled===true&&host?.run_mode==='trading'&&!host?.entries_paused&&!host?.observer_fenced);
   const holder=()=>{if(!lease||!leaseLocallyValid(lease)||!ready())throw Error('GRID_LEASE_EXPIRED');return lease;};
   let queue:WorkerStartQueue;
   const ledger:GridLaunchStorage=new GridLaunchStorage(pool,async()=>{if(!ready())throw Error('GRID_WORKER_NOT_READY');},r=>readGridMargin(json,r),
     {lease:holder,ready,terminate,verifyStart:(c,id)=>queue.verify(c,id),releaseReservation:(c,id)=>queue.release(c,id)});
   const json:GridLaunchReads=new GridLaunchReads(dependencies.transport,ledger,'0.5',dependencies.fetcher),reads=new GridMonitorReads(json),monitor=new GridMonitorStorage(ledger);
-  const executor=gridExecutorCore(monitor,reads,json,dependencies),reconciliation=new WorkerReconciliation(pool,terminate,json,reads,dependencies,incidents);
+  const executor=gridExecutorCore(monitor,reads,json,dependencies),reconciliation=new WorkerReconciliation(pool,terminate,json,reads,dependencies,incidents,OWNER_MASTER_PUBLIC_KEYS,current);
   queue=new WorkerStartQueue(pool,terminate,incidents,holder,dependencies,
     (botId,umk,signal)=>collectStartFacts(pool,dependencies,json,ledger,botId,umk,signal),(wallet,id,expected,signal)=>executor.start(wallet,id,expected,signal));
   const scheduler=new WorkerScheduler({
@@ -79,7 +81,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   let leaseService:GridWorkerLease|undefined;
   const die=async(code:'lease_lost'|'clock_unhealthy'|'schema_drift'|'database_unavailable')=>{
     if(dying)return;dying=true;memory.critical=true;memory.inControl=false;readyUntil=0;
-    try{await incidents.record({code,dedupKey:'grid-worker:'+code,bootId,epoch:lease?.epoch});}finally{fatal();}
+    try{await (lease?fatalIncidents:bootIncidents).record({code,dedupKey:'grid-worker:'+code,bootId,epoch:lease?.epoch});}finally{fatal();}
   };
   async function refresh(){
     if(probing||closing)return;probing=true;
@@ -110,7 +112,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
         leaseService=new GridWorkerLease(pool,renewalLane,terminate,async()=>ready()&&!!host&&identityMatches(host));
         lease=await leaseService.acquire(bootId,{verified:true,milliseconds:0,skewMs:1000},async acquired=>{
           lease=acquired;host!.observer_fenced=true;
-          await fencedTransaction(pool,async c=>{await observer.acquire(c);if(env.GRID_ENTRIES_PAUSED==='true')await tightenHost(c,{pause:true});},{terminate});
+          await fencedTransaction(pool,async c=>{if(!await currentWorkerHolder(c,acquired))throw Error('GRID_LEASE_EXPIRED');await observer.acquire(c);if(env.GRID_ENTRIES_PAUSED==='true')await tightenHost(c,{pause:true});},{terminate});
           memory.reconciled=await reconciliation.pass(AbortSignal.timeout(30000));return true;
         });
         memory.inControl=true;memory.renewalAt=Date.now();
@@ -133,21 +135,24 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
     }catch(error){await die(error instanceof Error&&/CLOCK/.test(error.message)?'clock_unhealthy':'lease_lost');renewing=false;return;}
     renewing=false;
     if(maintaining)return;maintaining=true;
+    const authority=lease;
     const budget=new GridDeadline(8000);
     if(observer.silent){host!.observer_fenced=true;memory.critical=true;memory.incidentCode=priorityIncident([memory.incidentCode??'','observer_silent']);cache.rebuild();}
     try{
       // Local gates close before acknowledgment. A reset racing this maintenance is retried, never fatal.
       if(env.GRID_ENTRIES_PAUSED==='true'){
         host!.entries_paused=true;
-        await fencedTransaction(pool,c=>tightenHost(c,{pause:true}),{terminate,budget});
+        await fencedTransaction(pool,async c=>{if(await currentWorkerHolder(c,authority))await tightenHost(c,{pause:true});},{terminate,budget});
       }
       await fencedTransaction(pool,async c=>{
+        if(!await currentWorkerHolder(c,authority))return;
         const h=(await c.query('SELECT entries_paused,pause_revision,pause_ack_revision FROM grid_worker_host WHERE singleton_id=1')).rows[0];
         if(h?.entries_paused){host!.entries_paused=true;memory.paused=true;
           if(String(h.pause_revision)!==String(h.pause_ack_revision))await acknowledgePause(c,lease!,String(h.pause_revision));}
       },{terminate,budget});
       if(!closing){
         const state=await fencedTransaction(pool,async c=>{
+          if(!await currentWorkerHolder(c,authority))throw Error('GRID_LEASE_EXPIRED');
           const progress=lastProgress>0&&Date.now()-lastProgress<30000;
           if(ready()&&host&&identityMatches(host))await resolveHealthyConditions(c,{progress,reconciled:memory.reconciled&&progress});
           return observer.maintain(c,lease!,async()=>ready()&&memory.reconciled&&progress);

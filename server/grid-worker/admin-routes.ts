@@ -1,3 +1,4 @@
+import {registerControlRoutes} from './control-routes';
 import type {Express,RequestHandler} from 'express';
 import type {PoolClient} from 'pg';
 import {z} from 'zod';
@@ -80,10 +81,6 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
       let admitted=false,mutationStarted=false,external=false,evidence:TransitionEvidence|undefined;
       try{
         d=provided??await production();
-        if(path==='/host-transition'){
-          const b=signed.extend({params:z.unknown()}).parse(req.body);canonicalOwnerParams('host_transition',b.params);
-          if(!d.transitionEvidence)throw Error('GRID_TRANSITION_EVIDENCE');evidence=await d.transitionEvidence();
-        }
         const wallet=(req as typeof req & {walletAddress:string}).walletAddress;
         const result=await fencedTransaction(d.lane,async c=>{
           if(method==='get')await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -113,17 +110,6 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
         }
         throw Error('GRID_PAUSE_ACK_TIMEOUT');
       }catch(error){
-        if(path==='/host-transition'&&d&&admitted&&mutationStarted){
-          try{const b=signed.extend({params:z.unknown()}).parse(req.body),p=b.params as TransitionParams;
-            const saved=await fencedTransaction(d.lane,async c=>{
-              const h=(await c.query('SELECT * FROM grid_worker_host WHERE singleton_id=1')).rows[0];
-              const receipt=(await c.query("SELECT 1 FROM owner_action_receipts WHERE action='host_transition' AND target='all' AND owner_wallet=$1 AND message_digest=$2 AND params_digest=$3 AND consumed_at IS NOT NULL",
-                [h?.owner_wallet,ownerSha256(b.message),ownerParamsDigest('host_transition',p)])).rowCount;
-              return receipt&&exactTransitionReadback(h,p)?transitionView(h):null;
-            },{mode:'none',terminate:d.terminate});
-            if(saved){res.json({...saved,readback:true});return;}
-          }catch{/* Uncertainty remains a refusal; never roll back an activation. */}
-        }
         const rejected=error instanceof Error&&/^GRID_(?:OWNER|RECEIPT|VERIFIED|RESET|INCIDENT|ADMIN_TARGET)/.test(error.message);
         if(pause&&d&&admitted&&mutationStarted&&!rejected){
           // An uncertain commit is never converted into a successful latch response.
@@ -158,17 +144,7 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
     if((b.action==='ack_critical')!==b.target.startsWith('incident:'))throw Error('GRID_ADMIN_TARGET');
     return {message:await issueOwnerChallenge(c,wallet,b.action,b.target,undefined,120_000),expectedPauseRevision:b.expectedPauseRevision};
   });
-  route('post','/host-transition',async(c,wallet,body,_id,_d,mutating,evidence)=>{
-    const b=signed.extend({params:z.unknown()}).parse(body);if(!evidence)throw Error('GRID_TRANSITION_EVIDENCE');
-    const owner=await verifyOwnerReceipt(c,{...b,signer:wallet,sessionWallet:wallet});
-    mutating();return transitionHost(c,owner,b.params as TransitionParams,evidence);
-  });
-  route('post','/quota-policy',async(c,wallet,body)=>{
-    const b=signed.extend({policies:z.array(z.unknown()).length(2)}).parse(body),policies=b.policies as QuotaPolicy[];
-    validateQuotaPolicies(policies,Date.now());const params={policyDigests:policies.map(p=>p.policy_digest).sort()};
-    const owner=await verifyOwnerReceipt(c,{message:b.message,signature:b.signature,params,signer:wallet,sessionWallet:wallet});
-    return replaceQuotaPolicies(c,owner,policies);
-  });
+  registerControlRoutes(app,off,requireWallet,()=>provided?Promise.resolve(provided):production());
   route('post','/pause',async(c,wallet,body,_id,_d,mutating)=>{
     const owner=await receipt(c,wallet,body);requireVerifiedOwner(owner,'pause','all');mutating();return pauseHost(c,owner);
   },true);

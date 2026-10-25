@@ -1,3 +1,4 @@
+import {currentWorkerHolder,type HolderIdentity} from './current-holder';
 import type {PoolClient} from 'pg';
 import type {GridIncidents} from './incidents';
 import {fencedTransaction,type ClientLane} from './transaction';
@@ -5,9 +6,11 @@ import {ownerSha256} from './owner-auth';
 
 /** Per-bot durable failure counts survive supervisor passes and process replacement. */
 export class ProtectionTruth {
-  constructor(private lane:ClientLane,private terminate:(pid:number)=>Promise<void>,private incidents:Pick<GridIncidents,'record'>){}
+  constructor(private lane:ClientLane,private terminate:(pid:number)=>Promise<void>,private incidents:Pick<GridIncidents,'record'>,private holder?:()=>HolderIdentity|undefined){}
   async observe(botId:string,error?:unknown){
+    const authority=this.holder?.();if(this.holder&&!authority)return;
     const result=await fencedTransaction(this.lane,async c=>{
+      if(authority&&!await currentWorkerHolder(c,authority))return null;
       const r=(await c.query(`SELECT b.status,b.market,a.account,h.drain_requested,l.blocker,r.action,r.state,m.observation,
         extract(epoch FROM clock_timestamp())*1000 AS now,
         m.reconciled_at BETWEEN clock_timestamp()-interval '5 seconds' AND clock_timestamp() AS fresh,

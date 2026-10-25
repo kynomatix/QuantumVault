@@ -34,9 +34,12 @@ export const outcomeCopy={
 };
 export const relativeAge=(seconds:number|null)=>seconds===null?'not yet':seconds<5?'just now':seconds<90?`${Math.floor(seconds)} s`:seconds<5400?`${Math.floor(seconds/60)} min`:seconds<172800?`${Math.floor(seconds/3600)} h`:'over 2 days';
 export const aged=(seconds:number|null,elapsed:number)=>seconds===null?null:Math.max(0,seconds+elapsed);
+export const relativeAgo=(seconds:number|null)=>seconds===null?'not yet':seconds<5?'just now':relativeAge(seconds)+' ago';
 export function botName(names:ReadonlyMap<string,string>,id:string|null){const name=id?names.get(id):null;return name&&!workerCopyViolation(name)?name:'A grid bot';}
 export function restrictionText(s:WorkerStatus):string[]{return s.executionRestrictions.map(r=>r==='test'?(s.executionMode==='external'?'Worker test mode: no orders or stops.':'Test mode: no orders or stops.'):
   r==='trading_off'?(s.executionMode==='external'?"Worker trading is off; stops won't run.":"Trading is off; stops won't run."):
+  r==='limits_unavailable'?"Request limits couldn't be checked. Refresh status.":
+  r==='limits_expired'?'Request limits have expired. Stops and closes may be unavailable.':
   r==='drain'?'A handover has been requested. New activity is on hold, and stops and closes are restricted.':'Execution availability needs review.');}
 export function resumeReason(s:WorkerStatus,stale:boolean):string {
   if(stale)return 'Resume opens once this page reaches the server again.';
@@ -57,6 +60,7 @@ export function cardCopy(p:WorkerPresentation,names:ReadonlyMap<string,string>=n
   switch(s.cardState){
     case 'rescue_running':return {pill:'Rescue close running',sentence:`The main app is running a rescue close on ${botName(names,s.rescue?.botId??null)}. Open that bot to see progress.`,tone:'amber'};
     case 'rescue_unknown':return {pill:'Rescue outcome unknown',sentence:'A rescue close outcome is unknown. The worker must settle the unknown order before it can take back control.',tone:'red'};
+    case 'awaiting_worker':return {pill:'Waiting for the worker',sentence:'The handover is saved. Start the worker, then wait for its checks before resuming new activity.',tone:'amber'};
     case 'offline':return {pill:'Offline or not responding',sentence:"The worker isn't available to run your bots. Orders already on Pacifica can still fill, and stops won't run until it's back.",tone:'red'};
     case 'exec_off':return {pill:'Trading switched off',sentence:s.executionMode==='external'?"Trading is switched off for the worker, so it won't run stops or place orders.":"Trading is switched off, so the main app won't run stops or place orders.",tone:'red'};
     case 'pause_unconfirmed':return {pill:'Pause not confirmed',sentence:currentPause(s)?"The pause is saved, but the worker hasn't confirmed it, so it may still place new entries.":"The worker hasn't confirmed this pause.",tone:'red'};

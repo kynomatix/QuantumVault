@@ -6,7 +6,7 @@ import {join,resolve} from 'node:path';
 
 it('introduces no TypeScript diagnostics relative to the dispatched base',()=>{
   if(process.platform!=='linux')throw Error('FRACTAL only');
-  const baseCommitHash='1500f44ccb63a4db67f6a6574171da5710872bde';
+  const baseCommitHash='a02bdb5f8e0063128b0c4fc1ab16d0d28138d72c';
   const root=mkdtempSync(join(tmpdir(),'qv-u7a-types-'));
   const check=(cwd:string,extra:string[]=[])=>{
     const r=spawnSync(process.execPath,[resolve('node_modules/typescript/bin/tsc'),'--noEmit','--incremental','false','--pretty','false',...extra],{cwd,encoding:'utf8',timeout:120000,maxBuffer:16*1024*1024});
@@ -22,7 +22,7 @@ it('introduces no TypeScript diagnostics relative to the dispatched base',()=>{
     for(const d of baseline)remaining.set(d,(remaining.get(d)??0)+1);
     const introduced=tip.filter(d=>{const n=remaining.get(d)??0;if(n){remaining.set(d,n-1);return false;}return true;});
     console.log(JSON.stringify({kind:'U7A_TYPECHECK',baseCommitHash,baselineErrors:baseline.length,tipErrors:tip.length,newErrors:introduced.length,diagnostics:introduced.slice(0,40)}));
-    expect(introduced).toEqual([]);
+    expect(introduced,JSON.stringify(introduced)).toEqual([]);
     const ci=new Map<string,number>();
     for(const d of readFileSync('.github/typecheck-baseline.txt','utf8').split(/\r?\n/).filter(Boolean))ci.set(d,(ci.get(d)??0)+1);
     const ciNew=tip.filter(d=>{const n=ci.get(d)??0;if(n){ci.set(d,n-1);return false;}return true;});
@@ -34,6 +34,6 @@ it('introduces no TypeScript diagnostics relative to the dispatched base',()=>{
     };
     const extraBase=new Map<string,number>();for(const d of expanded(root,'base-expanded'))extraBase.set(d,(extraBase.get(d)??0)+1);
     const extraNew=expanded(process.cwd(),'tip-expanded').filter(d=>{const n=extraBase.get(d)??0;if(n){extraBase.set(d,n-1);return false;}return true;});
-    expect(extraNew.slice(0,40),'Expanded changed test/script types').toEqual([]);
+    expect(extraNew.slice(0,40),'Expanded changed test/script types: '+JSON.stringify(extraNew)).toEqual([]);
   }finally{rmSync(root,{recursive:true,force:true});}
 },270000);

@@ -1,7 +1,7 @@
 import React from 'react';
 import {botName} from '@/lib/grid-worker-copy';
 import {rescueCopy,rescuePhoneWarnings,rescueStops} from '@/lib/grid-worker-rescue-copy';
-import {aged,cardCopy,drawerCopy,phoneState,relativeAge,resumeReason,restrictionText} from '@/lib/grid-worker-copy';
+import {aged,cardCopy,drawerCopy,phoneState,relativeAgo,resumeReason,restrictionText} from '@/lib/grid-worker-copy';
 import {controlsVisible,currentPause,type WorkerAction,type WorkerPresentation} from '@/lib/grid-worker-view';
 import {GridWorkerInbox} from './GridWorkerInbox';
 export interface WorkerViewProps {state:WorkerPresentation;names:ReadonlyMap<string,string>;canSign:boolean;onAction?:(action:WorkerAction,target:string)=>void;onRefresh?:()=>void;onSeen?:(ids:string[])=>void;expanded?:boolean;rowsCollapsed?:boolean}
@@ -14,7 +14,7 @@ export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,o
   return <section className="gw-surface" aria-label="Grid worker">
     {(phone==='off'||phone==='stale')&&<div className="gw-banner" role="status">
       <strong>{phone==='stale'?'Phone alerts may be off':'Phone alerts are off'}</strong>
-      <p>{phone==='stale'?"This page's view of the worker is out of date, so we can't tell whether phone alerts reach you.":monitor===null?"The desktop alert monitor (FRACTAL) hasn't checked in yet. It may be asleep or switched off, so nothing will reach your phone if a grid bot needs you.":`The desktop alert monitor (FRACTAL) hasn't checked in for ${relativeAge(monitor)}. It may be asleep or switched off, so nothing will reach your phone if a grid bot needs you.`}</p>
+      <p>{phone==='stale'?"This page's view of the worker is out of date, so we can't tell whether phone alerts reach you.":monitor===null?"The desktop alert monitor (FRACTAL) hasn't checked in yet. It may be asleep or switched off, so nothing will reach your phone if a grid bot needs you.":`The desktop alert monitor (FRACTAL) hasn't checked in for ${relativeAgo(monitor)}. It may be asleep or switched off, so nothing will reach your phone if a grid bot needs you.`}</p>
       {phone==='off'&&<><p>{s.host.observer_fenced?(s.unacknowledgedCritical>0?'New starts and resumes are on hold until the monitor checks in and you acknowledge the alert below.':'New starts and resumes are on hold until the monitor checks in.'):'Running bots carry on as they are. After 5 min without a check-in, new starts and resumes go on hold.'}</p><p className="gw-muted">Wake FRACTAL to turn phone alerts back on.</p></>}
     </div>}
     {s.executionMode==='external'&&rescuePhoneWarnings(s,names).map(text=><p role="status" className="gw-banner gw-red" key={text}>{text}</p>)}
@@ -27,8 +27,8 @@ export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,o
       {restrictionText(s).map(text=><p role="status" className="gw-restriction" key={text}>{text}</p>)}
       {s.cardState==='offline'&&<p>Your phone should be alerting you. If it isn't, the desktop alert monitor (FRACTAL) may be asleep too.</p>}
       {phone==='legacy'&&<p className="gw-muted">Phone alerts watch the worker, not the main app, so they don't cover your grid bots in this mode.</p>}
-      {phone==='muted'&&<p className="gw-muted">{monitor===null?"Desktop alert monitor hasn't checked in yet. Phone alerts are off.":`Desktop alert monitor last checked in ${relativeAge(monitor)} ago. Phone alerts are off.`}</p>}
-      <p className="gw-muted">{s.executionMode==='legacy'?`Status checked ${relativeAge(p.elapsedSeconds)} ago`:<>{worker===null?'No check-in recorded':`Worker checked in ${relativeAge(worker)} ago`} · Alert monitor {monitor===null?'not yet':`${relativeAge(monitor)} ago`}</>}</p>
+      {phone==='muted'&&<p className="gw-muted">{monitor===null?"Desktop alert monitor hasn't checked in yet. Phone alerts are off.":`Desktop alert monitor last checked in ${relativeAgo(monitor)}. Phone alerts are off.`}</p>}
+      <p className="gw-muted">{s.executionMode==='legacy'?`Status checked ${relativeAgo(p.elapsedSeconds)}`:<>{worker===null?'No check-in recorded':`Worker checked in ${relativeAgo(worker)}`} · Alert monitor {monitor===null?'not yet':`${relativeAgo(monitor)}`}</>}</p>
       {p.overlay==='signing'&&p.target&&<p className="gw-wallet">Your wallet shows a QV-OWNER-ACTION message with action:{p.target.action} and {p.target.action==='ack_critical'?`target ending …${p.target.target.slice(-4)}`:'target:all'}. Sign only if it says that.</p>}
       {p.notice&&<p role="status" className="gw-red">{p.notice}</p>}
       {rows&&<dl className="gw-rows"><div><dt>Pause saved</dt><dd>{unknown?'Unknown':p.overlay==='pausing'&&!paused?'Saving…':paused?'Yes':'Unknown'}</dd></div>

@@ -60,3 +60,13 @@ it('real adapter transport never applies grid boot refusal to signal, AI or othe
     await expect((adapter as any).fetchBounded('https://api.pacifica.fi/api/v1/account?account=EXAMPLE_MASTER',{method:'GET'},500,1000,'EXAMPLE')).rejects.toThrow('EXAMPLE_BOOT_REFUSAL');
   }finally{vi.unstubAllGlobals();}
 });
+
+it('inspects MAIN capacity without spending and retains cold-start quarantine, backoff and competing usage',()=>{
+  const p={...policy(),total_units:'2500'},q=new MainQuota(true);q.install([p],0);
+  expect(q.inspect('pacifica_rest',360,1)).toBe(false);q.install([p],60001);
+  expect(q.inspect('pacifica_rest',360,60001)).toBe(true);expect(q.inspect('pacifica_rest',360,60001)).toBe(true);
+  q.debit('pacifica_rest',120,60001);expect(q.inspect('pacifica_rest',360,60002)).toBe(true);
+  q.debit('pacifica_rest',120,60002);expect(q.inspect('pacifica_rest',360,60003)).toBe(false);
+  q.rateLimited('pacifica_rest',60003);expect(q.inspect('pacifica_rest',1,60004)).toBe(false);
+  const filled=new MainQuota();filled.install([policy()],0);expect(mainAllocation(1000,500)).toBe(125);expect(filled.inspect('pacifica_rest',360,0)).toBe(false);
+});

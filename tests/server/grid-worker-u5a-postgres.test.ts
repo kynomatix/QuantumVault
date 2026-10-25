@@ -295,7 +295,7 @@ it('U5b exposes stored acknowledgement capability, complete critical totals and 
   expect(payload.incidents).toHaveLength(100);expect(payload.truncated).toBe(true);
   expect(payload.unacknowledgedCritical).toBe(101);expect(payload.acknowledgedCritical).toBe(1);
   for(const row of payload.incidents)expect(row.canAcknowledge).toBe(!row.acknowledged);
-  expect(payload.executionRestrictions).toEqual(['trading_off','test']);expect(payload.stopsAllowed).toBe(false);expect(typeof payload.stopsAllowed).toBe('boolean');
+  expect(payload.executionRestrictions).toEqual(['trading_off','test','limits_unavailable']);expect(payload.stopsAllowed).toBe(false);expect(typeof payload.stopsAllowed).toBe('boolean');
   await pool.query("DELETE FROM grid_worker_incidents");
   await pool.query("INSERT INTO grid_worker_incidents(id,dedup_key,severity,code,first_seen_at,last_seen_at) VALUES($1,'EXAMPLE_U5B_STORED_WARNING','warning','stop_failed',clock_timestamp(),clock_timestamp())",[randomUUID()]);
   const downgraded=await tx(c=>adminStatus(c,false),'none');

@@ -1,5 +1,5 @@
 import React,{useState} from 'react';
-import {botName,incidentCopy,relativeAge,unknownIncident} from '@/lib/grid-worker-copy';
+import {botName,incidentCopy,relativeAgo,unknownIncident} from '@/lib/grid-worker-copy';
 import type {WorkerIncident,WorkerStatus} from '@/lib/grid-worker-view';
 export function inboxGroups(s:WorkerStatus){
   const critical:WorkerIncident[][]=[],notices=new Map<string,WorkerIncident[]>();
@@ -27,7 +27,7 @@ export function GridWorkerInbox({status:s,names,busy,onAcknowledge,onSeen,expand
         return <li key={i.id} className="gw-incident"><div className="gw-grow">
           <strong className={critical?'gw-red':'gw-muted'}>{critical?(i.acknowledged?'Acknowledged':'Needs you'):'Notice'}</strong>
           <p>{copy.text}{i.code==='lease_lost'&&i.afterRescue===true?' This happened after your rescue close.':''}{critical&&i.bot_id?<span className="gw-name"> · {botName(names,i.bot_id)}</span>:named.length>0?<span className="gw-name"> · on {new Set(group.map(x=>x.bot_id).filter(Boolean)).size} bots: {named.join(', ')}</span>:null}</p>
-          <p className="gw-muted">{relativeAge(i.first_seen_seconds)} ago{critical&&i.acknowledged?(i.resolved_at?' · cleared':copy.kind==='condition'?' · still happening':' · waiting for review'):critical&&i.resolved_at?' · cleared, needs acknowledgement':''}{i.occurrence_count>1?` · happened ${i.occurrence_count} times`:''}</p>
+          <p className="gw-muted">{relativeAgo(i.first_seen_seconds)}{critical&&i.acknowledged?(i.resolved_at?' · cleared':copy.kind==='condition'?' · still happening':' · waiting for review'):critical&&i.resolved_at?' · cleared, needs acknowledgement':''}{i.occurrence_count>1?` · happened ${i.occurrence_count} times`:''}</p>
         </div>{critical&&!i.acknowledged?(i.canAcknowledge?<button type="button" disabled={busy} onClick={()=>onAcknowledge?.(i.id)}>Acknowledge</button>:<span className="gw-muted">Review needed</span>):critical&&!i.resolved_at?<span className="gw-muted">{unfinished?'Clears once the bot is closed':copy.kind==='condition'?'Clears once fixed':'Stays open until reviewed'}</span>:null}</li>;
       })}</ul>}
       {!all&&groups.length>3&&<button type="button" onClick={()=>{setAll(true);seen(groups);}}>Show {groups.length-3} more</button>}

@@ -1,3 +1,5 @@
+import {mainQuota} from './main-quota';
+import type {ControlBlocker,HostTransitionOffer} from '../../shared/grid-worker-controls';
 import type {PoolClient} from 'pg';
 import Decimal from 'decimal.js';
 import {ownerParamsDigest,canonicalOwnerParams} from './owner-auth';
@@ -28,10 +30,11 @@ const accountSql=`SELECT account,master FROM (
 ) identities ORDER BY account,master`;
 /** Venue reads finish before the exclusive transaction. Retained identities are rechecked inside it. */
 export async function collectTransitionEvidence(lane:ClientLane,read:Read):Promise<TransitionEvidence>{
-  const c=await lane.connect();let accounts:Account[];
-  try{accounts=(await c.query<Account>(accountSql)).rows;}finally{c.release();}
+  const c=await lane.connect();let accounts:Account[],observedAt:number;
+  try{accounts=(await c.query<Account>(accountSql)).rows;observedAt=new Date((await c.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime();}finally{c.release();}
   if(accounts.length>100||accounts.some(a=>!a.account||!a.master||!OWNER_MASTER_PUBLIC_KEYS.includes(a.master)))throw Error('GRID_TRANSITION_SCOPE');
-  const observedAt=Date.now();let flat=true;
+  if(accounts.length&&!mainQuota.inspect('pacifica_rest',accounts.length*360))throw Error('GRID_CONTROL:limits_busy');
+  let flat=true;
   for(const a of accounts){
     const raw=await Promise.all([read(a.master,'/account',{account:a.account}),read(a.master,'/orders',{account:a.account}),read(a.master,'/positions',{account:a.account})]);
     const [balance,orders,positions]=raw as Record<string,any>[];
@@ -41,10 +44,9 @@ export async function collectTransitionEvidence(lane:ClientLane,read:Read):Promi
   }
   return {accounts,observedAt,flat};
 }
-export interface TransitionResult {executionMode:string;runMode:string;executionEnabled:boolean;entriesPaused:true;fencingEpoch:string;scopeRevision:string}
+export interface TransitionResult {executionMode:string;runMode:string;executionEnabled:boolean;entriesPaused:boolean;fencingEpoch:string;scopeRevision:string}
 export function transitionView(h:Record<string,any>):TransitionResult {
-  if(h.entries_paused!==true)throw Error('GRID_TRANSITION_READBACK');
-  return {executionMode:h.execution_mode,runMode:h.run_mode,executionEnabled:h.execution_enabled,entriesPaused:true,
+  return {executionMode:h.execution_mode,runMode:h.run_mode,executionEnabled:h.execution_enabled,entriesPaused:h.entries_paused,
     fencingEpoch:String(h.fencing_epoch),scopeRevision:String(h.scope_revision)};
 }
 export function exactTransitionReadback(h:Record<string,any>|undefined,p:TransitionParams):boolean {
@@ -66,27 +68,14 @@ export async function transitionHost(c:PoolClient,owner:VerifiedOwnerContext,p:T
   for(const id of bots)await waitGridWorkerFence(c,id);
   const pools=(await c.query('SELECT protocol_subaccount_id AS id FROM grid_launch_accounts UNION SELECT protocol_subaccount_id AS id FROM grid_bots WHERE protocol_subaccount_id IS NOT NULL ORDER BY id')).rows.map(r=>Number(r.id));
   await identityFences(c,bots,pools);
-  const h=(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live,clock_timestamp() AS db_now FROM grid_worker_host WHERE singleton_id=1 FOR UPDATE')).rows[0];
-  const now=new Date(h?.db_now).getTime();
-  if(!OWNER_MASTER_PUBLIC_KEYS.length||!h||h.drain_requested||h.owner_wallet!==owner.ownerWallet||!h.authority_tracking_enabled||h.holder_live||!h.entries_paused
-    ||String(h.fencing_epoch)!==p.expectedFencingEpoch||String(h.scope_revision)!==p.expectedScopeRevision
-    ||!Number.isSafeInteger(e.observedAt)||now<e.observedAt||now-e.observedAt>=5000||!e.flat)throw Error('GRID_TRANSITION_NOT_READY');
-  if(p.executionMode!=='external'||p.drainRequested||p.legacyControlsEnabled!==true
-    ||!(h.execution_mode==='legacy'&&p.runMode==='test'&&!p.executionEnabled
-      ||h.execution_mode==='external'&&h.run_mode==='test'&&!h.execution_enabled&&p.runMode==='trading'&&p.executionEnabled))throw Error('GRID_TRANSITION_DIRECTION');
+  await c.query('SELECT singleton_id FROM grid_worker_host WHERE singleton_id=1 FOR UPDATE');
+  const blocker=await transitionBlocker(c,p,identity,owner.ownerWallet,false);
+  if(blocker)throw Error('GRID_CONTROL:'+blocker);
+  const now=new Date((await c.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime();
+  if(!Number.isSafeInteger(e.observedAt)||now<e.observedAt||now-e.observedAt>=5000)throw Error('GRID_CONTROL:evidence_unavailable');
+  if(!e.flat)throw Error('GRID_CONTROL:not_flat');
   const accounts=(await c.query<Account>(accountSql)).rows;
-  if(JSON.stringify(accounts)!==JSON.stringify(e.accounts))throw Error('GRID_TRANSITION_EVIDENCE_CHANGED');
-  const refusal=(await c.query(`SELECT
-    EXISTS(SELECT 1 FROM wallets w LEFT JOIN grid_worker_wallet_authority a ON a.wallet_address=w.address WHERE a.wallet_address IS NULL)
-    OR EXISTS(SELECT 1 FROM grid_bots b LEFT JOIN protocol_subaccounts p ON p.id=b.protocol_subaccount_id WHERE b.protocol_subaccount_id IS NOT NULL AND (p.id IS NULL OR p.protocol<>'pacifica' OR p.protocol_subaccount_id IS NULL OR p.agent_public_key IS NULL))
-    OR EXISTS(SELECT 1 FROM grid_bots WHERE status NOT IN ('draft','failed','stopped') OR lease_expires_at>clock_timestamp())
-    OR EXISTS(SELECT 1 FROM grid_operations WHERE state IN ('prepared','submitted','unconfirmed'))
-    OR EXISTS(SELECT 1 FROM grid_execution_claims WHERE NOT slot_released)
-    OR EXISTS(SELECT 1 FROM grid_worker_send_audit WHERE signed_expires_at>clock_timestamp() OR outcome='unknown')
-    OR EXISTS(SELECT 1 FROM grid_worker_reservations WHERE state IN ('held','uncertain'))
-    OR EXISTS(SELECT 1 FROM grid_worker_incidents WHERE severity='critical' AND (acknowledged_at IS NULL OR resolved_at IS NULL)) AS refused`)).rows[0];
-  if(refusal.refused)throw Error('GRID_TRANSITION_LIABILITY');
-  validateQuotaPolicies(await readQuotaPolicies(c),now);
+  if(JSON.stringify(accounts)!==JSON.stringify(e.accounts))throw Error('GRID_CONTROL:changed');
   await c.query("SELECT grid_worker_consume_receipt($1::uuid,'host_transition','all',$2)",[owner.receiptId,owner.paramsDigest]);
   await c.query("SELECT set_config('qv.grid_worker_ready','true',true),set_config('qv.grid_worker_owner_verified','true',true)");
   await localContext(c,'transition');
@@ -95,4 +84,54 @@ export async function transitionHost(c:PoolClient,owner:VerifiedOwnerContext,p:T
     holder_boot_id=NULL,holder_role=NULL,lease_expires_at='-infinity' WHERE singleton_id=1 RETURNING *`,
     [p.runMode,p.executionEnabled,p.commitHash,p.treeHash,p.lockfileSha256])).rows[0];
   return transitionView(changed);
+}
+
+/** All DB-checkable offer predicates are re-evaluated under the commit-time fences. Fallback (b) never fences a live holder. */
+export async function transitionBlocker(c:PoolClient,p:TransitionParams,identity=mainReadinessIdentity,owner?:string,checkBudget=true):Promise<ControlBlocker|null>{
+  const h=(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live,clock_timestamp() AS db_now FROM grid_worker_host WHERE singleton_id=1')).rows[0];
+  if(!h)return 'unavailable';
+  if(!OWNER_MASTER_PUBLIC_KEYS.length)return 'owner_key';
+  if(owner!==undefined&&h.owner_wallet!==owner)return 'scope';
+  if(!h.authority_tracking_enabled)return 'tracking';
+  if(h.drain_requested)return 'drain';
+  if(!h.entries_paused)return 'not_paused';
+  if(String(h.fencing_epoch)!==p.expectedFencingEpoch||String(h.scope_revision)!==p.expectedScopeRevision)return 'changed';
+  if(!identityMatches({commit_hash:p.commitHash,tree_hash:p.treeHash,lockfile_sha256:p.lockfileSha256},identity))return 'identity';
+  if(p.executionMode!=='external'||p.drainRequested||!p.legacyControlsEnabled
+    ||!(h.execution_mode==='legacy'&&p.runMode==='test'&&!p.executionEnabled
+      ||h.execution_mode==='external'&&h.run_mode==='test'&&!h.execution_enabled&&p.runMode==='trading'&&p.executionEnabled))return 'changed';
+  if(p.runMode==='trading'&&!identityMatches(h,identity))return 'identity';
+  if(h.holder_live)return 'holder';
+  if(p.runMode==='trading'&&(h.observer_fenced||String(h.pause_ack_revision)!==String(h.pause_revision)))return 'worker_unhealthy';
+  const r=(await c.query(`SELECT
+    EXISTS(SELECT 1 FROM wallets w LEFT JOIN grid_worker_wallet_authority a ON a.wallet_address=w.address WHERE a.wallet_address IS NULL) AS tracking,
+    EXISTS(SELECT 1 FROM grid_bots b LEFT JOIN protocol_subaccounts p ON p.id=b.protocol_subaccount_id WHERE b.protocol_subaccount_id IS NOT NULL AND (p.id IS NULL OR p.protocol<>'pacifica' OR p.protocol_subaccount_id IS NULL OR p.agent_public_key IS NULL)) AS scope,
+    EXISTS(SELECT 1 FROM grid_bots WHERE status NOT IN ('draft','failed','stopped') OR lease_expires_at>clock_timestamp()) AS bots_active,
+    EXISTS(SELECT 1 FROM grid_operations WHERE state IN ('prepared','submitted','unconfirmed'))
+      OR EXISTS(SELECT 1 FROM grid_execution_claims WHERE NOT slot_released)
+      OR EXISTS(SELECT 1 FROM grid_worker_send_audit WHERE signed_expires_at>clock_timestamp() OR outcome='unknown')
+      OR EXISTS(SELECT 1 FROM grid_worker_reservations WHERE state IN ('held','uncertain')) AS settling,
+    EXISTS(SELECT 1 FROM grid_worker_requests WHERE action='protective_close' AND state IN ('pending','admitted','unknown')) AS rescue,
+    EXISTS(SELECT 1 FROM grid_worker_incidents WHERE severity='critical' AND acknowledged_at IS NULL) AS open_alert,
+    EXISTS(SELECT 1 FROM grid_worker_incidents WHERE severity='critical' AND resolved_at IS NULL) AS needs_review`)).rows[0];
+  for(const reason of ['tracking','scope','rescue','open_alert','needs_review','bots_active','settling'] as const)if(r[reason])return reason;
+  const accounts=(await c.query<Account>(accountSql)).rows;
+  if(accounts.length>100||accounts.some(a=>!a.account||!a.master||!OWNER_MASTER_PUBLIC_KEYS.includes(a.master)))return 'scope';
+  try{validateQuotaPolicies(await readQuotaPolicies(c),new Date(h.db_now).getTime());}catch{return 'limits_expired';}
+  if(p.runMode==='trading'){
+    const {transitionHistoryReady}=await import('./transition-history');
+    if(!await transitionHistoryReady(c))return 'history';
+  }
+  if(checkBudget&&accounts.length&&!mainQuota.inspect('pacifica_rest',accounts.length*360))return 'limits_busy';
+  return null;
+}
+export async function hostTransitionOffer(c:PoolClient):Promise<HostTransitionOffer|null>{
+  const h=(await c.query('SELECT * FROM grid_worker_host WHERE singleton_id=1')).rows[0];
+  if(!h||!(h.execution_mode==='legacy'||h.execution_mode==='external'&&h.run_mode==='test'&&!h.execution_enabled))return null;
+  if(!identityMatches({commit_hash:mainReadinessIdentity.commitHash,tree_hash:mainReadinessIdentity.treeHash,lockfile_sha256:mainReadinessIdentity.lockfileSha256},mainReadinessIdentity))return null;
+  const trading=h.execution_mode==='external';
+  const params:TransitionParams={executionMode:'external',runMode:trading?'trading':'test',executionEnabled:trading,
+    legacyControlsEnabled:true,drainRequested:false,...mainReadinessIdentity,
+    expectedFencingEpoch:String(h.fencing_epoch),expectedScopeRevision:String(h.scope_revision)};
+  return {direction:trading?'to_trading':'to_test',params,scopeRevision:String(h.scope_revision),blockedBy:await transitionBlocker(c,params),handover:'stop_sign_restart'};
 }

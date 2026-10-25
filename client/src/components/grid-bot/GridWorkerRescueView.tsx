@@ -1,5 +1,5 @@
 import React from 'react';
-import {botName,relativeAge,restrictionText} from '@/lib/grid-worker-copy';
+import {botName,relativeAgo,restrictionText} from '@/lib/grid-worker-copy';
 import {rescueBlockers,rescueCopy,rescueOutcome,rescuePhases,rescuePhoneWarnings,rescueStale,rescueStops,rescueTriggers} from '@/lib/grid-worker-rescue-copy';
 import {emptyRescueDriver,type RescueDriverState} from '@/lib/grid-worker-rescue-state';
 import type {WorkerPresentation} from '@/lib/grid-worker-view';
@@ -7,7 +7,7 @@ export interface RescueViewProps {
   state:WorkerPresentation;botId:string;names:ReadonlyMap<string,string>;driverState?:RescueDriverState;
   stopped?:boolean;confirming?:boolean;canSign?:boolean;onConfirm?:()=>void;onCancel?:()=>void;onStart?:()=>void;onContinue?:()=>void;onRefresh?:()=>void;
 }
-const remaining=(seconds:number)=>seconds<=0?'Checking the latest status':seconds<60?'Under a minute':relativeAge(seconds);
+const remaining=(seconds:number)=>seconds<=0?'Checking the latest status':seconds<60?'Under a minute':relativeAgo(seconds);
 const known=(map:Readonly<Record<string,string>>,key:string,fallback:string)=>Object.hasOwn(map,key)?map[key]:fallback;
 export function GridWorkerRescueView({state:p,botId,names,driverState:d=emptyRescueDriver,stopped=false,confirming=false,canSign=false,onConfirm,onCancel,onStart,onContinue,onRefresh}:RescueViewProps){
   const s=p.status;if(!p.admitted||!s||s.executionMode!=='external')return null;
@@ -63,7 +63,7 @@ export function GridWorkerRescueView({state:p,botId,names,driverState:d=emptyRes
       {r&&<details><summary>Details</summary><dl className="gw-rows">
         <div><dt>Control remaining</dt><dd>{r.leaseRemainingSeconds===null?'Unavailable':remaining(r.leaseRemainingSeconds-elapsed)}</dd></div>
         <div><dt>Rescue time remaining</dt><dd>{remaining(r.expiresInSeconds-elapsed)}</dd></div>
-        <div><dt>Last step</dt><dd>{r.stepIdleSeconds===null?'Unavailable':relativeAge(r.stepIdleSeconds+elapsed)+' ago'}</dd></div>
+        <div><dt>Last step</dt><dd>{r.stepIdleSeconds===null?'Unavailable':relativeAgo(r.stepIdleSeconds+elapsed)}</dd></div>
         {r.live&&r.waitSeconds!==null&&<div><dt>Waiting for earlier orders</dt><dd>{remaining(r.waitSeconds-elapsed)}</dd></div>}
       </dl></details>}
       {(live||working||unknown)&&<p className="gw-muted">{unknown?rescueCopy.unknownLocked:rescueCopy.locked}</p>}

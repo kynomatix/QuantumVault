@@ -1,5 +1,6 @@
+import {parseWorkerControls,controlChallengeDigest,type WorkerControls,type ControlChallengeRequest} from './grid-worker-controls-wire';
 import {parseWorkerRescue,parseWorkerRescueOffers,type WorkerRescue,type WorkerRescueOffer} from './grid-worker-rescue-wire';
-export const cardStates=['rescue_running','rescue_unknown','offline','exec_off','pause_unconfirmed','needs_you','check_bots','test','paused','legacy_paused','attention_fence','attention_history','attention_checks','attention_drain','attention_open','legacy','running'] as const;
+export const cardStates=['rescue_running','rescue_unknown','awaiting_worker','offline','exec_off','pause_unconfirmed','needs_you','check_bots','test','paused','legacy_paused','attention_fence','attention_history','attention_checks','attention_drain','attention_open','legacy','running'] as const;
 export type WorkerCardState=typeof cardStates[number];
 export type WorkerAction='pause'|'reset_pause'|'ack_critical';
 export type WorkerOverlay='none'|'stale'|'checking'|'signing'|'pausing'|'save_unknown'|'resuming';
@@ -8,7 +9,7 @@ export interface WorkerIncident {
   acknowledged:boolean;seen:boolean;resolved_at:string|null;occurrence_count:number;
   first_seen_seconds:number|null;last_seen_seconds:number|null;resolved_seconds:number|null;
 }
-export interface WorkerStatus {
+export interface WorkerStatus extends Partial<WorkerControls> {
   rescue?:WorkerRescue|null;rescueOffers?:WorkerRescueOffer[];rescueAlertsPhone?:boolean;
   cardState:string;executionMode:'external'|'legacy';entriesPaused:boolean;pauseRevision:string;pauseAckRevision:string|null;
   host:{legacy_controls_enabled:boolean;observer_fenced:boolean};executionRestrictions:string[];stopsAllowed:boolean;
@@ -35,9 +36,11 @@ export function currentPause(s:WorkerStatus|null,revision?:string|null):boolean 
 /** Revisions are deliberately outside the unchanged signed wire; check the challenge echo too. */
 export interface RescueChallengeRequest {action:'break_glass_close';target:string;params:{botId:string}}
 export function validWorkerChallenge(value:unknown,request:WorkerTarget&{expectedPauseRevision:string}):value is {message:string;expectedPauseRevision:string};
-export function validWorkerChallenge(value:unknown,request:RescueChallengeRequest):Promise<boolean>;
-export function validWorkerChallenge(value:unknown,request:(WorkerTarget&{expectedPauseRevision:string})|RescueChallengeRequest):boolean|Promise<boolean>{
+export function validWorkerChallenge(value:unknown,request:RescueChallengeRequest|ControlChallengeRequest):Promise<boolean>;
+export function validWorkerChallenge(value:unknown,request:(WorkerTarget&{expectedPauseRevision:string})|RescueChallengeRequest|ControlChallengeRequest):boolean|Promise<boolean>{
+  if(request.action==='host_transition'||request.action==='quota_policy')return validControlChallenge(value,request);
   if(request.action==='break_glass_close')return validRescueChallenge(value,request);
+  if(!('expectedPauseRevision' in request))return false;
   if(!value||typeof value!=='object')return false;
   const c=value as Record<string,unknown>;
   if(c.expectedPauseRevision!==request.expectedPauseRevision||typeof c.message!=='string')return false;
@@ -75,6 +78,7 @@ function wireRevision(value:unknown):value is string {
 export function parseWorkerStatus(value:unknown):WorkerStatus|null {
   if(!value||typeof value!=='object')return null;
   const raw=value as WorkerStatus;
+  if(['hostTransitionOffer','quotaPolicy','quotaRenewal'].some(k=>k in raw)&&!parseWorkerControls(raw))return null;
   if(!['external','legacy'].includes(raw.executionMode)||typeof raw.cardState!=='string'||typeof raw.entriesPaused!=='boolean'||
     !wireRevision(raw.pauseRevision)||!raw.host||!raw.ages||!raw.botsPaused||
     !Array.isArray(raw.incidents)||!Array.isArray(raw.executionRestrictions)||!Array.isArray(raw.resetBlockedBy)||
@@ -106,4 +110,16 @@ export function parseWorkerStatus(value:unknown):WorkerStatus|null {
   const rescueOffers=raw.rescueOffers===undefined?undefined:parseWorkerRescueOffers(raw.rescueOffers);
   if(raw.rescue!=null&&!rescue||rescueOffers===null||raw.rescueAlertsPhone!==undefined&&typeof raw.rescueAlertsPhone!=='boolean')return null;
   return {...s,incidents,...(rescue===undefined?{}:{rescue}),...(rescueOffers===undefined?{}:{rescueOffers})};
+}
+
+async function validControlChallenge(value:unknown,request:ControlChallengeRequest):Promise<boolean>{
+  try{
+    const paramsDigest=await controlChallengeDigest(request);
+    if(!value||typeof value!=='object'||Object.keys(value).join(',')!=='message')return false;
+    const message=(value as {message:unknown}).message;if(typeof message!=='string')return false;
+    const lines=message.split('\n');
+    if(lines[1]!=='action:'+request.action||lines[3]!=='target:all'||lines[7]!=='params:'+paramsDigest)return false;
+    lines[1]='action:pause';lines[7]='params:none';
+    return validWorkerChallenge({message:lines.join('\n'),expectedPauseRevision:'0'},{action:'pause',target:'all',expectedPauseRevision:'0'});
+  }catch{return false;}
 }

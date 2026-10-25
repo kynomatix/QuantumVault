@@ -1,3 +1,4 @@
+import {currentWorkerHolder,type HolderIdentity} from './current-holder';
 import {balanceReplay,type BalanceProof} from './balance-history';
 import {ownedBalanceEvents,retainedBalanceFills} from './balance-ledger';
 import {balancePages,matchBalanceTrades} from './balance-trades';
@@ -31,8 +32,9 @@ export function reconciliationFresh(observation:GridObservation|null,account:Rec
 export class WorkerReconciliation {
   constructor(private pool:Pool,private terminate:(pid:number)=>Promise<void>,private reads:GridLaunchReads,
     private observations:GridMonitorReads,private security:GridRuntimeDependencies,private incidents:GridIncidents,
-    private ownerKeys:readonly string[]=OWNER_MASTER_PUBLIC_KEYS){}
+    private ownerKeys:readonly string[]=OWNER_MASTER_PUBLIC_KEYS,private holder?:()=>HolderIdentity|undefined){}
   async pass(signal:AbortSignal):Promise<boolean>{
+    const authority=this.holder?.();if(this.holder&&!authority)return false;
     const accounts=(await this.pool.query<ReconciliationAccount>(`SELECT p.protocol_subaccount_id AS account,p.agent_public_key AS master_account,
       a.bot_id,p.wallet_address,b.market,b.created_at FROM protocol_subaccounts p LEFT JOIN grid_launch_accounts a ON a.protocol_subaccount_id=p.id
       LEFT JOIN grid_bots b ON b.id=a.bot_id WHERE p.protocol='pacifica' AND p.protocol_subaccount_id IS NOT NULL
@@ -88,6 +90,7 @@ export class WorkerReconciliation {
           if(!complete)clean=false;
           const evidenceDigest=createHash('sha256').update(JSON.stringify({stream,state,observation:complete?observation:null,balanceEvidenceDigest:balance?.evidenceDigest})).digest('hex');
           await fencedTransaction(this.pool,async c=>{
+            if(authority&&!await currentWorkerHolder(c,authority)){clean=false;return;}
             await c.query(`INSERT INTO grid_worker_reconciliation(account,master_account,bot_id,stream,state,last_attempt_at,last_complete_at,covered_through_at,evidence_digest,cursor)
               VALUES($1,$2,$3,$4,$5,clock_timestamp(),CASE WHEN $6 THEN clock_timestamp() END,$7,$8,$9)
               ON CONFLICT(account,stream) DO UPDATE SET master_account=EXCLUDED.master_account,bot_id=EXCLUDED.bot_id,state=EXCLUDED.state,
