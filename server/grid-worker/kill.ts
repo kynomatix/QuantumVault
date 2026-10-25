@@ -13,7 +13,8 @@ export function gridActionAllowed(action: GridAction, c: KillContext): boolean {
   if (!c.identityValid) return false;
   if (c.executionMode === 'legacy') { if (c.role !== 'legacy' || !c.holderValid) return false; }
   else if (c.role === 'legacy' || !c.holderValid) return false;
-  if (c.role === 'protective' && !['cancel', 'close', 'settle'].includes(action)) return false;
+  if (c.role === 'protective' && !['cancel', 'close', 'settle', 'claim'].includes(action)) return false;
+  if (c.role === 'protective' && action === 'claim' && !c.scopeAndConsent) return false;
   const controls = c.executionMode === 'external' || c.legacyControlsEnabled;
   if (controls && c.runMode === 'test') return false;
   if (!c.authorityValid || controls && !c.executionEnabled) return action === 'settle';
@@ -21,7 +22,7 @@ export function gridActionAllowed(action: GridAction, c: KillContext): boolean {
     if (c.entriesPaused && ['start', 'resume', 'cycle'].includes(action)) return false;
     if (c.observerFenced && ['start', 'resume'].includes(action)) return false;
     if (c.drainRequested) {
-      if (['start', 'resume', 'cycle', 'claim'].includes(action)) return false;
+      if (['start', 'resume', 'cycle'].includes(action) || action === 'claim' && !(c.role === 'protective' && c.scopeAndConsent)) return false;
       if (['cancel', 'close'].includes(action) && !(c.alreadyOwned && c.protectiveDrain)) return false;
       if (['sweep', 'release'].includes(action) && !(c.alreadyOwned && c.terminalProof)) return false;
     }

@@ -41,6 +41,7 @@ export class GridAutoResumeStorage {
   }
   async set(wallet:string,id:string,enabled:boolean,expectedGeneration:string,tick:string|null,identity:GridResumeIdentity|null){
     return this.monitor.launch.transaction(async c=>{
+      await refuseRescueMutation(c,id);
       const bot=(await c.query('SELECT * FROM grid_bots WHERE id=$1 AND wallet_address=$2 FOR UPDATE',[id,wallet])).rows[0];if(!bot)throw new GridStorageError('not_found');
       const row=(await c.query('SELECT * FROM grid_auto_resume WHERE bot_id=$1 FOR UPDATE',[id])).rows[0];
       if(String(row?.generation??'0')!==expectedGeneration)throw new GridStorageError('conflict');
@@ -147,3 +148,4 @@ export class GridAutoResumeStorage {
   }
   async current(claim:GridMonitorClaim,permit:GridAutoResumeToken,tick?:string){return this.monitor.launch.transaction(async c=>this.valid(c,await this.monitor.assertLease(c,claim),permit,tick));}
 }
+import {refuseRescueMutation} from '../grid-worker/rescue-recovery';

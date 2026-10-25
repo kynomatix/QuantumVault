@@ -13,6 +13,9 @@ import {WorkerObserver} from './observer';
 import {priorityIncident,resolveHealthyConditions} from './incident-policy';
 import {runtimeFailureCode} from './runtime-failure';
 import {GridIncidents} from './incidents';
+import {serviceBotPass} from './bot-pass';
+import {ProtectionTruth} from './protection-truth';
+import {recoverAbandonedRescues} from './rescue-recovery';
 import {WorkerQuota} from './quota';
 import {workerDependencies} from './dependencies';
 import {WorkerScheduler} from './scheduler';
@@ -46,12 +49,13 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(Number(env.PORT??5000),'0.0.0.0',()=>{server.removeListener('error',reject);resolve();});});
   const terminate=async(pid:number)=>{await pool.query('SELECT pg_terminate_backend($1)',[pid]);};
   const incidents=new GridIncidents(pool,terminate),quota=new WorkerQuota(pool,terminate),dependencies=workerDependencies(pool,quota,env);
+  const protection=new ProtectionTruth(pool,terminate,incidents);
   installWorkerBindings(dependencies.umk,()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.execution_enabled===true&&host?.run_mode==='trading'&&!host?.entries_paused&&!host?.observer_fenced);
   const holder=()=>{if(!lease||!leaseLocallyValid(lease)||!ready())throw Error('GRID_LEASE_EXPIRED');return lease;};
   let queue:WorkerStartQueue;
   const ledger:GridLaunchStorage=new GridLaunchStorage(pool,async()=>{if(!ready())throw Error('GRID_WORKER_NOT_READY');},r=>readGridMargin(json,r),
     {lease:holder,ready,terminate,verifyStart:(c,id)=>queue.verify(c,id),releaseReservation:(c,id)=>queue.release(c,id)});
-  const json:GridLaunchReads=new GridLaunchReads(dependencies.transport,ledger,'0.5',dependencies.fetcher),reads=new GridMonitorReads(json),monitor=new GridMonitorStorage(ledger,OWNER_MASTER_PUBLIC_KEYS);
+  const json:GridLaunchReads=new GridLaunchReads(dependencies.transport,ledger,'0.5',dependencies.fetcher),reads=new GridMonitorReads(json),monitor=new GridMonitorStorage(ledger);
   const executor=gridExecutorCore(monitor,reads,json,dependencies),reconciliation=new WorkerReconciliation(pool,terminate,json,reads,dependencies,incidents);
   queue=new WorkerStartQueue(pool,terminate,incidents,holder,dependencies,async()=>{
     // Full transfer/withdrawal history is deliberately unavailable in the frozen read inventory.
@@ -61,12 +65,13 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   const scheduler=new WorkerScheduler({
     async existing(signal){
       if(!host||host.run_mode!=='trading'||!host.execution_enabled)return;
-      const seen:string[]=[];
-      for(let i=0;i<100;i++){
-        signal.throwIfAborted();holder();const claim=await monitor.claim(seen);if(!claim)break;seen.push(claim.id);
-        if(!OWNER_MASTER_PUBLIC_KEYS.includes(claim.masterAccount))throw Error('GRID_OWNER_MASTER_UNCONFIRMED');
-        await executor.tick(claim,signal);signal.throwIfAborted();if(lease&&leaseLocallyValid(lease)&&ready())await monitor.release(claim);
-      }
+      await serviceBotPass(signal,{
+        assertHolder:holder,claim:seen=>monitor.claim(seen),allowed:claim=>OWNER_MASTER_PUBLIC_KEYS.includes(claim.masterAccount),
+        refused:claim=>incidents.record({code:'authority_refused',dedupKey:'authority-refused:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch}),
+        tick:claim=>executor.tick(claim,signal),observed:(claim,error)=>protection.observe(claim.id,error),
+        observationFailed:claim=>incidents.record({code:'protective_failure',dedupKey:'protective-failure:'+claim.id,botId:claim.id,bootId,epoch:lease?.epoch}),
+        release:async claim=>{if(lease&&leaseLocallyValid(lease)&&ready())try{await monitor.release(claim);}catch{/* Retain the bounded bot lease on uncertainty. */}},
+      });
     },
     // The injected executor tick services lifecycle/protection before new order work.
     lifecycle:async()=>{},
@@ -96,6 +101,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
       if(memory.standby){if(lease)await die('lease_lost');return;}
       if(!identityMatches(host)||host.protocol_version!=='grid-worker-v3-a1-wire1'){if(lease)await die('schema_drift');return;}
       if(!lease){
+        await fencedTransaction(pool,recoverAbandonedRescues,{terminate});
         // No unverified acceptance bound: acquire only when there are NO retained unknown windows.
         const pending=(await pool.query(`SELECT 1 FROM grid_operations WHERE state IN ('prepared','submitted','unconfirmed')
           UNION ALL SELECT 1 FROM grid_worker_send_audit WHERE outcome='unknown' LIMIT 1`)).rowCount;

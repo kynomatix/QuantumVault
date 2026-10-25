@@ -7,6 +7,8 @@ import {acknowledgeCritical,pauseHost,resetPause} from './host';
 import {GridIncidents} from './incidents';
 import {adminStatus,readAdminFacts,resetBlockedBy} from './admin-state';
 import {mainOwnerWallet} from './main-runtime';
+import {registerRescueRoutes,type RescueService} from './rescue-routes';
+import {rescueOffer} from './rescue-state';
 
 export function pauseSaveOutcome(mutationStarted:boolean,revision:string|undefined){
   return {saved:revision?true:mutationStarted?'unknown' as const:false,
@@ -17,6 +19,7 @@ const action=z.enum(['pause','reset_pause','ack_critical']);
 const target=z.union([z.literal('all'),z.string().regex(/^incident:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)]);
 const revision=z.string().regex(/^(0|[1-9][0-9]{0,18})$/);
 const challenge=z.object({action,target,expectedPauseRevision:revision}).strict();
+const rescueChallenge=z.object({action:z.literal('break_glass_close'),target:z.string().regex(/^bot:[0-9a-f-]{36}$/),params:z.object({botId:z.string().uuid().regex(/^[0-9a-f-]+$/)}).strict()}).strict();
 const signed=z.object({message:z.string().max(2048),signature:z.string().max(128)}).strict();
 const incidentId=z.string().uuid().regex(/^[0-9a-f-]+$/);
 export interface AdminDependencies {
@@ -24,6 +27,7 @@ export interface AdminDependencies {
   enabled:()=>boolean;entriesPaused:()=>boolean;
   readiness:(c:PoolClient)=>Promise<boolean>;
   ownerWallet:()=>string|null;
+  rescue?:RescueService;
 }
 /** Uses the same production predicates as the status response; no venue calls. */
 export async function ownerResetReady(c:PoolClient):Promise<boolean>{
@@ -32,8 +36,21 @@ export async function ownerResetReady(c:PoolClient):Promise<boolean>{
 async function production():Promise<AdminDependencies>{
   const [{pool},{independentLane,backendTerminator}]=await Promise.all([import('../db'),import('./lanes')]);
   const lane=independentLane(pool);
+  const [{ProtectiveExecutor},{workerDependencies},{mainQuota},{probeGridWorkerSchema},{mainIdentityMatches},{OWNER_MASTER_PUBLIC_KEYS}]=await Promise.all([
+    import('./protective-executor'),import('./dependencies'),import('./main-quota'),import('./boot'),import('./main-readiness-identity'),import('./owner-master-keys')]);
+  const terminate=backendTerminator(independentLane(pool));
+  const rescue=new ProtectiveExecutor(pool,terminate,workerDependencies(pool,{
+    debit:async(provider,units)=>mainQuota.debit(provider,units),rateLimited:async provider=>mainQuota.rateLimited(provider),
+  },process.env),async c=>{
+    // The catalog probe owns BEGIN/COMMIT; never run it on the takeover/step connection.
+    const probe=await lane.connect();
+    try{await probeGridWorkerSchema((text,values)=>probe.query(text,values?[...values]:undefined));}finally{probe.release();}
+    const h=(await c.query('SELECT * FROM grid_worker_host WHERE singleton_id=1')).rows[0];
+    const master=h?(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1',[h.owner_wallet])).rows[0]?.agent_public_key:null;
+    if(!h||h.execution_mode!=='external'||!mainIdentityMatches(h)||!master||!OWNER_MASTER_PUBLIC_KEYS.includes(master))throw Error('GRID_RESCUE_NOT_READY');
+  });
   return {lane,terminate:backendTerminator(independentLane(pool)),enabled:()=>process.env.GRID_REMOTE_WORKER_ENABLED==='true',
-    entriesPaused:()=>process.env.GRID_ENTRIES_PAUSED==='true',readiness:ownerResetReady,ownerWallet:mainOwnerWallet};
+    entriesPaused:()=>process.env.GRID_ENTRIES_PAUSED==='true',readiness:ownerResetReady,ownerWallet:mainOwnerWallet,rescue};
 }
 /** MAIN only. Registration does not load the database or expose an enabled control. */
 export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestHandler,provided?:AdminDependencies){
@@ -58,6 +75,7 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
             ON h.singleton_id=o.singleton_id AND h.owner_wallet=o.wallet_address
             WHERE o.singleton_id=1`)).rows[0];
           if(!owner||owner.wallet_address!==wallet)throw Error('GRID_ADMIN_NOT_FOUND');
+          if((req.body as {action?:unknown})?.action==='break_glass_close'&&owner.execution_mode!=='external')throw Error('GRID_ADMIN_NOT_FOUND');
           admitted=true;external=owner.execution_mode==='external';
           return run(c,wallet,req.body,req.params.id,d!,()=>{mutationStarted=true;});
         },{mode:method==='get'?'none':'exclusive',pause,terminate:d.terminate,budget:new GridDeadline(pause?Math.min(9000,overall.remaining()):Math.min(18000,overall.remaining()))});
@@ -98,6 +116,11 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
   };
   route('get','/status',async(c,_wallet,_body,_id,d)=>adminStatus(c,d.entriesPaused()));
   route('post','/challenge',async(c,wallet,body)=>{
+    if((body as {action?:unknown})?.action==='break_glass_close'){
+      const b=rescueChallenge.parse(body);
+      if(b.target!=='bot:'+b.params.botId||!(await rescueOffer(c,wallet,b.params.botId)))throw Error('GRID_ADMIN_TARGET');
+      return {message:await issueOwnerChallenge(c,wallet,b.action,b.target,b.params,120_000)};
+    }
     const b=challenge.parse(body);
     await expectRevision(c,b.expectedPauseRevision);
     if((b.action==='ack_critical')!==b.target.startsWith('incident:'))throw Error('GRID_ADMIN_TARGET');
@@ -119,6 +142,7 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
     await c.query(`UPDATE grid_worker_incidents SET inbox_seen_at=clock_timestamp()
       WHERE id IN (SELECT value::uuid FROM jsonb_array_elements_text($1::jsonb))`,[JSON.stringify(ids)]);return {seen:true};
   });
+  registerRescueRoutes(app,off,requireWallet,()=>provided?Promise.resolve(provided):production());
 }
 
 async function expectRevision(c:PoolClient,expected:string){

@@ -1,3 +1,4 @@
+import {parseWorkerRescue} from './grid-worker-rescue-wire';
 import {cardStates,currentPause,decimalCompare,parseWorkerStatus,type WorkerPresentation,type WorkerStatus} from './grid-worker-view';
 export type WorkerRead=(signal:AbortSignal)=>Promise<{status:number;body:unknown}>;
 const initial=():WorkerPresentation=>({status:null,admitted:false,overlay:'none',elapsedSeconds:0,target:null,outcome:null,notice:'',busy:false});
@@ -5,6 +6,7 @@ const initial=():WorkerPresentation=>({status:null,admitted:false,overlay:'none'
 export class GridWorkerCache {
   private value=initial();private listeners=new Set<()=>void>();private controller:AbortController|null=null;
   private pending:Promise<WorkerStatus|null>|null=null;private receivedAt:number|null=null;private nextPoll=Infinity;
+  private readGeneration=0;
   private disposed=false;private denied=false;private knownOwner=false;
   private leases=0;private pauseBaseline:string|null=null;private resumedAt:number|null=null;private resumeNotice='';
   constructor(readonly wallet:string,private read:WorkerRead,private now=()=>performance.now()){}
@@ -23,14 +25,17 @@ export class GridWorkerCache {
   refresh=():Promise<WorkerStatus|null>=>{
     if(this.disposed||this.denied)return Promise.resolve(null);
     if(this.pending)return this.pending;
+    const generation=++this.readGeneration;
     const controller=new AbortController();this.controller=controller;
     const timeout=setTimeout(()=>controller.abort(),30_000);
     if(this.value.admitted&&!this.value.busy)this.update({overlay:'checking'});
     this.pending=(async()=>{
       try{
-        const result=await this.read(controller.signal);if(this.disposed)return null;
+        const result=await this.read(controller.signal);if(this.disposed||generation!==this.readGeneration)return null;
         if(result.status===200){
           const status=parseWorkerStatus(result.body);if(!status)throw Error('Invalid status');
+          const prior=this.value.status?.rescue;
+          if(prior&&!prior.live&&status.rescue?.requestId===prior.requestId&&status.rescue.live)throw Error('Conflicting rescue snapshot');
           this.knownOwner=true;this.receivedAt=this.now();
           let outcome=this.value.outcome;
           if(outcome?.saved==='unknown'&&currentPause(status,outcome.pauseRevision)&&this.pauseBaseline!==null&&(decimalCompare(status.pauseRevision,this.pauseBaseline)??-1)>0)
@@ -43,10 +48,18 @@ export class GridWorkerCache {
         if(!this.knownOwner&&result.status===404){this.denied=true;this.update(initial());return null;}
         if(this.knownOwner||result.status===503||result.status===409){this.knownOwner=true;this.update({admitted:true,...(!this.value.busy?{overlay:'stale' as const}:{})});}
         return null;
-      }catch{if(this.knownOwner&&!this.value.busy)this.update({overlay:'stale'});return null;}
-      finally{clearTimeout(timeout);this.pending=null;this.controller=null;this.nextPoll=this.knownOwner?this.now()+(this.value.busy?2000:30000):Infinity;}
+      }catch{if(generation===this.readGeneration&&this.knownOwner&&!this.value.busy)this.update({overlay:'stale'});return null;}
+      finally{clearTimeout(timeout);this.pending=null;this.controller=null;if(generation===this.readGeneration)this.nextPoll=this.knownOwner?this.now()+(this.value.busy?2000:30000):Infinity;}
     })();return this.pending;
   };
+  /** U6b's driver calls this after a session step; older GETs cannot undo its result. */
+  acceptRescueStep(value:unknown):boolean {
+    const rescue=parseWorkerRescue(value);
+    if(this.disposed||!rescue||!this.value.status||this.value.status.rescue?.requestId!==rescue.requestId)return false;
+    this.readGeneration++;this.controller?.abort();
+    this.update({status:{...this.value.status,rescue},overlay:'checking'});
+    this.nextPoll=this.now();return true;
+  }
   accelerate(){this.nextPoll=this.now()+2000;}
   dispose(){this.disposed=true;this.controller?.abort();this.value=initial();this.listeners.clear();}
 }

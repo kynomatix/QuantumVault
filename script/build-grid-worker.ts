@@ -9,7 +9,7 @@ import {resolveGitBuildIdentity} from './git-build-identity';
 import {auditGridWorkerCopy} from './grid-worker-copy-audit';
 
 const builtins = new Set(builtinModules.flatMap(name => [name, `node:${name}`]));
-const forbiddenPath = /(?:server\/(?:crypto\.ts|session-v3\.ts|storage\.ts|db\.ts|agent-wallet\.ts|grid-worker\/admin-routes\.ts)|adapter-registry|pacifica-adapter|notification-service|mnemonic|bip39|account\/withdraw)/i;
+const forbiddenPath = /(?:server\/(?:crypto\.ts|session-v3\.ts|storage\.ts|db\.ts|agent-wallet\.ts|grid-worker\/(?:admin-routes|rescue-routes|protective-executor)\.ts)|adapter-registry|pacifica-adapter|notification-service|mnemonic|bip39|account\/withdraw)/i;
 const forbiddenSymbol = /^(?:getStorageKeyV[23]|legacyDecrypt|applySchemaMigrationManifest|\w*Mnemonic\w*)$/i;
 
 // Audit emitted JavaScript, including every remaining import/require edge. Only

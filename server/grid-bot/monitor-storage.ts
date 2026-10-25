@@ -19,8 +19,27 @@ export interface GridMonitorClaim {id:string;leaseToken:string;account:string;ma
 const fillsFromRows=(rows:Record<string,any>[]):GridEconomicFill[]=>rows.map(r=>({tradeId:r.trade_id,operationId:r.operation_id,orderId:r.order_id,levelId:r.level_id,time:Number(r.venue_time),leg:r.leg,size:r.size,price:r.price,fee:r.fee}));
 export class GridMonitorStorage {
   constructor(readonly launch:GridLaunchStorage,private readonly allowedMasters?:readonly string[]){}
+  /** Only the request's bot may be claimed by MAIN. Never manufactures a worker lease. */
+  async claimProtective(requestId:string,botId:string):Promise<GridMonitorClaim|null>{return this.launch.transaction(async c=>{
+    if(this.launch.protectiveTarget()!==botId||this.launch.protectiveRequest()!==requestId)throw Error('GRID_PROTECTIVE_TARGET');
+    this.launch.hostAction(c,'claim');
+    if(!await gridWorkerFence(c,botId))return null;
+    const b=(await c.query(`SELECT b.*,a.account,a.master_account,clock_timestamp() AS db_now FROM grid_bots b
+      JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 AND a.released_at IS NULL FOR UPDATE OF b`,[botId])).rows[0];
+    if(!b||b.lease_token&&b.lease_token!==requestId&&new Date(b.lease_expires_at).getTime()>new Date(b.db_now).getTime())return null;
+    const now=new Date(b.db_now).getTime();
+    const pending=(await c.query("SELECT exact_request FROM grid_operations WHERE bot_id=$1 AND state IN ('prepared','submitted','unconfirmed')",[botId])).rows;
+    if(pending.some(({exact_request:r})=>!r||!Number.isSafeInteger(r.timestamp)||!Number.isSafeInteger(r.expiryMs)||r.expiryMs<1||r.expiryMs>15000||r.timestamp+r.expiryMs+7000>now))return null;
+    if(b.lease_token&&b.lease_token!==requestId)await c.query(`INSERT INTO grid_risk_events(bot_id,event_key,kind,evidence,delivered_at)
+      VALUES($1,$2,'internal_worker_retirement',$3::jsonb,clock_timestamp()) ON CONFLICT DO NOTHING`,[botId,'worker-retired:'+b.lease_token,
+      JSON.stringify({version:1,retiredGeneration:b.lease_token,replacementGeneration:requestId,retiredAt:now,fence:'exclusive_postgres_sender_lock',signedWindowsExpired:true})]);
+    await c.query(`UPDATE grid_bots SET lease_token=$2,lease_expires_at=(SELECT lease_expires_at FROM grid_worker_host WHERE singleton_id=1),startup_reconciled_at=NULL WHERE id=$1`,[botId,requestId]);
+    await recordGridWorker(c,botId,requestId,true);
+    return {id:botId,leaseToken:requestId,account:b.account,masterAccount:b.master_account};
+  });}
   /** Expiry nominates a generation; the send fence retires it. Unregistered legacy owners stay blocked. */
   async claim(exclude:string[]=[]):Promise<GridMonitorClaim|null>{return this.launch.transaction(async c=>{
+    if(this.launch.protectiveTarget?.())throw Error('GRID_PROTECTIVE_TARGET_REQUIRED');
     this.launch.hostAction(c,'claim');
     const rows=(await c.query(`SELECT b.id,b.lease_token,a.account,a.master_account FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id
       WHERE b.status IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND a.released_at IS NULL AND b.id NOT IN (SELECT value::uuid FROM jsonb_array_elements_text($2::jsonb))
@@ -29,7 +48,7 @@ export class GridMonitorStorage {
           AND e.evidence->>'version'='1' AND e.evidence->>'generation'=b.lease_token::text)))
       AND (b.last_tick_at IS NULL OR b.last_tick_at<=clock_timestamp()-interval '15 seconds')
       ${this.allowedMasters===undefined?'':"AND a.master_account IN (SELECT value FROM jsonb_array_elements_text($3::jsonb))"}
-      ORDER BY b.last_tick_at NULLS FIRST,b.id LIMIT 2`,this.allowedMasters===undefined?[JSON.stringify(states),JSON.stringify(exclude)]:[JSON.stringify(states),JSON.stringify(exclude),JSON.stringify(this.allowedMasters)])).rows;
+      ORDER BY CASE WHEN b.status IN ('stopping','pausing') THEN 0 ELSE 1 END,b.last_tick_at NULLS FIRST,b.id LIMIT 2`,this.allowedMasters===undefined?[JSON.stringify(states),JSON.stringify(exclude)]:[JSON.stringify(states),JSON.stringify(exclude),JSON.stringify(this.allowedMasters)])).rows;
     for(const row of rows){
       if(!await gridWorkerFence(c,row.id))continue;
       if(!(await c.query(`SELECT id FROM grid_bots WHERE id=$1 AND lease_token IS NOT DISTINCT FROM $2::uuid
@@ -53,12 +72,14 @@ export class GridMonitorStorage {
     }
     return null;
   });}
-  async assertLease(c:PoolClient,claim:GridMonitorClaim){const bot=(await c.query(`SELECT b.*,a.account,a.master_account,clock_timestamp() AS db_now
+  async assertLease(c:PoolClient,claim:GridMonitorClaim){
+    if(this.launch.protectiveTarget?.()&&(this.launch.protectiveTarget()!==claim.id||this.launch.protectiveRequest()!==claim.leaseToken))throw Error('GRID_PROTECTIVE_TARGET');
+    const bot=(await c.query(`SELECT b.*,a.account,a.master_account,clock_timestamp() AS db_now
     FROM grid_bots b JOIN grid_launch_accounts a ON a.bot_id=b.id WHERE b.id=$1 AND b.lease_token=$2
     AND b.lease_expires_at>clock_timestamp() AND a.released_at IS NULL AND b.status IN (SELECT value FROM jsonb_array_elements_text($3::jsonb)) FOR UPDATE OF b`,[claim.id,claim.leaseToken,JSON.stringify(states)])).rows[0];
     if(!bot||bot.account!==claim.account||bot.master_account!==claim.masterAccount)throw Error('Grid ownership uncertain');return bot;
   }
-  async release(claim:GridMonitorClaim){await this.launch.transaction(async c=>{this.launch.hostAction(c,'claim');if(!await gridWorkerFence(c,claim.id))throw Error('Grid sender still active');await c.query(`UPDATE grid_bots SET lease_token=NULL,lease_expires_at=NULL,last_tick_at=clock_timestamp()
+  async release(claim:GridMonitorClaim){if(this.launch.protectiveTarget?.())throw Error('GRID_PROTECTIVE_RELEASE_REFUSED');await this.launch.transaction(async c=>{this.launch.hostAction(c,'claim');if(!await gridWorkerFence(c,claim.id))throw Error('Grid sender still active');await c.query(`UPDATE grid_bots SET lease_token=NULL,lease_expires_at=NULL,last_tick_at=clock_timestamp()
     WHERE id=$1 AND lease_token=$2`,[claim.id,claim.leaseToken]);});}
   async snapshot(claim:GridMonitorClaim){return this.launch.transaction(async c=>{const bot=await this.assertLease(c,claim);
     const operations=(await c.query(`SELECT ${gridOperationProjection} FROM grid_operations o WHERE bot_id=$1 ORDER BY created_at,id`,[claim.id])).rows as ReconciliationOperation[];

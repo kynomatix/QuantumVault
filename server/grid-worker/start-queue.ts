@@ -17,7 +17,7 @@ export class WorkerStartQueue {
   }
   async one(signal:AbortSignal){
     const row=(await this.pool.query(`SELECT id,owner_wallet,bot_id,draft_revision,server_intent_digest FROM grid_worker_requests
-      WHERE state='pending' AND expires_at>clock_timestamp() ORDER BY created_at,id LIMIT 1`)).rows[0];
+      WHERE action='start' AND state='pending' AND expires_at>clock_timestamp() ORDER BY created_at,id LIMIT 1`)).rows[0];
     if(!row)return;
     const key=await this.security.umk(row.owner_wallet);if(!key)throw Error('GRID_START_AUTHORITY_UNAVAILABLE');
     try{
@@ -27,10 +27,14 @@ export class WorkerStartQueue {
       signal.throwIfAborted();
       await this.requests.refresh(row.id,this.holder(),facts.spending);
       await this.start(row.owner_wallet,row.bot_id,{draftRevision:row.draft_revision,serverIntentDigest:row.server_intent_digest},signal);
+    }catch(error){
+      // A failed cleanup retains the reservation. Never conceal the original launch failure.
+      try{await this.requests.releaseFailedZeroState(row.id,this.holder());}catch{}
+      throw error;
     }finally{key.cleanup();}
   }
   async verify(c:PoolClient,botId:string){
-    const row=(await c.query("SELECT id,owner_wallet FROM grid_worker_requests WHERE bot_id=$1 AND state='admitted'",[botId])).rows[0];
+    const row=(await c.query("SELECT id,owner_wallet FROM grid_worker_requests WHERE bot_id=$1 AND action='start' AND state='admitted'",[botId])).rows[0];
     if(!row)throw Error('GRID_START_AUTHORITY_UNAVAILABLE');
     // The locked connection is used for the key read, avoiding pool starvation under the final fence.
     const {getExecutionUmk}=await import('../execution/umk');const key=await getExecutionUmk(c,row.owner_wallet);
