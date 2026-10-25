@@ -38,7 +38,7 @@
  *   plan-audit     qwen/qwen3.7-max         / deepseek/deepseek-v4-pro    / deepseek/deepseek-v4-pro
  *   architecture   qwen/qwen3.7-max         / z-ai/glm-5.1                / deepseek/deepseek-v4-pro
  *   algorithm      qwen/qwen3.7-max         / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-pro
- *   frontend       moonshotai/kimi-k3       / z-ai/glm-5.2                / deepseek/deepseek-v4-pro
+ *   frontend       moonshotai/kimi-k3.1-pro / z-ai/glm-5.2                / deepseek/deepseek-v4-pro
  *   large-context  minimax/minimax-m3       / qwen/qwen3.7-max            / deepseek/deepseek-v4-pro
  *   batch          deepseek/deepseek-v4-pro / minimax/minimax-m3          / deepseek/deepseek-v4-flash
  *   sanity         deepseek/deepseek-v4-pro / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-flash
@@ -57,6 +57,7 @@ const MODELS = {
   KIMI_K26:        'moonshotai/kimi-k2.6',
   KIMI_K27_CODE:   'moonshotai/kimi-k2.7-code',
   KIMI_K3:         'moonshotai/kimi-k3',
+  KIMI_K31_PRO:    'moonshotai/kimi-k3.1-pro',
   GLM_51:          'z-ai/glm-5.1',
   GLM_52:          'z-ai/glm-5.2',
   MINIMAX_M3:      'minimax/minimax-m3',
@@ -151,13 +152,14 @@ Show your working. A verdict without a trace is not useful.`,
   },
 
   'frontend': {
-    // Kimi K3 primary since 2026-07-16: #1 on Frontend Code Arena (1679, beat
+    // Kimi K3.1 Pro primary since 2026-10-26 (owner: move from K3 to K3.1; post-trained
+    // from K3 for long-horizon coding, $2/$10 per 1M). Kimi K3 was primary from 2026-07-16: #1 on Frontend Code Arena (1679, beat
     // Claude Fable 5) — the one domain where its benchmark maps directly to the
     // task. Always-thinking model: thinking consumes output tokens, hence the
     // 8192 budget (bump --max-tokens if a review comes back empty). Pricier
     // ($3/$15 per 1M) — use --fallback (GLM-5.2, the old primary) for routine
     // passes where cost matters.
-    primary:  MODELS.KIMI_K3,
+    primary:  MODELS.KIMI_K31_PRO,
     fallback: MODELS.GLM_52,
     budget:   MODELS.DEEPSEEK_V4_PRO,
     temperature: 0.15,
