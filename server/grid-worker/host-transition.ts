@@ -20,12 +20,17 @@ export interface TransitionParams {
 interface Account {account:string;master:string}
 export interface TransitionEvidence {accounts:Account[];observedAt:number;flat:boolean}
 type Read=(master:string,path:string,params:Record<string,string>)=>Promise<unknown>;
-const accountSql=`SELECT DISTINCT a.account,a.master_account AS master FROM grid_launch_accounts a ORDER BY a.account,a.master_account`;
+const accountSql=`SELECT account,master FROM (
+  SELECT a.account,a.master_account AS master FROM grid_launch_accounts a
+  UNION SELECT p.protocol_subaccount_id AS account,p.agent_public_key AS master
+    FROM grid_bots b JOIN protocol_subaccounts p ON p.id=b.protocol_subaccount_id
+    WHERE p.protocol='pacifica'
+) identities ORDER BY account,master`;
 /** Venue reads finish before the exclusive transaction. Retained identities are rechecked inside it. */
 export async function collectTransitionEvidence(lane:ClientLane,read:Read):Promise<TransitionEvidence>{
   const c=await lane.connect();let accounts:Account[];
   try{accounts=(await c.query<Account>(accountSql)).rows;}finally{c.release();}
-  if(accounts.length>100||accounts.some(a=>!OWNER_MASTER_PUBLIC_KEYS.includes(a.master)))throw Error('GRID_TRANSITION_SCOPE');
+  if(accounts.length>100||accounts.some(a=>!a.account||!a.master||!OWNER_MASTER_PUBLIC_KEYS.includes(a.master)))throw Error('GRID_TRANSITION_SCOPE');
   const observedAt=Date.now();let flat=true;
   for(const a of accounts){
     const raw=await Promise.all([read(a.master,'/account',{account:a.account}),read(a.master,'/orders',{account:a.account}),read(a.master,'/positions',{account:a.account})]);
@@ -59,20 +64,21 @@ export async function transitionHost(c:PoolClient,owner:VerifiedOwnerContext,p:T
   await walletFences(c,wallets);
   const bots=(await c.query('SELECT id FROM grid_bots ORDER BY id')).rows.map(r=>r.id as string);
   for(const id of bots)await waitGridWorkerFence(c,id);
-  const pools=(await c.query('SELECT protocol_subaccount_id AS id FROM grid_launch_accounts ORDER BY protocol_subaccount_id')).rows.map(r=>Number(r.id));
+  const pools=(await c.query('SELECT protocol_subaccount_id AS id FROM grid_launch_accounts UNION SELECT protocol_subaccount_id AS id FROM grid_bots WHERE protocol_subaccount_id IS NOT NULL ORDER BY id')).rows.map(r=>Number(r.id));
   await identityFences(c,bots,pools);
   const h=(await c.query('SELECT *,lease_expires_at>clock_timestamp() AS holder_live,clock_timestamp() AS db_now FROM grid_worker_host WHERE singleton_id=1 FOR UPDATE')).rows[0];
   const now=new Date(h?.db_now).getTime();
   if(!OWNER_MASTER_PUBLIC_KEYS.length||!h||h.drain_requested||h.owner_wallet!==owner.ownerWallet||!h.authority_tracking_enabled||h.holder_live||!h.entries_paused
     ||String(h.fencing_epoch)!==p.expectedFencingEpoch||String(h.scope_revision)!==p.expectedScopeRevision
     ||!Number.isSafeInteger(e.observedAt)||now<e.observedAt||now-e.observedAt>=5000||!e.flat)throw Error('GRID_TRANSITION_NOT_READY');
-  if(p.executionMode!=='external'||p.drainRequested||p.legacyControlsEnabled!==h.legacy_controls_enabled
+  if(p.executionMode!=='external'||p.drainRequested||p.legacyControlsEnabled!==true
     ||!(h.execution_mode==='legacy'&&p.runMode==='test'&&!p.executionEnabled
       ||h.execution_mode==='external'&&h.run_mode==='test'&&!h.execution_enabled&&p.runMode==='trading'&&p.executionEnabled))throw Error('GRID_TRANSITION_DIRECTION');
   const accounts=(await c.query<Account>(accountSql)).rows;
   if(JSON.stringify(accounts)!==JSON.stringify(e.accounts))throw Error('GRID_TRANSITION_EVIDENCE_CHANGED');
   const refusal=(await c.query(`SELECT
     EXISTS(SELECT 1 FROM wallets w LEFT JOIN grid_worker_wallet_authority a ON a.wallet_address=w.address WHERE a.wallet_address IS NULL)
+    OR EXISTS(SELECT 1 FROM grid_bots b LEFT JOIN protocol_subaccounts p ON p.id=b.protocol_subaccount_id WHERE b.protocol_subaccount_id IS NOT NULL AND (p.id IS NULL OR p.protocol<>'pacifica' OR p.protocol_subaccount_id IS NULL OR p.agent_public_key IS NULL))
     OR EXISTS(SELECT 1 FROM grid_bots WHERE status NOT IN ('draft','failed','stopped') OR lease_expires_at>clock_timestamp())
     OR EXISTS(SELECT 1 FROM grid_operations WHERE state IN ('prepared','submitted','unconfirmed'))
     OR EXISTS(SELECT 1 FROM grid_execution_claims WHERE NOT slot_released)
@@ -84,7 +90,7 @@ export async function transitionHost(c:PoolClient,owner:VerifiedOwnerContext,p:T
   await c.query("SELECT grid_worker_consume_receipt($1::uuid,'host_transition','all',$2)",[owner.receiptId,owner.paramsDigest]);
   await c.query("SELECT set_config('qv.grid_worker_ready','true',true),set_config('qv.grid_worker_owner_verified','true',true)");
   await localContext(c,'transition');
-  const changed=(await c.query(`UPDATE grid_worker_host SET execution_mode='external',run_mode=$1,execution_enabled=$2,
+  const changed=(await c.query(`UPDATE grid_worker_host SET execution_mode='external',run_mode=$1,execution_enabled=$2,legacy_controls_enabled=true,
     commit_hash=$3,tree_hash=$4,lockfile_sha256=$5,fencing_epoch=fencing_epoch+1,scope_revision=scope_revision+1,
     holder_boot_id=NULL,holder_role=NULL,lease_expires_at='-infinity' WHERE singleton_id=1 RETURNING *`,
     [p.runMode,p.executionEnabled,p.commitHash,p.treeHash,p.lockfileSha256])).rows[0];

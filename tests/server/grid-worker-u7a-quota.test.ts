@@ -47,3 +47,16 @@ it('no-key launch permission is explicit and cannot accept an invalid key',()=>{
   expect(new PacificaTransportAuthority(undefined,'EXAMPLE',Date.now,true).gridReady).toBe(true);
   expect(new PacificaTransportAuthority('EXAMPLE_INVALID','EXAMPLE',Date.now,true).gridReady).toBe(false);
 });
+
+it('real adapter transport never applies grid boot refusal to signal, AI or other accounts',async()=>{
+  vi.stubEnv('GRID_REMOTE_WORKER_ENABLED','true');vi.stubEnv('QV_PROCESS_ROLE','main');
+  const debit=vi.spyOn(mainQuota,'debit').mockImplementation(()=>{throw Error('EXAMPLE_BOOT_REFUSAL');});
+  const raw=new Response('{}'),fetcher=vi.fn().mockResolvedValue(raw);vi.stubGlobal('fetch',fetcher);
+  try{const {PacificaAdapter}=await import('../../server/protocol/pacifica/pacifica-adapter');const adapter=new PacificaAdapter();
+    for(const account of ['EXAMPLE_SIGNAL','EXAMPLE_AI','EXAMPLE_OTHER']){
+      expect(await (adapter as any).fetchBounded('https://api.pacifica.fi/api/v1/account?account='+account,{method:'GET'},500,1000,'EXAMPLE')).toBe(raw);
+    }
+    expect(fetcher).toHaveBeenCalledTimes(3);expect(debit).not.toHaveBeenCalled();
+    await expect((adapter as any).fetchBounded('https://api.pacifica.fi/api/v1/account?account=EXAMPLE_MASTER',{method:'GET'},500,1000,'EXAMPLE')).rejects.toThrow('EXAMPLE_BOOT_REFUSAL');
+  }finally{vi.unstubAllGlobals();}
+});

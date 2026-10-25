@@ -26,7 +26,8 @@ const sha256 = (value: string) => createHash('sha256').update(value).digest('hex
 const baselineSha256 = {
   privateWsSha256: '98bcb0a087e332dac6cd141c23646d21e5485b621a10051063bb2244a4f2efde',
   priceWsSha256: '18785fe53909ef7d51cecf0746d8f311141fe1d8d0fb9d69429ce18d7ee74313',
-  fetchBoundedSha256: '556158b7a9917b3852d9740a6e56b6ae1baece7241d7d23d079a1b8015886aff',
+  // U7a scopes MAIN quota before fetch; deadline/abort/error identity behavior remains covered below.
+  fetchBoundedSha256: '2c81d3c8db2b126016ea37f1654ac842d91f40d9aff355162cd63b439418f152',
 };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); mocks.sockets.length = 0; });
 function presentKey() {

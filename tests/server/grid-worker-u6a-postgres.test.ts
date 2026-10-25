@@ -58,7 +58,7 @@ const fakeFetch:typeof fetch=async(input,init)=>{
     path.endsWith('/positions')&&position?[{symbol:'BTC',side:'bid',amount:'1'}]:path.endsWith('/info/prices')?[{symbol:'BTC',mark:'100',timestamp:Date.now()}]:[];
   return new Response(JSON.stringify({success:true,data,has_more:false,last_order_id:0}),{status:200});
 };
-const deps={fetcher:fakeFetch,transport:{keyStatus:'present',quota:{snapshot:()=>({availability:'unavailable'})},restInit:(_url:string,init:RequestInit)=>init,response:(r:Response)=>r},
+const deps={fetcher:fakeFetch,transport:{keyStatus:'present',gridReady:true,quota:{snapshot:()=>({availability:'unavailable'})},restInit:(_url:string,init:RequestInit)=>init,response:(r:Response)=>r},
   umk:async()=>({umk:Buffer.from(fixture.key!),cleanup(){}}),unlock:async()=>null,move:async()=>{throw Error('EXAMPLE_FORBIDDEN_MOVE');}} as unknown as GridRuntimeDependencies;
 async function api(path:string,body?:unknown){const r=await fetch(url+'/api/grid-worker'+path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});const text=await r.text();let data:any;try{data=JSON.parse(text);}catch{data=text;}return {status:r.status,data};}
 async function challenge(){return api('/challenge',{action:'break_glass_close',target:'bot:'+botId,params:{botId}});}
