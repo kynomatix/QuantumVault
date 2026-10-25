@@ -1,5 +1,7 @@
 import {GridRangeMove} from './GridRangeMove';
-import {GridWorkerDrawerSlot} from './GridWorkerContext';
+import {GridWorkerDrawerSlot,useGridRescueLock} from './GridWorkerContext';
+import {GridWorkerRescuePanel} from './GridWorkerRescuePanel';
+import {rescueCopy} from '@/lib/grid-worker-rescue-copy';
 import { gridBehaviourCopy } from '../../../../shared/grid-behaviour';
 import { gridModeBoundary } from '@/lib/grid-behaviour-view';
 import { isGridCyclePolicyVersion } from '../../../../shared/grid-behaviour';
@@ -89,19 +91,29 @@ export function GridStartAgain({surface,createEnabled,busy,onAdjust}:{surface:Gr
     if(!busy&&createEnabled&&gridCanStartAgain(surface)&&surface.bot.createIntent)onAdjust({...surface.bot.createIntent,rangeSource:'manual'},surface.bot.id);
   }}>Start again with the same settings</Button><p className="text-xs text-muted-foreground">Opens an editable draft with your saved settings. A new bot starts a fresh run with a fresh breakeven.</p></div>;
 }
+export function GridBotFooter({surface,createEnabled,busy,adjust,rescueLocked,now,onAdjust,act,setConfirm}:{surface:GridBotSurface|null;createEnabled:boolean;busy:boolean;adjust:boolean;rescueLocked:boolean;now:number;onAdjust:(intent:GridIntent,sourceBotId:string)=>void;act:(action:GridOwnerAction)=>void;setConfirm:(value:'start'|'stop'|'adjust')=>void}){
+  const canAdjust=createEnabled&&!!surface&&gridCanAdjust(surface),autoView=surface?gridAutoResumeView(surface,now):null;
+  return <div className="space-y-2 border-t bg-background p-4">{rescueLocked&&<p className="text-xs text-muted-foreground">{rescueCopy.locked}</p>}<div className="flex flex-wrap gap-2">{surface?.startEnabled&&surface.bot.status==='draft'&&surface.startDraft?<Button disabled={busy||rescueLocked} onClick={()=>setConfirm('start')}>Start bot</Button>:null}{surface&&gridVisibleActions(surface).filter(action=>action!=='resume'||autoView?.state!=='attention').map(action=><Button key={action} variant={action==='stop'?'destructive':'outline'} disabled={busy||rescueLocked} onClick={()=>action==='stop'?setConfirm('stop'):void act(action)}>{action==='resync'?'Re-sync':action[0].toUpperCase()+action.slice(1)}</Button>)}</div>
+      {surface&&<GridStartAgain surface={surface} createEnabled={createEnabled} busy={busy||adjust||rescueLocked} onAdjust={onAdjust}/>}
+      {canAdjust&&surface?.bot.status!=='stopped'&&<Button variant="outline" disabled={busy||adjust||rescueLocked} onClick={()=>{if(rescueLocked||!surface?.bot.createIntent)return;if(gridAdjustReady(surface))onAdjust({...surface.bot.createIntent,rangeSource:'manual'},surface.bot.id);else setConfirm('adjust');}}>Adjust Range</Button>}
+      {((canAdjust&&surface?.bot.status!=='stopped')||adjust)&&<p className="text-xs text-muted-foreground">Adjust range ends this bot and starts a new setup. {adjust?'Waiting for terminal settlement. You may close this drawer; reopen and choose Adjust Range to continue.':''}</p>}
+    </div>;
+}
 export function GridBotDrawer({id,createEnabled,onClose,onAdjust}:{id:string;createEnabled:boolean;onClose:()=>void;onAdjust:(intent:GridIntent,sourceBotId:string)=>void}){
   const [surface,setSurface]=useState<GridBotSurface|null>(null),[message,setMessage]=useState(''),[busy,setBusy]=useState(false),[adjust,setAdjust]=useState(false),[now,setNow]=useState(Date.now());
   const [confirm,setConfirm]=useState<'start'|'stop'|'adjust'|null>(null);
+  const rescueLocked=useGridRescueLock(id),rescueLock=useRef(rescueLocked);rescueLock.current=rescueLocked;
+  useEffect(()=>{if(rescueLocked){setConfirm(null);setAdjust(false);adjusting.current=false;}},[rescueLocked]);
   const reader=useRef<AbortController|null>(null);
   const history=useRef<HTMLDetailsElement>(null);
   const reads=useRef(new GridReadOrder()),keys=useRef(new GridActionKeys()),alive=useRef(true),writing=useRef(false),adjusting=useRef(false),createAllowed=useRef(createEnabled),handled=useRef(false);
   createAllowed.current=createEnabled;
   const load=async()=>{if(writing.current)return;reader.current?.abort();reader.current=new AbortController();const seq=reads.current.next();try{const next:GridBotSurface=await gridJson('/'+id+'/surface',{signal:reader.current.signal});if(!alive.current||!reads.current.accepts(seq))return;
       setSurface(next);setNow(Date.now());
-      if(adjusting.current&&createAllowed.current&&gridCanAdjust(next)&&gridAdjustReady(next)&&next.bot.createIntent&&!handled.current){handled.current=true;onAdjust({...next.bot.createIntent,rangeSource:'manual'},next.bot.id);}
+      if(!rescueLock.current&&adjusting.current&&createAllowed.current&&gridCanAdjust(next)&&gridAdjustReady(next)&&next.bot.createIntent&&!handled.current){handled.current=true;onAdjust({...next.bot.createIntent,rangeSource:'manual'},next.bot.id);}
     }catch{if(alive.current&&reads.current.accepts(seq)){setSurface(null);setMessage('Current bot state unavailable. Actions are disabled until refreshed.');}}};
   useEffect(()=>{alive.current=true;void load();const timer=setInterval(()=>void load(),10000),clock=setInterval(()=>setNow(Date.now()),1000);return()=>{alive.current=false;reader.current?.abort();reads.current.next();clearInterval(timer);clearInterval(clock);};},[id]);
-  const act=async(action:GridOwnerAction,forAdjust=false)=>{if(writing.current||!surface||!gridVisibleActions(surface).includes(action))return;
+  const act=async(action:GridOwnerAction,forAdjust=false)=>{if(rescueLock.current||writing.current||!surface||!gridVisibleActions(surface).includes(action))return;
     writing.current=true;reads.current.next();reader.current?.abort();setBusy(true);setMessage('Submitting '+action+' request…');
     if(forAdjust){adjusting.current=true;setAdjust(true);}
     try{await gridJson('/'+id+'/'+action,{method:'POST',body:JSON.stringify({requestId:keys.current.key(id,action,()=>crypto.randomUUID())})});keys.current.accepted(id,action);if(alive.current)setMessage('Request recorded. Waiting for confirmed venue state.');}
@@ -109,32 +121,28 @@ export function GridBotDrawer({id,createEnabled,onClose,onAdjust}:{id:string;cre
     finally{writing.current=false;if(alive.current){setBusy(false);void load();}}
   };
   const setAutoResume=async(enabled:boolean)=>{
-    if(writing.current||!surface?.autoResume)return;
+    if(rescueLock.current||writing.current||!surface?.autoResume)return;
     writing.current=true;reads.current.next();reader.current?.abort();setBusy(true);setMessage('Saving auto-resume preference…');
     try{await gridJson('/'+id+'/auto-resume',{method:'POST',body:JSON.stringify({enabled,expectedGeneration:surface.autoResume.generation})});if(alive.current)setMessage(enabled?'Auto-resume enabled. Current safety checks still apply.':'Auto-resume off.');}
     catch(error){if(alive.current)setMessage((error as Error).message+'. Refresh state before changing this preference again.');}
     finally{writing.current=false;if(alive.current){setBusy(false);void load();}}
   };
   const start=async()=>{
-    if(writing.current||!surface?.startEnabled||surface.bot.status!=='draft'||!surface.startDraft)return;
+    if(rescueLock.current||writing.current||!surface?.startEnabled||surface.bot.status!=='draft'||!surface.startDraft)return;
     writing.current=true;reads.current.next();reader.current?.abort();setBusy(true);setMessage('Checking launch authority…');
     try{const result=await submitGridStart(id,surface.startDraft,(path,options)=>gridJson(path.slice('/api/grid-bots'.length),options));if(alive.current)setMessage(result.reason??'Launch recorded. Waiting for exchange confirmation.');}
     catch(error){if(alive.current)setMessage((error as Error).message+' Refresh state before retrying this draft.');}
     finally{writing.current=false;if(alive.current){setBusy(false);void load();}}
   };
-  const canAdjust=createEnabled&&!!surface&&gridCanAdjust(surface),autoView=surface?gridAutoResumeView(surface,now):null;
   return <Sheet open onOpenChange={open=>{if(!open)onClose();}}><SheetContent className="flex h-full w-full flex-col p-0 sm:max-w-2xl overflow-hidden">
     <SheetHeader className="border-b px-6 py-4 text-left"><div className="flex items-center justify-between gap-3"><SheetTitle>{surface?.bot.market??'Pacifica'} Grid Bot</SheetTitle><div className="flex shrink-0 gap-1"><Button variant="ghost" size="icon" disabled={busy} aria-label="Refresh state" title="Refresh state" onClick={()=>void load()}><RefreshCw className="h-4 w-4"/></Button><Button variant="ghost" size="icon" aria-label="Close bot details" title="Close bot details" onClick={onClose}><X className="h-4 w-4"/></Button></div></div><SheetDescription>{surface?<>Pacifica · {price(surface.bot.totalInvestment)} investment · {value(surface.bot.leverage??surface.bot.createIntent?.leverage)}×</>:'Loading bot details…'}</SheetDescription></SheetHeader>
-    <div className="flex-1 space-y-5 overflow-y-auto px-6 py-4">
+    <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-4">
       <p role="status" aria-live="polite" className="text-sm">{message||(!surface?'Loading current bot state…':'')}</p>
       <GridWorkerDrawerSlot botId={id}/>
-      {surface?<><GridBotOverview surface={surface} now={now} chart={<GridBotChart surface={surface} compact/>} busy={busy} onResume={()=>void act('resume')} onReview={()=>{if(history.current){history.current.open=true;history.current.scrollIntoView({block:'nearest'});}}}/><GridRangeMove id={id} revision={String(surface.observedAt)} onChanged={()=>void load()}/><GridBotDetails surface={surface} now={now} busy={busy} onAutoResumeChange={enabled=>void setAutoResume(enabled)}/><GridBotHistory surface={surface} now={now} historyRef={history}/></>:null}
+      <GridWorkerRescuePanel botId={id} stopped={surface?.bot.status==='stopped'}/>
+      {surface?<><GridBotOverview surface={surface} now={now} chart={<GridBotChart surface={surface} compact/>} busy={busy||rescueLocked} onResume={()=>void act('resume')} onReview={()=>{if(history.current){history.current.open=true;history.current.scrollIntoView({block:'nearest'});}}}/><GridRangeMove id={id} revision={String(surface.observedAt)} onChanged={()=>void load()}/><GridBotDetails surface={surface} now={now} busy={busy||rescueLocked} onAutoResumeChange={enabled=>void setAutoResume(enabled)}/><GridBotHistory surface={surface} now={now} historyRef={history}/></>:null}
     </div>
-    <div className="space-y-2 border-t bg-background p-4"><div className="flex flex-wrap gap-2">{surface?.startEnabled&&surface.bot.status==='draft'&&surface.startDraft?<Button disabled={busy} onClick={()=>setConfirm('start')}>Start bot</Button>:null}{surface&&gridVisibleActions(surface).filter(action=>action!=='resume'||autoView?.state!=='attention').map(action=><Button key={action} variant={action==='stop'?'destructive':'outline'} disabled={busy} onClick={()=>action==='stop'?setConfirm('stop'):void act(action)}>{action==='resync'?'Re-sync':action[0].toUpperCase()+action.slice(1)}</Button>)}</div>
-      {surface&&<GridStartAgain surface={surface} createEnabled={createEnabled} busy={busy||adjust} onAdjust={onAdjust}/>}
-      {canAdjust&&surface?.bot.status!=='stopped'&&<Button variant="outline" disabled={busy||adjust} onClick={()=>{if(!surface?.bot.createIntent)return;if(gridAdjustReady(surface))onAdjust({...surface.bot.createIntent,rangeSource:'manual'},surface.bot.id);else setConfirm('adjust');}}>Adjust Range</Button>}
-      {((canAdjust&&surface?.bot.status!=='stopped')||adjust)&&<p className="text-xs text-muted-foreground">Adjust range ends this bot and starts a new setup. {adjust?'Waiting for terminal settlement. You may close this drawer; reopen and choose Adjust Range to continue.':''}</p>}
-    </div>
-    <AlertDialog open={confirm!==null} onOpenChange={open=>{if(!open)setConfirm(null);}}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{confirm==='start'?'Start this Grid bot?':confirm==='adjust'?'Stop before adjusting range?':'Stop this Grid bot?'}</AlertDialogTitle><AlertDialogDescription>{confirm==='start'&&surface?gridStartConfirmation(surface.bot.totalInvestment,surface.bot.seedAtCreation===true,surface.bot.behaviourMode,surface.bot.direction):'This requests cancellation and a reduce-only close of the residual position. Settlement remains pending until exchange confirmation.'}{confirm==='adjust'?' A new editable draft opens only after confirmed terminal settlement.':''}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep bot</AlertDialogCancel><AlertDialogAction disabled={busy} onClick={()=>confirm==='start'?void start():void act('stop',confirm==='adjust')}>{confirm==='start'?'Confirm Start':'Confirm Stop'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
+    <GridBotFooter surface={surface} createEnabled={createEnabled} busy={busy} adjust={adjust} rescueLocked={rescueLocked} now={now} onAdjust={onAdjust} act={action=>void act(action)} setConfirm={setConfirm}/>
+    <AlertDialog open={!rescueLocked&&confirm!==null} onOpenChange={open=>{if(!open)setConfirm(null);}}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{confirm==='start'?'Start this Grid bot?':confirm==='adjust'?'Stop before adjusting range?':'Stop this Grid bot?'}</AlertDialogTitle><AlertDialogDescription>{confirm==='start'&&surface?gridStartConfirmation(surface.bot.totalInvestment,surface.bot.seedAtCreation===true,surface.bot.behaviourMode,surface.bot.direction):'This requests cancellation and a reduce-only close of the residual position. Settlement remains pending until exchange confirmation.'}{confirm==='adjust'?' A new editable draft opens only after confirmed terminal settlement.':''}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Keep bot</AlertDialogCancel><AlertDialogAction disabled={busy||rescueLocked} onClick={()=>confirm==='start'?void start():void act('stop',confirm==='adjust')}>{confirm==='start'?'Confirm Start':'Confirm Stop'}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </SheetContent></Sheet>;
 }

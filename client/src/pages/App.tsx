@@ -128,7 +128,7 @@ import { CreateBotModal } from '@/components/CreateBotModal';
 import { CreateAiTraderModal } from '@/components/CreateAiTraderModal';
 import { AiTraderDrawer } from '@/components/AiTraderDrawer';
 import { GridDraftCard } from '@/components/grid-bot/GridDraftCard';
-import { GridWorkerStatusSlot } from '@/components/grid-bot/GridWorkerContext';
+import { GridWorkerProvider, GridWorkerStatusSlot } from '@/components/grid-bot/GridWorkerContext';
 import { TradeHistoryModal, resolveTradePriceDisplay } from '@/components/TradeHistoryModal';
 import { WalletContent } from '@/pages/WalletManagement';
 import { WelcomePopup } from '@/components/WelcomePopup';
@@ -2251,7 +2251,7 @@ export default function AppPage() {
   }
 
   return (
-    <div className="min-h-screen flex overflow-x-clip">
+    <GridWorkerProvider wallet={publicKeyString} authenticated={sessionConnected}><div className="min-h-screen flex overflow-x-clip">
       <aside className={`fixed inset-y-0 left-0 z-50 bg-card/95 backdrop-blur-xl border-r border-border/50 transform transition-all duration-300 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} ${sidebarCollapsed ? 'lg:w-20' : 'lg:w-64'} w-64`}>
         <div className="flex flex-col h-full">
           <div className="p-4 border-b border-border/50">
@@ -6432,6 +6432,6 @@ export default function AppPage() {
           }}
         />
       )}
-    </div>
+    </div></GridWorkerProvider>
   );
 }

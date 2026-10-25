@@ -1,3 +1,7 @@
+import React from 'react';
+import {renderToStaticMarkup} from 'react-dom/server';
+import {GridWorkerRescueView} from '../../client/src/components/grid-bot/GridWorkerRescueView';
+import {presentation} from '../helpers/grid-worker-u5b-fixtures';
 import {afterAll,beforeAll,beforeEach,expect,it,vi} from 'vitest';
 import {Pool,type PoolClient} from 'pg';
 import {generateKeyPairSync,randomBytes,randomInt,randomUUID,sign,createHash} from 'node:crypto';
@@ -135,6 +139,7 @@ async function rescueHost(role:'grid-worker'|'protective'|null,heartbeatAge:numb
 async function roundTripOffers(){
   const r=await api('/status');expect(r.status,JSON.stringify(r.data)).toBe(200);
   const parsed=parseWorkerStatus(JSON.parse(JSON.stringify(r.data)));expect(parsed).not.toBeNull();
+  const markup=renderToStaticMarkup(React.createElement(GridWorkerRescueView,{state:presentation({status:parsed}),botId,names:new Map([[botId,'Morning grid']]),canSign:true}));if(parsed!.rescueOffers?.length)expect(markup).toContain('Rescue close');else expect(markup).toBe('');
   const offer=await tx(c=>rescueOffer(c,owner,botId));
   expect(parsed!.rescueOffers).toEqual(offer?[offer]:[]);
   return parsed!.rescueOffers;
@@ -379,7 +384,9 @@ it('normalizes the real rescue route and status JSON and rejects inexact numeric
   expect(parseWorkerRescue({...wire,phase:'EXAMPLE_FUTURE_PHASE'})?.next).toBe('step');
   for(const value of [' 2','2e1','+2','02','Infinity','9007199254740992'])expect(parseWorkerRescue({...wire,expiresInSeconds:value})).toBeNull();
   const status=(await api('/status')).data;status.rescue=wire;
-  expect(parseWorkerStatus(JSON.parse(JSON.stringify(status)))?.rescue?.requestId).toBe(wire.requestId);
+  const parsed=parseWorkerStatus(JSON.parse(JSON.stringify(status)));expect(parsed?.rescue?.requestId).toBe(wire.requestId);
+  expect(typeof wire.expiresInSeconds).toBe('string');expect(typeof parsed?.rescue?.expiresInSeconds).toBe('number');
+  const markup=renderToStaticMarkup(React.createElement(GridWorkerRescueView,{state:presentation({status:parsed}),botId,names:new Map([[botId,'Morning grid']]),canSign:true}));expect(markup).toContain('Rescue close running');expect(markup).toContain('Morning grid');
 });
 
 it('keeps a newer step result when an older GET completes later',async()=>{

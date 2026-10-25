@@ -1,4 +1,5 @@
 import React,{useEffect,useRef,useState} from 'react';
+import {useGridRescueLock} from './GridWorkerContext';
 import {Button} from '@/components/ui/button';
 import {walletAuthHeaders} from '@/lib/queryClient';
 
@@ -10,22 +11,27 @@ async function request(id:string,path:string,body?:unknown,signal?:AbortSignal){
   const value=await response.json();if(!response.ok)throw Error(value.error??'Range moving is unavailable');return value;
 }
 export function GridRangeMove({id,revision,onChanged,compact=false}:{id:string;revision?:string;onChanged?:()=>void;compact?:boolean}){
+  const rescueLocked=useGridRescueLock(id),rescueLock=useRef(rescueLocked);rescueLock.current=rescueLocked;
   const [state,setState]=useState<MoveSurface|null>(null),[proposal,setProposal]=useState<Proposal|null>(null),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);
   const [qualified,setQualified]=useState<Proposal|null>(null);
+  useEffect(()=>{if(rescueLocked){setProposal(null);setQualified(null);}},[rescueLocked]);
   const key=useRef(''),alive=useRef(true),writing=useRef(false);
   useEffect(()=>{alive.current=true;const controller=new AbortController();
     request(id,'/range-move',undefined,controller.signal).then(value=>{if(!controller.signal.aborted)setState(value);}).catch(()=>{if(!controller.signal.aborted)setState(null);});
     return()=>{alive.current=false;controller.abort();};
   },[id,revision]);
   useEffect(()=>{
-    setQualified(null);if(compact||!state?.enabled||state.mode!=='ask'||!state.available)return;
+    setQualified(null);if(rescueLocked||compact||!state?.enabled||state.mode!=='ask'||!state.available)return;
     const controller=new AbortController();let timer:number|undefined;
     request(id,'/range-move/proposal',{},controller.signal).then((next:Proposal)=>{
-      if(controller.signal.aborted)return;setQualified(next);timer=window.setTimeout(()=>setQualified(null),Math.max(0,next.proposal.expiresAt-Date.now()));
+      if(controller.signal.aborted||rescueLock.current)return;setQualified(next);timer=window.setTimeout(()=>setQualified(null),Math.max(0,next.proposal.expiresAt-Date.now()));
     }).catch(()=>{});
     return()=>{controller.abort();if(timer!==undefined)window.clearTimeout(timer);};
-  },[id,revision,compact,state?.enabled,state?.mode,state?.generation,state?.available]);
-  const perform=async(work:()=>Promise<void>)=>{if(writing.current)return;writing.current=true;setBusy(true);setMessage('');try{await work();}catch(error){if(alive.current)setMessage((error as Error).message);}finally{writing.current=false;if(alive.current)setBusy(false);}};
+  },[id,revision,compact,rescueLocked,state?.enabled,state?.mode,state?.generation,state?.available]);
+  const perform=async(work:()=>Promise<void>)=>{if(rescueLock.current||writing.current)return;writing.current=true;setBusy(true);setMessage('');try{await work();}catch(error){if(alive.current)setMessage((error as Error).message);}finally{writing.current=false;if(alive.current)setBusy(false);}};
+  return <GridRangeMoveView state={state} proposal={proposal} qualified={qualified} message={message} busy={busy} rescueLocked={rescueLocked} compact={compact} perform={perform} id={id} alive={alive} rescueLock={rescueLock} keyRef={key} setState={setState} setProposal={setProposal} setMessage={setMessage} onChanged={onChanged}/>;
+}
+export function GridRangeMoveView({state,proposal,qualified,message,busy,rescueLocked,compact,perform,id,alive,rescueLock,keyRef:key,setState,setProposal,setMessage,onChanged}:{state:MoveSurface|null;proposal:Proposal|null;qualified:Proposal|null;message:string;busy:boolean;rescueLocked:boolean;compact:boolean;perform:(work:()=>Promise<void>)=>Promise<void>;id:string;alive:{current:boolean};rescueLock:{current:boolean};keyRef:{current:string};setState:(value:MoveSurface)=>void;setProposal:(value:Proposal|null)=>void;setMessage:(value:string)=>void;onChanged?:()=>void}){
   if(!state)return null;
   const latest=state.epochs[0],direction=state.direction==='long'?'up':'down',information=(proposal??qualified)?.proposal.confirmation.information;
   if(compact)return latest?.ordinal>1?<span className="mt-2 block text-xs">Range moved {direction} · Range {latest.ordinal}</span>:null;
@@ -33,13 +39,13 @@ export function GridRangeMove({id,revision,onChanged,compact=false}:{id:string;r
   return <section className="space-y-3 rounded-lg border p-4 text-sm" aria-label="Range following">
     {state.enabled&&<>
       <label className="flex items-center justify-between gap-3">Follow price {direction}
-        <select aria-label={'Follow price '+direction} value={state.mode} disabled={busy} onChange={event=>{const mode=event.target.value;void perform(async()=>{
+        <select aria-label={'Follow price '+direction} value={state.mode} disabled={busy||rescueLocked} onChange={event=>{const mode=event.target.value;void perform(async()=>{
           const saved=await request(id,'/range-following',{mode,generation:state.generation});if(alive.current)setState({...state,...saved,generation:String(saved.generation)});
         });}} className="rounded border bg-background p-2"><option value="off">Off</option><option value="ask">Ask me</option></select>
       </label>
       {state.mode==='ask'&&qualified&&<p>Price closed {state.direction==='long'?'above':'below'} your range</p>}
-      <Button variant="outline" disabled={busy||!state.available} onClick={()=>void perform(async()=>{
-        const next=await request(id,'/range-move/proposal',{});if(alive.current){key.current=crypto.randomUUID();setProposal(next);}
+      <Button variant="outline" disabled={busy||rescueLocked||!state.available} onClick={()=>void perform(async()=>{
+        const next=await request(id,'/range-move/proposal',{});if(alive.current&&!rescueLock.current){key.current=crypto.randomUUID();setProposal(next);}
       })}>Move range {direction}</Button>
       {information&&<p className="text-xs text-muted-foreground">{information.state==='available'
         ?`DI+ ${information.plusDi?.toFixed(1)} / DI? ${information.minusDi?.toFixed(1)} ? ADX ${information.adx?.toFixed(1)}${information.adxDeclining?' (declining)':''} ? ATR(14) ${information.atr?.toFixed(4)} ? ${information.edgeAtr?.toFixed(2)} ATR beyond the old edge.`
@@ -48,11 +54,11 @@ export function GridRangeMove({id,revision,onChanged,compact=false}:{id:string;r
         <p>Range: {proposal.old.lower} – {proposal.old.upper} → {proposal.proposal.policy.lowerPrice} – {proposal.proposal.policy.upperPrice}</p>
         <p>Stop: {proposal.old.stop} → {proposal.proposal.policy.stopLossPrice}</p>
         <p>Investment and leverage stay the same</p><p>Existing holdings stay with this bot</p>
-        <div className="flex gap-2"><Button disabled={busy} onClick={()=>void perform(async()=>{
+        <div className="flex gap-2"><Button disabled={busy||rescueLocked} onClick={()=>void perform(async()=>{
           if(Date.now()>=proposal.proposal.expiresAt){setProposal(null);throw Error('Confirmation expired. Check the move again.');}
           await request(id,'/range-move/confirm',{requestId:key.current,proposal:proposal.proposal,proposalHash:proposal.proposalHash});
           if(alive.current){setProposal(null);setMessage('Move requested. Waiting for confirmed orders and the new range.');onChanged?.();}
-        })}>Confirm move {direction}</Button><Button variant="ghost" disabled={busy} onClick={()=>setProposal(null)}>Cancel</Button></div>
+        })}>Confirm move {direction}</Button><Button variant="ghost" disabled={busy||rescueLocked} onClick={()=>setProposal(null)}>Cancel</Button></div>
       </div>}
     </>}
     {message&&<p role="status">{message}</p>}

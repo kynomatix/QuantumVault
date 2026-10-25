@@ -10,3 +10,9 @@
 .gw-surface button.gw-primary{background:hsl(248 90% 60%);color:white}.gw-surface button:disabled{opacity:.5;cursor:not-allowed}.gw-surface button:focus-visible{outline:2px solid hsl(248 90% 78%);outline-offset:3px}
 .gw-inbox{border-top:1px solid hsl(235 30% 18%);margin-top:16px;padding-top:12px}.gw-list{list-style:none;padding:0;margin:10px 0}.gw-incident{display:flex;align-items:flex-start;gap:16px;border-bottom:1px solid hsl(235 30% 18%);padding:12px 0}.gw-incident>button{flex-shrink:0;font-size:12px}.gw-incident>span{max-width:130px}.gw-grow{flex:1;min-width:0}.gw-incident strong{font-size:12px}.gw-name{font-weight:600;white-space:normal;overflow-wrap:anywhere}.gw-drawer-line{font-size:13px;min-width:0;white-space:normal;overflow-wrap:anywhere;color:hsl(38 92% 65%)}
 @container(max-width:520px){.gw-card{padding:14px}.gw-banner{padding:12px 14px}.gw-banner p{margin-top:2px}.gw-incident{flex-wrap:wrap;gap:8px}.gw-grow{flex-basis:100%}}
+
+.gw-rescue { min-width: 0; position: static; overflow-wrap: anywhere; }
+.gw-rescue .gw-name { overflow-wrap: anywhere; word-break: break-word; }
+.gw-rescue details { margin-top: 16px; }
+.gw-rescue .gw-danger { border-color: #df6572; color: #fda4af; }
+@container (max-width: 520px) { .gw-rescue .gw-actions { flex-direction: column; } .gw-rescue .gw-actions button { width: 100%; white-space: normal; } }

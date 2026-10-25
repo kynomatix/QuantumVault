@@ -10,6 +10,7 @@ export class GridWorkerActions {
   async run(action:WorkerAction,target:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>,isWalletCurrent:()=>boolean){
     if(this.locked||!isWalletCurrent())return;
     if(action==='ack_critical'?!/^incident:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(target):target!=='all')return;
+    const release=this.cache.acquireSignature();if(!release)return;
     this.locked=true;const captured={action,target};let sent=false,signing=false;let beforeRevision:string|null=null;
     this.cache.update({busy:true,target:captured,notice:'',outcome:null});this.cache.accelerate();
     try{
@@ -55,7 +56,7 @@ export class GridWorkerActions {
           this.cache.update({busy:false,target:null,overlay:this.cache.snapshot().outcome?.saved==='unknown'?'save_unknown':latest&&cardStates.includes(latest.cardState as typeof cardStates[number])?'none':'stale'});
         }
       }
-      this.locked=false;
+      this.locked=false;release();
     }
   }
   async seen(ids:readonly string[]){if(ids.length)try{await this.post('/incidents/seen',{ids});}catch{/* Seen-only is best effort; no signed action is implied. */}}

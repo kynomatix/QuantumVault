@@ -17,9 +17,9 @@ describe('U5b wallet-scoped status and signed actions',()=>{
     const release=c.retain();const first=c.refresh();release();const again=c.retain();await c.refresh();await first;
     expect(read).toHaveBeenCalledTimes(1);expect(c.snapshot().status).not.toBeNull();again();await Promise.resolve();
   });
-  it('uses monotonic freshness and retains an owner shell across later denial',async()=>{
+  it('clears owner state across later denial',async()=>{
     let now=0,code=200;const c=new GridWorkerCache('EXAMPLE',async()=>({status:code,body:status()}),()=>now);
-    await c.refresh();now=61000;code=404;c.tick();await c.refresh();expect(c.snapshot().overlay).toBe('stale');expect(c.snapshot().admitted).toBe(true);c.dispose();
+    await c.refresh();now=61000;code=404;c.tick();await c.refresh();expect(c.snapshot().status).toBeNull();expect(c.snapshot().admitted).toBe(false);c.dispose();
   });
   it.each([503,409])('admits the stale first-load shell for %s',async code=>{const c=new GridWorkerCache('EXAMPLE',async()=>({status:code,body:null}));await c.refresh();expect(c.snapshot()).toMatchObject({admitted:true,overlay:'stale',status:null});c.dispose();});
   it('keeps an uncertain save unknown across polls until a newer currently paused revision is observed',async()=>{

@@ -1,11 +1,13 @@
 import React from 'react';
+import {botName} from '@/lib/grid-worker-copy';
+import {rescueCopy,rescuePhoneWarnings,rescueStops} from '@/lib/grid-worker-rescue-copy';
 import {aged,cardCopy,drawerCopy,phoneState,relativeAge,resumeReason,restrictionText} from '@/lib/grid-worker-copy';
 import {controlsVisible,currentPause,type WorkerAction,type WorkerPresentation} from '@/lib/grid-worker-view';
 import {GridWorkerInbox} from './GridWorkerInbox';
 export interface WorkerViewProps {state:WorkerPresentation;names:ReadonlyMap<string,string>;canSign:boolean;onAction?:(action:WorkerAction,target:string)=>void;onRefresh?:()=>void;onSeen?:(ids:string[])=>void;expanded?:boolean;rowsCollapsed?:boolean}
 export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,onSeen,expanded,rowsCollapsed=false}:WorkerViewProps){
   const s=p.status;if(!p.admitted||!controlsVisible(s)||!s)return null;
-  const copy=cardCopy(p),phone=phoneState(p),stale=copy.tone==='muted',paused=currentPause(s),reason=resumeReason(s,stale);
+  const copy=cardCopy(p,names),phone=phoneState(p),stale=copy.tone==='muted',paused=currentPause(s),reason=resumeReason(s,stale);
   const monitor=aged(s.ages.monitorPollSeconds,p.elapsedSeconds),worker=aged(s.ages.workerCheckInSeconds,p.elapsedSeconds);
   const busy=p.busy||!canSign,unknown=p.overlay==='save_unknown';
   const rows=!rowsCollapsed&&(paused||p.overlay==='pausing'||unknown);
@@ -15,9 +17,13 @@ export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,o
       <p>{phone==='stale'?"This page's view of the worker is out of date, so we can't tell whether phone alerts reach you.":monitor===null?"The desktop alert monitor (FRACTAL) hasn't checked in yet. It may be asleep or switched off, so nothing will reach your phone if a grid bot needs you.":`The desktop alert monitor (FRACTAL) hasn't checked in for ${relativeAge(monitor)}. It may be asleep or switched off, so nothing will reach your phone if a grid bot needs you.`}</p>
       {phone==='off'&&<><p>{s.host.observer_fenced?(s.unacknowledgedCritical>0?'New starts and resumes are on hold until the monitor checks in and you acknowledge the alert below.':'New starts and resumes are on hold until the monitor checks in.'):'Running bots carry on as they are. After 5 min without a check-in, new starts and resumes go on hold.'}</p><p className="gw-muted">Wake FRACTAL to turn phone alerts back on.</p></>}
     </div>}
+    {s.executionMode==='external'&&rescuePhoneWarnings(s,names).map(text=><p role="status" className="gw-banner gw-red" key={text}>{text}</p>)}
     <div className="gw-card">
       <header><h2>Grid worker</h2><span className="gw-muted">Only you can see this</span></header>
       <p className={'gw-pill gw-'+copy.tone} role="status">● {copy.pill}</p><p>{copy.sentence}</p>
+      {(s.rescue?.live||s.rescue?.unknownOpen)&&<p className="gw-red" role="status">{rescueStops(p)}</p>}
+      {s.rescue?.live&&<p className="gw-muted">{rescueCopy.screen}</p>}
+      {s.rescue?.unknownOpen&&<p>{rescueCopy.settlement}</p>}
       {restrictionText(s).map(text=><p role="status" className="gw-restriction" key={text}>{text}</p>)}
       {s.cardState==='offline'&&<p>Your phone should be alerting you. If it isn't, the desktop alert monitor (FRACTAL) may be asleep too.</p>}
       {phone==='legacy'&&<p className="gw-muted">Phone alerts watch the worker, not the main app, so they don't cover your grid bots in this mode.</p>}
@@ -42,7 +48,10 @@ export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,o
     </div>
   </section>;
 }
-export function GridWorkerDrawerView({state,botId}:{state:WorkerPresentation;botId:string}){
-  if(!state.admitted||!controlsVisible(state.status))return null;const line=drawerCopy(state,botId);
+export function GridWorkerDrawerView({state,botId,names=new Map()}:{state:WorkerPresentation;botId:string;names?:ReadonlyMap<string,string>}){
+  if(!state.admitted||!controlsVisible(state.status))return null;const s=state.status!,r=s.rescue;
+  const independent=drawerCopy(state,botId);
+  const rescueLine=r&&r.botId!==botId&&(r.live||r.unknownOpen)?(r.unknownOpen?'A rescue close outcome is unknown.':`A rescue close is running on ${botName(names,r.botId)}.`)+' '+rescueStops(state):null;
+  const line=[rescueLine,independent].filter(Boolean).join(' ');
   return line?<p className="gw-drawer-line" role="status">{line}</p>:null;
 }

@@ -23,4 +23,4 @@ export function GridWorkerStatus(){
     onRefresh={()=>void context.cache.refresh()} onSeen={ids=>void actions?.seen(ids)}
     onAction={(action,target)=>{if(wallet.signMessage)void actions?.run(action,target,wallet.signMessage,()=>alive.current&&currentWallet.current===context.cache.wallet);}}/>;
 }
-export function GridWorkerDrawerLine({botId}:{botId:string}){const {state}=useGridWorker();return <GridWorkerDrawerView state={state} botId={botId}/>;}
+export function GridWorkerDrawerLine({botId}:{botId:string}){const {state,context}=useGridWorker();return <GridWorkerDrawerView state={state} botId={botId} names={context?.names}/>;}

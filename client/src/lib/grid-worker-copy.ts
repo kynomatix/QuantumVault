@@ -1,7 +1,7 @@
 import {workerCopyViolation} from '../../../shared/grid-worker-copy-check';
 import {cardStates,currentPause,type WorkerPresentation,type WorkerStatus} from './grid-worker-view';
 export const incidentCopy:Readonly<Record<string,{text:string;kind:'condition'|'event'|'notice'}>>=Object.freeze(Object.assign(Object.create(null),{
-  lease_lost:{kind:'condition',text:"The worker lost its lease and shut down to stay safe. Stops don't run until a worker is back in control."},
+  lease_lost:{kind:'condition',text:"The worker lost control and shut down to stay safe. It must restart before taking control again. Stops don't run until a worker is back in control."},
   contender_seen:{kind:'event',text:"A second process tried to run your grid bots, or the worker's control record changed unexpectedly."},
   database_unavailable:{kind:'condition',text:"The worker couldn't reach its database."},
   clock_unhealthy:{kind:'condition',text:"The worker's clock went out of step with the database, so it shut down to stay safe."},
@@ -14,7 +14,7 @@ export const incidentCopy:Readonly<Record<string,{text:string;kind:'condition'|'
   observer_silent:{kind:'condition',text:"The alert monitor has been silent for over 5 minutes, so new starts and resumes are on hold."},
   audit_mismatch:{kind:'event',text:"The worker's records don't match Pacifica's, so new activity on the affected bots is on hold."},
   reconciliation_unavailable:{kind:'condition',text:"The worker couldn't finish checking your Pacifica history, so new starts and resumes are on hold."},
-  protective_failure:{kind:'event',text:"The worker couldn't finish cancelling orders or closing a position, so a position may still be open."},
+  protective_failure:{kind:'event',text:"Cancelling orders or closing a position didn't finish, so a position may still be open."},
   schema_drift:{kind:'condition',text:"The worker couldn't verify its database setup, so it shut down to stay safe. Stops don't run until it's back."},
   quota_pressure:{kind:'notice',text:"The worker is close to Pacifica's request limit and is slowing down."},
   notification_delayed:{kind:'notice',text:"A bot notification is taking longer than usual to send."},
@@ -42,11 +42,12 @@ export function resumeReason(s:WorkerStatus,stale:boolean):string {
   if(stale)return 'Resume opens once this page reaches the server again.';
   if(s.incidents.some(i=>!incidentCopy[i.code]))return 'This setup needs review before Resume is available.';
   if(s.incidents.some(i=>i.resolved_at===null&&incidentCopy[i.code]?.kind==='event'))return 'Resume stays locked until this alert has been reviewed and cleared.';
+  if(s.resetBlockedBy.includes('rescue'))return 'Resume waits until the rescue close ends and any unknown order is settled.';
   const reason=s.resetBlockedBy[0];
   if(!reason)return '';
   return ({server_flag:"Resume is locked by the server's pause setting.",open_alert:'Resume opens once every alert is acknowledged and fixed.',review_required:'This setup needs review before Resume is available.',worker_checks:'Resume is waiting for the worker to be ready.',monitor_fence:'Resume opens once the desktop alert monitor checks in.',history_checks:'Resume opens once Pacifica history checks are complete.'} as Record<string,string>)[reason]??'This setup needs review before Resume is available.';
 }
-export function cardCopy(p:WorkerPresentation):{pill:string;sentence:string;tone:'red'|'amber'|'teal'|'primary'|'muted'} {
+export function cardCopy(p:WorkerPresentation,names:ReadonlyMap<string,string>=new Map()):{pill:string;sentence:string;tone:'red'|'amber'|'teal'|'primary'|'muted'} {
   const s=p.status;
   if(p.overlay==='stale'||p.overlay==='checking'||!s)return {pill:'Not checked recently',sentence:p.overlay==='checking'?'Checking the latest status…':"The latest status isn't confirmed. Last known information is shown below.",tone:'muted'};
   if(p.overlay==='signing')return {pill:'Check your wallet…',sentence:p.target?.action==='pause'?'Check your wallet to sign the pause.':p.target?.action==='reset_pause'?'Check your wallet to sign the resume.':'Check your wallet to acknowledge this alert.',tone:'primary'};
@@ -54,11 +55,13 @@ export function cardCopy(p:WorkerPresentation):{pill:string;sentence:string;tone
   if(p.overlay==='save_unknown')return {pill:'Pause not confirmed',sentence:"We couldn't tell whether the pause was saved. Check again, or pause again to be sure.",tone:'red'};
   if(p.overlay==='resuming')return {pill:'Resuming',sentence:'Resume sent. Waiting for the server to clear it.',tone:'amber'};
   switch(s.cardState){
+    case 'rescue_running':return {pill:'Rescue close running',sentence:`The main app is running a rescue close on ${botName(names,s.rescue?.botId??null)}. Open that bot to see progress.`,tone:'amber'};
+    case 'rescue_unknown':return {pill:'Rescue outcome unknown',sentence:'A rescue close outcome is unknown. The worker must settle the unknown order before it can take back control.',tone:'red'};
     case 'offline':return {pill:'Offline or not responding',sentence:"The worker isn't available to run your bots. Orders already on Pacifica can still fill, and stops won't run until it's back.",tone:'red'};
     case 'exec_off':return {pill:'Trading switched off',sentence:s.executionMode==='external'?"Trading is switched off for the worker, so it won't run stops or place orders.":"Trading is switched off, so the main app won't run stops or place orders.",tone:'red'};
     case 'pause_unconfirmed':return {pill:'Pause not confirmed',sentence:currentPause(s)?"The pause is saved, but the worker hasn't confirmed it, so it may still place new entries.":"The worker hasn't confirmed this pause.",tone:'red'};
     case 'needs_you':return {pill:'Needs you',sentence:currentPause(s)?`New grid activity is paused, and ${s.unacknowledgedCritical} ${s.unacknowledgedCritical===1?'alert needs':'alerts need'} you.`:s.unacknowledgedCritical===1?'An alert needs you: acknowledge it below.':`${s.unacknowledgedCritical} alerts need you: acknowledge them below.`,tone:'red'};
-    case 'check_bots':return {pill:'Check your bots',sentence:'A position may still be open. Check the bot named below, or close it on Pacifica.',tone:'red'};
+    case 'check_bots':return {pill:'Check your bots',sentence:s.rescueOffers?.some(o=>o.blockedBy===null)?'A position may still be open. Open the bot named below to check or close it.':'A position may still be open. Open the bot named below to check it.',tone:'red'};
     case 'test':return {pill:'Test mode, not trading',sentence:s.executionMode==='external'?"Test mode: the worker checks your grid bots but won't place orders or run stops.":"Test mode: the main app won't place orders or run stops.",tone:'primary'};
     case 'paused':case 'legacy_paused':return {pill:'New activity paused',sentence:'New grid activity is paused for all bots.'+(s.stopsAllowed&&s.executionRestrictions.length===0?(s.executionMode==='external'?' Stops and closes still run while the worker is online.':' Stops and closes still run while the main app is running.') :''),tone:'amber'};
     case 'attention_fence':return {pill:'Needs attention',sentence:'Start and resume are on hold until the alert monitor checks in.',tone:'amber'};
