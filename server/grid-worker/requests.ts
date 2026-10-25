@@ -1,3 +1,4 @@
+import {initialStartZeroSql} from './start-facts';
 import {refuseRescueMutation} from './rescue-recovery';
 import {createHash} from 'node:crypto';
 import Decimal from 'decimal.js';
@@ -44,7 +45,8 @@ async function externalHost(c:PoolClient) {
   return (await c.query(`SELECT *,lease_expires_at>clock_timestamp() AS holder_live,
     date_trunc('milliseconds',clock_timestamp()) AS db_now FROM grid_worker_host WHERE singleton_id=1`)).rows[0];
 }
-function entryGates(h:Record<string,any>|undefined) {
+async function entryGates(h:Record<string,any>|undefined,c:PoolClient) {
+  if((await c.query("SELECT 1 FROM grid_worker_incidents WHERE code='audit_mismatch' AND acknowledged_at IS NULL LIMIT 1")).rowCount)throw new StartRefusal('facts_unavailable');
   if(!h||h.execution_mode!=='external'||h.run_mode!=='trading'||!h.execution_enabled||h.drain_requested
     ||!h.authority_tracking_enabled||h.start_scope!=='owner_allowlist')throw new StartRefusal('authority_refused');
   if(h.entries_paused)throw new StartRefusal('entries_paused');
@@ -76,7 +78,7 @@ export class MainStartRequests {
     return fencedTransaction(this.lane,async c=>{
       await walletFences(c,[owner]);await identityFences(c,[botId],[]);
       await refuseRescueMutation(c,botId);
-      const h=await externalHost(c);entryGates(h);
+      const h=await externalHost(c);await entryGates(h,c);
       if(h.owner_wallet!==owner)throw new StartRefusal('authority_refused');
       await expirePending(c,owner,botId);
       const {policy,bot}=await signedPolicy(c,botId,umk);
@@ -110,7 +112,7 @@ async function requestLocks(c:PoolClient,id:string) {
 }
 async function workerHost(c:PoolClient,holder:WorkerRequestContext,protective=false) {
   const h=await externalHost(c);
-  if(!protective)entryGates(h);
+  if(!protective)await entryGates(h,c);
   if(!h||h.execution_mode!=='external')throw new StartRefusal('authority_refused');
   if(!h.holder_live||h.holder_role!=='grid-worker'||h.holder_boot_id!==holder.bootId||String(h.fencing_epoch)!==holder.epoch)throw new StartRefusal('authority_refused');
   await localContext(c,'start',holder);return h;
@@ -160,6 +162,8 @@ export class WorkerStartRequests {
         return consent;
       }
       if(reservation)throw new StartRefusal('authority_refused'); // Lifetime identity is never reused, including released rows.
+      if(bot.protocol_subaccount_id!==null||!['draft','failed'].includes(bot.status)
+        ||(await c.query(initialStartZeroSql,[row.bot_id])).rows[0].used)throw new StartRefusal('facts_unavailable');
       const now=new Date(h.db_now).getTime();
       if(!preflightGridLaunch(policy,consent.consent.policyHmac,umk,facts,now).ok)throw new StartRefusal('facts_unavailable');
       const r=calculateSpending(policy.totalInvestment,policy.leverage,spending,now);

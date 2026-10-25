@@ -1,3 +1,4 @@
+import {workerLaunchEnvironment} from './environment';
 import bs58 from 'bs58';
 import nacl from 'tweetnacl';
 import Decimal from 'decimal.js';
@@ -15,8 +16,8 @@ import type {WorkerQuota} from './quota';
 
 /** No MAIN defaults, sessions, canonical UMK, general adapter or background service. */
 export function workerDependencies(pool:Pool,quota:Pick<WorkerQuota,'debit'|'rateLimited'>,env:Readonly<NodeJS.ProcessEnv>):GridRuntimeDependencies {
-  const fetcher=workerFetch(quota),transport=new PacificaTransportAuthority(env.PACIFICA_API_KEY);
-  const environment={REUSE_ON_CREATE:env.REUSE_ON_CREATE,RECYCLE_ON_DELETE:env.RECYCLE_ON_DELETE,REPLIT_DEPLOYMENT:env.REPLIT_DEPLOYMENT,GRID_RECYCLER_DEPLOYMENT:env.GRID_RECYCLER_DEPLOYMENT};
+  const fetcher=workerFetch(quota),transport=new PacificaTransportAuthority(undefined,'pacifica:worker-no-key',Date.now,true);
+  const environment=workerLaunchEnvironment(env);
   const dependencies:GridRuntimeDependencies={
     umk:wallet=>getExecutionUmk(pool,wallet),
     async unlock(wallet,umk){
@@ -39,8 +40,7 @@ export function workerDependencies(pool:Pool,quota:Pick<WorkerQuota,'debit'|'rat
     },
     transport,fetcher,environment,
     async sol(wallet,signal){
-      const endpoint=new URL(env.HELIUS_API_KEY?'https://mainnet.helius-rpc.com/':'https://api.mainnet-beta.solana.com/');
-      if(env.HELIUS_API_KEY)endpoint.searchParams.set('api-key',env.HELIUS_API_KEY);
+      const endpoint=new URL('https://api.mainnet-beta.solana.com/');
       const url=endpoint.href;
       const started=Date.now(),response=await fetcher(url,{method:'POST',headers:{'Content-Type':'application/json'},signal,
         body:JSON.stringify({jsonrpc:'2.0',id:1,method:'getBalance',params:[wallet,{commitment:'confirmed'}]})});

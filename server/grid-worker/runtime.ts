@@ -1,3 +1,4 @@
+import {collectStartFacts} from './start-facts';
 import {installWorkerBindings} from './runtime-bindings';
 import {readGridMargin} from '../grid-bot/margin';
 import {randomUUID} from 'node:crypto';
@@ -50,18 +51,15 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
   const terminate=async(pid:number)=>{await pool.query('SELECT pg_terminate_backend($1)',[pid]);};
   const incidents=new GridIncidents(pool,terminate),quota=new WorkerQuota(pool,terminate),dependencies=workerDependencies(pool,quota,env);
   const protection=new ProtectionTruth(pool,terminate,incidents);
-  installWorkerBindings(dependencies.umk,()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.execution_enabled===true&&host?.run_mode==='trading'&&!host?.entries_paused&&!host?.observer_fenced);
+  installWorkerBindings(dependencies.umk,()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&!memory.critical&&memory.reconciled&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.execution_enabled===true&&host?.run_mode==='trading'&&!host?.entries_paused&&!host?.observer_fenced);
   const holder=()=>{if(!lease||!leaseLocallyValid(lease)||!ready())throw Error('GRID_LEASE_EXPIRED');return lease;};
   let queue:WorkerStartQueue;
   const ledger:GridLaunchStorage=new GridLaunchStorage(pool,async()=>{if(!ready())throw Error('GRID_WORKER_NOT_READY');},r=>readGridMargin(json,r),
     {lease:holder,ready,terminate,verifyStart:(c,id)=>queue.verify(c,id),releaseReservation:(c,id)=>queue.release(c,id)});
   const json:GridLaunchReads=new GridLaunchReads(dependencies.transport,ledger,'0.5',dependencies.fetcher),reads=new GridMonitorReads(json),monitor=new GridMonitorStorage(ledger);
   const executor=gridExecutorCore(monitor,reads,json,dependencies),reconciliation=new WorkerReconciliation(pool,terminate,json,reads,dependencies,incidents);
-  queue=new WorkerStartQueue(pool,terminate,incidents,holder,dependencies,async()=>{
-    // Full transfer/withdrawal history is deliberately unavailable in the frozen read inventory.
-    // Never fabricate spending facts from balances or from an incomplete cursor. U7 cannot activate this path.
-    throw Error('GRID_RECONCILIATION_UNAVAILABLE');
-  },(wallet,id,expected,signal)=>executor.start(wallet,id,expected,signal));
+  queue=new WorkerStartQueue(pool,terminate,incidents,holder,dependencies,
+    (botId,umk,signal)=>collectStartFacts(pool,dependencies,json,ledger,botId,umk,signal),(wallet,id,expected,signal)=>executor.start(wallet,id,expected,signal));
   const scheduler=new WorkerScheduler({
     async existing(signal){
       if(!host||host.run_mode!=='trading'||!host.execution_enabled)return;
@@ -77,7 +75,7 @@ export async function startWorkerRuntime(env:Readonly<NodeJS.ProcessEnv>,databas
     lifecycle:async()=>{},
     async reconcile(signal){const clean=await reconciliation.pass(signal);memory.reconciled=clean;return clean;},
     startOne:signal=>queue.one(signal),
-  },()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.run_mode==='trading'&&host.execution_enabled&&!host.entries_paused&&!host.observer_fenced&&!host.drain_requested&&memory.reconciled);
+  },()=>ready()&&!!lease&&leaseLocallyValid(lease)&&observer.polledSinceAcquire&&!memory.critical&&memory.reconciled&&env.GRID_ENTRIES_PAUSED!=='true'&&host?.run_mode==='trading'&&host.execution_enabled&&!host.entries_paused&&!host.observer_fenced&&!host.drain_requested&&memory.reconciled);
   let leaseService:GridWorkerLease|undefined;
   const die=async(code:'lease_lost'|'clock_unhealthy'|'schema_drift'|'database_unavailable')=>{
     if(dying)return;dying=true;memory.critical=true;memory.inControl=false;readyUntil=0;

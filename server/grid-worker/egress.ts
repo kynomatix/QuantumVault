@@ -1,5 +1,5 @@
 const writes = new Set(['/account/subaccount/create', '/account/subaccount/transfer', '/account/leverage', '/orders/create_market', '/orders/create', '/orders/cancel']);
-const reads = new Set(['/info', '/info/prices', '/book', '/account', '/account/settings', '/orders', '/positions', '/orders/history', '/trades/history', '/kline']);
+const reads = new Set(['/info', '/info/prices', '/book', '/account', '/account/settings', '/orders', '/positions', '/orders/history', '/trades/history', '/account/balance/history', '/funding/history', '/kline']);
 const rpcReads = new Set(['getBalance', 'getLatestBlockhash', 'getBlockHeight', 'getAccountInfo', 'getMultipleAccounts', 'getTokenAccountBalance', 'getSignatureStatuses']);
 
 export type WorkerEgress = { kind: 'venue'; method: 'GET' | 'POST' }
@@ -13,6 +13,13 @@ export function assertWorkerEgress(raw: string, request: WorkerEgress): URL {
   if (request.kind === 'venue') {
     if (url.protocol !== 'https:' || url.hostname !== 'api.pacifica.fi' || !url.pathname.startsWith('/api/v1/')) throw Error('GRID_EGRESS_REFUSED');
     const route = url.pathname.slice('/api/v1'.length);
+    if(route==='/account/balance/history'){
+      const keys=[...url.searchParams.keys()];
+      if(new Set(keys).size!==keys.length||keys.some(k=>!['account','limit','cursor','include_trades'].includes(k))
+        ||! /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(url.searchParams.get('account')??'')
+        ||url.searchParams.get('limit')!=='100'||url.searchParams.get('include_trades')!=='true'
+        ||url.searchParams.has('cursor')&&!/^[A-Za-z0-9_-]{1,512}$/.test(url.searchParams.get('cursor')??''))throw Error('GRID_EGRESS_REFUSED');
+    }
     if (!(request.method === 'POST' ? writes.has(route)||route==='/account/subaccount/list' : reads.has(route)) || request.method === 'POST' && url.search) throw Error('GRID_EGRESS_REFUSED');
   } else if (request.kind === 'websocket') {
     if (url.protocol !== 'wss:' || url.hostname !== 'ws.pacifica.fi' || url.pathname !== '/ws' || url.search) throw Error('GRID_EGRESS_REFUSED');

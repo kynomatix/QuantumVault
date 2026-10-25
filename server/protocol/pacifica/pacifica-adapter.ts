@@ -1,3 +1,4 @@
+import {debitMainRequest,mainQuota} from '../../grid-worker/main-quota';
 import type {
   ProtocolAdapter,
   CreateSubaccountInput,
@@ -4298,9 +4299,12 @@ export class PacificaAdapter implements ProtocolAdapter {
     // the 2026-07-24 prod incident AbortSignal.timeout never fired on a
     // wedged socket; a plain setTimeout always fires regardless of socket
     // state because it runs entirely in the JS event loop.
+    const scoped=debitMainRequest(url,init);
     const controller = new AbortController();
     const softTimer = setTimeout(() => controller.abort(), softMs);
-    const fetchPromise = fetch(url, { ...init, signal: controller.signal });
+    const fetchPromise = fetch(url, { ...init, signal: controller.signal }).then(response=>{
+      if(scoped&&response.status===429)mainQuota.rateLimited('pacifica_rest');return response;
+    });
     // Suppress: once the hard cap has moved on, we do not want an unhandled
     // rejection if the late fetch eventually settles.
     fetchPromise.catch(() => {});

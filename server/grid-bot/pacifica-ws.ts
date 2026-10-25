@@ -54,7 +54,7 @@ export class GridPacificaWsManager {
     }
 
     // Refusal is a configuration failure, never a reconnectable network failure.
-    this.transport.websocketOptions(this.config.wsUrl);
+    this.transport.websocketOptions(this.config.wsUrl,this.config.account);
     this.shouldReconnect = true;
     this.doConnect();
   }
@@ -120,7 +120,7 @@ export class GridPacificaWsManager {
     this.state = 'connecting';
 
     try {
-      const options = this.transport.websocketOptions(this.config.wsUrl);
+      const options = this.transport.websocketOptions(this.config.wsUrl,this.config.account);
       this.ws = this.transport.keyStatus === 'present'
         ? new NodeWebSocket(this.config.wsUrl, options) as unknown as WebSocket
         : new WebSocket(this.config.wsUrl);

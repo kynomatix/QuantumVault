@@ -1,3 +1,4 @@
+import {debitMainRequest} from '../grid-worker/main-quota';
 import Decimal from 'decimal.js';
 import {PacificaSigner,buildSigningMessage} from '../protocol/pacifica/pacifica-signer';
 import {PacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
@@ -13,7 +14,7 @@ export const validExactRequest=validGridPayload;
 export class GridPacificaSender {
   constructor(private transport:PacificaTransportAuthority,private fetcher:typeof fetch=fetch,private firstPlacement?:GridFirstPlacementBoundary,private margin?:Pick<GridLaunchStorage,'finalMargin'|'sendOwned'|'validatePayload'>){}
   async send(r:ExactGridRequest,subaccountSecret:Buffer,masterSecret?:Buffer,leaseToken?:string):Promise<GridSendResult>{
-    if(!validExactRequest(r) || this.transport.keyStatus!=='present')throw Error('Grid transport authority unavailable');
+    if(!validExactRequest(r) || !this.transport.gridReady)throw Error('Grid transport authority unavailable');
     if(!this.margin)throw new GridLaunchTransientError('Grid send ownership boundary unavailable');
     await this.margin.validatePayload(r);
     const payload=gridPayload(r);
@@ -43,7 +44,8 @@ export class GridPacificaSender {
     if(Date.now()>=r.timestamp+r.expiryMs)throw new GridLaunchTransientError('Grid signed request expired before POST');
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired before POST.');
     // One bounded request only. Header/HTTP success alone never settles money or an order.
-    const response=this.transport.response(await this.fetcher(url,{...init,redirect:'error',signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(5000)])}));
+    const scoped=debitMainRequest(url,init);
+    const response=this.transport.response(await this.fetcher(url,{...init,redirect:'error',signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(5000)])}),scoped);
     if(response.redirected||response.status>=300&&response.status<400)throw Error('GRID_EGRESS_REFUSED');
     if(response.status===400||response.status===403||response.status===429){
       const body=response.status===400?await response.json().catch(()=>null):null;

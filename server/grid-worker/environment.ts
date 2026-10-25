@@ -17,3 +17,10 @@ export function workerEnvironment(source: Readonly<Record<string, string | undef
   if (env.PORT !== undefined && (!/^\d{1,5}$/.test(env.PORT) || Number(env.PORT) < 1 || Number(env.PORT) > 65535)) throw Error('GRID_WORKER_PORT_INVALID');
   return Object.freeze(env);
 }
+
+/** Frozen worker settings. A worker cannot inherit MAIN's deployment marker. */
+export function workerLaunchEnvironment(env:Readonly<NodeJS.ProcessEnv>){
+  return {REUSE_ON_CREATE:env.REUSE_ON_CREATE,RECYCLE_ON_DELETE:env.RECYCLE_ON_DELETE,
+    REPLIT_DEPLOYMENT:env.QV_PROCESS_ROLE==='grid-worker'?(env.GRID_REMOTE_WORKER_ENABLED==='true'?'1':''):env.REPLIT_DEPLOYMENT,
+    GRID_RECYCLER_DEPLOYMENT:env.GRID_RECYCLER_DEPLOYMENT};
+}

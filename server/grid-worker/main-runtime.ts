@@ -1,4 +1,5 @@
 import {mainQuota} from './main-quota';
+import {installMainQuotaAccounts} from './main-quota-scope';
 import type {Pool} from 'pg';
 import {fencedTransaction,type ClientLane} from './transaction';
 import {tightenHost} from './host';
@@ -22,6 +23,8 @@ export async function startMainQuotaRefresh(pool:Pool){
     try{await relayMainEntriesPause(lane,terminate,process.env.GRID_ENTRIES_PAUSED==='true');}
     catch{/* Retry on the next tick; local entry gates remain closed. */}
     if(process.env.GRID_REMOTE_WORKER_ENABLED==='true'){
+      try{installMainQuotaAccounts((await pool.query("SELECT protocol_subaccount_id AS account,agent_public_key AS master_account FROM protocol_subaccounts WHERE protocol='pacifica' AND protocol_subaccount_id IS NOT NULL")).rows);}
+      catch{/* Retain the last verified child identities. */}
       try{mainQuota.install((await pool.query('SELECT * FROM grid_worker_quota_policy WHERE valid_until>clock_timestamp()')).rows);}
       catch{mainQuota.install([]);}
       try{ownerWallet=(await pool.query(`SELECT o.wallet_address FROM grid_worker_owner o JOIN grid_worker_host h

@@ -1,3 +1,4 @@
+import {debitMainRequest} from '../grid-worker/main-quota';
 import type {PacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
 import type {GridLaunchStorage} from './launch-storage-core';
 import {GridLaunchTransientError} from './launch-storage-core';
@@ -8,7 +9,7 @@ import {PacificaSigner,OPERATION_TYPES} from '../protocol/pacifica/pacifica-sign
 export class GridLaunchReads {
   private measured:{credits:string;remaining:string;at:number}|null=null;
   constructor(private transport:PacificaTransportAuthority,private ledger:Pick<GridLaunchStorage,'claimRead'|'recordRateLimit'> & Partial<Pick<GridLaunchStorage,'availableCredits'>>,private share:string,private fetcher:typeof fetch=fetch){}
-  ready(){return this.transport.keyStatus==='present';}
+  ready(){return this.transport.gridReady;}
   private ceiling(){
     const now=Date.now(),q=this.transport.quota.snapshot();
     if(this.measured&&now-this.measured.at>=60_000)this.measured=null;
@@ -16,20 +17,20 @@ export class GridLaunchReads {
       // Remaining credits also lower the shared ceiling; the fixed half-share and
       // durable claims then debit reads/execution from that bound, not a reusable balance.
       const remaining=new Decimal(q.remainingDeciCredits!).div(10).floor().toFixed(),credits=Decimal.min(300,new Decimal(q.quotaDeciCredits!).div(10),remaining).toFixed();
-      this.measured={credits:Decimal.min(this.measured?.credits??'300',credits).toFixed(),remaining:Decimal.min(this.measured?.remaining??remaining,remaining).toFixed(),at:this.measured?.at??now};
+      this.measured={credits:Decimal.min(this.measured?.credits??(this.transport.workerNoKey?'100':'300'),credits).toFixed(),remaining:Decimal.min(this.measured?.remaining??remaining,remaining).toFixed(),at:this.measured?.at??now};
     }
     return this.measured;
   }
   /** ASSUMED 300-credit policy. Measured observations may only reduce it. */
   async quota(masterAccount:string){
     if(!this.ready()||!new Decimal(this.share).eq('0.5')||!this.ledger.availableCredits)throw Error('Grid quota authority unavailable');
-    const q=this.ceiling(),observed=q?.credits??'300';
+    const q=this.ceiling(),observed=q?.credits??(this.transport.workerNoKey?'100':'300');
     let available=new Decimal(await this.ledger.availableCredits(masterAccount,observed));
     if(q)available=Decimal.min(available,q.remaining);
     return {observedCredits:observed,availableGridCredits:Decimal.max(0,available).toFixed()};
   }
   async json(masterAccount:string,path:string,params:Record<string,string>,signal?:AbortSignal):Promise<unknown>{
-    if(this.transport.keyStatus!=='present'||!/^\/[a-z_]+(?:\/[a-z_]+)*$/.test(path))throw Error('Grid read authority unavailable');
+    if(!this.transport.gridReady||!/^\/[a-z_]+(?:\/[a-z_]+)*$/.test(path))throw Error('Grid read authority unavailable');
     const url=new URL('https://api.pacifica.fi/api/v1'+path);for(const [k,v] of Object.entries(params))url.searchParams.set(k,v);
     return this.request(masterAccount,url,{method:'GET'},signal);
   }
@@ -44,11 +45,12 @@ export class GridLaunchReads {
   private async request(masterAccount:string,url:URL,init:RequestInit,signal?:AbortSignal):Promise<unknown>{
     if(!masterAccount||!this.ready())throw Error('Grid read authority unavailable');
     signal?.throwIfAborted();
-    const observed=this.ceiling()?.credits??'300';
+    const observed=this.ceiling()?.credits??(this.transport.workerNoKey?'100':'300');
     await this.ledger.claimRead(masterAccount,'1',observed,this.share);
     signal?.throwIfAborted();
+    const scoped=debitMainRequest(url.toString(),init,masterAccount);
     let response:Response;
-    try{response=this.transport.response(await this.fetcher(url,this.transport.restInit(url.toString(),{...init,signal:signal?AbortSignal.any([signal,AbortSignal.timeout(5000)]):AbortSignal.timeout(5000)})));}
+    try{response=this.transport.response(await this.fetcher(url,this.transport.restInit(url.toString(),{...init,signal:signal?AbortSignal.any([signal,AbortSignal.timeout(5000)]):AbortSignal.timeout(5000)})),scoped);}
     catch{signal?.throwIfAborted();throw Error('Grid observation transport unavailable');}
     this.ceiling();
     if(response.status===429){

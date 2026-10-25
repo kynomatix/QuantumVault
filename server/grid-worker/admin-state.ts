@@ -81,13 +81,16 @@ export async function readAdminFacts(c:PoolClient):Promise<AdminFacts>{
     WHERE (severity='critical' OR NOT(code=ANY(SELECT jsonb_array_elements_text($1::jsonb))))
       AND (acknowledged_at IS NULL OR resolved_at IS NULL)`,[JSON.stringify([...CRITICAL_PRIORITY,'exposure_above_budget','quota_pressure','notification_delayed'])])).rows;
   // Legacy controls have no worker history producer. Their per-bot launch/entry checks still apply.
-  const history=host.execution_mode==='legacy'||!(await c.query(`SELECT 1 FROM protocol_subaccounts p
-    CROSS JOIN jsonb_array_elements_text($1::jsonb) s(stream)
-    WHERE p.protocol='pacifica' AND p.protocol_subaccount_id IS NOT NULL AND NOT EXISTS(
-      SELECT 1 FROM grid_worker_reconciliation r WHERE r.account=p.protocol_subaccount_id AND r.stream=s.stream
+  const history=host.execution_mode==='legacy'||OWNER_MASTER_PUBLIC_KEYS.length>0&&!(await c.query(`WITH accounts AS (
+      SELECT unnest($2::text[]) AS account,false AS grid
+      UNION SELECT p.protocol_subaccount_id,EXISTS(SELECT 1 FROM grid_launch_accounts a WHERE a.protocol_subaccount_id=p.id)
+        FROM protocol_subaccounts p WHERE p.protocol='pacifica' AND p.agent_public_key=ANY($2::text[]) AND p.protocol_subaccount_id IS NOT NULL)
+    SELECT 1 FROM accounts a CROSS JOIN jsonb_array_elements_text($1::jsonb) s(stream)
+    WHERE (a.grid OR s.stream IN ('transfers','withdrawals')) AND NOT EXISTS(
+      SELECT 1 FROM grid_worker_reconciliation r WHERE r.account=a.account AND r.stream=s.stream
       AND r.state='complete' AND r.last_complete_at BETWEEN clock_timestamp()-interval '30 seconds' AND clock_timestamp()
       AND r.covered_through_at BETWEEN clock_timestamp()-interval '125 seconds' AND clock_timestamp()) LIMIT 1`,
-    [JSON.stringify(RECONCILIATION_STREAMS)])).rowCount;
+    [JSON.stringify(RECONCILIATION_STREAMS),OWNER_MASTER_PUBLIC_KEYS])).rowCount;
   const rescue=await rescueView(c,host.owner_wallet);
   return {host,rescueLive:rescue?.live??false,rescueUnknown:rescue?.unknownOpen??false,catalog:!catalog.unavailableCapabilities.some(x=>required.has(x)),identity:host.execution_mode==='legacy'||mainIdentityMatches(host),history,
     ownerKeys:host.execution_mode==='legacy'||OWNER_MASTER_PUBLIC_KEYS.length>0,

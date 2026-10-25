@@ -1,4 +1,5 @@
 import type {QuotaPolicy, QuotaProvider} from './quota';
+import {mainGridQuotaRequest,mainGridQuotaAccount} from './main-quota-scope';
 // Owner confirms published max machines <= this assumption before U7.
 export const MAIN_AUTOSCALE_INSTANCE_CAP_ASSUMED = 4;
 export function mainAllocation(total: number, worker: number): number {
@@ -38,6 +39,11 @@ export class MainQuota {
   rateLimited(provider: QuotaProvider, now=Date.now()){const w=this.windows.get(provider);if(w)w.backoff=now+60000;}
 }
 export const mainQuota = new MainQuota(true);
+export function debitMainRequest(url:string, init:RequestInit, master?:string):boolean {
+  const scoped=mainGridQuotaAccount(master)||mainGridQuotaRequest(url,init);
+  if(scoped)debitMainQuota('pacifica_rest',120);
+  return scoped;
+}
 export function debitMainQuota(provider: QuotaProvider, units = 1) {
   if(process.env.GRID_REMOTE_WORKER_ENABLED==='true' && process.env.QV_PROCESS_ROLE!=='grid-worker')mainQuota.debit(provider,units);
 }

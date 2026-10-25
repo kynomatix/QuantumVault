@@ -9,6 +9,10 @@ import {adminStatus,readAdminFacts,resetBlockedBy} from './admin-state';
 import {mainOwnerWallet} from './main-runtime';
 import {registerRescueRoutes,type RescueService} from './rescue-routes';
 import {rescueOffer} from './rescue-state';
+import {collectTransitionEvidence,transitionHost,exactTransitionReadback,transitionView,type TransitionEvidence,type TransitionParams} from './host-transition';
+import {canonicalOwnerParams,ownerParamsDigest,ownerSha256} from './owner-auth';
+import {replaceQuotaPolicies,validateQuotaPolicies} from './quota-policy';
+import type {QuotaPolicy} from './quota';
 
 export function pauseSaveOutcome(mutationStarted:boolean,revision:string|undefined){
   return {saved:revision?true:mutationStarted?'unknown' as const:false,
@@ -28,6 +32,7 @@ export interface AdminDependencies {
   readiness:(c:PoolClient)=>Promise<boolean>;
   ownerWallet:()=>string|null;
   rescue?:RescueService;
+  transitionEvidence?:()=>Promise<TransitionEvidence>;
 }
 /** Uses the same production predicates as the status response; no venue calls. */
 export async function ownerResetReady(c:PoolClient):Promise<boolean>{
@@ -39,6 +44,13 @@ async function production():Promise<AdminDependencies>{
   const [{ProtectiveExecutor},{workerDependencies},{mainQuota},{probeGridWorkerSchema},{mainIdentityMatches},{OWNER_MASTER_PUBLIC_KEYS}]=await Promise.all([
     import('./protective-executor'),import('./dependencies'),import('./main-quota'),import('./boot'),import('./main-readiness-identity'),import('./owner-master-keys')]);
   const terminate=backendTerminator(independentLane(pool));
+  const transportDependencies=workerDependencies(pool,{
+    debit:async(provider,units)=>mainQuota.debit(provider,units),rateLimited:async provider=>mainQuota.rateLimited(provider),
+  },process.env);
+  const transitionEvidence=()=>collectTransitionEvidence(lane,async(_master,path,params)=>{
+    const url=new URL('https://api.pacifica.fi/api/v1'+path);for(const [k,v] of Object.entries(params))url.searchParams.set(k,v);
+    const r=await transportDependencies.fetcher!(url,{method:'GET'});if(!r.ok)throw Error('GRID_TRANSITION_EVIDENCE');return r.json();
+  });
   const rescue=new ProtectiveExecutor(pool,terminate,workerDependencies(pool,{
     debit:async(provider,units)=>mainQuota.debit(provider,units),rateLimited:async provider=>mainQuota.rateLimited(provider),
   },process.env),async c=>{
@@ -50,7 +62,7 @@ async function production():Promise<AdminDependencies>{
     if(!h||h.execution_mode!=='external'||!mainIdentityMatches(h)||!master||!OWNER_MASTER_PUBLIC_KEYS.includes(master))throw Error('GRID_RESCUE_NOT_READY');
   });
   return {lane,terminate:backendTerminator(independentLane(pool)),enabled:()=>process.env.GRID_REMOTE_WORKER_ENABLED==='true',
-    entriesPaused:()=>process.env.GRID_ENTRIES_PAUSED==='true',readiness:ownerResetReady,ownerWallet:mainOwnerWallet,rescue};
+    entriesPaused:()=>process.env.GRID_ENTRIES_PAUSED==='true',readiness:ownerResetReady,ownerWallet:mainOwnerWallet,rescue,transitionEvidence};
 }
 /** MAIN only. Registration does not load the database or expose an enabled control. */
 export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestHandler,provided?:AdminDependencies){
@@ -62,12 +74,16 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
     if(!enabled()||!owner||session!==owner){next('route');return;}
     res.set('Cache-Control','no-store');next();
   };
-  const route=(method:'get'|'post',path:string,run:(c:PoolClient,wallet:string,body:unknown,id:unknown,d:AdminDependencies,mutating:()=>void)=>Promise<unknown>,pause=false)=>{
+  const route=(method:'get'|'post',path:string,run:(c:PoolClient,wallet:string,body:unknown,id:unknown,d:AdminDependencies,mutating:()=>void,evidence?:TransitionEvidence)=>Promise<unknown>,pause=false)=>{
     app[method]('/api/grid-worker'+path,off,requireWallet,async(req,res,next)=>{
       const overall=new GridDeadline(20_000);let d:AdminDependencies|undefined,revision:string|undefined;
-      let admitted=false,mutationStarted=false,external=false;
+      let admitted=false,mutationStarted=false,external=false,evidence:TransitionEvidence|undefined;
       try{
         d=provided??await production();
+        if(path==='/host-transition'){
+          const b=signed.extend({params:z.unknown()}).parse(req.body);canonicalOwnerParams('host_transition',b.params);
+          if(!d.transitionEvidence)throw Error('GRID_TRANSITION_EVIDENCE');evidence=await d.transitionEvidence();
+        }
         const wallet=(req as typeof req & {walletAddress:string}).walletAddress;
         const result=await fencedTransaction(d.lane,async c=>{
           if(method==='get')await c.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
@@ -77,7 +93,7 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
           if(!owner||owner.wallet_address!==wallet)throw Error('GRID_ADMIN_NOT_FOUND');
           if((req.body as {action?:unknown})?.action==='break_glass_close'&&owner.execution_mode!=='external')throw Error('GRID_ADMIN_NOT_FOUND');
           admitted=true;external=owner.execution_mode==='external';
-          return run(c,wallet,req.body,req.params.id,d!,()=>{mutationStarted=true;});
+          return run(c,wallet,req.body,req.params.id,d!,()=>{mutationStarted=true;},evidence);
         },{mode:method==='get'?'none':'exclusive',pause,terminate:d.terminate,budget:new GridDeadline(pause?Math.min(9000,overall.remaining()):Math.min(18000,overall.remaining()))});
         if(!pause){res.json(result);return;}
         revision=String(result);
@@ -97,6 +113,17 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
         }
         throw Error('GRID_PAUSE_ACK_TIMEOUT');
       }catch(error){
+        if(path==='/host-transition'&&d&&admitted&&mutationStarted){
+          try{const b=signed.extend({params:z.unknown()}).parse(req.body),p=b.params as TransitionParams;
+            const saved=await fencedTransaction(d.lane,async c=>{
+              const h=(await c.query('SELECT * FROM grid_worker_host WHERE singleton_id=1')).rows[0];
+              const receipt=(await c.query("SELECT 1 FROM owner_action_receipts WHERE action='host_transition' AND target='all' AND owner_wallet=$1 AND message_digest=$2 AND params_digest=$3 AND consumed_at IS NOT NULL",
+                [h?.owner_wallet,ownerSha256(b.message),ownerParamsDigest('host_transition',p)])).rowCount;
+              return receipt&&exactTransitionReadback(h,p)?transitionView(h):null;
+            },{mode:'none',terminate:d.terminate});
+            if(saved){res.json({...saved,readback:true});return;}
+          }catch{/* Uncertainty remains a refusal; never roll back an activation. */}
+        }
         const rejected=error instanceof Error&&/^GRID_(?:OWNER|RECEIPT|VERIFIED|RESET|INCIDENT|ADMIN_TARGET)/.test(error.message);
         if(pause&&d&&admitted&&mutationStarted&&!rejected){
           // An uncertain commit is never converted into a successful latch response.
@@ -121,10 +148,26 @@ export function registerGridWorkerAdminRoutes(app:Express,requireWallet:RequestH
       if(b.target!=='bot:'+b.params.botId||!(await rescueOffer(c,wallet,b.params.botId)))throw Error('GRID_ADMIN_TARGET');
       return {message:await issueOwnerChallenge(c,wallet,b.action,b.target,b.params,120_000)};
     }
+    if(['host_transition','quota_policy'].includes(String((body as {action?:unknown})?.action))){
+      const b=z.object({action:z.enum(['host_transition','quota_policy']),target:z.literal('all'),params:z.unknown()}).strict().parse(body);
+      canonicalOwnerParams(b.action,b.params);
+      return {message:await issueOwnerChallenge(c,wallet,b.action,b.target,b.params,120_000)};
+    }
     const b=challenge.parse(body);
     await expectRevision(c,b.expectedPauseRevision);
     if((b.action==='ack_critical')!==b.target.startsWith('incident:'))throw Error('GRID_ADMIN_TARGET');
     return {message:await issueOwnerChallenge(c,wallet,b.action,b.target,undefined,120_000),expectedPauseRevision:b.expectedPauseRevision};
+  });
+  route('post','/host-transition',async(c,wallet,body,_id,_d,mutating,evidence)=>{
+    const b=signed.extend({params:z.unknown()}).parse(body);if(!evidence)throw Error('GRID_TRANSITION_EVIDENCE');
+    const owner=await verifyOwnerReceipt(c,{...b,signer:wallet,sessionWallet:wallet});
+    mutating();return transitionHost(c,owner,b.params as TransitionParams,evidence);
+  });
+  route('post','/quota-policy',async(c,wallet,body)=>{
+    const b=signed.extend({policies:z.array(z.unknown()).length(2)}).parse(body),policies=b.policies as QuotaPolicy[];
+    validateQuotaPolicies(policies,Date.now());const params={policyDigests:policies.map(p=>p.policy_digest).sort()};
+    const owner=await verifyOwnerReceipt(c,{message:b.message,signature:b.signature,params,signer:wallet,sessionWallet:wallet});
+    return replaceQuotaPolicies(c,owner,policies);
   });
   route('post','/pause',async(c,wallet,body,_id,_d,mutating)=>{
     const owner=await receipt(c,wallet,body);requireVerifiedOwner(owner,'pause','all');mutating();return pauseHost(c,owner);
