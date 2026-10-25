@@ -20,7 +20,7 @@
  *   npm run openrouter -- --task large-context --prompt-file big-module.txt
  *   npm run openrouter -- --budget --task plan-audit --prompt-file p.md   (cheapest model)
  *   npm run openrouter -- --fallback --task code-review --prompt "..."    (second-opinion model)
- *   npm run openrouter -- --model moonshotai/kimi-k2.7-code --prompt "..." (explicit override)
+ *   npm run openrouter -- --model moonshotai/kimi-k3.1-pro --prompt "..." (explicit override)
  *   cat file.ts | npm run openrouter -- --task code-review
  *
  * Tasks:
@@ -34,14 +34,14 @@
  *   sanity         — quick single-concern check (default)
  *
  * Routing (primary / fallback / budget):
- *   code-review    qwen/qwen3.7-max         / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-pro
+ *   code-review    qwen/qwen3.7-max         / moonshotai/kimi-k3.1-pro    / deepseek/deepseek-v4-pro
  *   plan-audit     qwen/qwen3.7-max         / deepseek/deepseek-v4-pro    / deepseek/deepseek-v4-pro
  *   architecture   qwen/qwen3.7-max         / z-ai/glm-5.1                / deepseek/deepseek-v4-pro
- *   algorithm      qwen/qwen3.7-max         / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-pro
+ *   algorithm      qwen/qwen3.7-max         / moonshotai/kimi-k3.1-pro    / deepseek/deepseek-v4-pro
  *   frontend       moonshotai/kimi-k3.1-pro / z-ai/glm-5.2                / deepseek/deepseek-v4-pro
  *   large-context  minimax/minimax-m3       / qwen/qwen3.7-max            / deepseek/deepseek-v4-pro
  *   batch          deepseek/deepseek-v4-pro / minimax/minimax-m3          / deepseek/deepseek-v4-flash
- *   sanity         deepseek/deepseek-v4-pro / moonshotai/kimi-k2.7-code   / deepseek/deepseek-v4-flash
+ *   sanity         deepseek/deepseek-v4-pro / moonshotai/kimi-k3.1-pro    / deepseek/deepseek-v4-flash
  */
 
 import fs from 'node:fs/promises';
@@ -66,7 +66,7 @@ const MODELS = {
 const TASKS = {
   'code-review': {
     primary:  MODELS.QWEN_37_MAX,
-    fallback: MODELS.KIMI_K27_CODE,
+    fallback: MODELS.KIMI_K31_PRO, // K2.7 Code dropped 2026-10-26 (owner)
     budget:   MODELS.DEEPSEEK_V4_PRO,
     temperature: 0.15,
     maxTokens:   4096,
@@ -135,7 +135,7 @@ Top 3 highest-priority changes. Reference specific components by name. No generi
 
   'algorithm': {
     primary:  MODELS.QWEN_37_MAX,
-    fallback: MODELS.KIMI_K27_CODE,
+    fallback: MODELS.KIMI_K31_PRO, // K2.7 Code dropped 2026-10-26 (owner)
     budget:   MODELS.DEEPSEEK_V4_PRO,
     temperature: 0.1,
     maxTokens:   4096,
@@ -214,7 +214,7 @@ Final line: // ── BATCH COMPLETE: [N] items generated ── Anomalies: [lis
 
   'sanity': {
     primary:  MODELS.DEEPSEEK_V4_PRO,
-    fallback: MODELS.KIMI_K27_CODE,
+    fallback: MODELS.KIMI_K31_PRO, // K2.7 Code dropped 2026-10-26 (owner)
     budget:   MODELS.DEEPSEEK_FLASH,
     temperature: 0.1,
     maxTokens:   256,
