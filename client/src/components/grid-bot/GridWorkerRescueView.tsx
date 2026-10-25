@@ -18,7 +18,7 @@ export function GridWorkerRescueView({state:p,botId,names,driverState:d=emptyRes
   const shown=working||r?.live||outcome||!!offer,phone=rescuePhoneWarnings(s,names,botId);
   if(!shown&&!phone.length)return null;
   const stale=rescueStale(p),name=botName(names,botId),live=!!r?.live;
-  const unknown=!!s.rescue?.unknownOpen,blocked=!!offer?.blockedBy||!!s.rescue?.live||unknown;
+  const unknown=!!s.rescue?.unknownOpen||p.control?.phase==='unknown',blocked=!!offer?.blockedBy||!!s.rescue?.live||unknown;
   const validOffer=!!offer&&Object.hasOwn(rescueTriggers,offer.trigger),ready=validOffer&&!blocked&&!stale&&!p.busy&&canSign&&!working;
   const continuing=live&&!d.driving&&['idle','refused'].includes(d.mode)&&r.stepIdleSeconds!==null&&r.stepIdleSeconds+elapsed>=15&&!stale;
   return <section className="gw-surface gw-rescue min-w-0" aria-label="Rescue close">
@@ -32,7 +32,7 @@ export function GridWorkerRescueView({state:p,botId,names,driverState:d=emptyRes
         <p>{r.expiresInSeconds-elapsed>0?'Up to '+remaining(r.expiresInSeconds-elapsed).toLowerCase()+' left':'Checking latest status'}</p>
         <p className="gw-red">{rescueStops(p)}</p><p>{rescueCopy.screen}</p>
         {!d.driving&&<p>{rescueCopy.watching}</p>}
-        {continuing&&<div className="gw-actions"><button type="button" onClick={onContinue}>Continue here</button><p className="gw-muted">No new signature needed.</p></div>}
+        {continuing&&<div className="gw-actions"><button type="button" disabled={p.busy||p.control?.phase==='unknown'||p.outcome?.saved==='unknown'||!!p.rescueUncertain} onClick={onContinue}>Continue here</button><p className="gw-muted">No new signature needed.</p></div>}
         <p>{rescueCopy.queued}</p><p>{rescueCopy.restart}</p>
       </>:outcome?<>
         <p role="status" className={r?.phase==='complete'&&!r.unknownOpen?'gw-teal':'gw-red'}>{rescueOutcome(r!,elapsed)}</p>

@@ -20,6 +20,10 @@ export function GridWorkerStatus(){
   useEffect(()=>{setRowsCollapsed(false);if(!finalRows)return;const t=setTimeout(()=>setRowsCollapsed(true),10000);return()=>clearTimeout(t);},[finalRows,s?.pauseRevision]);
   if(!context)return null;
   return <GridWorkerStatusView state={state} names={context.names} canSign={!!wallet.signMessage&&identity===context.cache.wallet} rowsCollapsed={rowsCollapsed}
+    onOpen={kind=>void context.controls.open(kind,()=>alive.current&&currentWallet.current===context.cache.wallet)}
+    onCheck={checked=>context.controls.check(checked)} onCancel={()=>context.controls.cancel()}
+    onSign={()=>{if(wallet.signMessage)void context.controls.sign(wallet.signMessage,()=>alive.current&&currentWallet.current===context.cache.wallet);}}
+    onCheckResult={()=>void context.controls.recover(()=>alive.current&&currentWallet.current===context.cache.wallet)}
     onRefresh={()=>void context.cache.refresh()} onSeen={ids=>void actions?.seen(ids)}
     onAction={(action,target)=>{if(wallet.signMessage)void actions?.run(action,target,wallet.signMessage,()=>alive.current&&currentWallet.current===context.cache.wallet);}}/>;
 }

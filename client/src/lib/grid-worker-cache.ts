@@ -13,7 +13,7 @@ export class GridWorkerCache {
   constructor(readonly wallet:string,private read:WorkerRead,private now=()=>performance.now()){}
   snapshot=()=>this.value;
   retain(){this.leases++;return()=>{this.leases--;queueMicrotask(()=>{if(this.leases===0)this.dispose();});};}
-  acquireSignature(){if(this.disposed||signatureInFlight)return null;signatureInFlight=true;this.update({busy:true});let released=false;return()=>{if(released)return;released=true;signatureInFlight=false;this.update({busy:false});};}
+  acquireSignature(action:'pause'|'other'='other'){if(this.disposed||signatureInFlight||action!=='pause'&&(this.value.rescueUncertain||this.value.control?.phase==='unknown'||this.value.outcome?.saved==='unknown'||this.value.status?.rescue?.unknownOpen))return null;signatureInFlight=true;this.update({busy:true});let released=false;return()=>{if(released)return;released=true;signatureInFlight=false;this.update({busy:false});};}
   clearOwner(){this.denied=true;this.knownOwner=false;this.readGeneration++;this.controller?.abort();this.pending=null;this.controller=null;this.update(initial());}
   pauseStarted(revision:string){this.pauseBaseline=revision;}
   resumed(notice:string){this.resumedAt=this.now();this.resumeNotice=notice;}
@@ -57,6 +57,8 @@ export class GridWorkerCache {
       finally{clearTimeout(timeout);if(this.controller===controller){this.pending=null;this.controller=null;}if(generation===this.readGeneration)this.nextPoll=this.knownOwner?this.now()+(this.value.status?.rescue?.live?3000:this.value.busy?2000:30000):Infinity;}
     })();return this.pending;
   };
+  /** Signing requires a GET started after acquiring the mutex, never an older poll. */
+  refreshForSignature=()=>{this.readGeneration++;this.controller?.abort();this.controller=null;this.pending=null;return this.refresh();};
   /** U6b's driver calls this after a session step; older GETs cannot undo its result. */
   acceptRescueStep(value:unknown,allowStart=false):boolean {
     const rescue=parseWorkerRescue(value);

@@ -44,7 +44,7 @@ const policies=():QuotaPolicy[]=>['pacifica_rest','rpc_backup'].map(provider=>{
   return {...p,policy_digest:quotaPolicyDigest(p)};
 });
 async function post(path:string,body:unknown){const response=await fetch(url+'/api/grid-worker'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const text=await response.text();let parsed:any;try{parsed=JSON.parse(text);}catch{parsed={text};}return {status:response.status,body:parsed};}
-async function signed(action:string,p:unknown){const challenge=await post('/challenge',{action,target:'all',params:p});expect(challenge.status).toBe(200);return {message:challenge.body.message,signature:bs58.encode(sign(null,Buffer.from(challenge.body.message),EXAMPLE))};}
+async function signed(action:string,p:unknown){const challenge=await post('/challenge',{action,target:'all',params:p});expect(challenge.status).toBe(200);if(action==='host_transition'&&(p as {executionMode?:string}).executionMode==='external'){const {validWorkerChallenge}=await import('../../client/src/lib/grid-worker-view');expect(await validWorkerChallenge(challenge.body,{action,target:'all',params:p})).toBe(true);}return {message:challenge.body.message,signature:bs58.encode(sign(null,Buffer.from(challenge.body.message),EXAMPLE))};}
 beforeAll(async()=>{
   const connectionString=process.env.DATABASE_URL;if(!connectionString||new URL(connectionString).pathname!=='/qvtest')throw Error('FRACTAL qvtest required');
   admin=new Pool({connectionString,max:1});await admin.query('CREATE SCHEMA '+schema);
@@ -177,13 +177,23 @@ it('round trips canonical controls and cryptographic challenges through actual r
   const response=await fetch(url+'/api/grid-worker/status');expect(response.status,diagnostics.status).toBe(200);
   const wire=await response.json();expect(parseWorkerControls(wire)).not.toBeNull();
   const {parseWorkerStatus}=await import('../../client/src/lib/grid-worker-view');expect(parseWorkerStatus(wire)).not.toBeNull();
+  const React=await import('react'),{renderToStaticMarkup}=await import('react-dom/server');
+  const {GridWorkerStatusView}=await import('../../client/src/components/grid-bot/GridWorkerStatusView');
+  const {presentation}=await import('../helpers/grid-worker-u5b-fixtures');
+  const parsed=parseWorkerStatus(wire)!;const html=renderToStaticMarkup(React.createElement(GridWorkerStatusView,{state:presentation({status:parsed}),names:new Map(),canSign:true}));
+  expect(html).toBe(''); // Actual legacy-off wire must remain dormant.
   const offer=wire.hostTransitionOffer;expect(offer.params.expectedFencingEpoch).toBe('0');
   const req={action:'host_transition' as const,target:'all' as const,params:offer.params};
   const ch=await post('/challenge',req);expect(await validWorkerChallenge(ch.body,req)).toBe(true);
   expect(await validWorkerChallenge(ch.body,{...req,params:{...req.params,extra:true}})).toBe(false);
   const n=wire.quotaRenewal,qr={action:'quota_policy' as const,target:'all' as const,params:n.params,policies:n.policies};
   const qch=await post('/challenge',{action:qr.action,target:qr.target,params:qr.params});expect(await validWorkerChallenge(qch.body,qr)).toBe(true);
+  const renewalResult=await post('/quota-policy',{message:qch.body.message,signature:bs58.encode(sign(null,Buffer.from(qch.body.message),EXAMPLE)),policies:n.policies});expect(renewalResult).toMatchObject({status:200,body:{saved:true,outcome:'saved'}});
+  const after=parseWorkerStatus(await (await fetch(url+'/api/grid-worker/status')).json());expect(after?.quotaPolicy?.providers.every(row=>row.validUntil===n.policies[0].valid_until)).toBe(true);
   n.policies[0].total_units='1001';expect(await validWorkerChallenge(qch.body,qr)).toBe(false);
+  const transitionResult=await post('/host-transition',{message:ch.body.message,signature:bs58.encode(sign(null,Buffer.from(ch.body.message),EXAMPLE)),params:req.params});expect(transitionResult).toMatchObject({status:200,body:{saved:true,outcome:'saved'}});
+  const external=parseWorkerStatus(await (await fetch(url+'/api/grid-worker/status')).json());expect(external?.executionMode).toBe('external');
+  expect(renderToStaticMarkup(React.createElement(GridWorkerStatusView,{state:presentation({status:external}),names:new Map(),canSign:true}))).toContain('Grid worker');
 });
 
 async function checkedStoppedWorker(){

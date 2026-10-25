@@ -9,8 +9,8 @@ export function GridWorkerRescuePanel({botId,stopped}:{botId:string;stopped?:boo
   const [confirming,setConfirming]=useState(false);
   useEffect(()=>setConfirming(false),[botId,context?.cache,driverState.mode,state.status?.rescue?.live]);
   if(!context)return null;
-  return <GridWorkerRescueView state={state} botId={botId} names={context.names} driverState={driverState} stopped={stopped} confirming={confirming}
-    canSign={!!wallet.signMessage&&identity===context.cache.wallet} onConfirm={()=>setConfirming(true)} onCancel={()=>setConfirming(false)}
+  return <GridWorkerRescueView state={state} botId={botId} names={context.names} driverState={driverState} stopped={stopped} confirming={confirming&&state.confirmation==='rescue'}
+    canSign={!!wallet.signMessage&&identity===context.cache.wallet} onConfirm={()=>{context.cache.update({confirmation:'rescue'});setConfirming(true);}} onCancel={()=>{context.cache.update({confirmation:null});setConfirming(false);}}
     onStart={()=>{const target=botId,sign=wallet.signMessage;if(sign)void context.driver.start(target,sign,()=>current.current===context.cache.wallet);}}
     onContinue={context.driver.continueHere} onRefresh={()=>{void context.cache.refresh();void context.driver.focus();}}/>;
 }

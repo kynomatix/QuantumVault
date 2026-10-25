@@ -10,7 +10,7 @@ export class GridWorkerActions {
   async run(action:WorkerAction,target:string,sign:(bytes:Uint8Array)=>Promise<Uint8Array>,isWalletCurrent:()=>boolean){
     if(this.locked||!isWalletCurrent())return;
     if(action==='ack_critical'?!/^incident:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(target):target!=='all')return;
-    const release=this.cache.acquireSignature();if(!release)return;
+    const release=this.cache.acquireSignature(action==='pause'?'pause':'other');if(!release)return;
     this.locked=true;const captured={action,target};let sent=false,signing=false;let beforeRevision:string|null=null;
     this.cache.update({busy:true,target:captured,notice:'',outcome:null});this.cache.accelerate();
     try{

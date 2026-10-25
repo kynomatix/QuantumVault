@@ -1,3 +1,4 @@
+import type {ControlState} from './grid-worker-controls-state';
 import {parseWorkerControls,controlChallengeDigest,type WorkerControls,type ControlChallengeRequest} from './grid-worker-controls-wire';
 import {parseWorkerRescue,parseWorkerRescueOffers,type WorkerRescue,type WorkerRescueOffer} from './grid-worker-rescue-wire';
 export const cardStates=['rescue_running','rescue_unknown','awaiting_worker','offline','exec_off','pause_unconfirmed','needs_you','check_bots','test','paused','legacy_paused','attention_fence','attention_history','attention_checks','attention_drain','attention_open','legacy','running'] as const;
@@ -22,6 +23,7 @@ export interface PauseOutcome {saved:boolean|'unknown';acknowledgementOutcome:'c
 export interface WorkerTarget {action:WorkerAction;target:string}
 export interface WorkerPresentation {
   status:WorkerStatus|null;admitted:boolean;overlay:WorkerOverlay;elapsedSeconds:number;rescueElapsedSeconds?:number;
+  rescueUncertain?:boolean;control?:ControlState;confirmation?:'control'|'rescue'|null;
   target:WorkerTarget|null;outcome:PauseOutcome|null;notice:string;busy:boolean;
 }
 export function controlsVisible(s:WorkerStatus|null):boolean {return !!s&&(s.executionMode==='external'||s.executionMode==='legacy'&&s.host.legacy_controls_enabled===true);}

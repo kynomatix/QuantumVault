@@ -16,3 +16,10 @@
 .gw-rescue details { margin-top: 16px; }
 .gw-rescue .gw-danger { border-color: #df6572; color: #fda4af; }
 @container (max-width: 520px) { .gw-rescue .gw-actions { flex-direction: column; } .gw-rescue .gw-actions button { width: 100%; white-space: normal; } }
+
+.gw-controls{border-top:1px solid #28283b;margin-top:16px;padding-top:12px;min-width:0;position:static}
+.gw-confirm{border:1px solid #44445b;border-radius:10px;padding:14px;min-width:0}
+.gw-transcript{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-all;font-size:12px;max-width:100%}
+.gw-tick{display:flex;align-items:flex-start;gap:10px;margin-top:14px}.gw-tick input{flex-shrink:0;margin-top:4px}
+.gw-controls .gw-danger{border-color:#df6572;color:#fda4af}
+@container (max-width: 520px){.gw-controls .gw-actions{flex-direction:column}.gw-controls .gw-actions button{width:100%;white-space:normal}}

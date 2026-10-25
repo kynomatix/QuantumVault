@@ -1,3 +1,4 @@
+import {GridWorkerControlsDriver} from '../../lib/grid-worker-controls-driver';
 import {installRescuePageLifetime} from '../../lib/grid-worker-rescue-lifetime';
 import React,{createContext,lazy,Suspense,useCallback,useContext,useEffect,useMemo,useState,useSyncExternalStore} from 'react';
 import {walletAuthHeaders} from '@/lib/queryClient';
@@ -6,7 +7,7 @@ import {controlsVisible,type WorkerPresentation} from '@/lib/grid-worker-view';
 import {gridWorkerBotNames,type WorkerBotName} from '@/lib/grid-worker-names';
 import {GridWorkerRescueDriver,emptyRescueDriver} from '@/lib/grid-worker-rescue-driver';
 import {rescueBotLocked} from '@/lib/grid-worker-rescue-copy';
-const Context=createContext<{cache:GridWorkerCache;driver:GridWorkerRescueDriver;names:ReadonlyMap<string,string>;setBots:(bots:readonly WorkerBotName[])=>void}|null>(null);
+const Context=createContext<{cache:GridWorkerCache;controls:GridWorkerControlsDriver;driver:GridWorkerRescueDriver;names:ReadonlyMap<string,string>;setBots:(bots:readonly WorkerBotName[])=>void}|null>(null);
 const empty:WorkerPresentation={status:null,admitted:false,overlay:'none',elapsedSeconds:0,target:null,outcome:null,notice:'',busy:false};
 const noop=()=>()=>{};
 const emptySnapshot=()=>empty;
@@ -27,6 +28,12 @@ export function GridWorkerProvider({wallet,authenticated,children}:{wallet:strin
     try{const r=await fetch('/api/grid-worker'+path,{method:body===undefined?'GET':'POST',credentials:'include',headers:{...walletAuthHeaders(),'Content-Type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)}),signal:controller.signal});return {status:r.status,body:await r.json().catch(()=>null)};}
     finally{clearTimeout(timer);}
   }):null,[cache]);
+  const controls=useMemo(()=>cache?new GridWorkerControlsDriver(cache,async(path,body)=>{
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),30000);
+    try{const r=await fetch('/api/grid-worker'+path,{method:'POST',credentials:'include',headers:{...walletAuthHeaders(),'Content-Type':'application/json'},body:JSON.stringify(body),signal:controller.signal});return {status:r.status,body:await r.json().catch(()=>null)};}
+    finally{clearTimeout(timer);}
+  }):null,[cache]);
+  useEffect(()=>controls?.retain(),[controls]);
   const [collection,setCollection]=useState<{cache:GridWorkerCache|null;bots:readonly WorkerBotName[]}>({cache:null,bots:[]});
   const setBots=useCallback((bots:readonly WorkerBotName[])=>setCollection({cache,bots}),[cache]);
   const names=useMemo(()=>gridWorkerBotNames(collection.cache===cache?collection.bots:[]),[collection,cache]);
@@ -39,7 +46,7 @@ export function GridWorkerProvider({wallet,authenticated,children}:{wallet:strin
     return()=>{clearInterval(timer);window.removeEventListener('focus',focus);document.removeEventListener('visibilitychange',focus);release();};
   },[cache,driver]);
   useEffect(()=>{if(!driver)return;return driver.retain();},[driver]);
-  return <Context.Provider value={cache&&driver?{cache,driver,names,setBots}:null}><RescuePageLifetime/>{children}</Context.Provider>;
+  return <Context.Provider value={cache&&driver&&controls?{cache,driver,controls,names,setBots}:null}><RescuePageLifetime/>{children}</Context.Provider>;
 }
 export function useGridWorker(){
   const context=useContext(Context);
@@ -52,7 +59,7 @@ export function useGridRescue(){
   const driverState=useSyncExternalStore(context?.driver.subscribe??noop,context?.driver.snapshot??emptyDriverSnapshot,context?.driver.snapshot??emptyDriverSnapshot);
   return {context,state,driverState};
 }
-export function useGridRescueLock(botId:string){const {context,state,driverState}=useGridRescue();return rescueBotLocked(state.status,botId)||!!context?.driver.locked(botId)||driverState.mode==='uncertain'&&driverState.botId===botId;}
+export function useGridRescueLock(botId:string){const {context,state,driverState}=useGridRescue();return state.control?.phase==='unknown'||rescueBotLocked(state.status,botId)||!!context?.driver.locked(botId)||driverState.mode==='uncertain'&&driverState.botId===botId;}
 function RescuePageLifetime(){
   const {context,state,driverState}=useGridRescue();
   const active=driverState.driving||['starting','uncertain'].includes(driverState.mode);

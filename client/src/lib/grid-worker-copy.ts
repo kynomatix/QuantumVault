@@ -23,7 +23,7 @@ export const incidentCopy:Readonly<Record<string,{text:string;kind:'condition'|'
 export const unknownIncident={kind:'event' as const,text:"The worker raised an alert this page doesn't recognise."};
 export const outcomeCopy={
   prepare:"Couldn't prepare the signature. Refresh and try again.",
-  expired:'The signature took too long, so nothing was sent. Try again.',
+  expired:'This signature expired. Review the details and sign again.',
   pauseCancelled:'Pause not sent. You cancelled the signature.',
   resumeCancelled:'Resume not sent. You cancelled the signature.',
   ackCancelled:'Not acknowledged. You cancelled the signature.',
@@ -42,6 +42,7 @@ export function restrictionText(s:WorkerStatus):string[]{return s.executionRestr
   r==='limits_expired'?'Request limits have expired. Stops and closes may be unavailable.':
   r==='drain'?'A handover has been requested. New activity is on hold, and stops and closes are restricted.':'Execution availability needs review.');}
 export function resumeReason(s:WorkerStatus,stale:boolean):string {
+  if(s.rescue?.live||s.rescue?.unknownOpen)return 'Resume waits until the rescue close ends and any unknown order is settled.';
   if(stale)return 'Resume opens once this page reaches the server again.';
   if(s.incidents.some(i=>!incidentCopy[i.code]))return 'This setup needs review before Resume is available.';
   if(s.incidents.some(i=>i.resolved_at===null&&incidentCopy[i.code]?.kind==='event'))return 'Resume stays locked until this alert has been reviewed and cleared.';

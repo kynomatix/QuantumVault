@@ -1,15 +1,16 @@
 import React from 'react';
+import {GridWorkerControlsView,type WorkerControlsProps} from './GridWorkerControlsView';
 import {botName} from '@/lib/grid-worker-copy';
 import {rescueCopy,rescuePhoneWarnings,rescueStops} from '@/lib/grid-worker-rescue-copy';
 import {aged,cardCopy,drawerCopy,phoneState,relativeAgo,resumeReason,restrictionText} from '@/lib/grid-worker-copy';
 import {controlsVisible,currentPause,type WorkerAction,type WorkerPresentation} from '@/lib/grid-worker-view';
 import {GridWorkerInbox} from './GridWorkerInbox';
-export interface WorkerViewProps {state:WorkerPresentation;names:ReadonlyMap<string,string>;canSign:boolean;onAction?:(action:WorkerAction,target:string)=>void;onRefresh?:()=>void;onSeen?:(ids:string[])=>void;expanded?:boolean;rowsCollapsed?:boolean}
-export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,onSeen,expanded,rowsCollapsed=false}:WorkerViewProps){
+export interface WorkerViewProps extends Omit<WorkerControlsProps,'state'|'canSign'> {state:WorkerPresentation;names:ReadonlyMap<string,string>;canSign:boolean;onAction?:(action:WorkerAction,target:string)=>void;onRefresh?:()=>void;onSeen?:(ids:string[])=>void;expanded?:boolean;rowsCollapsed?:boolean}
+export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,onSeen,expanded,rowsCollapsed=false,...controlProps}:WorkerViewProps){
   const s=p.status;if(!p.admitted||!controlsVisible(s)||!s)return null;
   const copy=cardCopy(p,names),phone=phoneState(p),stale=copy.tone==='muted',paused=currentPause(s),reason=resumeReason(s,stale);
   const monitor=aged(s.ages.monitorPollSeconds,p.elapsedSeconds),worker=aged(s.ages.workerCheckInSeconds,p.elapsedSeconds);
-  const busy=p.busy||!canSign,unknown=p.overlay==='save_unknown';
+  const busy=p.busy||!canSign,unknown=!!p.rescueUncertain||!!s.rescue?.unknownOpen||p.overlay==='save_unknown'||p.control?.phase==='unknown';
   const rows=!rowsCollapsed&&(paused||p.overlay==='pausing'||unknown);
   return <section className="gw-surface" aria-label="Grid worker">
     {(phone==='off'||phone==='stale')&&<div className="gw-banner" role="status">
@@ -37,14 +38,15 @@ export function GridWorkerStatusView({state:p,names,canSign,onAction,onRefresh,o
       </dl>}
       <div className="gw-actions">
         {(!paused||unknown)&&<button type="button" className={unknown?'':'gw-primary'} disabled={busy} onClick={()=>onAction?.('pause','all')}>{p.overlay==='signing'&&p.target?.action==='pause'?'Check your wallet…':p.overlay==='pausing'?'Pausing…':unknown?'Pause again':'Pause new grid activity'}</button>}
-        {paused&&!unknown&&s.cardState!=='pause_unconfirmed'&&<button type="button" disabled={busy||!!reason} onClick={()=>onAction?.('reset_pause','all')}>Resume new activity</button>}
+        {paused&&!unknown&&s.cardState!=='pause_unconfirmed'&&<button type="button" disabled={busy||!!reason||!!s.rescue?.live||!!s.rescue?.unknownOpen} onClick={()=>onAction?.('reset_pause','all')}>Resume new activity</button>}
         {(stale||unknown||s.cardState==='pause_unconfirmed')&&<button type="button" className={unknown?'gw-primary':''} disabled={p.busy} onClick={onRefresh}>Check again</button>}
       </div>
       {!canSign&&<p className="gw-muted">Connect your wallet to sign.</p>}
       {paused&&reason&&<p className="gw-muted">{reason}</p>}
       {paused&&s.cardState==='pause_unconfirmed'&&<p className="gw-muted">The pause stays saved, and the worker picks it up when it next checks in.</p>}
       {s.cardState==='offline'&&<p className="gw-muted">The worker is offline, so it can confirm the pause only when it's back. Orders already on Pacifica stay until then.</p>}
-      <GridWorkerInbox status={s} names={names} busy={busy} onAcknowledge={id=>onAction?.('ack_critical','incident:'+id)} onSeen={onSeen} expanded={expanded}/>
+      <GridWorkerControlsView state={p} canSign={canSign} {...controlProps}/>
+      <GridWorkerInbox status={s} names={names} busy={busy||unknown} onAcknowledge={id=>onAction?.('ack_critical','incident:'+id)} onSeen={unknown?undefined:onSeen} expanded={expanded}/>
     </div>
   </section>;
 }

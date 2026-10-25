@@ -17,7 +17,7 @@ export class GridWorkerRescueDriver {
   private leases=0;
   retain(){this.leases++;return()=>{this.leases--;queueMicrotask(()=>{if(!this.leases)this.dispose();});};}
   subscribe=(fn:()=>void)=>{this.listeners.add(fn);return()=>{this.listeners.delete(fn);};};
-  private update(p:Partial<RescueDriverState>){if(this.disposed)return;this.value={...this.value,...p};for(const fn of this.listeners)fn();}
+  private update(p:Partial<RescueDriverState>){if(this.disposed)return;this.value={...this.value,...p};this.cache.update({rescueUncertain:this.value.mode==='uncertain'});for(const fn of this.listeners)fn();}
   private current(g:number){return !this.disposed&&g===this.generation;}
   private cancelTimer(){if(this.timer!==null)clearTimeout(this.timer);this.timer=null;}
   private denied(){this.generation++;this.cancelTimer();this.request=null;this.requestKey=null;this.signedNonce=null;this.cache.clearOwner();this.update({...emptyRescueDriver});}
@@ -78,7 +78,7 @@ export class GridWorkerRescueDriver {
   };
   continueHere=()=>{
     const p=this.cache.snapshot(),r=p.status?.rescue;
-    if(this.disposed||this.value.driving||!['idle','refused'].includes(this.value.mode)||!r?.live||r.stepIdleSeconds===null||r.stepIdleSeconds+(p.rescueElapsedSeconds??p.elapsedSeconds)<15||rescueStale(p))return;
+    if(this.disposed||p.busy||p.control?.phase==='unknown'||p.outcome?.saved==='unknown'||p.rescueUncertain||this.value.driving||!['idle','refused'].includes(this.value.mode)||!r?.live||r.stepIdleSeconds===null||r.stepIdleSeconds+(p.rescueElapsedSeconds??p.elapsedSeconds)<15||rescueStale(p))return;
     this.generation++;this.request=r;this.requestKey=r.requestKey;this.update({botId:r.botId,mode:'idle',driving:true,notice:''});void this.step();
   };
   private schedule(seconds:number){this.cancelTimer();if(this.value.driving)this.timer=setTimeout(()=>{this.timer=null;void this.step();},seconds*1000);}
