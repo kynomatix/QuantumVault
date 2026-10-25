@@ -28,7 +28,7 @@ import {verifyProtectiveConsent} from '../../server/grid-worker/protective-conse
 import {serviceBotPass} from '../../server/grid-worker/bot-pass';
 import {ProtectionTruth} from '../../server/grid-worker/protection-truth';
 import {GridIncidents} from '../../server/grid-worker/incidents';
-import {rescueOffer,rescueView} from '../../server/grid-worker/rescue-state';
+import {rescueOffer,rescueView,RESCUE_TRIGGER_FLOOR_SECONDS} from '../../server/grid-worker/rescue-state';
 import {validWorkerChallenge,parseWorkerStatus} from '../../client/src/lib/grid-worker-view';
 import {parseWorkerRescue} from '../../client/src/lib/grid-worker-rescue-wire';
 import {GridWorkerCache} from '../../client/src/lib/grid-worker-cache';
@@ -120,6 +120,66 @@ it('uses the same blocker for offer and takeover and hides disabled/non-owner ro
   await tx(async c=>{await localContext(c,'tighten');await c.query('UPDATE grid_worker_host SET execution_enabled=false');},'exclusive');
   expect((await tx(c=>rescueOffer(c,owner,botId)))?.blockedBy).toBe('trading_off');expect((await start()).data.refusal).toBe('trading_off');
   session=bs58.encode(randomBytes(32));expect((await challenge()).status).toBe(404);session=owner;enabled=false;expect((await challenge()).status).toBe(404);
+});
+/** Move fixture time through the package's permitted transition path; never alter triggers. */
+async function rescueHost(role:'grid-worker'|'protective'|null,heartbeatAge:number|null,leaseRemaining:number){
+  return tx(async c=>{
+    await localContext(c,'transition');
+    await c.query("SELECT set_config('qv.grid_worker_owner_verified','true',true),set_config('qv.grid_worker_ready','true',true)");
+    return (await c.query(`UPDATE grid_worker_host SET holder_role=$1,holder_boot_id=$2,fencing_epoch=fencing_epoch+1,
+      heartbeat_at=CASE WHEN $3::integer IS NULL THEN NULL ELSE clock_timestamp()-make_interval(secs=>$3) END,
+      lease_expires_at=CASE WHEN $1::text IS NULL THEN '-infinity'::timestamptz ELSE clock_timestamp()+make_interval(secs=>$4) END
+      RETURNING holder_boot_id AS "bootId",fencing_epoch::text AS epoch`,[role,role?randomUUID():null,heartbeatAge,leaseRemaining])).rows[0];
+  },'exclusive');
+}
+async function roundTripOffers(){
+  const r=await api('/status');expect(r.status,JSON.stringify(r.data)).toBe(200);
+  const parsed=parseWorkerStatus(JSON.parse(JSON.stringify(r.data)));expect(parsed).not.toBeNull();
+  const offer=await tx(c=>rescueOffer(c,owner,botId));
+  expect(parsed!.rescueOffers).toEqual(offer?[offer]:[]);
+  return parsed!.rescueOffers;
+}
+it('R3 refuses drain as handover after an eligible challenge and under the takeover lock',async()=>{
+  expect(await roundTripOffers()).toEqual([{botId,trigger:'worker_unavailable',blockedBy:null}]);
+  const c=await challenge();expect(c.status).toBe(200);
+  await tx(async db=>{await localContext(db,'tighten');await db.query('UPDATE grid_worker_host SET drain_requested=true');},'exclusive');
+  expect(await roundTripOffers()).toEqual([{botId,trigger:'worker_unavailable',blockedBy:'handover'}]);
+  const r=await api('/rescue',{botId,message:c.data.message,signature:bs58.encode(sign(null,Buffer.from(c.data.message),keys.privateKey))});
+  expect(r.status).toBe(409);expect(r.data.refusal).toBe('handover');
+  expect((await pool.query('SELECT holder_role,drain_requested FROM grid_worker_host')).rows[0]).toEqual({holder_role:null,drain_requested:true});
+  expect((await pool.query('SELECT count(*)::integer AS n FROM grid_worker_requests')).rows[0].n).toBe(0);
+  expect(posts).toBe(0);
+});
+it('R3 gives an unmatched live protective holder its own typed blocker, never handover',async()=>{
+  await rescueHost('protective',RESCUE_TRIGGER_FLOOR_SECONDS,45);
+  expect(await roundTripOffers()).toEqual([{botId,trigger:'worker_unavailable',blockedBy:'protective_holder_active'}]);
+  const r=await start();expect(r.status).toBe(409);expect(r.data.refusal).toBe('protective_holder_active');expect(posts).toBe(0);
+});
+it.each([0,RESCUE_TRIGGER_FLOOR_SECONDS-1,RESCUE_TRIGGER_FLOOR_SECONDS,RESCUE_TRIGGER_FLOOR_SECONDS+1])(
+  'R3 graceful release with heartbeat age %i uses the heartbeat floor despite minus-infinity lease',async age=>{
+    const holder=await rescueHost('grid-worker',age,-1);
+    await tx(async c=>{
+      await localContext(c,'lease_release',holder);
+      await c.query("UPDATE grid_worker_host SET holder_boot_id=NULL,holder_role=NULL,lease_expires_at='-infinity',fencing_epoch=fencing_epoch+1");
+    },'exclusive');
+    const eligible=age>=RESCUE_TRIGGER_FLOOR_SECONDS;
+    expect(await roundTripOffers()).toEqual(eligible?[{botId,trigger:'worker_unavailable',blockedBy:null}]:[]);
+    if(eligible){expect((await start()).status).toBe(200);}
+    else{expect((await challenge()).status).toBe(409);}
+    expect(posts).toBe(0);
+  });
+it.each([RESCUE_TRIGGER_FLOOR_SECONDS-1,RESCUE_TRIGGER_FLOOR_SECONDS,RESCUE_TRIGGER_FLOOR_SECONDS+1])(
+  'R3 crash with heartbeat age %i uses last heartbeat, not the later lease expiry',async age=>{
+    await rescueHost('grid-worker',age,45-age);
+    const eligible=age>=RESCUE_TRIGGER_FLOOR_SECONDS;
+    expect(await roundTripOffers()).toEqual(eligible?[{botId,trigger:'worker_unavailable',blockedBy:null}]:[]);
+    if(eligible){expect((await start()).status).toBe(200);}
+    else{expect((await challenge()).status).toBe(409);}
+    expect(posts).toBe(0);
+  });
+it('R3 never calls a live worker unavailable even with a stale heartbeat',async()=>{
+  await rescueHost('grid-worker',RESCUE_TRIGGER_FLOOR_SECONDS,45);
+  expect(await roundTripOffers()).toEqual([{botId,trigger:'worker_stalled',blockedBy:null}]);
 });
 it('serializes duplicate steps without waiting and never posts during contention',async()=>{
   const r=await start();expect(r.status,r.data).toBe(200);const c=await pool.connect();

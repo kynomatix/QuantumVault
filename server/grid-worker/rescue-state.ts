@@ -2,7 +2,7 @@ import type {PoolClient} from 'pg';
 /** Proposed trigger floor; changing it requires review, not a schema change. */
 export const RESCUE_TRIGGER_FLOOR_SECONDS=120;
 export type RescueTrigger='worker_unavailable'|'worker_stalled'|'stop_failed'|'protective_failure';
-export type RescueBlocker='automated_trading_off'|'emergency_stop'|'trading_off'|'other_rescue'|'other_unknown'|'handover';
+export type RescueBlocker='automated_trading_off'|'emergency_stop'|'trading_off'|'other_rescue'|'other_unknown'|'handover'|'protective_holder_active';
 export interface RescueOffer{botId:string;trigger:RescueTrigger;blockedBy:RescueBlocker|null}
 export type RescuePhase='waiting'|'settling'|'cancelling'|'closing'|'verifying'|'complete'|'partial_ended'|'unknown_ended'|'ended';
 export interface RescueView{
@@ -22,7 +22,7 @@ function seconds(v:unknown):number|null{
 export async function rescueOffer(c:PoolClient,owner:string,botId:string):Promise<RescueOffer|null>{
   const r=(await c.query(`SELECT b.id,b.status,b.last_tick_at,w.execution_enabled AS automated,w.emergency_stop_triggered,
     h.*,h.lease_expires_at>clock_timestamp() AS holder_live,
-    (h.lease_expires_at IS NULL OR h.lease_expires_at<=clock_timestamp()-make_interval(secs=>$3)) AS unavailable,
+    (h.heartbeat_at IS NULL OR h.heartbeat_at<=clock_timestamp()-make_interval(secs=>$3)) AS unavailable,
     (h.progress_at IS NULL OR h.progress_at<=clock_timestamp()-make_interval(secs=>$3)
       OR b.last_tick_at IS NULL OR b.last_tick_at<=clock_timestamp()-make_interval(secs=>$3)) AS stalled,
     EXISTS(SELECT 1 FROM grid_worker_incidents i WHERE i.bot_id=b.id AND i.code='stop_failed' AND i.resolved_at IS NULL) AS stop_failed,
@@ -39,8 +39,8 @@ export async function rescueOffer(c:PoolClient,owner:string,botId:string):Promis
   const liveWorker=r.holder_role==='grid-worker'&&r.holder_live;
   const trigger:RescueTrigger|null=r.stop_failed?'stop_failed':r.protective_failure?'protective_failure':!liveWorker&&r.unavailable?'worker_unavailable':liveWorker&&r.stalled?'worker_stalled':null;
   if(!trigger)return null;
-  const blockedBy:RescueBlocker|null=!r.automated?'automated_trading_off':r.emergency_stop_triggered?'emergency_stop':!r.execution_enabled?'trading_off':
-    r.rescue_live?'other_rescue':r.protective_unknown?'other_unknown':r.holder_role==='protective'&&r.holder_live?'handover':null;
+  const blockedBy:RescueBlocker|null=r.drain_requested?'handover':!r.automated?'automated_trading_off':r.emergency_stop_triggered?'emergency_stop':!r.execution_enabled?'trading_off':
+    r.rescue_live?'other_rescue':r.protective_unknown?'other_unknown':r.holder_role==='protective'&&r.holder_live?'protective_holder_active':null;
   return {botId,trigger,blockedBy};
 }
 /** All predecessor windows, not only this request's sends. Missing window data denies. */

@@ -37,11 +37,12 @@ export class ProtectiveExecutor{
     await fencedTransaction(this.pool,async c=>{
       await this.ready(c);await walletFences(c,[owner]);await waitGridWorkerFence(c,input.botId);await identityFences(c,[input.botId],[]);
       await recoverAbandonedRescues(c);
+      const h=(await c.query('SELECT *,clock_timestamp() AS db_now FROM grid_worker_host WHERE singleton_id=1 FOR UPDATE')).rows[0];
+      if(!h||h.owner_wallet!==owner)throw new RescueRefusal('not_owner');
+      // Re-evaluate the shared offer predicate under both the host fence and row lock.
       const offer=await rescueOffer(c,owner,input.botId);
       if(!offer)throw new RescueRefusal('changed');if(offer.blockedBy)throw new RescueRefusal(offer.blockedBy);
       if(await rescueWait(c,input.botId)>480)throw new RescueRefusal('wait_too_long');
-      const h=(await c.query('SELECT *,clock_timestamp() AS db_now FROM grid_worker_host WHERE singleton_id=1 FOR UPDATE')).rows[0];
-      if(!h||h.owner_wallet!==owner)throw new RescueRefusal('not_owner');
       const master=(await c.query('SELECT agent_public_key FROM wallets WHERE address=$1',[owner])).rows[0]?.agent_public_key;
       const authority=await currentAuthority(c,{botId:input.botId,wallet:owner,masterAccount:master,workerExposure:true});
       if(authority.generation===null)throw new RescueRefusal('changed');
