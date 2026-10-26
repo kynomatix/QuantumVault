@@ -27,12 +27,14 @@ function resolveBotAdapterArgs(bot: TradingBot, wallet: Wallet): { account: stri
   return null;
 }
 
-async function getAccountEquity(account: string, subaccountId: string | undefined, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<{ usdcBalance: number; unrealizedPnl: number }> {
+async function getAccountEquity(account: string, subaccountId: string | undefined, adapter: ProtocolAdapter = getDefaultAdapter()): Promise<{ usdcBalance: number; unrealizedPnl: number } | null> {
   try {
     const info = await adapter.getAccountInfo(account, subaccountId);
-    return { usdcBalance: info.balance || 0, unrealizedPnl: info.unrealizedPnl || 0 };
+    // Unreadable equity must never become a real zero in private or public history.
+    if (!Number.isFinite(info.balance) || !Number.isFinite(info.unrealizedPnl)) return null;
+    return { usdcBalance: info.balance, unrealizedPnl: info.unrealizedPnl };
   } catch {
-    return { usdcBalance: 0, unrealizedPnl: 0 };
+    return null;
   }
 }
 
@@ -70,6 +72,10 @@ export async function takePnlSnapshots(): Promise<void> {
         
         const snapshotAdapter = getAdapterForBot(sourceTradingBot);
         const accountInfo = await getAccountEquity(adapterArgs.account, adapterArgs.subaccountId, snapshotAdapter);
+        if (accountInfo === null) {
+          console.log(`[PnL Snapshots] Skipping bot ${sourceTradingBot.id.slice(0, 8)} (${sourceTradingBot.name}): account equity unreadable (fail-closed)`);
+          continue;
+        }
         
         const stats = sourceTradingBot.stats as any || {};
         const realizedPnl = stats.totalPnl || 0;
@@ -96,11 +102,8 @@ export async function takePnlSnapshots(): Promise<void> {
         // Get actual net deposited from equity events (same as bot management drawer)
         const botEvents = await storage.getBotEquityEvents(sourceTradingBot.id, 1000);
         const netDeposited = sumNetDepositedFromEvents(botEvents);
-        // Fall back to maxPositionSize if no equity events (legacy data)
-        const maxPosSize = typeof sourceTradingBot.maxPositionSize === 'string' 
-          ? parseFloat(sourceTradingBot.maxPositionSize) 
-          : (sourceTradingBot.maxPositionSize || 0);
-        const totalDeposited = netDeposited > 0 ? netDeposited : maxPosSize;
+        // Preserve the observed ledger sum; a non-positive sum is not a PnL base.
+        const totalDeposited = netDeposited;
         
         // Save private PnL snapshot for trading bot
         await storage.createPnlSnapshot({
@@ -108,7 +111,7 @@ export async function takePnlSnapshots(): Promise<void> {
           snapshotDate: new Date(),
           equity: String(creatorEquity),
           realizedPnl: String(realizedPnl),
-          unrealizedPnl: String(accountInfo.unrealizedPnl || 0),
+          unrealizedPnl: String(accountInfo.unrealizedPnl),
           totalDeposited: String(totalDeposited),
         });
         
@@ -130,14 +133,16 @@ export async function takePnlSnapshots(): Promise<void> {
         // Update totalCapitalInvested separately if needed
         await storage.incrementPublishedBotSubscribers(publishedBot.id, 0, newTotalCapital - parseFloat(publishedBot.totalCapitalInvested || '0'));
         
-        // Save public equity snapshot for marketplace
-        const allTimePnl = pnlStats.pnlPercentAllTime ? parseFloat(pnlStats.pnlPercentAllTime) : 0;
-        await storage.createMarketplaceEquitySnapshot({
-          publishedBotId: publishedBot.id,
-          snapshotDate: new Date(),
-          equity: String(creatorEquity),
-          pnlPercent: String(allTimePnl),
-        });
+        // Public snapshots require a percentage. Skip the row when its base is
+        // unknown rather than publishing a fabricated zero (or a stale value).
+        if (pnlStats.pnlPercentAllTime !== undefined) {
+          await storage.createMarketplaceEquitySnapshot({
+            publishedBotId: publishedBot.id,
+            snapshotDate: new Date(),
+            equity: String(creatorEquity),
+            pnlPercent: pnlStats.pnlPercentAllTime,
+          });
+        }
         
         console.log(`[PnL Snapshots] Saved snapshot for bot ${sourceTradingBot.name}: equity=${creatorEquity.toFixed(2)}, pnl=${realizedPnl.toFixed(2)}, trades=${totalTrades}, wins=${winningTrades}`);
       } catch (botError) {
@@ -163,7 +168,9 @@ async function calculatePnlPercentages(
 }> {
   try {
     // Use actual deposited for all-time PnL (matches bot management drawer calculation)
-    const allTimePnl = totalDeposited > 0 ? ((currentEquity - totalDeposited) / totalDeposited) * 100 : 0;
+    const allTimePnl = Number.isFinite(totalDeposited) && totalDeposited > 0
+      ? ((currentEquity - totalDeposited) / totalDeposited) * 100
+      : undefined;
     
     // For 7d/30d/90d, we still compare to historical snapshots
     const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
@@ -191,7 +198,7 @@ async function calculatePnlPercentages(
       pnlPercent7d: calculatePnlPercent(findSnapshotNearDate(7)),
       pnlPercent30d: calculatePnlPercent(findSnapshotNearDate(30)),
       pnlPercent90d: calculatePnlPercent(findSnapshotNearDate(90)),
-      pnlPercentAllTime: allTimePnl.toFixed(4),
+      ...(allTimePnl !== undefined ? { pnlPercentAllTime: allTimePnl.toFixed(4) } : {}),
     };
   } catch (error) {
     console.error("[PnL Snapshots] Error calculating PnL percentages:", error);
