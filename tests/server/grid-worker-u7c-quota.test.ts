@@ -1,4 +1,5 @@
 import bs58 from 'bs58';
+import {MAIN_QUOTA_GUARD_LOCK_NAMESPACE} from '../../server/wallet-lock-constants';
 import nacl from 'tweetnacl';
 import {afterAll,afterEach,beforeAll,expect,it,vi} from 'vitest';
 import {Pool} from 'pg';
@@ -29,7 +30,7 @@ beforeAll(async()=>{
   admin=new Pool({connectionString,max:2});await admin.query('CREATE SCHEMA '+schema);
   pool=new Pool({connectionString,max:8,options:'-c search_path='+schema+',public,pg_catalog',query_timeout:2000});
   pool.on('connect',c=>{c.on('error',()=>{});c.query=new Proxy(c.query,{apply(fn,self,args){
-    if(Array.isArray(args[1]))args[1]=args[1].map((v:unknown)=>v===927413?namespace:v);
+    if(Array.isArray(args[1]))args[1]=args[1].map((v:unknown)=>v===MAIN_QUOTA_GUARD_LOCK_NAMESPACE?namespace:v);
     return Reflect.apply(fn,self,args);
   }});});pool.on('error',()=>{});
   const migration=readFileSync('migrations/grid_worker_v3_owner.sql','utf8');

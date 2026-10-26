@@ -1,8 +1,9 @@
 import type {PoolClient} from 'pg';
+import {MAIN_QUOTA_GUARD_LOCK_NAMESPACE} from '../wallet-lock-constants';
 import type {ClientLane} from './transaction';
 
 // Separate from every worker host/wallet advisory-lock namespace. No table or migration.
-const LOCK_NAMESPACE=927413, LOCK_ID=1;
+const LOCK_ID=1;
 export class MainQuotaGuard {
   private client:PoolClient|undefined;
   private acquiredAt=Infinity;
@@ -24,13 +25,13 @@ export class MainQuotaGuard {
         const c=await this.lane.connect();this.client=c;
         c.on('error',()=>{if(this.client===c)this.close();});
         c.on('end',()=>{if(this.client===c)this.close();});
-        const result=await c.query('SELECT pg_try_advisory_lock($1,$2) AS held',[LOCK_NAMESPACE,LOCK_ID]);
+        const result=await c.query('SELECT pg_try_advisory_lock($1,$2) AS held',[MAIN_QUOTA_GUARD_LOCK_NAMESPACE,LOCK_ID]);
         if(this.client!==c||result.rows[0]?.held!==true)throw Error('GRID_MAIN_OWNER_UNAVAILABLE');
         this.acquiredAt=this.now();this.generation++;
       }
       const c=this.client;
       const result=await c.query(`SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory'
-        AND pid=pg_backend_pid() AND classid=$1::oid AND objid=$2::oid AND objsubid=2 AND granted) AS held`,[LOCK_NAMESPACE,LOCK_ID]);
+        AND pid=pg_backend_pid() AND classid=$1::oid AND objid=$2::oid AND objsubid=2 AND granted) AS held`,[MAIN_QUOTA_GUARD_LOCK_NAMESPACE,LOCK_ID]);
       if(this.client!==c||result.rows[0]?.held!==true)throw Error('GRID_MAIN_OWNER_UNAVAILABLE');
     } catch(error){this.close();throw error;}
   }
