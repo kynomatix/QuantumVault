@@ -1,3 +1,4 @@
+import { CLOSE_QUEUE_WAIT_MS, CLOSE_TOTAL_WAIT_MS, closeSnapshotTimingError } from '../close-outcome.js';
 import {debitMainRequest,mainQuota} from '../../grid-worker/main-quota';
 import type {
   ProtocolAdapter,
@@ -1863,17 +1864,17 @@ export class PacificaAdapter implements ProtocolAdapter {
     const startedAt = Date.now();
     let dispatchedAt: number | undefined;
     const requestId = randomUUID();
-    const envelope: unknown = await this.get('/positions', { account }, {
-      cachePolicy: 'fresh-required', responseShape: 'envelope', noDedup: true,
-      priority: 'critical', onDispatch: () => { dispatchedAt = Date.now(); },
-    });
-    const receivedAt = Date.now();
+    let envelope: unknown;
+    let receivedAt: number;
+    let expired = false;
     // Log only a fixed field allowlist's presence and JS types, never venue values.
     const paginationFields = ['has_more', 'next_cursor', 'cursor', 'next_page', 'pagination', 'truncated', 'limit', 'offset'];
-    const rejectEnvelope = (reason: string): never => {
+    const envelopeError = (reason: string): Error => {
       const fields = ['success', 'error', 'code', 'data', 'last_order_id', 'account', 'subaccount_id', ...paginationFields];
       const object = envelope !== null && typeof envelope === 'object' ? envelope as Record<string, unknown> : undefined;
       console.warn(`[Pacifica] invalid_close_envelope:${reason} ${JSON.stringify({
+        queueWaitMs: Math.trunc((dispatchedAt ?? Date.now()) - startedAt),
+        requestMs: dispatchedAt === undefined ? 0 : Math.trunc((receivedAt ?? Date.now()) - dispatchedAt),
         envelopeType: typeof envelope,
         data_empty: Array.isArray(object?.data) && object.data.length === 0,
         fields: Object.fromEntries(fields.map(field => [field, {
@@ -1881,8 +1882,31 @@ export class PacificaAdapter implements ProtocolAdapter {
           type: typeof object?.[field],
         }])),
       })}`);
-      throw new Error(`invalid_close_envelope:${reason}`);
+      return new Error(`invalid_close_envelope:${reason}`);
     };
+    const rejectEnvelope = (reason: string): never => { throw envelopeError(reason); };
+    let totalTimer: ReturnType<typeof setTimeout> | undefined;
+    const totalDeadline = new Promise<never>((_, reject) => {
+      totalTimer = setTimeout(() => {
+        expired = true;
+        reject(envelopeError('total_timeout'));
+      }, CLOSE_TOTAL_WAIT_MS);
+      totalTimer.unref?.();
+    });
+    try {
+      envelope = await Promise.race([this.get('/positions', { account }, {
+        cachePolicy: 'fresh-required', responseShape: 'envelope', noDedup: true,
+        priority: 'critical', onDispatch: () => {
+          // Refuse a late wake from the quota queue before any HTTP request.
+          if (expired) throw new Error('invalid_close_envelope:total_timeout');
+          if (Date.now() - startedAt > CLOSE_QUEUE_WAIT_MS) rejectEnvelope('queue_timeout');
+          dispatchedAt = Date.now();
+        },
+      }), totalDeadline]);
+      receivedAt = Date.now();
+    } finally {
+      if (totalTimer) clearTimeout(totalTimer);
+    }
     if (envelope === null) rejectEnvelope('body_null');
     if (typeof envelope !== 'object') rejectEnvelope('body_type');
     if (Array.isArray(envelope)) rejectEnvelope('body_array');
@@ -1890,7 +1914,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     const rawWatermark = body.last_order_id;
     const watermarkAbsent = !Object.prototype.hasOwnProperty.call(body, 'last_order_id');
     if (dispatchedAt === undefined) return rejectEnvelope('dispatch_missing');
-    if (receivedAt - startedAt > 10_000) rejectEnvelope('timeout');
+    const timingError = closeSnapshotTimingError(startedAt, dispatchedAt, receivedAt);
+    if (timingError) rejectEnvelope(timingError);
     if (body.success !== true) rejectEnvelope('success_not_true');
     if (body.error !== null) rejectEnvelope('error_not_null');
     if (body.code !== null) rejectEnvelope('code_not_null');

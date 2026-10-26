@@ -28,6 +28,21 @@ export interface CloseResult {
   remainingSize?: number;
 }
 
+// Queueing consumes no venue snapshot age. Keep separate finite budgets, shared
+// by the transport reader and every downstream close-evidence consumer.
+export const CLOSE_QUEUE_WAIT_MS = 8_000;
+export const CLOSE_SNAPSHOT_AGE_MS = 10_000;
+export const CLOSE_TOTAL_WAIT_MS = CLOSE_QUEUE_WAIT_MS + CLOSE_SNAPSHOT_AGE_MS;
+
+export function closeSnapshotTimingError(startedAt: number, dispatchedAt: number, receivedAt: number): string | undefined {
+  if (![startedAt, dispatchedAt, receivedAt].every(Number.isFinite)
+    || startedAt > dispatchedAt || dispatchedAt > receivedAt) return 'timing_invalid';
+  if (receivedAt - startedAt > CLOSE_TOTAL_WAIT_MS) return 'total_timeout';
+  if (dispatchedAt - startedAt > CLOSE_QUEUE_WAIT_MS) return 'queue_timeout';
+  if (receivedAt - dispatchedAt > CLOSE_SNAPSHOT_AGE_MS) return 'timeout';
+  return undefined;
+}
+
 function validSnapshot(snapshot: CloseSnapshot, account: string): boolean {
   const e = snapshot?.evidence;
   return Boolean(e && e.account === account && e.environment && e.requestId
@@ -38,7 +53,8 @@ function validSnapshot(snapshot: CloseSnapshot, account: string): boolean {
     && [e.startedAt, e.dispatchedAt, e.receivedAt].every(Number.isFinite)
     && e.startedAt <= e.dispatchedAt && e.dispatchedAt <= e.receivedAt
     && e.receivedAt <= Date.now() && Date.now() - e.receivedAt <= 10_000
-    && e.receivedAt - e.startedAt <= 10_000 && Array.isArray(snapshot.positions)
+    && closeSnapshotTimingError(e.startedAt, e.dispatchedAt, e.receivedAt) === undefined
+    && Array.isArray(snapshot.positions)
     && snapshot.positions.every(p => p.internalSymbol && Number.isFinite(p.baseSize))
     && new Set(snapshot.positions.map(p => p.internalSymbol)).size === snapshot.positions.length);
 }

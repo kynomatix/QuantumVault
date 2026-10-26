@@ -227,7 +227,11 @@ describe('strict close envelope diagnostics', () => {
     const line = calls[0][0] as string;
     expect(line).not.toMatch(/[\r\n]/);
     const diagnostics = JSON.parse(line.slice(line.indexOf(' {') + 1));
-    expect(Object.keys(diagnostics)).toEqual(['envelopeType', 'data_empty', 'fields']);
+    expect(Object.keys(diagnostics)).toEqual(['queueWaitMs', 'requestMs', 'envelopeType', 'data_empty', 'fields']);
+    expect(Number.isInteger(diagnostics.queueWaitMs)).toBe(true);
+    expect(Number.isInteger(diagnostics.requestMs)).toBe(true);
+    expect(diagnostics.queueWaitMs).toBeGreaterThanOrEqual(0);
+    expect(diagnostics.requestMs).toBeGreaterThanOrEqual(0);
     expect(diagnostics.data_empty).toBe(true);
     expect(diagnostics.fields.last_order_id).toEqual({ present: true, type: 'number' });
     expect(diagnostics.envelopeType).toBe('object');
