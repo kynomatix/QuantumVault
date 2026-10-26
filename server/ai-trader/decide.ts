@@ -155,6 +155,8 @@ const DECIDE_TOOL = {
 
 export interface RunDecisionInput {
   bot: AiTraderBot;
+  /** Runtime routing only; the configured bot model remains the material era setting. */
+  modelOverride?: string;
   apiKey /* caller-supplied runtime credential; never a literal */: string;
   /** Output of buildMarketContext (WO-3) — non-stale by contract. */
   context: { system: string; user: string; contextDigest: Record<string, any> };
@@ -235,6 +237,7 @@ function finiteOrNaN(v: unknown): number {
 
 export async function runDecision(input: RunDecisionInput): Promise<RunDecisionResult> {
   const { bot, apiKey, context, adapter } = input;
+  const modelUsed = input.modelOverride ?? bot.model;
   const qualificationEraDigest = computeQualificationEraDigest({
     bot,
     contextDigest: context.contextDigest,
@@ -275,7 +278,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     if (!sawUsage) return null;
     try {
       const cost = await estimateCallCostUsd(
-        bot.model,
+        modelUsed,
         usageTotal.promptTokens,
         usageTotal.completionTokens
       );
@@ -293,7 +296,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
   const callGateway = async () => {
     const opts = {
       apiKey,
-      model: bot.model,
+      model: modelUsed,
       messages,
       temperature: 0.2,
       timeoutMs: 60_000,
@@ -357,6 +360,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
         latencyMs: Date.now() - started,
         llmCostUsd: await computeCostUsd(),
         qualificationEraDigest,
+        modelUsed,
       });
     }
 
@@ -441,8 +445,9 @@ async function finalizeDecision(args: {
   latencyMs: number;
   llmCostUsd: string | null;
   qualificationEraDigest: string;
+  modelUsed: string;
 }): Promise<RunDecisionResult> {
-  const { bot, adapter, context, decision, usage, latencyMs, llmCostUsd, qualificationEraDigest } = args;
+  const { bot, adapter, context, decision, usage, latencyMs, llmCostUsd, qualificationEraDigest, modelUsed } = args;
   const digest = context.contextDigest ?? {};
 
   // risk-based-sizing-spec Phase A: the equity read happens ONLY when the bot is
@@ -533,7 +538,7 @@ async function finalizeDecision(args: {
     qualificationEraDigest,
     llmCostUsd,
     llmLatencyMs: latencyMs,
-    modelUsed: bot.model,
+    modelUsed,
   });
 
   return {

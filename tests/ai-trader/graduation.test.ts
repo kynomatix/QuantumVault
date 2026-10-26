@@ -34,10 +34,11 @@ const qualificationBaseline = JSON.parse(readFileSync('tests/fixtures/qualificat
 };
 const cycleBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-cycles-baseline.json', 'utf8')) as typeof qualificationBaseline;
 const declarationBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-declarations-main-baseline.json', 'utf8')) as typeof qualificationBaseline;
+const eraFlapBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-era-flap-baseline.json', 'utf8')) as typeof qualificationBaseline;
 const consumerBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-consumer-main-baseline.json', 'utf8')) as {
   baseCommitHash: string;
   sourceSha256: string;
-  cases: { name: string; input: QualificationEraInput; identity: QualificationEraObject; identityHash: string }[];
+  cases: { name: string; input: QualificationEraInput; identity: Omit<QualificationEraObject, "schemaVersion"> & { schemaVersion: 1 }; identityHash: string }[];
 };
 
 const NOW = Date.UTC(2026, 6, 8, 12, 0, 0); // 2026-07-08T12:00:00Z
@@ -343,21 +344,21 @@ describe("qualification era identity", () => {
     expect(() => canonicalEraDecimal("1e3")).toThrow(/malformed/);
   });
 
-  it("is deterministic and binds venue/basis while grouping admitted finality", () => {
+  it("is deterministic across observed venue, basis and finality", () => {
     const base = { candleProvenance: { selected: provenance("forming"), parent: provenance() } };
     const finalized = { candleProvenance: { selected: provenance("finalized"), parent: provenance() } };
     expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: base }))
       .toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
     const gate = { candleProvenance: { selected: { ...provenance(), source: "gate", venue: "gate" }, parent: provenance() } };
     expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: gate }))
-      .not.toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
+      .toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
     const spot = { candleProvenance: { selected: { ...provenance(), basis: "spot" }, parent: provenance() } };
     expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: spot }))
-      .not.toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
+      .toBe(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest: finalized }));
     expect(buildQualificationEraObject({ bot: ERA_BOT, contextDigest: finalized }).bot.allocatedUsdc).toBe("100");
   });
 
-  it("binds scanner identity to the strategy while retaining the exact reviewed provenance shape", () => {
+  it("binds identity only to declared versions and material bot settings", () => {
     const contextDigest = {
       candleProvenance: {
         selected: provenance("forming"),
@@ -367,9 +368,9 @@ describe("qualification era identity", () => {
     const identity = buildQualificationEraObject({ bot: ERA_BOT, contextDigest });
 
     expect(identity).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       components: {
-        scanner_capability_policy: 4,
+        scanner_capability_policy: 5,
         accepted_candle_provenance: 1,
         prompt_context_schema: 4,
         session_policy: 1,
@@ -391,42 +392,8 @@ describe("qualification era identity", () => {
         maxLeverage: 3,
         stopPolicy: "static",
       },
-      scannerPick: {
-        timeframe: "15m",
-        marketSource: "scanner",
-        selected: {
-          source: "okx",
-          venue: "okx",
-          basis: "perp",
-          proxy: "direct",
-          finalityClass: "forming_or_finalized",
-        },
-        parent: {
-          source: "okx",
-          venue: "okx",
-          basis: "perp",
-          proxy: "direct",
-          finalityClass: "forming_or_finalized",
-        },
-      },
-      candleProvenance: {
-        selected: {
-          source: "okx",
-          venue: "okx",
-          basis: "perp",
-          proxy: "direct",
-          finalityClass: "forming_or_finalized",
-        },
-        parent: {
-          source: "okx",
-          venue: "okx",
-          basis: "perp",
-          proxy: "direct",
-          finalityClass: "forming_or_finalized",
-        },
-      },
     });
-    expect(Object.keys(identity.scannerPick!)).toEqual(["timeframe", "marketSource", "selected", "parent"]);
+    expect(Object.keys(identity)).toEqual(["schemaVersion", "components", "bot"]);
 
     const scannerOtherMarket = { ...ERA_BOT, market: "SOL-PERP" } as AiTraderBot;
     expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest }))
@@ -555,7 +522,7 @@ describe("qualification era forgotten-declaration gate", () => {
     })).toEqual([]);
     expect(Object.fromEntries(components.map(component =>
       [component, QUALIFICATION_ERA_REGISTRY[component].materialVersion]))).toEqual({
-      scanner_capability_policy: 4, accepted_candle_provenance: 1,
+      scanner_capability_policy: 5, accepted_candle_provenance: 1,
       prompt_context_schema: 4, session_policy: 1,
       guardrail_risk_policy: 5, paper_execution_simulator: 3,
       fixed_paper_decision_tool: 1,
@@ -668,13 +635,13 @@ describe("qualification era forgotten-declaration gate", () => {
   it("binds every real owner source to the pinned main registry without requiring Git history", () => {
     // This tracked main baseline captures the pre-declaration source and registry. Hash every owner,
     // including any newly declared path; sealed FRACTAL payloads cannot read Git alternates.
-    const base = structuredClone(declarationBaseline.registry);
-    const paths = new Set([...Object.keys(declarationBaseline.ownerSha256),
+    const base = structuredClone(eraFlapBaseline.registry);
+    const paths = new Set([...Object.keys(eraFlapBaseline.ownerSha256),
       ...Object.values(QUALIFICATION_ERA_REGISTRY).flatMap(entry => [...entry.ownerPaths])]);
     const changedPaths = [...paths].filter(path => {
       const source = readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
       const sha256 = createHash('sha256').update(source).digest('hex');
-      return sha256 !== declarationBaseline.ownerSha256[path]?.replace(/^sha256:/, '');
+      return sha256 !== eraFlapBaseline.ownerSha256[path]?.replace(/^sha256:/, '');
     });
     const beginMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN";
     const endMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END";
@@ -706,18 +673,18 @@ describe("qualification era forgotten-declaration gate", () => {
     const material = new Set<QualificationEraComponent>([
       "scanner_capability_policy", "prompt_context_schema", "guardrail_risk_policy",
     ]);
-    expect(validateQualificationEraDeclarationChanges({ base, current: cloneRegistry(), changedPaths })).toEqual([]);
+    expect(validateQualificationEraDeclarationChanges({ base, current: eraFlapBaseline.registry, changedPaths })).toEqual([]);
     for (const component of components) {
       if (component === "session_policy") {
-        expect(QUALIFICATION_ERA_REGISTRY[component]).toEqual(base[component]);
+        expect(eraFlapBaseline.registry[component]).toEqual(base[component]);
         continue;
       }
-      expect(QUALIFICATION_ERA_REGISTRY[component]).toMatchObject({
+      expect(eraFlapBaseline.registry[component]).toMatchObject({
         decisionGeneration: base[component].decisionGeneration + 1,
         materialVersion: base[component].materialVersion + (material.has(component) ? 1 : 0),
         decision: material.has(component) ? "bump" : "no_bump",
       });
-      const undeclared = cloneRegistry();
+      const undeclared = structuredClone(eraFlapBaseline.registry);
       undeclared[component] = structuredClone(base[component]);
       expect(validateQualificationEraDeclarationChanges({ base, current: undeclared, changedPaths }))
         .toContain(`${component}: changed owner requires decisionGeneration + 1`);
@@ -759,12 +726,12 @@ describe("qualification consumer identities against main fixtures", () => {
         trialStartedAt, graduationState: "in_trial" } as AiTraderBot;
       const components = {
         ...fixture.identity.components,
-        scanner_capability_policy: 4,
+        scanner_capability_policy: 5,
         prompt_context_schema: 4,
         guardrail_risk_policy: 5,
         ...(fixedPaper ? { fixed_paper_decision_tool: 1 } : {}),
       };
-      expect(identity).toEqual({ ...fixture.identity, components });
+      expect(identity).toEqual({ schemaVersion: 2, bot: fixture.identity.bot, components });
       expect(identityHash).not.toBe(baselineHash);
       const patch = qualificationEraDecisionPatch(existing, identityHash);
       expect(patch).toMatchObject({
@@ -802,5 +769,58 @@ describe("qualification consumer identities against main fixtures", () => {
     } finally {
       registry.fixed_paper_decision_tool.materialVersion = version;
     }
+  });
+});
+
+describe("qualification era v2 material boundaries", () => {
+  it("declares the identity correction against dispatched main and rejects a missing declaration", () => {
+    const base = eraFlapBaseline.registry;
+    const changedPaths = ["server/ai-trader/graduation.ts", "server/ai-trader/decide.ts", "server/ai-trader/routes.ts"];
+    expect(validateQualificationEraDeclarationChanges({ base, current: cloneRegistry(), changedPaths })).toEqual([]);
+    expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
+      materialVersion: base.scanner_capability_policy.materialVersion + 1,
+      decisionGeneration: base.scanner_capability_policy.decisionGeneration + 1,
+      decision: "bump",
+    });
+    expect(validateQualificationEraDeclarationChanges({ base, current: base, changedPaths })).toContain(
+      "scanner_capability_policy: changed owner requires decisionGeneration + 1");
+  });
+
+  it("ignores the complete observed context, including missing/malformed provenance and key order", () => {
+    const expected = computeQualificationEraDigest({ bot: ERA_BOT });
+    for (const contextDigest of [null, {}, { candleProvenance: { selected: {}, parent: null } },
+      { price: 123, timestamp: NOW, scannerPick: { market: "SOL-PERP" }, model: "runtime/model" },
+      { model: "runtime/other", timestamp: NOW + DAY, price: 456 }]) {
+      expect(computeQualificationEraDigest({ bot: ERA_BOT, contextDigest })).toBe(expected);
+    }
+    const reversedBot = Object.fromEntries(Object.entries(ERA_BOT).reverse()) as AiTraderBot;
+    expect(computeQualificationEraDigest({ bot: reversedBot })).toBe(expected);
+  });
+
+  it.each([
+    { protocol: "hyperliquid" }, { marketSource: "fixed" }, { timeframe: "1h" },
+    { mode: "confirm" }, { riskProfile: "balanced" }, { model: "different/model" },
+    { sizingMode: "discretionary" }, { riskMinPct: "0.6" }, { riskMaxPct: "1.6" },
+    { allocatedUsdc: "101" }, { maxLeverage: 4 }, { stopPolicy: "trailing" },
+  ])("material setting %j still changes the era", (patch) => {
+    expect(computeQualificationEraDigest({ bot: { ...ERA_BOT, ...patch } as AiTraderBot }))
+      .not.toBe(computeQualificationEraDigest({ bot: ERA_BOT }));
+  });
+
+  it("every applicable component version changes the era; declaration metadata does not", () => {
+    const registry = QUALIFICATION_ERA_REGISTRY as unknown as QualificationEraRegistry;
+    const bot = { ...ERA_BOT, marketSource: "fixed" };
+    const before = computeQualificationEraDigest({ bot });
+    for (const entry of Object.values(registry)) {
+      const original = { ...entry };
+      try {
+        entry.decisionGeneration += 1;
+        entry.decision = "no_bump";
+        expect(computeQualificationEraDigest({ bot })).toBe(before);
+        entry.materialVersion += 1;
+        expect(computeQualificationEraDigest({ bot })).not.toBe(before);
+      } finally { Object.assign(entry, original); }
+    }
+    expect(computeQualificationEraDigest({ bot: { ...bot, paperMode: false } })).not.toBe(before);
   });
 });

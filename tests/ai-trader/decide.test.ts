@@ -243,7 +243,7 @@ describe("runDecision — happy path", () => {
 
     const result = await runDecision({
       bot: makeBot(),
-      apiKey: "sk-or-test",
+      apiKey: "EXAMPLE",
       context: makeContext(),
       adapter: makeAdapter(),
     });
@@ -1080,4 +1080,56 @@ describe("fixed-paper decision-v2 flat explanations", () => {
     } });
     expect(insertMock).not.toHaveBeenCalled();
   });
+});
+
+// Regression: consecutive observations are not material strategy changes.
+describe("qualification era observation stability", () => {
+  it.each(["scanner", "fixed"])("%s: retains the trial and per-decision provenance across feed A/B/A and missing parent", async (marketSource) => {
+    const { runDecision } = await importDecide();
+    const trialStartedAt = new Date("2026-10-01T00:00:00Z");
+    const bot = makeBot({ marketSource, paperMode: true, trialStartedAt, graduationState: "in_trial" });
+    const candle = (source: string) => ({ source, venue: source, basis: "perp", proxy: "direct", finality: "finalized", timeSemantic: "open_time" });
+    const contexts = [
+      { selected: candle("gate"), parent: null },
+      { selected: candle("gate"), parent: candle("okx") },
+      { selected: candle("gate"), parent: null },
+      { selected: candle("okx"), parent: candle("okx") },
+      { selected: candle("gate"), parent: candle("okx") },
+      { selected: candle("okx"), parent: candle("gate") },
+      { selected: candle("okx"), parent: null },
+      { selected: candle("okx"), parent: candle("okx") },
+    ];
+    bot.currentQualificationEraDigest = computeQualificationEraDigest({ bot, contextDigest: { candleProvenance: contexts[0] } });
+    callMock.mockResolvedValue(toolResponse({ action: "flat", confidence: 5, rationale: "No setup", invalidation: "None", flatReasonsVersion: 1, flatReasons: ["no_setup"] }));
+    for (const [index, candleProvenance] of contexts.entries()) {
+      const context = { ...makeContext(), contextDigest: { ...DIGEST, price: 100 + index, candleProvenance } };
+      const result = await runDecision({ bot, apiKey: "EXAMPLE", context, adapter: makeAdapter() });
+      expect(result.ok).toBe(true);
+      expect(insertMock.mock.calls[index][0]).toMatchObject({
+        qualificationEraDigest: bot.currentQualificationEraDigest,
+        contextDigest: { candleProvenance },
+      });
+    }
+    expect(updateBotMock).not.toHaveBeenCalled();
+    expect(bot.trialStartedAt).toBe(trialStartedAt);
+  });
+});
+
+
+it("runtime model overrides preserve the saved-model era and retain actual model/cost attribution", async () => {
+  const { runDecision } = await importDecide();
+  const trialStartedAt = new Date("2026-10-01T00:00:00Z");
+  const bot = makeBot({ paperMode: true, marketSource: "fixed", trialStartedAt, graduationState: "in_trial" });
+  bot.currentQualificationEraDigest = computeQualificationEraDigest({ bot });
+  callMock.mockResolvedValue(toolResponse({ action: "flat", confidence: 5, rationale: "No setup", invalidation: "None", flatReasonsVersion: 1, flatReasons: ["no_setup"] }));
+  for (const [index, modelOverride] of [undefined, "deepseek/deepseek-v4-flash", undefined].entries()) {
+    const modelUsed = modelOverride ?? bot.model;
+    const result = await runDecision({ bot, modelOverride, apiKey: "EXAMPLE", context: makeContext(), adapter: makeAdapter() });
+    expect(result.ok).toBe(true);
+    expect(capturedCalls[index].opts.model).toBe(modelUsed);
+    expect(costMock.mock.calls[index][0]).toBe(modelUsed);
+    expect(insertMock.mock.calls[index][0]).toMatchObject({ modelUsed, qualificationEraDigest: bot.currentQualificationEraDigest });
+  }
+  expect(updateBotMock).not.toHaveBeenCalled();
+  expect(bot.trialStartedAt).toBe(trialStartedAt);
 });

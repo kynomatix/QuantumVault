@@ -1461,8 +1461,8 @@ export function registerAiTraderRoutes(app: Express): void {
 
         // Free-trial calls always run the pinned cheap model — never the bot's
         // configured (possibly expensive) model.
-        const effectiveBot = keyRes.modelOverride ? { ...bot, model: keyRes.modelOverride } : bot;
-        const result = await runDecision({ bot: effectiveBot, apiKey: keyRes.apiKey, context, adapter });
+        // Keep saved material settings intact for era identity; route only the LLM call.
+        const result = await runDecision({ bot, modelOverride: keyRes.modelOverride, apiKey: keyRes.apiKey, context, adapter });
 
         // From here on the call reached the LLM gateway — no refund, win or lose
         // (matches storage.ts's decrementAiTraderFreeCalls contract).

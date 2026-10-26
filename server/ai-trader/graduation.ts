@@ -44,17 +44,17 @@ export interface QualificationEraRegistryEntry {
 
 export type QualificationEraRegistry = Record<QualificationEraComponent, QualificationEraRegistryEntry>;
 
-// Declare the admission-geometry prompt and cross-bot entry cooldown against the
-// pinned main registry. Prompt inputs, scanner candidate admission and execution
-// risk policy are material: their versions advance and existing era handling applies.
-// Candle provenance, the fixed-paper v2 tool/parent contract and paper fill math
-// are unchanged; their shared owner paths receive explicit no_bump declarations.
-// Existing decisions, trades and qualification records retain their original eras.
+// Identity v2 excludes observed candle feeds and optional parent availability.
+// Declare the era identity correction on its graduation owner; all admission,
+// execution and prompt policies retain their existing material versions. Shared
+// decide/routes owners declare no_bump: model routing, tool schema and risk rules
+// are unchanged; only era identity now uses the saved model setting.
+// Historical decisions and records keep their original digests.
 // QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN
 export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
-    "materialVersion": 4,
-    "decisionGeneration": 50,
+    "materialVersion": 5,
+    "decisionGeneration": 51,
     "decision": "bump",
     "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts", "server/ai-trader/graduation.ts"]
   },
@@ -66,13 +66,13 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "prompt_context_schema": {
     "materialVersion": 4,
-    "decisionGeneration": 7,
-    "decision": "bump",
+    "decisionGeneration": 8,
+    "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts"]
   },
   "fixed_paper_decision_tool": {
     "materialVersion": 1,
-    "decisionGeneration": 2,
+    "decisionGeneration": 3,
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts", "shared/ai-trader-flat-reasons.ts"]
   },
@@ -84,8 +84,8 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "guardrail_risk_policy": {
     "materialVersion": 5,
-    "decisionGeneration": 21,
-    "decision": "bump",
+    "decisionGeneration": 22,
+    "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/guardrails.ts", "server/ai-trader/executor.ts", "server/ai-trader/routes.ts"]
   },
   "paper_execution_simulator": {
@@ -124,19 +124,15 @@ export interface QualificationEraInput {
     | "maxLeverage"
     | "stopPolicy"
   >;
+  /** Retained for callers/audit compatibility; observations never define an era. */
   contextDigest?: Record<string, unknown> | null;
 }
 
 export interface QualificationEraObject {
-  schemaVersion: 1;
+  schemaVersion: 2;
   components: Record<Exclude<QualificationEraComponent, "fixed_paper_decision_tool">, number> &
     Partial<Record<"fixed_paper_decision_tool", number>>;
   bot: Record<string, string | number>;
-  scannerPick: Record<string, string | Record<string, string> | null> | null;
-  candleProvenance: {
-    selected: Record<string, string> | null;
-    parent: Record<string, string> | null;
-  };
 }
 
 function canonicalIdentifier(value: unknown, casing: "upper" | "lower"): string {
@@ -166,34 +162,15 @@ export function canonicalEraDecimal(value: unknown): string {
   return negative && magnitude !== "0" ? `-${magnitude}` : magnitude;
 }
 
-function canonicalProvenance(value: unknown): Record<string, string> | null {
-  if (!value || typeof value !== "object") return null;
-  const source = value as Record<string, unknown>;
-  const finality = canonicalIdentifier(source.finality, "lower");
-  return {
-    source: canonicalIdentifier(source.source, "lower"),
-    venue: canonicalIdentifier(source.venue, "lower"),
-    basis: canonicalIdentifier(source.basis, "lower"),
-    proxy: canonicalIdentifier(source.proxy, "lower"),
-    finalityClass:
-      finality === "forming" || finality === "finalized" ? "forming_or_finalized" : finality,
-  };
-}
-
 export function buildQualificationEraObject(input: QualificationEraInput): QualificationEraObject {
-  const digest = input.contextDigest ?? {};
-  const provenance =
-    digest.candleProvenance && typeof digest.candleProvenance === "object"
-      ? (digest.candleProvenance as Record<string, unknown>)
-      : {};
-  const selected = canonicalProvenance(provenance.selected);
-  const parent = canonicalProvenance(provenance.parent);
+  // Policy versions identify material behavior. Actual feed selection, availability,
+  // prices and timestamps belong to each decision's retained context, not its era.
   const components = {} as QualificationEraObject["components"];
   for (const component of QUALIFICATION_ERA_COMPONENTS) {
     components[component] = QUALIFICATION_ERA_REGISTRY[component].materialVersion;
   }
   const bot = input.bot;
-  // Omit the key entirely for legacy consumers to preserve their canonical bytes/hash.
+  // The fixed-paper tool is a material component only for its consuming bot class.
   if (usesFixedPaperDecisionV2(bot)) {
     components.fixed_paper_decision_tool = QUALIFICATION_ERA_REGISTRY.fixed_paper_decision_tool.materialVersion;
   }
@@ -202,7 +179,7 @@ export function buildQualificationEraObject(input: QualificationEraInput): Quali
   const market = marketSource === "scanner" ? "SCANNER_DYNAMIC" : selectedMarket;
   const timeframe = canonicalIdentifier(bot.timeframe, "lower");
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     components,
     bot: {
       protocol: canonicalIdentifier(bot.protocol, "lower"),
@@ -219,11 +196,6 @@ export function buildQualificationEraObject(input: QualificationEraInput): Quali
       maxLeverage: canonicalEraInteger(bot.maxLeverage),
       stopPolicy: canonicalIdentifier(bot.stopPolicy, "lower"),
     },
-    scannerPick:
-      marketSource === "scanner"
-        ? { timeframe, marketSource, selected, parent }
-        : null,
-    candleProvenance: { selected, parent },
   };
 }
 
