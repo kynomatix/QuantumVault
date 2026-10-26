@@ -102,7 +102,7 @@ async function getAgentSplBalance(agentPublicKey: string): Promise<number | null
 }
 
 const SNAPSHOT_INTERVAL_MS = 12 * 60 * 60 * 1000; // Every 12 hours (00:00 and 12:00 UTC)
-const SNAPSHOT_WINDOW_MS = 10 * 60 * 1000;
+const SNAPSHOT_WINDOW_MS = 60 * 60 * 1000;
 type SnapshotTrigger = "scheduled" | "boot";
 let snapshotRunInProgress = false;
 
@@ -120,7 +120,7 @@ function withinSnapshotWindow(now: Date, boundary: Date): boolean {
 export async function takePortfolioSnapshots(trigger: SnapshotTrigger = "scheduled"): Promise<void> {
   const now = new Date();
   if (!withinSnapshotWindow(now, snapshotBoundary(now))) {
-    console.log(`[Portfolio Snapshots] Skipping ${trigger} run outside the 10-minute UTC boundary window`);
+    console.log(`[Portfolio Snapshots] Skipping ${trigger} run outside the 60-minute UTC boundary window`);
     return;
   }
   if (snapshotRunInProgress) {
@@ -257,7 +257,7 @@ export async function computeWalletTotalBalance(
 export async function processWalletSnapshot(walletAddress: string, trigger: SnapshotTrigger = "scheduled"): Promise<void> {
   const snapshotTime = snapshotBoundary(new Date());
   if (!withinSnapshotWindow(new Date(), snapshotTime)) {
-    console.log(`[Portfolio Snapshots] Skipping ${walletAddress.slice(0, 8)}... outside the 10-minute UTC boundary window`);
+    console.log(`[Portfolio Snapshots] Skipping ${walletAddress.slice(0, 8)}... outside the 60-minute UTC boundary window`);
     return;
   }
   if (trigger === "boot") {
@@ -291,7 +291,7 @@ export async function processWalletSnapshot(walletAddress: string, trigger: Snap
   const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
   const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);
 
-  // The UTC boundary labels a capture made within its first ten minutes.
+  // The UTC boundary labels a capture made within its first hour.
   // Match flows to the live balance observation, not the earlier bucket label.
   const { deposits, withdrawals, internalTransfers } =
     await storage.getWalletCumulativeDepositsWithdrawals(walletAddress, balanceReadAt);

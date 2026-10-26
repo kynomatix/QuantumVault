@@ -98,7 +98,7 @@ describe('portfolio snapshot boot capture', () => {
   });
 
   it.each(['scheduled', 'boot'] as const)('skips a %s capture outside the window', async trigger => {
-    vi.setSystemTime(new Date('2026-10-27T12:10:00.000Z'));
+    vi.setSystemTime(new Date('2026-10-27T13:00:00.000Z'));
     await processWalletSnapshot(wallet, trigger);
     expect(mocks.storage.getWallet).not.toHaveBeenCalled();
     expect(mocks.storage.upsertPortfolioDailySnapshot).not.toHaveBeenCalled();
@@ -106,7 +106,7 @@ describe('portfolio snapshot boot capture', () => {
 
   it('discards a balance read that crosses the window cutoff', async () => {
     mocks.adapter.getAccountInfo.mockImplementation(async () => {
-      vi.setSystemTime(new Date('2026-10-27T12:10:00.000Z'));
+      vi.setSystemTime(new Date('2026-10-27T13:00:00.000Z'));
       return { balance: 120 };
     });
     await processWalletSnapshot(wallet, 'boot');
