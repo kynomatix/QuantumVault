@@ -44,36 +44,36 @@ export interface QualificationEraRegistryEntry {
 
 export type QualificationEraRegistry = Record<QualificationEraComponent, QualificationEraRegistryEntry>;
 
-// Cycle visibility is observational: scanner policy, risk and simulator versions stay fixed.
-// Accepted provenance keeps primary/finality requirements (no_bump). Scanner and live
-// model prompts, tool schemas and rendered context remain byte-identical to main;
-// passive contextQuality metadata does not change those decision inputs.
-// Declare the batch without resetting existing Pacifica scanner paper trials:
-// only fixed-ticker PAPER identities include the v2 tool/parent-omission component.
+// Declare the admission-geometry prompt and cross-bot entry cooldown against the
+// pinned main registry. Prompt inputs, scanner candidate admission and execution
+// risk policy are material: their versions advance and existing era handling applies.
+// Candle provenance, the fixed-paper v2 tool/parent contract and paper fill math
+// are unchanged; their shared owner paths receive explicit no_bump declarations.
+// Existing decisions, trades and qualification records retain their original eras.
 // QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN
 export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
-    "materialVersion": 3,
-    "decisionGeneration": 49,
-    "decision": "no_bump",
+    "materialVersion": 4,
+    "decisionGeneration": 50,
+    "decision": "bump",
     "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts", "server/ai-trader/graduation.ts"]
   },
   "accepted_candle_provenance": {
     "materialVersion": 1,
-    "decisionGeneration": 22,
+    "decisionGeneration": 23,
     "decision": "no_bump",
     "ownerPaths": ["server/lab/datafeed.ts", "server/lab/candle-store.ts", "server/ai-trader/context-builder.ts"]
   },
   "prompt_context_schema": {
-    "materialVersion": 3,
-    "decisionGeneration": 6,
-    "decision": "no_bump",
+    "materialVersion": 4,
+    "decisionGeneration": 7,
+    "decision": "bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts"]
   },
   "fixed_paper_decision_tool": {
     "materialVersion": 1,
-    "decisionGeneration": 1,
-    "decision": "bump",
+    "decisionGeneration": 2,
+    "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts", "shared/ai-trader-flat-reasons.ts"]
   },
   "session_policy": {
@@ -83,14 +83,14 @@ export const QUALIFICATION_ERA_REGISTRY = {
     "ownerPaths": ["server/ai-trader/session-context.ts"]
   },
   "guardrail_risk_policy": {
-    "materialVersion": 4,
-    "decisionGeneration": 20,
-    "decision": "no_bump",
+    "materialVersion": 5,
+    "decisionGeneration": 21,
+    "decision": "bump",
     "ownerPaths": ["server/ai-trader/guardrails.ts", "server/ai-trader/executor.ts", "server/ai-trader/routes.ts"]
   },
   "paper_execution_simulator": {
     "materialVersion": 3,
-    "decisionGeneration": 19,
+    "decisionGeneration": 20,
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/paper-math.ts", "server/ai-trader/monitor.ts"]
   }
