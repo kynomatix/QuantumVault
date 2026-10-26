@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDataRelayClient, parseRelayRead } from '../../server/market-stats/liquidations-relay';
-import { HOUR } from '../../server/market-stats/liquidations-model';
+import { HOUR, modelMultiVenueLiquidations } from '../../server/market-stats/liquidations-model';
 import { END } from './liquidations-fixtures';
 import { relayEnvelope } from './liquidations-relay-fixtures';
 
@@ -40,8 +40,7 @@ describe('bounded optional relay read', () => {
     const result = parseRelayRead(kind === 'envelope' ? [] : fixture, start, last, now);
     expect(result.series).toEqual([]); expect(result.coverage.every(c => c.reason === 'malformed')).toBe(true);
   });
-  it.each(['venue', 'symbol', 'interval', 'duplicate', 'unsorted', 'outside', 'non-hour', 'number', 'ohlc',
-    'fetch-future', 'fetch-before-close', 'source', 'gap-conflict', 'gap-duplicate', 'gap-outside', 'row-bound', 'gap-bound'] as const)(
+  it.each(['venue', 'symbol', 'interval', 'duplicate', 'unsorted', 'outside', 'non-hour', 'number', 'hour-parse', 'price-schema', 'fetch-schema', 'source', 'gap-conflict', 'gap-duplicate', 'gap-outside', 'row-bound', 'gap-bound'] as const)(
     'rejects %s only for the affected venue', kind => {
       const fixture = relayEnvelope(), venue = fixture.venues.binance;
       if (kind === 'venue') venue.venue = 'bybit';
@@ -52,9 +51,9 @@ describe('bounded optional relay read', () => {
       if (kind === 'outside') venue.rows[0].hour = new Date(start - HOUR).toISOString();
       if (kind === 'non-hour') venue.rows[0].hour = new Date(start + 1).toISOString();
       if (kind === 'number') (venue.rows[0] as unknown as { oiCoins: unknown }).oiCoins = '100';
-      if (kind === 'ohlc') venue.rows[0].low = 102;
-      if (kind === 'fetch-future') venue.rows[0].fetchedAt = new Date(now + HOUR).toISOString();
-      if (kind === 'fetch-before-close') venue.rows[0].fetchedAt = new Date(start).toISOString();
+      if (kind === 'hour-parse') venue.rows[0].hour = 'EXAMPLE';
+      if (kind === 'price-schema') (venue.rows[0] as unknown as { open: unknown }).open = '100';
+      if (kind === 'fetch-schema') venue.rows[0].fetchedAt = 'EXAMPLE';
       if (kind === 'source') venue.rows[0].sourceKind = 'x'.repeat(81);
       if (kind === 'gap-conflict') venue.gaps.push({ hour: venue.rows[0].hour, reason: 'EXAMPLE' });
       if (kind === 'gap-duplicate') { const removed = venue.rows.splice(1, 1)[0]; venue.gaps.push(...Array(2).fill({ hour: removed.hour, reason: 'EXAMPLE' })); }
@@ -65,6 +64,57 @@ describe('bounded optional relay read', () => {
       expect(result.series.map(v => v.venue)).toEqual(['bybit', 'hyperliquid']);
       expect(result.coverage[0].reason).toBe('malformed');
     });
+  it.each(['premature', 'future', 'after-generated', 'low', 'high', 'inverted', 'zero', 'negative'] as const)(
+    'skips one %s row, retains the venue and resets only its book at the gap', kind => {
+      const begin = END - 5 * HOUR, fixture = relayEnvelope(begin, last);
+      const row = fixture.venues.bybit.rows[2], time = Date.parse(row.hour);
+      if (kind === 'premature') row.fetchedAt = new Date(time + HOUR - 1).toISOString();
+      if (kind === 'future') row.fetchedAt = new Date(now + 5 * 60_000 + 1).toISOString();
+      if (kind === 'after-generated') row.fetchedAt = new Date(now + 5 * 60_000 + 1).toISOString();
+      if (kind === 'low') row.low = 102;
+      if (kind === 'high') row.high = 99;
+      if (kind === 'inverted') { row.low = 102; row.high = 98; }
+      if (kind === 'zero') row.open = 0;
+      if (kind === 'negative') row.close = -1;
+      // A large invalid OI must never reach the model, even as a new baseline.
+      row.oiCoins = 1_000_000;
+      const result = parseRelayRead(fixture, begin, last, kind === 'after-generated' ? now + HOUR : now);
+      expect(result.series.map(v => v.venue)).toEqual(['binance', 'bybit', 'hyperliquid']);
+      expect(result.coverage[1]).toMatchObject({ status: 'included', skippedRows: 1, gapHours: 1,
+        gaps: [{ start: time, end: time }] });
+      expect(result.series[1].rows.map(r => r.time)).toEqual([begin, begin + HOUR, begin + 3 * HOUR, last]);
+      expect(result.series[1].rows.every(r => r.btc < 1_000_000)).toBe(true);
+      const prices = Array.from({ length: 5 }, (_, i) => ({ time: begin + i * HOUR,
+        open: 100, high: 100, low: 100, close: 100, oiBtc: 100 + i }));
+      const model = modelMultiVenueLiquidations(prices, begin, result.series);
+      if (!('venueAccounting' in model)) throw new Error('Expected multi-venue accounting');
+      expect(model.venueAccounting.find(v => v.venue === 'bybit')).toMatchObject({
+        enteredBtc: 2, discardedForGapBtc: 1 });
+      expect(model.venueAccounting.find(v => v.venue === 'bybit')!.liveBtc).toBeCloseTo(1);
+      for (const venue of ['okx', 'binance', 'hyperliquid']) {
+        expect(model.venueAccounting.find(v => v.venue === venue)).toMatchObject({ enteredBtc: 4, discardedForGapBtc: 0 });
+        expect(model.venueAccounting.find(v => v.venue === venue)!.liveBtc).toBeCloseTo(4);
+      }
+    });
+  it.each(['duplicate', 'unsorted', 'gap-conflict'] as const)('still rejects %s involving a skipped row', kind => {
+    const fixture = relayEnvelope(), rows = fixture.venues.binance.rows;
+    rows[1].low = 102;
+    if (kind === 'duplicate') rows.splice(2, 0, { ...rows[1] });
+    if (kind === 'unsorted') [rows[1], rows[2]] = [rows[2], rows[1]];
+    if (kind === 'gap-conflict') fixture.venues.binance.gaps.push({ hour: rows[1].hour, reason: 'EXAMPLE' });
+    expect(parseRelayRead(fixture, start, last, now).coverage[0]).toMatchObject({ status: 'omitted', reason: 'malformed' });
+  });
+  it('counts leading and trailing skips without changing interior-gap or freshness semantics', () => {
+    const begin = END - 6 * HOUR, fixture = relayEnvelope(begin, last);
+    fixture.venues.bybit.rows[0].low = 102;
+    fixture.venues.bybit.rows.at(-1)!.low = 102;
+    expect(parseRelayRead(fixture, begin, last, now).coverage[1]).toMatchObject({ status: 'included',
+      skippedRows: 2, gapHours: 0, gaps: [], firstObservation: begin + HOUR,
+      lastObservation: last - HOUR, terminalLagHours: 1 });
+    for (const row of fixture.venues.bybit.rows) row.low = 102;
+    expect(parseRelayRead(fixture, begin, last, now).coverage[1]).toMatchObject({
+      status: 'omitted', reason: 'empty', skippedRows: 6, firstObservation: null, lastObservation: null });
+  });
   it('derives unlisted gaps and distinguishes terminal lag from an interior reset', () => {
     const fixture = relayEnvelope(END - 6 * HOUR, last);
     fixture.venues.binance.rows.splice(2, 2);

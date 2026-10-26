@@ -14,9 +14,9 @@ const MAX_BODY = 2 * 1024 * 1024;
 const MAX_HOURS = MODEL_DAYS * 24;
 const utc = z.string().max(32).datetime();
 const nonnegative = z.number().finite().nonnegative();
-const positive = z.number().finite().positive();
+const price = z.number().finite();
 const rowSchema = z.object({ hour: utc, oiCoins: nonnegative, oiUsd: nonnegative.nullable(),
-  open: positive, high: positive, low: positive, close: positive,
+  open: price, high: price, low: price, close: price,
   sourceKind: z.string().min(1).max(80), fetchedAt: utc });
 const venueSchema = z.object({ venue: z.enum(RELAY_VENUES).optional(), symbol: z.literal('BTC').optional(),
   interval: z.literal('1h').optional(), rows: z.array(rowSchema).max(MAX_HOURS),
@@ -34,7 +34,7 @@ function validWindow(start: number, lastHour: number) {
 class SafeFailure extends Error { constructor(public reason: SafeReason, public httpStatus?: number) { super(reason); } }
 export function omittedRelay(reason: SafeReason): RelayRead {
   return { series: [], coverage: RELAY_VENUES.map(venue => ({ venue, status: 'omitted', reason,
-    firstObservation: null, lastObservation: null, lastFetchedAt: null, gaps: [], gapHours: 0, terminalLagHours: 0 })) };
+    firstObservation: null, lastObservation: null, lastFetchedAt: null, gaps: [], gapHours: 0, skippedRows: 0, terminalLagHours: 0 })) };
 }
 
 /** Missing hours are derived from the rows, even if an upstream gap record is absent. */
@@ -48,26 +48,31 @@ export function parseRelayRead(raw: unknown, start: number, lastHour: number, no
     const invalid = () => result.coverage.push(omittedRelay('malformed').coverage.find(c => c.venue === venue)!);
     const parsed = venueSchema.safeParse((envelope.data.venues ?? envelope.data)[venue]);
     if (!parsed.success || (parsed.data.venue !== undefined && parsed.data.venue !== venue)) { invalid(); continue; }
-    const rows: RelaySeries['rows'] = [], seen = new Set<number>();
-    let bad = false, previous = -Infinity;
+    const rows: RelaySeries['rows'] = [], seen = new Set<number>(), rowTimes = new Set<number>();
+    let bad = false, previous = -Infinity, skippedRows = 0;
     for (const row of parsed.data.rows) {
       const time = Date.parse(row.hour), fetchedAt = Date.parse(row.fetchedAt);
-      if (!Number.isSafeInteger(time) || time % HOUR || time < start || time > lastHour || time <= previous
-        || !Number.isFinite(fetchedAt) || fetchedAt < time + HOUR || fetchedAt > now + 5 * 60_000
+      if (!Number.isSafeInteger(time) || time % HOUR || time < start || time > lastHour || time <= previous) { bad = true; break; }
+      // Ordering and gap conflicts include skipped rows; bad values cannot hide a structural failure.
+      previous = time; rowTimes.add(time);
+      if (!Number.isFinite(fetchedAt) || fetchedAt < time + HOUR || fetchedAt > now + 5 * 60_000
         || fetchedAt > Date.parse(envelope.data.generatedAt) + 5 * 60_000
-        || row.low > Math.min(row.open, row.close) || row.high < Math.max(row.open, row.close) || row.low > row.high) { bad = true; break; }
-      rows.push({ time, btc: row.oiCoins, fetchedAt }); seen.add(time); previous = time;
+        || row.open <= 0 || row.high <= 0 || row.low <= 0 || row.close <= 0
+        || row.low > Math.min(row.open, row.close) || row.high < Math.max(row.open, row.close) || row.low > row.high) {
+        skippedRows++; continue;
+      }
+      rows.push({ time, btc: row.oiCoins, fetchedAt }); seen.add(time);
     }
     const gapTimes = new Set<number>();
     for (const gap of parsed.data.gaps) {
       const time = Date.parse(gap.hour);
-      if (!Number.isSafeInteger(time) || time % HOUR || time < start || time > lastHour || seen.has(time) || gapTimes.has(time)) { bad = true; break; }
+      if (!Number.isSafeInteger(time) || time % HOUR || time < start || time > lastHour || rowTimes.has(time) || gapTimes.has(time)) { bad = true; break; }
       gapTimes.add(time);
     }
     if (bad) { invalid(); continue; }
     const first = rows[0], last = rows.at(-1);
     const coverage: LiquidationVenueCoverage = { venue, status: 'omitted', firstObservation: first?.time ?? null,
-      lastObservation: last?.time ?? null, lastFetchedAt: last?.fetchedAt ?? null, gaps: [], gapHours: 0,
+      lastObservation: last?.time ?? null, lastFetchedAt: last?.fetchedAt ?? null, gaps: [], gapHours: 0, skippedRows,
       terminalLagHours: last ? (lastHour - last.time) / HOUR : 0 };
     if (first && last) for (let time = first.time; time <= last.time; time += HOUR) {
       if (seen.has(time)) continue;

@@ -1,10 +1,15 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Layers } from 'lucide-react';
-import type { LiquidationCluster, LiquidationStatsResponse } from '@shared/market-stats';
+import type { LiquidationCluster, LiquidationCoverageReason, LiquidationStatsResponse } from '@shared/market-stats';
 import { getActiveWalletAddress, walletAuthHeaders } from '@/lib/queryClient';
 import LiquidationHeatmapChart from './LiquidationHeatmapChart';
 
+const omissionReasons: Record<LiquidationCoverageReason, string> = {
+  disabled: 'source unavailable', deadline: 'source timed out', http: 'source request failed',
+  malformed: 'data failed checks', empty: 'no recent data', stale: 'data too old',
+  'baseline-only': 'not enough consecutive observations',
+};
 const money = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n);
 const compact = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(n);
 function Cluster({ side, cluster }: { side: 'above' | 'below'; cluster: LiquidationCluster | null }) {
@@ -43,7 +48,11 @@ export function LiquidationHeatmapView({ card, now }: { card: LiquidationStatsRe
           {card.coverage?.venues.filter(v => v.status === 'included').map(v => <p key={v.venue}>
             {venueNames[v.venue]}: observations from {utc(v.firstObservation!)} to {utc(v.lastObservation!)}; {v.gapHours} missing {v.gapHours === 1 ? 'hour' : 'hours'}
             {v.gaps.length > 0 && ` (${v.gaps.slice(0, 2).map(g => g.start === g.end ? utc(g.start) : `${utc(g.start)} to ${utc(g.end)}`).join('; ')}${v.gaps.length > 2 ? '; more gaps' : ''})`}.
+            {(v.skippedRows ?? 0) > 0 && ` ${v.skippedRows} ${v.skippedRows === 1 ? 'hour' : 'hours'} skipped after failing checks.`}
             {v.terminalLagHours > 0 && ` Prices continue through the last ${v.terminalLagHours} hours without new open-interest changes.`}
+          </p>)}
+          {card.coverage?.venues.filter(v => v.status === 'omitted').map(v => <p key={v.venue}>
+            {venueNames[v.venue]}: left out ({v.reason ? omissionReasons[v.reason] : 'no usable recent data'}).
           </p>)}
           {card.coverage?.venues.some(v => v.status === 'omitted') && <p>Some venues have no usable recent observations and are left out of this snapshot.</p>}
           {method === 'oi-leverage-v3' && <p>Coverage changes over time; this is not a continuous four-venue history. A venue starts empty at its first observation. Missing interior hours clear only that venue’s positions; the next observation starts a new baseline. Zero bands mean no modelled exposure from observed books, not measured zero open interest at missing venues.</p>}

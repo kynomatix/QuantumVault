@@ -2,7 +2,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { LiquidationHeatmapView } from '../../client/src/components/market-stats/LiquidationHeatmap';
-import type { LiquidationStatsResponse } from '../../shared/market-stats';
+import type { LiquidationCoverageReason, LiquidationStatsResponse } from '../../shared/market-stats';
 import { modelLiquidations } from '../../server/market-stats/liquidations-model';
 import { END, hour } from './liquidations-fixtures';
 vi.mock('../../client/src/lib/queryClient', () => ({ walletAuthHeaders: () => ({}), getActiveWalletAddress: () => null }));
@@ -37,6 +37,28 @@ describe('modelled monthly liquidation display', () => {
     const html = renderToStaticMarkup(createElement(LiquidationHeatmapView, { card: card(), now: END }));
     expect(html).toContain('Sources: OKX'); expect(html).not.toContain('One venue:');
     expect(html).not.toContain('relay'); expect(html).not.toContain('scheduler');
+  });
+  it.each([
+    ['disabled', 'source unavailable'], ['deadline', 'source timed out'], ['http', 'source request failed'],
+    ['malformed', 'data failed checks'], ['empty', 'no recent data'], ['stale', 'data too old'],
+    ['baseline-only', 'not enough consecutive observations'], [undefined, 'no usable recent data'],
+  ] as [LiquidationCoverageReason | undefined, string][])('explains omitted venues (%s)', (reason, explanation) => {
+    const data = card();
+    data.coverage = { venuesUsed: ['okx'], priceVenue: 'okx', venues: [{ venue: 'bybit', status: 'omitted', reason,
+      firstObservation: null, lastObservation: null, lastFetchedAt: null, gaps: [], gapHours: 0, terminalLagHours: 0 }] };
+    const html = renderToStaticMarkup(createElement(LiquidationHeatmapView, { card: data, now: END }));
+    expect(html).toContain(`Bybit: left out (${explanation}).`);
+    expect(html).toContain('Some venues have no usable recent observations');
+  });
+  it.each([1, 2])('snapshots all four sources and reports %s skipped hours', skippedRows => {
+    const data = card();
+    data.coverage = { venuesUsed: ['okx', 'binance', 'bybit', 'hyperliquid'], priceVenue: 'okx',
+      venues: [{ venue: 'bybit', status: 'included', firstObservation: END - 14400000,
+        lastObservation: END, lastFetchedAt: END, gaps: [], gapHours: 0, terminalLagHours: 0, skippedRows }] };
+    const html = renderToStaticMarkup(createElement(LiquidationHeatmapView, { card: data, now: END }));
+    expect(html.match(/Sources: [^<]+/)?.[0]).toMatchInlineSnapshot(`"Sources: OKX + Binance + Bybit + Hyperliquid"`);
+    expect(html).toContain(`${skippedRows} ${skippedRows === 1 ? 'hour' : 'hours'} skipped after failing checks`);
+    expect(html).not.toContain('left out');
   });
   it.each([{ venues: ['binance'] }, { venues: ['bybit', 'hyperliquid'] }, { venues: ['binance', 'bybit', 'hyperliquid'] }])(
     'renders actual source subsets and coverage details ($venues)', ({ venues }) => {

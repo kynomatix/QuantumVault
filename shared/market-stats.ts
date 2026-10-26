@@ -49,6 +49,8 @@ export type LiquidationVenueCoverage = {
   firstObservation: number | null; lastObservation: number | null; lastFetchedAt: number | null;
   /** Inclusive ranges of missing hours between the first and last observations. */
   gaps: { start: number; end: number }[]; gapHours: number; terminalLagHours: number;
+  /** Rows excluded by value checks, including leading and trailing hours. Absent on older snapshots. */
+  skippedRows?: number;
 };
 export type LiquidationCoverage = {
   venuesUsed: LiquidationVenue[]; priceVenue: 'okx'; venues: LiquidationVenueCoverage[];
