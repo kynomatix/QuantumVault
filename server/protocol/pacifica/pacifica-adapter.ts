@@ -1868,16 +1868,41 @@ export class PacificaAdapter implements ProtocolAdapter {
       priority: 'critical', onDispatch: () => { dispatchedAt = Date.now(); },
     });
     const receivedAt = Date.now();
-    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) throw new Error('invalid_close_envelope');
+    // Log only a fixed field allowlist's presence and JS types, never venue values.
+    const paginationFields = ['has_more', 'next_cursor', 'cursor', 'next_page', 'pagination', 'truncated', 'limit', 'offset'];
+    const rejectEnvelope = (reason: string): never => {
+      const fields = ['success', 'error', 'code', 'data', 'last_order_id', 'account', 'subaccount_id', ...paginationFields];
+      const object = envelope !== null && typeof envelope === 'object' ? envelope as Record<string, unknown> : undefined;
+      console.warn(`[Pacifica] invalid_close_envelope:${reason}`, {
+        envelopeType: typeof envelope,
+        fields: Object.fromEntries(fields.map(field => [field, {
+          present: object !== undefined && Object.prototype.hasOwnProperty.call(object, field),
+          type: typeof object?.[field],
+        }])),
+      });
+      throw new Error(`invalid_close_envelope:${reason}`);
+    };
+    if (envelope === null) rejectEnvelope('body_null');
+    if (typeof envelope !== 'object') rejectEnvelope('body_type');
+    if (Array.isArray(envelope)) rejectEnvelope('body_array');
     const body = envelope as Record<string, unknown>;
     const watermark = body.last_order_id;
-    if (dispatchedAt === undefined || receivedAt - startedAt > 10_000 || body.success !== true
-      || body.error !== null || body.code !== null || !Array.isArray(body.data)
-      || typeof watermark !== 'number' || !Number.isSafeInteger(watermark) || watermark < 0
-      || (body.account !== undefined && body.account !== account) || body.subaccount_id !== undefined
-      || ['has_more', 'next_cursor', 'cursor', 'next_page', 'pagination', 'truncated', 'limit', 'offset']
-        .some(key => body[key] !== undefined && body[key] !== null && body[key] !== false)
-      || watermark < (this.closeWatermarks.get(account) ?? 0)) throw new Error('invalid_close_envelope');
+    if (dispatchedAt === undefined) return rejectEnvelope('dispatch_missing');
+    if (receivedAt - startedAt > 10_000) rejectEnvelope('timeout');
+    if (body.success !== true) rejectEnvelope('success_not_true');
+    if (body.error !== null) rejectEnvelope('error_not_null');
+    if (body.code !== null) rejectEnvelope('code_not_null');
+    if (!Array.isArray(body.data)) return rejectEnvelope('data_not_array');
+    // The public positions contract specifies an integer, not a decimal string.
+    if (typeof watermark !== 'number') return rejectEnvelope('last_order_id_type');
+    if (!Number.isSafeInteger(watermark)) rejectEnvelope('last_order_id_unsafe');
+    if (watermark < 0) rejectEnvelope('last_order_id_negative');
+    if (body.account !== undefined && body.account !== account) rejectEnvelope('account_mismatch');
+    if (body.subaccount_id !== undefined) rejectEnvelope('subaccount_scope');
+    if (paginationFields.some(key => body[key] !== undefined && body[key] !== null && body[key] !== false)) {
+      rejectEnvelope('pagination');
+    }
+    if (watermark < (this.closeWatermarks.get(account) ?? 0)) rejectEnvelope('watermark_regressed');
     const symbols = new Set<string>();
     const positions = body.data.map((value: unknown): ProtocolPosition => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_close_row');
