@@ -146,6 +146,23 @@ describe('public reconciler requires qualified flatness', () => {
     mocks.storage.recordCloseEventAtomic.mockResolvedValue({ isNew: true, trade: { id: 'EXAMPLE_CLOSE' } });
     mocks.sendTradeNotification.mockResolvedValue(undefined);
   });
+  it.each([null, 'flat', 'exposed'])('handles no history with stored state %s without changing positions', async state => {
+    mocks.storage.getBotPosition.mockResolvedValue(state === null ? null
+      : { ...storedPosition('EXAMPLE_ENTRY'), baseSize: state === 'flat' ? '0' : '0.00972' });
+    let sequence = 0;
+    mocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => {
+      const now = Date.now();
+      return { positions: [], evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${++sequence}`,
+        startedAt: now, dispatchedAt: now, receivedAt: now, lastOrderId: null, fresh: true, complete: true, noDedup: true } };
+    });
+    const result = await reconcile(`EXAMPLE_NO_HISTORY_${state}`);
+    expect(result.synced).toBe(state !== 'exposed');
+    expect(result.discrepancy).toBe(state === 'exposed');
+    expect(mocks.storage.upsertBotPosition).not.toHaveBeenCalled();
+    expect(mocks.storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+    expect(mocks.storage.updateBotTrade).not.toHaveBeenCalled();
+    expect(mocks.adapter.getPositions).not.toHaveBeenCalled();
+  });
   it('completes qualified flat pending exposure without fabricating no-fill accounting', async () => {
     mocks.storage.getBotTrades.mockResolvedValue([{ id: 'EXAMPLE_PENDING', status: 'pending', side: 'CLOSE', market,
       executedAt: new Date(), txSignature: 'EXAMPLE_ORDER' }]);

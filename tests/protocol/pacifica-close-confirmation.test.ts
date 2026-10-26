@@ -41,7 +41,7 @@ describe('strict Pacifica close confirmation through real HTTP transport', () =>
   });
   it.each([
     { success: false }, { error: 'EXAMPLE' }, { code: 0 }, { data: {} }, { data: null },
-    { last_order_id: undefined }, { last_order_id: -1 }, { last_order_id: Number.MAX_SAFE_INTEGER + 1 },
+    { last_order_id: undefined, data: [row] }, { last_order_id: -1 }, { last_order_id: Number.MAX_SAFE_INTEGER + 1 },
     { account: 'EXAMPLE_WRONG' }, { subaccount_id: '1' }, { has_more: true }, { next_cursor: 'EXAMPLE' },
     { data: [row, row] }, { data: [{ ...row, amount: undefined }] }, { data: [{ ...row, amount: 'NaN' }] },
     { data: [{ ...row, amount: '' }] }, { data: [{ ...row, amount: '-1' }] },
@@ -107,7 +107,7 @@ describe('strict close envelope diagnostics', () => {
     ['data_not_array', { data: null }],
     ['data_not_array', { data: {} }],
     ['data_not_array', { data: undefined }],
-    ['last_order_id_type', { last_order_id: undefined }],
+    ['last_order_id_type', { last_order_id: undefined, data: [row] }],
     ['last_order_id_type', { last_order_id: null }],
     ['last_order_id_type', { last_order_id: '2' }],
     ['last_order_id_type', { last_order_id: '02' }],

@@ -213,7 +213,7 @@ function snapshot(account: string, sequence: number, size: number) {
   const now = Date.now();
   return { positions: size === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: size, entryPrice: 64000 }],
     evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${account}-${sequence}`, startedAt: now, dispatchedAt: now,
-      receivedAt: now, lastOrderId: sequence, complete: true, fresh: true, noDedup: true } };
+      receivedAt: now, lastOrderId: sequence as number | null, complete: true, fresh: true, noDedup: true } };
 }
 function primeConfirmation(defect: string) {
   vi.clearAllMocks();
@@ -243,13 +243,14 @@ function primeConfirmation(defect: string) {
     if (sequence > 1 && defect === 'read-failed') throw new Error('EXAMPLE unavailable');
     const result = snapshot(account, sequence, sequence === 1 ? 0.25 : defect === 'residual' ? 0.000001 : 0);
     if (sequence > 1 && defect === 'wrong-account') result.evidence.account = 'EXAMPLE_WRONG';
+    if (sequence > 1 && defect === 'no-history') result.evidence.lastOrderId = null;
     if (sequence > 1 && defect === 'unchanged-watermark') result.evidence.lastOrderId = 1;
     return result;
   });
 }
 describe('registered close routes enforce strict completion', () => {
   for (const endpoint of ['tradingview', 'user'] as const) {
-    it.each(['baseline-failed', 'read-failed', 'residual', 'wrong-account', 'unchanged-watermark', 'no-signature', 'ambiguous-dispatch', 'missing-epoch', 'account-rotated', 'epoch-changed'])(`${endpoint} keeps %s pending without money effects`, async defect => {
+    it.each(['no-history', 'baseline-failed', 'read-failed', 'residual', 'wrong-account', 'unchanged-watermark', 'no-signature', 'ambiguous-dispatch', 'missing-epoch', 'account-rotated', 'epoch-changed'])(`${endpoint} keeps %s pending without money effects`, async defect => {
       primeConfirmation(defect);
       const result = await postFullClose(endpoint);
       expect(result.status).toBe(202);

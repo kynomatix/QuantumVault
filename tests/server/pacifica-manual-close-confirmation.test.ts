@@ -19,7 +19,7 @@ function visit(node: ts.Node): void {
 visit(ast);
 const js = ts.transpileModule(selected.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 describe('registered manual close and executor boundary', () => {
-  it.each(['unavailable', 'residual', 'unchanged', 'unsigned', 'prior-pending', 'epoch-changed'])('keeps %s pending without dust resends or success fallthrough', async defect => {
+  it.each(['no-history', 'unavailable', 'residual', 'unchanged', 'unsigned', 'prior-pending', 'epoch-changed'])('keeps %s pending without dust resends or success fallthrough', async defect => {
     const account = 'EXAMPLE_ACCOUNT';
     const bot = { id: 'EXAMPLE_BOT', walletAddress: 'EXAMPLE_OWNER', market: 'BTC-PERP', activeProtocol: 'pacifica', protocolSubaccountId: account };
     let positionReads = 0;
@@ -41,7 +41,7 @@ describe('registered manual close and executor boundary', () => {
         const now = Date.now();
         return { positions: sequence === 1 || defect === 'residual' ? [{ internalSymbol: bot.market, baseSize: sequence === 1 ? 1 : 0.000001 }] : [],
           evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${sequence}`, startedAt: now, dispatchedAt: now, receivedAt: now,
-            lastOrderId: defect === 'unchanged' ? 1 : sequence, fresh: true, complete: true, noDedup: true } };
+            lastOrderId: sequence > 1 && defect === 'no-history' ? null : defect === 'unchanged' ? 1 : sequence, fresh: true, complete: true, noDedup: true } };
       }),
     };
     let handler: (req: unknown, res: unknown) => Promise<void> = async () => { throw new Error('route missing'); };

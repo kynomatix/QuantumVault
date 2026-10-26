@@ -713,7 +713,10 @@ async function teardownPacificaSubaccountForDelete(
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
       const after = await readCloseSnapshot(adapter, acct);
-      if (!qualifiedFlatObservation(acct, undefined, closeBaseline, after, closeSettledAt)) continue;
+      // A never-used account needs no close confirmation. Any submitted intent
+      // still requires numeric order history, even if the inventory is empty.
+      if (!qualifiedFlatObservation(acct, undefined, closeBaseline, after, closeSettledAt,
+        closeIntents.length === 0 ? 'empty-account' : 'close')) continue;
       const currentBot = await storage.getTradingBotById(bot.id);
       if (currentBot?.protocolSubaccountId !== acct) return { ok: false, error: 'close_account_changed' };
       for (const intent of closeIntents) {

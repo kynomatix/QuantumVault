@@ -1531,6 +1531,11 @@ export async function reconcileBotPosition(
     const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
     const onChainBaseSize = onChainPos ? onChainPos.baseAssetAmount : 0;
     if (!Number.isFinite(onChainBaseSize) || !Number.isFinite(dbBaseSize)) return { synced: false, discrepancy: false };
+    // No order history is flat inventory, but cannot retire stored exposure or
+    // prove a submitted close. Preserve even a small stored position for review.
+    if (strictSnapshot?.evidence.lastOrderId === null && dbBaseSize !== 0) {
+      return { synced: false, discrepancy: true };
+    }
     const onChainHasRealPosition = onChainPos && (strictSnapshot ? onChainBaseSize !== 0 : Math.abs(onChainBaseSize) > 0.0001);
 
     if (onChainHasRealPosition) {

@@ -8,7 +8,8 @@ export interface CloseObservation {
   startedAt: number;
   dispatchedAt: number;
   receivedAt: number;
-  lastOrderId: number;
+  /** Null means an empty inventory with no observed order history, never close proof. */
+  lastOrderId: number | null;
   complete: true;
   fresh: true;
   noDedup: true;
@@ -31,7 +32,9 @@ function validSnapshot(snapshot: CloseSnapshot, account: string): boolean {
   const e = snapshot?.evidence;
   return Boolean(e && e.account === account && e.environment && e.requestId
     && e.complete === true && e.fresh === true && e.noDedup === true
-    && Number.isSafeInteger(e.lastOrderId) && e.lastOrderId >= 0
+    && (e.lastOrderId === null
+      ? Array.isArray(snapshot.positions) && snapshot.positions.length === 0
+      : Number.isSafeInteger(e.lastOrderId) && e.lastOrderId >= 0)
     && [e.startedAt, e.dispatchedAt, e.receivedAt].every(Number.isFinite)
     && e.startedAt <= e.dispatchedAt && e.dispatchedAt <= e.receivedAt
     && e.receivedAt <= Date.now() && Date.now() - e.receivedAt <= 10_000
@@ -40,15 +43,21 @@ function validSnapshot(snapshot: CloseSnapshot, account: string): boolean {
     && new Set(snapshot.positions.map(p => p.internalSymbol)).size === snapshot.positions.length);
 }
 
-/** Independent inventory observations, including externally closed positions. */
+/** Independent inventory observations, including externally closed positions.
+ * Empty-account mode is only for callers that have submitted no close orders. */
 export function qualifiedFlatObservation(account: string, market: string | undefined,
-  baseline: CloseSnapshot, after: CloseSnapshot, notBefore: number): boolean {
+  baseline: CloseSnapshot, after: CloseSnapshot, notBefore: number,
+  purpose: 'close' | 'empty-account' = 'close'): boolean {
   if (!validSnapshot(baseline, account) || !validSnapshot(after, account)
     || !Number.isFinite(notBefore) || after.evidence.startedAt < notBefore
     || after.evidence.startedAt < baseline.evidence.receivedAt
     || baseline.evidence.environment !== after.evidence.environment
-    || baseline.evidence.requestId === after.evidence.requestId
-    || after.evidence.lastOrderId < baseline.evidence.lastOrderId) return false;
+    || baseline.evidence.requestId === after.evidence.requestId) return false;
+  if (baseline.evidence.lastOrderId === null || after.evidence.lastOrderId === null) {
+    return purpose === 'empty-account'
+      && baseline.evidence.lastOrderId === null && after.evidence.lastOrderId === null;
+  }
+  if (after.evidence.lastOrderId < baseline.evidence.lastOrderId) return false;
   const inScope = (p: ProtocolPosition) => market === undefined || p.internalSymbol === market;
   if (after.positions.some(p => inScope(p) && p.baseSize !== 0)) return false;
   return !baseline.positions.some(p => inScope(p) && p.baseSize !== 0)
@@ -70,6 +79,7 @@ export function closeResultFromObservation(input: {
   const result: CloseResult = { outcome: 'unknown', account, market, reason: 'unqualified_close_observation',
     baseline: baseline.evidence, observation: after.evidence };
   if (!validSnapshot(baseline, account) || !validSnapshot(after, account)
+    || baseline.evidence.lastOrderId === null || after.evidence.lastOrderId === null
     || baseline.evidence.account !== account || after.evidence.account !== account
     || baseline.evidence.environment !== after.evidence.environment
     || baseline.evidence.requestId === after.evidence.requestId || after.evidence.startedAt < settledAt

@@ -1887,23 +1887,32 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (typeof envelope !== 'object') rejectEnvelope('body_type');
     if (Array.isArray(envelope)) rejectEnvelope('body_array');
     const body = envelope as Record<string, unknown>;
-    const watermark = body.last_order_id;
+    const rawWatermark = body.last_order_id;
+    const watermarkAbsent = !Object.prototype.hasOwnProperty.call(body, 'last_order_id');
     if (dispatchedAt === undefined) return rejectEnvelope('dispatch_missing');
     if (receivedAt - startedAt > 10_000) rejectEnvelope('timeout');
     if (body.success !== true) rejectEnvelope('success_not_true');
     if (body.error !== null) rejectEnvelope('error_not_null');
     if (body.code !== null) rejectEnvelope('code_not_null');
     if (!Array.isArray(body.data)) return rejectEnvelope('data_not_array');
-    // The public positions contract specifies an integer, not a decimal string.
-    if (typeof watermark !== 'number') return rejectEnvelope('last_order_id_type');
-    if (!Number.isSafeInteger(watermark)) rejectEnvelope('last_order_id_unsafe');
-    if (watermark < 0) rejectEnvelope('last_order_id_negative');
+    // Idle accounts without order history omit the field. Null/string/undefined
+    // values are not that wire shape, and an omission cannot erase accepted history.
+    let watermark: number | null;
+    if (watermarkAbsent && body.data.length === 0) {
+      if (this.closeWatermarks.has(account)) return rejectEnvelope('watermark_regressed');
+      watermark = null;
+    } else {
+      if (typeof rawWatermark !== 'number') return rejectEnvelope('last_order_id_type');
+      if (!Number.isSafeInteger(rawWatermark)) rejectEnvelope('last_order_id_unsafe');
+      if (rawWatermark < 0) rejectEnvelope('last_order_id_negative');
+      watermark = rawWatermark;
+    }
     if (body.account !== undefined && body.account !== account) rejectEnvelope('account_mismatch');
     if (body.subaccount_id !== undefined) rejectEnvelope('subaccount_scope');
     if (paginationFields.some(key => body[key] !== undefined && body[key] !== null && body[key] !== false)) {
       rejectEnvelope('pagination');
     }
-    if (watermark < (this.closeWatermarks.get(account) ?? 0)) rejectEnvelope('watermark_regressed');
+    if (watermark !== null && watermark < (this.closeWatermarks.get(account) ?? 0)) rejectEnvelope('watermark_regressed');
     const symbols = new Set<string>();
     const positions = body.data.map((value: unknown): ProtocolPosition => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_close_row');
@@ -1912,7 +1921,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         || (row.account !== undefined && row.account !== account) || row.subaccount_id !== undefined
         || typeof row.amount !== 'string' || !/^(?:0|[1-9]\d*)(?:\.\d+)?$(?![\s\S])/.test(row.amount)
         || !Number.isFinite(Number(row.amount)) || (Number(row.amount) === 0 && /[1-9]/.test(row.amount))
-        || (row.li != null && (typeof row.li !== 'number' || !Number.isSafeInteger(row.li) || row.li < 0 || row.li > watermark))) {
+        || (row.li != null && (typeof row.li !== 'number' || !Number.isSafeInteger(row.li) || row.li < 0 || watermark === null || row.li > watermark))) {
         throw new Error('invalid_close_row');
       }
       const symbol = this.cancelSymbol(row.symbol);
@@ -1924,7 +1933,9 @@ export class PacificaAdapter implements ProtocolAdapter {
         entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : 0,
         markPrice: null, unrealizedPnl: null, leverage: 1, liquidationPrice: null, marginMode: 'cross' };
     });
-    this.closeWatermarks.set(account, watermark);
+    // Keep numeric history sticky, including zero. Repeated no-history reads
+    // remain valid until this account accepts its first numeric watermark.
+    if (watermark !== null) this.closeWatermarks.set(account, watermark);
     return { positions, evidence: { account, environment: this.config.baseUrl, requestId, startedAt,
       dispatchedAt, receivedAt, lastOrderId: watermark, complete: true, fresh: true, noDedup: true } };
   }
