@@ -35,6 +35,7 @@ const qualificationBaseline = JSON.parse(readFileSync('tests/fixtures/qualificat
 const cycleBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-cycles-baseline.json', 'utf8')) as typeof qualificationBaseline;
 const declarationBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-declarations-main-baseline.json', 'utf8')) as typeof qualificationBaseline;
 const eraFlapBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-era-flap-baseline.json', 'utf8')) as typeof qualificationBaseline;
+const modelAttributionBaseline = JSON.parse(readFileSync("tests/fixtures/qualification-model-attribution-baseline.json", "utf8")) as typeof qualificationBaseline;
 const consumerBaseline = JSON.parse(readFileSync('tests/fixtures/qualification-consumer-main-baseline.json', 'utf8')) as {
   baseCommitHash: string;
   sourceSha256: string;
@@ -632,16 +633,16 @@ describe("qualification era forgotten-declaration gate", () => {
     expect(registry.guardrail_risk_policy.decisionGeneration).toBe(guardrailGeneration);
   });
 
-  it("binds every real owner source to the pinned main registry without requiring Git history", () => {
-    // This tracked main baseline captures the pre-declaration source and registry. Hash every owner,
+  it("binds every real owner source to the pinned R2 parent registry without requiring Git history", () => {
+    // This tracked R2 baseline captures the parent source and registry. Hash every owner,
     // including any newly declared path; sealed FRACTAL payloads cannot read Git alternates.
-    const base = structuredClone(eraFlapBaseline.registry);
-    const paths = new Set([...Object.keys(eraFlapBaseline.ownerSha256),
+    const base = structuredClone(modelAttributionBaseline.registry);
+    const paths = new Set([...Object.keys(modelAttributionBaseline.ownerSha256),
       ...Object.values(QUALIFICATION_ERA_REGISTRY).flatMap(entry => [...entry.ownerPaths])]);
     const changedPaths = [...paths].filter(path => {
       const source = readFileSync(path, 'utf8').replaceAll('\r\n', '\n');
       const sha256 = createHash('sha256').update(source).digest('hex');
-      return sha256 !== eraFlapBaseline.ownerSha256[path]?.replace(/^sha256:/, '');
+      return sha256 !== modelAttributionBaseline.ownerSha256[path]?.replace(/^sha256:/, '');
     });
     const beginMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN";
     const endMarker = "QV_QUALIFICATION_ERA_REGISTRY_LITERAL_END";
@@ -776,8 +777,8 @@ describe("qualification era v2 material boundaries", () => {
   it("declares the identity correction against dispatched main and rejects a missing declaration", () => {
     const base = eraFlapBaseline.registry;
     const changedPaths = ["server/ai-trader/graduation.ts", "server/ai-trader/decide.ts", "server/ai-trader/routes.ts"];
-    expect(validateQualificationEraDeclarationChanges({ base, current: cloneRegistry(), changedPaths })).toEqual([]);
-    expect(QUALIFICATION_ERA_REGISTRY.scanner_capability_policy).toMatchObject({
+    expect(validateQualificationEraDeclarationChanges({ base, current: modelAttributionBaseline.registry, changedPaths })).toEqual([]);
+    expect(modelAttributionBaseline.registry.scanner_capability_policy).toMatchObject({
       materialVersion: base.scanner_capability_policy.materialVersion + 1,
       decisionGeneration: base.scanner_capability_policy.decisionGeneration + 1,
       decision: "bump",
@@ -822,5 +823,27 @@ describe("qualification era v2 material boundaries", () => {
       } finally { Object.assign(entry, original); }
     }
     expect(computeQualificationEraDigest({ bot: { ...bot, paperMode: false } })).not.toBe(before);
+  });
+});
+
+
+describe("model attribution declaration against the R2 parent", () => {
+  it("requires fresh declarations while retaining every material version", () => {
+    const base = modelAttributionBaseline.registry;
+    const changedPaths = ["server/ai-trader/decide.ts", "server/ai-trader/graduation.ts"];
+    expect(validateQualificationEraDeclarationChanges({ base, current: cloneRegistry(), changedPaths })).toEqual([]);
+    const affected = new Set(["scanner_capability_policy", "prompt_context_schema", "fixed_paper_decision_tool"]);
+    for (const component of Object.keys(base) as QualificationEraComponent[]) {
+      expect(QUALIFICATION_ERA_REGISTRY[component].materialVersion).toBe(base[component].materialVersion);
+      if (affected.has(component)) expect(QUALIFICATION_ERA_REGISTRY[component]).toMatchObject({
+        decision: "no_bump", decisionGeneration: base[component].decisionGeneration + 1,
+      });
+      else expect(QUALIFICATION_ERA_REGISTRY[component]).toEqual(base[component]);
+    }
+    const undeclared = validateQualificationEraDeclarationChanges({ base, current: base, changedPaths });
+    for (const component of affected) expect(undeclared).toContain(`${component}: changed owner requires decisionGeneration + 1`);
+    // The parent's scanner declaration was a bump; replaying it also lacks a new material version.
+    expect(undeclared).toContain("scanner_capability_policy: bump requires materialVersion + 1");
+    expect(undeclared).toHaveLength(4);
   });
 });

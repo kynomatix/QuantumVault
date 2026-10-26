@@ -395,6 +395,7 @@ export async function runDecision(input: RunDecisionInput): Promise<RunDecisionR
     qualificationEraDigest,
     llmCostUsd: await computeCostUsd(),
     llmLatencyMs: latencyMs,
+    modelUsed,
   });
   return { ok: false, reason: "malformed", detail: lastDetail, decisionId: malformedRow.id };
 }

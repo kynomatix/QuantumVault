@@ -1133,3 +1133,56 @@ it("runtime model overrides preserve the saved-model era and retain actual model
   expect(updateBotMock).not.toHaveBeenCalled();
   expect(bot.trialStartedAt).toBe(trialStartedAt);
 });
+
+
+describe("actual model attribution on every retained decision path", () => {
+  describe.each([undefined, "deepseek/deepseek-v4-flash"])("override %s", (modelOverride) => {
+    it.each([
+      "flat", "long", "short", "close", "guardrail rejection", "constraint failure",
+      "malformed", "corrected output",
+    ])("attributes %s to the actual gateway and cost model without changing the era", async (path) => {
+      const { runDecision } = await importDecide();
+      const trialStartedAt = new Date("2026-10-01T00:00:00Z");
+      const bot = makeBot({ trialStartedAt, graduationState: "in_trial" });
+      bot.currentQualificationEraDigest = computeQualificationEraDigest({ bot });
+      const modelUsed = modelOverride ?? bot.model;
+      const context = structuredClone(makeContext());
+      const adapter = makeAdapter(path === "constraint failure"
+        ? { getMarkets: vi.fn().mockRejectedValue(new Error("EXAMPLE market read failure")) } : {});
+      const flat = { action: "flat", confidence: 5, rationale: "No setup", invalidation: "None" };
+      let decision: Record<string, unknown> = { ...VALID_LONG_ARGS };
+      if (path === "flat") decision = flat;
+      if (path === "short") decision = { ...VALID_LONG_ARGS, action: "short", stopLossPrice: 102, takeProfitPrice: 94 };
+      if (path === "close") {
+        decision = { action: "close", confidence: 5, rationale: "Exit", invalidation: "None" };
+        context.contextDigest.account.hasPosition = true;
+      }
+      if (path === "guardrail rejection") decision = { ...VALID_LONG_ARGS, stopLossPrice: 102 };
+      const malformed = { ...VALID_LONG_ARGS, stopLossPrice: undefined };
+      if (path === "malformed") callMock.mockResolvedValue(toolResponse(malformed));
+      else if (path === "corrected output") callMock.mockResolvedValueOnce(toolResponse(malformed)).mockResolvedValueOnce(toolResponse(flat));
+      else callMock.mockResolvedValue(toolResponse(decision));
+
+      const result = await runDecision({ bot, modelOverride, apiKey: "EXAMPLE", context, adapter });
+      const attempts = path === "malformed" || path === "corrected output" ? 2 : 1;
+      expect(capturedCalls).toHaveLength(attempts);
+      for (const call of capturedCalls) expect(call.opts.model).toBe(modelUsed);
+      expect(costMock).toHaveBeenCalledTimes(1);
+      expect(costMock).toHaveBeenCalledWith(modelUsed, 1000 * attempts, 200 * attempts);
+      expect(insertMock).toHaveBeenCalledTimes(1);
+      const rejected = path === "guardrail rejection" || path === "constraint failure";
+      const outcome = path === "malformed" ? "aborted_malformed"
+        : rejected ? "rejected_guardrails" : path === "flat" || path === "corrected output" ? "flat" : null;
+      expect(insertMock.mock.calls[0][0]).toMatchObject({
+        modelUsed, outcome, llmCostUsd: "0.012345", qualificationEraDigest: bot.currentQualificationEraDigest,
+      });
+      if (path === "malformed") expect(result).toMatchObject({ ok: false, reason: "malformed", decisionId: "dec-1" });
+      else expect(result).toMatchObject({ ok: true, rejected });
+      if (path === "constraint failure") expect(insertMock.mock.calls[0][0].guardrailViolations).toEqual([
+        expect.objectContaining({ code: "constraint_unavailable" }),
+      ]);
+      expect(updateBotMock).not.toHaveBeenCalled();
+      expect(bot.trialStartedAt).toBe(trialStartedAt);
+    });
+  });
+});

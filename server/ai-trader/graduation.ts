@@ -49,13 +49,14 @@ export type QualificationEraRegistry = Record<QualificationEraComponent, Qualifi
 // execution and prompt policies retain their existing material versions. Shared
 // decide/routes owners declare no_bump: model routing, tool schema and risk rules
 // are unchanged; only era identity now uses the saved model setting.
+// R2 advances audit-only declarations; malformed-row attribution changes no material version.
 // Historical decisions and records keep their original digests.
 // QV_QUALIFICATION_ERA_REGISTRY_LITERAL_BEGIN
 export const QUALIFICATION_ERA_REGISTRY = {
   "scanner_capability_policy": {
     "materialVersion": 5,
-    "decisionGeneration": 51,
-    "decision": "bump",
+    "decisionGeneration": 52,
+    "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/scanner.ts", "server/ai-trader/scanner-capabilities.ts", "server/ai-trader/market-admission.ts", "server/ai-trader/multiplier-market-quarantine.ts", "server/ai-trader/monitor.ts", "server/ai-trader/routes.ts", "server/ai-trader/graduation.ts"]
   },
   "accepted_candle_provenance": {
@@ -66,13 +67,13 @@ export const QUALIFICATION_ERA_REGISTRY = {
   },
   "prompt_context_schema": {
     "materialVersion": 4,
-    "decisionGeneration": 8,
+    "decisionGeneration": 9,
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts"]
   },
   "fixed_paper_decision_tool": {
     "materialVersion": 1,
-    "decisionGeneration": 3,
+    "decisionGeneration": 4,
     "decision": "no_bump",
     "ownerPaths": ["server/ai-trader/context-builder.ts", "server/ai-trader/decide.ts", "shared/ai-trader-flat-reasons.ts"]
   },

@@ -1,0 +1,93 @@
+{
+  "baseCommitHash": "38c641236e36c3584e3466f70824f70356deb258",
+  "registry": {
+    "scanner_capability_policy": {
+      "materialVersion": 5,
+      "decisionGeneration": 51,
+      "decision": "bump",
+      "ownerPaths": [
+        "server/ai-trader/scanner.ts",
+        "server/ai-trader/scanner-capabilities.ts",
+        "server/ai-trader/market-admission.ts",
+        "server/ai-trader/multiplier-market-quarantine.ts",
+        "server/ai-trader/monitor.ts",
+        "server/ai-trader/routes.ts",
+        "server/ai-trader/graduation.ts"
+      ]
+    },
+    "accepted_candle_provenance": {
+      "materialVersion": 1,
+      "decisionGeneration": 23,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/lab/datafeed.ts",
+        "server/lab/candle-store.ts",
+        "server/ai-trader/context-builder.ts"
+      ]
+    },
+    "prompt_context_schema": {
+      "materialVersion": 4,
+      "decisionGeneration": 8,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/context-builder.ts",
+        "server/ai-trader/decide.ts"
+      ]
+    },
+    "fixed_paper_decision_tool": {
+      "materialVersion": 1,
+      "decisionGeneration": 3,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/context-builder.ts",
+        "server/ai-trader/decide.ts",
+        "shared/ai-trader-flat-reasons.ts"
+      ]
+    },
+    "session_policy": {
+      "materialVersion": 1,
+      "decisionGeneration": 1,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/session-context.ts"
+      ]
+    },
+    "guardrail_risk_policy": {
+      "materialVersion": 5,
+      "decisionGeneration": 22,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/guardrails.ts",
+        "server/ai-trader/executor.ts",
+        "server/ai-trader/routes.ts"
+      ]
+    },
+    "paper_execution_simulator": {
+      "materialVersion": 3,
+      "decisionGeneration": 20,
+      "decision": "no_bump",
+      "ownerPaths": [
+        "server/ai-trader/paper-math.ts",
+        "server/ai-trader/monitor.ts"
+      ]
+    }
+  },
+  "ownerSha256": {
+    "server/ai-trader/context-builder.ts": "sha256:7834a2a587c2a8f8cc3374de037bb7bdd981bf9bb98ba9ae57e67aaf13298632",
+    "server/ai-trader/decide.ts": "sha256:c5faf525bb20a105b5ef7aa964a02c339aa767ee7c5adb7e5883bda72fac520d",
+    "server/ai-trader/executor.ts": "sha256:2b55ff9427ba3b4afb7fad2be69726d13df28d084dee3d441a567216ab2ff3f0",
+    "server/ai-trader/graduation.ts": "sha256:510c8fa339c88b8140fdb4f228ec2959ad605cce6bd5c4e75e987d1c95011772",
+    "server/ai-trader/guardrails.ts": "sha256:02953b34b93a43d535ca66269984c303df1e64906f4e496cdd027da2cc728dab",
+    "server/ai-trader/market-admission.ts": "sha256:b71e1eae76b5e7104daf7dfbf0c68721a96f054454bc30212be1ef63bc588aab",
+    "server/ai-trader/monitor.ts": "sha256:d4c727a9bfdb156697e784d01fea76287ec0b1db1e14aaa7ca587c6aa8353907",
+    "server/ai-trader/multiplier-market-quarantine.ts": "sha256:c49ee636893c9998d2299ad887b4473b59a0bf22805a8ed60899e5af6f9a548b",
+    "server/ai-trader/paper-math.ts": "sha256:107fa30113fa6dc69fed3beb650fa8c51b3d7f059c92407fae7a6223990c4517",
+    "server/ai-trader/routes.ts": "sha256:d8c86c13e7419f95f507564f78568a7af2d190732c0ef90f2b9e78f4b55a195a",
+    "server/ai-trader/scanner-capabilities.ts": "sha256:eb0792c5a2e8e6beb0afca6a8d8438ff1c31a8adf17875be66cf4bd1fda56dcb",
+    "server/ai-trader/scanner.ts": "sha256:ec3ff862a02ed4e8da90c1e318f7a5c1287351faa98ac2a15f714791eb901ea2",
+    "server/ai-trader/session-context.ts": "sha256:934c178d699e09a242264f75b95c61e1322277c9514a720ce5fd8ab21ee24c0b",
+    "server/lab/candle-store.ts": "sha256:41d4f51bb3518b70b815e1e0dc2f6a70cf256f35da606a6b2574691d2ea250cf",
+    "server/lab/datafeed.ts": "sha256:b2682c65b1ad5b8cc75e5c587e5f1252a916fd2401137e00e17247cf21c16ed8",
+    "shared/ai-trader-flat-reasons.ts": "sha256:5efbb6a7b9bb9164cd037cbd0c4a667509c7f949678b9bde5c8aecb0d55766b1"
+  }
+}
