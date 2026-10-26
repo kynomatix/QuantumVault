@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ storage: { getWallet: vi.fn(), getTradingBots: vi.fn(), sumOpenBorrowDebtUsdc: vi.fn(), getWalletTradeStats: vi.fn(), getWalletCreatorEarnings: vi.fn(), getWalletCumulativeDepositsWithdrawals: vi.fn(), getLatestPortfolioDailySnapshot: vi.fn(), upsertPortfolioDailySnapshot: vi.fn() }, flash: { getWalletPortfolioBalanceStrict: vi.fn() }, pacifica: { getAccountInfo: vi.fn() }, drift: { getAccountInfo: vi.fn() }, rpc: { getAccountInfo: vi.fn(), getTokenAccountBalance: vi.fn() } }));
 vi.mock('../../server/storage', () => ({ storage: mocks.storage }));
 vi.mock('../../server/rpc-config', () => ({ createSolanaRpcConnection: () => mocks.rpc }));
@@ -7,7 +7,9 @@ vi.mock('../../server/vault/vault-service', () => ({ sumVaultPositionValueUsdc: 
 vi.mock('../../server/protocol/adapter-registry', () => ({ getDefaultAdapter: () => mocks.drift, getAdapterForBot: (bot: any) => { if (bot.activeProtocol === 'flash') throw Error('retired adapter accessed'); return bot.activeProtocol === 'pacifica' ? mocks.pacifica : mocks.drift; } }));
 vi.mock('../../server/protocol/flash/manual-withdrawal', () => ({getManualFlashWithdrawalAdapter: async () => mocks.flash}));
 import { computeWalletTotalBalance, processWalletSnapshot } from '../../server/portfolio-snapshot-job';
+afterEach(() => { vi.useRealTimers(); });
 beforeEach(() => {
+ vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-27T12:03:00.000Z'));
  vi.clearAllMocks(); mocks.flash.getWalletPortfolioBalanceStrict.mockResolvedValue(7);
  mocks.storage.getWallet.mockResolvedValue({ agentPublicKey: '11111111111111111111111111111111' });
  mocks.storage.getTradingBots.mockResolvedValue([{id:'f',activeProtocol:'flash',protocolSubaccountId:'flash-wallet',subaccountStatus:'error',isActive:false}, {id:'p',activeProtocol:'pacifica',subaccountAuthMode:'external_key',subaccountStatus:'active',protocolSubaccountId:'p',isActive:true}, {id:'d',activeProtocol:'drift',subaccountAuthMode:'main_plus_id',driftSubaccountId:2,isActive:true}]);

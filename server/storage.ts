@@ -1157,7 +1157,7 @@ export interface IStorage {
   updatePendingProfitShareStatus(id: string, updates: { status?: string; retryCount?: number; lastError?: string | null; lastAttemptAt?: Date | null; processingClaimToken?: string | null; processingClaimedFromStatus?: string | null; referralLegsInitializedAt?: Date | null }): Promise<PendingProfitShare | undefined>;
   deletePendingProfitShare(id: string): Promise<void>;
 
-  upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot): Promise<PortfolioDailySnapshot>;
+  upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot, preserveExisting?: boolean): Promise<PortfolioDailySnapshot | undefined>;
   getPortfolioDailySnapshots(walletAddress: string, since?: Date): Promise<PortfolioDailySnapshot[]>;
   getPortfolioDailySnapshotsBatch(walletAddresses: string[], since?: Date): Promise<Map<string, PortfolioDailySnapshot[]>>;
   getEarliestPortfolioSnapshotDates(walletAddresses: string[]): Promise<Map<string, Date>>;
@@ -6386,9 +6386,15 @@ export class DatabaseStorage implements IStorage {
     await db.delete(pendingProfitShares).where(eq(pendingProfitShares.id, id));
   }
 
-  async upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot): Promise<PortfolioDailySnapshot> {
-    const result = await db.insert(portfolioDailySnapshots).values(snapshot)
-      .onConflictDoUpdate({
+  async upsertPortfolioDailySnapshot(snapshot: InsertPortfolioDailySnapshot, preserveExisting = false): Promise<PortfolioDailySnapshot | undefined> {
+    const insert = db.insert(portfolioDailySnapshots).values(snapshot);
+    if (preserveExisting) {
+      const result = await insert.onConflictDoNothing({
+        target: [portfolioDailySnapshots.walletAddress, portfolioDailySnapshots.snapshotDate],
+      }).returning();
+      return result[0];
+    }
+    const result = await insert.onConflictDoUpdate({
         target: [portfolioDailySnapshots.walletAddress, portfolioDailySnapshots.snapshotDate],
         set: {
           totalBalance: snapshot.totalBalance,

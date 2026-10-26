@@ -102,8 +102,32 @@ async function getAgentSplBalance(agentPublicKey: string): Promise<number | null
 }
 
 const SNAPSHOT_INTERVAL_MS = 12 * 60 * 60 * 1000; // Every 12 hours (00:00 and 12:00 UTC)
+const SNAPSHOT_WINDOW_MS = 10 * 60 * 1000;
+type SnapshotTrigger = "scheduled" | "boot";
+let snapshotRunInProgress = false;
 
-export async function takePortfolioSnapshots(): Promise<void> {
+function snapshotBoundary(now: Date): Date {
+  const boundary = new Date(now);
+  boundary.setUTCHours(now.getUTCHours() < 12 ? 0 : 12, 0, 0, 0);
+  return boundary;
+}
+
+function withinSnapshotWindow(now: Date, boundary: Date): boolean {
+  const elapsed = now.getTime() - boundary.getTime();
+  return elapsed >= 0 && elapsed < SNAPSHOT_WINDOW_MS;
+}
+
+export async function takePortfolioSnapshots(trigger: SnapshotTrigger = "scheduled"): Promise<void> {
+  const now = new Date();
+  if (!withinSnapshotWindow(now, snapshotBoundary(now))) {
+    console.log(`[Portfolio Snapshots] Skipping ${trigger} run outside the 10-minute UTC boundary window`);
+    return;
+  }
+  if (snapshotRunInProgress) {
+    console.log(`[Portfolio Snapshots] Skipping ${trigger} run - snapshot run already in progress`);
+    return;
+  }
+  snapshotRunInProgress = true;
   console.log("[Portfolio Snapshots] Starting 12-hour snapshot run...");
   
   try {
@@ -113,7 +137,7 @@ export async function takePortfolioSnapshots(): Promise<void> {
     
     for (const walletAddress of walletAddresses) {
       try {
-        await processWalletSnapshot(walletAddress);
+        await processWalletSnapshot(walletAddress, trigger);
       } catch (error) {
         console.error(`[Portfolio Snapshots] Error processing wallet ${walletAddress.slice(0, 8)}...`, error);
       }
@@ -122,6 +146,8 @@ export async function takePortfolioSnapshots(): Promise<void> {
     console.log("[Portfolio Snapshots] Completed 12-hour snapshot run");
   } catch (error) {
     console.error("[Portfolio Snapshots] Fatal error during snapshot run:", error);
+  } finally {
+    snapshotRunInProgress = false;
   }
 }
 
@@ -228,7 +254,20 @@ export async function computeWalletTotalBalance(
   return { totalBalance, activeBotCount, ok };
 }
 
-export async function processWalletSnapshot(walletAddress: string): Promise<void> {
+export async function processWalletSnapshot(walletAddress: string, trigger: SnapshotTrigger = "scheduled"): Promise<void> {
+  const snapshotTime = snapshotBoundary(new Date());
+  if (!withinSnapshotWindow(new Date(), snapshotTime)) {
+    console.log(`[Portfolio Snapshots] Skipping ${walletAddress.slice(0, 8)}... outside the 10-minute UTC boundary window`);
+    return;
+  }
+  if (trigger === "boot") {
+    const rows = await storage.getPortfolioDailySnapshots(walletAddress, snapshotTime);
+    if (rows.some(row => row.snapshotDate.getTime() === snapshotTime.getTime())) {
+      console.log(`[Portfolio Snapshots] Skipping boot snapshot for ${walletAddress.slice(0, 8)}... - current bucket already exists`);
+      return;
+    }
+  }
+
   const wallet = await storage.getWallet(walletAddress);
   if (!wallet) return;
 
@@ -236,6 +275,7 @@ export async function processWalletSnapshot(walletAddress: string): Promise<void
   if (bots.length === 0) return;
 
   const { totalBalance, activeBotCount, ok } = await computeWalletTotalBalance(walletAddress);
+  const balanceReadAt = new Date();
 
   // Refuse to persist a snapshot built on a failed balance read. A single
   // bot returning 0 due to an RPC/SDK timeout used to write a phantom loss
@@ -251,21 +291,10 @@ export async function processWalletSnapshot(walletAddress: string): Promise<void
   const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
   const creatorEarnings = await storage.getWalletCreatorEarnings(walletAddress);
 
-  // Round to nearest 12-hour mark (00:00 or 12:00 UTC)
-  const now = new Date();
-  const snapshotTime = new Date(now);
-  snapshotTime.setMinutes(0, 0, 0);
-  const hour = snapshotTime.getUTCHours();
-  if (hour < 12) {
-    snapshotTime.setUTCHours(0);
-  } else {
-    snapshotTime.setUTCHours(12);
-  }
-
-  // Use as-of-snapshot cumulative flows (block-time aware) so a late-backfilled
-  // deposit gets attributed to the snapshot when it actually happened.
+  // The UTC boundary labels a capture made within its first ten minutes.
+  // Match flows to the live balance observation, not the earlier bucket label.
   const { deposits, withdrawals, internalTransfers } =
-    await storage.getWalletCumulativeDepositsWithdrawals(walletAddress, snapshotTime);
+    await storage.getWalletCumulativeDepositsWithdrawals(walletAddress, balanceReadAt);
 
   const netExternalFlowCum = deposits - withdrawals;
   const tradingPnl = totalBalance - netExternalFlowCum;
@@ -288,7 +317,13 @@ export async function processWalletSnapshot(walletAddress: string): Promise<void
 
   // Keep legacy `netPnl` writing the same value as trading P&L for read-compat,
   // so any pre-Task-119 consumer still sees a coherent number.
-  await storage.upsertPortfolioDailySnapshot({
+  // Slow reads must not publish a late observation into an older bucket.
+  if (!withinSnapshotWindow(balanceReadAt, snapshotTime) || !withinSnapshotWindow(new Date(), snapshotTime)) {
+    console.log(`[Portfolio Snapshots] Skipping ${walletAddress.slice(0, 8)}... - capture exceeded the UTC boundary window`);
+    return;
+  }
+
+  const snapshot = {
     walletAddress,
     snapshotDate: snapshotTime,
     totalBalance: String(totalBalance),
@@ -305,38 +340,39 @@ export async function processWalletSnapshot(walletAddress: string): Promise<void
     cumulativeTradingPnl: String(tradingPnl),
     netExternalFlow: String(netExternalFlow),
     pnlPercent: String(pnlPercent),
-  });
+  };
+  if (trigger === "boot") {
+    // Enforce no-overwrite atomically, including another process winning the race.
+    const inserted = await storage.upsertPortfolioDailySnapshot(snapshot, true);
+    if (!inserted) {
+      console.log(`[Portfolio Snapshots] Skipping boot snapshot for ${walletAddress.slice(0, 8)}... - current bucket already exists`);
+      return;
+    }
+  } else {
+    await storage.upsertPortfolioDailySnapshot(snapshot);
+  }
 
   console.log(`[Portfolio Snapshots] Saved snapshot for ${walletAddress.slice(0, 8)}...: balance=${totalBalance.toFixed(2)}, tradingPnl=${tradingPnl.toFixed(2)}, pnlPct=${pnlPercent.toFixed(2)}%, netFlow=${netExternalFlow.toFixed(2)}`);
 }
 
 export function startPortfolioSnapshotJob(): void {
   console.log("[Portfolio Snapshots] Starting snapshot job (12h interval, 00:00 and 12:00 UTC)");
-  
-  // Calculate time until next 00:00 or 12:00 UTC
-  const now = new Date();
-  const currentHour = now.getUTCHours();
-  const currentMinutes = now.getUTCMinutes();
-  
-  let hoursUntilNext: number;
-  if (currentHour < 12) {
-    hoursUntilNext = 12 - currentHour;
-  } else {
-    hoursUntilNext = 24 - currentHour;
+
+  function scheduleNextBoundary(): void {
+    const now = new Date();
+    const nextBoundary = snapshotBoundary(now).getTime() + SNAPSHOT_INTERVAL_MS;
+    const delay = nextBoundary - now.getTime();
+    console.log(`[Portfolio Snapshots] Next snapshot in ${(delay / 3600000).toFixed(1)} hours`);
+    setTimeout(async () => {
+      try {
+        await takePortfolioSnapshots();
+      } finally {
+        // Recompute from the clock after every run; run duration cannot add drift.
+        scheduleNextBoundary();
+      }
+    }, delay);
   }
-  // Subtract current minutes to get exact time
-  const msUntilNext = (hoursUntilNext * 60 - currentMinutes) * 60 * 1000;
-  
-  console.log(`[Portfolio Snapshots] Next snapshot in ${(msUntilNext / 3600000).toFixed(1)} hours`);
-  
-  // Take an initial snapshot after 5 seconds, then schedule at 00:00/12:00 UTC
-  setTimeout(async () => {
-    await takePortfolioSnapshots();
-    
-    // Schedule to run at next 00:00 or 12:00 UTC, then every 12 hours
-    setTimeout(() => {
-      takePortfolioSnapshots();
-      setInterval(takePortfolioSnapshots, SNAPSHOT_INTERVAL_MS);
-    }, msUntilNext);
-  }, 5000);
+
+  scheduleNextBoundary();
+  setTimeout(() => { void takePortfolioSnapshots("boot"); }, 5000);
 }
