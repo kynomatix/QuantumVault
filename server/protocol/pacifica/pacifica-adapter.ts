@@ -1873,13 +1873,14 @@ export class PacificaAdapter implements ProtocolAdapter {
     const rejectEnvelope = (reason: string): never => {
       const fields = ['success', 'error', 'code', 'data', 'last_order_id', 'account', 'subaccount_id', ...paginationFields];
       const object = envelope !== null && typeof envelope === 'object' ? envelope as Record<string, unknown> : undefined;
-      console.warn(`[Pacifica] invalid_close_envelope:${reason}`, {
+      console.warn(`[Pacifica] invalid_close_envelope:${reason} ${JSON.stringify({
         envelopeType: typeof envelope,
+        data_empty: Array.isArray(object?.data) && object.data.length === 0,
         fields: Object.fromEntries(fields.map(field => [field, {
           present: object !== undefined && Object.prototype.hasOwnProperty.call(object, field),
           type: typeof object?.[field],
         }])),
-      });
+      })}`);
       throw new Error(`invalid_close_envelope:${reason}`);
     };
     if (envelope === null) rejectEnvelope('body_null');

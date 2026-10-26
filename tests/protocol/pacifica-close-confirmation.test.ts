@@ -124,7 +124,15 @@ describe('strict close envelope diagnostics', () => {
       new Error(`invalid_close_envelope:${reason}`),
     );
     expect(console.warn).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(console.warn).mock.calls[0][0]).toBe(`[Pacifica] invalid_close_envelope:${reason}`);
+    const calls = vi.mocked(console.warn).mock.calls;
+    expect(calls[0]).toHaveLength(1);
+    const line = calls[0][0] as string;
+    const prefix = `[Pacifica] invalid_close_envelope:${reason} `;
+    expect(line.startsWith(prefix)).toBe(true);
+    expect(line).not.toMatch(/[\r\n]/);
+    const diagnostics = JSON.parse(line.slice(prefix.length));
+    expect(typeof diagnostics.data_empty).toBe('boolean');
+    expect(diagnostics.fields.last_order_id.type).toBe(typeof ('last_order_id' in fields ? fields.last_order_id : 2));
   });
 
   it.each([
@@ -183,6 +191,22 @@ describe('strict close envelope diagnostics', () => {
     expect(fetch).toHaveBeenCalledTimes(4);
   });
 
+
+  it.each([
+    [[], true], [[{ secret: 'REDACTED' }], false], [null, false], [{}, false], [undefined, false], ['', false],
+  ])('prints data_empty safely for data %#', async (data, empty) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(response([], { data, last_order_id: null }));
+    await expect(adapter().getCloseConfirmationSnapshot('EXAMPLE_ACCOUNT')).rejects.toThrow('invalid_close_envelope:');
+    const call = vi.mocked(console.warn).mock.calls[0];
+    expect(call).toHaveLength(1);
+    const line = call[0] as string;
+    expect(line).not.toMatch(/[\r\n]/);
+    expect(line).not.toContain('REDACTED');
+    const diagnostics = JSON.parse(line.slice(line.indexOf(' {') + 1));
+    expect(diagnostics.data_empty).toBe(empty);
+    expect(diagnostics.fields.last_order_id).toEqual({ present: true, type: 'object' });
+  });
+
   it('emits only allowlisted field presence and JS types, never body, account or key values', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -199,8 +223,13 @@ describe('strict close envelope diagnostics', () => {
     const fieldNames = ['success', 'error', 'code', 'data', 'last_order_id', 'account', 'subaccount_id',
       'has_more', 'next_cursor', 'cursor', 'next_page', 'pagination', 'truncated', 'limit', 'offset'];
     expect(calls).toHaveLength(1);
-    const diagnostics = calls[0][1];
-    expect(Object.keys(diagnostics)).toEqual(['envelopeType', 'fields']);
+    expect(calls[0]).toHaveLength(1);
+    const line = calls[0][0] as string;
+    expect(line).not.toMatch(/[\r\n]/);
+    const diagnostics = JSON.parse(line.slice(line.indexOf(' {') + 1));
+    expect(Object.keys(diagnostics)).toEqual(['envelopeType', 'data_empty', 'fields']);
+    expect(diagnostics.data_empty).toBe(true);
+    expect(diagnostics.fields.last_order_id).toEqual({ present: true, type: 'number' });
     expect(diagnostics.envelopeType).toBe('object');
     expect(Object.keys(diagnostics.fields)).toEqual(fieldNames);
     expect(diagnostics.fields.error).toEqual({ present: true, type: 'string' });
