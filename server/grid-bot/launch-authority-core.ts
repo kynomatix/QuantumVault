@@ -55,7 +55,7 @@ export interface GridLaunchSecurity {
   masterAccount:string;umkVersion:number;signingKey:Uint8Array;current():Promise<boolean>;cleanup():void;
 }
 export interface GridLaunchAuthorityDeps {
-  reads:Pick<GridLaunchReads,'json'|'subaccounts'|'quota'|'ready'>;
+  reads:Pick<GridLaunchReads,'json'|'subaccounts'|'quota'|'ready'> & Partial<Pick<GridLaunchReads,'burst'>>;
   unlock(wallet:string,umk:Buffer):Promise<GridLaunchSecurity|null>;
   sol(wallet:string,signal:AbortSignal):Promise<{balance:string;observedAt:number}|null>;
   reusable(wallet:string,masterAccount:string):Promise<string[]>;
@@ -71,7 +71,7 @@ export class GridLaunchAuthority {
   }
   async collect(wallet:string,policy:GridPolicy,account:GridAccount|null,umk:Buffer,signal:AbortSignal):Promise<{facts:LaunchFacts;risk:GridResumeRisk}>{
     signal.throwIfAborted();if(!canonicalGridPolicy(policy))deny('Grid retained policy unavailable.');
-    const started=this.deps.now(),security=await this.deps.unlock(wallet,umk);
+    let started=this.deps.now();const security=await this.deps.unlock(wallet,umk);
     if(!security)return deny('Durable Grid agent generation unavailable.');
     try{
       const master=security.masterAccount,target=account?.account??master,symbol=policy.market.replace(/-PERP$/,'');
@@ -80,18 +80,33 @@ export class GridLaunchAuthority {
       const recycler={reuse:env.REUSE_ON_CREATE,recycle:env.RECYCLE_ON_DELETE,deployment:env.REPLIT_DEPLOYMENT??'',expectedDeployment:env.GRID_RECYCLER_DEPLOYMENT??'',checkedAt:started};
       if(!this.deps.reads.ready()
         ||!gridRecyclerGate(recycler,this.deps.now()))return deny('Grid transport or recycler authority unavailable.');
-      // Settle every read before releasing the signing key, including failure/abort paths.
+      // Signing happens synchronously at read dispatch; deadline aborts late reads before releasing the key.
+      const accountRead=()=>this.deps.reads.json(master,'/account',{account:master},signal);
+      let sameAccount:Promise<unknown>|undefined;
+      const readMaster=()=>sameAccount??=accountRead();
       const jobs=[
-        ()=>this.deps.reads.json(master,'/account',{account:master},signal),
-        ()=>this.deps.reads.json(master,'/account',{account:target},signal),
+        readMaster,
+        ()=>target===master?readMaster():this.deps.reads.json(master,'/account',{account:target},signal),
         ()=>this.deps.reads.json(master,'/account/settings',{account:target},signal),
         ()=>this.deps.reads.json(master,'/info',{},signal),()=>this.deps.reads.json(master,'/book',{symbol},signal),
         ()=>this.deps.reads.json(master,'/orders',{account:target},signal),()=>this.deps.reads.json(master,'/positions',{account:target},signal),
         ()=>this.deps.reads.subaccounts(master,security.signingKey,signal),()=>this.deps.sol(master,signal),()=>this.deps.reusable(wallet,master),
         ()=>this.deps.capacity(master,target)
       ];
-      const settled=await Promise.allSettled(jobs.map(job=>Promise.resolve().then(job)));signal.throwIfAborted();
-      if(settled.some(r=>r.status==='rejected'&&r.reason instanceof GridLaunchTransientError))throw new GridLaunchTransientError('Fresh Grid launch reads are waiting for durable quota authority.');
+      const request=(path:string,params:Record<string,string>={},method='GET')=>{
+        const url=new URL('https://api.pacifica.fi/api/v1'+path);for(const [key,value] of Object.entries(params))url.searchParams.set(key,value);return {method,url:url.toString()};
+      };
+      const requests=[request('/account',{account:master}),...(target===master?[]:[request('/account',{account:target})]),
+        request('/account/settings',{account:target}),request('/info'),request('/book',{symbol}),request('/orders',{account:target}),
+        request('/positions',{account:target}),request('/account/subaccount/list',{},'POST')];
+      const collect=async()=>{
+        started=this.deps.now();const abort=new AbortController();signal=AbortSignal.any([signal,abort.signal]);
+        let timer:ReturnType<typeof setTimeout>|undefined;
+        try{return await Promise.race([Promise.allSettled(jobs.map(job=>Promise.resolve().then(job))),new Promise<never>((_,reject)=>{timer=setTimeout(()=>{const error=Error('Fresh Grid launch observations unavailable.');abort.abort(error);reject(error);},5000);})]);}
+        finally{if(timer)clearTimeout(timer);}
+      };
+      const settled=await (this.deps.reads.burst?this.deps.reads.burst(master,requests,collect):collect());signal.throwIfAborted();
+      if(settled.some(r=>r.status==='rejected'&&r.reason instanceof GridLaunchTransientError))throw new GridLaunchTransientError('Waiting for venue request budget.');
       if(settled.some(r=>r.status==='rejected'))deny('Fresh Grid launch observations unavailable.');
       const values=settled.map(r=>(r as PromiseFulfilledResult<unknown>).value);
       const [rawMaster,rawTarget,rawSettings,rawInfo,rawBook,rawOrders,rawPositions,rawInventory,rawSol,rawReusable,rawCapacity]=values;

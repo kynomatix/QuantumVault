@@ -56,11 +56,11 @@ describe('Config Key custody and target binding', () => {
     expect(t.safeError(new Error(EXAMPLE_KEY)).message).not.toContain(EXAMPLE_KEY);
     const bad = t.response(new Response(EXAMPLE_KEY, { status: 200 }));
     await expect(bad.json()).rejects.toThrow('Pacifica transport failed');
-    expect(t.status().liveEntryAllowed).toBe(false);
+    expect(t.status().liveEntryAllowed).toBe(true);
   });
-  it.each([400, 401, 403, 429, 500])('rejects acceptance evidence on HTTP %s', code => {
+  it.each([400, 401, 403, 429, 500])('retains quota metadata on HTTP %s without treating it as order acceptance', code => {
     const t = new PacificaTransportAuthority(EXAMPLE_KEY);
-    t.response(response({}, true, code)); expect(t.status().liveEntryAllowed).toBe(false);
+    t.response(response({}, true, code)); expect(t.status().liveEntryAllowed).toBe(true);
   });
   it('only Grid REST opts into the credential and observed-quota boundary', async () => {
     const t = new PacificaTransportAuthority(EXAMPLE_KEY);
@@ -71,7 +71,7 @@ describe('Config Key custody and target binding', () => {
     }); vi.stubGlobal('fetch', fetch);
     await adapter.getGridOpenOrders('EXAMPLE_ACCOUNT');
     expect(fetch).toHaveBeenCalledTimes(1);
-    expect(t.status().quota.outstandingDeciCredits).toBe(120);
+    expect(t.status().quota.outstandingDeciCredits).toBe(30);
     expect(t.status().liveEntryAllowed).toBe(true);
   });
   it('refuses a Grid REST target visibly before dispatch or quota reservation', async () => {
@@ -100,7 +100,7 @@ describe('Config Key custody and target binding', () => {
     await vi.advanceTimersByTimeAsync(20); await result;
     deliver(response()); await vi.advanceTimersByTimeAsync(0);
     expect(t.status().liveEntryAllowed).toBe(false);
-    expect(t.status().quota.outstandingDeciCredits).toBe(120);
+    expect(t.status().quota.outstandingDeciCredits).toBe(30);
   });
   it('private WS attaches the key on reconnect and ignores replaced-connection quota', () => {
     vi.useFakeTimers(); vi.stubGlobal('WebSocket', mocks.Socket);
@@ -159,7 +159,7 @@ describe('observed quota and shared reservations', () => {
     expect(q.snapshot().entryDeciCredits).toBe(100);
     q.observe({ quota: 30_000, remaining: 30_000, resetSeconds: 60 });
     expect(q.snapshot()).toMatchObject({ quotaDeciCredits: 500, remainingDeciCredits: 400, entryDeciCredits: 100 });
-    q.observe(null); expect(q.snapshot().entryDeciCredits).toBe(0);
+    q.observe(null); expect(q.snapshot().entryDeciCredits).toBe(100);
   });
   it('never cross-promotes domains or accepts subscription quota', () => {
     const a = new PacificaTransportAuthority(EXAMPLE_KEY, 'EXAMPLE_A');

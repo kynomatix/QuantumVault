@@ -6,6 +6,9 @@ export interface QuotaPolicy {provider: QuotaProvider; domain_id: string; window
 export class WorkerQuota {
   constructor(private lane: ClientLane, private terminate: (pid: number) => Promise<void>) {}
   async debit(provider: QuotaProvider, units: number, protective = false, domain = QUOTA_DOMAIN): Promise<void> {
+    await this.reserve(provider,units,protective,domain);
+  }
+  async reserve(provider: QuotaProvider, units: number, protective = false, domain = QUOTA_DOMAIN): Promise<{release():Promise<void>}> {
     if (!Number.isSafeInteger(units) || units < 1) throw Error('GRID_QUOTA_COST_INVALID');
     const ok = await fencedTransaction(this.lane, async c => {
       // Serializes all processes and policy replacement; backoff spans window boundaries.
@@ -29,10 +32,18 @@ export class WorkerQuota {
         ON CONFLICT(provider,domain_id,window_start) DO UPDATE SET worker_used_units=grid_worker_quota_windows.worker_used_units+$3,observed_at=clock_timestamp()
         WHERE grid_worker_quota_windows.policy_digest=EXCLUDED.policy_digest
           AND grid_worker_quota_windows.worker_used_units+$3<=EXCLUDED.worker_limit_units-CASE WHEN $4 THEN 0 ELSE EXCLUDED.worker_protective_reserve_units END
-        RETURNING provider`,[provider,domain,units,protective]);
-      return changed.rowCount === 1;
+        RETURNING window_start`,[provider,domain,units,protective]);
+      return changed.rowCount === 1 ? changed.rows[0].window_start : null;
     },{mode:'none',terminate:this.terminate});
     if (!ok) throw Error('GRID_QUOTA_UNAVAILABLE');
+    let released=false;
+    return {release:async()=>{
+      if(released)return;released=true;
+      await fencedTransaction(this.lane,async c=>{
+        await c.query('SELECT provider FROM grid_worker_quota_policy WHERE provider=$1 AND domain_id=$2 FOR UPDATE',[provider,domain]);
+        await c.query('UPDATE grid_worker_quota_windows SET worker_used_units=worker_used_units-$4 WHERE provider=$1 AND domain_id=$2 AND window_start=$3 AND worker_used_units>=$4',[provider,domain,ok,units]);
+      },{mode:'none',terminate:this.terminate});released=true;
+    }};
   }
   async rateLimited(provider: QuotaProvider, domain = QUOTA_DOMAIN): Promise<void> {
     await fencedTransaction(this.lane,async c=>{

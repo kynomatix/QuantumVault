@@ -47,6 +47,8 @@ async function production():Promise<AdminDependencies>{
   const terminate=backendTerminator(independentLane(pool));
   const transportDependencies=workerDependencies(pool,{
     debit:async(provider,units)=>mainQuota.debit(provider,units),rateLimited:async provider=>mainQuota.rateLimited(provider),
+    reserve:async(provider,units)=>{const release=mainQuota.reserve(provider,units);return {release:async()=>{release();}};},
+    beforeSend:async()=> (await import('./main-quota-guard')).verifyMainSend(),
   },process.env);
   const transitionEvidence=()=>collectTransitionEvidence(lane,async(_master,path,params)=>{
     const url=new URL('https://api.pacifica.fi/api/v1'+path);for(const [k,v] of Object.entries(params))url.searchParams.set(k,v);
@@ -54,6 +56,8 @@ async function production():Promise<AdminDependencies>{
   });
   const rescue=new ProtectiveExecutor(pool,terminate,workerDependencies(pool,{
     debit:async(provider,units)=>mainQuota.debit(provider,units),rateLimited:async provider=>mainQuota.rateLimited(provider),
+    reserve:async(provider,units)=>{const release=mainQuota.reserve(provider,units);return {release:async()=>{release();}};},
+    beforeSend:async()=> (await import('./main-quota-guard')).verifyMainSend(),
   },process.env),async c=>{
     // The catalog probe owns BEGIN/COMMIT; never run it on the takeover/step connection.
     const probe=await lane.connect();

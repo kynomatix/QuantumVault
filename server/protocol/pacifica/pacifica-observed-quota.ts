@@ -1,3 +1,4 @@
+import {PROVIDER_COST} from '../../grid-bot/provider-request-cost';
 /** Grid authority uses observed deci-credits. The legacy adapter budget is not tier evidence. */
 export interface QuotaObservation { quota: number; remaining: number; resetSeconds: number }
 const integer = (n: unknown): n is number => Number.isSafeInteger(n) && (n as number) >= 0;
@@ -19,29 +20,27 @@ export function parseWsQuota(raw: unknown): QuotaObservation | null {
   if (!integer(t) || t > 60_000) return null;
   return parseQuota({ r, q, t: Math.floor(t / 1000) });
 }
-export const GRID_QUOTA_COST_DECI_CREDITS = Object.freeze({ heavyRead: 120, standard: 10, cancel: 5 });
+export const GRID_QUOTA_COST_DECI_CREDITS = Object.freeze({ heavyRead: PROVIDER_COST.unknown, standard: PROVIDER_COST.standard, cancel: PROVIDER_COST.standard });
 export class ObservedPacificaQuota {
-  private observation: (QuotaObservation & { observedAt: number; expiresAt: number }) | null = null;
+  private observations: (QuotaObservation & { observedAt: number; expiresAt: number })[] = [];
   private reservations = new Map<string, { cost: number; at: number; settled: boolean }>();
   constructor(readonly domain: string, private now: () => number = Date.now) {
     if (!domain || domain.trim() !== domain) throw new Error('Invalid quota domain');
   }
-  invalidate(): void { this.observation = null; }
+  invalidate(): void { this.observations = []; }
   observe(raw: QuotaObservation | null): void {
     if (!raw || !parseQuota({ r: raw.remaining, q: raw.quota, t: raw.resetSeconds })) {
-      this.invalidate(); return;
+      return;
     }
     const at = this.now();
-    const old = this.observation;
-    // No reordered response or upgrade can mint budget within the current window.
-    this.observation = { ...raw, observedAt: at, expiresAt: old && old.expiresAt > at ? Math.min(old.expiresAt, at + raw.resetSeconds * 1000) : at + raw.resetSeconds * 1000,
-      quota: old && old.expiresAt > at ? Math.min(old.quota, raw.quota) : raw.quota,
-      remaining: old && old.expiresAt > at ? Math.min(old.remaining, raw.remaining) : raw.remaining };
+    this.observations=this.observations.filter(o=>at<o.expiresAt);
+    this.observations.push({...raw,observedAt:at,expiresAt:at+raw.resetSeconds*1000});
   }
   snapshot() {
     const now = this.now();
     for (const [id, r] of this.reservations) if (now - r.at >= 60_000) this.reservations.delete(id);
-    const o = this.observation;
+    this.observations=this.observations.filter(o=>now>=o.observedAt&&now<o.expiresAt);
+    const o=this.observations.length?this.observations.reduce((a,b)=>({...a,quota:Math.min(a.quota,b.quota),remaining:Math.min(a.remaining,b.remaining)})):null;
     const known = !!o && now < o.expiresAt && now - o.observedAt <= 60_000;
     const outstanding = [...this.reservations.values()].reduce((a, r) => a + r.cost, 0);
     const reserve = known ? Math.max(300, Math.ceil(o!.quota * .30)) : 300;

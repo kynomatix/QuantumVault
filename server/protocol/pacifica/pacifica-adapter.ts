@@ -1,4 +1,7 @@
 import { CLOSE_QUEUE_WAIT_MS, CLOSE_TOTAL_WAIT_MS, closeSnapshotTimingError } from '../close-outcome.js';
+import {verifyMainSend} from '../../grid-worker/main-quota-guard';
+import {mainGridQuotaRequest} from '../../grid-worker/main-quota-scope';
+import {providerRequestCost} from '../../grid-bot/provider-request-cost';
 import {debitMainRequest,mainQuota} from '../../grid-worker/main-quota';
 import type {
   ProtocolAdapter,
@@ -4333,13 +4336,14 @@ export class PacificaAdapter implements ProtocolAdapter {
     // Validate before reservation/dispatch; target refusals remain visible to callers.
     const request = transport.restInit(url, init);
     const reservationId = `grid-transport:${randomUUID()}`;
-    const path = new URL(url).pathname;
-    const cost = /cancel/.test(path) ? 5 : /\/(account|orders|positions|trades)(\/|$)/.test(path) && (!init.method || init.method === 'GET') ? 120 : 10;
+    const cost = providerRequestCost(init.method??'GET',url);
+    const observed=transport.quota.snapshot();
+    if(observed.availability==='observed'&&observed.remainingDeciCredits!<cost)throw Error('GRID_QUOTA_UNAVAILABLE');
     transport.quota.reserve(reservationId, cost, 'risk-reduction');
     let disposition: 'sent' | 'uncertain' = 'uncertain';
     try {
       // The legacy deadline owns the raw promise. A late response never reaches observation.
-      const response = await this.fetchBounded(url, request, softMs, hardMs, label);
+      const response = await transport.request(url,request,async(input,options)=>this.fetchBounded(String(input),options??{},softMs,hardMs,label,true),true);
       disposition = 'sent';
       return transport.response(response);
     } catch (error) {
@@ -4355,12 +4359,15 @@ export class PacificaAdapter implements ProtocolAdapter {
     softMs: number,
     hardMs: number,
     label: string,
+    observed=false,
   ): Promise<Response> {
+    if(!observed&&mainGridQuotaRequest(url,init))return this.gridTransport.request(url,init,(_input,options)=>this.fetchBounded(url,options??{},softMs,hardMs,label,true),false,false);
     // Use an explicit AbortController so abort() is driven by a JS-level
     // setTimeout rather than the system-managed AbortSignal.timeout(). In
     // the 2026-07-24 prod incident AbortSignal.timeout never fired on a
     // wedged socket; a plain setTimeout always fires regardless of socket
     // state because it runs entirely in the JS event loop.
+    if(mainGridQuotaRequest(url,init)){const assert=await verifyMainSend();assert();softMs=Math.min(softMs,5000);hardMs=Math.min(hardMs,5000);}
     const scoped=debitMainRequest(url,init);
     const controller = new AbortController();
     const softTimer = setTimeout(() => controller.abort(), softMs);

@@ -82,20 +82,20 @@ describe('U4 scheduler',()=>{
 });
 describe('U4 MAIN quota allocation',()=>{
   const policy:QuotaPolicy={provider:'pacifica_rest',domain_id:'deployment',window_ms:60000,total_units:'100',worker_limit_units:'60',worker_protective_reserve_units:'10',policy_digest:digest,valid_until:new Date(now+120000)};
-  it('documents the cap assumption for one, four and five machines',()=>{
-    expect(MAIN_AUTOSCALE_INSTANCE_CAP_ASSUMED).toBe(4);
-    for(const machines of [1,4])expect(mainAllocation(100,60)*machines+60).toBeLessThanOrEqual(100);
-    expect(mainAllocation(100,60)*5+60).toBeGreaterThan(100);expect(mainAllocation(63,60)).toBe(0);
+  it('enforces the sole MAIN REST allocation',()=>{
+    expect(MAIN_AUTOSCALE_INSTANCE_CAP_ASSUMED).toBe(1);
+    for(const machines of [1])expect(mainAllocation(100,60)*machines+60).toBeLessThanOrEqual(100);
+    expect(mainAllocation(100,60)*2+60).toBeGreaterThan(100);expect(mainAllocation(63,60)).toBe(3);
   });
   it('retains debits across refresh and policy outages, and enforces backoff',()=>{
-    const q=new MainQuota();q.install([policy],now);q.debit('pacifica_rest',10,now);
+    const q=new MainQuota();q.install([policy],now);q.debit('pacifica_rest',40,now);
     q.install([],now+1);expect(()=>q.debit('pacifica_rest',1,now+1)).toThrow();q.install([policy],now+2);
     expect(()=>q.debit('pacifica_rest',1,now+2)).toThrow();q.install([policy],now+60001);q.rateLimited('pacifica_rest',now+60001);
     expect(()=>q.debit('pacifica_rest',1,now+60001)).toThrow();
   });
   it('fails closed on stale, absent and below-one policies',()=>{
     const q=new MainQuota();expect(()=>q.debit('pacifica_rest',1,now)).toThrow();q.install([policy],now);
-    expect(()=>q.debit('pacifica_rest',1,now+10000)).toThrow();q.install([{...policy,total_units:'63'}],now);expect(()=>q.debit('pacifica_rest',1,now)).toThrow();
+    expect(()=>q.debit('pacifica_rest',1,now+10000)).toThrow();q.install([{...policy,total_units:'60'}],now);expect(()=>q.debit('pacifica_rest',1,now)).toThrow();
   });
 });
 describe('U4 security and reconciliation boundaries',()=>{
@@ -133,7 +133,7 @@ import {supersedeStartConsents} from '../../server/grid-worker/consent';
 it('U4 local MAIN replacement waits a complete provider window',()=>{
   const q=new MainQuota(true),policy:QuotaPolicy={provider:'rpc_primary',domain_id:'deployment',window_ms:60000,total_units:'100',worker_limit_units:'60',worker_protective_reserve_units:'10',policy_digest:digest,valid_until:new Date(now+120000)};
   q.install([policy],now);expect(()=>q.debit('rpc_primary',1,now)).toThrow();
-  q.install([policy],now+60000);expect(()=>q.debit('rpc_primary',1,now+60000)).not.toThrow();
+  q.install([policy],now+65000);expect(()=>q.debit('rpc_primary',1,now+65000)).not.toThrow();
 });
 it.each([{list:[]},{list:['EXAMPLE_A']},{list:['EXAMPLE_A','EXAMPLE_B']}])('U4 consent supersession binds one JSON list: %j',async ({list})=>{
   const query=vi.fn(async(_sql:string,_values?:unknown[])=>({rows:[],rowCount:0}));await supersedeStartConsents({query} as unknown as PoolClient,'EXAMPLE_OWNER',list,'stop');

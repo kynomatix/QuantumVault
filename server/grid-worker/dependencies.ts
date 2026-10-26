@@ -1,3 +1,4 @@
+import {bindProviderCostIncidents,restoreProviderCostLatches} from './provider-cost-incidents';
 import {workerLaunchEnvironment} from './environment';
 import bs58 from 'bs58';
 import nacl from 'tweetnacl';
@@ -15,8 +16,15 @@ import {workerFetch} from './transport';
 import type {WorkerQuota} from './quota';
 
 /** No MAIN defaults, sessions, canonical UMK, general adapter or background service. */
-export function workerDependencies(pool:Pool,quota:Pick<WorkerQuota,'debit'|'rateLimited'>,env:Readonly<NodeJS.ProcessEnv>):GridRuntimeDependencies {
-  const fetcher=workerFetch(quota),transport=new PacificaTransportAuthority(undefined,'pacifica:worker-no-key',Date.now,true);
+export function workerDependencies(pool:Pool,quota:Pick<WorkerQuota,'debit'|'rateLimited'> & Partial<Pick<WorkerQuota,'reserve'>> & {beforeSend?:()=>Promise<()=>void>},env:Readonly<NodeJS.ProcessEnv>):GridRuntimeDependencies {
+  const transport=new PacificaTransportAuthority(undefined,'pacifica:worker-no-key',Date.now,true);
+  bindProviderCostIncidents(pool,transport);
+  let restored:Promise<void>|undefined;
+  const fetcher=workerFetch({
+    debit:(...args)=>quota.debit(...args),rateLimited:(...args)=>quota.rateLimited(...args),
+    reserve:quota.reserve?(...args)=>quota.reserve!(...args):undefined,
+    beforeSend:async()=>{await (restored??=restoreProviderCostLatches(pool).catch(error=>{restored=undefined;throw error;}));return quota.beforeSend?quota.beforeSend():()=>{};},
+  },fetch,transport);
   const environment=workerLaunchEnvironment(env);
   const dependencies:GridRuntimeDependencies={
     umk:wallet=>getExecutionUmk(pool,wallet),

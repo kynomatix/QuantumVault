@@ -100,7 +100,7 @@ describe('write ahead and exact identity execution',()=>{
     const ledger={claimRead:vi.fn(async()=>randomUUID()),recordRateLimit:vi.fn(async()=>{})};
     const fetcher=vi.fn(async()=>new Response('{}',{status:200}));
     const reads=new GridLaunchReads(new PacificaTransportAuthority('EXAMPLE1_'+bs58.encode(new Uint8Array(16).fill(9))),ledger,'0.25',fetcher as typeof fetch);
-    await reads.json('EXAMPLE_MASTER','/account',{});expect(ledger.claimRead).toHaveBeenLastCalledWith('EXAMPLE_MASTER','1','300','0.25');
+    await reads.json('EXAMPLE_MASTER','/account',{});expect(ledger.claimRead).toHaveBeenLastCalledWith('EXAMPLE_MASTER','3','300','0.25');
     fetcher.mockImplementationOnce(async()=>new Response(null,{status:429}));
     await expect(reads.json('EXAMPLE_MASTER','/account',{})).rejects.toBeInstanceOf(GridLaunchTransientError);
     expect(ledger.recordRateLimit).toHaveBeenCalledWith('EXAMPLE_MASTER');

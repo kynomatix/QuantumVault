@@ -20,18 +20,18 @@ describe('C5 transport and fixed master quota',()=>{
     const f=fixture();expect(f.transport.quota.snapshot().availability).toBe('unknown');
     expect(await f.reads.quota('EXAMPLE_MASTER')).toEqual({observedCredits:'300',availableGridCredits:'150'});
     await f.reads.json('EXAMPLE_MASTER','/account',{account:'EXAMPLE_SUB'});
-    expect(f.ledger.claimRead).toHaveBeenCalledWith('EXAMPLE_MASTER','1','300','0.5');
+    expect(f.ledger.claimRead).toHaveBeenCalledWith('EXAMPLE_MASTER','3','300','0.5');
     const [url,init]=f.fetcher.mock.calls[0] as unknown as [URL,RequestInit];
-    expect(url.searchParams.get('account')).toBe('EXAMPLE_SUB');expect(new Headers(init.headers).get('PF-API-KEY')).toBe(f.config);expect(init.redirect).toBe('error');
+    expect(new URL(String(url)).searchParams.get('account')).toBe('EXAMPLE_SUB');expect(new Headers(init.headers).get('PF-API-KEY')).toBe(f.config);expect(init.redirect).toBe('error');
   });
   it('only lowers policy using observations and cannot upgrade after missing headers',async()=>{
     const f=fixture();f.transport.quota.observe({quota:2000,remaining:400,resetSeconds:60});
     expect(await f.reads.quota('EXAMPLE_MASTER')).toEqual({observedCredits:'40',availableGridCredits:'20'});
-    await f.reads.json('EXAMPLE_MASTER','/account',{}); // A headerless response invalidates the transport observation.
-    expect(await f.reads.quota('EXAMPLE_MASTER')).toEqual({observedCredits:'40',availableGridCredits:'20'});
+    await f.reads.json('EXAMPLE_MASTER','/account',{}); // A headerless response retains the observation and charged reservation.
+    expect(await f.reads.quota('EXAMPLE_MASTER')).toEqual({observedCredits:'37',availableGridCredits:'18.5'});
     f.transport.quota.observe({quota:9000,remaining:9000,resetSeconds:60});
-    expect(await f.reads.quota('EXAMPLE_MASTER')).toEqual({observedCredits:'40',availableGridCredits:'20'});
-    expect(f.ledger.claimRead).toHaveBeenLastCalledWith('EXAMPLE_MASTER','1','40','0.5');
+    expect(await f.reads.quota('EXAMPLE_MASTER')).toEqual({observedCredits:'37',availableGridCredits:'18.5'});
+    expect(f.ledger.claimRead).toHaveBeenLastCalledWith('EXAMPLE_MASTER','3','40','0.5');
     vi.mocked(Date.now).mockReturnValue(clock+60_001);f.transport.quota.invalidate();
     expect(await f.reads.quota('EXAMPLE_MASTER')).toEqual({observedCredits:'300',availableGridCredits:'150'});
   });
@@ -42,7 +42,7 @@ describe('C5 transport and fixed master quota',()=>{
       const [url,init]=f.fetcher.mock.calls[0] as unknown as [URL,RequestInit],body=JSON.parse(init.body as string);
       expect(url.toString()).toBe('https://api.pacifica.fi/api/v1/account/subaccount/list');expect(init.method).toBe('POST');
       expect(Object.keys(body).sort()).toEqual(['account','expiry_window','signature','timestamp']);expect(body).toMatchObject({account:master,expiry_window:5000,timestamp:clock});
-      expect(bs58.decode(body.signature)).toHaveLength(64);expect(f.ledger.claimRead).toHaveBeenCalledWith(master,'1','300','0.5');
+      expect(bs58.decode(body.signature)).toHaveLength(64);expect(f.ledger.claimRead).toHaveBeenCalledWith(master,'12','300','0.5');
       await expect(f.reads.subaccounts('EXAMPLE_OTHER',pair.secretKey)).rejects.toThrow('identity');expect(f.fetcher).toHaveBeenCalledOnce();
     }finally{pair.secretKey.fill(0);}
   });

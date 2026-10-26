@@ -39,7 +39,7 @@ it('charges each send once and honors backoff without blind retries',async()=>{
   const debit=vi.fn(async()=>{}),rateLimited=vi.fn(async()=>{}),fetcher=vi.fn(async()=>new Response('{}',{status:429}));
   const send=workerFetch({debit,rateLimited},fetcher as typeof fetch);
   await expect(withProtectivePurpose(()=>send(url('/orders/create_market'),{method:'POST',body:JSON.stringify({reduce_only:true})}))).rejects.toThrow('GRID_QUOTA_BACKOFF');
-  expect(debit).toHaveBeenCalledWith('pacifica_rest',120,true);expect(rateLimited).toHaveBeenCalledOnce();expect(fetcher).toHaveBeenCalledOnce();
+  expect(debit).toHaveBeenCalledWith('pacifica_rest',30,true);expect(rateLimited).toHaveBeenCalledOnce();expect(fetcher).toHaveBeenCalledOnce();
 });
 it('protective authority never permits opening, funding, sweeping or release',()=>{
   const c:KillContext={role:'protective',executionMode:'external',legacyControlsEnabled:true,runMode:'trading',executionEnabled:true,entriesPaused:true,drainRequested:false,observerFenced:false,holderValid:true,identityValid:true,authorityValid:true,alreadyOwned:true,terminalProof:true,scopeAndConsent:true,retainedAuthority:true,signedPolicy:true,protectiveDrain:true};

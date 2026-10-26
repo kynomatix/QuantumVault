@@ -26,8 +26,8 @@ const sha256 = (value: string) => createHash('sha256').update(value).digest('hex
 const baselineSha256 = {
   privateWsSha256: '98bcb0a087e332dac6cd141c23646d21e5485b621a10051063bb2244a4f2efde',
   priceWsSha256: '18785fe53909ef7d51cecf0746d8f311141fe1d8d0fb9d69429ce18d7ee74313',
-  // U7a scopes MAIN quota before fetch; deadline/abort/error identity behavior remains covered below.
-  fetchBoundedSha256: '2c81d3c8db2b126016ea37f1654ac842d91f40d9aff355162cd63b439418f152',
+  // U7c scopes MAIN lock, quota and lower-only headers before fetch; deadline/abort/error identity behavior remains covered below.
+  fetchBoundedSha256: '103f56d688104b9a501a1324fbf954e1ac97c996b26231a966c34944edd3239d',
 };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); mocks.sockets.length = 0; });
 function presentKey() {
@@ -46,7 +46,7 @@ function presentKey() {
 }
 
 describe('legacy Pacifica remains at the baseline with Config Key present', () => {
-  it('retains both live WS files and the REST deadline implementation byte for byte', () => {
+  it('retains both live WS files and the reviewed REST boundary pin', () => {
     expect(sha256(source('server/protocol/pacifica/pacifica-ws.ts'))).toBe(baselineSha256.privateWsSha256);
     expect(sha256(source('server/live-data-spine/pacifica-prices-ws.ts'))).toBe(baselineSha256.priceWsSha256);
     const adapter = source('server/protocol/pacifica/pacifica-adapter.ts');

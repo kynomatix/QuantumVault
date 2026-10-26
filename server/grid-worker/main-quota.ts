@@ -1,7 +1,8 @@
+import {providerRequestCost} from '../grid-bot/provider-request-cost';
 import type {QuotaPolicy, QuotaProvider} from './quota';
 import {mainGridQuotaRequest,mainGridQuotaAccount} from './main-quota-scope';
 // Owner confirms published max machines <= this assumption before U7.
-export const MAIN_AUTOSCALE_INSTANCE_CAP_ASSUMED = 4;
+export const MAIN_AUTOSCALE_INSTANCE_CAP_ASSUMED = 1;
 export function mainAllocation(total: number, worker: number): number {
   return Number.isSafeInteger(total) && Number.isSafeInteger(worker) && total > worker && worker > 0
     ? Math.floor((total-worker)/MAIN_AUTOSCALE_INSTANCE_CAP_ASSUMED) : 0;
@@ -9,7 +10,7 @@ export function mainAllocation(total: number, worker: number): number {
 interface LocalWindow {policy: QuotaPolicy; observedAt: number; used: number; start: number; backoff: number; debits:{at:number;units:number;until:number}[]}
 export class MainQuota {
   private warmUntil=new Map<QuotaProvider,number>();
-  constructor(private quarantineFirstWindow=false){}
+  constructor(private quarantineFirstWindow=false,instanceCap:number=MAIN_AUTOSCALE_INSTANCE_CAP_ASSUMED){if(instanceCap!==1)throw Error('GRID_MAIN_INSTANCE_CAP_INVALID');}
   private windows = new Map<QuotaProvider,LocalWindow>();
   private enabled=new Set<QuotaProvider>();
   install(policies: readonly QuotaPolicy[], now = Date.now()) {
@@ -18,7 +19,7 @@ export class MainQuota {
     for (const policy of policies) {
       if (policy.domain_id !== 'deployment' || next.has(policy.provider)) { return; }
       const old=this.windows.get(policy.provider);
-      if(this.quarantineFirstWindow&&!this.warmUntil.has(policy.provider))this.warmUntil.set(policy.provider,now+policy.window_ms);
+      if(this.quarantineFirstWindow&&!this.warmUntil.has(policy.provider))this.warmUntil.set(policy.provider,now+Math.max(65000,policy.window_ms+5000));
       // Policy edits cannot refund already spent units in the current window.
       next.set(policy.provider,{policy,observedAt:now,used:old?.used??0,start:old?.start??now,backoff:old?.backoff??0,debits:old?.debits??[]});
     }
@@ -32,7 +33,7 @@ export class MainQuota {
     if (!Number.isSafeInteger(duration)||duration<1||now<w.start) throw Error('GRID_MAIN_QUOTA_UNAVAILABLE');
     // A sliding window cannot overspend any fixed provider window.
     w.debits=w.debits.filter(d=>now<d.until);w.used=w.debits.reduce((sum,d)=>sum+d.units,0);
-    const limit=mainAllocation(Number(w.policy.total_units),Number(w.policy.worker_limit_units));
+    const limit=mainAllocation(Number(w.policy.total_units),Number(w.policy.worker_limit_units))/(provider==='pacifica_rest'?1:4);
     if(limit<1||w.used+units>limit)throw Error('GRID_MAIN_QUOTA_UNAVAILABLE');
     w.used+=units;w.debits.push({at:now,units,until:now+duration});
   }
@@ -44,14 +45,18 @@ export class MainQuota {
       ||now>=new Date(w.policy.valid_until).getTime()||!Number.isSafeInteger(w.policy.window_ms)||w.policy.window_ms<1
       ||!/^[a-f0-9]{64}$/.test(w.policy.policy_digest))return false;
     const used=w.debits.filter(d=>now<d.until).reduce((sum,d)=>sum+d.units,0);
-    return used+units<=mainAllocation(Number(w.policy.total_units),Number(w.policy.worker_limit_units));
+    return used+units<=Math.floor(mainAllocation(Number(w.policy.total_units),Number(w.policy.worker_limit_units))/(provider==='pacifica_rest'?1:4));
+  }
+  reserve(provider:QuotaProvider,units:number,now=Date.now()):()=>void {
+    this.debit(provider,units,now);const w=this.windows.get(provider)!;const debit=w.debits[w.debits.length-1];let released=false;
+    return ()=>{if(released)return;released=true;const current=this.windows.get(provider);if(current)current.debits=current.debits.filter(d=>d!==debit);};
   }
   rateLimited(provider: QuotaProvider, now=Date.now()){const w=this.windows.get(provider);if(w)w.backoff=now+60000;}
 }
 export const mainQuota = new MainQuota(true);
 export function debitMainRequest(url:string, init:RequestInit, master?:string):boolean {
   const scoped=mainGridQuotaAccount(master)||mainGridQuotaRequest(url,init);
-  if(scoped)debitMainQuota('pacifica_rest',120);
+  if(scoped)debitMainQuota('pacifica_rest',providerRequestCost(init.method??'GET',url));
   return scoped;
 }
 export function debitMainQuota(provider: QuotaProvider, units = 1) {

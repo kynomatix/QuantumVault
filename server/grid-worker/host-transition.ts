@@ -1,3 +1,4 @@
+import {providerRequestCost} from '../grid-bot/provider-request-cost';
 import {mainQuota} from './main-quota';
 import type {ControlBlocker,HostTransitionOffer} from '../../shared/grid-worker-controls';
 import type {PoolClient} from 'pg';
@@ -33,7 +34,8 @@ export async function collectTransitionEvidence(lane:ClientLane,read:Read):Promi
   const c=await lane.connect();let accounts:Account[],observedAt:number;
   try{accounts=(await c.query<Account>(accountSql)).rows;observedAt=new Date((await c.query('SELECT clock_timestamp() AS now')).rows[0].now).getTime();}finally{c.release();}
   if(accounts.length>100||accounts.some(a=>!a.account||!a.master||!OWNER_MASTER_PUBLIC_KEYS.includes(a.master)))throw Error('GRID_TRANSITION_SCOPE');
-  if(accounts.length&&!mainQuota.inspect('pacifica_rest',accounts.length*360))throw Error('GRID_CONTROL:limits_busy');
+  if(accounts.length>1)throw Error('GRID_CONTROL:limits_busy');
+  if(accounts.length&&!mainQuota.inspect('pacifica_rest',accounts.length*(['/account','/orders','/positions'].reduce((sum,path)=>sum+providerRequestCost('GET',path),0))))throw Error('GRID_CONTROL:limits_busy');
   let flat=true;
   for(const a of accounts){
     const raw=await Promise.all([read(a.master,'/account',{account:a.account}),read(a.master,'/orders',{account:a.account}),read(a.master,'/positions',{account:a.account})]);
@@ -122,7 +124,7 @@ export async function transitionBlocker(c:PoolClient,p:TransitionParams,identity
     const {transitionHistoryReady}=await import('./transition-history');
     if(!await transitionHistoryReady(c))return 'history';
   }
-  if(checkBudget&&accounts.length&&!mainQuota.inspect('pacifica_rest',accounts.length*360))return 'limits_busy';
+  if(accounts.length>1||checkBudget&&accounts.length&&!mainQuota.inspect('pacifica_rest',accounts.length*(['/account','/orders','/positions'].reduce((sum,path)=>sum+providerRequestCost('GET',path),0))))return 'limits_busy';
   return null;
 }
 export async function hostTransitionOffer(c:PoolClient):Promise<HostTransitionOffer|null>{

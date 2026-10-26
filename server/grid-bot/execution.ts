@@ -1,4 +1,6 @@
-import {debitMainRequest} from '../grid-worker/main-quota';
+import {mainQuota} from '../grid-worker/main-quota';
+import {mainGridQuotaAccount} from '../grid-worker/main-quota-scope';
+import {beforeMainRequest,hasRequestBudget} from '../grid-worker/request-budget';
 import Decimal from 'decimal.js';
 import {PacificaSigner,buildSigningMessage} from '../protocol/pacifica/pacifica-signer';
 import {PacificaTransportAuthority} from '../protocol/pacifica/pacifica-transport';
@@ -44,8 +46,12 @@ export class GridPacificaSender {
     if(Date.now()>=r.timestamp+r.expiryMs)throw new GridLaunchTransientError('Grid signed request expired before POST');
     if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired before POST.');
     // One bounded request only. Header/HTTP success alone never settles money or an order.
-    const scoped=debitMainRequest(url,init);
-    const response=this.transport.response(await this.fetcher(url,{...init,redirect:'error',signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(5000)])}),scoped);
+    const assertMain=await beforeMainRequest(this.fetcher,url,init,r.masterAccount);
+    if(Date.now()>=r.timestamp+r.expiryMs)throw new GridLaunchTransientError('Grid signed request expired before POST');
+    if(needsBook&&(!proof||!this.firstPlacement!.valid(proof,r)))throw Error('Grid first placement book expired before POST.');
+    const bounded={...init,redirect:'error' as const,signal:AbortSignal.any([...(signal?[signal]:[]),AbortSignal.timeout(5000)])};
+    const response=hasRequestBudget(this.fetcher)?this.transport.response(await this.fetcher(url,bounded)):await this.transport.request(url,bounded,(input,options)=>{assertMain();if(Date.now()>=r.timestamp+r.expiryMs)throw new GridLaunchTransientError('Grid signed request expired before POST');return this.fetcher(input,options);});
+    if(response.status===429&&mainGridQuotaAccount(r.masterAccount))mainQuota.rateLimited('pacifica_rest');
     if(response.redirected||response.status>=300&&response.status<400)throw Error('GRID_EGRESS_REFUSED');
     if(response.status===400||response.status===403||response.status===429){
       const body=response.status===400?await response.json().catch(()=>null):null;

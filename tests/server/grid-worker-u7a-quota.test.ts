@@ -27,13 +27,13 @@ it('never debits or refuses unrelated MAIN REST, RPC or WS even at boot with its
     expect(()=>t.websocketOptions('wss://ws.pacifica.fi/ws',account)).toThrow('GRID_MAIN_WS_QUOTA_UNAVAILABLE');
   }
 });
-it('bounds one and four MAIN instances; a fifth violates the declared cap',()=>{
+it('bounds the sole MAIN instance and rejects a different cap',()=>{
   const p=policy(),per=mainAllocation(1000,500);
-  expect(per).toBe(125);expect(per+500).toBeLessThanOrEqual(1000);expect(4*per+500).toBe(1000);expect(5*per+500).toBeGreaterThan(1000);
-  for(let i=0;i<4;i++){const q=new MainQuota();q.install([p],0);q.debit('pacifica_rest',125,0);expect(()=>q.debit('pacifica_rest',1,0)).toThrow();}
+  expect(per).toBe(500);expect(per+500).toBe(1000);expect(()=>new MainQuota(false,2)).toThrow();
+  const q=new MainQuota();q.install([p],0);q.debit('pacifica_rest',500,0);expect(()=>q.debit('pacifica_rest',1,0)).toThrow();
 });
 it('policy replacement never refunds local debit or backoff',()=>{
-  const q=new MainQuota();q.install([policy()],0);q.debit('pacifica_rest',120,0);q.install([{...policy(),policy_digest:createHash('sha256').update('EXAMPLE_REPLACEMENT').digest('hex')}],1);
+  const q=new MainQuota();q.install([policy()],0);q.debit('pacifica_rest',495,0);q.install([{...policy(),policy_digest:createHash('sha256').update('EXAMPLE_REPLACEMENT').digest('hex')}],1);
   expect(()=>q.debit('pacifica_rest',6,1)).toThrow();q.rateLimited('pacifica_rest',1);q.install([policy()],2);expect(()=>q.debit('pacifica_rest',1,2)).toThrow();
 });
 it('canonical policies require both providers, integer budgets, exact digest and <=90 days',()=>{
@@ -57,16 +57,16 @@ it('real adapter transport never applies grid boot refusal to signal, AI or othe
       expect(await (adapter as any).fetchBounded('https://api.pacifica.fi/api/v1/account?account='+account,{method:'GET'},500,1000,'EXAMPLE')).toBe(raw);
     }
     expect(fetcher).toHaveBeenCalledTimes(3);expect(debit).not.toHaveBeenCalled();
-    await expect((adapter as any).fetchBounded('https://api.pacifica.fi/api/v1/account?account=EXAMPLE_MASTER',{method:'GET'},500,1000,'EXAMPLE')).rejects.toThrow('EXAMPLE_BOOT_REFUSAL');
+    await expect((adapter as any).fetchBounded('https://api.pacifica.fi/api/v1/account?account=EXAMPLE_MASTER',{method:'GET'},500,1000,'EXAMPLE')).rejects.toThrow('GRID_MAIN_OWNER_UNAVAILABLE');
   }finally{vi.unstubAllGlobals();}
 });
 
 it('inspects MAIN capacity without spending and retains cold-start quarantine, backoff and competing usage',()=>{
-  const p={...policy(),total_units:'2500'},q=new MainQuota(true);q.install([p],0);
-  expect(q.inspect('pacifica_rest',360,1)).toBe(false);q.install([p],60001);
-  expect(q.inspect('pacifica_rest',360,60001)).toBe(true);expect(q.inspect('pacifica_rest',360,60001)).toBe(true);
-  q.debit('pacifica_rest',120,60001);expect(q.inspect('pacifica_rest',360,60002)).toBe(true);
-  q.debit('pacifica_rest',120,60002);expect(q.inspect('pacifica_rest',360,60003)).toBe(false);
-  q.rateLimited('pacifica_rest',60003);expect(q.inspect('pacifica_rest',1,60004)).toBe(false);
-  const filled=new MainQuota();filled.install([policy()],0);expect(mainAllocation(1000,500)).toBe(125);expect(filled.inspect('pacifica_rest',360,0)).toBe(false);
+  const p=policy(),q=new MainQuota(true);q.install([p],0);
+  expect(q.inspect('pacifica_rest',360,1)).toBe(false);q.install([p],65001);
+  expect(q.inspect('pacifica_rest',360,65001)).toBe(true);expect(q.inspect('pacifica_rest',360,65001)).toBe(true);
+  q.debit('pacifica_rest',120,65001);expect(q.inspect('pacifica_rest',360,65002)).toBe(true);
+  q.debit('pacifica_rest',120,65002);expect(q.inspect('pacifica_rest',360,65003)).toBe(false);
+  q.rateLimited('pacifica_rest',65003);expect(q.inspect('pacifica_rest',1,65004)).toBe(false);
+  const filled=new MainQuota();filled.install([policy()],0);expect(mainAllocation(1000,500)).toBe(500);expect(filled.inspect('pacifica_rest',360,0)).toBe(true);
 });
