@@ -24,6 +24,8 @@ export function makeCloseRouteStore(storage: any) {
     admit: async (s: any, row: any, attempt: any) => store.mutate(s, row, { attempt_log: [...row.attempt_log, attempt], attempt_count: row.attempt_count + 1, dispatch_state: 'admitted_unknown' }),
     outcome: async (s: any, row: any, id: string, outcome: any) => store.mutate(s, row, { attempt_log: row.attempt_log.map((a: any) => a.attemptId === id ? { ...a, outcome, receivedAt: Date.now() } : a), dispatch_state: outcome.kind === 'not_entered' ? 'proven_not_landed' : 'admitted_unknown' }),
     settle: async (s: any, row: any, fields: any) => store.mutate(s, row, fields),
+    updateConfirmedEvidence: async (s: any, row: any, fields: any) => store.mutate(s, row, { last_evidence: {...row.last_evidence,...fields} }),
+    recordNotificationDelivered: async (s: any, row: any) => store.updateConfirmedEvidence(s,row,{notificationPending:false}),
     dueAccounting: async () => [],
     byId: async (_s: any, id: string) => rows.get(id), due: async () => [],
     statusForBot: async () => null, historyStatuses: async () => new Map(), legacyInventory: async () => [],

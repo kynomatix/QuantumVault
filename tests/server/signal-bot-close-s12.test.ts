@@ -9,7 +9,7 @@ const holder = vi.hoisted(() => ({ store: {} as any }));
 vi.mock('../../server/protocol/adapter-registry', () => ({ getAdapter: () => ({ getCloseEnvironment: () => 'EXAMPLE' }) }));
 vi.mock('../../server/trading/close-intent-store', () => ({ get closeIntentStore() { return holder.store; } }));
 vi.mock('../../server/trading/signal-bot-close-intent-accounting', () => ({ accountDurableClose: vi.fn() }));
-import { closeReleaseEvidence, submitDurableClose } from '../../server/trading/signal-bot-close-intent';
+import { assertCloseObjective, closeReleaseEvidence, submitDurableClose } from '../../server/trading/signal-bot-close-intent';
 import { observeCloseIntent } from '../../server/trading/signal-bot-close-intent-worker';
 import { SignalBotCloseIntentStorage } from '../../server/trading/signal-bot-close-intent-storage';
 const source = (name: string) => readFileSync(new URL('../../' + name, import.meta.url), 'utf8');
@@ -169,4 +169,13 @@ describe('manual terminal click boundary', () => {
     expect(res.code).toBe(mode==='pending'?202:mode==='conflict'?409:200);
   });
 
+});
+
+describe('S13 partial source identity',()=>{
+  it('rejects equal-size distinct partials and permits only the same source replay',()=>{
+    const row=intent();row.close_kind='partial';row.requested_size_base='0.5';row.source_key='EXAMPLE_ORIGINAL';
+    expect(()=>assertCloseObjective(row,'partial','0.5','EXAMPLE_OTHER')).toThrow('already in progress');
+    expect(()=>assertCloseObjective(row,'partial','0.5','EXAMPLE_ORIGINAL')).not.toThrow();
+    expect(()=>assertCloseObjective(row,'partial','0.25','EXAMPLE_ORIGINAL')).toThrow('already in progress');
+  });
 });

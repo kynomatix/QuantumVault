@@ -185,7 +185,7 @@ describe("partial-close integration guards", () => {
     const user = routes.slice(userStart, routes.indexOf("DEFENSE-IN-DEPTH", userStart));
     expect(tradingView).not.toContain("syncPositionFromOnChain(");
     expect(user).not.toContain("syncPositionFromOnChain(");
-    expect(routes).toContain("if (pcPnl !== null && pcAccounting.isNew)");
+    expect(routes).toContain("if (bot.activeProtocol !== 'pacifica' && pcPnl !== null && pcAccounting.isNew)");
     expect(routes.match(/buildSignalBotCloseResponse\("accounting_incomplete"/g)).toHaveLength(2);
     expect(routes).toContain("await storage.updatePendingBotTrade(marker.trade.id");
     expect(routes).not.toContain("input.executionPrice ?? input.signalPriceContext ?? 0");

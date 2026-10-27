@@ -83,7 +83,7 @@ export async function submitDurableClose(input: {
   const result = await store.withScope(environment, params.agentPublicKey, params.internalSymbol, async scope => {
     const unresolved = await store.unresolved(scope);
     if (unresolved) {
-      assertCloseObjective(unresolved, input.kind, params.sizeBaseExact ?? String(params.sizeBase));
+      assertCloseObjective(unresolved, input.kind, params.sizeBaseExact ?? String(params.sizeBase), identity.source_key);
       return { intent: unresolved, created: false };
     }
     if (await store.hasLegacyPending(scope)) throw new Error(CLOSE_IN_PROGRESS);
@@ -120,7 +120,7 @@ export async function submitDurableClose(input: {
         expectedLastTradeId: identity.lastTradeId, requestedClosedSize: Number(prepared.operationData.amount) },
     } } : input.trade);
     if (!created.created) {
-      assertCloseObjective(created.intent, input.kind, prepared.operationData.amount);
+      assertCloseObjective(created.intent, input.kind, prepared.operationData.amount, identity.source_key);
       return created;
     }
     let intent = created.intent;
@@ -184,8 +184,8 @@ export async function persistCloseObservation(scope: CloseScope, intent: CloseIn
 }
 
 /** Exact text matters: a coalesced request cannot borrow another objective. */
-export function assertCloseObjective(intent: CloseIntent, kind: 'full' | 'partial', size: string): void {
-  if (intent.close_kind !== kind || intent.requested_size_base !== size) throw new Error(CLOSE_IN_PROGRESS);
+export function assertCloseObjective(intent: CloseIntent, kind: 'full' | 'partial', size: string, sourceKey?: string): void {
+  if (intent.close_kind !== kind || intent.requested_size_base !== size || (kind === 'partial' && intent.source_key !== sourceKey)) throw new Error(CLOSE_IN_PROGRESS);
 }
 
 /** DB brackets are conservative dispatch bounds; app-clock offsets never authorize intent actions. */
@@ -207,8 +207,9 @@ export async function confirmDurableClose(scope: CloseScope, intent: CloseIntent
   const evidence = await readIntentFillEvidence(scope, adapter, intent);
   const fill = evidence.fill;
   const settled = await store.settle(scope, intent, { status: 'confirmed', completed_at: new Date(await store.databaseTime(scope)),
-    last_error_code: null, last_evidence: { ...intent.last_evidence, accountingPending: !fill || fill.realizedPnl === null, notificationPending: true, fill, subscriberAccounting: evidence.accounting, closeResult: evidence.closeResult } },
+    last_error_code: null, last_evidence: { ...intent.last_evidence, accountingPending: !fill || fill.realizedPnl === null, notificationPending: true, ...(intent.close_kind === 'partial' ? { effectsPending: true } : {}), fill, subscriberAccounting: evidence.accounting, closeResult: evidence.closeResult } },
     client => account(client, intent, 'confirmed', fill));
-  if (fill) { const { notifyDurableClose } = await import('./signal-bot-close-intent-accounting'); await notifyDurableClose(scope, settled, fill); }
+  if (intent.close_kind === 'partial') { const { dispatchPartialCloseEffects } = await import('./signal-bot-close-intent-effects'); await dispatchPartialCloseEffects(scope, settled); }
+  if (fill) { const { notifyDurableClose } = await import('./signal-bot-close-intent-accounting'); await notifyDurableClose(scope, (await store.byId(scope, settled.id))!, fill); }
   return (await store.byId(scope, settled.id)) ?? settled;
 }

@@ -839,6 +839,7 @@ export interface IStorage {
   remediateReconcilerCloseAccountingAtomic(opts: {
     botId: string;
     tradeId: string;
+    closeIntentId?: string;
     evidence: Extract<ReconcilerCloseAccountingEvidence, { kind: "venue_exact" }>;
   }, transactionClient?: any): Promise<{ trade: BotTrade; remediated: boolean }>;
   getRecentCanonicalCloseForBot(opts: {
@@ -2998,7 +2999,13 @@ export class DatabaseStorage implements IStorage {
     if (a.outcome !== "confirmed" || !a.orderId || (!exact && !deferred)) {
       throw new Error("subscriber repair requires exact confirmed evidence or its durable recovery request");
     }
-    return db.transaction(async tx => {
+    const { closeIntentStore } = await import('./trading/close-intent-store');
+    return closeIntentStore.guardLinkedSubscriberRepair(opts.tradeId, async client => {
+      const [trade] = await closeIntentDrizzle(client).select().from(botTrades).where(and(eq(botTrades.id, opts.tradeId), eq(botTrades.tradingBotId, opts.botId)));
+      if (!trade) throw new Error('subscriber repair trade missing');
+      // The canonical worker alone attributes and applies durable intent money.
+      return { trade, remediated: false };
+    }, () => db.transaction(async tx => {
       const [locked] = await tx.select().from(botTrades)
         .where(and(eq(botTrades.id, opts.tradeId), eq(botTrades.tradingBotId, opts.botId)))
         .for("update").limit(1);
@@ -3050,12 +3057,13 @@ export class DatabaseStorage implements IStorage {
         updatedAt: sql`NOW()`,
       }).where(eq(botPositions.id, position.id));
       return { trade, remediated: true };
-    });
+    }));
   }
 
   async remediateReconcilerCloseAccountingAtomic(opts: {
     botId: string;
     tradeId: string;
+    closeIntentId?: string;
     evidence: Extract<ReconcilerCloseAccountingEvidence, { kind: "venue_exact" }>;
   }, transactionClient?: any): Promise<{ trade: BotTrade; remediated: boolean }> {
     const evidence = opts.evidence;
@@ -3084,7 +3092,13 @@ export class DatabaseStorage implements IStorage {
       const payload = locked.webhookPayload && typeof locked.webhookPayload === "object"
         ? locked.webhookPayload as Record<string, any>
         : {};
-      if (payload.subscriberCloseAccounting) throw new Error("use subscriber close accounting repair");
+      if (payload.subscriberCloseAccounting) {
+        // Only the canonical writer, holding its transaction's scope lock, can
+        // supersede a legacy marker. History attribution was to this immutable intent.
+        if (!transactionClient || !opts.closeIntentId) throw new Error("use subscriber close accounting repair");
+        const linked = await transactionClient.query("SELECT id FROM signal_bot_close_intents WHERE id=$1 AND original_trade_id=$2 AND bot_id=$3 AND status='confirmed'", [opts.closeIntentId, opts.tradeId, opts.botId]);
+        if (!linked.rowCount) throw new Error('canonical_subscriber_intent_missing');
+      }
       const prior = payload.closeAccounting;
       if (prior?.kind === "venue_exact") {
         const same = prior.protocolFillId === evidence.protocolFillId
@@ -3101,6 +3115,16 @@ export class DatabaseStorage implements IStorage {
       }
 
       const netPnl = evidence.pnl - evidence.fee;
+      // A pre-upgrade subscriber writer may already have committed the money
+      // while retaining the unavailable closeAccounting marker. Adopt matching
+      // exact trade facts without adding those economics a second time.
+      if (payload.subscriberCloseAccounting && locked.pnl !== null) {
+        if (!new Decimal(locked.pnl).eq(netPnl) || !new Decimal(locked.fee ?? '0').eq(evidence.fee)
+          || !new Decimal(locked.price).eq(evidence.fillPrice)) throw new Error('canonical_subscriber_money_conflict');
+        const [trade] = await tx.update(botTrades).set({ webhookPayload: { ...payload, closeAccounting: evidence,
+          accountingRemediation: { source: 'adopted_subscriber_fill', prior } } }).where(eq(botTrades.id, opts.tradeId)).returning();
+        return { trade, remediated: false };
+      }
       const remediatedSize = Math.abs(Number(locked.size));
       if (!Number.isFinite(remediatedSize)) {
         throw new Error("remediateReconcilerCloseAccountingAtomic: invalid durable trade size");

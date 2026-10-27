@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
+import { eq } from 'drizzle-orm';
 import { botTrades, type InsertBotTrade } from '@shared/schema';
 import { SIGNAL_BOT_CLOSE_INTENT_LOCK_NAMESPACE as NS } from '../wallet-lock-constants';
 import type { CloseIntent, CloseScope, NewCloseIntent, CloseAttempt, CloseSendOutcome } from './signal-bot-close-intent-types';
@@ -52,7 +53,7 @@ export class SignalBotCloseIntentStorage {
       clients.delete(token);
       if (held) await client.query('SELECT pg_advisory_unlock($1,hashtext($2))', [NS, key]).catch(() => {});
       if (accountHeld) await client.query('SELECT pg_advisory_unlock_shared($1,hashtext($2))', [NS, accountKey]).catch(() => {});
-      await client.query('RESET lock_timeout').catch(() => {});
+      if (!parent) await client.query('RESET lock_timeout').catch(() => {});
       if (!parent) client.release();
     }
   }
@@ -150,13 +151,17 @@ export class SignalBotCloseIntentStorage {
     try { await this.ready(); } catch { return { message: CLOSE_SAVE_FAILED, unresolved: false }; }
     const rows = await this.pool.query(`SELECT * FROM signal_bot_close_intents WHERE owner_wallet=$1 AND bot_id=$2 ORDER BY created_at DESC,id DESC LIMIT 1`, [owner, botId]);
     const latest = rows.rows[0] as CloseIntent | undefined;
-    const pendingLegacy = await this.pool.query("SELECT t.id FROM bot_trades t JOIN trading_bots b ON b.id=t.trading_bot_id WHERE b.id=$1 AND b.wallet_address=$2 AND b.active_protocol='pacifica' AND upper(t.side)='CLOSE' AND t.status='pending' AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents i WHERE i.original_trade_id=t.id) LIMIT 1", [botId,owner]);
-    if (pendingLegacy.rows[0]) return { message: 'Close needs your attention. The position may still be open.', unresolved: true, tradeId: pendingLegacy.rows[0].id };
+    const pendingLegacy = await this.pool.query("SELECT t.id,(t.executed_at > clock_timestamp()-interval '15 minutes') AS blocking FROM bot_trades t JOIN trading_bots b ON b.id=t.trading_bot_id WHERE b.id=$1 AND b.wallet_address=$2 AND b.active_protocol='pacifica' AND upper(t.side)='CLOSE' AND t.status='pending' AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents i WHERE i.original_trade_id=t.id) ORDER BY t.executed_at DESC LIMIT 1", [botId,owner]);
+    if (pendingLegacy.rows[0]?.blocking) return { message: 'Close needs your attention. The position may still be open.', unresolved: true, tradeId: pendingLegacy.rows[0].id };
+    if (latest && ['pending','needs_user'].includes(latest.status)) return { message: closeIntentMessage(latest), unresolved: true, tradeId: latest.original_trade_id };
+    if (pendingLegacy.rows[0]) return { message: 'An earlier close could not be confirmed. Check the position.', unresolved: false, tradeId: pendingLegacy.rows[0].id };
     if (!latest || !['pending','needs_user'].includes(latest.status)) {
       const attention = await this.pool.query("SELECT * FROM signal_bot_close_intents r WHERE owner_wallet=$1 AND bot_id=$2 AND release_mode='residual' AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents c WHERE c.environment=r.environment AND c.original_account=r.original_account AND c.market=r.market AND c.status='confirmed' AND c.created_at>r.created_at) ORDER BY created_at DESC LIMIT 1", [owner, botId]);
       if (attention.rows[0]) return { message: closeIntentMessage(attention.rows[0]), unresolved: false, tradeId: attention.rows[0].original_trade_id };
     }
 
+    if (latest?.last_evidence.notificationAttention === true) return { message: 'Close confirmed. Notification delivery needs your attention.', unresolved: false, tradeId: latest.original_trade_id };
+    if (latest?.last_evidence.repairAttention === true) return { message: 'Close confirmed. Accounting needs your attention.', unresolved: false, tradeId: latest.original_trade_id };
     if (latest) return { message: closeIntentMessage(latest), unresolved: ['pending','needs_user'].includes(latest.status), tradeId: latest.original_trade_id };
     const legacy = await this.legacyInventory(owner, botId);
     return legacy.length ? { message: 'Close needs your attention. The position may still be open.', unresolved: false, tradeId: legacy[0].original_trade_id } : null;
@@ -214,21 +219,48 @@ export class SignalBotCloseIntentStorage {
   }
 
   async hasLegacyPending(scope: CloseScope): Promise<boolean> {
-    const result = await this.client(scope).query(`SELECT t.id FROM bot_trades t JOIN trading_bots b ON b.id=t.trading_bot_id LEFT JOIN wallets w ON w.address=b.wallet_address WHERE upper(t.side)='CLOSE' AND t.status='pending' AND t.market=$1 AND b.active_protocol='pacifica' AND COALESCE(b.protocol_subaccount_id,w.agent_public_key)=$2 AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents i WHERE i.original_trade_id=t.id) LIMIT 1`, [scope.market, scope.account]);
+    const result = await this.client(scope).query(`SELECT t.id FROM bot_trades t JOIN trading_bots b ON b.id=t.trading_bot_id LEFT JOIN wallets w ON w.address=b.wallet_address WHERE upper(t.side)='CLOSE' AND t.status='pending' AND t.executed_at > clock_timestamp()-interval '15 minutes' AND t.market=$1 AND b.active_protocol='pacifica' AND COALESCE(b.protocol_subaccount_id,w.agent_public_key)=$2 AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents i WHERE i.original_trade_id=t.id) LIMIT 1`, [scope.market, scope.account]);
     return !!result.rowCount;
   }
 
   /** Worker is serial: one scope connection, at most one additional awaited pool query. */
   async dueAccounting(): Promise<CloseIntent[]> {
-    return (await this.pool.query("SELECT * FROM signal_bot_close_intents WHERE status='confirmed' AND (last_evidence->>'accountingPending'='true' OR last_evidence->>'notificationPending'='true') AND next_action_at<=clock_timestamp() ORDER BY next_action_at,id LIMIT 10")).rows;
+    return (await this.pool.query("SELECT * FROM signal_bot_close_intents WHERE status='confirmed' AND (last_evidence->>'accountingPending'='true' OR last_evidence->>'notificationPending'='true' OR last_evidence->>'effectsPending'='true') AND next_action_at<=clock_timestamp() ORDER BY next_action_at,id LIMIT 10")).rows;
+  }
+
+  /** Terminal evidence changes use the same scope lock and revision fence as confirmation. */
+  async updateConfirmedEvidence(scope: CloseScope, current: CloseIntent, evidence: Record<string, unknown>, delayMs = 0): Promise<CloseIntent> {
+    const result = await this.client(scope).query("UPDATE signal_bot_close_intents SET last_evidence=last_evidence||$3::jsonb,next_action_at=clock_timestamp()+($4::double precision*interval '1 millisecond'),revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 AND revision=$2 AND status='confirmed' RETURNING *", [current.id,current.revision,JSON.stringify(evidence),delayMs]);
+    if (!result.rows[0]) throw new Error('close_terminal_revision_changed');
+    return result.rows[0];
+  }
+
+  /** Eight observations, exponential 30 s backoff capped at 30 min, then owner attention. */
+  async recordRepairFailure(scope: CloseScope, current: CloseIntent): Promise<void> {
+    const attempts = Number(current.last_evidence.repairAttempts ?? 0) + 1;
+    const exhausted = attempts >= 8;
+    await this.updateConfirmedEvidence(scope, current, { repairAttempts: attempts, repairAttention: exhausted,
+      ...(exhausted ? { accountingPending: false, notificationPending: false, effectsPending: false } : {}) },
+      Math.min(30_000 * 2 ** (attempts - 1), 1_800_000));
   }
 
   async recordAccountingRepair(scope: CloseScope, current: CloseIntent, pending: boolean, fill?: import('./signal-bot-close-intent-accounting').IntentFill | null): Promise<void> {
-    await this.client(scope).query("UPDATE signal_bot_close_intents SET last_evidence=last_evidence||jsonb_build_object('accountingPending',$3::boolean,'fill',$4::jsonb),next_action_at=clock_timestamp()+interval '5 minutes',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 AND revision=$2 AND status='confirmed'", [current.id,current.revision,pending,JSON.stringify(fill ?? null)]);
+    const updated = await this.updateConfirmedEvidence(scope, current, { accountingPending: pending, fill: fill ?? null });
+    if (pending) await this.recordRepairFailure(scope, updated);
+  }
+
+  /** A legacy consumer may observe a durable trade, but cannot write its money or payload. */
+  async guardLinkedSubscriberRepair<T>(tradeId: string, canonical: (client: PoolClient) => Promise<T>, legacy: () => Promise<T>): Promise<T> {
+    const present = await this.pool.query("SELECT to_regclass(current_schema()||'.signal_bot_close_intents') IS NOT NULL AS present");
+    if (!present.rows[0]?.present) return legacy();
+    const linked = (await this.pool.query('SELECT * FROM signal_bot_close_intents WHERE original_trade_id=$1', [tradeId])).rows[0] as CloseIntent | undefined;
+    if (!linked) return legacy();
+    return await this.withScope(linked.environment, linked.original_account, linked.market, scope =>
+      this.transaction(scope, canonical)) as T;
   }
 
   async recordNotificationDelivered(scope: CloseScope, current: CloseIntent): Promise<void> {
-    await this.client(scope).query("UPDATE signal_bot_close_intents SET last_evidence=last_evidence||jsonb_build_object('notificationPending',false),revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 AND revision=$2 AND status='confirmed'", [current.id,current.revision]);
+    await this.client(scope).query("UPDATE signal_bot_close_intents SET last_evidence=last_evidence||jsonb_build_object('notificationPending',false,'notificationAttention',false),revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 AND revision=$2 AND status='confirmed'", [current.id,current.revision]);
   }
 
   async byId(scope: CloseScope, id: string): Promise<CloseIntent | undefined> {
@@ -331,15 +363,16 @@ export class SignalBotCloseIntentStorage {
     const result = await this.withScope(linked.environment, linked.original_account, linked.market, async scope => {
       const current = (await this.byId(scope, linked.id))!;
       if (current.status === 'released') throw new Error('released_close_cannot_confirm');
-      if (current.status !== 'confirmed' && current.last_evidence.objectiveMet !== true)
-        throw new Error('close_objective_not_confirmed');
+      if (current.status !== 'confirmed') {
+        // Legacy finalizers do not promote durable intents or attach payloads.
+        // Only confirmDurableClose can settle exposure, money and effects together.
+        const [trade] = await drizzle(this.client(scope)).select().from(botTrades).where(eq(botTrades.id, current.original_trade_id));
+        return { trade, isNew: false } as T;
+      }
       return this.transaction(scope, async client => {
         const result = await work(client);
         const canonical = result as { trade?: { id?: string; status?: string }; isNew?: boolean };
         if (!canonical.trade || canonical.trade.id !== current.original_trade_id || !(current.close_kind === 'partial' ? ['executed','recovered','pending'] : ['executed','recovered']).includes(String(canonical.trade.status))) throw new Error('close_atomic_accounting_not_applied');
-        if (current.status !== 'confirmed') await this.update(client, current, {
-          status: 'confirmed', completed_at: new Date(await this.databaseTime(scope)), last_error_code: null,
-        });
         return result;
       });
     });

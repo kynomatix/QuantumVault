@@ -49,7 +49,13 @@ export async function observeCloseIntent(scope: CloseScope, initial: CloseIntent
     return;
   }
   if (intent.last_evidence.objectiveMet === true) {
-    await confirmDurableClose(scope, intent, adapter, deps.account); return;
+    try { await confirmDurableClose(scope, intent, adapter, deps.account); return; }
+    catch (error) {
+      if (!(error instanceof Error) || error.message !== 'partial_close_residual_unavailable'
+        || now - new Date(intent.created_at).getTime() < 900_000) throw error;
+      // Continue to S4's independent expiry/flat/residual proof; never replay this send.
+      intent = await store.mutate(scope, intent, { status: 'needs_user', last_error_code: 'partial_close_residual_unavailable' });
+    }
   }
   const prior = intent.attempt_log[intent.attempt_log.length - 1];
   const baseline = intent.position_epoch.strictBaseline;
@@ -117,25 +123,28 @@ export async function runCloseIntentWorkerPass(): Promise<void> {
   try {
     await store.ready();
     for (const row of [...await store.due(), ...await store.dueAccounting()]) {
-      await store.withScope(row.environment, row.original_account, row.market, async scope => {
+      try { await store.withScope(row.environment, row.original_account, row.market, async scope => {
         let current = await store.byId(scope, row.id);
         if (!current) return;
-        if (current.status === 'confirmed' && (current.last_evidence.accountingPending === true || current.last_evidence.notificationPending === true)) {
-          const { repairIntentAccounting } = await import('./signal-bot-close-intent-accounting');
-          await repairIntentAccounting(scope, current, dependencies!.adapter(current)); return;
+        try {
+          if (current.status === 'confirmed' && (current.last_evidence.accountingPending === true || current.last_evidence.notificationPending === true || current.last_evidence.effectsPending === true)) {
+            const { repairIntentAccounting } = await import('./signal-bot-close-intent-accounting');
+            await repairIntentAccounting(scope, current, dependencies!.adapter(current)); return;
+          }
+          if (!['pending', 'needs_user'].includes(current.status)) return;
+          await observeCloseIntent(scope, current, dependencies!);
         }
-        if (!['pending', 'needs_user'].includes(current.status)) return;
-        try { await observeCloseIntent(scope, current, dependencies!); }
         catch {
           current = await store.byId(scope, row.id);
-          if (current && ['pending', 'needs_user'].includes(current.status)) {
+          if (current?.status === 'confirmed') await store.recordRepairFailure(scope, current);
+          else if (current && ['pending', 'needs_user'].includes(current.status)) {
             const now = await store.databaseTime(scope);
             await store.mutate(scope, current, { next_action_at: new Date(now + 300_000),
               status: now - new Date(current.created_at).getTime() >= 900_000 ? 'needs_user' : current.status,
               last_error_code: 'close_observation_unavailable' });
           }
         }
-      }, true);
+      }, true); } catch { /* Scope acquisition/teardown failures cannot starve later accounts. */ }
     }
   } finally { running = false; }
 }

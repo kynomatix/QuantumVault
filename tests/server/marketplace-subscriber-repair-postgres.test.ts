@@ -17,6 +17,8 @@ vi.mock('../../server/db', () => ({ pool: {}, db: new Proxy({}, {
     return typeof member === 'function' ? member.bind(holder.db) : member;
   },
 }) }));
+// This suite has no durable intents; canonical scope fencing is covered in the isolated intent suite.
+vi.mock('../../server/trading/close-intent-store',()=>({closeIntentStore:{guardLinkedSubscriberRepair:(_id:any,_canonical:any,legacy:any)=>legacy()}}));
 import { DatabaseStorage } from '../../server/storage';
 
 // FRACTAL supplies the connection. All writes target connection-private TEMP

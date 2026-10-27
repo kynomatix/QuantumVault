@@ -526,6 +526,14 @@ describe('close-path and restart contract wiring', () => {
       bridgePreparedClose(routeMocks.adapter);
     });
 
+    it.each(['tradingview','user'] as const)('S13 N3 %s merged partial gets 409 in-progress semantics',async endpoint=>{
+      primeCloseRoute({market:'BTC-PERP',baseSize:'0.25',avgEntryPrice:'64000',lastTradeId:'EXAMPLE_ENTRY'});
+      primeCloseSnapshots(0.25,{baseSize:0.125});
+      const spy=vi.spyOn(closeIntentStore,'unresolved').mockResolvedValue({close_kind:'partial',requested_size_base:'0.125',source_key:'EXAMPLE_OTHER'} as any);
+      try { const response=await postPartialClose(endpoint);expect(response.status).toBe(409);expect(response.body.message).toBe("A close is already in progress for this position. We'll update it when that finishes.");expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled(); }
+      finally {spy.mockRestore();}
+    });
+
     it.each(['tradingview', 'user'] as const)(
       '%s accepts the body credential, logs only the redacted payload, and preserves nested strategy data',
       async (endpoint) => {

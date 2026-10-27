@@ -1,3 +1,5 @@
+import { CLOSE_IN_PROGRESS } from './trading/signal-bot-close-intent-types';
+import { registerPartialCloseFanout } from './trading/signal-bot-close-intent-effects';
 import { registerCloseWorkerDependencies, startCloseIntentWorker } from './trading/signal-bot-close-intent-worker';
 import { accountDurableClose } from './trading/signal-bot-close-intent-accounting';
 import type { InsertBotTrade, BotTrade } from '@shared/schema';
@@ -643,6 +645,7 @@ function cancellationConflict(result?: CancelResult) {
   };
 }
 
+registerPartialCloseFanout(routeSignalToSubscribers);
 registerCloseWorkerDependencies({
   adapter: () => getAdapter('pacifica'),
   epochUnchanged: async intent => {
@@ -19958,8 +19961,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             return res.json({ success: false, terminal: true, status: 'released', tradeId: result.pendingTradeId, message: result.message });
           }
           if (closeAdapter.protocolName === 'pacifica' && !result.pendingTradeId) {
-            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: false, errorMessage: CLOSE_SAVE_FAILED });
-            return res.status(503).json({ success: false, error: CLOSE_SAVE_FAILED, message: CLOSE_SAVE_FAILED });
+            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: false, errorMessage: result.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
+            return res.status(result.error === CLOSE_IN_PROGRESS ? 409 : 503).json({ success: false, error: result.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED, message: result.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
           }
           if (closeAdapter.protocolName === 'pacifica' && !isConfirmedClose(result.closeResult)) {
             await storage.updatePendingBotTrade(closeTrade.id, { status: 'pending', txSignature: result.signature ?? null,
@@ -20474,7 +20477,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             false, undefined, bot.id, false, undefined, `partial:${log.id}`,
           );
 
-          if (bot.activeProtocol === 'pacifica' && !pcResult.pendingTradeId) return res.status(503).json({ success: false, error: CLOSE_SAVE_FAILED, message: CLOSE_SAVE_FAILED });
+          if (bot.activeProtocol === 'pacifica' && !pcResult.pendingTradeId) return res.status(pcResult.error === CLOSE_IN_PROGRESS ? 409 : 503).json({ success: false, error: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED, message: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
           if (bot.activeProtocol === 'pacifica' && !pcResult.success) return res.status(202).json({ success: false, status: 'pending', tradeId: pcResult.pendingTradeId, message: 'Close not confirmed yet; we keep checking.' });
           if (!pcResult.success) {
             console.error(`[Webhook] Partial close failed: ${pcResult.error}`);
@@ -20550,7 +20553,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
 
           // Schedule debounced Telegram notification.
-          if (pcPnl !== null && pcAccounting.isNew) schedulePartialCloseNotification({
+          if (bot.activeProtocol !== 'pacifica' && pcPnl !== null && pcAccounting.isNew) schedulePartialCloseNotification({
             walletAddress: bot.walletAddress,
             botId,
             botName: bot.name,
@@ -20562,7 +20565,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
 
           // Fan out to copy-trade subscribers proportionally.
-          if (botPublishedInfo?.isActive && pcAccounting.isNew) {
+          if (bot.activeProtocol !== 'pacifica' && botPublishedInfo?.isActive && pcAccounting.isNew) {
             routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
@@ -21417,8 +21420,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             return res.json({ success: false, terminal: true, status: 'released', message: result.message });
           }
           if (userCloseAdapter.protocolName === 'pacifica' && !result.pendingTradeId) {
-            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: false, errorMessage: CLOSE_SAVE_FAILED });
-            return res.status(503).json({ success: false, error: CLOSE_SAVE_FAILED, message: CLOSE_SAVE_FAILED });
+            await storage.updateWebhookLog(log.id, { processed: true, tradeExecuted: false, errorMessage: result.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
+            return res.status(result.error === CLOSE_IN_PROGRESS ? 409 : 503).json({ success: false, error: result.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED, message: result.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
           }
           if (userCloseAdapter.protocolName === 'pacifica' && !isConfirmedClose(result.closeResult)) {
             await storage.updatePendingBotTrade(closeTrade.id, { status: 'pending', txSignature: result.signature ?? null,
@@ -21961,7 +21964,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             false, undefined, bot.id, false, undefined, `partial:${log.id}`,
           );
 
-          if (bot.activeProtocol === 'pacifica' && !pcResult.pendingTradeId) return res.status(503).json({ success: false, error: CLOSE_SAVE_FAILED, message: CLOSE_SAVE_FAILED });
+          if (bot.activeProtocol === 'pacifica' && !pcResult.pendingTradeId) return res.status(pcResult.error === CLOSE_IN_PROGRESS ? 409 : 503).json({ success: false, error: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED, message: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
           if (bot.activeProtocol === 'pacifica' && !pcResult.success) return res.status(202).json({ success: false, status: 'pending', tradeId: pcResult.pendingTradeId, message: 'Close not confirmed yet; we keep checking.' });
           if (!pcResult.success) {
             console.error(`[User Webhook] Partial close failed: ${pcResult.error}`);
@@ -22037,7 +22040,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           }
 
           // Schedule debounced Telegram notification.
-          if (pcPnl !== null && pcAccounting.isNew) schedulePartialCloseNotification({
+          if (bot.activeProtocol !== 'pacifica' && pcPnl !== null && pcAccounting.isNew) schedulePartialCloseNotification({
             walletAddress: bot.walletAddress,
             botId,
             botName: bot.name,
