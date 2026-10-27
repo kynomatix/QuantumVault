@@ -41,8 +41,9 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     store = new SignalBotCloseIntentStorage(pool); holder.store = store;
     vi.spyOn(store, 'ready').mockResolvedValue();
   });
-  afterAll(async () => { await pool?.end(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); });
-  beforeEach(async () => { vi.clearAllMocks(); await pool.query('TRUNCATE signal_bot_close_intents,bot_trades,bot_positions,trading_bots,wallets,bot_subscriptions,published_bots,pending_profit_shares'); });
+  afterAll(async () => { await drainEffects(); await pool?.end(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); });
+  async function drainEffects() { const effects = await import('../../server/trading/signal-bot-close-intent-effects'); if ('waitForCloseEffects' in effects) await (effects as any).waitForCloseEffects(); }
+  beforeEach(async () => { await drainEffects(); vi.clearAllMocks(); await pool.query('TRUNCATE signal_bot_close_intents,bot_trades,bot_positions,trading_bots,wallets,bot_subscriptions,published_bots,pending_profit_shares'); });
   const scope = <T>(work: (s: CloseScope) => Promise<T>, market = 'BTC-PERP') => store.withScope('EXAMPLE', 'EXAMPLE_ACCOUNT', market, work);
   async function create(s: CloseScope, source?: string) { return (await store.create(s, newIntent(source), trade)).intent!; }
   async function admit(s: CloseScope, row: CloseIntent, timestamp?: number) {
@@ -325,7 +326,8 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     expect((await pool.query('SELECT stats FROM trading_bots')).rows[0].stats).toMatchObject({totalPnl:24,totalVolume:125});
     expect((await pool.query('SELECT count(*)::int AS n FROM bot_trades')).rows[0].n).toBe(1);
     expect((await pool.query('SELECT amount,status FROM pending_profit_shares')).rows).toEqual([{amount:'2.400000',status:'deferred'}]);
-    pool.removeListener('acquire',acquire);pool.removeListener('release',returned);expect(peak).toBeLessThanOrEqual(2);
+    // One execution lease plus short scope work and the concurrent observer: bounded at three.
+    pool.removeListener('acquire',acquire);pool.removeListener('release',returned);expect(peak).toBeLessThanOrEqual(3);
   });
 
   it('waits for a held fence, then allows the open instead of a spurious busy refusal', async()=>{
@@ -362,8 +364,9 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
       getTradeHistory:vi.fn(async(_a:any,o:any)=>state.available?[{tradeId:'EXAMPLE_FILL',orderId:'EXAMPLE_ORDER',internalSymbol:'BTC-PERP',side:'short',venueEventKind:'close_long',size:partial?0.5:1,price:125,fee:1,realizedPnl:25,timestamp:o.startTime,subaccountId:account}]:[])} as any;
     return {adapter,state};
   }
-  async function submitMoney(adapter:any, bot='EXAMPLE_BOT', account='EXAMPLE_ACCOUNT', partial=false, source='EXAMPLE_R4') {
-    const result=await submitDurableClose({adapter,params:{agentPublicKey:account,agentSecretKey:new Uint8Array(),mainWalletAddress:'EXAMPLE_OWNER',internalSymbol:'BTC-PERP',side:'short',sizeBase:partial?0.5:1,sizeBaseExact:partial?'0.5':'1',reduceOnly:true},identity:{owner_wallet:'EXAMPLE_OWNER',bot_id:bot,source_key:source,signer_mode:'external_key',authority_ref:{subscriberAccounting:true},baseSize:'1',lastTradeId:'EXAMPLE_ENTRY'},trade:{...trade,tradingBotId:bot,size:partial?'0.5':'1'},kind:partial?'partial':'full',positionSide:'long'});
+  async function submitMoney(adapter:any, bot='EXAMPLE_BOT', account='EXAMPLE_ACCOUNT', partial=false, source='EXAMPLE_R4', waitEffects=true) {
+    const result=await submitDurableClose({adapter,params:{agentPublicKey:account,agentSecretKey:new Uint8Array(),mainWalletAddress:'EXAMPLE_OWNER',internalSymbol:'BTC-PERP',side:'short',sizeBase:partial?0.5:1,sizeBaseExact:partial?'0.5':'1',reduceOnly:true},identity:{owner_wallet:'EXAMPLE_OWNER',bot_id:bot,source_key:source,signer_mode:'external_key',authority_ref:{subscriberAccounting:partial ? bot!=='EXAMPLE_BOT' : true},baseSize:'1',lastTradeId:'EXAMPLE_ENTRY'},trade:{...trade,tradingBotId:bot,size:partial?'0.5':'1'},kind:partial?'partial':'full',positionSide:'long'});
+    if(waitEffects) await drainEffects();
     if(!result.intent)throw new Error('EXAMPLE_INTENT_NOT_ADMITTED');
     return {...result,intent:result.intent};
   }
@@ -377,13 +380,13 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     expect((await pool.query('SELECT status FROM bot_trades WHERE id=$1',[row.id])).rows[0].status).toBe('pending');
   });
   it.each(['route','worker'])('S13 N1 %s confirmed published partial dispatches original-account subscriber intents and effects once across restart',async confirmer=>{
-    const {registerPartialCloseFanout,dispatchPartialCloseEffects}=await import('../../server/trading/signal-bot-close-intent-effects').catch(()=>({registerPartialCloseFanout:(_f:any)=>{},dispatchPartialCloseEffects:async(_s:any,_i:any)=>{}}));
+    const {registerPartialCloseFanout}=await import('../../server/trading/signal-bot-close-intent-effects');
     const {sendTradeNotification}=await import('../../server/notification-service');
     const {maybeScheduleAutoRepark}=await import('../../server/vault/auto-repark');
     await seedMoney();await seedMoney('EXAMPLE_SUB_A','EXAMPLE_ACCOUNT_A');await seedMoney('EXAMPLE_SUB_B','EXAMPLE_ACCOUNT_B');
     await pool.query("INSERT INTO published_bots(id,trading_bot_id,is_active) VALUES('EXAMPLE_PUBLISHED','EXAMPLE_BOT',true)");
     const subscriberAdapters=[adapterFor('EXAMPLE_ACCOUNT_A',true),adapterFor('EXAMPLE_ACCOUNT_B',true)];
-    const fanout=vi.fn(async(_bot:any,signal:any)=>{expect(signal.partialCloseFraction).toBe(0.5);for(const [index,sub] of subscriberAdapters.entries())await submitMoney(sub.adapter,index===0?'EXAMPLE_SUB_A':'EXAMPLE_SUB_B',index===0?'EXAMPLE_ACCOUNT_A':'EXAMPLE_ACCOUNT_B',true,signal.originId);});
+    const fanout=vi.fn(async(_bot:any,signal:any)=>{expect(signal.partialCloseFraction).toBe(0.5);for(const [index,sub] of subscriberAdapters.entries())await submitMoney(sub.adapter,index===0?'EXAMPLE_SUB_A':'EXAMPLE_SUB_B',index===0?'EXAMPLE_ACCOUNT_A':'EXAMPLE_ACCOUNT_B',true,signal.originId,false);});
     registerPartialCloseFanout(fanout);
     const source=adapterFor('EXAMPLE_ACCOUNT',true);
     if(confirmer==='worker') source.adapter.getCloseConfirmationSnapshot.mockResolvedValue(snapshot('1',7));
@@ -398,12 +401,12 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     expect((await pool.query('SELECT status FROM signal_bot_close_intents WHERE id=$1',[result.intent.id])).rows[0].status).toBe('confirmed');expect(fanout).toHaveBeenCalledOnce();
     expect(subscriberAdapters.map(s=>s.adapter.sendPreparedReduceOnlyMarketOrder.mock.calls.length)).toEqual([1,1]);
     expect((await pool.query("SELECT original_account,close_kind,requested_size_base FROM signal_bot_close_intents WHERE bot_id<>'EXAMPLE_BOT' ORDER BY original_account")).rows).toEqual(['EXAMPLE_ACCOUNT_A','EXAMPLE_ACCOUNT_B'].map(original_account=>({original_account,close_kind:'partial',requested_size_base:'0.5'})));
-    expect(vi.mocked(sendTradeNotification).mock.calls.filter(c=>c[1].type==='partial_close')).toHaveLength(3);
-    expect(maybeScheduleAutoRepark).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(sendTradeNotification).mock.calls.filter(c=>c[1].type==='partial_close')).toHaveLength(1);
+    expect(maybeScheduleAutoRepark).toHaveBeenCalledTimes(1);
     holder.store=new SignalBotCloseIntentStorage(pool);vi.spyOn(holder.store,'ready').mockResolvedValue(undefined);
-    try{await scope(async s=>{await dispatchPartialCloseEffects(s,(await store.byId(s,result.intent.id))!);});await runCloseIntentWorkerPass();}
+    try{await drainEffects();await runCloseIntentWorkerPass();}
     finally{holder.store=store;}
-    expect(fanout).toHaveBeenCalledOnce();expect(maybeScheduleAutoRepark).toHaveBeenCalledTimes(3);expect(sendTradeNotification).toHaveBeenCalledTimes(3);
+    expect(fanout).toHaveBeenCalledOnce();expect(maybeScheduleAutoRepark).toHaveBeenCalledTimes(1);expect(sendTradeNotification).toHaveBeenCalledTimes(1);
     registerPartialCloseFanout(async()=>{});
   });
   it.each(['before','after'])('S13 K-R3 legacy subscriber marker %s canonical confirmation cannot wedge delayed accounting',async order=>{
@@ -471,6 +474,98 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     await runCloseIntentWorkerPass();
     expect((await pool.query('SELECT status,release_mode FROM signal_bot_close_intents')).rows[0]).toEqual(proof?{status:'released',release_mode:'residual'}:{status:'needs_user',release_mode:null});
     expect(adapter.sendPreparedReduceOnlyMarketOrder).not.toHaveBeenCalled();
+  });
+
+  it.each(['exit webhook','manual Close','new open'])('S14 R4-1 admits %s during a ten-follower fanout without holding the source lock',async operation=>{
+    await seedMoney();
+    await pool.query("INSERT INTO published_bots(id,trading_bot_id,is_active) VALUES('EXAMPLE_PUBLISHED','EXAMPLE_BOT',true)");
+    const effects=await import('../../server/trading/signal-bot-close-intent-effects');
+    let entered!:()=>void,release!:()=>void;
+    const arrived=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+    const subs=Array.from({length:10},(_,i)=>({bot:`EXAMPLE_SUB_${i}`,account:`EXAMPLE_ACCOUNT_${i}`, ...adapterFor(`EXAMPLE_ACCOUNT_${i}`,true)}));
+    for(const sub of subs)await seedMoney(sub.bot,sub.account);
+    const delivered:string[]=[];
+    effects.registerPartialCloseFanout(async(_bot,signal)=>{for(const [i,sub] of subs.entries()){
+      if(i===5){entered();await gate;}
+      await submitMoney(sub.adapter,sub.bot,sub.account,true,`fanout-partial:EXAMPLE_BOT:${signal.originId}`,false);
+      delivered.push(sub.bot);
+    }});
+    const source=adapterFor('EXAMPLE_ACCOUNT',true);
+    const pending=submitMoney(source.adapter,'EXAMPLE_BOT','EXAMPLE_ACCOUNT',true,'EXAMPLE_SOURCE',false);
+    await arrived;
+    let reply:any;
+    const next=adapterFor();
+    const open=vi.fn(async()=> 'EXAMPLE_OPEN');
+    const admittedAt=Date.now();
+    try {
+      if(operation==='new open') await store.withOpenFence('EXAMPLE','EXAMPLE_ACCOUNT','BTC-PERP',open);
+      else reply=await submitMoney(next.adapter,'EXAMPLE_BOT','EXAMPLE_ACCOUNT',false,`EXAMPLE_${operation}`,false);
+      expect(Date.now()-admittedAt).toBeLessThan(4500);
+    } finally {release();await pending;await drainEffects();}
+    expect(delivered).toHaveLength(10);
+    expect(subs.map(s=>s.adapter.sendPreparedReduceOnlyMarketOrder.mock.calls.length)).toEqual(Array(10).fill(1));
+    expect(source.adapter.sendPreparedReduceOnlyMarketOrder).toHaveBeenCalledOnce();
+    if(operation==='new open')expect(open).toHaveBeenCalledOnce();
+    else {expect(reply.intent.status).toBe('confirmed');expect(next.adapter.sendPreparedReduceOnlyMarketOrder).toHaveBeenCalledOnce();}
+  },15000);
+  it('S14 notification delivery releases the source scope before its network wait',async()=>{
+    await seedMoney();
+    const {sendTradeNotification}=await import('../../server/notification-service');
+    let entered!:()=>void,release!:()=>void;
+    const arrived=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+    vi.mocked(sendTradeNotification).mockImplementationOnce(async()=>{entered();await gate;return true;});
+    const pending=submitMoney(adapterFor().adapter,'EXAMPLE_BOT','EXAMPLE_ACCOUNT',false,'EXAMPLE_NOTIFY',false);
+    await arrived;
+    const open=vi.fn(async()=>{});
+    try{await store.withOpenFence('EXAMPLE','EXAMPLE_ACCOUNT','BTC-PERP',open);}
+    finally{release();await pending;await drainEffects();}
+    expect(open).toHaveBeenCalledOnce();
+  },15000);
+  it('S14 confirmed source reply survives throwing fanout; worker resumes midway without duplicate subscriber sends',async()=>{
+    await seedMoney();
+    await pool.query("INSERT INTO published_bots(id,trading_bot_id,is_active) VALUES('EXAMPLE_PUBLISHED','EXAMPLE_BOT',true)");
+    const effects=await import('../../server/trading/signal-bot-close-intent-effects');
+    const subs=Array.from({length:10},(_,i)=>({bot:`EXAMPLE_SUB_${i}`,account:`EXAMPLE_ACCOUNT_${i}`, ...adapterFor(`EXAMPLE_ACCOUNT_${i}`,true)}));
+    for(const sub of subs)await seedMoney(sub.bot,sub.account);
+    let crash=true;
+    const fanout=vi.fn(async(_bot:any,signal:any)=>{for(const [i,sub] of subs.entries()){
+      if(crash&&i===5)throw Error('EXAMPLE_PROCESS_LOST');
+      await submitMoney(sub.adapter,sub.bot,sub.account,true,`fanout-partial:EXAMPLE_BOT:${signal.originId}`,false);
+    }});
+    effects.registerPartialCloseFanout(fanout);
+    const source=adapterFor('EXAMPLE_ACCOUNT',true);
+    const result=await submitMoney(source.adapter,'EXAMPLE_BOT','EXAMPLE_ACCOUNT',true);
+    expect(result.intent.status).toBe('confirmed');
+    expect((await pool.query('SELECT last_evidence FROM signal_bot_close_intents WHERE id=$1',[result.intent.id])).rows[0].last_evidence.effectsPending).toBe(true);
+    crash=false;
+    const {accountDurableClose}=await import('../../server/trading/signal-bot-close-intent-accounting');
+    holder.store=new SignalBotCloseIntentStorage(pool);vi.spyOn(holder.store,'ready').mockResolvedValue(undefined);
+    registerCloseWorkerDependencies({adapter:row=>row.bot_id==='EXAMPLE_BOT'?source.adapter:subs.find(s=>s.bot===row.bot_id)!.adapter,epochUnchanged:async()=>true,signer:async()=>null,account:accountDurableClose});
+    try{await pool.query('UPDATE signal_bot_close_intents SET revision=revision+1,next_action_at=clock_timestamp()');await runCloseIntentWorkerPass();await drainEffects();}
+    finally{holder.store=store;}
+    expect(subs.map(s=>s.adapter.sendPreparedReduceOnlyMarketOrder.mock.calls.length)).toEqual(Array(10).fill(1));
+    expect((await pool.query('SELECT last_evidence FROM signal_bot_close_intents WHERE id=$1',[result.intent.id])).rows[0].last_evidence.effectsPending).toBe(false);
+  });
+  it('S14 published subscriber partials neither chain fanout nor send partial notifications',async()=>{
+    await seedMoney('EXAMPLE_SUB','EXAMPLE_ACCOUNT_SUB');
+    await pool.query("INSERT INTO published_bots(id,trading_bot_id,is_active) VALUES('EXAMPLE_PUBLISHED_SUB','EXAMPLE_SUB',true)");
+    const {registerPartialCloseFanout}=await import('../../server/trading/signal-bot-close-intent-effects');
+    const {sendTradeNotification}=await import('../../server/notification-service');
+    const fanout=vi.fn(async()=>{});registerPartialCloseFanout(fanout);
+    await submitMoney(adapterFor('EXAMPLE_ACCOUNT_SUB',true).adapter,'EXAMPLE_SUB','EXAMPLE_ACCOUNT_SUB',true);
+    expect(fanout).not.toHaveBeenCalled();expect(sendTradeNotification).not.toHaveBeenCalled();
+  });
+  it.each(['fanout','accounting','parking'])('S14 exhausted %s names the real attention cause',async cause=>{
+    await seedMoney();const {adapter,state}=adapterFor('EXAMPLE_ACCOUNT',true);state.available=false;
+    const {registerPartialCloseFanout}=await import('../../server/trading/signal-bot-close-intent-effects');registerPartialCloseFanout(async()=>{});
+    const result=await submitMoney(adapter,'EXAMPLE_BOT','EXAMPLE_ACCOUNT',true);
+    await scope(async s=>{
+      let row=(await store.byId(s,result.intent.id))!;
+      row=await store.updateConfirmedEvidence(s,row,{accountingPending:cause==='accounting',effectsPending:cause!=='accounting',fanoutDelivered:cause!=='fanout',parkingDelivered:cause!=='parking',notificationPending:true,notificationAttention:false,repairAttempts:7});
+      await store.recordRepairFailure(s,row);
+    });
+    expect((await store.statusForBot('EXAMPLE_OWNER','EXAMPLE_BOT'))?.message).toBe(cause==='fanout'
+      ?'Copy-trade update could not be delivered to some followers':cause==='parking'?'Close confirmed. Fund parking needs your attention.':'Close confirmed. Accounting needs your attention.');
   });
 
 });

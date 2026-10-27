@@ -123,16 +123,18 @@ export async function runCloseIntentWorkerPass(): Promise<void> {
   try {
     await store.ready();
     for (const row of [...await store.due(), ...await store.dueAccounting()]) {
-      try { await store.withScope(row.environment, row.original_account, row.market, async scope => {
+      try { const observed = await store.withScope(row.environment, row.original_account, row.market, async scope => {
         let current = await store.byId(scope, row.id);
         if (!current) return;
         try {
           if (current.status === 'confirmed' && (current.last_evidence.accountingPending === true || current.last_evidence.notificationPending === true || current.last_evidence.effectsPending === true)) {
             const { repairIntentAccounting } = await import('./signal-bot-close-intent-accounting');
-            await repairIntentAccounting(scope, current, dependencies!.adapter(current)); return;
+            if (current.last_evidence.accountingPending === true) await repairIntentAccounting(scope, current, dependencies!.adapter(current));
+            return await store.byId(scope, row.id);
           }
           if (!['pending', 'needs_user'].includes(current.status)) return;
           await observeCloseIntent(scope, current, dependencies!);
+          return await store.byId(scope, row.id);
         }
         catch {
           current = await store.byId(scope, row.id);
@@ -144,7 +146,12 @@ export async function runCloseIntentWorkerPass(): Promise<void> {
               last_error_code: 'close_observation_unavailable' });
           }
         }
-      }, true); } catch { /* Scope acquisition/teardown failures cannot starve later accounts. */ }
+      }, true);
+      if (observed?.status === 'confirmed') {
+        const { dispatchConfirmedCloseEffects } = await import('./signal-bot-close-intent-effects');
+        await dispatchConfirmedCloseEffects(observed);
+      }
+      } catch { /* Scope acquisition/teardown failures cannot starve later accounts. */ }
     }
   } finally { running = false; }
 }

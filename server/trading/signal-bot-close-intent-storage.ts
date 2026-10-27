@@ -58,6 +58,20 @@ export class SignalBotCloseIntentStorage {
     }
   }
 
+  /** Serialize one execution's external effects without locking its trading scope. */
+  async withEffects<T>(intentId: string, work: () => Promise<T>): Promise<T | undefined> {
+    const client = await this.pool.connect();
+    const key = `close-effects:${intentId}`;
+    let held = false;
+    try {
+      held = (await client.query('SELECT pg_try_advisory_lock($1,hashtext($2)) AS held', [NS,key])).rows[0]?.held === true;
+      if (held) return await work();
+    } finally {
+      if (held) await client.query('SELECT pg_advisory_unlock($1,hashtext($2))', [NS,key]).catch(() => {});
+      client.release();
+    }
+  }
+
   async withAccount<T>(environment: string, account: string, work: (scope: CloseScope) => Promise<T>): Promise<T> {
     try { await this.ready(); } catch (error) {
       if (await this.capabilityAbsent()) return work({ environment, account, market: '*', token: {} });
@@ -160,7 +174,9 @@ export class SignalBotCloseIntentStorage {
       if (attention.rows[0]) return { message: closeIntentMessage(attention.rows[0]), unresolved: false, tradeId: attention.rows[0].original_trade_id };
     }
 
+    if (latest?.last_evidence.fanoutAttention === true) return { message: 'Copy-trade update could not be delivered to some followers', unresolved: false, tradeId: latest.original_trade_id };
     if (latest?.last_evidence.notificationAttention === true) return { message: 'Close confirmed. Notification delivery needs your attention.', unresolved: false, tradeId: latest.original_trade_id };
+    if (latest?.last_evidence.parkingAttention === true) return { message: 'Close confirmed. Fund parking needs your attention.', unresolved: false, tradeId: latest.original_trade_id };
     if (latest?.last_evidence.repairAttention === true) return { message: 'Close confirmed. Accounting needs your attention.', unresolved: false, tradeId: latest.original_trade_id };
     if (latest) return { message: closeIntentMessage(latest), unresolved: ['pending','needs_user'].includes(latest.status), tradeId: latest.original_trade_id };
     const legacy = await this.legacyInventory(owner, botId);
@@ -239,7 +255,9 @@ export class SignalBotCloseIntentStorage {
   async recordRepairFailure(scope: CloseScope, current: CloseIntent): Promise<void> {
     const attempts = Number(current.last_evidence.repairAttempts ?? 0) + 1;
     const exhausted = attempts >= 8;
-    await this.updateConfirmedEvidence(scope, current, { repairAttempts: attempts, repairAttention: exhausted,
+    await this.updateConfirmedEvidence(scope, current, { repairAttempts: attempts, repairAttention: exhausted && current.last_evidence.accountingPending === true,
+      ...(exhausted ? { fanoutAttention: current.last_evidence.effectsPending === true && current.last_evidence.fanoutDelivered !== true,
+        parkingAttention: current.last_evidence.effectsPending === true && current.last_evidence.parkingDelivered !== true } : {}),
       ...(exhausted ? { accountingPending: false, notificationPending: false, effectsPending: false } : {}) },
       Math.min(30_000 * 2 ** (attempts - 1), 1_800_000));
   }

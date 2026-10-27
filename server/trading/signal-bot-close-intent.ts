@@ -162,6 +162,11 @@ export async function submitDurableClose(input: {
       return { intent: persisted, created: true };
     }
   }, false, input.parentScope);
+  // A parent account scope is released by its caller; the worker handles its effects.
+  if (result?.intent.status === 'confirmed' && !input.parentScope) {
+    const { scheduleCloseEffects } = await import('./signal-bot-close-intent-effects');
+    scheduleCloseEffects(result.intent);
+  }
   return result!;
 }
 
@@ -206,10 +211,9 @@ export async function confirmDurableClose(scope: CloseScope, intent: CloseIntent
   if (!closeObjectiveMet(intent, intent.last_evidence.after as CloseSnapshot, now)) throw new Error('close_confirmation_stale');
   const evidence = await readIntentFillEvidence(scope, adapter, intent);
   const fill = evidence.fill;
+  const subscriberPartial = intent.close_kind === 'partial' && intent.authority_ref.subscriberAccounting === true;
   const settled = await store.settle(scope, intent, { status: 'confirmed', completed_at: new Date(await store.databaseTime(scope)),
-    last_error_code: null, last_evidence: { ...intent.last_evidence, accountingPending: !fill || fill.realizedPnl === null, notificationPending: true, ...(intent.close_kind === 'partial' ? { effectsPending: true } : {}), fill, subscriberAccounting: evidence.accounting, closeResult: evidence.closeResult } },
+    last_error_code: null, last_evidence: { ...intent.last_evidence, accountingPending: !fill || fill.realizedPnl === null, notificationPending: !subscriberPartial, ...(intent.close_kind === 'partial' ? { effectsPending: !subscriberPartial } : {}), fill, subscriberAccounting: evidence.accounting, closeResult: evidence.closeResult } },
     client => account(client, intent, 'confirmed', fill));
-  if (intent.close_kind === 'partial') { const { dispatchPartialCloseEffects } = await import('./signal-bot-close-intent-effects'); await dispatchPartialCloseEffects(scope, settled); }
-  if (fill) { const { notifyDurableClose } = await import('./signal-bot-close-intent-accounting'); await notifyDurableClose(scope, (await store.byId(scope, settled.id))!, fill); }
-  return (await store.byId(scope, settled.id)) ?? settled;
+  return settled;
 }

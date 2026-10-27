@@ -106,23 +106,27 @@ async function persistCreatorShare(db: NodePgDatabase, intent: CloseIntent, pnl:
     .onConflictDoNothing({ target: [pendingProfitShares.subscriberBotId, pendingProfitShares.tradeId] });
 }
 
-/** Economic effects are durable first; uncertain notification delivery needs attention. */
-export async function notifyDurableClose(scope: CloseScope, intent: CloseIntent, fill: IntentFill): Promise<void> {
-  if (intent.last_evidence.notificationPending !== true || fill.realizedPnl === null) return;
+/** Claim under a short scope lock, then deliver outside every source scope lock. */
+export async function notifyDurableClose(initial: CloseIntent, fill: IntentFill): Promise<void> {
+  if (fill.realizedPnl === null) return;
   const { closeIntentStore: store } = await import('./close-intent-store');
+  const intent = await store.withScope(initial.environment, initial.original_account, initial.market, async scope => {
+    const current = await store.byId(scope, initial.id);
+    if (!current || current.status !== 'confirmed' || current.last_evidence.notificationPending !== true) return;
+    return store.updateConfirmedEvidence(scope, current, { notificationPending: false, notificationClaimed: true, notificationAttention: true });
+  });
+  if (!intent) return;
   const { sendTradeNotification } = await import('../notification-service');
-  const bot = await (await import('../storage')).storage.getTradingBotById(intent.bot_id);
   try {
-    // Claim before external delivery. Re-entry never repeats an uncertain delivery.
-    intent = await store.updateConfirmedEvidence(scope, intent, { notificationPending: false, notificationClaimed: true, notificationAttention: true });
+    const bot = await (await import('../storage')).storage.getTradingBotById(intent.bot_id);
     await sendTradeNotification(intent.owner_wallet, { type: intent.close_kind === 'partial' ? 'partial_close' : 'position_closed', botName: bot?.name ?? 'Signal bot', market: intent.market,
       ...(intent.close_kind === 'partial' ? { side: intent.position_side === 'long' ? 'LONG' : 'SHORT', closedFraction: Number(intent.requested_size_base) / Number(intent.original_position_size_base), stageCount: 1 } : {}),
-      size: fill.filledSize, price: fill.fillPrice, pnl: fill.realizedPnl - fill.fee, closeReason: 'Close confirmed' });
-    await store.recordNotificationDelivered(scope, intent);
-  } catch {
-    const current = await store.byId(scope, intent.id);
-    if (current) await store.updateConfirmedEvidence(scope, current, { notificationPending: false, notificationAttention: true });
-  }
+      size: fill.filledSize, price: fill.fillPrice, pnl: fill.realizedPnl! - fill.fee, closeReason: 'Close confirmed' });
+    await store.withScope(intent.environment, intent.original_account, intent.market, async scope => {
+      const current = await store.byId(scope, intent.id);
+      if (current) await store.recordNotificationDelivered(scope, current);
+    });
+  } catch { /* The durable claim retains notification attention; uncertain delivery is never repeated. */ }
 }
 
 /** Exact money may arrive after terminal exposure, without replaying a close. */
@@ -141,10 +145,4 @@ export async function repairIntentAccounting(scope: CloseScope, intent: CloseInt
     });
   }
   await store.recordAccountingRepair(scope, intent, !fill || fill.realizedPnl === null, fill);
-  let current = await store.byId(scope, intent.id);
-  if (current?.last_evidence.effectsPending === true) {
-    const { dispatchPartialCloseEffects } = await import('./signal-bot-close-intent-effects');
-    await dispatchPartialCloseEffects(scope, current); current = await store.byId(scope, intent.id);
-  }
-  if (current && fill) await notifyDurableClose(scope, current, fill);
 }
