@@ -467,8 +467,9 @@ describe("close-path integration guards", () => {
     expect(userSource.indexOf("const fillConfirmation =")).toBeLessThan(
       userSource.indexOf("if (postCloseReadError || observedResidual)"),
     );
-    expect(routesSource.match(/readSignalBotCloseFillConfirmation\(\{/g)).toHaveLength(5);
-    expect(routesSource).toContain('const fills = isConfirmedClose(closeResult) ? await readSignalBotCloseFillConfirmation');
+    expect(routesSource.match(/readSignalBotCloseFillConfirmation\(\{/g)).toHaveLength(4);
+    expect(routesSource).toContain("const proven = submitted.intent.status === 'confirmed'");
+    expect(routesSource).toContain('const fill = submitted.intent.last_evidence.fill');
     expect(tradingViewSource).toContain('!isConfirmedClose(result.closeResult)');
     expect(userSource).toContain('!isConfirmedClose(result.closeResult)');
   });

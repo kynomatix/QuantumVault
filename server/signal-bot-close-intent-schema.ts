@@ -41,7 +41,7 @@ export const SIGNAL_CLOSE_INTENT_DDL = String.raw`CREATE TABLE IF NOT EXISTS sig
   CONSTRAINT sb_close_original_size_check CHECK (length(original_position_size_base) <= 80 AND original_position_size_base ~ '^(0|[1-9][0-9]*)(\.[0-9]+)?$' AND original_position_size_base !~ '^0(\.0+)?$'),
   CONSTRAINT sb_close_requested_size_check CHECK (length(requested_size_base) <= 80 AND requested_size_base ~ '^(0|[1-9][0-9]*)(\.[0-9]+)?$' AND requested_size_base !~ '^0(\.0+)?$'),
   CONSTRAINT sb_close_size_bound_check CHECK (requested_size_base::numeric <= original_position_size_base::numeric AND (close_kind <> 'full' OR requested_size_base::numeric = original_position_size_base::numeric)),
-  CONSTRAINT sb_close_payload_check CHECK (jsonb_typeof(request_payload) = 'object' AND request_payload @> jsonb_build_object('account', original_account, 'reduce_only', true, 'amount', requested_size_base, 'client_order_id', client_order_id::text, 'side', CASE WHEN position_side = 'long' THEN 'ask' ELSE 'bid' END)),
+  CONSTRAINT sb_close_payload_check CHECK (jsonb_typeof(request_payload) = 'object' AND request_payload @> jsonb_build_object('account', original_account, 'reduce_only', true, 'amount', requested_size_base, 'client_order_id', client_order_id::text) AND ((position_side = 'long' AND request_payload @> '{"side":"ask"}'::jsonb) OR (position_side = 'short' AND request_payload @> '{"side":"bid"}'::jsonb))),
   CONSTRAINT sb_close_status_check CHECK (status IN ('pending','needs_user','confirmed','released')),
   CONSTRAINT sb_close_dispatch_check CHECK (dispatch_state IN ('not_admitted','admitted_unknown','proven_not_landed') AND ((dispatch_state = 'not_admitted') = (attempt_count = 0))),
   CONSTRAINT sb_close_attempts_check CHECK (attempt_count BETWEEN 0 AND 3 AND jsonb_typeof(attempt_log) = 'array' AND jsonb_array_length(attempt_log) = attempt_count),
@@ -71,6 +71,9 @@ BEGIN
   END IF;
   IF EXISTS (SELECT 1 FROM jsonb_array_elements(OLD.attempt_log) WITH ORDINALITY a(value, n) WHERE ((NEW.attempt_log -> (a.n::integer - 1)) - ARRAY['outcome','receivedAt']::text[]) IS DISTINCT FROM (a.value - ARRAY['outcome','receivedAt']::text[])) THEN
     RAISE EXCEPTION 'Admitted close header is immutable';
+  END IF;
+  IF EXISTS (SELECT 1 FROM jsonb_array_elements(OLD.attempt_log) WITH ORDINALITY a(value, n) WHERE (a.value ? 'outcome' OR a.value ? 'receivedAt') AND (NEW.attempt_log -> (a.n::integer - 1)) IS DISTINCT FROM a.value) THEN
+    RAISE EXCEPTION 'Recorded close outcome is immutable';
   END IF;
   RETURN NEW;
 END;
@@ -178,7 +181,7 @@ export const SIGNAL_CLOSE_INTENT_REQUIREMENTS = [
     "kind": "constraint",
     "table": "signal_bot_close_intents",
     "constraint": "sb_close_payload_check",
-    "definitionIncludes": ["CHECK (jsonb_typeof(request_payload) = 'object' AND request_payload @> jsonb_build_object('account', original_account, 'reduce_only', true, 'amount', requested_size_base, 'client_order_id', client_order_id::text, 'side', CASE WHEN position_side = 'long' THEN 'ask' ELSE 'bid' END))"]
+    "definitionIncludes": ["jsonb_typeof(request_payload) = 'object'", "jsonb_build_object('account', original_account, 'reduce_only', true, 'amount', requested_size_base, 'client_order_id', client_order_id::text)", "position_side = 'long'", "position_side = 'short'", "side", "ask", "bid"]
   },
   {
     "kind": "constraint",
@@ -261,6 +264,6 @@ export const SIGNAL_CLOSE_INTENT_REQUIREMENTS = [
   {
     "kind": "data",
     "identity": "signal_bot_close_intent.function.bodySha256",
-    "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace n ON n.oid=p.pronamespace WHERE t.tgrelid=to_regclass(current_schema() || '.signal_bot_close_intents') AND t.tgname='sb_close_preserve_identity_trigger' AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=27 AND n.nspname=current_schema() AND p.proname='sb_close_preserve_identity' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='3eba30bd8a780a70b08bae110f4962400041936a691b2591a59279d95268bc2f') AS ok"
+    "checkSql": "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid JOIN pg_namespace n ON n.oid=p.pronamespace WHERE t.tgrelid=to_regclass(current_schema() || '.signal_bot_close_intents') AND t.tgname='sb_close_preserve_identity_trigger' AND NOT t.tgisinternal AND t.tgenabled='O' AND t.tgtype=27 AND n.nspname=current_schema() AND p.proname='sb_close_preserve_identity' AND encode(sha256(convert_to(p.prosrc,'UTF8')),'hex')='6ddb3b5078a69f7169e999adfc063271a10afff78ae4d62fe211da891d9434d2') AS ok"
   }
 ] as const;

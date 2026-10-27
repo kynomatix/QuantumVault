@@ -1,19 +1,21 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { Pool } from 'pg';
 import { getTableColumns } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { botTrades, botPositions, tradingBots } from '../../shared/schema';
+import { botTrades, botPositions, tradingBots, botSubscriptions, publishedBots, pendingProfitShares } from '../../shared/schema';
 import { SignalBotCloseIntentStorage } from '../../server/trading/signal-bot-close-intent-storage';
 import { probeSchemaMigrationManifest } from '../../server/schema-readiness-probe';
 import { readDbSchemaMigrationManifest } from '../helpers/schema-migration-manifest';
 import { newIntent, snapshot, orders } from '../helpers/close-intent-fixtures';
 import type { CloseIntent, CloseScope } from '../../server/trading/signal-bot-close-intent-types';
+vi.mock('../../server/notification-service',()=>({sendTradeNotification:vi.fn(async()=>true)}));
 const holder = vi.hoisted(() => ({ store: undefined as any, pool: undefined as any }));
 vi.mock('../../server/trading/close-intent-store', () => ({ get closeIntentStore() { return holder.store; } }));
 vi.mock('../../server/db', async () => { const { drizzle } = await import('drizzle-orm/node-postgres'); return { get pool() { return holder.pool; }, get db() { return drizzle(holder.pool); } }; });
-vi.mock('../../server/trading/signal-bot-close-intent-accounting', () => ({ accountDurableClose: vi.fn() }));
+
 import { submitDurableClose } from '../../server/trading/signal-bot-close-intent';
-import { observeCloseIntent } from '../../server/trading/signal-bot-close-intent-worker';
+import { observeCloseIntent, registerCloseWorkerDependencies, runCloseIntentWorkerPass } from '../../server/trading/signal-bot-close-intent-worker';
 
 describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated PostgreSQL', () => {
   const schema = 'close_intent_' + randomUUID().replaceAll('-', '');
@@ -27,17 +29,19 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     const columns = Object.values(getTableColumns(botTrades)).map(column => `"${column.name}" ${column.getSQLType()}${column.name === 'id' ? ' PRIMARY KEY DEFAULT gen_random_uuid()' : column.name === 'executed_at' ? ' DEFAULT now()' : ''}`);
     await pool.query(`CREATE TABLE bot_trades (${columns.join(',')})`);
     holder.pool = pool;
-    for (const [name, table] of [['trading_bots', tradingBots], ['bot_positions', botPositions]] as const) {
+    for (const [name, table] of [['trading_bots', tradingBots], ['bot_positions', botPositions], ['bot_subscriptions', botSubscriptions], ['published_bots', publishedBots], ['pending_profit_shares', pendingProfitShares]] as const) {
       const cols = Object.values(getTableColumns(table)).map(c => `"${c.name}" ${c.getSQLType()}${c.name === 'id' ? ' PRIMARY KEY DEFAULT gen_random_uuid()' : ''}`);
       await pool.query(`CREATE TABLE ${name} (${cols.join(',')})`);
     }
+    await pool.query('CREATE UNIQUE INDEX ON pending_profit_shares(subscriber_bot_id,trade_id)');
+    await pool.query('CREATE TABLE wallets(address text PRIMARY KEY,agent_public_key text)');
     await pool.query('CREATE UNIQUE INDEX ON bot_positions(trading_bot_id,market)');
     await pool.query(migration.sql);
     store = new SignalBotCloseIntentStorage(pool); holder.store = store;
     vi.spyOn(store, 'ready').mockResolvedValue();
   });
   afterAll(async () => { await pool?.end(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); });
-  beforeEach(async () => { await pool.query('TRUNCATE signal_bot_close_intents,bot_trades,bot_positions,trading_bots'); });
+  beforeEach(async () => { await pool.query('TRUNCATE signal_bot_close_intents,bot_trades,bot_positions,trading_bots,wallets,bot_subscriptions,published_bots,pending_profit_shares'); });
   const scope = <T>(work: (s: CloseScope) => Promise<T>, market = 'BTC-PERP') => store.withScope('EXAMPLE', 'EXAMPLE_ACCOUNT', market, work);
   async function create(s: CloseScope, source?: string) { return (await store.create(s, newIntent(source), trade)).intent; }
   async function admit(s: CloseScope, row: CloseIntent, timestamp?: number) {
@@ -66,6 +70,25 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     expect((await probeSchemaMigrationManifest(query, [migration])).unavailableCapabilities).toEqual(['signal_bot_close_intent']);
     await pool.query('DROP INDEX sb_close_due_idx');
     await pool.query("CREATE INDEX sb_close_due_idx ON signal_bot_close_intents(next_action_at,id) WHERE status IN ('pending','needs_user')");
+  });
+  it('owner DDL validates the schema it creates despite a different caller search path and rejects a changed CHECK', async () => {
+    const ddl = readFileSync(new URL('../fixtures/owner-close-intent-ddl-r3.sql', import.meta.url), 'utf8')
+      .replaceAll('public.', schema + '.').replaceAll("'public'", "'" + schema + "'").replace('search_path = public,', 'search_path = ' + schema + ',');
+    expect(ddl.split('\n').filter(line => /CHECK/i.test(line) && /CASE/i.test(line))).toEqual([]);
+    const client = await pool.connect();
+    try {
+      await client.query('SET search_path = pg_catalog');
+      await client.query(ddl); await client.query(ddl);
+      await client.query(`ALTER TABLE ${schema}.signal_bot_close_intents DROP CONSTRAINT sb_close_protocol_check`);
+      await client.query(`ALTER TABLE ${schema}.signal_bot_close_intents ADD CONSTRAINT sb_close_protocol_check CHECK (protocol IN ('pacifica','EXAMPLE'))`);
+      await expect(client.query(ddl)).rejects.toThrow('constraint mismatch');
+      await client.query('ROLLBACK');
+    } finally {
+      await client.query('ROLLBACK');
+      await client.query(`ALTER TABLE ${schema}.signal_bot_close_intents DROP CONSTRAINT IF EXISTS sb_close_protocol_check`);
+      await client.query(`ALTER TABLE ${schema}.signal_bot_close_intents ADD CONSTRAINT sb_close_protocol_check CHECK (protocol = 'pacifica')`);
+      await client.query(`SET search_path = ${schema}`); client.release();
+    }
   });
   it('deduplicates source and unresolved scope without an orphan pending trade', async () => {
     await scope(async s => {
@@ -151,14 +174,13 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
   it.each(['inactive','missing'])('observes the original account after restart with an %s bot', async _state => {
     await scope(async s => { const row = await admit(s, await create(s)); const d = deps(); d.epochUnchanged.mockResolvedValue(false);
       await observeCloseIntent(s, row, d);
-      expect(d.adapter.mock.results[0].value.getCloseConfirmationSnapshot).toHaveBeenCalledWith('EXAMPLE_ACCOUNT', undefined);
+      expect(d.adapter.mock.results[0].value.getCloseConfirmationSnapshot).toHaveBeenCalledWith('EXAMPLE_ACCOUNT');
       expect(d.signer).not.toHaveBeenCalled(); expect((await store.byId(s, row.id))!.status).toBe('needs_user');
     });
   });
   it('a same-size reopen with watermark advancement cannot authorize retry', async () => {
     await scope(async s => { let row = await admit(s, await create(s), Date.now() - 40000);
-      row = await store.outcome(s, row, row.attempt_log[0].attemptId, { kind: 'not_entered', cause: 'ENOTFOUND' });
-      row = await store.mutate(s, row, { attempt_log: [{ ...row.attempt_log[0], receivedAt: Date.now() - 31000 }] });
+      row = await store.mutate(s, row, { dispatch_state: 'proven_not_landed', attempt_log: [{ ...row.attempt_log[0], outcome: { kind: 'not_entered', cause: 'ENOTFOUND' }, receivedAt: Date.now() - 31000 }] });
       const d = deps('1', 8); await observeCloseIntent(s, row, d);
       expect(d.signer).not.toHaveBeenCalled(); expect((await store.byId(s, row.id))!.status).toBe('needs_user');
     });
@@ -225,6 +247,98 @@ describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated Po
     expect((await pool.query('SELECT status FROM signal_bot_close_intents')).rows[0].status).toBe('confirmed');
     expect((await pool.query('SELECT base_size,realized_pnl,total_fees FROM bot_positions')).rows[0]).toMatchObject({ base_size: '0.75000000', realized_pnl: '24.000000', total_fees: '1.000000' });
     expect((await pool.query('SELECT stats FROM trading_bots')).rows[0].stats).toMatchObject({ totalPnl: 24, totalVolume: 25, totalTrades: 0 });
+  });
+
+  it('a pending partial cannot lend its outcome or money to a full request', async () => {
+    await pool.query("INSERT INTO bot_positions(trading_bot_id,wallet_address,market,base_size,avg_entry_price,realized_pnl,total_fees) VALUES('EXAMPLE_BOT','EXAMPLE_OWNER','BTC-PERP',1,100,0,0)");
+    await scope(async s => {
+      const input = newIntent('EXAMPLE_PARTIAL');
+      await store.create(s, { ...input, close_kind: 'partial', requested_size_base: '0.5', request_payload: { ...input.request_payload, amount: '0.5' } }, { ...trade, size: '0.5' });
+    });
+    const send = vi.fn(), prepare = vi.fn();
+    await expect(submitDurableClose({ adapter: { getCloseEnvironment: () => 'EXAMPLE', prepareReduceOnlyMarketOrder: prepare, sendPreparedReduceOnlyMarketOrder: send } as any,
+      params: { agentPublicKey: 'EXAMPLE_ACCOUNT', internalSymbol: 'BTC-PERP', sizeBaseExact: '1' } as any,
+      identity: {} as any, trade, kind: 'full', positionSide: 'long' })).rejects.toThrow('already in progress');
+    expect(send).not.toHaveBeenCalled(); expect(prepare).not.toHaveBeenCalled();
+    expect((await pool.query('SELECT base_size,realized_pnl,total_fees FROM bot_positions')).rows[0]).toMatchObject({ base_size: '1.00000000', realized_pnl: '0.000000', total_fees: '0.000000' });
+    expect((await pool.query('SELECT status FROM bot_trades')).rows).toEqual([{status:'pending'}]);
+    expect((await pool.query('SELECT count(*)::int AS n FROM pending_profit_shares')).rows[0].n).toBe(0);
+  });
+  it('blocks a legacy pending close on the same account/market, reports attention, and unblocks after reconciliation', async () => {
+    await pool.query("INSERT INTO trading_bots(id,wallet_address,active_protocol,protocol_subaccount_id,stats) VALUES('EXAMPLE_BOT','EXAMPLE_OWNER','pacifica','EXAMPLE_ACCOUNT','{}')");
+    const legacy = await pool.query("INSERT INTO bot_trades(trading_bot_id,wallet_address,market,side,size,price,status) VALUES('EXAMPLE_BOT','EXAMPLE_OWNER','BTC-PERP','CLOSE','1','0','pending') RETURNING id");
+    const send = vi.fn();
+    await expect(store.withOpenFence('EXAMPLE','EXAMPLE_ACCOUNT','BTC-PERP',send)).rejects.toThrow('prior_close');
+    await scope(async s => { expect(await store.hasLegacyPending(s)).toBe(true); });
+    expect(await store.statusForBot('EXAMPLE_OWNER','EXAMPLE_BOT')).toMatchObject({ unresolved: true, tradeId: legacy.rows[0].id });
+    expect(send).not.toHaveBeenCalled();
+    await pool.query("UPDATE bot_trades SET status='executed' WHERE id=$1",[legacy.rows[0].id]);
+    await store.withOpenFence('EXAMPLE','EXAMPLE_ACCOUNT','BTC-PERP',send);
+    expect(send).toHaveBeenCalledOnce();
+  });
+  it('rejects changing an already recorded outcome or receipt time', async () => {
+    await scope(async s => {
+      let row = await admit(s,await create(s));
+      row = await store.outcome(s,row,row.attempt_log[0].attemptId,{kind:'not_entered',cause:'ENOTFOUND'});
+      await expect(store.mutate(s,row,{attempt_log:[{...row.attempt_log[0],outcome:{kind:'acknowledged',orderId:'EXAMPLE_ORDER'}}]})).rejects.toThrow('Recorded close outcome is immutable');
+      await expect(store.mutate(s,row,{attempt_log:[{...row.attempt_log[0],receivedAt:row.attempt_log[0].receivedAt!+1}]})).rejects.toThrow('Recorded close outcome is immutable');
+    });
+  });
+  it.each([true,false])('serializes request/worker confirmation and repairs delayed attributable money exactly once (fill initially available: %s)', async available => {
+    await pool.query("INSERT INTO trading_bots(id,wallet_address,active_protocol,stats) VALUES('EXAMPLE_BOT','EXAMPLE_OWNER','pacifica','{}')");
+    await pool.query("INSERT INTO bot_positions(trading_bot_id,wallet_address,market,base_size,avg_entry_price,cost_basis,realized_pnl,total_fees,last_trade_id) VALUES('EXAMPLE_BOT','EXAMPLE_OWNER','BTC-PERP',1,100,100,0,0,'EXAMPLE_ENTRY')");
+    await pool.query("INSERT INTO published_bots(id,creator_wallet_address,profit_share_percent) VALUES('EXAMPLE_PUBLISHED','EXAMPLE_CREATOR',10)");
+    await pool.query("INSERT INTO bot_subscriptions(published_bot_id,subscriber_bot_id,status) VALUES('EXAMPLE_PUBLISHED','EXAMPLE_BOT','active')");
+    let active=0,peak=0;const acquire=()=>{peak=Math.max(peak,++active);},returned=()=>{active--;};
+    pool.on('acquire',acquire);pool.on('release',returned);
+    let entered!:()=>void,release!:()=>void,reads=0,fillAvailable=available;
+    const arrived=new Promise<void>(resolve=>entered=resolve),gate=new Promise<void>(resolve=>release=resolve);
+    const adapter={protocolName:'pacifica',getCloseEnvironment:()=> 'EXAMPLE',
+      prepareReduceOnlyMarketOrder:async(p:any)=>({account:'EXAMPLE_ACCOUNT',environment:'EXAMPLE',market:'BTC-PERP',operationData:{symbol:'BTC',side:'ask',amount:'1',reduce_only:true,client_order_id:p.clientOrderId}}),
+      sendPreparedReduceOnlyMarketOrder:vi.fn(async()=>{entered();await gate;return {kind:'acknowledged',orderId:'EXAMPLE_ORDER'};}),
+      getCloseConfirmationSnapshot:vi.fn(async()=>snapshot(++reads===1?'1':'0',reads===1?7:8)),
+      getTradeHistory:vi.fn(async(_account:any,options:any)=>fillAvailable?[{tradeId:'EXAMPLE_FILL',orderId:'EXAMPLE_ORDER',internalSymbol:'BTC-PERP',side:'short',venueEventKind:'close_long',size:1,price:125,fee:1,realizedPnl:25,timestamp:options.startTime,subaccountId:'EXAMPLE_ACCOUNT'}]:[])} as any;
+    const {accountDurableClose}=await import('../../server/trading/signal-bot-close-intent-accounting');
+    registerCloseWorkerDependencies({adapter:()=>adapter,epochUnchanged:async()=>true,signer:async()=>null,account:accountDurableClose});
+    const pending=submitDurableClose({adapter,params:{agentPublicKey:'EXAMPLE_ACCOUNT',agentSecretKey:new Uint8Array(),mainWalletAddress:'EXAMPLE_OWNER',internalSymbol:'BTC-PERP',side:'short',sizeBase:1,sizeBaseExact:'1',reduceOnly:true},identity:{owner_wallet:'EXAMPLE_OWNER',bot_id:'EXAMPLE_BOT',source_key:'EXAMPLE_RACE',signer_mode:'external_key',authority_ref:{mode:'EXAMPLE'},baseSize:'1',lastTradeId:'EXAMPLE_ENTRY'},trade,kind:'full',positionSide:'long'});
+    await arrived;
+    try { await runCloseIntentWorkerPass();expect(adapter.getCloseConfirmationSnapshot).toHaveBeenCalledTimes(1); }
+    finally { release(); }
+    const result=await pending;
+    expect(result.intent.status).toBe('confirmed');expect(adapter.sendPreparedReduceOnlyMarketOrder).toHaveBeenCalledOnce();
+    let money=(await pool.query('SELECT realized_pnl,total_fees,base_size FROM bot_positions')).rows[0];
+    expect(money).toMatchObject({base_size:'0.00000000',realized_pnl:available?'24.000000':'0.000000',total_fees:available?'1.000000':'0.000000'});
+    if(!available){
+      expect((await pool.query('SELECT webhook_payload FROM bot_trades')).rows[0].webhook_payload.closeAccounting.kind).toBe('unavailable');
+      fillAvailable=true;await pool.query('UPDATE signal_bot_close_intents SET revision=revision+1,next_action_at=clock_timestamp()');await runCloseIntentWorkerPass();await runCloseIntentWorkerPass();
+    }
+    money=(await pool.query('SELECT realized_pnl,total_fees FROM bot_positions')).rows[0];
+    expect(money).toMatchObject({realized_pnl:'24.000000',total_fees:'1.000000'});
+    expect((await pool.query('SELECT stats FROM trading_bots')).rows[0].stats).toMatchObject({totalPnl:24,totalVolume:125});
+    expect((await pool.query('SELECT count(*)::int AS n FROM bot_trades')).rows[0].n).toBe(1);
+    expect((await pool.query('SELECT amount,status FROM pending_profit_shares')).rows).toEqual([{amount:'2.400000',status:'deferred'}]);
+    pool.removeListener('acquire',acquire);pool.removeListener('release',returned);expect(peak).toBeLessThanOrEqual(2);
+  });
+
+  it('waits for a held fence, then allows the open instead of a spurious busy refusal', async()=>{
+    let entered!:()=>void,release!:()=>void;
+    const arrived=new Promise<void>(r=>entered=r),gate=new Promise<void>(r=>release=r);
+    const held=scope(async()=>{entered();await gate;});await arrived;
+    const send=vi.fn(async()=> 'EXAMPLE_OPEN');
+    const opening=store.withOpenFence('EXAMPLE','EXAMPLE_ACCOUNT','BTC-PERP',send);
+    const timer=setTimeout(release,50);
+    try {expect(await opening).toBe('EXAMPLE_OPEN');expect(send).toHaveBeenCalledOnce();}
+    finally {clearTimeout(timer);release();await held;}
+  });
+  it.each(['released','confirmed'])('allows account teardown after %s and retains a fresh source',async status=>{
+    await scope(async s=>{let row=await create(s);row=await store.settle(s,row,{status:status as any,
+      completed_at:new Date(await store.databaseTime(s)),release_mode:status==='released'?'not_sent':null},async client=>{await client.query("UPDATE bot_trades SET status=$2 WHERE id=$1",[row.original_trade_id,status==='released'?'failed':'executed']);});});
+    const remove=vi.fn(async()=> 'EXAMPLE_DELETED');expect(await store.withAccount('EXAMPLE','EXAMPLE_ACCOUNT',remove)).toBe('EXAMPLE_DELETED');
+    expect(remove).toHaveBeenCalledOnce();await scope(async s=>expect((await create(s,'EXAMPLE_FRESH')).status).toBe('pending'));
+  });
+  it('shows old queue attention without retaining an unresolved close or disabling Close',async()=>{
+    vi.spyOn(store,'legacyInventory').mockResolvedValueOnce([{id:'EXAMPLE_QUEUE',original_trade_id:'EXAMPLE_OLD_TRADE',bot_id:'EXAMPLE_BOT',protocol:null,protocol_subaccount_id:null}]);
+    expect(await store.statusForBot('EXAMPLE_OWNER','EXAMPLE_BOT')).toMatchObject({unresolved:false,message:'Close needs your attention. The position may still be open.'});
   });
 
 });

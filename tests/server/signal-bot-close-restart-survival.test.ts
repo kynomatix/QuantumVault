@@ -753,7 +753,7 @@ describe('close-path and restart contract wiring', () => {
           open: { kind: 'not_evaluated' },
         });
         expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
-        expect(storage.updateBotTrade).toHaveBeenCalledWith('close-trade-1', expect.objectContaining({
+        expect(storage.updatePendingBotTrade).toHaveBeenCalledWith('close-trade-1', expect.objectContaining({
           status: 'pending',
         }));
       },
@@ -829,7 +829,7 @@ describe('close-path and restart contract wiring', () => {
         // A2: fills cannot substitute for failed flatness evidence.
         expect(routeMocks.adapter.getTradeHistory).not.toHaveBeenCalled();
         expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
-        expect(storage.updateBotTrade).toHaveBeenCalledWith('close-trade-1', expect.objectContaining({
+        expect(storage.updatePendingBotTrade).toHaveBeenCalledWith('close-trade-1', expect.objectContaining({
           status: 'pending',
           txSignature: 'signed-close-one',
         }));
@@ -957,9 +957,8 @@ describe('close-path and restart contract wiring', () => {
         primeCloseRoute(preClose);
         primeCloseSnapshots(0.25, { baseSize: 0.125 });
         vi.mocked(storage.createBotTrade as any).mockResolvedValue({ id: 'pending-partial-row' });
-        vi.mocked(storage.recordCloseEventAtomic as any).mockReset().mockResolvedValue({
-          isNew: false,
-          trade: {
+        vi.mocked(storage.updatePendingBotTrade as any).mockResolvedValue(undefined);
+        vi.mocked(storage.getBotTrade as any).mockResolvedValue({
             id: 'pending-partial-row',
             tradingBotId: ROUTE_BOT_ID,
             status: 'executed',
@@ -967,7 +966,6 @@ describe('close-path and restart contract wiring', () => {
               partialClose: true,
               partialCloseAccounting: { status: 'complete', residualBaseSize: 0.125 },
             },
-          },
         });
         routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
           success: true,
@@ -992,9 +990,9 @@ describe('close-path and restart contract wiring', () => {
           type: 'partial_close',
           remainingSize: 0.125,
         });
-        expect(storage.recordCloseEventAtomic).toHaveBeenCalledOnce();
-        expect(vi.mocked(storage.recordCloseEventAtomic).mock.calls[0][0]).toMatchObject({ deltas: {} });
-        expect(storage.updatePendingBotTrade).not.toHaveBeenCalled();
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(storage.updatePendingBotTrade).toHaveBeenCalledOnce();
+        expect(vi.mocked(storage.updatePendingBotTrade).mock.calls[0][0]).toBe('pending-partial-row');
         expect(storage.getSubscriberBotsBySourceId).not.toHaveBeenCalled();
       },
       10_000,
@@ -1025,7 +1023,7 @@ describe('close-path and restart contract wiring', () => {
           isNew: true,
           trade: { ...terminal, status: 'pending' },
         });
-        vi.mocked(storage.updatePendingBotTrade as any).mockResolvedValue(undefined);
+        vi.mocked(storage.updatePendingBotTrade as any).mockResolvedValueOnce({ ...terminal, status: 'pending' }).mockResolvedValue(undefined);
         vi.mocked(storage.getBotTrade as any).mockResolvedValue(terminal);
         routeMocks.adapter.getStrictPositionForMarket.mockReset().mockResolvedValue(null);
         routeMocks.adapter.placeMarketOrder.mockReset().mockResolvedValue({
@@ -1051,10 +1049,9 @@ describe('close-path and restart contract wiring', () => {
           type: 'partial_close',
           remainingSize: 0.125,
         });
-        expect(storage.updatePendingBotTrade).toHaveBeenCalledTimes(1);
+        expect(storage.updatePendingBotTrade).toHaveBeenCalledTimes(2);
         expect(storage.updateBotTrade).not.toHaveBeenCalled();
-        expect(storage.recordCloseEventAtomic).toHaveBeenCalledOnce();
-        expect(vi.mocked(storage.recordCloseEventAtomic).mock.calls[0][0]).toMatchObject({ deltas: {} });
+        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
         expect(storage.getSubscriberBotsBySourceId).not.toHaveBeenCalled();
       },
       10_000,
@@ -1196,7 +1193,7 @@ describe('close-path and restart contract wiring', () => {
 
       expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
       expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
-      expect(storage.updateBotTrade).toHaveBeenCalledWith('subscriber-close-trade', expect.objectContaining({
+      expect(storage.updatePendingBotTrade).toHaveBeenCalledWith('subscriber-close-trade', expect.objectContaining({
         status: 'pending',
       }));
       expect(storage.createBotTrade).toHaveBeenCalledTimes(2);

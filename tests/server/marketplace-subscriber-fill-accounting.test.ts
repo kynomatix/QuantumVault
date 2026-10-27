@@ -276,7 +276,7 @@ describe('subscriber execution accounting through the routing seam', () => {
     routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) =>
       snapshot(account, ++seq, !routeMocks.adapter.placeMarketOrder.mock.calls.length ? 0.25 : 0.15));
     await route();
-    expect(storage.updateBotTrade).toHaveBeenCalledWith('EXAMPLE_PENDING', expect.objectContaining({
+    expect(storage.updatePendingBotTrade).toHaveBeenCalledWith('EXAMPLE_PENDING', expect.objectContaining({
       status: 'pending', size: '0.1', price: '65000', fee: '1', pnl: null,
     }));
     expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();

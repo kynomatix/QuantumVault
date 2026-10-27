@@ -840,7 +840,7 @@ export interface IStorage {
     botId: string;
     tradeId: string;
     evidence: Extract<ReconcilerCloseAccountingEvidence, { kind: "venue_exact" }>;
-  }): Promise<{ trade: BotTrade; remediated: boolean }>;
+  }, transactionClient?: any): Promise<{ trade: BotTrade; remediated: boolean }>;
   getRecentCanonicalCloseForBot(opts: {
     botId: string;
     market: string;
@@ -3057,7 +3057,7 @@ export class DatabaseStorage implements IStorage {
     botId: string;
     tradeId: string;
     evidence: Extract<ReconcilerCloseAccountingEvidence, { kind: "venue_exact" }>;
-  }): Promise<{ trade: BotTrade; remediated: boolean }> {
+  }, transactionClient?: any): Promise<{ trade: BotTrade; remediated: boolean }> {
     const evidence = opts.evidence;
     if (
       !evidence.protocolFillId.trim()
@@ -3069,7 +3069,7 @@ export class DatabaseStorage implements IStorage {
       throw new Error("remediateReconcilerCloseAccountingAtomic: invalid venue evidence");
     }
 
-    return await db.transaction(async (tx) => {
+    const persist = async (tx: any) => {
       const rows = await tx
         .select()
         .from(botTrades)
@@ -3165,7 +3165,8 @@ export class DatabaseStorage implements IStorage {
         throw new Error("remediateReconcilerCloseAccountingAtomic: updated trade disappeared");
       }
       return { trade: updated[0], remediated: true };
-    });
+    };
+    return transactionClient ? persist(closeIntentDrizzle(transactionClient)) : db.transaction(persist);
   }
 
   async getSubscriberCloseAccountingCandidates(botId: string): Promise<BotTrade[]> {

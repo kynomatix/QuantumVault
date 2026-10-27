@@ -14,9 +14,12 @@ const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order
 // completion and open fencing to both incumbent webhook routes.
 // Phoenix boundaries and incumbent entry policy remain pinned below.
 incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
-  'sha256:6515c08f5a4031a4c39a2982f6a68c5cf3ba697ef2ce0e8ece0726377004cc49';
+  'sha256:deba7f6f111924288e08ce5b49855b29a7e2dc5e83293bf8fd3538b4d2a9ed0b';
 incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
-  'sha256:0417edeac520f9fbce5c8c5cd835e97a8b3415d4ea1b7361bcd7c3aaaeda6110';
+  'sha256:7717f1e5e310617fc651a907770b89301fb8e51812ea8d81bd52d8f7cacf15f6';
+
+incumbentBaseline.routeSha256['patch:/api/trading-bots/:id'] =
+  'sha256:a80d9069f66e39a80f9613365ea6664fe534a76479072593c16b62f351152b9d';
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {

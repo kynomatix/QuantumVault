@@ -21,6 +21,12 @@ export class SignalBotCloseIntentStorage {
     });
   }
 
+  /** Missing rollout table cannot contain an unresolved intent. Other readiness failures stay fenced. */
+  private async capabilityAbsent(): Promise<boolean> {
+    const result = await this.pool.query("SELECT to_regclass(current_schema()||'.signal_bot_close_intents') IS NOT NULL AS present");
+    return result.rows[0]?.present === false;
+  }
+
   async withScope<T>(environment: string, account: string, market: string,
     work: (scope: CloseScope) => Promise<T>, tryOnly = false, parent?: CloseScope): Promise<T | undefined> {
     if (parent && (parent.environment !== environment || parent.account !== account || parent.market !== '*'))
@@ -31,6 +37,7 @@ export class SignalBotCloseIntentStorage {
     let accountHeld = false, held = false;
     const token = {};
     try {
+      await client.query("SET lock_timeout = '5s'");
       if (!parent) {
         const shared = await client.query(`SELECT ${tryOnly ? 'pg_try_advisory_lock_shared' : 'pg_advisory_lock_shared'}($1,hashtext($2)) AS held`, [NS, accountKey]);
         accountHeld = !tryOnly || shared.rows[0]?.held === true;
@@ -45,19 +52,23 @@ export class SignalBotCloseIntentStorage {
       clients.delete(token);
       if (held) await client.query('SELECT pg_advisory_unlock($1,hashtext($2))', [NS, key]).catch(() => {});
       if (accountHeld) await client.query('SELECT pg_advisory_unlock_shared($1,hashtext($2))', [NS, accountKey]).catch(() => {});
+      await client.query('RESET lock_timeout').catch(() => {});
       if (!parent) client.release();
     }
   }
 
   async withAccount<T>(environment: string, account: string, work: (scope: CloseScope) => Promise<T>): Promise<T> {
-    await this.ready();
+    try { await this.ready(); } catch (error) {
+      if (await this.capabilityAbsent()) return work({ environment, account, market: '*', token: {} });
+      throw error;
+    }
     const client = await this.pool.connect();
     const key = scopeKey(environment, account, '*');
     const token = {};
     let held = false;
     try {
-      const lock = await client.query('SELECT pg_try_advisory_lock($1,hashtext($2)) AS held', [NS, key]);
-      if (!lock.rows[0]?.held) throw new Error('close_account_busy');
+      await client.query("SET lock_timeout = '5s'");
+      await client.query('SELECT pg_advisory_lock($1,hashtext($2))', [NS, key]);
       held = true;
       const blocked = await client.query(`SELECT id FROM signal_bot_close_intents WHERE environment=$1 AND original_account=$2 AND ${unresolved} LIMIT 1`, [environment, account]);
       if (blocked.rowCount) throw new Error('prior_close_confirmation_pending');
@@ -66,14 +77,15 @@ export class SignalBotCloseIntentStorage {
     } finally {
       clients.delete(token);
       if (held) await client.query('SELECT pg_advisory_unlock($1,hashtext($2))', [NS, key]).catch(() => {});
+      await client.query('RESET lock_timeout').catch(() => {});
       client.release();
     }
   }
 
   async withOpenFence<T>(environment: string, account: string, market: string, send: () => Promise<T>): Promise<T> {
-    await this.ready();
+    try { await this.ready(); } catch (error) { if (await this.capabilityAbsent()) return send(); throw error; }
     const result = await this.withScope(environment, account, market, async scope => {
-      if (await this.unresolved(scope)) throw new Error('prior_close_confirmation_pending');
+      if (await this.unresolved(scope) || await this.hasLegacyPending(scope)) throw new Error('prior_close_confirmation_pending');
       return send();
     });
     return result as T;
@@ -87,18 +99,18 @@ export class SignalBotCloseIntentStorage {
   }
 
   async withOwnerLifecycle<T>(owner: string, agent: string | null | undefined, work: () => Promise<T>, destinations: readonly (string | null | undefined)[] = []): Promise<T> {
-    await this.ready();
+    try { await this.ready(); } catch (error) { if (await this.capabilityAbsent()) return work(); throw error; }
     const { getAdapter } = await import('../protocol/adapter-registry');
     const environment = getAdapter('pacifica').getCloseEnvironment!();
     const client = await this.pool.connect();
     const held: string[] = [];
     try {
+      await client.query("SET lock_timeout = '5s'");
       const bots = await client.query("SELECT protocol_subaccount_id FROM trading_bots WHERE wallet_address=$1 AND active_protocol='pacifica'", [owner]);
       const accounts = [...new Set([agent, ...destinations, ...bots.rows.map(row => row.protocol_subaccount_id)].filter(Boolean))].sort() as string[];
       for (const account of accounts) {
         const key = scopeKey(environment, account, '*');
-        const lock = await client.query('SELECT pg_try_advisory_lock($1,hashtext($2)) AS held', [NS, key]);
-        if (!lock.rows[0]?.held) throw new Error('close_account_busy');
+        await client.query('SELECT pg_advisory_lock($1,hashtext($2))', [NS, key]);
         held.push(key);
       }
       const current = await client.query('SELECT agent_public_key FROM wallets WHERE address=$1', [owner]);
@@ -110,6 +122,7 @@ export class SignalBotCloseIntentStorage {
       return await work();
     } finally {
       for (const key of held.reverse()) await client.query('SELECT pg_advisory_unlock($1,hashtext($2))', [NS, key]).catch(() => {});
+      await client.query('RESET lock_timeout').catch(() => {});
       client.release();
     }
   }
@@ -137,13 +150,16 @@ export class SignalBotCloseIntentStorage {
     try { await this.ready(); } catch { return { message: CLOSE_SAVE_FAILED, unresolved: false }; }
     const rows = await this.pool.query(`SELECT * FROM signal_bot_close_intents WHERE owner_wallet=$1 AND bot_id=$2 ORDER BY created_at DESC,id DESC LIMIT 1`, [owner, botId]);
     const latest = rows.rows[0] as CloseIntent | undefined;
+    const pendingLegacy = await this.pool.query("SELECT t.id FROM bot_trades t JOIN trading_bots b ON b.id=t.trading_bot_id WHERE b.id=$1 AND b.wallet_address=$2 AND b.active_protocol='pacifica' AND upper(t.side)='CLOSE' AND t.status='pending' AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents i WHERE i.original_trade_id=t.id) LIMIT 1", [botId,owner]);
+    if (pendingLegacy.rows[0]) return { message: 'Close needs your attention. The position may still be open.', unresolved: true, tradeId: pendingLegacy.rows[0].id };
     if (!latest || !['pending','needs_user'].includes(latest.status)) {
       const attention = await this.pool.query("SELECT * FROM signal_bot_close_intents r WHERE owner_wallet=$1 AND bot_id=$2 AND release_mode='residual' AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents c WHERE c.environment=r.environment AND c.original_account=r.original_account AND c.market=r.market AND c.status='confirmed' AND c.created_at>r.created_at) ORDER BY created_at DESC LIMIT 1", [owner, botId]);
       if (attention.rows[0]) return { message: closeIntentMessage(attention.rows[0]), unresolved: false, tradeId: attention.rows[0].original_trade_id };
     }
+
     if (latest) return { message: closeIntentMessage(latest), unresolved: ['pending','needs_user'].includes(latest.status), tradeId: latest.original_trade_id };
     const legacy = await this.legacyInventory(owner, botId);
-    return legacy.length ? { message: 'Close needs your attention. The position may still be open.', unresolved: true, tradeId: legacy[0].original_trade_id } : null;
+    return legacy.length ? { message: 'Close needs your attention. The position may still be open.', unresolved: false, tradeId: legacy[0].original_trade_id } : null;
   }
 
   async hasUnresolvedPosition(botId: string, market: string): Promise<boolean> {
@@ -195,6 +211,24 @@ export class SignalBotCloseIntentStorage {
 
   async unresolved(scope: CloseScope): Promise<CloseIntent | undefined> {
     return (await this.client(scope).query(`SELECT * FROM signal_bot_close_intents WHERE environment=$1 AND original_account=$2 AND market=$3 AND ${unresolved} LIMIT 1`, [scope.environment, scope.account, scope.market])).rows[0];
+  }
+
+  async hasLegacyPending(scope: CloseScope): Promise<boolean> {
+    const result = await this.client(scope).query(`SELECT t.id FROM bot_trades t JOIN trading_bots b ON b.id=t.trading_bot_id LEFT JOIN wallets w ON w.address=b.wallet_address WHERE upper(t.side)='CLOSE' AND t.status='pending' AND t.market=$1 AND b.active_protocol='pacifica' AND COALESCE(b.protocol_subaccount_id,w.agent_public_key)=$2 AND NOT EXISTS (SELECT 1 FROM signal_bot_close_intents i WHERE i.original_trade_id=t.id) LIMIT 1`, [scope.market, scope.account]);
+    return !!result.rowCount;
+  }
+
+  /** Worker is serial: one scope connection, at most one additional awaited pool query. */
+  async dueAccounting(): Promise<CloseIntent[]> {
+    return (await this.pool.query("SELECT * FROM signal_bot_close_intents WHERE status='confirmed' AND (last_evidence->>'accountingPending'='true' OR last_evidence->>'notificationPending'='true') AND next_action_at<=clock_timestamp() ORDER BY next_action_at,id LIMIT 10")).rows;
+  }
+
+  async recordAccountingRepair(scope: CloseScope, current: CloseIntent, pending: boolean, fill?: import('./signal-bot-close-intent-accounting').IntentFill | null): Promise<void> {
+    await this.client(scope).query("UPDATE signal_bot_close_intents SET last_evidence=last_evidence||jsonb_build_object('accountingPending',$3::boolean,'fill',$4::jsonb),next_action_at=clock_timestamp()+interval '5 minutes',revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 AND revision=$2 AND status='confirmed'", [current.id,current.revision,pending,JSON.stringify(fill ?? null)]);
+  }
+
+  async recordNotificationDelivered(scope: CloseScope, current: CloseIntent): Promise<void> {
+    await this.client(scope).query("UPDATE signal_bot_close_intents SET last_evidence=last_evidence||jsonb_build_object('notificationPending',false),revision=revision+1,updated_at=clock_timestamp() WHERE id=$1 AND revision=$2 AND status='confirmed'", [current.id,current.revision]);
   }
 
   async byId(scope: CloseScope, id: string): Promise<CloseIntent | undefined> {

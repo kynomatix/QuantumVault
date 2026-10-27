@@ -95,6 +95,7 @@ export interface StrictCloseOpenOrders {
   orders: Array<{ market: string; orderType: string }>;
 }
 
+export const CLOSE_IN_PROGRESS = "A close is already in progress for this position. We'll update it when that finishes.";
 export const CLOSE_NOT_SENT = "Close was not sent. The position may still be open. You can close it again.";
 export const CLOSE_SAVE_FAILED = "We couldn't save your close request. Please try again.";
 export function closeIntentMessage(intent: Pick<CloseIntent, 'status' | 'release_mode' | 'close_kind' | 'position_epoch'>): string {

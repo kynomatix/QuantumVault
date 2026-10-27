@@ -4,8 +4,9 @@ import Decimal from 'decimal.js';
 import type { InsertBotTrade } from '@shared/schema';
 import type { ProtocolAdapter } from '../protocol/adapter';
 import type { MarketOrderParams } from '../protocol/protocol-types';
-import { readCloseSnapshot, validSnapshot, type CloseSnapshot } from '../protocol/close-outcome';
+import { validSnapshot, type CloseSnapshot } from '../protocol/close-outcome';
 import type { CloseIntent, CloseScope, NewCloseIntent, StrictCloseOpenOrders } from './signal-bot-close-intent-types';
+import { CLOSE_IN_PROGRESS } from './signal-bot-close-intent-types';
 import { closeIntentStore as store } from './close-intent-store';
 
 export function exactExposure(snapshot: CloseSnapshot, market: string): string | null {
@@ -14,8 +15,8 @@ export function exactExposure(snapshot: CloseSnapshot, market: string): string |
   return position.sizeBaseExact ?? null;
 }
 
-export function closeObjectiveMet(intent: CloseIntent, after: CloseSnapshot): boolean {
-  if (!validSnapshot(after, intent.original_account) || after.evidence.environment !== intent.environment) return false;
+export function closeObjectiveMet(intent: CloseIntent, after: CloseSnapshot, databaseTime = after.evidence.receivedAt): boolean {
+  if (!validSnapshot(after, intent.original_account, databaseTime) || after.evidence.environment !== intent.environment) return false;
   const attempt = intent.attempt_log[intent.attempt_log.length - 1];
   if (!attempt?.outcome?.orderId || attempt.outcome.kind !== 'acknowledged'
     || attempt.receivedAt === undefined || after.evidence.dispatchedAt! < attempt.receivedAt) return false;
@@ -40,17 +41,18 @@ export function closeReleaseEvidence(intent: CloseIntent, databaseTime: number,
   const lowerBound = intent.last_evidence.watermarkLowerBound ?? intent.position_epoch.strictBaseline?.evidence.lastOrderId;
   if (typeof lowerBound !== 'number' || !Number.isSafeInteger(lowerBound)) return false;
   for (const snapshot of [first, second]) {
-    if (!validSnapshot(snapshot, intent.original_account) || snapshot.evidence.environment !== intent.environment
+    if (!validSnapshot(snapshot, intent.original_account, databaseTime) || snapshot.evidence.environment !== intent.environment
       || !(snapshot.evidence.dispatchedAt! > threshold)
       || typeof snapshot.evidence.lastOrderId !== 'number' || snapshot.evidence.lastOrderId < lowerBound
       || typeof snapshot.evidence.venueClockMs !== 'number' || snapshot.evidence.venueClockMs < expiry + 60_000) return false;
   }
+  if (second.evidence.lastOrderId! < first.evidence.lastOrderId! || orders.lastOrderId < second.evidence.lastOrderId!) return false;
   const one = exactExposure(first, intent.market), two = exactExposure(second, intent.market);
   if (one === null || two === null || !new Decimal(one).eq(two)) return false;
   return orders.account === intent.original_account && orders.environment === intent.environment
     && orders.complete === true && orders.fresh === true && orders.noDedup === true
     && orders.dispatchedAt > threshold && orders.receivedAt >= orders.dispatchedAt
-    && Date.now() - orders.receivedAt <= 10_000 && Number.isSafeInteger(orders.lastOrderId)
+    && orders.receivedAt <= databaseTime && databaseTime - orders.receivedAt <= 10_000 && Number.isSafeInteger(orders.lastOrderId)
     && orders.lastOrderId >= lowerBound && !orders.orders.some(order => order.market === intent.market && order.orderType === 'market')
     && intent.last_evidence.contradiction !== true;
 }
@@ -80,11 +82,15 @@ export async function submitDurableClose(input: {
   const environment = adapter.getCloseEnvironment();
   const result = await store.withScope(environment, params.agentPublicKey, params.internalSymbol, async scope => {
     const unresolved = await store.unresolved(scope);
-    if (unresolved) return { intent: unresolved, created: false };
+    if (unresolved) {
+      assertCloseObjective(unresolved, input.kind, params.sizeBaseExact ?? String(params.sizeBase));
+      return { intent: unresolved, created: false };
+    }
+    if (await store.hasLegacyPending(scope)) throw new Error(CLOSE_IN_PROGRESS);
     if (input.validateIdentity && !await input.validateIdentity()) throw new Error('close_account_or_epoch_changed');
     const prepared = await adapter.prepareReduceOnlyMarketOrder!({ ...params, clientOrderId: randomUUID(), reduceOnly: true });
     let baseline: CloseSnapshot | undefined;
-    try { baseline = await readCloseSnapshot(adapter, params.agentPublicKey); } catch { /* bounded first full close below */ }
+    try { baseline = await readIntentSnapshot(scope, adapter, params.agentPublicKey); } catch { /* bounded first full close below */ }
     const exposure = baseline ? exactExposure(baseline, params.internalSymbol) : null;
     if (baseline && (exposure === null || new Decimal(exposure).isZero()
       || new Decimal(exposure).isPositive() !== (input.positionSide === 'long')
@@ -113,7 +119,10 @@ export async function submitDurableClose(input: {
       partialCloseAccounting: { status: 'pending_venue_authority', expectedBaseSize: identity.baseSize ?? String(identity.cachedBaseSize ?? ''),
         expectedLastTradeId: identity.lastTradeId, requestedClosedSize: Number(prepared.operationData.amount) },
     } } : input.trade);
-    if (!created.created) return created;
+    if (!created.created) {
+      assertCloseObjective(created.intent, input.kind, prepared.operationData.amount);
+      return created;
+    }
     let intent = created.intent;
     try {
     const now = await store.databaseTime(scope);
@@ -130,12 +139,20 @@ export async function submitDurableClose(input: {
       return { intent, created: true };
     }
     try {
-      const after = await readCloseSnapshot(adapter, intent.original_account);
+      const after = await readIntentSnapshot(scope, adapter, intent.original_account);
       if (input.validateIdentity && !await input.validateIdentity()) {
         intent = await store.mutate(scope, intent, { status: 'needs_user',
           last_evidence: { ...intent.last_evidence, contradiction: true, objectiveMet: false },
           last_error_code: 'close_account_or_epoch_changed' });
-      } else intent = await persistCloseObservation(scope, intent, after);
+      } else {
+        intent = await persistCloseObservation(scope, intent, after);
+        if (intent.last_evidence.objectiveMet === true) intent = await confirmDurableClose(scope, intent, adapter);
+        else if (intent.authority_ref.subscriberAccounting === true) {
+          const { readIntentFillEvidence } = await import('./signal-bot-close-intent-accounting');
+          const evidence = await readIntentFillEvidence(scope, adapter, intent);
+          intent = await store.mutate(scope, intent, { last_evidence: { ...intent.last_evidence, subscriberAccounting: evidence.accounting, closeResult: evidence.closeResult } });
+        }
+      }
     } catch { /* admitted unknown is deliberately durable */ }
     return { intent, created: true };
     } catch {
@@ -149,18 +166,49 @@ export async function submitDurableClose(input: {
 }
 
 export async function persistCloseObservation(scope: CloseScope, intent: CloseIntent, snapshot: CloseSnapshot): Promise<CloseIntent> {
-  if (!validSnapshot(snapshot, intent.original_account) || snapshot.evidence.environment !== intent.environment)
+  const databaseTime = await store.databaseTime(scope);
+  if (!validSnapshot(snapshot, intent.original_account, databaseTime) || snapshot.evidence.environment !== intent.environment)
     throw new Error('invalid_original_close_observation');
   const oldBound = intent.last_evidence.watermarkLowerBound ?? intent.position_epoch.strictBaseline?.evidence.lastOrderId;
   const bound = typeof oldBound === 'number' ? Math.max(oldBound, snapshot.evidence.lastOrderId ?? oldBound) : snapshot.evidence.lastOrderId;
-  const now = await store.databaseTime(scope);
+  const now = databaseTime;
   const age = now - new Date(intent.created_at).getTime();
   const observed = Number(intent.last_evidence.observationCount ?? 0) + 1;
   const delay = intent.status === 'needs_user' || age >= 900_000 ? 300_000 : [5_000, 15_000, 30_000][Math.min(observed - 1, 2)] ?? 60_000;
   return store.mutate(scope, intent, {
     last_evidence: { ...intent.last_evidence, after: snapshot, watermarkLowerBound: bound,
-      objectiveMet: closeObjectiveMet(intent, snapshot), observationCount: observed },
+      objectiveMet: closeObjectiveMet(intent, snapshot, databaseTime), observationCount: observed },
     last_observed_at: new Date(now), status: age >= 900_000 ? 'needs_user' : intent.status,
     next_action_at: new Date(Math.max(intent.dispatch_state === 'proven_not_landed' ? new Date(intent.next_action_at).getTime() : 0, now + (observed >= 4 && age < 900_000 ? 60_000 + Math.floor(Math.random() * 5_000) : delay))),
   });
+}
+
+/** Exact text matters: a coalesced request cannot borrow another objective. */
+export function assertCloseObjective(intent: CloseIntent, kind: 'full' | 'partial', size: string): void {
+  if (intent.close_kind !== kind || intent.requested_size_base !== size) throw new Error(CLOSE_IN_PROGRESS);
+}
+
+/** DB brackets are conservative dispatch bounds; app-clock offsets never authorize intent actions. */
+export async function readIntentSnapshot(scope: CloseScope, adapter: ProtocolAdapter, account: string): Promise<CloseSnapshot> {
+  if (!adapter.getCloseConfirmationSnapshot) throw new Error('close_confirmation_reader_unavailable');
+  const start = await store.databaseTime(scope);
+  const snapshot = await adapter.getCloseConfirmationSnapshot(account);
+  const end = await store.databaseTime(scope);
+  if (!validSnapshot(snapshot, account, snapshot.evidence.receivedAt) || end < start || end - start > 10_000)
+    throw new Error('invalid_close_confirmation_evidence');
+  return { ...snapshot, evidence: { ...snapshot.evidence, startedAt: start, dispatchedAt: start, receivedAt: end } };
+}
+
+export async function confirmDurableClose(scope: CloseScope, intent: CloseIntent, adapter: ProtocolAdapter,
+  account = accountDurableClose): Promise<CloseIntent> {
+  const { readIntentFillEvidence } = await import('./signal-bot-close-intent-accounting');
+  const now = await store.databaseTime(scope);
+  if (!closeObjectiveMet(intent, intent.last_evidence.after as CloseSnapshot, now)) throw new Error('close_confirmation_stale');
+  const evidence = await readIntentFillEvidence(scope, adapter, intent);
+  const fill = evidence.fill;
+  const settled = await store.settle(scope, intent, { status: 'confirmed', completed_at: new Date(await store.databaseTime(scope)),
+    last_error_code: null, last_evidence: { ...intent.last_evidence, accountingPending: !fill || fill.realizedPnl === null, notificationPending: true, fill, subscriberAccounting: evidence.accounting, closeResult: evidence.closeResult } },
+    client => account(client, intent, 'confirmed', fill));
+  if (fill) { const { notifyDurableClose } = await import('./signal-bot-close-intent-accounting'); await notifyDurableClose(scope, settled, fill); }
+  return (await store.byId(scope, settled.id)) ?? settled;
 }

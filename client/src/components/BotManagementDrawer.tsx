@@ -1058,9 +1058,10 @@ export function BotManagementDrawer({
       });
 
       const data = await safeResponseJson(res);
+      if (data.terminal === true) sessionStorage.removeItem(requestKey);
 
       if (!res.ok) {
-        throw new Error(data.error || "We couldn't save your close request. Please try again.");
+        throw new Error(data.message || data.error || "We couldn't save your close request. Please try again.");
       }
 
       const pending = res.status === 202 || data.status === 'pending';

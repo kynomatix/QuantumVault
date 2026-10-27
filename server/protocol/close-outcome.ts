@@ -44,7 +44,7 @@ export function closeSnapshotTimingError(startedAt: number, dispatchedAt: number
   return undefined;
 }
 
-export function validSnapshot(snapshot: CloseSnapshot, account: string): boolean {
+export function validSnapshot(snapshot: CloseSnapshot, account: string, now = Date.now()): boolean {
   const e = snapshot?.evidence;
   return Boolean(e && e.account === account && e.environment && e.requestId
     && e.complete === true && e.fresh === true && e.noDedup === true
@@ -53,7 +53,7 @@ export function validSnapshot(snapshot: CloseSnapshot, account: string): boolean
       : Number.isSafeInteger(e.lastOrderId) && e.lastOrderId >= 0)
     && [e.startedAt, e.dispatchedAt, e.receivedAt].every(Number.isFinite)
     && e.startedAt <= e.dispatchedAt && e.dispatchedAt <= e.receivedAt
-    && e.receivedAt <= Date.now() && Date.now() - e.receivedAt <= 10_000
+    && e.receivedAt <= now && now - e.receivedAt <= 10_000
     && closeSnapshotTimingError(e.startedAt, e.dispatchedAt, e.receivedAt) === undefined
     && Array.isArray(snapshot.positions)
     && snapshot.positions.every(p => p.internalSymbol && Number.isFinite(p.baseSize))

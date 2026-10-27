@@ -11,6 +11,7 @@ export function makeCloseRouteStore(storage: any) {
     withOpenFence: async (_e: string, _a: string, _m: string, work: any) => work(),
     withLifecycle: async (_a: string, work: any) => work(),
     unresolved: async (s: any) => [...rows.values()].find(r => r.environment === s.environment && r.original_account === s.account && r.market === s.market && ['pending','needs_user'].includes(r.status)),
+    hasLegacyPending: async () => false,
     create: async (s: any, input: any, trade: any) => {
       const prior = await store.unresolved(s); if (prior) return { intent: prior, created: false };
       const linked = await storage.createBotTrade({ ...trade, status: 'pending' });
@@ -22,6 +23,8 @@ export function makeCloseRouteStore(storage: any) {
     mutate: async (_s: any, row: any, fields: any) => { const next = { ...row, ...fields, revision: row.revision + 1 }; rows.set(row.id, next); return next; },
     admit: async (s: any, row: any, attempt: any) => store.mutate(s, row, { attempt_log: [...row.attempt_log, attempt], attempt_count: row.attempt_count + 1, dispatch_state: 'admitted_unknown' }),
     outcome: async (s: any, row: any, id: string, outcome: any) => store.mutate(s, row, { attempt_log: row.attempt_log.map((a: any) => a.attemptId === id ? { ...a, outcome, receivedAt: Date.now() } : a), dispatch_state: outcome.kind === 'not_entered' ? 'proven_not_landed' : 'admitted_unknown' }),
+    settle: async (s: any, row: any, fields: any) => store.mutate(s, row, fields),
+    dueAccounting: async () => [],
     byId: async (_s: any, id: string) => rows.get(id), due: async () => [],
     statusForBot: async () => null, historyStatuses: async () => new Map(), legacyInventory: async () => [],
   };
