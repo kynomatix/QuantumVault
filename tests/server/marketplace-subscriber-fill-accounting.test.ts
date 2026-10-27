@@ -37,6 +37,14 @@ vi.mock('../../server/session', () => ({
   sessionMiddleware: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
 
+vi.mock('../../server/trading/close-intent-store', async () => {
+  const { makeCloseRouteStore } = await import('../helpers/close-route-intent-store');
+  const { storage } = await import('../../server/storage');
+  return { closeIntentStore: makeCloseRouteStore(storage) };
+});
+import { closeIntentStore } from '../../server/trading/close-intent-store';
+import { bridgePreparedClose } from '../helpers/close-route-intent-store';
+
 vi.mock('../../server/db', () => ({
   db: {},
   pool: {}, // These routes do not use SQL; unexpected pool operations must fail.
@@ -136,7 +144,7 @@ import { selectPendingPartialCloseMarker } from '../../server/reconciliation-ser
 
 function snapshot(account: string, sequence: number, size: number): CloseSnapshot {
   const now = Date.now();
-  return { positions: size === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: size, entryPrice: 64000,
+  return { positions: size === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: size, sizeBaseExact: String(size), entryPrice: 64000,
     markPrice: null, unrealizedPnl: null, leverage: 2, liquidationPrice: null, marginMode: 'cross' }],
     evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${sequence}`, startedAt: now,
       dispatchedAt: now, receivedAt: now, lastOrderId: sequence, complete: true, fresh: true, noDedup: true } };
@@ -154,11 +162,13 @@ function evidence(): SubscriberCloseEvidenceInput {
 }
 function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () => [fill()]) {
   vi.clearAllMocks();
+  (closeIntentStore as any).reset(); bridgePreparedClose(routeMocks.adapter);
   routeMocks.adapter.getCapabilities.mockReturnValue({});
   const sign = side === 'long' ? 1 : -1;
   vi.mocked(storage.getTradingBotById).mockResolvedValue(routeBot as never);
   vi.mocked(storage.getPublishedBotByTradingBotId).mockResolvedValue({ id: 'EXAMPLE_LISTING', isActive: true } as never);
   vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([routeBot] as never);
+  vi.mocked(storage.getTradingBotById).mockResolvedValue(routeBot as never);
   vi.mocked(storage.getWallet).mockResolvedValue(routeWallet as never);
   vi.mocked(storage.getBotPosition).mockResolvedValue({ baseSize: String(sign * 0.25), avgEntryPrice: '64000',
     market: 'BTC-PERP', lastTradeId: 'EXAMPLE_ENTRY' } as never);
@@ -176,10 +186,10 @@ function prime(side: 'long' | 'short' = 'long', rows: () => TradeRecord[] = () =
   routeMocks.adapter.getTradeHistory.mockImplementation(async () => rows());
   routeMocks.adapter.placeMarketOrder.mockResolvedValue({ success: true, status: 'filled', orderId: 'EXAMPLE_ORDER', landingDisposition: 'terminal' });
   let seq = 0;
-  routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => snapshot(account, ++seq, seq === 1 ? sign * 0.25 : 0));
+  routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => snapshot(account, ++seq, !routeMocks.adapter.placeMarketOrder.mock.calls.length ? sign * 0.25 : 0));
 }
 async function route(partial = false) {
-  await routeSignalToSubscribers('EXAMPLE_SOURCE', { action: 'sell', contracts: '0', positionSize: '0',
+  await routeSignalToSubscribers('EXAMPLE_SOURCE', { originId: 'EXAMPLE_SIGNAL', action: 'sell', contracts: '0', positionSize: '0',
     price: '90000', isCloseSignal: !partial, strategyPositionSize: null,
     ...(partial ? { partialCloseFraction: 0.5 } : {}) });
 }
@@ -190,7 +200,7 @@ describe('subscriber execution accounting through the routing seam', () => {
     await route();
     expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
     const event = vi.mocked(storage.recordCloseEventAtomic).mock.calls[0]?.[0];
-    expect(event?.update?.fields).toMatchObject({ size: '0.25', price: side === 'long' ? '65000' : '63000',
+    expect(event?.update?.fields, JSON.stringify({size:event?.update?.fields.size,price:event?.update?.fields.price,pnl:event?.update?.fields.pnl,fee:event?.update?.fields.fee,payload:event?.update?.fields.webhookPayload})).toMatchObject({ size: '0.25', price: side === 'long' ? '65000' : '63000',
       pnl: '249', fee: '1', protocolFillId: 'tx-EXAMPLE_ORDER' });
     expect(event?.deltas?.totalPnlDelta).toBe(249);
     expect(event?.deltas?.totalVolumeDelta).toBe(side === 'long' ? 16250 : 15750);
@@ -210,7 +220,7 @@ describe('subscriber execution accounting through the routing seam', () => {
     if (defect === 'entry' || defect === 'unconfirmed') {
       let seq = 0;
       routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) => {
-        const value = snapshot(account, ++seq, seq === 1 || defect === 'unconfirmed' ? 0.25 : 0);
+        const value = snapshot(account, ++seq, !routeMocks.adapter.placeMarketOrder.mock.calls.length || defect === 'unconfirmed' ? 0.25 : 0);
         if (defect === 'entry' && value.positions[0]) value.positions[0].entryPrice = NaN;
         return value;
       });
@@ -229,12 +239,15 @@ describe('subscriber execution accounting through the routing seam', () => {
   it('retains actual partial fills without crystallizing or substituting the requested quantity', async () => {
     prime('long', () => [fill({ size: 0.1 })]);
     await route(true);
-    const marker = vi.mocked(storage.createBotTradeIdempotent).mock.calls[0]?.[0];
+    const marker = vi.mocked(storage.updatePendingBotTrade).mock.calls[0]?.[1];
+    expect(storage.updatePendingBotTrade).toHaveBeenCalledWith('EXAMPLE_PENDING', expect.any(Object));
+    expect(storage.createBotTradeIdempotent).not.toHaveBeenCalled();
+    expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
     expect(marker).toMatchObject({ size: '0.1', price: '65000', fee: null, pnl: null, status: 'pending' });
     expect(marker?.webhookPayload).toMatchObject({ partialClose: true, partialCloseAccounting: {
       expectedBaseSize: '0.25', expectedLastTradeId: 'EXAMPLE_ENTRY', requestedClosedSize: 0.1 } });
     const restarted = selectPendingPartialCloseMarker({
-      trades: [{ ...marker, id: 'EXAMPLE_PENDING', executedAt: new Date() } as never],
+      trades: [{ market: 'BTC-PERP', side: 'short', tradingBotId: ROUTE_BOT_ID, ...marker, id: 'EXAMPLE_PENDING', executedAt: new Date() } as never],
       protocol: 'pacifica', market: 'BTC-PERP', closeSide: 'short', dbBaseSize: 0.25,
       dbLastTradeId: 'EXAMPLE_ENTRY', closedSlice: 0.1, closingFills: [fill({ size: 0.1 })], nowMs: Date.now(),
     });
@@ -250,7 +263,7 @@ describe('subscriber execution accounting through the routing seam', () => {
     routeMocks.adapter.getStrictPositionForMarket
       .mockResolvedValueOnce({ internalSymbol: 'BTC-PERP', baseSize: 0.25, entryPrice: 64000 })
       .mockResolvedValue(null);
-    await routeSignalToSubscribers('EXAMPLE_SOURCE', { action: 'sell', contracts: '0.25', positionSize: '0.25',
+    await routeSignalToSubscribers('EXAMPLE_SOURCE', { originId: 'EXAMPLE_SIGNAL', action: 'sell', contracts: '0.25', positionSize: '0.25',
       price: '90000', isCloseSignal: false, strategyPositionSize: '-0.25' });
     expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
     expect(vi.mocked(storage.recordCloseEventAtomic).mock.calls[0]?.[0].update?.fields)
@@ -261,7 +274,7 @@ describe('subscriber execution accounting through the routing seam', () => {
     prime('long', () => [fill({ size: 0.1 })]);
     let seq = 0;
     routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async (account: string) =>
-      snapshot(account, ++seq, seq === 1 ? 0.25 : 0.15));
+      snapshot(account, ++seq, !routeMocks.adapter.placeMarketOrder.mock.calls.length ? 0.25 : 0.15));
     await route();
     expect(storage.updateBotTrade).toHaveBeenCalledWith('EXAMPLE_PENDING', expect.objectContaining({
       status: 'pending', size: '0.1', price: '65000', fee: '1', pnl: null,

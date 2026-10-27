@@ -35,17 +35,19 @@ function harness(result: CancelResult | Error | undefined, protocol = 'pacifica'
   const adapter = {
     getCloseConfirmationSnapshot: vi.fn(async () => {
       const now = Date.now(); const sequence = ++observations;
-      return { positions: sequence === 1 ? [{ internalSymbol: 'SOL-PERP', baseSize: 1 }] : [],
+      return { positions: await adapter.getPositions(),
         evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${sequence}`, startedAt: now, dispatchedAt: now, receivedAt: now,
           lastOrderId: sequence, fresh: true, complete: true, noDedup: true } };
     }),
-    placeMarketOrder: vi.fn(async () => ({ success: true, orderId: 'EXAMPLE_ORDER' })),
+    placeMarketOrder: vi.fn(async (_params: unknown) => ({ success: true, orderId: 'EXAMPLE_ORDER' })),
     cancelTpSlOrders: result === undefined ? undefined : vi.fn(async () => { if (result instanceof Error) throw result; return result; }),
     setTpSl: vi.fn(async () => ({ success: true, appliedTakeProfitPrice: 120, appliedStopLossPrice: 80 })),
     getPositions: vi.fn(async () => [{ internalSymbol: 'SOL-PERP', baseSize: 1 }]),
     cancelAllOrders: vi.fn(async () => ({ success: false, outcome: 'unknown' })),
     closePosition: vi.fn(async () => ({ success: true })),
     getOpenOrders: vi.fn(async () => []), getOpenStopOrders: vi.fn(async () => []),
+    getCloseEnvironment: () => 'EXAMPLE',
+    getCloseOpenOrders: async () => ({ orders: [...await adapter.getOpenOrders(), ...await adapter.getOpenStopOrders()] }),
   };
   const storage = { getBotTrades: vi.fn(async (): Promise<Array<{ id: string; side: string; status: string }>> => []),
     createBotTrade: vi.fn(async () => ({ id: 'EXAMPLE_INTENT' })), updateBotTrade: vi.fn(), recordCloseEventAtomic: vi.fn(),
@@ -55,6 +57,15 @@ function harness(result: CancelResult | Error | undefined, protocol = 'pacifica'
   const deps = { app: { post: (path: string, _auth: unknown, handler: Function) => { handlers[path] = handler; } },
     requireWallet: () => {}, storage, fullClosesInFlight: new Set<string>(),
     DatabaseStorage: { canonicalCloseFillId: () => 'EXAMPLE_FILL' }, isConfirmedCancellation, readCloseSnapshot, qualifiedFlatObservation,
+    CLOSE_SAVE_FAILED: 'Close was not saved. Nothing was sent.',
+    closeIntentStore: { ready: async () => {}, withAccount: async (_e: string, _a: string, work: Function) => {
+      if ((await storage.getBotTrades()).some(t => t.side === 'CLOSE' && t.status === 'pending')) throw new Error('prior_close_confirmation_pending');
+      return work({});
+    } },
+    submitDurableClose: async (input: any) => {
+      await adapter.placeMarketOrder(input.params);
+      return { intent: { status: 'confirmed' } };
+    },
     getUmkForWebhook: async () => ({ umk: new Uint8Array(32), cleanup: umkCleanup }),
     decryptAgentKeyStrict: async () => ({ secretKey: new Uint8Array(64), cleanup: keyCleanup }),
     getBotSubaccountContext: () => ({ botPublicKey: account }),

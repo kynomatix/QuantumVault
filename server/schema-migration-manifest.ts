@@ -1,3 +1,4 @@
+import { SIGNAL_CLOSE_INTENT_DDL, SIGNAL_CLOSE_INTENT_REQUIREMENTS } from "./signal-bot-close-intent-schema";
 import type { SchemaMigrationDefinition } from "./schema-readiness-probe";
 
 const schemaMigrationSql = [
@@ -2407,6 +2408,7 @@ END $migration$;`,
          CHECK (rpc_provider IN ('configured_primary', 'configured_backup'))`,
       `SELECT 1 /* verify retained market entry history; owner publishes DDL */`,
       `SELECT 1`,
+      SIGNAL_CLOSE_INTENT_DDL,
 ] as const;
 
 const schemaMigrationMetadata = [
@@ -8022,7 +8024,8 @@ const schemaMigrationMetadata = [
     }
   ],
   "operation": "ddl"
-}
+},
+  { "id": "206-signal-bot-close-intent", "capabilities": ["signal_bot_close_intent"], "requirements": SIGNAL_CLOSE_INTENT_REQUIREMENTS, "operation": "ddl" }
 ] as const;
 
 export const SCHEMA_MIGRATION_MANIFEST: readonly SchemaMigrationDefinition[] =

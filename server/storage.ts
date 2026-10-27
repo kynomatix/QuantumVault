@@ -1,3 +1,5 @@
+import { closeIntentStore } from './trading/close-intent-store';
+import { drizzle as closeIntentDrizzle } from 'drizzle-orm/node-postgres';
 import { AGENT_WALLET_RESET_LOCK_NAMESPACE } from "./wallet-lock-constants";
 import { cooldownQuery, marketEntryKey, sameMarketEntryKey, lockMarketEntry, marketEntryBlock, reserveMarketEntry,
   lockRetainedMarketEntry, confirmMarketEntry, releaseNeverSentMarketEntry, verifyMarketEntrySchema,
@@ -829,7 +831,7 @@ export interface IStorage {
       walletAddress: string;
       market: string;
     };
-  }): Promise<{ trade?: BotTrade; isNew: boolean }>;
+  }, transactionClient?: any): Promise<{ trade?: BotTrade; isNew: boolean }>;
   getSubscriberCloseAccountingCandidates(botId: string): Promise<BotTrade[]>;
   remediateSubscriberCloseAccountingAtomic(opts: {
     botId: string; tradeId: string; accounting: SubscriberCloseAccounting;
@@ -1470,26 +1472,35 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateWalletAgentKeys(address: string, agentPublicKey: string, agentPrivateKeyEncrypted: string): Promise<void> {
+    const original = await this.getWallet(address);
+    return closeIntentStore.withOwnerLifecycle(address, original?.agentPublicKey, async () => {
     return walletWrite(pool, [address], async (tx, poolId) => {
       await tx.update(wallets).set({
         agentPublicKey,
         agentPrivateKeyEncrypted
       }).where(eq(wallets.address, address));
     }, {});
+    }, [agentPublicKey]);
   }
 
   async updateWalletAgentIdentityV3(address: string, agentPublicKey: string, agentPrivateKeyEncryptedV3: string): Promise<void> {
+    const original = await this.getWallet(address);
+    return closeIntentStore.withOwnerLifecycle(address, original?.agentPublicKey, async () => {
     await walletWrite(pool, [address], async tx => {
       await tx.update(wallets).set({ agentPublicKey, agentPrivateKeyEncryptedV3 }).where(eq(wallets.address, address));
     });
+    }, [agentPublicKey]);
   }
 
   async updateWalletAgentKeyV3(address: string, agentPrivateKeyEncryptedV3: string): Promise<void> {
+    const original = await this.getWallet(address);
+    return closeIntentStore.withOwnerLifecycle(address, original?.agentPublicKey, async () => {
     return walletWrite(pool, [address], async (tx, poolId) => {
       await tx.update(wallets).set({
         agentPrivateKeyEncryptedV3
       }).where(eq(wallets.address, address));
     }, {});
+    });
   }
 
   // --- QuantumLab AI Strategy Creator (Task 187): BYO LLM key (V3-encrypted) ---
@@ -1541,8 +1552,13 @@ export class DatabaseStorage implements IStorage {
 
   async updateWallet(address: string, updates: Partial<InsertWallet>): Promise<Wallet | undefined> {
     rejectUnfencedAuthority(updates);
-    const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
-    return result[0];
+    const original = await this.getWallet(address);
+    const changesIdentity = ['agentPublicKey','agentPrivateKeyEncrypted','agentPrivateKeyEncryptedV3'].some(key => key in updates);
+    const work = async () => {
+      const result = await db.update(wallets).set(updates).where(eq(wallets.address, address)).returning();
+      return result[0];
+    };
+    return changesIdentity ? closeIntentStore.withOwnerLifecycle(address, original?.agentPublicKey, work, [updates.agentPublicKey]) : work();
   }
 
   /**
@@ -1556,6 +1572,8 @@ export class DatabaseStorage implements IStorage {
   async finalizeAgentWalletReset(
     p: AgentWalletResetReplacement,
   ): Promise<AgentWalletResetFinalizeOutcome> {
+    const original = await this.getWallet(p.walletAddress);
+    return closeIntentStore.withOwnerLifecycle(p.walletAddress, original?.agentPublicKey, async () => {
     return walletWrite<AgentWalletResetFinalizeOutcome>(pool, [p.walletAddress], async (tx) => {
       const lockResult = await tx.execute(sql`
         SELECT pg_try_advisory_xact_lock(
@@ -1675,6 +1693,7 @@ export class DatabaseStorage implements IStorage {
       if (error instanceof Error && error.message === "GRID_WALLET_BUSY") return { outcome: "busy" } as const;
       throw error;
     });
+    }, [p.newAgentPublicKey]);
   }
 
   // Atomically union `indices` into wallets.recovered_orphan_indices. Computed
@@ -1838,6 +1857,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async assignProtocolSubaccountId(botId: string, protocolSubaccountId: string, protocol: string): Promise<void> {
+    const closeIdentity = await this.getTradingBotById(botId);
+    return closeIntentStore.withBotLifecycle(botId, [protocol === 'pacifica' ? protocolSubaccountId : undefined], async () => {
     // Deprecated compatibility seam only. New production flows must use the
     // coordinated reservation lifecycle before creating durable linkage.
     await db.update(tradingBots)
@@ -1847,9 +1868,12 @@ export class DatabaseStorage implements IStorage {
         updatedAt: sql`NOW()`,
       } as any)
       .where(eq(tradingBots.id, botId));
+    });
   }
 
   async clearProtocolSubaccount(botId: string): Promise<void> {
+    const closeIdentity = await this.getTradingBotById(botId);
+    return closeIntentStore.withBotLifecycle(botId, [], async () => {
     // Group D item 18 (April 17, 2026): activeProtocol is now NOT NULL with a CHECK
     // constraint (see shared/schema.ts and server/db.ts). The protocol tag is a
     // permanent property of the bot — it records which adapter created the bot,
@@ -1862,6 +1886,7 @@ export class DatabaseStorage implements IStorage {
         updatedAt: sql`NOW()`,
       } as any)
       .where(eq(tradingBots.id, botId));
+    });
   }
 
   async findBotByProtocolSubaccount(walletAddress: string, protocolSubaccountId: string, protocol?: string): Promise<TradingBot | undefined> {
@@ -1897,6 +1922,8 @@ export class DatabaseStorage implements IStorage {
     derivationIndex?: number | null;
     derivationPathVersion?: number | null;
   }): Promise<void> {
+
+    return closeIntentStore.withLifecycle(params.protocol === 'pacifica' ? params.protocolSubaccountId : undefined, async () => {
     return walletWrite(pool, [params.walletAddress], async (tx, poolId) => {
       await tx.insert(protocolSubaccounts)
         .values({
@@ -1933,6 +1960,7 @@ export class DatabaseStorage implements IStorage {
           } as any,
         });
     }, { identity: { protocol: params.protocol, protocolSubaccountId: params.protocolSubaccountId, insert: true } });
+    });
   }
 
   async markSubaccountStuckFunds(params: {
@@ -2164,6 +2192,8 @@ export class DatabaseStorage implements IStorage {
     botId: string;
     terminalSubaccountStatus: "active" | "error";
   }): Promise<boolean> {
+
+    return closeIntentStore.withLifecycle(params.protocol === 'pacifica' ? params.protocolSubaccountId : undefined, async () => {
     return db.transaction(async (tx) => {
       const result = await tx.update(protocolSubaccounts)
         .set({
@@ -2222,6 +2252,7 @@ export class DatabaseStorage implements IStorage {
       }
       return true;
     });
+    });
   }
 
   async releaseReservationToSpare(params: {
@@ -2229,6 +2260,8 @@ export class DatabaseStorage implements IStorage {
     protocolSubaccountId: string;
     claimToken: string;
   }): Promise<boolean> {
+
+    return closeIntentStore.withLifecycle(params.protocol === 'pacifica' ? params.protocolSubaccountId : undefined, async () => {
     const conditions = [
       eq(protocolSubaccounts.protocol, params.protocol),
       eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
@@ -2248,6 +2281,7 @@ export class DatabaseStorage implements IStorage {
       .where(and(...conditions))
       .returning({ id: protocolSubaccounts.id });
     return result.length > 0;
+    });
   }
 
   async deleteReservedSubaccount(params: {
@@ -2255,6 +2289,8 @@ export class DatabaseStorage implements IStorage {
     protocolSubaccountId: string;
     claimToken: string;
   }): Promise<boolean> {
+
+    return closeIntentStore.withLifecycle(params.protocol === 'pacifica' ? params.protocolSubaccountId : undefined, async () => {
     const result = await db.delete(protocolSubaccounts).where(and(
       eq(protocolSubaccounts.protocol, params.protocol),
       eq(protocolSubaccounts.protocolSubaccountId, params.protocolSubaccountId),
@@ -2262,6 +2298,7 @@ export class DatabaseStorage implements IStorage {
       eq(protocolSubaccounts.claimToken, params.claimToken),
     )).returning({ id: protocolSubaccounts.id });
     return result.length > 0;
+    });
   }
 
   async findExpiredReservations(ttlMs: number): Promise<ProtocolSubaccount[]> {
@@ -2289,9 +2326,11 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createTradingBot(bot: InsertTradingBot, labResultId?: number): Promise<TradingBot> {
-    if (labResultId !== undefined) return createLabLinkedBot(bot, labResultId);
-    const result = await db.insert(tradingBots).values(bot as any).returning();
-    return result[0];
+    return closeIntentStore.withLifecycle(bot.activeProtocol === 'pacifica' ? bot.protocolSubaccountId ?? (await this.getWallet(bot.walletAddress))?.agentPublicKey : undefined, async () => {
+      if (labResultId !== undefined) return createLabLinkedBot(bot, labResultId);
+      const result = await db.insert(tradingBots).values(bot as any).returning();
+      return result[0];
+    });
   }
 
   async createAgentAuthorityTradingBot(params: {
@@ -2302,7 +2341,7 @@ export class DatabaseStorage implements IStorage {
     if ((params.bot as { walletAddress?: unknown }).walletAddress !== params.walletAddress) {
       throw new Error("agent-authority bot wallet identity mismatch");
     }
-    return db.transaction(async (tx) => {
+    return closeIntentStore.withLifecycle(params.bot.activeProtocol === 'pacifica' ? params.observedAgentPublicKey : undefined, () => db.transaction(async (tx) => {
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
           ${AGENT_WALLET_RESET_LOCK_NAMESPACE},
@@ -2318,7 +2357,7 @@ export class DatabaseStorage implements IStorage {
       }
       const [bot] = await tx.insert(tradingBots).values(params.bot as any).returning();
       return { outcome: "created", bot } as const;
-    });
+    }));
   }
 
   // Phase 4b (Flash agent-HD wallets): single-statement atomic allocator. The
@@ -2340,8 +2379,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateTradingBot(id: string, updates: Partial<InsertTradingBot>): Promise<TradingBot | undefined> {
+    const closeIdentity = await this.getTradingBotById(id);
+    const changesIdentity = ['activeProtocol','protocolSubaccountId','subaccountAuthMode','botSubaccountKeyEncrypted','botSubaccountKeyEncryptedV3','driftSubaccountId','subaccountStatus'].some(key => key in updates);
+    return (changesIdentity ? (work: () => Promise<TradingBot | undefined>) => closeIntentStore.withBotLifecycle(id, [(updates.activeProtocol ?? closeIdentity?.activeProtocol) === 'pacifica' ? updates.protocolSubaccountId : undefined], work) : (work: () => Promise<TradingBot | undefined>) => work())(async () => {
     const result = await db.update(tradingBots).set({ ...updates, updatedAt: sql`NOW()` } as any).where(eq(tradingBots.id, id)).returning();
     return result[0];
+    });
   }
 
   async scheduleBotAutoParkDueAt(id: string, dueAt: Date): Promise<void> {
@@ -2376,17 +2419,25 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateBotSubaccountKeyV3(id: string, encryptedV3: string): Promise<void> {
+    const closeIdentity = await this.getTradingBotById(id);
+    return closeIntentStore.withBotLifecycle(id, [], async () => {
     await db
       .update(tradingBots)
       .set({ botSubaccountKeyEncryptedV3: encryptedV3, updatedAt: sql`NOW()` })
       .where(eq(tradingBots.id, id));
+    });
   }
 
   async clearTradingBotSubaccount(id: string): Promise<void> {
+    const closeIdentity = await this.getTradingBotById(id);
+    return closeIntentStore.withBotLifecycle(id, [], async () => {
     await db.update(tradingBots).set({ driftSubaccountId: null, updatedAt: sql`NOW()` }).where(eq(tradingBots.id, id));
+    });
   }
 
   async deleteTradingBot(id: string): Promise<void> {
+    const closeIdentity = await this.getTradingBotById(id);
+    return closeIntentStore.withBotLifecycle(id, [], async () => {
     if ((await this.getTradingBotById(id))?.activeProtocol === 'phoenix') throw new Error('Phoenix recovery identity must be archived and retained');
     const obligations = await db.select({ id: pendingProfitShares.id })
       .from(pendingProfitShares)
@@ -2402,6 +2453,7 @@ export class DatabaseStorage implements IStorage {
     }
     await this.snapshotBotStatsBeforeDeletion(id);
     await db.delete(tradingBots).where(eq(tradingBots.id, id));
+    });
   }
 
   async updateTradingBotStats(id: string, stats: TradingBot['stats']): Promise<void> {
@@ -2613,7 +2665,7 @@ export class DatabaseStorage implements IStorage {
       walletAddress: string;
       market: string;
     };
-  }): Promise<{ trade?: BotTrade; isNew: boolean }> {
+  }, transactionClient?: any): Promise<{ trade?: BotTrade; isNew: boolean }> {
     const confirmedTransitions = [
       opts.confirmedPositionClose,
       opts.confirmedPositionReduction,
@@ -2657,7 +2709,7 @@ export class DatabaseStorage implements IStorage {
         opts = { ...opts, insert: { ...opts.insert, protocol: ownerBot.activeProtocol } };
       }
     }
-    return await db.transaction(async (tx) => {
+    const persist = async (tx: any): Promise<{ trade?: BotTrade; isNew: boolean }> => {
       let trade: BotTrade | undefined;
       let isNew = true;
       const persistConfirmedPositionClose = async (): Promise<void> => {
@@ -2917,7 +2969,12 @@ export class DatabaseStorage implements IStorage {
         await persistSupersededPendingPartial();
       }
       return { trade, isNew };
-    });
+    };
+    if (transactionClient) return persist(closeIntentDrizzle(transactionClient));
+    const canonical = opts.confirmedPositionClose || opts.confirmedPositionReduction || opts.confirmedPositionCloseIncomplete;
+    if (canonical && opts.update) return closeIntentStore.completeLinked(opts.update.tradeId,
+      client => client ? persist(closeIntentDrizzle(client)) : db.transaction(persist));
+    return db.transaction(persist);
   }
 
   /**

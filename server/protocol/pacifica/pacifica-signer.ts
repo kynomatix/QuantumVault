@@ -51,8 +51,9 @@ export class PacificaSigner {
     operationType: string,
     operationData: Record<string, unknown>,
     expiryWindow: number = DEFAULT_EXPIRY_WINDOW,
+    timestamp: number = Date.now(),
   ): SignResult {
-    const timestamp = Date.now();
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0 || !Number.isSafeInteger(expiryWindow) || expiryWindow <= 0) throw new Error('invalid_admitted_signing_header');
 
     const signingMessage = {
       timestamp,
@@ -86,6 +87,7 @@ export class PacificaSigner {
     mainWalletAddress: string,
     agentPublicKey: string | null,
     expiryWindow: number = DEFAULT_EXPIRY_WINDOW,
+    admittedTimestamp?: number,
   ): PacificaRequestBody {
     for (const key of Object.keys(operationData)) {
       if (RESERVED_FIELDS.has(key)) {
@@ -100,6 +102,7 @@ export class PacificaSigner {
       operationType,
       operationData,
       expiryWindow,
+      admittedTimestamp,
     );
 
     const body: PacificaRequestBody = {

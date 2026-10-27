@@ -358,7 +358,7 @@ describe('Round 2 mark and exit settlements', () => {
     const a = subject(); a.getStrictPositionForMarket = vi.fn(async () => { throw new Error('outage'); });
     a.getExitStep = vi.fn(async () => 0.1);
     expect(await a.prepareReduction({ ...intent, side: 'short', sizeBase: 0.25, reductionContext: evidence() }, false))
-      .toEqual({ ok: true, size: 0.3, tick: null });
+      .toEqual({ ok: true, size: 0.3, sizeExact: '0.3', tick: null });
   });
 
   it('submits a fallback reduction above its retained observation under venue reduce-only enforcement', async () => {

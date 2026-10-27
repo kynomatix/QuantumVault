@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import ts from "typescript";
+import { SIGNAL_CLOSE_INTENT_DDL, SIGNAL_CLOSE_INTENT_REQUIREMENTS } from "../../server/signal-bot-close-intent-schema";
 import type { SchemaMigrationDefinition } from "../../server/schema-readiness";
 
 // Read the runtime manifest without importing db.ts and starting a database pool.
@@ -29,12 +30,13 @@ export function readDbSchemaMigrationManifest(): {
   visit(source);
   if (!sqlArray || !metadataArray) throw new Error("schema migration arrays missing from server/schema-migration-manifest.ts");
   const sqlEntries = sqlArray.elements.map((element) => {
+    if (ts.isIdentifier(element) && element.text === "SIGNAL_CLOSE_INTENT_DDL") return SIGNAL_CLOSE_INTENT_DDL;
     if (!ts.isNoSubstitutionTemplateLiteral(element) && !ts.isStringLiteral(element)) {
       throw new Error("schemaMigrationSql contains a non-literal entry");
     }
     return element.text;
   });
-  const metadata = JSON.parse(metadataArray.getText(source)) as Array<Omit<SchemaMigrationDefinition, "sql">>;
+  const metadata = JSON.parse(metadataArray.getText(source).replace(/SIGNAL_CLOSE_INTENT_REQUIREMENTS/g, () => JSON.stringify(SIGNAL_CLOSE_INTENT_REQUIREMENTS))) as Array<Omit<SchemaMigrationDefinition, "sql">>;
   return {
     sqlEntries,
     metadata,

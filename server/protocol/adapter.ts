@@ -634,6 +634,11 @@ export interface PublicReadAdapter<TMarkets, TCapabilities> {
 }
 
 export interface ProtocolAdapter {
+  getCloseEnvironment?(): string;
+  prepareReduceOnlyMarketOrder?(params: MarketOrderParams): Promise<import('../trading/signal-bot-close-intent-types').PreparedReduceOnlyMarketOrder>;
+  sendPreparedReduceOnlyMarketOrder?(prepared: import('../trading/signal-bot-close-intent-types').PreparedReduceOnlyMarketOrder, attempt: import('../trading/signal-bot-close-intent-types').CloseAttempt, secretKey: Uint8Array): Promise<import('../trading/signal-bot-close-intent-types').CloseSendOutcome>;
+  getCloseOpenOrders?(account: string): Promise<import('../trading/signal-bot-close-intent-types').StrictCloseOpenOrders>;
+
   getCloseConfirmationSnapshot?(account: string, subaccountId?: string): Promise<import('./close-outcome.js').CloseSnapshot>;
   readonly protocolName: string;
   readonly protocolVersion: string;

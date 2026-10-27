@@ -4,6 +4,7 @@ export const SCHEMA_CAPABILITIES = [
   "lab",
   "lab_scanner",
   "signal_bot",
+  "signal_bot_close_intent",
   "referrals",
   "portfolio",
   "notifications",
@@ -63,6 +64,7 @@ export type SchemaRequirement =
       readonly columns: readonly string[];
       readonly unique: boolean;
       readonly predicateIncludes?: readonly string[];
+      readonly predicateEquals?: string;
     }
   | {
       readonly kind: "data";
@@ -214,7 +216,8 @@ async function verifyRequirement(
       if (!requirement.columns.every((column, index) =>
         actualColumns[index] === normalizeDefinition(column),
       )) return false;
-      return includesAll(row.predicate, requirement.predicateIncludes);
+      return includesAll(row.predicate, requirement.predicateIncludes)
+        && (requirement.predicateEquals === undefined || normalizeDefinition(row.predicate) === normalizeDefinition(requirement.predicateEquals));
     }
     case "data": {
       const result = await query(requirement.checkSql);

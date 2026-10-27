@@ -226,6 +226,7 @@ interface BotTrade {
   fee?: string | null;
   status: string;
   errorMessage?: string | null;
+  closeStatusMessage?: string | null;
   executionMethod?: string | null;
   executedAt: string;
   webhookPayload?: {
@@ -409,6 +410,7 @@ export function BotManagementDrawer({
   const [userWebhookSecret, setUserWebhookSecret] = useState<string | null>(null);
   const [webhookUrlLoading, setWebhookUrlLoading] = useState(false);
   const [dataPartial, setDataPartial] = useState(false);
+  const [closeStatus, setCloseStatus] = useState<{ message: string; unresolved: boolean } | null>(null);
   const [botPosition, setBotPosition] = useState<BotPosition | null>(null);
   const [positionLoading, setPositionLoading] = useState(false);
   const [hasPositionLoaded, setHasPositionLoaded] = useState(false);
@@ -572,6 +574,8 @@ export function BotManagementDrawer({
         setHasBalanceLoaded(true);
         
         // Position data
+        setCloseStatus(data.closeStatus ?? null);
+        if (data.closeStatus && !data.closeStatus.unresolved && localBot) sessionStorage.removeItem(`close-request:${localBot.id}`);
         if (data.position) {
           setBotPosition(data.position);
         }
@@ -1040,6 +1044,9 @@ export function BotManagementDrawer({
       console.log('[ClosePosition] No localBot, returning early');
       return;
     }
+    const requestKey = `close-request:${localBot.id}`;
+    const closeRequestId = sessionStorage.getItem(requestKey) ?? crypto.randomUUID();
+    sessionStorage.setItem(requestKey, closeRequestId);
     setClosePositionLoading(true);
     console.log('[ClosePosition] Making fetch request to:', `/api/trading-bots/${localBot.id}/close-position?wallet=${walletAddress}`);
     try {
@@ -1047,22 +1054,22 @@ export function BotManagementDrawer({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
+        body: JSON.stringify({ closeRequestId }),
       });
 
       const data = await safeResponseJson(res);
 
       if (!res.ok) {
-        throw new Error(data.error || 'Failed to close position');
+        throw new Error(data.error || "We couldn't save your close request. Please try again.");
       }
 
-      toast({
-        title: res.status === 202 || data.status === 'pending' ? 'Close sent, confirming' : 'Position closed',
-        description: res.status === 202 || data.status === 'pending'
-          ? 'Confirmation is pending. No additional close has been sent.'
-          : data.fillPrice == null ? 'Exposure closed. Accounting is unavailable.'
-            : `Closed ${data.closedSize?.toFixed(4)} ${localBot.market} @ $${data.fillPrice.toFixed(2)}`,
-      });
-      
+      const pending = res.status === 202 || data.status === 'pending';
+      const message = pending ? 'Close not confirmed yet; we keep checking.'
+        : data.message ?? (data.fillPrice == null ? 'Position closed. Accounting is unavailable.' : 'Position closed.');
+      setCloseStatus({ message, unresolved: pending });
+      if (!pending) sessionStorage.removeItem(requestKey);
+      if (!pending) toast({ title: message });
+
       // Refresh position and balance data
       setTimeout(() => fetchBotOverview(), 1500);
       
@@ -2107,11 +2114,12 @@ export function BotManagementDrawer({
                     </div>
                   )}
 
+                  {closeStatus && <p className="text-sm text-muted-foreground" role="status" data-testid="close-intent-status">{closeStatus.message}</p>}
                   <Button
                     variant="destructive"
                     size="sm"
                     onClick={handleClosePosition}
-                    disabled={closePositionLoading}
+                    disabled={closePositionLoading || closeStatus?.unresolved}
                     className="w-full"
                     data-testid="button-close-position"
                   >
@@ -2131,6 +2139,7 @@ export function BotManagementDrawer({
               ) : (
                 <div className="text-center py-4 text-muted-foreground">
                   <p className="text-sm">No open position</p>
+                  {closeStatus && <p role="status" data-testid="close-intent-status">{closeStatus.message}</p>}
                   <p className="text-xs mt-1">Position will appear when bot executes a trade</p>
                 </div>
               )}
@@ -2788,7 +2797,8 @@ export function BotManagementDrawer({
                                 {trade.errorMessage}
                               </p>
                             )}
-                            {isFailed && !isLiquidated && trade.errorMessage && (
+                            {trade.closeStatusMessage && <p className="text-xs text-amber-400 mt-0.5" data-testid={`close-status-${trade.id}`}>{trade.closeStatusMessage}</p>}
+                            {isFailed && !isLiquidated && !trade.closeStatusMessage && trade.errorMessage && (
                               <p className="text-xs text-red-400 mt-0.5">
                                 {getErrorExplanation(trade.errorMessage)}
                               </p>

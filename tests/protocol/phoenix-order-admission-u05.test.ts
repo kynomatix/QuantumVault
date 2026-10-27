@@ -10,13 +10,13 @@ import { authority, intent, now, key, pin, lifetime } from '../helpers/phoenix-o
 const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order-route-baseline.json', 'utf8')) as {
   baseCommitHash: string; routeSha256: Record<string, string>;
 };
-// Reviewed close-truth repair (commitHash: df61a316) adds strict completion,
-// original-order fill attribution and pending/null accounting to both webhooks.
+// B1 reviewed scope adds durable original-account close admission, partial
+// completion and open fencing to both incumbent webhook routes.
 // Phoenix boundaries and incumbent entry policy remain pinned below.
 incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
-  'sha256:3ec45060c762806e5e490b0914352e7b66fcbb6db5cb413b24fa562ad78ea45e';
+  'sha256:6515c08f5a4031a4c39a2982f6a68c5cf3ba697ef2ce0e8ece0726377004cc49';
 incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
-  'sha256:d7eb9db318d6b6999a26794561438b616a378795f1f9a6b87d74e60b42bda578';
+  'sha256:0417edeac520f9fbce5c8c5cd835e97a8b3415d4ea1b7361bcd7c3aaaeda6110';
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {

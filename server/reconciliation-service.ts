@@ -1,3 +1,4 @@
+import { closeIntentStore } from './trading/close-intent-store';
 import { readCloseSnapshot, qualifiedFlatObservation, type CloseSnapshot } from './protocol/close-outcome';
 import { recoverSubscriberCloseEvidence } from './trading/subscriber-close-recovery';
 import { startJobTiming } from "./job-timing";
@@ -17,6 +18,7 @@ import {
 } from "./trading/signal-bot-close-integrity";
 
 export interface RecoveredCloseRoutingSignal {
+  originId?: string;
   action: 'buy' | 'sell';
   contracts: string;
   positionSize: string;
@@ -902,6 +904,9 @@ export async function syncPositionFromOnChain(
     const normalizedMarket = normalizeMarket(market);
     let onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
 
+    if (await closeIntentStore.hasUnresolvedPosition(botId, market)) {
+      return { success: false, error: 'prior_close_confirmation_pending' };
+    }
     const dbPosition = await storage.getBotPosition(botId, market);
     const existingRealizedPnl = dbPosition ? parseFloat(dbPosition.realizedPnl) : 0;
     const existingFees = dbPosition ? parseFloat(dbPosition.totalFees) : 0;
@@ -1391,7 +1396,7 @@ async function bookPartialReduction(opts: {
       routingReason = 'recovered_close_routing_callback_unregistered';
     } else {
       try {
-        await recoveredCloseRoutingCallback(botId, routingSignal);
+        await recoveredCloseRoutingCallback(botId, { ...routingSignal, originId: `recovered:${pendingPartial.id}` });
         externalEffectsRouted = true;
       } catch (error) {
         routingReason = error instanceof Error ? error.message : String(error);
@@ -1526,6 +1531,9 @@ export async function reconcileBotPosition(
       return { synced: false, discrepancy: false };
     }
     const onChainPos = fetchResult.positions.find(p => normalizeMarket(p.market) === normalizedMarket);
+    if (await closeIntentStore.hasUnresolvedPosition(botId, market)) {
+      return { synced: false, discrepancy: true };
+    }
     const dbPosition = await storage.getBotPosition(botId, market);
     
     const dbBaseSize = dbPosition ? parseFloat(dbPosition.baseSize) : 0;
@@ -1591,6 +1599,11 @@ export async function reconcileBotPosition(
           nowMs: Date.now(),
         });
 
+        if (pendingPartialFullClose.kind === 'eligible' && await closeIntentStore.hasUnresolvedTrade(pendingPartialFullClose.trade.id)) {
+          // A full-flat result does not prove this intent's exact partial objective.
+          // Its retained row is settled by the expiry worker, never superseded here.
+          return { synced: false, discrepancy: true };
+        }
         if (pendingPartialFullClose.kind !== 'none') {
           const fillBackedMoneyValid = pendingPartialFullClose.kind === 'eligible'
             && Boolean(closeDetection.protocolFillId)
@@ -1701,7 +1714,7 @@ export async function reconcileBotPosition(
             else if (!recoveredCloseRoutingCallback) routingReason = 'recovered_close_routing_callback_unregistered';
             else {
               try {
-                await recoveredCloseRoutingCallback(botId, routingSignal);
+                await recoveredCloseRoutingCallback(botId, { ...routingSignal, originId: `recovered:${pendingPartialFullClose.trade.id}` });
                 routed = true;
               } catch (error) {
                 routingReason = error instanceof Error ? error.message : String(error);

@@ -1,3 +1,5 @@
+import type { PreparedReduceOnlyMarketOrder, CloseAttempt, CloseSendOutcome, StrictCloseOpenOrders } from '../../trading/signal-bot-close-intent-types';
+import { classifyCloseFetchFailure } from './close-send-outcome';
 import { CLOSE_QUEUE_WAIT_MS, CLOSE_TOTAL_WAIT_MS, closeSnapshotTimingError } from '../close-outcome.js';
 import {verifyMainSend} from '../../grid-worker/main-quota-guard';
 import {mainGridQuotaRequest} from '../../grid-worker/main-quota-scope';
@@ -1029,9 +1031,9 @@ export class PacificaAdapter implements ProtocolAdapter {
   }
 
   private async prepareReduction(
-    params: Pick<MarketOrderParams, 'agentPublicKey' | 'internalSymbol' | 'side' | 'sizeBase' | 'subaccountId' | 'reductionContext'>,
+    params: Pick<MarketOrderParams, 'agentPublicKey' | 'internalSymbol' | 'side' | 'sizeBase' | 'sizeBaseExact' | 'subaccountId' | 'reductionContext'>,
     needsTick: boolean,
-  ): Promise<{ ok: true; size: number; tick: number | null } | { ok: false; rejection: Extract<ConstraintAdmission, { ok: false }> }> {
+  ): Promise<{ ok: true; size: number; sizeExact: string; tick: number | null } | { ok: false; rejection: Extract<ConstraintAdmission, { ok: false }> }> {
     const denied = (reason: string) => ({ ok: false as const,
       rejection: { ok: false as const, code: 'constraint_unavailable' as const, reason } });
     const resolved = await this.resolveReductionPosition(params);
@@ -1047,7 +1049,8 @@ export class PacificaAdapter implements ProtocolAdapter {
     if (lot === null) return denied(`${params.internalSymbol}: reduction lot unavailable after fresh /info and saved observation`);
     const tick = needsTick ? await this.getExitStep(params.internalSymbol, 'tick') : null;
     if (needsTick && tick === null) return denied(`${params.internalSymbol}: reduction tick unavailable after fresh /info and saved observation`);
-    const rounded = new Decimal(String(params.sizeBase)).div(String(lot)).ceil().mul(String(lot)).toNumber();
+    const roundedExact = new Decimal(params.sizeBaseExact ?? String(params.sizeBase)).div(String(lot)).ceil().mul(String(lot));
+    const rounded = roundedExact.toNumber();
     // Ordinary reductions round up; only a strict read establishes a position cap.
     // A full close constructed from fallback evidence has its own request limit.
     const positionCap = resolved.current === true ? Math.abs(positionSize) : Infinity;
@@ -1061,7 +1064,10 @@ export class PacificaAdapter implements ProtocolAdapter {
         || size > cap) {
       return denied(`${params.internalSymbol}: quantized reduction would exceed position bound`);
     }
-    return { ok: true, size, tick };
+    const strictCap = resolved.current === true && position?.sizeBaseExact
+      ? new Decimal(position.sizeBaseExact).abs() : new Decimal(String(cap));
+    const sizeExact = Decimal.min(roundedExact, strictCap).toFixed();
+    return { ok: true, size: Number(sizeExact), sizeExact, tick };
   }
 
   private async preflightOpeningOrder(
@@ -1592,6 +1598,69 @@ export class PacificaAdapter implements ProtocolAdapter {
     return result;
   }
 
+  getCloseEnvironment(): string { return this.config.baseUrl; }
+
+  /** All mutable preparation happens before storage admits the unsigned request. */
+  async prepareReduceOnlyMarketOrder(params: MarketOrderParams): Promise<PreparedReduceOnlyMarketOrder> {
+    if (!params.reduceOnly || !params.clientOrderId || params.subaccountId !== undefined)
+      throw new Error('invalid_close_intent_parameters');
+    const reduction = await this.prepareReduction(params, false);
+    if (!reduction.ok) throw new Error(reduction.rejection.reason);
+    const enrollment = await this.ensurePacificaEnrollment(params.agentPublicKey, params.agentSecretKey);
+    const builderCode = params.builderAttachment?.mode === 'attach' ? params.builderAttachment.code
+      : params.builderAttachment?.mode === 'suppress' ? undefined
+      : params.builderCode ?? (enrollment.builderApproved ? this.config.builderCode : undefined);
+    const operationData: PreparedReduceOnlyMarketOrder['operationData'] = {
+      symbol: this.getRegistry().internalToProtocol(params.internalSymbol),
+      amount: reduction.sizeExact, side: mapToProtocolSide(params.side), reduce_only: true,
+      slippage_percent: String(params.maxSlippagePct ?? 0.5), client_order_id: params.clientOrderId,
+      ...(builderCode ? { builder_code: builderCode } : {}),
+    };
+    return Object.freeze({ account: params.agentPublicKey, environment: this.config.baseUrl,
+      market: params.internalSymbol, operationData: Object.freeze(operationData) });
+  }
+
+  /** Exactly one fetch; no enrollment, reads, wrapper retries, or replacement headers. */
+  async sendPreparedReduceOnlyMarketOrder(prepared: PreparedReduceOnlyMarketOrder,
+    attempt: CloseAttempt, secretKey: Uint8Array): Promise<CloseSendOutcome> {
+    const path = '/orders/create_market';
+    let body: string;
+    try {
+      if (prepared.environment !== this.config.baseUrl || !prepared.account
+        || prepared.operationData.reduce_only !== true || !Number.isSafeInteger(attempt.timestamp)
+        || !Number.isSafeInteger(attempt.expiry_window) || attempt.expiry_window <= 0)
+        throw new Error('invalid_admitted_close');
+      body = JSON.stringify(new PacificaSigner(secretKey).buildRequestBody(OPERATION_TYPES.CREATE_MARKET_ORDER,
+        { ...prepared.operationData }, prepared.account, null, attempt.expiry_window, attempt.timestamp));
+    } catch {
+      return { kind: 'not_entered', cause: 'close_construction_or_signing_failed' };
+    }
+    if (!pacificaQuota.canAfford(path, 'critical')) return { kind: 'not_entered', cause: 'close_quota_refused_before_dispatch' };
+    let response: Response;
+    try {
+      response = await this.fetchBounded(`${this.config.baseUrl}${path}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+      }, 5_000, 6_000, 'admitted close', true);
+    } catch (error) { return classifyCloseFetchFailure(error); }
+    finally { pacificaQuota.record(path); }
+    // HTTP status, including 429 and every 4xx, never proves non-entry.
+    if (!response.ok) return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_http_unresolved' };
+    try {
+      const envelope = await this.readBodyBounded(response.json(), 5_000, 'admitted close body');
+      const result = this.mapOrderResponse(this.unwrapEnvelope(envelope), prepared.operationData.client_order_id);
+      if (result.success && result.orderId) return { kind: 'acknowledged', orderId: result.orderId, httpStatus: response.status };
+      return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_response_unresolved' };
+    } catch { return { kind: 'ambiguous', httpStatus: response.status, cause: 'close_body_unresolved' }; }
+  }
+
+  async getCloseOpenOrders(account: string): Promise<StrictCloseOpenOrders> {
+    const inventory = await this.cancelInventory(account);
+    return { account, environment: this.config.baseUrl, dispatchedAt: inventory.evidence.dispatchedAt!,
+      receivedAt: inventory.evidence.receivedAt, complete: true, fresh: true, noDedup: true,
+      lastOrderId: inventory.evidence.lastOrderId!,
+      orders: inventory.rows.map(row => ({ market: row.symbol, orderType: row.orderType })) };
+  }
+
   async placeMarketOrder(params: MarketOrderParams): Promise<OrderResult> {
     const completedEffects: string[] = [];
     const openingAmount = String(params.sizeBase);
@@ -1691,7 +1760,7 @@ export class PacificaAdapter implements ProtocolAdapter {
 
     const slippagePct = params.maxSlippagePct ?? 0.5;
     const isReduceOnly = params.reduceOnly ?? false;
-    const signedAmount = reduction && reduction.ok ? String(reduction.size) : openingAmount;
+    const signedAmount = reduction && reduction.ok ? reduction.sizeExact : openingAmount;
     if (Number(signedAmount) <= 0) {
       throw new Error(`Order size ${params.sizeBase} rounds to zero for ${params.internalSymbol} (lot size too large)`);
     }
@@ -1869,6 +1938,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     const requestId = randomUUID();
     let envelope: unknown;
     let receivedAt: number;
+    let venueClockMs: number | undefined;
     let expired = false;
     // Log only a fixed field allowlist's presence and JS types, never venue values.
     const paginationFields = ['has_more', 'next_cursor', 'cursor', 'next_page', 'pagination', 'truncated', 'limit', 'offset'];
@@ -1899,6 +1969,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     try {
       envelope = await Promise.race([this.get('/positions', { account }, {
         cachePolicy: 'fresh-required', responseShape: 'envelope', noDedup: true,
+        onResponse: response => { const raw = response.headers?.get('date'); const value = raw ? Date.parse(raw) : NaN; if (Number.isFinite(value)) venueClockMs = value; },
         priority: 'critical', onDispatch: () => {
           // Refuse a late wake from the quota queue before any HTTP request.
           if (expired) throw new Error('invalid_close_envelope:total_timeout');
@@ -1958,6 +2029,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       // Entry/mark are context only. Flatness depends exclusively on the validated amount.
       const entryPrice = Number(row.entry_price);
       return { internalSymbol: symbol.internal, baseSize: (row.side === 'ask' ? -1 : 1) * Number(row.amount),
+        sizeBaseExact: (row.side === 'ask' && Number(row.amount) !== 0 ? '-' : '') + row.amount,
         entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : 0,
         markPrice: null, unrealizedPnl: null, leverage: 1, liquidationPrice: null, marginMode: 'cross' };
     });
@@ -1965,7 +2037,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     // remain valid until this account accepts its first numeric watermark.
     if (watermark !== null) this.closeWatermarks.set(account, watermark);
     return { positions, evidence: { account, environment: this.config.baseUrl, requestId, startedAt,
-      dispatchedAt, receivedAt, lastOrderId: watermark, complete: true, fresh: true, noDedup: true } };
+      dispatchedAt, receivedAt, venueClockMs, lastOrderId: watermark, complete: true, fresh: true, noDedup: true } };
   }
 
   /** Documented account inventory; no alias, cache fallback, or shared request. */
@@ -4141,6 +4213,7 @@ export class PacificaAdapter implements ProtocolAdapter {
     return {
       internalSymbol,
       baseSize: size,
+      sizeBaseExact: (p.side === 'ask' && rawAmount !== 0 ? '-' : '') + amount,
       entryPrice,
       markPrice,
       unrealizedPnl,
@@ -4467,6 +4540,7 @@ export class PacificaAdapter implements ProtocolAdapter {
       responseShape?: 'data' | 'envelope';
       noDedup?: boolean;
       onDispatch?: () => void;
+      onResponse?: (response: Response) => void;
       caller?: string;
     },
   ): Promise<any> {
@@ -4560,6 +4634,7 @@ export class PacificaAdapter implements ProtocolAdapter {
         pacificaQuota.record(path, undefined, caller);
       }
 
+      options?.onResponse?.(response);
       if (!response.ok) {
         // Graceful fallback on rate-limit: serve stale cache if any.
         if (response.status === 429 && !freshRequired) {

@@ -10,7 +10,7 @@ import type { ProtocolAdapter } from '../../server/protocol/adapter';
 import type { CloseSnapshot } from '../../server/protocol/close-outcome';
 
 const holder = vi.hoisted(() => ({ db: undefined as NodePgDatabase | undefined }));
-vi.mock('../../server/db', () => ({ db: new Proxy({}, {
+vi.mock('../../server/db', () => ({ pool: {}, db: new Proxy({}, {
   get(_target, name) {
     if (!holder.db) throw new Error('test database unavailable');
     const member = Reflect.get(holder.db, name);

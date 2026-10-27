@@ -38,6 +38,8 @@ export interface PacificaReductionContext {
 }
 
 export interface ProtocolPosition {
+  /** Exact unsigned amount from a validated strict position row. */
+  sizeBaseExact?: string;
   reductionContext?: PacificaReductionContext;
   internalSymbol: string;
   baseSize: number;
@@ -62,6 +64,8 @@ export type BuilderAttachmentPolicy =
   | { mode: 'attach'; code: string };
 
 export interface MarketOrderParams {
+  /** Preserve the admitted decimal through reduction preparation. */
+  sizeBaseExact?: string;
   reductionContext?: PacificaReductionContext;
   agentPublicKey: string;
   agentSecretKey: Uint8Array;

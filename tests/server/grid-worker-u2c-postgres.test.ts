@@ -1,3 +1,4 @@
+import { makeLifecycleFenceFixture } from '../helpers/close-lifecycle-fence';
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from 'vitest';
 import {Pool,type PoolClient} from 'pg';
 import {randomUUID,randomInt,randomBytes} from 'node:crypto';
@@ -19,6 +20,7 @@ import {policy,umk} from '../grid-bot/draft-fixtures';
 import {computeGridPolicyHmac} from '../../server/grid-bot/policy-hmac';
 
 const fixture=vi.hoisted(()=>({pool:undefined as Pool|undefined}));
+vi.mock('../../server/trading/close-intent-store', async () => { const { makeLifecycleFenceFixture } = await import('../helpers/close-lifecycle-fence'); return { closeIntentStore: makeLifecycleFenceFixture() }; });
 vi.mock('../../server/db',()=>({get pool(){return fixture.pool;},get db(){return drizzle(fixture.pool!,{schema:schemaTypes});}}));
 vi.mock('../../server/grid-worker/lanes',async importOriginal=>{
   const original=await importOriginal<typeof import('../../server/grid-worker/lanes')>();

@@ -1,3 +1,4 @@
+import { makeLifecycleFenceFixture } from '../helpers/close-lifecycle-fence';
 import { describe, expect, it } from 'vitest';
 import { Pool } from 'pg';
 import { randomUUID } from 'node:crypto';
@@ -50,7 +51,8 @@ describe('U2c fenced wallet writer result parity with U2a', () => {
             await client.query(readFileSync('migrations/grid_worker_v3_owner.sql', 'utf8').replaceAll('SET search_path = pg_catalog, public', 'SET search_path = pg_catalog, ' + namespace));
           }
           const js = ts.transpileModule('class Writer {\n' + methods(installed ? source : baseline).join('\n') + '\n}; new Writer()', { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } }).outputText;
-          const writer = vm.runInNewContext(js, { ...schema, db: drizzle(client), pool, walletWrite, rejectUnfencedAuthority, sql, eq, and, or, isNull, isNotNull, AGENT_WALLET_RESET_LOCK_NAMESPACE: 927412, assessResetBlockerRows });
+          const writer = vm.runInNewContext(js, { ...schema, db: drizzle(client), pool, walletWrite, rejectUnfencedAuthority, sql, eq, and, or, isNull, isNotNull, AGENT_WALLET_RESET_LOCK_NAMESPACE: 927412, assessResetBlockerRows, closeIntentStore: makeLifecycleFenceFixture() });
+            writer.getWallet = async (address: string) => (await drizzle(client).select().from(schema.wallets).where(eq(schema.wallets.address, address)))[0];
           const outcomes: unknown[] = [];
           outcomes.push(await writer.createWallet({ address: walletAddress, agentPublicKey: 'EXAMPLE_OLD' }));
           if (installed && seeded) {

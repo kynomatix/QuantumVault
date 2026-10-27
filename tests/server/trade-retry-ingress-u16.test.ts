@@ -1,3 +1,4 @@
+vi.mock('../../server/trading/close-intent-store', async () => { const { makeLifecycleFenceFixture } = await import('../helpers/close-lifecycle-fence'); return { closeIntentStore: makeLifecycleFenceFixture() }; });
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks=vi.hoisted(()=>({getTradingBotById:vi.fn(),createTradeRetryJob:vi.fn(),getWallet:vi.fn()}));
 vi.mock('../../server/storage',()=>({storage:mocks,DatabaseStorage:class {}}));

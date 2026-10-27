@@ -10,6 +10,7 @@ export interface CloseObservation {
   receivedAt: number;
   /** Null means an empty inventory with no observed order history, never close proof. */
   lastOrderId: number | null;
+  venueClockMs?: number;
   complete: true;
   fresh: true;
   noDedup: true;
@@ -43,7 +44,7 @@ export function closeSnapshotTimingError(startedAt: number, dispatchedAt: number
   return undefined;
 }
 
-function validSnapshot(snapshot: CloseSnapshot, account: string): boolean {
+export function validSnapshot(snapshot: CloseSnapshot, account: string): boolean {
   const e = snapshot?.evidence;
   return Boolean(e && e.account === account && e.environment && e.requestId
     && e.complete === true && e.fresh === true && e.noDedup === true

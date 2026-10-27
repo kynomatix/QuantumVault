@@ -1,3 +1,4 @@
+import { closeIntentStore } from './trading/close-intent-store';
 import { readCloseSnapshot } from './protocol/close-outcome';
 import { FLASH_RETIRED_MESSAGE } from './protocol/flash-retirement.js';
 import { sendTradeNotification } from "./notification-service";
@@ -7,7 +8,7 @@ import { getMarketBySymbol } from "./market-liquidity-service";
 import { resolveAgentKeypair } from "./agent-wallet";
 import { payGrossCreatorObligation, type ProfitShareObligationInput } from "./profit-share-payment";
 import { PublicKey } from "@solana/web3.js";
-import { getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
+import { getAdapter, getDefaultAdapter, getAdapterForBot } from "./protocol/adapter-registry";
 import {
   placeMarketOrderWithFeeAuthority,
   resolveFeeRateQuote,
@@ -61,7 +62,7 @@ function _mapPositionToDrift(p: { internalSymbol: string; baseSize: number; entr
 async function driftExecutePerpOrder(
   encryptedKey: Uint8Array, market: string, side: 'long' | 'short', size: number,
   subAccountId: number, reduceOnly: boolean, _slippageBps: number,
-  _privateKeyBase58?: string, agentPublicKey?: string, leverage?: number, adapter = getDefaultAdapter()
+  _privateKeyBase58?: string, agentPublicKey?: string, leverage?: number, adapter = getDefaultAdapter(), originalBotId?: string
 ): Promise<any> {
   const keypair = resolveAgentKeypair(encryptedKey);
   const pubKey = agentPublicKey || keypair.publicKey.toBase58();
@@ -81,7 +82,16 @@ async function driftExecutePerpOrder(
   // fresh fee-authority read against the same account identity sent to venue.
   const orderResult: FeeAuthorizedMarketOrderResult = reduceOnly
     ? await adapter.placeMarketOrder(orderParams)
-    : await placeMarketOrderWithFeeAuthority(adapter, orderParams);
+    : adapter.protocolName === 'pacifica'
+      ? await closeIntentStore.withOpenFence(adapter.getCloseEnvironment!(), pubKey, market,
+        async () => {
+          const current = originalBotId ? await storage.getTradingBotById(originalBotId) : undefined;
+          const wallet = await storage.getWallet(mainWalletAddress);
+          if (!current || current.activeProtocol !== 'pacifica' || current.walletAddress !== mainWalletAddress
+            || (current.protocolSubaccountId ?? wallet?.agentPublicKey) !== pubKey) throw new Error('open_account_generation_changed');
+          return placeMarketOrderWithFeeAuthority(adapter, orderParams);
+        })
+      : await placeMarketOrderWithFeeAuthority(adapter, orderParams);
   return {
     success: orderResult.success,
     signature: orderResult.orderId,
@@ -280,6 +290,7 @@ const inFlightJobs: Set<string> = new Set();
 type RoutingCallback = (
   botId: string,
   signal: {
+    originId?: string;
     action: 'buy' | 'sell';
     contracts: string;
     positionSize: string;
@@ -558,7 +569,7 @@ export async function queueTradeRetry(job: Omit<RetryJob, 'id' | 'attempts' | 'm
     dbJobId = dbJob.id;
     console.log(`[TradeRetry] Persisted job ${dbJobId} to database`);
   } catch (dbErr) {
-    if (job.side === 'close' && (job.protocol === 'pacifica' || !job.protocol)) throw dbErr;
+    if (job.side === 'close') throw dbErr;
     // Fallback to generated ID if database fails (job won't survive restart)
     dbJobId = generateJobId();
     console.warn(`[TradeRetry] Failed to persist job to database, using fallback ID ${dbJobId}:`, dbErr);
@@ -680,14 +691,14 @@ async function processRetryJob(job: RetryJob): Promise<void> {
   const retirementBot = await storage.getTradingBotById(job.botId);
   // Slice A cannot prove original signer/epoch identity. Never execute or
   // complete these jobs, including when today's bot has been replaced/deleted.
-  if (job.side === 'close' && (job.protocol === 'pacifica' || !job.protocol
-      || retirementBot?.activeProtocol === 'pacifica')) {
+  if (job.side === 'close' && (job.protocol === 'pacifica' || !['drift','phoenix','flash'].includes(job.protocol ?? '')
+      || !retirementBot || !job.protocolSubaccountId || retirementBot.activeProtocol === 'pacifica')) {
     job.nextRetryAt = Date.now() + COOLDOWN_DELAY_MS;
     job.lastError = 'close_confirmation_pending; resend_suspended_until_durable_intent';
     // The recorded address is observation-only. Never substitute today's bot.
-    if (job.protocol === 'pacifica' && job.protocolSubaccountId && retirementBot?.activeProtocol === 'pacifica') {
+    if (job.protocol === 'pacifica' && job.protocolSubaccountId) {
       try {
-        await readCloseSnapshot(getAdapterForBot(retirementBot), job.protocolSubaccountId);
+        await readCloseSnapshot(getAdapter('pacifica'), job.protocolSubaccountId);
       } catch { /* Unknown remains pending; observation never authorizes replay. */ }
     }
     await storage.updateTradeRetryJob(job.id, { nextRetryAt: new Date(job.nextRetryAt), lastError: job.lastError });
@@ -937,7 +948,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         job.privateKeyBase58,
         job.agentPublicKey,
         job.leverage,
-        jobAdapter
+        jobAdapter,
+        job.botId
       );
     }
     
@@ -1111,6 +1123,7 @@ async function processRetryJob(job: RetryJob): Promise<void> {
             if (payload.action && (payload.contracts !== undefined || isCloseSignal)) {
               console.log(`[TradeRetry] Routing ${isCloseSignal ? 'CLOSE' : 'OPEN'} signal to subscribers for source bot ${job.botId}: ${payload.action}`);
               await routingCallback(job.botId, {
+                originId: `retry:${job.id}`,
                 action: payload.action as 'buy' | 'sell',
                 contracts: isCloseSignal ? '0' : String(payload.contracts),
                 positionSize: String(payload.positionSize ?? '100'),
@@ -1461,7 +1474,10 @@ export async function startRetryWorker(): Promise<void> {
       const MAX_CLOSE_JOB_AGE_MS = 30 * 60 * 1000; // 30 minute TTL for CLOSE retry jobs (subscriber copies must still close even if delayed)
       
       for (const dbJob of pendingJobs) {
-        if (dbJob.side === 'close' && (dbJob.protocol === 'pacifica' || !dbJob.protocol)) {
+        const originalBot = dbJob.side === 'close' ? await storage.getTradingBotById(dbJob.botId) : undefined;
+        if (dbJob.side === 'close' && (dbJob.protocol === 'pacifica' || !dbJob.protocol
+          || !['pacifica','phoenix','flash','drift'].includes(dbJob.protocol) || !originalBot || !dbJob.protocolSubaccountId
+          || originalBot.activeProtocol === 'pacifica')) {
           retryQueue.set(dbJob.id, {
             id: dbJob.id, botId: dbJob.botId, protocol: dbJob.protocol,
             walletAddress: dbJob.walletAddress, agentPublicKey: '', market: dbJob.market,

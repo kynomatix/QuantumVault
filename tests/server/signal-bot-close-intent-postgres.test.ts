@@ -1,0 +1,230 @@
+import { randomUUID } from 'node:crypto';
+import { Pool } from 'pg';
+import { getTableColumns } from 'drizzle-orm';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { botTrades, botPositions, tradingBots } from '../../shared/schema';
+import { SignalBotCloseIntentStorage } from '../../server/trading/signal-bot-close-intent-storage';
+import { probeSchemaMigrationManifest } from '../../server/schema-readiness-probe';
+import { readDbSchemaMigrationManifest } from '../helpers/schema-migration-manifest';
+import { newIntent, snapshot, orders } from '../helpers/close-intent-fixtures';
+import type { CloseIntent, CloseScope } from '../../server/trading/signal-bot-close-intent-types';
+const holder = vi.hoisted(() => ({ store: undefined as any, pool: undefined as any }));
+vi.mock('../../server/trading/close-intent-store', () => ({ get closeIntentStore() { return holder.store; } }));
+vi.mock('../../server/db', async () => { const { drizzle } = await import('drizzle-orm/node-postgres'); return { get pool() { return holder.pool; }, get db() { return drizzle(holder.pool); } }; });
+vi.mock('../../server/trading/signal-bot-close-intent-accounting', () => ({ accountDurableClose: vi.fn() }));
+import { submitDurableClose } from '../../server/trading/signal-bot-close-intent';
+import { observeCloseIntent } from '../../server/trading/signal-bot-close-intent-worker';
+
+describe.skipIf(!process.env.DATABASE_URL)('durable close intents on isolated PostgreSQL', () => {
+  const schema = 'close_intent_' + randomUUID().replaceAll('-', '');
+  const admin = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+  let pool: Pool, store: SignalBotCloseIntentStorage;
+  const trade = { tradingBotId: 'EXAMPLE_BOT', walletAddress: 'EXAMPLE_OWNER', market: 'BTC-PERP', side: 'CLOSE', size: '1', price: '100' };
+  const migration = readDbSchemaMigrationManifest().manifest.find(row => row.id.startsWith('206-'))!;
+  beforeAll(async () => {
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    pool = new Pool({ connectionString: process.env.DATABASE_URL, options: `-c search_path=${schema}`, max: 5 });
+    const columns = Object.values(getTableColumns(botTrades)).map(column => `"${column.name}" ${column.getSQLType()}${column.name === 'id' ? ' PRIMARY KEY DEFAULT gen_random_uuid()' : column.name === 'executed_at' ? ' DEFAULT now()' : ''}`);
+    await pool.query(`CREATE TABLE bot_trades (${columns.join(',')})`);
+    holder.pool = pool;
+    for (const [name, table] of [['trading_bots', tradingBots], ['bot_positions', botPositions]] as const) {
+      const cols = Object.values(getTableColumns(table)).map(c => `"${c.name}" ${c.getSQLType()}${c.name === 'id' ? ' PRIMARY KEY DEFAULT gen_random_uuid()' : ''}`);
+      await pool.query(`CREATE TABLE ${name} (${cols.join(',')})`);
+    }
+    await pool.query('CREATE UNIQUE INDEX ON bot_positions(trading_bot_id,market)');
+    await pool.query(migration.sql);
+    store = new SignalBotCloseIntentStorage(pool); holder.store = store;
+    vi.spyOn(store, 'ready').mockResolvedValue();
+  });
+  afterAll(async () => { await pool?.end(); await admin.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`); await admin.end(); });
+  beforeEach(async () => { await pool.query('TRUNCATE signal_bot_close_intents,bot_trades,bot_positions,trading_bots'); });
+  const scope = <T>(work: (s: CloseScope) => Promise<T>, market = 'BTC-PERP') => store.withScope('EXAMPLE', 'EXAMPLE_ACCOUNT', market, work);
+  async function create(s: CloseScope, source?: string) { return (await store.create(s, newIntent(source), trade)).intent; }
+  async function admit(s: CloseScope, row: CloseIntent, timestamp?: number) {
+    const now = timestamp ?? await store.databaseTime(s);
+    return store.admit(s, row, { attemptId: randomUUID(), timestamp: now, expiry_window: 5000, admittedAt: now });
+  }
+  const deps = (size = '1', watermark = 7) => ({
+    adapter: vi.fn(() => ({ protocolName: 'pacifica', getCloseEnvironment: () => 'EXAMPLE', getCloseConfirmationSnapshot: vi.fn(async () => snapshot(size, watermark)),
+      sendPreparedReduceOnlyMarketOrder: vi.fn(), getCloseOpenOrders: vi.fn() }) as any),
+    epochUnchanged: vi.fn(async () => true), signer: vi.fn(async () => null), account: vi.fn(async () => {}),
+  });
+  it('accepts the actual manifest and rejects a missing trigger or broadened due predicate', async () => {
+    const query = (text: string, values?: readonly unknown[]) => pool.query(text.replaceAll("'public'", `'${schema}'`), values?.map(v => typeof v === 'string' ? v.replace(/^public\./, schema + '.') : v));
+    const result = await probeSchemaMigrationManifest(query, [migration]);
+    if (result.evidence.length) {
+      const definitions = await pool.query("SELECT conname,pg_get_constraintdef(oid,true) AS definition FROM pg_constraint WHERE conrelid='signal_bot_close_intents'::regclass ORDER BY conname");
+      console.log('EXAMPLE catalog mismatches', JSON.stringify(result.evidence));
+      console.log('EXAMPLE close constraints', JSON.stringify(definitions.rows));
+    }
+    expect(result.unavailableCapabilities).toEqual([]);
+    await pool.query('ALTER TABLE signal_bot_close_intents DISABLE TRIGGER sb_close_preserve_identity_trigger');
+    expect((await probeSchemaMigrationManifest(query, [migration])).unavailableCapabilities).toEqual(['signal_bot_close_intent']);
+    await pool.query('ALTER TABLE signal_bot_close_intents ENABLE TRIGGER sb_close_preserve_identity_trigger');
+    await pool.query('DROP INDEX sb_close_due_idx');
+    await pool.query("CREATE INDEX sb_close_due_idx ON signal_bot_close_intents(next_action_at,id) WHERE status IN ('pending','needs_user','released')");
+    expect((await probeSchemaMigrationManifest(query, [migration])).unavailableCapabilities).toEqual(['signal_bot_close_intent']);
+    await pool.query('DROP INDEX sb_close_due_idx');
+    await pool.query("CREATE INDEX sb_close_due_idx ON signal_bot_close_intents(next_action_at,id) WHERE status IN ('pending','needs_user')");
+  });
+  it('deduplicates source and unresolved scope without an orphan pending trade', async () => {
+    await scope(async s => {
+      const row = await create(s, 'EXAMPLE_SOURCE');
+      expect((await store.create(s, newIntent('EXAMPLE_SOURCE'), trade)).intent.id).toBe(row.id);
+      expect((await store.create(s, newIntent('EXAMPLE_NEW_CLICK'), trade)).intent.id).toBe(row.id);
+      expect((await pool.query('SELECT count(*)::int AS n FROM bot_trades')).rows[0].n).toBe(1);
+    });
+  });
+  it('rolls back the trade when an insert conflicts outside this scope', async () => {
+    let first: CloseIntent;
+    await scope(async s => { first = await create(s); });
+    await store.withScope('EXAMPLE', 'EXAMPLE_OTHER', 'BTC-PERP', async s => {
+      const input = { ...newIntent(), original_account: s.account, signer_public_key: s.account, client_order_id: first!.client_order_id };
+      input.request_payload = { ...input.request_payload, account: s.account, client_order_id: first!.client_order_id };
+      await expect(store.create(s, input, trade)).rejects.toThrow();
+    });
+    expect((await pool.query('SELECT count(*)::int AS n FROM bot_trades')).rows[0].n).toBe(1);
+  });
+  it('commits the immutable admitted header before sign and survives a new storage instance', async () => {
+    let admitted: CloseIntent;
+    await scope(async s => {
+      admitted = await admit(s, await create(s));
+      const other = new SignalBotCloseIntentStorage(pool);
+      expect((await pool.query('SELECT attempt_log FROM signal_bot_close_intents WHERE id=$1', [admitted.id])).rows[0].attempt_log).toEqual(admitted.attempt_log);
+      await expect(store.mutate(s, admitted, { attempt_log: [{ ...admitted.attempt_log[0], timestamp: 1 }] })).rejects.toThrow('immutable');
+    });
+    await scope(async s => {
+      const restarted = (await store.byId(s, admitted!.id))!; const d = deps();
+      await observeCloseIntent(s, restarted, d);
+      expect(d.signer).not.toHaveBeenCalled();
+      expect((await store.byId(s, restarted.id))!.attempt_log).toEqual(admitted!.attempt_log);
+    });
+  });
+  it('increments once for each CAS, conflict update and batch update, and rejects a stale revision', async () => {
+    await scope(async s => {
+      const first = await create(s); const updated = await store.mutate(s, first, { last_error_code: 'EXAMPLE' });
+      expect(BigInt(updated.revision)).toBe(BigInt(first.revision) + 1n);
+      await expect(store.mutate(s, first, { last_error_code: 'EXAMPLE_STALE' })).rejects.toThrow('revision_conflict');
+      await pool.query('UPDATE signal_bot_close_intents SET revision=revision+1,last_error_code=$1', ['EXAMPLE_BATCH']);
+      const conflict = await pool.query("INSERT INTO signal_bot_close_intents SELECT * FROM signal_bot_close_intents WHERE id=$1 ON CONFLICT(id) DO UPDATE SET revision=signal_bot_close_intents.revision+1 RETURNING revision", [first.id]);
+      expect(BigInt(conflict.rows[0].revision)).toBe(BigInt(first.revision) + 3n);
+      await expect(pool.query('UPDATE signal_bot_close_intents SET last_error_code=$1', ['EXAMPLE_BAD'])).rejects.toThrow('revision');
+    });
+  });
+  it('excludes released rows from due and unresolved and forbids reopening or deletion', async () => {
+    await scope(async s => {
+      let row = await create(s); row = await store.mutate(s, row, { status: 'needs_user' });
+      row = await store.settle(s, row, { status: 'released', release_mode: 'not_sent', completed_at: new Date() }, async client => { await client.query("UPDATE bot_trades SET status='failed',error_message='close_not_sent' WHERE id=$1", [row.original_trade_id]); });
+      expect(await store.unresolved(s)).toBeUndefined(); expect(await store.due()).toEqual([]);
+      await expect(pool.query("UPDATE signal_bot_close_intents SET status='pending',completed_at=NULL,release_mode=NULL,revision=revision+1 WHERE id=$1", [row.id])).rejects.toThrow('Terminal');
+      await expect(pool.query('DELETE FROM signal_bot_close_intents WHERE id=$1', [row.id])).rejects.toThrow('retained');
+      expect((await create(s)).id).not.toBe(row.id);
+    });
+  });
+  it('requires fresh independent venue-clock reads and no live market before committing release', async () => {
+    await scope(async s => {
+      const row = await admit(s, await create(s), Date.now() - 400000);
+      const d = deps(); const adapter = d.adapter();
+      d.adapter.mockReturnValue(adapter);
+      adapter.getCloseOpenOrders.mockImplementation(async () => orders());
+      adapter.getCloseConfirmationSnapshot.mockImplementation(async () => {
+        const value = snapshot(); delete value.evidence.venueClockMs; return value;
+      });
+      await observeCloseIntent(s, row, d);
+      expect((await store.byId(s,row.id))!.status).toBe('pending'); expect(d.account).not.toHaveBeenCalled();
+      adapter.getCloseConfirmationSnapshot.mockImplementation(async () => snapshot());
+      adapter.getCloseOpenOrders.mockImplementation(async () => ({...orders(),orders:[{market:'BTC-PERP',orderType:'market'}]}));
+      await observeCloseIntent(s, (await store.byId(s,row.id))!, d);
+      expect((await store.byId(s,row.id))!.status).toBe('pending'); expect(d.account).not.toHaveBeenCalled();
+      adapter.getCloseOpenOrders.mockImplementation(async () => ({...orders(),orders:[{market:'BTC-PERP',orderType:'stop_loss_market'}]}));
+      await observeCloseIntent(s, (await store.byId(s,row.id))!, d);
+      expect((await store.byId(s,row.id))!).toMatchObject({status:'released',release_mode:'still_open'});
+      expect(d.account).toHaveBeenCalledTimes(1); expect(await store.unresolved(s)).toBeUndefined();
+    });
+  });
+  it('rolls back settlement when canonical accounting fails', async () => {
+    await scope(async s => { const row = await create(s);
+      await expect(store.settle(s, row, { status: 'released', release_mode: 'not_sent', completed_at: new Date() }, async () => { throw new Error('EXAMPLE_ROLLBACK'); })).rejects.toThrow('EXAMPLE_ROLLBACK');
+      expect((await store.byId(s, row.id))!.status).toBe('pending');
+    });
+  });
+  it.each(['inactive','missing'])('observes the original account after restart with an %s bot', async _state => {
+    await scope(async s => { const row = await admit(s, await create(s)); const d = deps(); d.epochUnchanged.mockResolvedValue(false);
+      await observeCloseIntent(s, row, d);
+      expect(d.adapter.mock.results[0].value.getCloseConfirmationSnapshot).toHaveBeenCalledWith('EXAMPLE_ACCOUNT', undefined);
+      expect(d.signer).not.toHaveBeenCalled(); expect((await store.byId(s, row.id))!.status).toBe('needs_user');
+    });
+  });
+  it('a same-size reopen with watermark advancement cannot authorize retry', async () => {
+    await scope(async s => { let row = await admit(s, await create(s), Date.now() - 40000);
+      row = await store.outcome(s, row, row.attempt_log[0].attemptId, { kind: 'not_entered', cause: 'ENOTFOUND' });
+      row = await store.mutate(s, row, { attempt_log: [{ ...row.attempt_log[0], receivedAt: Date.now() - 31000 }] });
+      const d = deps('1', 8); await observeCloseIntent(s, row, d);
+      expect(d.signer).not.toHaveBeenCalled(); expect((await store.byId(s, row.id))!.status).toBe('needs_user');
+    });
+  });
+  it('a busy session lock makes a restarted worker skip, while opens remain blocked', async () => {
+    let release!: () => void, entered!: () => void;
+    const arrived = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = scope(async s => { await create(s); entered(); await gate; });
+    await arrived;
+    try {
+      expect(await store.withScope('EXAMPLE','EXAMPLE_ACCOUNT','BTC-PERP', async () => 'unsafe', true)).toBeUndefined();
+    } finally { release(); await held; }
+    const send = vi.fn(); await expect(store.withOpenFence('EXAMPLE','EXAMPLE_ACCOUNT','BTC-PERP', send)).rejects.toThrow('prior_close');
+    expect(send).not.toHaveBeenCalled();
+  });
+  it.each(['webhook_partial','user_partial','subscriber_partial'])('%s creates one partial row before the market send', async family => {
+    let prepared = false;
+    const adapter = { protocolName: 'pacifica', getCloseEnvironment: () => 'EXAMPLE', getCloseConfirmationSnapshot: async () => snapshot(),
+      prepareReduceOnlyMarketOrder: vi.fn(async (p: any) => {
+        expect((await pool.query('SELECT count(*)::int AS n FROM signal_bot_close_intents')).rows[0].n).toBe(0); prepared = true;
+        return { account: p.agentPublicKey, environment: 'EXAMPLE', market: 'BTC-PERP', operationData: { symbol: 'BTC', amount: '0.25', side: 'ask', reduce_only: true, client_order_id: p.clientOrderId } };
+      }),
+      sendPreparedReduceOnlyMarketOrder: vi.fn(async (_p: any, a: any) => {
+        expect(prepared).toBe(true);
+        const durable = (await pool.query('SELECT * FROM signal_bot_close_intents')).rows[0];
+        expect(durable.attempt_log[0].timestamp).toBe(a.timestamp); expect(durable.request_payload.amount).toBe('0.25');
+        expect((await pool.query('SELECT count(*)::int AS n FROM bot_trades')).rows[0].n).toBe(1);
+        return { kind: 'acknowledged', orderId: 'EXAMPLE_ORDER' };
+      }) } as any;
+    const result = await submitDurableClose({ adapter, params: { agentPublicKey: 'EXAMPLE_ACCOUNT', agentSecretKey: new Uint8Array(), mainWalletAddress: 'EXAMPLE_OWNER', internalSymbol: 'BTC-PERP', side: 'short', sizeBase: 0.25, reduceOnly: true },
+      identity: { owner_wallet: 'EXAMPLE_OWNER', bot_id: 'EXAMPLE_BOT', source_key: family, signer_mode: 'external_key', authority_ref: { mode: 'EXAMPLE' }, baseSize: '1', lastTradeId: 'EXAMPLE_ENTRY' }, trade, kind: 'partial', positionSide: 'long' });
+    expect(result.intent.close_kind).toBe('partial'); expect(adapter.sendPreparedReduceOnlyMarketOrder).toHaveBeenCalledTimes(1);
+    expect((await pool.query('SELECT side,webhook_payload FROM bot_trades')).rows[0]).toMatchObject({ side: 'short', webhook_payload: { partialClose: true } });
+  });
+  it('an admitted sender loses authority after its session lock is lost and another pass releases', async () => {
+    await scope(async s => {
+      const row = await admit(s, await create(s), Date.now() - 400000);
+      await store.transaction(s, async client => { await client.query('SELECT pg_advisory_unlock_all()'); });
+      await scope(async other => {
+        const current = (await store.byId(other, row.id))!;
+        await store.settle(other, current, { status: 'released', release_mode: 'still_open', completed_at: new Date() }, async () => {});
+      });
+      await expect(store.assertSendAuthorized(s, row)).rejects.toThrow('close_send_authority_lost');
+    });
+  });
+  it.each(['webhook_partial','user_partial','subscriber_partial'])('%s completes the SAME row and money once through the real atomic finalizer', async family => {
+    const { DatabaseStorage } = await import('../../server/storage');
+    const writer = new DatabaseStorage();
+    await pool.query("INSERT INTO trading_bots(id,wallet_address,active_protocol,stats) VALUES('EXAMPLE_BOT','EXAMPLE_OWNER','pacifica','{}')");
+    await pool.query("INSERT INTO bot_positions(trading_bot_id,wallet_address,market,base_size,avg_entry_price,realized_pnl,total_fees,last_trade_id) VALUES('EXAMPLE_BOT','EXAMPLE_OWNER','BTC-PERP',1,100,0,0,'EXAMPLE_ENTRY')");
+    let row!: CloseIntent;
+    await scope(async s => {
+      const input = { ...newIntent(family), close_kind: 'partial' as const, requested_size_base: '0.25' };
+      input.request_payload.amount = '0.25';
+      row = (await store.create(s, input, { ...trade, side: 'short', size: '0.25', webhookPayload: { partialClose: true } })).intent;
+      row = await store.mutate(s, row, { last_evidence: { objectiveMet: true } });
+    });
+    const event = { botId: 'EXAMPLE_BOT', update: { tradeId: row.original_trade_id, fields: { status: 'executed', pnl: '24', fee: '1', protocolFillId: 'EXAMPLE_FILL', webhookPayload: { partialClose: true, partialCloseAccounting: { status: 'complete' } } } },
+      deltas: { totalPnlDelta: 24, totalVolumeDelta: 25 }, confirmedPositionReduction: { market: 'BTC-PERP', expectedBaseSize: '1', expectedLastTradeId: 'EXAMPLE_ENTRY', residualBaseSize: 0.75, residualEntryPrice: 100, realizedPnlDelta: 24, feeDelta: 1 } };
+    expect((await writer.recordCloseEventAtomic(event)).isNew).toBe(true);
+    expect((await writer.recordCloseEventAtomic(event)).isNew).toBe(false);
+    expect((await pool.query('SELECT count(*)::int AS n FROM bot_trades')).rows[0].n).toBe(1);
+    expect((await pool.query('SELECT status FROM signal_bot_close_intents')).rows[0].status).toBe('confirmed');
+    expect((await pool.query('SELECT base_size,realized_pnl,total_fees FROM bot_positions')).rows[0]).toMatchObject({ base_size: '0.75000000', realized_pnl: '24.000000', total_fees: '1.000000' });
+    expect((await pool.query('SELECT stats FROM trading_bots')).rows[0].stats).toMatchObject({ totalPnl: 24, totalVolume: 25, totalTrades: 0 });
+  });
+
+});

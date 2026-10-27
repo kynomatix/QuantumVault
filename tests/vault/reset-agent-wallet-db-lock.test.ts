@@ -1,9 +1,10 @@
+vi.mock('../../server/trading/close-intent-store', async () => { const { makeLifecycleFenceFixture } = await import('../helpers/close-lifecycle-fence'); return { closeIntentStore: makeLifecycleFenceFixture() }; });
 /**
  * Real-PostgreSQL proof for WO-R1's short reset critical section. Skips when
  * DATABASE_URL is absent. Fixture rows use a unique wallet and are deleted in
  * finally/afterAll; no production wallet is read or mutated.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "fs";
 import { resolve } from "path";
 import pg from "pg";

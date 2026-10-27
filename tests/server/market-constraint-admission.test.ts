@@ -83,7 +83,7 @@ afterEach(() => {
 
 const routeMocks = vi.hoisted(() => {
   const defaultAdapter = {
-    protocolName: 'pacifica',
+    protocolName: 'pacifica', getCloseEnvironment: () => 'EXAMPLE',
     minTransferAmount: 1,
     getMarkets: vi.fn(),
     getAccountInfo: vi.fn(),
@@ -135,6 +135,14 @@ vi.mock('../../server/session', () => ({
     next();
   },
 }));
+
+vi.mock('../../server/trading/close-intent-store', async () => {
+  const { makeCloseRouteStore } = await import('../helpers/close-route-intent-store');
+  const { storage } = await import('../../server/storage');
+  return { closeIntentStore: makeCloseRouteStore(storage) };
+});
+import { closeIntentStore } from '../../server/trading/close-intent-store';
+import { bridgePreparedClose } from '../helpers/close-route-intent-store';
 
 vi.mock('../../server/db', () => ({
   db: {},

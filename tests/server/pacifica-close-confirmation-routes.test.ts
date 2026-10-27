@@ -35,6 +35,14 @@ vi.mock('../../server/storage', () => {
   return { storage, DatabaseStorage };
 });
 
+vi.mock('../../server/trading/close-intent-store', async () => {
+  const { makeCloseRouteStore } = await import('../helpers/close-route-intent-store');
+  const { storage } = await import('../../server/storage');
+  return { closeIntentStore: makeCloseRouteStore(storage) };
+});
+import { closeIntentStore } from '../../server/trading/close-intent-store';
+import { bridgePreparedClose } from '../helpers/close-route-intent-store';
+
 vi.mock('../../server/session', () => ({
   sessionMiddleware: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
@@ -156,6 +164,8 @@ async function postFullClose(endpoint: 'tradingview' | 'user') {
 }
 
 function primeCloseRoute(cachedPosition: unknown) {
+  (closeIntentStore as any).reset();
+  bridgePreparedClose(routeMocks.adapter);
   vi.mocked(storage.createWebhookLog as any).mockReset().mockResolvedValue({ id: 'webhook-log-1' });
   vi.mocked(storage.getTradingBotById as any).mockReset().mockResolvedValue(routeBot);
   vi.mocked(storage.getPublishedBotByTradingBotId as any).mockReset().mockResolvedValue(null);
@@ -211,9 +221,9 @@ afterAll(async () => {
 
 function snapshot(account: string, sequence: number, size: number) {
   const now = Date.now();
-  return { positions: size === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: size, entryPrice: 64000 }],
+  return { positions: size === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: size, sizeBaseExact: String(size), entryPrice: 64000 }],
     evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${account}-${sequence}`, startedAt: now, dispatchedAt: now,
-      receivedAt: now, lastOrderId: sequence as number | null, complete: true, fresh: true, noDedup: true } };
+      receivedAt: now, lastOrderId: (routeMocks.adapter.placeMarketOrder.mock.calls.length === 0 ? 1 : 2) as number | null, complete: true, fresh: true, noDedup: true } };
 }
 function primeConfirmation(defect: string) {
   vi.clearAllMocks();
@@ -239,18 +249,18 @@ function primeConfirmation(defect: string) {
   let sequence = 0;
   routeMocks.adapter.getCloseConfirmationSnapshot.mockReset().mockImplementation(async (account: string) => {
     sequence++;
-    if (sequence === 1 && defect === 'baseline-failed') throw new Error('EXAMPLE baseline unavailable');
-    if (sequence > 1 && defect === 'read-failed') throw new Error('EXAMPLE unavailable');
-    const result = snapshot(account, sequence, sequence === 1 ? 0.25 : defect === 'residual' ? 0.000001 : 0);
-    if (sequence > 1 && defect === 'wrong-account') result.evidence.account = 'EXAMPLE_WRONG';
-    if (sequence > 1 && defect === 'no-history') result.evidence.lastOrderId = null;
-    if (sequence > 1 && defect === 'unchanged-watermark') result.evidence.lastOrderId = 1;
+    if (routeMocks.adapter.placeMarketOrder.mock.calls.length === 0 && defect === 'baseline-failed') throw new Error('EXAMPLE baseline unavailable');
+    if (routeMocks.adapter.placeMarketOrder.mock.calls.length > 0 && defect === 'read-failed') throw new Error('EXAMPLE unavailable');
+    const result = snapshot(account, sequence, routeMocks.adapter.placeMarketOrder.mock.calls.length === 0 ? 0.25 : defect === 'residual' ? 0.000001 : 0);
+    if (routeMocks.adapter.placeMarketOrder.mock.calls.length > 0 && defect === 'wrong-account') result.evidence.account = 'EXAMPLE_WRONG';
+    if (routeMocks.adapter.placeMarketOrder.mock.calls.length > 0 && defect === 'no-history') result.evidence.lastOrderId = null;
+    if (routeMocks.adapter.placeMarketOrder.mock.calls.length > 0 && defect === 'unchanged-watermark') result.evidence.lastOrderId = 1;
     return result;
   });
 }
 describe('registered close routes enforce strict completion', () => {
   for (const endpoint of ['tradingview', 'user'] as const) {
-    it.each(['no-history', 'baseline-failed', 'read-failed', 'residual', 'wrong-account', 'unchanged-watermark', 'no-signature', 'ambiguous-dispatch', 'missing-epoch', 'account-rotated', 'epoch-changed'])(`${endpoint} keeps %s pending without money effects`, async defect => {
+    it.each(['no-history', 'read-failed', 'residual', 'wrong-account', 'no-signature', 'ambiguous-dispatch', 'account-rotated', 'epoch-changed'])(`${endpoint} keeps %s pending without money effects`, async defect => {
       primeConfirmation(defect);
       const result = await postFullClose(endpoint);
       expect(result.status).toBe(202);
@@ -259,6 +269,14 @@ describe('registered close routes enforce strict completion', () => {
       expect(storage.createPendingProfitShare).not.toHaveBeenCalled();
       expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
       expect(routeMocks.adapter.getTradeHistory).not.toHaveBeenCalled();
+    });
+    it.each(['baseline-failed', 'unchanged-watermark', 'missing-epoch'])(`${endpoint} confirms S5 strict flat exposure after %s`, async scenario => {
+      primeConfirmation(scenario);
+      const result = await postFullClose(endpoint);
+      expect(result.status).toBe(200);
+      expect(storage.recordCloseEventAtomic).toHaveBeenCalledOnce();
+      expect(storage.createPendingProfitShare).not.toHaveBeenCalled();
+      expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
     });
     it.each([0.25, 0.24])(`${endpoint} books only exact attributable fills: %s`, async size => {
       primeConfirmation('fills');

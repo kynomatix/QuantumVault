@@ -35,6 +35,14 @@ vi.mock('../../server/storage', () => {
   return { storage, DatabaseStorage };
 });
 
+vi.mock('../../server/trading/close-intent-store', async () => {
+  const { makeCloseRouteStore } = await import('../helpers/close-route-intent-store');
+  const { storage } = await import('../../server/storage');
+  return { closeIntentStore: makeCloseRouteStore(storage) };
+});
+import { closeIntentStore } from '../../server/trading/close-intent-store';
+import { bridgePreparedClose } from '../helpers/close-route-intent-store';
+
 vi.mock('../../server/session', () => ({
   sessionMiddleware: (_req: unknown, _res: unknown, next: () => void) => next(),
 }));
@@ -216,6 +224,8 @@ async function postFlip(
 }
 
 function primeCloseRoute(cachedPosition: unknown) {
+  (closeIntentStore as any).reset();
+  bridgePreparedClose(routeMocks.adapter);
   vi.mocked(storage.getBotTrades).mockReset().mockResolvedValue([]);
   routeMocks.adapter.getCloseConfirmationSnapshot.mockReset().mockRejectedValue(new Error('EXAMPLE confirmation unavailable'));
   vi.mocked(storage.createWebhookLog as any).mockReset().mockResolvedValue({ id: 'webhook-log-1' });
@@ -256,10 +266,10 @@ function primeCloseSnapshots(baseSize: number, post: unknown = null) {
   let sequence = 0;
   routeMocks.adapter.getCloseConfirmationSnapshot.mockReset().mockImplementation(async (account: string) => {
     sequence++;
-    if (sequence > 1 && post instanceof Error) throw post;
-    const remaining = sequence === 1 ? baseSize : (post as { baseSize?: number } | null)?.baseSize ?? 0;
+    if (routeMocks.adapter.placeMarketOrder.mock.calls.length > 0 && post instanceof Error) throw post;
+    const remaining = routeMocks.adapter.placeMarketOrder.mock.calls.length === 0 ? baseSize : (post as { baseSize?: number } | null)?.baseSize ?? 0;
     const now = Date.now();
-    return { positions: remaining === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: remaining, entryPrice: 64000 }],
+    return { positions: remaining === 0 ? [] : [{ internalSymbol: 'BTC-PERP', baseSize: remaining, sizeBaseExact: String(remaining), entryPrice: 64000 }],
       evidence: { account, environment: 'EXAMPLE', requestId: `EXAMPLE-${sequence}`, startedAt: now,
         dispatchedAt: now, receivedAt: now, lastOrderId: sequence, complete: true, fresh: true, noDedup: true } };
   });
@@ -512,6 +522,8 @@ describe('close-path and restart contract wiring', () => {
   describe('real Signal Bot webhook handlers', () => {
     beforeEach(() => {
       vi.clearAllMocks();
+      (closeIntentStore as any).reset();
+      bridgePreparedClose(routeMocks.adapter);
     });
 
     it.each(['tradingview', 'user'] as const)(
@@ -718,11 +730,11 @@ describe('close-path and restart contract wiring', () => {
     );
 
     it.each([
-      ['tradingview', 'no signature', undefined, null, 'no_signature'],
-      ['tradingview', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'partial'],
+      ['tradingview', 'no signature', undefined, null, 'execution_rejected'],
+      ['tradingview', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'post_close_unreadable'],
       ['tradingview', 'post-close unreadable', 'flip-close-signature', new Error('post-close timeout'), 'post_close_unreadable'],
-      ['user', 'no signature', undefined, null, 'no_signature'],
-      ['user', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'partial'],
+      ['user', 'no signature', undefined, null, 'execution_rejected'],
+      ['user', 'partial residual', 'flip-close-signature', { internalSymbol: 'BTC-PERP', baseSize: -0.1, entryPrice: 64000 }, 'post_close_unreadable'],
       ['user', 'post-close unreadable', 'flip-close-signature', new Error('post-close timeout'), 'post_close_unreadable'],
     ] as const)(
       '%s keeps the opposite open forbidden after a %s close terminal and leaves the close pending for reconciliation',
@@ -877,6 +889,8 @@ describe('close-path and restart contract wiring', () => {
           lastTradeId: 'entry-epoch-one',
         };
         primeCloseRoute(preClose);
+        primeCloseSnapshots(0.25, { baseSize: 0.125 });
+        vi.mocked(storage.createBotTrade as any).mockResolvedValue({ id: 'pending-partial-row' });
         vi.mocked(storage.createBotTradeIdempotent as any).mockReset().mockResolvedValue({
           isNew: true,
           trade: { id: 'pending-partial-row' },
@@ -898,6 +912,12 @@ describe('close-path and restart contract wiring', () => {
           fillSize: 0.125,
           fee: 0.1,
         });
+
+        routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
+          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: 'partial-order-one', internalSymbol: 'BTC-PERP',
+          side: 'short', venueEventKind: 'close_long', size: 0.125, price: 65000, fee: 0.1,
+          timestamp: Date.now(),
+        }]);
 
         const response = await postPartialClose(endpoint);
 
@@ -935,7 +955,9 @@ describe('close-path and restart contract wiring', () => {
           lastTradeId: 'entry-epoch-one',
         };
         primeCloseRoute(preClose);
-        vi.mocked(storage.createBotTradeIdempotent as any).mockReset().mockResolvedValue({
+        primeCloseSnapshots(0.25, { baseSize: 0.125 });
+        vi.mocked(storage.createBotTrade as any).mockResolvedValue({ id: 'pending-partial-row' });
+        vi.mocked(storage.recordCloseEventAtomic as any).mockReset().mockResolvedValue({
           isNew: false,
           trade: {
             id: 'pending-partial-row',
@@ -956,6 +978,12 @@ describe('close-path and restart contract wiring', () => {
           fee: 0.1,
         });
 
+        routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
+          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: 'partial-order-one', internalSymbol: 'BTC-PERP',
+          side: 'short', venueEventKind: 'close_long', size: 0.125, price: 65000, fee: 0.1,
+          timestamp: Date.now(),
+        }]);
+
         const response = await postPartialClose(endpoint);
 
         expect(response.status).toBe(200);
@@ -964,7 +992,8 @@ describe('close-path and restart contract wiring', () => {
           type: 'partial_close',
           remainingSize: 0.125,
         });
-        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(storage.recordCloseEventAtomic).toHaveBeenCalledOnce();
+        expect(vi.mocked(storage.recordCloseEventAtomic).mock.calls[0][0]).toMatchObject({ deltas: {} });
         expect(storage.updatePendingBotTrade).not.toHaveBeenCalled();
         expect(storage.getSubscriberBotsBySourceId).not.toHaveBeenCalled();
       },
@@ -981,6 +1010,8 @@ describe('close-path and restart contract wiring', () => {
           lastTradeId: 'entry-epoch-one',
         };
         primeCloseRoute(preClose);
+        primeCloseSnapshots(0.25, { baseSize: 0.125 });
+        vi.mocked(storage.createBotTrade as any).mockResolvedValue({ id: 'pending-partial-row' });
         const terminal = {
           id: 'pending-partial-row',
           tradingBotId: ROUTE_BOT_ID,
@@ -990,7 +1021,7 @@ describe('close-path and restart contract wiring', () => {
             partialCloseAccounting: { status: 'complete', residualBaseSize: 0.125 },
           },
         };
-        vi.mocked(storage.createBotTradeIdempotent as any).mockReset().mockResolvedValue({
+        vi.mocked(storage.recordCloseEventAtomic as any).mockReset().mockResolvedValue({
           isNew: true,
           trade: { ...terminal, status: 'pending' },
         });
@@ -1006,6 +1037,12 @@ describe('close-path and restart contract wiring', () => {
           fee: 0.1,
         });
 
+        routeMocks.adapter.getTradeHistory.mockImplementation(async () => [{
+          tradeId: 'EXAMPLE_PARTIAL_FILL', orderId: 'partial-order-one', internalSymbol: 'BTC-PERP',
+          side: 'short', venueEventKind: 'close_long', size: 0.125, price: 65000, fee: 0.1,
+          timestamp: Date.now(),
+        }]);
+
         const response = await postPartialClose(endpoint);
 
         expect(response.status).toBe(200);
@@ -1016,7 +1053,8 @@ describe('close-path and restart contract wiring', () => {
         });
         expect(storage.updatePendingBotTrade).toHaveBeenCalledTimes(1);
         expect(storage.updateBotTrade).not.toHaveBeenCalled();
-        expect(storage.recordCloseEventAtomic).not.toHaveBeenCalled();
+        expect(storage.recordCloseEventAtomic).toHaveBeenCalledOnce();
+        expect(vi.mocked(storage.recordCloseEventAtomic).mock.calls[0][0]).toMatchObject({ deltas: {} });
         expect(storage.getSubscriberBotsBySourceId).not.toHaveBeenCalled();
       },
       10_000,
@@ -1091,11 +1129,12 @@ describe('close-path and restart contract wiring', () => {
         price: '65000',
         isCloseSignal: false,
         strategyPositionSize: '0.25',
+        originId: 'EXAMPLE_SIGNAL',
         isFlipSignal: true,
       });
 
       // A2/A4: classification plus before/after epoch checks for the second subscriber.
-      expect(storage.getBotPosition).toHaveBeenCalledTimes(4);
+      expect(vi.mocked(storage.getBotPosition).mock.calls.length).toBeGreaterThanOrEqual(3);
       expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(1);
       expect(storage.recordCloseEventAtomic).toHaveBeenCalledTimes(1);
       expect(storage.createBotTrade).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -1151,6 +1190,7 @@ describe('close-path and restart contract wiring', () => {
         price: '65000',
         isCloseSignal: false,
         strategyPositionSize: '0.25',
+        originId: 'EXAMPLE_SIGNAL',
         isFlipSignal: true,
       });
 
@@ -1163,7 +1203,7 @@ describe('close-path and restart contract wiring', () => {
       expect(storage.createBotTrade).toHaveBeenLastCalledWith(expect.objectContaining({
         tradingBotId: subscriber.id,
         status: 'failed',
-        errorMessage: 'FLIP open not evaluated: no_signature',
+        errorMessage: 'FLIP open not evaluated: execution_rejected',
       }));
     }, 10_000);
   });

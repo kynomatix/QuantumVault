@@ -1,3 +1,4 @@
+vi.mock('../../server/trading/close-intent-store', async () => { const { makeLifecycleFenceFixture } = await import('../helpers/close-lifecycle-fence'); return { closeIntentStore: makeLifecycleFenceFixture() }; });
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -466,7 +467,7 @@ describe("close-path integration guards", () => {
     expect(userSource.indexOf("const fillConfirmation =")).toBeLessThan(
       userSource.indexOf("if (postCloseReadError || observedResidual)"),
     );
-    expect(routesSource.match(/readSignalBotCloseFillConfirmation\(\{/g)).toHaveLength(3);
+    expect(routesSource.match(/readSignalBotCloseFillConfirmation\(\{/g)).toHaveLength(5);
     expect(routesSource).toContain('const fills = isConfirmedClose(closeResult) ? await readSignalBotCloseFillConfirmation');
     expect(tradingViewSource).toContain('!isConfirmedClose(result.closeResult)');
     expect(userSource).toContain('!isConfirmedClose(result.closeResult)');
