@@ -1,0 +1,151 @@
+{
+  "catalogSha256": "b49c90b20ff3102301ca63113c8b49e9cd9060174bde1c808f274258da2d5d65",
+  "tablesSha256": "6317532b7e9b1fc403b6dee1107098b20f71e1b5bac5cf7be9dae8f6f8f2d30e",
+  "packageSqlSha256": "e66ae706e45cb1a747cb0578c030de9b7b644af30e931821b8efba2f84410ba3",
+  "objects": [
+    {
+      "identity": "table:grid_worker_host",
+      "sha256": "fd189902bc507e7fbe88ad52a7212e33ddf76c3feee978024a6aaa7dc34c6ac1"
+    },
+    {
+      "identity": "table:grid_worker_owner",
+      "sha256": "6eda0114161ef895f7ba2c51c4567d21705648b61b85becf3dd3bf4fc6a210ae"
+    },
+    {
+      "identity": "table:grid_worker_requests",
+      "sha256": "f21506eb58ab80ebb51f04eac563ef6c09df8704d1dcafe536fa00f4cd61c8db"
+    },
+    {
+      "identity": "table:grid_worker_incidents",
+      "sha256": "90408609f7d3d6b4e4be719516cd1dbec0a81c12aa144c25addde8d558c4ef9c"
+    },
+    {
+      "identity": "table:owner_action_receipts",
+      "sha256": "c6c074664636ec33c3a2fafb681b873513ec173208a8ace8c274e7a6f0928807"
+    },
+    {
+      "identity": "table:grid_worker_send_audit",
+      "sha256": "1e7a3fe73c98b665da1b348490b7d1747eb89392ad854c25be4fc1ea9d348715"
+    },
+    {
+      "identity": "table:grid_worker_quota_policy",
+      "sha256": "8bbf8cef2d18a679824c6fe815862fb51021153023c6d05a50183501a8e710e1"
+    },
+    {
+      "identity": "table:grid_worker_reservations",
+      "sha256": "67dfc54840e9f7a4166e4f502da46c414605c301cf3b14d7b8f0dbb1016f70fa"
+    },
+    {
+      "identity": "table:grid_worker_quota_windows",
+      "sha256": "4ed07d69ae671f736f59cd84c68d664c5c841cf2b6086dff8512e0834d2801c2"
+    },
+    {
+      "identity": "table:grid_worker_reconciliation",
+      "sha256": "60b0a187a3066eda66ca166b80800bda0eeff900f251e1a6e3a60b94f5e299bd"
+    },
+    {
+      "identity": "table:grid_worker_wallet_authority",
+      "sha256": "1344950a82ebcee1ae765d8be5dc89bbd375b1ab226257fa88620930a26fa26c"
+    },
+    {
+      "identity": "function:grid_worker_track_wallet()",
+      "sha256": "d7a6c7f52306b7594182c0c9a6c1e1e89552ea3bb17035b3f622098d1166366a"
+    },
+    {
+      "identity": "function:grid_worker_validate_host()",
+      "sha256": "a784547fbfff3fbca21afc71ac3f0a0ac20b2a24b2ffa9a6f4b97cc394390e88"
+    },
+    {
+      "identity": "function:grid_worker_validate_audit()",
+      "sha256": "230f296c5660579dec9012aae12c92ad5aa2ccc337c93a20e2316dbaf08d669d"
+    },
+    {
+      "identity": "function:grid_worker_validate_release()",
+      "sha256": "989615b14fc25c00bafa862e3251bad6bad9cd9423b2a7fb8b817970196f358c"
+    },
+    {
+      "identity": "trigger:wallets.grid_worker_wallet_insert",
+      "sha256": "2977d6de276a290ecedbed71367375abdf30a876a9f2198f02e202c208622df3"
+    },
+    {
+      "identity": "trigger:wallets.grid_worker_wallet_update",
+      "sha256": "1cc8937f514b5dd431332d51ea0acf6e31a854113f29de63e1a72200b52aee21"
+    },
+    {
+      "identity": "function:grid_worker_validate_generation()",
+      "sha256": "72cc0e5774d79549d5f3a433070b5dd3186b3445e4b98136430263d23d73ea70"
+    },
+    {
+      "identity": "function:grid_worker_validate_owner_scope()",
+      "sha256": "e7893abdfa874702385e3756a39ce8ea5f809dfeae2a13dbe54ee27a1f6af6a3"
+    },
+    {
+      "identity": "trigger:grid_bots.grid_worker_grid_bots_insert",
+      "sha256": "74c557ecd5c9e6308d9a63b7076d8fc8b62373db80114641b3c91e2f87f80619"
+    },
+    {
+      "identity": "trigger:grid_bots.grid_worker_grid_bots_update",
+      "sha256": "142d0469592340ee3544c28cc22a44da1f2d60ae88a9c5120e017008d2499852"
+    },
+    {
+      "identity": "function:grid_worker_has_wallet_lock(wallet text)",
+      "sha256": "911ee9ad55ee2f5fbb4fdbb14527f03af17541ae3b775b9c3eb58869a73a7036"
+    },
+    {
+      "identity": "trigger:grid_worker_host.grid_worker_host_validate",
+      "sha256": "4c9031ed25d805c69eb55017ef15364bd09b8bd5321d3b4f2b670d0885dff9b7"
+    },
+    {
+      "identity": "trigger:grid_worker_send_audit.grid_worker_audit_validate",
+      "sha256": "31c5f1f8d1a5a85c561234b0c7924493d8df481026f7625814829dfea1be6f6e"
+    },
+    {
+      "identity": "function:grid_worker_has_host_lock(exclusive_required boolean)",
+      "sha256": "f53c8a3edb0d49e34533fd8ad71421b4bba5094826e1b5f39f03f93a1c2d3f46"
+    },
+    {
+      "identity": "trigger:protocol_subaccounts.grid_worker_pool_release_validate",
+      "sha256": "9ac793f0f4e4d15f575f7819cbed08aaec683c377b11e15b3006d5d3b95279f1"
+    },
+    {
+      "identity": "trigger:grid_launch_accounts.grid_worker_launch_release_validate",
+      "sha256": "0285d47a62f0b79a0a9fe4e06f69d4b92768638f175ba089320480f6dcfd2e45"
+    },
+    {
+      "identity": "trigger:grid_worker_requests.grid_worker_requests_owner_validate",
+      "sha256": "2f9da9856e6bd91f70c7018eb46b5a651676aa6c9f672cd08aea59858c290ad4"
+    },
+    {
+      "identity": "trigger:grid_launch_accounts.grid_worker_grid_launch_accounts_insert",
+      "sha256": "384ced5e177669716b74a4f86a1e1c8e372f2509550ec5db30e1e3904ed0b5fb"
+    },
+    {
+      "identity": "trigger:grid_launch_accounts.grid_worker_grid_launch_accounts_update",
+      "sha256": "c3f67ccdc73c9a0edd449a2d8e3ee143549d892fceb889e26b0259c353886353"
+    },
+    {
+      "identity": "trigger:grid_worker_wallet_authority.grid_worker_generation_validate",
+      "sha256": "05ddd555f409ff9a6b7f6acba877912ccb6e141d9b29991ee0fbac2737b249cf"
+    },
+    {
+      "identity": "trigger:protocol_subaccounts.grid_worker_protocol_subaccounts_insert",
+      "sha256": "ac541ca445d6f9923be10c2afa03d8dbf4d59e76c0a3b9030f879464b38bd48d"
+    },
+    {
+      "identity": "trigger:protocol_subaccounts.grid_worker_protocol_subaccounts_update",
+      "sha256": "23ed0e896a19eb5f05416253e2c15d0db1a9e0492c4cafe7178e9b551645f540"
+    },
+    {
+      "identity": "trigger:grid_worker_reservations.grid_worker_reservations_owner_validate",
+      "sha256": "48305f5d50924f5e3fc7c3046bc3796b82c04faa1f1f2cb354ba985e20677dc7"
+    },
+    {
+      "identity": "function:grid_worker_consume_receipt(receipt_id uuid, expected_action text, expected_target text, expected_params_digest text)",
+      "sha256": "a4dfcb3fca7fe626dc3be25f5e63f525d6b8070c1191cb739b65e5c700b6e2e7"
+    },
+    {
+      "identity": "function:grid_worker_pause_from_verified_receipt(receipt_id uuid, expected_action text, expected_target text, expected_params_digest text)",
+      "sha256": "865c68a38b22ddc2f846748a94fc4ef26ced8701fc58407ae9ce7c49feda3a89"
+    }
+  ]
+}
