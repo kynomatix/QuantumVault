@@ -48,10 +48,9 @@ describe('heatmap time coordinates', () => {
     const after = fillRect.mock.calls[0];
     expect(before[2]).toBe(5); expect(after[2]).toBe(9); expect(after[0]).not.toBe(before[0]);
   });
-  it('lets older candle-only history autoscale without the model price range', () => {
+  it('leaves autoscale to the visible candles rather than the model price range', () => {
     const { timeScale } = scale(), value = data();
-    timeScale.getVisibleRange = () => ({ from: (END / 1000 - 86400) as never, to: (END / 1000 - 14400) as never });
     const primitive = createLiquidationHeatmapPrimitive(value, { timeScale: () => timeScale } as IChartApi, {} as ISeriesApi<'Candlestick'>);
-    expect(primitive.autoscaleInfo!(0, 179)).toBeNull();
+    expect(primitive.autoscaleInfo).toBeUndefined();
   });
 });
