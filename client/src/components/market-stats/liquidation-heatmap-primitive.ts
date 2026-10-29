@@ -76,12 +76,7 @@ export function createLiquidationHeatmapPrimitive(data: LiquidationStats, chart:
     attached: ({ requestUpdate }) => { requestRedraw = requestUpdate; requestUpdate(); },
     detached: () => { requestRedraw = undefined; },
     requestRedraw: () => requestRedraw?.(),
-    autoscaleInfo: () => {
-      const visible = chart.timeScale().getVisibleRange();
-      if (visible && (Number(visible.to) * 1000 < data.columns[0].time
-        || Number(visible.from) * 1000 > data.columns[data.columns.length - 1].time)) return null;
-      return { priceRange: { minValue: data.priceRange.lower, maxValue: data.priceRange.upper } };
-    },
+    // No autoscaleInfo: auto-fit follows the visible candles and bands outside the scale clip.
     updateAllViews() {
       columns = mapHeatmapColumns(data.columns, chart.timeScale());
       bands = Array.from({ length: data.columns[0].bins.length }, (_, band) => {

@@ -27,8 +27,16 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
     for (const c of data.columns) candles.set(c.time, { time: c.time, ...c.candle });
     series.setData([...candles.values()].sort((a, b) => a.time - b.time).map(c => ({ ...c, time: c.time / 1000 as UTCTimestamp })));
     chart.timeScale().applyOptions({ fixLeftEdge: true, fixRightEdge: true });
-    // Vertical swipes scroll the page; horizontal drag and pinch stay with the chart.
+    // Vertical swipes on the plot scroll the page; on the price axis they zoom the price scale.
+    // In lightweight-charts v4 the axis drag is gated by vertTouchDrag, so set it per touch.
+    const el = container.current;
+    const axisTouch = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (touch) chart.applyOptions({ handleScroll: {
+        vertTouchDrag: touch.clientX >= el.getBoundingClientRect().right - chart.priceScale('right').width() } });
+    };
     chart.applyOptions({ handleScroll: { vertTouchDrag: false } });
+    el.addEventListener('touchstart', axisTouch, { capture: true, passive: true });
     series.createPriceLine({ price: data.currentPrice, color: '#e6dfed', lineWidth: 1,
       lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Last close' });
     const primitive = createLiquidationHeatmapPrimitive(data, chart, series, minUsd);
@@ -57,7 +65,7 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
       if (container.current) chart.applyOptions({ width: container.current.clientWidth, height: container.current.clientHeight });
     });
     resize.observe(container.current);
-    return () => { primitiveRef.current = null; resize.disconnect(); chart.unsubscribeCrosshairMove(show); chart.unsubscribeClick(show); series.detachPrimitive(halo); series.detachPrimitive(primitive); chart.remove(); };
+    return () => { primitiveRef.current = null; resize.disconnect(); el.removeEventListener('touchstart', axisTouch, { capture: true }); chart.unsubscribeCrosshairMove(show); chart.unsubscribeClick(show); series.detachPrimitive(halo); series.detachPrimitive(primitive); chart.remove(); };
   }, [data]);
   const columnIndex = Math.min(selected.column, data.columns.length - 1), bandIndex = Math.min(selected.band, data.columns[0].bins.length - 1);
   const column = data.columns[columnIndex], bins = column.bins[bandIndex];
