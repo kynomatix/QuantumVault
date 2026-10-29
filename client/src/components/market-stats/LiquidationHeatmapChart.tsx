@@ -11,7 +11,6 @@ const money = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency',
 const compact = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', notation: 'compact', maximumFractionDigits: 1 }).format(n);
 export default function LiquidationHeatmapChart({ data }: { data: LiquidationStats }) {
   const container = useRef<HTMLDivElement>(null);
-  const scroller = useRef<HTMLDivElement>(null);
   const tooltip = useRef<HTMLDivElement>(null);
   const primitiveRef = useRef<ReturnType<typeof createLiquidationHeatmapPrimitive> | null>(null);
   const [threshold, setThreshold] = useState(0);
@@ -28,6 +27,8 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
     for (const c of data.columns) candles.set(c.time, { time: c.time, ...c.candle });
     series.setData([...candles.values()].sort((a, b) => a.time - b.time).map(c => ({ ...c, time: c.time / 1000 as UTCTimestamp })));
     chart.timeScale().applyOptions({ fixLeftEdge: true, fixRightEdge: true });
+    // Vertical swipes scroll the page; horizontal drag and pinch stay with the chart.
+    chart.applyOptions({ handleScroll: { vertTouchDrag: false } });
     series.createPriceLine({ price: data.currentPrice, color: '#e6dfed', lineWidth: 1,
       lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'Last close' });
     const primitive = createLiquidationHeatmapPrimitive(data, chart, series, minUsd);
@@ -43,12 +44,14 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
       if (price === null) return;
       setSelected({ column,
         band: Math.max(0, Math.min(data.columns[0].bins.length - 1, Math.floor((price - data.priceRange.lower) / data.bandWidth))) });
-      if (scroller.current && container.current) setPointer(placeHeatmapTooltip(event.point,
-        { scrollLeft: scroller.current.scrollLeft, width: scroller.current.clientWidth, height: container.current.clientHeight },
+      if (container.current) setPointer(placeHeatmapTooltip(event.point,
+        { scrollLeft: 0, width: container.current.clientWidth, height: container.current.clientHeight },
         { width: 256, height: tooltip.current?.offsetHeight ?? 128 }));
     };
     chart.subscribeCrosshairMove(show); chart.subscribeClick(show);
-    chart.timeScale().setVisibleRange({ from: data.columns[0].time / 1000 as UTCTimestamp,
+    // Phones open on the latest ~8 days (48 four-hour columns); drag or pinch for the rest.
+    const first = container.current.clientWidth < 640 ? Math.max(0, data.columns.length - 48) : 0;
+    chart.timeScale().setVisibleRange({ from: data.columns[first].time / 1000 as UTCTimestamp,
       to: data.columns[data.columns.length - 1].time / 1000 as UTCTimestamp });
     const resize = new ResizeObserver(() => {
       if (container.current) chart.applyOptions({ width: container.current.clientWidth, height: container.current.clientHeight });
@@ -64,9 +67,9 @@ export default function LiquidationHeatmapChart({ data }: { data: LiquidationSta
     <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground">
       <span>30 days · 4-hour candles and end-of-block exposure · UTC</span><span>Current reference: {money(data.currentPrice)} (last completed close)</span>
     </div>
-    <p className="mb-2 text-[10px] text-muted-foreground">Heatmap covers the last 30 days · Scroll or zoom left for older candles (180 days).</p>
-    <div ref={scroller} onScroll={() => setPointer(null)} className="max-w-full overflow-x-auto overscroll-x-contain rounded-xl border border-border bg-[#0c0c16]" role="region" aria-label="Scrollable monthly Bitcoin liquidation chart" tabIndex={0}>
-      <div className="relative min-w-[900px]">
+    <p className="mb-2 text-[10px] text-muted-foreground">Heatmap covers the last 30 days · Drag or pinch to move and zoom; older candles go back 180 days.</p>
+    <div className="overflow-hidden rounded-xl border border-border bg-[#0c0c16]" role="region" aria-label="Monthly Bitcoin liquidation chart">
+      <div className="relative">
         <div ref={container} className="h-[360px]" role="img" aria-label="Modelled liquidation bands beneath Bitcoin candles. Brighter bands represent larger USD-equivalent exposure. Use the time and price controls below for values." />
         {pointer && <div ref={tooltip} role="tooltip" className="pointer-events-none absolute z-10 w-64 rounded-lg border border-border bg-[#151522] p-3 text-[11px] shadow-xl" style={{ left: pointer.x, top: pointer.y }}>
           <p>{date} UTC</p><p className="mt-1">Band {money(low)}–{money(low + data.bandWidth)}</p>
