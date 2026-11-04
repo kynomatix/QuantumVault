@@ -1737,6 +1737,38 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect(result.partialTermination).toBe("batch_deadline_exhausted");
   });
 
+  it("preserves within-chunk admission authority after cooperative expiry without inventing misses", async () => {
+    const now = Date.now();
+    const deadlineAt = now + 35_000;
+    mockGetCachedBatch.mockImplementationOnce(async () => {
+      vi.setSystemTime(deadlineAt);
+      throw Object.assign(new Error("EXAMPLE admission deadline"), {
+        name: "CandleBatchPartialReadError", code: "candle_batch_partial_read",
+        completed: new Map([
+          ["SOL/USDT", cachedBars(now)],
+          ["STALE/USDT", cachedBars(now - 8 * TF_MS)],
+          ["MISS/USDT", null],
+        ]),
+        unresolvedSymbols: new Set(["BTC/USDT", "EMPTY/USDT"]),
+        termination: "batch_deadline_exhausted",
+      });
+    });
+    const result = await prefetchCachedOHLCV(
+      ["SOL/USDT", "STALE/USDT", "MISS/USDT", "BTC/USDT", "EMPTY/USDT"], "15m", now - 100 * TF_MS, now,
+      { basisPolicy: MONEY_CANDLE_POLICY, callerClass: "scanner", batchDeadlineAtMs: deadlineAt },
+    );
+    expect(Date.now()).toBe(deadlineAt);
+    expect([...result.complete.keys()]).toEqual(["SOL/USDT"]);
+    expect([...result.prefixes.keys()]).toEqual(["STALE/USDT"]);
+    expect([...result.exactMisses]).toEqual(["MISS/USDT"]);
+    expect([...result.unresolvedSymbols]).toEqual(["BTC/USDT", "EMPTY/USDT"]);
+    expect(result.partialTermination).toBe("batch_deadline_exhausted");
+    expect(mockGetCachedBatch).toHaveBeenCalledTimes(1);
+    expect(mockGetCached).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
   it("partitions policy-ineligible groups as misses and a natural-boundary stale group as a reusable prefix", async () => {
     const now = Date.now();
     const spot = cachedBars(now, {

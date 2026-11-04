@@ -243,6 +243,11 @@ export type CandleBatchReadPhases = {
   plannedChunks: number;
   chunks: number;
   batchBudgetMs: number;
+  setupMs: number;
+  yieldWaitMs: number;
+  restoreMs: number;
+  cpuUserMs: number;
+  cpuSystemMs: number;
   hits: number;
   misses: number;
   semaphoreWaitMs: number;
@@ -529,6 +534,7 @@ export async function getCachedCandlesBatch(
 
   await requireCandleCacheSchema();
   const startedAt = Date.now();
+  const cpuStartedAt = process.cpuUsage();
   const signal = opts.signal;
   const plannedChunks = Math.ceil(uniqueSymbols.length / SCANNER_BATCH_SYMBOL_CHUNK_SIZE);
   const phases: CandleBatchReadPhases = {
@@ -544,6 +550,11 @@ export async function getCachedCandlesBatch(
     plannedChunks,
     chunks: 0,
     batchBudgetMs: 0,
+    setupMs: 0,
+    yieldWaitMs: 0,
+    restoreMs: 0,
+    cpuUserMs: 0,
+    cpuSystemMs: 0,
     hits: 0,
     misses: uniqueSymbols.length,
     semaphoreWaitMs: 0,
@@ -560,6 +571,10 @@ export async function getCachedCandlesBatch(
   const finish = (outcome: CandleBatchReadOutcome) => {
     phases.outcome = outcome;
     phases.totalMs = Date.now() - startedAt;
+    // Process-wide deltas include other work running while this batch awaits.
+    const cpu = process.cpuUsage(cpuStartedAt);
+    phases.cpuUserMs = cpu.user / 1000;
+    phases.cpuSystemMs = cpu.system / 1000;
     phases.pool = poolSnapshot(scannerCandlePool);
     try {
       opts.onPhases?.(phases);
@@ -573,6 +588,7 @@ export async function getCachedCandlesBatch(
       `batch_budget=${phases.batchBudgetMs}ms hits=${phases.hits} misses=${phases.misses} ` +
       `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
       `query=${phases.queryMs}ms group=${phases.groupingMs}ms process=${phases.resultProcessingMs}ms max_chunk_rows=${phases.maxChunkRows} max_work_span=${phases.maxWorkSpanMs}ms total=${phases.totalMs}ms ` +
+      `setup=${phases.setupMs}ms yield_wait=${phases.yieldWaitMs}ms restore=${phases.restoreMs}ms cpu_user=${phases.cpuUserMs}ms cpu_system=${phases.cpuSystemMs}ms ` +
       `termination=${phases.termination} sqlstate=${phases.sqlstate ?? "none"} ` +
       `pool=${phases.pool.total}/${phases.pool.idle}i/${phases.pool.waiting}w`;
     console.log(line);
@@ -627,6 +643,31 @@ export async function getCachedCandlesBatch(
       : Number.POSITIVE_INFINITY;
     const batchDeadlineAt = Math.min(internalBatchDeadlineAt, callerBatchDeadlineAt);
     phases.batchBudgetMs = Math.max(0, batchDeadlineAt - Date.now());
+    const checkBatchTime = () => {
+      if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+      if (Date.now() >= batchDeadlineAt) throw new CandleBatchDeadlineExhaustedError();
+    };
+    const yieldBatch = async () => {
+      checkBatchTime();
+      const yieldStartedAt = performance.now();
+      try {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      } finally {
+        phases.yieldWaitMs += performance.now() - yieldStartedAt;
+      }
+      checkBatchTime();
+    };
+    const restoreSession = async () => {
+      const restoreStartedAt = performance.now();
+      try {
+        await client.query({
+          text: "SELECT set_config('statement_timeout', '30000', false)",
+          query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+        } as any);
+      } finally {
+        phases.restoreMs += performance.now() - restoreStartedAt;
+      }
+    };
     let selectStartedAt: number | null = null;
     let selectCompleted = true;
     const admittedBySymbol = new Map<string, ProvenancedOHLCV[] | null>();
@@ -641,15 +682,21 @@ export async function getCachedCandlesBatch(
         && policy.acceptedFinality.length === 1
         && policy.acceptedProxy.length === 1;
       for (let offset = 0; offset < uniqueSymbols.length; offset += SCANNER_BATCH_SYMBOL_CHUNK_SIZE) {
-        if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+        checkBatchTime();
         const remainingMs = Math.floor(batchDeadlineAt - Date.now());
         if (remainingMs <= 0) throw new CandleBatchDeadlineExhaustedError();
         const chunkStatementTimeoutMs = Math.min(statementTimeoutMs, remainingMs);
-        await client.query({
-          text: "SELECT set_config('statement_timeout', $1, false)",
-          values: [String(chunkStatementTimeoutMs)],
-          query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
-        } as any);
+        const setupStartedAt = performance.now();
+        try {
+          await client.query({
+            text: "SELECT set_config('statement_timeout', $1, false)",
+            values: [String(chunkStatementTimeoutMs)],
+            query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
+          } as any);
+        } finally {
+          phases.setupMs += performance.now() - setupStartedAt;
+        }
+        checkBatchTime();
         const symbolChunk = uniqueSymbols.slice(offset, offset + SCANNER_BATCH_SYMBOL_CHUNK_SIZE);
         selectStartedAt = Date.now();
         selectCompleted = false;
@@ -675,41 +722,47 @@ export async function getCachedCandlesBatch(
         phases.queryMs += Date.now() - selectStartedAt;
         selectCompleted = true;
         phases.chunks++;
-        for (const symbol of symbolChunk) completedSymbols.add(symbol);
         // Each symbol belongs to one SQL chunk. Keep all of its rows together
         // for unchanged source/finality selection, then release the raw chunk.
         // A processing failure must fail the whole read, never become a trusted
         // partial SQL prefix.
         try {
+          checkBatchTime();
           const chunkRows = result.rows as CandleCacheBatchRow[];
           phases.rows += chunkRows.length;
           phases.maxChunkRows = Math.max(phases.maxChunkRows, chunkRows.length);
           const grouped = new Map(symbolChunk.map((symbol) => [symbol, [] as CandleCacheRow[]]));
           const endGrouping = startJobTiming("candle.group");
-          let spanStartedAt = performance.now();
+          let spanStartedAt: number | null = performance.now();
           try {
             for (let index = 0; index < chunkRows.length; index++) {
               const row = chunkRows[index];
               grouped.get(row.symbol)?.push(row);
-              if ((index & 255) === 255 && performance.now() - spanStartedAt >= 8) {
-                const spanMs = performance.now() - spanStartedAt;
-                phases.groupingMs += spanMs;
-                phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
-                await new Promise<void>((resolve) => setImmediate(resolve));
-                if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
-                spanStartedAt = performance.now();
+              if ((index & 255) === 255) {
+                checkBatchTime();
+                if (performance.now() - spanStartedAt! >= 8) {
+                  const spanMs = performance.now() - spanStartedAt!;
+                  phases.groupingMs += spanMs;
+                  phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
+                  // Exclude yield waits even when expiry/cancellation interrupts.
+                  spanStartedAt = null;
+                  await yieldBatch();
+                  spanStartedAt = performance.now();
+                }
               }
             }
           } finally {
-            const spanMs = performance.now() - spanStartedAt;
-            phases.groupingMs += spanMs;
-            phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
+            if (spanStartedAt !== null) {
+              const spanMs = performance.now() - spanStartedAt;
+              phases.groupingMs += spanMs;
+              phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
+            }
             endGrouping();
           }
           const endAdmission = startJobTiming("candle.admit");
           try {
             for (let index = 0; index < symbolChunk.length; index++) {
-              if (isSignalAborted(signal)) throw makeAbortError(signal!.reason);
+              checkBatchTime();
               const symbol = symbolChunk[index];
               const localPhases: CandleReadPhases = {
                 callerClass: phases.callerClass, symbol, timeframe, outcome: "miss",
@@ -725,22 +778,27 @@ export async function getCachedCandlesBatch(
               // bound on uninterrupted work, not exclusive CPU attribution.
               phases.maxWorkSpanMs = Math.max(phases.maxWorkSpanMs, spanMs);
               admittedBySymbol.set(symbol, admitted);
+              // SQL/grouping alone cannot establish an exact miss. Publish only
+              // after this symbol's complete row group has finished admission.
+              completedSymbols.add(symbol);
               grouped.delete(symbol);
               if (admitted !== null) phases.hits++;
               if (index + 1 < symbolChunk.length) {
-                await new Promise<void>((resolve) => setImmediate(resolve));
+                await yieldBatch();
               }
             }
           } finally { endAdmission(); }
-        } catch (error) { chunkProcessingFailed = true; throw error; }
+        } catch (error) {
+          // Cooperative expiry retains fully admitted groups; real processing
+          // failures and cancellation still invalidate the entire read.
+          chunkProcessingFailed = !(error instanceof CandleBatchDeadlineExhaustedError);
+          throw error;
+        }
         if (offset + SCANNER_BATCH_SYMBOL_CHUNK_SIZE < uniqueSymbols.length) {
-          await new Promise<void>((resolve) => setImmediate(resolve));
+          await yieldBatch();
         }
       }
-      await client.query({
-        text: "SELECT set_config('statement_timeout', '30000', false)",
-        query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
-      } as any);
+      await restoreSession();
       phases.termination = "success";
       client.release();
     } catch (error) {
@@ -756,14 +814,11 @@ export async function getCachedCandlesBatch(
       phases.sqlstate = classified.sqlstate;
       let partialCause = error;
       if (classified.termination === "batch_deadline_exhausted") {
-        // The local clock expired between chunks, not while PostgreSQL was
+        // The local clock expired cooperatively, not while PostgreSQL was
         // executing. Restore the shared session default and keep the healthy
         // max-one scanner-pool connection available to the next timeframe.
         try {
-          await client.query({
-            text: "SELECT set_config('statement_timeout', '30000', false)",
-            query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
-          } as any);
+          await restoreSession();
           client.release();
         } catch (restoreError) {
           client.release(restoreError instanceof Error ? restoreError : new Error(String(restoreError)));
@@ -781,8 +836,8 @@ export async function getCachedCandlesBatch(
       } else {
         client.release(error instanceof Error ? error : new Error(String(error)));
       }
-      // Preserve only a strict prefix. If no SELECT completed there are no
-      // trustworthy bytes to retain; if every SELECT completed, the failure
+      // Preserve only a strict admitted prefix. If no group was admitted there
+      // are no trustworthy bytes to retain; if every group was admitted, failure
       // belongs to session cleanup and retains the existing full-failure
       // semantics rather than masquerading as an unresolved-symbol suffix.
       if (completedSymbols.size === 0 || completedSymbols.size === uniqueSymbols.length) throw error;

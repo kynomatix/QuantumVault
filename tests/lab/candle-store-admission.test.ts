@@ -17,7 +17,7 @@
 //      any other reason → "cancelled" (phase telemetry drives incident
 //      attribution from this).
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const { fakePool, fakeScannerPool, fakeDb } = vi.hoisted(() => ({
   fakePool: {
@@ -555,6 +555,23 @@ describe("getCachedCandles — cancellation-aware admission", () => {
 });
 
 describe("getCachedCandlesBatch — scanner universe admission", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function batchClock() {
+    let now = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    return { advance: (ms: number) => { now += ms; } };
+  }
+
+  function immediateYields(onYield = () => {}) {
+    return vi.spyOn(globalThis, "setImmediate").mockImplementation(((resolve: () => void) => {
+      onYield();
+      resolve();
+      return {} as NodeJS.Immediate;
+    }) as typeof setImmediate);
+  }
+
   const row = (symbol: string, finality: CandleFinality = "finalized", close = 10) => ({
     symbol,
     time: "3600000",
@@ -724,8 +741,9 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     const release = vi.fn();
     let now = 1_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let selects = 0;
     const query = vi.fn(async (config: { text: string }) => {
-      if (config.text.includes("FROM lab_candle_cache_v2")) now += 5_001;
+      if (config.text.includes("FROM lab_candle_cache_v2")) now += ++selects === 1 ? 5_001 : 4_998;
       return { rows: [] };
     });
     fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
@@ -798,10 +816,12 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     let now = 1_000;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
     const query = vi.fn(async (config: { text: string }) => {
-      if (config.text.includes("FROM lab_candle_cache_v2")) now += 5_001;
+      if (config.text.includes("FROM lab_candle_cache_v2")) now += 4_000;
       return { rows: [] };
     });
     fakeScannerPool.connect.mockResolvedValue({ release, query });
+    let yields = 0;
+    immediateYields(() => { if (++yields === 10) now += 1_001; });
     let phases: CandleBatchReadPhases | undefined;
 
     const first = await getCachedCandlesBatch(
@@ -856,13 +876,15 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
     const query = vi.fn(async (config: { text: string }) => {
       if (config.text.includes("FROM lab_candle_cache_v2")) {
-        now += 5_001;
+        now += 4_000;
         return { rows: [] };
       }
       if (config.text.includes("'30000'")) throw restoreFailure;
       return { rows: [] };
     });
     fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let yields = 0;
+    immediateYields(() => { if (++yields === 10) now += 1_001; });
     let phases: CandleBatchReadPhases | undefined;
 
     const rejection = await getCachedCandlesBatch(
@@ -900,6 +922,176 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       query_timeout: SCANNER_BATCH_CLIENT_QUERY_TIMEOUT_MS,
     });
     nowSpy.mockRestore();
+  });
+
+  it.each([false, true])("stops before SELECT when setup expires (admitted prefix=%s)", async (hasPrefix) => {
+    const clock = batchClock();
+    immediateYields();
+    const symbols = Array.from({ length: hasPrefix ? 12 : 2 }, (_, index) => `M${index}-PERP`);
+    const release = vi.fn();
+    let setups = 0;
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("$1, false") && ++setups === (hasPrefix ? 2 : 1)) clock.advance(100);
+      if (config.text.includes("'30000'")) clock.advance(17);
+      return { rows: [] };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+    const error = await getCachedCandlesBatch(symbols, "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
+      onPhases: (value) => { phases = value; },
+    }).catch((value) => value);
+
+    expect(error).toBeInstanceOf(CandleBatchReadError);
+    expect(error instanceof CandleBatchPartialReadError).toBe(hasPrefix);
+    if (hasPrefix) {
+      expect([...error.completed]).toEqual(symbols.slice(0, 10).map((symbol) => [symbol, null]));
+      expect([...error.unresolvedSymbols]).toEqual(symbols.slice(10));
+    }
+    expect(query.mock.calls.filter(([config]) => config.text.includes("FROM lab_candle_cache_v2"))).toHaveLength(hasPrefix ? 1 : 0);
+    expect(query.mock.calls.at(-1)?.[0].text).toContain("'30000'");
+    expect(release).toHaveBeenCalledExactlyOnceWith();
+    expect(phases).toMatchObject({ termination: "batch_deadline_exhausted", setupMs: 100, restoreMs: 17, totalMs: 117 });
+    expect(getCandleStoreLoad().activeReads).toBe(0);
+  });
+
+  it.each(["work", "yield"])("does not publish partially grouped rows when grouping %s expires", async (expiry) => {
+    const clock = batchClock();
+    let selects = 0;
+    let reads = 0;
+    let admissions = 0;
+    // Ten admission/chunk yields precede the second chunk's grouping yield.
+    immediateYields(() => { if (expiry === "yield" && selects === 2) clock.advance(100); });
+    const symbols = Array.from({ length: 12 }, (_, index) => `M${index}-PERP`);
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string }) => {
+      if (!config.text.includes("FROM lab_candle_cache_v2")) return { rows: [] };
+      if (++selects === 1) return { rows: [row(symbols[0])] };
+      return { rows: Array.from({ length: 600 }, () => ({
+        ...row(symbols[10]),
+        get symbol() { reads++; clock.advance(expiry === "work" ? 1 : 0.04); return symbols[10]; },
+        get open() { admissions++; return 9; },
+      })) };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+    const error = await getCachedCandlesBatch(symbols, "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
+      onPhases: (value) => { phases = value; },
+    }).catch((value) => value);
+
+    expect(error).toBeInstanceOf(CandleBatchPartialReadError);
+    expect(error.completed.get(symbols[0])?.[0].close).toBe(10);
+    expect([...error.completed.keys()]).toEqual(symbols.slice(0, 10));
+    expect([...error.unresolvedSymbols]).toEqual(symbols.slice(10));
+    expect(reads).toBe(256);
+    expect(admissions).toBe(0);
+    expect(selects).toBe(2);
+    expect(phases).toMatchObject({ termination: "batch_deadline_exhausted", resolvedSymbols: 10, hits: 1, misses: 9 });
+    if (expiry === "yield") {
+      expect(phases?.yieldWaitMs).toBe(100);
+      expect(phases!.groupingMs).toBeCloseTo(10.24);
+    }
+    expect(query.mock.calls.at(-1)?.[0].text).toContain("'30000'");
+    expect(release).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it.each(["work", "yield"])("publishes only finished symbol admissions when admission %s expires", async (expiry) => {
+    const clock = batchClock();
+    immediateYields(() => { if (expiry === "yield") clock.advance(100); });
+    const release = vi.fn();
+    const untouched = vi.fn(() => 9);
+    const query = vi.fn(async (config: { text: string }) => ({
+      rows: config.text.includes("FROM lab_candle_cache_v2") ? [
+        { ...row("BTC-PERP"), get open() { if (expiry === "work") clock.advance(100); return 9; } },
+        { ...row("SOL-PERP"), get open() { return untouched(); } },
+      ] : [],
+    }));
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    const error = await getCachedCandlesBatch(["BTC-PERP", "SOL-PERP", "MISS-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
+    }).catch((value) => value);
+
+    expect(error).toBeInstanceOf(CandleBatchPartialReadError);
+    expect([...error.completed.keys()]).toEqual(["BTC-PERP"]);
+    expect(error.completed.get("BTC-PERP")?.[0]).toMatchObject({ open: 9, close: 10 });
+    expect([...error.unresolvedSymbols]).toEqual(["SOL-PERP", "MISS-PERP"]);
+    expect(untouched).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(release).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("discards staged admissions on caller cancellation even when the batch deadline also expires", async () => {
+    const clock = batchClock();
+    const controller = new AbortController();
+    immediateYields(() => { clock.advance(100); controller.abort("scanner-stopped"); });
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string }) => ({ rows: config.text.includes("FROM lab_candle_cache_v2") ? [row("BTC-PERP")] : [] }));
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    const error = await getCachedCandlesBatch(["BTC-PERP", "SOL-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100, signal: controller.signal,
+    }).catch((value) => value);
+    expect(error).toMatchObject({ name: "AbortError" });
+    expect(error).not.toBeInstanceOf(CandleBatchPartialReadError);
+    expect(release).toHaveBeenCalledExactlyOnceWith(expect.any(Error));
+    expect(getCandleStoreLoad().activeReads).toBe(0);
+  });
+
+  it("does not retain staged admissions after a later symbol's processing failure", async () => {
+    batchClock();
+    immediateYields();
+    const release = vi.fn();
+    const failure = new Error("EXAMPLE later admission failure");
+    const query = vi.fn(async (config: { text: string }) => ({ rows: config.text.includes("FROM lab_candle_cache_v2") ? [
+      row("BTC-PERP"), { ...row("SOL-PERP"), get open() { throw failure; } },
+    ] : [] }));
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    const error = await getCachedCandlesBatch(["BTC-PERP", "SOL-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000,
+    }).catch((value) => value);
+    expect(error).toBeInstanceOf(CandleBatchReadError);
+    expect(error).not.toBeInstanceOf(CandleBatchPartialReadError);
+    expect(release).toHaveBeenCalledExactlyOnceWith(failure);
+  });
+
+  it.each([false, true])("finishes cleanup after expiry and measures all new phases (restore failure=%s)", async (fails) => {
+    const clock = batchClock();
+    immediateYields(() => clock.advance(7));
+    vi.spyOn(process, "cpuUsage").mockImplementation((previous) => previous
+      ? { user: 1_234, system: 567 } : { user: 100, system: 200 });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const release = vi.fn();
+    const failure = new Error("EXAMPLE restore failure");
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("'30000'")) {
+        clock.advance(5_000);
+        if (fails) throw failure;
+      } else if (config.text.includes("$1, false")) clock.advance(2);
+      else { clock.advance(3); return { rows: [row("BTC-PERP")] }; }
+      return { rows: [] };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    let phases: CandleBatchReadPhases | undefined;
+    const result = await getCachedCandlesBatch(["BTC-PERP", "MISS-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000,
+      onPhases: (value) => { phases = value; },
+    }).catch((value) => value);
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(phases).toMatchObject({ setupMs: 2, queryMs: 3, yieldWaitMs: 7, restoreMs: 5_000, totalMs: 5_012, cpuUserMs: 1.234, cpuSystemMs: 0.567 });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("setup=2ms yield_wait=7ms restore=5000ms cpu_user=1.234ms cpu_system=0.567ms"));
+    if (fails) {
+      expect(result).toBeInstanceOf(CandleBatchReadError);
+      expect(result).not.toBeInstanceOf(CandleBatchPartialReadError);
+      expect(release).toHaveBeenCalledExactlyOnceWith(failure);
+    } else {
+      expect([...result.keys()]).toEqual(["BTC-PERP", "MISS-PERP"]);
+      expect(result.get("BTC-PERP")).toEqual([{ time: RANGE.end, open: 9, high: 11, low: 8, close: 10, volume: 10,
+        provenance: { source: "okx", venue: "okx", basis: "perp", proxy: "direct", finality: "finalized", timeSemantic: "open_time" } }]);
+      expect(result.get("MISS-PERP")).toBeNull();
+      expect(phases?.termination).toBe("success");
+      expect(release).toHaveBeenCalledExactlyOnceWith();
+    }
+    expect(getCandleStoreLoad().activeReads).toBe(0);
   });
 
   it("classifies a zero-prefix deadline restore failure as session_restore_failed", async () => {

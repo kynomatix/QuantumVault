@@ -2477,6 +2477,52 @@ describe("scanner batch cache prefetch", () => {
     }
   });
 
+  it.each([35_000, 235_000, 240_000])("charges cooperative batch expiry to the shared global budget (%i ms spent)", async (spentMs) => {
+    vi.useFakeTimers();
+    try {
+      stopScanner();
+      const start = new Date("2026-08-18T00:15:00Z").getTime();
+      vi.setSystemTime(start);
+      setLiveMarkets([{ internalSymbol: "BTC-PERP" }, { internalSymbol: "SOL-PERP" }]);
+      const primary = textbookWBars(start, TF_15M).map((bar) => ({ ...bar, provenance: directPerp }));
+      const parent = healthyMixedParentBars().map((bar) => ({ ...bar, provenance: directPerp }));
+      prefetchCachedOHLCVMock.mockImplementation(async (_symbols: string[], timeframe: string, _start: number, _end: number, options: { batchDeadlineAtMs: number }) => {
+        expect(options.batchDeadlineAtMs).toBe(start + 240_000);
+        if (timeframe === "15m") {
+          await new Promise<void>((resolve) => setTimeout(resolve, spentMs));
+          return {
+            complete: new Map([["BTC/USDT", primary]]), prefixes: new Map(), exactMisses: new Set(),
+            unresolvedSymbols: new Set(["SOL/USDT"]), partialTermination: "batch_deadline_exhausted",
+          };
+        }
+        return { complete: new Map([["BTC/USDT", parent], ["SOL/USDT", parent]]), prefixes: new Map(), exactMisses: new Set() };
+      });
+      fetchOHLCVMock.mockImplementation(async () => primary);
+      startScanner();
+      const sweep = runScannerSweepForTest();
+      await vi.advanceTimersByTimeAsync(spentMs + 1_000);
+      await sweep;
+
+      if (spentMs === 240_000) {
+        expect(fetchOHLCVMock).not.toHaveBeenCalled();
+      } else {
+        expect(fetchOHLCVMock).toHaveBeenCalledTimes(1);
+        const call = fetchOHLCVMock.mock.calls[0] as unknown[];
+        expect(call[0]).toBe("SOL/USDT");
+        expect(call[5]).toEqual(expect.objectContaining({ bypassCache: true, cacheWritePolicy: "skip" }));
+        const options = call[5] as { deadlineMs: number };
+        expect(options.deadlineMs).toBeGreaterThan(0);
+        expect(options.deadlineMs).toBeLessThanOrEqual(240_000 - spentMs);
+        expect(getScannerStatus().recentHistory).toEqual(expect.arrayContaining([
+          expect.objectContaining({ protocol: "pacifica", marketsScanned: 2, errorCount: 0, accountingValid: true }),
+        ]));
+      }
+    } finally {
+      stopScanner();
+      vi.useRealTimers();
+    }
+  });
+
   it("uses completed batch groups and bypasses cache only for unresolved symbols", async () => {
     vi.useFakeTimers();
     try {
