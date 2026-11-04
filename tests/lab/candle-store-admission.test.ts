@@ -996,6 +996,87 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(release).toHaveBeenCalledExactlyOnceWith();
   });
 
+  it("stops grouping at the 256-row boundary even when no yield is due", async () => {
+    const clock = batchClock();
+    // Pin the work-span clock so the boundary never reaches the 8 ms yield branch.
+    vi.mocked(performance.now).mockImplementation(() => 0);
+    immediateYields();
+    let reads = 0;
+    let admissions = 0;
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string }) => ({
+      rows: config.text.includes("FROM lab_candle_cache_v2")
+        ? Array.from({ length: 300 }, () => ({
+          ...row("BTC-PERP"),
+          get symbol() { reads++; clock.advance(0.4); return "BTC-PERP"; },
+          get open() { admissions++; return 9; },
+        }))
+        : [],
+    }));
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    const error = await getCachedCandlesBatch(["BTC-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
+    }).catch((value) => value);
+
+    expect(error).toBeInstanceOf(CandleBatchReadError);
+    expect(error instanceof CandleBatchPartialReadError).toBe(false);
+    expect(reads).toBe(256);
+    expect(admissions).toBe(0);
+    expect(release).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("does not start grouping when the SELECT itself reaches the deadline", async () => {
+    const clock = batchClock();
+    immediateYields();
+    let reads = 0;
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string }) => {
+      if (!config.text.includes("FROM lab_candle_cache_v2")) return { rows: [] };
+      clock.advance(200);
+      return { rows: Array.from({ length: 10 }, () => ({
+        ...row("BTC-PERP"),
+        get symbol() { reads++; return "BTC-PERP"; },
+      })) };
+    });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    const error = await getCachedCandlesBatch(["BTC-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
+    }).catch((value) => value);
+
+    expect(error).toBeInstanceOf(CandleBatchReadError);
+    expect(error instanceof CandleBatchPartialReadError).toBe(false);
+    expect(reads).toBe(0);
+    expect(query.mock.calls.at(-1)?.[0].text).toContain("'30000'");
+    expect(release).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it("does not start the first admission when short grouping reaches the deadline", async () => {
+    const clock = batchClock();
+    immediateYields();
+    let reads = 0;
+    let admissions = 0;
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string }) => ({
+      rows: config.text.includes("FROM lab_candle_cache_v2")
+        ? Array.from({ length: 10 }, () => ({
+          ...row("BTC-PERP"),
+          get symbol() { reads++; clock.advance(20); return "BTC-PERP"; },
+          get open() { admissions++; return 9; },
+        }))
+        : [],
+    }));
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    const error = await getCachedCandlesBatch(["BTC-PERP", "SOL-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
+    }).catch((value) => value);
+
+    expect(error).toBeInstanceOf(CandleBatchReadError);
+    expect(error instanceof CandleBatchPartialReadError).toBe(false);
+    expect(reads).toBe(10);
+    expect(admissions).toBe(0);
+    expect(release).toHaveBeenCalledExactlyOnceWith();
+  });
+
   it.each(["work", "yield"])("publishes only finished symbol admissions when admission %s expires", async (expiry) => {
     const clock = batchClock();
     immediateYields(() => { if (expiry === "yield") clock.advance(100); });
