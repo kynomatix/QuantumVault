@@ -602,7 +602,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     const result = await getCachedCandlesBatch(
       ["BTC-PERP", "SOL-PERP", "BTC-PERP"], "1h", RANGE.start, RANGE.end,
       {
-        basisPolicy: TEST_BASIS_POLICY,
+        basisPolicy: { ...TEST_BASIS_POLICY, consumer: "scanner" },
         queryTimeoutMs: 5_000,
         callerClass: "scanner",
         onPhases: (value) => (phases = value),
@@ -636,7 +636,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(dataStatements).toHaveLength(1);
     expect(result.get("BTC-PERP")?.[0].close).toBe(10);
     expect(result.get("SOL-PERP")).toBeNull();
-    expect(phases).toMatchObject({ poolLane: "scanner-candle", requestedSymbols: 2, hits: 1, misses: 1, outcome: "hit", termination: "success", sqlstate: null, queryMs: 7 });
+    expect(phases).toMatchObject({ poolLane: "scanner-candle", requestedSymbols: 2, hits: 1, misses: 1, outcome: "hit", termination: "success", sqlstate: null, queryMs: 7, rows: 1, distinctSymbolTimes: 1 });
     expect(fakePool.connect).not.toHaveBeenCalled();
     expect(release).toHaveBeenCalledWith();
     nowSpy.mockRestore();
@@ -667,6 +667,52 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
       ["perp"], ["finalized", "forming"], ["direct"],
     ]);
     expect(release).toHaveBeenCalledWith();
+  });
+
+  it.each(["lab", "scanner"] as const)("keeps defensive JS selection unchanged for %s, including equal identities", async (consumer) => {
+    immediateYields();
+    const winner = { ...row("BTC-PERP", "finalized", 21), source: "gate", venue: "gate" };
+    const rows = [
+      row("BTC-PERP", "forming", 80),
+      { ...row("BTC-PERP", "unknown", 90), source: "gate", venue: "gate" },
+      { ...winner, venue: "none", close: 50 },
+      row("BTC-PERP", "finalized", 40),
+      winner,
+      { ...winner, close: 99 }, // Same identity: the original first row still wins.
+    ];
+    const release = vi.fn();
+    const query = vi.fn(async (config: { text: string }) => ({
+      rows: config.text.includes("FROM lab_candle_cache_v2") ? rows : [],
+    }));
+    fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
+    const result = await getCachedCandlesBatch(["BTC-PERP"], "1h", RANGE.start, RANGE.end, {
+      basisPolicy: { ...TEST_BASIS_POLICY, consumer }, queryTimeoutMs: 5_000,
+    });
+    const { symbol, time, source, venue, basis, proxy, finality, timeSemantic, ...ohlcv } = winner;
+    expect(result.get(symbol)).toEqual([{
+      time: Number(time), ...ohlcv, provenance: { source, venue, basis, proxy, finality, timeSemantic },
+    }]);
+    const sql = query.mock.calls[1][0].text;
+    expect(sql.includes('SELECT DISTINCT ON (symbol COLLATE "C", time)')).toBe(consumer === "scanner");
+    if (consumer === "scanner") {
+      expect(sql).toContain("CASE finality WHEN 'finalized' THEN 0 WHEN 'forming' THEN 1 ELSE 2 END");
+      expect(sql).toContain('(source || \'/\' || venue || \'/\' || basis || \'/\' || proxy || \'/\' || finality || \'/\' || time_semantic) COLLATE "C"');
+    }
+    expect(release).toHaveBeenCalledExactlyOnceWith();
+  });
+
+  it.each([
+    { ...TEST_BASIS_POLICY, consumer: "ai_context" as const },
+    { ...TEST_BASIS_POLICY, consumer: "scanner" as const, acceptedBasis: ["spot"] as const },
+    { ...TEST_BASIS_POLICY, consumer: "scanner" as const, acceptedFinality: ["forming"] as const },
+    { ...TEST_BASIS_POLICY, consumer: "scanner" as const, acceptedProxy: ["proxy"] as const },
+    { ...TEST_BASIS_POLICY, consumer: "scanner" as const, acceptedFinality: ["finalized", "forming"] as const },
+  ])("preserves the old SQL outside the exact scanner money policy: %j", async (basisPolicy) => {
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    fakeScannerPool.connect.mockResolvedValueOnce({ release: vi.fn(), query });
+    await getCachedCandlesBatch(["BTC-PERP"], "1h", RANGE.start, RANGE.end, { basisPolicy, queryTimeoutMs: 5_000 });
+    expect(query.mock.calls[1][0].text).not.toContain("DISTINCT");
+    expect(query.mock.calls[1][0].text).toMatch(/ORDER BY symbol, time$/);
   });
 
   it("bounds each wire result to ten symbols, yields between chunks, and aggregates under one batch", async () => {
@@ -1077,7 +1123,9 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     expect(release).toHaveBeenCalledExactlyOnceWith();
   });
 
-  it.each(["work", "yield"])("publishes only finished symbol admissions when admission %s expires", async (expiry) => {
+  it.each([
+    ["work", "lab"], ["yield", "lab"], ["work", "scanner"], ["yield", "scanner"],
+  ] as const)("publishes only finished symbol admissions when admission %s expires for %s", async (expiry, consumer) => {
     const clock = batchClock();
     immediateYields(() => { if (expiry === "yield") clock.advance(100); });
     const release = vi.fn();
@@ -1090,7 +1138,7 @@ describe("getCachedCandlesBatch — scanner universe admission", () => {
     }));
     fakeScannerPool.connect.mockResolvedValueOnce({ release, query });
     const error = await getCachedCandlesBatch(["BTC-PERP", "SOL-PERP", "MISS-PERP"], "1h", RANGE.start, RANGE.end, {
-      basisPolicy: TEST_BASIS_POLICY, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
+      basisPolicy: { ...TEST_BASIS_POLICY, consumer }, queryTimeoutMs: 5_000, batchDeadlineAtMs: 1_100,
     }).catch((value) => value);
 
     expect(error).toBeInstanceOf(CandleBatchPartialReadError);

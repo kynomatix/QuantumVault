@@ -256,6 +256,8 @@ export type CandleBatchReadPhases = {
   resultProcessingMs: number;
   groupingMs: number;
   maxChunkRows: number;
+  /** SQL guarantees uniqueness only for the scanner money-policy query. */
+  distinctSymbolTimes: number | null;
   maxWorkSpanMs: number;
   totalMs: number;
   rows: number;
@@ -537,6 +539,10 @@ export async function getCachedCandlesBatch(
   const cpuStartedAt = process.cpuUsage();
   const signal = opts.signal;
   const plannedChunks = Math.ceil(uniqueSymbols.length / SCANNER_BATCH_SYMBOL_CHUNK_SIZE);
+  const selectOneObservation = opts.basisPolicy.consumer === "scanner"
+    && opts.basisPolicy.acceptedBasis.length === 1 && opts.basisPolicy.acceptedBasis[0] === "perp"
+    && opts.basisPolicy.acceptedFinality.length === 1 && opts.basisPolicy.acceptedFinality[0] === "finalized"
+    && opts.basisPolicy.acceptedProxy.length === 1 && opts.basisPolicy.acceptedProxy[0] === "direct";
   const phases: CandleBatchReadPhases = {
     callerClass: opts.callerClass ?? "scanner",
     poolLane: "scanner-candle",
@@ -563,6 +569,7 @@ export async function getCachedCandlesBatch(
     resultProcessingMs: 0,
     groupingMs: 0,
     maxChunkRows: 0,
+    distinctSymbolTimes: selectOneObservation ? 0 : null,
     maxWorkSpanMs: 0,
     totalMs: 0,
     rows: 0,
@@ -586,7 +593,7 @@ export async function getCachedCandlesBatch(
       `requested=${phases.requestedSymbols} planned_chunks=${phases.plannedChunks} completed_chunks=${phases.chunks} ` +
       `resolved_symbols=${phases.resolvedSymbols} unresolved_symbols=${phases.unresolvedSymbols} ` +
       `batch_budget=${phases.batchBudgetMs}ms hits=${phases.hits} misses=${phases.misses} ` +
-      `rows=${phases.rows} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
+      `rows=${phases.rows} distinct_symbol_times=${phases.distinctSymbolTimes ?? "n/a"} sem=${phases.semaphoreWaitMs}ms acquire=${phases.poolAcquireMs}ms ` +
       `query=${phases.queryMs}ms group=${phases.groupingMs}ms process=${phases.resultProcessingMs}ms max_chunk_rows=${phases.maxChunkRows} max_work_span=${phases.maxWorkSpanMs}ms total=${phases.totalMs}ms ` +
       `setup=${phases.setupMs}ms yield_wait=${phases.yieldWaitMs}ms restore=${phases.restoreMs}ms cpu_user=${phases.cpuUserMs}ms cpu_system=${phases.cpuSystemMs}ms ` +
       `termination=${phases.termination} sqlstate=${phases.sqlstate ?? "none"} ` +
@@ -702,14 +709,25 @@ export async function getCachedCandlesBatch(
         selectCompleted = false;
         const result = await client.query({
           text:
-            "SELECT symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
+            (selectOneObservation ? 'SELECT DISTINCT ON (symbol COLLATE "C", time) ' : "SELECT ") +
+            "symbol, time, open, high, low, close, volume, source, venue, basis, proxy, finality, time_semantic AS \"timeSemantic\" FROM lab_candle_cache_v2 " +
             "WHERE symbol = ANY($1::text[]) AND timeframe = $2 AND time >= $3 AND time <= $4 " +
             (singletonPolicy
               ? "AND basis = $5 AND finality = $6 AND proxy = $7 "
               : "AND basis = ANY($5::text[]) AND finality = ANY($6::text[]) AND proxy = ANY($7::text[]) ") +
             "AND source <> 'unknown' AND venue <> 'unknown' AND time_semantic <> 'unknown' " +
             "AND (NOT $8::boolean OR (source = 'okx' AND venue = 'okx' AND time_semantic = 'open_time')) " +
-            "ORDER BY symbol, time",
+            (selectOneObservation
+              // Match processCandleRows: strongest finality, then the COMPLETE
+              // slash-joined identity. All schema-allowed provenance values are
+              // ASCII enums, so C byte order equals JS UTF-16 lexical order.
+              // time is numeric(20,0): DISTINCT ON groups canonical open times.
+              // The unique provenance index excludes equal-identity ties at a
+              // symbol/timeframe/time; JS admission still handles raw duplicates.
+              ? 'ORDER BY symbol COLLATE "C", time, ' +
+                "CASE finality WHEN 'finalized' THEN 0 WHEN 'forming' THEN 1 ELSE 2 END, " +
+                '(source || \'/\' || venue || \'/\' || basis || \'/\' || proxy || \'/\' || finality || \'/\' || time_semantic) COLLATE "C"'
+              : "ORDER BY symbol, time"),
           values: [
             symbolChunk, timeframe, String(startMs), String(endMs),
             ...(singletonPolicy
@@ -730,6 +748,7 @@ export async function getCachedCandlesBatch(
           checkBatchTime();
           const chunkRows = result.rows as CandleCacheBatchRow[];
           phases.rows += chunkRows.length;
+          if (phases.distinctSymbolTimes !== null) phases.distinctSymbolTimes += chunkRows.length;
           phases.maxChunkRows = Math.max(phases.maxChunkRows, chunkRows.length);
           const grouped = new Map(symbolChunk.map((symbol) => [symbol, [] as CandleCacheRow[]]));
           const endGrouping = startJobTiming("candle.group");

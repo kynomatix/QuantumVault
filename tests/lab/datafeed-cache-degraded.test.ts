@@ -1737,16 +1737,19 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect(result.partialTermination).toBe("batch_deadline_exhausted");
   });
 
-  it("preserves within-chunk admission authority after cooperative expiry without inventing misses", async () => {
+  it.each(["okx", "gate"] as const)("preserves %s selected bars and within-chunk authority after cooperative expiry", async (source) => {
     const now = Date.now();
     const deadlineAt = now + 35_000;
+    const provenance = { source, venue: source, basis: "perp", proxy: "direct", finality: "finalized", timeSemantic: "open_time" } as const;
+    const admitted = cachedBars(now, provenance);
+    const stale = cachedBars(now - 8 * TF_MS, provenance);
     mockGetCachedBatch.mockImplementationOnce(async () => {
       vi.setSystemTime(deadlineAt);
       throw Object.assign(new Error("EXAMPLE admission deadline"), {
         name: "CandleBatchPartialReadError", code: "candle_batch_partial_read",
         completed: new Map([
-          ["SOL/USDT", cachedBars(now)],
-          ["STALE/USDT", cachedBars(now - 8 * TF_MS)],
+          ["SOL/USDT", admitted],
+          ["STALE/USDT", stale],
           ["MISS/USDT", null],
         ]),
         unresolvedSymbols: new Set(["BTC/USDT", "EMPTY/USDT"]),
@@ -1763,6 +1766,10 @@ describe("prefetchCachedOHLCV batch hits", () => {
     expect([...result.exactMisses]).toEqual(["MISS/USDT"]);
     expect([...result.unresolvedSymbols]).toEqual(["BTC/USDT", "EMPTY/USDT"]);
     expect(result.partialTermination).toBe("batch_deadline_exhausted");
+    // SQL multiplicity must not affect datafeed authority: it receives only
+    // admitted bars, and an expired unresolved group is never an exact miss.
+    expect(result.complete.get("SOL/USDT")).toEqual(admitted);
+    expect(result.prefixes.get("STALE/USDT")).toBeDefined();
     expect(mockGetCachedBatch).toHaveBeenCalledTimes(1);
     expect(mockGetCached).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
