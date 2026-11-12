@@ -19,7 +19,7 @@ vi.mock('../../server/protocol/adapter-registry', () => ({
   getDefaultAdapter: () => mocks.adapter, getAdapterForBot: () => mocks.adapter,
 }));
 vi.mock('../../server/protocol/flash/manual-withdrawal', () => ({ getManualFlashWithdrawalAdapter: vi.fn() }));
-import { processWalletSnapshot, startPortfolioSnapshotJob, takePortfolioSnapshots } from '../../server/portfolio-snapshot-job';
+import { computeWalletTotalBalance, processWalletSnapshot, startPortfolioSnapshotJob, takePortfolioSnapshots } from '../../server/portfolio-snapshot-job';
 
 const wallet = 'EXAMPLE_OWNER';
 const boundary = new Date('2026-10-27T12:00:00.000Z');
@@ -147,6 +147,25 @@ describe('portfolio snapshot boot capture', () => {
     await processWalletSnapshot(wallet, 'boot');
     expect(mocks.storage.upsertPortfolioDailySnapshot).not.toHaveBeenCalled();
     expect(mocks.storage.getWalletCumulativeDepositsWithdrawals).not.toHaveBeenCalled();
+  });
+});
+
+describe('partial totals remain excluded from persistence', () => {
+  it('keeps the numeric subtotal diagnostic, skips persistence, and resumes on recovery', async () => {
+    const [bot] = await mocks.storage.getTradingBots();
+    mocks.storage.getTradingBots.mockResolvedValue([bot, { ...bot, id: 'EXAMPLE_SECOND_BOT', protocolSubaccountId: 'EXAMPLE_SECOND_ACCOUNT' }]);
+    mocks.adapter.getAccountInfo.mockResolvedValueOnce({ balance: 120 }).mockRejectedValueOnce(new Error('EXAMPLE_READ_FAILURE'));
+    expect(await computeWalletTotalBalance(wallet)).toEqual({ totalBalance: 120, activeBotCount: 2, ok: false });
+
+    mocks.adapter.getAccountInfo.mockResolvedValueOnce({ balance: 120 }).mockRejectedValueOnce(new Error('EXAMPLE_READ_FAILURE'));
+    await processWalletSnapshot(wallet);
+    expect(mocks.storage.upsertPortfolioDailySnapshot).not.toHaveBeenCalled();
+    expect(mocks.storage.getWalletCumulativeDepositsWithdrawals).not.toHaveBeenCalled();
+
+    await processWalletSnapshot(wallet);
+    expect(mocks.storage.upsertPortfolioDailySnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      totalBalance: '240', cumulativeTradingPnl: '140',
+    }));
   });
 });
 

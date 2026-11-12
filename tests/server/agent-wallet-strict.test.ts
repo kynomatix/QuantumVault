@@ -23,6 +23,7 @@ import {
   agentDepositPreflightHttpResponse,
   buildTransferToAgentTransaction,
   getAgentUsdcBalanceStrict,
+  getAgentSolBalanceStrict,
   getServerConnection,
 } from '../../server/agent-wallet';
 
@@ -108,6 +109,20 @@ describe('getAgentUsdcBalanceStrict — connection seam contract (item 6)', () =
     const result = await getAgentUsdcBalanceStrict(TEST_AGENT_KEY);
 
     expect(result).toBe(0);
+  });
+});
+
+describe('getAgentSolBalanceStrict - display read contract', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('propagates a transport failure instead of inventing zero', async () => {
+    vi.spyOn(getServerConnection(), 'getBalance').mockRejectedValueOnce(new Error('EXAMPLE_SOL_RPC_FAILURE'));
+    await expect(getAgentSolBalanceStrict(TEST_AGENT_KEY)).rejects.toThrow('EXAMPLE_SOL_RPC_FAILURE');
+  });
+
+  it.each([0, 1_250_000_000])('converts a successful %i lamport read to SOL', async lamports => {
+    vi.spyOn(getServerConnection(), 'getBalance').mockResolvedValueOnce(lamports);
+    expect(await getAgentSolBalanceStrict(TEST_AGENT_KEY)).toBe(lamports / 1_000_000_000);
   });
 });
 

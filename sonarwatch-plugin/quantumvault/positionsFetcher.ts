@@ -146,6 +146,7 @@ const executor: FetcherExecutor = async (
   const elements: PortfolioElement[] = [];
   for (const block of payload.protocols) {
     if (block.id === 'agent_wallet') {
+      if (block.status !== 'ok') continue;
       const el = buildAgentWalletElement(block, owner, usdcPrice ?? null, solPrice ?? null);
       if (el) elements.push(el);
       continue;

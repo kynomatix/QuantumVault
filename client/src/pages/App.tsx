@@ -25,6 +25,7 @@ import bs58 from 'bs58';
 import { useWallet } from '@/hooks/useWallet';
 import { isSessionError, showReconnectToast } from '@/lib/reconnect-toast';
 import { useBots, usePositions, useTrades, useLeaderboard, useLeaderboardSparklines, usePrices, useTradingBots, useHealthMetrics, useBotHealth, useReconcilePositions, useMarketplace, useMyMarketplaceSubscriptions, useMyPublishedBots, useUnpublishBot, useUnsubscribeFromBot, usePortfolioPerformance, type HealthMetrics, type PublishedBot, type PortfolioPerformanceData } from '@/hooks/useApi';
+import { PortfolioLiveValue, PortfolioPartialNotice, portfolioValueClass } from '@/components/PortfolioLiveValue';
 import { Sparkline } from '@/components/Sparkline';
 import { useToast } from '@/hooks/use-toast';
 import { useConfirm } from '@/hooks/useConfirm';
@@ -536,6 +537,11 @@ export default function AppPage() {
   
   // Portfolio performance data
   const { data: portfolioPerformanceData, isLoading: portfolioPerformanceLoading } = usePortfolioPerformance(portfolioChartRange);
+  const portfolioPartial = portfolioPerformanceData?.dataCompleteness === 'partial';
+  const portfolioBalance = portfolioPartial ? null : portfolioPerformanceData?.currentBalance ?? null;
+  const portfolioPnl = portfolioPartial ? null : portfolioPerformanceData?.netPnl ?? null;
+  const portfolioReturn = portfolioPartial ? null : portfolioPerformanceData?.pnlPercent ?? null;
+  const portfolioDisplayedPnl = portfolioChartView === 'percent' ? portfolioReturn : portfolioPnl;
 
   const [totalEquity, setTotalEquity] = useState<number | null>(null);
   const [exchangeBalance, setExchangeBalance] = useState<number | null>(null);
@@ -3817,6 +3823,7 @@ export default function AppPage() {
                   </div>
                 ) : portfolioPerformanceData ? (
                   <>
+                    <PortfolioPartialNotice partial={portfolioPartial} />
                     <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                       <div className="gradient-border p-4 noise">
                         <div className="flex items-center gap-2 mb-1">
@@ -3824,7 +3831,7 @@ export default function AppPage() {
                           <p className="text-xs text-muted-foreground">Current Balance</p>
                         </div>
                         <p className="text-2xl font-bold font-mono" data-testid="text-portfolio-balance">
-                          ${portfolioPerformanceData.currentBalance.toFixed(2)}
+                          <PortfolioLiveValue value={portfolioBalance} format="dollar" />
                         </p>
                         <p className="text-xs text-muted-foreground mt-1">USDC</p>
                       </div>
@@ -3843,10 +3850,8 @@ export default function AppPage() {
                             </Tooltip>
                           </TooltipProvider>
                         </div>
-                        <p className={`text-2xl font-bold font-mono ${portfolioPerformanceData.netPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} data-testid="text-portfolio-pnl">
-                          {portfolioChartView === 'percent'
-                            ? `${portfolioPerformanceData.pnlPercent >= 0 ? '+' : ''}${portfolioPerformanceData.pnlPercent.toFixed(2)}%`
-                            : `${portfolioPerformanceData.netPnl >= 0 ? '+' : ''}$${portfolioPerformanceData.netPnl.toFixed(2)}`}
+                        <p className={`text-2xl font-bold font-mono ${portfolioValueClass(portfolioDisplayedPnl)}`} data-testid="text-portfolio-pnl">
+                          <PortfolioLiveValue value={portfolioDisplayedPnl} format={portfolioChartView} signed />
                         </p>
                         <p className="text-xs text-muted-foreground mt-1">True trading performance</p>
                       </div>
@@ -3855,8 +3860,8 @@ export default function AppPage() {
                           <Activity className="w-4 h-4 text-muted-foreground" />
                           <p className="text-xs text-muted-foreground">P&L Percentage</p>
                         </div>
-                        <p className={`text-2xl font-bold font-mono ${portfolioPerformanceData.pnlPercent >= 0 ? 'text-emerald-400' : 'text-red-400'}`} data-testid="text-portfolio-pnl-percent">
-                          {portfolioPerformanceData.pnlPercent >= 0 ? '+' : ''}{portfolioPerformanceData.pnlPercent.toFixed(2)}%
+                        <p className={`text-2xl font-bold font-mono ${portfolioValueClass(portfolioReturn)}`} data-testid="text-portfolio-pnl-percent">
+                          <PortfolioLiveValue value={portfolioReturn} format="percent" signed />
                         </p>
                         <p className="text-xs text-muted-foreground mt-1">Return on deposits</p>
                       </div>
@@ -4016,9 +4021,9 @@ export default function AppPage() {
                               <Area 
                                 type="monotone" 
                                 dataKey={portfolioChartView === 'dollar' ? 'netPnl' : 'pnlPercent'}
-                                stroke={portfolioPerformanceData.netPnl >= 0 ? '#10b981' : '#ef4444'}
+                                stroke={portfolioPnl === null ? '#6b7280' : portfolioPnl >= 0 ? '#10b981' : '#ef4444'}
                                 strokeWidth={2}
-                                fill={portfolioPerformanceData.netPnl >= 0 ? 'url(#colorPnlPositive)' : 'url(#colorPnlNegative)'}
+                                fill={portfolioPnl === null ? 'none' : portfolioPnl >= 0 ? 'url(#colorPnlPositive)' : 'url(#colorPnlNegative)'}
                               />
                             </AreaChart>
                           </ResponsiveContainer>

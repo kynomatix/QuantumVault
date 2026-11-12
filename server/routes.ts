@@ -25676,10 +25676,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // the leaderboard (which reads stored snapshot fields) and the live
       // portfolio endpoint are guaranteed to agree on currentBalance/netPnl/%.
       const { computeWalletTotalBalance } = await import('./portfolio-snapshot-job');
-      // Live endpoint best-effort: a partial balance (one bot's read failed)
-      // is still useful to render — we only refuse to PERSIST a partial total
-      // (that's the snapshot writer's job).
-      const { totalBalance: currentBalance, activeBotCount } = await computeWalletTotalBalance(walletAddress);
+      const { totalBalance, activeBotCount, ok } = await computeWalletTotalBalance(walletAddress);
+      const dataCompleteness = ok ? 'complete' : 'partial';
+      const currentBalance = ok ? totalBalance : null;
 
       // Backfill any deposits the client-side confirmation missed before reading totals.
       // Cached per-wallet for 5 minutes inside the reconciler so this stays cheap.
@@ -25691,7 +25690,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // Task 119: trading P&L $ is flow-neutral by construction:
       //   currentBalance - (cumulativeExternalDeposits - cumulativeExternalWithdrawals)
-      const netPnl = currentBalance - deposits + withdrawals;
+      const netPnl = currentBalance === null ? null : currentBalance - deposits + withdrawals;
       
       // Get trade stats
       const { totalTrades, totalVolume } = await storage.getWalletTradeStats(walletAddress);
@@ -25783,29 +25782,32 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // Task 119: simple lifetime ratio — trading P&L / total external deposits.
       // Matches snapshot writer and backfill so all surfaces agree.
-      let livePnlPercent = (netPnl / Math.max(deposits, 1)) * 100;
-      if (livePnlPercent > 1000) livePnlPercent = 1000;
-      if (livePnlPercent < -100) livePnlPercent = -100;
+      const livePnlPercent = netPnl === null ? null
+        : Math.max(-100, Math.min(1000, (netPnl / Math.max(deposits, 1)) * 100));
 
-      if (!hasToday) {
-        chartData.push({
-          date: today,
-          netPnl,
-          pnlPercent: livePnlPercent,
-          balance: currentBalance,
-        });
-      } else if (chartData.length > 0) {
-        // Update the existing "today" snapshot point with live numbers so the
-        // headline and chart tail always agree.
-        chartData[chartData.length - 1] = {
-          date: chartData[chartData.length - 1].date,
-          netPnl,
-          pnlPercent: livePnlPercent,
-          balance: currentBalance,
-        };
+      // An incomplete live read must neither append nor replace stored history.
+      if (currentBalance !== null && netPnl !== null && livePnlPercent !== null) {
+        if (!hasToday) {
+          chartData.push({
+            date: today,
+            netPnl,
+            pnlPercent: livePnlPercent,
+            balance: currentBalance,
+          });
+        } else if (chartData.length > 0) {
+          // Update the existing "today" snapshot point with live numbers so the
+          // headline and chart tail always agree.
+          chartData[chartData.length - 1] = {
+            date: chartData[chartData.length - 1].date,
+            netPnl,
+            pnlPercent: livePnlPercent,
+            balance: currentBalance,
+          };
+        }
       }
 
       res.json({
+        dataCompleteness,
         currentBalance,
         totalDeposits: deposits,
         totalWithdrawals: withdrawals,

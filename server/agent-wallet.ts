@@ -183,7 +183,7 @@ export async function getAgentUsdcBalance(agentPublicKey: string): Promise<numbe
 /**
  * Strict display-read variant: throws on RPC failure instead of returning 0.
  * Successful zero (e.g. ATA not yet initialized) is a valid result.
- * Used ONLY by initSnapshotModule. Do NOT call from trade/funding/safety paths.
+ * Used by display readers. Do NOT call from trade/funding/safety paths.
  */
 export async function getAgentUsdcBalanceStrict(agentPublicKey: string): Promise<number> {
   const connection = getConnection();
@@ -231,7 +231,7 @@ export async function getAgentSolBalance(agentPublicKey: string): Promise<number
 /**
  * Strict display-read variant: throws on RPC failure instead of returning 0.
  * Successful zero balance is a valid result.
- * Used ONLY by initSnapshotModule. Do NOT call from trade/funding/safety paths.
+ * Used by display readers. Do NOT call from trade/funding/safety paths.
  */
 export async function getAgentSolBalanceStrict(agentPublicKey: string): Promise<number> {
   const connection = getConnection();

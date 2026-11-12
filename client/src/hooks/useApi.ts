@@ -647,11 +647,12 @@ export function useBotPerformance(botId: string | null) {
 }
 
 export interface PortfolioPerformanceData {
-  currentBalance: number;
+  dataCompleteness: 'complete' | 'partial';
+  currentBalance: number | null;
   totalDeposits: number;
   totalWithdrawals: number;
-  netPnl: number;
-  pnlPercent: number;
+  netPnl: number | null;
+  pnlPercent: number | null;
   activeBotCount: number;
   totalBots: number;
   totalTrades: number;

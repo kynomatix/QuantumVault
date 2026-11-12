@@ -17,7 +17,7 @@ import { db } from './db';
 import { wallets, tradingBots } from '@shared/schema';
 import { eq, and } from 'drizzle-orm';
 import { listAdapters, getAdapter, getAdapterHealth } from './protocol/adapter-registry';
-import { getAgentUsdcBalance, getAgentSolBalance } from './agent-wallet';
+import { getAgentUsdcBalanceStrict, getAgentSolBalanceStrict } from './agent-wallet';
 import type { Request, Response } from 'express';
 
 // ---- Response contract -----------------------------------------------------
@@ -314,8 +314,8 @@ async function fetchAgentWalletBlock(agentPublicKey: string | null): Promise<Por
     return { id: 'agent_wallet', status: 'ok', balance: { usdc: 0, sol: 0 }, positions: [] };
   }
   const [usdcRes, solRes] = await Promise.allSettled([
-    getAgentUsdcBalance(agentPublicKey),
-    getAgentSolBalance(agentPublicKey),
+    getAgentUsdcBalanceStrict(agentPublicKey),
+    getAgentSolBalanceStrict(agentPublicKey),
   ]);
   const usdc = usdcRes.status === 'fulfilled' ? usdcRes.value : 0;
   const sol = solRes.status === 'fulfilled' ? solRes.value : 0;
@@ -428,6 +428,7 @@ export async function publicPortfolioHandler(req: Request, res: Response): Promi
 
 // Exposed for tests / diagnostics.
 export const __internals = {
+  fetchAgentWalletBlock,
   resolveTargetsForWallet,
   buildPortfolio,
   responseCache,
