@@ -11,6 +11,7 @@ import { useWallet } from '@solana/wallet-adapter-react';
 import bs58 from 'bs58';
 import { useToast } from '@/hooks/use-toast';
 import { useLeverageLimits } from '@/hooks/useLeverageLimits';
+import { useBotPerformance } from '@/hooks/useBotPerformance';
 import {
   Sheet,
   SheetContent,
@@ -84,7 +85,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { PublishBotModal } from './PublishBotModal';
-import { SharePnLCard } from './SharePnLCard';
+import { SharePnLCard, getPerformanceChartCaption } from './SharePnLCard';
 import { LineChart, Line, XAxis, YAxis, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
 
 export function deriveKnownBotEquity(
@@ -424,11 +425,15 @@ export function BotManagementDrawer({
   const [publishedBotId, setPublishedBotId] = useState<string | null>(null);
   const [performanceTimeframe, setPerformanceTimeframe] = useState<'7d' | '30d' | '90d' | 'all'>('7d');
   const [performanceView, setPerformanceView] = useState<'dollar' | 'percent'>('dollar');
-  const [performanceData, setPerformanceData] = useState<{ timestamp: string; pnl: number; cumulativePnl: number }[]>([]);
-  const [performanceLoading, setPerformanceLoading] = useState(false);
-  const [performanceTotalPnl, setPerformanceTotalPnl] = useState<number>(0);
-  const [performanceTradeCount, setPerformanceTradeCount] = useState<number>(0);
-  const [performanceAccountingIncompleteCount, setPerformanceAccountingIncompleteCount] = useState<number>(0);
+  const {
+    series: performanceData,
+    loading: performanceLoading,
+    stale: performanceStale,
+    totalPnl: performanceTotalPnl,
+    tradeCount: performanceTradeCount,
+    accountingIncompleteCloseCount: performanceAccountingIncompleteCount,
+    refresh: fetchPerformanceData,
+  } = useBotPerformance(isOpen, bot?.id, performanceTimeframe, walletAddress);
   const [manualTradeLoading, setManualTradeLoading] = useState<'long' | 'short' | null>(null);
   const [tpslOpen, setTpslOpen] = useState(false);
   const [tpslMode, setTpslMode] = useState<'price' | 'percent'>('percent');
@@ -474,33 +479,6 @@ export function BotManagementDrawer({
       fetchPublishedStatus();
     }
   }, [isOpen, bot?.id]);
-
-  const fetchPerformanceData = async () => {
-    if (!bot) return;
-    setPerformanceLoading(true);
-    try {
-      const res = await fetch(`/api/trading-bots/${bot.id}/performance?timeframe=${performanceTimeframe}&wallet=${walletAddress}`, {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const data = await safeResponseJson(res);
-        setPerformanceData(data.series || []);
-        setPerformanceTotalPnl(data.totalPnl || 0);
-        setPerformanceTradeCount(data.tradeCount || 0);
-        setPerformanceAccountingIncompleteCount(data.accountingIncompleteCloseCount || 0);
-      }
-    } catch (error) {
-      console.error('Failed to fetch performance data:', error);
-    } finally {
-      setPerformanceLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (isOpen && bot) {
-      fetchPerformanceData();
-    }
-  }, [isOpen, bot?.id, performanceTimeframe]);
 
   const handleManualRefresh = async () => {
     setIsRefreshing(true);
@@ -1507,6 +1485,7 @@ export function BotManagementDrawer({
   const overviewReturnPct = overviewNetPnl === null || netDeposited <= 0
     ? null
     : (overviewNetPnl / netDeposited) * 100;
+  const showPerformancePercent = performanceView === 'percent' && netDeposited > 0;
   const tradingEquity = deriveKnownBotEquity(botBalance, parkedValueUsdc, borrowDebtUsdc);
   const performanceSharingAuthority = resolvePerformanceSharingAuthority(
     overviewNetPnl,
@@ -2148,7 +2127,13 @@ export function BotManagementDrawer({
 
             <div className="p-4 rounded-xl border bg-muted/20" data-testid="performance-chart-container">
               <div className="flex items-center justify-between mb-3">
-                <p className="text-sm font-medium">Performance Chart</p>
+                <div>
+                  <p className="text-sm font-medium">Performance Chart</p>
+                  <p className="text-xs text-muted-foreground">{getPerformanceChartCaption(performanceTimeframe)}</p>
+                  {showPerformancePercent && (
+                    <p className="text-xs text-muted-foreground">% of current net deposits</p>
+                  )}
+                </div>
                 <div className="flex gap-1">
                   {(['7d', '30d', '90d', 'all'] as const).map((tf) => (
                     <Button
@@ -2164,22 +2149,23 @@ export function BotManagementDrawer({
                   ))}
                 </div>
               </div>
-              {performanceLoading ? (
+              {performanceLoading && performanceTradeCount === null ? (
                 <div className="h-[130px] flex items-center justify-center">
                   <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+                  <p role="status" className="text-sm">Loading performance…</p>
                 </div>
               ) : performanceData.length === 0 ? (
                 <div className="h-[130px] flex items-center justify-center rounded-lg bg-muted/50 border border-dashed">
                   <div className="text-center text-muted-foreground">
                     <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No executed trades yet</p>
+                    <p className="text-sm">{performanceTradeCount === null ? 'Performance unavailable' : 'No executed trades yet'}</p>
                   </div>
                 </div>
               ) : (
                 <div className="h-[130px]" data-testid="performance-chart">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart 
-                      data={performanceView === 'percent' && netDeposited > 0
+                      data={showPerformancePercent
                         ? performanceData.map(d => ({ ...d, cumulativePnlPercent: (d.cumulativePnl / netDeposited) * 100 }))
                         : performanceData
                       } 
@@ -2198,7 +2184,7 @@ export function BotManagementDrawer({
                       />
                       <YAxis
                         tick={{ fontSize: 10 }}
-                        tickFormatter={(value) => performanceView === 'percent' 
+                        tickFormatter={(value) => showPerformancePercent
                           ? `${value >= 0 ? '+' : ''}${value.toFixed(0)}%`
                           : `$${value >= 0 ? '+' : ''}${value.toFixed(0)}`
                         }
@@ -2215,16 +2201,16 @@ export function BotManagementDrawer({
                         }}
                         labelFormatter={(value) => new Date(value).toLocaleDateString()}
                         formatter={(value: number) => [
-                          performanceView === 'percent'
+                          showPerformancePercent
                             ? `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
                             : `$${value >= 0 ? '+' : ''}${value.toFixed(2)}`,
-                          'PnL'
+                          showPerformancePercent ? 'PnL (% of current net deposits)' : 'PnL'
                         ]}
                       />
                       <Line
                         type="monotone"
-                        dataKey={performanceView === 'percent' ? 'cumulativePnlPercent' : 'cumulativePnl'}
-                        stroke={performanceTotalPnl >= 0 ? '#22c55e' : '#ef4444'}
+                        dataKey={showPerformancePercent ? 'cumulativePnlPercent' : 'cumulativePnl'}
+                        stroke={performanceTotalPnl !== null && performanceTotalPnl >= 0 ? '#22c55e' : '#ef4444'}
                         strokeWidth={2}
                         dot={false}
                       />
@@ -2235,7 +2221,7 @@ export function BotManagementDrawer({
               <div className="flex items-center justify-between text-xs text-muted-foreground mt-2">
                 <div className="flex gap-1" data-testid="toggle-performance-view">
                   <Button
-                    variant={performanceView === 'dollar' ? 'default' : 'outline'}
+                    variant={!showPerformancePercent ? 'default' : 'outline'}
                     size="sm"
                     className="h-5 px-2 text-xs"
                     onClick={() => setPerformanceView('dollar')}
@@ -2243,22 +2229,28 @@ export function BotManagementDrawer({
                     $
                   </Button>
                   <Button
-                    variant={performanceView === 'percent' ? 'default' : 'outline'}
+                    variant={showPerformancePercent ? 'default' : 'outline'}
                     size="sm"
                     className="h-5 px-2 text-xs"
                     onClick={() => setPerformanceView('percent')}
+                    disabled={netDeposited <= 0}
                   >
                     %
                   </Button>
                 </div>
-                <span>{performanceTradeCount} trade{performanceTradeCount !== 1 ? 's' : ''}</span>
-                <span className={performanceTotalPnl >= 0 ? 'text-green-500' : 'text-red-500'}>
-                  {performanceView === 'percent' && netDeposited > 0
-                    ? `${performanceTotalPnl >= 0 ? '+' : ''}${((performanceTotalPnl / netDeposited) * 100).toFixed(2)}%`
+                <span>{performanceTradeCount === null ? (performanceLoading ? 'Loading trades…' : 'Trades unavailable') : `${performanceTradeCount} trade${performanceTradeCount !== 1 ? 's' : ''}`}</span>
+                <span className={performanceTotalPnl === null ? 'text-muted-foreground' : performanceTotalPnl >= 0 ? 'text-green-500' : 'text-red-500'}>
+                  {performanceTotalPnl === null ? (performanceLoading ? 'Loading PnL…' : 'PnL unavailable') : showPerformancePercent
+                    ? `${performanceTotalPnl >= 0 ? '+' : ''}${((performanceTotalPnl / netDeposited) * 100).toFixed(2)}% of current net deposits`
                     : `${performanceTotalPnl >= 0 ? '+' : ''}$${performanceTotalPnl.toFixed(2)}`
                   }
                 </span>
               </div>
+              {performanceStale && (
+                <p role="status" className="mt-2 text-xs text-muted-foreground" data-testid="performance-stale">
+                  {performanceLoading ? 'Refreshing performance…' : 'Refresh failed.'} Showing last successful chart and trades (stale).
+                </p>
+              )}
               {performanceAccountingIncompleteCount > 0 && (
                 <p
                   className="mt-2 text-xs text-amber-500"
@@ -3441,9 +3433,11 @@ export function BotManagementDrawer({
           botName={displayBot.name}
           market={displayBot.market}
           pnl={overviewNetPnl}
-          pnlPercent={overviewReturnPct ?? 0}
+          pnlPercent={overviewReturnPct}
           timeframe={performanceTimeframe}
           tradeCount={performanceTradeCount}
+          performanceLoading={performanceLoading}
+          performanceStale={performanceStale}
           winRate={getWinRate()}
           chartData={performanceData}
           displayName={displayName}

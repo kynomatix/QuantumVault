@@ -12,9 +12,11 @@ interface SharePnLCardProps {
   botName: string;
   market: string;
   pnl: number;
-  pnlPercent: number;
+  pnlPercent: number | null;
   timeframe: TimeframeOption;
-  tradeCount: number;
+  tradeCount: number | null;
+  performanceLoading?: boolean;
+  performanceStale?: boolean;
   winRate?: number;
   chartData?: { timestamp: string; cumulativePnl: number }[];
   displayName?: string;
@@ -31,6 +33,34 @@ const TIMEFRAME_OPTIONS: { value: TimeframeOption; label: string }[] = [
   { value: 'all', label: 'All Time' },
 ];
 
+function getPerformanceTimeframeLabel(timeframe: TimeframeOption): string {
+  return TIMEFRAME_OPTIONS.find(option => option.value === timeframe)?.label || timeframe;
+}
+
+export function getPerformanceChartCaption(timeframe: TimeframeOption): string {
+  return `Chart: ${getPerformanceTimeframeLabel(timeframe).toLowerCase()}`;
+}
+
+export function getSharePnLCardText({
+  market, pnl, pnlPercent, timeframe, tradeCount, performanceLoading, winRate, shareUrl, isPublishedBot,
+}: Pick<SharePnLCardProps, 'market' | 'pnl' | 'pnlPercent' | 'timeframe' | 'tradeCount' | 'performanceLoading' | 'winRate' | 'shareUrl' | 'isPublishedBot'>) {
+  const isProfit = pnl >= 0;
+  const headlineValue = pnlPercent === null
+    ? `${isProfit ? '+' : '-'}$${Math.abs(pnl).toFixed(2)}`
+    : `${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%`;
+  const linkText = isPublishedBot && shareUrl
+    ? `\n\nCopy my trades: ${shareUrl}`
+    : shareUrl ? `\n\nJoin here: ${shareUrl}` : '';
+
+  return {
+    headlineLabel: 'All Time',
+    headlineValue,
+    tradesText: tradeCount === null ? (performanceLoading ? 'Loading trades…' : 'Trades unavailable') : `${tradeCount} trade${tradeCount !== 1 ? 's' : ''} (${getPerformanceTimeframeLabel(timeframe).toLowerCase()})`,
+    winText: winRate !== undefined && !isNaN(winRate) ? `${winRate.toFixed(1)}% win (all time)` : undefined,
+    postText: `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${headlineValue} all time!${linkText}\n\nPowered by @QuantumVaultLab`,
+  };
+}
+
 export function SharePnLCard({
   isOpen,
   onClose,
@@ -40,6 +70,9 @@ export function SharePnLCard({
   pnlPercent,
   timeframe,
   tradeCount,
+  performanceLoading,
+  performanceStale,
+  chartData,
   winRate,
   displayName,
   xUsername,
@@ -54,11 +87,9 @@ export function SharePnLCard({
 
   const isProfit = pnl >= 0;
   
-  const getTimeframeLabel = (tf: TimeframeOption) => {
-    const option = TIMEFRAME_OPTIONS.find(o => o.value === tf);
-    return option?.label || tf;
-  };
-  const timeframeLabel = getTimeframeLabel(timeframe);
+  const text = getSharePnLCardText({
+    market, pnl, pnlPercent, timeframe, tradeCount, performanceLoading, winRate, shareUrl, isPublishedBot,
+  });
 
   useEffect(() => {
     const img = new Image();
@@ -230,35 +261,42 @@ export function SharePnLCard({
     ctx.fillText(botName, padding + marketWidth + 20, padding + 80);
 
     ctx.fillStyle = isProfit ? '#4ade80' : '#f87171';
+    ctx.font = '16px Inter, system-ui, sans-serif';
+    ctx.fillText(text.headlineLabel, padding, padding + 110);
     ctx.font = 'bold 72px Inter, system-ui, sans-serif';
-    const pnlText = `${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}%`;
+    const headlineMaxWidth = width - padding * 2;
+    const headlineWidth = ctx.measureText(text.headlineValue).width;
+    if (headlineWidth > headlineMaxWidth) {
+      const headlineFontSize = Math.floor(72 * headlineMaxWidth / headlineWidth);
+      ctx.font = `bold ${headlineFontSize}px Inter, system-ui, sans-serif`;
+    }
     
     ctx.shadowColor = isProfit ? 'rgba(34, 197, 94, 0.5)' : 'rgba(239, 68, 68, 0.5)';
     ctx.shadowBlur = 35;
-    ctx.fillText(pnlText, padding, padding + 175);
+    ctx.fillText(text.headlineValue, padding, padding + 175);
     ctx.shadowBlur = 0;
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.font = '16px Inter, system-ui, sans-serif';
+    ctx.font = '14px Inter, system-ui, sans-serif';
+    if (chartData && chartData.length > 0) {
+      ctx.fillText(getPerformanceChartCaption(timeframe), padding, padding + 200);
+    }
     let statsX = padding;
-    const tradesText = `${tradeCount} trade${tradeCount !== 1 ? 's' : ''}`;
+    const tradesText = text.tradesText;
     ctx.fillText(tradesText, statsX, padding + 220);
     statsX += ctx.measureText(tradesText).width + 18;
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-    ctx.fillText('•', statsX, padding + 220);
-    statsX += 22;
-    
-    if (winRate !== undefined && !isNaN(winRate)) {
-      ctx.fillStyle = '#4ade80';
-      const winText = `${winRate.toFixed(1)}% win`;
-      ctx.fillText(winText, statsX, padding + 220);
-      statsX += ctx.measureText(winText).width + 18;
+    if (text.winText !== undefined) {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
       ctx.fillText('•', statsX, padding + 220);
       statsX += 22;
+      ctx.fillStyle = '#4ade80';
+      ctx.fillText(text.winText, statsX, padding + 220);
     }
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
-    ctx.fillText(timeframeLabel, statsX, padding + 220);
+
+    if (performanceStale) {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+      ctx.fillText('Chart/trades: last successful data (stale)', padding, padding + 240);
+    }
 
     ctx.strokeStyle = 'rgba(139, 92, 246, 0.2)';
     ctx.lineWidth = 1;
@@ -386,13 +424,7 @@ export function SharePnLCard({
         toast({ title: 'Image downloaded! Attach it to your X post.' });
       }
 
-      let tweetText: string;
-      if (isPublishedBot && shareUrl) {
-        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!\n\nCopy my trades: ${shareUrl}\n\nPowered by @QuantumVaultLab`;
-      } else {
-        const urlText = shareUrl ? `\n\nJoin here: ${shareUrl}` : '';
-        tweetText = `My ${market} trading bot ${isProfit ? 'gained' : 'lost'} ${isProfit ? '+' : ''}${pnlPercent.toFixed(2)}% ${timeframeLabel.toLowerCase()}!${urlText}\n\nPowered by @QuantumVaultLab`;
-      }
+      const tweetText = text.postText;
       const xUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(tweetText)}`;
       window.open(xUrl, '_blank', 'noopener,noreferrer');
     } catch (error) {
@@ -413,7 +445,7 @@ export function SharePnLCard({
         
         <div className="space-y-4">
           <div className="flex items-center gap-2">
-            <span className="text-sm text-muted-foreground">Time Period:</span>
+            <span className="text-sm text-muted-foreground">Chart / trades period:</span>
             <div className="flex gap-1">
               {TIMEFRAME_OPTIONS.map((option) => (
                 <Button
