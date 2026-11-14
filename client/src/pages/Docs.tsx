@@ -297,8 +297,7 @@ function FundingSection() {
       <Paragraph>
         SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) 
         plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover 
-        setup and many trades. Flash bots each run from their own wallet, so they need a little 
-        extra SOL (about 0.025 SOL per bot) the first time you create them — see Supported Exchanges below.
+        setup and many trades.
       </Paragraph>
       <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
         <div className="flex items-center justify-between">
@@ -363,44 +362,30 @@ function FundingSection() {
 
       <SubHeading>Supported Exchanges & Withdrawal Costs</SubHeading>
       <Paragraph>
-        QuantumVault routes each bot to a perpetual exchange on Solana. You choose the exchange when you 
-        create a bot (Pacifica is the default). Minimum transfer amounts and withdrawal fees are set by each 
-        exchange, not by QuantumVault:
+        Pacifica is the only venue for new bots. Minimum transfer amounts and withdrawal fees are set by the exchange, not by QuantumVault.
       </Paragraph>
       <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4 space-y-3">
         <div>
           <div className="flex items-center justify-between">
-            <span className="text-white font-medium">Pacifica <span className="text-white/40 text-sm">(default)</span></span>
+            <span className="text-white font-medium">Pacifica</span>
             <span className="text-white/60">$10 min transfer · $1 withdrawal fee</span>
           </div>
           <p className="text-white/50 text-sm mt-1">Isolated subaccount under your agent wallet · needs ~0.005 SOL to create a bot</p>
         </div>
-        <div>
-          <div className="flex items-center justify-between">
-            <span className="text-white font-medium">Flash</span>
-            <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
-          </div>
-          <p className="text-white/50 text-sm mt-1">Isolated per-bot wallet · needs ~0.025 SOL to create a bot (reclaimed when you delete it)</p>
-        </div>
-        <div>
-          <div className="flex items-center justify-between">
-            <span className="text-white font-medium">Drift <span className="text-white/40 text-sm">(legacy)</span></span>
-            <span className="text-white/60">0.1 USDC min · no withdrawal fee</span>
-          </div>
-          <p className="text-white/50 text-sm mt-1">Existing Drift bots keep running, but you can no longer create new ones</p>
-        </div>
       </div>
       <Paragraph>
-        Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), 
-        so QuantumVault batches small amounts into larger withdrawals. Flash and Drift transfers carry no fee 
-        and only a small 0.1 USDC floor.
+        Pacifica has a $10 minimum transfer and a $1 withdrawal fee. QuantumVault batches small amounts into larger withdrawals.
+      </Paragraph>
+      <SubHeading>Closed venue: existing Flash bots</SubHeading>
+      <Paragraph>
+        Flash has closed: New bots and trading are disabled. Existing bot records remain available.
       </Paragraph>
       <Paragraph>
-        <strong className="text-white/90">Which should you pick?</strong> Pacifica is the simple default. 
-        Flash is better for smaller amounts (no $10 floor) and frequent profit-taking (no withdrawal fee), and 
-        each Flash bot runs from its own wallet that you can always recover from your 24-word recovery phrase — 
-        it just needs a bit more SOL up front to create. Creators who publish Flash bots are also paid their 
-        profit share immediately as trades close, rather than in a later batch.
+        You can manually withdraw USDC held in a Flash bot wallet to your agent wallet; its wallet balance is checked at withdrawal.
+        {" "}This does not close venue positions or recover venue-held funds.
+      </Paragraph>
+      <Paragraph>
+        You can recover the per-bot wallet from your 24-word recovery phrase.
       </Paragraph>
     </div>
   );
@@ -424,9 +409,8 @@ function CreatingBotsSection() {
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <h4 className="font-medium text-white mb-2">Exchange</h4>
           <p className="text-white/60 text-sm">
-            Choose where the bot trades — <strong className="text-white/80">Pacifica</strong> (default) or 
-            <strong className="text-white/80"> Flash</strong>. Your choice sets the fees, minimums, and how much 
-            SOL is needed to create the bot (see Funding → Supported Exchanges). If your agent wallet is low on 
+            The bot trades on <strong className="text-white/80">Pacifica</strong>.
+            See Funding → Supported Exchanges for fees, minimums, and setup costs. If your agent wallet is low on
             SOL, QuantumVault prompts you to top up before the bot can be created.
           </p>
         </div>
@@ -458,12 +442,6 @@ function CreatingBotsSection() {
         </div>
       </div>
 
-      <Alert type="warning">
-        On Flash, very small positions can be too small to attach automatic take-profit / stop-loss orders. 
-        If you rely on TP/SL, give the bot enough capital (and leverage) so each position clears Flash's 
-        minimum size.
-      </Alert>
-      
       {/* Automated Capital Management Intro */}
       <SubHeading>Automated Capital Management</SubHeading>
       <div className="p-5 rounded-xl bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-purple-500/10 border border-violet-500/20 mb-8">
@@ -486,10 +464,6 @@ function CreatingBotsSection() {
           <div className="flex items-start gap-2">
             <div className="w-2 h-2 rounded-full bg-fuchsia-400 mt-1.5 flex-shrink-0" />
             <span className="text-white/60"><strong className="text-fuchsia-300">Auto Withdraw</strong> — Take profits automatically <span className="text-white/30">(Cash Management)</span></span>
-          </div>
-          <div className="flex items-start gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 mt-1.5 flex-shrink-0" />
-            <span className="text-white/60"><strong className="text-emerald-300">Auto-Park Idle Funds</strong> — Earn yield between trades <span className="text-white/30">(Cash Management · Flash)</span></span>
           </div>
         </div>
       </div>
@@ -641,104 +615,6 @@ function CreatingBotsSection() {
         </div>
       </div>
 
-      {/* Auto-Park Idle Funds Section */}
-      <div className="relative mb-10">
-        <div className="absolute -inset-1 bg-gradient-to-r from-emerald-500/20 to-teal-500/20 rounded-2xl blur-xl opacity-50" />
-        <div className="relative p-6 rounded-xl bg-card/80 backdrop-blur-sm border border-emerald-500/20">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-500 flex items-center justify-center">
-              <Landmark className="w-5 h-5 text-white" />
-            </div>
-            <h3 className="text-xl font-semibold text-white">Auto-Park Idle Funds</h3>
-            <span className="text-[10px] uppercase tracking-wide font-medium text-emerald-300 bg-emerald-500/15 border border-emerald-500/30 rounded px-1.5 py-0.5">Flash only</span>
-          </div>
-
-          <Paragraph>
-            Turn this on and your bot's spare USDC never sits idle. About a minute after a position 
-            fully closes, the leftover cash is parked into a yield Vault automatically — then pulled 
-            back just before the next trade. You earn between trades without lifting a finger.
-          </Paragraph>
-
-          <div className="mt-4 p-4 rounded-lg bg-black/30 border border-white/10">
-            <h4 className="font-medium text-white mb-4 text-sm uppercase tracking-wide opacity-60">The full cycle</h4>
-            <div className="space-y-3">
-              <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm font-medium text-emerald-300">1</div>
-                <span className="text-white/70">Spare USDC sits in a yield Vault, <strong className="text-emerald-300">earning</strong></span>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">2</div>
-                <span className="text-white/70">A trade signal arrives</span>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">3</div>
-                <span className="text-white/70">The Vault <strong className="text-white">unparks to back the trade</strong> — by default, <strong className="text-emerald-300">everything</strong>, for the full safety buffer</span>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">4</div>
-                <span className="text-white/70">The position opens and runs</span>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-sm font-medium text-white/60">5</div>
-                <span className="text-white/70">The position <strong className="text-white">fully closes</strong> (take-profit, stop-loss, or a close signal)</span>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm font-medium text-emerald-300">6</div>
-                <span className="text-white/70">About a minute later, the leftover USDC is <strong className="text-emerald-300">parked again</strong> — back to earning</span>
-              </div>
-            </div>
-          </div>
-
-          <p className="mt-4 text-white/50 text-sm leading-relaxed">
-            If a new trade opens during that short wait (a quick flip or re-entry), the repark is skipped — 
-            funds the bot is about to use are never parked by mistake. Parking is also skipped when there's 
-            less than about $5 of spare cash, to avoid tiny, pointless transfers. It's a persistent per-bot 
-            setting: turn it on once and it keeps working after every trade.
-          </p>
-
-          <div className="mt-5 p-4 rounded-lg bg-emerald-500/[0.07] border border-emerald-500/20">
-            <h4 className="font-medium text-white mb-1.5 text-sm flex items-center gap-2">
-              <Coins className="w-4 h-4 text-emerald-300" />
-              Choose your yield token — and switch any time
-            </h4>
-            <p className="text-white/60 text-sm leading-relaxed">
-              Each Flash bot remembers which yield Vault it parks into. Pick the token once in the bot's 
-              settings and it sticks — every auto-park and manual park uses it. Change it whenever you like 
-              and hit <strong className="text-white/80">Save</strong>: if money is already parked in the old 
-              token, QuantumVault <strong className="text-emerald-300">moves it into the new one for you</strong> — 
-              one swap, no manual unpark-then-repark. If the bot is mid-trade when you switch, the move happens 
-              automatically the next time the position fully closes.
-            </p>
-          </div>
-
-          <div className="mt-5 p-4 rounded-lg bg-emerald-500/[0.07] border border-emerald-500/20">
-            <h4 className="font-medium text-white mb-1.5 text-sm flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-emerald-300" />
-              Full buffer, or keep spare earning
-            </h4>
-            <p className="text-white/60 text-sm leading-relaxed">
-              You decide how much comes back when a position opens. <strong className="text-emerald-300">Full 
-              buffer</strong> (the default, and the safest) pulls <strong className="text-white">all</strong> your 
-              parked USDC back, so your entire cash cushion is backing the trade — parking can never thin the buffer 
-              that keeps a position away from its liquidation price. <strong className="text-white/80">Keep spare 
-              earning</strong> pulls back only enough to fund the trade and leaves the rest earning yield — a slimmer 
-              cushion, your call.
-            </p>
-            <p className="text-white/60 text-sm leading-relaxed mt-2">
-              In <strong className="text-emerald-300">Full buffer</strong> mode, if your parked funds can't be pulled 
-              back when a trade is about to open, the bot <strong className="text-white">skips that signal and tries 
-              again</strong> rather than opening with a reduced buffer. Keep spare earning trades with whatever margin 
-              is already free.
-            </p>
-          </div>
-
-          <p className="mt-4 text-sm text-emerald-300/80 flex items-center gap-2">
-            <Info className="w-4 h-4" />
-            Available on Flash bots, where each bot has its own isolated wallet.
-          </p>
-        </div>
-      </div>
-      
       {/* Using Together Section */}
       <div className="relative mb-8">
         <div className="absolute -inset-1 bg-gradient-to-r from-violet-500/20 via-fuchsia-500/20 to-sky-500/20 rounded-2xl blur-xl opacity-50" />
@@ -749,7 +625,7 @@ function CreatingBotsSection() {
           <div className="p-4 rounded-lg bg-gradient-to-r from-violet-500/10 via-fuchsia-500/10 to-sky-500/10 border border-white/10 mb-4">
             <h4 className="font-semibold text-white mb-1">"Keep $100 Working" Strategy</h4>
             <p className="text-white/40 text-sm mb-4">
-              Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON • Auto-Park ON (Flash)
+              Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON
             </p>
             
             <div className="grid md:grid-cols-3 gap-3">
@@ -1354,11 +1230,10 @@ function SecuritySection() {
         Never share it with anyone - QuantumVault will never ask for your recovery phrase.
       </Alert>
 
-      <SubHeading>Your Funds Are Protected If Bot Creation Fails</SubHeading>
+      <SubHeading>Recovering Funds After a Failed Pacifica Bot Creation</SubHeading>
       <Paragraph>
-        Creating a bot involves funding its trading account before the bot is fully registered.
-        If something goes wrong at that exact moment — a network hiccup, a temporary error — 
-        your funds are never lost. Each exchange has an automatic safety net built in.
+        For a failed Pacifica bot creation, check your main Pacifica account and the recovery control in the wallet panel.
+        See Funding Your Account for closed-venue recovery information.
       </Paragraph>
       <div className="space-y-4 mb-6">
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
@@ -1375,20 +1250,18 @@ function SecuritySection() {
         <div className="p-4 rounded-lg bg-white/5 border border-white/10">
           <div className="flex items-center gap-3 mb-2">
             <Key className="w-5 h-5 text-violet-400" />
-            <h4 className="font-medium text-white">Flash — Per-Bot Wallet Recovery</h4>
+            <h4 className="font-medium text-white">Per-Bot Wallet Recovery</h4>
           </div>
           <p className="text-white/60 text-sm">
-            Each Flash bot runs in its own isolated wallet, derived from your agent seed. If creation fails 
-            after that wallet was funded, QuantumVault detects it automatically. The <strong className="text-white/80">"Recover stranded funds"</strong> button 
-            appears only when stranded funds are actually present — it re-derives the wallet, sweeps the 
-            funds back to your agent wallet, and disappears once everything is clear. These wallets are 
-            also fully self-custodial: your 24-word phrase is all you ever need to access them independently.
+            You can recover the per-bot wallet from your 24-word recovery phrase.
+            If a pre-closure Flash bot creation funded its per-bot wallet but failed before saving a bot record, these legacy wallets cannot be recovered in the app right now.
+            Contact support with the wallet address and the team will help.
+            See Funding Your Account for closed-venue recovery information.
           </p>
         </div>
       </div>
       <Alert type="success">
-        In both cases, the platform detects the problem automatically and shows you a one-click fix. 
-        You never need to contact support to recover funds from a failed bot creation.
+        For a failed Pacifica bot creation, the wallet panel shows the recovery control described above.
       </Alert>
 
       <SubHeading>Best Practices</SubHeading>
@@ -2009,8 +1882,7 @@ function VaultsOverviewSection() {
           </div>
           <p className="text-white/60 text-sm">
             When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls it back to 
-            fund the position — a Flash bot restores its full safety buffer by default, while account-level parking 
-            pulls back just what's needed. You never have to unpark by hand before trading.
+            fund the position. Account-level parking pulls back just what's needed. You never have to unpark by hand before trading.
           </p>
         </div>
       </div>
@@ -2190,52 +2062,14 @@ function VaultsSafetySection() {
 
       <SubHeading>Parked Funds Still Count</SubHeading>
       <Paragraph>
-        Your parked position is always included in your total balance and your profit/loss — whether you park at your 
-        account level or for an individual bot. Parking spare USDC into a Vault never shows up as a loss, and a bot 
-        whose spare cash is parked never reads as empty: the live value of what you've parked is counted right 
-        alongside your trading funds.
+        Your account-level parked position is included in your total balance and profit/loss.
+        Parking spare USDC into a Vault never shows up as a loss.
       </Paragraph>
 
       <SubHeading>Parked Funds Back Your Trades</SubHeading>
       <Paragraph>
-        When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough 
-        to cover it, QuantumVault automatically unparks your spare cash to fund it. A Flash bot pulls back its 
-        <strong className="text-white/90"> full buffer</strong> by default — every parked dollar, so your whole cushion 
-        backs the position (you can switch it to just-enough in the bot's settings). Account-level parking pulls back 
-        just what the trade needs, plus a small buffer for fees and price movement. Either way, a parked bot is never 
-        falsely paused as "underfunded," the rest keeps earning, and you don't have to remember to unpark first.
+        Account-level parking automatically unparks spare cash when your spendable USDC cannot cover a trade. It pulls back what the trade needs, plus a small buffer for fees and price movement.
       </Paragraph>
-
-      <Alert type="info">
-        This auto-funding is hands-off by design. A Flash bot restores its full buffer by default; account-level 
-        parking pulls back only what the trade needs. Either way, you don't lift a finger.
-      </Alert>
-
-      <SubHeading>Reparked After Each Trade (Auto-Park Idle Funds)</SubHeading>
-      <Paragraph>
-        The other half of hands-off cash management. Turn on <strong className="text-white/90">Auto-park idle 
-        funds</strong> in a bot's settings and, about a minute after the bot's position fully closes, all its spare 
-        USDC is parked back into yield automatically — so the cash earns between trades instead of sitting idle. If a 
-        new trade opens during that short wait (a quick flip or re-entry), the repark is skipped, so funds the bot is 
-        about to use are never parked by mistake. Parking is also skipped when there's less than about $5 of spare 
-        cash, to avoid tiny, pointless transfers.
-      </Paragraph>
-      <Paragraph>
-        Put together with the auto-funding above, a Flash bot runs a fully automatic loop:
-      </Paragraph>
-      <StepList steps={[
-        'Spare USDC sits in a yield Vault, earning.',
-        'A trade signal arrives.',
-        'The Vault unparks to back the trade — by default, everything, for the full safety buffer.',
-        'The position opens and runs.',
-        'The position fully closes (take-profit, stop-loss, or a close signal).',
-        'About a minute later, the leftover USDC is parked again — back to earning.',
-      ]} />
-      <Alert type="info">
-        Auto-park idle funds is available on Flash bots, where each bot has its own isolated wallet. It's a 
-        persistent per-bot setting — turn it on once and it keeps working after every trade. All the same 
-        money-safety rules apply: on-chain truth, realized amounts only, price-impact cap, and fail-closed.
-      </Alert>
     </div>
   );
 }
@@ -2595,13 +2429,11 @@ function BorrowOverviewSection() {
       <SubHeading>Carry Trade</SubHeading>
       <Paragraph>
         A carry trade is when you borrow USDC at one rate and park it into a Vault destination that earns a higher rate.
-        The difference is your net edge. The Equity tab on a bot with an open per-bot borrow shows a "Carry Advisor"
-        that recommends whether to park, repay, or hold based on the current edge. It is read-only — you tap to act; the
-        advisor does not act on its own.
+        The difference is your net edge.
       </Paragraph>
       <Alert type="warning">
         A carry trade is not risk-free. The collateral price can drop (liquidation risk), the Vault yield can change, and
-        the borrow rate can rise. The advisor only compares rates; it does not protect you from price moves.
+        the borrow rate can rise. Comparing rates does not protect you from price moves.
       </Alert>
     </div>
   );
@@ -2615,83 +2447,7 @@ function BorrowPerbotSection() {
         Per-Bot Borrow
       </SectionHeading>
       <Paragraph>
-        Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge the bot's own
-        eligible collateral, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot
-        closes, the system automatically repays the debt and returns the collateral to your account.
-      </Paragraph>
-
-      <Alert type="info">
-        This is available on Flash bots, where each bot has its own isolated wallet. The bot's Equity tab shows the
-        borrow controls when it holds eligible collateral.
-      </Alert>
-
-      <SubHeading>Where to Find It</SubHeading>
-      <Paragraph>
-        Open a bot's <strong className="text-white/90">Bot Management Drawer</strong> and go to the{" "}
-        <strong className="text-white/90">Equity</strong> tab. If the bot holds eligible collateral, you will see a
-        "Borrow Against Collateral" card. Tap it to open the borrow flow.
-      </Paragraph>
-
-      <SubHeading>How It Works</SubHeading>
-      <StepList steps={[
-        'Open the Equity tab on a Flash bot that holds eligible collateral.',
-        'Tap "Borrow Against Collateral" — the system shows your pledged collateral, current debt, and a safe borrow limit.',
-        'Choose an amount and confirm. The USDC lands in the bot\'s wallet immediately.',
-        'The bot\'s displayed balance grows by the borrowed amount, but the debt is subtracted from its net PnL so the numbers stay honest.',
-        'When you close or delete the bot, the system automatically repays the debt and moves the released collateral back to your account.',
-      ]} />
-
-      <SubHeading>Automatic Close &amp; Repay</SubHeading>
-      <Paragraph>
-        When you unsubscribe or delete a bot with an open per-bot borrow, the system handles the cleanup automatically:
-      </Paragraph>
-      <div className="grid gap-4 mb-6">
-        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <div className="flex items-center gap-3 mb-2">
-            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary text-sm font-medium flex items-center justify-center">1</span>
-            <h4 className="font-medium text-white">Check Debt</h4>
-          </div>
-          <p className="text-white/60 text-sm ml-9">The system checks if the bot still owes USDC.</p>
-        </div>
-        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <div className="flex items-center gap-3 mb-2">
-            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary text-sm font-medium flex items-center justify-center">2</span>
-            <h4 className="font-medium text-white">Fund Top-Up</h4>
-          </div>
-          <p className="text-white/60 text-sm ml-9">If needed, a small USDC top-up from your account wallet covers accrued interest.</p>
-        </div>
-        <div className="p-4 rounded-lg bg-white/5 border border-white/10">
-          <div className="flex items-center gap-3 mb-2">
-            <span className="flex-shrink-0 w-6 h-6 rounded-full bg-primary/20 text-primary text-sm font-medium flex items-center justify-center">3</span>
-            <h4 className="font-medium text-white">Repay &amp; Release</h4>
-          </div>
-          <p className="text-white/60 text-sm ml-9">The full debt is repaid, then the collateral is withdrawn and transferred back to your account wallet.</p>
-        </div>
-      </div>
-
-      <Alert type="info">
-        This is fully automatic. You do not need to manually repay before closing a bot. If your account wallet has no
-        spare USDC for the top-up, the close may pause at "needs attention." Fund the small top-up and retry; the close
-        then resumes automatically.
-      </Alert>
-
-      <SubHeading>Debt &amp; Your Bot's Displayed PnL</SubHeading>
-      <Paragraph>
-        The bot's displayed balance includes the borrowed USDC (it is real cash the bot can trade with), but its net
-        profit/loss subtracts the debt. This keeps the PnL honest: borrowing does not look like instant profit.
-      </Paragraph>
-      <div className="p-4 rounded-lg bg-white/5 border border-white/10 mb-4">
-        <div className="flex items-center justify-between">
-          <span className="text-white/60">Bot Balance</span>
-          <span className="text-white font-medium">exchange balance + parked value − borrow debt</span>
-        </div>
-        <div className="flex items-center justify-between mt-2">
-          <span className="text-white/60">PnL</span>
-          <span className="text-white font-medium">Bot Balance − total deposited − borrow debt</span>
-        </div>
-      </div>
-      <Paragraph>
-        The debt is shown separately on the Equity tab so you always know what you owe.
+        Per-bot borrowing is unavailable. See Funding Your Account for closed-venue recovery information.
       </Paragraph>
     </div>
   );
@@ -2778,7 +2534,7 @@ function QuantumLabOverviewSection() {
       <SubHeading>Data Sources</SubHeading>
       <Paragraph>
         QuantumLab fetches historical OHLCV (open, high, low, close, volume) candle data from OKX perpetual futures markets. 
-        For tickers not listed on OKX (such as DRIFT, TNSR, CLOUD, IO, DBR, and MNT), it automatically falls back to Gate.io.
+        For tickers not listed on OKX (such as TNSR, CLOUD, IO, DBR, and MNT), it automatically falls back to Gate.io.
       </Paragraph>
       <Paragraph>
         Fetched candle data is cached in the database so subsequent runs on the same ticker, timeframe, and date range 
@@ -4047,7 +3803,6 @@ function AiTraderScannerSection() {
           { label: 'Auto mode only', desc: 'Scanner bots always run in Auto mode — the mode toggle is not available. The scanner only makes sense when the bot acts at each candle without waiting for manual approval.' },
           { label: 'Auto Next on by default', desc: 'After a position closes the bot returns to scanning immediately. It does not stop and wait.' },
           { label: 'No ticker or timeframe to pick', desc: 'During setup the market and timeframe selects are replaced by a live status line: "Scanning N markets · 15m / 1h / 4h / 1d". You just set exchange, model, leverage, and allocation.' },
-          { label: 'Flash scanner — paper only', desc: 'Flash scanner bots run in paper mode only. Flash live trading on scanner bots is not yet supported.' },
         ].map(g => (
           <div key={g.label} className="flex gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
             <div className="w-1.5 h-1.5 rounded-full bg-violet-400 flex-shrink-0 mt-2" />
@@ -4321,8 +4076,8 @@ function AiTraderFaqSection() {
 const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet: string }[] = [
   { id: 'getting-started', label: 'Getting Started', snippet: 'Overview of how QuantumVault works: connect wallet, fund account, create bot, connect TradingView.', keywords: ['getting started', 'overview', 'intro', 'introduction', 'how it works', 'quickstart', 'first steps', 'onboarding', 'setup'] },
   { id: 'wallet-setup', label: 'Wallet Setup', snippet: 'Connect your Phantom or Solana wallet. Understand the two-wallet system: your personal wallet and your agent wallet.', keywords: ['wallet', 'phantom', 'solana', 'agent wallet', 'connect wallet', 'wallet standard', 'mobile wallet adapter', 'mwa', 'seeker'] },
-  { id: 'funding', label: 'Funding Your Account', snippet: 'Deposit SOL for fees and USDC for trading. Understand how capital flows from your wallet to trading subaccounts.', keywords: ['fund', 'funding', 'deposit', 'usdc', 'sol', 'capital', 'money', 'balance', 'transfer', 'withdraw', 'withdrawal', 'any asset', 'swap', 'auto-swap', 'spl token', 'exchange', 'pacifica', 'flash', 'drift', 'supported exchanges'] },
-  { id: 'creating-bots', label: 'Creating Bots', snippet: 'Set up a trading bot: pick a market, leverage, investment amount, direction. Group settings into Position Growth (Profit Reinvest, Auto Top-Up) and Cash Management (Auto Withdraw, Auto-Park Idle Funds).', keywords: ['bot', 'create bot', 'leverage', 'market', 'investment', 'direction', 'long', 'short', 'profit reinvest', 'auto withdraw', 'auto top-up', 'top up', 'compound', 'reinvest', 'perp', 'perpetual', 'sol-perp', 'btc-perp', 'eth-perp', 'position growth', 'cash management', 'auto park', 'auto-park', 'idle funds', 'park idle', 'full buffer', 'yield token', 'park destination'] },
+  { id: 'funding', label: 'Funding Your Account', snippet: 'Deposit SOL for fees and USDC for trading. Understand how capital flows from your wallet to trading subaccounts.', keywords: ['fund', 'funding', 'deposit', 'usdc', 'sol', 'capital', 'money', 'balance', 'transfer', 'withdraw', 'withdrawal', 'any asset', 'swap', 'auto-swap', 'spl token', 'exchange', 'pacifica', 'flash', 'closed venue', 'recovery', 'supported exchanges'] },
+  { id: 'creating-bots', label: 'Creating Bots', snippet: 'Set up a trading bot: pick a market, leverage, investment amount, direction. Group settings into Position Growth (Profit Reinvest, Auto Top-Up) and Cash Management (Auto Withdraw).', keywords: ['bot', 'create bot', 'leverage', 'market', 'investment', 'direction', 'long', 'short', 'profit reinvest', 'auto withdraw', 'auto top-up', 'top up', 'compound', 'reinvest', 'perp', 'perpetual', 'sol-perp', 'btc-perp', 'eth-perp', 'position growth', 'cash management'] },
   { id: 'tradingview', label: 'TradingView Integration', snippet: 'Set up TradingView webhook alerts to trigger your bot. Includes the JSON payload format and alert message template.', keywords: ['tradingview', 'webhook', 'alert', 'pine script', 'signal', 'json', 'payload', 'url', 'strategy', 'indicator', 'automation', 'trigger'] },
   { id: 'bot-management', label: 'Bot Management', snippet: 'Monitor positions, pause and resume bots, close trades manually, view PnL history and trade logs.', keywords: ['manage', 'management', 'pause', 'resume', 'stop', 'close', 'position', 'pnl', 'profit', 'loss', 'trade history', 'logs', 'monitor', 'status', 'active', 'inactive', 'manual trade', 'manual trading', 'add equity', 'has position'] },
   { id: 'marketplace', label: 'Marketplace', snippet: 'Subscribe to signal bots published by other traders. Publish your own bot to earn profit-sharing fees.', keywords: ['marketplace', 'signal', 'subscribe', 'subscription', 'publish', 'creator', 'profit share', 'profit sharing', 'fee', 'community', 'leaderboard', 'copy trading', 'follower'] },
@@ -4331,18 +4086,18 @@ const searchIndex: { id: DocSection; label: string; keywords: string[]; snippet:
   { id: 'trade-execution', label: 'Trade Execution', snippet: 'How trades are routed from webhook signals through the execution engine, including retries and error handling.', keywords: ['trade execution', 'execution', 'order', 'fill', 'route', 'retry', 'error', 'failed trade', 'slippage', 'entry price', 'size', 'notional', 'fee'] },
   { id: 'ai-agents', label: 'AI Agent Integration', snippet: 'Use AI agents (Claude, GPT, etc.) to send trade signals to QuantumVault via the agent API.', keywords: ['ai', 'agent', 'claude', 'gpt', 'openai', 'llm', 'language model', 'api', 'integration', 'programmatic', 'automated', 'server execution key', 'openclaw', 'mcp server', 'revoke', 'api access', 'sui-perp', 'apt-perp'] },
   { id: 'ai-trader-overview', label: 'AI Trader', snippet: 'Built-in autonomous trading agent. AI model watches the market, decides long/short/flat, and places bracketed orders (entry + SL + TP). Every bot starts in paper mode — no real money until graduation.', keywords: ['ai trader', 'autonomous', 'trading bot', 'ai bot', 'paper mode', 'paper trading', 'decision card', 'rationale', 'flat', 'guardrail', 'bracket', 'stop loss', 'take profit', 'breakeven', 'break even', 'move stop', 'entry', 'candle', 'indicator', 'context', 'confidence', 'openrouter', 'opus', 'claude', 'cot', 'commitment of traders', 'cftc', 'smart money', 'positioning', 'macro bias', 'ema', 'rsi', 'macd', 'bollinger', 'vwap', 'adx', 'obv', 'funding rate', 'open interest', 'risk reward', 'accumulating', 'distributing', 'session', 'trading session', 'weekend', 'asia', 'london', 'new york', 'dow structure', 'swing', 'trend structure', 'uptrend', 'downtrend', 'aligned', 'price levels', 'touch count', 'support', 'resistance', 'double top', 'double bottom', 'wm pattern', 'neckline', 'pattern detection'] },
-  { id: 'ai-trader-scanner', label: 'Market Scanner', snippet: 'Market Scanner mode lets an AI Trader bot find its own trades across all markets and timeframes, instead of watching a single fixed ticker. The bot enters Auto mode and evaluates every market on the selected exchange on 15m, 1h, 4h, and 1d before each decision.', keywords: ['market scanner', 'scanner', 'scan', 'scanning', 'all markets', 'multi market', 'auto select', 'find trade', 'pick market', 'fixed market', 'timeframe sweep', 'flash scanner', 'pacifica scanner', 'scanning markets', 'how to find', 'no ticker'] },
+  { id: 'ai-trader-scanner', label: 'Market Scanner', snippet: 'Market Scanner mode lets an AI Trader bot find its own trades across all markets and timeframes, instead of watching a single fixed ticker. The bot enters Auto mode and evaluates every market on the selected exchange on 15m, 1h, 4h, and 1d before each decision.', keywords: ['market scanner', 'scanner', 'scan', 'scanning', 'all markets', 'multi market', 'auto select', 'find trade', 'pick market', 'fixed market', 'timeframe sweep', 'pacifica scanner', 'scanning markets', 'how to find', 'no ticker'] },
   { id: 'ai-trader-trials', label: 'Paper Trials & Graduation', snippet: 'Every AI Trader bot must pass a 30-day paper trial before live trading unlocks. Criteria: net PnL > 0, profit factor ≥ 1.1, drawdown ≤ 30% mark-to-market. Graduation is an unlock, not an auto-flip.', keywords: ['paper trial', 'graduation', 'graduate', 'paper mode', 'trial period', 'unlock', 'live toggle', 'net pnl', 'profit factor', 'drawdown', 'mark to market', 'slippage penalty', 'simulated', 'restart trial', 'failed trial', 'criteria', '30 days', 'ltf', 'htf', '30 day'] },
   { id: 'ai-trader-modes', label: 'Modes & Risk Profiles', snippet: 'Suggest mode: AI proposes, you approve. Auto mode: AI executes at each candle close. Guarded profile adds daily-loss circuit breaker and consecutive-loss brake. Degen mode runs until allocation is depleted. Risk-Based Sizing optional mode.', keywords: ['suggest mode', 'auto mode', 'guarded', 'degen', 'risk profile', 'circuit breaker', 'daily loss', 'consecutive loss', 'frequency cap', 'auto next', 'ask ai again', 'wait for me', 'execute', 'skip', 'mode switch', 'loss pacing', 'position sizing', 'risk based', 'risk-based', 'sizing mode', 'risk band', 'live equity', 'confidence scaled', 'discretionary', 'stop distance', 'fixed fractional'] },
   { id: 'ai-trader-models', label: 'Models & Costs', snippet: 'Default: Qwen3.7 Max for 15m/1h (96 decisions/day, ~$0.29/day), Opus 4.8 for 4h/1d. Opus on 15m ≈ $9.60/day. Net P&L subtracts cumulative LLM cost — a bot that wins less than its AI bill is not profitable.', keywords: ['model', 'claude', 'opus', 'qwen', 'deepseek', 'openrouter', 'api key', 'cost', 'price', 'per decision', 'tokens', 'llm cost', 'net pnl', 'realized pnl', 'trading fees', 'taker fee', 'pnl definition', 'openrouter key', 'model picker', 'byo key', 'alpha arena', 'decision frequency', 'candles per day'] },
   { id: 'ai-trader-faq', label: 'AI Trader FAQ', snippet: 'Common questions: does it always trade, can it lose everything, what if SL placement fails, can the AI close early, what if the call times out. Includes disclaimer.', keywords: ['faq', 'frequently asked', 'questions', 'flat', 'no trade', 'lose everything', 'naked position', 'sl fail', 'stop loss fail', 'timeout', 'model fail', 'close early', 'financial advice', 'disclaimer', 'risk warning', 'not advice', 'all losses'] },
   { id: 'vaults-overview', label: 'Vaults Overview', snippet: 'Vaults put idle USDC to work earning yield. One tap to park all spare USDC, one tap to unpark it back.', keywords: ['vault', 'vaults', 'earn', 'yield', 'idle', 'spare', 'park', 'unpark', 'interest', 'apy', 'save', 'savings', 'passive', 'stablecoin'] },
   { id: 'vaults-destinations', label: 'Stable Vaults', snippet: 'Stable Vaults park idle USDC into near-$1 yield tokens: Kamino USDC, Perena USD*, Jupiter Lend USDC, Ondo USDY, and OnRe ONyc. Simple, one tap in and one tap out.', keywords: ['stable vaults', 'destination', 'destinations', 'yield', 'apy', 'kamino', 'perena', 'jupiter lend', 'ondo', 'usdy', 'onre', 'onyc', 'stablecoin', 'stable', 'floating', 'reinsurance', 'treasury', 'park usdc', 'idle usdc'] },
-  { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap), auto-unpark to fund trades, and auto-park idle funds back into yield after a position closes (Flash).', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'per bot', 'per-bot', 'auto park', 'auto-park', 'repark', 'idle funds', 'after close', 'earn between trades', 'flash'] },
+  { id: 'vaults-safety', label: 'Safety & Funding', snippet: 'How Vaults stay money-safe (on-chain truth, realized amounts, price-impact cap) and account-level parking funds trades.', keywords: ['safety', 'safe', 'money', 'on-chain', 'realized', 'price impact', 'fail closed', 'equity', 'balance', 'auto unpark', 'fund trade', 'top up', 'collateral', 'idle funds'] },
   { id: 'asset-vaults', label: 'Asset Vaults', snippet: 'Asset Vaults run DeFi strategies on your SOL — leveraged, actively managed every minute, with automatic safety unwinds and Telegram alerts. More complex than Stable Vaults.', keywords: ['asset vault', 'asset vaults', 'defi', 'leveraged', 'automated', 'strategy', 'sol', 'managed', 'active', 'auto-manage', 'loop', 'hopping', 'complex', 'risk', 'liquidation'] },
   { id: 'sol-loop-vault', label: 'SOL Loop Vault', snippet: 'Leveraged LST staking loop. Pick a pair (INF, mSOL, JitoSOL, JupSOL, dfdvSOL) and leverage (up to ~3.7×). Platform auto-manages: safety unwind, re-lever, and pair-switching when a better option appears.', keywords: ['sol loop', 'loop vault', 'lst', 'liquid staking', 'leveraged staking', 'inf', 'msol', 'jitosol', 'jupsol', 'dfdvsol', 'dfdv', 'leverage', 'borrow rate', 'carry', 'net apy', 'pair switching', 'hop', 'hopping', 'unwind', 'relever', 'health factor', 'liquidation', 'staking yield', 'sanctum', 'marinade', 'jito', 'jupiter'] },
   { id: 'borrow-overview', label: 'Borrow Overview', snippet: 'Borrow USDC against collateral like SOL, INF, or BTC without selling it. Built on Jupiter Lend (Fluid). Live health factor, borrow rate APR, and carry-trade guidance.', keywords: ['borrow', 'debt', 'loan', 'lend', 'collateral', 'inf', 'sol', 'jitosol', 'msol', 'wbtc', 'cbbtc', 'xbtc', 'lbtc', 'btc', 'jlp', 'jup', 'syrupusdc', 'tslax', 'nvdax', 'spyx', 'qqqx', 'jupiter lend', 'fluid', 'health factor', 'liquidation', 'ltv', 'borrow rate', 'apr', 'carry trade', 'carry', 'usdc', 'liability', 'repay', 'supply collateral', 'pledge', 'position'] },
-  { id: 'borrow-perbot', label: 'Per-Bot Borrow', snippet: 'Borrow USDC against a single bot\'s collateral. Available on Flash bots. Automatic repay and collateral return when the bot closes.', keywords: ['per bot', 'per-bot', 'bot borrow', 'borrow against bot', 'flash borrow', 'bot collateral', 'auto repay', 'automatic close', 'equity tab', 'carry advisor', 'bot debt', 'bot liability'] },
+  { id: 'borrow-perbot', label: 'Per-Bot Borrow', snippet: 'Per-bot borrowing is unavailable. See Funding Your Account for closed-venue recovery information.', keywords: ['per bot', 'per-bot', 'bot borrow', 'unavailable', 'closed venue', 'recovery'] },
   { id: 'quantumlab-overview', label: 'QuantumLab Overview', snippet: 'QuantumLab is the built-in backtesting and strategy optimization engine. Test strategies before deploying them live.', keywords: ['quantumlab', 'quantum lab', 'backtest', 'backtesting', 'lab', 'test', 'simulation', 'historical', 'strategy', 'candle', 'ohlc'] },
   { id: 'quantumlab-strategies', label: 'Strategy Library', snippet: 'Write and save Pine Script strategies in QuantumLab. Load from the library to backtest or optimize.', keywords: ['strategy', 'library', 'pine script', 'pine', 'script', 'code', 'write', 'save', 'load', 'indicator', 'signal', 'entry', 'exit'] },
   { id: 'quantumlab-optimizer', label: 'Optimizer', snippet: 'Run random search and refinement optimization to find the best parameters for your strategy.', keywords: ['optimizer', 'optimize', 'optimization', 'parameter', 'tune', 'search', 'random search', 'refinement', 'coordinate', 'best', 'sharpe', 'drawdown', 'win rate', 'out-of-sample', 'oos', 'holdout', 'robustness', 'deep search', 'smoke test', 'run queue', 'profit factor', 'date range'] },

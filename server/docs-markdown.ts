@@ -16,7 +16,6 @@ export const DOCS_MARKDOWN = `# QuantumVault Documentation
    - [Profit Reinvest](#profit-reinvest)
    - [Auto Withdraw](#auto-withdraw)
    - [Auto Top-Up](#auto-top-up)
-   - [Auto-Park Idle Funds](#auto-park-idle-funds)
    - [Using These Features Together](#using-these-features-together)
 5. [TradingView Integration](#tradingview-integration)
 6. [Bot Management](#bot-management)
@@ -95,7 +94,7 @@ To start trading, you need to fund your agent wallet with both SOL (for transact
 
 ### SOL for Account Setup & Fees
 
-SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover setup and many trades. Flash bots each run from their own wallet, so they need a little extra SOL (about 0.025 SOL per bot) the first time you create them — see Supported Exchanges below.
+SOL covers a one-time account setup (~0.05 SOL for your trading account initialization) plus ongoing transaction fees. We recommend depositing at least 0.1 SOL to cover setup and many trades.
 
 | Item                     | Amount          |
 |--------------------------|-----------------|
@@ -133,18 +132,23 @@ When you deposit to a bot, funds move from your agent wallet to that bot's tradi
 
 ### Supported Exchanges & Withdrawal Costs
 
-QuantumVault routes each bot to a perpetual exchange on Solana. You choose the exchange when you create a bot (Pacifica is the default). Minimum transfer amounts and withdrawal fees are set by each exchange, not by QuantumVault:
+Pacifica is the only venue for new bots. Minimum transfer amounts and withdrawal fees are set by the exchange, not by QuantumVault.
 
 | Exchange            | Minimum transfer | Withdrawal fee | SOL to create a bot | Wallet model |
 |---------------------|------------------|----------------|---------------------|--------------|
-| Pacifica (default)  | $10 USDC         | $1 USDC        | ~0.005 SOL          | Isolated subaccount under your agent wallet |
-| Drift (legacy)      | 0.1 USDC         | None           | n/a (no new bots)   | Isolated subaccount |
+| Pacifica            | $10 USDC         | $1 USDC        | ~0.005 SOL          | Isolated subaccount under your agent wallet |
 
-> **Note:** Pacifica is the only exchange with a real protocol minimum ($10) and an on-chain withdrawal fee ($1), so QuantumVault batches small amounts into larger withdrawals. Legacy Drift transfers carry no fee and only a small 0.1 USDC floor.
+Pacifica has a $10 minimum transfer and a $1 withdrawal fee. QuantumVault batches small amounts into larger withdrawals.
 
-> **Drift is legacy:** Existing Drift bots keep running, but you can no longer create new ones. New bots are created on Pacifica.
+### Closed venue: existing Flash bots
 
-**Flash has closed:** New bots and trading are disabled. Existing bot records remain available. You can manually withdraw USDC held in a Flash bot wallet to your agent wallet; its wallet balance is checked at withdrawal. This does not close venue positions or recover venue-held funds.
+Flash has closed: New bots and trading are disabled. Existing bot records remain available.
+
+You can manually withdraw USDC held in a Flash bot wallet to your agent wallet; its wallet balance is checked at withdrawal. This does not close venue positions or recover venue-held funds.
+
+You can recover the per-bot wallet from your 24-word recovery phrase.
+
+If a pre-closure Flash bot creation funded its per-bot wallet but failed before saving a bot record, these legacy wallets cannot be recovered in the app right now. Contact support with the wallet address and the team will help.
 
 ### Phoenix availability and account balances
 
@@ -178,7 +182,7 @@ Bots are automated trading agents that execute trades based on TradingView webho
 
 ### Bot Settings
 
-- **Exchange** — Choose where the bot trades: **Pacifica** (default). Your choice sets the fees, minimums, and how much SOL is needed to create the bot (see Funding → Supported Exchanges). If your agent wallet is low on SOL, QuantumVault prompts you to top up before the bot can be created.
+- **Exchange** — The bot trades on **Pacifica**. See Funding → Supported Exchanges for fees, minimums, and setup costs. If your agent wallet is low on SOL, QuantumVault prompts you to top up before the bot can be created.
 - **Market** — Choose which perpetual market to trade (e.g., SOL-PERP, BTC-PERP, ETH-PERP). Each bot trades one market only.
 - **Leverage** — Set your leverage multiplier (1x to 20x depending on market). Higher leverage amplifies both gains and losses.
 - **Investment Amount** — The USDC amount allocated to this bot. This is your maximum position size before leverage.
@@ -192,7 +196,6 @@ These features let you fully automate how your bot handles money. Instead of man
 - **Profit Reinvest** — Grow your trades as you win *(Position Growth)*
 - **Auto Top-Up** — Refill when running low *(Position Growth)*
 - **Auto Withdraw** — Take profits automatically *(Cash Management)*
-- **Auto-Park Idle Funds** — Earn yield between trades, Flash only *(Cash Management)*
 
 ---
 
@@ -249,40 +252,13 @@ When a trade signal arrives, if your bot's equity is below your investment amoun
 
 ---
 
-### Auto-Park Idle Funds
-
-*Flash bots only.* Turn this on and your bot's spare USDC never sits idle. About a minute after a position fully closes, the leftover cash is parked into a yield Vault automatically — then pulled back just before the next trade. You earn between trades without lifting a finger.
-
-#### The full cycle
-
-1. Spare USDC sits in a yield Vault, earning.
-2. A trade signal arrives.
-3. The Vault unparks to back the trade — by default, everything, for the full safety buffer.
-4. The position opens and runs.
-5. The position fully closes (take-profit, stop-loss, or a close signal).
-6. About a minute later, the leftover USDC is parked again — back to earning.
-
-If a new trade opens during that short wait (a quick flip or re-entry), the repark is skipped, so funds the bot is about to use are never parked by mistake. Parking is also skipped when there's less than about $5 of spare cash, to avoid tiny, pointless transfers. It's a persistent per-bot setting — turn it on once and it keeps working after every trade.
-
-#### Choose your yield token — and switch any time
-
-Each Flash bot remembers which yield Vault it parks into. Pick the token once in the bot's settings and it sticks — every auto-park and manual park uses it. Change it whenever you like and hit **Save**: if money is already parked in the old token, QuantumVault **moves it into the new one for you** — one swap, no manual unpark-then-repark. If the bot is mid-trade when you switch, the move happens automatically the next time the position fully closes.
-
-#### Full buffer, or keep spare earning
-
-You decide how much comes back when a position opens. **Full buffer** (the default, and the safest) pulls **all** your parked USDC back, so your entire cash cushion is backing the trade — parking can never thin the buffer that keeps a position away from its liquidation price. **Keep spare earning** pulls back only enough to fund the trade and leaves the rest earning yield — a slimmer cushion, your call. In **Full buffer** mode, if your parked funds can't be pulled back when a trade is about to open, the bot **skips that signal and tries again** rather than opening with a reduced buffer. Keep spare earning trades with whatever margin is already free.
-
-> ℹ️ Available on Flash bots, where each bot has its own isolated wallet. See **Vaults → Safety & Funding** for the money-safety details.
-
----
-
 ### Using These Features Together
 
 These features are compatible and can create powerful automation.
 
 #### "Keep $100 Working" Strategy
 
-**Configuration:** Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON • Auto-Park ON (Flash)
+**Configuration:** Profit Reinvest ON • Auto Withdraw at $100 • Auto Top-Up ON
 
 | When you win | When you lose | The result |
 |---|---|---|
@@ -836,7 +812,7 @@ Both types live in the Vaults tab. You can use them independently or together.
 - **Custody, not a casino** — Your funds stay in your own agent wallet the whole time. QuantumVault only signs the move into and out of the yield token; it never takes custody of your money.
 - **One tap in, one tap out** — There are no sliders or amounts to set. "Park all spare USDC" puts your full idle balance to work; "Unpark all to USDC" pulls the whole position back. The platform reads your real on-chain balance and moves all of it.
 - **Always counted** — Parked funds still count as part of your balance and your profit/loss, so parking money never looks like a loss. The live value of your position is always included in your totals.
-- **Funds your trades automatically** — When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls it back to fund the position — a Flash bot restores its full safety buffer by default, while account-level parking pulls back just what's needed. You never have to unpark by hand before trading.
+- **Funds your trades automatically** — When you open a trade and your spendable USDC isn't enough, your Vault automatically pulls it back to fund the position. Account-level parking pulls back just what's needed. You never have to unpark by hand before trading.
 
 ### Where to Find It
 
@@ -890,28 +866,11 @@ Vaults are built money-safe first. The platform never guesses about your money �
 
 ### Parked Funds Still Count
 
-Your parked position is always included in your total balance and your profit/loss — whether you park at your account level or for an individual bot. Parking spare USDC into a Vault never shows up as a loss, and a bot whose spare cash is parked never reads as empty: the live value of what you've parked is counted right alongside your trading funds.
+Your account-level parked position is included in your total balance and profit/loss. Parking spare USDC into a Vault never shows up as a loss.
 
 ### Parked Funds Back Your Trades
 
-When you place a trade — by hand or from a TradingView/webhook signal — and your spendable USDC isn't enough to cover it, QuantumVault automatically unparks your spare cash to fund it. A Flash bot pulls back its **full buffer** by default — every parked dollar, so your whole cushion backs the position (you can switch it to just-enough in the bot's settings). Account-level parking pulls back just what the trade needs, plus a small buffer for fees and price movement. Either way, a parked bot is never falsely paused as "underfunded," the rest keeps earning, and you don't have to remember to unpark first.
-
-> **Note:** This auto-funding is hands-off by design. A Flash bot restores its full buffer by default; account-level parking pulls back only what the trade needs. Either way, you don't lift a finger.
-
-### Reparked After Each Trade (Auto-Park Idle Funds)
-
-The other half of hands-off cash management. Turn on **Auto-park idle funds** in a bot's settings and, about a minute after the bot's position fully closes, all its spare USDC is parked back into yield automatically — so the cash earns between trades instead of sitting idle. If a new trade opens during that short wait (a quick flip or re-entry), the repark is skipped, so funds the bot is about to use are never parked by mistake. Parking is also skipped when there's less than about $5 of spare cash, to avoid tiny, pointless transfers.
-
-Put together with the auto-funding above, a Flash bot runs a fully automatic loop:
-
-1. Spare USDC sits in a yield Vault, earning.
-2. A trade signal arrives.
-3. The Vault unparks to back the trade — by default, everything, for the full safety buffer.
-4. The position opens and runs.
-5. The position fully closes (take-profit, stop-loss, or a close signal).
-6. About a minute later, the leftover USDC is parked again — back to earning.
-
-> **Note:** Auto-park idle funds is available on Flash bots, where each bot has its own isolated wallet. It's a persistent per-bot setting — turn it on once and it keeps working after every trade. All the same money-safety rules apply: on-chain truth, realized amounts only, price-impact cap, and fail-closed.
+Account-level parking automatically unparks spare cash when your spendable USDC cannot cover a trade. It pulls back what the trade needs, plus a small buffer for fees and price movement.
 
 ---
 
@@ -982,7 +941,7 @@ At 3× leverage, for example, you earn staking yield on roughly 3× your origina
 
 ## Borrow Overview
 
-Borrow lets you use lending collateral you already hold — such as SOL, a staked-SOL token, or BTC — as security to borrow extra USDC without selling anything. The borrowed cash lands in your account wallet (or straight into a bot), so your trading capital grows while your collateral stays intact.
+Borrow lets you use lending collateral you already hold — such as SOL, a staked-SOL token, or BTC — as security to borrow extra USDC without selling anything. The borrowed cash lands in your account wallet, so your trading capital grows while your collateral stays intact.
 
 This is different from a loan from a bank. You never hand your collateral to QuantumVault. The collateral token stays in your own agent wallet; the platform only signs the on-chain borrow instruction. You can repay the debt anytime to release your collateral.
 
@@ -1003,7 +962,7 @@ The Lending section only shows the collaterals you already hold in your wallet �
 
 - **Keep your collateral** — You borrow USDC against your collateral without selling it. It stays in your wallet — and if it is a staked-SOL token like INF or JitoSOL, it keeps earning staking yield — while the borrowed USDC funds your trades.
 - **One position per collateral** — You can open one borrow position per collateral type. The position tracks your pledged collateral, your owed USDC, and your health factor in real time.
-- **Borrowed cash is real trading capital** — The USDC you borrow lands directly in your account wallet (or bot wallet for per-bot borrowing) and can be used for trades immediately. It is treated as a liability, not a deposit, so your profit/loss stays honest.
+- **Borrowed cash is real trading capital** — The USDC you borrow lands directly in your account wallet and can be used for trades immediately. It is treated as a liability, not a deposit, so your profit/loss stays honest.
 - **Repay anytime** — Tap "Repay Debt" to clear all or part of the loan. Partial repayments lower your debt; full repayments close the position and return your collateral.
 
 ### Where to Find It
@@ -1040,51 +999,13 @@ A carry trade is when you borrow USDC at one rate and park it into a Vault desti
 - Positive edge (Vault APY > borrow APR) — The Vault earns more than the loan costs. Net gain.
 - Negative edge (Vault APY < borrow APR) — The loan costs more than the Vault earns. Net loss.
 
-The Equity tab on a bot with an open per-bot borrow shows a "Carry Advisor" that recommends whether to park, repay, or hold based on the current edge. It is read-only — you tap to act, the advisor does not act on its own.
-
-> **Warning:** A carry trade is not risk-free. The collateral price can drop (liquidation risk), the Vault yield can change, and the borrow rate can rise. The advisor only compares rates; it does not protect you from price moves.
+> **Warning:** A carry trade is not risk-free. The collateral price can drop (liquidation risk), the Vault yield can change, and the borrow rate can rise. Comparing rates does not protect you from price moves.
 
 ---
 
 ## Per-Bot Borrow
 
-Per-bot borrow is the same idea as account-level borrow, but scoped to a single bot. You pledge the bot's own eligible collateral, borrow USDC against it, and the cash lands directly in that bot's balance. When the bot closes, the system automatically repays the debt and returns the collateral to your account.
-
-This is available on Flash bots, where each bot has its own isolated wallet.
-
-### Where to Find It
-
-Open a bot's **Bot Management Drawer** and go to the **Equity** tab. If the bot holds eligible collateral, you will see a "Borrow Against Collateral" card. Tap it to open the borrow flow.
-
-### How It Works
-
-1. Open the Equity tab on a Flash bot that holds eligible collateral.
-2. Tap "Borrow Against Collateral" — the system shows your pledged collateral, current debt, and a safe borrow limit.
-3. Choose an amount and confirm. The USDC lands in the bot's wallet immediately.
-4. The bot's displayed balance grows by the borrowed amount, but the debt is subtracted from its net PnL so the numbers stay honest.
-5. When you close or delete the bot, the system automatically repays the debt and moves the released collateral back to your account.
-
-### Automatic Close & Repay
-
-When you unsubscribe or delete a bot with an open per-bot borrow:
-
-1. The system checks if the bot still owes USDC.
-2. If yes, it funds a small USDC top-up from your account wallet (to cover accrued interest), then repays the full debt.
-3. Once the debt is cleared, it withdraws the collateral and transfers it back to your account wallet.
-4. The position is closed and the collateral is yours again.
-
-This is fully automatic. You do not need to manually repay before closing a bot.
-
-> **Note:** The auto-repay step uses your account's spare USDC to cover any interest that accrued since the last display update. If your account wallet has no spare USDC, the close may pause at "needs attention" and ask you to fund a small top-up. Once funded, the close resumes automatically on retry.
-
-### Debt & Your Bot's Displayed PnL
-
-The bot's displayed balance includes the borrowed USDC (it is real cash the bot can trade with), but its net profit/loss subtracts the debt. This keeps the PnL honest: borrowing does not look like instant profit.
-
-- Bot Balance = exchange balance + parked value − borrow debt
-- PnL = Bot Balance − total deposited − borrow debt
-
-The debt is shown separately on the Equity tab so you always know what you owe.
+Per-bot borrowing is unavailable. See Funding Your Account for closed-venue recovery information.
 
 ---
 
@@ -1725,7 +1646,6 @@ The practical difference: a fixed-market bot waits for you to pick a ticker and 
 - Scanner bots always run in **Auto mode** — the mode toggle is not available (the scanner only makes sense when the bot decides without waiting for your approval at each candle).
 - **Auto Next** is on by default so the bot returns to scanning after a position closes.
 - **No ticker or timeframe to pick** — during setup the market and timeframe selects are replaced by a live status line showing how many markets are being scanned. You set exchange, model, leverage, and allocation; the scanner handles the rest.
-- Flash scanner bots run in **paper mode only**. Flash live trading on scanner bots is not yet supported.
 
 The scanner is designed for users who want broad market coverage without running many individual bots or managing separate subscriptions for each ticker.
 
@@ -1841,7 +1761,7 @@ Open positions contribute unrealized PnL to the equity curve and to the drawdown
 
 **Stopping the bot** — Tap Stop at any time. The bot cancels all open orders, closes any open position at market, and leaves your funds in the subaccount to withdraw normally.
 
-On Flash bots with idle-funds parking enabled, funds park automatically back into the Vault after each trade closes — earning yield while the bot waits for the next setup. On Pacifica, idle funds stay in the subaccount (the $10 min withdrawal + $1 fee makes parking uneconomical on small allocations).
+On Pacifica, idle funds stay in the subaccount (the $10 min withdrawal + $1 fee makes parking uneconomical on small allocations).
 
 ---
 
