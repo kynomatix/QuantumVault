@@ -1030,7 +1030,7 @@ export interface IStorage {
   getBotSubscriptionsByPublishedBot(publishedBotId: string): Promise<BotSubscription[]>;
   getBotSubscriptionsByWallet(walletAddress: string): Promise<(BotSubscription & { publishedBot: PublishedBot })[]>;
   getBotSubscriptionBySubscriberBotId(botId: string): Promise<(BotSubscription & { publishedBot: PublishedBot }) | undefined>;
-  getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]>;
+  getSubscriberBotsBySourceId(sourceId: string, options?: { sourceTradingBotId: boolean }): Promise<TradingBot[]>;
   createBotSubscription(subscription: InsertBotSubscription): Promise<BotSubscription>;
   updateBotSubscription(id: string, updates: Partial<InsertBotSubscription>): Promise<BotSubscription | undefined>;
   reactivateBotSubscription(id: string, updates: { subscriberBotId: string; capitalInvested: string }): Promise<BotSubscription | undefined>;
@@ -5347,17 +5347,23 @@ export class DatabaseStorage implements IStorage {
     return { ...results[0].subscription, publishedBot: results[0].publishedBot };
   }
 
-  async getSubscriberBotsBySourceId(publishedBotId: string): Promise<TradingBot[]> {
+  async getSubscriberBotsBySourceId(sourceId: string, options?: { sourceTradingBotId: boolean }): Promise<TradingBot[]> {
+    // Identity-only subquery: no listing state or active flag participates in
+    // subscription routing. Existing callers may still supply a listing id.
+    const listingFilter = options?.sourceTradingBotId
+      ? inArray(botSubscriptions.publishedBotId, db.select({ id: publishedBots.id })
+        .from(publishedBots).where(eq(publishedBots.tradingBotId, sourceId)))
+      : eq(botSubscriptions.publishedBotId, sourceId);
     // Join with bot_subscriptions to only return bots with active subscriptions
     // This ensures cancelled subscriptions don't receive signals
     const results = await db.select({ bot: tradingBots })
       .from(tradingBots)
       .innerJoin(botSubscriptions, and(
         eq(botSubscriptions.subscriberBotId, tradingBots.id),
-        eq(botSubscriptions.publishedBotId, publishedBotId),
+        listingFilter,
         eq(botSubscriptions.status, 'active')
       ))
-      .where(eq(tradingBots.sourcePublishedBotId, publishedBotId))
+      .where(eq(tradingBots.sourcePublishedBotId, botSubscriptions.publishedBotId))
       .orderBy(desc(tradingBots.createdAt));
     
     return results.map(r => r.bot);

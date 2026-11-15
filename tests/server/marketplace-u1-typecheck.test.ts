@@ -11,6 +11,7 @@ function newErrors(focused: boolean): string[] {
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, root);
   const files = focused ? [...parsed.fileNames,
     path.join(root, 'tests/server/marketplace-subscriber-fill-accounting.test.ts'),
+    path.join(root, 'tests/server/marketplace-unpublish-close-routing.test.ts'),
     path.join(root, 'tests/server/marketplace-subscriber-repair-postgres.test.ts'),
     path.join(root, 'tests/server/marketplace-u1-typecheck.test.ts')] : parsed.fileNames;
   const program = ts.createProgram(files, { ...parsed.options, incremental: false });
@@ -31,4 +32,7 @@ function newErrors(focused: boolean): string[] {
   });
 }
 it('CI.production', () => expect(newErrors(false)).toEqual([]), 240000);
-it('CI.focused.tests', () => expect(newErrors(true)).toEqual([]), 240000);
+it('CI.focused.tests', () => {
+  const errors = newErrors(true);
+  expect(errors, errors.join('\n')).toEqual([]);
+}, 240000);

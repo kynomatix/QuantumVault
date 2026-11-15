@@ -71,17 +71,14 @@ export async function dispatchPartialCloseEffects(initial: CloseIntent): Promise
   }
   const bot = await storage.getTradingBotById(intent.bot_id);
   if (!bot) throw new Error('close_effect_bot_missing');
-  const published = await storage.getPublishedBotByTradingBotId(intent.bot_id);
   if (intent.last_evidence.fanoutDelivered !== true) {
-    if (published?.isActive) {
-      if (!fanout) throw new Error('close_fanout_not_registered');
-      await fanout(intent.bot_id, {
-        originId: intent.id, action: intent.position_side === 'long' ? 'sell' : 'buy',
-        contracts: intent.requested_size_base, positionSize: String(Number(intent.original_position_size_base) - Number(intent.requested_size_base)),
-        price: String((intent.last_evidence.fill as any)?.fillPrice ?? 0), isCloseSignal: false,
-        strategyPositionSize: null, partialCloseFraction: Number(intent.requested_size_base) / Number(intent.original_position_size_base),
-      });
-    }
+    if (!fanout) throw new Error('close_fanout_not_registered');
+    await fanout(intent.bot_id, {
+      originId: intent.id, action: intent.position_side === 'long' ? 'sell' : 'buy',
+      contracts: intent.requested_size_base, positionSize: String(Number(intent.original_position_size_base) - Number(intent.requested_size_base)),
+      price: String((intent.last_evidence.fill as any)?.fillPrice ?? 0), isCloseSignal: false,
+      strategyPositionSize: null, partialCloseFraction: Number(intent.requested_size_base) / Number(intent.original_position_size_base),
+    });
     intent = await readOrUpdate(intent, { fanoutDelivered: true });
   }
   if (intent.last_evidence.parkingDelivered !== true) {

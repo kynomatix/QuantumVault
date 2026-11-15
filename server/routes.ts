@@ -645,7 +645,11 @@ function cancellationConflict(result?: CancelResult) {
   };
 }
 
-registerPartialCloseFanout(routeSignalToSubscribers);
+registerPartialCloseFanout(async (sourceBotId, signal) => {
+  // This is the sole retry boundary: no subscriber has been processed yet.
+  const subscribers = await storage.getSubscriberBotsBySourceId(sourceBotId, { sourceTradingBotId: true });
+  await routeSignalToSubscribers(sourceBotId, signal, subscribers);
+});
 registerCloseWorkerDependencies({
   adapter: () => getAdapter('pacifica'),
   epochUnchanged: async intent => {
@@ -4950,7 +4954,12 @@ async function writeReferralChain(descendantWallet: string, referrerWallet: stri
   }
 }
 
-function parseSignalForRouting(body: any): { action: string | null; contracts: string; isCloseSignal: boolean; price: string; strategyPositionSize: string | null } {
+const LEGACY_TRADE_MESSAGE = /order\s+(buy|sell)\s+@\s+([\d.]+)\s+filled\s+on\s+([A-Za-z0-9:\-/]+).*position\s+is\s+([-\d.]+)/i;
+
+function parseSignalForRouting(body: any, sourcePosition?: { baseSize: string; avgEntryPrice: string } | null, inferSourceFromSignal = false): {
+  action: string | null; contracts: string; isCloseSignal: boolean; price: string; strategyPositionSize: string | null;
+  reduceOnlyIfRefused?: 'full' | { fraction: number };
+} {
   let action: string | null = null;
   let contracts = "0";
   let strategyPositionSize: string | null = null;
@@ -4982,7 +4991,28 @@ function parseSignalForRouting(body: any): { action: string | null; contracts: s
   const isCloseSignal = strategyPositionSize !== null && 
     (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
   
-  return { action, contracts, isCloseSignal, price, strategyPositionSize };
+  // Classification affects only an admission refused by the marketplace.
+  // Legacy parsing here must not change the shallow fields returned above.
+  const legacy = typeof body?.message === 'string' ? body.message.match(LEGACY_TRADE_MESSAGE) : null;
+  const inferredAction = legacy ? legacy[1].toLowerCase() : action;
+  const inferredContracts = legacy ? Number(legacy[2]) : Number(contracts);
+  const inferredTarget = legacy ? Number(legacy[4]) : strategyPositionSize === null ? null : Number(strategyPositionSize);
+  let classificationPosition = sourcePosition;
+  if (inferSourceFromSignal && (inferredAction === 'buy' || inferredAction === 'sell') && inferredTarget !== null) {
+    const prior = inferredTarget - (inferredAction === 'buy' ? inferredContracts : -inferredContracts);
+    if (Number.isFinite(inferredTarget) && Number.isFinite(inferredContracts) && inferredContracts > 0 && Number.isFinite(prior)) {
+      classificationPosition = { baseSize: String(prior), avgEntryPrice: sourcePosition?.avgEntryPrice ?? '0' };
+    }
+  }
+  const classified = classificationPosition && (inferredAction === 'buy' || inferredAction === 'sell')
+    ? classifySignal({
+      side: Number(classificationPosition.baseSize) > 0 ? 'LONG' : Number(classificationPosition.baseSize) < 0 ? 'SHORT' : 'FLAT',
+      size: Math.abs(Number(classificationPosition.baseSize)), entryPrice: Number(classificationPosition.avgEntryPrice),
+    }, { action: inferredAction, contracts: inferredContracts, strategyPositionSize: inferredTarget })
+    : undefined;
+  const reduceOnlyIfRefused = classified?.type === 'FULL_CLOSE' || classified?.type === 'FLIP' ? 'full'
+    : classified?.type === 'PARTIAL_CLOSE' ? { fraction: classified.closedFraction } : undefined;
+  return { action, contracts, isCloseSignal, price, strategyPositionSize, reduceOnlyIfRefused };
 }
 
 interface SignalBotFlipAuthorityContext {
@@ -5753,6 +5783,17 @@ function acquireBotWebhookLock(key: string): Promise<() => void> {
   return current.then(() => release);
 }
 
+// Admission is point-in-time per subscriber. Already admitted work may finish
+// after unpublish; later subscribers read fresh before any new-exposure work.
+async function readMarketplaceOpenAdmission(sourceBotId: string): Promise<{ reason?: string }> {
+  try {
+    const listing = await storage.getPublishedBotByTradingBotId(sourceBotId);
+    return listing?.isActive ? {} : { reason: 'Source bot is unpublished' };
+  } catch {
+    return { reason: 'Source listing state unavailable' };
+  }
+}
+
 export async function routeSignalToSubscribers(
   sourceBotId: string,
   signal: {
@@ -5767,7 +5808,10 @@ export async function routeSignalToSubscribers(
     isFlipSignal?: boolean;
     /** Fraction of source position closed [0,1]; present for PARTIAL_CLOSE signals. */
     partialCloseFraction?: number;
-  }
+    /** Source reducing intent, consulted only when admission is refused. */
+    reduceOnlyIfRefused?: 'full' | { fraction: number };
+  },
+  preloadedSubscriberBots?: Awaited<ReturnType<typeof storage.getSubscriberBotsBySourceId>>,
 ): Promise<void> {
   if (!signal.isCloseSignal && signal.partialCloseFraction !== undefined
       && (!Number.isFinite(signal.partialCloseFraction)
@@ -5781,22 +5825,8 @@ export async function routeSignalToSubscribers(
   try {
     console.log(`[Subscriber Routing] Starting routing for source bot ${sourceBotId}, signal: ${signal.action}, close=${signal.isCloseSignal}`);
     
-    const publishedBot = await storage.getPublishedBotByTradingBotId(sourceBotId);
-    if (!publishedBot) {
-      console.log(`[Subscriber Routing] Source bot ${sourceBotId} is not published - skipping routing`);
-      return;
-    }
-    if (!publishedBot.isActive) {
-      console.log(`[Subscriber Routing] Published bot ${publishedBot.id} (${publishedBot.name}) is not active - skipping routing`);
-      return;
-    }
-    console.log(`[Subscriber Routing] Found published bot: ${publishedBot.id} (${publishedBot.name}), active=${publishedBot.isActive}`);
-
-    const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
-    if (!subscriberBots || subscriberBots.length === 0) {
-      console.log(`[Subscriber Routing] No active subscriber bots found for published bot ${publishedBot.id} - skipping routing`);
-      return;
-    }
+    const subscriberBots = preloadedSubscriberBots ?? await storage.getSubscriberBotsBySourceId(sourceBotId, { sourceTradingBotId: true });
+    if (!subscriberBots?.length) return;
 
     console.log(`[Subscriber Routing] Routing ${signal.action} (close=${signal.isCloseSignal}) to ${subscriberBots.length} subscribers IN PARALLEL`);
 
@@ -5804,12 +5834,17 @@ export async function routeSignalToSubscribers(
     type SubscriberResult = 'skippedInactive' | 'skippedFlat' | 'skippedTooSmall' | 'tradeSuccess' | 'tradeFailed' | 'closeSuccess' | 'closeFailed' | 'partialCloseSuccess' | 'partialCloseFailed' | 'error';
 
     // Process subscriber function - returns result for aggregation after parallel execution
+    const originalSignal = signal;
     const processSubscriber = async (subBot: typeof subscriberBots[0]): Promise<SubscriberResult> => {
       console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), isActive=${subBot.isActive}, market=${subBot.market}`);
 
+      let signal = originalSignal;
       try {
         const currentSubscriber = await storage.getTradingBotById(subBot.id);
         if (currentSubscriber?.activeProtocol === 'phoenix' || subBot.activeProtocol === 'phoenix') return 'skippedInactive';
+        const logRoutedClose = () => console.log(
+          `[Subscriber Routing] Close routed: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`,
+        );
         const subscriberDbPosition = await storage.getBotPosition(subBot.id, subBot.market);
         const subscriberClassified = classifySignal(
           {
@@ -5838,6 +5873,31 @@ export async function routeSignalToSubscribers(
           return 'skippedInactive';
         }
 
+        // Explicit closes retain the base branches and never consult listing state.
+        // Every other signal is admitted once, before choosing a close quantity
+        // or reading a wallet. Admitted signals ignore all refused-mode hints.
+        const admission = signal.isCloseSignal || signal.partialCloseFraction !== undefined
+          ? {} : await readMarketplaceOpenAdmission(sourceBotId);
+        if (admission.reason) {
+          const opposesPosition = subscriberDbPosition
+            && (parseFloat(subscriberDbPosition.baseSize) > 0 ? signal.action === 'sell'
+              : parseFloat(subscriberDbPosition.baseSize) < 0 && signal.action === 'buy');
+          const reducingType = subscriberClassified.type === 'FULL_CLOSE'
+            || subscriberClassified.type === 'PARTIAL_CLOSE' || subscriberFlip;
+          const hint = signal.reduceOnlyIfRefused ?? (signal.isFlipSignal ? 'full' : undefined);
+          const fraction = typeof hint === 'object' ? hint.fraction : undefined;
+          const validFraction = fraction !== undefined && Number.isFinite(fraction) && fraction > 0;
+          if (opposesPosition && reducingType && validFraction && fraction < 1) {
+            signal = { ...signal, partialCloseFraction: fraction };
+          } else if (opposesPosition && reducingType && subscriberFlip) {
+            // Preserve the base flip's close authority; refuse its reopen below.
+          } else if (opposesPosition && reducingType && (hint === 'full' || (validFraction && fraction >= 1))) {
+            signal = { ...signal, isCloseSignal: true };
+          } else {
+            console.log(`[Subscriber Routing] New exposure refused: ${admission.reason}: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
+            return 'skippedInactive';
+          }
+        }
         const subWallet = await storage.getWallet(subBot.walletAddress);
         console.log(`[Subscriber Routing] Wallet lookup for ${subBot.walletAddress}: found=${!!subWallet}, hasAgentKey=${!!subWallet?.agentPublicKey}`);
         if (!subWallet) {
@@ -5998,6 +6058,7 @@ export async function routeSignalToSubscribers(
             }
             if (finalized.isNew && pnl !== null) await sendTradeNotification(subBot.walletAddress,
               { type: 'position_closed', botName: subBot.name, market: subBot.market, pnl });
+            logRoutedClose();
             return 'closeSuccess';
           } else {
             console.error(`[Subscriber Routing] Close failed for subscriber bot ${subBot.id}:`, closeResult.error);
@@ -6091,6 +6152,7 @@ export async function routeSignalToSubscribers(
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId,
                 requestedSize: String(subPartialSize), signalPrice: signal.price, ...facts.webhookPayload },
             });
+            logRoutedClose();
             return 'partialCloseSuccess';
           } else {
             console.error(`[Subscriber Routing] Partial close failed for ${subBot.id}: ${subPartialResult.error}`);
@@ -6139,9 +6201,11 @@ export async function routeSignalToSubscribers(
               });
               return 'closeFailed';
             }
+            if (subscriberFlipDisposition.close.kind === 'executed') logRoutedClose();
             const requestedSide = signal.action === 'buy' ? 'long' : 'short';
-            if (!subBot.isActive) {
-              const reason = 'Bot is paused';
+            if (admission.reason || !subBot.isActive) {
+              const reason = admission.reason ?? 'Bot is paused';
+              console.log(`[Subscriber Routing] Flip reopen refused: ${reason}: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
               subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'admission', reason);
               await storage.createBotTrade({
                 tradingBotId: subBot.id,
@@ -6475,8 +6539,7 @@ export async function routeSignalToSubscribers(
       // Store routing audit trail in webhook log for visibility
       try {
         const routingSummary = {
-          publishedBotId: publishedBot.id,
-          publishedBotName: publishedBot.name,
+          sourceBotId,
           subscriberCount: subscriberBots.length,
           results: { success: results.filter(r => r === 'tradeSuccess' || r === 'closeSuccess').length, failed: results.filter(r => r === 'tradeFailed' || r === 'closeFailed').length, skipped: results.filter(r => r === 'skippedInactive' || r === 'skippedFlat').length, errors: results.filter(r => r === 'error').length },
           timestamp: new Date().toISOString(),
@@ -19482,29 +19545,27 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         throw dbError;
       }
 
-      const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
       console.log(`[WEBHOOK-TRACE] Bot found: name="${bot.name}", market=${bot.market}`);
-      console.log(`[WEBHOOK-TRACE] Bot publish status: isPublished=${!!botPublishedInfo}, publishedBotId=${botPublishedInfo?.id || 'none'}`);
       console.log(`[WEBHOOK-TRACE] Bot active: ${bot.isActive}`);
       // Check if bot is active
       if (!bot.isActive) {
-        // DECOUPLED ROUTING: If source bot is published, still route signal to subscribers
+        // DECOUPLED ROUTING: Route signals independently of source execution availability
         // Subscribers should trade independently even if creator's bot is paused/underfunded
-        if (botPublishedInfo && botPublishedInfo.isActive) {
-          const routingSignal = parseSignalForRouting(req.body);
-          if (routingSignal.action) {
-            console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... is paused but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
-            routeSignalToSubscribers(botId, {
-              originId: log.id,
-              action: routingSignal.action as 'buy' | 'sell',
-              contracts: routingSignal.contracts,
-              positionSize: routingSignal.contracts,
-              price: routingSignal.price,
-              isCloseSignal: routingSignal.isCloseSignal,
-              strategyPositionSize: routingSignal.strategyPositionSize,
-            }).catch(err => console.error(`[Subscriber Routing] Error routing from paused source ${botId.slice(0, 8)}...:`, err));
-          }
-          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused (subscribers routed)" });
+        const routingSignal = parseSignalForRouting(req.body,
+          await storage.getBotPosition(botId, bot.market).catch(() => null), true);
+        if (routingSignal.action) {
+          console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... is paused - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+          routeSignalToSubscribers(botId, {
+            originId: log.id,
+            action: routingSignal.action as 'buy' | 'sell',
+            contracts: routingSignal.contracts,
+            positionSize: routingSignal.contracts,
+            price: routingSignal.price,
+            isCloseSignal: routingSignal.isCloseSignal,
+            strategyPositionSize: routingSignal.strategyPositionSize,
+            reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
+          }).catch(err => console.error(`[Subscriber Routing] Error routing from paused source ${botId.slice(0, 8)}...:`, err));
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused (subscriber routing requested)" });
         } else {
           await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused" });
         }
@@ -19524,21 +19585,21 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       if (!ownerWallet.executionEnabled) {
-        if (botPublishedInfo && botPublishedInfo.isActive) {
-          const routingSignal = parseSignalForRouting(req.body);
-          if (routingSignal.action) {
-            console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution disabled but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
-            routeSignalToSubscribers(botId, {
-              originId: log.id,
-              action: routingSignal.action as 'buy' | 'sell',
-              contracts: routingSignal.contracts,
-              positionSize: routingSignal.contracts,
-              price: routingSignal.price,
-              isCloseSignal: routingSignal.isCloseSignal,
-              strategyPositionSize: routingSignal.strategyPositionSize,
-            }).catch(err => console.error(`[Subscriber Routing] Error routing from auth-disabled source ${botId.slice(0, 8)}...:`, err));
-          }
-          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required (subscribers routed)" });
+        const routingSignal = parseSignalForRouting(req.body,
+          await storage.getBotPosition(botId, bot.market).catch(() => null), true);
+        if (routingSignal.action) {
+          console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution disabled - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+          routeSignalToSubscribers(botId, {
+            originId: log.id,
+            action: routingSignal.action as 'buy' | 'sell',
+            contracts: routingSignal.contracts,
+            positionSize: routingSignal.contracts,
+            price: routingSignal.price,
+            isCloseSignal: routingSignal.isCloseSignal,
+            strategyPositionSize: routingSignal.strategyPositionSize,
+            reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
+          }).catch(err => console.error(`[Subscriber Routing] Error routing from auth-disabled source ${botId.slice(0, 8)}...:`, err));
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required (subscriber routing requested)" });
         } else {
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required" });
         }
@@ -19546,21 +19607,21 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       
       if (ownerWallet.executionExpiresAt && new Date() > ownerWallet.executionExpiresAt) {
-        if (botPublishedInfo && botPublishedInfo.isActive) {
-          const routingSignal = parseSignalForRouting(req.body);
-          if (routingSignal.action) {
-            console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution expired but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
-            routeSignalToSubscribers(botId, {
-              originId: log.id,
-              action: routingSignal.action as 'buy' | 'sell',
-              contracts: routingSignal.contracts,
-              positionSize: routingSignal.contracts,
-              price: routingSignal.price,
-              isCloseSignal: routingSignal.isCloseSignal,
-              strategyPositionSize: routingSignal.strategyPositionSize,
-            }).catch(err => console.error(`[Subscriber Routing] Error routing from expired-auth source ${botId.slice(0, 8)}...:`, err));
-          }
-          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired (subscribers routed)" });
+        const routingSignal = parseSignalForRouting(req.body,
+          await storage.getBotPosition(botId, bot.market).catch(() => null), true);
+        if (routingSignal.action) {
+          console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution expired - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+          routeSignalToSubscribers(botId, {
+            originId: log.id,
+            action: routingSignal.action as 'buy' | 'sell',
+            contracts: routingSignal.contracts,
+            positionSize: routingSignal.contracts,
+            price: routingSignal.price,
+            isCloseSignal: routingSignal.isCloseSignal,
+            strategyPositionSize: routingSignal.strategyPositionSize,
+            reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
+          }).catch(err => console.error(`[Subscriber Routing] Error routing from expired-auth source ${botId.slice(0, 8)}...:`, err));
+          await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired (subscriber routing requested)" });
         } else {
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired" });
         }
@@ -19710,8 +19771,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                         typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
 
         // Try regex parsing for legacy format: "order buy @ 33.33 filled on TICKER. New strategy position is 100"
-        const regex = /order\s+(buy|sell)\s+@\s+([\d.]+)\s+filled\s+on\s+([A-Za-z0-9:\-/]+).*position\s+is\s+([-\d.]+)/i;
-        const match = message.match(regex);
+        const match = message.match(LEGACY_TRADE_MESSAGE);
 
         if (match) {
           action = match[1].toLowerCase();
@@ -19785,7 +19845,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // subscriber. Dispatch the reversal intent once, before source close
       // resolution, so every subscriber can classify and resolve its own
       // position even if this source's later open is rejected.
-      if (isFlipSignal && botPublishedInfo?.isActive) {
+      if (isFlipSignal) {
         routeSignalToSubscribers(botId, {
           originId: log.id,
           action: action as 'buy' | 'sell',
@@ -19816,10 +19876,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       const webhookBotCtx = getBotSubaccountContext(bot);
-      console.log(`[Webhook] Signal: action=${action}, contracts=${contracts}, close=${isCloseSignal}, published=${!!botPublishedInfo}, pacificaSubaccount=${!!webhookBotCtx}`);
+      console.log(`[Webhook] Signal: action=${action}, contracts=${contracts}, close=${isCloseSignal}, subscriberRouting=independent, pacificaSubaccount=${!!webhookBotCtx}`);
       console.log(`[WEBHOOK-TRACE] ========== SIGNAL BRANCHING ==========`);
       console.log(`[WEBHOOK-TRACE] isCloseSignal=${isCloseSignal} (will take ${isCloseSignal ? 'CLOSE' : 'OPEN/REGULAR'} path)`);
-      console.log(`[WEBHOOK-TRACE] Bot isPublished=${!!botPublishedInfo} - routing ${botPublishedInfo ? 'WILL' : 'will NOT'} be attempted`);
       
       // CRITICAL FIX: Wrap entire close signal handling in outer try/catch to guarantee no fallthrough
       // to open-order logic. Any exception inside this block MUST return, not continue to open-order flow.
@@ -19883,8 +19942,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             processed: true 
           });
 
-          if (botPublishedInfo && botPublishedInfo.isActive) {
-            console.log(`[Webhook] Source bot flat but published - routing close signal to subscribers`);
+          {
+            console.log(`[Webhook] Source bot flat - routing close signal to subscribers`);
             routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
@@ -20565,7 +20624,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
 
           // Fan out to copy-trade subscribers proportionally.
-          if (bot.activeProtocol !== 'pacifica' && botPublishedInfo?.isActive && pcAccounting.isNew) {
+          if (bot.activeProtocol !== 'pacifica' && pcAccounting.isNew) {
             routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
@@ -20916,6 +20975,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           price: signalPrice || fillPrice.toString(),
           isCloseSignal: false,
           strategyPositionSize,
+          reduceOnlyIfRefused: classifiedSignal.type === 'FULL_CLOSE' ? 'full' : undefined,
         }).then(() => {
           console.log(`[WEBHOOK-TRACE] OPEN routing completed successfully for bot ${botId}`);
         }).catch(routingErr => {
@@ -21224,8 +21284,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                         typeof payload === 'object' && payload.message ? payload.message :
                         typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
 
-        const regex = /order\s+(buy|sell)\s+@\s+([\d.]+)\s+filled\s+on\s+([A-Za-z0-9:\-/]+).*position\s+is\s+([-\d.]+)/i;
-        const match = message.match(regex);
+        const match = message.match(LEGACY_TRADE_MESSAGE);
 
         if (match) {
           action = match[1].toLowerCase();
@@ -21268,10 +21327,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // Check if bot is active - route to subscribers even if paused
       if (!bot.isActive) {
-        const routingSignal = parseSignalForRouting(payload);
-        const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
-        if (botPublishedInfo && botPublishedInfo.isActive && routingSignal.action) {
-          console.log(`[User Webhook] Source bot ${botId.slice(0, 8)}... is paused but published - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
+        const routingSignal = parseSignalForRouting(payload,
+          await storage.getBotPosition(botId, bot.market).catch(() => null), true);
+        if (routingSignal.action) {
+          console.log(`[User Webhook] Source bot ${botId.slice(0, 8)}... is paused - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
           routeSignalToSubscribers(botId, {
             originId: log.id,
             action: routingSignal.action as 'buy' | 'sell',
@@ -21280,9 +21339,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             price: routingSignal.price,
             isCloseSignal: routingSignal.isCloseSignal,
             strategyPositionSize: routingSignal.strategyPositionSize,
+            reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
           }).catch(err => console.error(`[User Webhook] Error routing signal from paused bot:`, err));
         }
-        await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused", processed: true });
+        await storage.updateWebhookLog(log.id, { errorMessage: routingSignal.action ? "Bot is paused (subscriber routing requested)" : "Bot is paused", processed: true });
         return res.status(400).json({ error: "Bot is paused" });
       }
 
@@ -21351,9 +21411,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
 
             // Route close signal to subscribers even if source bot is flat
-            const botPublishedInfo = await storage.getPublishedBotByTradingBotId(botId);
-            if (botPublishedInfo && botPublishedInfo.isActive) {
-              console.log(`[User Webhook] Source bot flat but published - routing close signal to subscribers`);
+            {
+              console.log(`[User Webhook] Source bot flat - routing close signal to subscribers`);
               routeSignalToSubscribers(botId, {
                 originId: log.id,
                 action: action as 'buy' | 'sell',
@@ -21445,9 +21504,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
 
             // Route close signal to subscribers even when source position was already closed
-            const botPubInfo = await storage.getPublishedBotByTradingBotId(botId);
-            if (botPubInfo && botPubInfo.isActive) {
-              console.log(`[User Webhook] Source position already flat but published - routing close to subscribers`);
+            {
+              console.log(`[User Webhook] Source position already flat - routing close to subscribers`);
               routeSignalToSubscribers(botId, {
                 originId: log.id,
                 action: action as 'buy' | 'sell',
@@ -21906,8 +21964,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const uwIsFlipSignal = uwClassified.type === 'FLIP';
 
       if (uwIsFlipSignal) {
-        const publishedFlipSource = await storage.getPublishedBotByTradingBotId(botId);
-        if (publishedFlipSource?.isActive) {
+        {
           routeSignalToSubscribers(botId, {
             originId: log.id,
             action: action as 'buy' | 'sell',
@@ -22052,8 +22109,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
 
           // Fan out to copy-trade subscribers proportionally.
-          const pcPublished = await storage.getPublishedBotByTradingBotId(botId);
-          if (pcPublished?.isActive && pcAccounting.isNew) {
+
+          if (pcAccounting.isNew) {
             routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
@@ -22425,6 +22482,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           price: signalPrice || userFillPrice.toString(),
           isCloseSignal: false,
           strategyPositionSize,
+          reduceOnlyIfRefused: uwClassified.type === 'FULL_CLOSE' ? 'full' : undefined,
         }).then(() => {
           console.log(`[User Webhook] OPEN routing completed successfully for bot ${botId}`);
         }).catch(routingErr => {
@@ -26725,7 +26783,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         if (!publishedBot) issues.push('Published bot not found');
         if (!sourceBot) issues.push('Source trading bot not found');
         if (subscriberBot && !subscriberBot.isActive) issues.push('Subscriber bot is inactive');
-        if (publishedBot && !publishedBot.isActive) issues.push('Published bot is inactive');
+        const listingStatus = publishedBot && !publishedBot.isActive
+          ? 'new entries blocked; closes still route' : undefined;
         if (subscriberBot && !subscriberBot.sourcePublishedBotId) issues.push('Subscriber bot missing sourcePublishedBotId');
         if (subscriberBot && subscriberBot.sourcePublishedBotId !== sub.publishedBotId) issues.push('Subscriber sourcePublishedBotId mismatch');
         if (!subscriberWallet) issues.push('Subscriber wallet not found');
@@ -26773,6 +26832,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           } : null,
           
           // Routing status
+          listingStatus,
           wouldBeRouted,
           issues,
           canRoute: issues.length === 0,
@@ -26809,15 +26869,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
       }
       
-      // Step 2: Check if published bot is active
-      if (!publishedBot.isActive) {
-        return res.json({
-          success: false,
-          step: "checkActive",
-          error: "Published bot is inactive",
-          publishedBotId: publishedBot.id,
-        });
-      }
+      // Inactivity limits new exposure, not subscriber close routing.
+      const listingStatus = publishedBot.isActive
+        ? 'new entries and closes route' : 'new entries blocked; closes still route';
       
       // Step 3: Get subscriber bots
       const subscriberBots = await storage.getSubscriberBotsBySourceId(publishedBot.id);
@@ -26862,6 +26916,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         sourceBotId: botId,
         publishedBotId: publishedBot.id,
         publishedBotActive: publishedBot.isActive,
+        listingStatus,
         totalSubscribers: subscriberBots.length,
         routableSubscribers: routableCount,
         subscribers: subscriberDetails,

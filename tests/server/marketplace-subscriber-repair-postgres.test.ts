@@ -2,7 +2,7 @@
 import { Client } from 'pg';
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { getTableConfig } from 'drizzle-orm/pg-core';
-import { botTrades, botPositions, tradingBots } from '../../shared/schema';
+import { botTrades, botPositions, tradingBots, publishedBots, botSubscriptions } from '../../shared/schema';
 import type { SubscriberCloseAccounting } from '../../server/trading/subscriber-close-accounting';
 import { subscriberCloseAccounting } from '../../server/trading/subscriber-close-accounting';
 import { recoverSubscriberCloseEvidence } from '../../server/trading/subscriber-close-recovery';
@@ -34,14 +34,14 @@ describe('subscriber later evidence repair with real Drizzle/node-postgres', () 
     client = new Client({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 5000 });
     await client.connect();
     holder.db = drizzle(client);
-    for (const table of [botTrades, botPositions, tradingBots]) {
+    for (const table of [botTrades, botPositions, tradingBots, publishedBots, botSubscriptions]) {
       const config = getTableConfig(table);
       await client.query(`CREATE TEMP TABLE "${config.name}" (${config.columns.map(c => `"${c.name}" ${c.getSQLType()}`).join(',')})`);
     }
   });
   afterAll(async () => { await client?.end(); });
   beforeEach(async () => {
-    await client.query('TRUNCATE pg_temp.bot_trades, pg_temp.bot_positions, pg_temp.trading_bots');
+    await client.query('TRUNCATE pg_temp.bot_trades, pg_temp.bot_positions, pg_temp.trading_bots, pg_temp.published_bots, pg_temp.bot_subscriptions');
     await client.query(`INSERT INTO pg_temp.trading_bots (id, stats) VALUES ('EXAMPLE_BOT', $1::jsonb)`,
       [JSON.stringify({ totalPnl: 4, totalVolume: 200 })]);
     await client.query(`INSERT INTO pg_temp.bot_positions
@@ -52,6 +52,52 @@ describe('subscriber later evidence repair with real Drizzle/node-postgres', () 
       VALUES ('EXAMPLE_CLOSE', 'EXAMPLE_BOT', 'BTC-PERP', 'CLOSE', 0, 0, NULL, NULL, 'recovered',
       'EXAMPLE_ORDER', 'tx-EXAMPLE_RECONCILER', 'net_of_close_fee', $1::jsonb)`,
       [JSON.stringify({ closeAccounting: { kind: 'unavailable', reason: 'missing_history' } })]);
+  });
+  it('looks up active subscriptions by source identity regardless of publication or subscriber pause', async () => {
+    await client.query(`INSERT INTO pg_temp.published_bots (id, trading_bot_id, is_active)
+      VALUES ('EXAMPLE_LISTING', 'EXAMPLE_SOURCE', true)`);
+    await client.query(`INSERT INTO pg_temp.trading_bots (id, source_published_bot_id, is_active) VALUES
+      ('EXAMPLE_ACTIVE', 'EXAMPLE_LISTING', true), ('EXAMPLE_PAUSED', 'EXAMPLE_LISTING', false),
+      ('EXAMPLE_CANCELLED', 'EXAMPLE_LISTING', true)`);
+    await client.query(`INSERT INTO pg_temp.bot_subscriptions (id, published_bot_id, subscriber_bot_id, status) VALUES
+      ('EXAMPLE_SUB_ACTIVE', 'EXAMPLE_LISTING', 'EXAMPLE_ACTIVE', 'active'),
+      ('EXAMPLE_SUB_PAUSED', 'EXAMPLE_LISTING', 'EXAMPLE_PAUSED', 'active'),
+      ('EXAMPLE_SUB_CANCELLED', 'EXAMPLE_LISTING', 'EXAMPLE_CANCELLED', 'cancelled')`);
+    const expected = ['EXAMPLE_ACTIVE', 'EXAMPLE_PAUSED'];
+    for (const active of [true, false]) {
+      await client.query('UPDATE pg_temp.published_bots SET is_active = $1', [active]);
+      expect((await store.getSubscriberBotsBySourceId('EXAMPLE_SOURCE', { sourceTradingBotId: true })).map(bot => bot.id).sort()).toEqual(expected);
+      expect((await store.getSubscriberBotsBySourceId('EXAMPLE_LISTING')).map(bot => bot.id).sort()).toEqual(expected);
+    }
+  });
+  it('returns no subscribers for a source with no listing despite dangling or mismatched subscriptions', async () => {
+    await client.query(`INSERT INTO pg_temp.published_bots (id, trading_bot_id, is_active)
+      VALUES ('EXAMPLE_OTHER_LISTING', 'EXAMPLE_OTHER_SOURCE', true)`);
+    await client.query(`INSERT INTO pg_temp.trading_bots (id, source_published_bot_id, is_active) VALUES
+      ('EXAMPLE_DANGLING', 'EXAMPLE_SOURCE', true), ('EXAMPLE_NULL', NULL, true),
+      ('EXAMPLE_MISMATCH', 'EXAMPLE_OTHER_LISTING', true)`);
+    await client.query(`INSERT INTO pg_temp.bot_subscriptions (id, published_bot_id, subscriber_bot_id, status) VALUES
+      ('EXAMPLE_SUB_DANGLING', 'EXAMPLE_SOURCE', 'EXAMPLE_DANGLING', 'active'),
+      ('EXAMPLE_SUB_NULL', 'EXAMPLE_SOURCE', 'EXAMPLE_NULL', 'active'),
+      ('EXAMPLE_SUB_MISMATCH', 'EXAMPLE_UNRELATED', 'EXAMPLE_MISMATCH', 'active')`);
+    expect(await store.getSubscriberBotsBySourceId('EXAMPLE_SOURCE', { sourceTradingBotId: true })).toEqual([]);
+  });
+  it('returns subscribers across two source listings while preserving listing association and cancellation', async () => {
+    // These existing TEMP fixtures copy column types, without production uniqueness constraints.
+    await client.query(`INSERT INTO pg_temp.published_bots (id, trading_bot_id, is_active) VALUES
+      ('EXAMPLE_FIRST', 'EXAMPLE_SOURCE', false), ('EXAMPLE_SECOND', 'EXAMPLE_SOURCE', true)`);
+    await client.query(`INSERT INTO pg_temp.trading_bots (id, source_published_bot_id, is_active) VALUES
+      ('EXAMPLE_FIRST_BOT', 'EXAMPLE_FIRST', false), ('EXAMPLE_SECOND_BOT', 'EXAMPLE_SECOND', true),
+      ('EXAMPLE_CROSS', 'EXAMPLE_SECOND', true), ('EXAMPLE_CANCELLED', 'EXAMPLE_FIRST', true)`);
+    await client.query(`INSERT INTO pg_temp.bot_subscriptions (id, published_bot_id, subscriber_bot_id, status) VALUES
+      ('EXAMPLE_SUB_FIRST', 'EXAMPLE_FIRST', 'EXAMPLE_FIRST_BOT', 'active'),
+      ('EXAMPLE_SUB_SECOND', 'EXAMPLE_SECOND', 'EXAMPLE_SECOND_BOT', 'active'),
+      ('EXAMPLE_SUB_CROSS', 'EXAMPLE_FIRST', 'EXAMPLE_CROSS', 'active'),
+      ('EXAMPLE_SUB_CANCELLED', 'EXAMPLE_FIRST', 'EXAMPLE_CANCELLED', 'cancelled')`);
+    expect((await store.getSubscriberBotsBySourceId('EXAMPLE_SOURCE', { sourceTradingBotId: true }))
+      .map(bot => bot.id).sort()).toEqual(['EXAMPLE_FIRST_BOT', 'EXAMPLE_SECOND_BOT']);
+    expect((await store.getSubscriberBotsBySourceId('EXAMPLE_FIRST')).map(bot => bot.id)).toEqual(['EXAMPLE_FIRST_BOT']);
+    expect((await store.getSubscriberBotsBySourceId('EXAMPLE_SECOND')).map(bot => bot.id)).toEqual(['EXAMPLE_SECOND_BOT']);
   });
   const repair = (value = accounting) => store.remediateSubscriberCloseAccountingAtomic({
     botId: 'EXAMPLE_BOT', tradeId: 'EXAMPLE_CLOSE', accounting: value,
