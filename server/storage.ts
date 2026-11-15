@@ -2444,7 +2444,7 @@ export class DatabaseStorage implements IStorage {
       .from(pendingProfitShares)
       .where(and(
         eq(pendingProfitShares.subscriberBotId, id),
-        inArray(pendingProfitShares.status, ['pending', 'processing']),
+        inArray(pendingProfitShares.status, ['pending', 'processing', 'deferred']),
       ));
     if (obligations.length > 0) {
       throw new Error('Trading bot has an unsettled creator payout obligation');

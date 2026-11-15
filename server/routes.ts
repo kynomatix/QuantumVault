@@ -4537,6 +4537,49 @@ async function settleEmptyFreshReservation(params: {
     : storage.releaseReservationToSpare(params);
 }
 
+function creatorPayoutFundingAmount(totalOwed: number): string {
+  // Amounts are stored to six decimals. Normalize the sum before ceiling to cents.
+  return (Math.ceil(Math.round(totalOwed * 1e6) / 1e4) / 100).toFixed(2);
+}
+
+function creatorPayoutTopUpMessage(totalOwed?: number): string {
+  const amount = totalOwed === undefined ? 'an unpaid creator share' : `$${creatorPayoutFundingAmount(totalOwed)}`;
+  const funding = totalOwed === undefined ? 'enough USDC to pay the owed amount' : `at least $${creatorPayoutFundingAmount(totalOwed)} USDC`;
+  return `This bot owes its creator ${amount}. Unsubscribing pays it from your agent wallet. Top up your agent wallet from your wallet if needed so it holds ${funding} plus SOL for fees.`;
+}
+
+async function creatorPayoutConflictMessage(botId: string, totalOwed: number | undefined, action: 'Delete' | 'Withdrawal'): Promise<string> {
+  try {
+    const bot = await storage.getTradingBotById(botId);
+    // This reader includes paused subscriptions; the bot-specific reader only returns active ones.
+    const subscriptions = bot ? await storage.getBotSubscriptionsByWallet(bot.walletAddress) : [];
+    if (!subscriptions.some(subscription => subscription.subscriberBotId === botId && subscription.status !== 'cancelled')) {
+      return 'This bot still owes a creator share that is kept on record. The strategy it copied is no longer available, so contact support to settle it.';
+    }
+  } catch {
+    console.warn('[Creator share] Subscription availability could not be checked');
+    return 'This bot still owes a creator share that is kept on record. Contact support to settle it.';
+  }
+  return creatorPayoutTopUpMessage(totalOwed) + ' ' + action + ' is available after unsubscribing settles the creator share.';
+}
+
+async function creatorPayoutDeleteConflict(botId: string, knownShares?: Array<{ amount: string }>): Promise<string> {
+  let totalOwed: number | undefined;
+  try {
+    // Late storage refusals need a fresh read: debt may have appeared after the pre-check.
+    const shares = knownShares ?? await storage.getUnsettledProfitSharesByBot(botId);
+    if (shares.length > 0) totalOwed = shares.reduce((sum, share) => sum + parseFloat(share.amount), 0);
+  } catch {
+    // Keep the refusal actionable even if the amount cannot be read; never invent a zero debt.
+    console.warn('[Delete] Creator share amount unavailable for the top-up message');
+  }
+  return creatorPayoutConflictMessage(botId, totalOwed, 'Delete');
+}
+
+function isCreatorPayoutDeletionConflict(error: unknown): boolean {
+  return error instanceof Error && error.message === 'Trading bot has an unsettled creator payout obligation';
+}
+
 /**
  * Phase 5.5: shared post-insert step that secures a freshly provisioned external-key
  * bot's secret key. Encrypts the key under the owner's UMK bound to the new bot.id
@@ -4638,7 +4681,11 @@ async function persistBotSubaccountKeyV3WithRollback(params: {
     if (!reservationSettled) {
       console.error(`[Provision] Confirmed empty subaccount ${botSubaccountPublicKey}, but reservation settlement CAS was lost`);
     }
-    try { await storage.deleteTradingBot(botId); } catch { /* noop */ }
+    try { await storage.deleteTradingBot(botId); } catch (error) {
+      if (isCreatorPayoutDeletionConflict(error)) {
+        return { ok: false, status: 409, error: await creatorPayoutDeleteConflict(botId) };
+      }
+    }
     return { ok: false, status: 500, error: 'Failed to secure the bot trading-account key. Any confirmed-empty provisional account was safely released; please retry.' };
   } finally {
     try { _botSubUmk?.cleanup(); } catch { /* noop */ }
@@ -9252,6 +9299,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         const { PHOENIX_FUNDING_DISABLED } = await import('./protocol/phoenix/funding-routes');
         return res.status(503).json(PHOENIX_FUNDING_DISABLED);
       }
+      const unsettledIOUs = botId ? await storage.getUnsettledProfitSharesByBot(botId) : [];
+      const deferredIOUs = unsettledIOUs.filter(iou => iou.status === 'deferred');
+      if (deferredIOUs.length > 0) {
+        const totalOwed = deferredIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
+        return res.status(409).json({
+          error: await creatorPayoutConflictMessage(botId!, totalOwed, 'Withdrawal'),
+          totalOwed,
+        });
+      }
       const isFlashWithdrawal = ownedBot?.activeProtocol === 'flash';
       if (!wallet.agentPublicKey || (!isFlashWithdrawal && !wallet.agentPrivateKeyEncryptedV3)) {
         return res.status(400).json({ error: "Agent wallet not initialized" });
@@ -9301,7 +9357,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         }
         
         // Check for pending profit share IOUs before allowing withdrawal
-        const pendingIOUs = await storage.getPendingProfitSharesBySubscriberBot(botId);
+        const pendingIOUs = unsettledIOUs.filter(iou => iou.status === 'pending' || iou.status === 'processing');
         if (bot.activeProtocol === 'flash' && pendingIOUs.length > 0) {
           return res.status(409).json({ error: 'Withdrawal is blocked by an outstanding creator profit share. Contact support for owner-directed review. The liability and wallet link are preserved; no payout or withdrawal was attempted.' });
         }
@@ -9336,7 +9392,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               }
               if (transferResult.error?.includes('Insufficient SOL')) {
                 return res.status(400).json({
-                  error: `Cannot withdraw - pending creator profit share of $${totalOwed.toFixed(2)} cannot be paid. Agent wallet needs more SOL for transaction fees.`,
+                  error: `Cannot withdraw - pending creator profit share of $${creatorPayoutFundingAmount(totalOwed)} cannot be paid. Agent wallet needs more SOL for transaction fees.`,
                   pendingIOUs: pendingIOUs.length,
                   totalOwed
                 });
@@ -9347,7 +9403,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           
           if (!allPaid) {
             return res.status(400).json({
-              error: `Cannot withdraw - you have $${totalOwed.toFixed(2)} in pending profit share payments to signal creators. Please ensure your agent wallet has enough USDC to cover these payments.`,
+              error: `Cannot withdraw - you have $${creatorPayoutFundingAmount(totalOwed)} in pending profit share payments to signal creators. Please ensure your agent wallet has enough USDC to cover these payments.`,
               pendingIOUs: pendingIOUs.length,
               totalOwed
             });
@@ -17167,7 +17223,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
             if (!finalized) {
               try { await storage.updateTradingBot(bot.id, { subaccountStatus: 'error' } as any); } catch { /* noop */ }
-              try { await storage.deleteTradingBot(bot.id); } catch { /* pooled marker still preserves custody */ }
+              try { await storage.deleteTradingBot(bot.id); } catch (error) {
+                if (isCreatorPayoutDeletionConflict(error)) {
+                  return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id) });
+                }
+              }
               return res.status(500).json({
                 error: "Provisioning ownership could not be finalized. The incomplete bot was disabled or removed, and the provisional account remains recoverable; contact support before retrying.",
               });
@@ -17236,7 +17296,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
                 claimToken: _freshReservationContext.claimToken,
               }).catch(() => false);
             }
-            try { await storage.deleteTradingBot(bot.id); } catch {}
+            try { await storage.deleteTradingBot(bot.id); } catch (error) {
+              if (isCreatorPayoutDeletionConflict(error)) {
+                return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id) });
+              }
+            }
             return res.status(500).json({ error: 'Failed to secure the bot trading-account key. The provisional account was confirmed empty; please retry.' });
           }
           // Pacifica: attempt the same immediate raw-key recovery, but only while the
@@ -17257,7 +17321,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
             if (recovery.swept) {
               await settleEmptyFreshReservation(_freshReservationContext).catch(() => false);
-              try { await storage.deleteTradingBot(bot.id); } catch { /* marker remains a blocker if deletion fails */ }
+              try { await storage.deleteTradingBot(bot.id); } catch (error) {
+                if (isCreatorPayoutDeletionConflict(error)) {
+                  return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id) });
+                }
+              }
               return res.status(500).json({
                 error: 'Failed to secure the bot trading-account key. The provisional account was confirmed empty; please retry.',
               });
@@ -17340,18 +17408,23 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           // Funds were transferred into the reused subaccount, but its key is still
           // retained in the spare row (POOLED AAD) — recoverable, not a loss. Tear down
           // the half-created bot and quarantine the slot for admin/recovery sweep.
-          try { await storage.deleteTradingBot(bot.id); } catch {}
-          try {
-            await storage.markSubaccountStuckFunds({
-              walletAddress: req.walletAddress!,
-              protocol: _reuseContext.protocol,
-              protocolSubaccountId: _reuseContext.protocolSubaccountId,
-              botId: null,
-              agentPublicKey: _reuseContext.agentPublicKey,
-              lastError: `reuse key-rebind failed: ${reuseKeyErr?.message || reuseKeyErr}`,
-              claimToken: _reuseContext.claimToken,
-            });
-          } catch { /* best-effort quarantine */ }
+          try { await storage.deleteTradingBot(bot.id); } catch (error) {
+            if (isCreatorPayoutDeletionConflict(error)) {
+              return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id) });
+            }
+          } finally {
+            try {
+              await storage.markSubaccountStuckFunds({
+                walletAddress: req.walletAddress!,
+                protocol: _reuseContext.protocol,
+                protocolSubaccountId: _reuseContext.protocolSubaccountId,
+                botId: null,
+                agentPublicKey: _reuseContext.agentPublicKey,
+                lastError: `reuse key-rebind failed: ${reuseKeyErr?.message || reuseKeyErr}`,
+                claimToken: _reuseContext.claimToken,
+              });
+            } catch { /* best-effort quarantine */ }
+          }
           return res.status(500).json({ error: 'The reused trading account could not be finalized safely. The incomplete bot was removed and the account remains recoverable; contact support before retrying.' });
         } finally {
           try { _reuseUmk?.cleanup(); } catch {}
@@ -17827,6 +17900,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const unsettledCreatorShares = await storage.getUnsettledProfitSharesByBot(bot.id);
+      if (unsettledCreatorShares.some(share => share.status === 'deferred')) {
+        return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id, unsettledCreatorShares) });
+      }
       if (bot.activeProtocol === 'phoenix') {
         return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
       }
@@ -17888,14 +17965,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           
           if (!allPaid) {
             return res.status(400).json({
-              error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments to signal creators. Please fund your agent wallet and try again.`,
+              error: `Cannot delete bot - you have $${creatorPayoutFundingAmount(totalOwed)} in pending profit share payments to signal creators. Please fund your agent wallet and try again.`,
               pendingIOUs: pendingIOUs.length,
               totalOwed
             });
           }
         } else {
           return res.status(400).json({
-            error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments. Agent wallet access is required to pay these.`,
+            error: `Cannot delete bot - you have $${creatorPayoutFundingAmount(totalOwed)} in pending profit share payments. Agent wallet access is required to pay these.`,
             pendingIOUs: pendingIOUs.length,
             totalOwed
           });
@@ -17905,6 +17982,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(409).json({ error: 'Cannot delete bot yet - a payout submission is awaiting on-chain resolution.' });
       }
       
+      // Settle pending shares first, then refuse any remaining debt before custody changes.
+      if (agentAddress) {
+        const remainingCreatorShares = await storage.getUnsettledProfitSharesByBot(bot.id);
+        if (remainingCreatorShares.length > 0) {
+          return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id, remainingCreatorShares) });
+        }
+      }
+
       // Flash per-bot wallet sweep — Flash bots are external_key bots so they ALSO
       // satisfy getBotSubaccountContext, but their funds live in the bot's OWN
       // Solana wallet and must be swept with sweepBotWallet (NOT Pacifica's
@@ -18069,6 +18154,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             message: msg,
           });
         } catch (sweepErr: any) {
+          if (isCreatorPayoutDeletionConflict(sweepErr)) {
+            return res.status(409).json({ error: await creatorPayoutDeleteConflict(req.params.id) });
+          }
           console.error(`[Delete] Flash sweep error for bot ${bot.id}: ${sweepErr?.message || sweepErr}`);
           return res.status(500).json({
             error: `Cannot delete bot - error sweeping the Flash bot wallet: ${sweepErr?.message || sweepErr}`,
@@ -18095,6 +18183,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               message: "Open positions or orders remain on this bot. Please close them and try again.",
             });
           }
+        }
+
+        // Flattening can record a new creator share. Check again before sweeping or pooling.
+        const postTeardownCreatorShares = await storage.getUnsettledProfitSharesByBot(bot.id);
+        if (postTeardownCreatorShares.length > 0) {
+          return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id, postTeardownCreatorShares) });
         }
 
         const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[Delete]', agentSecret);
@@ -18473,6 +18567,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       await storage.deleteTradingBot(req.params.id);
       res.json({ success: true });
     } catch (error) {
+      if (isCreatorPayoutDeletionConflict(error)) {
+        return res.status(409).json({ error: await creatorPayoutDeleteConflict(req.params.id) });
+      }
       console.error("Delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
     } finally {
@@ -18754,6 +18851,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const unsettledCreatorShares = await storage.getUnsettledProfitSharesByBot(bot.id);
+      if (unsettledCreatorShares.some(share => share.status === 'deferred')) {
+        return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id, unsettledCreatorShares) });
+      }
       if (bot.activeProtocol === 'phoenix') {
         return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
       }
@@ -18814,14 +18915,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           
           if (!allPaid) {
             return res.status(400).json({
-              error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments to signal creators. Please fund your agent wallet and try again.`,
+              error: `Cannot delete bot - you have $${creatorPayoutFundingAmount(totalOwed)} in pending profit share payments to signal creators. Please fund your agent wallet and try again.`,
               pendingIOUs: pendingIOUs.length,
               totalOwed
             });
           }
         } else {
           return res.status(400).json({
-            error: `Cannot delete bot - you have $${totalOwed.toFixed(2)} in pending profit share payments. Agent wallet access is required to pay these.`,
+            error: `Cannot delete bot - you have $${creatorPayoutFundingAmount(totalOwed)} in pending profit share payments. Agent wallet access is required to pay these.`,
             pendingIOUs: pendingIOUs.length,
             totalOwed
           });
@@ -18831,6 +18932,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         return res.status(409).json({ error: 'Cannot delete bot yet - a payout submission is awaiting on-chain resolution.' });
       }
       
+      // Settle pending shares first, then refuse any remaining debt before custody changes.
+      if (agentAddress) {
+        const remainingCreatorShares = await storage.getUnsettledProfitSharesByBot(bot.id);
+        if (remainingCreatorShares.length > 0) {
+          return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id, remainingCreatorShares) });
+        }
+      }
+
       // Pacifica subaccount sweep — transfer funds back to agent wallet before deletion
       if (getBotSubaccountContext(bot) && agentAddress) {
         const sweepResult = await sweepPacificaSubaccount(bot, agentAddress, '[ForceDelete]', agentSecret);
@@ -18997,6 +19106,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             });
           }
         } catch (sweepErr: any) {
+          if (isCreatorPayoutDeletionConflict(sweepErr)) {
+            return res.status(409).json({ error: await creatorPayoutDeleteConflict(req.params.id) });
+          }
           console.error(`[Delete] Sweep error:`, sweepErr);
           return res.status(500).json({
             error: "Sweep transaction failed",
@@ -19015,6 +19127,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         message: `This bot has $${balance.toFixed(2)} USDC. Please withdraw from Trading Account to Agent Wallet first via Wallet Management.`
       });
     } catch (error) {
+      if (isCreatorPayoutDeletionConflict(error)) {
+        return res.status(409).json({ error: await creatorPayoutDeleteConflict(req.params.id) });
+      }
       console.error("Force delete trading bot error:", error);
       res.status(500).json({ error: "Internal server error" });
     } finally {
@@ -19034,6 +19149,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const unsettledCreatorShares = await storage.getUnsettledProfitSharesByBot(bot.id);
+      if (unsettledCreatorShares.length > 0) {
+        return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id, unsettledCreatorShares) });
+      }
       if (bot.activeProtocol === 'phoenix') {
         return res.status(409).json(await new PhoenixLifecycleStore(pool).stop(bot.id, req.walletAddress!, 'archive'));
       }
@@ -19047,6 +19166,13 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.driftSubaccountId !== null && bot.driftSubaccountId !== undefined && !wallet?.agentPublicKey) {
         console.error(`[ConfirmDelete] Warning: Bot ${bot.id} has subaccount but wallet is missing`);
         // Still allow deletion since this is a confirmation after user signed sweep tx
+      }
+
+      if (wallet?.agentPublicKey) {
+        const remainingCreatorShares = await storage.getUnsettledProfitSharesByBot(bot.id);
+        if (remainingCreatorShares.length > 0) {
+          return res.status(409).json({ error: await creatorPayoutDeleteConflict(bot.id, remainingCreatorShares) });
+        }
       }
 
       // Try to close the subaccount to reclaim rent (~0.035 SOL)
@@ -19099,6 +19225,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
       return res.json({ success: true, txSignature, rentReclaimed });
     } catch (error) {
+      if (isCreatorPayoutDeletionConflict(error)) {
+        return res.status(409).json({ error: await creatorPayoutDeleteConflict(req.params.id) });
+      }
       console.error("Confirm delete trading bot error:", error);
       return res.status(500).json({ error: "Internal server error" });
     } finally {
@@ -23337,6 +23466,15 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== req.walletAddress) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const unsettledIOUs = await storage.getUnsettledProfitSharesByBot(botId);
+      const deferredIOUs = unsettledIOUs.filter(iou => iou.status === 'deferred');
+      if (deferredIOUs.length > 0) {
+        const totalOwed = deferredIOUs.reduce((sum, iou) => sum + parseFloat(iou.amount), 0);
+        return res.status(409).json({
+          error: await creatorPayoutConflictMessage(botId!, totalOwed, 'Withdrawal'),
+          totalOwed,
+        });
+      }
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Valid amount required" });
       }
@@ -24362,7 +24500,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         });
         if (!reservationFinalized) {
           try { await storage.updateTradingBot(subscriberBot.id, { subaccountStatus: 'error' } as any); } catch { /* noop */ }
-          try { await storage.deleteTradingBot(subscriberBot.id); } catch { /* pooled marker still preserves custody */ }
+          try { await storage.deleteTradingBot(subscriberBot.id); } catch (error) {
+            if (isCreatorPayoutDeletionConflict(error)) {
+              return res.status(409).json({ error: await creatorPayoutDeleteConflict(subscriberBot.id) });
+            }
+          }
           console.error(`[Marketplace] provisioning reservation CAS lost for ${provision.botSubaccountPublicKey} (bot ${subscriberBot.id})`);
           return res.status(500).json({
             error: "Copy-bot provisioning ownership could not be finalized. The incomplete bot was disabled or removed, and the provisional account remains recoverable; contact support before retrying.",
@@ -24573,7 +24715,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
               return res.status(transferResult.outcome === 'ambiguous' ? 409 : 400).json({
                 error: transferResult.outcome === 'ambiguous'
                   ? 'Cannot unsubscribe yet - a prior creator payout submission is awaiting on-chain resolution.'
-                  : `Cannot unsubscribe yet — $${totalOwed.toFixed(2)} in creator profit share still needs to be paid. Ensure your agent wallet has enough USDC and SOL for fees, then try again.`,
+                  : `Cannot unsubscribe yet — $${creatorPayoutFundingAmount(totalOwed)} in creator profit share still needs to be paid. Ensure your agent wallet has enough USDC and SOL for fees, then try again.`,
                 pendingIOUs: owedIOUs.length,
                 totalOwed,
               });

@@ -2134,7 +2134,7 @@ export default function AppPage() {
           delete updated[botToDelete.id];
           return updated;
         });
-      }
+      } else throw new Error(forceData.error || 'Failed to delete bot');
     } catch (error: any) {
       console.error('Confirm delete error:', error);
       toast({ 

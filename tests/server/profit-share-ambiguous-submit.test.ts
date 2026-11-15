@@ -629,7 +629,7 @@ describe('creator payout ambiguity durability', () => {
     expect(storageSource).toContain("if (!allowedSourceStatuses.includes(share.status as 'pending' | 'deferred'))");
     expect(storageSource).toContain("eq(pendingProfitShares.processingClaimToken, claimToken)");
     expect(storageSource).toContain("a.status='confirmation_pending'");
-    expect(storageSource).toContain("inArray(pendingProfitShares.status, ['pending', 'processing'])");
+    expect(storageSource).toContain("inArray(pendingProfitShares.status, ['pending', 'processing', 'deferred'])");
     expect(storageSource).toContain('if (paid[0]?.referralLegsInitializedAt)');
     expect(storageSource).toContain("status: 'pending', releasedAt: now");
     expect(storageSource).not.toContain("status: 'pending', releasedAt: now, createdAt:");
