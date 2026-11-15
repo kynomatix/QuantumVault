@@ -337,13 +337,13 @@ describe('round9 active parity and refused admission', () => {
     prime(); await route({ ...full, partialCloseFraction: 0 }); expectOnlyReducingOrders();
     expect(storage.getPublishedBotByTradingBotId).not.toHaveBeenCalled();
   });
-  it.each([true, false])('paused subscriber receives no partial with listing active=%s', async active => {
-    prime(); listing(active);
+  it.each([true, false])('safety paused explicit partial reduces with listing active=%s', async active => {
+    prime(); primePartial(); listing(active);
     vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([{ ...routeBot, isActive: false }] as never);
-    await route(partial);
-    expect(storage.getWallet).not.toHaveBeenCalled();
+    await route(partial); expectOnlyReducingOrders();
+    expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.125);
     expect(storage.getPublishedBotByTradingBotId).not.toHaveBeenCalled();
-    expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+    expectNoOpeningWork();
   });
   it('retains paused subscriber full-close authority', async () => {
     prime(); vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([{ ...routeBot, isActive: false }] as never);
@@ -487,17 +487,33 @@ async function audited(work: () => Promise<unknown>) {
     return result;
   } finally { log.mockRestore(); error.mockRestore(); }
 }
-describe('round9 early paths preserve base live fields', () => {
-  it.each(['paused-tv', 'disabled-tv', 'expired-tv', 'paused-user'] as const)('%s ignores source reduction hints on an active listing and uses the base open path', async path => {
-    prime(); primeEarly(path, true);
-    const bot = { ...routeBot, maxPositionSize: '0' };
-    vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([bot] as never);
-    await audited(() => earlyWebhook(path, { action: 'sell', contracts: '0.125', position_size: '0.125', price: '65000' }));
-    expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
-    expect(storage.createBotTrade).toHaveBeenCalledWith(expect.objectContaining({ errorMessage: 'Bot has no Max Position Size configured' }));
-    expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
+describe('subscriber close safety early paths', () => {
+  it.each(['paused-tv', 'disabled-tv', 'expired-tv', 'paused-user'] as const)('safety %s active legacy reductions use source fraction and full size', async path => {
+    for (const fraction of [0.5, 1]) {
+      prime(); primeEarly(path, true); primePartial(fraction);
+      // A different source size proves sizing uses the subscriber position, not source contracts.
+      vi.mocked(storage.getBotPosition).mockImplementation(async id => ({ baseSize: id === 'EXAMPLE_SOURCE' ? '0.5' : '0.25', avgEntryPrice: '60000' } as never));
+      const unpark = vi.spyOn(vaultService, 'unparkToUsdc');
+      try {
+        await audited(() => earlyWebhook(path, { message: `order sell @ ${0.5 * fraction} filled on BTC. New strategy position is ${0.5 * (1 - fraction)}` }));
+        expectOnlyReducingOrders();
+        expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.25 * fraction);
+        expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
+        expectNoOpeningWork(); expect(unpark).not.toHaveBeenCalled();
+        expect(storage.createBotTrade).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+      } finally { unpark.mockRestore(); }
+    }
   });
-  it.each(['paused-tv', 'disabled-tv', 'expired-tv', 'paused-user'] as const)('%s inferred legacy partial takes precedence over subscriber FLIP only when refused', async path => {
+  it.each(['paused-tv', 'disabled-tv', 'expired-tv', 'paused-user'] as const)('%s active entry retains the live opening order', async path => {
+    prime(); primeEarly(path, true); const leverage = primeRiskSizing();
+    try {
+      await audited(() => earlyWebhook(path, { action: 'buy', contracts: '0.25', position_size: '0.5', price: '1000' }));
+      expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
+      expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0]).toMatchObject({ reduceOnly: false, side: 'long' });
+      expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
+    } finally { leverage.mockRestore(); }
+  });
+  it.each(['paused-tv', 'disabled-tv', 'expired-tv', 'paused-user'] as const)('%s inferred legacy partial takes precedence over subscriber FLIP when refused', async path => {
     prime(); primeEarly(path, false); primePartial();
     await audited(() => earlyWebhook(path, { message: 'order sell @ 0.125 filled on BTC. New strategy position is 0.125' }));
     expectOnlyReducingOrders(); expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.125);
@@ -564,29 +580,46 @@ describe('round9 durable lookup boundary', () => {
     } finally { error.mockRestore(); }
   });
 });
-it('round9 active-source user legacy full close reaches the post-order refused subscriber as reduce-only', async () => {
-  prime(); listing(false); const leverage = primeRiskSizing();
-  const source = { ...routeBot, id: 'EXAMPLE_SOURCE' };
+it('safety user legacy zero takes the source close handler without sizing or netting', async () => {
+  prime();
+  const source = { ...routeBot, id: 'EXAMPLE_SOURCE', protocolSubaccountId: Keypair.generate().publicKey.toBase58() };
+  vi.mocked(storage.getTradingBotById).mockImplementation(async id => (id === source.id ? source : routeBot) as never);
+  // Source and subscriber have independent close truth, even after the first order fills.
   let sequence = 0;
   routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async account => snapshot(account, ++sequence,
-    routeMocks.adapter.placeMarketOrder.mock.calls.some(([order]) => order.reduceOnly) ? 0 : 0.25));
-  vi.mocked(storage.getTradingBotById).mockImplementation(async id => (id === source.id ? source : routeBot) as never);
+    routeMocks.adapter.placeMarketOrder.mock.calls.some(([order]) => order.agentPublicKey === account) ? 0 : 0.25));
   vi.mocked(storage.createWebhookLog).mockResolvedValue({ id: 'EXAMPLE_WEBHOOK' } as never);
-  const errors = vi.spyOn(console, 'error');
+  const response = await earlyWebhook('paused-user', { message: 'order sell @ 0.25 filled on BTC. New strategy position is 0' });
+  const body = await response.json();
+  expect(response.status, JSON.stringify(body)).toBe(200);
+  await vi.waitFor(() => expect(storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({ botId: routeBot.id })));
+  expectOnlyReducingOrders(2);
+  expect(routeMocks.adapter.placeMarketOrder.mock.calls.map(([order]) => order.sizeBase)).toEqual([0.25, 0.25]);
+  expect(storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({ botId: source.id }));
+  expectNoOpeningWork();
+  expect(storage.getPublishedBotByTradingBotId).not.toHaveBeenCalled();
+});
+it('user legacy nonzero entry retains the live source order', async () => {
+  prime(); const leverage = primeRiskSizing();
+  vi.mocked(storage.getTradingBotById).mockResolvedValue({ ...routeBot, id: 'EXAMPLE_SOURCE' } as never);
+  vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([]);
+  vi.mocked(storage.createWebhookLog).mockResolvedValue({ id: 'EXAMPLE_WEBHOOK' } as never);
   try {
-    const response = await earlyWebhook('paused-user', { message: 'order sell @ 0.25 filled on BTC. New strategy position is 0' });
-    const body = await response.json();
-    if (response.status !== 200) throw new Error(`Legacy source status ${response.status}: ${body.error}; ${errors.mock.calls.flatMap(call => call.filter(value => value instanceof Error).map(value => value.message)).join('; ')}`);
-    await vi.waitFor(() => {
-      if (!vi.mocked(storage.recordCloseEventAtomic).mock.calls.some(([record]) => record.botId === routeBot.id)) {
-        throw new Error(`Legacy subscriber close missing; orders=${routeMocks.adapter.placeMarketOrder.mock.calls.length}; listingReads=${vi.mocked(storage.getPublishedBotByTradingBotId).mock.calls.length}`);
-      }
-    }, { timeout: 5000 });
-    if (routeMocks.adapter.placeMarketOrder.mock.calls.length !== 2) throw new Error(`Expected source and subscriber orders; actual=${routeMocks.adapter.placeMarketOrder.mock.calls.length}`);
-    expect(routeMocks.adapter.placeMarketOrder.mock.calls.map(([order]) => order.reduceOnly)).toEqual([false, true]);
-    expect(storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({ botId: routeBot.id }));
-    expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
-  } finally { errors.mockRestore(); leverage.mockRestore(); }
+    const response = await earlyWebhook('paused-user', { message: 'order buy @ 0.25 filled on BTC. New strategy position is 0.5' });
+    const body = await response.json(); expect(response.status, JSON.stringify(body)).toBe(200);
+    expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
+    expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0]).toMatchObject({ reduceOnly: false, side: 'long' });
+  } finally { leverage.mockRestore(); }
+});
+it('user legacy nonzero crossing target preserves the live partial instead of enabling a flip', async () => {
+  prime(); primePartial();
+  vi.mocked(storage.getTradingBotById).mockResolvedValue({ ...routeBot, id: 'EXAMPLE_SOURCE' } as never);
+  vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([]);
+  vi.mocked(storage.createWebhookLog).mockResolvedValue({ id: 'EXAMPLE_WEBHOOK' } as never);
+  const response = await earlyWebhook('paused-user', { message: 'order sell @ 0.125 filled on BTC. New strategy position is -0.125' });
+  const body = await response.json(); expect(response.status, JSON.stringify(body)).toBe(200);
+  expectOnlyReducingOrders(); expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.125);
+  expectNoOpeningWork();
 });
 async function partialIntent() {
   const store = closeIntentStore as any;
@@ -625,7 +658,7 @@ it('round9 restores exact base DELETE, sequential loop, guards and shallow early
   }
   visit(source); expect(bare).toEqual([]); expect(early).toHaveLength(4);
   for (const [index, fields] of early.entries()) {
-    expect(fields).toEqual(['originId: log.id', "action: routingSignal.action as 'buy' | 'sell'", 'contracts: routingSignal.contracts', index === 3 ? 'positionSize' : 'positionSize: routingSignal.contracts', 'price: routingSignal.price', 'isCloseSignal: routingSignal.isCloseSignal', 'strategyPositionSize: routingSignal.strategyPositionSize', 'reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused']);
+    expect(fields).toEqual(['originId: log.id', "action: routingSignal.action as 'buy' | 'sell'", 'contracts: routingSignal.contracts', index === 3 ? 'positionSize' : 'positionSize: routingSignal.contracts', 'price: routingSignal.price', 'isCloseSignal: routingSignal.isCloseSignal', 'strategyPositionSize: routingSignal.strategyPositionSize', 'reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused', 'sourceNotTrading: true']);
   }
   const parse = span(text, 'function parseSignalForRouting(', '\ninterface SignalBotFlipAuthorityContext');
   expect(sha256(span(parse, '  let action', '  // Classification'))).toBe(baseSha256.parserSha256);
@@ -635,6 +668,118 @@ it('round9 restores exact base DELETE, sequential loop, guards and shallow early
   expect(fanout.slice(fanout.indexOf('computeTradeSizingAndTopUp('))).not.toMatch(/readMarketplaceOpenAdmission|getPublishedBotByTradingBotId/);
   expect(fanout).not.toContain('subscriberClassified.closedFraction');
   const user = span(text, '  app.post("/api/webhook/user/:walletAddress"', '\n  app.');
-  expect(user).not.toContain('strategyPositionSize = match[4]');
+  expect(user).toContain('if (parseFloat(match[4]) === 0) strategyPositionSize = match[4]');
   expect(user).toContain("reduceOnlyIfRefused: uwClassified.type === 'FULL_CLOSE' ? 'full' : undefined");
+});
+
+function expectNoOpeningWork() {
+  expect(routeMocks.adapter.getAccountInfo).not.toHaveBeenCalled();
+  expect(routeMocks.adapter.getMarkPrice).not.toHaveBeenCalled();
+  expect(routeMocks.adapter.getMarkets).not.toHaveBeenCalled();
+  expect(routeMocks.adapter.deposit).not.toHaveBeenCalled();
+  expect(routeMocks.adapter.transferBetweenSubaccounts).not.toHaveBeenCalled();
+}
+describe('subscriber close safety paused and hint boundaries', () => {
+  it.each(['active', 'unpublished', 'unreadable'] as const)('safety paused hint reductions on %s listing never open or record a phantom flip', async state => {
+    for (const fraction of [0.5, 1]) {
+      prime(); primePartial(fraction); listing(state === 'active');
+      if (state === 'unreadable') vi.mocked(storage.getPublishedBotByTradingBotId).mockRejectedValue(new Error('EXAMPLE_UNAVAILABLE'));
+      vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([{ ...routeBot, isActive: false }] as never);
+      await route({ ...entry, action: 'sell', contracts: '0', strategyPositionSize: null, sourceNotTrading: true,
+        reduceOnlyIfRefused: fraction === 1 ? 'full' : { fraction } });
+      expectOnlyReducingOrders(); expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.25 * fraction);
+      expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce(); expectNoOpeningWork();
+      expect(storage.createBotTrade).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    }
+  });
+  it.each(['entry', 'pyramid'] as const)('paused %s with an unusable hint never reaches wallet or opening work', async kind => {
+    prime();
+    vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([{ ...routeBot, isActive: false }] as never);
+    if (kind === 'entry') vi.mocked(storage.getBotPosition).mockResolvedValue(undefined);
+    await route({ ...entry, sourceNotTrading: true, reduceOnlyIfRefused: { fraction: 0.5 } });
+    expect(storage.getWallet).not.toHaveBeenCalled(); expectNoOpeningWork();
+    expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+  it('safety marked refused full hint suppresses phantom reopen but a genuine flip keeps refusal', async () => {
+    prime(); listing(false);
+    await route({ ...entry, action: 'sell', contracts: '0', strategyPositionSize: null, sourceNotTrading: true, reduceOnlyIfRefused: 'full' });
+    expectOnlyReducingOrders();
+    expect(storage.createBotTrade).not.toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
+    primeFlip(); listing(false);
+    await route({ ...flip, sourceNotTrading: true, reduceOnlyIfRefused: 'full' });
+    expectOnlyReducingOrders(); expectNoOpeningWork();
+    expect(storage.createBotTrade).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorMessage: 'Source bot is unpublished' }));
+  });
+  it('paused genuine flip closes and refuses the reopen on an active listing', async () => {
+    primeFlip(); vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([{ ...routeBot, isActive: false }] as never);
+    await route(flip); expectOnlyReducingOrders(); expectNoOpeningWork();
+    expect(storage.createBotTrade).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', errorMessage: 'Bot is paused' }));
+  });
+  it('paused refused unmarked partial hint converts without reaching the open path', async () => {
+    prime(); primePartial(); listing(false);
+    vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([{ ...routeBot, isActive: false }] as never);
+    await route({ ...partial, partialCloseFraction: undefined, reduceOnlyIfRefused: { fraction: 0.5 } });
+    expectOnlyReducingOrders(); expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.125); expectNoOpeningWork();
+  });
+  it('unmarked active and marked hintless or same-side signals retain live behavior', async () => {
+    for (const change of [{ reduceOnlyIfRefused: { fraction: 0.5 } }, { sourceNotTrading: true }, { sourceNotTrading: true, reduceOnlyIfRefused: 'full' as const, action: 'buy' as const }]) {
+      prime(); const leverage = primeRiskSizing();
+      try {
+        await route({ ...partial, partialCloseFraction: undefined, ...change });
+        expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledOnce();
+        expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].reduceOnly).toBe(false);
+        expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
+      } finally { leverage.mockRestore(); }
+    }
+  });
+});
+
+
+describe('subscriber close safety round2', () => {
+  it.each([false, true])('round2 paused source flip hint with subscriber partial classification and listing active=%s', async active => {
+    prime('long', () => [fill({ size: 1 })]); listing(active);
+    vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([{ ...routeBot, isActive: false }] as never);
+    vi.mocked(storage.getBotPosition).mockResolvedValue({ baseSize: '1', avgEntryPrice: '64000' } as never);
+    routeMocks.adapter.getStrictPositionForMarket.mockResolvedValue({ internalSymbol: 'BTC-PERP', baseSize: 1, entryPrice: 64000 });
+    routeMocks.adapter.getPositions.mockResolvedValue([{ internalSymbol: 'BTC-PERP', baseSize: 1, entryPrice: 64000 }]);
+    let sequence = 0;
+    routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async account => snapshot(account, ++sequence,
+      routeMocks.adapter.placeMarketOrder.mock.calls.length ? 0 : 1));
+    const signal = { ...flip, strategyPositionSize: null, contracts: '0.125' };
+    expect(classifySignal({ side: 'LONG', size: 1, entryPrice: 64000 },
+      { action: signal.action, contracts: 0.125, strategyPositionSize: null }).type).toBe('PARTIAL_CLOSE');
+    const unpark = vi.spyOn(vaultService, 'unparkToUsdc');
+    try {
+      await route(signal);
+      expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
+      if (active) {
+        expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+        expect(storage.getWallet).not.toHaveBeenCalled();
+      } else {
+        expectOnlyReducingOrders();
+        expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(1);
+      }
+      expectNoOpeningWork(); expect(unpark).not.toHaveBeenCalled();
+    } finally { unpark.mockRestore(); }
+  });
+  it('round2 marked early flip on active listing logs the skipped subscriber reopen without an extra trade row', async () => {
+    prime(); primeEarly('paused-tv', true);
+    const log = vi.spyOn(console, 'log');
+    const unpark = vi.spyOn(vaultService, 'unparkToUsdc');
+    try {
+      await earlyWebhook('paused-tv', { message: 'order sell @ 0.5 filled on BTC. New strategy position is -0.25' });
+      await vi.waitFor(() => expect(log.mock.calls.some(([line]) => String(line).includes('[Subscriber Routing] AUDIT:'))).toBe(true));
+      expectOnlyReducingOrders();
+      expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.25);
+      expect(log.mock.calls.filter(([line]) => String(line).includes('Reopen skipped:'))).toEqual([
+        [`[Subscriber Routing] Reopen skipped: source not trading: sourceBotId=EXAMPLE_SOURCE subscriberBotId=${routeBot.id}`],
+      ]);
+      expect(storage.createBotTrade).toHaveBeenCalledOnce();
+      expect(storage.createBotTrade).toHaveBeenCalledWith(expect.objectContaining({
+        tradingBotId: routeBot.id, side: 'CLOSE', status: 'pending',
+      }));
+      expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
+      expectNoOpeningWork(); expect(unpark).not.toHaveBeenCalled();
+    } finally { log.mockRestore(); unpark.mockRestore(); }
+  });
 });

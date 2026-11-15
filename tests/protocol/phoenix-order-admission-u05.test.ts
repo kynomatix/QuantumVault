@@ -13,12 +13,13 @@ const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order
 // B1 reviewed scope adds durable original-account close admission, partial
 // completion and open fencing to both incumbent webhook routes.
 // S13 also pins the 409 close-conflict mapping and canonical partial consumers.
-// Marketplace unpublish changes only subscriber routing admission in the two webhook spans.
+// Subscriber close safety marks early dispatches and recognizes legacy source full closes.
+// Only the two incumbent webhook spans changed; Phoenix boundaries remain unchanged.
 // Phoenix boundaries and incumbent entry policy remain pinned below.
 incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
-  'sha256:a4eb5f8a643bf028207587bef0223b2eef72a520cc2f2616759758ab46593c5f';
+  'sha256:cc978077415ffbedf0c803ada1e54d52d3acfbccf351f12c165a426e1220a424';
 incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
-  'sha256:1fd93f1ee4ff21e00ff8e1d6df4b517ab266485de27fd5c8b63354d79404852c';
+  'sha256:295307a69fa6ddc1124fb7a3493edb93fcfc6443fa5c6456918bd25b814e6df2';
 
 incumbentBaseline.routeSha256['patch:/api/trading-bots/:id'] =
   'sha256:a80d9069f66e39a80f9613365ea6664fe534a76479072593c16b62f351152b9d';

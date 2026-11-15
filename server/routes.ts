@@ -4991,7 +4991,7 @@ function parseSignalForRouting(body: any, sourcePosition?: { baseSize: string; a
   const isCloseSignal = strategyPositionSize !== null && 
     (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
   
-  // Classification affects only an admission refused by the marketplace.
+  // Classification supplies reduction hints for refused admission and non-trading sources.
   // Legacy parsing here must not change the shallow fields returned above.
   const legacy = typeof body?.message === 'string' ? body.message.match(LEGACY_TRADE_MESSAGE) : null;
   const inferredAction = legacy ? legacy[1].toLowerCase() : action;
@@ -5808,8 +5808,10 @@ export async function routeSignalToSubscribers(
     isFlipSignal?: boolean;
     /** Fraction of source position closed [0,1]; present for PARTIAL_CLOSE signals. */
     partialCloseFraction?: number;
-    /** Source reducing intent, consulted only when admission is refused. */
+    /** Source reducing intent for refused admission or an explicitly non-trading source. */
     reduceOnlyIfRefused?: 'full' | { fraction: number };
+    /** Set only by the four paused/unauthorized source dispatches. */
+    sourceNotTrading?: boolean;
   },
   preloadedSubscriberBots?: Awaited<ReturnType<typeof storage.getSubscriberBotsBySourceId>>,
 ): Promise<void> {
@@ -5868,17 +5870,18 @@ export async function routeSignalToSubscribers(
         // Paused subscribers retain risk-reducing close authority. Their FLIP
         // close leg may proceed, but the opposite risk-increasing open is
         // rejected below after close truth has been resolved.
-        if (!subBot.isActive && !signal.isCloseSignal && !subscriberFlip) {
+        if (!subBot.isActive && !signal.isCloseSignal && signal.partialCloseFraction === undefined
+            && !subscriberFlip && signal.reduceOnlyIfRefused === undefined && !signal.isFlipSignal) {
           console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
           return 'skippedInactive';
         }
 
         // Explicit closes retain the base branches and never consult listing state.
         // Every other signal is admitted once, before choosing a close quantity
-        // or reading a wallet. Admitted signals ignore all refused-mode hints.
+        // or reading a wallet. Trading sources retain their admitted behavior.
         const admission = signal.isCloseSignal || signal.partialCloseFraction !== undefined
           ? {} : await readMarketplaceOpenAdmission(sourceBotId);
-        if (admission.reason) {
+        if (admission.reason || (signal.sourceNotTrading && signal.reduceOnlyIfRefused !== undefined)) {
           const opposesPosition = subscriberDbPosition
             && (parseFloat(subscriberDbPosition.baseSize) > 0 ? signal.action === 'sell'
               : parseFloat(subscriberDbPosition.baseSize) < 0 && signal.action === 'buy');
@@ -5889,14 +5892,26 @@ export async function routeSignalToSubscribers(
           const validFraction = fraction !== undefined && Number.isFinite(fraction) && fraction > 0;
           if (opposesPosition && reducingType && validFraction && fraction < 1) {
             signal = { ...signal, partialCloseFraction: fraction };
+          } else if (opposesPosition && reducingType && signal.sourceNotTrading && !signal.isFlipSignal
+              && (hint === 'full' || (validFraction && fraction >= 1))) {
+            // A source close hint is not a genuine subscriber flip/reopen request.
+            if (!admission.reason && subscriberFlip) {
+              console.log(`[Subscriber Routing] Reopen skipped: source not trading: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
+            }
+            signal = { ...signal, isCloseSignal: true };
           } else if (opposesPosition && reducingType && subscriberFlip) {
             // Preserve the base flip's close authority; refuse its reopen below.
           } else if (opposesPosition && reducingType && (hint === 'full' || (validFraction && fraction >= 1))) {
             signal = { ...signal, isCloseSignal: true };
-          } else {
+          } else if (admission.reason) {
             console.log(`[Subscriber Routing] New exposure refused: ${admission.reason}: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
             return 'skippedInactive';
           }
+        }
+        // Hints may admit paused subscribers only to an actual reducing branch.
+        if (!subBot.isActive && !signal.isCloseSignal && signal.partialCloseFraction === undefined && !subscriberFlip) {
+          console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
+          return 'skippedInactive';
         }
         const subWallet = await storage.getWallet(subBot.walletAddress);
         console.log(`[Subscriber Routing] Wallet lookup for ${subBot.walletAddress}: found=${!!subWallet}, hasAgentKey=${!!subWallet?.agentPublicKey}`);
@@ -19564,6 +19579,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             isCloseSignal: routingSignal.isCloseSignal,
             strategyPositionSize: routingSignal.strategyPositionSize,
             reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
+            sourceNotTrading: true,
           }).catch(err => console.error(`[Subscriber Routing] Error routing from paused source ${botId.slice(0, 8)}...:`, err));
           await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused (subscriber routing requested)" });
         } else {
@@ -19598,6 +19614,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             isCloseSignal: routingSignal.isCloseSignal,
             strategyPositionSize: routingSignal.strategyPositionSize,
             reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
+            sourceNotTrading: true,
           }).catch(err => console.error(`[Subscriber Routing] Error routing from auth-disabled source ${botId.slice(0, 8)}...:`, err));
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization required (subscriber routing requested)" });
         } else {
@@ -19620,6 +19637,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             isCloseSignal: routingSignal.isCloseSignal,
             strategyPositionSize: routingSignal.strategyPositionSize,
             reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
+            sourceNotTrading: true,
           }).catch(err => console.error(`[Subscriber Routing] Error routing from expired-auth source ${botId.slice(0, 8)}...:`, err));
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Authorization expired (subscriber routing requested)" });
         } else {
@@ -21291,6 +21309,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           contracts = match[2];
           ticker = match[3];
           positionSize = match[4];
+          // Zero is explicit close intent. Preserve live non-zero legacy classification
+          // so learning a target cannot introduce a new flip/reopen order.
+          if (parseFloat(match[4]) === 0) strategyPositionSize = match[4];
         } else {
           try {
             const parsed = typeof payload === 'object' ? payload : JSON.parse(message);
@@ -21340,6 +21361,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             isCloseSignal: routingSignal.isCloseSignal,
             strategyPositionSize: routingSignal.strategyPositionSize,
             reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
+            sourceNotTrading: true,
           }).catch(err => console.error(`[User Webhook] Error routing signal from paused bot:`, err));
         }
         await storage.updateWebhookLog(log.id, { errorMessage: routingSignal.action ? "Bot is paused (subscriber routing requested)" : "Bot is paused", processed: true });
