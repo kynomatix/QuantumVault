@@ -253,7 +253,9 @@ export function registerLabRoutes(app: Express): void {
       const id = parseInt(req.params.id);
       const { labStrategies } = await import("@shared/schema");
       const [strat] = await db.select().from(labStrategies).where(eq(labStrategies.id, id));
-      if (!strat?.pineScript) return res.status(404).json({ error: "Strategy not found" });
+      if (!strat?.pineScript || !strat.userId || strat.userId !== (req as any).walletAddress) {
+        return res.status(404).json({ error: "Strategy not found" });
+      }
       const plan = compilePine(strat.pineScript);
       const candles: any[] = [];
       for (let i = 0; i < 500; i++) {
@@ -1980,9 +1982,43 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.get("/api/lab/job/:id/progress", requireLabAuth, (req: Request, res: Response) => {
+  async function ownsLabJob(job: ReturnType<typeof labStorage.getJob>, walletAddress?: string): Promise<boolean> {
+    if (!job || !walletAddress) return false;
+    if (job.walletAddress) return job.walletAddress === walletAddress;
+    const run = job.runId ? await labStorage.getRun(job.runId) : undefined;
+    if (run?.userId) return run.userId === walletAddress;
+    const strategyId = run ? run.strategyId : job.config.strategyId;
+    if (!strategyId) return false;
+    const strategy = await labStorage.getStrategy(strategyId);
+    return !!strategy?.userId && strategy.userId === walletAddress;
+  }
+
+  app.get("/api/lab/job/:id/progress", requireLabAuth, async (req: Request, res: Response) => {
     const job = labStorage.getJob(req.params.id);
-    if (!job) {
+    let closed = false;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    const sendProgress = (progress: any) => {
+      try {
+        res.write(`data: ${JSON.stringify(progress)}\n\n`);
+      } catch {}
+    };
+    const cleanup = () => {
+      if (heartbeat !== undefined) clearInterval(heartbeat);
+      job?.listeners.delete(sendProgress);
+    };
+    req.once("close", () => {
+      closed = true;
+      cleanup();
+    });
+
+    let owned = false;
+    try {
+      owned = await ownsLabJob(job, (req as any).walletAddress);
+    } catch (error) {
+      console.error("[QuantumLab] Progress ownership lookup failed", error);
+    }
+    if (closed || req.destroyed || res.destroyed || res.writableEnded) return;
+    if (!owned) {
       return res.status(404).json({ error: "Job not found" });
     }
 
@@ -1996,27 +2032,28 @@ export function registerLabRoutes(app: Express): void {
       (res as any).flushHeaders();
     }
 
-    const sendProgress = (progress: any) => {
-      try {
-        res.write(`data: ${JSON.stringify(progress)}\n\n`);
-      } catch {}
-    };
+    sendProgress(job!.progress);
 
-    sendProgress(job.progress);
-
-    const heartbeat = setInterval(() => {
-      try { res.write(":heartbeat\n\n"); } catch { clearInterval(heartbeat); }
+    heartbeat = setInterval(() => {
+      if (res.destroyed || res.writableEnded) {
+        cleanup();
+        return;
+      }
+      try { res.write(":heartbeat\n\n"); } catch { cleanup(); }
     }, 25000);
 
-    job.listeners.add(sendProgress);
-
-    req.on("close", () => {
-      clearInterval(heartbeat);
-      job.listeners.delete(sendProgress);
-    });
+    job!.listeners.add(sendProgress);
   });
 
-  app.get("/api/lab/job/:id/results", requireLabAuth, (req: Request, res: Response) => {
+  app.get("/api/lab/job/:id/results", requireLabAuth, async (req: Request, res: Response) => {
+    try {
+      if (!await ownsLabJob(labStorage.getJob(req.params.id), (req as any).walletAddress)) {
+        return res.status(404).json({ error: "Results not found" });
+      }
+    } catch (error) {
+      console.error("[QuantumLab] Results ownership lookup failed", error);
+      return res.status(404).json({ error: "Results not found" });
+    }
     const results = labStorage.getJobResult(req.params.id);
     if (!results) {
       return res.status(404).json({ error: "Results not found" });
@@ -2669,7 +2706,15 @@ export function registerLabRoutes(app: Express): void {
     res.json({ success: true });
   });
 
-  app.get("/api/lab/export/csv/:id", requireLabAuth, (req: Request, res: Response) => {
+  app.get("/api/lab/export/csv/:id", requireLabAuth, async (req: Request, res: Response) => {
+    try {
+      if (!await ownsLabJob(labStorage.getJob(req.params.id), (req as any).walletAddress)) {
+        return res.status(404).json({ error: "Results not found" });
+      }
+    } catch (error) {
+      console.error("[QuantumLab] CSV ownership lookup failed", error);
+      return res.status(404).json({ error: "Results not found" });
+    }
     const results = labStorage.getJobResult(req.params.id);
     if (!results) {
       return res.status(404).json({ error: "Results not found" });
@@ -2742,7 +2787,25 @@ export function registerLabRoutes(app: Express): void {
     }
   });
 
-  app.delete("/api/lab/cache", requireLabAuth, async (_req: Request, res: Response) => {
+  const requireLabCacheAdmin = (req: Request, res: Response, next: () => void) => {
+    const adminPassword = process.env.ADMIN_PASSWORD?.trim();
+    if (!adminPassword) {
+      return res.status(503).json({ error: "Admin endpoints disabled - ADMIN_PASSWORD not configured" });
+    }
+    const match = typeof req.headers.authorization === "string"
+      ? /^Bearer\s+(.+)$/.exec(req.headers.authorization)
+      : null;
+    const providedToken = match?.[1]?.trim();
+    if (!providedToken || !timingSafeEqual(
+      createHash("sha256").update(providedToken).digest(),
+      createHash("sha256").update(adminPassword).digest(),
+    )) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    next();
+  };
+
+  app.delete("/api/lab/cache", requireLabCacheAdmin, async (_req: Request, res: Response) => {
     try {
       const deleted = await clearCandleCache();
       res.json({ success: true, deletedRows: deleted });
@@ -2756,7 +2819,9 @@ export function registerLabRoutes(app: Express): void {
       const { strategyId, ticker, timeframe } = req.body;
       if (!strategyId) return res.status(400).json({ error: "strategyId required" });
       const strategy = await labStorage.getStrategy(strategyId);
-      if (!strategy) return res.status(404).json({ error: "Strategy not found" });
+      if (!strategy?.userId || strategy.userId !== (req as any).walletAddress) {
+        return res.status(404).json({ error: "Strategy not found" });
+      }
       const { compilePine: compilePineFn, runPineParityTest } = await import("./pine/index");
       const plan = compilePineFn(strategy.pineScript);
       const useTicker = ticker || "SOL/USDT:USDT";

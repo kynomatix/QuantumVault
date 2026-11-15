@@ -21237,8 +21237,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
 
       const wallet = await storage.getWallet(walletAddress);
-      if (!wallet) {
-        return res.status(404).json({ error: "Wallet not found" });
+      if (!wallet || !secureTokenMatches(suppliedSecret, wallet.userWebhookSecret)) {
+        return res.status(401).json({ error: "Invalid secret" });
       }
 
       const bot = await storage.getTradingBotById(botId);
@@ -21249,10 +21249,6 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (bot.walletAddress !== walletAddress) {
         return res.status(403).json({ error: "Bot does not belong to this wallet" });
       }
-      if (!secureTokenMatches(suppliedSecret, wallet.userWebhookSecret)) {
-        return res.status(401).json({ error: "Invalid secret" });
-      }
-
       if (bot.activeProtocol === 'phoenix') {
         const { handlePhoenixTradingView } = await import('./protocol/phoenix/signal-routes');
         return handlePhoenixTradingView(bot, req.body, res);
@@ -22832,7 +22828,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
   app.patch("/api/subscriptions/:id", requireAuth, async (req, res) => {
     try {
       const { status } = req.body;
-      await storage.updateSubscriptionStatus(req.params.id, status);
+      const updated = await storage.updateOwnedSubscriptionStatus(req.params.id, req.session.userId!, status);
+      if (updated === 0) return res.status(404).json({ error: "Subscription not found" });
       res.json({ success: true });
     } catch (error) {
       console.error("Update subscription error:", error);

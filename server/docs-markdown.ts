@@ -1558,7 +1558,7 @@ GET /api/lab/export/csv/:runId      — Download results as CSV
 
 \`\`\`
 GET    /api/lab/cache/stats   — Candle cache statistics
-DELETE /api/lab/cache          — Clear the candle cache
+DELETE /api/lab/cache          — Clear the candle cache (admin Bearer authentication required)
 \`\`\`
 
 ### Rate Limiting & Best Practices

@@ -18,8 +18,9 @@ const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order
 // Phoenix boundaries and incumbent entry policy remain pinned below.
 incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
   'sha256:cc978077415ffbedf0c803ada1e54d52d3acfbccf351f12c165a426e1220a424';
+// SEC-02 changes authentication order only in the user webhook span.
 incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
-  'sha256:295307a69fa6ddc1124fb7a3493edb93fcfc6443fa5c6456918bd25b814e6df2';
+  'sha256:6b15d6bba754cfdb2066132e94de4bc22229c9f7e12e591f250a807f214f55e8';
 
 incumbentBaseline.routeSha256['patch:/api/trading-bots/:id'] =
   'sha256:a80d9069f66e39a80f9613365ea6664fe534a76479072593c16b62f351152b9d';

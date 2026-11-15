@@ -77,7 +77,7 @@ describe('Phoenix persisted identity and policy', () => {
       const authorization = handler.indexOf('if (bot.policyHmac)');
       const secretCheck = handler.indexOf(endpoint.includes(':botId')
         ? 'if (!secureTokenMatches(suppliedSecret, bot.webhookSecret))'
-        : 'if (!secureTokenMatches(suppliedSecret, wallet.userWebhookSecret))');
+        : 'if (!wallet || !secureTokenMatches(suppliedSecret, wallet.userWebhookSecret))');
       const secretRejection = handler.indexOf('return res.status(401).json({ error: "Invalid secret" });');
       expect(secretCheck).toBeGreaterThan(-1);
       expect(secretRejection).toBeGreaterThan(secretCheck);
@@ -87,7 +87,9 @@ describe('Phoenix persisted identity and policy', () => {
         const ownershipRejection = handler.indexOf('return res.status(403).json({ error: "Bot does not belong to this wallet" });');
         expect(ownershipCheck).toBeGreaterThan(-1);
         expect(ownershipRejection).toBeGreaterThan(ownershipCheck);
-        expect(secretCheck).toBeGreaterThan(ownershipRejection);
+        expect(secretRejection).toBeLessThan(handler.indexOf('const bot = await storage.getTradingBotById(botId)'));
+        expect(secretRejection).toBeLessThan(handler.indexOf("if (bot?.activeProtocol === 'flash')"));
+        expect(secretRejection).toBeLessThan(ownershipCheck);
       }
       expect(authorization).toBeGreaterThan(phoenix);
       expect(handler.slice(phoenix, authorization))

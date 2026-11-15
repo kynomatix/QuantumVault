@@ -580,7 +580,57 @@ describe('round9 durable lookup boundary', () => {
     } finally { error.mockRestore(); }
   });
 });
-it('safety user legacy zero takes the source close handler without sizing or netting', async () => {
+describe('SEC02-DISCRIMINATING-SERVER user webhook authentication', () => {
+  it.each(['unknown-wallet', 'known-bot', 'unknown-bot', 'foreign-bot', 'retired-bot', 'null-secret'] as const)(
+    'returns identical 401 without a bot lookup for %s', async scenario => {
+      prime();
+      if (scenario === 'unknown-wallet') vi.mocked(storage.getWallet).mockResolvedValue(undefined);
+      if (scenario === 'null-secret') vi.mocked(storage.getWallet).mockResolvedValue({ ...routeWallet, userWebhookSecret: null } as never);
+      if (scenario === 'unknown-bot') vi.mocked(storage.getTradingBotById).mockResolvedValue(undefined);
+      if (scenario === 'foreign-bot') vi.mocked(storage.getTradingBotById).mockResolvedValue({ ...routeBot, walletAddress: 'EXAMPLE_OTHER' } as never);
+      if (scenario === 'retired-bot') vi.mocked(storage.getTradingBotById).mockResolvedValue({ ...routeBot, activeProtocol: 'flash' } as never);
+      // The wallet read itself observes the boundary, not merely the response.
+      vi.mocked(storage.getWallet).mockImplementationOnce(async () => {
+        expect(storage.getTradingBotById).not.toHaveBeenCalled();
+        return (scenario === 'unknown-wallet' ? undefined : { ...routeWallet,
+          userWebhookSecret: scenario === 'null-secret' ? null : ROUTE_USER_SECRET }) as never;
+      });
+      const response = await fetch(`${baseUrl}/api/webhook/user/${ROUTE_WALLET}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ botId: ROUTE_BOT_ID, secret: 'EXAMPLE_WRONG' }),
+      });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: 'Invalid secret' });
+      expect(storage.getTradingBotById).not.toHaveBeenCalled();
+      expect(storage.createWebhookLog).not.toHaveBeenCalled();
+      expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+    });
+});
+describe('SEC02-PRESERVATION authenticated webhook errors', () => {
+  it.each(['missing', 'foreign'] as const)('retains the valid-secret %s bot response', async scenario => {
+    prime();
+    vi.mocked(storage.getTradingBotById).mockResolvedValue(scenario === 'missing' ? undefined : { ...routeBot, walletAddress: 'EXAMPLE_OTHER' } as never);
+    const response = await fetch(`${baseUrl}/api/webhook/user/${ROUTE_WALLET}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botId: ROUTE_BOT_ID, secret: ROUTE_USER_SECRET }),
+    });
+    expect(response.status).toBe(scenario === 'missing' ? 404 : 403);
+    expect(await response.json()).toEqual({ error: scenario === 'missing' ? 'Bot not found' : 'Bot does not belong to this wallet' });
+    expect(storage.createWebhookLog).not.toHaveBeenCalled();
+    expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+  });
+  it('keeps Missing botId first', async () => {
+    prime();
+    const response = await fetch(`${baseUrl}/api/webhook/user/${ROUTE_WALLET}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ secret: 'EXAMPLE_WRONG' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Missing botId in payload' });
+    expect(storage.getWallet).not.toHaveBeenCalled();
+    expect(storage.getTradingBotById).not.toHaveBeenCalled();
+  });
+});
+it('SEC02-PRESERVATION valid-secret user close retains response fields and closes source and subscriber', async () => {
   prime();
   const source = { ...routeBot, id: 'EXAMPLE_SOURCE', protocolSubaccountId: Keypair.generate().publicKey.toBase58() };
   vi.mocked(storage.getTradingBotById).mockImplementation(async id => (id === source.id ? source : routeBot) as never);
@@ -592,6 +642,7 @@ it('safety user legacy zero takes the source close handler without sizing or net
   const response = await earlyWebhook('paused-user', { message: 'order sell @ 0.25 filled on BTC. New strategy position is 0' });
   const body = await response.json();
   expect(response.status, JSON.stringify(body)).toBe(200);
+  expect(body).toMatchObject({ status: 'success', type: 'close', closedSize: 0.25 });
   await vi.waitFor(() => expect(storage.recordCloseEventAtomic).toHaveBeenCalledWith(expect.objectContaining({ botId: routeBot.id })));
   expectOnlyReducingOrders(2);
   expect(routeMocks.adapter.placeMarketOrder.mock.calls.map(([order]) => order.sizeBase)).toEqual([0.25, 0.25]);

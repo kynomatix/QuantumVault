@@ -870,6 +870,7 @@ export interface IStorage {
   createSubscription(subscription: InsertSubscription): Promise<Subscription>;
   getUserSubscriptions(userId: string): Promise<(Subscription & { bot: Bot })[]>;
   updateSubscriptionStatus(id: string, status: string): Promise<void>;
+  updateOwnedSubscriptionStatus(id: string, userId: string, status: string): Promise<number>;
 
   getPortfolio(userId: string): Promise<Portfolio | undefined>;
   upsertPortfolio(portfolio: InsertPortfolio): Promise<Portfolio>;
@@ -3541,6 +3542,14 @@ export class DatabaseStorage implements IStorage {
 
   async updateSubscriptionStatus(id: string, status: string): Promise<void> {
     await db.update(subscriptions).set({ status }).where(eq(subscriptions.id, id));
+  }
+
+  async updateOwnedSubscriptionStatus(id: string, userId: string, status: string): Promise<number> {
+    const updated = await db.update(subscriptions).set({ status }).where(and(
+      eq(subscriptions.id, id),
+      eq(subscriptions.userId, userId),
+    )).returning({ id: subscriptions.id });
+    return updated.length;
   }
 
   async getPortfolio(userId: string): Promise<Portfolio | undefined> {
