@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
+import ts from 'typescript';
 import type { ProtocolAdapter } from '../../server/protocol/adapter';
 import type { ProtocolMarket } from '../../server/protocol/protocol-types';
 import { PacificaAdapter } from '../../server/protocol/pacifica/pacifica-adapter';
@@ -189,7 +190,7 @@ describe('Signal Bot choke-point wiring', () => {
   const retrySource = readFileSync(resolve(process.cwd(), 'server/trade-retry-service.ts'), 'utf8');
   const aiTraderSource = readFileSync(resolve(process.cwd(), 'server/ai-trader/executor.ts'), 'utf8');
 
-  it('guards the shared route wrapper before signing and preserves reduce-only bypass', () => {
+  it('control guards every entry through the leverage wrapper and preserves reduce-only bypass', () => {
     const start = routesSource.indexOf('async function executePerpOrder(');
     const end = routesSource.indexOf('\nasync function getPerpPositions(', start);
     const body = routesSource.slice(start, end);
@@ -200,7 +201,40 @@ describe('Signal Bot choke-point wiring', () => {
     expect(body).toContain('if (!reduceOnly)');
     expect(guard).toBeGreaterThanOrEqual(0);
     expect(guard).toBeLessThan(signing);
-    expect(routesSource.match(/await executePerpOrder\(/g)).toHaveLength(6);
+    const source = ts.createSourceFile('routes.ts', routesSource, ts.ScriptTarget.Latest, true);
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'executePerpOrder') calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+    expect(calls).toHaveLength(6);
+    const wrapped = calls.filter(call => ts.isArrowFunction(call.parent)
+      && call.parent.body === call && ts.isCallExpression(call.parent.parent)
+      && call.parent.parent.expression.getText(source) === 'executeSignalBotEntry'
+      && call.parent.parent.arguments[1] === call.parent);
+    expect(wrapped).toHaveLength(5);
+    const owners = [
+      'export async function routeSignalToSubscribers(',
+      '  app.post("/api/trading-bots/:id/manual-trade"',
+      '  app.post("/api/webhook/tradingview/:botId"',
+      '  app.post("/api/webhook/user/:walletAddress"',
+      '  app.post("/api/trades/:tradeId/retry"',
+    ];
+    for (const [index, owner] of owners.entries()) {
+      const start = routesSource.indexOf(owner);
+      const end = routesSource.indexOf('\n  app.', start + 1);
+      expect(start, owner).toBeGreaterThanOrEqual(0);
+      expect(wrapped[index].getStart(source), owner).toBeGreaterThan(start);
+      expect(wrapped[index].getStart(source), owner).toBeLessThan(end < 0 ? routesSource.length : end);
+      const admissionCall = wrapped[index].parent.parent as ts.CallExpression;
+      expect(admissionCall.arguments[0].getText(source)).toBe(index === 0 ? 'subBot' : 'bot');
+    }
+    const direct = calls.filter(call => !wrapped.includes(call));
+    expect(direct).toHaveLength(1);
+    expect(ts.isAwaitExpression(direct[0].parent)).toBe(true);
+    expect(direct[0].arguments[5].kind).toBe(ts.SyntaxKind.TrueKeyword);
+    expect(direct[0].arguments[0].getText(source)).toBe('_pauseAgentKey.secretKey');
   });
 
   it('preserves lower-leverage refusal truth through the existing Trade Failed boundary', () => {

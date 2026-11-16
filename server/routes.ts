@@ -1,3 +1,4 @@
+import { executeSignalBotEntry, pauseSignalBotIfFlat } from './trading/signal-bot-entry-admission';
 import { CLOSE_IN_PROGRESS } from './trading/signal-bot-close-intent-types';
 import { registerPartialCloseFanout } from './trading/signal-bot-close-intent-effects';
 import { registerCloseWorkerDependencies, startCloseIntentWorker } from './trading/signal-bot-close-intent-worker';
@@ -1290,7 +1291,7 @@ async function executePerpOrder(
   botCtx?: BotSubaccountContext | null,
   mainWalletOverride?: string,
   adapter = getDefaultAdapter(),
-): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; executionMethod?: string; swiftOrderId?: string | null }> {
+): Promise<{ success: boolean; signature?: string; txSignature?: string; error?: string; fillPrice?: number; actualFee?: number; admissionFeeQuote?: AvailableFeeRateQuote; submissionUnconfirmed?: boolean; executionMethod?: string; swiftOrderId?: string | null }> {
   if (!reduceOnly) {
     const admission = await checkSignalBotLeverageAdmission({
       adapter,
@@ -1344,6 +1345,7 @@ async function executePerpOrder(
       fillPrice: orderResult.fillPrice,
       actualFee: orderResult.fee,
       admissionFeeQuote: orderResult.admissionFeeQuote,
+      submissionUnconfirmed: adapter.protocolName === 'pacifica' && orderResult.landingDisposition === 'unconfirmed',
       error: orderResult.error,
       executionMethod: 'adapter',
       swiftOrderId: null,
@@ -1605,7 +1607,8 @@ async function closePerpPosition(
           source_key: closeSourceKey!,
           signer_mode: botCtx ? 'external_key' : 'wallet_agent',
           authority_ref: { botId: ownerBotId, walletAddress: mainWalletAddress,
-            account: agentPubKey, subscriberAccounting, mode: botCtx ? 'external_key' : 'wallet_agent' },
+            account: agentPubKey, subscriberAccounting, pausedAtAdmission: !ownerBot.isActive,
+            mode: botCtx ? 'external_key' : 'wallet_agent' },
           baseSize: typeof closeEpoch?.baseSize === 'string' ? closeEpoch.baseSize : null,
           cachedBaseSize: typeof closeEpoch?.baseSize === 'number' ? closeEpoch.baseSize : undefined,
           lastTradeId: closeEpoch?.lastTradeId ?? null },
@@ -5062,6 +5065,24 @@ function parseSignalForRouting(body: any, sourcePosition?: { baseSize: string; a
   return { action, contracts, isCloseSignal, price, strategyPositionSize, reduceOnlyIfRefused };
 }
 
+// Admission at the pause gate uses the bot's own DB position. Keep the existing
+// execution parsers intact; a second guard also protects parser disagreements.
+function classifyPausedBotSignal(body: any, position: { baseSize: string; avgEntryPrice: string } | null | undefined) {
+  const parsed = parseSignalForRouting(body);
+  const message = typeof body === 'string' ? body : body?.message;
+  const legacy = typeof message === 'string' ? message.match(LEGACY_TRADE_MESSAGE) : null;
+  const action = legacy ? legacy[1].toLowerCase() : parsed.action;
+  if (action !== 'buy' && action !== 'sell') return null;
+  const size = Number(position?.baseSize ?? 0);
+  return classifySignal({
+    side: size > 0 ? 'LONG' : size < 0 ? 'SHORT' : 'FLAT',
+    size: Math.abs(size), entryPrice: Number(position?.avgEntryPrice ?? 0),
+  }, {
+    action, contracts: Number(legacy ? legacy[2] : parsed.contracts),
+    strategyPositionSize: legacy ? Number(legacy[4]) : parsed.strategyPositionSize === null ? null : Number(parsed.strategyPositionSize),
+  });
+}
+
 interface SignalBotFlipAuthorityContext {
   botId: string;
   market: string;
@@ -5622,6 +5643,7 @@ interface ExecuteSignalBotFlipInput {
   bot: TradingBot;
   classifiedSignal: ReturnType<typeof classifySignal> & { type: "FLIP" };
   authority: SignalBotFlipAuthorityContext;
+  initialAuthority?: SignalBotFlipAuthorityRead;
   agentSecretKey: Uint8Array;
   subaccountId: number;
   slippageBps: number;
@@ -5646,6 +5668,7 @@ async function executeSignalBotFlipClose(
   const disposition = await resolveSignalBotFlipCloseThenOpen({
     classifiedSignal: input.classifiedSignal,
     readAuthority: async stage => {
+      if (stage === 'initial' && input.initialAuthority) return input.initialAuthority;
       if (stage !== 'post_close' || input.bot.activeProtocol !== 'pacifica') {
         return readSignalBotFlipCloseAuthority(input.authority, stage);
       }
@@ -5883,11 +5906,10 @@ export async function routeSignalToSubscribers(
     type SubscriberResult = 'skippedInactive' | 'skippedFlat' | 'skippedTooSmall' | 'tradeSuccess' | 'tradeFailed' | 'closeSuccess' | 'closeFailed' | 'partialCloseSuccess' | 'partialCloseFailed' | 'error';
 
     // Process subscriber function - returns result for aggregation after parallel execution
-    const originalSignal = signal;
     const processSubscriber = async (subBot: typeof subscriberBots[0]): Promise<SubscriberResult> => {
       console.log(`[Subscriber Routing] Processing subscriber bot ${subBot.id} (${subBot.name}), isActive=${subBot.isActive}, market=${subBot.market}`);
 
-      let signal = originalSignal;
+      let subSignal = signal;
       try {
         const currentSubscriber = await storage.getTradingBotById(subBot.id);
         if (currentSubscriber?.activeProtocol === 'phoenix' || subBot.activeProtocol === 'phoenix') return 'skippedInactive';
@@ -5904,9 +5926,9 @@ export async function routeSignalToSubscribers(
             entryPrice: subscriberDbPosition ? parseFloat(subscriberDbPosition.avgEntryPrice) : 0,
           },
           {
-            action: signal.action,
-            contracts: parseFloat(signal.contracts),
-            strategyPositionSize: signal.strategyPositionSize !== null ? parseFloat(signal.strategyPositionSize) : null,
+            action: subSignal.action,
+            contracts: parseFloat(subSignal.contracts),
+            strategyPositionSize: subSignal.strategyPositionSize !== null ? parseFloat(subSignal.strategyPositionSize) : null,
           },
         );
         // Carrying source FLIP intent makes fan-out observable, but it is not
@@ -5917,8 +5939,8 @@ export async function routeSignalToSubscribers(
         // Paused subscribers retain risk-reducing close authority. Their FLIP
         // close leg may proceed, but the opposite risk-increasing open is
         // rejected below after close truth has been resolved.
-        if (!subBot.isActive && !signal.isCloseSignal && signal.partialCloseFraction === undefined
-            && !subscriberFlip && signal.reduceOnlyIfRefused === undefined && !signal.isFlipSignal) {
+        if (!subBot.isActive && !subSignal.isCloseSignal && subSignal.partialCloseFraction === undefined
+            && !subscriberFlip && subSignal.reduceOnlyIfRefused === undefined && !subSignal.isFlipSignal) {
           console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
           return 'skippedInactive';
         }
@@ -5926,37 +5948,95 @@ export async function routeSignalToSubscribers(
         // Explicit closes retain the base branches and never consult listing state.
         // Every other signal is admitted once, before choosing a close quantity
         // or reading a wallet. Trading sources retain their admitted behavior.
-        const admission = signal.isCloseSignal || signal.partialCloseFraction !== undefined
+        const admission = subSignal.isCloseSignal || subSignal.partialCloseFraction !== undefined
           ? {} : await readMarketplaceOpenAdmission(sourceBotId);
-        if (admission.reason || (signal.sourceNotTrading && signal.reduceOnlyIfRefused !== undefined)) {
+        const requiresReduction = subSignal.sourceNotTrading && !subSignal.isCloseSignal && (subSignal.reduceOnlyIfRefused !== undefined
+          || subSignal.isFlipSignal || subSignal.partialCloseFraction !== undefined);
+        const venueReduction = subSignal.sourceNotTrading && subBot.activeProtocol === 'pacifica'
+          && (subSignal.isCloseSignal || requiresReduction);
+        let subscriberReductionPosition: Pick<Awaited<ReturnType<typeof PositionService.getPositionForExecution>>, 'side' | 'size' | 'entryPrice'> | null = null;
+        let subscriberReductionAuthority: SignalBotFlipAuthorityRead | undefined;
+        if (venueReduction) {
+          const hint = subSignal.reduceOnlyIfRefused;
+          const fraction = typeof hint === 'object' ? hint.fraction : hint === 'full' ? undefined : subSignal.partialCloseFraction;
+          if (fraction !== undefined && (!Number.isFinite(fraction) || fraction <= 0)) return 'skippedFlat';
+          // Resolve both admission and quantity from one fresh subscriber read.
+          // DB truth is usable only when the venue is unavailable, never when
+          // the venue positively reports flat or the signal's own side.
+          const reductionCtx = getBotSubaccountContext(subBot);
+          let positionSource: SignalBotFlipPosition['source'] = 'venue_authoritative';
+          try {
+            const reductionWallet = reductionCtx ? null : await storage.getWallet(subBot.walletAddress);
+            const queryAccount = reductionCtx?.botPublicKey ?? reductionWallet?.agentPublicKey;
+            if (!queryAccount) throw new Error('Subscriber position query account unavailable');
+            subscriberReductionPosition = await PositionService.getPositionForCloseAuthority(
+              subBot.id, queryAccount, reductionCtx ? 0 : subBot.driftSubaccountId ?? 0,
+              subBot.market, reductionCtx?.botPublicKey,
+            );
+          } catch {
+            const dbSize = Number(subscriberDbPosition?.baseSize);
+            if (Number.isFinite(dbSize) && Math.abs(dbSize) >= 0.0001) {
+              const dbEntryPrice = Number(subscriberDbPosition?.avgEntryPrice);
+              positionSource = 'durable_risk_reducing_fallback';
+              subscriberReductionPosition = {
+                size: Math.abs(dbSize), side: dbSize > 0 ? 'LONG' : 'SHORT',
+                entryPrice: Number.isFinite(dbEntryPrice) && dbEntryPrice > 0 ? dbEntryPrice : 0,
+              };
+            }
+          }
+          const opposesPosition = subscriberReductionPosition
+            && (subscriberReductionPosition.side === 'LONG' ? subSignal.action === 'sell'
+              : subscriberReductionPosition.side === 'SHORT' && subSignal.action === 'buy');
+          if (!opposesPosition) return 'skippedFlat';
+          subscriberReductionAuthority = { kind: 'position', position: {
+            side: subscriberReductionPosition!.side as 'LONG' | 'SHORT',
+            size: Math.abs(subscriberReductionPosition!.size),
+            entryPrice: subscriberReductionPosition!.entryPrice, source: positionSource,
+          } };
+          const partial = fraction !== undefined && Number.isFinite(fraction) && fraction > 0 && fraction < 1;
+          // A paused-source hint owns only a reduction, regardless of the DB
+          // classifier's OPEN/PYRAMID verdict. Genuine flips retain their close
+          // accounting and refusal record, with reopening refused below.
+          const genuineFlip = !partial && subSignal.isFlipSignal && subscriberFlip;
+          if (!partial && !genuineFlip && subscriberFlip && !admission.reason) {
+            console.log(`[Subscriber Routing] Reopen skipped: source not trading: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
+          }
+          subSignal = { ...subSignal, isCloseSignal: !partial && !genuineFlip, partialCloseFraction: partial ? fraction : undefined };
+        }
+
+        if ((admission.reason || requiresReduction) && !venueReduction) {
           const opposesPosition = subscriberDbPosition
-            && (parseFloat(subscriberDbPosition.baseSize) > 0 ? signal.action === 'sell'
-              : parseFloat(subscriberDbPosition.baseSize) < 0 && signal.action === 'buy');
+            && (parseFloat(subscriberDbPosition.baseSize) > 0 ? subSignal.action === 'sell'
+              : parseFloat(subscriberDbPosition.baseSize) < 0 && subSignal.action === 'buy');
           const reducingType = subscriberClassified.type === 'FULL_CLOSE'
             || subscriberClassified.type === 'PARTIAL_CLOSE' || subscriberFlip;
-          const hint = signal.reduceOnlyIfRefused ?? (signal.isFlipSignal ? 'full' : undefined);
+          if (requiresReduction && (!opposesPosition || !reducingType)) return 'skippedFlat';
+          const hint = subSignal.reduceOnlyIfRefused ?? (subSignal.partialCloseFraction !== undefined
+            ? { fraction: subSignal.partialCloseFraction } : subSignal.isCloseSignal || subSignal.isFlipSignal ? 'full' : undefined);
           const fraction = typeof hint === 'object' ? hint.fraction : undefined;
           const validFraction = fraction !== undefined && Number.isFinite(fraction) && fraction > 0;
           if (opposesPosition && reducingType && validFraction && fraction < 1) {
-            signal = { ...signal, partialCloseFraction: fraction };
-          } else if (opposesPosition && reducingType && signal.sourceNotTrading && !signal.isFlipSignal
+            subSignal = { ...subSignal, partialCloseFraction: fraction };
+          } else if (opposesPosition && reducingType && subSignal.sourceNotTrading && !subSignal.isFlipSignal
               && (hint === 'full' || (validFraction && fraction >= 1))) {
             // A source close hint is not a genuine subscriber flip/reopen request.
             if (!admission.reason && subscriberFlip) {
               console.log(`[Subscriber Routing] Reopen skipped: source not trading: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
             }
-            signal = { ...signal, isCloseSignal: true };
+            subSignal = { ...subSignal, isCloseSignal: true };
           } else if (opposesPosition && reducingType && subscriberFlip) {
             // Preserve the base flip's close authority; refuse its reopen below.
           } else if (opposesPosition && reducingType && (hint === 'full' || (validFraction && fraction >= 1))) {
-            signal = { ...signal, isCloseSignal: true };
+            subSignal = { ...subSignal, isCloseSignal: true };
+          } else if (requiresReduction) {
+            return 'skippedFlat';
           } else if (admission.reason) {
             console.log(`[Subscriber Routing] New exposure refused: ${admission.reason}: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
             return 'skippedInactive';
           }
         }
         // Hints may admit paused subscribers only to an actual reducing branch.
-        if (!subBot.isActive && !signal.isCloseSignal && signal.partialCloseFraction === undefined && !subscriberFlip) {
+        if (!subBot.isActive && !subSignal.isCloseSignal && subSignal.partialCloseFraction === undefined && !subscriberFlip) {
           console.log(`[Subscriber Routing] Skipping inactive subscriber bot ${subBot.id} for non-close signal`);
           return 'skippedInactive';
         }
@@ -5968,9 +6048,9 @@ export async function routeSignalToSubscribers(
             tradingBotId: subBot.id,
             walletAddress: subBot.walletAddress,
             market: subBot.market,
-            side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+            side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
             size: '0',
-            price: signal.price,
+            price: subSignal.price,
             status: 'failed',
             fee: '0',
             errorMessage: 'Wallet not found in database',
@@ -5988,9 +6068,9 @@ export async function routeSignalToSubscribers(
             tradingBotId: subBot.id,
             walletAddress: subBot.walletAddress,
             market: subBot.market,
-            side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+            side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
             size: '0',
-            price: signal.price,
+            price: subSignal.price,
             status: 'failed',
             fee: '0',
             errorMessage: 'No V3 agent wallet configured for trading',
@@ -6001,7 +6081,7 @@ export async function routeSignalToSubscribers(
         }
 
         // V3 Phase 3b: strict-decrypt the subscriber's agent key for this
-        // signal. If the subscriber has revoked execution / emergency-stopped
+        // subSignal. If the subscriber has revoked execution / emergency-stopped
         // or no longer has a usable V3 key, pause the subscription with a
         // reason and skip — never fall back to legacy AGENT_ENCRYPTION_KEY.
         const umkResult = await getUmkForWebhook(subBot.walletAddress);
@@ -6015,9 +6095,9 @@ export async function routeSignalToSubscribers(
             tradingBotId: subBot.id,
             walletAddress: subBot.walletAddress,
             market: subBot.market,
-            side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+            side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
             size: '0',
-            price: signal.price,
+            price: subSignal.price,
             status: 'failed',
             fee: '0',
             errorMessage: `Subscriber execution authorization unavailable (${pauseReason}). Subscription paused — re-enable execution to resume.`,
@@ -6040,9 +6120,9 @@ export async function routeSignalToSubscribers(
             tradingBotId: subBot.id,
             walletAddress: subBot.walletAddress,
             market: subBot.market,
-            side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+            side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
             size: '0',
-            price: signal.price,
+            price: subSignal.price,
             status: 'failed',
             fee: '0',
             errorMessage: 'V3 strict decrypt failed for subscriber agent key. Subscription paused.',
@@ -6057,10 +6137,10 @@ export async function routeSignalToSubscribers(
         const subAccountId = subBot.driftSubaccountId ?? 0;
         const subCloseCtx = getBotSubaccountContext(subBot);
 
-        if (signal.isCloseSignal) {
+        if (subSignal.isCloseSignal) {
           const subCloseQueryAccount = subCloseCtx ? subCloseCtx.botPublicKey : subWallet.agentPublicKey;
           const subCloseQuerySubId = subCloseCtx ? 0 : subAccountId;
-          const position = await PositionService.getPositionForExecution(
+          const position = subscriberReductionPosition ?? await PositionService.getPositionForExecution(
             subBot.id,
             subCloseQueryAccount,
             subCloseQuerySubId,
@@ -6074,7 +6154,7 @@ export async function routeSignalToSubscribers(
           
           const subscriberPendingClose = await pendingCloseDraft(subBot, { tradingBotId: subBot.id, walletAddress: subBot.walletAddress,
                 market: subBot.market, side: 'CLOSE', size: String(Math.abs(position.size)), price: '0',
-                fee: null, pnl: null, status: 'pending', webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, requestedSize: String(Math.abs(position.size)), signalPrice: signal.price } });
+                fee: null, pnl: null, status: 'pending', webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, requestedSize: String(Math.abs(position.size)), signalPrice: subSignal.price } });
           const subCloseSlippageBps = subWallet.slippageBps ?? 50;
           const closeResult = await closePerpPosition(
             subAgentKey,
@@ -6088,7 +6168,7 @@ export async function routeSignalToSubscribers(
             subCloseCtx,
             subBot.walletAddress,
             getAdapterForBot(subBot),
-            true, subscriberPendingClose.id, subBot.id, true, subscriberPendingClose, `fanout:${sourceBotId}:${signal.originId}`,
+            true, subscriberPendingClose.id, subBot.id, true, subscriberPendingClose, `fanout:${sourceBotId}:${subSignal.originId}`,
           );
           if (subBot.activeProtocol === 'pacifica' && !closeResult.pendingTradeId) throw new Error(CLOSE_SAVE_FAILED);
           if (closeResult.success || closeResult.signature) {
@@ -6100,7 +6180,7 @@ export async function routeSignalToSubscribers(
                 size: facts?.size ?? '0', price: facts?.price ?? '0', fee: facts?.fee ?? null, pnl: null,
                 errorMessage: closeResult.closeResult?.reason ?? 'close_confirmation_unavailable',
                 webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId,
-                  requestedSize: String(Math.abs(position.size)), signalPrice: signal.price,
+                  requestedSize: String(Math.abs(position.size)), signalPrice: subSignal.price,
                   ...facts?.webhookPayload },
               });
               return 'closeFailed';
@@ -6145,13 +6225,13 @@ export async function routeSignalToSubscribers(
 
             return 'closeFailed';
           }
-        } else if (signal.partialCloseFraction !== undefined && signal.partialCloseFraction > 0) {
+        } else if (subSignal.partialCloseFraction !== undefined && subSignal.partialCloseFraction > 0) {
           // ── Proportional partial close fan-out ──────────────────────────
           // Close `fraction × subscriber_position_size` contracts (reduce-only).
           const subPartialCtx = subCloseCtx;
           const subPartialQueryAccount = subPartialCtx ? subPartialCtx.botPublicKey : subWallet.agentPublicKey;
           const subPartialQuerySubId = subPartialCtx ? 0 : subAccountId;
-          const subPartialPosition = await PositionService.getPositionForExecution(
+          const subPartialPosition = subscriberReductionPosition ?? await PositionService.getPositionForExecution(
             subBot.id,
             subPartialQueryAccount,
             subPartialQuerySubId,
@@ -6164,13 +6244,13 @@ export async function routeSignalToSubscribers(
             return 'skippedFlat';
           }
 
-          const subPartialSize = signal.partialCloseFraction * Math.abs(subPartialPosition.size);
+          const subPartialSize = subSignal.partialCloseFraction * Math.abs(subPartialPosition.size);
           if (subPartialSize < 0.0001) {
             console.log(`[Subscriber Routing] Partial close size too small for ${subBot.id}: ${subPartialSize.toFixed(6)}`);
             return 'skippedTooSmall';
           }
 
-          console.log(`[Subscriber Routing] Partial close for ${subBot.id}: fraction=${(signal.partialCloseFraction * 100).toFixed(1)}%, size=${subPartialSize.toFixed(4)}`);
+          console.log(`[Subscriber Routing] Partial close for ${subBot.id}: fraction=${(subSignal.partialCloseFraction * 100).toFixed(1)}%, size=${subPartialSize.toFixed(4)}`);
           const subPartialCloseSlippage = subWallet.slippageBps ?? 50;
           const subPartialEpoch = await storage.getBotPosition(subBot.id, subBot.market);
           const subPartialResult = await closePerpPosition(
@@ -6185,7 +6265,7 @@ export async function routeSignalToSubscribers(
             subPartialCtx,
             subBot.walletAddress,
             getAdapterForBot(subBot),
-            false, undefined, subBot.id, true, undefined, `fanout-partial:${sourceBotId}:${signal.originId}`,
+            false, undefined, subBot.id, true, undefined, `fanout-partial:${sourceBotId}:${subSignal.originId}`,
           );
 
           if (subBot.activeProtocol === 'pacifica' && !subPartialResult.pendingTradeId) throw new Error(CLOSE_SAVE_FAILED);
@@ -6204,15 +6284,15 @@ export async function routeSignalToSubscribers(
               pendingTradeId: subPartialResult.pendingTradeId,
               bot: subBot, queryAccount: subPartialQueryAccount!, querySubaccountId: subPartialQuerySubId,
               botSubaccountPublicKey: subPartialCtx?.botPublicKey, preClosePosition: subPartialEpoch,
-              closedSize: Number(accounting.size ?? subPartialSize), closedFraction: signal.partialCloseFraction,
+              closedSize: Number(accounting.size ?? subPartialSize), closedFraction: subSignal.partialCloseFraction,
               closeSide: subPartialPosition.side === 'LONG' ? 'short' : 'long',
               executionPrice: execution.price, executionPriceAuthority: execution.price === null ? null : 'venue_execution',
-              signalPriceContext: Number(signal.price), fee: execution.fee, pnl: execution.pnl,
+              signalPriceContext: Number(subSignal.price), fee: execution.fee, pnl: execution.pnl,
               feeEvidence: subPartialResult.feeEvidence, signature: subPartialResult.signature,
               protocolFillId: subPartialDedupKey, executionMethod: subPartialResult.executionMethod ?? 'adapter',
               subscriberAccounting: accounting,
               webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId,
-                requestedSize: String(subPartialSize), signalPrice: signal.price, ...facts.webhookPayload },
+                requestedSize: String(subPartialSize), signalPrice: subSignal.price, ...facts.webhookPayload },
             });
             logRoutedClose();
             return 'partialCloseSuccess';
@@ -6228,6 +6308,7 @@ export async function routeSignalToSubscribers(
             const classifiedFlip = subscriberClassified as ReturnType<typeof classifySignal> & { type: 'FLIP' };
             subscriberFlipDisposition = await executeSignalBotFlipClose({
               bot: subBot,
+              initialAuthority: subscriberReductionAuthority,
               classifiedSignal: classifiedFlip,
               authority: {
                 botId: subBot.id,
@@ -6242,8 +6323,8 @@ export async function routeSignalToSubscribers(
               agentPublicKey: subWallet.agentPublicKey || undefined,
               botCtx: subCloseCtx,
               walletAddress: subBot.walletAddress,
-              signalPrice: signal.price,
-              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, closeSourceId: signal.originId },
+              signalPrice: subSignal.price,
+              webhookPayload: { source: 'marketplace_routing', signalFrom: sourceBotId, closeSourceId: subSignal.originId },
               executionLabel: "subscriber",
               finalizer: "per_bot",
             });
@@ -6252,9 +6333,9 @@ export async function routeSignalToSubscribers(
                 tradingBotId: subBot.id,
                 walletAddress: subBot.walletAddress,
                 market: subBot.market,
-                side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+                side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
                 size: '0',
-                price: signal.price,
+                price: subSignal.price,
                 status: 'failed',
                 fee: '0',
                 errorMessage: `FLIP open not evaluated: ${subscriberFlipDisposition.close.kind}`,
@@ -6264,8 +6345,8 @@ export async function routeSignalToSubscribers(
               return 'closeFailed';
             }
             if (subscriberFlipDisposition.close.kind === 'executed') logRoutedClose();
-            const requestedSide = signal.action === 'buy' ? 'long' : 'short';
-            if (admission.reason || !subBot.isActive) {
+            const requestedSide = subSignal.action === 'buy' ? 'long' : 'short';
+            if (admission.reason || !subBot.isActive || venueReduction || requiresReduction) {
               const reason = admission.reason ?? 'Bot is paused';
               console.log(`[Subscriber Routing] Flip reopen refused: ${reason}: sourceBotId=${sourceBotId} subscriberBotId=${subBot.id}`);
               subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'admission', reason);
@@ -6275,7 +6356,7 @@ export async function routeSignalToSubscribers(
                 market: subBot.market,
                 side: requestedSide.toUpperCase(),
                 size: '0',
-                price: signal.price,
+                price: subSignal.price,
                 status: 'failed',
                 fee: '0',
                 errorMessage: reason,
@@ -6293,7 +6374,7 @@ export async function routeSignalToSubscribers(
                 market: subBot.market,
                 side: requestedSide.toUpperCase(),
                 size: '0',
-                price: signal.price,
+                price: subSignal.price,
                 status: 'failed',
                 fee: '0',
                 errorMessage: reason,
@@ -6304,7 +6385,7 @@ export async function routeSignalToSubscribers(
             }
           }
 
-          const oraclePrice = parseFloat(signal.price);
+          const oraclePrice = parseFloat(subSignal.price);
           const maxPos = parseFloat(subBot.maxPositionSize || '0');
           const profitReinvestEnabled = subBot.profitReinvest === true;
           
@@ -6314,12 +6395,12 @@ export async function routeSignalToSubscribers(
               subscriberFlipDisposition = rejectSignalBotFlipOpen(subscriberFlipDisposition, 'sizing', 'Bot has no Max Position Size configured');
             }
             // Create a failed trade record for visibility
-            const oraclePriceForLog = parseFloat(signal.price);
+            const oraclePriceForLog = parseFloat(subSignal.price);
             await storage.createBotTrade({
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
               market: subBot.market,
-              side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+              side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
               size: '0',
               price: oraclePriceForLog.toFixed(6),
               status: 'failed',
@@ -6332,8 +6413,8 @@ export async function routeSignalToSubscribers(
           }
 
           // Calculate signal percentage from source signal
-          const sourceContracts = parseFloat(signal.contracts);
-          const sourcePositionSize = parseFloat(signal.positionSize) || 100;
+          const sourceContracts = parseFloat(subSignal.contracts);
+          const sourcePositionSize = parseFloat(subSignal.positionSize) || 100;
           const tradePercent = Math.min(sourceContracts / sourcePositionSize, 1);
           const signalPercent = tradePercent * 100; // Convert to 0-100 range
 
@@ -6375,7 +6456,7 @@ export async function routeSignalToSubscribers(
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
               market: subBot.market,
-              side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+              side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
               size: '0',
               price: oraclePrice.toFixed(6),
               status: 'failed',
@@ -6386,8 +6467,8 @@ export async function routeSignalToSubscribers(
             });
             
             if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
-              await storage.updateTradingBot(subBot.id, { isActive: false, pauseReason: sizingResult.pauseReason } as any);
-              console.log(`[Subscriber Routing] Bot ${subBot.id} paused: ${sizingResult.pauseReason}`);
+              const paused = await pauseSignalBotIfFlat(subBot, sizingResult.pauseReason, subWallet.agentPublicKey!, subBotCtx);
+              if (paused) console.log(`[Subscriber Routing] Bot ${subBot.id} paused: ${sizingResult.pauseReason}`);
             }
             return 'tradeFailed';
           }
@@ -6403,7 +6484,7 @@ export async function routeSignalToSubscribers(
               tradingBotId: subBot.id,
               walletAddress: subBot.walletAddress,
               market: subBot.market,
-              side: signal.action === 'buy' ? 'LONG' : 'SHORT',
+              side: subSignal.action === 'buy' ? 'LONG' : 'SHORT',
               size: contractSize.toFixed(8),
               price: oraclePrice.toFixed(6),
               status: 'failed',
@@ -6418,10 +6499,10 @@ export async function routeSignalToSubscribers(
 
           // V3 Phase 3b: subscriber agent key is the Uint8Array secret produced
           // by decryptAgentKeyStrict above; the encrypted blob is never used.
-          const side = signal.action === 'buy' ? 'long' : 'short';
+          const side = subSignal.action === 'buy' ? 'long' : 'short';
           const subSlippageBps = subWallet.slippageBps ?? 50;
 
-          const orderResult = await executePerpOrder(
+          const orderResult = await executeSignalBotEntry(subBot, () => executePerpOrder(
             subAgentKey,
             subBot.market,
             side,
@@ -6435,7 +6516,7 @@ export async function routeSignalToSubscribers(
             subBotCtx,
             subBot.walletAddress,
             getAdapterForBot(subBot),
-          );
+          ));
 
           if (orderResult.success) {
             if (subscriberFlipDisposition) {
@@ -10767,9 +10848,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       });
 
       if (!sizingResult.success) {
-        if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
-          await storage.updateTradingBot(bot.id, { isActive: false, pauseReason: sizingResult.pauseReason } as any);
-        }
+        const paused = sizingResult.shouldPauseBot && sizingResult.pauseReason
+          ? await pauseSignalBotIfFlat(bot, sizingResult.pauseReason, wallet.agentPublicKey, manualBotCtx, false) : false;
         // Early failure (no on-chain order placed yet) — fire trade_failed
         // so the user is notified of sizing / top-up failures (insufficient
         // collateral, etc.) the same way as executor failures.
@@ -10778,7 +10858,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           botName: bot.name,
           market: bot.market,
           side: side === 'long' ? 'LONG' : 'SHORT',
-          error: sizingResult.error || "Trade sizing failed",
+          error: paused ? `Bot paused: ${sizingResult.pauseReason}` : sizingResult.error || "Trade sizing failed",
         }).catch(err => console.error('[ManualTrade] Failed to send trade_failed notification:', err));
         return res.status(400).json({ error: sizingResult.error || "Trade sizing failed" });
       }
@@ -10800,7 +10880,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       });
 
       const userSlippageBps = wallet.slippageBps ?? 50;
-      const orderResult = await executePerpOrder(
+      const orderResult = await executeSignalBotEntry(bot, () => executePerpOrder(
         agentSecret,
         bot.market,
         side,
@@ -10809,12 +10889,12 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         false,
         userSlippageBps,
         undefined,
-        wallet.agentPublicKey,
+        wallet.agentPublicKey || undefined,
         bot.leverage || 1,
         manualBotCtx,
         bot.walletAddress,
         getAdapterForBot(bot),
-      );
+      ));
 
       if (!orderResult.success) {
         const userFriendlyError = parseDriftError(orderResult.error);
@@ -19652,7 +19732,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     console.log(`[WEBHOOK-TRACE] Payload: ${JSON.stringify(safePayload).slice(0, 500)}`);
 
     const signalHash = generateSignalHash(botId, req.body);
-    let log;
+    let log!: Awaited<ReturnType<typeof storage.createWebhookLog>>;
+    let pausedSourceRouted = false;
+    let durablePartialOwnsFanout = false;
+    let routePausedSource: () => void = () => {};
     try {
       const bot = await storage.getTradingBotById(botId);
       if (bot?.activeProtocol === 'flash') return res.status(410).json({ error: FLASH_RETIRED_MESSAGE });
@@ -19691,13 +19774,14 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       console.log(`[WEBHOOK-TRACE] Bot found: name="${bot.name}", market=${bot.market}`);
       console.log(`[WEBHOOK-TRACE] Bot active: ${bot.isActive}`);
-      // Check if bot is active
-      if (!bot.isActive) {
-        // DECOUPLED ROUTING: Route signals independently of source execution availability
-        // Subscribers should trade independently even if creator's bot is paused/underfunded
-        const routingSignal = parseSignalForRouting(req.body,
-          await storage.getBotPosition(botId, bot.market).catch(() => null), true);
-        if (routingSignal.action) {
+      const pausedPosition = !bot.isActive ? await storage.getBotPosition(botId, bot.market).catch(() => null) : null;
+      const pausedClassification = !bot.isActive ? classifyPausedBotSignal(req.body, pausedPosition) : null;
+      const pausedRoutingSignal = !bot.isActive ? parseSignalForRouting(req.body, pausedPosition, true) : null;
+      routePausedSource = () => {
+        if (!pausedRoutingSignal || durablePartialOwnsFanout) return;
+        const routingSignal = pausedRoutingSignal;
+        if (routingSignal.action && !pausedSourceRouted) {
+          pausedSourceRouted = true;
           console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... is paused - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
           routeSignalToSubscribers(botId, {
             originId: log.id,
@@ -19710,21 +19794,26 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             reduceOnlyIfRefused: routingSignal.reduceOnlyIfRefused,
             sourceNotTrading: true,
           }).catch(err => console.error(`[Subscriber Routing] Error routing from paused source ${botId.slice(0, 8)}...:`, err));
-          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused (subscriber routing requested)" });
-        } else {
-          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused" });
         }
-        return res.status(400).json({ error: "Bot is paused" });
+      };
+      if (!bot.isActive) {
+        if (!pausedClassification || !['FULL_CLOSE', 'PARTIAL_CLOSE', 'FLIP'].includes(pausedClassification.type)) {
+          routePausedSource();
+          await storage.updateWebhookLog(log.id, { errorMessage: pausedRoutingSignal?.action ? "Bot is paused (subscriber routing requested)" : "Bot is paused" });
+            return res.status(400).json({ error: "Bot is paused" });
+        }
       }
 
       // Security v3: Check execution authorization
       const ownerWallet = await storage.getWallet(bot.walletAddress);
       if (!ownerWallet) {
+        routePausedSource();
         await storage.updateWebhookLog(log.id, { errorMessage: "Wallet not found" });
         return res.status(404).json({ error: "Wallet not found" });
       }
       
       if (ownerWallet.emergencyStopTriggered) {
+        routePausedSource();
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Emergency stop active" });
         return res.status(403).json({ error: "Trade execution blocked: Emergency stop is active for this wallet" });
       }
@@ -19732,7 +19821,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!ownerWallet.executionEnabled) {
         const routingSignal = parseSignalForRouting(req.body,
           await storage.getBotPosition(botId, bot.market).catch(() => null), true);
-        if (routingSignal.action) {
+        if (routingSignal.action && !pausedSourceRouted) {
           console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution disabled - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
           routeSignalToSubscribers(botId, {
             originId: log.id,
@@ -19755,7 +19844,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (ownerWallet.executionExpiresAt && new Date() > ownerWallet.executionExpiresAt) {
         const routingSignal = parseSignalForRouting(req.body,
           await storage.getBotPosition(botId, bot.market).catch(() => null), true);
-        if (routingSignal.action) {
+        if (routingSignal.action && !pausedSourceRouted) {
           console.log(`[Webhook] Source bot ${botId.slice(0, 8)}... execution expired - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
           routeSignalToSubscribers(botId, {
             originId: log.id,
@@ -19784,6 +19873,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // This ensures the EUMK_exec is valid and the server has the correct key material
       const umkResult = await getUmkForWebhook(bot.walletAddress);
       if (!umkResult) {
+        routePausedSource();
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Invalid execution authorization" });
         return res.status(403).json({ error: "Invalid execution authorization. Please re-enable automated trading." });
       }
@@ -19798,6 +19888,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         );
         if (!policyValid) {
           umkResult.cleanup();
+          routePausedSource();
           await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Bot policy tampered" });
           return res.status(403).json({ error: "Bot configuration has been tampered with. Please reconfigure the bot." });
         }
@@ -19816,6 +19907,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       
       if (!agentKeyResult) {
         // Agent key decryption failed - this is a critical error
+        routePausedSource();
         await storage.updateWebhookLog(log.id, { errorMessage: "Execution blocked: Agent key decryption failed" });
         recordCriticalError({
           category: "security",
@@ -19845,6 +19937,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       console.log(`[Webhook] Secret key validation: length=${agentKeyResult.secretKey.length}, nonZeroBytes=${nonZeroBytes}`);
       if (nonZeroBytes === 0) {
         cleanupAgentKey();
+        routePausedSource();
         await storage.updateWebhookLog(log.id, { errorMessage: "Agent key is all zeros - possible encryption/decryption issue" });
         return res.status(500).json({ error: "Agent key decryption produced invalid key (all zeros). Please reconfigure your agent wallet." });
       }
@@ -19961,15 +20054,29 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // CLOSE SIGNAL DETECTION: Check if this is a position close signal (SL/TP)
       // TradingView sends strategy.position_size = 0 when closing a position
-      const isCloseSignal = strategyPositionSize !== null && 
-        (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
+
 
       // ── Signal classifier (partial-close / flip disambiguation) ──────────
       // Fetch the DB position BEFORE any on-chain read to avoid Pacifica's
       // ~10s propagation lag that would cause a stale read to misclassify a
       // partial reduce as OPEN or FLIP.
-      const dbPositionForClassification = await storage.getBotPosition(botId, bot.market);
-      const classifiedSignal = classifySignal(
+      const dbPositionForClassification = await storage.getBotPosition(botId, bot.market).catch(error => { routePausedSource(); throw error; });
+      const freshPausedClassification = !bot.isActive ? classifyPausedBotSignal(req.body, dbPositionForClassification) : null;
+      if (!bot.isActive && (!freshPausedClassification || !['FULL_CLOSE', 'PARTIAL_CLOSE', 'FLIP'].includes(freshPausedClassification.type))) {
+        routePausedSource();
+        await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused (subscriber routing requested)" });
+        return res.status(400).json({ error: "Bot is paused" });
+      }
+      if (pausedRoutingSignal && freshPausedClassification) {
+        // The fresh execution classification chooses the sole fan-out owner.
+        pausedRoutingSignal.isCloseSignal = freshPausedClassification.type === 'FULL_CLOSE';
+        pausedRoutingSignal.reduceOnlyIfRefused = freshPausedClassification.type === 'PARTIAL_CLOSE'
+          ? { fraction: freshPausedClassification.closedFraction } : 'full';
+        if (freshPausedClassification.type !== 'PARTIAL_CLOSE' || bot.activeProtocol !== 'pacifica') routePausedSource();
+      }
+      const isCloseSignal = !bot.isActive ? freshPausedClassification?.type === 'FULL_CLOSE'
+        : strategyPositionSize !== null && parseFloat(strategyPositionSize) === 0;
+      const classifiedSignal = !bot.isActive ? freshPausedClassification! : classifySignal(
         {
           side: dbPositionForClassification
             ? (parseFloat(dbPositionForClassification.baseSize) > 0 ? 'LONG' : parseFloat(dbPositionForClassification.baseSize) < 0 ? 'SHORT' : 'FLAT')
@@ -19992,7 +20099,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // subscriber. Dispatch the reversal intent once, before source close
       // resolution, so every subscriber can classify and resolve its own
       // position even if this source's later open is rejected.
-      if (isFlipSignal) {
+      if (isFlipSignal && bot.isActive) {
         routeSignalToSubscribers(botId, {
           originId: log.id,
           action: action as 'buy' | 'sell',
@@ -20038,6 +20145,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         // Get wallet for execution
         const wallet = await storage.getWallet(bot.walletAddress);
         if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
+          routePausedSource();
           await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured for close", processed: true });
           return res.status(400).json({ error: "Agent wallet not configured" });
         }
@@ -20089,7 +20197,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             processed: true 
           });
 
-          {
+          if (!pausedSourceRouted) {
             console.log(`[Webhook] Source bot flat - routing close signal to subscribers`);
             routeSignalToSubscribers(botId, {
               originId: log.id,
@@ -20415,7 +20523,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             console.log(`[WEBHOOK-TRACE] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
             console.log(`[WEBHOOK-TRACE] Calling routeSignalToSubscribers for bot ${botId}`);
             console.log(`[WEBHOOK-TRACE] Signal: action=${action}, contracts=${contracts}, isCloseSignal=true, price=${signalPrice || closeFillPrice.toString()}`);
-            routeSignalToSubscribers(botId, {
+            if (!pausedSourceRouted) routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
               contracts,
@@ -20658,6 +20766,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         try {
           const pcWallet = await storage.getWallet(bot.walletAddress);
           if (!pcWallet?.agentPublicKey) {
+            routePausedSource();
             await storage.updateWebhookLog(log.id, { errorMessage: "No agent wallet for partial close", processed: true });
             return res.status(400).json({ error: "Agent wallet not configured" });
           }
@@ -20683,6 +20792,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             false, undefined, bot.id, false, undefined, `partial:${log.id}`,
           );
 
+          durablePartialOwnsFanout = bot.activeProtocol === 'pacifica'
+            && ((!!pcResult.pendingTradeId && pcResult.intentStatus !== 'released') || pcResult.error === CLOSE_IN_PROGRESS);
+          if (!durablePartialOwnsFanout) routePausedSource();
           if (bot.activeProtocol === 'pacifica' && !pcResult.pendingTradeId) return res.status(pcResult.error === CLOSE_IN_PROGRESS ? 409 : 503).json({ success: false, error: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED, message: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
           if (bot.activeProtocol === 'pacifica' && !pcResult.success) return res.status(202).json({ success: false, status: 'pending', tradeId: pcResult.pendingTradeId, message: 'Close not confirmed yet; we keep checking.' });
           if (!pcResult.success) {
@@ -20771,7 +20883,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           });
 
           // Fan out to copy-trade subscribers proportionally.
-          if (bot.activeProtocol !== 'pacifica' && pcAccounting.isNew) {
+          if (bot.activeProtocol !== 'pacifica' && pcAccounting.isNew && !pausedSourceRouted) {
             routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
@@ -20795,6 +20907,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             signature: pcResult.signature,
           });
         } catch (pcErr: any) {
+          if (!durablePartialOwnsFanout) routePausedSource();
           console.error(`[Webhook] Partial close handler error:`, pcErr);
           await storage.updateWebhookLog(log.id, { errorMessage: `Partial close error: ${pcErr.message}`, processed: true });
           return res.status(500).json({ error: "Partial close failed", details: pcErr.message });
@@ -20823,6 +20936,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // from another venue read: a read failure must never manufacture FLAT.
       const wallet = await storage.getWallet(bot.walletAddress);
       if (!wallet?.agentPrivateKeyEncryptedV3 || !wallet?.agentPublicKey) {
+        routePausedSource();
         await storage.updateWebhookLog(log.id, { errorMessage: "Agent wallet not configured", processed: true });
         return res.status(400).json({ error: "Agent wallet not configured" });
       }
@@ -20859,12 +20973,23 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true });
           return res.status(409).json(signalBotFlipHttpPayload(flipDisposition, { error: reason }));
         }
-        if (bot.side !== "both" && bot.side !== side) {
+        if (bot.isActive && bot.side !== "both" && bot.side !== side) {
           const reason = `Bot only accepts ${bot.side} signals`;
           flipDisposition = rejectSignalBotFlipOpen(flipDisposition, "direction", reason);
           await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true, tradeExecuted: true });
           return res.status(400).json(signalBotFlipHttpPayload(flipDisposition, { error: reason }));
         }
+      }
+
+      if (!bot.isActive) {
+        routePausedSource();
+        if (flipDisposition) {
+          flipDisposition = rejectSignalBotFlipOpen(flipDisposition, 'admission', 'Bot is paused');
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused", processed: true, tradeExecuted: true });
+          return res.status(400).json(signalBotFlipHttpPayload(flipDisposition, { error: "Bot is paused" }));
+        }
+        await storage.updateWebhookLog(log.id, { errorMessage: pausedSourceRouted ? "Bot is paused (subscriber routing requested)" : "Bot is paused" });
+        return res.status(400).json({ error: "Bot is paused" });
       }
 
       // Regular order execution (not a close signal)
@@ -20959,7 +21084,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!sizingResult.success) {
         const errorMsg = sizingResult.error || "Trade sizing failed";
         if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
-          await storage.updateTradingBot(bot.id, { isActive: false, pauseReason: sizingResult.pauseReason } as any);
+          await pauseSignalBotIfFlat(bot, sizingResult.pauseReason, wallet.agentPublicKey, webhookBotCtx);
         }
         await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, errorMessage: errorMsg });
         await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
@@ -20976,7 +21101,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const userSlippageBps = wallet.slippageBps ?? 50;
       const openExecStartTime = Date.now();
       console.log(`[Webhook] ⏱️ OPEN EXEC START at +${openExecStartTime - webhookStartTime}ms, ${side} ${finalContractSize} ${bot.market}`);
-      const orderResult = await executePerpOrder(
+      const orderResult = await executeSignalBotEntry(bot, () => executePerpOrder(
         agentKeyResult.secretKey,
         bot.market,
         side,
@@ -20990,7 +21115,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         webhookBotCtx,
         bot.walletAddress,
         getAdapterForBot(bot),
-      );
+      ));
       const openExecEndTime = Date.now();
       console.log(`[Webhook] ⏱️ OPEN EXEC END at +${openExecEndTime - webhookStartTime}ms (took ${openExecEndTime - openExecStartTime}ms), success=${orderResult.success}`);
 
@@ -21207,9 +21332,10 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       }
     } catch (error) {
       console.error("Webhook processing error:", error);
+      routePausedSource();
       if (log) await storage.updateWebhookLog(log.id, { errorMessage: String(error) });
-      // Reaching this catch means the bot passed the isActive + secret gates above, so this is a
-      // genuine "webhook failed for an active user" event worth surfacing in the admin Errors tab.
+      // Authenticated paused reductions can fail here too. Their fallback routes
+      // subscribers unless the durable partial intent already owns that effect.
       recordCriticalError({
         category: "webhook_failed",
         severity: "error",
@@ -21230,7 +21356,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
     const botId = payload?.botId;
     const signalHash = botId ? generateSignalHash(botId, payload) : null;
 
-    let log;
+    let log!: Awaited<ReturnType<typeof storage.createWebhookLog>>;
     try {
       if (!botId) {
         return res.status(400).json({ error: "Missing botId in payload" });
@@ -21466,16 +21592,20 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // CLOSE SIGNAL DETECTION: Check if this is a position close signal (SL/TP)
       // TradingView sends strategy.position_size = 0 when closing a position
-      const isCloseSignal = strategyPositionSize !== null && 
+      let isCloseSignal = strategyPositionSize !== null &&
         (strategyPositionSize === "0" || parseFloat(strategyPositionSize) === 0);
       
       console.log(`[User Webhook] Signal analysis: action=${action}, contracts=${contracts}, strategyPositionSize=${strategyPositionSize}, isCloseSignal=${isCloseSignal}`);
 
       // Check if bot is active - route to subscribers even if paused
-      if (!bot.isActive) {
-        const routingSignal = parseSignalForRouting(payload,
-          await storage.getBotPosition(botId, bot.market).catch(() => null), true);
-        if (routingSignal.action) {
+      let pausedSourceRouted = false;
+      const pausedPosition = !bot.isActive ? await storage.getBotPosition(botId, bot.market).catch(() => null) : null;
+      const pausedClassification = !bot.isActive ? classifyPausedBotSignal(payload, pausedPosition) : null;
+      const routingSignal = !bot.isActive ? parseSignalForRouting(payload, pausedPosition, true) : null;
+
+      const routePausedSource = () => {
+        if (routingSignal?.action && !pausedSourceRouted) {
+          pausedSourceRouted = true;
           console.log(`[User Webhook] Source bot ${botId.slice(0, 8)}... is paused - routing ${routingSignal.action} (close=${routingSignal.isCloseSignal}) to subscribers`);
           routeSignalToSubscribers(botId, {
             originId: log.id,
@@ -21489,8 +21619,30 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             sourceNotTrading: true,
           }).catch(err => console.error(`[User Webhook] Error routing signal from paused bot:`, err));
         }
-        await storage.updateWebhookLog(log.id, { errorMessage: routingSignal.action ? "Bot is paused (subscriber routing requested)" : "Bot is paused", processed: true });
-        return res.status(400).json({ error: "Bot is paused" });
+      };
+      if (!bot.isActive) {
+        if (!pausedClassification || !['FULL_CLOSE', 'PARTIAL_CLOSE', 'FLIP'].includes(pausedClassification.type)) {
+            routePausedSource();
+            await storage.updateWebhookLog(log.id, { errorMessage: routingSignal?.action ? "Bot is paused (subscriber routing requested)" : "Bot is paused", processed: true });
+            return res.status(400).json({ error: "Bot is paused" });
+        }
+      }
+
+      const freshPausedPosition = !bot.isActive ? await storage.getBotPosition(botId, bot.market).catch(error => { routePausedSource(); throw error; }) : null;
+      const freshPausedClassification = !bot.isActive ? classifyPausedBotSignal(payload, freshPausedPosition) : null;
+      if (!bot.isActive) {
+        if (!freshPausedClassification || !['FULL_CLOSE', 'PARTIAL_CLOSE', 'FLIP'].includes(freshPausedClassification.type)) {
+          routePausedSource();
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused (subscriber routing requested)", processed: true });
+          return res.status(400).json({ error: "Bot is paused" });
+        }
+        isCloseSignal = freshPausedClassification.type === 'FULL_CLOSE';
+        if (routingSignal) {
+          routingSignal.isCloseSignal = isCloseSignal;
+          routingSignal.reduceOnlyIfRefused = freshPausedClassification.type === 'PARTIAL_CLOSE'
+            ? { fraction: freshPausedClassification.closedFraction } : 'full';
+          if (freshPausedClassification.type !== 'PARTIAL_CLOSE' || bot.activeProtocol !== 'pacifica') routePausedSource();
+        }
       }
 
       // CLOSE SIGNAL HANDLING - mirrors logic from /api/webhook/tradingview/:botId
@@ -21560,7 +21712,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // Route close signal to subscribers even if source bot is flat
             {
               console.log(`[User Webhook] Source bot flat - routing close signal to subscribers`);
-              routeSignalToSubscribers(botId, {
+              if (!pausedSourceRouted) routeSignalToSubscribers(botId, {
                 originId: log.id,
                 action: action as 'buy' | 'sell',
                 contracts,
@@ -21653,7 +21805,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // Route close signal to subscribers even when source position was already closed
             {
               console.log(`[User Webhook] Source position already flat - routing close to subscribers`);
-              routeSignalToSubscribers(botId, {
+              if (!pausedSourceRouted) routeSignalToSubscribers(botId, {
                 originId: log.id,
                 action: action as 'buy' | 'sell',
                 contracts,
@@ -21843,7 +21995,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             // SUBSCRIBER ROUTING: Route close signal to subscriber bots
             console.log(`[User Webhook] ========== ROUTING SUBSCRIBER BOTS (CLOSE) ==========`);
             console.log(`[User Webhook] Calling routeSignalToSubscribers for bot ${botId}`);
-            routeSignalToSubscribers(botId, {
+            if (!pausedSourceRouted) routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
               contracts,
@@ -22090,8 +22242,8 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       // DB position (anchors on intent, dodging on-chain propagation lag) and, if
       // it's a partial reduce, execute a reduce-only close of the slice via the
       // bot's adapter (Flash/Drift/Pacifica) instead of opening new exposure.
-      const uwDbPosition = await storage.getBotPosition(botId, bot.market);
-      const uwClassified = classifySignal(
+      const uwDbPosition = !bot.isActive ? freshPausedPosition : await storage.getBotPosition(botId, bot.market);
+      const uwClassified = !bot.isActive ? freshPausedClassification! : classifySignal(
         {
           side: uwDbPosition
             ? (parseFloat(uwDbPosition.baseSize) > 0 ? 'LONG' : parseFloat(uwDbPosition.baseSize) < 0 ? 'SHORT' : 'FLAT')
@@ -22110,7 +22262,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const uwPartialCloseFraction = uwIsPartialClose ? uwClassified.closedFraction : 0;
       const uwIsFlipSignal = uwClassified.type === 'FLIP';
 
-      if (uwIsFlipSignal) {
+      if (uwIsFlipSignal && bot.isActive) {
         {
           routeSignalToSubscribers(botId, {
             originId: log.id,
@@ -22140,9 +22292,11 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         console.log(`[User Webhook] *** PARTIAL CLOSE DETECTED *** (slice=${uwPartialCloseSize.toFixed(4)}, fraction=${(uwPartialCloseFraction * 100).toFixed(1)}%, classified=${uwClassified.type})`);
         const releaseUwLock = await acquireBotWebhookLock(`${botId}:${bot.market}`);
         const uwLockTimer = setTimeout(() => releaseUwLock(), 30_000);
+        let durablePartialOwnsFanout = false;
         try {
           const pcWallet = await storage.getWallet(walletAddress);
           if (!pcWallet?.agentPublicKey) {
+            routePausedSource();
             await storage.updateWebhookLog(log.id, { errorMessage: "No agent wallet for partial close", processed: true });
             return res.status(400).json({ error: "Agent wallet not configured" });
           }
@@ -22168,6 +22322,9 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             false, undefined, bot.id, false, undefined, `partial:${log.id}`,
           );
 
+          durablePartialOwnsFanout = bot.activeProtocol === 'pacifica'
+            && ((!!pcResult.pendingTradeId && pcResult.intentStatus !== 'released') || pcResult.error === CLOSE_IN_PROGRESS);
+          if (!durablePartialOwnsFanout) routePausedSource();
           if (bot.activeProtocol === 'pacifica' && !pcResult.pendingTradeId) return res.status(pcResult.error === CLOSE_IN_PROGRESS ? 409 : 503).json({ success: false, error: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED, message: pcResult.error === CLOSE_IN_PROGRESS ? CLOSE_IN_PROGRESS : CLOSE_SAVE_FAILED });
           if (bot.activeProtocol === 'pacifica' && !pcResult.success) return res.status(202).json({ success: false, status: 'pending', tradeId: pcResult.pendingTradeId, message: 'Close not confirmed yet; we keep checking.' });
           if (!pcResult.success) {
@@ -22257,7 +22414,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
           // Fan out to copy-trade subscribers proportionally.
 
-          if (pcAccounting.isNew) {
+          if (bot.activeProtocol !== 'pacifica' && pcAccounting.isNew && !pausedSourceRouted) {
             routeSignalToSubscribers(botId, {
               originId: log.id,
               action: action as 'buy' | 'sell',
@@ -22281,6 +22438,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
             signature: pcResult.signature,
           });
         } catch (pcErr: any) {
+          if (!durablePartialOwnsFanout) routePausedSource();
           console.error(`[User Webhook] Partial close handler error:`, pcErr);
           await storage.updateWebhookLog(log.id, { errorMessage: `Partial close error: ${pcErr.message}`, processed: true });
           return res.status(500).json({ error: "Partial close failed", details: pcErr.message });
@@ -22321,12 +22479,23 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
           await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true });
           return res.status(409).json(signalBotFlipHttpPayload(uwFlipDisposition, { error: reason }));
         }
-        if (bot.side !== "both" && bot.side !== side) {
+        if (bot.isActive && bot.side !== "both" && bot.side !== side) {
           const reason = `Bot only accepts ${bot.side} signals`;
           uwFlipDisposition = rejectSignalBotFlipOpen(uwFlipDisposition, "direction", reason);
           await storage.updateWebhookLog(log.id, { errorMessage: reason, processed: true, tradeExecuted: true });
           return res.status(400).json(signalBotFlipHttpPayload(uwFlipDisposition, { error: reason }));
         }
+      }
+
+      if (!bot.isActive) {
+        routePausedSource();
+        if (uwFlipDisposition) {
+          uwFlipDisposition = rejectSignalBotFlipOpen(uwFlipDisposition, 'admission', 'Bot is paused');
+          await storage.updateWebhookLog(log.id, { errorMessage: "Bot is paused", processed: true, tradeExecuted: true });
+          return res.status(400).json(signalBotFlipHttpPayload(uwFlipDisposition, { error: "Bot is paused" }));
+        }
+        await storage.updateWebhookLog(log.id, { errorMessage: pausedSourceRouted ? "Bot is paused (subscriber routing requested)" : "Bot is paused", processed: true });
+        return res.status(400).json({ error: "Bot is paused" });
       }
 
       // Create trade record
@@ -22429,7 +22598,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       if (!sizingResult.success) {
         const errorMsg = sizingResult.error || "Trade sizing failed";
         if (sizingResult.shouldPauseBot && sizingResult.pauseReason) {
-          await storage.updateTradingBot(bot.id, { isActive: false, pauseReason: sizingResult.pauseReason } as any);
+          await pauseSignalBotIfFlat(bot, sizingResult.pauseReason, wallet.agentPublicKey!, userWebhookBotCtx);
         }
         await storage.updateBotTrade(trade.id, { status: "failed", txSignature: null, errorMessage: errorMsg });
         await storage.updateWebhookLog(log.id, { errorMessage: errorMsg, processed: true });
@@ -22441,7 +22610,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
 
       // Execute on Drift (subAccountId already declared above for collateral check)
       const userSlippageBps2 = userWallet.slippageBps ?? 50;
-      const orderResult = await executePerpOrder(
+      const orderResult = await executeSignalBotEntry(bot, () => executePerpOrder(
         agentKeyResult.secretKey,
         bot.market,
         side,
@@ -22455,7 +22624,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         userWebhookBotCtx,
         walletAddress,
         getAdapterForBot(bot),
-      );
+      ));
 
       if (!orderResult.success) {
         const userFriendlyError = parseDriftError(orderResult.error);
@@ -25684,7 +25853,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
       const bs58 = await import('bs58');
       const privateKeyBase58 = bs58.default.encode(agentKeypair.secretKey);
       
-      const result = await executePerpOrder(
+      const result = await executeSignalBotEntry(bot, () => executePerpOrder(
         retryAgentSecret,
         market,
         isLong ? 'long' : 'short',
@@ -25698,7 +25867,7 @@ QuantumVault connects TradingView alerts and AI trading agents to perpetual exch
         retryBotCtx,
         walletAddress,
         getAdapterForBot(bot),
-      );
+      ));
       
       if (result.success) {
         // Get fill price for trade record

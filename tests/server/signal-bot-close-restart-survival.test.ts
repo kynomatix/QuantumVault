@@ -547,7 +547,7 @@ describe('close-path and restart contract wiring', () => {
           botId: ROUTE_BOT_ID,
           secret: endpoint === 'tradingview' ? ROUTE_TV_SECRET : ROUTE_USER_SECRET,
           action: 'buy',
-          position_size: '0',
+          contracts: '0.25', position_size: '0.25',
           data: { action: 'buy', secret: 'nested-strategy-value' },
         };
         const url = endpoint === 'tradingview'
@@ -577,7 +577,7 @@ describe('close-path and restart contract wiring', () => {
         } else {
           vi.mocked(storage.getWallet as any).mockResolvedValue({ ...routeWallet, executionEnabled: false });
         }
-        const payload: Record<string, unknown> = { botId: ROUTE_BOT_ID, action: 'buy', position_size: '0' };
+        const payload: Record<string, unknown> = { botId: ROUTE_BOT_ID, action: 'buy', contracts: '0.25', position_size: '0.25' };
         const url = endpoint === 'tradingview'
           ? `${routeBaseUrl}/api/webhook/tradingview/${ROUTE_BOT_ID}?secret=${ROUTE_TV_SECRET}`
           : `${routeBaseUrl}/api/webhook/user/${ROUTE_WALLET}?secret=${ROUTE_USER_SECRET}`;
@@ -1223,7 +1223,10 @@ describe('close-path and restart contract wiring', () => {
     const strictReads = routes.match(/getPositionForCloseAuthority\(/g) ?? [];
     const cacheFallbacks = routes.match(/getRiskReducingCachedCloseFallback\(/g) ?? [];
     const flipDelegations = routes.match(/await executeSignalBotFlipClose\(/g) ?? [];
-    expect(strictReads).toHaveLength(4);
+    // Auto-pause flatness authority lives in the shared entry admission module.
+    // Paused-source subscribers now own a strict decision/quantity snapshot.
+    expect(strictReads).toHaveLength(5);
+    expect(readFileSync('server/trading/signal-bot-entry-admission.ts', 'utf8').match(/getPositionForCloseAuthority\(/g)).toHaveLength(1);
     expect(cacheFallbacks).toHaveLength(3);
     expect(flipDelegations).toHaveLength(3);
     expect(routes).toContain('executionLabel: "per_bot"');

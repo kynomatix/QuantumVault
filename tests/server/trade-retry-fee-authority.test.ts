@@ -29,7 +29,8 @@ describe('Trade retry fee-rate admission choke point', () => {
       openBranch,
     );
 
-    expect(process).toContain('result = await driftExecutePerpOrder(');
+    expect(process).toContain('const submitRetryEntry = () => driftExecutePerpOrder(');
+    expect(process).toContain('await executeSignalBotEntry({ id: job.botId }, submitRetryEntry)');
     expect(openBranch).toBeGreaterThanOrEqual(0);
     expect(closeBranch).toContain('result = await driftClosePerpPosition(');
     expect(closeBranch).not.toContain('placeMarketOrderWithFeeAuthority');

@@ -198,7 +198,7 @@ describe("FLIP route wiring", () => {
     expect(routes).toContain('executionLabel: "per_bot"');
     expect(routes).toContain('executionLabel: "user_webhook"');
     expect(routes).toContain('executionLabel: "subscriber"');
-    expect(routes.match(/getPositionForCloseAuthority\(/g)).toHaveLength(4);
+    expect(routes.match(/getPositionForCloseAuthority\(/g)).toHaveLength(5);
     expect(routes.match(/getRiskReducingCachedCloseFallback\(/g)).toHaveLength(3);
     expect(routes.match(/confirmedPositionClose:\s*\{/g)).toHaveLength(2);
   });
@@ -210,10 +210,10 @@ describe("FLIP route wiring", () => {
   });
 
   it("classifies before applying direction and carries each subscriber's own classification", () => {
-    const perBotClassifier = routes.indexOf("const classifiedSignal = classifySignal(");
-    const perBotFlipDirection = routes.indexOf('if (bot.side !== "both" && bot.side !== side)', perBotClassifier);
-    const userClassifier = routes.indexOf("const uwClassified = classifySignal(");
-    const userFlipDirection = routes.indexOf('if (bot.side !== "both" && bot.side !== side)', userClassifier);
+    const perBotClassifier = routes.indexOf("const classifiedSignal = ");
+    const perBotFlipDirection = routes.indexOf('if (bot.isActive && bot.side !== "both" && bot.side !== side)', perBotClassifier);
+    const userClassifier = routes.indexOf("const uwClassified = ");
+    const userFlipDirection = routes.indexOf('if (bot.isActive && bot.side !== "both" && bot.side !== side)', userClassifier);
 
     expect(perBotClassifier).toBeGreaterThan(0);
     expect(perBotFlipDirection).toBeGreaterThan(perBotClassifier);

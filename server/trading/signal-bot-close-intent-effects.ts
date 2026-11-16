@@ -3,6 +3,7 @@ import type { CloseIntent } from './signal-bot-close-intent-types';
 type Fanout = (botId: string, signal: {
   originId?: string; action: 'buy' | 'sell'; contracts: string; positionSize: string;
   price: string; isCloseSignal: boolean; strategyPositionSize: string | null; partialCloseFraction: number;
+  sourceNotTrading?: boolean;
 }) => Promise<unknown>;
 let fanout: Fanout | undefined;
 export function registerPartialCloseFanout(value: Fanout): void { fanout = value; }
@@ -78,6 +79,7 @@ export async function dispatchPartialCloseEffects(initial: CloseIntent): Promise
       contracts: intent.requested_size_base, positionSize: String(Number(intent.original_position_size_base) - Number(intent.requested_size_base)),
       price: String((intent.last_evidence.fill as any)?.fillPrice ?? 0), isCloseSignal: false,
       strategyPositionSize: null, partialCloseFraction: Number(intent.requested_size_base) / Number(intent.original_position_size_base),
+      ...(intent.authority_ref.pausedAtAdmission === true ? { sourceNotTrading: true } : {}),
     });
     intent = await readOrUpdate(intent, { fanoutDelivered: true });
   }

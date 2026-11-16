@@ -254,7 +254,7 @@ it('does not claim subscribers were routed when a paused webhook has no subscrib
   vi.mocked(storage.createWebhookLog).mockResolvedValue({ id: 'EXAMPLE_WEBHOOK' } as never);
   const response = await fetch(`${baseUrl}/api/webhook/tradingview/${ROUTE_BOT_ID}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ secret: ROUTE_TV_SECRET, action: 'sell', contracts: '0', position_size: '0' }),
+    body: JSON.stringify({ secret: ROUTE_TV_SECRET, action: 'buy', contracts: '0.25', position_size: '0.5' }),
   });
   expect(response.status).toBe(400);
   expect(storage.updateWebhookLog).toHaveBeenCalledWith('EXAMPLE_WEBHOOK',
@@ -443,16 +443,17 @@ describe('round9 active parity and refused admission', () => {
   });
 });
 
+const earlySourceKey = Keypair.generate().publicKey.toBase58();
 function primePartial(fraction = 0.5) {
   routeMocks.adapter.getTradeHistory.mockResolvedValue([fill({ size: 0.25 * fraction })]);
   vi.mocked(storage.updatePendingBotTrade).mockImplementation(async (_id, fields) => ({ id: 'EXAMPLE_PENDING', ...fields }) as never);
   let sequence = 0;
-  routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async account => snapshot(account, ++sequence, routeMocks.adapter.placeMarketOrder.mock.calls.length ? 0.25 * (1 - fraction) : 0.25));
-  routeMocks.adapter.getStrictPositionForMarket.mockImplementation(async () => ({ internalSymbol: 'BTC-PERP', baseSize: routeMocks.adapter.placeMarketOrder.mock.calls.length ? 0.25 * (1 - fraction) : 0.25, entryPrice: 64000 }));
+  routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async account => snapshot(account, ++sequence, account === earlySourceKey ? 0 : routeMocks.adapter.placeMarketOrder.mock.calls.length ? 0.25 * (1 - fraction) : 0.25));
+  routeMocks.adapter.getStrictPositionForMarket.mockImplementation(async account => account === earlySourceKey ? null : ({ internalSymbol: 'BTC-PERP', baseSize: routeMocks.adapter.placeMarketOrder.mock.calls.length ? 0.25 * (1 - fraction) : 0.25, entryPrice: 64000 }));
 }
 type Early = 'paused-tv' | 'disabled-tv' | 'expired-tv' | 'paused-user';
 function primeEarly(path: Early, active: boolean, sourceReadFails = false) {
-  const source = { ...routeBot, id: 'EXAMPLE_SOURCE', isActive: path !== 'paused-tv' && path !== 'paused-user' };
+  const source = { ...routeBot, id: 'EXAMPLE_SOURCE', protocolSubaccountId: earlySourceKey, isActive: path !== 'paused-tv' && path !== 'paused-user' };
   const wallet = { ...routeWallet, executionEnabled: path !== 'disabled-tv', executionExpiresAt: path === 'expired-tv' ? new Date(0) : null };
   vi.mocked(storage.getWallet).mockResolvedValue(wallet as never);
   vi.mocked(storage.getTradingBotById).mockImplementation(async id => {
@@ -460,7 +461,8 @@ function primeEarly(path: Early, active: boolean, sourceReadFails = false) {
     vi.mocked(storage.getWallet).mockResolvedValue(routeWallet as never); return routeBot as never;
   });
   vi.mocked(storage.getBotPosition).mockImplementation(async id => {
-    if (id === source.id && sourceReadFails) throw new Error('EXAMPLE_SOURCE_READ_FAILED');
+    // These cases isolate subscriber routing when the source has no position authority.
+    if (id === source.id && (sourceReadFails || path === 'paused-tv' || path === 'paused-user')) throw new Error('EXAMPLE_SOURCE_READ_FAILED');
     return { baseSize: '0.25', avgEntryPrice: '64000', lastTradeId: 'EXAMPLE_ENTRY' } as never;
   });
   vi.mocked(storage.createWebhookLog).mockResolvedValue({ id: 'EXAMPLE_WEBHOOK' } as never); listing(active);
@@ -492,10 +494,14 @@ describe('subscriber close safety early paths', () => {
     for (const fraction of [0.5, 1]) {
       prime(); primeEarly(path, true); primePartial(fraction);
       // A different source size proves sizing uses the subscriber position, not source contracts.
-      vi.mocked(storage.getBotPosition).mockImplementation(async id => ({ baseSize: id === 'EXAMPLE_SOURCE' ? '0.5' : '0.25', avgEntryPrice: '60000' } as never));
+      vi.mocked(storage.getBotPosition).mockImplementation(async id => {
+        if (id === 'EXAMPLE_SOURCE' && (path === 'paused-tv' || path === 'paused-user')) throw new Error('EXAMPLE_SOURCE_READ_FAILED');
+        return { baseSize: id === 'EXAMPLE_SOURCE' ? '0.5' : '0.25', avgEntryPrice: '60000' } as never;
+      });
       const unpark = vi.spyOn(vaultService, 'unparkToUsdc');
       try {
-        await audited(() => earlyWebhook(path, { message: `order sell @ ${0.5 * fraction} filled on BTC. New strategy position is ${0.5 * (1 - fraction)}` }));
+        const response = await audited(() => earlyWebhook(path, { message: `order sell @ ${0.5 * fraction} filled on BTC. New strategy position is ${0.5 * (1 - fraction)}` })) as Response;
+        if (fraction === 1 && (path === 'paused-tv' || path === 'paused-user')) expect(response.status).toBe(500);
         expectOnlyReducingOrders();
         expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.25 * fraction);
         expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
@@ -526,7 +532,8 @@ describe('subscriber close safety early paths', () => {
     vi.mocked(storage.getPublishedBotByTradingBotId).mockRejectedValue(new Error('EXAMPLE_UNAVAILABLE'));
     const target = kind === 'full' ? '0' : kind === 'flip' ? '-0.25' : '0.125';
     const contracts = kind === 'flip' ? '0.5' : kind === 'full' ? '0.25' : '0.125';
-    await audited(() => earlyWebhook('paused-tv', { message: `order sell @ ${contracts} filled on BTC. New strategy position is ${target}` }));
+    const response = await audited(() => earlyWebhook('paused-tv', { message: `order sell @ ${contracts} filled on BTC. New strategy position is ${target}` })) as Response;
+    if (kind === 'full') expect(response.status).toBe(500);
     expectOnlyReducingOrders(); expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(kind === 'missing-source-partial' ? 0.125 : 0.25);
   });
 });
@@ -553,7 +560,8 @@ describe('round9 sequential point-in-time window', () => {
       release.resolve(); await barrier(stagger.promise); advance!(); await routing;
       expect(routeMocks.adapter.placeMarketOrder).toHaveBeenCalledTimes(unpublish ? 1 : 2);
       expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledTimes(2);
-      expect(storage.getWallet).toHaveBeenCalledTimes(unpublish ? 1 : 2);
+      // Each admitted entry reloads wallet authority after acquiring its bot lock.
+      expect(storage.getWallet).toHaveBeenCalledTimes(unpublish ? 2 : 4);
       expect(routeMocks.adapter.getAccountInfo).toHaveBeenCalledTimes(unpublish ? 1 : 2);
     } finally { release.resolve(); advance?.(); await routing; timer.mockRestore(); leverage.mockRestore(); }
   });
@@ -573,7 +581,7 @@ describe('round9 durable lookup boundary', () => {
     vi.mocked(storage.getSubscriberBotsBySourceId).mockRejectedValueOnce(new Error('EXAMPLE_LOOKUP_FAILED'));
     const error = vi.spyOn(console, 'error');
     try {
-      const response = await earlyWebhook('paused-tv', { action: 'sell', position_size: '0', contracts: '0.25' });
+      const response = await earlyWebhook('paused-tv', { action: 'buy', position_size: '0.5', contracts: '0.25' });
       expect(response.status).toBe(400);
       await vi.waitFor(() => expect(error.mock.calls.some(([line]) => line === '[Subscriber Routing] Error:')).toBe(true));
       await expect(route(full)).resolves.toBeUndefined();
@@ -772,8 +780,8 @@ describe('subscriber close safety paused and hint boundaries', () => {
     await route({ ...partial, partialCloseFraction: undefined, reduceOnlyIfRefused: { fraction: 0.5 } });
     expectOnlyReducingOrders(); expect(routeMocks.adapter.placeMarketOrder.mock.calls[0][0].sizeBase).toBe(0.125); expectNoOpeningWork();
   });
-  it('unmarked active and marked hintless or same-side signals retain live behavior', async () => {
-    for (const change of [{ reduceOnlyIfRefused: { fraction: 0.5 } }, { sourceNotTrading: true }, { sourceNotTrading: true, reduceOnlyIfRefused: 'full' as const, action: 'buy' as const }]) {
+  it('unmarked active and marked hintless signals retain live behavior', async () => {
+    for (const change of [{ reduceOnlyIfRefused: { fraction: 0.5 } }, { sourceNotTrading: true }]) {
       prime(); const leverage = primeRiskSizing();
       try {
         await route({ ...partial, partialCloseFraction: undefined, ...change });
@@ -782,6 +790,26 @@ describe('subscriber close safety paused and hint boundaries', () => {
         expect(storage.getPublishedBotByTradingBotId).toHaveBeenCalledOnce();
       } finally { leverage.mockRestore(); }
     }
+  });
+  it('round3 reduction same-side full hint skips sizing and funding', async () => {
+    prime(); const leverage = primeRiskSizing();
+    try {
+      await route({ ...partial, partialCloseFraction: undefined, sourceNotTrading: true, reduceOnlyIfRefused: 'full', action: 'buy' });
+      expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+      expect(storage.getWallet).not.toHaveBeenCalled();
+      expect(leverage).not.toHaveBeenCalled();
+      expect(routeMocks.adapter.deposit).not.toHaveBeenCalled();
+      expect(routeMocks.adapter.transferBetweenSubaccounts).not.toHaveBeenCalled();
+    } finally { leverage.mockRestore(); }
+  });
+  it('round3 reduction invalid fraction never falls through to entry sizing', async () => {
+    prime(); const leverage = primeRiskSizing();
+    try {
+      await route({ ...partial, partialCloseFraction: undefined, sourceNotTrading: true, reduceOnlyIfRefused: { fraction: NaN } });
+      expect(routeMocks.adapter.placeMarketOrder).not.toHaveBeenCalled();
+      expect(storage.getWallet).not.toHaveBeenCalled();
+      expect(leverage).not.toHaveBeenCalled();
+    } finally { leverage.mockRestore(); }
   });
 });
 

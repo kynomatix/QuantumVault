@@ -17,13 +17,17 @@ const incumbentBaseline = JSON.parse(readFileSync('tests/fixtures/pacifica-order
 // Only the two incumbent webhook spans changed; Phoenix boundaries remain unchanged.
 // Phoenix boundaries and incumbent entry policy remain pinned below.
 incumbentBaseline.routeSha256['post:/api/webhook/tradingview/:botId'] =
-  'sha256:cc978077415ffbedf0c803ada1e54d52d3acfbccf351f12c165a426e1220a424';
+  'sha256:749e3eb4d674f5523b62ce8046dbeb4e169a5cdd4fdd1a3cc8cea81c0eef5a0d';
 // SEC-02 changes authentication order only in the user webhook span.
 incumbentBaseline.routeSha256['post:/api/webhook/user/:walletAddress'] =
-  'sha256:6b15d6bba754cfdb2066132e94de4bc22229c9f7e12e591f250a807f214f55e8';
+  'sha256:6713bd89830b59d829bb3618e818c5ccda2c4abcaa44b3044a68ebbbbe6418ee';
 
 incumbentBaseline.routeSha256['patch:/api/trading-bots/:id'] =
   'sha256:a80d9069f66e39a80f9613365ea6664fe534a76479072593c16b62f351152b9d';
+
+// SB-04 changes Pacifica auto-pause admission and wraps manual entry in the entry lock.
+incumbentBaseline.routeSha256['post:/api/trading-bots/:id/manual-trade'] =
+  'sha256:79a0b499df634ad9727a925f72c4da682df3983cc106be5d7812e87765fdeb45';
 
 describe('Phoenix U05 exact admission and explicit wire policy', () => {
   it('admits canonical phUSD collateral and refuses a USDC collateral substitution', () => {

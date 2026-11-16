@@ -1,3 +1,4 @@
+import { executeSignalBotEntry } from './trading/signal-bot-entry-admission';
 import { closeIntentStore } from './trading/close-intent-store';
 import { readCloseSnapshot } from './protocol/close-outcome';
 import { FLASH_RETIRED_MESSAGE } from './protocol/flash-retirement.js';
@@ -20,7 +21,7 @@ import {
   closeFeeAmount,
   type CloseFeeEvidence,
 } from "./trading/signal-bot-close-integrity";
-import { isUnconfirmedLandingVerdict } from "./protocol/tx-verdicts";
+import { isUnconfirmedLandingVerdict, isUnconfirmedLandingResult } from "./protocol/tx-verdicts";
 import { db } from "./db";
 import { wallets } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -94,6 +95,7 @@ async function driftExecutePerpOrder(
       : await placeMarketOrderWithFeeAuthority(adapter, orderParams);
   return {
     success: orderResult.success,
+    submissionUnconfirmed: isUnconfirmedLandingResult(orderResult),
     signature: orderResult.orderId,
     txSignature: orderResult.orderId,
     fillPrice: orderResult.fillPrice,
@@ -937,10 +939,11 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         console.warn(`[TradeRetry] Could not verify existing position, proceeding with trade attempt:`, posCheckErr);
       }
       
-      result = await driftExecutePerpOrder(
+      const retrySide = job.side;
+      const submitRetryEntry = () => driftExecutePerpOrder(
         agentSecretKey,
         job.market,
-        job.side,
+        retrySide,
         job.size,
         job.subAccountId,
         job.reduceOnly,
@@ -951,6 +954,8 @@ async function processRetryJob(job: RetryJob): Promise<void> {
         jobAdapter,
         job.botId
       );
+      result = job.reduceOnly ? await submitRetryEntry()
+        : await executeSignalBotEntry({ id: job.botId }, submitRetryEntry);
     }
     
     if (result.success) {
