@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   storage: {
-    getWalletsWithActiveBots: vi.fn(),
+    getWalletsForReconciliation: vi.fn(),
     getWallet: vi.fn(),
     getTradingBots: vi.fn(),
     getBotPosition: vi.fn(),
@@ -63,7 +63,7 @@ describe('periodic reconciler single-flight', () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    mocks.storage.getWalletsWithActiveBots.mockResolvedValue([]);
+    mocks.storage.getWalletsForReconciliation.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -74,16 +74,16 @@ describe('periodic reconciler single-flight', () => {
 
   it('skips an overlapping tick and allows a later tick after successful completion', async () => {
     const firstCycle = deferred<string[]>();
-    mocks.storage.getWalletsWithActiveBots
+    mocks.storage.getWalletsForReconciliation
       .mockImplementationOnce(() => firstCycle.promise)
       .mockResolvedValue([]);
 
     startPeriodicReconciliation();
     await vi.advanceTimersByTimeAsync(TICK_MS);
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(1);
 
     await vi.advanceTimersByTimeAsync(TICK_MS);
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(1);
     expect(console.warn).toHaveBeenCalledWith(
       '[Reconcile] Skipping tick - previous cycle still running age=60000ms',
     );
@@ -91,25 +91,25 @@ describe('periodic reconciler single-flight', () => {
     firstCycle.resolve([]);
     await settleAsyncCycle();
     await vi.advanceTimersByTimeAsync(TICK_MS);
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(2);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(2);
   });
 
   it('releases the lease in finally after a cycle failure', async () => {
     const failedCycle = deferred<string[]>();
-    mocks.storage.getWalletsWithActiveBots
+    mocks.storage.getWalletsForReconciliation
       .mockImplementationOnce(() => failedCycle.promise)
       .mockResolvedValue([]);
 
     startPeriodicReconciliation();
     await vi.advanceTimersByTimeAsync(TICK_MS);
     await vi.advanceTimersByTimeAsync(TICK_MS);
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(1);
 
     failedCycle.reject(new Error('controlled cycle failure'));
     await settleAsyncCycle();
     await vi.advanceTimersByTimeAsync(TICK_MS);
 
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(2);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(2);
     expect(console.error).toHaveBeenCalledWith(
       '[Reconcile] Periodic reconciliation error:',
       expect.any(Error),
@@ -118,22 +118,22 @@ describe('periodic reconciler single-flight', () => {
 
   it('does not falsely release an active lease when the interval is stopped and restarted', async () => {
     const firstCycle = deferred<string[]>();
-    mocks.storage.getWalletsWithActiveBots
+    mocks.storage.getWalletsForReconciliation
       .mockImplementationOnce(() => firstCycle.promise)
       .mockResolvedValue([]);
 
     startPeriodicReconciliation();
     await vi.advanceTimersByTimeAsync(TICK_MS);
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(1);
 
     stopPeriodicReconciliation();
     startPeriodicReconciliation();
     await vi.advanceTimersByTimeAsync(TICK_MS);
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(1);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(1);
 
     firstCycle.resolve([]);
     await settleAsyncCycle();
     await vi.advanceTimersByTimeAsync(TICK_MS);
-    expect(mocks.storage.getWalletsWithActiveBots).toHaveBeenCalledTimes(2);
+    expect(mocks.storage.getWalletsForReconciliation).toHaveBeenCalledTimes(2);
   });
 });

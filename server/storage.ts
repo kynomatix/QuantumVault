@@ -1000,6 +1000,7 @@ export interface IStorage {
   upsertBotPosition(position: InsertBotPosition): Promise<BotPosition>;
   updateBotPositionFromTrade(tradingBotId: string, market: string, walletAddress: string, side: string, size: number, price: number, fee: number, tradeId: string): Promise<BotPosition>;
   getWalletsWithActiveBots(): Promise<string[]>;
+  getWalletsForReconciliation(): Promise<string[]>;
 
   createOrphanedSubaccount(data: InsertOrphanedSubaccount): Promise<OrphanedSubaccount>;
   getOrphanedSubaccounts(): Promise<OrphanedSubaccount[]>;
@@ -5104,6 +5105,29 @@ export class DatabaseStorage implements IStorage {
     const result = await db.selectDistinct({ walletAddress: tradingBots.walletAddress })
       .from(tradingBots)
       .where(eq(tradingBots.isActive, true));
+    return result.map(r => r.walletAddress);
+  }
+
+  async getWalletsForReconciliation(): Promise<string[]> {
+    // Mirror the periodic loop's admission filter, including exact bot/market identity.
+    // base_size is decimal(20,8) NOT NULL: malformed text/null cannot be stored,
+    // but PostgreSQL numeric NaN compares above finite values and must be excluded.
+    const result = await db.selectDistinct({ walletAddress: tradingBots.walletAddress })
+      .from(tradingBots)
+      .where(or(
+        eq(tradingBots.isActive, true),
+        and(
+          eq(tradingBots.isActive, false),
+          ne(tradingBots.activeProtocol, 'flash'),
+          sql`exists (
+            select 1 from ${botPositions}
+            where ${botPositions.tradingBotId} = ${tradingBots.id}
+              and ${botPositions.market} = ${tradingBots.market}
+              and abs(${botPositions.baseSize}) > 0.0001
+              and ${botPositions.baseSize} <> 'NaN'::numeric
+          )`,
+        ),
+      ));
     return result.map(r => r.walletAddress);
   }
 

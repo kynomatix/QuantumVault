@@ -15,6 +15,7 @@ let entryAdmission: typeof import('../../server/trading/signal-bot-entry-admissi
 beforeEach(() => entryAdmission?.resetSignalBotAcceptedEntriesForTests?.());
 
 const routeMocks = vi.hoisted(() => ({
+  reconcileCycleDone: vi.fn(),
   adapter: {
     protocolName: 'pacifica',
     getMarkets: vi.fn(),
@@ -30,12 +31,17 @@ const routeMocks = vi.hoisted(() => ({
     deposit: vi.fn(),
     transferBetweenSubaccounts: vi.fn(),
     closePosition: vi.fn(),
+    cancelOrder: vi.fn(),
+    cancelAllOrders: vi.fn(),
     getCapabilities: vi.fn(() => ({})),
   },
   notify: vi.fn(async () => {}),
   getUmkForWebhook: vi.fn(),
   decryptAgentKeyStrict: vi.fn(),
   decryptBotSubaccountKey: vi.fn(),
+}));
+vi.mock('../../server/job-timing', () => ({
+  startJobTiming: (name: string) => name === 'reconcile.tick' ? routeMocks.reconcileCycleDone : () => {},
 }));
 
 vi.mock('../../server/notification-service', async importOriginal => ({ ...await importOriginal<any>(), sendTradeNotification: routeMocks.notify }));
@@ -62,7 +68,9 @@ vi.mock('../../server/session', () => ({
 vi.mock('../../server/trading/close-intent-store', async () => {
   const { makeCloseRouteStore } = await import('../helpers/close-route-intent-store');
   const { storage } = await import('../../server/storage');
-  return { closeIntentStore: { ...makeCloseRouteStore(storage), withEffects: async (_id: string, work: () => Promise<void>) => work() } };
+  return { closeIntentStore: { ...makeCloseRouteStore(storage),
+    hasUnresolvedPosition: vi.fn(async () => false), hasUnresolvedTrade: vi.fn(async () => false),
+    withEffects: async (_id: string, work: () => Promise<void>) => work() } };
 });
 import { closeIntentStore } from '../../server/trading/close-intent-store';
 import { bridgePreparedClose } from '../helpers/close-route-intent-store';
@@ -162,6 +170,7 @@ import type { TradeRecord } from '../../server/protocol/protocol-types';
 import * as marketLiquidity from '../../server/market-liquidity-service';
 import { observePacificaConstraints } from '../../server/protocol/market-constraints';
 import { classifySignal } from '../../server/trading/signal-classifier';
+import { startPeriodicReconciliation, stopPeriodicReconciliation, registerRecoveredCloseRoutingCallback } from '../../server/reconciliation-service';
 
 function snapshot(account: string, sequence: number, size: number): CloseSnapshot {
   const now = Date.now();
@@ -334,6 +343,109 @@ function sourceOrders() { return routeMocks.adapter.placeMarketOrder.mock.calls.
 function subscriberOrders() { return routeMocks.adapter.placeMarketOrder.mock.calls.map(([order]) => order).filter(order => order.agentPublicKey === subscriberKey); }
 function expectPaused() { expect(storage.updateTradingBot).toHaveBeenCalledWith(ROUTE_BOT_ID, expect.objectContaining({ isActive: false, pauseReason: expect.stringContaining('Bot underfunded') })); }
 function expectNotPaused() { expect(storage.updateTradingBot).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ isActive: false })); }
+
+describe('SB07 recovered-close wallet parity', () => {
+  async function run(mixed: boolean, state: 'closed' | 'healthy' | 'failed' = 'closed', subaccountStatus = 'active') {
+    stopPeriodicReconciliation();
+    // Only the periodic timer and clock are fake: subscriber close-effect I/O can finish normally.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(new Date('2026-11-17T00:00:00Z'));
+    try {
+      const { source, subscriber, orders } = setup({ subscriber: true });
+      source.subaccountStatus = subaccountStatus;
+      const flat = { ...subscriber, id: 'EXAMPLE_FLAT_SUBSCRIBER', walletAddress: 'EXAMPLE_FLAT_WALLET' };
+      const active = { ...source, id: 'EXAMPLE_ACTIVE_COMPANION', isActive: true,
+        protocolSubaccountId: 'EXAMPLE_COMPANION_ACCOUNT', subaccountStatus: 'active' };
+      const walletBots = mixed ? [source, active] : [source];
+      const marker = { id: 'EXAMPLE_RECOVERED_PARTIAL', status: 'pending', side: 'short', market: source.market,
+        size: '0.125', executedAt: new Date(Date.now() - 30_000), txSignature: 'EXAMPLE_RECOVERED_ORDER',
+        protocolFillId: 'tx-partial-EXAMPLE_RECOVERED_FILL', protocol: 'pacifica',
+        webhookPayload: { partialClose: true, partialCloseAccounting: {
+          expectedBaseSize: '0.25', expectedLastTradeId: 'EXAMPLE_ENTRY', requestedClosedSize: 0.125,
+        } } };
+      vi.mocked(storage.getWalletsWithActiveBots).mockResolvedValue(mixed ? [ROUTE_WALLET] : []);
+      vi.mocked(storage.getWalletsForReconciliation).mockResolvedValue([ROUTE_WALLET]);
+      vi.mocked(storage.getTradingBots).mockResolvedValue(walletBots as never);
+      vi.mocked(storage.getTradingBotById).mockImplementation(async id =>
+        ([source, subscriber, flat, active].find(row => row.id === id) ?? source) as never);
+      vi.mocked(storage.getSubscriberBotsBySourceId).mockResolvedValue([subscriber, flat] as never);
+      vi.mocked(storage.getBotPosition).mockImplementation(async id => ({ baseSize: id === flat.id || id === active.id ? '0' : '0.25',
+        avgEntryPrice: '64000', realizedPnl: '0', totalFees: '0', lastTradeId: 'EXAMPLE_ENTRY',
+        lastTradeAt: new Date(Date.now() - 600_000) }) as never);
+      vi.mocked(storage.getBotTrades).mockImplementation(async id => id === source.id ? [marker] as never : []);
+      vi.mocked(storage.getRecentCanonicalCloseForBot).mockResolvedValue(undefined);
+      const flatAccount = 'EXAMPLE_FLAT_ACCOUNT';
+      const mainAccount = 'EXAMPLE_SOURCE_MAIN_ACCOUNT';
+      vi.mocked(storage.getWallet).mockImplementation(async address => ({ ...routeWallet,
+        agentPublicKey: address === flat.walletAddress ? flatAccount : address === subscriber.walletAddress ? subscriberKey : mainAccount,
+      }) as never);
+      const size = (account: string) => account === flatAccount || account === active.protocolSubaccountId ? 0
+        : account === source.protocolSubaccountId ? (state === 'healthy' ? 0.25 : 0)
+        : orders.has(account) ? 0 : 0.25;
+      routeMocks.adapter.getPositions.mockImplementation(async account => size(account)
+        ? [{ internalSymbol: source.market, baseSize: size(account), entryPrice: 64000 }] : []);
+      routeMocks.adapter.getStrictPositionForMarket.mockImplementation(async account => size(account)
+        ? { internalSymbol: source.market, baseSize: size(account), entryPrice: 64000 } : null);
+      let sequence = 0;
+      routeMocks.adapter.getCloseConfirmationSnapshot.mockImplementation(async account => {
+        if (state === 'failed' && account === source.protocolSubaccountId) throw new Error('EXAMPLE_UNAVAILABLE');
+        return snapshot(account, ++sequence, size(account));
+      });
+      const subscriberHistory = routeMocks.adapter.getTradeHistory.getMockImplementation()!;
+      routeMocks.adapter.getTradeHistory.mockImplementation(async (account, options) => account === source.protocolSubaccountId
+        ? [fill({ orderId: 'EXAMPLE_RECOVERED_ORDER', tradeId: 'EXAMPLE_RECOVERED_FILL', venueEventKind: 'close_long' })]
+        : subscriberHistory(account, options));
+      routeMocks.adapter.getAccountInfo.mockResolvedValue({ exists: true, balance: 100, equity: 100 });
+      const callback = vi.fn(async (sourceBotId: string, signal: Signal) => {
+        await routeSignalToSubscribers(sourceBotId, signal);
+      });
+      registerRecoveredCloseRoutingCallback(callback);
+      startPeriodicReconciliation();
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => expect(routeMocks.reconcileCycleDone).toHaveBeenCalledTimes(1), { timeout: 10000 });
+      expect(routeMocks.adapter.getCloseConfirmationSnapshot, 'not reconciled').toHaveBeenCalled();
+      expect(routeMocks.adapter.getCloseConfirmationSnapshot).toHaveBeenCalledWith(source.protocolSubaccountId, undefined);
+      expect(routeMocks.adapter.getCloseConfirmationSnapshot.mock.calls.some(([account]) => account === mainAccount)).toBe(false);
+      // Fanout's existing stagger runs asynchronously. Drain its close effects before inspecting orders.
+      if (state === 'closed') {
+        expect(callback).toHaveBeenCalledTimes(1);
+        await vi.waitFor(() => expect(subscriberOrders()).toHaveLength(1), { timeout: 5000 });
+      }
+      await waitForCloseEffects();
+      expect(sourceOrders()).toHaveLength(0);
+      expect(routeMocks.adapter.cancelOrder).not.toHaveBeenCalled();
+      expect(routeMocks.adapter.cancelAllOrders).not.toHaveBeenCalled();
+      expect(storage.updateTradingBot).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ executionActive: true }));
+      if (state === 'closed') {
+        expectOnlyReducingOrders(1);
+        expect(subscriberOrders()[0]).toMatchObject({ side: 'short', reduceOnly: true, sizeBase: 0.25 });
+      } else {
+        expect(callback).not.toHaveBeenCalled();
+        expectOnlyReducingOrders(0);
+      }
+      const events = vi.mocked(storage.recordCloseEventAtomic).mock.calls
+        .filter(([event]) => event.botId === source.id);
+      if (state === 'closed') expect(events).toHaveLength(1);
+      else expect(events).toHaveLength(0);
+      // Capture at completion: production mutates routing metadata after the atomic write.
+      return structuredClone({ callbacks: callback.mock.calls, events,
+        orders: subscriberOrders().map(order => ({ side: order.side, size: order.sizeBase, reduceOnly: order.reduceOnly })) });
+    } finally {
+      stopPeriodicReconciliation();
+      registerRecoveredCloseRoutingCallback(async (sourceBotId, signal) => { await routeSignalToSubscribers(sourceBotId, signal); });
+      vi.useRealTimers();
+    }
+  }
+  it('paused-only and mixed wallets produce identical recovered-close callbacks and atomic arguments', async () => {
+    expect(await run(false)).toEqual(await run(true));
+  }, 20000);
+  it.each(['healthy', 'failed'] as const)('%s paused-only source dispatches nothing', async state => {
+    await run(false, state);
+  }, 10000);
+  it.each(['pending', 'error'])('R2 published paused source %s recovers only reducing subscriber closes', async status => {
+    expect(await run(false, 'closed', status)).toEqual(await run(true, 'closed', status));
+  }, 20000);
+});
 
 describe.each(['tv', 'user'] as const)('SB04 %s', path => {
   it('discriminating full close uses exactly the own position reduce-only', async () => {

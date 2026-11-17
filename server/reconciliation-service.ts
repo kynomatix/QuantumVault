@@ -2276,7 +2276,7 @@ export function startPeriodicReconciliation(): void {
       console.log(`[Reconcile] DB pressure backoff — skipping cycle (${consecutiveDbTimeouts} remaining)`);
         return;
       }
-      const allWallets = await storage.getWalletsWithActiveBots();
+      const allWallets = await storage.getWalletsForReconciliation();
       
       for (const walletAddress of allWallets) {
         const wallet = await storage.getWallet(walletAddress);
@@ -2299,7 +2299,8 @@ export function startPeriodicReconciliation(): void {
         
         for (const bot of botsToReconcile) {
           const subAccountId = bot.driftSubaccountId ?? 0;
-          const botSubPubKey = (bot.subaccountAuthMode === 'external_key' && bot.subaccountStatus === 'active' && bot.protocolSubaccountId)
+          // Reconciliation reads the bot's own account even when execution is unavailable.
+          const botSubPubKey = (bot.subaccountAuthMode === 'external_key' && bot.protocolSubaccountId)
             ? bot.protocolSubaccountId
             : undefined;
           await reconcileBotPosition(
